@@ -630,6 +630,7 @@ function _createStream(path, options, dynamicArgs) {
 				initialLoaded = true;
 				if (Array.isArray(currentValue)) currentValue = currentValue.slice();
 				store.set(currentValue);
+				_recordHistory();
 
 				// Subscribe to live updates on the topic
 				if (topic && !topicUnsub) {
