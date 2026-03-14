@@ -163,7 +163,7 @@ export const messages = live.stream('messages', async (ctx) => []);
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:__registry', {});
 
-		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate } from 'svelte-realtime/server'");
+		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions } from 'svelte-realtime/server'");
 		expect(code).toContain("__register('chat/sendMessage'");
 		expect(code).toContain("__register('chat/messages'");
 		expect(code).toContain("__registerGuard('chat'");
@@ -564,7 +564,7 @@ export const refreshStats = live.cron('*/5 * * * *', 'stats', async () => {});
 		const code = plugin.load('\0live:__registry', {});
 
 		expect(code).toContain("__registerCron('jobs/refreshStats'");
-		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate }");
+		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions }");
 	});
 
 	it('does not generate client stub for cron exports', () => {
@@ -840,7 +840,7 @@ export const chat = live.room({
 		const code = plugin.load('\0live:__registry', {});
 
 		expect(code).toContain("__register('rooms/chat/__data'");
-		expect(code).toContain("__register('rooms/chat/__action/'");
+		expect(code).toContain("__registerRoomActions('rooms/chat'");
 	});
 });
 

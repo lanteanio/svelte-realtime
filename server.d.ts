@@ -756,6 +756,12 @@ export function __registerEffect(path: string, fn: Function): void;
 export function __registerAggregate(path: string, fn: Function): void;
 
 /**
+ * Register room actions lazily. Called by the Vite-generated registry module.
+ * @internal
+ */
+export function __registerRoomActions(basePath: string, loader: Function): void;
+
+/**
  * Activate derived stream listeners after platform is available.
  * Wraps `platform.publish` to detect source topic events and trigger recomputation.
  */

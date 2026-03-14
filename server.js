@@ -62,11 +62,13 @@ function _getCtxHelpers(platform) {
 /**
  * Register a live function in the registry.
  * Called by the Vite-generated registry module.
+ * Accepts either a live function directly or a lazy loader (tagged with __lazy).
  * @param {string} path
  * @param {Function} fn
  */
 export function __register(path, fn) {
 	registry.set(path, fn);
+	if (/** @type {any} */ (fn).__lazy) return;
 	// Set rate limit path for rate-limited functions
 	if (/** @type {any} */ (fn).__isRateLimited) {
 		/** @type {any} */ (fn).__rateLimitPath = path;
@@ -77,13 +79,57 @@ export function __register(path, fn) {
 }
 
 /**
+ * Resolve a lazy registry entry. If the entry is a lazy loader (__lazy),
+ * dynamically import the module, cache the resolved function, and return it.
+ * @param {string} path
+ * @returns {Promise<Function | null>}
+ */
+async function _resolveRegistryEntry(path) {
+	const entry = registry.get(path);
+	if (!entry) return null;
+	if (!/** @type {any} */ (entry).__lazy) return entry;
+	const fn = await entry();
+	if (!fn) {
+		registry.delete(path);
+		return null;
+	}
+	registry.set(path, fn);
+	if (/** @type {any} */ (fn).__isRateLimited) {
+		/** @type {any} */ (fn).__rateLimitPath = path;
+	}
+	if (/** @type {any} */ (fn).__isStream && /** @type {any} */ (fn).__onUnsubscribe) {
+		_streamsWithUnsubscribe.add(fn);
+	}
+	return fn;
+}
+
+/**
  * Register a guard for a module.
  * Called by the Vite-generated registry module.
+ * Accepts either a guard function directly or a lazy loader (tagged with __lazy).
  * @param {string} modulePath
  * @param {Function} fn
  */
 export function __registerGuard(modulePath, fn) {
 	guards.set(modulePath, fn);
+}
+
+/**
+ * Resolve a lazy guard entry.
+ * @param {string} modulePath
+ * @returns {Promise<Function | null>}
+ */
+async function _resolveGuard(modulePath) {
+	const entry = guards.get(modulePath);
+	if (!entry) return null;
+	if (!/** @type {any} */ (entry).__lazy) return entry;
+	const fn = await entry();
+	if (!fn) {
+		guards.delete(modulePath);
+		return null;
+	}
+	guards.set(modulePath, fn);
+	return fn;
 }
 
 /**
@@ -492,6 +538,10 @@ live.effect = function effect(sources, fn, options) {
  * @param {Function} fn
  */
 export function __registerEffect(path, fn) {
+	if (/** @type {any} */ (fn).__lazy) {
+		_lazyQueue.push({ type: 'effect', path, loader: fn });
+		return;
+	}
 	const sources = /** @type {any} */ (fn).__effectSources;
 	const debounce = /** @type {any} */ (fn).__effectDebounce || 0;
 	if (!sources) return;
@@ -585,6 +635,10 @@ function _computeAggregateState(state, reducers) {
  * @param {Function} fn
  */
 export function __registerAggregate(path, fn) {
+	if (/** @type {any} */ (fn).__lazy) {
+		_lazyQueue.push({ type: 'aggregate', path, loader: fn });
+		return;
+	}
 	const source = /** @type {any} */ (fn).__aggregateSource;
 	const reducers = /** @type {any} */ (fn).__aggregateReducers;
 	const topic = /** @type {any} */ (fn).__streamTopic;
@@ -858,6 +912,10 @@ live.room = function room(config) {
  * @param {Function} fn
  */
 export function __registerDerived(path, fn) {
+	if (/** @type {any} */ (fn).__lazy) {
+		_lazyQueue.push({ type: 'derived', path, loader: fn });
+		return;
+	}
 	const sources = /** @type {any} */ (fn).__derivedSources;
 	const topic = /** @type {any} */ (fn).__streamTopic;
 	const debounce = /** @type {any} */ (fn).__derivedDebounce || 0;
@@ -1000,6 +1058,11 @@ async function _fireEffect(entry, event, data, platform) {
  * @param {Function} fn
  */
 export function __registerCron(path, fn) {
+	if (/** @type {any} */ (fn).__lazy) {
+		_lazyQueue.push({ type: 'cron', path, loader: fn });
+		_ensureCronInterval();
+		return;
+	}
 	const parsed = /** @type {any} */ (fn).__cronParsed;
 	const topic = /** @type {any} */ (fn).__cronTopic;
 	if (!parsed || !topic) return;
@@ -1026,6 +1089,72 @@ function _ensureCronInterval() {
 	_cronInterval = setInterval(_tickCron, 60000);
 	// Run an initial tick after a short delay to catch jobs on startup
 	_cronStartupTimer = setTimeout(_tickCron, 1000);
+}
+
+/**
+ * Queue of deferred registrations for cron/derived/effect/aggregate/room-actions.
+ * Populated when lazy loaders are passed to __registerCron, __registerDerived, etc.
+ * Resolved on first RPC call or cron tick via _resolveAllLazy().
+ * @type {Array<{ type: string, path: string, loader: Function }>}
+ */
+const _lazyQueue = [];
+
+/** @type {Promise<void> | null} */
+let _lazyInitPromise = null;
+
+/**
+ * Resolve all deferred (lazy) cron/derived/effect/aggregate/room-action registrations.
+ * Safe to call multiple times -- only the first call does work, concurrent callers
+ * await the same promise.
+ */
+async function _resolveAllLazy() {
+	if (_lazyInitPromise) return _lazyInitPromise;
+	if (_lazyQueue.length === 0) return;
+	_lazyInitPromise = (async () => {
+		const queue = _lazyQueue.splice(0);
+		for (const { type, path, loader } of queue) {
+			try {
+				const fn = await loader();
+				if (!fn) continue;
+				switch (type) {
+					case 'cron':
+						__registerCron(path, fn);
+						break;
+					case 'derived':
+						__register(path, fn);
+						__registerDerived(path, fn);
+						break;
+					case 'effect':
+						__registerEffect(path, fn);
+						break;
+					case 'aggregate':
+						__register(path, fn);
+						__registerAggregate(path, fn);
+						break;
+					case 'room-actions':
+						if (/** @type {any} */ (fn).__actions) {
+							for (const [k, v] of Object.entries(/** @type {any} */ (fn).__actions)) {
+								registry.set(path + '/__action/' + k, v);
+							}
+						}
+						break;
+				}
+			} catch (err) {
+				console.error(`[svelte-realtime] Failed to resolve lazy registration for '${path}':`, err);
+			}
+		}
+	})();
+	return _lazyInitPromise;
+}
+
+/**
+ * Register room actions lazily. Called by the Vite-generated registry module
+ * when a live.room() export needs its __actions registered.
+ * @param {string} basePath
+ * @param {Function} loader - Lazy loader that resolves to the room export
+ */
+export function __registerRoomActions(basePath, loader) {
+	_lazyQueue.push({ type: 'room-actions', path: basePath, loader });
 }
 
 /**
@@ -1067,6 +1196,10 @@ export function _prepareHmr() {
 
 	// Clear cron timers (but keep _cronPlatform -- it stays valid across HMR)
 	_clearCron();
+
+	// Clear lazy queue and reset lazy init state
+	_lazyQueue.length = 0;
+	_lazyInitPromise = null;
 
 	// Clear all registries and lookup maps
 	registry.clear();
@@ -1138,7 +1271,8 @@ export function _restoreHmr(snap) {
 	}
 }
 
-function _tickCron() {
+async function _tickCron() {
+	if (_lazyQueue.length) await _resolveAllLazy();
 	const now = new Date();
 	const minute = now.getMinutes();
 	const hour = now.getHours();
@@ -1396,8 +1530,11 @@ async function _executeRpc(ws, msg, platform, options) {
 
 	const args = rawArgs || [];
 
-	// Lookup function in registry
-	const fn = registry.get(path);
+	// Resolve lazy registrations (cron/derived/effect/aggregate) on first call
+	if (_lazyQueue.length) await _resolveAllLazy();
+
+	// Lookup function in registry (resolves lazy loader on first access)
+	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
 			console.warn(`[svelte-realtime] RPC call to '${path}' -- no such live function registered`);
@@ -1424,7 +1561,7 @@ async function _executeRpc(ws, msg, platform, options) {
 		await _runWithMiddleware(ctx, async () => {
 		// Run module guard if registered
 		const modulePath = path.substring(0, path.lastIndexOf('/'));
-		const guardFn = guards.get(modulePath);
+		const guardFn = await _resolveGuard(modulePath);
 		if (guardFn) await guardFn(ctx);
 
 		// Run beforeExecute hook
@@ -1707,7 +1844,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 	}
 
 	const args = rawArgs || [];
-	const fn = registry.get(path);
+	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		return { id, ok: false, code: 'NOT_FOUND', error: 'Not found' };
 	}
@@ -1726,7 +1863,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 	try {
 		return await _runWithMiddleware(ctx, async () => {
 		const modulePath = path.substring(0, path.lastIndexOf('/'));
-		const guardFn = guards.get(modulePath);
+		const guardFn = await _resolveGuard(modulePath);
 		if (guardFn) await guardFn(ctx);
 
 		if (options?.beforeExecute) {
@@ -1813,7 +1950,8 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 		return;
 	}
 
-	const fn = registry.get(path);
+	if (_lazyQueue.length) await _resolveAllLazy();
+	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		_respond(ws, platform, id, { ok: false, code: 'NOT_FOUND', error: 'Not found' });
 		return;
@@ -1845,7 +1983,7 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 	try {
 		await _runWithMiddleware(ctx, async () => {
 			const modulePath = path.substring(0, path.lastIndexOf('/'));
-			const guardFn = guards.get(modulePath);
+			const guardFn = await _resolveGuard(modulePath);
 			if (guardFn) await guardFn(ctx);
 
 			if (options?.beforeExecute) {
@@ -2031,7 +2169,8 @@ function _respond(ws, platform, correlationId, payload) {
  * @returns {Promise<any>}
  */
 export async function __directCall(path, args, platform, options) {
-	const fn = registry.get(path);
+	if (_lazyQueue.length) await _resolveAllLazy();
+	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		throw new LiveError('NOT_FOUND', `Live function '${path}' not found`);
 	}
@@ -2052,7 +2191,7 @@ export async function __directCall(path, args, platform, options) {
 	return _runWithMiddleware(ctx, async () => {
 	// Run module guard
 	const modulePath = path.substring(0, path.lastIndexOf('/'));
-	const guardFn = guards.get(modulePath);
+	const guardFn = await _resolveGuard(modulePath);
 	if (guardFn) await guardFn(ctx);
 
 	if (/** @type {any} */ (fn).__isStream) {

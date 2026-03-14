@@ -737,20 +737,20 @@ function _generateRegistry(liveDir, dir) {
 
 	const files = _findLiveFiles(liveDir);
 	const lines = [
-		`import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate } from 'svelte-realtime/server';\n`
+		`import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions } from 'svelte-realtime/server';`,
+		`const __L = fn => (fn.__lazy = true, fn);\n`
 	];
 
 	/** @type {Set<string>} */
 	const seenTopics = new Set();
-	let importIdx = 0;
 
 	for (const filePath of files) {
 		const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
 		const source = _readCached(filePath);
-		const alias = `_m${importIdx++}`;
 		const normalizedPath = filePath.split(sep).join(posix.sep);
 
-		lines.push(`import * as ${alias} from '${normalizedPath}';`);
+		/** @param {string} name */
+		const _lazy = (name) => `__L(() => import('${normalizedPath}').then(m => m.${name}))`;
 
 		// Register live() exports
 		/** @type {Set<string>} */
@@ -761,7 +761,7 @@ function _generateRegistry(liveDir, dir) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
 			registered.add(name);
-			lines.push(`__register('${rel}/${name}', ${alias}.${name});`);
+			lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
 		}
 
 		// Register live.validated() exports
@@ -771,7 +771,7 @@ function _generateRegistry(liveDir, dir) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${alias}.${name});`);
+				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
 			}
 		}
 
@@ -782,7 +782,7 @@ function _generateRegistry(liveDir, dir) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${alias}.${name});`);
+				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
 			}
 		}
 
@@ -791,7 +791,7 @@ function _generateRegistry(liveDir, dir) {
 		while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
-			lines.push(`__register('${rel}/${name}', ${alias}.${name});`);
+			lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
 
 			// Check for duplicate stream topics
 			const topicPattern = new RegExp(
@@ -817,7 +817,7 @@ function _generateRegistry(liveDir, dir) {
 		// Register guard
 		GUARD_EXPORT_RE.lastIndex = 0;
 		if (GUARD_EXPORT_RE.exec(source) !== null) {
-			lines.push(`__registerGuard('${rel}', ${alias}._guard);`);
+			lines.push(`__registerGuard('${rel}', ${_lazy('_guard')});`);
 		}
 
 		// Register live.binary() exports
@@ -827,7 +827,7 @@ function _generateRegistry(liveDir, dir) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${alias}.${name});`);
+				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
 			}
 		}
 
@@ -836,7 +836,7 @@ function _generateRegistry(liveDir, dir) {
 		while ((match = CRON_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
-			lines.push(`__registerCron('${rel}/${name}', ${alias}.${name});`);
+			lines.push(`__registerCron('${rel}/${name}', ${_lazy(name)});`);
 		}
 
 		// Register live.derived() exports
@@ -846,12 +846,12 @@ function _generateRegistry(liveDir, dir) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${alias}.${name});`);
-				lines.push(`__registerDerived('${rel}/${name}', ${alias}.${name});`);
+				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+				lines.push(`__registerDerived('${rel}/${name}', ${_lazy(name)});`);
 			}
 		}
 
-		// Register live.room() exports -- register sub-streams and actions
+		// Register live.room() exports -- register sub-streams and actions lazily
 		ROOM_EXPORT_RE.lastIndex = 0;
 		while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
@@ -859,13 +859,13 @@ function _generateRegistry(liveDir, dir) {
 			if (!registered.has(name)) {
 				registered.add(name);
 				// Register the data stream
-				lines.push(`if (${alias}.${name}.__dataStream) __register('${rel}/${name}/__data', ${alias}.${name}.__dataStream);`);
+				lines.push(`__register('${rel}/${name}/__data', __L(() => import('${normalizedPath}').then(m => m.${name}.__dataStream)));`);
 				// Register presence stream if present
-				lines.push(`if (${alias}.${name}.__presenceStream) __register('${rel}/${name}/__presence', ${alias}.${name}.__presenceStream);`);
+				lines.push(`__register('${rel}/${name}/__presence', __L(() => import('${normalizedPath}').then(m => m.${name}.__presenceStream)));`);
 				// Register cursor stream if present
-				lines.push(`if (${alias}.${name}.__cursorStream) __register('${rel}/${name}/__cursors', ${alias}.${name}.__cursorStream);`);
-				// Register actions
-				lines.push(`if (${alias}.${name}.__actions) { for (const [k, v] of Object.entries(${alias}.${name}.__actions)) __register('${rel}/${name}/__action/' + k, v); }`);
+				lines.push(`__register('${rel}/${name}/__cursors', __L(() => import('${normalizedPath}').then(m => m.${name}.__cursorStream)));`);
+				// Register actions (deferred -- resolved on first RPC or cron tick)
+				lines.push(`__registerRoomActions('${rel}/${name}', ${_lazy(name)});`);
 			}
 		}
 
@@ -882,7 +882,7 @@ function _generateRegistry(liveDir, dir) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${alias}.${name});`);
+				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
 			}
 		}
 
@@ -893,7 +893,7 @@ function _generateRegistry(liveDir, dir) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__registerEffect('${rel}/${name}', ${alias}.${name});`);
+				lines.push(`__registerEffect('${rel}/${name}', ${_lazy(name)});`);
 			}
 		}
 
@@ -904,8 +904,8 @@ function _generateRegistry(liveDir, dir) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${alias}.${name});`);
-				lines.push(`__registerAggregate('${rel}/${name}', ${alias}.${name});`);
+				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+				lines.push(`__registerAggregate('${rel}/${name}', ${_lazy(name)});`);
 			}
 		}
 	}
