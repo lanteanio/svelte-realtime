@@ -4,6 +4,12 @@
   "description": "Realtime RPC and reactive subscriptions for SvelteKit, built on svelte-adapter-uws",
   "author": "Kevin Radziszewski",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lanteanio/svelte-realtime.git"
+  },
+  "homepage": "https://github.com/lanteanio/svelte-realtime",
+  "bugs": "https://github.com/lanteanio/svelte-realtime/issues",
   "type": "module",
   "exports": {
     ".": {
@@ -23,6 +29,7 @@
       "default": "./vite.js"
     },
     "./devtools": {
+      "types": "./devtools.d.ts",
       "default": "./devtools.js"
     },
     "./test": {
@@ -40,6 +47,7 @@
     "test.js",
     "test.d.ts",
     "devtools.js",
+    "devtools.d.ts",
     "LICENSE",
     "README.md"
   ],
