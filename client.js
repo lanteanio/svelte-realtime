@@ -883,6 +883,12 @@ function _createStream(path, options, dynamicArgs) {
 		undo() {
 			if (!_historyEnabled) {
 				_historyEnabled = true;
+				// Record baseline snapshot (same as enableHistory)
+				if (_history.length === 0 && currentValue !== undefined) {
+					const snapshot = Array.isArray(currentValue) ? [...currentValue] : currentValue;
+					_history.push(snapshot);
+					_historyIndex = 0;
+				}
 				return;
 			}
 			if (_historyIndex <= 0) return;
@@ -900,6 +906,12 @@ function _createStream(path, options, dynamicArgs) {
 		redo() {
 			if (!_historyEnabled) {
 				_historyEnabled = true;
+				// Record baseline snapshot (same as enableHistory)
+				if (_history.length === 0 && currentValue !== undefined) {
+					const snapshot = Array.isArray(currentValue) ? [...currentValue] : currentValue;
+					_history.push(snapshot);
+					_historyIndex = 0;
+				}
 				return;
 			}
 			if (_historyIndex >= _history.length - 1) return;
