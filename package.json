@@ -1,0 +1,72 @@
+{
+  "name": "svelte-realtime",
+  "version": "0.1.0",
+  "description": "Realtime RPC and reactive subscriptions for SvelteKit, built on svelte-adapter-uws",
+  "author": "Kevin Radziszewski",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./server.d.ts",
+      "default": "./server.js"
+    },
+    "./server": {
+      "types": "./server.d.ts",
+      "default": "./server.js"
+    },
+    "./client": {
+      "types": "./client.d.ts",
+      "default": "./client.js"
+    },
+    "./vite": {
+      "types": "./vite.d.ts",
+      "default": "./vite.js"
+    },
+    "./devtools": {
+      "default": "./devtools.js"
+    },
+    "./test": {
+      "types": "./test.d.ts",
+      "default": "./test.js"
+    }
+  },
+  "files": [
+    "server.js",
+    "server.d.ts",
+    "client.js",
+    "client.d.ts",
+    "vite.js",
+    "vite.d.ts",
+    "test.js",
+    "test.d.ts",
+    "devtools.js",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "peerDependencies": {
+    "svelte-adapter-uws": ">=0.2.0",
+    "svelte": "^4.0.0 || ^5.0.0",
+    "@sveltejs/kit": "^2.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  },
+  "keywords": [
+    "svelte",
+    "sveltekit",
+    "websocket",
+    "rpc",
+    "realtime",
+    "pubsub",
+    "uwebsockets",
+    "streams",
+    "live"
+  ]
+}
