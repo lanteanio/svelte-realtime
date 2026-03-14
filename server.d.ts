@@ -70,22 +70,22 @@ export interface StreamOptions {
 
 	/**
 	 * Called when a client disconnects from this stream.
-	 * Only fires for static topics. For dynamic topics, use the `close` hook.
+	 * Fires for both static and dynamic topics.
 	 */
 	onUnsubscribe?(ctx: LiveContext, topic: string): void | Promise<void>;
 
 	/**
-	 * Per-connection publish filter. If provided, each pub/sub event is passed
-	 * through this predicate before delivery. Return `false` to drop the event
-	 * for that connection.
+	 * Subscribe-time access predicate. Checked once when a client subscribes.
+	 * Return `false` to deny the subscription with an "Access denied" error.
+	 * For per-event filtering, use `pipe.filter()`.
 	 */
-	filter?(ctx: LiveContext, event: string, data: any): boolean;
+	filter?(ctx: LiveContext): boolean;
 
 	/**
-	 * Declarative access control filter (alias for `filter`).
+	 * Subscribe-time access predicate (alias for `filter`).
 	 * Use `live.access` helpers to build predicates.
 	 */
-	access?(ctx: LiveContext, event: string, data: any): boolean;
+	access?(ctx: LiveContext): boolean;
 
 	/**
 	 * Schema version number. Increment when the data shape changes.
@@ -499,19 +499,20 @@ export namespace live {
 	function webhook(topic: string, config: WebhookConfig): WebhookHandler;
 
 	/**
-	 * Declarative access control helpers for stream filtering.
+	 * Declarative access control helpers for subscribe-time gating.
+	 * For per-event filtering, use `pipe.filter()`.
 	 */
 	const access: {
-		/** Only allow events where `data[field]` matches `ctx.user.id`. */
-		owner(field: string): (ctx: LiveContext, event: string, data: any) => boolean;
-		/** Role-based access: map role names to filter predicates. */
-		role(map: Record<string, true | ((ctx: LiveContext, data: any) => boolean)>): (ctx: LiveContext, event: string, data: any) => boolean;
-		/** Only allow events where `data[field]` matches `ctx.user.teamId`. */
-		team(field: string): (ctx: LiveContext, event: string, data: any) => boolean;
-		/** OR logic: any predicate returning true allows the event. */
-		any(...predicates: Array<(ctx: LiveContext, event: string, data: any) => boolean>): (ctx: LiveContext, event: string, data: any) => boolean;
+		/** Only allow subscription if `ctx.user[field]` is present. Default field: `'id'`. */
+		owner(field?: string): (ctx: LiveContext) => boolean;
+		/** Role-based access: map role names to boolean or predicate. */
+		role(map: Record<string, true | ((ctx: LiveContext) => boolean)>): (ctx: LiveContext) => boolean;
+		/** Only allow subscription if `ctx.user.teamId` is present. */
+		team(): (ctx: LiveContext) => boolean;
+		/** OR logic: any predicate returning true allows the subscription. */
+		any(...predicates: Array<(ctx: LiveContext) => boolean>): (ctx: LiveContext) => boolean;
 		/** AND logic: all predicates must return true. */
-		all(...predicates: Array<(ctx: LiveContext, event: string, data: any) => boolean>): (ctx: LiveContext, event: string, data: any) => boolean;
+		all(...predicates: Array<(ctx: LiveContext) => boolean>): (ctx: LiveContext) => boolean;
 	};
 }
 

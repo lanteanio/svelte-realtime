@@ -248,9 +248,9 @@ describe('__stream()', () => {
 		const afterDisconnect = values[values.length - 1];
 		expect(afterDisconnect).toHaveProperty('error');
 
-		// Reconnect (debounced -- wait for it)
+		// Reconnect (debounced with jitter -- wait for it)
 		simulateStatus('open');
-		await new Promise((r) => setTimeout(r, 60));
+		await new Promise((r) => setTimeout(r, 250));
 
 		// Should have re-fetched (second sendQueued call)
 		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
@@ -688,10 +688,10 @@ describe('__stream() seq tracking', () => {
 		// Simulate seq from a pub/sub event
 		simulateTopicMessage('seq-topic', { event: 'created', data: { id: 2 }, seq: 11 });
 
-		// Disconnect and reconnect (debounced -- wait for it)
+		// Disconnect and reconnect (debounced with jitter -- wait for it)
 		simulateStatus('closed');
 		simulateStatus('open');
-		await new Promise((r) => setTimeout(r, 60));
+		await new Promise((r) => setTimeout(r, 250));
 
 		// Second request should include seq
 		expect(sendQueuedFn.mock.calls.length).toBeGreaterThanOrEqual(2);

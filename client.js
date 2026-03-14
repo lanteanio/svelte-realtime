@@ -18,7 +18,8 @@ export class RpcError extends Error {
 	}
 }
 
-/** Incrementing counter for short correlation IDs */
+/** Incrementing counter for short correlation IDs, prefixed to avoid cross-tab collision */
+const _idPrefix = Math.random().toString(36).slice(2, 6);
 let idCounter = 0;
 
 /** @type {Array<{ rpc: string, id: string, args: any[] }> | null} */
@@ -159,7 +160,7 @@ function _sendRpc(path, args) {
 		});
 	}
 
-	const id = (idCounter++).toString(36);
+	const id = _idPrefix + (idCounter++).toString(36);
 
 	// If inside a batch() call, collect instead of sending
 	if (_batchCollector) {
@@ -200,7 +201,7 @@ export function __binaryRpc(path) {
 		ensureListener();
 		ensureDisconnectListener();
 
-		const id = (idCounter++).toString(36);
+		const id = _idPrefix + (idCounter++).toString(36);
 
 		_devtoolsStart(path, id, args);
 		const conn = _connect();
@@ -546,7 +547,7 @@ function _createStream(path, options, dynamicArgs) {
 		ensureListener();
 		ensureDisconnectListener();
 
-		const id = (idCounter++).toString(36);
+		const id = _idPrefix + (idCounter++).toString(36);
 		pendingId = id;
 		const conn = _connect();
 
@@ -731,7 +732,7 @@ function _createStream(path, options, dynamicArgs) {
 							fetching = false;
 							buffer = [];
 							fetchAndSubscribe();
-						}, 50);
+						}, 50 + Math.floor(Math.random() * 150));
 					}
 				});
 			}
@@ -787,7 +788,7 @@ function _createStream(path, options, dynamicArgs) {
 			_loadingMore = true;
 
 			ensureListener();
-			const id = (idCounter++).toString(36);
+			const id = _idPrefix + (idCounter++).toString(36);
 			const conn = _connect();
 
 			return new Promise((resolve, reject) => {
@@ -1121,7 +1122,7 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function }} OfflineEntry
  */
 
-/** @type {{ onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
+/** @type {{ onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
 let _clientConfig = {};
 
 /** @type {boolean} */
@@ -1139,7 +1140,7 @@ let _replayingQueue = false;
 /**
  * Configure client-side connection hooks and offline queue.
  *
- * @param {{ onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * @param {{ onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
 	_clientConfig = config;
@@ -1172,11 +1173,17 @@ async function _drainOfflineQueue() {
 	const offlineOpts = _clientConfig.offline;
 	const beforeReplay = offlineOpts?.beforeReplay;
 	const onReplayError = offlineOpts?.onReplayError;
+	const maxAge = offlineOpts?.maxAge || 0;
+	const now = Date.now();
 
 	// Filter the queue
 	/** @type {OfflineEntry[]} */
 	let queue = [];
 	for (const entry of _offlineQueue) {
+		if (maxAge > 0 && now - entry.queuedAt > maxAge) {
+			entry.reject(new RpcError('STALE', 'Offline mutation expired'));
+			continue;
+		}
 		if (beforeReplay) {
 			const keep = beforeReplay({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt });
 			if (!keep) {
@@ -1194,8 +1201,9 @@ async function _drainOfflineQueue() {
 	}
 
 	// Replay using the configured strategy
-	if (offlineOpts?.replay === 'batch' && queue.length > 0) {
-		// Batch strategy: send queued calls with concurrency limit to avoid flooding
+	const strategy = offlineOpts?.replay;
+	if ((strategy === 'concurrent' || strategy === 'batch') && queue.length > 0) {
+		// Concurrent strategy: send queued calls with concurrency limit to avoid flooding
 		const concurrency = 10;
 		for (let i = 0; i < queue.length; i += concurrency) {
 			const chunk = queue.slice(i, i + concurrency);

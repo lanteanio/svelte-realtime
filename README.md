@@ -778,6 +778,7 @@ configure({
   offline: {
     queue: true,        // enable offline queuing
     maxQueue: 100,      // drop oldest if queue exceeds this (default: 100)
+    maxAge: 60000,      // auto-reject queued calls older than this (ms)
     beforeReplay(call) {
       // Return false to drop stale mutations
       return Date.now() - call.queuedAt < 60000; // drop if older than 1 minute
@@ -789,7 +790,7 @@ configure({
 });
 ```
 
-When offline queuing is enabled, RPC calls made while disconnected return promises that resolve when the call is replayed after reconnection. If the queue overflows, the oldest entry is dropped and its promise rejects with `QUEUE_FULL`.
+When offline queuing is enabled, RPC calls made while disconnected return promises that resolve when the call is replayed after reconnection. If the queue overflows, the oldest entry is dropped and its promise rejects with `QUEUE_FULL`. If `maxAge` is set, queued calls older than that threshold are rejected with `STALE` at replay time.
 
 ---
 
@@ -916,15 +917,13 @@ export const presence = live.stream('room:lobby', async (ctx) => {
 export { message, close } from 'svelte-realtime/server';
 ```
 
-`onUnsubscribe` only fires automatically for static topics. For dynamic topics, use the adapter's `ws.getTopics()` to check which topics a connection was on.
+`onUnsubscribe` fires for both static and dynamic topics. For dynamic topics, the server tracks which stream produced each subscription and only fires the correct hook on disconnect.
 
 ---
 
 ## Access control
 
-Use the `filter` / `access` option on `live.stream()` to control who can subscribe. The predicate receives the connection context and is checked before the client is subscribed to the topic. If it returns `false`, the subscription is denied with an "Access denied" error and no data is sent.
-
-**Subscription-time access control** prevents unauthorized clients from subscribing to a topic. Use a simple predicate that checks `ctx.user`:
+Use the `filter` / `access` option on `live.stream()` to control who can subscribe. The predicate receives `ctx` and is checked once at subscription time. If it returns `false`, the subscription is denied with `{ ok: false, code: 'FORBIDDEN', error: 'Access denied' }` and no data is sent. For per-event filtering, use `pipe.filter()`.
 
 ```js
 import { live } from 'svelte-realtime/server';
@@ -962,6 +961,8 @@ export const myOrders = live.stream(
 
 | Helper | Description |
 |---|---|
+| `live.access.owner(field?)` | Subscription allowed if `ctx.user[field]` is present (default: `'id'`) |
+| `live.access.team()` | Subscription allowed if `ctx.user.teamId` is present |
 | `live.access.role(map)` | Role-based: `{ admin: true, viewer: (ctx) => ... }` |
 | `live.access.any(...predicates)` | OR: any predicate returning true allows the subscription |
 | `live.access.all(...predicates)` | AND: all predicates must return true |
@@ -1146,7 +1147,7 @@ export const betaFeed = live.gate(
 {/if}
 ```
 
-When the predicate returns false, the server responds with a graceful no-op (no error, no subscription). The client store stays `undefined`. `.when()` accepts a boolean, a Svelte store, or a getter function. When given a store, it subscribes/unsubscribes reactively as the value changes.
+When the predicate returns false, the server responds with a graceful no-op (no error, no subscription). The client store stays `undefined`. `.when()` accepts a boolean, a Svelte store, or a getter function. When given a store, it subscribes/unsubscribes reactively as the value changes. Getter functions are evaluated once at subscribe time; for reactivity with Svelte 5 `$state`, wrap in `$derived` or pass a store.
 
 ---
 
@@ -1172,7 +1173,7 @@ export const myNotifications = pipe(
 
 | Transform | Initial data | Live events |
 |-----------|-------------|-------------|
-| `pipe.filter(predicate)` | Filters the array | Drops non-matching events |
+| `pipe.filter(predicate)` | Filters the array | Initial data only |
 | `pipe.sort(field, dir)` | Sorts the array | Initial data only |
 | `pipe.limit(n)` | Slices to N items | Initial data only |
 | `pipe.join(field, resolver, as)` | Enriches each item | Initial data only |
@@ -1190,12 +1191,9 @@ Use `live.binary()` to send raw binary data (file uploads, images, protobuf) ove
 import { live } from 'svelte-realtime/server';
 
 export const uploadAvatar = live.binary(async (ctx, buffer, filename) => {
-  if (buffer.byteLength > 5 * 1024 * 1024)
-    throw new LiveError('VALIDATION', 'File too large (5MB max)');
-
   await storage.put(`avatars/${ctx.user.id}/${filename}`, buffer);
   return { url: `/avatars/${ctx.user.id}/${filename}` };
-});
+}, { maxSize: 5 * 1024 * 1024 }); // reject payloads over 5MB (default: 10MB)
 ```
 
 ```svelte
@@ -1665,7 +1663,7 @@ Import from `svelte-realtime/server`.
 | `live(fn)` | Mark a function as RPC-callable |
 | `live.stream(topic, initFn, options?)` | Create a reactive stream |
 | `live.channel(topic, options?)` | Create an ephemeral pub/sub channel |
-| `live.binary(fn)` | Mark a function as a binary RPC handler |
+| `live.binary(fn, options?)` | Mark a function as a binary RPC handler (`maxSize` limits payload, default 10MB) |
 | `live.validated(schema, fn)` | RPC with Zod/Valibot input validation |
 | `live.cron(schedule, topic, fn)` | Server-side scheduled function |
 | `live.derived(sources, fn, options?)` | Server-side computed stream |
@@ -1676,7 +1674,7 @@ Import from `svelte-realtime/server`.
 | `live.gate(predicate, fn)` | Conditional stream activation |
 | `live.rateLimit(config, fn)` | Per-function sliding window rate limiter |
 | `live.middleware(fn)` | Global middleware (runs before guards) |
-| `live.access.*` | Declarative access control helpers |
+| `live.access.*` | Subscribe-time access control helpers |
 | `guard(...fns)` | Per-module auth middleware |
 | `LiveError(code, message?)` | Typed error (propagates to client) |
 | `handleRpc(ws, data, platform, options?)` | Low-level RPC handler |

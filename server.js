@@ -1,6 +1,7 @@
 // @ts-check
 
 const textDecoder = new TextDecoder();
+const _validPathRe = /^[a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+$/;
 
 /** @type {Map<string, Function>} */
 const registry = new Map();
@@ -10,6 +11,9 @@ const guards = new Map();
 
 /** @type {Set<Function>} Streams with onUnsubscribe hooks for fast close() */
 const _streamsWithUnsubscribe = new Set();
+
+/** @type {WeakMap<object, Map<string, Function>>} Maps ws -> (topic -> stream fn) for dynamic unsubscribe */
+const _dynamicSubscriptions = new WeakMap();
 
 /** @type {Array<(ctx: any, next: () => Promise<any>) => Promise<any>>} */
 const _globalMiddleware = [];
@@ -112,7 +116,7 @@ live.stream = function stream(topic, initFn, options) {
 	/** @type {any} */ (initFn).__streamOptions = merged;
 	if (onSubscribe) /** @type {any} */ (initFn).__onSubscribe = onSubscribe;
 	if (onUnsubscribe) /** @type {any} */ (initFn).__onUnsubscribe = onUnsubscribe;
-	// Per-connection filter: (ctx, event, data) => boolean
+	// Subscribe-time access predicate: (ctx) => boolean
 	const filterFn = access || filter;
 	if (filterFn) /** @type {any} */ (initFn).__streamFilter = filterFn;
 	// Schema versioning
@@ -151,9 +155,10 @@ live.channel = function channel(topic, options) {
  * @param {Function} fn - Handler function (ctx, buffer, ...jsonArgs)
  * @returns {Function}
  */
-live.binary = function binary(fn) {
+live.binary = function binary(fn, options) {
 	/** @type {any} */ (fn).__isLive = true;
 	/** @type {any} */ (fn).__isBinary = true;
+	if (options?.maxSize) /** @type {any} */ (fn).__maxBinarySize = options.maxSize;
 	return fn;
 };
 
@@ -169,58 +174,61 @@ live.middleware = function middleware(fn) {
 };
 
 /**
- * Declarative access control helpers for stream filtering.
- * These return filter functions compatible with `live.stream({ access: ... })`.
+ * Declarative access control helpers for subscribe-time gating.
+ * These return predicates compatible with `live.stream({ access: ... })`.
+ * Access predicates receive only `ctx` and are checked once at subscription time.
+ * For per-event filtering, use `pipe.filter()`.
  */
 live.access = {
 	/**
-	 * Only allow events where `data[field]` matches `ctx.user.id`.
-	 * @param {string} field - The field on the event data to check
-	 * @returns {(ctx: any, event: string, data: any) => boolean}
+	 * Only allow subscription if `ctx.user[field]` is present (authenticated with that field).
+	 * For per-user data isolation, use dynamic topics instead: `(ctx) => \`items:\${ctx.user.id}\``.
+	 * @param {string} [field] - The field on ctx.user to check (default: 'id')
+	 * @returns {(ctx: any) => boolean}
 	 */
-	owner(field) {
-		return (ctx, _event, data) => data && data[field] === ctx.user?.id;
+	owner(field = 'id') {
+		return (ctx) => ctx.user?.[field] != null;
 	},
 
 	/**
-	 * Role-based access: map role names to filter predicates.
-	 * @param {Record<string, true | ((ctx: any, data: any) => boolean)>} map
-	 * @returns {(ctx: any, event: string, data: any) => boolean}
+	 * Role-based access: map role names to boolean or predicate.
+	 * @param {Record<string, true | ((ctx: any) => boolean)>} map
+	 * @returns {(ctx: any) => boolean}
 	 */
 	role(map) {
-		return (ctx, _event, data) => {
+		return (ctx) => {
 			const role = ctx.user?.role;
 			if (!role || !(role in map)) return false;
 			const rule = map[role];
-			return rule === true ? true : rule(ctx, data);
+			return rule === true ? true : rule(ctx);
 		};
 	},
 
 	/**
-	 * Only allow events where `data[field]` matches `ctx.user.teamId`.
-	 * @param {string} field - The field on the event data to check
-	 * @returns {(ctx: any, event: string, data: any) => boolean}
+	 * Only allow subscription if `ctx.user.teamId` is present.
+	 * For per-team data isolation, use dynamic topics: `(ctx) => \`items:\${ctx.user.teamId}\``.
+	 * @returns {(ctx: any) => boolean}
 	 */
-	team(field) {
-		return (ctx, _event, data) => data && data[field] === ctx.user?.teamId;
+	team() {
+		return (ctx) => ctx.user?.teamId != null;
 	},
 
 	/**
-	 * OR logic: any predicate returning true allows the event.
-	 * @param {...((ctx: any, event: string, data: any) => boolean)} predicates
-	 * @returns {(ctx: any, event: string, data: any) => boolean}
+	 * OR logic: any predicate returning true allows the subscription.
+	 * @param {...((ctx: any) => boolean)} predicates
+	 * @returns {(ctx: any) => boolean}
 	 */
 	any(...predicates) {
-		return (ctx, event, data) => predicates.some(p => p(ctx, event, data));
+		return (ctx) => predicates.some(p => p(ctx));
 	},
 
 	/**
-	 * AND logic: all predicates must return true to allow the event.
-	 * @param {...((ctx: any, event: string, data: any) => boolean)} predicates
-	 * @returns {(ctx: any, event: string, data: any) => boolean}
+	 * AND logic: all predicates must return true to allow the subscription.
+	 * @param {...((ctx: any) => boolean)} predicates
+	 * @returns {(ctx: any) => boolean}
 	 */
 	all(...predicates) {
-		return (ctx, event, data) => predicates.every(p => p(ctx, event, data));
+		return (ctx) => predicates.every(p => p(ctx));
 	}
 };
 
@@ -259,6 +267,14 @@ live.rateLimit = function rateLimit(config, fn) {
 					}
 					if (++swept >= maxSweep) break;
 				}
+			}
+		}
+
+		if (_rateLimits.size > 10000) {
+			let excess = _rateLimits.size - 10000;
+			for (const k of _rateLimits.keys()) {
+				if (excess-- <= 0) break;
+				_rateLimits.delete(k);
 			}
 		}
 
@@ -379,6 +395,9 @@ function _validate(schema, input) {
 	}
 
 	// Unknown schema type - pass through unchanged
+	if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+		console.warn('[svelte-realtime] live.validated() received an unrecognized schema type -- input passed through without validation');
+	}
 	return { ok: true, data: input };
 }
 
@@ -658,21 +677,8 @@ export function pipe(stream, ...transforms) {
 		/** @type {any} */ (wrapper).__gatePredicate = /** @type {any} */ (stream).__gatePredicate;
 	}
 
-	// Build a composite filter from any pipe.filter transforms + existing filter
-	const existingFilter = /** @type {any} */ (stream).__streamFilter;
-	const eventFilters = transforms
-		.filter(t => t.transformEvent)
-		.map(t => t.transformEvent);
-
-	if (eventFilters.length > 0 || existingFilter) {
-		/** @type {any} */ (wrapper).__streamFilter = (ctx, event, data) => {
-			if (existingFilter && !existingFilter(ctx, event, data)) return false;
-			for (const f of eventFilters) {
-				if (!f(ctx, event, data)) return false;
-			}
-			return true;
-		};
-	} else if (/** @type {any} */ (stream).__streamFilter) {
+	// Preserve subscribe-time access predicate from the underlying stream
+	if (/** @type {any} */ (stream).__streamFilter) {
 		/** @type {any} */ (wrapper).__streamFilter = /** @type {any} */ (stream).__streamFilter;
 	}
 
@@ -871,11 +877,18 @@ export function __registerDerived(path, fn) {
  * triggered externally when the platform fires publish.
  * @param {import('svelte-adapter-uws').Platform} platform
  */
+/** @type {WeakSet<object>} Guard against double-wrapping platform.publish during HMR */
+const _activatedPlatforms = new WeakSet();
+
 export function _activateDerived(platform) {
+	if (_activatedPlatforms.has(platform)) return;
+
 	// Only wrap platform.publish if there are actual reactive registrations
 	if (_derivedBySource.size === 0 && _effectBySource.size === 0 && _aggregateBySource.size === 0) {
 		return;
 	}
+
+	_activatedPlatforms.add(platform);
 
 	const originalPublish = platform.publish.bind(platform);
 
@@ -1275,6 +1288,11 @@ export function handleRpc(ws, data, platform, options) {
 async function _executeRpc(ws, msg, platform, options) {
 	const { rpc: path, id, args: rawArgs, stream: isStream, seq: clientSeq, cursor: clientCursor, schemaVersion: clientSchemaVersion } = msg;
 
+	if (!_validPathRe.test(path)) {
+		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' });
+		return;
+	}
+
 	// Validate args
 	if (rawArgs !== undefined && !Array.isArray(rawArgs)) {
 		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' });
@@ -1332,17 +1350,28 @@ async function _executeRpc(ws, msg, platform, options) {
 
 			const rawTopic = /** @type {any} */ (fn).__streamTopic;
 			const topic = typeof rawTopic === 'function' ? rawTopic(ctx, ...args) : rawTopic;
+			if (typeof rawTopic === 'function' && topic.startsWith('__')) {
+				_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' });
+				return;
+			}
 			const streamOpts = /** @type {any} */ (fn).__streamOptions;
 			const replayOpts = /** @type {any} */ (fn).__replay;
 
 			// Enforce stream filter/access predicate before subscribing
 			const streamFilter = /** @type {any} */ (fn).__streamFilter;
 			if (streamFilter && !streamFilter(ctx)) {
-				_respond(ws, platform, id, { ok: false, error: 'Access denied' });
+				_respond(ws, platform, id, { ok: false, code: 'FORBIDDEN', error: 'Access denied' });
 				return;
 			}
 
 			ws.subscribe(topic);
+
+			// Track dynamic topic -> stream mapping for accurate onUnsubscribe dispatch
+			if (typeof rawTopic === 'function' && /** @type {any} */ (fn).__onUnsubscribe) {
+				let map = _dynamicSubscriptions.get(ws);
+				if (!map) { map = new Map(); _dynamicSubscriptions.set(ws, map); }
+				map.set(topic, fn);
+			}
 
 			// Fire onSubscribe lifecycle hook
 			if (/** @type {any} */ (fn).__onSubscribe) {
@@ -1574,6 +1603,10 @@ async function _executeBatch(ws, msg, platform, options) {
 async function _executeSingleRpc(ws, msg, platform, options) {
 	const { rpc: path, id, args: rawArgs, stream: isStream } = msg;
 
+	if (!_validPathRe.test(path)) {
+		return { id, ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' };
+	}
+
 	if (rawArgs !== undefined && !Array.isArray(rawArgs)) {
 		return { id, ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' };
 	}
@@ -1591,7 +1624,8 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 		platform,
 		publish: _h.publish,
 		throttle: _h.throttle,
-		debounce: _h.debounce
+		debounce: _h.debounce,
+		signal: _h.signal
 	};
 
 	try {
@@ -1615,15 +1649,26 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 
 			const rawTopic = /** @type {any} */ (fn).__streamTopic;
 			const topic = typeof rawTopic === 'function' ? rawTopic(ctx, ...args) : rawTopic;
+			if (typeof rawTopic === 'function' && topic.startsWith('__')) {
+				return { id, ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' };
+			}
 			const streamOpts = /** @type {any} */ (fn).__streamOptions;
 
 			// Enforce stream filter/access predicate before subscribing
 			const streamFilter = /** @type {any} */ (fn).__streamFilter;
 			if (streamFilter && !streamFilter(ctx)) {
-				return { id, ok: false, error: 'Access denied' };
+				return { id, ok: false, code: 'FORBIDDEN', error: 'Access denied' };
 			}
 
 			ws.subscribe(topic);
+
+			// Track dynamic topic -> stream mapping for accurate onUnsubscribe dispatch
+			if (typeof rawTopic === 'function' && /** @type {any} */ (fn).__onUnsubscribe) {
+				let map = _dynamicSubscriptions.get(ws);
+				if (!map) { map = new Map(); _dynamicSubscriptions.set(ws, map); }
+				map.set(topic, fn);
+			}
+
 			const result = await fn(ctx, ...args);
 			return {
 				id, ok: true, data: result, topic, merge: streamOpts.merge,
@@ -1668,6 +1713,11 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 async function _executeBinaryRpc(ws, header, payload, platform, options) {
 	const { rpc: path, id, args: extraArgs } = header;
 
+	if (!_validPathRe.test(path)) {
+		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' });
+		return;
+	}
+
 	const fn = registry.get(path);
 	if (!fn) {
 		_respond(ws, platform, id, { ok: false, code: 'NOT_FOUND', error: 'Not found' });
@@ -1679,6 +1729,12 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 		return;
 	}
 
+	const maxBinarySize = /** @type {any} */ (fn).__maxBinarySize || 10485760;
+	if (payload.byteLength > maxBinarySize) {
+		_respond(ws, platform, id, { ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Binary payload exceeds size limit' });
+		return;
+	}
+
 	const _h = _getCtxHelpers(platform);
 	const ctx = {
 		user: ws.getUserData(),
@@ -1687,7 +1743,8 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 		publish: _h.publish,
 		cursor: null,
 		throttle: _h.throttle,
-		debounce: _h.debounce
+		debounce: _h.debounce,
+		signal: _h.signal
 	};
 
 	try {
@@ -1951,10 +2008,6 @@ export function close(ws, { platform }) {
 	/** @type {Set<string> | null} */
 	let subscribedSet = null;
 
-	// Separate static and dynamic streams to avoid redundant iteration
-	/** @type {Function[]} */
-	const dynamicStreams = [];
-
 	for (const fn of _streamsWithUnsubscribe) {
 		const rawTopic = /** @type {any} */ (fn).__streamTopic;
 		if (typeof rawTopic === 'string') {
@@ -1967,20 +2020,16 @@ export function close(ws, { platform }) {
 					try { /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic); } catch {}
 				}
 			}
-		} else if (typeof rawTopic === 'function') {
-			dynamicStreams.push(fn);
 		}
 	}
 
-	// For dynamic streams, iterate user topics once and fire all matching hooks
-	if (dynamicStreams.length > 0 && subscribedTopics) {
-		const topics = subscribedSet || new Set(subscribedTopics);
-		for (const t of topics) {
-			if (t.startsWith('__')) continue;
-			for (const fn of dynamicStreams) {
-				try { /** @type {any} */ (fn).__onUnsubscribe(closeCtx, t); } catch {}
-			}
+	// For dynamic streams, use the recorded topic -> stream mapping
+	const dynamicMap = _dynamicSubscriptions.get(ws);
+	if (dynamicMap) {
+		for (const [topic, fn] of dynamicMap) {
+			try { /** @type {any} */ (fn).__onUnsubscribe(closeCtx, topic); } catch {}
 		}
+		_dynamicSubscriptions.delete(ws);
 	}
 }
 

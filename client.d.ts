@@ -63,8 +63,8 @@ export interface StreamStore<T = any> extends Readable<T> {
 	readonly canUndo: boolean;
 	/** Whether there are entries to redo. */
 	readonly canRedo: boolean;
-	/** Return a wrapper store that only activates when `condition` is truthy. */
-	when(condition: boolean): Readable<T | undefined>;
+	/** Return a wrapper store that only activates when `condition` is truthy. Accepts a boolean, a Svelte store, or a getter function. Getter functions are evaluated once at subscribe time; for reactivity, pass a store. */
+	when(condition: boolean | Readable<any> | (() => any)): Readable<T | undefined>;
 }
 
 export function __stream(
@@ -162,8 +162,8 @@ export function configure(config: {
 		queue?: boolean;
 		/** Maximum queue size before oldest entries are dropped. @default 100 */
 		maxQueue?: number;
-		/** Replay strategy on reconnect: 'sequential' (default), 'batch', or a custom filter function. */
-		replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]);
+		/** Replay strategy on reconnect: 'sequential' (default), 'concurrent' (10-at-a-time), or a custom filter function. 'batch' is accepted as an alias for 'concurrent'. */
+		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]);
 		/** Filter function called before replaying each queued call. Return false to drop. */
 		beforeReplay?(call: { path: string; args: any[]; queuedAt: number }): boolean;
 		/** Called when a replayed call fails. */

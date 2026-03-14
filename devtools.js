@@ -155,19 +155,19 @@ function renderRpcs(el, dt) {
 
 	let html = '';
 	if (pending.length > 0) {
-		html += '<div style="color:#ffc107;margin-bottom:6px">Pending (' + pending.length + ')</div>';
+		html += '<div style="color:#ffc107;margin-bottom:6px">Pending (' + esc(String(pending.length)) + ')</div>';
 		for (const p of pending) {
 			const elapsed = Date.now() - p.startTime;
-			html += `<div style="padding:2px 0;color:#aaa">${esc(p.path)} <span style="color:#666">${elapsed}ms</span></div>`;
+			html += `<div style="padding:2px 0;color:#aaa">${esc(p.path)} <span style="color:#666">${esc(String(elapsed))}ms</span></div>`;
 		}
 		html += '<hr style="border-color:#333;margin:6px 0">';
 	}
 
-	html += '<div style="margin-bottom:4px">History (' + history.length + ')</div>';
+	html += '<div style="margin-bottom:4px">History (' + esc(String(history.length)) + ')</div>';
 	for (let i = history.length - 1; i >= Math.max(0, history.length - 20); i--) {
 		const h = history[i];
 		const color = h.ok ? '#4caf50' : '#f44336';
-		html += `<div style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:#666">${h.duration}ms</span></div>`;
+		html += `<div style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:#666">${esc(String(h.duration))}ms</span></div>`;
 	}
 	if (history.length === 0) html += '<div style="color:#666">No RPC calls yet</div>';
 
@@ -180,9 +180,9 @@ function renderRpcs(el, dt) {
 /** @param {HTMLElement} el @param {any} dt */
 function renderStreams(el, dt) {
 	const streams = dt.streams ? Array.from(dt.streams.values()) : [];
-	let html = '<div style="margin-bottom:4px">Active (' + streams.length + ')</div>';
+	let html = '<div style="margin-bottom:4px">Active (' + esc(String(streams.length)) + ')</div>';
 	for (const s of streams) {
-		html += `<div style="padding:2px 0">${esc(s.path)} <span style="color:#666">topic:${esc(s.topic || '?')} subs:${s.subCount}</span></div>`;
+		html += `<div style="padding:2px 0">${esc(s.path)} <span style="color:#666">topic:${esc(s.topic || '?')} subs:${esc(String(s.subCount))}</span></div>`;
 	}
 	if (streams.length === 0) html += '<div style="color:#666">No active streams</div>';
 
@@ -196,9 +196,9 @@ function renderStreams(el, dt) {
 function renderConnection(el, dt) {
 	const pending = dt.pending ? dt.pending.size : 0;
 	const html = `
-		<div style="padding:2px 0">Pending RPCs: ${pending}</div>
-		<div style="padding:2px 0">History entries: ${(dt.history || []).length}</div>
-		<div style="padding:2px 0">Active streams: ${dt.streams ? dt.streams.size : 0}</div>
+		<div style="padding:2px 0">Pending RPCs: ${esc(String(pending))}</div>
+		<div style="padding:2px 0">History entries: ${esc(String((dt.history || []).length))}</div>
+		<div style="padding:2px 0">Active streams: ${esc(String(dt.streams ? dt.streams.size : 0))}</div>
 		<div style="padding:4px 0;color:#666;font-size:11px">Press Ctrl+Shift+L to toggle</div>
 	`;
 

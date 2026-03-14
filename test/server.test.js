@@ -674,6 +674,20 @@ describe('handleRpc() batch', () => {
 		expect(batch[0].data).toBe(1);
 		expect(batch[1].data).toBe(2);
 	});
+
+	it('ctx.signal is available in batch path', async () => {
+		let capturedSignal;
+		const fn = live(async (ctx, x) => { capturedSignal = ctx.signal; return x; });
+		__register('batch/sig', fn);
+
+		const data = toArrayBuffer({
+			batch: [{ rpc: 'batch/sig', id: 'bs1', args: [1] }]
+		});
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(typeof capturedSignal).toBe('function');
+	});
 });
 
 // -- Batch validation ---------------------------------------------------------
@@ -770,6 +784,182 @@ describe('handleRpc() batch validation', () => {
 		expect(batch[0].ok).toBe(false);
 		expect(batch[0].code).toBe('INVALID_REQUEST');
 		expect(batch[1].ok).toBe(true);
+	});
+});
+
+// -- Path validation ----------------------------------------------------------
+
+describe('handleRpc() path validation', () => {
+	let ws, platform;
+
+	beforeEach(() => {
+		ws = mockWs({ id: 'user1' });
+		platform = mockPlatform();
+	});
+
+	it('rejects paths with traversal characters', async () => {
+		const data = toArrayBuffer({ rpc: '../../etc/passwd', id: 'pv1', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
+	});
+
+	it('rejects single-segment paths', async () => {
+		const data = toArrayBuffer({ rpc: 'onlyone', id: 'pv2', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
+	});
+
+	it('rejects paths with special characters', async () => {
+		const data = toArrayBuffer({ rpc: 'foo/bar;rm -rf', id: 'pv3', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
+	});
+
+	it('allows valid multi-segment paths', async () => {
+		const fn = live(async () => 'ok');
+		__register('valid/path', fn);
+		const data = toArrayBuffer({ rpc: 'valid/path', id: 'pv4', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.ok).toBe(true);
+	});
+
+	it('allows deeply nested paths with underscores', async () => {
+		const fn = live(async () => 'ok');
+		__register('admin/users/__action/delete_user', fn);
+		const data = toArrayBuffer({ rpc: 'admin/users/__action/delete_user', id: 'pv5', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.ok).toBe(true);
+	});
+
+	it('rejects invalid paths in batch entries', async () => {
+		const data = toArrayBuffer({
+			batch: [{ rpc: '../bad/path', id: 'pv6', args: [] }]
+		});
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 20));
+		const batch = platform.sent[0].data.batch;
+		expect(batch[0].ok).toBe(false);
+		expect(batch[0].code).toBe('INVALID_REQUEST');
+	});
+});
+
+// -- Binary payload size limit ------------------------------------------------
+
+describe('handleRpc() binary payload size', () => {
+	let ws, platform;
+
+	beforeEach(() => {
+		ws = mockWs({ id: 'user1' });
+		platform = mockPlatform();
+	});
+
+	it('rejects binary payloads exceeding maxSize', async () => {
+		const fn = live.binary(async (ctx, buffer) => 'ok', { maxSize: 100 });
+		__register('bin/limited', fn);
+
+		const header = JSON.stringify({ rpc: 'bin/limited', id: 'bs1' });
+		const headerBytes = new TextEncoder().encode(header);
+		const payload = new Uint8Array(200); // exceeds 100-byte limit
+		const frame = new Uint8Array(3 + headerBytes.length + payload.length);
+		frame[0] = 0x00;
+		frame[1] = (headerBytes.length >> 8) & 0xFF;
+		frame[2] = headerBytes.length & 0xFF;
+		frame.set(headerBytes, 3);
+		frame.set(payload, 3 + headerBytes.length);
+
+		handleRpc(ws, frame.buffer, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('PAYLOAD_TOO_LARGE');
+	});
+
+	it('allows binary payloads within maxSize', async () => {
+		const fn = live.binary(async (ctx, buffer) => ({ size: buffer.byteLength }), { maxSize: 500 });
+		__register('bin/ok', fn);
+
+		const header = JSON.stringify({ rpc: 'bin/ok', id: 'bs2' });
+		const headerBytes = new TextEncoder().encode(header);
+		const payload = new Uint8Array(100); // within limit
+		const frame = new Uint8Array(3 + headerBytes.length + payload.length);
+		frame[0] = 0x00;
+		frame[1] = (headerBytes.length >> 8) & 0xFF;
+		frame[2] = headerBytes.length & 0xFF;
+		frame.set(headerBytes, 3);
+		frame.set(payload, 3 + headerBytes.length);
+
+		handleRpc(ws, frame.buffer, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.data).toEqual({ size: 100 });
+	});
+});
+
+// -- Dynamic topic prefix guard -----------------------------------------------
+
+describe('handleRpc() dynamic topic guard', () => {
+	let ws, platform;
+
+	beforeEach(() => {
+		ws = mockWs({ id: 'user1' });
+		platform = mockPlatform();
+	});
+
+	it('rejects dynamic topics that resolve to __ prefix', async () => {
+		const stream = live.stream(
+			(ctx, name) => '__signal:' + name,
+			async () => [],
+			{ merge: 'crud', key: 'id' }
+		);
+		__register('topic/guard', stream);
+
+		const data = toArrayBuffer({ rpc: 'topic/guard', id: 'tg1', args: ['attack'], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
+		expect(platform.sent[0].data.error).toBe('Reserved topic prefix');
+	});
+
+	it('allows dynamic topics without __ prefix', async () => {
+		const stream = live.stream(
+			(ctx, room) => 'chat:' + room,
+			async () => [{ id: 1 }],
+			{ merge: 'crud', key: 'id' }
+		);
+		__register('topic/ok', stream);
+
+		const data = toArrayBuffer({ rpc: 'topic/ok', id: 'tg2', args: ['lobby'], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.topic).toBe('chat:lobby');
+	});
+
+	it('allows static topics with __ prefix (developer-controlled)', async () => {
+		const stream = live.stream(
+			'__internal:stats',
+			async () => ({ count: 0 }),
+			{ merge: 'set' }
+		);
+		__register('topic/static', stream);
+
+		const data = toArrayBuffer({ rpc: 'topic/static', id: 'tg3', args: [], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
 	});
 });
 
@@ -1313,7 +1503,7 @@ describe('close()', () => {
 		expect(fired).toBe(false);
 	});
 
-	it('fires onUnsubscribe for dynamic topic streams when socket has matching topics', () => {
+	it('fires onUnsubscribe for dynamic topic streams when socket has matching topics', async () => {
 		let firedTopics = [];
 		const topicFn = (ctx, roomId) => `room-${roomId}`;
 		const streamFn = live.stream(topicFn, async (ctx) => [], {
@@ -1324,16 +1514,47 @@ describe('close()', () => {
 		__register('close/dynamic', streamFn);
 
 		const ws = mockWs();
-		ws.subscribe('room-abc');
-		ws.subscribe('room-def');
-		ws.subscribe('__signal:u1'); // internal topic, should be skipped
 		const platform = mockPlatform();
+
+		// Subscribe through the RPC path so dynamic subscriptions are tracked
+		handleRpc(ws, toArrayBuffer({ rpc: 'close/dynamic', id: 'd1', args: ['abc'], stream: true }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'close/dynamic', id: 'd2', args: ['def'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		ws.subscribe('__signal:u1'); // internal topic, should be skipped
 
 		close(ws, { platform });
 
 		expect(firedTopics).toContain('room-abc');
 		expect(firedTopics).toContain('room-def');
 		expect(firedTopics).not.toContain('__signal:u1');
+	});
+
+	it('does not fire onUnsubscribe for unrelated dynamic streams', async () => {
+		let firedA = [];
+		let firedB = [];
+		const streamA = live.stream((ctx, id) => `chat-${id}`, async () => [], {
+			merge: 'crud', key: 'id',
+			onUnsubscribe(ctx, topic) { firedA.push(topic); }
+		});
+		const streamB = live.stream((ctx, id) => `presence-${id}`, async () => [], {
+			merge: 'crud', key: 'id',
+			onUnsubscribe(ctx, topic) { firedB.push(topic); }
+		});
+		__register('close/chatA', streamA);
+		__register('close/presB', streamB);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Subscribe chat stream only
+		handleRpc(ws, toArrayBuffer({ rpc: 'close/chatA', id: 'c1', args: ['123'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		close(ws, { platform });
+
+		expect(firedA).toEqual(['chat-123']);
+		expect(firedB).toEqual([]);
 	});
 
 	it('fires onUnsubscribe for static topic streams on close', () => {
@@ -1447,6 +1668,33 @@ describe('handleRpc() binary', () => {
 		expect(fn.__isLive).toBe(true);
 		expect(fn.__isBinary).toBe(true);
 	});
+
+	it('ctx.signal is available in binary path', async () => {
+		let capturedSignal;
+		const handler = live.binary(async (ctx, buffer) => {
+			capturedSignal = ctx.signal;
+			return { ok: true };
+		});
+		__register('bin/sigtest', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		const header = JSON.stringify({ rpc: 'bin/sigtest', id: 'bns1' });
+		const headerBytes = new TextEncoder().encode(header);
+		const payload = new Uint8Array([0x01]);
+		const frame = new Uint8Array(3 + headerBytes.length + payload.length);
+		frame[0] = 0x00;
+		frame[1] = (headerBytes.length >> 8) & 0xFF;
+		frame[2] = headerBytes.length & 0xFF;
+		frame.set(headerBytes, 3);
+		frame.set(payload, 3 + headerBytes.length);
+
+		handleRpc(ws, frame.buffer, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(typeof capturedSignal).toBe('function');
+	});
 });
 
 // -- Phase 27: Throttle / Debounce -------------------------------------------
@@ -1530,48 +1778,54 @@ describe('ctx.throttle and ctx.debounce', () => {
 // -- Phase 26/32: live.access helpers ----------------------------------------
 
 describe('live.access', () => {
-	it('owner() checks data[field] === ctx.user.id', () => {
-		const filter = live.access.owner('userId');
-		expect(filter({ user: { id: 'u1' } }, 'created', { userId: 'u1' })).toBe(true);
-		expect(filter({ user: { id: 'u2' } }, 'created', { userId: 'u1' })).toBe(false);
-		expect(filter({ user: { id: 'u1' } }, 'created', null)).toBeFalsy();
+	it('owner() checks ctx.user[field] is present', () => {
+		const filter = live.access.owner('id');
+		expect(filter({ user: { id: 'u1' } })).toBe(true);
+		expect(filter({ user: {} })).toBe(false);
+		expect(filter({ user: null })).toBe(false);
+	});
+
+	it('owner() defaults to "id" field', () => {
+		const filter = live.access.owner();
+		expect(filter({ user: { id: 'u1' } })).toBe(true);
+		expect(filter({ user: {} })).toBe(false);
 	});
 
 	it('role() checks ctx.user.role in map', () => {
 		const filter = live.access.role({
 			admin: true,
-			viewer: (ctx, data) => data.public === true
+			viewer: (ctx) => ctx.user.level >= 2
 		});
-		expect(filter({ user: { role: 'admin' } }, 'created', {})).toBe(true);
-		expect(filter({ user: { role: 'viewer' } }, 'created', { public: true })).toBe(true);
-		expect(filter({ user: { role: 'viewer' } }, 'created', { public: false })).toBe(false);
-		expect(filter({ user: { role: 'guest' } }, 'created', {})).toBe(false);
-		expect(filter({ user: {} }, 'created', {})).toBe(false);
+		expect(filter({ user: { role: 'admin' } })).toBe(true);
+		expect(filter({ user: { role: 'viewer', level: 3 } })).toBe(true);
+		expect(filter({ user: { role: 'viewer', level: 1 } })).toBe(false);
+		expect(filter({ user: { role: 'guest' } })).toBe(false);
+		expect(filter({ user: {} })).toBe(false);
 	});
 
-	it('team() checks data[field] === ctx.user.teamId', () => {
-		const filter = live.access.team('teamId');
-		expect(filter({ user: { teamId: 't1' } }, 'created', { teamId: 't1' })).toBe(true);
-		expect(filter({ user: { teamId: 't2' } }, 'created', { teamId: 't1' })).toBe(false);
+	it('team() checks ctx.user.teamId is present', () => {
+		const filter = live.access.team();
+		expect(filter({ user: { teamId: 't1' } })).toBe(true);
+		expect(filter({ user: {} })).toBe(false);
 	});
 
 	it('any() returns true if any predicate matches', () => {
 		const filter = live.access.any(
-			live.access.owner('userId'),
+			live.access.owner(),
 			live.access.role({ admin: true })
 		);
-		expect(filter({ user: { id: 'u1' } }, 'created', { userId: 'u1' })).toBe(true);
-		expect(filter({ user: { role: 'admin' } }, 'created', {})).toBe(true);
-		expect(filter({ user: { id: 'u2', role: 'viewer' } }, 'created', { userId: 'u1' })).toBe(false);
+		expect(filter({ user: { id: 'u1' } })).toBe(true);
+		expect(filter({ user: { role: 'admin' } })).toBe(true);
+		expect(filter({ user: { role: 'viewer' } })).toBe(false);
 	});
 
 	it('all() returns true only if all predicates match', () => {
 		const filter = live.access.all(
-			live.access.owner('userId'),
+			live.access.owner(),
 			live.access.role({ admin: true })
 		);
-		expect(filter({ user: { id: 'u1', role: 'admin' } }, 'created', { userId: 'u1' })).toBe(true);
-		expect(filter({ user: { id: 'u1', role: 'viewer' } }, 'created', { userId: 'u1' })).toBe(false);
+		expect(filter({ user: { id: 'u1', role: 'admin' } })).toBe(true);
+		expect(filter({ user: { id: 'u1', role: 'viewer' } })).toBe(false);
 	});
 });
 
@@ -1579,20 +1833,20 @@ describe('live.access', () => {
 
 describe('live.stream() with filter/access', () => {
 	it('stores filter function from filter option', () => {
-		const filterFn = (ctx, event, data) => true;
+		const filterFn = (ctx) => true;
 		const fn = live.stream('filtered', async () => [], { filter: filterFn });
 		expect(fn.__streamFilter).toBe(filterFn);
 	});
 
 	it('stores filter function from access option (alias)', () => {
-		const accessFn = live.access.owner('userId');
+		const accessFn = live.access.owner();
 		const fn = live.stream('accessed', async () => [], { access: accessFn });
 		expect(fn.__streamFilter).toBe(accessFn);
 	});
 
 	it('access takes priority over filter', () => {
-		const accessFn = (ctx, event, data) => true;
-		const filterFn = (ctx, event, data) => false;
+		const accessFn = (ctx) => true;
+		const filterFn = (ctx) => false;
 		const fn = live.stream('priority', async () => [], { access: accessFn, filter: filterFn });
 		expect(fn.__streamFilter).toBe(accessFn);
 	});
@@ -2440,6 +2694,7 @@ describe('stream filter/access', () => {
 		await new Promise((r) => setTimeout(r, 10));
 		const response = platform.sent[0]?.data;
 		expect(response.ok).toBe(false);
+		expect(response.code).toBe('FORBIDDEN');
 		expect(response.error).toBe('Access denied');
 		expect(ws.isSubscribed('secret-feed')).toBe(false);
 	});
@@ -2484,6 +2739,7 @@ describe('stream filter/access', () => {
 		await new Promise((r) => setTimeout(r, 10));
 		const batch = platform.sent[0]?.data?.batch;
 		expect(batch[0].ok).toBe(false);
+		expect(batch[0].code).toBe('FORBIDDEN');
 		expect(batch[0].error).toBe('Access denied');
 	});
 });
