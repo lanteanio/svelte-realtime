@@ -61,7 +61,6 @@ export default function svelteRealtime(options) {
 
 	return {
 		name: 'svelte-realtime',
-		enforce: 'pre',
 
 		configResolved(config) {
 			root = config.root;
