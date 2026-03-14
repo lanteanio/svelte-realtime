@@ -63,6 +63,10 @@ export interface StreamStore<T = any> extends Readable<T> {
 	readonly canUndo: boolean;
 	/** Whether there are entries to redo. */
 	readonly canRedo: boolean;
+	/** Pause history recording. Events still apply but no snapshots are saved. */
+	pauseHistory(): void;
+	/** Resume history recording. Records current state as a snapshot. */
+	resumeHistory(): void;
 	/** Return a wrapper store that only activates when `condition` is truthy. Accepts a boolean, a Svelte store, or a getter function. Getter functions are evaluated once at subscribe time; for reactivity, pass a store. */
 	when(condition: boolean | Readable<any> | (() => any)): Readable<T | undefined>;
 }

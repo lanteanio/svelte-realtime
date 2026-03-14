@@ -1163,6 +1163,122 @@ describe('stream undo/redo', () => {
 	});
 });
 
+// -- pauseHistory / resumeHistory (Phase 36) ----------------------------------
+
+describe('stream pauseHistory / resumeHistory', () => {
+	it('pauseHistory suppresses undo snapshots while events still apply', () => {
+		const store = __stream('pause/test1', { merge: 'crud', key: 'id' });
+		let value;
+		const unsub = store.subscribe(v => { value = v; });
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true, data: [{ id: 1, text: 'a' }], topic: 'pause1', merge: 'crud', key: 'id'
+		});
+
+		store.enableHistory();
+		store.pauseHistory();
+
+		// Events still apply to the store value
+		simulateTopicMessage('pause1', { event: 'created', data: { id: 2, text: 'b' } });
+		expect(value).toEqual([{ id: 1, text: 'a' }, { id: 2, text: 'b' }]);
+
+		// But undo should not be available (no snapshots recorded)
+		expect(store.canUndo).toBe(false);
+
+		unsub();
+	});
+
+	it('resumeHistory records a snapshot so undo goes back to resume-time state', () => {
+		const store = __stream('pause/test2', { merge: 'set' });
+		let value;
+		const unsub = store.subscribe(v => { value = v; });
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true, data: 0, topic: 'pause2', merge: 'set'
+		});
+
+		store.enableHistory();
+
+		// Record one change before pausing
+		simulateTopicMessage('pause2', { event: 'set', data: 1 });
+		expect(store.canUndo).toBe(true);
+
+		store.pauseHistory();
+
+		// Several changes while paused — no snapshots
+		simulateTopicMessage('pause2', { event: 'set', data: 2 });
+		simulateTopicMessage('pause2', { event: 'set', data: 3 });
+		expect(value).toBe(3);
+
+		store.resumeHistory();
+
+		// One more change after resume
+		simulateTopicMessage('pause2', { event: 'set', data: 4 });
+		expect(value).toBe(4);
+
+		// Undo should go back to the resume-time snapshot (3), not 2 or 1
+		store.undo();
+		expect(value).toBe(3);
+
+		unsub();
+	});
+
+	it('resumeHistory is a no-op when not paused', () => {
+		const store = __stream('pause/test3', { merge: 'set' });
+		let value;
+		const unsub = store.subscribe(v => { value = v; });
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true, data: 'init', topic: 'pause3', merge: 'set'
+		});
+
+		store.enableHistory();
+		simulateTopicMessage('pause3', { event: 'set', data: 'changed' });
+
+		// Resume without pause should not create an extra snapshot
+		store.resumeHistory();
+
+		store.undo();
+		expect(value).toBe('init');
+		// No further undo available
+		expect(store.canUndo).toBe(false);
+
+		unsub();
+	});
+
+	it('optimistic updates during pause do not create undo entries', () => {
+		const store = __stream('pause/test4', { merge: 'crud', key: 'id' });
+		let value;
+		const unsub = store.subscribe(v => { value = v; });
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true, data: [{ id: 1 }], topic: 'pause4', merge: 'crud', key: 'id'
+		});
+
+		store.enableHistory();
+		store.pauseHistory();
+
+		store.optimistic('created', { id: 2 });
+		expect(value).toEqual([{ id: 1 }, { id: 2 }]);
+		expect(store.canUndo).toBe(false);
+
+		store.resumeHistory();
+
+		// After resume, new changes should record history again
+		store.optimistic('created', { id: 3 });
+		expect(store.canUndo).toBe(true);
+
+		store.undo();
+		expect(value).toEqual([{ id: 1 }, { id: 2 }]);
+
+		unsub();
+	});
+});
+
 // -- onSignal() (Phase 43) ----------------------------------------------------
 
 describe('onSignal()', () => {

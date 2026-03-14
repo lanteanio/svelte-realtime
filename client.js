@@ -928,6 +928,25 @@ function _createStream(path, options, dynamicArgs) {
 		},
 
 		/**
+		 * Pause history recording. Events still apply to the store value,
+		 * but no snapshots are saved to the undo stack.
+		 */
+		pauseHistory() {
+			_historyPaused = true;
+		},
+
+		/**
+		 * Resume history recording after a pause.
+		 * Records the current value as a snapshot so undo returns to
+		 * the state at resume-time rather than before the pause.
+		 */
+		resumeHistory() {
+			if (!_historyPaused) return;
+			_historyPaused = false;
+			_recordHistory();
+		},
+
+		/**
 		 * Return a wrapper store that only activates when `condition` is truthy.
 		 * When condition becomes falsy, the underlying subscription is cleaned up.
 		 *
