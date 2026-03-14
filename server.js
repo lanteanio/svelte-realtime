@@ -1596,7 +1596,7 @@ async function _executeRpc(ws, msg, platform, options) {
 				return;
 			}
 
-			ws.subscribe(topic);
+			try { ws.subscribe(topic); } catch { return; }
 
 			// Track dynamic topic -> stream mapping for accurate onUnsubscribe dispatch
 			if (typeof rawTopic === 'function' && /** @type {any} */ (fn).__onUnsubscribe) {
@@ -1892,7 +1892,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 				return { id, ok: false, code: 'FORBIDDEN', error: 'Access denied' };
 			}
 
-			ws.subscribe(topic);
+			try { ws.subscribe(topic); } catch { return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' }; }
 
 			// Track dynamic topic -> stream mapping for accurate onUnsubscribe dispatch
 			if (typeof rawTopic === 'function' && /** @type {any} */ (fn).__onUnsubscribe) {
@@ -2150,11 +2150,16 @@ function _respond(ws, platform, correlationId, payload) {
 			);
 		}
 	}
-	const result = platform.send(ws, '__rpc', correlationId, payload);
-	if (result === 0 && typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-		console.warn(
-			`[svelte-realtime] RPC response was not delivered (backpressure or closed connection)`
-		);
+	try {
+		const result = platform.send(ws, '__rpc', correlationId, payload);
+		if (result === 0 && typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+			console.warn(
+				`[svelte-realtime] RPC response was not delivered (backpressure or closed connection)`
+			);
+		}
+	} catch {
+		// uWS throws when accessing a closed WebSocket — silently discard.
+		// This is expected when the client disconnects mid-RPC.
 	}
 }
 
