@@ -138,6 +138,20 @@ export default function svelteRealtime(options) {
 				} else {
 					config.build.rollupOptions.input = { '__live-registry': REGISTRY_ID };
 				}
+
+				// Keep svelte-realtime imports as bare specifiers so the registry
+				// and ws-handler resolve to the same Node module instance at runtime.
+				// Without this, Vite rewrites the import to a chunk-relative path,
+				// creating a separate module instance with its own registry Map.
+				const ext = config.build.rollupOptions.external;
+				const svelteRealtimeRe = /^svelte-realtime(\/.*)?$/;
+				if (Array.isArray(ext)) {
+					ext.push(svelteRealtimeRe);
+				} else if (typeof ext === 'string' || ext instanceof RegExp || typeof ext === 'function') {
+					config.build.rollupOptions.external = [ext, svelteRealtimeRe];
+				} else {
+					config.build.rollupOptions.external = [svelteRealtimeRe];
+				}
 			}
 		},
 
