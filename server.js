@@ -8,8 +8,52 @@ const registry = new Map();
 /** @type {Map<string, Function>} */
 const guards = new Map();
 
+/** @type {Set<Function>} Streams with onUnsubscribe hooks for fast close() */
+const _streamsWithUnsubscribe = new Set();
+
 /** @type {Array<(ctx: any, next: () => Promise<any>) => Promise<any>>} */
 const _globalMiddleware = [];
+
+/** @type {WeakMap<any, Function>} Cache bound publish per platform to avoid repeated .bind() */
+const _boundPublishCache = new WeakMap();
+
+/**
+ * Get a cached bound publish function for a platform.
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @returns {Function}
+ */
+function _getBoundPublish(platform) {
+	let bound = _boundPublishCache.get(platform);
+	if (!bound) {
+		bound = platform.publish.bind(platform);
+		_boundPublishCache.set(platform, bound);
+	}
+	return bound;
+}
+
+/** @type {WeakMap<any, { publish: Function, throttle: Function, debounce: Function, signal: Function }>} */
+const _ctxHelpersCache = new WeakMap();
+
+/**
+ * Get cached ctx helper methods for a platform.
+ * Avoids creating new closures on every RPC call.
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @returns {{ publish: Function, throttle: Function, debounce: Function, signal: Function }}
+ */
+function _getCtxHelpers(platform) {
+	let helpers = _ctxHelpersCache.get(platform);
+	if (!helpers) {
+		const publish = _getBoundPublish(platform);
+		helpers = {
+			publish,
+			throttle: (topic, event, data, ms) => _throttlePublish(platform, topic, event, data, ms),
+			debounce: (topic, event, data, ms) => _debouncePublish(platform, topic, event, data, ms),
+			signal: (userId, event, data) => platform.publish('__signal:' + userId, event, data)
+		};
+		_ctxHelpersCache.set(platform, helpers);
+	}
+	return helpers;
+}
 
 /**
  * Register a live function in the registry.
@@ -22,6 +66,9 @@ export function __register(path, fn) {
 	// Set rate limit path for rate-limited functions
 	if (/** @type {any} */ (fn).__isRateLimited) {
 		/** @type {any} */ (fn).__rateLimitPath = path;
+	}
+	if (/** @type {any} */ (fn).__isStream && /** @type {any} */ (fn).__onUnsubscribe) {
+		_streamsWithUnsubscribe.add(fn);
 	}
 }
 
@@ -177,7 +224,7 @@ live.access = {
 	}
 };
 
-/** @type {Map<string, number[]>} */
+/** @type {Map<string, { prev: number, curr: number, windowStart: number }>} */
 const _rateLimits = new Map();
 
 /** @type {number} */
@@ -200,40 +247,54 @@ live.rateLimit = function rateLimit(config, fn) {
 		const bucketKey = /** @type {any} */ (wrapper).__rateLimitPath + '\0' + userKey;
 		const now = Date.now();
 
-		// Lazy sweep: prune stale entries every 60s
+		// Lazy sweep: prune stale entries, but limit work per sweep
 		if (now - _rateLimitLastSweep > 60000) {
 			_rateLimitLastSweep = now;
-			for (const [k, timestamps] of _rateLimits) {
-				const pruned = timestamps.filter(t => now - t < windowMs);
-				if (pruned.length === 0) {
-					_rateLimits.delete(k);
-				} else {
-					_rateLimits.set(k, pruned);
+			if (_rateLimits.size > 0) {
+				const maxSweep = Math.max(200, _rateLimits.size >> 2);
+				let swept = 0;
+				for (const [k, bucket] of _rateLimits) {
+					if (now - bucket.windowStart >= windowMs * 2) {
+						_rateLimits.delete(k);
+					}
+					if (++swept >= maxSweep) break;
 				}
 			}
 		}
 
-		let timestamps = _rateLimits.get(bucketKey);
-		if (!timestamps) {
-			timestamps = [];
-			_rateLimits.set(bucketKey, timestamps);
+		let bucket = _rateLimits.get(bucketKey);
+		if (!bucket) {
+			bucket = { prev: 0, curr: 0, windowStart: now };
+			_rateLimits.set(bucketKey, bucket);
 		}
 
-		// Prune expired timestamps (single splice instead of repeated shift)
-		let expired = 0;
-		while (expired < timestamps.length && now - timestamps[expired] >= windowMs) {
-			expired++;
+		// Rotate windows if needed
+		const elapsed = now - bucket.windowStart;
+		if (elapsed >= windowMs * 2) {
+			// Both windows expired, reset
+			bucket.prev = 0;
+			bucket.curr = 0;
+			bucket.windowStart = now;
+		} else if (elapsed >= windowMs) {
+			// Current window expired, rotate
+			bucket.prev = bucket.curr;
+			bucket.curr = 0;
+			bucket.windowStart += windowMs;
 		}
-		if (expired > 0) timestamps.splice(0, expired);
 
-		if (timestamps.length >= points) {
-			const retryAfter = windowMs - (now - timestamps[0]);
+		// Estimate count in sliding window using weighted average
+		const windowElapsed = now - bucket.windowStart;
+		const weight = Math.max(0, 1 - windowElapsed / windowMs);
+		const estimated = bucket.prev * weight + bucket.curr;
+
+		if (estimated >= points) {
+			const retryAfter = Math.ceil(windowMs - windowElapsed);
 			const err = new LiveError('RATE_LIMITED', 'Too many requests');
 			/** @type {any} */ (err).retryAfter = retryAfter;
 			throw err;
 		}
 
-		timestamps.push(now);
+		bucket.curr++;
 		return fn(ctx, ...args);
 	};
 
@@ -416,12 +477,30 @@ export function __registerEffect(path, fn) {
 	const debounce = /** @type {any} */ (fn).__effectDebounce || 0;
 	if (!sources) return;
 	effectRegistry.set(path, { sources, fn, debounce, timer: null });
+	for (const src of sources) {
+		let set = _effectBySource.get(src);
+		if (!set) { set = new Set(); _effectBySource.set(src, set); }
+		set.add(effectRegistry.get(path));
+		_watchedTopics.add(src);
+	}
 }
 
 /** @type {Map<string, { source: string, reducers: any, topic: string, state: any, snapshot: Function | null, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
 const aggregateRegistry = new Map();
 /** @type {Map<string, any>} Topic-keyed lookup for aggregates */
 const _aggregateByTopic = new Map();
+
+/** @type {Map<string, Set<any>>} Source topic -> derived entries that watch it */
+const _derivedBySource = new Map();
+
+/** @type {Map<string, Set<any>>} Source topic -> effect entries that watch it */
+const _effectBySource = new Map();
+
+/** @type {Map<string, Set<any>>} Source topic -> aggregate entries that watch it */
+const _aggregateBySource = new Map();
+
+/** @type {Set<string>} All source topics watched by derived/effect/aggregate for fast bail-out */
+const _watchedTopics = new Set();
 
 /**
  * Create a real-time incremental aggregation over a source topic.
@@ -497,6 +576,10 @@ export function __registerAggregate(path, fn) {
 	const entry = { source, reducers, topic, state: { ...initState }, snapshot, debounce, timer: null };
 	aggregateRegistry.set(path, entry);
 	_aggregateByTopic.set(topic, entry);
+	let srcSet = _aggregateBySource.get(source);
+	if (!srcSet) { srcSet = new Set(); _aggregateBySource.set(source, srcSet); }
+	srcSet.add(entry);
+	_watchedTopics.add(source);
 }
 
 /**
@@ -774,6 +857,12 @@ export function __registerDerived(path, fn) {
 	const debounce = /** @type {any} */ (fn).__derivedDebounce || 0;
 	if (!sources || !topic) return;
 	derivedRegistry.set(path, { sources, fn, topic, debounce, timer: null });
+	for (const src of sources) {
+		let set = _derivedBySource.get(src);
+		if (!set) { set = new Set(); _derivedBySource.set(src, set); }
+		set.add(derivedRegistry.get(path));
+		_watchedTopics.add(src);
+	}
 }
 
 /**
@@ -783,66 +872,73 @@ export function __registerDerived(path, fn) {
  * @param {import('svelte-adapter-uws').Platform} platform
  */
 export function _activateDerived(platform) {
-	// Derived streams recompute when source topics publish.
-	// This is integrated into the publish path -- wrap platform.publish
-	// to detect source topic events.
+	// Only wrap platform.publish if there are actual reactive registrations
+	if (_derivedBySource.size === 0 && _effectBySource.size === 0 && _aggregateBySource.size === 0) {
+		return;
+	}
+
 	const originalPublish = platform.publish.bind(platform);
 
 	platform.publish = function derivedPublish(topic, event, data, opts) {
 		const result = originalPublish(topic, event, data, opts);
 
-		// Check if any derived stream watches this topic
-		for (const [path, entry] of derivedRegistry) {
-			if (!entry.sources.includes(topic)) continue;
+		if (!_watchedTopics.has(topic)) return result;
 
-			if (entry.debounce > 0) {
-				if (entry.timer) clearTimeout(entry.timer);
-				entry.timer = setTimeout(() => {
-					entry.timer = null;
+		// Check if any derived stream watches this topic
+		const derivedEntries = _derivedBySource.get(topic);
+		if (derivedEntries) {
+			for (const entry of derivedEntries) {
+				if (entry.debounce > 0) {
+					if (entry.timer) clearTimeout(entry.timer);
+					entry.timer = setTimeout(() => {
+						entry.timer = null;
+						_recomputeDerived(entry, platform);
+					}, entry.debounce);
+				} else {
 					_recomputeDerived(entry, platform);
-				}, entry.debounce);
-			} else {
-				_recomputeDerived(entry, platform);
+				}
 			}
 		}
 
 		// Fire matching effects
-		for (const [path, entry] of effectRegistry) {
-			if (!entry.sources.includes(topic)) continue;
-
-			if (entry.debounce > 0) {
-				if (entry.timer) clearTimeout(entry.timer);
-				entry.timer = setTimeout(() => {
-					entry.timer = null;
-					_fireEffect(entry, event, data, platform);
-				}, entry.debounce);
-			} else {
-				// Fire-and-forget: don't block the publish path
-				Promise.resolve().then(() => _fireEffect(entry, event, data, platform));
+		const effectEntries = _effectBySource.get(topic);
+		if (effectEntries) {
+			for (const entry of effectEntries) {
+				if (entry.debounce > 0) {
+					if (entry.timer) clearTimeout(entry.timer);
+					entry.timer = setTimeout(() => {
+						entry.timer = null;
+						_fireEffect(entry, event, data, platform);
+					}, entry.debounce);
+				} else {
+					// Fire-and-forget: don't block the publish path
+					Promise.resolve().then(() => _fireEffect(entry, event, data, platform));
+				}
 			}
 		}
 
 		// Run matching aggregates
-		for (const [path, entry] of aggregateRegistry) {
-			if (entry.source !== topic) continue;
-
-			// Apply reducers
-			for (const [field, reducer] of Object.entries(entry.reducers)) {
-				if (reducer.reduce) {
-					entry.state[field] = reducer.reduce(entry.state[field], event, data);
+		const aggregateEntries = _aggregateBySource.get(topic);
+		if (aggregateEntries) {
+			for (const entry of aggregateEntries) {
+				// Apply reducers
+				for (const [field, reducer] of Object.entries(entry.reducers)) {
+					if (reducer.reduce) {
+						entry.state[field] = reducer.reduce(entry.state[field], event, data);
+					}
 				}
-			}
 
-			const computed = _computeAggregateState(entry.state, entry.reducers);
+				const computed = _computeAggregateState(entry.state, entry.reducers);
 
-			if (entry.debounce > 0) {
-				if (entry.timer) clearTimeout(entry.timer);
-				entry.timer = setTimeout(() => {
-					entry.timer = null;
+				if (entry.debounce > 0) {
+					if (entry.timer) clearTimeout(entry.timer);
+					entry.timer = setTimeout(() => {
+						entry.timer = null;
+						originalPublish(entry.topic, 'set', computed);
+					}, entry.debounce);
+				} else {
 					originalPublish(entry.topic, 'set', computed);
-				}, entry.debounce);
-			} else {
-				originalPublish(entry.topic, 'set', computed);
+				}
 			}
 		}
 
@@ -1198,15 +1294,16 @@ async function _executeRpc(ws, msg, platform, options) {
 	}
 
 	// Build context
+	const _h = _getCtxHelpers(platform);
 	const ctx = {
 		user: ws.getUserData(),
 		ws,
 		platform,
-		publish: platform.publish.bind(platform),
+		publish: _h.publish,
 		cursor: clientCursor !== undefined ? clientCursor : null,
-		throttle: (topic, event, data, ms) => _throttlePublish(platform, topic, event, data, ms),
-		debounce: (topic, event, data, ms) => _debouncePublish(platform, topic, event, data, ms),
-		signal: (userId, event, data) => platform.publish('__signal:' + userId, event, data)
+		throttle: _h.throttle,
+		debounce: _h.debounce,
+		signal: _h.signal
 	};
 
 	try {
@@ -1237,6 +1334,14 @@ async function _executeRpc(ws, msg, platform, options) {
 			const topic = typeof rawTopic === 'function' ? rawTopic(ctx, ...args) : rawTopic;
 			const streamOpts = /** @type {any} */ (fn).__streamOptions;
 			const replayOpts = /** @type {any} */ (fn).__replay;
+
+			// Enforce stream filter/access predicate before subscribing
+			const streamFilter = /** @type {any} */ (fn).__streamFilter;
+			if (streamFilter && !streamFilter(ctx)) {
+				_respond(ws, platform, id, { ok: false, error: 'Access denied' });
+				return;
+			}
+
 			ws.subscribe(topic);
 
 			// Fire onSubscribe lifecycle hook
@@ -1479,13 +1584,14 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 		return { id, ok: false, code: 'NOT_FOUND', error: 'Not found' };
 	}
 
+	const _h = _getCtxHelpers(platform);
 	const ctx = {
 		user: ws.getUserData(),
 		ws,
 		platform,
-		publish: platform.publish.bind(platform),
-		throttle: (topic, event, data, ms) => _throttlePublish(platform, topic, event, data, ms),
-		debounce: (topic, event, data, ms) => _debouncePublish(platform, topic, event, data, ms)
+		publish: _h.publish,
+		throttle: _h.throttle,
+		debounce: _h.debounce
 	};
 
 	try {
@@ -1499,9 +1605,24 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 		}
 
 		if (isStream && /** @type {any} */ (fn).__isStream) {
+			// Gate check: if predicate returns false, respond with gated no-op
+			if (/** @type {any} */ (fn).__isGated) {
+				const predicate = /** @type {any} */ (fn).__gatePredicate;
+				if (!predicate(ctx, ...args)) {
+					return { id, ok: true, data: null, gated: true };
+				}
+			}
+
 			const rawTopic = /** @type {any} */ (fn).__streamTopic;
 			const topic = typeof rawTopic === 'function' ? rawTopic(ctx, ...args) : rawTopic;
 			const streamOpts = /** @type {any} */ (fn).__streamOptions;
+
+			// Enforce stream filter/access predicate before subscribing
+			const streamFilter = /** @type {any} */ (fn).__streamFilter;
+			if (streamFilter && !streamFilter(ctx)) {
+				return { id, ok: false, error: 'Access denied' };
+			}
+
 			ws.subscribe(topic);
 			const result = await fn(ctx, ...args);
 			return {
@@ -1558,14 +1679,15 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 		return;
 	}
 
+	const _h = _getCtxHelpers(platform);
 	const ctx = {
 		user: ws.getUserData(),
 		ws,
 		platform,
-		publish: platform.publish.bind(platform),
+		publish: _h.publish,
 		cursor: null,
-		throttle: (topic, event, data, ms) => _throttlePublish(platform, topic, event, data, ms),
-		debounce: (topic, event, data, ms) => _debouncePublish(platform, topic, event, data, ms)
+		throttle: _h.throttle,
+		debounce: _h.debounce
 	};
 
 	try {
@@ -1729,24 +1851,13 @@ function _migrateItem(item, fromVersion, toVersion, migrateFns) {
 
 function _respond(ws, platform, correlationId, payload) {
 	if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-		// Only stringify to check size when the payload is likely large.
-		// Avoids double-serialization overhead for the common (small) case.
+		// Estimate size without double-serialization.
 		const data = payload.data;
-		const likelyLarge = Array.isArray(data)
-			? data.length > 30
-			: typeof data === 'string'
-				? data.length > 8000
-				: false;
-		if (likelyLarge) {
-			try {
-				const json = JSON.stringify(payload);
-				if (json.length > 12288) {
-					console.warn(
-						`[svelte-realtime] RPC response for '${correlationId}' is ${json.length} bytes -- close to maxPayloadLength (16KB). ` +
-						'Connection will be closed if exceeded. Increase maxPayloadLength in adapter config if needed.'
-					);
-				}
-			} catch {}
+		if ((Array.isArray(data) && data.length > 100) || (typeof data === 'string' && data.length > 12000)) {
+			console.warn(
+				`[svelte-realtime] RPC response for '${correlationId}' contains ${data.length} items -- ` +
+				'large responses may exceed maxPayloadLength (16KB). Increase maxPayloadLength in adapter config if needed.'
+			);
 		}
 	}
 	const result = platform.send(ws, '__rpc', correlationId, payload);
@@ -1773,13 +1884,20 @@ export async function __directCall(path, args, platform, options) {
 		throw new LiveError('NOT_FOUND', `Live function '${path}' not found`);
 	}
 
+	const _h = _getCtxHelpers(platform);
 	const ctx = {
 		user: options?.user || null,
 		ws: null,
 		platform,
-		publish: platform.publish.bind(platform)
+		publish: _h.publish,
+		cursor: null,
+		throttle: _h.throttle,
+		debounce: _h.debounce,
+		signal: _h.signal
 	};
 
+	// Run global middleware chain, then guard, then execution
+	return _runWithMiddleware(ctx, async () => {
 	// Run module guard
 	const modulePath = path.substring(0, path.lastIndexOf('/'));
 	const guardFn = guards.get(modulePath);
@@ -1791,6 +1909,7 @@ export async function __directCall(path, args, platform, options) {
 	}
 
 	return fn(ctx, ...args);
+	});
 }
 
 /**
@@ -1822,16 +1941,44 @@ export function enableSignals(ws, options) {
 }
 
 export function close(ws, { platform }) {
+	if (_streamsWithUnsubscribe.size === 0) return;
+
 	const user = ws.getUserData();
-	const closeCtx = { user, ws, platform, publish: platform.publish.bind(platform), cursor: null };
-	for (const [, fn] of registry) {
-		if (/** @type {any} */ (fn).__isStream && /** @type {any} */ (fn).__onUnsubscribe) {
-			const rawTopic = /** @type {any} */ (fn).__streamTopic;
-			// For static topics, fire onUnsubscribe directly.
-			// For dynamic topics, we cannot determine which topic this ws was on
-			// without tracking state -- the adapter's ws.getTopics() is the source of truth
-			if (typeof rawTopic === 'string') {
+	const closeCtx = { user, ws, platform, publish: _getCtxHelpers(platform).publish, cursor: null };
+
+	// Get the actual topics this socket was subscribed to
+	const subscribedTopics = typeof ws.getTopics === 'function' ? ws.getTopics() : null;
+	/** @type {Set<string> | null} */
+	let subscribedSet = null;
+
+	// Separate static and dynamic streams to avoid redundant iteration
+	/** @type {Function[]} */
+	const dynamicStreams = [];
+
+	for (const fn of _streamsWithUnsubscribe) {
+		const rawTopic = /** @type {any} */ (fn).__streamTopic;
+		if (typeof rawTopic === 'string') {
+			// Static topic: only fire if the socket was actually subscribed
+			if (!subscribedTopics) {
 				try { /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic); } catch {}
+			} else {
+				if (!subscribedSet) subscribedSet = new Set(subscribedTopics);
+				if (subscribedSet.has(rawTopic)) {
+					try { /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic); } catch {}
+				}
+			}
+		} else if (typeof rawTopic === 'function') {
+			dynamicStreams.push(fn);
+		}
+	}
+
+	// For dynamic streams, iterate user topics once and fire all matching hooks
+	if (dynamicStreams.length > 0 && subscribedTopics) {
+		const topics = subscribedSet || new Set(subscribedTopics);
+		for (const t of topics) {
+			if (t.startsWith('__')) continue;
+			for (const fn of dynamicStreams) {
+				try { /** @type {any} */ (fn).__onUnsubscribe(closeCtx, t); } catch {}
 			}
 		}
 	}

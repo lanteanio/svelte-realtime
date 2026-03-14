@@ -20,6 +20,23 @@ const RATE_LIMIT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.rateLimit\s*\(/
 const EFFECT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.effect\s*\(/g;
 const AGGREGATE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.aggregate\s*\(/g;
 
+/** @type {Map<string, string>} Cache file contents to avoid redundant reads within a build cycle */
+const _fileCache = new Map();
+
+/**
+ * Read a file with caching. Returns cached content if available.
+ * @param {string} filePath
+ * @returns {string}
+ */
+function _readCached(filePath) {
+	let content = _fileCache.get(filePath);
+	if (content === undefined) {
+		content = readFileSync(filePath, 'utf-8');
+		_fileCache.set(filePath, content);
+	}
+	return content;
+}
+
 /**
  * Vite plugin for svelte-realtime.
  * Resolves `$live/` imports to virtual modules with auto-generated client stubs.
@@ -51,9 +68,11 @@ export default function svelteRealtime(options) {
 			liveDir = resolve(root, dir);
 			isSsr = !!config.build?.ssr;
 			isDev = config.command === 'serve';
+			_fileCache.clear();
 		},
 
 		buildStart() {
+			_fileCache.clear();
 			if (!existsSync(liveDir)) {
 				console.warn(
 					`[svelte-realtime] Plugin loaded but no live modules found in ${dir}/`
@@ -156,6 +175,7 @@ export default function svelteRealtime(options) {
 
 		handleHotUpdate({ file, server }) {
 			if (!file.startsWith(liveDir)) return;
+			_fileCache.delete(file);
 
 			// Regenerate type declarations on file change
 			if (typedImports) {
@@ -217,7 +237,7 @@ function _resolveFile(liveDir, modulePath) {
  */
 function _generateSsrStubs(filePath, modulePath) {
 	const normalized = filePath.split(sep).join(posix.sep);
-	const source = readFileSync(filePath, 'utf-8');
+	const source = _readCached(filePath);
 
 	/** @type {string[]} */
 	const streamNames = [];
@@ -242,7 +262,7 @@ function _generateSsrStubs(filePath, modulePath) {
 
 	for (const name of streamNames) {
 		// Attach .load() method to the exported stream function
-		lines.push(`_mod.${name}.load = (platform, options) => __directCall('${modulePath}/${name}', [], platform, options);`);
+		lines.push(`_mod.${name}.load = (platform, options) => __directCall('${modulePath}/${name}', options?.args || [], platform, options);`);
 	}
 
 	return lines.join('\n') + '\n';
@@ -256,7 +276,7 @@ function _generateSsrStubs(filePath, modulePath) {
  * @returns {string}
  */
 function _generateClientStubs(filePath, modulePath, dir) {
-	const source = readFileSync(filePath, 'utf-8');
+	const source = _readCached(filePath);
 
 	/** @type {string[]} */
 	const lines = [];
@@ -650,7 +670,7 @@ function _generateRegistry(liveDir, dir) {
 
 	for (const filePath of files) {
 		const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-		const source = readFileSync(filePath, 'utf-8');
+		const source = _readCached(filePath);
 		const alias = `_m${importIdx++}`;
 		const normalizedPath = filePath.split(sep).join(posix.sep);
 
@@ -875,7 +895,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 
 	for (const filePath of files) {
 		const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-		const source = readFileSync(filePath, 'utf-8');
+		const source = _readCached(filePath);
 		const isTS = filePath.endsWith('.ts');
 
 		/** @type {string[]} */

@@ -252,7 +252,15 @@ const _streamCache = new Map();
 export function __stream(path, options, isDynamic) {
 	if (isDynamic) {
 		return function dynamicStream(...args) {
-			const cacheKey = path + ':' + JSON.stringify(args);
+			let cacheKey;
+			if (args.length === 1) {
+				const a = args[0];
+				const t = typeof a;
+				if (t === 'string' || t === 'number') cacheKey = path + ':' + a;
+				else cacheKey = path + ':' + JSON.stringify(args);
+			} else {
+				cacheKey = path + ':' + JSON.stringify(args);
+			}
 			const cached = _streamCache.get(cacheKey);
 			if (cached) return cached.store;
 
@@ -382,7 +390,9 @@ function _createStream(path, options, dynamicArgs) {
 	function _recordHistory() {
 		if (!_historyEnabled) return;
 		// Discard any redo entries after the current position
-		_history = _history.slice(0, _historyIndex + 1);
+		if (_historyIndex < _history.length - 1) {
+			_history.length = _historyIndex + 1;
+		}
 		// Snapshot must be a copy since _applyMerge mutates currentValue in place
 		const snapshot = Array.isArray(currentValue) ? currentValue.slice() : currentValue;
 		_history.push(snapshot);
@@ -395,7 +405,9 @@ function _createStream(path, options, dynamicArgs) {
 	/**
 	 * Apply a merge event in place (mutates currentValue, updates _index).
 	 * Does NOT call store.set or _recordHistory.
+	 * Returns true if currentValue was replaced with a new reference (no copy needed).
 	 * @param {{ event: string, data: any, seq?: number }} envelope
+	 * @returns {boolean}
 	 */
 	function _applyMerge(envelope) {
 		const { event, data } = envelope;
@@ -415,7 +427,8 @@ function _createStream(path, options, dynamicArgs) {
 					currentValue[idx] = data;
 				} else if (prepend) {
 					currentValue.unshift(data);
-					_rebuildIndex();
+					for (const [k, i] of _index) _index.set(k, i + 1);
+					_index.set(data[key], 0);
 				} else {
 					_index.set(data[key], currentValue.length);
 					currentValue.push(data);
@@ -427,15 +440,21 @@ function _createStream(path, options, dynamicArgs) {
 				const idx = _index.get(data[key]);
 				if (idx !== undefined) {
 					currentValue.splice(idx, 1);
-					_rebuildIndex();
+					_index.delete(data[key]);
+					for (const [k, i] of _index) {
+						if (i > idx) _index.set(k, i - 1);
+					}
 				}
 			}
+			return false;
 		} else if (merge === 'latest') {
 			if (!Array.isArray(currentValue)) currentValue = [];
 			currentValue.push(data);
 			if (currentValue.length > max) {
-				currentValue.splice(0, currentValue.length - max);
+				currentValue = currentValue.slice(-max);
+				return true;
 			}
+			return false;
 		} else if (merge === 'presence') {
 			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
 			if (event === 'join') {
@@ -450,12 +469,17 @@ function _createStream(path, options, dynamicArgs) {
 				const idx = _index.get(data.key);
 				if (idx !== undefined) {
 					currentValue.splice(idx, 1);
-					_rebuildIndex();
+					_index.delete(data.key);
+					for (const [k, i] of _index) {
+						if (i > idx) _index.set(k, i - 1);
+					}
 				}
 			} else if (event === 'set') {
 				currentValue = data;
 				_rebuildIndex();
+				return true;
 			}
+			return false;
 		} else if (merge === 'cursor') {
 			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
 			if (event === 'update') {
@@ -470,25 +494,32 @@ function _createStream(path, options, dynamicArgs) {
 				const idx = _index.get(data.key);
 				if (idx !== undefined) {
 					currentValue.splice(idx, 1);
-					_rebuildIndex();
+					_index.delete(data.key);
+					for (const [k, i] of _index) {
+						if (i > idx) _index.set(k, i - 1);
+					}
 				}
 			} else if (event === 'set') {
 				currentValue = data;
 				_rebuildIndex();
+				return true;
 			}
+			return false;
 		} else if (merge === 'set') {
 			currentValue = data;
+			return true;
 		}
+		return false;
 	}
 
 	/**
 	 * Apply a single pub/sub event to the current value using the merge strategy.
-	 * Mutates in place, creates a new reference for reactivity, notifies store, records history.
+	 * Creates a new array reference for Svelte reactivity only when needed.
 	 * @param {{ event: string, data: any }} envelope
 	 */
 	function applyEvent(envelope) {
-		_applyMerge(envelope);
-		if (Array.isArray(currentValue)) currentValue = currentValue.slice();
+		const replaced = _applyMerge(envelope);
+		if (!replaced && Array.isArray(currentValue)) currentValue = currentValue.slice();
 		store.set(currentValue);
 		_recordHistory();
 	}
@@ -897,7 +928,11 @@ function _createStream(path, options, dynamicArgs) {
 		 * Return a wrapper store that only activates when `condition` is truthy.
 		 * When condition becomes falsy, the underlying subscription is cleaned up.
 		 *
-		 * @param {boolean} condition
+		 * Accepts a boolean, a Svelte store (object with .subscribe), or a
+		 * getter function (() => boolean). Stores and functions are reactive:
+		 * the stream subscribes/unsubscribes as the condition changes.
+		 *
+		 * @param {boolean | { subscribe: Function } | (() => boolean)} condition
 		 * @returns {{ subscribe: Function }}
 		 */
 		when(condition) {
@@ -907,9 +942,13 @@ function _createStream(path, options, dynamicArgs) {
 			/** @type {Set<(v: any) => void>} */
 			const subs = new Set();
 			let subCount = 0;
+			let active = false;
+			/** @type {(() => void) | null} */
+			let conditionUnsub = null;
 
 			function activate() {
 				if (innerUnsub) return;
+				active = true;
 				innerUnsub = self.subscribe((v) => {
 					currentVal = v;
 					for (const s of subs) s(currentVal);
@@ -918,15 +957,37 @@ function _createStream(path, options, dynamicArgs) {
 
 			function deactivate() {
 				if (!innerUnsub) return;
+				active = false;
 				innerUnsub();
 				innerUnsub = null;
 				currentVal = undefined;
+				for (const s of subs) s(currentVal);
 			}
+
+			function handleCondition(value) {
+				if (value && subCount > 0) {
+					activate();
+				} else if (!value) {
+					deactivate();
+				}
+			}
+
+			// Determine condition type
+			const isStore = condition && typeof condition === 'object' && typeof condition.subscribe === 'function';
+			const isFn = typeof condition === 'function';
 
 			return {
 				subscribe(fn) {
-					if (subCount++ === 0 && condition) {
-						activate();
+					if (subCount++ === 0) {
+						if (isStore) {
+							conditionUnsub = condition.subscribe((v) => handleCondition(v));
+						} else if (isFn) {
+							// Poll the getter on subscribe. For true reactivity with
+							// Svelte 5 $state, users should wrap in $derived or pass a store.
+							handleCondition(condition());
+						} else if (condition) {
+							activate();
+						}
 					}
 					subs.add(fn);
 					fn(currentVal);
@@ -935,6 +996,10 @@ function _createStream(path, options, dynamicArgs) {
 						subs.delete(fn);
 						if (--subCount === 0) {
 							deactivate();
+							if (conditionUnsub) {
+								conditionUnsub();
+								conditionUnsub = null;
+							}
 						}
 					};
 				}
@@ -1056,7 +1121,7 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function }} OfflineEntry
  */
 
-/** @type {{ beforeReconnect?: () => Promise<void> | void, onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
+/** @type {{ onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
 let _clientConfig = {};
 
 /** @type {boolean} */
@@ -1074,7 +1139,7 @@ let _replayingQueue = false;
 /**
  * Configure client-side connection hooks and offline queue.
  *
- * @param {{ beforeReconnect?: () => Promise<void> | void, onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * @param {{ onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
 	_clientConfig = config;
@@ -1128,16 +1193,39 @@ async function _drainOfflineQueue() {
 		queue = offlineOpts.replay(queue);
 	}
 
-	// Replay
-	for (const entry of queue) {
-		try {
-			const result = await _sendRpc(entry.path, entry.args);
-			entry.resolve(result);
-		} catch (err) {
-			if (onReplayError) {
-				onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
+	// Replay using the configured strategy
+	if (offlineOpts?.replay === 'batch' && queue.length > 0) {
+		// Batch strategy: send queued calls with concurrency limit to avoid flooding
+		const concurrency = 10;
+		for (let i = 0; i < queue.length; i += concurrency) {
+			const chunk = queue.slice(i, i + concurrency);
+			const promises = chunk.map(entry => {
+				const promise = _sendRpc(entry.path, entry.args);
+				promise.then(
+					(result) => entry.resolve(result),
+					(err) => {
+						if (onReplayError) {
+							onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
+						}
+						entry.reject(err);
+					}
+				);
+				return promise.catch(() => {}); // swallow for Promise.all
+			});
+			await Promise.all(promises);
+		}
+	} else {
+		// Sequential strategy (default)
+		for (const entry of queue) {
+			try {
+				const result = await _sendRpc(entry.path, entry.args);
+				entry.resolve(result);
+			} catch (err) {
+				if (onReplayError) {
+					onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
+				}
+				entry.reject(err);
 			}
-			entry.reject(err);
 		}
 	}
 
@@ -1173,20 +1261,23 @@ export function combine(...args) {
 
 	function notify() {
 		const next = fn(...values);
+		if (next === currentValue) return;
 		currentValue = next;
 		for (const sub of subscribers) sub(currentValue);
 	}
 
 	function startSources() {
+		let initializing = true;
 		sourceUnsubs = sources.map((source, i) => {
 			return source.subscribe((v) => {
 				values[i] = v;
-				if (sourceUnsubs.length === sources.length) {
+				if (!initializing) {
 					notify();
 				}
 			});
 		});
-		// After all initial subscriptions, compute the first value
+		initializing = false;
+		// Compute once after all sources have emitted their initial values
 		currentValue = fn(...values);
 	}
 
@@ -1217,11 +1308,21 @@ export function combine(...args) {
  * Register a handler for point-to-point signals.
  * Signals are sent by `ctx.signal(userId, event, data)` on the server.
  *
+ * The userId must match the one used by `enableSignals()` on the server,
+ * because the server publishes to `__signal:${userId}`.
+ *
+ * @param {string} userId - The current user's id (must match server-side enableSignals)
  * @param {(event: string, data: any) => void} callback
  * @returns {() => void} Unsubscribe function
  */
-export function onSignal(callback) {
-	const store = on('__signal');
+export function onSignal(userId, callback) {
+	// Support legacy call signature: onSignal(callback)
+	if (typeof userId === 'function' && callback === undefined) {
+		callback = /** @type {(event: string, data: any) => void} */ (/** @type {unknown} */ (userId));
+		userId = '';
+	}
+	const topic = userId ? ('__signal:' + userId) : '__signal';
+	const store = on(topic);
 	return store.subscribe((envelope) => {
 		if (!envelope) return;
 		callback(envelope.event, envelope.data);

@@ -1295,6 +1295,47 @@ describe('live.stream() lifecycle hooks', () => {
 // -- Phase 20: close() -------------------------------------------------------
 
 describe('close()', () => {
+	it('does not fire onUnsubscribe when socket was not subscribed to the topic', () => {
+		let fired = false;
+		const streamFn = live.stream('unrelated-topic', async (ctx) => [], {
+			merge: 'crud',
+			key: 'id',
+			onUnsubscribe() { fired = true; }
+		});
+		__register('close/unrelated', streamFn);
+
+		const ws = mockWs();
+		// ws is NOT subscribed to 'unrelated-topic'
+		const platform = mockPlatform();
+
+		close(ws, { platform });
+
+		expect(fired).toBe(false);
+	});
+
+	it('fires onUnsubscribe for dynamic topic streams when socket has matching topics', () => {
+		let firedTopics = [];
+		const topicFn = (ctx, roomId) => `room-${roomId}`;
+		const streamFn = live.stream(topicFn, async (ctx) => [], {
+			merge: 'crud',
+			key: 'id',
+			onUnsubscribe(ctx, topic) { firedTopics.push(topic); }
+		});
+		__register('close/dynamic', streamFn);
+
+		const ws = mockWs();
+		ws.subscribe('room-abc');
+		ws.subscribe('room-def');
+		ws.subscribe('__signal:u1'); // internal topic, should be skipped
+		const platform = mockPlatform();
+
+		close(ws, { platform });
+
+		expect(firedTopics).toContain('room-abc');
+		expect(firedTopics).toContain('room-def');
+		expect(firedTopics).not.toContain('__signal:u1');
+	});
+
 	it('fires onUnsubscribe for static topic streams on close', () => {
 		let unsubTopic;
 		const streamFn = live.stream('close-topic', async (ctx) => [], {
@@ -1305,6 +1346,7 @@ describe('close()', () => {
 		__register('close/items', streamFn);
 
 		const ws = mockWs();
+		ws.subscribe('close-topic');
 		const platform = mockPlatform();
 
 		close(ws, { platform });
@@ -2354,6 +2396,95 @@ describe('live.gate()', () => {
 		expect(calls.length).toBe(1);
 		expect(calls[0].userId).toBe('u42');
 		expect(calls[0].roomId).toBe('room-7');
+	});
+
+	it('gate is enforced in batch (single-rpc) execution path', async () => {
+		const stream = live.stream('batch-gate-feed', async (ctx) => [{ id: 1 }], { merge: 'crud' });
+		const gated = live.gate((ctx) => false, stream);
+		__register('bgate/feed', gated);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({
+			batch: [
+				{ rpc: 'bgate/feed', id: 'bg1', args: [], stream: true }
+			]
+		});
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const batch = platform.sent[0]?.data?.batch;
+		expect(batch).toBeDefined();
+		expect(batch[0].ok).toBe(true);
+		expect(batch[0].data).toBeNull();
+		expect(batch[0].gated).toBe(true);
+	});
+});
+
+// -- Stream filter/access enforcement -----------------------------------------
+
+describe('stream filter/access', () => {
+	it('denies subscription when filter returns false', async () => {
+		const stream = live.stream('secret-feed', async (ctx) => [{ id: 1 }], {
+			merge: 'crud',
+			key: 'id',
+			access: (ctx) => ctx.user?.admin === true
+		});
+		__register('filtered/feed', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'filtered/feed', id: 'f1', args: [], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(false);
+		expect(response.error).toBe('Access denied');
+		expect(ws.isSubscribed('secret-feed')).toBe(false);
+	});
+
+	it('allows subscription when filter returns true', async () => {
+		const stream = live.stream('open-feed', async (ctx) => [{ id: 1 }], {
+			merge: 'crud',
+			key: 'id',
+			access: (ctx) => ctx.user?.admin === true
+		});
+		__register('filtered/open', stream);
+
+		const ws = mockWs({ id: 'u1', admin: true });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'filtered/open', id: 'f2', args: [], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.data).toEqual([{ id: 1 }]);
+		expect(ws.isSubscribed('open-feed')).toBe(true);
+	});
+
+	it('filter/access is also enforced in batch path', async () => {
+		const stream = live.stream('batch-secret', async (ctx) => [{ id: 1 }], {
+			merge: 'crud',
+			key: 'id',
+			filter: (ctx) => false
+		});
+		__register('bfilter/secret', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({
+			batch: [
+				{ rpc: 'bfilter/secret', id: 'bf1', args: [], stream: true }
+			]
+		});
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const batch = platform.sent[0]?.data?.batch;
+		expect(batch[0].ok).toBe(false);
+		expect(batch[0].error).toBe('Access denied');
 	});
 });
 

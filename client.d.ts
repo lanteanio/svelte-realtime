@@ -152,8 +152,6 @@ export interface OfflineEntry {
 }
 
 export function configure(config: {
-	/** Called before each reconnection attempt. */
-	beforeReconnect?(): void | Promise<void>;
 	/** Called when the WebSocket connection opens (not on initial connect, only reconnects). */
 	onConnect?(): void;
 	/** Called when the WebSocket connection closes. */
@@ -177,6 +175,10 @@ export function configure(config: {
  * Register a handler for point-to-point signals.
  * Signals are sent by `ctx.signal(userId, event, data)` on the server.
  *
+ * The userId must match the one used by `enableSignals()` on the server,
+ * because the server publishes to `__signal:${userId}`.
+ *
+ * @param userId - The current user's id (must match server-side enableSignals)
  * @param callback - Called with (event, data) for each received signal
  * @returns Unsubscribe function
  *
@@ -184,11 +186,13 @@ export function configure(config: {
  * ```js
  * import { onSignal } from 'svelte-realtime/client';
  *
- * const unsub = onSignal((event, data) => {
+ * const unsub = onSignal(currentUser.id, (event, data) => {
  *   if (event === 'call:offer') showIncomingCall(data);
  * });
  * ```
  */
+export function onSignal(userId: string, callback: (event: string, data: any) => void): () => void;
+/** @deprecated Pass userId as the first argument so the topic matches the server. */
 export function onSignal(callback: (event: string, data: any) => void): () => void;
 
 /**

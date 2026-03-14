@@ -161,7 +161,10 @@ function benchCrudMerge(arraySize) {
 			const idx = index.get(targetId);
 			if (idx !== undefined) {
 				arr.splice(idx, 1);
-				rebuildIndex();
+				index.delete(targetId);
+				for (const [k, ii] of index) {
+					if (ii > idx) index.set(k, ii - 1);
+				}
 			}
 			index.set(targetId, arr.length);
 			arr.push({ id: targetId, text: 'restored' });
@@ -234,7 +237,10 @@ function benchPresenceMerge(arraySize) {
 			const idx = index.get(targetKey);
 			if (idx !== undefined) {
 				arr.splice(idx, 1);
-				rebuildIndex();
+				index.delete(targetKey);
+				for (const [k, ii] of index) {
+					if (ii > idx) index.set(k, ii - 1);
+				}
 			}
 			index.set(targetKey, arr.length);
 			arr.push({ key: targetKey, name: 'Rejoined' });

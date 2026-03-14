@@ -922,48 +922,48 @@ export { message, close } from 'svelte-realtime/server';
 
 ## Access control
 
-Use `live.access` helpers to filter pub/sub events per connection. Only matching events are delivered to each subscriber.
+Use the `filter` / `access` option on `live.stream()` to control who can subscribe. The predicate receives the connection context and is checked before the client is subscribed to the topic. If it returns `false`, the subscription is denied with an "Access denied" error and no data is sent.
+
+**Subscription-time access control** prevents unauthorized clients from subscribing to a topic. Use a simple predicate that checks `ctx.user`:
 
 ```js
 import { live } from 'svelte-realtime/server';
 
-// Only deliver events where the userId matches the connected user
-export const myOrders = live.stream('orders', async (ctx) => {
-  return db.orders.forUser(ctx.user.id);
+// Only admins can subscribe
+export const adminFeed = live.stream('admin-feed', async (ctx) => {
+  return db.adminEvents.recent();
 }, {
   merge: 'crud',
-  access: live.access.owner('userId')
+  access: (ctx) => ctx.user?.role === 'admin'
 });
 
-// Role-based: admins see everything, viewers only see public items
+// Role-based: different roles get different access
 export const items = live.stream('items', async (ctx) => {
   return db.items.all();
 }, {
   merge: 'crud',
   access: live.access.role({
     admin: true,
-    viewer: (ctx, data) => data.public === true
+    viewer: false
   })
 });
+```
 
-// Combine with any() or all()
-export const teamDocs = live.stream('docs', async (ctx) => {
-  return db.docs.all();
-}, {
-  merge: 'crud',
-  access: live.access.any(
-    live.access.owner('createdBy'),
-    live.access.team('teamId')
-  )
-});
+For **per-user data isolation**, use dynamic topics so each user subscribes to their own topic:
+
+```js
+// Each user gets their own topic -- no cross-user data leakage
+export const myOrders = live.stream(
+  (ctx) => `orders:${ctx.user.id}`,
+  async (ctx) => db.orders.forUser(ctx.user.id),
+  { merge: 'crud', key: 'id' }
+);
 ```
 
 | Helper | Description |
 |---|---|
-| `live.access.owner(field)` | Only allow events where `data[field] === ctx.user.id` |
-| `live.access.role(map)` | Role-based: `{ admin: true, viewer: (ctx, data) => ... }` |
-| `live.access.team(field)` | Only allow events where `data[field] === ctx.user.teamId` |
-| `live.access.any(...predicates)` | OR: any predicate returning true allows the event |
+| `live.access.role(map)` | Role-based: `{ admin: true, viewer: (ctx) => ... }` |
+| `live.access.any(...predicates)` | OR: any predicate returning true allows the subscription |
 | `live.access.all(...predicates)` | AND: all predicates must return true |
 
 ---
@@ -1133,7 +1133,9 @@ export const betaFeed = live.gate(
 <script>
   import { betaFeed } from '$live/beta';
 
-  let tabActive = $state(true);
+  import { writable } from 'svelte/store';
+
+  const tabActive = writable(true);
   const feed = betaFeed.when(tabActive);
 </script>
 
@@ -1144,7 +1146,7 @@ export const betaFeed = live.gate(
 {/if}
 ```
 
-When the predicate returns false, the server responds with a graceful no-op (no error, no subscription). The client store stays `undefined`. `.when()` subscribes when the condition is truthy and unsubscribes when falsy.
+When the predicate returns false, the server responds with a graceful no-op (no error, no subscription). The client store stays `undefined`. `.when()` accepts a boolean, a Svelte store, or a getter function. When given a store, it subscribes/unsubscribes reactively as the value changes.
 
 ---
 
@@ -1231,8 +1233,8 @@ export const board = live.room({
     if (!ctx.user) throw new LiveError('UNAUTHORIZED');
   },
   actions: {
-    addCard: async (ctx, title) => {
-      const card = await db.cards.insert({ boardId: ctx.args[0], title });
+    addCard: async (ctx, boardId, title) => {
+      const card = await db.cards.insert({ boardId, title });
       ctx.publish('created', card);
       return card;
     }
@@ -1240,7 +1242,7 @@ export const board = live.room({
 });
 ```
 
-On the client, the room export becomes an object with sub-streams and actions:
+On the client, the room export becomes an object with sub-streams and actions. Room actions receive the same leading arguments as the topic function (boardId in this case), followed by any action-specific arguments:
 
 ```svelte
 <script>
@@ -1255,7 +1257,7 @@ On the client, the room export becomes an object with sub-streams and actions:
   <Card {card} />
 {/each}
 
-<button onclick={() => board.addCard('New card')}>Add</button>
+<button onclick={() => board.addCard(boardId, 'New card')}>Add</button>
 ```
 
 ---
@@ -1312,7 +1314,7 @@ const handler = live(async (ctx, targetUserId, offer) => {
 // Client: receive signals
 import { onSignal } from 'svelte-realtime/client';
 
-const unsub = onSignal((event, data) => {
+const unsub = onSignal(currentUser.id, (event, data) => {
   if (event === 'call:offer') showIncomingCall(data);
 });
 ```
@@ -1699,7 +1701,7 @@ Import from `svelte-realtime/client`.
 | `batch(fn, options?)` | Group RPC calls into one WebSocket frame |
 | `configure(config)` | Connection hooks and offline queue setup |
 | `combine(...stores, fn)` | Multi-store composition |
-| `onSignal(callback)` | Listen for point-to-point signals |
+| `onSignal(userId, callback)` | Listen for point-to-point signals |
 
 **Stream store methods** (on `$live/` stream imports):
 

@@ -7,9 +7,23 @@ let panel = null;
 let visible = false;
 let activeTab = 'rpcs';
 
+/** @type {ReturnType<typeof setInterval> | null} */
+let refreshInterval = null;
+
 function toggle() {
 	visible = !visible;
 	if (panel) panel.style.display = visible ? 'block' : 'none';
+	if (visible && !refreshInterval) {
+		const content = panel?.querySelector('div:last-child');
+		if (content) render(/** @type {HTMLElement} */ (content));
+		refreshInterval = setInterval(() => {
+			const content = panel?.querySelector('div:last-child');
+			if (content) render(/** @type {HTMLElement} */ (content));
+		}, 1000);
+	} else if (!visible && refreshInterval) {
+		clearInterval(refreshInterval);
+		refreshInterval = null;
+	}
 }
 
 function init() {
@@ -76,6 +90,7 @@ function init() {
 		`;
 		btn.onclick = () => {
 			activeTab = name;
+			_lastRenderedHtml = '';
 			for (const b of tabs.children) {
 				/** @type {HTMLElement} */ (b).style.borderBottomColor = 'transparent';
 				/** @type {HTMLElement} */ (b).style.color = '#888';
@@ -96,10 +111,7 @@ function init() {
 	panel.appendChild(content);
 	document.body.appendChild(panel);
 
-	// Refresh every second
-	setInterval(() => {
-		if (visible) render(content);
-	}, 1000);
+	// Refresh managed by toggle() -- no idle timer when hidden
 }
 
 /** @param {HTMLElement} el */
@@ -124,6 +136,18 @@ function render(el) {
 	}
 }
 
+/**
+ * Escape a string for safe insertion into HTML.
+ * @param {string} s
+ * @returns {string}
+ */
+function esc(s) {
+	return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/** @type {string} */
+let _lastRenderedHtml = '';
+
 /** @param {HTMLElement} el @param {any} dt */
 function renderRpcs(el, dt) {
 	const pending = dt.pending ? Array.from(dt.pending.values()) : [];
@@ -134,7 +158,7 @@ function renderRpcs(el, dt) {
 		html += '<div style="color:#ffc107;margin-bottom:6px">Pending (' + pending.length + ')</div>';
 		for (const p of pending) {
 			const elapsed = Date.now() - p.startTime;
-			html += `<div style="padding:2px 0;color:#aaa">${p.path} <span style="color:#666">${elapsed}ms</span></div>`;
+			html += `<div style="padding:2px 0;color:#aaa">${esc(p.path)} <span style="color:#666">${elapsed}ms</span></div>`;
 		}
 		html += '<hr style="border-color:#333;margin:6px 0">';
 	}
@@ -143,11 +167,14 @@ function renderRpcs(el, dt) {
 	for (let i = history.length - 1; i >= Math.max(0, history.length - 20); i--) {
 		const h = history[i];
 		const color = h.ok ? '#4caf50' : '#f44336';
-		html += `<div style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${h.path} <span style="color:#666">${h.duration}ms</span></div>`;
+		html += `<div style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:#666">${h.duration}ms</span></div>`;
 	}
 	if (history.length === 0) html += '<div style="color:#666">No RPC calls yet</div>';
 
-	el.innerHTML = html;
+	if (html !== _lastRenderedHtml) {
+		_lastRenderedHtml = html;
+		el.innerHTML = html;
+	}
 }
 
 /** @param {HTMLElement} el @param {any} dt */
@@ -155,21 +182,30 @@ function renderStreams(el, dt) {
 	const streams = dt.streams ? Array.from(dt.streams.values()) : [];
 	let html = '<div style="margin-bottom:4px">Active (' + streams.length + ')</div>';
 	for (const s of streams) {
-		html += `<div style="padding:2px 0">${s.path} <span style="color:#666">topic:${s.topic || '?'} subs:${s.subCount}</span></div>`;
+		html += `<div style="padding:2px 0">${esc(s.path)} <span style="color:#666">topic:${esc(s.topic || '?')} subs:${s.subCount}</span></div>`;
 	}
 	if (streams.length === 0) html += '<div style="color:#666">No active streams</div>';
-	el.innerHTML = html;
+
+	if (html !== _lastRenderedHtml) {
+		_lastRenderedHtml = html;
+		el.innerHTML = html;
+	}
 }
 
 /** @param {HTMLElement} el @param {any} dt */
 function renderConnection(el, dt) {
 	const pending = dt.pending ? dt.pending.size : 0;
-	el.innerHTML = `
+	const html = `
 		<div style="padding:2px 0">Pending RPCs: ${pending}</div>
 		<div style="padding:2px 0">History entries: ${(dt.history || []).length}</div>
 		<div style="padding:2px 0">Active streams: ${dt.streams ? dt.streams.size : 0}</div>
 		<div style="padding:4px 0;color:#666;font-size:11px">Press Ctrl+Shift+L to toggle</div>
 	`;
+
+	if (html !== _lastRenderedHtml) {
+		_lastRenderedHtml = html;
+		el.innerHTML = html;
+	}
 }
 
 // Auto-init when loaded

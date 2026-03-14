@@ -1201,6 +1201,35 @@ describe('onSignal()', () => {
 		simulateTopicMessage('__signal', { event: 'after-unsub', data: {} });
 		expect(calls.length).toBe(0);
 	});
+
+	it('subscribes to user-specific signal topic when userId is provided', () => {
+		const calls = [];
+		const unsub = onSignal('user42', (event, data) => {
+			calls.push({ event, data });
+		});
+
+		// Should NOT respond to generic signal
+		simulateTopicMessage('__signal', { event: 'generic', data: {} });
+		expect(calls.length).toBe(0);
+
+		// Should respond to user-specific signal
+		simulateTopicMessage('__signal:user42', { event: 'call:offer', data: { from: 'bob' } });
+		expect(calls.length).toBe(1);
+		expect(calls[0].event).toBe('call:offer');
+		expect(calls[0].data).toEqual({ from: 'bob' });
+
+		unsub();
+	});
+
+	it('legacy overload (callback only) still works', () => {
+		const calls = [];
+		const unsub = onSignal((event, data) => calls.push(event));
+
+		simulateTopicMessage('__signal', { event: 'test', data: {} });
+		expect(calls).toEqual(['test']);
+
+		unsub();
+	});
 });
 
 // -- .when() (Phase 40: gate) -------------------------------------------------
@@ -1237,6 +1266,61 @@ describe('.when(condition)', () => {
 		});
 
 		expect(values[values.length - 1]).toBe('hello');
+
+		unsub();
+	});
+
+	it('.when() with a store-like object reacts to changes', () => {
+		let storeValue = false;
+		const subscribers = new Set();
+		const conditionStore = {
+			subscribe(fn) {
+				subscribers.add(fn);
+				fn(storeValue);
+				return () => subscribers.delete(fn);
+			}
+		};
+
+		const store = __stream('gate/store', { merge: 'set' });
+		const gated = store.when(conditionStore);
+		const values = [];
+		const unsub = gated.subscribe((v) => values.push(v));
+
+		// Condition is false, stream should not activate
+		expect(sendQueuedFn).not.toHaveBeenCalled();
+		expect(values).toEqual([undefined]);
+
+		// Set condition to true
+		storeValue = true;
+		for (const fn of subscribers) fn(true);
+
+		// Now the stream should activate
+		expect(sendQueuedFn).toHaveBeenCalled();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true, data: 'activated', topic: 'gate-store-t', merge: 'set'
+		});
+
+		expect(values[values.length - 1]).toBe('activated');
+
+		// Set condition back to false
+		storeValue = false;
+		for (const fn of subscribers) fn(false);
+
+		// Should deactivate (value becomes undefined)
+		expect(values[values.length - 1]).toBeUndefined();
+
+		unsub();
+	});
+
+	it('.when() with a function evaluates on subscribe', () => {
+		const store = __stream('gate/fn', { merge: 'set' });
+		const gated = store.when(() => true);
+		const values = [];
+		const unsub = gated.subscribe((v) => values.push(v));
+
+		// Function returned true, should activate
+		expect(sendQueuedFn).toHaveBeenCalled();
 
 		unsub();
 	});
