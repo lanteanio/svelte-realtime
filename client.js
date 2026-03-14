@@ -2,6 +2,8 @@
 import { connect as _connect, on, status } from 'svelte-adapter-uws/client';
 import { writable } from 'svelte/store';
 
+const _textEncoder = new TextEncoder();
+
 /**
  * Typed error for RPC failures.
  */
@@ -81,6 +83,25 @@ function ensureDisconnectListener() {
 }
 
 /**
+ * Build a dedup key from path and args, avoiding JSON.stringify for common cases.
+ * @param {string} path
+ * @param {any[]} args
+ * @returns {string}
+ */
+function _buildDedupKey(path, args) {
+	if (args.length === 0) return path;
+	if (args.length === 1) {
+		const a = args[0];
+		if (a === null) return path + '\0null';
+		const t = typeof a;
+		if (t === 'string' || t === 'number' || t === 'boolean') {
+			return path + '\0' + a;
+		}
+	}
+	return path + '\0' + JSON.stringify(args);
+}
+
+/**
  * Create a callable RPC function for a given path.
  * Used by generated client stubs.
  *
@@ -91,7 +112,7 @@ export function __rpc(path) {
 	function rpcCall(...args) {
 		// Dedup: coalesce identical calls within the same microtask
 		if (!_batchCollector) {
-			const dedupKey = path + '\0' + JSON.stringify(args);
+			const dedupKey = _buildDedupKey(path, args);
 			const existing = _dedupMap.get(dedupKey);
 			if (existing) return existing;
 
@@ -199,7 +220,7 @@ export function __binaryRpc(path) {
 
 			// Wire format: byte[0] = 0x00, byte[1-2] = header length (uint16 BE), then JSON header, then binary payload
 			const header = JSON.stringify({ rpc: path, id, args: args.length > 0 ? args : undefined });
-			const headerBytes = new TextEncoder().encode(header);
+			const headerBytes = _textEncoder.encode(header);
 			const bufBytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer || buffer);
 			const frame = new Uint8Array(3 + headerBytes.length + bufBytes.length);
 			frame[0] = 0x00;
@@ -322,6 +343,9 @@ function _createStream(path, options, dynamicArgs) {
 	/** @type {Set<any>} Keys of optimistic entries pending server confirmation */
 	const _optimisticKeys = new Set();
 
+	/** @type {Map<any, number>} Key-to-index lookup for keyed merge strategies */
+	const _index = new Map();
+
 	/** @type {any[]} Undo/redo history stack */
 	let _history = [];
 	/** @type {number} Current position in history (-1 = no history) */
@@ -331,16 +355,36 @@ function _createStream(path, options, dynamicArgs) {
 	/** @type {number} Maximum history entries */
 	let _historyMax = 50;
 
+	/** @type {ReturnType<typeof setTimeout> | null} Reconnect debounce timer */
+	let _reconnectTimer = null;
+
+	/**
+	 * Rebuild the key->index lookup map from currentValue.
+	 * Only meaningful for keyed merge strategies (crud, presence, cursor).
+	 */
+	function _rebuildIndex() {
+		_index.clear();
+		if (!Array.isArray(currentValue)) return;
+		if (merge === 'set' || merge === 'latest') return;
+		const k = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
+		for (let i = 0; i < currentValue.length; i++) {
+			const item = currentValue[i];
+			if (item != null && item[k] !== undefined) {
+				_index.set(item[k], i);
+			}
+		}
+	}
+
 	/**
 	 * Record current state in history after a mutation (if history enabled).
-	 * Called after currentValue has been updated.
+	 * Called after currentValue has been updated and a new reference created.
 	 */
 	function _recordHistory() {
 		if (!_historyEnabled) return;
 		// Discard any redo entries after the current position
 		_history = _history.slice(0, _historyIndex + 1);
-		// Push snapshot (shallow clone for arrays)
-		const snapshot = Array.isArray(currentValue) ? [...currentValue] : currentValue;
+		// Snapshot must be a copy since _applyMerge mutates currentValue in place
+		const snapshot = Array.isArray(currentValue) ? currentValue.slice() : currentValue;
 		_history.push(snapshot);
 		if (_history.length > _historyMax) {
 			_history.shift();
@@ -349,85 +393,102 @@ function _createStream(path, options, dynamicArgs) {
 	}
 
 	/**
-	 * Apply a single pub/sub event to the current value using the merge strategy.
-	 * When a server event matches an optimistic key, the optimistic marker is cleared.
-	 * @param {{ event: string, data: any }} envelope
+	 * Apply a merge event in place (mutates currentValue, updates _index).
+	 * Does NOT call store.set or _recordHistory.
+	 * @param {{ event: string, data: any, seq?: number }} envelope
 	 */
-	function applyEvent(envelope) {
+	function _applyMerge(envelope) {
 		const { event, data } = envelope;
 
-		// Track seq for replay-enabled streams
 		if (envelope.seq !== undefined) _lastSeq = envelope.seq;
 
 		if (merge === 'crud') {
-			if (!Array.isArray(currentValue)) currentValue = [];
+			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
 
-			// Clear optimistic marker if server event matches
 			if (data && data[key] !== undefined) {
 				_optimisticKeys.delete(data[key]);
 			}
 
 			if (event === 'created') {
-				// If this key already exists (optimistic), replace it
-				const existingIdx = currentValue.findIndex((/** @type {any} */ item) => item[key] === data[key]);
-				if (existingIdx !== -1) {
-					currentValue = currentValue.map((/** @type {any} */ item) =>
-						item[key] === data[key] ? data : item
-					);
+				const idx = _index.get(data[key]);
+				if (idx !== undefined) {
+					currentValue[idx] = data;
+				} else if (prepend) {
+					currentValue.unshift(data);
+					_rebuildIndex();
 				} else {
-					currentValue = prepend ? [data, ...currentValue] : [...currentValue, data];
+					_index.set(data[key], currentValue.length);
+					currentValue.push(data);
 				}
 			} else if (event === 'updated') {
-				currentValue = currentValue.map((/** @type {any} */ item) =>
-					item[key] === data[key] ? data : item
-				);
+				const idx = _index.get(data[key]);
+				if (idx !== undefined) currentValue[idx] = data;
 			} else if (event === 'deleted') {
-				currentValue = currentValue.filter((/** @type {any} */ item) =>
-					item[key] !== data[key]
-				);
+				const idx = _index.get(data[key]);
+				if (idx !== undefined) {
+					currentValue.splice(idx, 1);
+					_rebuildIndex();
+				}
 			}
 		} else if (merge === 'latest') {
 			if (!Array.isArray(currentValue)) currentValue = [];
-			currentValue = [...currentValue, data];
+			currentValue.push(data);
 			if (currentValue.length > max) {
-				currentValue = currentValue.slice(currentValue.length - max);
+				currentValue.splice(0, currentValue.length - max);
 			}
 		} else if (merge === 'presence') {
-			if (!Array.isArray(currentValue)) currentValue = [];
+			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
 			if (event === 'join') {
-				const existingIdx = currentValue.findIndex((/** @type {any} */ item) => item.key === data.key);
-				if (existingIdx !== -1) {
-					currentValue = currentValue.map((/** @type {any} */ item) =>
-						item.key === data.key ? data : item
-					);
+				const idx = _index.get(data.key);
+				if (idx !== undefined) {
+					currentValue[idx] = data;
 				} else {
-					currentValue = [...currentValue, data];
+					_index.set(data.key, currentValue.length);
+					currentValue.push(data);
 				}
 			} else if (event === 'leave') {
-				currentValue = currentValue.filter((/** @type {any} */ item) => item.key !== data.key);
+				const idx = _index.get(data.key);
+				if (idx !== undefined) {
+					currentValue.splice(idx, 1);
+					_rebuildIndex();
+				}
 			} else if (event === 'set') {
 				currentValue = data;
+				_rebuildIndex();
 			}
 		} else if (merge === 'cursor') {
-			if (!Array.isArray(currentValue)) currentValue = [];
+			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
 			if (event === 'update') {
-				const existingIdx = currentValue.findIndex((/** @type {any} */ item) => item.key === data.key);
-				if (existingIdx !== -1) {
-					currentValue = currentValue.map((/** @type {any} */ item) =>
-						item.key === data.key ? data : item
-					);
+				const idx = _index.get(data.key);
+				if (idx !== undefined) {
+					currentValue[idx] = data;
 				} else {
-					currentValue = [...currentValue, data];
+					_index.set(data.key, currentValue.length);
+					currentValue.push(data);
 				}
 			} else if (event === 'remove') {
-				currentValue = currentValue.filter((/** @type {any} */ item) => item.key !== data.key);
+				const idx = _index.get(data.key);
+				if (idx !== undefined) {
+					currentValue.splice(idx, 1);
+					_rebuildIndex();
+				}
 			} else if (event === 'set') {
 				currentValue = data;
+				_rebuildIndex();
 			}
 		} else if (merge === 'set') {
 			currentValue = data;
 		}
+	}
 
+	/**
+	 * Apply a single pub/sub event to the current value using the merge strategy.
+	 * Mutates in place, creates a new reference for reactivity, notifies store, records history.
+	 * @param {{ event: string, data: any }} envelope
+	 */
+	function applyEvent(envelope) {
+		_applyMerge(envelope);
+		if (Array.isArray(currentValue)) currentValue = currentValue.slice();
 		store.set(currentValue);
 		_recordHistory();
 	}
@@ -497,23 +558,20 @@ function _createStream(path, options, dynamicArgs) {
 					return;
 				}
 
-				// Handle delta response: apply diff events using merge strategy
+				// Handle delta response: apply diff events in batch
 				if (response.delta === true && Array.isArray(response.data)) {
 					for (const item of response.data) {
 						if (item._deleted) {
-							applyEvent({ event: 'deleted', data: item });
+							_applyMerge({ event: 'deleted', data: item });
 						} else {
-							// Check if item exists in current value for update vs create
-							const exists = Array.isArray(currentValue) && currentValue.some(
-								(/** @type {any} */ existing) => existing[key] === item[key]
-							);
-							applyEvent({ event: exists ? 'updated' : 'created', data: item });
+							const exists = _index.has(item[key]);
+							_applyMerge({ event: exists ? 'updated' : 'created', data: item });
 						}
 					}
 				} else if (response.replay === true && Array.isArray(response.data)) {
-					// Handle replay response: apply missed events instead of replacing
+					// Handle replay response: apply missed events in batch
 					for (const evt of response.data) {
-						applyEvent(evt);
+						_applyMerge(evt);
 					}
 				} else {
 					currentValue = response.data;
@@ -525,6 +583,9 @@ function _createStream(path, options, dynamicArgs) {
 				if (response.prepend !== undefined) prepend = response.prepend;
 				if (response.max !== undefined) max = response.max;
 
+				// Rebuild index after data and options are settled
+				_rebuildIndex();
+
 				// Track pagination state
 				if (response.hasMore !== undefined) _hasMore = response.hasMore;
 				if (response.cursor !== undefined) _cursor = response.cursor;
@@ -533,6 +594,7 @@ function _createStream(path, options, dynamicArgs) {
 				if (response.schemaVersion !== undefined) _schemaVersion = response.schemaVersion;
 
 				initialLoaded = true;
+				if (Array.isArray(currentValue)) currentValue = currentValue.slice();
 				store.set(currentValue);
 
 				// Subscribe to live updates on the topic
@@ -548,9 +610,14 @@ function _createStream(path, options, dynamicArgs) {
 					});
 				}
 
-				// Replay buffered messages
-				for (const evt of buffer) {
-					applyEvent(evt);
+				// Replay buffered messages in batch
+				if (buffer.length > 0) {
+					for (const evt of buffer) {
+						_applyMerge(evt);
+					}
+					if (Array.isArray(currentValue)) currentValue = currentValue.slice();
+					store.set(currentValue);
+					_recordHistory();
 				}
 				buffer = [];
 			},
@@ -590,12 +657,17 @@ function _createStream(path, options, dynamicArgs) {
 			statusUnsub();
 			statusUnsub = null;
 		}
+		if (_reconnectTimer) {
+			clearTimeout(_reconnectTimer);
+			_reconnectTimer = null;
+		}
 		topic = null;
 		initialLoaded = false;
 		fetching = false;
 		buffer = [];
 		currentValue = undefined;
 		store.set(undefined);
+		_index.clear();
 		_history = [];
 		_historyIndex = -1;
 		_devtoolsStream(path, null, 0);
@@ -608,7 +680,7 @@ function _createStream(path, options, dynamicArgs) {
 				fetchAndSubscribe();
 				_devtoolsStream(path, topic, subCount);
 
-				// Listen for reconnects to refetch
+				// Listen for reconnects to refetch (debounced to avoid thundering herd)
 				let firstStatus = true;
 				statusUnsub = status.subscribe((s) => {
 					if (firstStatus) {
@@ -616,15 +688,19 @@ function _createStream(path, options, dynamicArgs) {
 						return;
 					}
 					if (s === 'open' && subCount > 0) {
-						// Reconnected - refetch without resetting store (keep stale data visible)
-						if (topicUnsub) {
-							topicUnsub();
-							topicUnsub = null;
-						}
-						initialLoaded = false;
-						fetching = false;
-						buffer = [];
-						fetchAndSubscribe();
+						if (_reconnectTimer) clearTimeout(_reconnectTimer);
+						_reconnectTimer = setTimeout(() => {
+							_reconnectTimer = null;
+							// Reconnected - refetch without resetting store (keep stale data visible)
+							if (topicUnsub) {
+								topicUnsub();
+								topicUnsub = null;
+							}
+							initialLoaded = false;
+							fetching = false;
+							buffer = [];
+							fetchAndSubscribe();
+						}, 50);
 					}
 				});
 			}
@@ -648,7 +724,7 @@ function _createStream(path, options, dynamicArgs) {
 		 * @returns {() => void} Rollback function
 		 */
 		optimistic(event, data) {
-			const snapshot = currentValue;
+			const snapshot = Array.isArray(currentValue) ? currentValue.slice() : currentValue;
 
 			if (merge === 'crud') {
 				if (data && data[key] !== undefined) {
@@ -663,6 +739,7 @@ function _createStream(path, options, dynamicArgs) {
 					_optimisticKeys.delete(data[key]);
 				}
 				currentValue = snapshot;
+				_rebuildIndex();
 				store.set(currentValue);
 			};
 		},
@@ -698,14 +775,15 @@ function _createStream(path, options, dynamicArgs) {
 
 						if (Array.isArray(response.data) && Array.isArray(currentValue)) {
 							if (prepend) {
-								currentValue = [...response.data, ...currentValue];
+								currentValue = response.data.concat(currentValue);
 							} else {
-								currentValue = [...currentValue, ...response.data];
+								currentValue = currentValue.concat(response.data);
 							}
 						} else if (response.data !== undefined) {
 							currentValue = response.data;
 						}
 
+						_rebuildIndex();
 						store.set(currentValue);
 						resolve(_hasMore);
 					},
@@ -744,6 +822,7 @@ function _createStream(path, options, dynamicArgs) {
 		 */
 		hydrate(initialData) {
 			currentValue = initialData;
+			_rebuildIndex();
 			store.set(currentValue);
 			_hydrated = true;
 			return this;
@@ -777,6 +856,7 @@ function _createStream(path, options, dynamicArgs) {
 			currentValue = Array.isArray(_history[_historyIndex])
 				? [..._history[_historyIndex]]
 				: _history[_historyIndex];
+			_rebuildIndex();
 			store.set(currentValue);
 		},
 
@@ -793,6 +873,7 @@ function _createStream(path, options, dynamicArgs) {
 			currentValue = Array.isArray(_history[_historyIndex])
 				? [..._history[_historyIndex]]
 				: _history[_historyIndex];
+			_rebuildIndex();
 			store.set(currentValue);
 		},
 

@@ -233,7 +233,7 @@ describe('__stream()', () => {
 		expect(topicCallbacks.has('temp')).toBe(false);
 	});
 
-	it('reconnects after disconnect during initial load (Finding 3)', () => {
+	it('reconnects after disconnect during initial load (Finding 3)', async () => {
 		const store = __stream('recover/data', { merge: 'set' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
@@ -248,8 +248,9 @@ describe('__stream()', () => {
 		const afterDisconnect = values[values.length - 1];
 		expect(afterDisconnect).toHaveProperty('error');
 
-		// Reconnect
+		// Reconnect (debounced -- wait for it)
 		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 60));
 
 		// Should have re-fetched (second sendQueued call)
 		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
@@ -669,7 +670,7 @@ describe('__stream() hydrate', () => {
 // -- __stream() seq tracking (Phase 15) ---------------------------------------
 
 describe('__stream() seq tracking', () => {
-	it('sends seq on reconnect request', () => {
+	it('sends seq on reconnect request', async () => {
 		const store = __stream('seq/data', { merge: 'crud', key: 'id' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
@@ -687,9 +688,10 @@ describe('__stream() seq tracking', () => {
 		// Simulate seq from a pub/sub event
 		simulateTopicMessage('seq-topic', { event: 'created', data: { id: 2 }, seq: 11 });
 
-		// Disconnect and reconnect
+		// Disconnect and reconnect (debounced -- wait for it)
 		simulateStatus('closed');
 		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 60));
 
 		// Second request should include seq
 		expect(sendQueuedFn.mock.calls.length).toBeGreaterThanOrEqual(2);

@@ -219,10 +219,12 @@ live.rateLimit = function rateLimit(config, fn) {
 			_rateLimits.set(bucketKey, timestamps);
 		}
 
-		// Prune expired timestamps
-		while (timestamps.length > 0 && now - timestamps[0] >= windowMs) {
-			timestamps.shift();
+		// Prune expired timestamps (single splice instead of repeated shift)
+		let expired = 0;
+		while (expired < timestamps.length && now - timestamps[expired] >= windowMs) {
+			expired++;
 		}
+		if (expired > 0) timestamps.splice(0, expired);
 
 		if (timestamps.length >= points) {
 			const retryAfter = windowMs - (now - timestamps[0]);
@@ -418,6 +420,8 @@ export function __registerEffect(path, fn) {
 
 /** @type {Map<string, { source: string, reducers: any, topic: string, state: any, snapshot: Function | null, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
 const aggregateRegistry = new Map();
+/** @type {Map<string, any>} Topic-keyed lookup for aggregates */
+const _aggregateByTopic = new Map();
 
 /**
  * Create a real-time incremental aggregation over a source topic.
@@ -440,7 +444,7 @@ live.aggregate = function aggregate(source, reducers, options) {
 
 	const initFn = async function aggregateInit() {
 		// If aggregate is active, return current state; otherwise return init state
-		const entry = [...aggregateRegistry.values()].find(e => e.topic === topic);
+		const entry = _aggregateByTopic.get(topic);
 		if (entry) {
 			const computed = _computeAggregateState(entry.state, reducers);
 			return computed;
@@ -490,7 +494,9 @@ export function __registerAggregate(path, fn) {
 	const snapshot = /** @type {any} */ (fn).__aggregateSnapshot;
 	const debounce = /** @type {any} */ (fn).__aggregateDebounce || 0;
 	if (!source || !topic) return;
-	aggregateRegistry.set(path, { source, reducers, topic, state: { ...initState }, snapshot, debounce, timer: null });
+	const entry = { source, reducers, topic, state: { ...initState }, snapshot, debounce, timer: null };
+	aggregateRegistry.set(path, entry);
+	_aggregateByTopic.set(topic, entry);
 }
 
 /**
@@ -1723,15 +1729,25 @@ function _migrateItem(item, fromVersion, toVersion, migrateFns) {
 
 function _respond(ws, platform, correlationId, payload) {
 	if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-		try {
-			const json = JSON.stringify(payload);
-			if (json.length > 12288) {
-				console.warn(
-					`[svelte-realtime] RPC response for '${correlationId}' is ${json.length} bytes -- close to maxPayloadLength (16KB). ` +
-					'Connection will be closed if exceeded. Increase maxPayloadLength in adapter config if needed.'
-				);
-			}
-		} catch {}
+		// Only stringify to check size when the payload is likely large.
+		// Avoids double-serialization overhead for the common (small) case.
+		const data = payload.data;
+		const likelyLarge = Array.isArray(data)
+			? data.length > 30
+			: typeof data === 'string'
+				? data.length > 8000
+				: false;
+		if (likelyLarge) {
+			try {
+				const json = JSON.stringify(payload);
+				if (json.length > 12288) {
+					console.warn(
+						`[svelte-realtime] RPC response for '${correlationId}' is ${json.length} bytes -- close to maxPayloadLength (16KB). ` +
+						'Connection will be closed if exceeded. Increase maxPayloadLength in adapter config if needed.'
+					);
+				}
+			} catch {}
+		}
 	}
 	const result = platform.send(ws, '__rpc', correlationId, payload);
 	if (result === 0 && typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
