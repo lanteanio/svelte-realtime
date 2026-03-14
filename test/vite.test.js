@@ -608,8 +608,28 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:chat', { ssr: true });
 
+		expect(code).toContain("import { readable } from 'svelte/store'");
 		expect(code).toContain("import { __directCall } from 'svelte-realtime/server'");
-		expect(code).toContain(".load = (platform, options) => __directCall('chat/messages'");
+		expect(code).toContain("const _messages = readable(undefined)");
+		expect(code).toContain("_messages.load = (platform, options) => __directCall('chat/messages'");
+		expect(code).toContain("export { _messages as messages }");
+	});
+
+	it('wraps dynamic streams as functions returning readable() in SSR mode', () => {
+		setup({
+			'board.js': `
+import { live } from 'svelte-realtime/server';
+export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) => [], { merge: 'crud', key: 'id' });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:board', { ssr: true });
+
+		expect(code).toContain("import { readable } from 'svelte/store'");
+		expect(code).toContain("const _notes = (...args) => readable(undefined)");
+		expect(code).toContain("_notes.load = (platform, options) => __directCall('board/notes'");
+		expect(code).toContain("export { _notes as notes }");
 	});
 
 	it('simple re-export when module has no streams', () => {
@@ -665,31 +685,45 @@ export const feed = live.stream('feed', async (ctx) => [], { merge: 'latest', re
 // -- DevTools injection (Phase 13) --------------------------------------------
 
 describe('devtools injection', () => {
-	it('injects devtools script in dev mode', () => {
+	it('injects devtools middleware in dev mode via configureServer', () => {
 		const plugin = svelteRealtime({ dir: 'src/live' });
 		plugin.configResolved({ root: testRoot, build: {}, command: 'serve' });
 
-		const result = plugin.transformIndexHtml();
-		expect(result).toHaveLength(1);
-		expect(result[0].tag).toBe('script');
-		expect(result[0].children).toContain('__devtools');
-		expect(result[0].children).toContain('svelte-realtime/devtools');
+		const middlewares = [];
+		const mockServer = {
+			middlewares: { use: (fn) => middlewares.push(fn) },
+			httpServer: { once: () => {} },
+			watcher: { on: () => {} },
+		};
+		plugin.configureServer.call({ load: () => {} }, mockServer);
+
+		// Should have registered at least one middleware (devtools injection)
+		expect(middlewares.length).toBeGreaterThan(0);
 	});
 
-	it('does not inject devtools in production', () => {
+	it('transformIndexHtml returns empty (devtools handled via middleware)', () => {
 		const plugin = svelteRealtime({ dir: 'src/live' });
-		plugin.configResolved({ root: testRoot, build: {}, command: 'build' });
+		plugin.configResolved({ root: testRoot, build: {}, command: 'serve' });
 
 		const result = plugin.transformIndexHtml();
 		expect(result).toEqual([]);
 	});
 
-	it('does not inject devtools when disabled', () => {
+	it('does not inject devtools middleware when disabled', () => {
 		const plugin = svelteRealtime({ dir: 'src/live', devtools: false });
 		plugin.configResolved({ root: testRoot, build: {}, command: 'serve' });
 
-		const result = plugin.transformIndexHtml();
-		expect(result).toEqual([]);
+		const middlewares = [];
+		const mockServer = {
+			middlewares: { use: (fn) => middlewares.push(fn) },
+			httpServer: { once: () => {} },
+			watcher: { on: () => {} },
+		};
+		plugin.configureServer.call({ load: () => {} }, mockServer);
+
+		// No devtools middleware, only the watcher setup
+		// (configureServer only adds middleware when devtools is enabled)
+		expect(middlewares).toHaveLength(0);
 	});
 });
 
@@ -912,5 +946,174 @@ export const items = live.stream('todos', async (ctx) => [], {
 
 		expect(code).toContain('"version":3');
 		expect(code).toContain("__stream('todos/items'");
+	});
+});
+
+// -- Server-side HMR ----------------------------------------------------------
+
+describe('handleHotUpdate (server-side HMR)', () => {
+	afterEach(teardown);
+
+	function createMockServer() {
+		const invalidated = [];
+		const modulesById = new Map();
+		const modulesByFile = new Map();
+		const ssrModules = new Map();
+		// Default: svelte-realtime/server returns HMR stubs
+		ssrModules.set('svelte-realtime/server', {
+			_prepareHmr: () => ({}),
+			_restoreHmr: () => {},
+		});
+		ssrModules.set('/@svelte-realtime-registry', {});
+		return {
+			invalidated,
+			modulesById,
+			modulesByFile,
+			ssrModules,
+			moduleGraph: {
+				getModuleById(id) { return modulesById.get(id) || null; },
+				getModulesByFile(file) { return modulesByFile.get(file) || null; },
+				invalidateModule(mod) { invalidated.push(mod); },
+			},
+			async ssrLoadModule(id) {
+				const result = ssrModules.get(id);
+				if (result instanceof Error) throw result;
+				return result || {};
+			},
+		};
+	}
+
+	it('invalidates the registry virtual module on src/live/ file change', async () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		const server = createMockServer();
+
+		const registryMod = { id: '\0live:__registry' };
+		const clientMod = { id: '\0live:chat' };
+		server.modulesById.set('\0live:__registry', registryMod);
+		server.modulesById.set('\0live:chat', clientMod);
+
+		const chatFile = resolve(liveDir, 'chat.js');
+		const result = await plugin.handleHotUpdate({ file: chatFile, server });
+
+		expect(server.invalidated).toContain(registryMod);
+		expect(server.invalidated).toContain(clientMod);
+		expect(result).toEqual([clientMod]);
+	});
+
+	it('invalidates SSR modules by file path', async () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		const server = createMockServer();
+		const chatFile = resolve(liveDir, 'chat.js');
+
+		const ssrMod = { id: chatFile };
+		server.modulesByFile.set(chatFile, new Set([ssrMod]));
+
+		await plugin.handleHotUpdate({ file: chatFile, server });
+
+		expect(server.invalidated).toContain(ssrMod);
+	});
+
+	it('calls _prepareHmr before re-importing and does not call _restoreHmr on success', async () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		const server = createMockServer();
+		const chatFile = resolve(liveDir, 'chat.js');
+
+		let prepared = false;
+		let restored = false;
+		server.ssrModules.set('svelte-realtime/server', {
+			_prepareHmr: () => { prepared = true; return {}; },
+			_restoreHmr: () => { restored = true; },
+		});
+
+		await plugin.handleHotUpdate({ file: chatFile, server });
+
+		expect(prepared).toBe(true);
+		expect(restored).toBe(false);
+	});
+
+	it('calls _restoreHmr when registry re-import fails', async () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		const chatFile = resolve(liveDir, 'chat.js');
+
+		let restored = false;
+		const snap = { test: true };
+		let loadCount = 0;
+
+		const server = {
+			moduleGraph: {
+				getModuleById() { return null; },
+				getModulesByFile() { return null; },
+				invalidateModule() {},
+			},
+			async ssrLoadModule(id) {
+				loadCount++;
+				// First call: svelte-realtime/server (succeeds)
+				if (loadCount === 1) {
+					return {
+						_prepareHmr: () => snap,
+						_restoreHmr: (s) => { restored = true; expect(s).toBe(snap); },
+					};
+				}
+				// Second call: registry re-import (fails)
+				throw new Error('Syntax error in chat.js');
+			},
+		};
+
+		const errors = [];
+		const origError = console.error;
+		console.error = (...args) => errors.push(args.join(' '));
+
+		await plugin.handleHotUpdate({ file: chatFile, server });
+
+		console.error = origError;
+
+		expect(restored).toBe(true);
+		expect(errors.some(e => e.includes('HMR failed'))).toBe(true);
+		expect(errors.some(e => e.includes('Previous handlers restored'))).toBe(true);
+	});
+
+	it('ignores files outside liveDir', async () => {
+		setup({
+			'chat.js': `export const send = live(async () => {});`
+		});
+
+		const plugin = createPlugin();
+		const server = createMockServer();
+
+		const result = await plugin.handleHotUpdate({
+			file: '/some/other/file.js',
+			server,
+		});
+
+		expect(result).toBeUndefined();
+		expect(server.invalidated).toHaveLength(0);
 	});
 });

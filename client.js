@@ -361,6 +361,8 @@ function _createStream(path, options, dynamicArgs) {
 	let _historyIndex = -1;
 	/** @type {boolean} Whether history tracking is enabled */
 	let _historyEnabled = false;
+	/** @type {boolean} Whether history recording is paused (events still apply, just no snapshots) */
+	let _historyPaused = false;
 	/** @type {number} Maximum history entries */
 	let _historyMax = 50;
 
@@ -389,7 +391,7 @@ function _createStream(path, options, dynamicArgs) {
 	 * Called after currentValue has been updated and a new reference created.
 	 */
 	function _recordHistory() {
-		if (!_historyEnabled) return;
+		if (!_historyEnabled || _historyPaused) return;
 		// Discard any redo entries after the current position
 		if (_historyIndex < _history.length - 1) {
 			_history.length = _historyIndex + 1;

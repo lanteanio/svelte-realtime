@@ -1577,6 +1577,24 @@ export function message(ws, { data, platform }) {
 
 ---
 
+## Server-Side HMR
+
+Changes to files in `src/live/` are hot-reloaded on the server without restarting `npm run dev`. When you save a file, the plugin:
+
+1. Invalidates the changed module in Vite's server module graph
+2. Clears all server-side registrations (RPC handlers, guards, cron jobs, derived streams, effects, aggregates)
+3. Re-imports the registry module so every `__register*` call runs with the updated handler functions
+
+This applies to all handler types -- `live()`, `live.stream()`, `live.cron()`, `live.derived()`, `live.effect()`, `live.aggregate()`, `live.room()`, `guard()`, and everything else. Adding or deleting files in `src/live/` also triggers a full re-registration.
+
+**Error recovery:** if the edited file has a syntax error, the previous handlers are restored so the server keeps working. Fix the error and save again.
+
+**Active subscriptions:** existing stream subscribers keep their current data and connection. They will receive new events published by the updated handler, but the init function only runs on new subscriptions. A full page reload picks up the latest init logic.
+
+**Cron jobs:** old intervals are cleared and restarted with the updated schedule and handler.
+
+---
+
 ## DevTools
 
 In dev mode, the Vite plugin injects an in-browser overlay that shows active streams, RPC history, and connection status. Toggle with `Ctrl+Shift+L`.

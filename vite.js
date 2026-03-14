@@ -143,10 +143,32 @@ export default function svelteRealtime(options) {
 		},
 
 		configureServer(server) {
-			// Dev mode: load live modules via ssrLoadModule for HMR
-			server.middlewares.use(async (_req, _res, next) => {
-				next();
-			});
+			// Inject devtools script into HTML responses (works with SvelteKit + traditional Vite)
+			if (devtools) {
+				const devtoolsScript = `<script type="module">
+import { __devtools } from 'svelte-realtime/client';
+if (__devtools) window.__svelte_realtime_devtools = __devtools;
+import('svelte-realtime/devtools');
+</script>`;
+				server.middlewares.use((_req, res, next) => {
+					const originalEnd = res.end;
+					/** @type {any} */
+					const _res = res;
+					_res.end = function (/** @type {any} */ chunk, /** @type {any} */ ...args) {
+						const contentType = res.getHeader('content-type');
+						if (typeof contentType === 'string' && contentType.includes('text/html') && chunk) {
+							const html = typeof chunk === 'string' ? chunk : chunk.toString();
+							if (html.includes('</body>')) {
+								chunk = html.replace('</body>', devtoolsScript + '</body>');
+							} else if (html.includes('</head>')) {
+								chunk = html.replace('</head>', devtoolsScript + '</head>');
+							}
+						}
+						return originalEnd.call(this, chunk, ...args);
+					};
+					next();
+				});
+			}
 
 			// On first transform, load the registry to populate server-side state
 			let registryLoaded = false;
@@ -171,9 +193,29 @@ export default function svelteRealtime(options) {
 					_loadRegistryDirect(server, liveDir, dir);
 				}
 			});
+
+			// Watch for new or deleted files in src/live/ -- these don't trigger
+			// handleHotUpdate since they're not in the module graph yet (add) or
+			// have already been removed (unlink).
+			for (const event of ['add', 'unlink']) {
+				server.watcher.on(event, async (file) => {
+					file = file.split(sep).join('/');
+					if (!file.includes('/' + dir + '/') && !file.startsWith(dir + '/')) return;
+					if (!/\.[jt]s$/.test(file) || file.endsWith('.d.ts') || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
+
+					_fileCache.clear();
+
+					if (typedImports) {
+						_writeTypeDeclarations(liveDir, dir);
+					}
+
+					const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
+					await _hmrReloadRegistry(server, liveDir, dir, rel);
+				});
+			}
 		},
 
-		handleHotUpdate({ file, server }) {
+		async handleHotUpdate({ file, server }) {
 			if (!file.startsWith(liveDir)) return;
 			_fileCache.delete(file);
 
@@ -186,6 +228,16 @@ export default function svelteRealtime(options) {
 				.replace(/\\/g, '/')
 				.replace(/\.[jt]s$/, '');
 
+			// Server-side HMR: invalidate the changed module so Vite re-executes it
+			const ssrMods = server.moduleGraph.getModulesByFile(file);
+			if (ssrMods) {
+				for (const m of ssrMods) server.moduleGraph.invalidateModule(m);
+			}
+
+			// Re-register all server handlers
+			await _hmrReloadRegistry(server, liveDir, dir, rel);
+
+			// Client-side: invalidate the virtual module so the browser picks up new stubs
 			const mod = server.moduleGraph.getModuleById(VIRTUAL_PREFIX + rel);
 			if (mod) {
 				server.moduleGraph.invalidateModule(mod);
@@ -194,19 +246,8 @@ export default function svelteRealtime(options) {
 		},
 
 		transformIndexHtml() {
-			if (!isDev || !devtools) return [];
-			return [
-				{
-					tag: 'script',
-					attrs: { type: 'module' },
-					children: `
-import { __devtools } from 'svelte-realtime/client';
-if (__devtools) window.__svelte_realtime_devtools = __devtools;
-import('svelte-realtime/devtools');
-`,
-					injectTo: 'body'
-				}
-			];
+			// Devtools injection handled via configureServer middleware (works with SvelteKit)
+			return [];
 		}
 	};
 }
@@ -240,29 +281,51 @@ function _generateSsrStubs(filePath, modulePath) {
 	const source = _readCached(filePath);
 
 	/** @type {string[]} */
-	const streamNames = [];
+	const storeNames = [];
+	/** @type {Set<string>} */
+	const dynamicNames = new Set();
 	let match;
 
-	STREAM_EXPORT_RE.lastIndex = 0;
-	while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
-		streamNames.push(match[1]);
+	// Detect dynamic (function-returning) streams and channels
+	for (const re of [DYNAMIC_STREAM_RE, DYNAMIC_CHANNEL_RE]) {
+		re.lastIndex = 0;
+		while ((match = re.exec(source)) !== null) {
+			dynamicNames.add(match[1]);
+		}
 	}
 
-	// If no streams, simple re-export
-	if (streamNames.length === 0) {
+	// Collect all stream-like exports that need readable() wrappers for SSR
+	for (const re of [STREAM_EXPORT_RE, CHANNEL_EXPORT_RE, DERIVED_EXPORT_RE, AGGREGATE_EXPORT_RE]) {
+		re.lastIndex = 0;
+		while ((match = re.exec(source)) !== null) {
+			storeNames.push(match[1]);
+		}
+	}
+
+	// If no store-like exports, simple re-export
+	if (storeNames.length === 0) {
 		return `export * from '${normalized}';\n`;
 	}
 
-	// Re-export everything, then add .load() wrapper for each stream
+	// Re-export non-stream exports, wrap store-like exports in readable() for SSR $ prefix support
 	const lines = [
-		`export * from '${normalized}';`,
+		`import { readable } from 'svelte/store';`,
 		`import { __directCall } from 'svelte-realtime/server';`,
-		`import * as _mod from '${normalized}';`
+		`export * from '${normalized}';`
 	];
 
-	for (const name of streamNames) {
-		// Attach .load() method to the exported stream function
-		lines.push(`_mod.${name}.load = (platform, options) => __directCall('${modulePath}/${name}', options?.args || [], platform, options);`);
+	for (const name of storeNames) {
+		if (dynamicNames.has(name)) {
+			// Dynamic stream: return a readable store from a function so name(args) works during SSR
+			lines.push(`const _${name} = (...args) => readable(undefined);`);
+			lines.push(`_${name}.load = (platform, options) => __directCall('${modulePath}/${name}', options?.args || [], platform, options);`);
+			lines.push(`export { _${name} as ${name} };`);
+		} else {
+			// Static stream: plain readable store
+			lines.push(`const _${name} = readable(undefined);`);
+			lines.push(`_${name}.load = (platform, options) => __directCall('${modulePath}/${name}', options?.args || [], platform, options);`);
+			lines.push(`export { _${name} as ${name} };`);
+		}
 	}
 
 	return lines.join('\n') + '\n';
@@ -1072,6 +1135,45 @@ function _splitParams(str) {
 	}
 	if (current.trim()) params.push(current.trim());
 	return params;
+}
+
+/**
+ * Invalidate the registry virtual module, clear all server-side registrations,
+ * and re-import the registry so handlers are updated. If the re-import fails
+ * (e.g. syntax error), restores the previous handlers so the server keeps working.
+ * @param {import('vite').ViteDevServer} server
+ * @param {string} liveDir
+ * @param {string} dir
+ * @param {string} rel - Relative path of the changed file (for logging)
+ */
+async function _hmrReloadRegistry(server, liveDir, dir, rel) {
+	// Invalidate the registry virtual module so Vite regenerates it
+	const registryMod = server.moduleGraph.getModuleById(REGISTRY_ID);
+	if (registryMod) {
+		server.moduleGraph.invalidateModule(registryMod);
+	}
+
+	/** @type {any} */
+	let serverMod;
+	try {
+		serverMod = await server.ssrLoadModule('svelte-realtime/server');
+	} catch {
+		console.error('[svelte-realtime] HMR failed: could not load svelte-realtime/server');
+		return;
+	}
+
+	// Snapshot current state, then clear everything
+	const snap = serverMod._prepareHmr();
+
+	try {
+		await server.ssrLoadModule('/@svelte-realtime-registry');
+		console.log(`[svelte-realtime] Hot-reloaded: ${dir}/${rel}`);
+	} catch (e) {
+		// Re-import failed -- restore old handlers so the server keeps working
+		serverMod._restoreHmr(snap);
+		console.error(`[svelte-realtime] HMR failed for ${dir}/${rel}:`, /** @type {Error} */ (e).message);
+		console.error('[svelte-realtime] Previous handlers restored -- fix the error and save again');
+	}
 }
 
 /**

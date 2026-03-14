@@ -1043,6 +1043,101 @@ export function _clearCron() {
 	cronRegistry.clear();
 }
 
+/**
+ * Snapshot and clear all registries for HMR. Returns a snapshot that can be
+ * passed to `_restoreHmr()` if the re-import fails, so old handlers survive
+ * a syntax error in the edited file.
+ * @returns {object}
+ */
+export function _prepareHmr() {
+	const snap = {
+		registry: new Map(registry),
+		guards: new Map(guards),
+		cron: new Map(cronRegistry),
+		derived: new Map(derivedRegistry),
+		effects: new Map(effectRegistry),
+		aggregates: new Map(aggregateRegistry),
+		hadCron: _cronInterval !== null,
+	};
+
+	// Clear debounce timers
+	for (const e of derivedRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
+	for (const e of effectRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
+	for (const e of aggregateRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
+
+	// Clear cron timers (but keep _cronPlatform -- it stays valid across HMR)
+	_clearCron();
+
+	// Clear all registries and lookup maps
+	registry.clear();
+	guards.clear();
+	derivedRegistry.clear();
+	effectRegistry.clear();
+	aggregateRegistry.clear();
+	_derivedBySource.clear();
+	_effectBySource.clear();
+	_aggregateBySource.clear();
+	_aggregateByTopic.clear();
+	_watchedTopics.clear();
+	_streamsWithUnsubscribe.clear();
+
+	return snap;
+}
+
+/**
+ * Restore registries from a snapshot produced by `_prepareHmr()`.
+ * Called when re-import fails so the server keeps working with old handlers.
+ * @param {object} snap
+ */
+export function _restoreHmr(snap) {
+	for (const [k, v] of snap.registry) {
+		registry.set(k, v);
+		if (/** @type {any} */ (v).__isStream && /** @type {any} */ (v).__onUnsubscribe) {
+			_streamsWithUnsubscribe.add(v);
+		}
+	}
+	for (const [k, v] of snap.guards) guards.set(k, v);
+
+	// Restore cron
+	for (const [k, v] of snap.cron) cronRegistry.set(k, v);
+	if (snap.hadCron && cronRegistry.size > 0) _ensureCronInterval();
+
+	// Restore derived (rebuild source maps from entries)
+	for (const [k, v] of snap.derived) {
+		v.timer = null;
+		derivedRegistry.set(k, v);
+		for (const src of v.sources) {
+			let set = _derivedBySource.get(src);
+			if (!set) { set = new Set(); _derivedBySource.set(src, set); }
+			set.add(v);
+			_watchedTopics.add(src);
+		}
+	}
+
+	// Restore effects
+	for (const [k, v] of snap.effects) {
+		v.timer = null;
+		effectRegistry.set(k, v);
+		for (const src of v.sources) {
+			let set = _effectBySource.get(src);
+			if (!set) { set = new Set(); _effectBySource.set(src, set); }
+			set.add(v);
+			_watchedTopics.add(src);
+		}
+	}
+
+	// Restore aggregates
+	for (const [k, v] of snap.aggregates) {
+		v.timer = null;
+		aggregateRegistry.set(k, v);
+		_aggregateByTopic.set(v.topic, v);
+		let srcSet = _aggregateBySource.get(v.source);
+		if (!srcSet) { srcSet = new Set(); _aggregateBySource.set(v.source, srcSet); }
+		srcSet.add(v);
+		_watchedTopics.add(v.source);
+	}
+}
+
 function _tickCron() {
 	const now = new Date();
 	const minute = now.getMinutes();
