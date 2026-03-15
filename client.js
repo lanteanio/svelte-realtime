@@ -5,6 +5,14 @@ import { writable } from 'svelte/store';
 const _textEncoder = new TextEncoder();
 
 /**
+ * RAF-based event batching for high-frequency streams (cursors, presence).
+ * In the browser, incoming pub/sub events are queued and flushed once per
+ * animation frame, reducing Svelte reactive updates from N-per-event to
+ * 1-per-frame. In Node/SSR, events apply synchronously (no DOM to protect).
+ */
+const _useRAF = typeof window !== 'undefined' && typeof requestAnimationFrame === 'function';
+
+/**
  * Typed error for RPC failures.
  */
 export class RpcError extends Error {
@@ -535,16 +543,47 @@ function _createStream(path, options, dynamicArgs) {
 		return false;
 	}
 
+	/** @type {Array<{ event: string, data: any }>} Queued events waiting for next animation frame */
+	let _eventQueue = [];
+
+	/** @type {number | null} */
+	let _rafId = null;
+
 	/**
-	 * Apply a single pub/sub event to the current value using the merge strategy.
-	 * Creates a new array reference for Svelte reactivity only when needed.
+	 * Flush all queued events in a single batch, then update the store once.
+	 * Reduces reactive updates from N-per-event to 1-per-frame.
+	 */
+	function _flushEvents() {
+		_rafId = null;
+		if (_eventQueue.length === 0) return;
+		const queue = _eventQueue;
+		_eventQueue = [];
+		for (let i = 0; i < queue.length; i++) {
+			_applyMerge(queue[i]);
+		}
+		if (Array.isArray(currentValue)) currentValue = currentValue.slice();
+		store.set(currentValue);
+		_recordHistory();
+	}
+
+	/**
+	 * Apply a pub/sub event to the store. In the browser, events are queued
+	 * and flushed once per animation frame to reduce reactive updates from
+	 * N-per-event to 1-per-frame. In Node/SSR, events apply immediately.
 	 * @param {{ event: string, data: any }} envelope
 	 */
 	function applyEvent(envelope) {
-		const replaced = _applyMerge(envelope);
-		if (!replaced && Array.isArray(currentValue)) currentValue = currentValue.slice();
-		store.set(currentValue);
-		_recordHistory();
+		if (_useRAF) {
+			_eventQueue.push(envelope);
+			if (_rafId === null) {
+				_rafId = requestAnimationFrame(_flushEvents);
+			}
+		} else {
+			const replaced = _applyMerge(envelope);
+			if (!replaced && Array.isArray(currentValue)) currentValue = currentValue.slice();
+			store.set(currentValue);
+			_recordHistory();
+		}
 	}
 
 	/**
@@ -716,6 +755,11 @@ function _createStream(path, options, dynamicArgs) {
 			clearTimeout(_reconnectTimer);
 			_reconnectTimer = null;
 		}
+		if (_rafId !== null) {
+			cancelAnimationFrame(_rafId);
+			_rafId = null;
+		}
+		_eventQueue = [];
 		topic = null;
 		initialLoaded = false;
 		fetching = false;
