@@ -1025,6 +1025,21 @@ export const stats = live.stream('stats', async (ctx) => {
 }, { merge: 'set' });
 ```
 
+The function receives a `ctx` object with `publish`, `throttle`, `debounce`, and `signal` -- the same helpers available in RPC handlers (minus `user` and `ws`, since cron runs outside a connection). Use `ctx.publish` for fine-grained control, e.g. publishing individual `created`/`deleted` events on a crud stream:
+
+```js
+export const cleanup = live.cron('0 * * * *', 'boards', async (ctx) => {
+  const stale = await listStaleBoards();
+  for (const board of stale) {
+    await deleteBoard(board.board_id);
+    ctx.publish('boards', 'deleted', { board_id: board.board_id });
+  }
+  // returning undefined skips the automatic 'set' publish
+});
+```
+
+If the function returns a value, it is published as a `set` event (same as before). If it returns `undefined`, no automatic publish happens -- this lets you use `ctx.publish` exclusively without an unwanted `set` event overwriting your crud updates.
+
 Cron expressions use 5 fields: `minute hour day month weekday`. Supported syntax: `*`, single values, ranges (`9-17`), lists (`0,15,30`), and steps (`*/5`).
 
 The platform is captured automatically from the first RPC call. If your app starts cron jobs before any WebSocket connections, call `setCronPlatform(platform)` in your `open` hook.

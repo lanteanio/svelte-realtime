@@ -1270,7 +1270,7 @@ export function _restoreHmr(snap) {
 	}
 }
 
-async function _tickCron() {
+export async function _tickCron() {
 	if (_lazyQueue.length) await _resolveAllLazy();
 	const now = new Date();
 	const minute = now.getMinutes();
@@ -1296,8 +1296,18 @@ async function _tickCron() {
 					}
 					return;
 				}
-				const result = await entry.fn();
-				_cronPlatform.publish(entry.topic, 'set', result);
+				const _h = _getCtxHelpers(_cronPlatform);
+				const ctx = {
+					platform: _cronPlatform,
+					publish: _h.publish,
+					throttle: _h.throttle,
+					debounce: _h.debounce,
+					signal: _h.signal
+				};
+				const result = await entry.fn(ctx);
+				if (result !== undefined) {
+					_cronPlatform.publish(entry.topic, 'set', result);
+				}
 			} catch (err) {
 				if (_cronErrorHandler) {
 					_cronErrorHandler(path, err);

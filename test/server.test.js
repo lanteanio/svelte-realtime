@@ -13,6 +13,9 @@ import {
 	__directCall,
 	_activateDerived,
 	_clearCron,
+	_tickCron,
+	__registerCron,
+	setCronPlatform,
 	onCronError,
 	close,
 	enableSignals,
@@ -1215,6 +1218,91 @@ describe('live.cron()', () => {
 
 	it('throws on invalid cron expression', () => {
 		expect(() => live.cron('* *', 'bad', async () => {})).toThrow('expected 5 fields');
+	});
+
+	describe('ctx and auto-publish', () => {
+		afterEach(() => {
+			_clearCron();
+		});
+
+		it('passes ctx with publish to cron function', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let receivedCtx = null;
+			const fn = live.cron('* * * * *', 'test-topic', async (ctx) => {
+				receivedCtx = ctx;
+			});
+			__registerCron('test/ctx-cron', fn);
+			await _tickCron();
+			expect(receivedCtx).not.toBeNull();
+			expect(typeof receivedCtx.publish).toBe('function');
+			expect(typeof receivedCtx.throttle).toBe('function');
+			expect(typeof receivedCtx.debounce).toBe('function');
+			expect(typeof receivedCtx.signal).toBe('function');
+			expect(receivedCtx.platform).toBe(platform);
+		});
+
+		it('auto-publishes return value as set event', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const fn = live.cron('* * * * *', 'auto-topic', async () => {
+				return { count: 42 };
+			});
+			__registerCron('test/auto-publish', fn);
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			const pub = platform.published.find(p => p.topic === 'auto-topic');
+			expect(pub).toBeDefined();
+			expect(pub.event).toBe('set');
+			expect(pub.data).toEqual({ count: 42 });
+		});
+
+		it('skips auto-publish when function returns undefined', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const fn = live.cron('* * * * *', 'skip-topic', async (ctx) => {
+				ctx.publish('skip-topic', 'deleted', { id: 1 });
+				// return undefined -> no auto-publish
+			});
+			__registerCron('test/skip-publish', fn);
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			const pubs = platform.published.filter(p => p.topic === 'skip-topic');
+			expect(pubs).toHaveLength(1);
+			expect(pubs[0].event).toBe('deleted');
+			expect(pubs[0].data).toEqual({ id: 1 });
+		});
+
+		it('ctx.publish works for crud-style events', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const fn = live.cron('* * * * *', 'boards', async (ctx) => {
+				ctx.publish('boards', 'deleted', { board_id: 'a' });
+				ctx.publish('boards', 'deleted', { board_id: 'b' });
+			});
+			__registerCron('test/crud-cron', fn);
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			const pubs = platform.published.filter(p => p.topic === 'boards');
+			expect(pubs).toHaveLength(2);
+			expect(pubs[0]).toEqual({ topic: 'boards', event: 'deleted', data: { board_id: 'a' }, options: undefined });
+			expect(pubs[1]).toEqual({ topic: 'boards', event: 'deleted', data: { board_id: 'b' }, options: undefined });
+		});
+
+		it('backwards compatible -- no-arg cron still works', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const fn = live.cron('* * * * *', 'compat-topic', async () => {
+				return 'hello';
+			});
+			__registerCron('test/compat', fn);
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			const pub = platform.published.find(p => p.topic === 'compat-topic');
+			expect(pub).toBeDefined();
+			expect(pub.event).toBe('set');
+			expect(pub.data).toBe('hello');
+		});
 	});
 });
 

@@ -1,6 +1,23 @@
 import type { Platform, WebSocket } from 'svelte-adapter-uws';
 
 /**
+ * Context passed to `live.cron()` functions.
+ * No `user` or `ws` since cron jobs run outside a connection.
+ */
+export interface CronContext {
+	/** The platform API (publish, send, topic helpers). */
+	platform: Platform;
+	/** Shorthand for `platform.publish` -- delegates to whatever platform was passed in. */
+	publish: Platform['publish'];
+	/** Throttled publish -- sends at most once per `ms` milliseconds. */
+	throttle(topic: string, event: string, data: any, ms: number): void;
+	/** Debounced publish -- sends after `ms` milliseconds of silence. */
+	debounce(topic: string, event: string, data: any, ms: number): void;
+	/** Send a point-to-point signal to a specific user. */
+	signal(userId: string, event: string, data: any): void;
+}
+
+/**
  * Context passed to every `live()` and `live.stream()` function.
  */
 export interface LiveContext<UserData = unknown> {
@@ -372,18 +389,32 @@ export namespace live {
 	/**
 	 * Create a server-side scheduled function that publishes to a topic on a cron schedule.
 	 *
+	 * The function receives a `ctx` object with `publish`, `throttle`, `debounce`, and `signal`.
+	 * If the function returns a value, it is published as a `set` event on the topic.
+	 * If the function returns `undefined`, no automatic publish happens (use `ctx.publish` instead).
+	 *
 	 * @param schedule - Cron expression (5 fields: minute hour day month weekday)
 	 * @param topic - Topic to publish results to
 	 * @param fn - Async function to run on schedule
 	 *
 	 * @example
 	 * ```js
+	 * // Return a value -- published as 'set' automatically
 	 * export const refreshStats = live.cron('*\/5 * * * *', 'stats', async () => {
 	 *   return db.stats();
 	 * });
+	 *
+	 * // Use ctx.publish for fine-grained control (e.g. crud streams)
+	 * export const cleanup = live.cron('0 * * * *', 'boards', async (ctx) => {
+	 *   const stale = await listStaleBoards();
+	 *   for (const board of stale) {
+	 *     await deleteBoard(board.board_id);
+	 *     ctx.publish('boards', 'deleted', { board_id: board.board_id });
+	 *   }
+	 * });
 	 * ```
 	 */
-	function cron<T extends () => any>(
+	function cron<T extends ((ctx: CronContext) => any) | (() => any)>(
 		schedule: string,
 		topic: string,
 		fn: T
@@ -772,6 +803,11 @@ export function _activateDerived(platform: Platform): void;
  * Called during HMR to prevent orphan intervals.
  */
 export function _clearCron(): void;
+
+/**
+ * Run all matching cron jobs for the current minute. Exported for testing.
+ */
+export function _tickCron(): Promise<void>;
 
 /**
  * Set a global error handler for cron job failures.
