@@ -284,6 +284,9 @@ const _rateLimits = new Map();
 /** @type {number} */
 let _rateLimitLastSweep = Date.now();
 
+/** Hard cap on rate limit buckets to prevent memory exhaustion */
+const _RATE_LIMIT_MAX = 5000;
+
 /**
  * Declarative per-function rate limiting.
  * Wraps a live() function with a sliding window rate limiter.
@@ -301,23 +304,19 @@ live.rateLimit = function rateLimit(config, fn) {
 		const bucketKey = /** @type {any} */ (wrapper).__rateLimitPath + '\0' + userKey;
 		const now = Date.now();
 
-		// Lazy sweep: prune stale entries, but limit work per sweep
-		if (now - _rateLimitLastSweep > 60000) {
+		// Lazy sweep: prune stale entries every 30s, sweep all entries
+		if (now - _rateLimitLastSweep > 30000) {
 			_rateLimitLastSweep = now;
-			if (_rateLimits.size > 0) {
-				const maxSweep = Math.max(200, _rateLimits.size >> 2);
-				let swept = 0;
-				for (const [k, bucket] of _rateLimits) {
-					if (now - bucket.windowStart >= windowMs * 2) {
-						_rateLimits.delete(k);
-					}
-					if (++swept >= maxSweep) break;
+			for (const [k, bucket] of _rateLimits) {
+				if (now - bucket.windowStart >= windowMs * 2) {
+					_rateLimits.delete(k);
 				}
 			}
 		}
 
-		if (_rateLimits.size > 10000) {
-			let excess = _rateLimits.size - 10000;
+		// Hard cap: evict oldest entries (Map iteration order = insertion order)
+		if (_rateLimits.size > _RATE_LIMIT_MAX) {
+			let excess = _rateLimits.size - _RATE_LIMIT_MAX;
 			for (const k of _rateLimits.keys()) {
 				if (excess-- <= 0) break;
 				_rateLimits.delete(k);
@@ -1475,7 +1474,11 @@ export function handleRpc(ws, data, platform, options) {
 					_executeBinaryRpc(ws, header, payload, platform, options);
 					return true;
 				}
-			} catch {}
+			} catch (err) {
+				if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+					console.warn('[svelte-realtime] Failed to parse binary RPC header:', err);
+				}
+			}
 		}
 		return false;
 	}
@@ -2030,6 +2033,9 @@ function _runWithMiddleware(ctx, handler) {
 
 // -- Throttle / Debounce infrastructure ----------------------------------------
 
+/** Hard cap on throttle/debounce entries to prevent memory exhaustion */
+const _THROTTLE_DEBOUNCE_MAX = 5000;
+
 /** @type {Map<string, { timer: ReturnType<typeof setTimeout>, lastData: any, lastEvent: string, platform: any, lastRun: number }>} */
 const _throttles = new Map();
 
@@ -2052,6 +2058,13 @@ function _throttlePublish(platform, topic, event, data, ms) {
 	const now = Date.now();
 
 	if (!existing) {
+		// Hard cap: evict oldest entry if at limit
+		if (_throttles.size >= _THROTTLE_DEBOUNCE_MAX) {
+			const oldest = _throttles.keys().next().value;
+			const entry = _throttles.get(oldest);
+			if (entry) clearTimeout(entry.timer);
+			_throttles.delete(oldest);
+		}
 		// First call -- publish immediately, set up trailing edge
 		platform.publish(topic, event, data);
 		_throttles.set(key, {
@@ -2088,6 +2101,13 @@ function _debouncePublish(platform, topic, event, data, ms) {
 	const key = topic + '\0' + event;
 	const existing = _debounces.get(key);
 	if (existing) clearTimeout(existing);
+
+	// Hard cap: evict oldest entry if at limit
+	if (!existing && _debounces.size >= _THROTTLE_DEBOUNCE_MAX) {
+		const oldest = _debounces.keys().next().value;
+		clearTimeout(_debounces.get(oldest));
+		_debounces.delete(oldest);
+	}
 
 	_debounces.set(key, setTimeout(() => {
 		_debounces.delete(key);
@@ -2157,9 +2177,11 @@ function _respond(ws, platform, correlationId, payload) {
 				`[svelte-realtime] RPC response was not delivered (backpressure or closed connection)`
 			);
 		}
-	} catch {
-		// uWS throws when accessing a closed WebSocket — silently discard.
-		// This is expected when the client disconnects mid-RPC.
+	} catch (err) {
+		// uWS throws when accessing a closed WebSocket -- expected during mid-RPC disconnect.
+		if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+			console.warn(`[svelte-realtime] RPC response for '${correlationId}' could not be delivered (client likely disconnected)`);
+		}
 	}
 }
 

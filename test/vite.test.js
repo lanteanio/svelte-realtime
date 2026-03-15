@@ -140,7 +140,7 @@ describe('load (SSR)', () => {
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:chat', { ssr: true });
 
-		expect(code).toContain("export * from '");
+		expect(code).toContain('export * from ');
 		expect(code).toContain('chat.js');
 	});
 });
@@ -611,7 +611,7 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		expect(code).toContain("import { readable } from 'svelte/store'");
 		expect(code).toContain("import { __directCall } from 'svelte-realtime/server'");
 		expect(code).toContain("const _messages = readable(undefined)");
-		expect(code).toContain("_messages.load = (platform, options) => __directCall('chat/messages'");
+		expect(code).toContain('_messages.load = (platform, options) => __directCall("chat/messages"');
 		expect(code).toContain("export { _messages as messages }");
 	});
 
@@ -628,7 +628,7 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 
 		expect(code).toContain("import { readable } from 'svelte/store'");
 		expect(code).toContain("const _notes = (...args) => readable(undefined)");
-		expect(code).toContain("_notes.load = (platform, options) => __directCall('board/notes'");
+		expect(code).toContain('_notes.load = (platform, options) => __directCall("board/notes"');
 		expect(code).toContain("export { _notes as notes }");
 	});
 
@@ -643,7 +643,7 @@ export const doThing = live(async (ctx) => {});
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:rpc', { ssr: true });
 
-		expect(code).toContain("export * from '");
+		expect(code).toContain('export * from ');
 		expect(code).not.toContain('__directCall');
 	});
 });

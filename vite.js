@@ -315,28 +315,32 @@ function _generateSsrStubs(filePath, modulePath) {
 		}
 	}
 
+	// Escape paths for safe embedding in generated code
+	const safePath = JSON.stringify(normalized);
+	const safeModulePath = (name) => JSON.stringify(modulePath + '/' + name);
+
 	// If no store-like exports, simple re-export
 	if (storeNames.length === 0) {
-		return `export * from '${normalized}';\n`;
+		return `export * from ${safePath};\n`;
 	}
 
 	// Re-export non-stream exports, wrap store-like exports in readable() for SSR $ prefix support
 	const lines = [
 		`import { readable } from 'svelte/store';`,
 		`import { __directCall } from 'svelte-realtime/server';`,
-		`export * from '${normalized}';`
+		`export * from ${safePath};`
 	];
 
 	for (const name of storeNames) {
 		if (dynamicNames.has(name)) {
 			// Dynamic stream: return a readable store from a function so name(args) works during SSR
 			lines.push(`const _${name} = (...args) => readable(undefined);`);
-			lines.push(`_${name}.load = (platform, options) => __directCall('${modulePath}/${name}', options?.args || [], platform, options);`);
+			lines.push(`_${name}.load = (platform, options) => __directCall(${safeModulePath(name)}, options?.args || [], platform, options);`);
 			lines.push(`export { _${name} as ${name} };`);
 		} else {
 			// Static stream: plain readable store
 			lines.push(`const _${name} = readable(undefined);`);
-			lines.push(`_${name}.load = (platform, options) => __directCall('${modulePath}/${name}', options?.args || [], platform, options);`);
+			lines.push(`_${name}.load = (platform, options) => __directCall(${safeModulePath(name)}, options?.args || [], platform, options);`);
 			lines.push(`export { _${name} as ${name} };`);
 		}
 	}

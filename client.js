@@ -22,6 +22,12 @@ export class RpcError extends Error {
 const _idPrefix = Math.random().toString(36).slice(2, 6);
 let idCounter = 0;
 
+/** Generate a unique correlation ID, wrapping the counter before exceeding safe integer range */
+function _nextId() {
+	if (idCounter >= 0x1FFFFFFFFFFFFF) idCounter = 0;
+	return _idPrefix + (idCounter++).toString(36);
+}
+
 /** @type {Array<{ rpc: string, id: string, args: any[] }> | null} */
 let _batchCollector = null;
 
@@ -160,7 +166,7 @@ function _sendRpc(path, args) {
 		});
 	}
 
-	const id = _idPrefix + (idCounter++).toString(36);
+	const id = _nextId();
 
 	// If inside a batch() call, collect instead of sending
 	if (_batchCollector) {
@@ -201,7 +207,7 @@ export function __binaryRpc(path) {
 		ensureListener();
 		ensureDisconnectListener();
 
-		const id = _idPrefix + (idCounter++).toString(36);
+		const id = _nextId();
 
 		_devtoolsStart(path, id, args);
 		const conn = _connect();
@@ -238,6 +244,9 @@ export function __binaryRpc(path) {
 /** @type {Map<string, { store: any, refCount: number }>} */
 const _streamCache = new Map();
 
+/** Hard cap on cached stream instances to prevent memory exhaustion */
+const _STREAM_CACHE_MAX = 1000;
+
 /**
  * Create a reactive stream store for a given path.
  * Used by generated client stubs.
@@ -268,6 +277,17 @@ export function __stream(path, options, isDynamic) {
 			const store = _createStream(path, options, args);
 			// Capture the original subscribe once, before wrapping
 			const rawSubscribe = store.subscribe.bind(store);
+
+			// Evict idle entries (refCount 0) if cache is at capacity
+			if (_streamCache.size >= _STREAM_CACHE_MAX) {
+				for (const [k, v] of _streamCache) {
+					if (v.refCount <= 0) {
+						_streamCache.delete(k);
+						if (_streamCache.size < _STREAM_CACHE_MAX) break;
+					}
+				}
+			}
+
 			_streamCache.set(cacheKey, { store, refCount: 0 });
 
 			// Wrap subscribe to track ref count and clean up cache on last unsubscribe
@@ -549,7 +569,7 @@ function _createStream(path, options, dynamicArgs) {
 		ensureListener();
 		ensureDisconnectListener();
 
-		const id = _idPrefix + (idCounter++).toString(36);
+		const id = _nextId();
 		pendingId = id;
 		const conn = _connect();
 
@@ -791,7 +811,7 @@ function _createStream(path, options, dynamicArgs) {
 			_loadingMore = true;
 
 			ensureListener();
-			const id = _idPrefix + (idCounter++).toString(36);
+			const id = _nextId();
 			const conn = _connect();
 
 			return new Promise((resolve, reject) => {
@@ -1113,6 +1133,18 @@ export function batch(fn, options) {
 	_batchCollector = null;
 
 	if (collected.length === 0) return Promise.resolve([]);
+
+	if (collected.length > 50) {
+		for (const call of collected) {
+			const entry = pending.get(call.id);
+			if (entry) {
+				pending.delete(call.id);
+				if (entry.timer) clearTimeout(entry.timer);
+				entry.reject(new RpcError('INVALID_REQUEST', 'Batch exceeds maximum of 50 calls'));
+			}
+		}
+		return Promise.reject(new RpcError('INVALID_REQUEST', 'Batch exceeds maximum of 50 calls'));
+	}
 
 	// Set a batch-level timeout
 	const batchTimer = setTimeout(() => {
