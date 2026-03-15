@@ -647,7 +647,7 @@ const [board, column] = await batch(() => [
 ], { sequential: true });
 ```
 
-Each call resolves or rejects independently -- one failure does not cancel the others. Batches are limited to 50 calls per frame.
+Each call resolves or rejects independently -- one failure does not cancel the others. Batches are limited to 50 calls -- enforced both client-side (rejects before sending) and server-side.
 
 ---
 
@@ -1511,7 +1511,7 @@ The adapter's `sendQueued()` drops the oldest item if the queue exceeds 1000. Un
 
 ### Batch size (max 50 calls)
 
-A single `batch()` call is limited to 50 RPC calls. If exceeded, the server rejects the entire batch. Split into multiple `batch()` calls if you need more.
+A single `batch()` call is limited to 50 RPC calls. The client rejects before sending if the limit is exceeded, and the server enforces the same limit as a safety net. Split into multiple `batch()` calls if you need more.
 
 ### ws.subscribe() vs the subscribe hook
 
@@ -1772,6 +1772,14 @@ What gets measured:
 - **Fast-path rejection**: how quickly non-RPC messages are identified and skipped
 
 Merge strategies use an internal `Map<key, index>` for O(1) lookups instead of linear scans. Updates and upserts on keyed strategies (crud, presence, cursor) are constant-time regardless of array size. Deletes and prepends require an index rebuild (linear), which matches the cost of the delete itself.
+
+### Event batching (browser)
+
+In the browser, incoming pub/sub events are queued and flushed once per `requestAnimationFrame` instead of triggering a Svelte store update per event. This is automatic -- no configuration needed.
+
+With high-frequency streams (e.g. 1000 cursors at 20 updates/sec), this reduces reactive store updates from ~20,000/sec to ~60/sec (one per frame). All merge operations still run, but Svelte only diffs and re-renders once per frame.
+
+In Node/SSR (tests, `__directCall`, etc.), events apply synchronously -- no batching overhead.
 
 These benchmarks run in-process with mock objects (no real network). They isolate the framework overhead from network latency. See [bench/rpc.js](bench/rpc.js) for the full source.
 
