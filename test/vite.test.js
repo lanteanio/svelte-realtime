@@ -235,6 +235,151 @@ export const helperFn = () => {};
 	});
 });
 
+// -- hooks.ws.js detection ----------------------------------------------------
+
+describe('hooks.ws.js detection', () => {
+	afterEach(teardown);
+
+	it('warns when live modules exist but src/hooks.ws.js is missing', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const warns = [];
+		const origWarn = console.warn;
+		console.warn = (...args) => warns.push(args.join(' '));
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		console.warn = origWarn;
+
+		expect(warns.some(w => w.includes('no src/hooks.ws.js') && w.includes('WebSocket RPC will not work'))).toBe(true);
+	});
+
+	it('warns when hooks.ws.js exists but has no message export', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+		// Write hooks.ws.js without message export
+		mkdirSync(resolve(testRoot, 'src'), { recursive: true });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.js'), `
+export function upgrade({ cookies }) {
+  return {};
+}
+`);
+
+		const warns = [];
+		const origWarn = console.warn;
+		console.warn = (...args) => warns.push(args.join(' '));
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		console.warn = origWarn;
+
+		expect(warns.some(w => w.includes('does not export') && w.includes('message'))).toBe(true);
+	});
+
+	it('does not warn when hooks.ws.js has re-exported message', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+		mkdirSync(resolve(testRoot, 'src'), { recursive: true });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.js'), `
+export { message } from 'svelte-realtime/server';
+export function upgrade() { return {}; }
+`);
+
+		const warns = [];
+		const origWarn = console.warn;
+		console.warn = (...args) => warns.push(args.join(' '));
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		console.warn = origWarn;
+
+		expect(warns.some(w => w.includes('hooks.ws'))).toBe(false);
+	});
+
+	it('does not warn when hooks.ws.ts exists with message export', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+		mkdirSync(resolve(testRoot, 'src'), { recursive: true });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.ts'), `
+export { message } from 'svelte-realtime/server';
+export function upgrade() { return {}; }
+`);
+
+		const warns = [];
+		const origWarn = console.warn;
+		console.warn = (...args) => warns.push(args.join(' '));
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		console.warn = origWarn;
+
+		expect(warns.some(w => w.includes('hooks.ws'))).toBe(false);
+	});
+
+	it('does not warn when no live modules exist', () => {
+		teardown(); // no src/live/ at all
+
+		const warns = [];
+		const origWarn = console.warn;
+		console.warn = (...args) => warns.push(args.join(' '));
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		console.warn = origWarn;
+
+		// Should get the "no live modules found" warning, NOT the hooks.ws warning
+		expect(warns.some(w => w.includes('hooks.ws'))).toBe(false);
+	});
+
+	it('accepts custom message handler defined in hooks.ws.js', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+		mkdirSync(resolve(testRoot, 'src'), { recursive: true });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.js'), `
+import { createMessage } from 'svelte-realtime/server';
+export const message = createMessage({ onError: console.error });
+export function upgrade() { return {}; }
+`);
+
+		const warns = [];
+		const origWarn = console.warn;
+		console.warn = (...args) => warns.push(args.join(' '));
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		console.warn = origWarn;
+
+		expect(warns.some(w => w.includes('hooks.ws'))).toBe(false);
+	});
+});
+
 // -- resolveId: /@svelte-realtime-registry (Finding 2) ------------------------
 
 describe('resolveId (registry URL)', () => {

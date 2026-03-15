@@ -76,8 +76,11 @@ export default function svelteRealtime(options) {
 				console.warn(
 					`[svelte-realtime] Plugin loaded but no live modules found in ${dir}/`
 				);
-			} else if (typedImports) {
-				_writeTypeDeclarations(liveDir, dir);
+			} else {
+				if (typedImports) {
+					_writeTypeDeclarations(liveDir, dir);
+				}
+				_checkHooksFile(root, liveDir, dir);
 			}
 		},
 
@@ -938,6 +941,49 @@ function _findLiveFiles(dir) {
 	}
 
 	return results;
+}
+
+/**
+ * Check that src/hooks.ws.{js,ts} exists and exports the `message` handler.
+ * Warns at build/dev startup if the file is missing or misconfigured.
+ * @param {string} root
+ * @param {string} liveDir
+ * @param {string} dir
+ */
+function _checkHooksFile(root, liveDir, dir) {
+	const files = _findLiveFiles(liveDir);
+	if (files.length === 0) return;
+
+	const hooksPath = resolve(root, 'src/hooks.ws');
+	const hooksJs = hooksPath + '.js';
+	const hooksTs = hooksPath + '.ts';
+	const found = existsSync(hooksJs) ? hooksJs : existsSync(hooksTs) ? hooksTs : null;
+
+	if (!found) {
+		console.warn(
+			`[svelte-realtime] Found live modules in ${dir}/ but no src/hooks.ws.js -- ` +
+			`WebSocket RPC will not work without it.\n` +
+			`  Create src/hooks.ws.js with at minimum:\n` +
+			`    export { message } from 'svelte-realtime/server';\n` +
+			`    export function upgrade() { return {}; }`
+		);
+		return;
+	}
+
+	let source;
+	try { source = readFileSync(found, 'utf-8'); } catch { return; }
+
+	const hasMessage = /export\s*\{[^}]*\bmessage\b[^}]*\}\s*from\s+['"]svelte-realtime\/server['"]/.test(source)
+		|| /export\s+(?:const|function|async\s+function)\s+message\b/.test(source);
+
+	if (!hasMessage) {
+		const name = found.endsWith('.ts') ? 'src/hooks.ws.ts' : 'src/hooks.ws.js';
+		console.warn(
+			`[svelte-realtime] ${name} exists but does not export a \`message\` handler -- ` +
+			`WebSocket RPC calls from ${dir}/ will go unhandled.\n` +
+			`  Add: export { message } from 'svelte-realtime/server';`
+		);
+	}
 }
 
 /**

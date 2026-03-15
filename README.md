@@ -75,6 +75,8 @@ export function upgrade({ cookies }) {
 
 `message` is a ready-made hook that routes incoming WebSocket messages to your live functions. `upgrade` decides who can connect and attaches user data to the connection.
 
+> **This file is required.** The Vite plugin will warn at startup if it finds live modules in `src/live/` but no `src/hooks.ws.js` (or `.ts`). Without it, WebSocket messages have nothing on the server side to route them, and all RPC calls will silently time out.
+
 ### Step 5: Write a server function
 
 Create the `src/live/` directory. Every `.js` file in this directory becomes a module of callable server functions.
