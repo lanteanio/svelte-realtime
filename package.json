@@ -1,6 +1,6 @@
 {
   "name": "svelte-realtime",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Realtime RPC and reactive subscriptions for SvelteKit, built on svelte-adapter-uws",
   "author": "Kevin Radziszewski",
   "license": "MIT",
@@ -52,6 +52,7 @@
     "devtools.js",
     "devtools.d.ts",
     "cli.js",
+    "cli-utils.js",
     "LICENSE",
     "README.md"
   ],
