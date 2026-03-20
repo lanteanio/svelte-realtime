@@ -884,6 +884,13 @@ function _createStream(path, options, dynamicArgs) {
 				// Track version for delta sync
 				if (response.version !== undefined) _lastVersion = response.version;
 
+				// Install server-provided options BEFORE applying diffs/replay,
+				// so _applyMerge uses the correct merge strategy and key field.
+				if (response.merge) merge = response.merge;
+				if (response.key) key = response.key;
+				if (response.prepend !== undefined) prepend = response.prepend;
+				if (response.max !== undefined) max = response.max;
+
 				// Handle unchanged response (delta sync -- nothing changed)
 				if (response.unchanged === true) {
 					if (topic && !topicUnsub) {
@@ -907,13 +914,6 @@ function _createStream(path, options, dynamicArgs) {
 					}
 					return;
 				}
-
-				// Install server-provided options BEFORE applying diffs/replay,
-				// so _applyMerge uses the correct merge strategy and key field.
-				if (response.merge) merge = response.merge;
-				if (response.key) key = response.key;
-				if (response.prepend !== undefined) prepend = response.prepend;
-				if (response.max !== undefined) max = response.max;
 
 				if (response.delta === true && Array.isArray(response.data)) {
 					for (const item of response.data) {
