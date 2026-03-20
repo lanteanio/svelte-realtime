@@ -2,6 +2,7 @@
 
 const textDecoder = new TextDecoder();
 const _validPathRe = /^[a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+$/;
+const _validSegmentRe = /^[a-zA-Z0-9_]+$/;
 
 /** @type {Map<string, Function>} */
 const registry = new Map();
@@ -9,14 +10,106 @@ const registry = new Map();
 /** @type {Map<string, Function>} */
 const guards = new Map();
 
-/** @type {Set<Function>} Streams with onUnsubscribe hooks for fast close() */
+/** @type {Set<Function>} Streams with onUnsubscribe hooks (for iterating static matches in close) */
 const _streamsWithUnsubscribe = new Set();
 
-/** @type {WeakMap<object, Map<string, Function>>} Maps ws -> (topic -> stream fn) for dynamic unsubscribe */
-const _dynamicSubscriptions = new WeakMap();
+/**
+ * Tag a topic function with __topicUsesCtx by inspecting its first parameter name.
+ *
+ * Auto-detects only named ctx params: ctx, context, _ctx → __topicUsesCtx = true.
+ * Everything else is left unset, falling back to fn.length in _callTopicFn.
+ *
+ * If fn.length is wrong (defaults, destructuring with defaults), the user must
+ * opt in explicitly by setting fn.__topicUsesCtx = true before registering.
+ * live.room already does this for its topic function.
+ *
+ * @param {Function} fn
+ */
+function _tagTopicFn(fn) {
+	try {
+		const src = fn.toString();
+		// Bare arrow: ctx => ... or context => ...
+		const arrow = src.match(/^\s*([\w$]+)\s*=>/);
+		if (arrow) {
+			const name = arrow[1];
+			if (name === 'ctx' || name === 'context' || name === '_ctx') {
+				/** @type {any} */ (fn).__topicUsesCtx = true;
+			}
+			return;
+		}
+		// Parenthesized: extract first token inside (...)
+		const paren = src.match(/\(\s*([\w$]+)/);
+		if (paren) {
+			const name = paren[1];
+			if (name === 'ctx' || name === 'context' || name === '_ctx') {
+				/** @type {any} */ (fn).__topicUsesCtx = true;
+			}
+		}
+		// Destructured, rest, empty, or unrecognized → leave unset
+	} catch {}
+}
+
+/**
+ * Call a topic factory function, deciding whether to inject ctx.
+ *
+ * If __topicUsesCtx was set by _tagTopicFn or explicitly, honor it.
+ * Otherwise fall back to fn.length vs args.length heuristic.
+ *
+ * @param {Function} fn
+ * @param {any} ctx
+ * @param {any[]} args
+ * @returns {any}
+ */
+function _callTopicFn(fn, ctx, args) {
+	let result;
+	if (fn.__topicUsesCtx === true) result = fn(ctx, ...args);
+	else if (fn.__topicUsesCtx === false) result = fn(...args);
+	else {
+		result = fn.length <= args.length ? fn(...args) : fn(ctx, ...args);
+	}
+	if (typeof result !== 'string') {
+		throw new LiveError('INVALID_REQUEST',
+			'Topic function must return a string, got ' + (result && typeof result === 'object' && typeof result.then === 'function' ? 'Promise (topic functions must not be async)' : typeof result)
+		);
+	}
+	return result;
+}
+
+/**
+ * Per-socket stream ownership. Maps ws -> topic -> [{fn, count}].
+ * Each entry tracks a logical stream subscription with its hook function and refcount.
+ * Used for gauge tracking, onUnsubscribe dispatch, and rollback.
+ * @type {WeakMap<object, Map<string, Array<{fn: Function, count: number}>>>}
+ */
+const _wsStreamOwners = new WeakMap();
 
 /** @type {Array<(ctx: any, next: () => Promise<any>) => Promise<any>>} */
 const _globalMiddleware = [];
+
+/**
+ * Copy stream metadata from a source function to a wrapper.
+ * Single source of truth for all metadata properties -- add new fields here.
+ * @param {any} target
+ * @param {any} source
+ */
+function _copyStreamMeta(target, source) {
+	target.__isStream = source.__isStream;
+	target.__isLive = source.__isLive;
+	target.__streamTopic = source.__streamTopic;
+	target.__streamOptions = source.__streamOptions;
+	if (source.__replay) target.__replay = source.__replay;
+	if (source.__delta) target.__delta = source.__delta;
+	if (source.__onSubscribe) target.__onSubscribe = source.__onSubscribe;
+	if (source.__onUnsubscribe) target.__onUnsubscribe = source.__onUnsubscribe;
+	if (source.__streamFilter) target.__streamFilter = source.__streamFilter;
+	if (source.__streamVersion !== undefined) target.__streamVersion = source.__streamVersion;
+	if (source.__streamMigrate) target.__streamMigrate = source.__streamMigrate;
+	if (source.__isChannel) target.__isChannel = source.__isChannel;
+	if (source.__isGated) {
+		target.__isGated = true;
+		target.__gatePredicate = source.__gatePredicate;
+	}
+}
 
 /** @type {WeakMap<any, Function>} Cache bound publish per platform to avoid repeated .bind() */
 const _boundPublishCache = new WeakMap();
@@ -35,14 +128,14 @@ function _getBoundPublish(platform) {
 	return bound;
 }
 
-/** @type {WeakMap<any, { publish: Function, throttle: Function, debounce: Function, signal: Function }>} */
+/** @type {WeakMap<any, { publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function }>} */
 const _ctxHelpersCache = new WeakMap();
 
 /**
  * Get cached ctx helper methods for a platform.
  * Avoids creating new closures on every RPC call.
  * @param {import('svelte-adapter-uws').Platform} platform
- * @returns {{ publish: Function, throttle: Function, debounce: Function, signal: Function }}
+ * @returns {{ publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function }}
  */
 function _getCtxHelpers(platform) {
 	let helpers = _ctxHelpersCache.get(platform);
@@ -52,11 +145,115 @@ function _getCtxHelpers(platform) {
 			publish,
 			throttle: (topic, event, data, ms) => _throttlePublish(platform, topic, event, data, ms),
 			debounce: (topic, event, data, ms) => _debouncePublish(platform, topic, event, data, ms),
-			signal: (userId, event, data) => platform.publish('__signal:' + userId, event, data)
+			signal: (userId, event, data) => platform.publish('__signal:' + userId, event, data),
+			batch: (messages) => platform.batch ? platform.batch(messages) : messages.forEach(m => publish(m.topic, m.event, m.data, m.options))
 		};
 		_ctxHelpersCache.set(platform, helpers);
 	}
 	return helpers;
+}
+
+/**
+ * Roll back a stream subscription that was set up before the init function failed.
+ * Unsubscribes the topic, removes dynamic mappings, and decrements the gauge.
+ * @param {any} ws
+ * @param {string} topic
+ * @param {Function} fn
+ */
+/**
+ * Register a stream subscription in the per-socket ownership map.
+ * @param {any} ws
+ * @param {string} topic
+ * @param {Function} fn
+ */
+function _trackStreamSub(ws, topic, fn) {
+	let topicMap = _wsStreamOwners.get(ws);
+	if (!topicMap) { topicMap = new Map(); _wsStreamOwners.set(ws, topicMap); }
+	let owners = topicMap.get(topic);
+	if (!owners) { owners = []; topicMap.set(topic, owners); }
+	const existing = owners.find(o => o.fn === fn);
+	if (existing) { existing.count++; } else { owners.push({ fn, count: 1 }); }
+	if (_metricsInstruments) _metricsInstruments.streamGauge.inc();
+}
+
+/**
+ * Record RPC metrics for any exit path. Call exactly once per RPC.
+ * @param {string} path
+ * @param {string} code - error code, or empty string for success
+ * @param {number} startTime - from Date.now(), or 0 to skip duration
+ */
+function _recordRpcMetrics(path, code, startTime) {
+	if (!_metricsInstruments) return;
+	const status = code ? 'error' : 'ok';
+	_metricsInstruments.rpcCount.inc({ path, status });
+	if (code) _metricsInstruments.rpcErrors.inc({ path, code });
+	if (startTime) _metricsInstruments.rpcDuration.observe({ path }, (Date.now() - startTime) / 1000);
+}
+
+/** @type {WeakSet<object>} Sockets currently in rollback (skips grace period in presence) */
+const _rollingBack = new WeakSet();
+
+function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
+	try { ws.unsubscribe(topic); } catch {}
+	if (_metricsInstruments) _metricsInstruments.streamGauge.dec();
+	const topicMap = _wsStreamOwners.get(ws);
+	if (topicMap) {
+		const owners = topicMap.get(topic);
+		if (owners) {
+			const idx = owners.findIndex(o => o.fn === fn);
+			if (idx >= 0) {
+				owners[idx].count--;
+				if (owners[idx].count <= 0) owners.splice(idx, 1);
+				if (owners.length === 0) topicMap.delete(topic);
+			}
+		}
+	}
+	if (/** @type {any} */ (fn).__onUnsubscribe && ctx) {
+		_rollingBack.add(ws);
+		Promise.resolve()
+			.then(() => /** @type {any} */ (fn).__onUnsubscribe(ctx, topic))
+			.catch(() => {})
+			.finally(() => _rollingBack.delete(ws));
+	}
+}
+
+/**
+ * Build a ctx object with a stable V8 hidden class.
+ * All call sites must use this factory to ensure monomorphic property access.
+ * Same property count, same order, same types at each slot → single hidden class.
+ * @param {any} user
+ * @param {any} ws
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @param {{ publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function }} helpers
+ * @param {any} cursor
+ * @returns {any}
+ */
+function _buildCtx(user, ws, platform, helpers, cursor) {
+	return {
+		user,
+		ws,
+		platform,
+		publish: helpers.publish,
+		cursor,
+		throttle: helpers.throttle,
+		debounce: helpers.debounce,
+		signal: helpers.signal,
+		batch: helpers.batch
+	};
+}
+
+/**
+ * Walk a wrapper chain and set __rateLimitPath on any rate-limited function found.
+ * Handles arbitrary nesting: validated(rateLimit(...)), room action wrappers, etc.
+ * @param {any} fn
+ * @param {string} path
+ */
+function _propagateRateLimitPath(fn, path) {
+	let cur = fn;
+	for (let depth = 0; cur && depth < 10; depth++) {
+		if (cur.__isRateLimited) cur.__rateLimitPath = path;
+		cur = cur.__wrappedFn || null;
+	}
 }
 
 /**
@@ -65,14 +262,18 @@ function _getCtxHelpers(platform) {
  * Accepts either a live function directly or a lazy loader (tagged with __lazy).
  * @param {string} path
  * @param {Function} fn
+ * @param {string} [modulePath] - Explicit module path for guard resolution (used by room sub-handlers)
  */
-export function __register(path, fn) {
+export function __register(path, fn, modulePath) {
 	registry.set(path, fn);
-	if (/** @type {any} */ (fn).__lazy) return;
-	// Set rate limit path for rate-limited functions
-	if (/** @type {any} */ (fn).__isRateLimited) {
-		/** @type {any} */ (fn).__rateLimitPath = path;
+	if (/** @type {any} */ (fn).__lazy) {
+		if (modulePath) /** @type {any} */ (fn).__modulePathHint = modulePath;
+		return;
 	}
+	// Cache module path to avoid recomputing substring on every RPC call
+	/** @type {any} */ (fn).__modulePath = modulePath || path.substring(0, path.lastIndexOf('/'));
+	// Propagate rate-limit path through the wrapper chain
+	_propagateRateLimitPath(fn, path);
 	if (/** @type {any} */ (fn).__isStream && /** @type {any} */ (fn).__onUnsubscribe) {
 		_streamsWithUnsubscribe.add(fn);
 	}
@@ -88,15 +289,15 @@ async function _resolveRegistryEntry(path) {
 	const entry = registry.get(path);
 	if (!entry) return null;
 	if (!/** @type {any} */ (entry).__lazy) return entry;
+	const hint = /** @type {any} */ (entry).__modulePathHint;
 	const fn = await entry();
 	if (!fn) {
 		registry.delete(path);
 		return null;
 	}
 	registry.set(path, fn);
-	if (/** @type {any} */ (fn).__isRateLimited) {
-		/** @type {any} */ (fn).__rateLimitPath = path;
-	}
+	/** @type {any} */ (fn).__modulePath = hint || path.substring(0, path.lastIndexOf('/'));
+	_propagateRateLimitPath(fn, path);
 	if (/** @type {any} */ (fn).__isStream && /** @type {any} */ (fn).__onUnsubscribe) {
 		_streamsWithUnsubscribe.add(fn);
 	}
@@ -152,6 +353,15 @@ export function live(fn) {
  * @returns {Function}
  */
 live.stream = function stream(topic, initFn, options) {
+	if (typeof topic === 'string' && topic.startsWith('__')) {
+		throw new Error(`[svelte-realtime] live.stream topic '${topic}' uses reserved prefix '__'`);
+	}
+	if (typeof topic === 'function') {
+		if (topic.constructor?.name === 'AsyncFunction') {
+			throw new Error(`[svelte-realtime] live.stream topic function must not be async -- topic resolution is synchronous`);
+		}
+		_tagTopicFn(topic);
+	}
 	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, ...rest } = options || {};
 	const merged = { merge: 'crud', key: 'id', ...rest };
 	if (replay) /** @type {any} */ (initFn).__replay = typeof replay === 'object' ? replay : {};
@@ -180,6 +390,15 @@ live.stream = function stream(topic, initFn, options) {
  * @returns {Function}
  */
 live.channel = function channel(topic, options) {
+	if (typeof topic === 'string' && topic.startsWith('__')) {
+		throw new Error(`[svelte-realtime] live.channel topic '${topic}' uses reserved prefix '__'`);
+	}
+	if (typeof topic === 'function') {
+		if (topic.constructor?.name === 'AsyncFunction') {
+			throw new Error(`[svelte-realtime] live.channel topic function must not be async -- topic resolution is synchronous`);
+		}
+		_tagTopicFn(topic);
+	}
 	const merged = { merge: options?.merge || 'set', key: options?.key || 'id' };
 	if (options?.max !== undefined) merged.max = options.max;
 	const emptyValue = (merged.merge === 'set') ? null : [];
@@ -278,7 +497,7 @@ live.access = {
 	}
 };
 
-/** @type {Map<string, { prev: number, curr: number, windowStart: number }>} */
+/** @type {Map<string, { prev: number, curr: number, windowStart: number, windowMs: number }>} */
 const _rateLimits = new Map();
 
 /** @type {number} */
@@ -297,7 +516,7 @@ const _RATE_LIMIT_MAX = 5000;
  */
 live.rateLimit = function rateLimit(config, fn) {
 	const { points, window: windowMs } = config;
-	const keyFn = config.key || ((ctx) => ctx.user?.id || 'anon');
+	const keyFn = config.key || ((ctx) => _getIdentityKey(ctx));
 
 	const wrapper = async function rateLimitedWrapper(ctx, ...args) {
 		const userKey = keyFn(ctx);
@@ -308,24 +527,25 @@ live.rateLimit = function rateLimit(config, fn) {
 		if (now - _rateLimitLastSweep > 30000) {
 			_rateLimitLastSweep = now;
 			for (const [k, bucket] of _rateLimits) {
-				if (now - bucket.windowStart >= windowMs * 2) {
+				if (now - bucket.windowStart >= bucket.windowMs * 2) {
 					_rateLimits.delete(k);
 				}
 			}
 		}
 
-		// Hard cap: evict oldest entries (Map iteration order = insertion order)
-		if (_rateLimits.size > _RATE_LIMIT_MAX) {
-			let excess = _rateLimits.size - _RATE_LIMIT_MAX;
-			for (const k of _rateLimits.keys()) {
-				if (excess-- <= 0) break;
-				_rateLimits.delete(k);
+		let bucket = _rateLimits.get(bucketKey);
+
+		// Hard cap on new buckets only — existing identities always pass through
+		if (!bucket && _rateLimits.size >= _RATE_LIMIT_MAX) {
+			for (const [k, b] of _rateLimits) {
+				if (now - b.windowStart >= b.windowMs * 2) _rateLimits.delete(k);
+			}
+			if (_rateLimits.size >= _RATE_LIMIT_MAX) {
+				throw new LiveError('RATE_LIMITED', 'Too many concurrent rate-limit identities');
 			}
 		}
-
-		let bucket = _rateLimits.get(bucketKey);
 		if (!bucket) {
-			bucket = { prev: 0, curr: 0, windowStart: now };
+			bucket = { prev: 0, curr: 0, windowStart: now, windowMs };
 			_rateLimits.set(bucketKey, bucket);
 		}
 
@@ -362,6 +582,7 @@ live.rateLimit = function rateLimit(config, fn) {
 	/** @type {any} */ (wrapper).__isLive = true;
 	/** @type {any} */ (wrapper).__isRateLimited = true;
 	/** @type {any} */ (wrapper).__rateLimitPath = '';
+	/** @type {any} */ (wrapper).__wrappedFn = fn;
 	return wrapper;
 };
 
@@ -389,6 +610,7 @@ live.validated = function validated(schema, fn) {
 	/** @type {any} */ (wrapper).__isLive = true;
 	/** @type {any} */ (wrapper).__isValidated = true;
 	/** @type {any} */ (wrapper).__schema = schema;
+	/** @type {any} */ (wrapper).__wrappedFn = fn;
 	return wrapper;
 };
 
@@ -439,11 +661,12 @@ function _validate(schema, input) {
 		}
 	}
 
-	// Unknown schema type - pass through unchanged
-	if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-		console.warn('[svelte-realtime] live.validated() received an unrecognized schema type -- input passed through without validation');
-	}
-	return { ok: true, data: input };
+	// Unknown schema type -- reject. Passing unvalidated input through is a security risk.
+	return {
+		ok: false,
+		message: 'Unrecognized schema type passed to live.validated(). Supported: Zod (.safeParse), Valibot (._run).',
+		issues: [{ path: [], message: 'Unrecognized schema type' }]
+	};
 }
 
 /** @type {Map<string, { schedule: number[], fn: Function, topic: string }>} */
@@ -456,15 +679,20 @@ let _cronInterval = null;
 let _cronPlatform = null;
 
 /** @type {((path: string, error: unknown) => void) | null} */
-let _cronErrorHandler = null;
+let _serverErrorHandler = null;
 
 /**
- * Set a global error handler for cron job failures.
- * Without this, cron errors are logged in dev and silently swallowed in production.
+ * Set a global error handler for server-side errors (cron, effects, derived).
+ * Without this, errors are logged in dev and silently swallowed in production.
  * @param {(path: string, error: unknown) => void} handler
  */
+export function onError(handler) {
+	_serverErrorHandler = handler;
+}
+
+/** @deprecated Use onError() instead. */
 export function onCronError(handler) {
-	_cronErrorHandler = handler;
+	_serverErrorHandler = handler;
 }
 
 /**
@@ -590,11 +818,11 @@ live.aggregate = function aggregate(source, reducers, options) {
 	}
 
 	const initFn = async function aggregateInit() {
-		// If aggregate is active, return current state; otherwise return init state
 		const entry = _aggregateByTopic.get(topic);
 		if (entry) {
-			const computed = _computeAggregateState(entry.state, reducers);
-			return computed;
+			// Wait for snapshot hydration to finish before returning state
+			if (entry._hydrationPromise) await entry._hydrationPromise;
+			return _computeAggregateState(entry.state, reducers);
 		}
 		return _computeAggregateState(initState, reducers);
 	};
@@ -645,7 +873,20 @@ export function __registerAggregate(path, fn) {
 	const snapshot = /** @type {any} */ (fn).__aggregateSnapshot;
 	const debounce = /** @type {any} */ (fn).__aggregateDebounce || 0;
 	if (!source || !topic) return;
-	const entry = { source, reducers, topic, state: { ...initState }, snapshot, debounce, timer: null };
+	const entry = { source, reducers, topic, state: { ...initState }, snapshot, debounce, timer: null, _reducerEntries: Object.entries(reducers), _hydrationPromise: null };
+
+	if (snapshot) {
+		entry._hydrationPromise = (async () => {
+			try {
+				const snapshotState = await snapshot();
+				if (snapshotState && typeof snapshotState === 'object') {
+					Object.assign(entry.state, snapshotState);
+				}
+			} catch {}
+			entry._hydrationPromise = null;
+		})();
+	}
+
 	aggregateRegistry.set(path, entry);
 	_aggregateByTopic.set(topic, entry);
 	let srcSet = _aggregateBySource.get(source);
@@ -667,18 +908,9 @@ live.gate = function gate(predicate, fn) {
 		return fn(ctx, ...args);
 	};
 
-	// Copy all metadata from the original function
-	/** @type {any} */ (wrapper).__isStream = /** @type {any} */ (fn).__isStream;
-	/** @type {any} */ (wrapper).__isLive = /** @type {any} */ (fn).__isLive;
-	/** @type {any} */ (wrapper).__streamTopic = /** @type {any} */ (fn).__streamTopic;
-	/** @type {any} */ (wrapper).__streamOptions = /** @type {any} */ (fn).__streamOptions;
+	_copyStreamMeta(wrapper, fn);
 	/** @type {any} */ (wrapper).__isGated = true;
 	/** @type {any} */ (wrapper).__gatePredicate = predicate;
-	if (/** @type {any} */ (fn).__replay) /** @type {any} */ (wrapper).__replay = /** @type {any} */ (fn).__replay;
-	if (/** @type {any} */ (fn).__delta) /** @type {any} */ (wrapper).__delta = /** @type {any} */ (fn).__delta;
-	if (/** @type {any} */ (fn).__onSubscribe) /** @type {any} */ (wrapper).__onSubscribe = /** @type {any} */ (fn).__onSubscribe;
-	if (/** @type {any} */ (fn).__onUnsubscribe) /** @type {any} */ (wrapper).__onUnsubscribe = /** @type {any} */ (fn).__onUnsubscribe;
-	if (/** @type {any} */ (fn).__streamFilter) /** @type {any} */ (wrapper).__streamFilter = /** @type {any} */ (fn).__streamFilter;
 
 	return wrapper;
 };
@@ -716,24 +948,7 @@ export function pipe(stream, ...transforms) {
 		return data;
 	};
 
-	// Copy all metadata from the original stream
-	/** @type {any} */ (wrapper).__isStream = /** @type {any} */ (stream).__isStream;
-	/** @type {any} */ (wrapper).__isLive = /** @type {any} */ (stream).__isLive;
-	/** @type {any} */ (wrapper).__streamTopic = /** @type {any} */ (stream).__streamTopic;
-	/** @type {any} */ (wrapper).__streamOptions = /** @type {any} */ (stream).__streamOptions;
-	if (/** @type {any} */ (stream).__replay) /** @type {any} */ (wrapper).__replay = /** @type {any} */ (stream).__replay;
-	if (/** @type {any} */ (stream).__delta) /** @type {any} */ (wrapper).__delta = /** @type {any} */ (stream).__delta;
-	if (/** @type {any} */ (stream).__onSubscribe) /** @type {any} */ (wrapper).__onSubscribe = /** @type {any} */ (stream).__onSubscribe;
-	if (/** @type {any} */ (stream).__onUnsubscribe) /** @type {any} */ (wrapper).__onUnsubscribe = /** @type {any} */ (stream).__onUnsubscribe;
-	if (/** @type {any} */ (stream).__isGated) {
-		/** @type {any} */ (wrapper).__isGated = true;
-		/** @type {any} */ (wrapper).__gatePredicate = /** @type {any} */ (stream).__gatePredicate;
-	}
-
-	// Preserve subscribe-time access predicate from the underlying stream
-	if (/** @type {any} */ (stream).__streamFilter) {
-		/** @type {any} */ (wrapper).__streamFilter = /** @type {any} */ (stream).__streamFilter;
-	}
+	_copyStreamMeta(wrapper, stream);
 
 	return wrapper;
 }
@@ -814,6 +1029,38 @@ pipe.join = function pipeJoin(field, resolver, as) {
  * @param {{ topic: (ctx: any, ...args: any[]) => string, init: (ctx: any, ...args: any[]) => Promise<any>, presence?: (ctx: any) => any, cursors?: boolean | { throttle?: number }, actions?: Record<string, Function>, guard?: Function, onJoin?: Function, onLeave?: Function, merge?: string, key?: string }} config
  * @returns {any}
  */
+/**
+ * Per topic+userId presence tracking.
+ * Stores { count, timer } where count is the number of active connections
+ * and timer is a pending grace-period leave (or null).
+ * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null }>}
+ */
+const _presenceRef = new Map();
+
+const _PRESENCE_REF_MAX = 10000;
+
+/** @type {WeakMap<object, string>} Stable guest ID per connection for anonymous users */
+const _guestIds = new WeakMap();
+let _guestIdCounter = 0;
+
+/**
+ * Get a stable identity key for a connection. Uses ctx.user.id if present,
+ * otherwise assigns a unique guest ID that persists for the connection lifetime.
+ * @param {any} ctx
+ * @returns {string}
+ */
+function _getIdentityKey(ctx) {
+	const id = ctx.user?.id;
+	if (id !== undefined && id !== null) return String(id);
+	if (!ctx.ws) return 'anon';
+	let guestId = _guestIds.get(ctx.ws);
+	if (!guestId) {
+		guestId = '__guest_' + (++_guestIdCounter).toString(36);
+		_guestIds.set(ctx.ws, guestId);
+	}
+	return guestId;
+}
+
 live.room = function room(config) {
 	const {
 		topic: topicFn,
@@ -828,32 +1075,103 @@ live.room = function room(config) {
 		key: keyField = 'id'
 	} = config;
 
-	// The room is exposed as a collection of live functions that the Vite plugin
-	// will detect and register. We return an object with __isRoom = true and
-	// the necessary metadata for the Vite plugin to generate correct client stubs.
+	/** @type {any} */ (topicFn).__topicUsesCtx = true;
+
+	// Number of room-identifying args the topic function expects (excluding ctx).
+	// Used by room actions to separate room args from action-specific payload.
+	let _roomArgCount = Math.max(0, topicFn.length - 1);
+	if (config.topicArgs !== undefined) {
+		if (!Number.isInteger(config.topicArgs) || config.topicArgs < 0) {
+			throw new Error(`[svelte-realtime] live.room() topicArgs must be a non-negative integer, got ${config.topicArgs}`);
+		}
+		_roomArgCount = config.topicArgs;
+	} else if (actions) {
+		throw new Error(
+			`[svelte-realtime] live.room() with actions requires 'topicArgs'. ` +
+			`Set topicArgs to the number of room-identifying args (excluding ctx).`
+		);
+	}
+
 	const roomExport = {};
 
-	// Data stream
 	const dataStream = live.stream(topicFn, async function roomInit(ctx, ...args) {
 		if (guardFn) await guardFn(ctx, ...args);
+		const result = await initFn(ctx, ...args);
+		// onJoin runs after successful init so a failed init doesn't leave orphaned side effects
 		if (onJoin) {
 			try { await onJoin(ctx, ...args); } catch {}
 		}
-		return initFn(ctx, ...args);
+		return result;
 	}, {
 		merge: mergeMode,
 		key: keyField,
 		onSubscribe: presenceFn ? (ctx, topic) => {
+			const userId = _getIdentityKey(ctx);
+			const refKey = topic + '\0' + userId;
+
+			let ref = _presenceRef.get(refKey);
+			if (ref) {
+				// Cancel pending grace leave if reconnecting
+				if (ref.timer) { clearTimeout(ref.timer); ref.timer = null; }
+				ref.count++;
+				// Refresh LRU position so active entries survive eviction
+				_presenceRef.delete(refKey);
+				_presenceRef.set(refKey, ref);
+				return;
+			}
+
+			if (_presenceRef.size >= _PRESENCE_REF_MAX) {
+				for (const [k, r] of _presenceRef) {
+					if (r.timer) {
+						clearTimeout(r.timer);
+						const [t, u] = k.split('\0');
+						ctx.publish(t + ':presence', 'leave', { key: u });
+						if (onLeave) {
+							Promise.resolve().then(() => onLeave(ctx, t)).catch(() => {});
+						}
+						_presenceRef.delete(k);
+					}
+				}
+				if (_presenceRef.size >= _PRESENCE_REF_MAX) {
+					return;
+				}
+			}
+
+			_presenceRef.set(refKey, { count: 1, timer: null });
+
 			const presenceData = presenceFn(ctx);
 			if (presenceData) {
-				ctx.publish(topic + ':presence', 'join', { key: ctx.user?.id || 'anon', data: presenceData });
+				ctx.publish(topic + ':presence', 'join', { key: userId, data: presenceData });
 			}
 		} : undefined,
 		onUnsubscribe: presenceFn ? (ctx, topic) => {
-			ctx.publish(topic + ':presence', 'leave', { key: ctx.user?.id || 'anon' });
-			if (onLeave) {
-				try { onLeave(ctx); } catch {}
+			const userId = _getIdentityKey(ctx);
+			const refKey = topic + '\0' + userId;
+
+			const ref = _presenceRef.get(refKey);
+			if (!ref) return;
+
+			ref.count--;
+			if (ref.count > 0) return;
+
+			// On rollback (failed stream init), skip grace and leave immediately
+			if (ctx.ws && _rollingBack.has(ctx.ws)) {
+				if (ref.timer) clearTimeout(ref.timer);
+				_presenceRef.delete(refKey);
+				ctx.publish(topic + ':presence', 'leave', { key: userId });
+				if (onLeave) {
+					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
+				}
+				return;
 			}
+
+			ref.timer = setTimeout(() => {
+				_presenceRef.delete(refKey);
+				ctx.publish(topic + ':presence', 'leave', { key: userId });
+				if (onLeave) {
+					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
+				}
+			}, 5000);
 		} : undefined
 	});
 
@@ -868,7 +1186,14 @@ live.room = function room(config) {
 	if (presenceFn) {
 		/** @type {any} */ (roomExport).__presenceStream = live.stream(
 			(ctx, ...args) => topicFn(ctx, ...args) + ':presence',
-			async (ctx, ...args) => [],
+			async (ctx, ...args) => {
+				if (guardFn) await guardFn(ctx, ...args);
+				const presenceTopic = topicFn(ctx, ...args) + ':presence';
+				if (ctx.platform.presence && typeof ctx.platform.presence.list === 'function') {
+					return ctx.platform.presence.list(presenceTopic);
+				}
+				return [];
+			},
 			{ merge: 'presence' }
 		);
 	}
@@ -877,7 +1202,10 @@ live.room = function room(config) {
 	if (cursorConfig) {
 		/** @type {any} */ (roomExport).__cursorStream = live.stream(
 			(ctx, ...args) => topicFn(ctx, ...args) + ':cursors',
-			async (ctx, ...args) => [],
+			async (ctx, ...args) => {
+				if (guardFn) await guardFn(ctx, ...args);
+				return [];
+			},
 			{ merge: 'cursor' }
 		);
 	}
@@ -886,10 +1214,16 @@ live.room = function room(config) {
 	if (actions) {
 		/** @type {any} */ (roomExport).__actions = {};
 		for (const [name, fn] of Object.entries(actions)) {
+			if (!_validSegmentRe.test(name)) {
+				if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+					console.warn(`[svelte-realtime] Room action '${name}' contains invalid characters (only a-z, A-Z, 0-9, _ allowed) -- skipped`);
+				}
+				continue;
+			}
 			const wrappedAction = live(async function roomAction(ctx, ...args) {
 				if (guardFn) await guardFn(ctx, ...args);
-				// Scope ctx.publish to the room's topic
-				const roomTopic = topicFn(ctx, ...args);
+				const roomArgs = args.slice(0, _roomArgCount);
+				const roomTopic = _callTopicFn(topicFn, ctx, roomArgs);
 				const originalPublish = ctx.publish;
 				ctx.publish = (event, data) => originalPublish(roomTopic, event, data);
 				try {
@@ -898,11 +1232,75 @@ live.room = function room(config) {
 					ctx.publish = originalPublish;
 				}
 			});
+			/** @type {any} */ (wrappedAction).__wrappedFn = fn;
 			/** @type {any} */ (roomExport).__actions[name] = wrappedAction;
 		}
 	}
 
+	// Convenience .hooks property for one-liner wiring in hooks.ws.js:
+	// export const { subscribe, unsubscribe, message, close } = myRoom.hooks;
+	/** @type {any} */ (roomExport).hooks = {
+		message(ws, ctx) {
+			handleRpc(ws, ctx.data, ctx.platform);
+		},
+		close(ws, ctx) {
+			close(ws, ctx);
+		},
+		unsubscribe: unsubscribe
+	};
+
 	return roomExport;
+};
+
+/** @type {{ rpcCount?: any, rpcDuration?: any, rpcErrors?: any, streamGauge?: any, cronCount?: any, cronErrors?: any } | null} */
+let _metricsInstruments = null;
+
+/**
+ * Opt-in Prometheus metrics integration.
+ * Accepts a MetricsRegistry from `svelte-adapter-uws-extensions/prometheus`
+ * and instruments RPC calls, stream subscriptions, and cron executions.
+ *
+ * Zero overhead if never called.
+ *
+ * @param {any} registry - A MetricsRegistry instance with counter(), histogram(), gauge()
+ */
+live.metrics = function metrics(registry) {
+	_metricsInstruments = {
+		rpcCount: registry.counter({ name: 'svelte_realtime_rpc_total', help: 'Total RPC calls', labelNames: ['path', 'status'] }),
+		rpcDuration: registry.histogram({ name: 'svelte_realtime_rpc_duration_seconds', help: 'RPC call duration', labelNames: ['path'] }),
+		rpcErrors: registry.counter({ name: 'svelte_realtime_rpc_errors_total', help: 'Total RPC errors', labelNames: ['path', 'code'] }),
+		streamGauge: registry.gauge({ name: 'svelte_realtime_stream_subscriptions', help: 'Active stream subscriptions' }),
+		cronCount: registry.counter({ name: 'svelte_realtime_cron_total', help: 'Total cron executions', labelNames: ['path', 'status'] }),
+		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] })
+	};
+};
+
+/**
+ * Wrap a stream initFn call with a circuit breaker.
+ * When the breaker is open, returns the fallback value or throws SERVICE_UNAVAILABLE.
+ *
+ * @param {{ breaker: any, fallback?: any }} options
+ * @param {Function} fn - The stream initFn
+ * @returns {Function}
+ */
+live.breaker = function breaker(options, fn) {
+	const { breaker: cb, fallback } = options;
+	const wrapper = async function breakerWrapper(ctx, ...args) {
+		if (cb.isOpen && cb.isOpen()) {
+			if (fallback !== undefined) return typeof fallback === 'function' ? fallback() : fallback;
+			throw new LiveError('SERVICE_UNAVAILABLE', 'Service temporarily unavailable (circuit open)');
+		}
+		try {
+			const result = await fn(ctx, ...args);
+			if (cb.success) cb.success();
+			return result;
+		} catch (err) {
+			if (cb.failure) cb.failure();
+			throw err;
+		}
+	};
+	_copyStreamMeta(wrapper, fn);
+	return wrapper;
 };
 
 /**
@@ -949,10 +1347,16 @@ export function _activateDerived(platform) {
 
 	const originalPublish = platform.publish.bind(platform);
 
+	let _publishDepth = 0;
+
 	platform.publish = function derivedPublish(topic, event, data, opts) {
 		const result = originalPublish(topic, event, data, opts);
 
 		if (!_watchedTopics.has(topic)) return result;
+
+		// Guard against infinite recursion (aggregate publishes back through this wrapper)
+		if (_publishDepth > 8) return result;
+		_publishDepth++;
 
 		// Check if any derived stream watches this topic
 		const derivedEntries = _derivedBySource.get(topic);
@@ -992,7 +1396,7 @@ export function _activateDerived(platform) {
 		if (aggregateEntries) {
 			for (const entry of aggregateEntries) {
 				// Apply reducers
-				for (const [field, reducer] of Object.entries(entry.reducers)) {
+				for (const [field, reducer] of entry._reducerEntries) {
 					if (reducer.reduce) {
 						entry.state[field] = reducer.reduce(entry.state[field], event, data);
 					}
@@ -1004,14 +1408,15 @@ export function _activateDerived(platform) {
 					if (entry.timer) clearTimeout(entry.timer);
 					entry.timer = setTimeout(() => {
 						entry.timer = null;
-						originalPublish(entry.topic, 'set', computed);
+						platform.publish(entry.topic, 'set', computed);
 					}, entry.debounce);
 				} else {
-					originalPublish(entry.topic, 'set', computed);
+					platform.publish(entry.topic, 'set', computed);
 				}
 			}
 		}
 
+		_publishDepth--;
 		return result;
 	};
 }
@@ -1043,8 +1448,8 @@ async function _fireEffect(entry, event, data, platform) {
 	try {
 		await entry.fn(event, data, platform);
 	} catch (err) {
-		if (_cronErrorHandler) {
-			try { _cronErrorHandler('effect', err); } catch {}
+		if (_serverErrorHandler) {
+			try { _serverErrorHandler('effect', err); } catch {}
 		} else if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
 			console.error('[svelte-realtime] Effect error:', err);
 		}
@@ -1101,14 +1506,18 @@ const _lazyQueue = [];
 /** @type {Promise<void> | null} */
 let _lazyInitPromise = null;
 
+/** @type {boolean} Set to true once all lazy entries have been resolved */
+let _lazyResolved = false;
+
 /**
  * Resolve all deferred (lazy) cron/derived/effect/aggregate/room-action registrations.
  * Safe to call multiple times -- only the first call does work, concurrent callers
  * await the same promise.
  */
 async function _resolveAllLazy() {
+	if (_lazyResolved) return;
 	if (_lazyInitPromise) return _lazyInitPromise;
-	if (_lazyQueue.length === 0) return;
+	if (_lazyQueue.length === 0) { _lazyResolved = true; return; }
 	_lazyInitPromise = (async () => {
 		const queue = _lazyQueue.splice(0);
 		for (const { type, path, loader } of queue) {
@@ -1130,18 +1539,23 @@ async function _resolveAllLazy() {
 						__register(path, fn);
 						__registerAggregate(path, fn);
 						break;
-					case 'room-actions':
+					case 'room-actions': {
+						const modulePath = path.substring(0, path.lastIndexOf('/'));
 						if (/** @type {any} */ (fn).__actions) {
 							for (const [k, v] of Object.entries(/** @type {any} */ (fn).__actions)) {
-								registry.set(path + '/__action/' + k, v);
+								if (_validSegmentRe.test(k)) {
+									__register(path + '/__action/' + k, v, modulePath);
+								}
 							}
 						}
 						break;
+					}
 				}
 			} catch (err) {
 				console.error(`[svelte-realtime] Failed to resolve lazy registration for '${path}':`, err);
 			}
 		}
+		_lazyResolved = true;
 	})();
 	return _lazyInitPromise;
 }
@@ -1193,12 +1607,19 @@ export function _prepareHmr() {
 	for (const e of effectRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
 	for (const e of aggregateRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
 
+	// Clear orphaned throttle/debounce timers to prevent stale platform.publish refs
+	for (const [, entry] of _throttles) clearTimeout(entry.timer);
+	_throttles.clear();
+	for (const [, timer] of _debounces) clearTimeout(timer);
+	_debounces.clear();
+
 	// Clear cron timers (but keep _cronPlatform -- it stays valid across HMR)
 	_clearCron();
 
 	// Clear lazy queue and reset lazy init state
 	_lazyQueue.length = 0;
 	_lazyInitPromise = null;
+	_lazyResolved = false;
 
 	// Clear all registries and lookup maps
 	registry.clear();
@@ -1271,7 +1692,7 @@ export function _restoreHmr(snap) {
 }
 
 export async function _tickCron() {
-	if (_lazyQueue.length) await _resolveAllLazy();
+	if (!_lazyResolved) await _resolveAllLazy();
 	const now = new Date();
 	const minute = now.getMinutes();
 	const hour = now.getHours();
@@ -1297,20 +1718,19 @@ export async function _tickCron() {
 					return;
 				}
 				const _h = _getCtxHelpers(_cronPlatform);
-				const ctx = {
-					platform: _cronPlatform,
-					publish: _h.publish,
-					throttle: _h.throttle,
-					debounce: _h.debounce,
-					signal: _h.signal
-				};
+				const ctx = _buildCtx(null, null, _cronPlatform, _h, null);
 				const result = await entry.fn(ctx);
 				if (result !== undefined) {
 					_cronPlatform.publish(entry.topic, 'set', result);
 				}
+				if (_metricsInstruments) _metricsInstruments.cronCount.inc({ path, status: 'ok' });
 			} catch (err) {
-				if (_cronErrorHandler) {
-					_cronErrorHandler(path, err);
+				if (_metricsInstruments) {
+					_metricsInstruments.cronCount.inc({ path, status: 'error' });
+					_metricsInstruments.cronErrors.inc({ path });
+				}
+				if (_serverErrorHandler) {
+					_serverErrorHandler(path, err);
 				} else if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
 					console.error(`[svelte-realtime] Cron '${path}' error:`, err);
 				}
@@ -1330,39 +1750,61 @@ function _parseCron(expr) {
 	if (parts.length !== 5) {
 		throw new Error(`[svelte-realtime] Invalid cron expression '${expr}' -- expected 5 fields (minute hour day month weekday)`);
 	}
-	return parts.map(_parseCronField);
+	return parts.map((field, idx) => _parseCronField(field, idx));
 }
 
+/** Max values per cron field index: minute, hour, day, month, weekday */
+const _CRON_RANGES = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+
 /**
- * Parse a single cron field.
- * Returns null for '*' (match all), or an array/Set of allowed values.
- * For step values, returns { step: N }.
+ * Parse a single cron field with validation.
+ * Returns null for '*' (match all), or a Set of allowed values,
+ * or { step: N } for step expressions.
  * @param {string} field
+ * @param {number} idx - Field index (0=minute, 1=hour, 2=day, 3=month, 4=weekday)
  * @returns {any}
  */
-function _parseCronField(field) {
-	if (field === '*') return null; // match all
+function _parseCronField(field, idx) {
+	const [min, max] = _CRON_RANGES[idx] || [0, 59];
 
-	// Step: */N
+	if (field === '*') return null;
+
 	if (field.startsWith('*/')) {
-		return { step: parseInt(field.slice(2), 10) };
+		const step = parseInt(field.slice(2), 10);
+		if (!Number.isFinite(step) || step < 1) {
+			throw new Error(`[svelte-realtime] Invalid cron step '${field}' -- step must be a positive integer`);
+		}
+		return { step };
 	}
 
-	// Range: N-M
 	if (field.includes('-') && !field.includes(',')) {
-		const [a, b] = field.split('-').map(Number);
+		const parts = field.split('-');
+		const a = parseInt(parts[0], 10);
+		const b = parseInt(parts[1], 10);
+		if (!Number.isFinite(a) || !Number.isFinite(b) || a < min || b > max || a > b) {
+			throw new Error(`[svelte-realtime] Invalid cron range '${field}' -- values must be ${min}-${max}`);
+		}
 		const vals = new Set();
 		for (let i = a; i <= b; i++) vals.add(i);
 		return vals;
 	}
 
-	// List: N,M,P
 	if (field.includes(',')) {
-		return new Set(field.split(',').map(Number));
+		const nums = field.split(',').map(s => {
+			const n = parseInt(s, 10);
+			if (!Number.isFinite(n) || n < min || n > max) {
+				throw new Error(`[svelte-realtime] Invalid cron value '${s}' in '${field}' -- must be ${min}-${max}`);
+			}
+			return n;
+		});
+		return new Set(nums);
 	}
 
-	// Single value
-	return new Set([parseInt(field, 10)]);
+	const n = parseInt(field, 10);
+	if (!Number.isFinite(n) || n < min || n > max) {
+		throw new Error(`[svelte-realtime] Invalid cron value '${field}' -- must be ${min}-${max}`);
+	}
+	return new Set([n]);
 }
 
 /**
@@ -1528,270 +1970,8 @@ export function handleRpc(ws, data, platform, options) {
  * @param {{ beforeExecute?: (ws: any, rpcPath: string, args: any[]) => Promise<void> | void, onError?: (path: string, error: unknown, ctx: any) => void }} [options]
  */
 async function _executeRpc(ws, msg, platform, options) {
-	const { rpc: path, id, args: rawArgs, stream: isStream, seq: clientSeq, cursor: clientCursor, schemaVersion: clientSchemaVersion } = msg;
-
-	if (!_validPathRe.test(path)) {
-		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' });
-		return;
-	}
-
-	// Validate args
-	if (rawArgs !== undefined && !Array.isArray(rawArgs)) {
-		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' });
-		return;
-	}
-
-	const args = rawArgs || [];
-
-	// Resolve lazy registrations (cron/derived/effect/aggregate) on first call
-	if (_lazyQueue.length) await _resolveAllLazy();
-
-	// Lookup function in registry (resolves lazy loader on first access)
-	const fn = await _resolveRegistryEntry(path);
-	if (!fn) {
-		if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-			console.warn(`[svelte-realtime] RPC call to '${path}' -- no such live function registered`);
-		}
-		_respond(ws, platform, id, { ok: false, code: 'NOT_FOUND', error: 'Not found' });
-		return;
-	}
-
-	// Build context
-	const _h = _getCtxHelpers(platform);
-	const ctx = {
-		user: ws.getUserData(),
-		ws,
-		platform,
-		publish: _h.publish,
-		cursor: clientCursor !== undefined ? clientCursor : null,
-		throttle: _h.throttle,
-		debounce: _h.debounce,
-		signal: _h.signal
-	};
-
-	try {
-		// Run global middleware chain, then guard, then execution
-		await _runWithMiddleware(ctx, async () => {
-		// Run module guard if registered
-		const modulePath = path.substring(0, path.lastIndexOf('/'));
-		const guardFn = await _resolveGuard(modulePath);
-		if (guardFn) await guardFn(ctx);
-
-		// Run beforeExecute hook
-		if (options?.beforeExecute) {
-			await options.beforeExecute(ws, path, args);
-		}
-
-		// Handle stream: subscribe BEFORE loading data (gap-free)
-		if (isStream && /** @type {any} */ (fn).__isStream) {
-			// Gate check: if predicate returns false, respond with gated no-op
-			if (/** @type {any} */ (fn).__isGated) {
-				const predicate = /** @type {any} */ (fn).__gatePredicate;
-				if (!predicate(ctx, ...args)) {
-					_respond(ws, platform, id, { ok: true, data: null, gated: true });
-					return;
-				}
-			}
-
-			const rawTopic = /** @type {any} */ (fn).__streamTopic;
-			const topic = typeof rawTopic === 'function' ? rawTopic(ctx, ...args) : rawTopic;
-			if (typeof rawTopic === 'function' && topic.startsWith('__')) {
-				_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' });
-				return;
-			}
-			const streamOpts = /** @type {any} */ (fn).__streamOptions;
-			const replayOpts = /** @type {any} */ (fn).__replay;
-
-			// Enforce stream filter/access predicate before subscribing
-			const streamFilter = /** @type {any} */ (fn).__streamFilter;
-			if (streamFilter && !streamFilter(ctx)) {
-				_respond(ws, platform, id, { ok: false, code: 'FORBIDDEN', error: 'Access denied' });
-				return;
-			}
-
-			try { ws.subscribe(topic); } catch { return; }
-
-			// Track dynamic topic -> stream mapping for accurate onUnsubscribe dispatch
-			if (typeof rawTopic === 'function' && /** @type {any} */ (fn).__onUnsubscribe) {
-				let map = _dynamicSubscriptions.get(ws);
-				if (!map) { map = new Map(); _dynamicSubscriptions.set(ws, map); }
-				map.set(topic, fn);
-			}
-
-			// Fire onSubscribe lifecycle hook
-			if (/** @type {any} */ (fn).__onSubscribe) {
-				try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic); } catch {}
-			}
-
-			// Channel fast-path: no database, respond immediately with empty data
-			if (/** @type {any} */ (fn).__isChannel) {
-				const emptyValue = streamOpts.merge === 'set' ? null : [];
-				_respond(ws, platform, id, {
-					ok: true,
-					data: emptyValue,
-					topic,
-					merge: streamOpts.merge,
-					key: streamOpts.key,
-					max: streamOpts.max
-				});
-				return;
-			}
-
-			// Delta sync: if client sent a version and delta is configured, try to send only changes
-			const deltaOpts = /** @type {any} */ (fn).__delta;
-			const clientVersion = msg.version;
-			if (deltaOpts && clientVersion !== undefined && deltaOpts.version && deltaOpts.diff) {
-				try {
-					const currentVersion = await deltaOpts.version();
-					if (currentVersion === clientVersion) {
-						// Nothing changed -- respond with unchanged flag
-						_respond(ws, platform, id, {
-							ok: true,
-							data: [],
-							topic,
-							merge: streamOpts.merge,
-							key: streamOpts.key,
-							prepend: streamOpts.prepend,
-							max: streamOpts.max,
-							unchanged: true,
-							version: currentVersion
-						});
-						return;
-					}
-					// Version differs -- try to get diff
-					const diff = await deltaOpts.diff(clientVersion);
-					if (diff !== null && diff !== undefined) {
-						_respond(ws, platform, id, {
-							ok: true,
-							data: diff,
-							topic,
-							merge: streamOpts.merge,
-							key: streamOpts.key,
-							prepend: streamOpts.prepend,
-							max: streamOpts.max,
-							delta: true,
-							version: currentVersion
-						});
-						return;
-					}
-					// diff returned null/undefined -- fall through to full refetch
-				} catch {
-					// Delta failed -- fall through to full refetch
-				}
-			}
-
-			// Replay: if client sent a seq and replay is enabled, try to send only missed events
-			if (replayOpts && typeof clientSeq === 'number' && platform.replay) {
-				try {
-					const missed = await platform.replay.since(topic, clientSeq);
-					if (missed) {
-						const currentSeq = await platform.replay.seq(topic);
-						_respond(ws, platform, id, {
-							ok: true,
-							data: missed,
-							topic,
-							merge: streamOpts.merge,
-							key: streamOpts.key,
-							prepend: streamOpts.prepend,
-							max: streamOpts.max,
-							seq: currentSeq,
-							replay: true
-						});
-						return;
-					}
-				} catch {
-					// Fallback to full refetch below
-				}
-			}
-
-			const result = await fn(ctx, ...args);
-
-			// Support paginated responses: initFn can return { data, hasMore, cursor }
-			const isPaginated = result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result;
-			let resultData = isPaginated ? result.data : result;
-
-			// Schema migration: apply migration functions if client version is behind server
-			const serverVersion = /** @type {any} */ (fn).__streamVersion;
-			const migrateFns = /** @type {any} */ (fn).__streamMigrate;
-			if (serverVersion !== undefined && migrateFns && typeof clientSchemaVersion === 'number' && clientSchemaVersion < serverVersion) {
-				resultData = _migrateData(resultData, clientSchemaVersion, serverVersion, migrateFns);
-			}
-
-			if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-				if (streamOpts.merge === 'crud' && !Array.isArray(resultData)) {
-					console.warn(
-						`[svelte-realtime] live.stream '${topic}' initFn returned ${typeof resultData} but merge:'crud' expects an array`
-					);
-				}
-			}
-
-			/** @type {any} */
-			const response = {
-				ok: true,
-				data: resultData,
-				topic,
-				merge: streamOpts.merge,
-				key: streamOpts.key,
-				prepend: streamOpts.prepend,
-				max: streamOpts.max
-			};
-
-			// Include pagination info
-			if (isPaginated) {
-				response.hasMore = result.hasMore;
-				if (result.cursor !== undefined) response.cursor = result.cursor;
-			}
-
-			// Include seq for replay-enabled streams
-			if (replayOpts && platform.replay) {
-				try {
-					response.seq = await platform.replay.seq(topic);
-				} catch {}
-			}
-			if (typeof clientSeq === 'number') {
-				response.replay = false; // Full refetch fallback
-			}
-
-			// Include version for delta-enabled streams (full refetch path)
-			if (deltaOpts && deltaOpts.version) {
-				try {
-					response.version = await deltaOpts.version();
-				} catch {}
-			}
-
-			// Include schema version in response
-			if (serverVersion !== undefined) {
-				response.schemaVersion = serverVersion;
-			}
-
-			_respond(ws, platform, id, response);
-		} else {
-			// Regular RPC
-			const result = await fn(ctx, ...args);
-			_respond(ws, platform, id, { ok: true, data: result });
-		}
-		}); // end _runWithMiddleware
-	} catch (err) {
-		if (err instanceof LiveError) {
-			/** @type {any} */
-			const response = { ok: false, code: err.code, error: err.message };
-			if (/** @type {any} */ (err).issues) response.issues = /** @type {any} */ (err).issues;
-			_respond(ws, platform, id, response);
-		} else {
-			if (options?.onError) {
-				try { options.onError(path, err, ctx); } catch {}
-			}
-			if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-				console.warn(
-					`[svelte-realtime] '${path}' threw a non-LiveError:`,
-					err,
-					'\nUse throw new LiveError(code, message) for client-visible errors. Raw errors are hidden from clients.'
-				);
-				console.error(`[svelte-realtime] Error in '${path}':`, err);
-			}
-			_respond(ws, platform, id, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
-		}
-	}
+	const result = await _executeSingleRpc(ws, msg, platform, options);
+	_respond(ws, platform, msg.id, result);
 }
 
 /**
@@ -1804,8 +1984,10 @@ async function _executeRpc(ws, msg, platform, options) {
  */
 async function _executeBatch(ws, msg, platform, options) {
 	const { batch, sequential } = msg;
+	const _batchMetricsStart = _metricsInstruments ? Date.now() : 0;
 
 	if (batch.length > 50) {
+		_recordRpcMetrics('__batch__', 'INVALID_REQUEST', _batchMetricsStart);
 		_respond(ws, platform, '__batch', {
 			batch: [{ id: '', ok: false, code: 'INVALID_REQUEST', error: 'Batch exceeds maximum of 50 calls' }]
 		});
@@ -1813,24 +1995,27 @@ async function _executeBatch(ws, msg, platform, options) {
 	}
 
 	/** @type {Array<{ id: string, ok: boolean, data?: any, code?: string, error?: string }>} */
-	const results = [];
+	let results;
 
 	if (sequential) {
-		for (const call of batch) {
+		results = new Array(batch.length);
+		for (let i = 0; i < batch.length; i++) {
+			const call = batch[i];
 			if (!call || typeof call.rpc !== 'string' || typeof call.id !== 'string') {
-				results.push({ id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id' });
+				_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _batchMetricsStart);
+				results[i] = { id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id' };
 				continue;
 			}
-			results.push(await _executeSingleRpc(ws, call, platform, options));
+			results[i] = await _executeSingleRpc(ws, call, platform, options);
 		}
 	} else {
-		const promises = batch.map((call) => {
+		results = await Promise.all(batch.map((call) => {
 			if (!call || typeof call.rpc !== 'string' || typeof call.id !== 'string') {
-				return Promise.resolve({ id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id' });
+				_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _batchMetricsStart);
+				return { id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id' };
 			}
 			return _executeSingleRpc(ws, call, platform, options);
-		});
-		results.push(...(await Promise.all(promises)));
+		}));
 	}
 
 	_respond(ws, platform, '__batch', { batch: results });
@@ -1846,36 +2031,38 @@ async function _executeBatch(ws, msg, platform, options) {
  * @returns {Promise<{ id: string, ok: boolean, data?: any, code?: string, error?: string }>}
  */
 async function _executeSingleRpc(ws, msg, platform, options) {
-	const { rpc: path, id, args: rawArgs, stream: isStream } = msg;
+	const { rpc: path, id, args: rawArgs, stream: isStream, seq: clientSeq, cursor: clientCursor, schemaVersion: clientSchemaVersion } = msg;
+	const _metricsStart = _metricsInstruments ? Date.now() : 0;
 
 	if (!_validPathRe.test(path)) {
+		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
 		return { id, ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' };
 	}
 
 	if (rawArgs !== undefined && !Array.isArray(rawArgs)) {
+		_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
 		return { id, ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' };
 	}
+
+	if (!_lazyResolved) await _resolveAllLazy();
 
 	const args = rawArgs || [];
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
+		if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+			console.warn(`[svelte-realtime] RPC call to '${path}' -- no such live function registered`);
+		}
+		_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
 		return { id, ok: false, code: 'NOT_FOUND', error: 'Not found' };
 	}
 
 	const _h = _getCtxHelpers(platform);
-	const ctx = {
-		user: ws.getUserData(),
-		ws,
-		platform,
-		publish: _h.publish,
-		throttle: _h.throttle,
-		debounce: _h.debounce,
-		signal: _h.signal
-	};
+	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null);
+	let _subscribedStreamTopic = null;
 
 	try {
-		return await _runWithMiddleware(ctx, async () => {
-		const modulePath = path.substring(0, path.lastIndexOf('/'));
+		const _result = await _runWithMiddleware(ctx, async () => {
+		const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 		const guardFn = await _resolveGuard(modulePath);
 		if (guardFn) await guardFn(ctx);
 
@@ -1884,7 +2071,6 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 		}
 
 		if (isStream && /** @type {any} */ (fn).__isStream) {
-			// Gate check: if predicate returns false, respond with gated no-op
 			if (/** @type {any} */ (fn).__isGated) {
 				const predicate = /** @type {any} */ (fn).__gatePredicate;
 				if (!predicate(ctx, ...args)) {
@@ -1893,38 +2079,102 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 			}
 
 			const rawTopic = /** @type {any} */ (fn).__streamTopic;
-			const topic = typeof rawTopic === 'function' ? rawTopic(ctx, ...args) : rawTopic;
-			if (typeof rawTopic === 'function' && topic.startsWith('__')) {
+			const topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, args) : rawTopic;
+			if (typeof topic === 'string' && topic.startsWith('__')) {
 				return { id, ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' };
 			}
 			const streamOpts = /** @type {any} */ (fn).__streamOptions;
+			const replayOpts = /** @type {any} */ (fn).__replay;
 
-			// Enforce stream filter/access predicate before subscribing
 			const streamFilter = /** @type {any} */ (fn).__streamFilter;
 			if (streamFilter && !streamFilter(ctx)) {
 				return { id, ok: false, code: 'FORBIDDEN', error: 'Access denied' };
 			}
 
 			try { ws.subscribe(topic); } catch { return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' }; }
+			_trackStreamSub(ws, topic, fn);
+			_subscribedStreamTopic = topic;
 
-			// Track dynamic topic -> stream mapping for accurate onUnsubscribe dispatch
-			if (typeof rawTopic === 'function' && /** @type {any} */ (fn).__onUnsubscribe) {
-				let map = _dynamicSubscriptions.get(ws);
-				if (!map) { map = new Map(); _dynamicSubscriptions.set(ws, map); }
-				map.set(topic, fn);
+			if (/** @type {any} */ (fn).__onSubscribe) {
+				try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic); } catch {}
+			}
+
+			// Channel fast-path
+			if (/** @type {any} */ (fn).__isChannel) {
+				const emptyValue = streamOpts.merge === 'set' ? null : [];
+				return { id, ok: true, data: emptyValue, topic, merge: streamOpts.merge, key: streamOpts.key, max: streamOpts.max };
+			}
+
+			// Delta sync
+			const deltaOpts = /** @type {any} */ (fn).__delta;
+			const clientVersion = msg.version;
+			if (deltaOpts && clientVersion !== undefined && deltaOpts.version && deltaOpts.diff) {
+				try {
+					const currentVersion = await deltaOpts.version();
+					if (currentVersion === clientVersion) {
+						return { id, ok: true, data: [], topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, unchanged: true, version: currentVersion };
+					}
+					const diff = await deltaOpts.diff(clientVersion);
+					if (diff !== null && diff !== undefined) {
+						return { id, ok: true, data: diff, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, delta: true, version: currentVersion };
+					}
+				} catch {}
+			}
+
+			// Replay
+			if (replayOpts && typeof clientSeq === 'number' && platform.replay) {
+				try {
+					const missed = await platform.replay.since(topic, clientSeq);
+					if (missed) {
+						const currentSeq = await platform.replay.seq(topic);
+						return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
+					}
+				} catch {}
 			}
 
 			const result = await fn(ctx, ...args);
-			return {
-				id, ok: true, data: result, topic, merge: streamOpts.merge,
-				key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max
+
+			const isPaginated = result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result;
+			let resultData = isPaginated ? result.data : result;
+
+			// Schema migration
+			const serverVersion = /** @type {any} */ (fn).__streamVersion;
+			const migrateFns = /** @type {any} */ (fn).__streamMigrate;
+			if (serverVersion !== undefined && migrateFns && typeof clientSchemaVersion === 'number' && clientSchemaVersion < serverVersion) {
+				resultData = _migrateData(resultData, clientSchemaVersion, serverVersion, migrateFns);
+			}
+
+			const response = {
+				id, ok: true, data: resultData, topic, merge: streamOpts.merge,
+				key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max,
+				hasMore: undefined, cursor: undefined, seq: undefined,
+				version: undefined, schemaVersion: undefined, replay: undefined
 			};
+
+			if (isPaginated) {
+				response.hasMore = result.hasMore;
+				if (result.cursor !== undefined) response.cursor = result.cursor;
+			}
+			if (replayOpts && platform.replay) {
+				try { response.seq = await platform.replay.seq(topic); } catch {}
+			}
+			if (typeof clientSeq === 'number') response.replay = false;
+			if (deltaOpts && deltaOpts.version) {
+				try { response.version = await deltaOpts.version(); } catch {}
+			}
+			if (serverVersion !== undefined) response.schemaVersion = serverVersion;
+
+			return response;
 		} else {
 			const result = await fn(ctx, ...args);
 			return { id, ok: true, data: result };
 		}
 		}); // end _runWithMiddleware
+		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart);
+		return _result;
 	} catch (err) {
+		if (_subscribedStreamTopic) _rollbackStreamSubscribe(ws, _subscribedStreamTopic, fn, ctx);
+		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart);
 		if (err instanceof LiveError) {
 			/** @type {any} */
 			const result = { id, ok: false, code: err.code, error: err.message };
@@ -1957,45 +2207,47 @@ async function _executeSingleRpc(ws, msg, platform, options) {
  */
 async function _executeBinaryRpc(ws, header, payload, platform, options) {
 	const { rpc: path, id, args: extraArgs } = header;
+	const _metricsStart = _metricsInstruments ? Date.now() : 0;
 
 	if (!_validPathRe.test(path)) {
+		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
 		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' });
 		return;
 	}
 
-	if (_lazyQueue.length) await _resolveAllLazy();
+	if (extraArgs !== undefined && !Array.isArray(extraArgs)) {
+		_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
+		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' });
+		return;
+	}
+
+	if (!_lazyResolved) await _resolveAllLazy();
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
+		_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
 		_respond(ws, platform, id, { ok: false, code: 'NOT_FOUND', error: 'Not found' });
 		return;
 	}
 
 	if (!/** @type {any} */ (fn).__isBinary) {
+		_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
 		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Not a binary endpoint' });
 		return;
 	}
 
 	const maxBinarySize = /** @type {any} */ (fn).__maxBinarySize || 10485760;
 	if (payload.byteLength > maxBinarySize) {
+		_recordRpcMetrics(path, 'PAYLOAD_TOO_LARGE', _metricsStart);
 		_respond(ws, platform, id, { ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Binary payload exceeds size limit' });
 		return;
 	}
 
 	const _h = _getCtxHelpers(platform);
-	const ctx = {
-		user: ws.getUserData(),
-		ws,
-		platform,
-		publish: _h.publish,
-		cursor: null,
-		throttle: _h.throttle,
-		debounce: _h.debounce,
-		signal: _h.signal
-	};
+	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null);
 
 	try {
 		await _runWithMiddleware(ctx, async () => {
-			const modulePath = path.substring(0, path.lastIndexOf('/'));
+			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 			const guardFn = await _resolveGuard(modulePath);
 			if (guardFn) await guardFn(ctx);
 
@@ -2006,7 +2258,9 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 			const result = await fn(ctx, payload, ...(extraArgs || []));
 			_respond(ws, platform, id, { ok: true, data: result });
 		});
+		_recordRpcMetrics(path, '', _metricsStart);
 	} catch (err) {
+		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart);
 		if (err instanceof LiveError) {
 			_respond(ws, platform, id, { ok: false, code: err.code, error: err.message });
 		} else {
@@ -2063,19 +2317,18 @@ const _debounces = new Map();
  * @param {number} ms - Throttle interval in milliseconds
  */
 function _throttlePublish(platform, topic, event, data, ms) {
-	const key = topic + '\0' + event;
+	const entityKey = data && typeof data === 'object' && data.key !== undefined ? '\0' + data.key : '';
+	const key = topic + '\0' + event + entityKey;
 	const existing = _throttles.get(key);
 	const now = Date.now();
 
 	if (!existing) {
-		// Hard cap: evict oldest entry if at limit
 		if (_throttles.size >= _THROTTLE_DEBOUNCE_MAX) {
-			const oldest = _throttles.keys().next().value;
-			const entry = _throttles.get(oldest);
-			if (entry) clearTimeout(entry.timer);
-			_throttles.delete(oldest);
+			// At capacity -- publish immediately without a trailing-edge timer
+			// so data is never silently dropped
+			platform.publish(topic, event, data);
+			return;
 		}
-		// First call -- publish immediately, set up trailing edge
 		platform.publish(topic, event, data);
 		_throttles.set(key, {
 			timer: setTimeout(() => {
@@ -2087,7 +2340,6 @@ function _throttlePublish(platform, topic, event, data, ms) {
 			}, ms),
 			lastData: undefined,
 			lastEvent: event,
-			platform,
 			lastRun: now
 		});
 		return;
@@ -2108,15 +2360,15 @@ function _throttlePublish(platform, topic, event, data, ms) {
  * @param {number} ms - Debounce interval in milliseconds
  */
 function _debouncePublish(platform, topic, event, data, ms) {
-	const key = topic + '\0' + event;
+	const entityKey = data && typeof data === 'object' && data.key !== undefined ? '\0' + data.key : '';
+	const key = topic + '\0' + event + entityKey;
 	const existing = _debounces.get(key);
 	if (existing) clearTimeout(existing);
 
-	// Hard cap: evict oldest entry if at limit
 	if (!existing && _debounces.size >= _THROTTLE_DEBOUNCE_MAX) {
-		const oldest = _debounces.keys().next().value;
-		clearTimeout(_debounces.get(oldest));
-		_debounces.delete(oldest);
+		// At capacity -- publish immediately instead of evicting an active timer
+		platform.publish(topic, event, data);
+		return;
 	}
 
 	_debounces.set(key, setTimeout(() => {
@@ -2206,33 +2458,31 @@ function _respond(ws, platform, correlationId, payload) {
  * @returns {Promise<any>}
  */
 export async function __directCall(path, args, platform, options) {
-	if (_lazyQueue.length) await _resolveAllLazy();
+	if (!_lazyResolved) await _resolveAllLazy();
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		throw new LiveError('NOT_FOUND', `Live function '${path}' not found`);
 	}
 
 	const _h = _getCtxHelpers(platform);
-	const ctx = {
-		user: options?.user || null,
-		ws: null,
-		platform,
-		publish: _h.publish,
-		cursor: null,
-		throttle: _h.throttle,
-		debounce: _h.debounce,
-		signal: _h.signal
-	};
+	const ctx = _buildCtx(options?.user || null, null, platform, _h, null);
 
 	// Run global middleware chain, then guard, then execution
 	return _runWithMiddleware(ctx, async () => {
 	// Run module guard
-	const modulePath = path.substring(0, path.lastIndexOf('/'));
+	const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 	const guardFn = await _resolveGuard(modulePath);
 	if (guardFn) await guardFn(ctx);
 
 	if (/** @type {any} */ (fn).__isStream) {
-		// For streams, just call the initFn and return data (no subscribe)
+		if (/** @type {any} */ (fn).__isGated) {
+			const predicate = /** @type {any} */ (fn).__gatePredicate;
+			if (!predicate(ctx, ...args)) return null;
+		}
+		const streamFilter = /** @type {any} */ (fn).__streamFilter;
+		if (streamFilter && !streamFilter(ctx)) {
+			throw new LiveError('FORBIDDEN', 'Access denied');
+		}
 		return fn(ctx, ...args);
 	}
 
@@ -2268,40 +2518,86 @@ export function enableSignals(ws, options) {
 	}
 }
 
-export function close(ws, { platform }) {
-	if (_streamsWithUnsubscribe.size === 0) return;
+/**
+ * Handle a real-time topic unsubscribe event. Fires onUnsubscribe lifecycle
+ * hooks for the stream function that owns the topic.
+ *
+ * The adapter 0.4.0 calls this when a client's topic reference count reaches zero.
+ * Export from hooks.ws.js:
+ * ```js
+ * export { unsubscribe } from 'svelte-realtime/server';
+ * ```
+ *
+ * @param {any} ws
+ * @param {string} topic
+ * @param {{ platform: import('svelte-adapter-uws').Platform }} ctx
+ */
+export function unsubscribe(ws, topic, { platform }) {
+	const topicMap = _wsStreamOwners.get(ws);
+	if (!topicMap) return;
+	const owners = topicMap.get(topic);
+	if (!owners || owners.length === 0) return;
+
+	const user = ws.getUserData();
+	const unsubCtx = { user, ws, platform, publish: _getCtxHelpers(platform).publish, cursor: null };
+
+	// Drain every logical subscriber for this topic
+	for (const entry of owners) {
+		for (let i = 0; i < entry.count; i++) {
+			if (_metricsInstruments) _metricsInstruments.streamGauge.dec();
+			if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
+				Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(unsubCtx, topic)).catch(() => {});
+			}
+		}
+	}
+	topicMap.delete(topic);
+
+	let fired = _firedUnsubscribes.get(ws);
+	if (!fired) { fired = new Set(); _firedUnsubscribes.set(ws, fired); }
+	fired.add(topic);
+}
+
+/** @type {WeakMap<object, Set<string>>} Topics whose hooks already fired via unsubscribe() */
+const _firedUnsubscribes = new WeakMap();
+
+export function close(ws, { platform, subscriptions }) {
+	const topicMap = _wsStreamOwners.get(ws);
+	const alreadyFired = _firedUnsubscribes.get(ws);
 
 	const user = ws.getUserData();
 	const closeCtx = { user, ws, platform, publish: _getCtxHelpers(platform).publish, cursor: null };
 
-	// Get the actual topics this socket was subscribed to
-	const subscribedTopics = typeof ws.getTopics === 'function' ? ws.getTopics() : null;
-	/** @type {Set<string> | null} */
-	let subscribedSet = null;
-
-	for (const fn of _streamsWithUnsubscribe) {
-		const rawTopic = /** @type {any} */ (fn).__streamTopic;
-		if (typeof rawTopic === 'string') {
-			// Static topic: only fire if the socket was actually subscribed
-			if (!subscribedTopics) {
-				try { /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic); } catch {}
-			} else {
-				if (!subscribedSet) subscribedSet = new Set(subscribedTopics);
-				if (subscribedSet.has(rawTopic)) {
-					try { /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic); } catch {}
+	// Drain tracked stream subscriptions (from the RPC subscribe path)
+	if (topicMap) {
+		for (const [topic, owners] of topicMap) {
+			if (alreadyFired && alreadyFired.has(topic)) continue;
+			for (const entry of owners) {
+				for (let i = 0; i < entry.count; i++) {
+					if (_metricsInstruments) _metricsInstruments.streamGauge.dec();
+					if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
+						Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(closeCtx, topic)).catch(() => {});
+					}
 				}
 			}
 		}
 	}
 
-	// For dynamic streams, use the recorded topic -> stream mapping
-	const dynamicMap = _dynamicSubscriptions.get(ws);
-	if (dynamicMap) {
-		for (const [topic, fn] of dynamicMap) {
-			try { /** @type {any} */ (fn).__onUnsubscribe(closeCtx, topic); } catch {}
+	// Also check static-topic streams for manually subscribed topics not tracked via RPC
+	const subscribedTopics = subscriptions || (typeof ws.getTopics === 'function' ? ws.getTopics() : null);
+	if (subscribedTopics && _streamsWithUnsubscribe.size > 0) {
+		const subSet = subscribedTopics instanceof Set ? subscribedTopics : new Set(subscribedTopics);
+		for (const fn of [..._streamsWithUnsubscribe]) {
+			const rawTopic = /** @type {any} */ (fn).__streamTopic;
+			if (typeof rawTopic !== 'string') continue;
+			if (!subSet.has(rawTopic)) continue;
+			if (alreadyFired && alreadyFired.has(rawTopic)) continue;
+			if (topicMap && topicMap.has(rawTopic)) continue; // already handled above
+			Promise.resolve().then(() => /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic)).catch(() => {});
 		}
-		_dynamicSubscriptions.delete(ws);
 	}
+
+	_wsStreamOwners.delete(ws);
+	_firedUnsubscribes.delete(ws);
 }
 
 /**

@@ -4,21 +4,22 @@ let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal;
 let topicCallbacks;
 let statusCallbacks;
 let sendQueuedFn;
+let readyReject;
 
 /**
  * Simulate an RPC response arriving from the server.
  */
 function simulateRpcResponse(correlationId, payload) {
-	const cb = topicCallbacks.get('__rpc');
-	if (cb) cb({ event: correlationId, data: payload });
+	const fns = topicCallbacks.get('__rpc');
+	if (fns) for (const cb of fns) cb({ event: correlationId, data: payload });
 }
 
 /**
  * Simulate a pub/sub message on a topic.
  */
 function simulateTopicMessage(topic, envelope) {
-	const cb = topicCallbacks.get(topic);
-	if (cb) cb(envelope);
+	const fns = topicCallbacks.get(topic);
+	if (fns) for (const cb of fns) cb(envelope);
 }
 
 /**
@@ -26,6 +27,14 @@ function simulateTopicMessage(topic, envelope) {
  */
 function simulateStatus(s) {
 	for (const cb of statusCallbacks) cb(s);
+}
+
+/**
+ * Wait one microtask. Needed after stream subscribe() because stream RPCs
+ * are now batched within a microtask via _batchedSubscribe.
+ */
+function flush() {
+	return new Promise((r) => queueMicrotask(r));
 }
 
 beforeEach(async () => {
@@ -36,11 +45,19 @@ beforeEach(async () => {
 	sendQueuedFn = vi.fn();
 
 	vi.doMock('svelte-adapter-uws/client', () => ({
-		connect: () => ({ sendQueued: sendQueuedFn }),
+		connect: () => ({
+			sendQueued: sendQueuedFn,
+			ready: () => new Promise((_resolve, reject) => { readyReject = reject; })
+		}),
 		on: (topic) => ({
 			subscribe: (fn) => {
-				topicCallbacks.set(topic, fn);
-				return () => topicCallbacks.delete(topic);
+				let fns = topicCallbacks.get(topic);
+				if (!fns) { fns = new Set(); topicCallbacks.set(topic, fns); }
+				fns.add(fn);
+				return () => {
+					fns.delete(fn);
+					if (fns.size === 0) topicCallbacks.delete(topic);
+				};
 			}
 		}),
 		status: {
@@ -106,12 +123,13 @@ describe('__rpc()', () => {
 // -- __stream (Findings 1, 3, 4, 5) ------------------------------------------
 
 describe('__stream()', () => {
-	it('resolves with full response (topic + data) for stream requests', () => {
+	it('resolves with full response (topic + data) for stream requests', async () => {
 		const store = __stream('chat/messages', { merge: 'crud', key: 'id' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
 		// Extract the sent message to get the correlation ID
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		expect(sent.stream).toBe(true);
 
@@ -132,11 +150,12 @@ describe('__stream()', () => {
 		unsub();
 	});
 
-	it('receives live updates after initial load', () => {
+	it('receives live updates after initial load', async () => {
 		const store = __stream('items/list', { merge: 'crud', key: 'id' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -155,12 +174,13 @@ describe('__stream()', () => {
 		unsub();
 	});
 
-	it('uses server-provided options over build-time defaults (Finding 5)', () => {
+	it('uses server-provided options over build-time defaults (Finding 5)', async () => {
 		// Build-time says merge:'crud' key:'id', server overrides with key:'uid'
 		const store = __stream('users/list', { merge: 'crud', key: 'id' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -182,11 +202,12 @@ describe('__stream()', () => {
 		unsub();
 	});
 
-	it('latest merge pushes raw data, not envelopes (Finding 4)', () => {
+	it('latest merge pushes raw data, not envelopes (Finding 4)', async () => {
 		const store = __stream('activity/feed', { merge: 'latest', max: 10 });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -211,16 +232,18 @@ describe('__stream()', () => {
 		unsub();
 	});
 
-	it('cleanup removes pending entry from shared map (Finding 3)', () => {
+	it('cleanup removes pending entry from shared map (Finding 3)', async () => {
 		const store = __stream('temp/data', { merge: 'set' });
 		const unsub = store.subscribe(() => {});
 
 		// There should be a pending entry (the stream fetch)
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		expect(sent.stream).toBe(true);
 
 		// Unsubscribe before the server responds - cleanup should remove pending
 		unsub();
+		await new Promise((r) => queueMicrotask(r)); // Wait for deferred cleanup
 
 		// Simulate a late response - should be ignored (no crash, no side effects)
 		simulateRpcResponse(sent.id, {
@@ -238,6 +261,7 @@ describe('__stream()', () => {
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const firstSent = sendQueuedFn.mock.calls[0][0];
 
 		// Disconnect before the initial load completes
@@ -274,11 +298,12 @@ describe('__stream()', () => {
 // -- __stream() optimistic updates (Phase 7) ----------------------------------
 
 describe('__stream() optimistic', () => {
-	it('optimistic created immediately adds item to store', () => {
+	it('optimistic created immediately adds item to store', async () => {
 		const store = __stream('opt/items', { merge: 'crud', key: 'id' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -301,11 +326,12 @@ describe('__stream() optimistic', () => {
 		unsub();
 	});
 
-	it('server event with same key replaces optimistic entry (no duplicate)', () => {
+	it('server event with same key replaces optimistic entry (no duplicate)', async () => {
 		const store = __stream('opt/dedup', { merge: 'crud', key: 'id' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -331,11 +357,12 @@ describe('__stream() optimistic', () => {
 		unsub();
 	});
 
-	it('optimistic set replaces value, rollback restores', () => {
+	it('optimistic set replaces value, rollback restores', async () => {
 		const store = __stream('opt/set', { merge: 'set' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -353,11 +380,12 @@ describe('__stream() optimistic', () => {
 		unsub();
 	});
 
-	it('optimistic updated snapshots previous, rollback restores', () => {
+	it('optimistic updated snapshots previous, rollback restores', async () => {
 		const store = __stream('opt/upd', { merge: 'crud', key: 'id' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -401,11 +429,12 @@ describe('__stream() dynamic topics', () => {
 		expect(store1).toBe(store2);
 	});
 
-	it('sends args in the stream request', () => {
+	it('sends args in the stream request', async () => {
 		const factory = __stream('rooms/withargs', { merge: 'crud', key: 'id' }, true);
 		const store = factory('room-42');
 		const unsub = store.subscribe(() => {});
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		expect(sent.rpc).toBe('rooms/withargs');
 		expect(sent.args).toEqual(['room-42']);
@@ -432,8 +461,7 @@ describe('batch()', () => {
 		expect(sent.batch[1].rpc).toBe('math/mul');
 
 		// Simulate batch response
-		const batchCb = topicCallbacks.get('__rpc');
-		batchCb({
+		simulateTopicMessage('__rpc', {
 			event: '__batch',
 			data: {
 				batch: [
@@ -455,8 +483,7 @@ describe('batch()', () => {
 
 		const sent = sendQueuedFn.mock.calls[0][0];
 
-		const batchCb = topicCallbacks.get('__rpc');
-		batchCb({
+		simulateTopicMessage('__rpc', {
 			event: '__batch',
 			data: {
 				batch: [
@@ -497,11 +524,12 @@ describe('batch()', () => {
 // -- __stream() presence merge (Phase 9) --------------------------------------
 
 describe('__stream() presence merge', () => {
-	it('join adds to presence list', () => {
+	it('join adds to presence list', async () => {
 		const store = __stream('room/presence', { merge: 'presence' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -522,11 +550,12 @@ describe('__stream() presence merge', () => {
 		unsub();
 	});
 
-	it('join with existing key updates in place', () => {
+	it('join with existing key updates in place', async () => {
 		const store = __stream('room/upd', { merge: 'presence' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -541,11 +570,12 @@ describe('__stream() presence merge', () => {
 		unsub();
 	});
 
-	it('leave removes from presence list', () => {
+	it('leave removes from presence list', async () => {
 		const store = __stream('room/leave', { merge: 'presence' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -560,11 +590,12 @@ describe('__stream() presence merge', () => {
 		unsub();
 	});
 
-	it('set replaces entire presence list', () => {
+	it('set replaces entire presence list', async () => {
 		const store = __stream('room/set', { merge: 'presence' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -583,11 +614,12 @@ describe('__stream() presence merge', () => {
 // -- __stream() cursor merge (Phase 9) ----------------------------------------
 
 describe('__stream() cursor merge', () => {
-	it('update adds or replaces cursor entry', () => {
+	it('update adds or replaces cursor entry', async () => {
 		const store = __stream('doc/cursors', { merge: 'cursor' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -605,11 +637,12 @@ describe('__stream() cursor merge', () => {
 		unsub();
 	});
 
-	it('remove deletes cursor entry', () => {
+	it('remove deletes cursor entry', async () => {
 		const store = __stream('doc/rm', { merge: 'cursor' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -624,11 +657,12 @@ describe('__stream() cursor merge', () => {
 		unsub();
 	});
 
-	it('set replaces all cursors', () => {
+	it('set replaces all cursors', async () => {
 		const store = __stream('doc/cset', { merge: 'cursor' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -675,6 +709,7 @@ describe('__stream() seq tracking', () => {
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent1 = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent1.id, {
 			ok: true,
@@ -767,11 +802,12 @@ describe('batch() cleanup on throw (Bug #5 fix)', () => {
 // -- Phase 19: Stream pagination (client) -------------------------------------
 
 describe('__stream() pagination', () => {
-	it('tracks hasMore and cursor from server response', () => {
+	it('tracks hasMore and cursor from server response', async () => {
 		const store = __stream('pag/data', { merge: 'crud', key: 'id' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -794,6 +830,7 @@ describe('__stream() pagination', () => {
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -834,6 +871,7 @@ describe('__stream() pagination', () => {
 		const store = __stream('pag/nocur', { merge: 'crud', key: 'id' });
 		const unsub = store.subscribe(() => {});
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true,
@@ -1042,11 +1080,12 @@ describe('stream undo/redo', () => {
 		expect(store.canRedo).toBe(false);
 	});
 
-	it('undo restores previous value after optimistic update', () => {
+	it('undo restores previous value after optimistic update', async () => {
 		const store = __stream('undo/test2', { merge: 'crud', key: 'id' });
 		let value;
 		const unsub = store.subscribe(v => { value = v; });
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: [{ id: 1, text: 'a' }], topic: 'undo2', merge: 'crud', key: 'id'
@@ -1067,11 +1106,12 @@ describe('stream undo/redo', () => {
 		unsub();
 	});
 
-	it('redo re-applies after undo', () => {
+	it('redo re-applies after undo', async () => {
 		const store = __stream('undo/test3', { merge: 'crud', key: 'id' });
 		let value;
 		const unsub = store.subscribe(v => { value = v; });
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: [{ id: 1 }], topic: 'undo3', merge: 'crud', key: 'id'
@@ -1091,11 +1131,12 @@ describe('stream undo/redo', () => {
 		unsub();
 	});
 
-	it('new change after undo discards redo stack', () => {
+	it('new change after undo discards redo stack', async () => {
 		const store = __stream('undo/test4', { merge: 'crud', key: 'id' });
 		let value;
 		const unsub = store.subscribe(v => { value = v; });
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: [], topic: 'undo4', merge: 'crud', key: 'id'
@@ -1115,11 +1156,12 @@ describe('stream undo/redo', () => {
 		unsub();
 	});
 
-	it('history cap is enforced', () => {
+	it('history cap is enforced', async () => {
 		const store = __stream('undo/test5', { merge: 'set' });
 		let value;
 		const unsub = store.subscribe(v => { value = v; });
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: 0, topic: 'undo5', merge: 'set'
@@ -1144,11 +1186,12 @@ describe('stream undo/redo', () => {
 		unsub();
 	});
 
-	it('history is cleared on cleanup/unsubscribe', () => {
+	it('history is cleared on cleanup/unsubscribe', async () => {
 		const store = __stream('undo/test6', { merge: 'set' });
 		let value;
 		const unsub = store.subscribe(v => { value = v; });
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: 'init', topic: 'undo6', merge: 'set'
@@ -1159,6 +1202,7 @@ describe('stream undo/redo', () => {
 		expect(store.canUndo).toBe(true);
 
 		unsub();
+		await new Promise((r) => queueMicrotask(r)); // Wait for deferred cleanup
 		expect(store.canUndo).toBe(false);
 	});
 });
@@ -1166,11 +1210,12 @@ describe('stream undo/redo', () => {
 // -- pauseHistory / resumeHistory (Phase 36) ----------------------------------
 
 describe('stream pauseHistory / resumeHistory', () => {
-	it('pauseHistory suppresses undo snapshots while events still apply', () => {
+	it('pauseHistory suppresses undo snapshots while events still apply', async () => {
 		const store = __stream('pause/test1', { merge: 'crud', key: 'id' });
 		let value;
 		const unsub = store.subscribe(v => { value = v; });
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: [{ id: 1, text: 'a' }], topic: 'pause1', merge: 'crud', key: 'id'
@@ -1189,11 +1234,12 @@ describe('stream pauseHistory / resumeHistory', () => {
 		unsub();
 	});
 
-	it('resumeHistory records a snapshot so undo goes back to resume-time state', () => {
+	it('resumeHistory records a snapshot so undo goes back to resume-time state', async () => {
 		const store = __stream('pause/test2', { merge: 'set' });
 		let value;
 		const unsub = store.subscribe(v => { value = v; });
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: 0, topic: 'pause2', merge: 'set'
@@ -1225,11 +1271,12 @@ describe('stream pauseHistory / resumeHistory', () => {
 		unsub();
 	});
 
-	it('resumeHistory is a no-op when not paused', () => {
+	it('resumeHistory is a no-op when not paused', async () => {
 		const store = __stream('pause/test3', { merge: 'set' });
 		let value;
 		const unsub = store.subscribe(v => { value = v; });
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: 'init', topic: 'pause3', merge: 'set'
@@ -1249,11 +1296,12 @@ describe('stream pauseHistory / resumeHistory', () => {
 		unsub();
 	});
 
-	it('optimistic updates during pause do not create undo entries', () => {
+	it('optimistic updates during pause do not create undo entries', async () => {
 		const store = __stream('pause/test4', { merge: 'crud', key: 'id' });
 		let value;
 		const unsub = store.subscribe(v => { value = v; });
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: [{ id: 1 }], topic: 'pause4', merge: 'crud', key: 'id'
@@ -1364,13 +1412,14 @@ describe('.when(condition)', () => {
 		unsub();
 	});
 
-	it('.when(true) activates the stream normally', () => {
+	it('.when(true) activates the stream normally', async () => {
 		const store = __stream('gate/active', { merge: 'set' });
 		const gated = store.when(true);
 		const values = [];
 		const unsub = gated.subscribe((v) => values.push(v));
 
 		// Should have sent the stream RPC
+		await flush();
 		expect(sendQueuedFn).toHaveBeenCalled();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		expect(sent.rpc).toBe('gate/active');
@@ -1386,7 +1435,7 @@ describe('.when(condition)', () => {
 		unsub();
 	});
 
-	it('.when() with a store-like object reacts to changes', () => {
+	it('.when() with a store-like object reacts to changes', async () => {
 		let storeValue = false;
 		const subscribers = new Set();
 		const conditionStore = {
@@ -1411,6 +1460,7 @@ describe('.when(condition)', () => {
 		for (const fn of subscribers) fn(true);
 
 		// Now the stream should activate
+		await flush();
 		expect(sendQueuedFn).toHaveBeenCalled();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
@@ -1429,24 +1479,26 @@ describe('.when(condition)', () => {
 		unsub();
 	});
 
-	it('.when() with a function evaluates on subscribe', () => {
+	it('.when() with a function evaluates on subscribe', async () => {
 		const store = __stream('gate/fn', { merge: 'set' });
 		const gated = store.when(() => true);
 		const values = [];
 		const unsub = gated.subscribe((v) => values.push(v));
 
 		// Function returned true, should activate
+		await flush();
 		expect(sendQueuedFn).toHaveBeenCalled();
 
 		unsub();
 	});
 
-	it('unsubscribing from gated store cleans up underlying stream', () => {
+	it('unsubscribing from gated store cleans up underlying stream', async () => {
 		const store = __stream('gate/cleanup', { merge: 'set' });
 		const gated = store.when(true);
 		const values = [];
 		const unsub = gated.subscribe((v) => values.push(v));
 
+		await flush();
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, {
 			ok: true, data: 'data', topic: 'gate-cleanup-t', merge: 'set'
@@ -1454,11 +1506,248 @@ describe('.when(condition)', () => {
 
 		expect(values[values.length - 1]).toBe('data');
 		unsub();
+		await new Promise((r) => queueMicrotask(r)); // Wait for deferred cleanup
 
 		// Resubscribe -- should get undefined (stream was cleaned up), and a new RPC sent
 		const values2 = [];
 		const unsub2 = gated.subscribe((v) => values2.push(v));
 		expect(values2[0]).toBeUndefined();
+		unsub2();
+	});
+});
+
+// -- dedup key collision (null vs 'null') -------------------------------------
+
+describe('__rpc() dedup key collision', () => {
+	it('null and string "null" are separate calls', async () => {
+		const call = __rpc('dedup/test');
+
+		const p1 = call(null);
+		const p2 = call('null');
+
+		// Should send two separate messages (not deduped)
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		const sent2 = sendQueuedFn.mock.calls[1][0];
+		expect(sent1.id).not.toBe(sent2.id);
+
+		simulateRpcResponse(sent1.id, { ok: true, data: 'from-null' });
+		simulateRpcResponse(sent2.id, { ok: true, data: 'from-string' });
+
+		expect(await p1).toBe('from-null');
+		expect(await p2).toBe('from-string');
+	});
+
+	it('number 0 and string "0" are separate calls', async () => {
+		const call = __rpc('dedup/types');
+
+		const p1 = call(0);
+		const p2 = call('0');
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		const sent2 = sendQueuedFn.mock.calls[1][0];
+
+		simulateRpcResponse(sent1.id, { ok: true, data: 'number' });
+		simulateRpcResponse(sent2.id, { ok: true, data: 'string' });
+
+		expect(await p1).toBe('number');
+		expect(await p2).toBe('string');
+	});
+
+	it('identical calls within microtask still dedup', async () => {
+		const call = __rpc('dedup/same');
+
+		const p1 = call('hello');
+		const p2 = call('hello');
+
+		// Should send only one message
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		expect(p1).toBe(p2);
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: 'result' });
+		expect(await p1).toBe('result');
+	});
+});
+
+// -- CRUD delete swap-remove --------------------------------------------------
+
+describe('__stream() CRUD delete swap-remove', () => {
+	it('delete from middle removes item without affecting others', async () => {
+		const store = __stream('swap/items', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1, n: 'A' }, { id: 2, n: 'B' }, { id: 3, n: 'C' }, { id: 4, n: 'D' }],
+			topic: 'swap-items',
+			merge: 'crud',
+			key: 'id'
+		});
+
+		// Delete from the middle (id: 2)
+		simulateTopicMessage('swap-items', { event: 'deleted', data: { id: 2 } });
+
+		const last = values[values.length - 1];
+		expect(last).toHaveLength(3);
+		expect(last.map(i => i.id).sort()).toEqual([1, 3, 4]);
+
+		// Subsequent updates to remaining items should still work via the index
+		simulateTopicMessage('swap-items', { event: 'updated', data: { id: 3, n: 'C2' } });
+		const updated = values[values.length - 1];
+		const item3 = updated.find(i => i.id === 3);
+		expect(item3.n).toBe('C2');
+
+		unsub();
+	});
+
+	it('delete last item works (no swap needed)', async () => {
+		const store = __stream('swap/last', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1 }, { id: 2 }],
+			topic: 'swap-last',
+			merge: 'crud',
+			key: 'id'
+		});
+
+		simulateTopicMessage('swap-last', { event: 'deleted', data: { id: 2 } });
+
+		const last = values[values.length - 1];
+		expect(last).toEqual([{ id: 1 }]);
+
+		unsub();
+	});
+
+	it('create after delete reuses freed slot correctly', async () => {
+		const store = __stream('swap/reuse', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1 }, { id: 2 }, { id: 3 }],
+			topic: 'swap-reuse',
+			merge: 'crud',
+			key: 'id'
+		});
+
+		// Delete id: 1 (first), then create id: 5
+		simulateTopicMessage('swap-reuse', { event: 'deleted', data: { id: 1 } });
+		simulateTopicMessage('swap-reuse', { event: 'created', data: { id: 5 } });
+
+		const last = values[values.length - 1];
+		expect(last).toHaveLength(3);
+		expect(last.map(i => i.id).sort()).toEqual([2, 3, 5]);
+
+		unsub();
+	});
+});
+
+// -- Terminated preflight on binary/batch/stream ------------------------------
+
+describe('terminated preflight', () => {
+	it('binary RPC rejects immediately when terminated', async () => {
+		// Trigger an RPC first to ensure the disconnect listener is attached
+		const warmup = __rpc('warmup/path');
+		const warmupPromise = warmup('test').catch(() => {});
+		await flush();
+
+		// Terminate the connection via ready() rejection
+		readyReject(new Error('Connection permanently closed'));
+		await new Promise((r) => setTimeout(r, 10));
+
+		const binaryCall = __binaryRpc('upload/file');
+		await expect(binaryCall(new ArrayBuffer(4))).rejects.toMatchObject({
+			code: 'CONNECTION_CLOSED'
+		});
+	});
+
+	it('batch rejects immediately when terminated', async () => {
+		// Trigger an RPC first to ensure the disconnect listener is attached
+		const warmup = __rpc('warmup/batch');
+		const warmupPromise = warmup('test').catch(() => {});
+		await flush();
+
+		// Terminate the connection via ready() rejection
+		readyReject(new Error('Connection permanently closed'));
+		await new Promise((r) => setTimeout(r, 10));
+
+		const rpc = __rpc('test/fn');
+		await expect(
+			batch(() => [rpc('a')])
+		).rejects.toMatchObject({
+			code: 'CONNECTION_CLOSED'
+		});
+	});
+});
+
+// -- Multi-listener topic delivery --------------------------------------------
+
+describe('multi-listener topic delivery', () => {
+	it('delivers events to two independent subscribers on the same topic', async () => {
+		const store1 = __stream('multi/a', { merge: 'set' });
+		const store2 = __stream('multi/b', { merge: 'set' });
+		const values1 = [];
+		const values2 = [];
+		const unsub1 = store1.subscribe((v) => values1.push(v));
+		const unsub2 = store2.subscribe((v) => values2.push(v));
+
+		await flush();
+
+		// Both streams subscribe via batched RPCs; respond to each
+		const calls = sendQueuedFn.mock.calls;
+		for (const call of calls) {
+			const msg = call[0];
+			if (msg.rpc === 'multi/a') {
+				simulateRpcResponse(msg.id, {
+					ok: true, data: 'init-a', topic: 'shared-topic', merge: 'set'
+				});
+			}
+			if (msg.rpc === 'multi/b') {
+				simulateRpcResponse(msg.id, {
+					ok: true, data: 'init-b', topic: 'shared-topic', merge: 'set'
+				});
+			}
+			// Handle batch frames
+			if (msg.batch) {
+				for (const item of msg.batch) {
+					if (item.rpc === 'multi/a') {
+						simulateRpcResponse(item.id, {
+							ok: true, data: 'init-a', topic: 'shared-topic', merge: 'set'
+						});
+					}
+					if (item.rpc === 'multi/b') {
+						simulateRpcResponse(item.id, {
+							ok: true, data: 'init-b', topic: 'shared-topic', merge: 'set'
+						});
+					}
+				}
+			}
+		}
+
+		// Publish on the shared topic -- both listeners should receive it
+		simulateTopicMessage('shared-topic', { event: 'set', data: 'broadcast' });
+
+		const last1 = values1[values1.length - 1];
+		const last2 = values2[values2.length - 1];
+		expect(last1).toBe('broadcast');
+		expect(last2).toBe('broadcast');
+
+		unsub1();
 		unsub2();
 	});
 });

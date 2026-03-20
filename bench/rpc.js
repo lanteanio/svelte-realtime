@@ -77,12 +77,22 @@ async function benchRpcDispatch() {
 		const buf = encodeRpc('bench/echo', String(i), ['hello']);
 		handleRpc(ws, buf, platform);
 	}
-	// Wait for all async handlers to settle
-	await new Promise(r => setTimeout(r, 100));
+	// Wait for all warmup handlers to settle
+	await new Promise(r => setTimeout(r, 50));
 
 	// Measure direct function call
 	const directIterations = 500_000;
-	const ctx = { user: ws.getUserData(), ws, platform, publish: platform.publish, cursor: null };
+	const ctx = {
+		user: ws.getUserData(),
+		ws,
+		platform,
+		publish: platform.publish,
+		cursor: null,
+		throttle: () => {},
+		debounce: () => {},
+		signal: () => {},
+		batch: () => {}
+	};
 
 	const directStart = performance.now();
 	for (let i = 0; i < directIterations; i++) {
@@ -91,7 +101,8 @@ async function benchRpcDispatch() {
 	const directMs = performance.now() - directStart;
 	const directNsPerOp = (directMs * 1e6) / directIterations;
 
-	// Measure handleRpc dispatch
+	// Measure handleRpc dispatch sequentially (same concurrency as direct calls).
+	// Each iteration sends one RPC and waits for the response before sending the next.
 	const dispatchIterations = 100_000;
 	const bufs = [];
 	for (let i = 0; i < dispatchIterations; i++) {
@@ -100,10 +111,12 @@ async function benchRpcDispatch() {
 
 	const dispatchStart = performance.now();
 	for (let i = 0; i < dispatchIterations; i++) {
-		handleRpc(ws, bufs[i], platform);
+		await new Promise(resolve => {
+			platform.send = () => { resolve(); return 1; };
+			handleRpc(ws, bufs[i], platform);
+		});
 	}
-	// handleRpc kicks off async work; wait for all to complete
-	await new Promise(r => setTimeout(r, 500));
+	platform.send = () => 1;
 	const dispatchMs = performance.now() - dispatchStart;
 	const dispatchNsPerOp = (dispatchMs * 1e6) / dispatchIterations;
 
@@ -156,15 +169,18 @@ function benchCrudMerge(arraySize) {
 			const idx = index.get(item[key]);
 			if (idx !== undefined) arr[idx] = item;
 		} else {
-			// deleted -- then re-add to keep size stable
+			// deleted (swap-remove) -- then re-add to keep size stable
 			const targetId = i % arraySize;
 			const idx = index.get(targetId);
 			if (idx !== undefined) {
-				arr.splice(idx, 1);
 				index.delete(targetId);
-				for (const [k, ii] of index) {
-					if (ii > idx) index.set(k, ii - 1);
+				const last = arr.length - 1;
+				if (idx < last) {
+					const swapped = arr[last];
+					arr[idx] = swapped;
+					index.set(swapped[key], idx);
 				}
+				arr.length = last;
 			}
 			index.set(targetId, arr.length);
 			arr.push({ id: targetId, text: 'restored' });
@@ -196,10 +212,11 @@ function benchLatestMerge(maxItems) {
 function benchSetMerge() {
 	let value = null;
 	const iterations = 1_000_000;
+	const data = Array.from({ length: 100 }, (_, i) => ({ id: i, value: i }));
 	const start = performance.now();
 
 	for (let i = 0; i < iterations; i++) {
-		value = { count: i, ts: Date.now() };
+		value = data[i % data.length];
 	}
 
 	const ms = performance.now() - start;
@@ -232,15 +249,18 @@ function benchPresenceMerge(arraySize) {
 				arr.push(item);
 			}
 		} else {
-			// leave then re-join to keep size stable
+			// leave (swap-remove) then re-join to keep size stable
 			const targetKey = 'user' + (i % arraySize);
 			const idx = index.get(targetKey);
 			if (idx !== undefined) {
-				arr.splice(idx, 1);
 				index.delete(targetKey);
-				for (const [k, ii] of index) {
-					if (ii > idx) index.set(k, ii - 1);
+				const last = arr.length - 1;
+				if (idx < last) {
+					const swapped = arr[last];
+					arr[idx] = swapped;
+					index.set(swapped.key, idx);
 				}
+				arr.length = last;
 			}
 			index.set(targetKey, arr.length);
 			arr.push({ key: targetKey, name: 'Rejoined' });

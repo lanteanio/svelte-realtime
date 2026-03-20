@@ -163,13 +163,14 @@ function renderRpcs(el, dt) {
 		html += '<hr style="border-color:#333;margin:6px 0">';
 	}
 
-	html += '<div style="margin-bottom:4px">History (' + esc(String(history.length)) + ')</div>';
-	for (let i = history.length - 1; i >= Math.max(0, history.length - 20); i--) {
-		const h = history[i];
+	const entries = history.filter(Boolean).sort((a, b) => (b.seq || 0) - (a.seq || 0));
+	html += '<div style="margin-bottom:4px">History (' + esc(String(entries.length)) + ')</div>';
+	for (let i = 0; i < Math.min(entries.length, 20); i++) {
+		const h = entries[i];
 		const color = h.ok ? '#4caf50' : '#f44336';
 		html += `<div style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:#666">${esc(String(h.duration))}ms</span></div>`;
 	}
-	if (history.length === 0) html += '<div style="color:#666">No RPC calls yet</div>';
+	if (entries.length === 0) html += '<div style="color:#666">No RPC calls yet</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
@@ -197,7 +198,7 @@ function renderConnection(el, dt) {
 	const pending = dt.pending ? dt.pending.size : 0;
 	const html = `
 		<div style="padding:2px 0">Pending RPCs: ${esc(String(pending))}</div>
-		<div style="padding:2px 0">History entries: ${esc(String((dt.history || []).length))}</div>
+		<div style="padding:2px 0">History entries: ${esc(String((dt.history || []).filter(Boolean).length))}</div>
 		<div style="padding:2px 0">Active streams: ${esc(String(dt.streams ? dt.streams.size : 0))}</div>
 		<div style="padding:4px 0;color:#666;font-size:11px">Press Ctrl+Shift+L to toggle</div>
 	`;

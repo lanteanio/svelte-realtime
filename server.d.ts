@@ -566,11 +566,13 @@ export interface RoomConfig {
 	/** Called when a user joins the room. */
 	onJoin?: (ctx: LiveContext, ...args: any[]) => void | Promise<void>;
 	/** Called when a user leaves the room. */
-	onLeave?: (ctx: LiveContext) => void | Promise<void>;
+	onLeave?: (ctx: LiveContext, topic: string) => void | Promise<void>;
 	/** Merge strategy for the data stream. @default 'crud' */
 	merge?: string;
 	/** Key field for the data stream. @default 'id' */
 	key?: string;
+	/** Number of room-identifying args the topic function expects (excluding ctx). Required when topic uses rest params and actions are defined. @default topicFn.length - 1 */
+	topicArgs?: number;
 }
 
 /**
@@ -754,7 +756,7 @@ export function setCronPlatform(platform: Platform): void;
  * Register a live function. Called by the Vite-generated registry module.
  * @internal
  */
-export function __register(path: string, fn: Function): void;
+export function __register(path: string, fn: Function, modulePath?: string): void;
 
 /**
  * Register a module guard. Called by the Vite-generated registry module.

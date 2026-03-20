@@ -555,6 +555,135 @@ export const sendMessage = live(async (ctx: LiveContext, text: string, roomId: n
 		expect(content).toContain('Promise<{ id: number }>');
 	});
 
+	it('falls back to generic args for destructured ctx topic param', () => {
+		setup({
+			'feed.ts': `
+import { live } from 'svelte-realtime/server';
+
+export const feed = live.stream(
+  ({ user }, roomId: string) => 'feed:' + roomId,
+  async (ctx, roomId: string) => [],
+  { merge: 'crud' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("declare module '$live/feed'");
+		expect(content).toContain('...args: any[]');
+		expect(content).not.toContain('{ user }');
+	});
+
+	it('falls back to generic args for destructured payload topic param', () => {
+		setup({
+			'rooms.ts': `
+import { live } from 'svelte-realtime/server';
+
+export const room = live.stream(
+  ({ roomId }: { roomId: string }) => 'room:' + roomId,
+  async (ctx) => [],
+  { merge: 'crud' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("declare module '$live/rooms'");
+		expect(content).toContain('...args: any[]');
+	});
+
+	it('falls back to generic args for destructured param with ctx-like names', () => {
+		setup({
+			'mixed.ts': `
+import { live } from 'svelte-realtime/server';
+
+export const mixed = live.stream(
+  ({ user, roomId }: { user: string, roomId: string }) => 'mixed:' + roomId,
+  async (ctx) => [],
+  { merge: 'crud' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("declare module '$live/mixed'");
+		expect(content).toContain('...args: any[]');
+		expect(content).not.toContain('{ user');
+	});
+
+	it('handles default string containing comma without generating broken type', () => {
+		setup({
+			'commas.ts': `
+import { live } from 'svelte-realtime/server';
+
+export const feed = live.stream(
+  (roomId: string = 'a,b') => 'r:' + roomId,
+  async (ctx) => [],
+  { merge: 'crud' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("declare module '$live/commas'");
+		expect(content).not.toContain("b')");
+		expect(content).toContain('roomId');
+	});
+
+	it('comparison operator in default does not swallow later params', () => {
+		setup({
+			'cmp.ts': `
+import { live } from 'svelte-realtime/server';
+
+export const feed = live.stream(
+  (roomId = 1 < 2 ? 'yes' : 'no', docId: string) => 'r:' + docId,
+  async (ctx) => [],
+  { merge: 'crud' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("declare module '$live/cmp'");
+		expect(content).toContain('docId');
+	});
+
+	it('generic type annotation is still handled correctly', () => {
+		setup({
+			'generic.ts': `
+import { live } from 'svelte-realtime/server';
+
+export const feed = live.stream(
+  (ctx: { items: Map<string, number> }, docId: string) => 'r:' + docId,
+  async (ctx) => [],
+  { merge: 'crud' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("declare module '$live/generic'");
+		expect(content).toContain('docId');
+	});
+
 	it('extracts stream return types from TS files', () => {
 		setup({
 			'items.ts': `
@@ -989,6 +1118,105 @@ export const chat = live.room({
 	});
 });
 
+// -- Parser robustness --------------------------------------------------------
+
+describe('parser edge cases', () => {
+	afterEach(teardown);
+
+	it('handles quoted keys in stream options', () => {
+		setup({
+			'items.js': `
+import { live } from 'svelte-realtime/server';
+export const items = live.stream('items', async () => [], { 'merge': 'latest', 'key': 'slug', 'max': 5 });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:items', {});
+
+		expect(code).toContain('"merge":"latest"');
+		expect(code).toContain('"key":"slug"');
+		expect(code).toContain('"max":5');
+	});
+
+	it('handles hyphenated key values', () => {
+		setup({
+			'docs.js': `
+import { live } from 'svelte-realtime/server';
+export const docs = live.stream('docs', async () => [], { merge: 'crud', key: 'client-id' });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:docs', {});
+
+		expect(code).toContain('"key":"client-id"');
+	});
+
+	it('does not extract actions from nested objects', () => {
+		setup({
+			'board.js': `
+import { live } from 'svelte-realtime/server';
+export const board = live.room({
+  topic: (ctx, id) => 'board:' + id,
+  init: async (ctx, id) => ({ text: 'presence:', actions: { fake: true } }),
+  actions: {
+    send: async (ctx, text) => null
+  }
+});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:board', {});
+
+		expect(code).toContain("send: __rpc('board/board/__action/send')");
+		expect(code).not.toContain('fake');
+	});
+
+	it('handles quoted room config keys', () => {
+		setup({
+			'room.js': `
+import { live } from 'svelte-realtime/server';
+export const game = live.room({
+  topic: (ctx, id) => 'game:' + id,
+  init: async (ctx, id) => [],
+  'presence': (ctx) => ({ name: ctx.user.name }),
+  'actions': {
+    move: async (ctx, pos) => null
+  }
+});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:room', {});
+
+		expect(code).toContain("presence: __stream('room/game/__presence'");
+		expect(code).toContain("move: __rpc('room/game/__action/move')");
+	});
+
+	it('extracts room merge/key from quoted keys', () => {
+		setup({
+			'rk.js': `
+import { live } from 'svelte-realtime/server';
+export const board = live.room({
+  topic: (ctx, id) => 'board:' + id,
+  init: async (ctx, id) => [],
+  'merge': 'set',
+  'key': 'board-id'
+});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:rk', {});
+
+		expect(code).toContain('"merge":"set"');
+		expect(code).toContain('"key":"board-id"');
+	});
+});
+
 // -- live.channel() client stubs (Phase 35) -----------------------------------
 
 describe('live.channel() vite integration', () => {
@@ -1091,6 +1319,30 @@ export const items = live.stream('todos', async (ctx) => [], {
 
 		expect(code).toContain('"version":3');
 		expect(code).toContain("__stream('todos/items'");
+	});
+});
+
+// -- Balanced-brace option extraction -----------------------------------------
+
+describe('stream option extraction with nested braces', () => {
+	afterEach(teardown);
+
+	it('extracts options correctly when init function body contains nested objects', () => {
+		setup({
+			'nested.js': `
+import { live } from 'svelte-realtime/server';
+export const items = live.stream('items', async (ctx) => {
+  const config = { local: true, nested: { deep: 1 } };
+  return db.query(config);
+}, { merge: 'set', key: 'item_id' });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:nested', { ssr: false });
+
+		expect(code).toContain('"merge":"set"');
+		expect(code).toContain('"key":"item_id"');
 	});
 });
 
@@ -1260,5 +1512,91 @@ export const send = live(async (ctx, text) => {});
 
 		expect(result).toBeUndefined();
 		expect(server.invalidated).toHaveLength(0);
+	});
+});
+
+// -- Import path escaping -----------------------------------------------------
+
+describe('import path escaping', () => {
+	afterEach(teardown);
+
+	it('escapes single quotes in generated import paths', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		// The generated import path should be JSON.stringify'd (double-quoted)
+		// so it never breaks if the path contains quotes
+		expect(code).not.toContain("import('");
+		expect(code).toContain('import("');
+	});
+});
+
+// -- Duplicate topic detection ------------------------------------------------
+
+describe('duplicate topic detection', () => {
+	afterEach(teardown);
+
+	it('throws when two streams use the same static topic', () => {
+		setup({
+			'a.js': `
+import { live } from 'svelte-realtime/server';
+export const feed1 = live.stream('same-topic', async () => [], { merge: 'crud' });
+`,
+			'b.js': `
+import { live } from 'svelte-realtime/server';
+export const feed2 = live.stream('same-topic', async () => [], { merge: 'crud' });
+`
+		});
+
+		const plugin = createPlugin();
+		expect(() => plugin.load('\0live:__registry', {})).toThrow('Duplicate stream topic');
+	});
+
+	it('throws when a stream uses a reserved __ prefix', () => {
+		setup({
+			'bad.js': `
+import { live } from 'svelte-realtime/server';
+export const feed = live.stream('__reserved', async () => [], { merge: 'crud' });
+`
+		});
+
+		const plugin = createPlugin();
+		expect(() => plugin.load('\0live:__registry', {})).toThrow('reserved');
+	});
+});
+
+// -- Room sub-handler registry includes module path ---------------------------
+
+describe('room sub-handler module path', () => {
+	afterEach(teardown);
+
+	it('passes module path to __register for room sub-handlers', () => {
+		setup({
+			'rooms.js': `
+import { live } from 'svelte-realtime/server';
+export const myRoom = live.room({
+	topic: (ctx, id) => 'room:' + id,
+	init: async (ctx, id) => [],
+	presence: (ctx) => ({ name: 'test' }),
+	cursors: true
+});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		// Room sub-handlers should get explicit module path 'rooms' (not 'rooms/myRoom')
+		expect(code).toContain("__register('rooms/myRoom/__data'");
+		expect(code).toContain(", 'rooms')");
+		expect(code).toContain("__register('rooms/myRoom/__presence'");
+		expect(code).toContain("__register('rooms/myRoom/__cursors'");
 	});
 });

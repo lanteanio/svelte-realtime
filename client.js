@@ -4,6 +4,24 @@ import { writable } from 'svelte/store';
 
 const _textEncoder = new TextEncoder();
 
+/** Pre-allocated binary frame buffer for reuse across sequential binary RPC calls */
+let _binaryFrameBuffer = /** @type {Uint8Array | null} */ (null);
+let _binaryFrameSize = 0;
+
+/**
+ * Get a reusable binary frame buffer of at least `size` bytes.
+ * Grows by 2x to avoid frequent reallocation.
+ * @param {number} size
+ * @returns {Uint8Array}
+ */
+function _getBinaryFrame(size) {
+	if (!_binaryFrameBuffer || _binaryFrameSize < size) {
+		_binaryFrameSize = Math.max(size, (_binaryFrameSize || 1024) * 2);
+		_binaryFrameBuffer = new Uint8Array(_binaryFrameSize);
+	}
+	return _binaryFrameBuffer;
+}
+
 /**
  * RAF-based event batching for high-frequency streams (cursors, presence).
  * In the browser, incoming pub/sub events are queued and flushed once per
@@ -51,6 +69,19 @@ let listenerAttached = false;
 /** @type {boolean} */
 let disconnectListenerAttached = false;
 
+/** Terminal close codes that indicate a permanently-dead connection (no retry) */
+const _TERMINAL_CODES = new Set([1008, 4401, 4403]);
+
+const _DEFAULT_TIMEOUT = 30000;
+
+/** @returns {number} Configured or default RPC timeout in ms */
+function _getTimeout() {
+	return _clientConfig.timeout || _DEFAULT_TIMEOUT;
+}
+
+/** @type {boolean} Whether the connection is permanently dead (terminal close code, exhausted retries, or explicit close) */
+let _terminated = false;
+
 /**
  * Attach the __rpc topic listener once.
  * Listens for RPC responses and resolves/rejects the matching pending promise.
@@ -63,6 +94,24 @@ function ensureListener() {
 	store.subscribe((envelope) => {
 		if (!envelope) return;
 		const { event: correlationId, data } = envelope;
+
+		// Batch response
+		if (correlationId === '__batch' && data?.batch) {
+			for (const result of data.batch) {
+				const entry = pending.get(result.id);
+				if (!entry) continue;
+				pending.delete(result.id);
+				if (entry.timer) clearTimeout(entry.timer);
+				if (result.ok) {
+					entry.resolve(result.data);
+				} else {
+					entry.reject(new RpcError(result.code || 'UNKNOWN', result.error || 'Unknown error'));
+				}
+			}
+			return;
+		}
+
+		// Single response
 		const entry = pending.get(correlationId);
 		if (!entry) return;
 		pending.delete(correlationId);
@@ -88,13 +137,44 @@ function ensureDisconnectListener() {
 
 	status.subscribe((s) => {
 		if (s === 'closed') {
+			const code = s === 'closed' ? 'DISCONNECTED' : 'CONNECTION_CLOSED';
 			for (const [id, entry] of pending) {
 				pending.delete(id);
 				if (entry.timer) clearTimeout(entry.timer);
-				entry.reject(new RpcError('DISCONNECTED', 'WebSocket connection lost'));
+				entry.reject(new RpcError(code, 'WebSocket connection lost'));
 			}
 		}
+		if (s === 'open') {
+			_terminated = false;
+		}
 	});
+
+	// Listen for terminal close via ready() rejection (adapter 0.4.0)
+	if (typeof _connect === 'function') {
+		try {
+			const conn = _connect();
+			if (conn && typeof conn.ready === 'function') {
+				conn.ready().catch((/** @type {any} */ err) => {
+					_terminated = true;
+					const errCode = err?.code || 'CONNECTION_CLOSED';
+					const errMsg = err?.message || 'Connection permanently closed';
+					// Reject all pending RPCs
+					for (const [id, entry] of pending) {
+						pending.delete(id);
+						if (entry.timer) clearTimeout(entry.timer);
+						entry.reject(new RpcError(errCode, errMsg));
+					}
+					// Drain offline queue with errors
+					for (const entry of _offlineQueue) {
+						entry.reject(new RpcError(errCode, errMsg));
+					}
+					_offlineQueue.length = 0;
+				});
+			}
+		} catch {
+			// _connect may not be callable yet (SSR) -- that's fine
+		}
+	}
 }
 
 /**
@@ -107,11 +187,12 @@ function _buildDedupKey(path, args) {
 	if (args.length === 0) return path;
 	if (args.length === 1) {
 		const a = args[0];
-		if (a === null) return path + '\0null';
+		if (a === null) return path + '\0N';
+		if (a === undefined) return path + '\0U';
 		const t = typeof a;
-		if (t === 'string' || t === 'number' || t === 'boolean') {
-			return path + '\0' + a;
-		}
+		if (t === 'string') return path + '\0S' + a;
+		if (t === 'number') return path + '\0#' + a;
+		if (t === 'boolean') return path + '\0B' + a;
 	}
 	return path + '\0' + JSON.stringify(args);
 }
@@ -157,6 +238,11 @@ function _sendRpc(path, args) {
 	ensureListener();
 	ensureDisconnectListener();
 
+	// Fast-fail if connection is permanently dead
+	if (_terminated) {
+		return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
+	}
+
 	if (typeof process === 'undefined' || (typeof import.meta !== 'undefined' && import.meta.env?.DEV)) {
 		_checkArgs(path, args);
 	}
@@ -188,11 +274,20 @@ function _sendRpc(path, args) {
 	const conn = _connect();
 
 	return new Promise((resolve, reject) => {
+		const _startTime = Date.now();
 		const timer = setTimeout(() => {
+			if (Date.now() - _startTime > 90000) {
+				// Device was sleeping. Clean up the pending entry so it doesn't hang
+				// forever — the disconnect listener or reconnect will handle the actual error.
+				pending.delete(id);
+				_devtoolsEnd(id, false, 'SLEEP_TIMEOUT');
+				reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
+				return;
+			}
 			pending.delete(id);
 			_devtoolsEnd(id, false, 'TIMEOUT');
 			reject(new RpcError('TIMEOUT', `RPC '${path}' timed out after 30s`));
-		}, 30000);
+		}, _getTimeout());
 
 		pending.set(id, {
 			resolve(v) { _devtoolsEnd(id, true, v); resolve(v); },
@@ -212,6 +307,9 @@ function _sendRpc(path, args) {
  */
 export function __binaryRpc(path) {
 	return function binaryRpcCall(buffer, ...args) {
+		if (_terminated) {
+			return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
+		}
 		ensureListener();
 		ensureDisconnectListener();
 
@@ -221,11 +319,18 @@ export function __binaryRpc(path) {
 		const conn = _connect();
 
 		return new Promise((resolve, reject) => {
+			const _startTime = Date.now();
 			const timer = setTimeout(() => {
+				if (Date.now() - _startTime > 90000) {
+					pending.delete(id);
+					_devtoolsEnd(id, false, 'SLEEP_TIMEOUT');
+					reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
+					return;
+				}
 				pending.delete(id);
 				_devtoolsEnd(id, false, 'TIMEOUT');
 				reject(new RpcError('TIMEOUT', `Binary RPC '${path}' timed out after 30s`));
-			}, 30000);
+			}, _getTimeout());
 
 			pending.set(id, {
 				resolve(v) { _devtoolsEnd(id, true, v); resolve(v); },
@@ -236,17 +341,57 @@ export function __binaryRpc(path) {
 			// Wire format: byte[0] = 0x00, byte[1-2] = header length (uint16 BE), then JSON header, then binary payload
 			const header = JSON.stringify({ rpc: path, id, args: args.length > 0 ? args : undefined });
 			const headerBytes = _textEncoder.encode(header);
-			const bufBytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : new Uint8Array(buffer.buffer || buffer);
-			const frame = new Uint8Array(3 + headerBytes.length + bufBytes.length);
+			if (headerBytes.length > 0xFFFF) {
+				pending.delete(id);
+				clearTimeout(timer);
+				reject(new RpcError('PAYLOAD_TOO_LARGE', 'Binary RPC header exceeds 65535 bytes'));
+				return;
+			}
+			const bufBytes = ArrayBuffer.isView(buffer)
+				? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+				: new Uint8Array(buffer);
+			const size = 3 + headerBytes.length + bufBytes.length;
+			const frame = _getBinaryFrame(size);
 			frame[0] = 0x00;
 			frame[1] = (headerBytes.length >> 8) & 0xFF;
 			frame[2] = headerBytes.length & 0xFF;
 			frame.set(headerBytes, 3);
 			frame.set(bufBytes, 3 + headerBytes.length);
 
-			conn.sendQueued(frame.buffer);
+			// Send a view of exactly the right size (frame may be oversized from reuse)
+			conn.sendQueued(frame.buffer.slice(0, size));
 		});
 	};
+}
+
+/**
+ * Microtask-batched stream subscribe RPCs.
+ * Collects all subscribe RPCs within a single microtask and sends them as one batch frame.
+ * @type {Array<any> | null}
+ */
+let _subscribeBatch = null;
+
+/**
+ * Queue a stream subscribe RPC to be sent in a batch within the current microtask.
+ * If only one request queues, it's sent as a single frame (no batch overhead).
+ * @param {any} request - The subscribe RPC request object
+ */
+function _batchedSubscribe(request) {
+	if (!_subscribeBatch) {
+		_subscribeBatch = [];
+		queueMicrotask(() => {
+			const batch = _subscribeBatch;
+			_subscribeBatch = null;
+			if (!batch || batch.length === 0) return;
+			const conn = _connect();
+			if (batch.length === 1) {
+				conn.sendQueued(batch[0]);
+			} else {
+				conn.sendQueued({ batch });
+			}
+		});
+	}
+	_subscribeBatch.push(request);
 }
 
 /** @type {Map<string, { store: any, refCount: number }>} */
@@ -254,6 +399,12 @@ const _streamCache = new Map();
 
 /** Hard cap on cached stream instances to prevent memory exhaustion */
 const _STREAM_CACHE_MAX = 1000;
+
+/** Overflow dedupe for currently-live stores that couldn't fit in the main cache */
+const _streamOverflow = new Map();
+
+/** Set of cache keys with zero refCount, for O(1) eviction instead of full scan */
+const _evictable = new Set();
 
 /**
  * Create a reactive stream store for a given path.
@@ -282,33 +433,52 @@ export function __stream(path, options, isDynamic) {
 			const cached = _streamCache.get(cacheKey);
 			if (cached) return cached.store;
 
+			// Check overflow dedupe for active stores that didn't fit in the main cache
+			const overflow = _streamOverflow.get(cacheKey);
+			if (overflow) return overflow.store;
+
 			const store = _createStream(path, options, args);
-			// Capture the original subscribe once, before wrapping
 			const rawSubscribe = store.subscribe.bind(store);
 
-			// Evict idle entries (refCount 0) if cache is at capacity
 			if (_streamCache.size >= _STREAM_CACHE_MAX) {
-				for (const [k, v] of _streamCache) {
-					if (v.refCount <= 0) {
-						_streamCache.delete(k);
-						if (_streamCache.size < _STREAM_CACHE_MAX) break;
-					}
+				for (const k of _evictable) {
+					_streamCache.delete(k);
+					_evictable.delete(k);
+					if (_streamCache.size < _STREAM_CACHE_MAX) break;
 				}
 			}
 
-			_streamCache.set(cacheKey, { store, refCount: 0 });
+			if (_streamCache.size < _STREAM_CACHE_MAX) {
+				_streamCache.set(cacheKey, { store, refCount: 0 });
+				_evictable.add(cacheKey);
+			} else {
+				if (_streamOverflow.size >= _STREAM_CACHE_MAX) {
+					for (const [k, e] of _streamOverflow) {
+						if (e.refCount <= 0) { _streamOverflow.delete(k); break; }
+					}
+				}
+				_streamOverflow.set(cacheKey, { store, refCount: 0 });
+			}
 
-			// Wrap subscribe to track ref count and clean up cache on last unsubscribe
 			store.subscribe = function cachedSubscribe(fn) {
-				const entry = _streamCache.get(cacheKey);
-				if (entry) entry.refCount++;
+				const mainEntry = _streamCache.get(cacheKey);
+				if (mainEntry && mainEntry.store === store) {
+					mainEntry.refCount++;
+					_evictable.delete(cacheKey);
+				}
+				const overflowEntry = _streamOverflow.get(cacheKey);
+				if (overflowEntry && overflowEntry.store === store) overflowEntry.refCount++;
 
 				const unsub = rawSubscribe(fn);
 				return () => {
 					unsub();
-					const entry = _streamCache.get(cacheKey);
-					if (entry && --entry.refCount <= 0) {
-						_streamCache.delete(cacheKey);
+					const mainEntry = _streamCache.get(cacheKey);
+					if (mainEntry && mainEntry.store === store && --mainEntry.refCount <= 0) {
+						_evictable.add(cacheKey);
+					}
+					const overflowEntry = _streamOverflow.get(cacheKey);
+					if (overflowEntry && overflowEntry.store === store && --overflowEntry.refCount <= 0) {
+						_streamOverflow.delete(cacheKey);
 					}
 				};
 			};
@@ -397,6 +567,9 @@ function _createStream(path, options, dynamicArgs) {
 	/** @type {ReturnType<typeof setTimeout> | null} Reconnect debounce timer */
 	let _reconnectTimer = null;
 
+	/** @type {number} Consecutive reconnect attempts (reset on successful fetch) */
+	let _reconnectAttempts = 0;
+
 	/**
 	 * Rebuild the key->index lookup map from currentValue.
 	 * Only meaningful for keyed merge strategies (crud, presence, cursor).
@@ -420,6 +593,8 @@ function _createStream(path, options, dynamicArgs) {
 	 */
 	function _recordHistory() {
 		if (!_historyEnabled || _historyPaused) return;
+		// Skip history for large arrays (> 200 items) to avoid excessive memory
+		if (Array.isArray(currentValue) && currentValue.length > 200) return;
 		// Discard any redo entries after the current position
 		if (_historyIndex < _history.length - 1) {
 			_history.length = _historyIndex + 1;
@@ -440,10 +615,14 @@ function _createStream(path, options, dynamicArgs) {
 	 * @param {{ event: string, data: any, seq?: number }} envelope
 	 * @returns {boolean}
 	 */
+	/** @type {boolean} Whether _applyMerge has changed currentValue since last flush */
+	let _dirty = false;
+
 	function _applyMerge(envelope) {
 		const { event, data } = envelope;
 
 		if (envelope.seq !== undefined) _lastSeq = envelope.seq;
+		_dirty = true;
 
 		if (merge === 'crud') {
 			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
@@ -470,11 +649,14 @@ function _createStream(path, options, dynamicArgs) {
 			} else if (event === 'deleted') {
 				const idx = _index.get(data[key]);
 				if (idx !== undefined) {
-					currentValue.splice(idx, 1);
 					_index.delete(data[key]);
-					for (const [k, i] of _index) {
-						if (i > idx) _index.set(k, i - 1);
+					const last = currentValue.length - 1;
+					if (idx < last) {
+						const swapped = currentValue[last];
+						currentValue[idx] = swapped;
+						_index.set(swapped[key], idx);
 					}
+					currentValue.length = last;
 				}
 			}
 			return false;
@@ -499,11 +681,14 @@ function _createStream(path, options, dynamicArgs) {
 			} else if (event === 'leave') {
 				const idx = _index.get(data.key);
 				if (idx !== undefined) {
-					currentValue.splice(idx, 1);
 					_index.delete(data.key);
-					for (const [k, i] of _index) {
-						if (i > idx) _index.set(k, i - 1);
+					const last = currentValue.length - 1;
+					if (idx < last) {
+						const swapped = currentValue[last];
+						currentValue[idx] = swapped;
+						_index.set(swapped.key, idx);
 					}
+					currentValue.length = last;
 				}
 			} else if (event === 'set') {
 				currentValue = data;
@@ -524,11 +709,14 @@ function _createStream(path, options, dynamicArgs) {
 			} else if (event === 'remove') {
 				const idx = _index.get(data.key);
 				if (idx !== undefined) {
-					currentValue.splice(idx, 1);
 					_index.delete(data.key);
-					for (const [k, i] of _index) {
-						if (i > idx) _index.set(k, i - 1);
+					const last = currentValue.length - 1;
+					if (idx < last) {
+						const swapped = currentValue[last];
+						currentValue[idx] = swapped;
+						_index.set(swapped.key, idx);
 					}
+					currentValue.length = last;
 				}
 			} else if (event === 'set') {
 				currentValue = data;
@@ -537,30 +725,62 @@ function _createStream(path, options, dynamicArgs) {
 			}
 			return false;
 		} else if (merge === 'set') {
+			if (data === currentValue) { _dirty = false; return true; }
 			currentValue = data;
 			return true;
 		}
 		return false;
 	}
 
-	/** @type {Array<{ event: string, data: any }>} Queued events waiting for next animation frame */
-	let _eventQueue = [];
+	/** Double-buffer swap pattern: two pre-allocated arrays reused every frame */
+	let _bufA = [];
+	let _bufB = [];
+	let _activeBuf = _bufA;
 
 	/** @type {number | null} */
 	let _rafId = null;
 
+	/** Idempotent events where the latest value per key wins (safe to dedup) */
+	const _IDEMPOTENT = new Set(['updated', 'update', 'join']);
+
 	/**
 	 * Flush all queued events in a single batch, then update the store once.
-	 * Reduces reactive updates from N-per-event to 1-per-frame.
+	 * Uses double-buffer swap to avoid allocating new arrays per frame.
+	 * Deduplicates idempotent events by entity key within a single frame.
 	 */
 	function _flushEvents() {
 		_rafId = null;
-		if (_eventQueue.length === 0) return;
-		const queue = _eventQueue;
-		_eventQueue = [];
-		for (let i = 0; i < queue.length; i++) {
-			_applyMerge(queue[i]);
+		const queue = _activeBuf;
+		_activeBuf = _activeBuf === _bufA ? _bufB : _bufA;
+		if (queue.length === 0) return;
+
+		// RAF dedup: for keyed merge strategies, keep only the last idempotent event per key
+		if (queue.length > 1 && merge !== 'set' && merge !== 'latest') {
+			const keyField = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
+			const seen = new Map();
+			for (let i = queue.length - 1; i >= 0; i--) {
+				if (!_IDEMPOTENT.has(queue[i].event)) continue;
+				const k = queue[i].data?.[keyField];
+				if (k !== undefined) {
+					if (seen.has(k)) {
+						queue[i] = null;
+					} else {
+						seen.set(k, true);
+					}
+				}
+			}
+			for (let i = 0; i < queue.length; i++) {
+				if (queue[i] !== null) _applyMerge(queue[i]);
+			}
+		} else {
+			for (let i = 0; i < queue.length; i++) {
+				_applyMerge(queue[i]);
+			}
 		}
+
+		queue.length = 0; // Reuse the array, don't allocate a new one
+		if (!_dirty) return;
+		_dirty = false;
 		if (Array.isArray(currentValue)) currentValue = currentValue.slice();
 		store.set(currentValue);
 		_recordHistory();
@@ -570,11 +790,30 @@ function _createStream(path, options, dynamicArgs) {
 	 * Apply a pub/sub event to the store. In the browser, events are queued
 	 * and flushed once per animation frame to reduce reactive updates from
 	 * N-per-event to 1-per-frame. In Node/SSR, events apply immediately.
+	 *
+	 * Handles replay end markers from adapter 0.4.0 extensions:
+	 * - `{ reqId }` signals replay complete (no action needed)
+	 * - `{ reqId, truncated: true }` signals a cache miss; triggers full refetch
 	 * @param {{ event: string, data: any }} envelope
 	 */
 	function applyEvent(envelope) {
+		// Replay end marker (adapter 0.4.0 extensions): object with reqId
+		if (envelope.data && typeof envelope.data === 'object' && envelope.data.reqId !== undefined) {
+			if (envelope.data.truncated === true) {
+				// Cache miss — trigger a full refetch (reset seq so we get full data)
+				_lastSeq = null;
+				if (topicUnsub) { topicUnsub(); topicUnsub = null; }
+				initialLoaded = false;
+				fetching = false;
+				buffer = [];
+				fetchAndSubscribe();
+			}
+			// Non-truncated end marker — replay complete, nothing to do
+			return;
+		}
+
 		if (_useRAF) {
-			_eventQueue.push(envelope);
+			_activeBuf.push(envelope);
 			if (_rafId === null) {
 				_rafId = requestAnimationFrame(_flushEvents);
 			}
@@ -591,6 +830,10 @@ function _createStream(path, options, dynamicArgs) {
 	 */
 	function fetchAndSubscribe() {
 		if (fetching) return;
+		if (_terminated) {
+			store.set({ error: new RpcError('CONNECTION_CLOSED', 'Connection permanently closed') });
+			return;
+		}
 		fetching = true;
 		initialLoaded = false;
 		buffer = [];
@@ -612,18 +855,27 @@ function _createStream(path, options, dynamicArgs) {
 		pendingId = id;
 		const conn = _connect();
 
+		const _startTime = Date.now();
 		const timer = setTimeout(() => {
+			if (Date.now() - _startTime > 90000) {
+				pending.delete(id);
+				pendingId = null;
+				fetching = false;
+				store.set({ error: new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)') });
+				return;
+			}
 			pending.delete(id);
 			pendingId = null;
 			fetching = false;
 			store.set({ error: new RpcError('TIMEOUT', `Stream '${path}' timed out after 30s`) });
-		}, 30000);
+		}, _getTimeout());
 
 		pending.set(id, {
 			stream: true,
 			resolve(response) {
 				fetching = false;
 				pendingId = null;
+				_reconnectAttempts = 0;
 				topic = response.topic || null;
 
 				// Track sequence number for replay
@@ -634,9 +886,6 @@ function _createStream(path, options, dynamicArgs) {
 
 				// Handle unchanged response (delta sync -- nothing changed)
 				if (response.unchanged === true) {
-					// Keep current value as-is, just re-subscribe to topic
-					initialLoaded = true;
-					// Subscribe to live updates on the topic
 					if (topic && !topicUnsub) {
 						const topicStore = on(topic);
 						topicUnsub = topicStore.subscribe((envelope) => {
@@ -648,10 +897,24 @@ function _createStream(path, options, dynamicArgs) {
 							}
 						});
 					}
+					initialLoaded = true;
+					// Drain anything buffered between listener attach and now
+					if (buffer.length > 0) {
+						for (const evt of buffer) _applyMerge(evt);
+						if (Array.isArray(currentValue)) currentValue = currentValue.slice();
+						store.set(currentValue);
+						buffer = [];
+					}
 					return;
 				}
 
-				// Handle delta response: apply diff events in batch
+				// Install server-provided options BEFORE applying diffs/replay,
+				// so _applyMerge uses the correct merge strategy and key field.
+				if (response.merge) merge = response.merge;
+				if (response.key) key = response.key;
+				if (response.prepend !== undefined) prepend = response.prepend;
+				if (response.max !== undefined) max = response.max;
+
 				if (response.delta === true && Array.isArray(response.data)) {
 					for (const item of response.data) {
 						if (item._deleted) {
@@ -662,7 +925,6 @@ function _createStream(path, options, dynamicArgs) {
 						}
 					}
 				} else if (response.replay === true && Array.isArray(response.data)) {
-					// Handle replay response: apply missed events in batch
 					for (const evt of response.data) {
 						_applyMerge(evt);
 					}
@@ -670,28 +932,14 @@ function _createStream(path, options, dynamicArgs) {
 					currentValue = response.data;
 				}
 
-				// Use server-provided options when available
-				if (response.merge) merge = response.merge;
-				if (response.key) key = response.key;
-				if (response.prepend !== undefined) prepend = response.prepend;
-				if (response.max !== undefined) max = response.max;
-
-				// Rebuild index after data and options are settled
 				_rebuildIndex();
 
-				// Track pagination state
 				if (response.hasMore !== undefined) _hasMore = response.hasMore;
 				if (response.cursor !== undefined) _cursor = response.cursor;
-
-				// Track schema version
 				if (response.schemaVersion !== undefined) _schemaVersion = response.schemaVersion;
 
-				initialLoaded = true;
-				if (Array.isArray(currentValue)) currentValue = currentValue.slice();
-				store.set(currentValue);
-				_recordHistory();
-
-				// Subscribe to live updates on the topic
+				// Attach topic listener BEFORE flipping initialLoaded, so events
+				// arriving between ws.subscribe(topic) (server-side) and now are buffered.
 				if (topic && !topicUnsub) {
 					const topicStore = on(topic);
 					topicUnsub = topicStore.subscribe((envelope) => {
@@ -703,6 +951,11 @@ function _createStream(path, options, dynamicArgs) {
 						}
 					});
 				}
+
+				initialLoaded = true;
+				if (Array.isArray(currentValue)) currentValue = currentValue.slice();
+				store.set(currentValue);
+				_recordHistory();
 
 				// Replay buffered messages in batch
 				if (buffer.length > 0) {
@@ -728,7 +981,7 @@ function _createStream(path, options, dynamicArgs) {
 		if (_lastSeq !== null) request.seq = _lastSeq;
 		if (_lastVersion !== undefined) request.version = _lastVersion;
 		if (_schemaVersion !== undefined) request.schemaVersion = _schemaVersion;
-		conn.sendQueued(request);
+		_batchedSubscribe(request);
 	}
 
 	/**
@@ -759,7 +1012,9 @@ function _createStream(path, options, dynamicArgs) {
 			cancelAnimationFrame(_rafId);
 			_rafId = null;
 		}
-		_eventQueue = [];
+		_bufA.length = 0;
+		_bufB.length = 0;
+		_activeBuf = _bufA;
 		topic = null;
 		initialLoaded = false;
 		fetching = false;
@@ -769,12 +1024,20 @@ function _createStream(path, options, dynamicArgs) {
 		_index.clear();
 		_history = [];
 		_historyIndex = -1;
+		_reconnectAttempts = 0;
 		_devtoolsStream(path, null, 0);
 	}
+
+	/** @type {boolean} Whether a deferred cleanup is pending (prevents thrashing on rapid unsub+resub) */
+	let _pendingCleanup = false;
 
 	return {
 		subscribe(fn) {
 			if (subCount++ === 0) {
+				if (_pendingCleanup) {
+					// Rapid resub — cancel the pending cleanup, subscription is still alive
+					_pendingCleanup = false;
+				} else {
 				// First subscriber - start the stream
 				fetchAndSubscribe();
 				_devtoolsStream(path, topic, subCount);
@@ -788,9 +1051,16 @@ function _createStream(path, options, dynamicArgs) {
 					}
 					if (s === 'open' && subCount > 0) {
 						if (_reconnectTimer) clearTimeout(_reconnectTimer);
+						let delay;
+						if (_reconnectAttempts < 2) {
+							delay = 20 + Math.floor(Math.random() * 80);
+						} else {
+							const base = Math.min(1000 * Math.pow(2.2, _reconnectAttempts - 2), 300000);
+							delay = Math.floor(base * (0.75 + Math.random() * 0.5));
+						}
+						_reconnectAttempts++;
 						_reconnectTimer = setTimeout(() => {
 							_reconnectTimer = null;
-							// Reconnected - refetch without resetting store (keep stale data visible)
 							if (topicUnsub) {
 								topicUnsub();
 								topicUnsub = null;
@@ -799,9 +1069,23 @@ function _createStream(path, options, dynamicArgs) {
 							fetching = false;
 							buffer = [];
 							fetchAndSubscribe();
-						}, 50 + Math.floor(Math.random() * 150));
+						}, delay);
 					}
 				});
+
+				// Surface terminal close as an error on the stream (adapter 0.4.0)
+				try {
+					const conn = _connect();
+					if (conn && typeof conn.ready === 'function') {
+						conn.ready().catch((/** @type {any} */ err) => {
+							if (subCount > 0) {
+								store.set({ error: new RpcError(err?.code || 'CONNECTION_CLOSED', err?.message || 'Connection permanently closed') });
+							}
+						});
+					}
+				} catch {}
+
+			} // end else (not _pendingCleanup)
 			}
 
 			const unsub = store.subscribe(fn);
@@ -809,7 +1093,13 @@ function _createStream(path, options, dynamicArgs) {
 			return () => {
 				unsub();
 				if (--subCount === 0) {
-					cleanup();
+					_pendingCleanup = true;
+					queueMicrotask(() => {
+						if (_pendingCleanup && subCount === 0) {
+							_pendingCleanup = false;
+							cleanup();
+						}
+					});
 				}
 			};
 		},
@@ -852,6 +1142,9 @@ function _createStream(path, options, dynamicArgs) {
 		 */
 		async loadMore(...extraArgs) {
 			if (_loadingMore || !_hasMore || !_cursor) return false;
+			if (_terminated) {
+				throw new RpcError('CONNECTION_CLOSED', 'Connection permanently closed');
+			}
 			_loadingMore = true;
 
 			ensureListener();
@@ -859,11 +1152,18 @@ function _createStream(path, options, dynamicArgs) {
 			const conn = _connect();
 
 			return new Promise((resolve, reject) => {
+				const _startTime = Date.now();
 				const timer = setTimeout(() => {
+					if (Date.now() - _startTime > 90000) {
+						pending.delete(id);
+						_loadingMore = false;
+						reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
+						return;
+					}
 					pending.delete(id);
 					_loadingMore = false;
 					reject(new RpcError('TIMEOUT', `loadMore '${path}' timed out after 30s`));
-				}, 30000);
+				}, _getTimeout());
 
 				pending.set(id, {
 					stream: true,
@@ -1107,38 +1407,6 @@ function _createStream(path, options, dynamicArgs) {
 	};
 }
 
-/** @type {boolean} */
-let batchListenerAttached = false;
-
-/**
- * Attach the __rpc batch response listener once.
- */
-function ensureBatchListener() {
-	if (batchListenerAttached) return;
-	batchListenerAttached = true;
-
-	const store = on('__rpc');
-	store.subscribe((envelope) => {
-		if (!envelope) return;
-		const { event: correlationId, data } = envelope;
-		if (correlationId !== '__batch' || !data?.batch) return;
-
-		// Resolve/reject individual promises from the batch
-		for (const result of data.batch) {
-			const entry = pending.get(result.id);
-			if (!entry) continue;
-			pending.delete(result.id);
-			if (entry.timer) clearTimeout(entry.timer);
-
-			if (result.ok) {
-				entry.resolve(result.data);
-			} else {
-				entry.reject(new RpcError(result.code || 'UNKNOWN', result.error || 'Unknown error'));
-			}
-		}
-	});
-}
-
 /**
  * Group multiple RPC calls into a single WebSocket frame.
  * Returns an array of results in the same order as the calls.
@@ -1148,9 +1416,11 @@ function ensureBatchListener() {
  * @returns {Promise<any[]>}
  */
 export function batch(fn, options) {
+	if (_terminated) {
+		return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
+	}
 	ensureListener();
 	ensureDisconnectListener();
-	ensureBatchListener();
 
 	// Collect RPC calls during fn() execution
 	_batchCollector = [];
@@ -1190,8 +1460,19 @@ export function batch(fn, options) {
 		return Promise.reject(new RpcError('INVALID_REQUEST', 'Batch exceeds maximum of 50 calls'));
 	}
 
-	// Set a batch-level timeout
+	// Set a batch-level timeout (sleep-aware)
+	const _batchStartTime = Date.now();
 	const batchTimer = setTimeout(() => {
+		if (Date.now() - _batchStartTime > 90000) {
+			for (const call of collected) {
+				const entry = pending.get(call.id);
+				if (entry) {
+					pending.delete(call.id);
+					entry.reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
+				}
+			}
+			return;
+		}
 		for (const call of collected) {
 			const entry = pending.get(call.id);
 			if (entry) {
@@ -1199,7 +1480,7 @@ export function batch(fn, options) {
 				entry.reject(new RpcError('TIMEOUT', `Batch timed out after 30s`));
 			}
 		}
-	}, 30000);
+	}, _getTimeout());
 
 	// Send all calls as one frame
 	const conn = _connect();
@@ -1232,7 +1513,7 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function }} OfflineEntry
  */
 
-/** @type {{ onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
+/** @type {{ onConnect?: () => void, onDisconnect?: () => void, timeout?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
 let _clientConfig = {};
 
 /** @type {boolean} */
@@ -1451,8 +1732,13 @@ export function onSignal(userId, callback) {
 
 /** @type {{ history: any[], streams: Map<string, any>, pending: Map<string, any> } | null} */
 export const __devtools = (typeof import.meta !== 'undefined' && import.meta.env?.DEV)
-	? { history: [], streams: new Map(), pending: new Map() }
+	? { history: new Array(50).fill(null), streams: new Map(), pending: new Map() }
 	: null;
+
+/** Ring buffer index for devtools history (O(1) insertion, no array.shift) */
+let _devtoolsHistoryIdx = 0;
+let _devtoolsSeq = 0;
+const _DEVTOOLS_HISTORY_MAX = 50;
 
 /**
  * Record an RPC call start for devtools.
@@ -1482,10 +1768,11 @@ function _devtoolsEnd(id, ok, result) {
 		ok,
 		result,
 		duration: Date.now() - entry.startTime,
-		time: Date.now()
+		time: Date.now(),
+		seq: ++_devtoolsSeq
 	};
-	__devtools.history.push(record);
-	if (__devtools.history.length > 50) __devtools.history.shift();
+	__devtools.history[_devtoolsHistoryIdx] = record;
+	_devtoolsHistoryIdx = (_devtoolsHistoryIdx + 1) % _DEVTOOLS_HISTORY_MAX;
 }
 
 /**
@@ -1502,3 +1789,11 @@ function _devtoolsStream(path, topic, subCount) {
 		__devtools.streams.set(path, { path, topic, subCount });
 	}
 }
+
+/**
+ * Re-export `onDerived` from the adapter client.
+ * Provides a reactive derived topic subscription that auto-switches when a
+ * source store changes. More lightweight than dynamic streams for cases where
+ * you just want raw topic events keyed to a store value.
+ */
+export { onDerived } from 'svelte-adapter-uws/client';

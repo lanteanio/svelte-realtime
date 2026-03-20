@@ -1,5 +1,5 @@
 // @ts-check
-import { readFileSync, writeFileSync, existsSync, readdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, rmSync } from 'fs';
 import { resolve, relative, dirname, sep, posix } from 'path';
 
 const VIRTUAL_PREFIX = '\0live:';
@@ -20,8 +20,195 @@ const RATE_LIMIT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.rateLimit\s*\(/
 const EFFECT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.effect\s*\(/g;
 const AGGREGATE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.aggregate\s*\(/g;
 
+const _validSegmentReVite = /^[a-zA-Z0-9_]+$/;
+
+/** @type {Set<string>} Track already-warned export names to avoid duplicate warnings */
+const _warnedExports = new Set();
+
+/**
+ * Check if an export name is a valid RPC path segment. Warn once per name if not.
+ * @param {string} name
+ * @param {string} filePath
+ * @returns {boolean}
+ */
+function _isValidExportName(name, filePath) {
+	if (_validSegmentReVite.test(name)) return true;
+	const warnKey = filePath + ':' + name;
+	if (!_warnedExports.has(warnKey)) {
+		_warnedExports.add(warnKey);
+		console.warn(
+			`[svelte-realtime] ${filePath}: export '${name}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) -- skipped`
+		);
+	}
+	return false;
+}
+
+/**
+ * Scan source for live exports with names that aren't valid path segments and warn about them.
+ * @param {string} source
+ * @param {string} filePath
+ * @param {Set<string>} [alreadyHandled]
+ */
+function _warnUnsafeExports(source, filePath, alreadyHandled) {
+	const re = /export\s+const\s+([\w$]+)\s*=\s*live[\s.(]/g;
+	let m;
+	while ((m = re.exec(source)) !== null) {
+		const n = m[1];
+		if (alreadyHandled && alreadyHandled.has(n)) continue;
+		_isValidExportName(n, filePath);
+	}
+}
+
+/**
+ * Read a string literal (', ", or `) starting at position `start` in `s`.
+ * The character at `start` must be the opening quote.
+ * Returns the decoded content between the quotes with standard JS escape
+ * sequences resolved (\n, \t, \r, \b, \f, \v, \0, \\, \', \", \`,
+ * \xNN, \uXXXX, \u{XXXXX}, and line continuations).
+ * For backtick strings with `${…}` interpolation, returns null and emits
+ * a build warning so the user knows why defaults were used.
+ * @param {string} s
+ * @param {number} start
+ * @returns {{ value: string, end: number } | null}
+ */
+function _readStringLiteral(s, start) {
+	const q = s[start];
+	if (q !== '\'' && q !== '"' && q !== '`') return null;
+	let result = '';
+	for (let j = start + 1; j < s.length; j++) {
+		const ch = s[j];
+		if (ch === '\\') {
+			const next = s[j + 1];
+			if (next === undefined) break; // trailing backslash
+			// Line continuation: backslash followed by newline (skip both)
+			if (next === '\n') { j++; continue; }
+			if (next === '\r') { j++; if (s[j + 1] === '\n') j++; continue; }
+			// Single-character escapes
+			if (next === '\\') { result += '\\'; j++; }
+			else if (next === '\'') { result += '\''; j++; }
+			else if (next === '"') { result += '"'; j++; }
+			else if (next === '`') { result += '`'; j++; }
+			else if (next === 'n') { result += '\n'; j++; }
+			else if (next === 't') { result += '\t'; j++; }
+			else if (next === 'r') { result += '\r'; j++; }
+			else if (next === 'b') { result += '\b'; j++; }
+			else if (next === 'f') { result += '\f'; j++; }
+			else if (next === 'v') { result += '\v'; j++; }
+			else if (next === '0' && !/[0-9]/.test(s[j + 2] || '')) { result += '\0'; j++; }
+			// \xNN — two hex digits
+			else if (next === 'x') {
+				const hex = s.slice(j + 2, j + 4);
+				if (/^[0-9a-fA-F]{2}$/.test(hex)) {
+					result += String.fromCharCode(parseInt(hex, 16));
+					j += 3;
+				} else { result += next; j++; }
+			}
+			// \uXXXX — four hex digits
+			else if (next === 'u' && s[j + 2] !== '{') {
+				const hex = s.slice(j + 2, j + 6);
+				if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+					result += String.fromCharCode(parseInt(hex, 16));
+					j += 5;
+				} else { result += next; j++; }
+			}
+			// \u{XXXXX} — unicode code point
+			else if (next === 'u' && s[j + 2] === '{') {
+				const close = s.indexOf('}', j + 3);
+				if (close > j + 2) {
+					const hex = s.slice(j + 3, close);
+					if (/^[0-9a-fA-F]+$/.test(hex)) {
+						result += String.fromCodePoint(parseInt(hex, 16));
+						j = close;
+					} else { result += next; j++; }
+				} else { result += next; j++; }
+			}
+			else { result += next; j++; }
+			continue;
+		}
+		if (ch === q) return { value: result, end: j };
+		// For backtick strings, interpolation cannot be statically analyzed —
+		// throw a build error so codegen never silently emits wrong defaults.
+		if (q === '`' && ch === '$' && s[j + 1] === '{') {
+			const snippet = s.slice(start, Math.min(start + 40, s.length)).replace(/\n/g, '\\n');
+			throw new Error(
+				`[svelte-realtime] Template literal with interpolation cannot be statically analyzed: ${snippet}... -- use a plain string ('...' or "...") instead`
+			);
+		}
+		result += ch;
+	}
+	return null; // unterminated
+}
+
+/**
+ * Shared syntax skipper for all JS/TS source scanners.
+ * From position `i` in `s`, if the current character starts a string (including
+ * template literals with `${…}` interpolation), regex literal, or comment,
+ * returns the index of the last character consumed so the caller can resume at
+ * `i + 1`. Returns -1 if the character at `i` is not a skippable construct.
+ *
+ * Template literals are handled with brace-depth tracking so `${expr}` inside
+ * the template does not end the skip prematurely.
+ *
+ * @param {string} s
+ * @param {number} i
+ * @returns {number} New index (last char consumed), or -1 if nothing was skipped
+ */
+function _skipNonCode(s, i) {
+	const ch = s[i];
+
+	// Single / double quoted strings
+	if (ch === '\'' || ch === '"') {
+		for (let j = i + 1; j < s.length; j++) {
+			if (s[j] === '\\') { j++; continue; }
+			if (s[j] === ch) return j;
+		}
+		return s.length - 1;
+	}
+
+	// Template literals — track ${…} interpolation depth
+	if (ch === '`') {
+		let tmplDepth = 0;
+		for (let j = i + 1; j < s.length; j++) {
+			if (s[j] === '\\') { j++; continue; }
+			if (s[j] === '`' && tmplDepth === 0) return j;
+			if (s[j] === '$' && s[j + 1] === '{') { tmplDepth++; j++; continue; }
+			if (s[j] === '}' && tmplDepth > 0) { tmplDepth--; continue; }
+		}
+		return s.length - 1;
+	}
+
+	// Line comments
+	if (ch === '/' && s[i + 1] === '/') {
+		const nl = s.indexOf('\n', i + 2);
+		return nl === -1 ? s.length - 1 : nl;
+	}
+
+	// Block comments
+	if (ch === '/' && s[i + 1] === '*') {
+		const end = s.indexOf('*/', i + 2);
+		return end === -1 ? s.length - 1 : end + 1;
+	}
+
+	// Regex literals: / not preceded by an identifier char, ) or ]
+	if (ch === '/' && s[i + 1] !== '/' && s[i + 1] !== '*') {
+		const prev = i > 0 ? s[i - 1] : '\n';
+		if (prev !== ')' && prev !== ']' && !/\w/.test(prev)) {
+			for (let j = i + 1; j < s.length; j++) {
+				if (s[j] === '\\') { j++; continue; }
+				if (s[j] === '/') return j;
+				if (s[j] === '\n') break; // malformed — give up
+			}
+		}
+	}
+
+	return -1;
+}
+
 /** @type {Map<string, string>} Cache file contents to avoid redundant reads within a build cycle */
 const _fileCache = new Map();
+
+/** @type {Map<string, { content: string, code: string }>} Cache generated stubs keyed by file path, validated against source content */
+const _codeCache = new Map();
 
 /**
  * Read a file with caching. Returns cached content if available.
@@ -68,10 +255,14 @@ export default function svelteRealtime(options) {
 			isSsr = !!config.build?.ssr;
 			isDev = config.command === 'serve';
 			_fileCache.clear();
+				_codeCache.clear();
+				_warnedExports.clear();
 		},
 
 		buildStart() {
 			_fileCache.clear();
+				_codeCache.clear();
+				_warnedExports.clear();
 			if (!existsSync(liveDir)) {
 				console.warn(
 					`[svelte-realtime] Plugin loaded but no live modules found in ${dir}/`
@@ -112,13 +303,23 @@ export default function svelteRealtime(options) {
 					return null;
 				}
 
-				if (ssr) {
-					// SSR: re-export the real server module, add .load() for streams
-					return _generateSsrStubs(filePath, modulePath);
+				// Code gen cache: avoid re-parsing when source content hasn't changed
+				const cacheKey = (ssr ? 'ssr:' : 'client:') + filePath;
+				const source = _readCached(filePath);
+				const cached = _codeCache.get(cacheKey);
+				if (cached && cached.content === source) {
+					return cached.code;
 				}
 
-				// Client: generate stubs
-				return _generateClientStubs(filePath, modulePath, dir);
+				let code;
+				if (ssr) {
+					code = _generateSsrStubs(filePath, modulePath);
+				} else {
+					code = _generateClientStubs(filePath, modulePath, dir);
+				}
+
+				_codeCache.set(cacheKey, { content: source, code });
+				return code;
 			}
 
 			return null;
@@ -176,8 +377,10 @@ import('svelte-realtime/devtools');
 							const html = typeof chunk === 'string' ? chunk : chunk.toString();
 							if (html.includes('</body>')) {
 								chunk = html.replace('</body>', devtoolsScript + '</body>');
+								res.removeHeader('content-length');
 							} else if (html.includes('</head>')) {
 								chunk = html.replace('</head>', devtoolsScript + '</head>');
+								res.removeHeader('content-length');
 							}
 						}
 						return originalEnd.call(this, chunk, ...args);
@@ -208,6 +411,15 @@ import('svelte-realtime/devtools');
 				} catch {
 					_loadRegistryDirect(server, liveDir, dir);
 				}
+
+				// Pre-warm virtual modules to eliminate cold-start waterfall
+				try {
+					const files = _findLiveFiles(liveDir);
+					for (const file of files) {
+						const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
+						server.warmupRequest(VIRTUAL_PREFIX + rel).catch(() => {});
+					}
+				} catch {}
 			});
 
 			// Watch for new or deleted files in src/live/ -- these don't trigger
@@ -220,6 +432,8 @@ import('svelte-realtime/devtools');
 					if (!/\.[jt]s$/.test(file) || file.endsWith('.d.ts') || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
 
 					_fileCache.clear();
+				_codeCache.clear();
+				_warnedExports.clear();
 
 					if (typedImports) {
 						_writeTypeDeclarations(liveDir, dir);
@@ -234,6 +448,8 @@ import('svelte-realtime/devtools');
 		async handleHotUpdate({ file, server }) {
 			if (!file.startsWith(liveDir)) return;
 			_fileCache.delete(file);
+			_codeCache.delete('client:' + file);
+			_codeCache.delete('ssr:' + file);
 
 			// Regenerate type declarations on file change
 			if (typedImports) {
@@ -406,13 +622,6 @@ function _generateClientStubs(filePath, modulePath, dir) {
 	}
 
 	// Detect live.stream() exports — check for dynamic vs static topic
-	/** @type {Set<string>} */
-	const dynamicStreams = new Set();
-	DYNAMIC_STREAM_RE.lastIndex = 0;
-	while ((match = DYNAMIC_STREAM_RE.exec(source)) !== null) {
-		dynamicStreams.add(match[1]);
-	}
-
 	STREAM_EXPORT_RE.lastIndex = 0;
 	while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
 		const name = match[1];
@@ -420,7 +629,8 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		exportedNames.add(name);
 		imports.add('__stream');
 		const streamOptions = _extractStreamOptions(source, name);
-		if (dynamicStreams.has(name)) {
+		const isDynamic = _isDynamicExport(source, name, 'live\\.stream');
+		if (isDynamic) {
 			// Dynamic topic: generate a function wrapper that passes args
 			lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify(streamOptions)}, true);`);
 		} else {
@@ -429,13 +639,6 @@ function _generateClientStubs(filePath, modulePath, dir) {
 	}
 
 	// Detect live.channel() exports -- treated as streams on the client
-	/** @type {Set<string>} */
-	const dynamicChannels = new Set();
-	DYNAMIC_CHANNEL_RE.lastIndex = 0;
-	while ((match = DYNAMIC_CHANNEL_RE.exec(source)) !== null) {
-		dynamicChannels.add(match[1]);
-	}
-
 	CHANNEL_EXPORT_RE.lastIndex = 0;
 	while ((match = CHANNEL_EXPORT_RE.exec(source)) !== null) {
 		const name = match[1];
@@ -444,7 +647,8 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			exportedNames.add(name);
 			imports.add('__stream');
 			const channelOpts = _extractChannelOptions(source, name);
-			if (dynamicChannels.has(name)) {
+			const isDynamic = _isDynamicExport(source, name, 'live\\.channel');
+			if (isDynamic) {
 				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify(channelOpts)}, true);`);
 			} else {
 				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify(channelOpts)});`);
@@ -561,10 +765,19 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		);
 	}
 
+	// Warn about exports with non-path-safe names
+	_warnUnsafeExports(source, `${dir}/${modulePath}`, exportedNames);
+
 	if (exportedNames.size === 0 && !hasGuard) {
-		console.warn(
-			`[svelte-realtime] ${dir}/${modulePath} has no live() or live.stream() exports`
-		);
+		// Only warn "no live exports" if the file truly has none —
+		// don't emit this when exports exist but were skipped due to invalid names
+		// (those already got their own warning from _warnUnsafeExports).
+		const hasAnyLiveExport = /export\s+const\s+[\w$]+\s*=\s*live[\s.(]/g.test(source);
+		if (!hasAnyLiveExport) {
+			console.warn(
+				`[svelte-realtime] ${dir}/${modulePath} has no live() or live.stream() exports`
+			);
+		}
 	}
 
 	const importLine = imports.size > 0
@@ -575,54 +788,368 @@ function _generateClientStubs(filePath, modulePath, dir) {
 }
 
 /**
+ * Walk a string and extract the content of the last balanced `{ ... }` block
+ * before a closing `)`. Returns the content between the braces, or null if
+ * no balanced block is found.
+ *
+ * This handles nested braces inside init functions so we don't misparse
+ * `live.stream(topic, async () => { wrap('x', { local: true }) }, { merge: 'set' })`
+ * as `merge: undefined` due to the inner `{ local: true }` ending the match early.
+ *
+ * @param {string} s - Source text after the first argument of live.stream(
+ * @returns {string | null}
+ */
+function _extractLastOptions(s) {
+	let braceDepth = 0;
+	let parenDepth = 0;
+	let lastOpenIdx = -1;
+	let lastContent = null;
+
+	for (let i = 0; i < s.length; i++) {
+		const skip = _skipNonCode(s, i);
+		if (skip >= 0) { i = skip; continue; }
+
+		const ch = s[i];
+		if (ch === '(') { parenDepth++; continue; }
+		if (ch === ')') {
+			if (parenDepth > 0) { parenDepth--; continue; }
+			// Top-level ) — this closes the live.stream() call
+			return lastContent;
+		}
+		if (ch === '{') {
+			if (braceDepth === 0 && parenDepth === 0) lastOpenIdx = i;
+			braceDepth++;
+		} else if (ch === '}') {
+			braceDepth--;
+			if (braceDepth === 0 && parenDepth === 0 && lastOpenIdx >= 0) {
+				lastContent = s.slice(lastOpenIdx + 1, i);
+			}
+		}
+	}
+	return lastContent;
+}
+
+/**
+ * Extract the brace-delimited value of a top-level object property.
+ * Returns the content between { } for `keyName: { ... }` or `'keyName': { ... }`.
+ * @param {string} body
+ * @param {string} keyName
+ * @returns {string | null}
+ */
+function _extractTopLevelBraceProp(body, keyName) {
+	let depth = 0;
+	const ID_CHAR = /[\w$]/;
+
+	for (let i = 0; i < body.length; i++) {
+		const ch = body[i];
+
+		const skip = _skipNonCode(body, i);
+		if (skip >= 0) {
+			// At depth 0, a skipped quote might be a quoted key — check before skipping
+			if (depth === 0 && (ch === '\'' || ch === '"')) {
+				const rest = body.slice(i);
+				const qm = rest.match(new RegExp(`^(['"])${keyName}\\1\\s*:\\s*`));
+				if (qm) {
+					const afterColon = body.slice(i + qm[0].length);
+					return _extractBraceContent(afterColon);
+				}
+			}
+			i = skip; continue;
+		}
+
+		if (ch === '{' || ch === '(' || ch === '[') { depth++; continue; }
+		if (ch === '}' || ch === ')' || ch === ']') { depth--; continue; }
+		if (depth !== 0) continue;
+
+		const rest = body.slice(i);
+		const bare = rest.match(new RegExp(`^${keyName}\\s*:\\s*`));
+		if (bare) {
+			const afterColon = body.slice(i + bare[0].length);
+			return _extractBraceContent(afterColon);
+		}
+
+		if (ID_CHAR.test(ch)) {
+			while (i + 1 < body.length && ID_CHAR.test(body[i + 1])) i++;
+		}
+	}
+	return null;
+}
+
+/**
+ * Extract only top-level property keys from an object body string.
+ * Tracks brace/paren/bracket depth so nested objects don't leak keys.
+ * @param {string} body - Content between the outer { }
+ * @returns {string[]}
+ */
+function _extractTopLevelKeys(body) {
+	const keys = [];
+	let depth = 0;
+	let i = 0;
+	const ID_CHAR = /[\w$]/;
+
+	while (i < body.length) {
+		const ch = body[i];
+
+		// At depth 0, check for quoted key before _skipNonCode consumes the string
+		if (depth === 0 && (ch === '\'' || ch === '"')) {
+			// Find the end of this simple string to check for key: pattern
+			let closeIdx = -1;
+			for (let j = i + 1; j < body.length; j++) {
+				if (body[j] === '\\') { j++; continue; }
+				if (body[j] === ch) { closeIdx = j; break; }
+			}
+			if (closeIdx > i) {
+				const afterClose = body.slice(closeIdx + 1).match(/^\s*(?:\(|:)/);
+				if (afterClose) {
+					const keyName = body.slice(i + 1, closeIdx);
+					if (/^[a-zA-Z0-9_]+$/.test(keyName)) {
+						keys.push(keyName);
+					} else if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+						console.warn(`[svelte-realtime] Action name '${keyName}' contains characters not allowed in RPC paths -- skipped`);
+					}
+					i = closeIdx + 1 + afterClose[0].length;
+					// If the match ended with '(' (quoted method shorthand), track depth
+					if (afterClose[0].trimStart() === '(') depth++;
+					continue;
+				}
+			}
+		}
+
+		const skip = _skipNonCode(body, i);
+		if (skip >= 0) { i = skip + 1; continue; }
+
+		if (ch === '{' || ch === '(' || ch === '[') { depth++; i++; continue; }
+		if (ch === '}' || ch === ')' || ch === ']') { depth--; i++; continue; }
+
+		if (depth === 0) {
+			// Bare identifier key (including $-prefixed): name: or async name(
+			const rest = body.slice(i);
+			const m = rest.match(/^(?:async\s+)?([\w$]+)\s*(?:\(|:)/);
+			if (m && m[1] !== 'async') {
+				if (/^[a-zA-Z0-9_]+$/.test(m[1])) {
+					keys.push(m[1]);
+				} else if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+					console.warn(`[svelte-realtime] Action name '${m[1]}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) -- skipped`);
+				}
+				i += m[0].length;
+				// If the match ended with '(' (method shorthand), account for the
+				// consumed opening paren so the depth tracker stays correct.
+				if (m[0][m[0].length - 1] === '(') depth++;
+				continue;
+			}
+			if (ID_CHAR.test(ch)) {
+				while (i < body.length && ID_CHAR.test(body[i])) i++;
+				continue;
+			}
+		}
+
+		i++;
+	}
+
+	return keys;
+}
+
+/**
+ * Extract the string value of a top-level property from an object body.
+ * Returns null if the key is not a top-level property or its value is not a string literal.
+ * @param {string} body
+ * @param {string} keyName
+ * @returns {string | null}
+ */
+function _extractTopLevelStringProp(body, keyName) {
+	let depth = 0;
+	const ID_CHAR = /[\w$]/;
+
+	for (let i = 0; i < body.length; i++) {
+		const ch = body[i];
+
+		// At depth 0, check for quoted key before _skipNonCode consumes the string
+		if (depth === 0 && (ch === '\'' || ch === '"' || ch === '`')) {
+			const rest = body.slice(i);
+			const qm = rest.match(new RegExp(`^(['"\`])${keyName}\\1\\s*:`));
+			if (qm) {
+				// Advance past the colon, skip whitespace, read string value
+				const valStart = i + qm[0].length;
+				const trimmed = body.slice(valStart).search(/\S/);
+				if (trimmed >= 0) {
+					const lit = _readStringLiteral(body, valStart + trimmed);
+					if (lit) return lit.value;
+				}
+			}
+		}
+
+		const skip = _skipNonCode(body, i);
+		if (skip >= 0) { i = skip; continue; }
+
+		// Depth tracking
+		if (ch === '{' || ch === '(' || ch === '[') { depth++; continue; }
+		if (ch === '}' || ch === ')' || ch === ']') { depth--; continue; }
+
+		if (depth !== 0) continue;
+
+		// Bare key: keyName:
+		const rest = body.slice(i);
+		const bare = rest.match(new RegExp(`^${keyName}\\s*:`));
+		if (bare) {
+			const valStart = i + bare[0].length;
+			const trimmed = body.slice(valStart).search(/\S/);
+			if (trimmed >= 0) {
+				const lit = _readStringLiteral(body, valStart + trimmed);
+				if (lit) return lit.value;
+			}
+		}
+
+		// Skip whole word to avoid partial matches
+		if (ID_CHAR.test(ch)) {
+			while (i + 1 < body.length && ID_CHAR.test(body[i + 1])) i++;
+		}
+	}
+	return null;
+}
+
+/**
+ * Extract the raw value token of a top-level property from an object body.
+ * Returns the trimmed text between the colon and the next comma/closing-brace at depth 0,
+ * or null if the key is not found at the top level.
+ * Useful for boolean, numeric, and simple object values where _extractTopLevelStringProp
+ * (which only reads quoted strings) is too narrow.
+ * @param {string} body
+ * @param {string} keyName
+ * @returns {string | null}
+ */
+function _extractTopLevelRawValue(body, keyName) {
+	let depth = 0;
+	const ID_CHAR = /[\w$]/;
+
+	for (let i = 0; i < body.length; i++) {
+		const ch = body[i];
+
+		// At depth 0, check for quoted key before _skipNonCode consumes the string
+		if (depth === 0 && (ch === '\'' || ch === '"')) {
+			const rest = body.slice(i);
+			const qm = rest.match(new RegExp(`^(['"])${keyName}\\1\\s*:`));
+			if (qm) {
+				const valStart = i + qm[0].length;
+				return _readTopLevelValue(body, valStart);
+			}
+		}
+
+		const skip = _skipNonCode(body, i);
+		if (skip >= 0) { i = skip; continue; }
+
+		if (ch === '{' || ch === '(' || ch === '[') { depth++; continue; }
+		if (ch === '}' || ch === ')' || ch === ']') { depth--; continue; }
+
+		if (depth !== 0) continue;
+
+		// Bare key: keyName:
+		const rest = body.slice(i);
+		const bare = rest.match(new RegExp(`^${keyName}\\s*:`));
+		if (bare) {
+			const valStart = i + bare[0].length;
+			return _readTopLevelValue(body, valStart);
+		}
+
+		if (ID_CHAR.test(ch)) {
+			while (i + 1 < body.length && ID_CHAR.test(body[i + 1])) i++;
+		}
+	}
+	return null;
+}
+
+/**
+ * Read a single value expression starting at `start` in `body`, stopping at
+ * the next top-level comma or closing brace/paren/bracket.
+ * @param {string} body
+ * @param {number} start
+ * @returns {string}
+ */
+function _readTopLevelValue(body, start) {
+	let depth = 0;
+	let end = body.length;
+	for (let i = start; i < body.length; i++) {
+		const skip = _skipNonCode(body, i);
+		if (skip >= 0) { i = skip; continue; }
+
+		const ch = body[i];
+		if (ch === '{' || ch === '(' || ch === '[') { depth++; continue; }
+		if (ch === '}' || ch === ')' || ch === ']') {
+			if (depth === 0) { end = i; break; }
+			depth--;
+			continue;
+		}
+		if (ch === ',' && depth === 0) { end = i; break; }
+	}
+	return body.slice(start, end).trim();
+}
+
+/**
  * Extract stream options from source code.
  * @param {string} source
  * @param {string} name
  * @returns {{ merge?: string, key?: string, prepend?: boolean, max?: number }}
  */
 function _extractStreamOptions(source, name) {
-	// Find the live.stream() call for this export
-	const pattern = new RegExp(
-		`export\\s+const\\s+${name}\\s*=\\s*live\\.stream\\s*\\(\\s*(['"\`])([^'"\`]+)\\1`,
-		's'
-	);
-	const match = pattern.exec(source);
-
 	/** @type {any} */
 	const opts = { merge: 'crud', key: 'id' };
 
-	if (!match) return opts;
+	// Try topic-string pattern first: live.stream('topic', ...)
+	const topicPattern = new RegExp(
+		`export\\s+const\\s+${name}\\s*=\\s*live\\.stream\\s*\\(\\s*(['"\`])([^'"\`]+)\\1`,
+		's'
+	);
+	const topicMatch = topicPattern.exec(source);
 
-	// Try to extract the options object (3rd argument)
-	// Find the closing of live.stream( ... )
-	const startIdx = /** @type {number} */ (match.index) + match[0].length;
-	const rest = source.slice(startIdx);
+	let rest;
+	if (topicMatch) {
+		rest = source.slice(topicMatch.index + topicMatch[0].length);
+	} else {
+		// Fallback for dynamic streams: live.stream((ctx) => ..., { opts })
+		const openPattern = new RegExp(
+			`export\\s+const\\s+${name}\\s*=\\s*live\\.stream\\s*\\(`
+		);
+		const openMatch = openPattern.exec(source);
+		if (!openMatch) return opts;
+		rest = source.slice(openMatch.index + openMatch[0].length);
+	}
 
-	// Look for options object like { merge: 'crud', key: 'id', prepend: true }
-	const optMatch = rest.match(/,\s*\{([^}]+)\}/);
-	if (optMatch) {
-		const optStr = optMatch[1];
-
-		const mergeMatch = optStr.match(/merge\s*:\s*['"](\w+)['"]/);
-		if (mergeMatch) opts.merge = mergeMatch[1];
-
-		const keyMatch = optStr.match(/key\s*:\s*['"](\w+)['"]/);
-		if (keyMatch) opts.key = keyMatch[1];
-
-		const prependMatch = optStr.match(/prepend\s*:\s*(true|false)/);
-		if (prependMatch) opts.prepend = prependMatch[1] === 'true';
-
-		const maxMatch = optStr.match(/max\s*:\s*(\d+)/);
-		if (maxMatch) opts.max = parseInt(maxMatch[1], 10);
-
-		const replayMatch = optStr.match(/replay\s*:\s*(true|false|\{[^}]*\})/);
-		if (replayMatch && replayMatch[1] !== 'false') opts.replay = true;
-
-		const versionMatch = optStr.match(/version\s*:\s*(\d+)/);
-		if (versionMatch) opts.version = parseInt(versionMatch[1], 10);
+	// Find the options object by walking balanced braces from the last { ... }
+	// before the closing ) of live.stream(). This handles nested objects
+	// inside the init function body without false-matching on them.
+	const optStr = _extractLastOptions(rest);
+	if (optStr) {
+		_applyParsedOptions(opts, optStr);
 	}
 
 	return opts;
+}
+
+/**
+ * Parse option properties from an object body string into an opts object.
+ * Shared by stream, channel, and room option extraction.
+ * Uses _extractTopLevelStringProp for robust quoted-key and non-word value support.
+ * @param {Record<string, any>} opts
+ * @param {string} optStr
+ */
+function _applyParsedOptions(opts, optStr) {
+	const mergeVal = _extractTopLevelStringProp(optStr, 'merge');
+	if (mergeVal) opts.merge = mergeVal;
+
+	const keyVal = _extractTopLevelStringProp(optStr, 'key');
+	if (keyVal) opts.key = keyVal;
+
+	const prependVal = _extractTopLevelRawValue(optStr, 'prepend');
+	if (prependVal === 'true') opts.prepend = true;
+	else if (prependVal === 'false') opts.prepend = false;
+
+	const maxVal = _extractTopLevelRawValue(optStr, 'max');
+	if (maxVal && /^\d+$/.test(maxVal)) opts.max = parseInt(maxVal, 10);
+
+	const replayVal = _extractTopLevelRawValue(optStr, 'replay');
+	if (replayVal && replayVal !== 'false') opts.replay = true;
+
+	const versionVal = _extractTopLevelRawValue(optStr, 'version');
+	if (versionVal && /^\d+$/.test(versionVal)) opts.version = parseInt(versionVal, 10);
 }
 
 /**
@@ -637,8 +1164,7 @@ function _extractChannelOptions(source, name) {
 
 	// Look for the options object in live.channel(topic, { ... })
 	const pattern = new RegExp(
-		`export\\s+const\\s+${name}\\s*=\\s*live\\.channel\\s*\\(`,
-		's'
+		`export\\s+const\\s+${name}\\s*=\\s*live\\.channel\\s*\\(`
 	);
 	const match = pattern.exec(source);
 	if (!match) return opts;
@@ -646,15 +1172,9 @@ function _extractChannelOptions(source, name) {
 	const startIdx = match.index + match[0].length;
 	const rest = source.slice(startIdx);
 
-	const optMatch = rest.match(/,\s*\{([^}]+)\}/);
-	if (optMatch) {
-		const optStr = optMatch[1];
-		const mergeMatch = optStr.match(/merge\s*:\s*['"](\w+)['"]/);
-		if (mergeMatch) opts.merge = mergeMatch[1];
-		const keyMatch = optStr.match(/key\s*:\s*['"](\w+)['"]/);
-		if (keyMatch) opts.key = keyMatch[1];
-		const maxMatch = optStr.match(/max\s*:\s*(\d+)/);
-		if (maxMatch) opts.max = parseInt(maxMatch[1], 10);
+	const optStr = _extractLastOptions(rest);
+	if (optStr) {
+		_applyParsedOptions(opts, optStr);
 	}
 
 	return opts;
@@ -676,38 +1196,24 @@ function _extractRoomInfo(source, name) {
 	const startMatch = startPattern.exec(source);
 	if (!startMatch) return info;
 
-	// Extract the config object body using brace matching
 	const afterOpen = source.slice(startMatch.index + startMatch[0].length);
 	const body = _extractBraceContent(afterOpen);
 	if (!body) return info;
 
-	// Check for presence
-	if (/presence\s*:/.test(body)) info.hasPresence = true;
-	// Check for cursors
-	if (/cursors\s*:/.test(body)) info.hasCursors = true;
+	const configKeys = new Set(_extractTopLevelKeys(body));
+	info.hasPresence = configKeys.has('presence');
+	info.hasCursors = configKeys.has('cursors');
 
-	// Extract merge mode
-	const mergeMatch = body.match(/merge\s*:\s*['"](\w+)['"]/);
-	if (mergeMatch) info.dataOpts.merge = mergeMatch[1];
+	const mergeVal = _extractTopLevelStringProp(body, 'merge');
+	if (mergeVal) info.dataOpts.merge = mergeVal;
 
-	// Extract key field
-	const keyMatch = body.match(/key\s*:\s*['"](\w+)['"]/);
-	if (keyMatch) info.dataOpts.key = keyMatch[1];
+	const keyVal = _extractTopLevelStringProp(body, 'key');
+	if (keyVal) info.dataOpts.key = keyVal;
 
-	// Extract action names from actions: { ... }
-	const actionsIdx = body.search(/actions\s*:\s*\{/);
-	if (actionsIdx !== -1) {
-		const afterActions = body.slice(body.indexOf('{', actionsIdx));
-		const actionsBody = _extractBraceContent(afterActions);
-		if (actionsBody) {
-			// Match property names: "name:" or "async name(" patterns
-			const actionPattern = /(?:async\s+)?(\w+)\s*(?:\(|:)/g;
-			let m;
-			while ((m = actionPattern.exec(actionsBody)) !== null) {
-				const actionName = m[1];
-				if (actionName !== 'async') info.actions.push(actionName);
-			}
-		}
+	// Extract action names from the top-level actions property
+	const actionsBody = _extractTopLevelBraceProp(body, 'actions');
+	if (actionsBody) {
+		info.actions = _extractTopLevelKeys(actionsBody);
 	}
 
 	return info;
@@ -724,8 +1230,13 @@ function _extractBraceContent(str) {
 	if (start === -1) return null;
 	let depth = 0;
 	for (let i = start; i < str.length; i++) {
-		if (str[i] === '{') depth++;
-		else if (str[i] === '}') {
+		const ch = str[i];
+
+		const skip = _skipNonCode(str, i);
+		if (skip >= 0) { i = skip; continue; }
+
+		if (ch === '{') depth++;
+		else if (ch === '}') {
 			depth--;
 			if (depth === 0) return str.slice(start + 1, i);
 		}
@@ -756,8 +1267,9 @@ function _generateRegistry(liveDir, dir) {
 		const source = _readCached(filePath);
 		const normalizedPath = filePath.split(sep).join(posix.sep);
 
+		const _importPath = JSON.stringify(normalizedPath);
 		/** @param {string} name */
-		const _lazy = (name) => `__L(() => import('${normalizedPath}').then(m => m.${name}))`;
+		const _lazy = (name) => `__L(() => import(${_importPath}).then(m => m.${name}))`;
 
 		// Register live() exports
 		/** @type {Set<string>} */
@@ -808,12 +1320,12 @@ function _generateRegistry(liveDir, dir) {
 			if (topicMatch) {
 				const topic = topicMatch[1];
 				if (topic.startsWith('__')) {
-					console.error(
+					throw new Error(
 						`[svelte-realtime] ${dir}/${rel} uses reserved topic '${topic}' -- topics starting with __ are reserved for internal use`
 					);
 				}
 				if (seenTopics.has(topic)) {
-					console.error(
+					throw new Error(
 						`[svelte-realtime] Duplicate stream topic '${topic}' in ${dir}/${rel} -- each topic must be unique across all modules`
 					);
 				}
@@ -865,12 +1377,13 @@ function _generateRegistry(liveDir, dir) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				// Register the data stream
-				lines.push(`__register('${rel}/${name}/__data', __L(() => import('${normalizedPath}').then(m => m.${name}.__dataStream)));`);
+				const importPath = JSON.stringify(normalizedPath);
+				// Register the data stream — inherit file-level guard via explicit module path
+				lines.push(`__register('${rel}/${name}/__data', __L(() => import(${importPath}).then(m => m.${name}.__dataStream)), '${rel}');`);
 				// Register presence stream if present
-				lines.push(`__register('${rel}/${name}/__presence', __L(() => import('${normalizedPath}').then(m => m.${name}.__presenceStream)));`);
+				lines.push(`__register('${rel}/${name}/__presence', __L(() => import(${importPath}).then(m => m.${name}.__presenceStream)), '${rel}');`);
 				// Register cursor stream if present
-				lines.push(`__register('${rel}/${name}/__cursors', __L(() => import('${normalizedPath}').then(m => m.${name}.__cursorStream)));`);
+				lines.push(`__register('${rel}/${name}/__cursors', __L(() => import(${importPath}).then(m => m.${name}.__cursorStream)), '${rel}');`);
 				// Register actions (deferred -- resolved on first RPC or cron tick)
 				lines.push(`__registerRoomActions('${rel}/${name}', ${_lazy(name)});`);
 			}
@@ -915,6 +1428,10 @@ function _generateRegistry(liveDir, dir) {
 				lines.push(`__registerAggregate('${rel}/${name}', ${_lazy(name)});`);
 			}
 		}
+
+		// Warn about exports with non-path-safe names (pass registered to avoid
+		// double-warning for names already handled above)
+		_warnUnsafeExports(source, `${dir}/${rel}`, registered);
 	}
 
 	return lines.join('\n') + '\n';
@@ -993,9 +1510,13 @@ function _checkHooksFile(root, liveDir, dir) {
  * @param {string} dir
  */
 function _writeTypeDeclarations(liveDir, dir) {
+	const typesPath = resolve(liveDir, '$types.d.ts');
 	const content = _generateTypeDeclarations(liveDir, dir);
 	if (content) {
-		writeFileSync(resolve(liveDir, '$types.d.ts'), content);
+		writeFileSync(typesPath, content);
+	} else if (existsSync(typesPath)) {
+		// Remove stale declarations when all live modules are deleted
+		try { rmSync(typesPath); } catch {}
 	}
 }
 
@@ -1026,6 +1547,8 @@ function _generateTypeDeclarations(liveDir, dir) {
 
 		/** @type {string[]} */
 		const exports = [];
+		/** @type {Set<string>} */
+		const handledNames = new Set();
 		let needsReadable = false;
 		let needsRpcError = false;
 
@@ -1034,6 +1557,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 		LIVE_EXPORT_RE.lastIndex = 0;
 		while ((match = LIVE_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
+			handledNames.add(name);
 			if (isTS) {
 				const sig = _extractFunctionSignature(source, name);
 				exports.push(`  export const ${name}: ${sig};`);
@@ -1042,13 +1566,19 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
-		// Detect live.validated() exports (same as live() for types)
+		// Detect live.validated() exports — extract real types for TS
 		VALIDATED_EXPORT_RE.lastIndex = 0;
 		while ((match = VALIDATED_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
+			handledNames.add(name);
 			// Only add if not already detected by LIVE_EXPORT_RE
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
-				exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);
+				if (isTS) {
+					const sig = _extractFunctionSignatureFor(source, name, 'live\\.validated', 1);
+					exports.push(`  export const ${name}: ${sig};`);
+				} else {
+					exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);
+				}
 			}
 		}
 
@@ -1064,15 +1594,109 @@ function _generateTypeDeclarations(liveDir, dir) {
 		STREAM_EXPORT_RE.lastIndex = 0;
 		while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
+			handledNames.add(name);
 			needsReadable = true;
 			needsRpcError = true;
+			const isDynamic = _isDynamicExport(source, name, 'live\\.stream');
 			if (isTS) {
 				const returnType = _extractStreamReturnType(source, name);
-				exports.push(`  export const ${name}: Readable<${returnType} | undefined | { error: RpcError }>;`);
+				const storeType = `Readable<${returnType} | undefined | { error: RpcError }>`;
+				if (isDynamic) {
+					const factoryParams = _extractDynamicFactoryParams(source, name, 'live\\.stream');
+					exports.push(`  export const ${name}: ${factoryParams} => ${storeType};`);
+				} else {
+					exports.push(`  export const ${name}: ${storeType};`);
+				}
 			} else {
+				if (isDynamic) {
+					exports.push(`  export const ${name}: (...args: any[]) => Readable<any>;`);
+				} else {
+					exports.push(`  export const ${name}: Readable<any>;`);
+				}
+			}
+		}
+
+		// Detect live.channel() exports (same shape as streams)
+		CHANNEL_EXPORT_RE.lastIndex = 0;
+		while ((match = CHANNEL_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				needsReadable = true;
+				const isDynamic = _isDynamicExport(source, name, 'live\\.channel');
+				if (isDynamic) {
+					if (isTS) {
+						const factoryParams = _extractDynamicFactoryParams(source, name, 'live\\.channel');
+						exports.push(`  export const ${name}: ${factoryParams} => Readable<any>;`);
+					} else {
+						exports.push(`  export const ${name}: (...args: any[]) => Readable<any>;`);
+					}
+				} else {
+					exports.push(`  export const ${name}: Readable<any>;`);
+				}
+			}
+		}
+
+		// Detect live.derived() exports (read-only stream)
+		DERIVED_EXPORT_RE.lastIndex = 0;
+		while ((match = DERIVED_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				needsReadable = true;
 				exports.push(`  export const ${name}: Readable<any>;`);
 			}
 		}
+
+		// Detect live.aggregate() exports (read-only stream)
+		AGGREGATE_EXPORT_RE.lastIndex = 0;
+		while ((match = AGGREGATE_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				needsReadable = true;
+				exports.push(`  export const ${name}: Readable<any>;`);
+			}
+		}
+
+		// Detect live.binary() exports
+		BINARY_EXPORT_RE.lastIndex = 0;
+		while ((match = BINARY_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				exports.push(`  export const ${name}: (buffer: ArrayBuffer | ArrayBufferView, ...args: any[]) => Promise<any>;`);
+			}
+		}
+
+		// Detect live.rateLimit() exports — extract real types for TS
+		RATE_LIMIT_EXPORT_RE.lastIndex = 0;
+		while ((match = RATE_LIMIT_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				if (isTS) {
+					const sig = _extractFunctionSignatureFor(source, name, 'live\\.rateLimit', 1);
+					exports.push(`  export const ${name}: ${sig};`);
+				} else {
+					exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);
+				}
+			}
+		}
+
+		// Detect live.room() exports
+		ROOM_EXPORT_RE.lastIndex = 0;
+		while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				needsReadable = true;
+				exports.push(`  export const ${name}: { data: (...args: any[]) => Readable<any>, presence?: (...args: any[]) => Readable<any>, cursors?: (...args: any[]) => Readable<any>, [action: string]: (...args: any[]) => Promise<any> | ((...args: any[]) => Readable<any>) };`);
+			}
+		}
+
+		// Warn about exports with non-path-safe names (after all valid names collected)
+		_warnUnsafeExports(source, `${dir}/${rel}`, handledNames);
 
 		if (exports.length > 0) {
 			declarations.push(`declare module '$live/${rel}' {`);
@@ -1119,27 +1743,44 @@ function _extractErrorCodes(source) {
  * @returns {string}
  */
 function _extractFunctionSignature(source, name) {
+	return _extractFunctionSignatureFor(source, name, 'live', 0);
+}
+
+/**
+ * Shared signature extractor for live(), live.validated(), and live.rateLimit().
+ * Finds the callback at the given argument position, handles both arrow functions
+ * and function expressions, and extracts params + return type.
+ * @param {string} source
+ * @param {string} name
+ * @param {string} liveCall - e.g. 'live', 'live\\.validated', 'live\\.rateLimit'
+ * @param {number} callbackArgIndex - 0-based position of the callback argument
+ * @returns {string}
+ */
+function _extractFunctionSignatureFor(source, name, liveCall, callbackArgIndex) {
 	const fallback = '(...args: any[]) => Promise<any>';
 
-	// Match: export const name = live(async (ctx: Type, param1: T1, param2: T2): ReturnType => {
-	// or:    export const name = live(async (ctx, param1: T1) => {
-	// Uses .+? for return type to handle nested generics like Promise<{ id: number }>
-	const pattern = new RegExp(
-		`export\\s+const\\s+${name}\\s*=\\s*live\\s*\\(\\s*(?:async\\s+)?` +
-		`\\(([^)]*)\\)\\s*(?::\\s*(.+?))?\\s*=>`,
-		's'
+	// Find: export const name = liveCall(
+	const startPattern = new RegExp(
+		`export\\s+const\\s+${name}\\s*=\\s*${liveCall}\\s*\\(`
 	);
-	const match = pattern.exec(source);
-	if (!match) return fallback;
+	const startMatch = startPattern.exec(source);
+	if (!startMatch) return fallback;
 
-	const paramsStr = match[1].trim();
-	const returnType = match[2]?.trim() || 'Promise<any>';
+	const afterOpen = startMatch.index + startMatch[0].length;
+	const cbStart = _findNthArgStart(source, afterOpen, callbackArgIndex);
+	if (cbStart < 0) return fallback;
 
-	// Split params, drop the first one (ctx)
-	const params = _splitParams(paramsStr);
+	const sig = _parseCallbackSignature(source, cbStart);
+	if (!sig) return fallback;
+
+	const returnType = sig.returnType || 'Promise<any>';
+
+	// Split params, drop the first one (ctx), strip default initializers
+	const params = _splitParams(sig.paramsStr);
 	params.shift(); // remove ctx
+	const cleanParams = _stripParamDefaults(params);
 
-	const clientParams = params.length > 0 ? params.join(', ') : '';
+	const clientParams = cleanParams.length > 0 ? cleanParams.join(', ') : '';
 	const clientParamsStr = clientParams ? `(${clientParams})` : '()';
 
 	// Normalize return type - ensure it's wrapped in Promise
@@ -1159,21 +1800,410 @@ function _extractFunctionSignature(source, name) {
  * @returns {string}
  */
 function _extractStreamReturnType(source, name) {
-	// Match: export const name = live.stream('topic', async (ctx): Promise<Type[]> => {
-	// Uses balanced angle bracket matching for nested generics
-	const pattern = new RegExp(
-		`export\\s+const\\s+${name}\\s*=\\s*live\\.stream\\s*\\([^,]+,\\s*` +
-		`(?:async\\s+)?\\([^)]*\\)\\s*(?::\\s*(.+?))?\\s*=>`,
-		's'
+	// Find: export const name = live.stream(
+	const startPattern = new RegExp(
+		`export\\s+const\\s+${name}\\s*=\\s*live\\.stream\\s*\\(`
 	);
-	const match = pattern.exec(source);
-	if (!match || !match[1]) return 'any';
+	const startMatch = startPattern.exec(source);
+	if (!startMatch) return 'any';
 
-	const returnAnnotation = match[1].trim();
+	const afterOpen = startMatch.index + startMatch[0].length;
+
+	// The init callback is the 2nd argument (after topic string or dynamic factory)
+	const cbStart = _findNthArgStart(source, afterOpen, 1);
+	if (cbStart < 0) return 'any';
+
+	const sig = _parseCallbackSignature(source, cbStart);
+	if (!sig || !sig.returnType) return 'any';
+
+	const returnAnnotation = sig.returnType.trim();
 	// Unwrap Promise<T> to get T
 	const promiseMatch = returnAnnotation.match(/^Promise\s*<\s*(.+)\s*>$/s);
 	if (promiseMatch) return promiseMatch[1].trim();
 	return returnAnnotation;
+}
+
+/**
+ * Find the next top-level comma in `source` starting from `start`,
+ * respecting balanced parens/braces/brackets and skipping strings/comments/regex.
+ * @param {string} source
+ * @param {number} start
+ * @returns {number} Index of the comma, or -1 if not found
+ */
+/**
+ * Check whether a live.stream() or live.channel() export is dynamic
+ * (first argument is a function expression or arrow function, not a string topic).
+ * @param {string} source
+ * @param {string} name
+ * @param {string} apiName - e.g. 'live\\.stream', 'live\\.channel'
+ * @returns {boolean}
+ */
+function _isDynamicExport(source, name, apiName) {
+	const pattern = new RegExp(
+		`export\\s+const\\s+${name}\\s*=\\s*${apiName}\\s*\\(`
+	);
+	const m = pattern.exec(source);
+	if (!m) return false;
+	const afterOpen = m.index + m[0].length;
+	return _isFirstArgFunction(source, afterOpen);
+}
+
+/**
+ * Extract the client-facing parameter list from a dynamic stream/channel's
+ * topic factory function. Drops the leading ctx param and returns a
+ * parenthesized param string like `(roomId: string, page: number)`.
+ * Falls back to `(...args: any[])` if parsing fails.
+ * @param {string} source
+ * @param {string} name
+ * @param {string} apiName
+ * @returns {string}
+ */
+/**
+ * Check whether a parameter string looks like a ctx/context parameter.
+ * Returns true if the param name (before : type annotation) is ctx, context,
+ * or is typed with a known context type pattern.
+ * @param {string} param - A single parameter string, e.g. 'ctx: Ctx', 'context', 'roomId: string'
+ * @returns {boolean}
+ */
+/**
+ * Strip default initializers from parameter strings for .d.ts output.
+ * `count: number = 1` → `count?: number`
+ * `label = 'x'` → `label?: any`
+ * Params without defaults are returned unchanged.
+ * @param {string[]} params
+ * @returns {string[]}
+ */
+function _stripParamDefaults(params) {
+	return params.map(p => {
+		// Find top-level = (not inside <>, (), {}, [])
+		let depth = 0;
+		let eqIdx = -1;
+		for (let i = 0; i < p.length; i++) {
+			const ch = p[i];
+			if (ch === '<' || ch === '(' || ch === '{' || ch === '[') depth++;
+			else if (ch === '>' || ch === ')' || ch === '}' || ch === ']') depth--;
+			else if (ch === '=' && depth === 0 && p[i + 1] !== '>') {
+				eqIdx = i;
+				break;
+			}
+		}
+		if (eqIdx < 0) return p; // no default
+
+		const beforeEq = p.slice(0, eqIdx).trim();
+		// Check if there's a type annotation
+		const colonIdx = beforeEq.indexOf(':');
+		if (colonIdx >= 0) {
+			// Has type: `name: Type = val` → `name?: Type`
+			const name = beforeEq.slice(0, colonIdx).trim();
+			const type = beforeEq.slice(colonIdx + 1).trim();
+			return `${name}?: ${type}`;
+		}
+		// No type: `name = val` → `name?: any`
+		return `${beforeEq}?: any`;
+	});
+}
+
+function _isCtxParam(param) {
+	const trimmed = param.trim();
+	// Destructured first param — never auto-classify. We cannot distinguish
+	// ctx destructuring from payload-object destructuring by property names.
+	if (trimmed.startsWith('{')) return false;
+	// Extract the bare name (strip type annotation, default value)
+	const nameMatch = trimmed.match(/^([\w$]+)/);
+	if (!nameMatch) return false;
+	const name = nameMatch[1];
+	if (name === 'ctx' || name === 'context' || name === '_ctx') return true;
+	// Check if typed as a context-like type
+	const typeMatch = trimmed.match(/:\s*(.+)/);
+	if (typeMatch) {
+		const type = typeMatch[1].trim();
+		if (/^(?:Ctx|Context|RequestContext|ServerContext|LiveContext)\b/.test(type)) return true;
+	}
+	return false;
+}
+
+function _extractDynamicFactoryParams(source, name, apiName) {
+	const fallback = '(...args: any[])';
+	const pattern = new RegExp(
+		`export\\s+const\\s+${name}\\s*=\\s*${apiName}\\s*\\(`
+	);
+	const m = pattern.exec(source);
+	if (!m) return fallback;
+	const afterOpen = m.index + m[0].length;
+	const argStart = _findNthArgStart(source, afterOpen, 0);
+	if (argStart < 0) return fallback;
+	const sig = _parseCallbackSignature(source, argStart);
+	if (!sig) return fallback;
+	const params = _splitParams(sig.paramsStr);
+	// Destructured first param is ambiguous (could be ctx or a payload object).
+	// Fall back to a safe generic signature instead of emitting a wrong one.
+	if (params.length > 0 && params[0].trim().startsWith('{')) return fallback;
+	// Only drop the first param if it looks like a ctx parameter.
+	// The server uses arity-aware dispatch: if fn.length <= args.length,
+	// the user omitted ctx and all params are client args.
+	if (params.length > 0 && _isCtxParam(params[0])) {
+		params.shift();
+	}
+	const cleanParams = _stripParamDefaults(params);
+	return cleanParams.length > 0 ? `(${cleanParams.join(', ')})` : '()';
+}
+
+function _findTopLevelComma(source, start) {
+	let depth = 0;
+	for (let i = start; i < source.length; i++) {
+		const skip = _skipNonCode(source, i);
+		if (skip >= 0) { i = skip; continue; }
+		const ch = source[i];
+		if (ch === '(' || ch === '{' || ch === '[') depth++;
+		else if (ch === ')' || ch === '}' || ch === ']') {
+			if (depth === 0) return -1; // hit closing paren of live.stream()
+			depth--;
+		}
+		else if (ch === ',' && depth === 0) return i;
+	}
+	return -1;
+}
+
+/**
+ * Check whether the first top-level argument starting at `start` in `source`
+ * is a function (arrow or function expression). Used to detect dynamic
+ * streams/channels structurally instead of via regex.
+ * @param {string} source
+ * @param {number} start - Position right after the opening ( of the call
+ * @returns {boolean}
+ */
+function _isFirstArgFunction(source, start) {
+	// Skip whitespace
+	let i = start;
+	while (i < source.length && /\s/.test(source[i])) i++;
+	// Check for: async? function, async? (, async? identifier =>
+	const rest = source.slice(i);
+	if (/^(?:async\s+)?function\b/.test(rest)) return true;
+	if (/^(?:async\s+)?\(/.test(rest)) {
+		// Could be arrow: (params) => ... or just grouped expression
+		// Find balanced ) then check for =>
+		const pMatch = rest.match(/^(?:async\s+)?\(/);
+		if (!pMatch) return false;
+		const pStart = i + pMatch[0].length - 1;
+		let depth = 1;
+		for (let j = pStart + 1; j < source.length; j++) {
+			const skip = _skipNonCode(source, j);
+			if (skip >= 0) { j = skip; continue; }
+			if (source[j] === '(') depth++;
+			else if (source[j] === ')') {
+				depth--;
+				if (depth === 0) {
+					// Check for optional return type then => using balanced scanning
+					let k = j + 1;
+					while (k < source.length && /\s/.test(source[k])) k++;
+					if (source[k] === '=' && source[k + 1] === '>') return true;
+					if (source[k] === ':') {
+						// Has return type — scan for => at depth 0
+						k++;
+						let retDepth = 0;
+						for (; k < source.length; k++) {
+							const sk = _skipNonCode(source, k);
+							if (sk >= 0) { k = sk; continue; }
+							const c = source[k];
+							if (c === '=' && source[k + 1] === '>') {
+								if (retDepth === 0) return true;
+								k++; continue; // skip > so it's not treated as angle-bracket close
+							}
+							if (c === '<' || c === '(' || c === '{' || c === '[') retDepth++;
+							else if (c === '>' || c === ')' || c === '}' || c === ']') retDepth--;
+						}
+					}
+					return false;
+				}
+			}
+		}
+		return false;
+	}
+	// Single-param arrow: identifier =>
+	if (/^(?:async\s+)?[a-zA-Z_$][\w$]*\s*=>/.test(rest)) return true;
+	return false;
+}
+
+/**
+ * Parse a callback function (arrow or function expression) starting at `start`.
+ * Returns the parameter string and return type annotation, or null on failure.
+ * Handles: async? (params): RetType => body
+ *          async? function name?(params): RetType { body }
+ *          async? ident => body (single-param arrow)
+ * @param {string} source
+ * @param {number} start - Position of the first non-whitespace char of the callback
+ * @returns {{ paramsStr: string, returnType: string | null } | null}
+ */
+function _parseCallbackSignature(source, start) {
+	let i = start;
+	while (i < source.length && /\s/.test(source[i])) i++;
+
+	const rest = source.slice(i);
+
+	// Skip async keyword if present
+	let isAsync = false;
+	if (rest.startsWith('async') && /\s/.test(rest[5])) {
+		isAsync = true;
+		i += 5;
+		while (i < source.length && /\s/.test(source[i])) i++;
+	}
+
+	// function expression: function name?(params): RetType {
+	if (source.slice(i).startsWith('function')) {
+		i += 8; // skip 'function'
+		while (i < source.length && /\s/.test(source[i])) i++;
+		// Skip optional name
+		if (/[\w$]/.test(source[i])) {
+			while (i < source.length && /[\w$]/.test(source[i])) i++;
+			while (i < source.length && /\s/.test(source[i])) i++;
+		}
+		if (source[i] !== '(') return null;
+		const pStart = i;
+		let depth = 1;
+		let pEnd = -1;
+		for (let j = pStart + 1; j < source.length; j++) {
+			const skip = _skipNonCode(source, j);
+			if (skip >= 0) { j = skip; continue; }
+			if (source[j] === '(') depth++;
+			else if (source[j] === ')') {
+				depth--;
+				if (depth === 0) { pEnd = j; break; }
+			}
+		}
+		if (pEnd < 0) return null;
+		const paramsStr = source.slice(pStart + 1, pEnd).trim();
+		// Check for : ReturnType before the function body's opening {
+		// Must use balanced scanning since the return type may contain { }
+		// e.g. ): Promise<{ id: number }> {
+		let afterIdx = pEnd + 1;
+		while (afterIdx < source.length && /\s/.test(source[afterIdx])) afterIdx++;
+		let retType = null;
+		if (source[afterIdx] === ':') {
+			afterIdx++; // skip ':'
+			while (afterIdx < source.length && /\s/.test(source[afterIdx])) afterIdx++;
+			// Scan for the body's opening { at depth 0
+			let retStart = afterIdx;
+			let braceDepth = 0;
+			for (let j = afterIdx; j < source.length; j++) {
+				const sk = _skipNonCode(source, j);
+				if (sk >= 0) { j = sk; continue; }
+				const c = source[j];
+				// Skip => tokens so the > doesn't decrement depth
+				if (c === '=' && source[j + 1] === '>') { j++; continue; }
+				if (c === '<' || c === '(' || c === '[') braceDepth++;
+				else if (c === '>' || c === ')' || c === ']') braceDepth--;
+				else if (c === '{') {
+					if (braceDepth === 0) {
+						retType = source.slice(retStart, j).trim();
+						break;
+					}
+					braceDepth++;
+				} else if (c === '}') {
+					braceDepth--;
+				}
+			}
+		}
+		return { paramsStr, returnType: retType };
+	}
+
+	// Single-param arrow: ident =>
+	const singleMatch = source.slice(i).match(/^([a-zA-Z_$][\w$]*)\s*=>/);
+	if (singleMatch) {
+		return { paramsStr: singleMatch[1], returnType: null };
+	}
+
+	// Parenthesized arrow: (params): RetType =>
+	if (source[i] !== '(') return null;
+	const pStart = i;
+	let depth = 1;
+	let pEnd = -1;
+	for (let j = pStart + 1; j < source.length; j++) {
+		const skip = _skipNonCode(source, j);
+		if (skip >= 0) { j = skip; continue; }
+		if (source[j] === '(') depth++;
+		else if (source[j] === ')') {
+			depth--;
+			if (depth === 0) { pEnd = j; break; }
+		}
+	}
+	if (pEnd < 0) return null;
+	const paramsStr = source.slice(pStart + 1, pEnd).trim();
+	// After ), look for optional : ReturnType then =>
+	// Must use balanced scanning since the return type can contain =>
+	// e.g. ): Promise<{ fn: (x: number) => string }> =>
+	let scanIdx = pEnd + 1;
+	while (scanIdx < source.length && /\s/.test(source[scanIdx])) scanIdx++;
+	let retType = null;
+	if (source[scanIdx] === ':') {
+		// Has return type annotation — scan for => at depth 0
+		scanIdx++; // skip ':'
+		while (scanIdx < source.length && /\s/.test(source[scanIdx])) scanIdx++;
+		const retStart = scanIdx;
+		let retDepth = 0;
+		for (let j = scanIdx; j < source.length; j++) {
+			const sk = _skipNonCode(source, j);
+			if (sk >= 0) { j = sk; continue; }
+			const c = source[j];
+			// Arrow token => : at depth 0 this ends the return type,
+			// at depth > 0 skip both chars so > doesn't decrement depth
+			if (c === '=' && source[j + 1] === '>') {
+				if (retDepth === 0) {
+					retType = source.slice(retStart, j).trim();
+					break;
+				}
+				j++; // skip the > so it's not treated as angle-bracket close
+				continue;
+			}
+			if (c === '<' || c === '(' || c === '{' || c === '[') retDepth++;
+			else if (c === '>' || c === ')' || c === '}' || c === ']') retDepth--;
+		}
+		if (retType === null) return null; // no arrow found
+	} else if (source[scanIdx] === '=' && source[scanIdx + 1] === '>') {
+		// No return type, just =>
+	} else {
+		return null; // not an arrow function
+	}
+	return { paramsStr, returnType: retType };
+}
+
+/**
+ * Find the start position of the Nth (0-based) top-level argument in a call,
+ * starting from `start` (right after the opening paren).
+ * Returns the index of the first non-whitespace character of that argument,
+ * or -1 if there aren't enough arguments.
+ * @param {string} source
+ * @param {number} start
+ * @param {number} n - 0-based argument index
+ * @returns {number}
+ */
+function _findNthArgStart(source, start, n) {
+	if (n === 0) {
+		let i = start;
+		while (i < source.length && /\s/.test(source[i])) i++;
+		return i < source.length ? i : -1;
+	}
+	// Skip n commas at depth 0
+	let commasFound = 0;
+	let depth = 0;
+	for (let i = start; i < source.length; i++) {
+		const skip = _skipNonCode(source, i);
+		if (skip >= 0) { i = skip; continue; }
+		const ch = source[i];
+		if (ch === '(' || ch === '{' || ch === '[') depth++;
+		else if (ch === ')' || ch === '}' || ch === ']') {
+			if (depth === 0) return -1;
+			depth--;
+		}
+		else if (ch === ',' && depth === 0) {
+			commasFound++;
+			if (commasFound === n) {
+				let j = i + 1;
+				while (j < source.length && /\s/.test(source[j])) j++;
+				return j < source.length ? j : -1;
+			}
+		}
+	}
+	return -1;
 }
 
 /**
@@ -1185,13 +2215,29 @@ function _splitParams(str) {
 	if (!str.trim()) return [];
 	const params = [];
 	let depth = 0;
+	let angleDepth = 0;
+	let inType = false;
 	let current = '';
-	for (const ch of str) {
-		if (ch === '<' || ch === '(' || ch === '{' || ch === '[') depth++;
-		else if (ch === '>' || ch === ')' || ch === '}' || ch === ']') depth--;
-		if (ch === ',' && depth === 0) {
+	for (let i = 0; i < str.length; i++) {
+		const skip = _skipNonCode(str, i);
+		if (skip >= 0) {
+			current += str.substring(i, skip + 1);
+			i = skip;
+			continue;
+		}
+		const ch = str[i];
+		if (ch === '(' || ch === '{' || ch === '[') depth++;
+		else if (ch === ')' || ch === '}' || ch === ']') depth--;
+		// Track <> only inside type annotations (after : before = or ,)
+		// to avoid treating comparison operators in default values as nesting
+		if (ch === ':' && depth === 0 && angleDepth === 0) inType = true;
+		if (ch === '=' && depth === 0 && angleDepth === 0 && str[i + 1] !== '>') inType = false;
+		if (ch === '<' && inType) angleDepth++;
+		else if (ch === '>' && angleDepth > 0) angleDepth--;
+		if (ch === ',' && depth === 0 && angleDepth === 0) {
 			params.push(current.trim());
 			current = '';
+			inType = false;
 		} else {
 			current += ch;
 		}
@@ -1266,13 +2312,12 @@ async function _loadRegistryDirect(server, liveDir, dir) {
 				if (name === '_guard' && /** @type {any} */ (fn)?.__isGuard) {
 					__registerGuard(rel, fn);
 				} else if (/** @type {any} */ (fn)?.__isRoom) {
-					// Room: register sub-streams and actions
-					if (fn.__dataStream) __register(rel + '/' + name + '/__data', fn.__dataStream);
-					if (fn.__presenceStream) __register(rel + '/' + name + '/__presence', fn.__presenceStream);
-					if (fn.__cursorStream) __register(rel + '/' + name + '/__cursors', fn.__cursorStream);
+					if (fn.__dataStream) __register(rel + '/' + name + '/__data', fn.__dataStream, rel);
+					if (fn.__presenceStream) __register(rel + '/' + name + '/__presence', fn.__presenceStream, rel);
+					if (fn.__cursorStream) __register(rel + '/' + name + '/__cursors', fn.__cursorStream, rel);
 					if (fn.__actions) {
 						for (const [k, v] of Object.entries(fn.__actions)) {
-							__register(rel + '/' + name + '/__action/' + k, v);
+							__register(rel + '/' + name + '/__action/' + k, v, rel);
 						}
 					}
 				} else if (/** @type {any} */ (fn)?.__isEffect) {

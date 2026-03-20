@@ -6,7 +6,19 @@ Write server functions. Import them in components. Call them over WebSocket. No 
 
 ---
 
-## Getting started
+## Quick start
+
+```bash
+npx svelte-realtime my-app
+cd my-app
+npm run dev
+```
+
+This creates a SvelteKit project with svelte-realtime fully wired: adapter, vite plugins, WebSocket hooks, and a working counter example you can open in your browser right away.
+
+---
+
+## Manual setup
 
 Starting from a SvelteKit project. If you do not have one yet, run `npx sv create my-app && cd my-app && npm install` first.
 
@@ -19,7 +31,7 @@ npm install -D ws
 ```
 
 What each package does:
-- `svelte-adapter-uws` -- the SvelteKit adapter that runs your app on uWebSockets.js with built-in WebSocket support
+- `svelte-adapter-uws` (>=0.4.0) -- the SvelteKit adapter that runs your app on uWebSockets.js with built-in WebSocket support
 - `svelte-realtime` -- this library (RPC + streams on top of the adapter)
 - `uWebSockets.js` -- the native C++ HTTP/WebSocket server (installed from GitHub, not npm)
 - `ws` -- dev dependency used by the adapter during `npm run dev` (not needed in production)
@@ -164,6 +176,9 @@ The `ctx` object passed to every server function contains:
 | `ctx.throttle` | `(topic, event, data, ms)` -- publish at most once per `ms` ms |
 | `ctx.debounce` | `(topic, event, data, ms)` -- publish after `ms` ms of silence |
 | `ctx.signal` | `(userId, event, data)` -- point-to-point message |
+| `ctx.batch` | `(messages)` -- publish multiple messages in one call via `platform.batch()` |
+
+Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `remoteAddress`) in addition to whatever your `upgrade()` function returned. These are stripped automatically by the adapter before broadcasting to other clients.
 
 ---
 
@@ -386,6 +401,16 @@ try {
   }
 }
 ```
+
+### Terminal close codes
+
+When the adapter's `ready()` promise rejects (terminal close codes 1008, 4401, 4403, exhausted retries, or explicit `close()`), svelte-realtime:
+
+- Rejects all pending RPCs immediately with `RpcError('CONNECTION_CLOSED', ...)`
+- Sets an `{ error }` state on all active stream stores
+- Drains the offline queue with errors
+
+RPCs called after a terminal close reject immediately without sending.
 
 ### Reusable error boundary component
 
@@ -651,6 +676,20 @@ const [board, column] = await batch(() => [
 
 Each call resolves or rejects independently -- one failure does not cancel the others. Batches are limited to 50 calls -- enforced both client-side (rejects before sending) and server-side.
 
+### Server-side batching
+
+Use `ctx.batch()` inside RPC handlers to publish multiple messages in a single call:
+
+```js
+export const resetBoard = live(async (ctx, boardId) => {
+  await db.boards.reset(boardId);
+  ctx.batch([
+    { topic: `board:${boardId}`, event: 'set', data: [] },
+    { topic: `board:${boardId}:presence`, event: 'set', data: [] }
+  ]);
+});
+```
+
 ---
 
 ## Optimistic updates
@@ -913,13 +952,13 @@ export const presence = live.stream('room:lobby', async (ctx) => {
 });
 ```
 
-`onSubscribe` fires after `ws.subscribe(topic)` and the initial data fetch. `onUnsubscribe` fires when the WebSocket closes (requires exporting `close` from your `hooks.ws.js`):
+`onSubscribe` fires after `ws.subscribe(topic)` and the initial data fetch. `onUnsubscribe` fires in real time when a client unsubscribes from a topic (adapter 0.4.0+), and also when the WebSocket closes for any remaining topics. Export both hooks from your `hooks.ws.js`:
 
 ```js
-export { message, close } from 'svelte-realtime/server';
+export { message, close, unsubscribe } from 'svelte-realtime/server';
 ```
 
-`onUnsubscribe` fires for both static and dynamic topics. For dynamic topics, the server tracks which stream produced each subscription and only fires the correct hook on disconnect.
+`onUnsubscribe` fires for both static and dynamic topics. For dynamic topics, the server tracks which stream produced each subscription and fires the correct hook. The `unsubscribe` hook fires as soon as the client drops a topic; `close` only fires for topics still active at disconnect time. There is no double-firing.
 
 ---
 
@@ -1004,6 +1043,49 @@ export const message = createMessage({
   }
 });
 ```
+
+---
+
+## Prometheus metrics
+
+Opt-in instrumentation for RPC calls, stream subscriptions, and cron executions. Zero overhead if not called.
+
+```js
+import { live } from 'svelte-realtime/server';
+import { createMetricsRegistry } from 'svelte-adapter-uws-extensions/prometheus';
+
+const registry = createMetricsRegistry();
+live.metrics(registry);
+```
+
+This registers counters/histograms for:
+- `svelte_realtime_rpc_total` -- RPC call count by path and status
+- `svelte_realtime_rpc_duration_seconds` -- RPC latency by path
+- `svelte_realtime_rpc_errors_total` -- RPC errors by path and code
+- `svelte_realtime_stream_subscriptions` -- active stream subscription gauge by topic
+- `svelte_realtime_cron_total` -- cron execution count by path and status
+- `svelte_realtime_cron_errors_total` -- cron errors by path
+
+---
+
+## Circuit breaker
+
+Wrap a stream or RPC init function with a circuit breaker from `svelte-adapter-uws-extensions`. When the breaker is open, returns a fallback value or throws `SERVICE_UNAVAILABLE`.
+
+```js
+import { live } from 'svelte-realtime/server';
+import { createBreaker } from 'svelte-adapter-uws-extensions/breaker';
+
+const dbBreaker = createBreaker({ threshold: 5, resetMs: 30000 });
+
+export const items = live.stream('items',
+  live.breaker({ breaker: dbBreaker, fallback: [] }, async (ctx) => {
+    return db.items.list();
+  })
+);
+```
+
+If `fallback` is omitted and the circuit is open, the call throws `LiveError('SERVICE_UNAVAILABLE', ...)`.
 
 ---
 
@@ -1275,6 +1357,17 @@ On the client, the room export becomes an object with sub-streams and actions. R
 <button onclick={() => board.addCard(boardId, 'New card')}>Add</button>
 ```
 
+### Room hooks shortcut
+
+Rooms expose a `.hooks` property for one-liner wiring in `hooks.ws.js`:
+
+```js
+// src/hooks.ws.js
+import { board } from './live/collab.js';
+
+export const { message, close, unsubscribe } = board.hooks;
+```
+
 ---
 
 ## Webhooks
@@ -1410,6 +1503,8 @@ export const feed = live.stream('feed', async (ctx) => {
 ```
 
 Replay requires the replay extension from `svelte-adapter-uws-extensions`. When replay is not available or the gap is too large, the client falls back to a full refetch automatically.
+
+With adapter 0.4.0+, the replay end marker sends `{ reqId }` (replay complete) or `{ reqId, truncated: true }` (cache miss). When truncated, the client automatically resets its sequence number and triggers a full refetch.
 
 ---
 
@@ -1716,11 +1811,14 @@ Import from `svelte-realtime/server`.
 | `message` | Ready-made message hook |
 | `createMessage(options?)` | Custom message hook factory |
 | `pipe(stream, ...transforms)` | Composable stream transforms |
-| `close` | Ready-made close hook (fires onUnsubscribe) |
+| `close` | Ready-made close hook (fires onUnsubscribe for remaining topics) |
+| `unsubscribe` | Ready-made unsubscribe hook (fires onUnsubscribe in real time) |
 | `setCronPlatform(platform)` | Capture platform for cron jobs |
 | `onCronError(handler)` | Global cron error handler |
 | `enableSignals(ws)` | Enable point-to-point signal delivery |
 | `_activateDerived(platform)` | Enable derived stream listeners |
+| `live.metrics(registry)` | Opt-in Prometheus metrics |
+| `live.breaker(options, fn)` | Circuit breaker wrapper |
 
 ---
 
@@ -1735,6 +1833,7 @@ Import from `svelte-realtime/client`.
 | `configure(config)` | Connection hooks and offline queue setup |
 | `combine(...stores, fn)` | Multi-store composition |
 | `onSignal(userId, callback)` | Listen for point-to-point signals |
+| `onDerived` | Re-exported from adapter: reactive derived topic subscription |
 
 **Stream store methods** (on `$live/` stream imports):
 
@@ -1807,6 +1906,43 @@ You can also run the package's own tests:
 ```bash
 npm test
 ```
+
+---
+
+## Tauri and Capacitor
+
+svelte-realtime works with Tauri and Capacitor without any static build or architectural changes.
+
+Both runtimes let you point their webview at a live URL instead of local files. Your SvelteKit app runs on the server as normal -- SSR, WebSocket hydration, live stores, RPC -- and the native wrapper adds platform APIs (camera, push notifications, filesystem, etc.) on top.
+
+**Capacitor** -- `capacitor.config.ts`:
+
+```ts
+import { CapacitorConfig } from '@capacitor/cli';
+
+const config: CapacitorConfig = {
+  appId: 'com.example.app',
+  appName: 'My App',
+  server: {
+    url: 'https://yourapp.com'
+  }
+};
+
+export default config;
+```
+
+**Tauri** -- `tauri.conf.json`:
+
+```json
+{
+  "build": {
+    "devPath": "https://yourapp.com",
+    "distDir": "https://yourapp.com"
+  }
+}
+```
+
+The webview loads your server directly. No static adapter, no URL configuration in the client, nothing special in your SvelteKit code.
 
 ---
 

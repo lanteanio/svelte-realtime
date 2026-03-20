@@ -21,6 +21,11 @@ export function mockPlatform() {
 		subscribers(topic) {
 			return 0;
 		},
+		batch(messages) {
+			for (const msg of messages) {
+				p.publish(msg.topic, msg.event, msg.data, msg.options);
+			}
+		},
 		topic(t) {
 			return {
 				publish(event, data) { p.publish(t, event, data); },

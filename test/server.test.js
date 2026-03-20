@@ -17,7 +17,9 @@ import {
 	__registerCron,
 	setCronPlatform,
 	onCronError,
+	onError,
 	close,
+	unsubscribe,
 	enableSignals,
 	pipe
 } from '../server.js';
@@ -341,7 +343,8 @@ describe('handleRpc()', () => {
 
 		await new Promise((r) => setTimeout(r, 10));
 
-		expect(capturedUser).toEqual({ id: 'user1', name: 'Alice' });
+		expect(capturedUser.id).toBe('user1');
+		expect(capturedUser.name).toBe('Alice');
 	});
 
 	it('handles args with no args field (defaults to empty array)', async () => {
@@ -950,19 +953,32 @@ describe('handleRpc() dynamic topic guard', () => {
 		expect(platform.sent[0].data.topic).toBe('chat:lobby');
 	});
 
-	it('allows static topics with __ prefix (developer-controlled)', async () => {
+	it('rejects static stream topics with __ prefix at registration', () => {
+		expect(() => {
+			live.stream('__internal:stats', async () => ({ count: 0 }), { merge: 'set' });
+		}).toThrow(/reserved prefix/);
+	});
+
+	it('rejects static channel topics with __ prefix at registration', () => {
+		expect(() => {
+			live.channel('__internal:typing', { merge: 'presence' });
+		}).toThrow(/reserved prefix/);
+	});
+
+	it('rejects dynamic topics with __ prefix at subscribe time', async () => {
 		const stream = live.stream(
-			'__internal:stats',
+			() => '__internal:stats',
 			async () => ({ count: 0 }),
 			{ merge: 'set' }
 		);
-		__register('topic/static', stream);
+		__register('topic/dynres', stream);
 
-		const data = toArrayBuffer({ rpc: 'topic/static', id: 'tg3', args: [], stream: true });
+		const data = toArrayBuffer({ rpc: 'topic/dynres', id: 'tg3', args: [], stream: true });
 		handleRpc(ws, data, platform);
 		await new Promise((r) => setTimeout(r, 10));
 
-		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
 	});
 });
 
@@ -1612,6 +1628,7 @@ describe('close()', () => {
 		ws.subscribe('__signal:u1'); // internal topic, should be skipped
 
 		close(ws, { platform });
+		await new Promise(r => setTimeout(r, 0));
 
 		expect(firedTopics).toContain('room-abc');
 		expect(firedTopics).toContain('room-def');
@@ -1640,12 +1657,13 @@ describe('close()', () => {
 		await new Promise((r) => setTimeout(r, 10));
 
 		close(ws, { platform });
+		await new Promise(r => setTimeout(r, 0));
 
 		expect(firedA).toEqual(['chat-123']);
 		expect(firedB).toEqual([]);
 	});
 
-	it('fires onUnsubscribe for static topic streams on close', () => {
+	it('fires onUnsubscribe for static topic streams on close', async () => {
 		let unsubTopic;
 		const streamFn = live.stream('close-topic', async (ctx) => [], {
 			merge: 'crud',
@@ -1659,6 +1677,7 @@ describe('close()', () => {
 		const platform = mockPlatform();
 
 		close(ws, { platform });
+		await new Promise(r => setTimeout(r, 0));
 
 		expect(unsubTopic).toBe('close-topic');
 	});
@@ -2008,7 +2027,8 @@ describe('live.room()', () => {
 			cursors: true,
 			actions: {
 				addItem: async (ctx, text) => ({ id: 2, text })
-			}
+			},
+			topicArgs: 1
 		});
 
 		expect(room.__isRoom).toBe(true);
@@ -3047,5 +3067,1268 @@ describe('schema evolution', () => {
 		expect(response.ok).toBe(true);
 		expect(response.data[0].extra).toBeUndefined();
 		expect(migrateSpy).not.toHaveBeenCalled();
+	});
+});
+
+// -- 0.4.0: unsubscribe() hook ------------------------------------------------
+
+describe('unsubscribe()', () => {
+	let ws, platform;
+
+	beforeEach(() => {
+		ws = mockWs({ id: 'u1' });
+		platform = mockPlatform();
+	});
+
+	it('fires onUnsubscribe on explicit topic unsubscribe', async () => {
+		const unsubSpy = vi.fn();
+		const stream = live.stream('items', async () => [{ id: 1 }], { onUnsubscribe: unsubSpy });
+		__register('unsub/items', stream);
+
+		// Subscribe via RPC
+		const data = toArrayBuffer({ rpc: 'unsub/items', id: 'u1', args: [], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Real-time unsubscribe for the topic
+		unsubscribe(ws, 'items', { platform });
+		await new Promise(r => setTimeout(r, 0));
+		expect(unsubSpy).toHaveBeenCalledTimes(1);
+		expect(unsubSpy.mock.calls[0][1]).toBe('items');
+	});
+
+	it('close() does not double-fire after real-time unsubscribe', async () => {
+		const unsubSpy = vi.fn();
+		const stream = live.stream('items2', async () => [{ id: 1 }], { onUnsubscribe: unsubSpy });
+		__register('unsub/items2', stream);
+
+		const data = toArrayBuffer({ rpc: 'unsub/items2', id: 'u2', args: [], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Fire real-time unsubscribe, then close
+		unsubscribe(ws, 'items2', { platform });
+		await new Promise(r => setTimeout(r, 0));
+		close(ws, { platform, subscriptions: new Set(['items2']) });
+		await new Promise(r => setTimeout(r, 0));
+
+		// Should only have been called once (by unsubscribe, not again by close)
+		expect(unsubSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('close() still fires for topics not unsubscribed via unsubscribe()', async () => {
+		const unsubSpy = vi.fn();
+		const stream = live.stream('items3', async () => [{ id: 1 }], { onUnsubscribe: unsubSpy });
+		__register('unsub/items3', stream);
+
+		const data = toArrayBuffer({ rpc: 'unsub/items3', id: 'u3', args: [], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Close without prior unsubscribe
+		close(ws, { platform, subscriptions: new Set(['items3']) });
+		await new Promise(r => setTimeout(r, 0));
+		expect(unsubSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+// -- 0.4.0: close() with ctx.subscriptions ------------------------------------
+
+describe('close() with ctx.subscriptions', () => {
+	it('uses subscriptions Set from ctx instead of ws.getTopics()', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const unsubSpy = vi.fn();
+		const stream = live.stream('closetopic', async () => [{ id: 1 }], { onUnsubscribe: unsubSpy });
+		__register('closet/items', stream);
+
+		const data = toArrayBuffer({ rpc: 'closet/items', id: 'c1', args: [], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Pass subscriptions as a Set (adapter 0.4.0 style)
+		close(ws, { platform, subscriptions: new Set(['closetopic']) });
+		await new Promise(r => setTimeout(r, 0));
+		expect(unsubSpy).toHaveBeenCalledTimes(1);
+	});
+});
+
+// -- 0.4.0: ctx.batch ---------------------------------------------------------
+
+describe('ctx.batch', () => {
+	it('ctx.batch calls platform.batch with messages', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const batchSpy = vi.spyOn(platform, 'batch');
+
+		let capturedBatch;
+		const handler = live(async (ctx) => {
+			capturedBatch = ctx.batch;
+			ctx.batch([
+				{ topic: 't1', event: 'set', data: 1 },
+				{ topic: 't2', event: 'set', data: 2 }
+			]);
+			return 'ok';
+		});
+		__register('batchtest/run', handler);
+
+		const data = toArrayBuffer({ rpc: 'batchtest/run', id: 'b1', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(typeof capturedBatch).toBe('function');
+		expect(batchSpy).toHaveBeenCalledTimes(1);
+		expect(batchSpy.mock.calls[0][0]).toHaveLength(2);
+	});
+});
+
+// -- 0.4.0: live.breaker() ----------------------------------------------------
+
+describe('live.breaker()', () => {
+	it('returns fallback when circuit is open', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+
+		const openBreaker = { isOpen: () => true, success: vi.fn(), failure: vi.fn() };
+		const stream = live.stream('breaker-topic', live.breaker(
+			{ breaker: openBreaker, fallback: [] },
+			async () => [{ id: 1, name: 'should not reach' }]
+		));
+		__register('breaker/items', stream);
+
+		const data = toArrayBuffer({ rpc: 'breaker/items', id: 'br1', args: [], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.data).toEqual([]);
+	});
+
+	it('throws SERVICE_UNAVAILABLE when circuit is open and no fallback', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+
+		const openBreaker = { isOpen: () => true, success: vi.fn(), failure: vi.fn() };
+		const handler = live(live.breaker({ breaker: openBreaker }, async () => 'ok'));
+		__register('breaker/nofb', handler);
+
+		const data = toArrayBuffer({ rpc: 'breaker/nofb', id: 'br2', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(false);
+		expect(response.code).toBe('SERVICE_UNAVAILABLE');
+	});
+
+	it('calls success() on successful execution', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+
+		const breaker = { isOpen: () => false, success: vi.fn(), failure: vi.fn() };
+		const handler = live(live.breaker({ breaker }, async () => 'ok'));
+		__register('breaker/ok', handler);
+
+		const data = toArrayBuffer({ rpc: 'breaker/ok', id: 'br3', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(breaker.success).toHaveBeenCalledTimes(1);
+		expect(breaker.failure).not.toHaveBeenCalled();
+	});
+});
+
+// -- 0.4.0: live.room() .hooks property ---------------------------------------
+
+describe('live.room() .hooks', () => {
+	it('room export has a .hooks property with message, close, unsubscribe', () => {
+		const room = live.room({
+			topic: (ctx) => 'room:test',
+			init: async () => []
+		});
+
+		expect(room.hooks).toBeDefined();
+		expect(typeof room.hooks.message).toBe('function');
+		expect(typeof room.hooks.close).toBe('function');
+		expect(typeof room.hooks.unsubscribe).toBe('function');
+	});
+});
+
+// -- live.validated() rejects unrecognized schemas ----------------------------
+
+describe('live.validated() schema rejection', () => {
+	it('rejects calls when schema type is unrecognized', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const handler = live.validated({ notASchema: true }, async (ctx, input) => input);
+		__register('val/bad', handler);
+
+		const data = toArrayBuffer({ rpc: 'val/bad', id: 'v1', args: ['test'] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(false);
+		expect(response.code).toBe('VALIDATION');
+	});
+});
+
+// -- throttle/debounce per-entity keying --------------------------------------
+
+describe('throttle per-entity keying', () => {
+	it('does not collapse throttled publishes for different data.key values', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+
+		let capturedCtx;
+		const handler = live(async (ctx) => {
+			capturedCtx = ctx;
+			ctx.throttle('cursors', 'update', { key: 'user1', x: 10 }, 100);
+			ctx.throttle('cursors', 'update', { key: 'user2', x: 20 }, 100);
+			return 'ok';
+		});
+		__register('thr/multi', handler);
+
+		const data = toArrayBuffer({ rpc: 'thr/multi', id: 't1', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Both publishes should have gone through (different entity keys)
+		const cursorPublishes = platform.published.filter(p => p.topic === 'cursors');
+		expect(cursorPublishes.length).toBe(2);
+		expect(cursorPublishes[0].data.key).toBe('user1');
+		expect(cursorPublishes[1].data.key).toBe('user2');
+	});
+});
+
+// -- onError / onCronError alias ----------------------------------------------
+
+describe('onError()', () => {
+	it('is exported as a function', () => {
+		expect(typeof onError).toBe('function');
+	});
+
+	it('onCronError is an alias for onError', () => {
+		expect(typeof onCronError).toBe('function');
+	});
+});
+
+// -- _copyStreamMeta via live.gate and pipe -----------------------------------
+
+describe('metadata propagation', () => {
+	it('live.gate copies all stream metadata including version and migrate', () => {
+		const initFn = async () => [];
+		const stream = live.stream('meta-test', initFn, {
+			merge: 'crud',
+			key: 'uid',
+			replay: { size: 100 },
+			version: 3,
+			migrate: { 2: (item) => item }
+		});
+
+		const gated = live.gate(() => true, stream);
+		expect(gated.__isStream).toBe(true);
+		expect(gated.__streamTopic).toBe('meta-test');
+		expect(gated.__streamOptions.merge).toBe('crud');
+		expect(gated.__replay).toEqual({ size: 100 });
+		expect(gated.__streamVersion).toBe(3);
+		expect(gated.__streamMigrate).toBeDefined();
+		expect(gated.__isGated).toBe(true);
+	});
+
+	it('pipe copies all stream metadata', () => {
+		const initFn = async () => [];
+		const stream = live.stream('pipe-meta', initFn, {
+			merge: 'crud',
+			key: 'id',
+			access: (ctx) => true
+		});
+
+		const piped = pipe(stream, pipe.limit(10));
+		expect(piped.__isStream).toBe(true);
+		expect(piped.__streamTopic).toBe('pipe-meta');
+		expect(piped.__streamFilter).toBeDefined();
+	});
+});
+
+// -- __directCall access/filter/gate enforcement ------------------------------
+
+describe('__directCall stream enforcement', () => {
+	it('returns null for gated streams when predicate fails', async () => {
+		const stream = live.stream('dc-gate-topic', async (ctx) => [{ id: 1 }], { merge: 'crud' });
+		const gated = live.gate(() => false, stream);
+		__register('dcgate/feed', gated);
+
+		const platform = mockPlatform();
+		const result = await __directCall('dcgate/feed', [], platform);
+		expect(result).toBeNull();
+	});
+
+	it('throws FORBIDDEN when stream filter rejects', async () => {
+		const stream = live.stream('dc-filter-topic', async (ctx) => [{ id: 1 }], {
+			merge: 'crud',
+			access: (ctx) => ctx.user?.admin === true
+		});
+		__register('dcfilter/feed', stream);
+
+		const platform = mockPlatform();
+		await expect(__directCall('dcfilter/feed', [], platform)).rejects.toMatchObject({
+			code: 'FORBIDDEN'
+		});
+	});
+
+	it('allows gated stream when predicate passes', async () => {
+		const stream = live.stream('dc-gate-ok', async (ctx) => [{ id: 1 }], { merge: 'crud' });
+		const gated = live.gate(() => true, stream);
+		__register('dcgate/ok', gated);
+
+		const platform = mockPlatform();
+		const result = await __directCall('dcgate/ok', [], platform);
+		expect(result).toEqual([{ id: 1 }]);
+	});
+});
+
+// -- Room guard enforcement on presence/cursor sub-streams --------------------
+
+describe('room guard on sub-streams', () => {
+	it('presence stream runs guard and rejects unauthorized access', async () => {
+		const calls = [];
+		const room = live.room({
+			topic: (ctx, roomId) => 'guarded-room:' + roomId,
+			init: async (ctx, roomId) => [],
+			presence: (ctx) => ({ name: 'test' }),
+			guard: async (ctx) => {
+				calls.push('guard');
+				throw new LiveError('FORBIDDEN', 'No access');
+			}
+		});
+
+		__register('roomguard/myroom/__presence', room.__presenceStream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'roomguard/myroom/__presence', id: 'rg1', args: ['room1'], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toContain('guard');
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(false);
+		expect(response.code).toBe('FORBIDDEN');
+	});
+
+	it('cursor stream runs guard and rejects unauthorized access', async () => {
+		const room = live.room({
+			topic: (ctx, roomId) => 'cursor-guard-room:' + roomId,
+			init: async (ctx, roomId) => [],
+			cursors: true,
+			guard: async (ctx) => {
+				throw new LiveError('FORBIDDEN', 'No access');
+			}
+		});
+
+		__register('roomguard/cursors/__cursors', room.__cursorStream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'roomguard/cursors/__cursors', id: 'rc1', args: ['room1'], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(false);
+		expect(response.code).toBe('FORBIDDEN');
+	});
+});
+
+// -- Topic function ctx handling -----------------------------------------------
+
+describe('topic function ctx handling', () => {
+	it('no-ctx topic fn resolves correctly', async () => {
+		let receivedArg;
+		const stream = live.stream(
+			(boardId) => {
+				receivedArg = boardId;
+				return 'notes/' + boardId;
+			},
+			async (ctx) => [{ id: 1 }],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/noctx', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'topicfn/noctx', id: 'tn1', args: ['board42'], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('notes/board42');
+		expect(receivedArg).toBe('board42');
+	});
+
+	it('ctx-only topic fn (zero user args) resolves correctly', async () => {
+		let receivedCtx;
+		const stream = live.stream(
+			(ctx) => {
+				receivedCtx = ctx;
+				return 'user:' + ctx.user.id;
+			},
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/ctxonly', stream);
+
+		const ws = mockWs({ id: 'u5' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'topicfn/ctxonly', id: 'tc1', args: [], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('user:u5');
+		expect(receivedCtx).toBeDefined();
+		expect(receivedCtx.user.id).toBe('u5');
+	});
+
+	it('ctx + args topic fn (standard pattern) resolves correctly', async () => {
+		let receivedCtx, receivedRoom;
+		const stream = live.stream(
+			(ctx, roomId) => {
+				receivedCtx = ctx;
+				receivedRoom = roomId;
+				return 'room:' + roomId;
+			},
+			async (ctx) => [{ id: 1 }],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/ctxargs', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'topicfn/ctxargs', id: 'ta1', args: ['lobby'], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('room:lobby');
+		expect(receivedCtx.user.id).toBe('u1');
+		expect(receivedRoom).toBe('lobby');
+	});
+
+	it('room topic with default param always receives ctx', async () => {
+		let receivedCtx;
+		const room = live.room({
+			topic: (ctx, roomId = 'default') => {
+				receivedCtx = ctx;
+				return 'room:' + roomId;
+			},
+			init: async (ctx, roomId) => [{ id: 1 }]
+		});
+		__register('topicfn/roomdef/__data', room.__dataStream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'topicfn/roomdef/__data', id: 'rd1', args: ['myroom'], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('room:myroom');
+		expect(receivedCtx).toBeDefined();
+		expect(receivedCtx.user).toBeDefined();
+	});
+
+	it('no-ctx channel topic resolves correctly', async () => {
+		let receivedArg;
+		const ch = live.channel(
+			(docId) => {
+				receivedArg = docId;
+				return 'cursors:' + docId;
+			},
+			{ merge: 'cursor' }
+		);
+		__register('topicfn/channel', ch);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'topicfn/channel', id: 'ch1', args: ['doc99'], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('cursors:doc99');
+		expect(receivedArg).toBe('doc99');
+	});
+});
+
+// -- Cron field validation ----------------------------------------------------
+
+describe('cron field validation', () => {
+	it('rejects */0 step', () => {
+		expect(() => __registerCron('cron/bad0', live.cron('*/0 * * * *', 'bad', async () => {})))
+			.toThrow('step must be a positive integer');
+	});
+
+	it('rejects non-numeric step', () => {
+		expect(() => __registerCron('cron/badfoo', live.cron('*/foo * * * *', 'bad', async () => {})))
+			.toThrow('step must be a positive integer');
+	});
+
+	it('rejects out-of-range minute', () => {
+		expect(() => __registerCron('cron/big', live.cron('99 * * * *', 'bad', async () => {})))
+			.toThrow('must be 0-59');
+	});
+
+	it('rejects out-of-range hour', () => {
+		expect(() => __registerCron('cron/bighour', live.cron('0 25 * * *', 'bad', async () => {})))
+			.toThrow('must be 0-23');
+	});
+
+	it('accepts valid cron expressions', () => {
+		expect(() => __registerCron('cron/valid', live.cron('*/5 0-12 1,15 1-6 0', 'ok', async () => {})))
+			.not.toThrow();
+	});
+});
+
+// -- ctx.throttle / ctx.debounce via RPC --------------------------------------
+
+describe('ctx.throttle and ctx.debounce', () => {
+	it('throttle publishes immediately on first call', async () => {
+		const handler = live(async (ctx, text) => {
+			ctx.throttle('throttle-topic', 'updated', { text }, 1000);
+			return 'ok';
+		});
+		__register('thr/send', handler);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'thr/send', id: 'th1', args: ['hello'] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const pub = platform.published.find(p => p.topic === 'throttle-topic');
+		expect(pub).toBeDefined();
+		expect(pub.data).toEqual({ text: 'hello' });
+	});
+
+	it('debounce delays publish until silence', async () => {
+		const handler = live(async (ctx, text) => {
+			ctx.debounce('debounce-topic', 'updated', { text }, 50);
+			return 'ok';
+		});
+		__register('deb/send', handler);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'deb/send', id: 'db1', args: ['world'] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		// Not yet published (debounce pending)
+		expect(platform.published.find(p => p.topic === 'debounce-topic')).toBeUndefined();
+
+		await new Promise((r) => setTimeout(r, 80));
+		// Now published after debounce window
+		const pub = platform.published.find(p => p.topic === 'debounce-topic');
+		expect(pub).toBeDefined();
+		expect(pub.data).toEqual({ text: 'world' });
+	});
+});
+
+// -- Room action _guard enforcement -------------------------------------------
+
+describe('room action _guard enforcement', () => {
+	it('file-level guard runs before room action via __register modulePath', async () => {
+		const order = [];
+		const guardFn = (ctx) => { order.push('file-guard'); throw new LiveError('FORBIDDEN', 'No access'); };
+		guardFn.__isGuard = true;
+		__registerGuard('guarded_room', guardFn);
+
+		const room = live.room({
+			topic: (ctx, roomId) => 'gr:' + roomId,
+			init: async (ctx) => [],
+			actions: {
+				send: async (ctx, text) => { order.push('action'); return 'ok'; }
+			},
+			topicArgs: 1
+		});
+
+		// Simulate what _resolveAllLazy does for room actions
+		for (const [k, v] of Object.entries(room.__actions)) {
+			__register('guarded_room/myRoom/__action/' + k, v, 'guarded_room');
+		}
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'guarded_room/myRoom/__action/send', id: 'ra1', args: ['hello'] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(false);
+		expect(response.code).toBe('FORBIDDEN');
+		expect(order).toEqual(['file-guard']);
+	});
+});
+
+// -- Room action rate-limit path isolation ------------------------------------
+
+describe('room action rate-limit isolation', () => {
+	it('rate-limited room actions get separate bucket keys', async () => {
+		const room = live.room({
+			topic: (ctx, roomId) => 'rl:' + roomId,
+			init: async (ctx) => [],
+			actions: {
+				actionA: live.rateLimit({ points: 1, window: 60000 }, async (ctx) => 'a'),
+				actionB: live.rateLimit({ points: 1, window: 60000 }, async (ctx) => 'b')
+			},
+			topicArgs: 1
+		});
+
+		// Register with distinct action paths
+		__register('rlroom/r1/__action/actionA', room.__actions.actionA, 'rlroom');
+		__register('rlroom/r1/__action/actionB', room.__actions.actionB, 'rlroom');
+
+		const ws = mockWs({ id: 'rl-user1' });
+		const platform = mockPlatform();
+
+		// Call actionA -- should succeed (first call)
+		handleRpc(ws, toArrayBuffer({ rpc: 'rlroom/r1/__action/actionA', id: 'rla1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0]?.data.ok).toBe(true);
+
+		// Call actionB -- should ALSO succeed (different action, different bucket)
+		handleRpc(ws, toArrayBuffer({ rpc: 'rlroom/r1/__action/actionB', id: 'rla2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[1]?.data.ok).toBe(true);
+	});
+});
+
+// -- Topic fn with defaulted/rest no-ctx params -------------------------------
+
+describe('topic fn with defaulted/rest no-ctx params', () => {
+	it('defaulted no-ctx param resolves correctly', async () => {
+		let receivedArg;
+		const stream = live.stream(
+			(roomId = 'lobby') => {
+				receivedArg = roomId;
+				return 'room:' + roomId;
+			},
+			async (ctx) => [{ id: 1 }],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/defnoctx', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'topicfn/defnoctx', id: 'dn1', args: ['arena'], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('room:arena');
+		expect(receivedArg).toBe('arena');
+	});
+
+	it('rest-only no-ctx param resolves correctly', async () => {
+		let receivedParts;
+		const stream = live.stream(
+			(...parts) => {
+				receivedParts = parts;
+				return 'path:' + parts.join('/');
+			},
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/restnoctx', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'topicfn/restnoctx', id: 'rn1', args: ['a', 'b'], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('path:a/b');
+		expect(receivedParts).toEqual(['a', 'b']);
+	});
+
+	it('defaulted no-ctx channel param resolves correctly', async () => {
+		let receivedArg;
+		const ch = live.channel(
+			(docId = 'main') => {
+				receivedArg = docId;
+				return 'doc:' + docId;
+			},
+			{ merge: 'set' }
+		);
+		__register('topicfn/defchannel', ch);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'topicfn/defchannel', id: 'dch1', args: ['draft'], stream: true });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('doc:draft');
+		expect(receivedArg).toBe('draft');
+	});
+});
+
+// -- validated(rateLimit(...)) bucket isolation --------------------------------
+
+describe('validated(rateLimit(...)) bucket isolation', () => {
+	it('two validated+rate-limited RPCs get separate buckets', async () => {
+		const schema = { safeParse: (v) => ({ success: true, data: v }) };
+
+		const handlerA = live.validated(schema, live.rateLimit(
+			{ points: 1, window: 60000 },
+			async (ctx, input) => 'a:' + input
+		));
+		const handlerB = live.validated(schema, live.rateLimit(
+			{ points: 1, window: 60000 },
+			async (ctx, input) => 'b:' + input
+		));
+
+		__register('composed/actionA', handlerA);
+		__register('composed/actionB', handlerB);
+
+		const ws = mockWs({ id: 'composed-user' });
+		const platform = mockPlatform();
+
+		// Call actionA -- should succeed
+		handleRpc(ws, toArrayBuffer({ rpc: 'composed/actionA', id: 'ca1', args: ['x'] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0]?.data.ok).toBe(true);
+
+		// Call actionB -- should ALSO succeed (different path, different bucket)
+		handleRpc(ws, toArrayBuffer({ rpc: 'composed/actionB', id: 'ca2', args: ['y'] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[1]?.data.ok).toBe(true);
+	});
+});
+
+// -- Room presence/cursor topic resolution ------------------------------------
+
+describe('room presence/cursor topic resolution', () => {
+	it('presence stream resolves correct topic with room args', async () => {
+		const room = live.room({
+			topic: (ctx, roomId) => 'proom:' + roomId,
+			init: async (ctx, roomId) => [],
+			presence: (ctx) => ({ name: 'test' })
+		});
+		__register('pres/chat/__presence', room.__presenceStream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'pres/chat/__presence', id: 'pt1', args: ['abc'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('proom:abc:presence');
+	});
+
+	it('cursor stream resolves correct topic with room args', async () => {
+		const room = live.room({
+			topic: (ctx, roomId) => 'croom:' + roomId,
+			init: async (ctx, roomId) => [],
+			cursors: true
+		});
+		__register('curs/chat/__cursors', room.__cursorStream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'curs/chat/__cursors', id: 'ct1', args: ['xyz'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('croom:xyz:cursors');
+	});
+});
+
+// -- ctx-aware dynamic topics with rest/default params ------------------------
+
+describe('ctx-aware dynamic topics with rest/default params', () => {
+	it('(ctx, ...parts) resolves correctly', async () => {
+		let receivedParts;
+		const stream = live.stream(
+			(ctx, ...parts) => {
+				receivedParts = parts;
+				return 'path:' + parts.join('/');
+			},
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/ctxrest', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/ctxrest', id: 'cr1', args: ['a', 'b'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('path:a/b');
+		expect(receivedParts).toEqual(['a', 'b']);
+	});
+
+	it('(ctx, roomId = "lobby") resolves correctly', async () => {
+		let receivedRoom;
+		const stream = live.stream(
+			(ctx, roomId = 'lobby') => {
+				receivedRoom = roomId;
+				return 'room:' + roomId;
+			},
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/ctxdef', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/ctxdef', id: 'cd1', args: ['arena'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('room:arena');
+		expect(receivedRoom).toBe('arena');
+	});
+});
+
+// -- Room action validated(rateLimit(...)) bucket isolation --------------------
+
+describe('room action validated(rateLimit(...)) bucket isolation', () => {
+	it('two room actions with validated+rateLimit get separate buckets', async () => {
+		const schema = { safeParse: (v) => ({ success: true, data: v }) };
+
+		const room = live.room({
+			topic: (ctx, roomId) => 'rlvroom:' + roomId,
+			init: async (ctx) => [],
+			actions: {
+				alpha: live.validated(schema, live.rateLimit(
+					{ points: 1, window: 60000 },
+					async (ctx, input) => 'alpha:' + input
+				)),
+				beta: live.validated(schema, live.rateLimit(
+					{ points: 1, window: 60000 },
+					async (ctx, input) => 'beta:' + input
+				))
+			},
+			topicArgs: 1
+		});
+
+		__register('rlvroom/r1/__action/alpha', room.__actions.alpha, 'rlvroom');
+		__register('rlvroom/r1/__action/beta', room.__actions.beta, 'rlvroom');
+
+		const ws = mockWs({ id: 'rlv-user' });
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rlvroom/r1/__action/alpha', id: 'rlv1', args: ['r1', 'x'] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0]?.data.ok).toBe(true);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rlvroom/r1/__action/beta', id: 'rlv2', args: ['r1', 'y'] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[1]?.data.ok).toBe(true);
+	});
+});
+
+// -- Room action topic arg slicing --------------------------------------------
+
+describe('room action topic arg slicing', () => {
+	it('action payload args do not leak into room topic', async () => {
+		let resolvedTopic;
+		const room = live.room({
+			topic: (ctx, boardId, sectionId) => {
+				resolvedTopic = 'board:' + boardId + ':' + sectionId;
+				return resolvedTopic;
+			},
+			init: async (ctx, boardId, sectionId) => [],
+			actions: {
+				addCard: async (ctx, boardId, sectionId, title) => title
+			},
+			topicArgs: 2
+		});
+
+		__register('argsroom/r/__action/addCard', room.__actions.addCard, 'argsroom');
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'argsroom/r/__action/addCard', id: 'as1', args: ['b1', 's2', 'My Card'] }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0]?.data.ok).toBe(true);
+		expect(resolvedTopic).toBe('board:b1:s2');
+	});
+});
+
+// -- ctx alias / destructured / typed topic params ----------------------------
+
+describe('ctx alias and destructured topic params', () => {
+	it('(c, roomId) => ... uses fn.length heuristic (not rejected)', async () => {
+		let receivedC;
+		const stream = live.stream(
+			(c, roomId) => { receivedC = c; return 'alias:' + roomId; },
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/alias', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/alias', id: 'al1', args: ['room7'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('alias:room7');
+		expect(receivedC).toBeDefined();
+		expect(receivedC.user).toBeDefined();
+	});
+
+	it('destructured ({ user }, roomId) => ... is detected as ctx-aware', async () => {
+		let receivedUser;
+		const stream = live.stream(
+			({ user }, roomId) => { receivedUser = user; return 'destr:' + roomId; },
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/destr', stream);
+
+		const ws = mockWs({ id: 'u9' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/destr', id: 'ds1', args: ['room8'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('destr:room8');
+		expect(receivedUser.id).toBe('u9');
+	});
+
+	it('destructured non-ctx ({ roomId }) => ... is NOT treated as ctx-aware', async () => {
+		let receivedArg;
+		const stream = live.stream(
+			({ roomId }) => { receivedArg = roomId; return 'room:' + roomId; },
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/destrnoctx', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/destrnoctx', id: 'dnc1', args: [{ roomId: 'abc' }], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('room:abc');
+		expect(receivedArg).toBe('abc');
+	});
+
+	it('destructured ctx with defaults requires explicit opt-in via __topicUsesCtx', async () => {
+		let receivedUser, receivedRoom;
+		const fallback = { user: { id: 'fallback' } };
+		const topicFn = ({ user } = fallback, roomId) => { receivedUser = user; receivedRoom = roomId; return 'dctx:' + roomId; };
+		topicFn.__topicUsesCtx = true;
+		const stream = live.stream(
+			topicFn,
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/defdestrctx', stream);
+
+		const ws = mockWs({ id: 'u7' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/defdestrctx', id: 'ddc1', args: ['lobby'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('dctx:lobby');
+		expect(receivedUser.id).toBe('u7');
+		expect(receivedRoom).toBe('lobby');
+	});
+
+	it('destructured ctx channel with defaults requires explicit opt-in', async () => {
+		let receivedUser, receivedDoc;
+		const fallback = { user: { id: 'fallback' } };
+		const topicFn = ({ user } = fallback, docId) => { receivedUser = user; receivedDoc = docId; return 'cdctx:' + docId; };
+		topicFn.__topicUsesCtx = true;
+		const ch = live.channel(
+			topicFn,
+			{ merge: 'set' }
+		);
+		__register('topicfn/defdestrch', ch);
+
+		const ws = mockWs({ id: 'u8' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/defdestrch', id: 'ddc2', args: ['draft'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('cdctx:draft');
+		expect(receivedUser.id).toBe('u8');
+		expect(receivedDoc).toBe('draft');
+	});
+
+	it('destructured payload with ctx-like names ({ user, roomId }) uses payload not ctx', async () => {
+		let receivedUser, receivedRoom;
+		const stream = live.stream(
+			({ user, roomId }) => { receivedUser = user; receivedRoom = roomId; return 'mixed:' + roomId; },
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/mixeddestr', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/mixeddestr', id: 'md1', args: [{ user: 'alice', roomId: 'r1' }], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('mixed:r1');
+		expect(receivedUser).toBe('alice');
+		expect(receivedRoom).toBe('r1');
+	});
+});
+
+// -- topicArgs required for ambiguous room topics with actions -----------------
+
+describe('topicArgs required for rooms with actions', () => {
+	it('throws when actions are defined without topicArgs', () => {
+		expect(() => live.room({
+			topic: (ctx, roomId) => 'room:' + roomId,
+			init: async (ctx) => [],
+			actions: { send: async (ctx) => 'ok' }
+		})).toThrow('topicArgs');
+	});
+
+	it('throws for defaulted topic params without topicArgs', () => {
+		expect(() => live.room({
+			topic: (ctx, boardId, sectionId = 'main') => 'board:' + boardId + ':' + sectionId,
+			init: async (ctx) => [],
+			actions: { send: async (ctx) => 'ok' }
+		})).toThrow('topicArgs');
+	});
+
+	it('throws for rest topic params without topicArgs', () => {
+		expect(() => live.room({
+			topic: (ctx, ...parts) => 'room:' + parts.join('/'),
+			init: async (ctx) => [],
+			actions: { send: async (ctx) => 'ok' }
+		})).toThrow('topicArgs');
+	});
+
+	it('works with explicit topicArgs on defaulted room topic', async () => {
+		let resolvedTopic;
+		const room = live.room({
+			topic: (ctx, boardId, sectionId = 'main') => {
+				resolvedTopic = 'board:' + boardId + ':' + sectionId;
+				return resolvedTopic;
+			},
+			init: async (ctx) => [],
+			actions: { addCard: async (ctx, boardId, sectionId, title) => title },
+			topicArgs: 2
+		});
+
+		__register('taroom/r/__action/addCard', room.__actions.addCard, 'taroom');
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'taroom/r/__action/addCard', id: 'ta1', args: ['b1', 's2', 'My Card'] }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0]?.data.ok).toBe(true);
+		expect(resolvedTopic).toBe('board:b1:s2');
+	});
+
+	it('topicArgs: 0 prevents payload args from leaking into topic', async () => {
+		let resolvedTopic;
+		const room = live.room({
+			topic: (ctx) => {
+				resolvedTopic = 'inbox:' + ctx.user.id;
+				return resolvedTopic;
+			},
+			init: async (ctx) => [],
+			actions: { send: async (ctx, message) => message },
+			topicArgs: 0
+		});
+
+		__register('ta0room/r/__action/send', room.__actions.send, 'ta0room');
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'ta0room/r/__action/send', id: 'ta01', args: ['hello'] }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0]?.data.ok).toBe(true);
+		expect(resolvedTopic).toBe('inbox:u1');
+	});
+
+	it('rejects non-integer topicArgs', () => {
+		expect(() => live.room({
+			topic: (ctx) => 'room',
+			init: async () => [],
+			topicArgs: 1.5
+		})).toThrow('non-negative integer');
+	});
+
+	it('rejects negative topicArgs', () => {
+		expect(() => live.room({
+			topic: (ctx) => 'room',
+			init: async () => [],
+			topicArgs: -1
+		})).toThrow('non-negative integer');
+	});
+});
+
+// -- Topic function must return string ----------------------------------------
+
+describe('topic function validation', () => {
+	it('rejects async topic functions at definition time', () => {
+		expect(() => live.stream(
+			async (ctx, roomId) => 'room:' + roomId,
+			async (ctx) => [],
+			{ merge: 'crud' }
+		)).toThrow('must not be async');
+	});
+
+	it('rejects async channel topic functions at definition time', () => {
+		expect(() => live.channel(
+			async (ctx, docId) => 'doc:' + docId,
+			{ merge: 'set' }
+		)).toThrow('must not be async');
+	});
+
+	it('rejects non-string topic at call time', async () => {
+		const stream = live.stream(
+			(ctx) => 42,
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/nonstr', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/nonstr', id: 'ns1', args: [], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(false);
+		expect(response.code).toBe('INVALID_REQUEST');
+	});
+});
+
+// -- Topic fn with defaults and fn.length heuristic --------------------------
+
+describe('topic fn with defaults uses fn.length heuristic', () => {
+	it('defaulted param uses fn.length (no source parsing)', async () => {
+		let receivedArg;
+		const stream = live.stream(
+			(roomId = 'a,b') => { receivedArg = roomId; return 'r:' + roomId; },
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/strcomma', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/strcomma', id: 'sc1', args: ['test'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('r:test');
+		expect(receivedArg).toBe('test');
+	});
+
+	it('single-param arrow without parens resolves correctly', async () => {
+		let receivedArg;
+		const stream = live.stream(
+			roomId => { receivedArg = roomId; return ['x', roomId].join(','); },
+			async (ctx) => [],
+			{ merge: 'crud' }
+		);
+		__register('topicfn/noparen', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/noparen', id: 'np1', args: ['y'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('x,y');
+		expect(receivedArg).toBe('y');
+	});
+
+	it('defaulted channel param uses fn.length (no source parsing)', async () => {
+		let receivedArg;
+		const ch = live.channel(
+			(docId = 'a,b') => { receivedArg = docId; return 'doc:' + docId; },
+			{ merge: 'set' }
+		);
+		__register('topicfn/chstrcomma', ch);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'topicfn/chstrcomma', id: 'csc1', args: ['draft'], stream: true }), platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.topic).toBe('doc:draft');
+		expect(receivedArg).toBe('draft');
+	});
+});
+
+// -- Rate limit bucket cap with existing identity -----------------------------
+
+describe('rate limit bucket cap with existing identity', () => {
+	it('existing identity passes, new identity rejected when map is full', async () => {
+		const fn = live.rateLimit({ points: 10000, window: 60000 }, async (ctx) => 'ok');
+		fn.__rateLimitPath = 'test/capcap';
+
+		// Fill until the cap is hit (prior tests may have leftover buckets)
+		let filled = 0;
+		try {
+			for (let i = 0; i < 6000; i++) {
+				await fn({ user: { id: 'cap' + i } });
+				filled++;
+			}
+		} catch {
+			// Expected: cap reached
+		}
+		expect(filled).toBeGreaterThan(0);
+		expect(filled).toBeLessThanOrEqual(5000);
+
+		// Repeat call for an existing identity must still work
+		const result = await fn({ user: { id: 'cap0' } });
+		expect(result).toBe('ok');
+
+		// New identity should be rejected
+		try {
+			await fn({ user: { id: 'definitely-new-' + Date.now() } });
+			expect.unreachable('should have thrown');
+		} catch (err) {
+			expect(err.code).toBe('RATE_LIMITED');
+		}
 	});
 });

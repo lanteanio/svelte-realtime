@@ -129,7 +129,7 @@ export function batch<T extends Promise<any>[]>(
  *
  * @internal
  */
-export function __binaryRpc(path: string): (buffer: ArrayBuffer, ...args: any[]) => Promise<any>;
+export function __binaryRpc(path: string): (buffer: ArrayBuffer | ArrayBufferView, ...args: any[]) => Promise<any>;
 
 /**
  * Configure client-side connection hooks.

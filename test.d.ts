@@ -78,7 +78,7 @@ export interface TestClient {
 	 * @param buffer - Binary data
 	 * @param args - Additional JSON arguments
 	 */
-	binary(path: string, buffer: ArrayBuffer, ...args: any[]): Promise<any>;
+	binary(path: string, buffer: ArrayBuffer | ArrayBufferView, ...args: any[]): Promise<any>;
 
 	/** Simulate disconnection. */
 	disconnect(): void;
