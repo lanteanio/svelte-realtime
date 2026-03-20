@@ -1751,3 +1751,47 @@ describe('multi-listener topic delivery', () => {
 		unsub2();
 	});
 });
+
+// -- Batch response for stream subscribes (regression test) -------------------
+
+describe('batched stream subscribe responses', () => {
+	it('delivers initial data and events when streams are batched (set + latest)', async () => {
+		const settingsStore = __stream('board/settings', { merge: 'set' });
+		const activityStore = __stream('board/activity', { merge: 'latest', max: 30 });
+		const settingsValues = [];
+		const activityValues = [];
+		const unsub1 = settingsStore.subscribe((v) => settingsValues.push(v));
+		const unsub2 = activityStore.subscribe((v) => activityValues.push(v));
+
+		await flush();
+
+		// Both streams are sent as a single batch frame
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect(sent.batch).toHaveLength(2);
+
+		// Server responds with a batch response (the __batch path)
+		simulateTopicMessage('__rpc', {
+			event: '__batch',
+			data: {
+				batch: [
+					{ id: sent.batch[0].id, ok: true, data: { title: 'My Board' }, topic: 'settings:123', merge: 'set' },
+					{ id: sent.batch[1].id, ok: true, data: [], topic: 'activity:123', merge: 'latest', max: 30 }
+				]
+			}
+		});
+
+		// Initial data should be delivered
+		expect(settingsValues[settingsValues.length - 1]).toEqual({ title: 'My Board' });
+		expect(activityValues[activityValues.length - 1]).toEqual([]);
+
+		// Published events should be received
+		simulateTopicMessage('settings:123', { event: 'set', data: { title: 'Renamed' } });
+		expect(settingsValues[settingsValues.length - 1]).toEqual({ title: 'Renamed' });
+
+		simulateTopicMessage('activity:123', { event: 'action', data: { type: 'renamed', user: 'Alice' } });
+		expect(activityValues[activityValues.length - 1]).toEqual([{ type: 'renamed', user: 'Alice' }]);
+
+		unsub1();
+		unsub2();
+	});
+});

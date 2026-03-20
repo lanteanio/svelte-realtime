@@ -103,7 +103,7 @@ function ensureListener() {
 				pending.delete(result.id);
 				if (entry.timer) clearTimeout(entry.timer);
 				if (result.ok) {
-					entry.resolve(result.data);
+					entry.resolve(entry.stream ? result : result.data);
 				} else {
 					entry.reject(new RpcError(result.code || 'UNKNOWN', result.error || 'Unknown error'));
 				}
