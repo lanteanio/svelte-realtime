@@ -107,14 +107,15 @@ p.log.step('Configuring svelte-realtime');
 writeFileSync(
 	join(dest, 'svelte.config.js'),
 	`import adapter from 'svelte-adapter-uws';
-import { vitePreprocess } from '@sveltejs/kit/vite';
 
-export default {
+/** @type {import('@sveltejs/kit').Config} */
+const config = {
 \tkit: {
 \t\tadapter: adapter({ websocket: true })
-\t},
-\tpreprocess: [vitePreprocess()]
+\t}
 };
+
+export default config;
 `
 );
 
