@@ -83,33 +83,26 @@ if (p.isCancel(template)) {
 const agent = detectAgent(process.env.npm_config_user_agent);
 
 if (template === 'demo') {
-	const s = p.spinner();
-	s.start('Cloning demo repository');
+	p.log.step('Cloning demo repository');
 	run(`git clone ${DEMO_REPO} "${name}"`);
-	s.stop('Cloned.');
 
-	s.start('Installing dependencies');
+	p.log.step('Installing dependencies');
 	run(`${agent} install`, dest);
-	s.stop('Installed.');
 
 	p.outro(`Done. cd ${name} && ${agent} run dev`);
 	process.exit(0);
 }
 
-const s = p.spinner();
+p.log.step('Creating SvelteKit project');
+run(`npx -y sv create "${name}" --template minimal --types ts --no-add-ons --no-install`);
 
-s.start('Creating SvelteKit project');
-run(`npx -y sv create "${name}" --template minimal --types ts`);
-s.stop('Project created.');
-
-s.start('Installing dependencies');
+p.log.step('Installing dependencies');
 const add = agent === 'npm' ? 'install' : 'add';
 run(`${agent} ${add} svelte-adapter-uws svelte-realtime`, dest);
 run(`${agent} ${add} uNetworking/uWebSockets.js#v20.60.0`, dest);
 run(`${agent} ${add} -D ws`, dest);
-s.stop('Dependencies installed.');
 
-s.start('Configuring svelte-realtime');
+p.log.step('Configuring svelte-realtime');
 
 writeFileSync(
 	join(dest, 'svelte.config.js'),
@@ -189,17 +182,22 @@ export const counter = live.stream('count', () => {
 	);
 }
 
-s.stop('Configured.');
+p.log.success('Configured.');
 
 p.outro(`Done. cd ${name} && ${agent} run dev`);
 
 // ---------------------------------------------------------------------------
 
+/** @param {string} cmd @param {string} [cwd] */
 function run(cmd, cwd) {
 	try {
-		execSync(cmd, { cwd, stdio: 'pipe' });
+		execSync(cmd, {
+			cwd,
+			stdio: 'inherit',
+			env: { ...process.env, NODE_ENV: undefined }
+		});
 	} catch (e) {
-		p.cancel(`Command failed: ${cmd}\n${e.stderr || e.message}`);
+		p.cancel(`Command failed: ${cmd}\n${/** @type {any} */ (e).stderr || /** @type {any} */ (e).message}`);
 		process.exit(1);
 	}
 }
