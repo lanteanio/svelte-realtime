@@ -1,6 +1,20 @@
-# svelte-realtime
+<p align="center">
+  <a href="https://svelte-realtime.dev">
+    <img src="https://svelte-realtime.dev/svelte_orange.png" alt="svelte-realtime" width="240" />
+  </a>
+</p>
 
-Realtime RPC and reactive subscriptions for SvelteKit, built on [svelte-adapter-uws](https://github.com/lanteanio/svelte-adapter-uws).
+<h1 align="center">svelte-realtime</h1>
+
+<p align="center">
+  Realtime RPC and reactive subscriptions for SvelteKit, built on <a href="https://github.com/lanteanio/svelte-adapter-uws">svelte-adapter-uws</a>.
+</p>
+
+<p align="center">
+  <a href="https://svelte-realtime.dev">Documentation</a> · <a href="https://svelte-realtime.dev/tutorial">Tutorial</a> · <a href="https://svelte-realtime-demo.lantean.io">Live Demo</a>
+</p>
+
+---
 
 Write server functions. Import them in components. Call them over WebSocket. No boilerplate, no manual pub/sub wiring, no protocol design.
 

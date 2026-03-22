@@ -37,7 +37,7 @@ function _isValidExportName(name, filePath) {
 	if (!_warnedExports.has(warnKey)) {
 		_warnedExports.add(warnKey);
 		console.warn(
-			`[svelte-realtime] ${filePath}: export '${name}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) -- skipped`
+			`[svelte-realtime] ${filePath}: export '${name}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) -- skipped\n  See: https://svti.me/rpc`
 		);
 	}
 	return false;
@@ -131,7 +131,7 @@ function _readStringLiteral(s, start) {
 		if (q === '`' && ch === '$' && s[j + 1] === '{') {
 			const snippet = s.slice(start, Math.min(start + 40, s.length)).replace(/\n/g, '\\n');
 			throw new Error(
-				`[svelte-realtime] Template literal with interpolation cannot be statically analyzed: ${snippet}... -- use a plain string ('...' or "...") instead`
+				`[svelte-realtime] Template literal with interpolation cannot be statically analyzed: ${snippet}... -- use a plain string ('...' or "...") instead\n  See: https://svti.me/vite`
 			);
 		}
 		result += ch;
@@ -265,7 +265,7 @@ export default function svelteRealtime(options) {
 				_warnedExports.clear();
 			if (!existsSync(liveDir)) {
 				console.warn(
-					`[svelte-realtime] Plugin loaded but no live modules found in ${dir}/`
+					`[svelte-realtime] Plugin loaded but no live modules found in ${dir}/\n  See: https://svti.me/start`
 				);
 			} else {
 				if (typedImports) {
@@ -756,12 +756,12 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		if (name.startsWith('_')) {
 			// Reserved names starting with _ (except _guard)
 			console.warn(
-				`[svelte-realtime] ${dir}/${modulePath} exports '${name}' starting with _ -- reserved for internal use`
+				`[svelte-realtime] ${dir}/${modulePath} exports '${name}' starting with _ -- reserved for internal use\n  See: https://svti.me/rpc`
 			);
 			continue;
 		}
 		console.warn(
-			`[svelte-realtime] ${dir}/${modulePath} exports '${name}' which is not wrapped in live() -- it won't be callable from the client. Did you forget live()?`
+			`[svelte-realtime] ${dir}/${modulePath} exports '${name}' which is not wrapped in live() -- it won't be callable from the client. Did you forget live()?\n  See: https://svti.me/rpc`
 		);
 	}
 
@@ -905,7 +905,7 @@ function _extractTopLevelKeys(body) {
 					if (/^[a-zA-Z0-9_]+$/.test(keyName)) {
 						keys.push(keyName);
 					} else if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-						console.warn(`[svelte-realtime] Action name '${keyName}' contains characters not allowed in RPC paths -- skipped`);
+						console.warn(`[svelte-realtime] Action name '${keyName}' contains characters not allowed in RPC paths -- skipped\n  See: https://svti.me/rooms`);
 					}
 					i = closeIdx + 1 + afterClose[0].length;
 					// If the match ended with '(' (quoted method shorthand), track depth
@@ -929,7 +929,7 @@ function _extractTopLevelKeys(body) {
 				if (/^[a-zA-Z0-9_]+$/.test(m[1])) {
 					keys.push(m[1]);
 				} else if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-					console.warn(`[svelte-realtime] Action name '${m[1]}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) -- skipped`);
+					console.warn(`[svelte-realtime] Action name '${m[1]}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) -- skipped\n  See: https://svti.me/rooms`);
 				}
 				i += m[0].length;
 				// If the match ended with '(' (method shorthand), account for the
@@ -1321,12 +1321,12 @@ function _generateRegistry(liveDir, dir) {
 				const topic = topicMatch[1];
 				if (topic.startsWith('__')) {
 					throw new Error(
-						`[svelte-realtime] ${dir}/${rel} uses reserved topic '${topic}' -- topics starting with __ are reserved for internal use`
+						`[svelte-realtime] ${dir}/${rel} uses reserved topic '${topic}' -- topics starting with __ are reserved for internal use\n  See: https://svti.me/streams`
 					);
 				}
 				if (seenTopics.has(topic)) {
 					throw new Error(
-						`[svelte-realtime] Duplicate stream topic '${topic}' in ${dir}/${rel} -- each topic must be unique across all modules`
+						`[svelte-realtime] Duplicate stream topic '${topic}' in ${dir}/${rel} -- each topic must be unique across all modules\n  See: https://svti.me/streams`
 					);
 				}
 				seenTopics.add(topic);
@@ -1482,7 +1482,8 @@ function _checkHooksFile(root, liveDir, dir) {
 			`WebSocket RPC will not work without it.\n` +
 			`  Create src/hooks.ws.js with at minimum:\n` +
 			`    export { message } from 'svelte-realtime/server';\n` +
-			`    export function upgrade() { return {}; }`
+			`    export function upgrade() { return {}; }\n` +
+			`  See: https://svti.me/hooks`
 		);
 		return;
 	}
@@ -1498,7 +1499,8 @@ function _checkHooksFile(root, liveDir, dir) {
 		console.warn(
 			`[svelte-realtime] ${name} exists but does not export a \`message\` handler -- ` +
 			`WebSocket RPC calls from ${dir}/ will go unhandled.\n` +
-			`  Add: export { message } from 'svelte-realtime/server';`
+			`  Add: export { message } from 'svelte-realtime/server';\n` +
+			`  See: https://svti.me/hooks`
 		);
 	}
 }
@@ -2267,7 +2269,7 @@ async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 	try {
 		serverMod = await server.ssrLoadModule('svelte-realtime/server');
 	} catch {
-		console.error('[svelte-realtime] HMR failed: could not load svelte-realtime/server');
+		console.error('[svelte-realtime] HMR failed: could not load svelte-realtime/server\n  See: https://svti.me/vite');
 		return;
 	}
 

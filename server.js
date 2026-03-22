@@ -354,11 +354,11 @@ export function live(fn) {
  */
 live.stream = function stream(topic, initFn, options) {
 	if (typeof topic === 'string' && topic.startsWith('__')) {
-		throw new Error(`[svelte-realtime] live.stream topic '${topic}' uses reserved prefix '__'`);
+		throw new Error(`[svelte-realtime] live.stream topic '${topic}' uses reserved prefix '__'\n  See: https://svti.me/streams`);
 	}
 	if (typeof topic === 'function') {
 		if (topic.constructor?.name === 'AsyncFunction') {
-			throw new Error(`[svelte-realtime] live.stream topic function must not be async -- topic resolution is synchronous`);
+			throw new Error(`[svelte-realtime] live.stream topic function must not be async -- topic resolution is synchronous\n  See: https://svti.me/streams`);
 		}
 		_tagTopicFn(topic);
 	}
@@ -391,11 +391,11 @@ live.stream = function stream(topic, initFn, options) {
  */
 live.channel = function channel(topic, options) {
 	if (typeof topic === 'string' && topic.startsWith('__')) {
-		throw new Error(`[svelte-realtime] live.channel topic '${topic}' uses reserved prefix '__'`);
+		throw new Error(`[svelte-realtime] live.channel topic '${topic}' uses reserved prefix '__'\n  See: https://svti.me/streams`);
 	}
 	if (typeof topic === 'function') {
 		if (topic.constructor?.name === 'AsyncFunction') {
-			throw new Error(`[svelte-realtime] live.channel topic function must not be async -- topic resolution is synchronous`);
+			throw new Error(`[svelte-realtime] live.channel topic function must not be async -- topic resolution is synchronous\n  See: https://svti.me/streams`);
 		}
 		_tagTopicFn(topic);
 	}
@@ -1082,13 +1082,13 @@ live.room = function room(config) {
 	let _roomArgCount = Math.max(0, topicFn.length - 1);
 	if (config.topicArgs !== undefined) {
 		if (!Number.isInteger(config.topicArgs) || config.topicArgs < 0) {
-			throw new Error(`[svelte-realtime] live.room() topicArgs must be a non-negative integer, got ${config.topicArgs}`);
+			throw new Error(`[svelte-realtime] live.room() topicArgs must be a non-negative integer, got ${config.topicArgs}\n  See: https://svti.me/rooms`);
 		}
 		_roomArgCount = config.topicArgs;
 	} else if (actions) {
 		throw new Error(
 			`[svelte-realtime] live.room() with actions requires 'topicArgs'. ` +
-			`Set topicArgs to the number of room-identifying args (excluding ctx).`
+			`Set topicArgs to the number of room-identifying args (excluding ctx).\n  See: https://svti.me/rooms`
 		);
 	}
 
@@ -1216,7 +1216,7 @@ live.room = function room(config) {
 		for (const [name, fn] of Object.entries(actions)) {
 			if (!_validSegmentRe.test(name)) {
 				if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-					console.warn(`[svelte-realtime] Room action '${name}' contains invalid characters (only a-z, A-Z, 0-9, _ allowed) -- skipped`);
+					console.warn(`[svelte-realtime] Room action '${name}' contains invalid characters (only a-z, A-Z, 0-9, _ allowed) -- skipped\n  See: https://svti.me/rooms`);
 				}
 				continue;
 			}
@@ -1713,7 +1713,7 @@ export async function _tickCron() {
 			try {
 				if (!_cronPlatform) {
 					if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-						console.warn(`[svelte-realtime] Cron '${path}' fired but no platform captured. Call setCronPlatform(platform) in your open hook.`);
+						console.warn(`[svelte-realtime] Cron '${path}' fired but no platform captured. Call setCronPlatform(platform) in your open hook.\n  See: https://svti.me/cron`);
 					}
 					return;
 				}
@@ -1748,7 +1748,7 @@ export async function _tickCron() {
 function _parseCron(expr) {
 	const parts = expr.trim().split(/\s+/);
 	if (parts.length !== 5) {
-		throw new Error(`[svelte-realtime] Invalid cron expression '${expr}' -- expected 5 fields (minute hour day month weekday)`);
+		throw new Error(`[svelte-realtime] Invalid cron expression '${expr}' -- expected 5 fields (minute hour day month weekday)\n  See: https://svti.me/cron`);
 	}
 	return parts.map((field, idx) => _parseCronField(field, idx));
 }
@@ -1772,7 +1772,7 @@ function _parseCronField(field, idx) {
 	if (field.startsWith('*/')) {
 		const step = parseInt(field.slice(2), 10);
 		if (!Number.isFinite(step) || step < 1) {
-			throw new Error(`[svelte-realtime] Invalid cron step '${field}' -- step must be a positive integer`);
+			throw new Error(`[svelte-realtime] Invalid cron step '${field}' -- step must be a positive integer\n  See: https://svti.me/cron`);
 		}
 		return { step };
 	}
@@ -1782,7 +1782,7 @@ function _parseCronField(field, idx) {
 		const a = parseInt(parts[0], 10);
 		const b = parseInt(parts[1], 10);
 		if (!Number.isFinite(a) || !Number.isFinite(b) || a < min || b > max || a > b) {
-			throw new Error(`[svelte-realtime] Invalid cron range '${field}' -- values must be ${min}-${max}`);
+			throw new Error(`[svelte-realtime] Invalid cron range '${field}' -- values must be ${min}-${max}\n  See: https://svti.me/cron`);
 		}
 		const vals = new Set();
 		for (let i = a; i <= b; i++) vals.add(i);
@@ -1793,7 +1793,7 @@ function _parseCronField(field, idx) {
 		const nums = field.split(',').map(s => {
 			const n = parseInt(s, 10);
 			if (!Number.isFinite(n) || n < min || n > max) {
-				throw new Error(`[svelte-realtime] Invalid cron value '${s}' in '${field}' -- must be ${min}-${max}`);
+				throw new Error(`[svelte-realtime] Invalid cron value '${s}' in '${field}' -- must be ${min}-${max}\n  See: https://svti.me/cron`);
 			}
 			return n;
 		});
@@ -1802,7 +1802,7 @@ function _parseCronField(field, idx) {
 
 	const n = parseInt(field, 10);
 	if (!Number.isFinite(n) || n < min || n > max) {
-		throw new Error(`[svelte-realtime] Invalid cron value '${field}' -- must be ${min}-${max}`);
+		throw new Error(`[svelte-realtime] Invalid cron value '${field}' -- must be ${min}-${max}\n  See: https://svti.me/cron`);
 	}
 	return new Set([n]);
 }
@@ -1928,7 +1928,7 @@ export function handleRpc(ws, data, platform, options) {
 				}
 			} catch (err) {
 				if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-					console.warn('[svelte-realtime] Failed to parse binary RPC header:', err);
+					console.warn('[svelte-realtime] Failed to parse binary RPC header:', err, '\n  See: https://svti.me/binary');
 				}
 			}
 		}
@@ -2050,7 +2050,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-			console.warn(`[svelte-realtime] RPC call to '${path}' -- no such live function registered`);
+			console.warn(`[svelte-realtime] RPC call to '${path}' -- no such live function registered\n  See: https://svti.me/rpc`);
 		}
 		_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
 		return { id, ok: false, code: 'NOT_FOUND', error: 'Not found' };
@@ -2188,7 +2188,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 			console.warn(
 				`[svelte-realtime] '${path}' threw a non-LiveError:`,
 				err,
-				'\nUse throw new LiveError(code, message) for client-visible errors. Raw errors are hidden from clients.'
+				'\nUse throw new LiveError(code, message) for client-visible errors. Raw errors are hidden from clients.\n  See: https://svti.me/errors'
 			);
 			console.error(`[svelte-realtime] Error in '${path}':`, err);
 		}
@@ -2415,7 +2415,7 @@ function _migrateItem(item, fromVersion, toVersion, migrateFns) {
 		if (fn) {
 			result = fn(result);
 		} else if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-			console.warn(`[svelte-realtime] Missing migration function for version ${v} -> ${v + 1}`);
+			console.warn(`[svelte-realtime] Missing migration function for version ${v} -> ${v + 1}\n  See: https://svti.me/schema`);
 		}
 	}
 	return result;
@@ -2428,7 +2428,7 @@ function _respond(ws, platform, correlationId, payload) {
 		if ((Array.isArray(data) && data.length > 100) || (typeof data === 'string' && data.length > 12000)) {
 			console.warn(
 				`[svelte-realtime] RPC response for '${correlationId}' contains ${data.length} items -- ` +
-				'large responses may exceed maxPayloadLength (16KB). Increase maxPayloadLength in adapter config if needed.'
+				'large responses may exceed maxPayloadLength (16KB). Increase maxPayloadLength in adapter config if needed.\n  See: https://svti.me/adapter-config'
 			);
 		}
 	}

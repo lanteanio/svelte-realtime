@@ -1503,7 +1503,7 @@ function _checkArgs(path, args) {
 		const t = typeof arg;
 		if (t === 'function' || t === 'symbol' || t === 'bigint' || t === 'undefined') {
 			console.warn(
-				`[svelte-realtime] RPC '${path}' called with non-JSON-serializable argument at index ${i} (${t}) -- this will be lost during transmission`
+				`[svelte-realtime] RPC '${path}' called with non-JSON-serializable argument at index ${i} (${t}) -- this will be lost during transmission\n  See: https://svti.me/rpc`
 			);
 		}
 	}
@@ -1644,10 +1644,10 @@ export function combine(...args) {
 	const sources = args;
 
 	if (typeof fn !== 'function') {
-		throw new Error('combine() requires a combining function as the last argument');
+		throw new Error('combine() requires a combining function as the last argument\n  See: https://svti.me/client');
 	}
 	if (sources.length < 2) {
-		throw new Error('combine() requires at least 2 source stores');
+		throw new Error('combine() requires at least 2 source stores\n  See: https://svti.me/client');
 	}
 
 	const values = new Array(sources.length);
