@@ -1,4 +1,5 @@
 import type { Readable } from 'svelte/store';
+import type { WSEvent } from 'svelte-adapter-uws/client';
 
 /**
  * Typed error for RPC failures.
@@ -237,3 +238,23 @@ export const __devtools: {
 	streams: Map<string, { path: string; topic: string | null; subCount: number }>;
 	pending: Map<string, { path: string; args: any[]; startTime: number }>;
 } | null;
+
+/**
+ * Reactive derived topic subscription that auto-switches when a source store changes.
+ * Re-exported from `svelte-adapter-uws/client`.
+ *
+ * @param topicFn - Function that computes the topic from the store value
+ * @param store - Readable store whose value drives the topic
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { onDerived } from 'svelte-realtime/client';
+ *   const messages = onDerived((id) => `room:${id}`, roomId);
+ * </script>
+ * ```
+ */
+export function onDerived<T = unknown>(
+	topicFn: (value: T) => string,
+	store: Readable<T>
+): Readable<WSEvent | null>;

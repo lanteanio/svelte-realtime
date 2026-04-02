@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
-let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal;
+let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived;
 let topicCallbacks;
 let statusCallbacks;
 let sendQueuedFn;
@@ -60,6 +60,28 @@ beforeEach(async () => {
 				};
 			}
 		}),
+		onDerived: (topicFn, store) => {
+			let currentTopic = null;
+			let unsub = null;
+			const subs = new Set();
+			const derivedStore = {
+				subscribe(fn) {
+					subs.add(fn);
+					fn(null);
+					if (!unsub) {
+						unsub = store.subscribe((val) => {
+							currentTopic = topicFn(val);
+						});
+					}
+					return () => {
+						subs.delete(fn);
+						if (subs.size === 0 && unsub) { unsub(); unsub = null; }
+					};
+				},
+				_getCurrentTopic() { return currentTopic; }
+			};
+			return derivedStore;
+		},
 		status: {
 			subscribe: (fn) => {
 				statusCallbacks.add(fn);
@@ -89,6 +111,7 @@ beforeEach(async () => {
 	configure = mod.configure;
 	combine = mod.combine;
 	onSignal = mod.onSignal;
+	onDerived = mod.onDerived;
 });
 
 // -- __rpc (Finding 1 regression) ---------------------------------------------
@@ -1793,5 +1816,50 @@ describe('batched stream subscribe responses', () => {
 
 		unsub1();
 		unsub2();
+	});
+});
+
+// -- onDerived re-export ------------------------------------------------------
+
+describe('onDerived()', () => {
+	it('is re-exported from the adapter client', () => {
+		expect(typeof onDerived).toBe('function');
+	});
+
+	it('returns a subscribable store that tracks the source store topic', () => {
+		const sourceSubs = new Set();
+		const sourceStore = {
+			subscribe(fn) { sourceSubs.add(fn); fn('room-42'); return () => sourceSubs.delete(fn); }
+		};
+
+		const derived = onDerived((id) => `chat:${id}`, sourceStore);
+		expect(typeof derived.subscribe).toBe('function');
+
+		const values = [];
+		const unsub = derived.subscribe((v) => values.push(v));
+		expect(values).toContain(null);
+		expect(derived._getCurrentTopic()).toBe('chat:room-42');
+		unsub();
+	});
+
+	it('switches topic when source store value changes', () => {
+		const sourceSubs = new Set();
+		let currentVal = 'a';
+		const sourceStore = {
+			subscribe(fn) {
+				sourceSubs.add(fn);
+				fn(currentVal);
+				return () => sourceSubs.delete(fn);
+			}
+		};
+
+		const derived = onDerived((id) => `room:${id}`, sourceStore);
+		const unsub = derived.subscribe(() => {});
+		expect(derived._getCurrentTopic()).toBe('room:a');
+
+		currentVal = 'b';
+		for (const fn of sourceSubs) fn('b');
+		expect(derived._getCurrentTopic()).toBe('room:b');
+		unsub();
 	});
 });

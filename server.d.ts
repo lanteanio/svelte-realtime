@@ -530,6 +530,43 @@ export namespace live {
 	function webhook(topic: string, config: WebhookConfig): WebhookHandler;
 
 	/**
+	 * Opt-in Prometheus metrics integration.
+	 * Accepts a MetricsRegistry from `svelte-adapter-uws-extensions/prometheus`
+	 * and instruments RPC calls, stream subscriptions, and cron executions.
+	 *
+	 * Zero overhead if never called.
+	 *
+	 * @param registry - A MetricsRegistry instance with counter(), histogram(), gauge()
+	 *
+	 * @example
+	 * ```js
+	 * import { createRegistry } from 'svelte-adapter-uws-extensions/prometheus';
+	 * live.metrics(createRegistry());
+	 * ```
+	 */
+	function metrics(registry: any): void;
+
+	/**
+	 * Wrap a stream initFn call with a circuit breaker.
+	 * When the breaker is open, returns the fallback value or throws SERVICE_UNAVAILABLE.
+	 *
+	 * @param options - Circuit breaker instance and optional fallback
+	 * @param fn - The stream initFn to wrap
+	 *
+	 * @example
+	 * ```js
+	 * export const messages = live.breaker(
+	 *   { breaker: cb, fallback: [] },
+	 *   live.stream('messages', async (ctx) => db.messages.latest(50))
+	 * );
+	 * ```
+	 */
+	function breaker<T extends Function>(
+		options: { breaker: any; fallback?: any },
+		fn: T
+	): T;
+
+	/**
 	 * Declarative access control helpers for subscribe-time gating.
 	 * For per-event filtering, use `pipe.filter()`.
 	 */
@@ -812,29 +849,23 @@ export function _clearCron(): void;
 export function _tickCron(): Promise<void>;
 
 /**
- * Set a global error handler for cron job failures.
- * Without this, cron errors are logged in dev and silently swallowed in production.
+ * Set a global error handler for server-side errors (cron, effects, derived).
+ * Without this, errors are logged in dev and silently swallowed in production.
  *
- * @param handler - Receives the cron path and the thrown error
+ * @param handler - Receives the path and the thrown error
  *
  * @example
  * ```js
- * onCronError((path, error) => {
- *   sentry.captureException(error, { tags: { cron: path } });
+ * onError((path, error) => {
+ *   sentry.captureException(error, { tags: { live: path } });
  * });
  * ```
  */
+export function onError(handler: (path: string, error: unknown) => void): void;
+
+/** @deprecated Use `onError()` instead. */
 export function onCronError(handler: (path: string, error: unknown) => void): void;
 
-/**
- * Handle a WebSocket close event. Fires `onUnsubscribe` lifecycle hooks
- * for stream functions that define them.
- *
- * Re-export from your `hooks.ws.js`:
- * ```js
- * export { close } from 'svelte-realtime/server';
- * ```
- */
 /**
  * Subscribe a WebSocket to its user's signal topic.
  * Call in your `open` hook to enable signal delivery.
@@ -847,6 +878,30 @@ export function onCronError(handler: (path: string, error: unknown) => void): vo
  */
 export function enableSignals(ws: WebSocket<any>, options?: { idField?: string }): void;
 
+/**
+ * Handle a real-time topic unsubscribe event. Fires onUnsubscribe lifecycle
+ * hooks for the stream function that owns the topic.
+ *
+ * Re-export from your `hooks.ws.js`:
+ * ```js
+ * export { unsubscribe } from 'svelte-realtime/server';
+ * ```
+ */
+export function unsubscribe(
+	ws: WebSocket<any>,
+	topic: string,
+	ctx: { platform: Platform }
+): void;
+
+/**
+ * Handle a WebSocket close event. Fires `onUnsubscribe` lifecycle hooks
+ * for stream functions that define them.
+ *
+ * Re-export from your `hooks.ws.js`:
+ * ```js
+ * export { close } from 'svelte-realtime/server';
+ * ```
+ */
 export function close(
 	ws: WebSocket<any>,
 	ctx: { platform: Platform }

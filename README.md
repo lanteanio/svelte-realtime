@@ -1662,17 +1662,19 @@ export const message = createMessage({
 });
 ```
 
-### onCronError hook
+### Standalone onError
 
-For cron jobs, use the standalone `onCronError` function:
+For errors in cron jobs, effects, and derived streams, use the standalone `onError` function:
 
 ```js
-import { onCronError } from 'svelte-realtime/server';
+import { onError } from 'svelte-realtime/server';
 
-onCronError((path, error) => {
-  sentry.captureException(error, { tags: { cron: path } });
+onError((path, error) => {
+  sentry.captureException(error, { tags: { live: path } });
 });
 ```
+
+> `onCronError` still works but is deprecated -- use `onError` instead.
 
 ---
 
@@ -1828,7 +1830,8 @@ Import from `svelte-realtime/server`.
 | `close` | Ready-made close hook (fires onUnsubscribe for remaining topics) |
 | `unsubscribe` | Ready-made unsubscribe hook (fires onUnsubscribe in real time) |
 | `setCronPlatform(platform)` | Capture platform for cron jobs |
-| `onCronError(handler)` | Global cron error handler |
+| `onError(handler)` | Global error handler for cron, effects, and derived |
+| `onCronError(handler)` | Deprecated alias for `onError` |
 | `enableSignals(ws)` | Enable point-to-point signal delivery |
 | `_activateDerived(platform)` | Enable derived stream listeners |
 | `live.metrics(registry)` | Opt-in Prometheus metrics |

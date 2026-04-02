@@ -3302,6 +3302,68 @@ describe('throttle per-entity keying', () => {
 	});
 });
 
+// -- live.metrics() -----------------------------------------------------------
+
+describe('live.metrics()', () => {
+	it('is a function on the live namespace', () => {
+		expect(typeof live.metrics).toBe('function');
+	});
+
+	it('instruments RPC calls with counter and histogram', async () => {
+		const counters = {};
+		const histograms = {};
+		const gauges = {};
+		const registry = {
+			counter(opts) { const vals = []; counters[opts.name] = vals; return { inc(labels) { vals.push(labels); } }; },
+			histogram(opts) { const vals = []; histograms[opts.name] = vals; return { observe(labels, v) { vals.push({ ...labels, v }); } }; },
+			gauge(opts) { const g = { val: 0 }; gauges[opts.name] = g; return { inc() { g.val++; }, dec() { g.val--; } }; }
+		};
+		live.metrics(registry);
+
+		const ws = mockWs({ id: 'metrics-user' });
+		const platform = mockPlatform();
+		const fn = live(async () => 'hello');
+		__register('metrics/echo', fn);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'metrics/echo', id: 'm1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const rpcCounts = counters['svelte_realtime_rpc_total'];
+		expect(rpcCounts.length).toBeGreaterThan(0);
+		expect(rpcCounts.some(l => l.path === 'metrics/echo' && l.status === 'ok')).toBe(true);
+
+		const durations = histograms['svelte_realtime_rpc_duration_seconds'];
+		expect(durations.length).toBeGreaterThan(0);
+		expect(durations.some(l => l.path === 'metrics/echo')).toBe(true);
+
+		// Reset so other tests are not affected
+		live.metrics({ counter: () => ({ inc() {} }), histogram: () => ({ observe() {} }), gauge: () => ({ inc() {}, dec() {} }) });
+	});
+
+	it('increments stream gauge on subscribe', async () => {
+		let gaugeVal = 0;
+		const registry = {
+			counter() { return { inc() {} }; },
+			histogram() { return { observe() {} }; },
+			gauge() { return { inc() { gaugeVal++; }, dec() { gaugeVal--; } }; }
+		};
+		live.metrics(registry);
+
+		const ws = mockWs({ id: 'metrics-stream-user' });
+		const platform = mockPlatform();
+		const stream = live.stream('metrics-items', async () => []);
+		__register('metrics/items', stream);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'metrics/items', id: 'ms1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(gaugeVal).toBeGreaterThanOrEqual(1);
+
+		// Reset
+		live.metrics({ counter: () => ({ inc() {} }), histogram: () => ({ observe() {} }), gauge: () => ({ inc() {}, dec() {} }) });
+	});
+});
+
 // -- onError / onCronError alias ----------------------------------------------
 
 describe('onError()', () => {
