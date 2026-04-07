@@ -968,6 +968,7 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		expect(code).toContain("import { readable } from 'svelte/store'");
 		expect(code).toContain("import { __directCall } from 'svelte-realtime/server'");
 		expect(code).toContain("const _messages = readable(undefined)");
+		expect(code).toContain("_messages.hydrate = (d) => readable(d)");
 		expect(code).toContain('_messages.load = (platform, options) => __directCall("chat/messages"');
 		expect(code).toContain("export { _messages as messages }");
 	});
@@ -984,7 +985,7 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 		const code = plugin.load('\0live:board', { ssr: true });
 
 		expect(code).toContain("import { readable } from 'svelte/store'");
-		expect(code).toContain("const _notes = (...args) => readable(undefined)");
+		expect(code).toContain("const _notes = (...args) => { const s = readable(undefined); s.hydrate = (d) => readable(d); return s; }");
 		expect(code).toContain('_notes.load = (platform, options) => __directCall("board/notes"');
 		expect(code).toContain("export { _notes as notes }");
 	});
@@ -1002,6 +1003,34 @@ export const doThing = live(async (ctx) => {});
 
 		expect(code).toContain('export * from ');
 		expect(code).not.toContain('__directCall');
+	});
+
+	it('static stream SSR stub has .hydrate() that returns readable with data', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const messages = live.stream('messages', async (ctx) => [], { merge: 'crud', key: 'id' });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:chat', { ssr: true });
+
+		expect(code).toContain("_messages.hydrate = (d) => readable(d)");
+	});
+
+	it('dynamic stream SSR stub factory returns store with .hydrate()', () => {
+		setup({
+			'board.js': `
+import { live } from 'svelte-realtime/server';
+export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) => [], { merge: 'crud', key: 'id' });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:board', { ssr: true });
+
+		expect(code).toContain("s.hydrate = (d) => readable(d)");
 	});
 });
 

@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.9] - 2026-04-07
+
+### Fixed
+
+- SSR stubs for stream exports now include a `.hydrate()` method. Previously, calling `messages.hydrate(data)` or `stats(orgId).hydrate(data)` during server-side rendering crashed because the SSR stub was a bare `readable(undefined)` with no `.hydrate()` method.
+
 ## [0.4.8] - 2026-04-07
 
 ### Fixed

@@ -552,13 +552,14 @@ function _generateSsrStubs(filePath, modulePath) {
 
 	for (const name of storeNames) {
 		if (dynamicNames.has(name)) {
-			// Dynamic stream: return a readable store from a function so name(args) works during SSR
-			lines.push(`const _${name} = (...args) => readable(undefined);`);
+			// Dynamic stream: factory returns a readable with .hydrate() for SSR rendering
+			lines.push(`const _${name} = (...args) => { const s = readable(undefined); s.hydrate = (d) => readable(d); return s; };`);
 			lines.push(`_${name}.load = (platform, options) => __directCall(${safeModulePath(name)}, options?.args || [], platform, options);`);
 			lines.push(`export { _${name} as ${name} };`);
 		} else {
-			// Static stream: plain readable store
+			// Static stream: readable with .hydrate() for SSR rendering
 			lines.push(`const _${name} = readable(undefined);`);
+			lines.push(`_${name}.hydrate = (d) => readable(d);`);
 			lines.push(`_${name}.load = (platform, options) => __directCall(${safeModulePath(name)}, options?.args || [], platform, options);`);
 			lines.push(`export { _${name} as ${name} };`);
 		}
