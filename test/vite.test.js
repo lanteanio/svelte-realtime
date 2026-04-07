@@ -527,7 +527,7 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		expect(content).toContain('sendMessage');
 		expect(content).toContain('(...args: any[]) => Promise<any>');
 		expect(content).toContain('messages');
-		expect(content).toContain('Readable<any>');
+		expect(content).toContain('StreamStore<any>');
 	});
 
 	it('generates typed declarations for TS files (strips ctx param)', () => {
@@ -703,7 +703,7 @@ export const items = live.stream('items', async (ctx: LiveContext): Promise<Item
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
 		expect(content).toContain("declare module '$live/items'");
-		expect(content).toContain('Readable<Item[] | undefined | { error: RpcError }>');
+		expect(content).toContain('StreamStore<Item[] | undefined | { error: RpcError }>');
 	});
 
 	it('handles mixed RPC and stream exports', () => {
@@ -721,7 +721,7 @@ export const cards = live.stream('cards', async (ctx) => [], { merge: 'crud' });
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
 		expect(content).toContain('addCard');
 		expect(content).toContain('cards');
-		expect(content).toContain('Readable');
+		expect(content).toContain('StreamStore');
 	});
 
 	it('handles multiple modules', () => {
@@ -762,6 +762,89 @@ export const join = live(async (ctx) => {});
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
 		expect(content).toContain("declare module '$live/rooms/lobby'");
+	});
+
+	it('imports StreamStore from svelte-realtime/client for stream exports', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const messages = live.stream('messages', async (ctx) => [], { merge: 'crud', key: 'id' });
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("StreamStore");
+		expect(content).toContain("from 'svelte-realtime/client'");
+		expect(content).not.toContain("from 'svelte/store'");
+	});
+
+	it('generates .load() type on static stream declarations', () => {
+		setup({
+			'items.ts': `
+import { live } from 'svelte-realtime/server';
+export const items = live.stream('items', async (ctx): Promise<Item[]> => [], { merge: 'crud', key: 'id' });
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain('StreamStore<Item[] | undefined | { error: RpcError }>');
+		expect(content).toContain('load(platform: any, options?: { args?: any[] }): Promise<Item[]>');
+	});
+
+	it('generates .load() type on dynamic stream declarations', () => {
+		setup({
+			'board.ts': `
+import { live } from 'svelte-realtime/server';
+export const notes = live.stream(
+  (ctx, boardId: string) => 'notes:' + boardId,
+  async (ctx, boardId: string): Promise<Note[]> => [],
+  { merge: 'crud', key: 'id' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain('(boardId: string) => StreamStore<Note[] | undefined | { error: RpcError }>');
+		expect(content).toContain('load(platform: any, options?: { args?: any[] }): Promise<Note[]>');
+	});
+
+	it('generates .load() type on JS stream declarations', () => {
+		setup({
+			'feed.js': `
+import { live } from 'svelte-realtime/server';
+export const feed = live.stream('feed', async (ctx) => [], { merge: 'latest' });
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain('StreamStore<any> & { load(platform: any, options?: { args?: any[] }): Promise<any> }');
+	});
+
+	it('generates .load() type on channel declarations', () => {
+		setup({
+			'events.js': `
+import { live } from 'svelte-realtime/server';
+export const notifications = live.channel('notifications');
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain('StreamStore<any> & { load(platform: any');
 	});
 });
 

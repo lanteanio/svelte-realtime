@@ -83,26 +83,26 @@ export interface StreamOptions {
 	 * Called when a client subscribes to this stream.
 	 * Receives the context and resolved topic string.
 	 */
-	onSubscribe?(ctx: LiveContext, topic: string): void | Promise<void>;
+	onSubscribe?(ctx: LiveContext<any>, topic: string): void | Promise<void>;
 
 	/**
 	 * Called when a client disconnects from this stream.
 	 * Fires for both static and dynamic topics.
 	 */
-	onUnsubscribe?(ctx: LiveContext, topic: string): void | Promise<void>;
+	onUnsubscribe?(ctx: LiveContext<any>, topic: string): void | Promise<void>;
 
 	/**
 	 * Subscribe-time access predicate. Checked once when a client subscribes.
 	 * Return `false` to deny the subscription with an "Access denied" error.
 	 * For per-event filtering, use `pipe.filter()`.
 	 */
-	filter?(ctx: LiveContext): boolean;
+	filter?(ctx: LiveContext<any>): boolean;
 
 	/**
 	 * Subscribe-time access predicate (alias for `filter`).
 	 * Use `live.access` helpers to build predicates.
 	 */
-	access?(ctx: LiveContext): boolean;
+	access?(ctx: LiveContext<any>): boolean;
 
 	/**
 	 * Schema version number. Increment when the data shape changes.
@@ -143,7 +143,7 @@ export interface HandleRpcOptions {
 	 * Called when an RPC handler throws a non-LiveError.
 	 * Use for error reporting (Sentry, logging, etc.).
 	 */
-	onError?(path: string, error: unknown, ctx: LiveContext): void;
+	onError?(path: string, error: unknown, ctx: LiveContext<any>): void;
 }
 
 /**
@@ -171,7 +171,7 @@ export interface CreateMessageOptions {
 	 * Called when an RPC handler throws a non-LiveError.
 	 * Use for error reporting (Sentry, logging, etc.).
 	 */
-	onError?(path: string, error: unknown, ctx: LiveContext): void;
+	onError?(path: string, error: unknown, ctx: LiveContext<any>): void;
 
 	/**
 	 * Called when a message is not an RPC request.
@@ -195,7 +195,7 @@ export interface CreateMessageOptions {
  * });
  * ```
  */
-export function live<T extends (ctx: LiveContext, ...args: any[]) => any>(fn: T): T;
+export function live<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(fn: T): T;
 
 export namespace live {
 	/**
@@ -212,7 +212,7 @@ export namespace live {
 	 * }, { merge: 'crud', key: 'id', prepend: true });
 	 * ```
 	 */
-	function stream<T extends (ctx: LiveContext, ...args: any[]) => any>(
+	function stream<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
 		topic: string,
 		initFn: T,
 		options?: StreamOptions
@@ -237,8 +237,8 @@ export namespace live {
 	 * );
 	 * ```
 	 */
-	function stream<T extends (ctx: LiveContext, ...args: any[]) => any>(
-		topicFn: (ctx: LiveContext, ...args: any[]) => string,
+	function stream<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
+		topicFn: (ctx: LiveContext<any>, ...args: any[]) => string,
 		initFn: T,
 		options?: StreamOptions
 	): T;
@@ -275,7 +275,7 @@ export namespace live {
 	 * ```
 	 */
 	function channel(
-		topicFn: (ctx: LiveContext, ...args: any[]) => string,
+		topicFn: (ctx: LiveContext<any>, ...args: any[]) => string,
 		options?: { merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor'; key?: string; max?: number }
 	): Function;
 
@@ -293,7 +293,7 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function binary<T extends (ctx: LiveContext, buffer: ArrayBuffer, ...args: any[]) => any>(
+	function binary<T extends (ctx: LiveContext<any>, buffer: ArrayBuffer, ...args: any[]) => any>(
 		fn: T
 	): T;
 
@@ -314,7 +314,7 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function middleware(fn: (ctx: LiveContext, next: () => Promise<any>) => Promise<any>): void;
+	function middleware(fn: (ctx: LiveContext<any>, next: () => Promise<any>) => Promise<any>): void;
 
 	/**
 	 * Wrap a stream with a server-side gate predicate.
@@ -333,7 +333,7 @@ export namespace live {
 	 * ```
 	 */
 	function gate<T extends Function>(
-		predicate: (ctx: LiveContext, ...args: any[]) => boolean,
+		predicate: (ctx: LiveContext<any>, ...args: any[]) => boolean,
 		fn: T
 	): T;
 
@@ -353,14 +353,14 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function rateLimit<T extends (ctx: LiveContext, ...args: any[]) => any>(
+	function rateLimit<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
 		config: {
 			/** Maximum number of calls allowed within the window. */
 			points: number;
 			/** Time window in milliseconds. */
 			window: number;
 			/** Custom key function. Defaults to `ctx.user.id`. */
-			key?(ctx: LiveContext): string;
+			key?(ctx: LiveContext<any>): string;
 		},
 		fn: T
 	): T;
@@ -381,7 +381,7 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function validated<S, T extends (ctx: LiveContext, input: any, ...args: any[]) => any>(
+	function validated<S, T extends (ctx: LiveContext<any>, input: any, ...args: any[]) => any>(
 		schema: S,
 		fn: T
 	): T;
@@ -572,15 +572,15 @@ export namespace live {
 	 */
 	const access: {
 		/** Only allow subscription if `ctx.user[field]` is present. Default field: `'id'`. */
-		owner(field?: string): (ctx: LiveContext) => boolean;
+		owner(field?: string): (ctx: LiveContext<any>) => boolean;
 		/** Role-based access: map role names to boolean or predicate. */
-		role(map: Record<string, true | ((ctx: LiveContext) => boolean)>): (ctx: LiveContext) => boolean;
+		role(map: Record<string, true | ((ctx: LiveContext<any>) => boolean)>): (ctx: LiveContext<any>) => boolean;
 		/** Only allow subscription if `ctx.user.teamId` is present. */
-		team(): (ctx: LiveContext) => boolean;
+		team(): (ctx: LiveContext<any>) => boolean;
 		/** OR logic: any predicate returning true allows the subscription. */
-		any(...predicates: Array<(ctx: LiveContext) => boolean>): (ctx: LiveContext) => boolean;
+		any(...predicates: Array<(ctx: LiveContext<any>) => boolean>): (ctx: LiveContext<any>) => boolean;
 		/** AND logic: all predicates must return true. */
-		all(...predicates: Array<(ctx: LiveContext) => boolean>): (ctx: LiveContext) => boolean;
+		all(...predicates: Array<(ctx: LiveContext<any>) => boolean>): (ctx: LiveContext<any>) => boolean;
 	};
 }
 
@@ -589,21 +589,21 @@ export namespace live {
  */
 export interface RoomConfig {
 	/** Function that computes the room topic from context and args. */
-	topic: (ctx: LiveContext, ...args: any[]) => string;
+	topic: (ctx: LiveContext<any>, ...args: any[]) => string;
 	/** Function that returns initial data for the room. */
-	init: (ctx: LiveContext, ...args: any[]) => Promise<any>;
+	init: (ctx: LiveContext<any>, ...args: any[]) => Promise<any>;
 	/** Function that returns presence data for the connecting user. */
-	presence?: (ctx: LiveContext) => any;
+	presence?: (ctx: LiveContext<any>) => any;
 	/** Enable cursor tracking. Pass `true` or `{ throttle: ms }`. */
 	cursors?: boolean | { throttle?: number };
 	/** Room-scoped RPC actions. */
-	actions?: Record<string, (ctx: LiveContext, ...args: any[]) => any>;
+	actions?: Record<string, (ctx: LiveContext<any>, ...args: any[]) => any>;
 	/** Guard function run before data access and actions. */
-	guard?: (ctx: LiveContext, ...args: any[]) => void | Promise<void>;
+	guard?: (ctx: LiveContext<any>, ...args: any[]) => void | Promise<void>;
 	/** Called when a user joins the room. */
-	onJoin?: (ctx: LiveContext, ...args: any[]) => void | Promise<void>;
+	onJoin?: (ctx: LiveContext<any>, ...args: any[]) => void | Promise<void>;
 	/** Called when a user leaves the room. */
-	onLeave?: (ctx: LiveContext, topic: string) => void | Promise<void>;
+	onLeave?: (ctx: LiveContext<any>, topic: string) => void | Promise<void>;
 	/** Merge strategy for the data stream. @default 'crud' */
 	merge?: string;
 	/** Key field for the data stream. @default 'id' */
@@ -649,8 +649,8 @@ export interface WebhookHandler {
  * A stream transform step created by `pipe.filter`, `pipe.sort`, etc.
  */
 export interface PipeTransform {
-	transformInit?(data: any[], ctx: LiveContext): any[] | Promise<any[]>;
-	transformEvent?(ctx: LiveContext, event: string, data: any): boolean;
+	transformInit?(data: any[], ctx: LiveContext<any>): any[] | Promise<any[]>;
+	transformEvent?(ctx: LiveContext<any>, event: string, data: any): boolean;
 }
 
 /**
@@ -672,7 +672,7 @@ export interface PipeTransform {
 export function pipe<T extends Function>(stream: T, ...transforms: PipeTransform[]): T;
 export namespace pipe {
 	/** Filter items from initial data and drop non-matching live events. */
-	function filter(predicate: (ctx: LiveContext, item: any) => boolean): PipeTransform;
+	function filter(predicate: (ctx: LiveContext<any>, item: any) => boolean): PipeTransform;
 	/** Sort initial data by a field. */
 	function sort(field: string, direction?: 'asc' | 'desc'): PipeTransform;
 	/** Cap initial data to N items. */
@@ -692,8 +692,8 @@ export namespace pipe {
  * ```
  */
 export function guard(
-	...fns: Array<(ctx: LiveContext) => void | Promise<void>>
-): (ctx: LiveContext) => void | Promise<void>;
+	...fns: Array<(ctx: LiveContext<any>) => void | Promise<void>>
+): (ctx: LiveContext<any>) => void | Promise<void>;
 
 /**
  * Typed error that propagates `code` and `message` to the client.

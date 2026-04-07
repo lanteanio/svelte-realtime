@@ -1551,7 +1551,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 		const exports = [];
 		/** @type {Set<string>} */
 		const handledNames = new Set();
-		let needsReadable = false;
+		let needsStreamStore = false;
 		let needsRpcError = false;
 
 		// Detect live() exports
@@ -1597,23 +1597,25 @@ function _generateTypeDeclarations(liveDir, dir) {
 		while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
-			needsReadable = true;
+			needsStreamStore = true;
 			needsRpcError = true;
 			const isDynamic = _isDynamicExport(source, name, 'live\\.stream');
 			if (isTS) {
 				const returnType = _extractStreamReturnType(source, name);
-				const storeType = `Readable<${returnType} | undefined | { error: RpcError }>`;
+				const storeType = `StreamStore<${returnType} | undefined | { error: RpcError }>`;
+				const loadSig = `{ load(platform: any, options?: { args?: any[] }): Promise<${returnType}> }`;
 				if (isDynamic) {
 					const factoryParams = _extractDynamicFactoryParams(source, name, 'live\\.stream');
-					exports.push(`  export const ${name}: ${factoryParams} => ${storeType};`);
+					exports.push(`  export const ${name}: (${factoryParams} => ${storeType}) & ${loadSig};`);
 				} else {
-					exports.push(`  export const ${name}: ${storeType};`);
+					exports.push(`  export const ${name}: ${storeType} & ${loadSig};`);
 				}
 			} else {
+				const loadSig = `{ load(platform: any, options?: { args?: any[] }): Promise<any> }`;
 				if (isDynamic) {
-					exports.push(`  export const ${name}: (...args: any[]) => Readable<any>;`);
+					exports.push(`  export const ${name}: ((...args: any[]) => StreamStore<any>) & ${loadSig};`);
 				} else {
-					exports.push(`  export const ${name}: Readable<any>;`);
+					exports.push(`  export const ${name}: StreamStore<any> & ${loadSig};`);
 				}
 			}
 		}
@@ -1624,17 +1626,18 @@ function _generateTypeDeclarations(liveDir, dir) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
-				needsReadable = true;
+				needsStreamStore = true;
 				const isDynamic = _isDynamicExport(source, name, 'live\\.channel');
+				const loadSig = `{ load(platform: any, options?: { args?: any[] }): Promise<any> }`;
 				if (isDynamic) {
 					if (isTS) {
 						const factoryParams = _extractDynamicFactoryParams(source, name, 'live\\.channel');
-						exports.push(`  export const ${name}: ${factoryParams} => Readable<any>;`);
+						exports.push(`  export const ${name}: (${factoryParams} => StreamStore<any>) & ${loadSig};`);
 					} else {
-						exports.push(`  export const ${name}: (...args: any[]) => Readable<any>;`);
+						exports.push(`  export const ${name}: ((...args: any[]) => StreamStore<any>) & ${loadSig};`);
 					}
 				} else {
-					exports.push(`  export const ${name}: Readable<any>;`);
+					exports.push(`  export const ${name}: StreamStore<any> & ${loadSig};`);
 				}
 			}
 		}
@@ -1645,8 +1648,8 @@ function _generateTypeDeclarations(liveDir, dir) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
-				needsReadable = true;
-				exports.push(`  export const ${name}: Readable<any>;`);
+				needsStreamStore = true;
+				exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: { args?: any[] }): Promise<any> };`);
 			}
 		}
 
@@ -1656,8 +1659,8 @@ function _generateTypeDeclarations(liveDir, dir) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
-				needsReadable = true;
-				exports.push(`  export const ${name}: Readable<any>;`);
+				needsStreamStore = true;
+				exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: { args?: any[] }): Promise<any> };`);
 			}
 		}
 
@@ -1692,8 +1695,8 @@ function _generateTypeDeclarations(liveDir, dir) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
-				needsReadable = true;
-				exports.push(`  export const ${name}: { data: (...args: any[]) => Readable<any>, presence?: (...args: any[]) => Readable<any>, cursors?: (...args: any[]) => Readable<any>, [action: string]: (...args: any[]) => Promise<any> | ((...args: any[]) => Readable<any>) };`);
+				needsStreamStore = true;
+				exports.push(`  export const ${name}: { data: (...args: any[]) => StreamStore<any>, presence?: (...args: any[]) => StreamStore<any>, cursors?: (...args: any[]) => StreamStore<any>, [action: string]: (...args: any[]) => Promise<any> | ((...args: any[]) => StreamStore<any>) };`);
 			}
 		}
 
@@ -1702,13 +1705,13 @@ function _generateTypeDeclarations(liveDir, dir) {
 
 		if (exports.length > 0) {
 			declarations.push(`declare module '$live/${rel}' {`);
-			if (needsReadable) {
-				declarations.push("  import type { Readable } from 'svelte/store';");
+			if (needsStreamStore || needsRpcError) {
+				const clientImports = [];
+				if (needsStreamStore) clientImports.push('StreamStore');
+				if (needsRpcError) clientImports.push('RpcError');
+				declarations.push(`  import type { ${clientImports.join(', ')} } from 'svelte-realtime/client';`);
 			}
-			if (needsRpcError) {
-				declarations.push("  import type { RpcError } from 'svelte-realtime/client';");
-			}
-			if (needsReadable || needsRpcError) {
+			if (needsStreamStore || needsRpcError) {
 				declarations.push('');
 			}
 			declarations.push(...exports);
