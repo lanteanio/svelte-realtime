@@ -874,9 +874,24 @@ Call `configure()` once at app startup. The hooks fire on state transitions only
 
 | Option | Description |
 |---|---|
+| `url` | Full WebSocket URL for cross-origin or native app usage (e.g. `'wss://api.example.com/ws'`) |
 | `onConnect()` | Called when the WebSocket connection opens after a reconnect |
 | `onDisconnect()` | Called when the WebSocket connection closes |
 | `beforeReconnect()` | Called before each reconnection attempt (can be async) |
+
+### Cross-origin and native app usage
+
+When using svelte-realtime from a client that runs on a different origin (Svelte Native, React Native, or any standalone app), pass the `url` option to point at your SvelteKit backend:
+
+```js
+import { configure } from 'svelte-realtime/client';
+
+configure({
+  url: 'wss://my-sveltekit-app.com/ws'
+});
+```
+
+When `url` is set, the default same-origin WebSocket URL is bypassed entirely. All RPC calls, streams, and pub/sub work the same way. Requires `svelte-adapter-uws` 0.4.8+.
 
 ---
 

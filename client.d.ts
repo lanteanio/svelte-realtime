@@ -157,6 +157,13 @@ export interface OfflineEntry {
 }
 
 export function configure(config: {
+	/**
+	 * Full WebSocket URL to connect to. Enables cross-origin and native app usage
+	 * (Svelte Native, React Native, standalone clients). When set, the default
+	 * same-origin URL is bypassed entirely.
+	 * @example 'wss://my-app.com/ws'
+	 */
+	url?: string;
 	/** Called when the WebSocket connection opens (not on initial connect, only reconnects). */
 	onConnect?(): void;
 	/** Called when the WebSocket connection closes. */

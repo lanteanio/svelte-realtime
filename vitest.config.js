@@ -4,6 +4,7 @@ export default defineConfig({
 	test: {
 		include: ['test/**/*.test.js'],
 		fileParallelism: false,
-		isolate: true
+		isolate: true,
+		reporters: ['verbose']
 	}
 });

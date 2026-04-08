@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.10] - 2026-04-08
+
+### Added
+
+- `configure({ url })` option for cross-origin and native app usage. When set, the client connects to the given WebSocket URL instead of the same-origin default. This enables Svelte Native, React Native, and standalone clients to use a remote SvelteKit backend as their realtime server. Requires `svelte-adapter-uws` 0.4.8+.
+
 ## [0.4.9] - 2026-04-07
 
 ### Fixed

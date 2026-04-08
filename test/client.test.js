@@ -5,6 +5,7 @@ let topicCallbacks;
 let statusCallbacks;
 let sendQueuedFn;
 let readyReject;
+let connectFn;
 
 /**
  * Simulate an RPC response arriving from the server.
@@ -44,11 +45,13 @@ beforeEach(async () => {
 	statusCallbacks = new Set();
 	sendQueuedFn = vi.fn();
 
+	connectFn = vi.fn(() => ({
+		sendQueued: sendQueuedFn,
+		ready: () => new Promise((_resolve, reject) => { readyReject = reject; })
+	}));
+
 	vi.doMock('svelte-adapter-uws/client', () => ({
-		connect: () => ({
-			sendQueued: sendQueuedFn,
-			ready: () => new Promise((_resolve, reject) => { readyReject = reject; })
-		}),
+		connect: connectFn,
 		on: (topic) => ({
 			subscribe: (fn) => {
 				let fns = topicCallbacks.get(topic);
@@ -976,6 +979,21 @@ describe('configure()', () => {
 		simulateStatus('closed');
 
 		expect(disconnected).toBe(true);
+	});
+
+	it('passes url to connect() for cross-origin usage', () => {
+		connectFn.mockClear();
+		configure({ url: 'wss://api.example.com/ws' });
+
+		expect(connectFn).toHaveBeenCalledWith({ url: 'wss://api.example.com/ws' });
+	});
+
+	it('does not call connect() with url when url is not set', () => {
+		connectFn.mockClear();
+		configure({ onConnect() {} });
+
+		const urlCalls = connectFn.mock.calls.filter(c => c[0]?.url);
+		expect(urlCalls).toHaveLength(0);
 	});
 });
 

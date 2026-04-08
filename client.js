@@ -1513,7 +1513,7 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function }} OfflineEntry
  */
 
-/** @type {{ onConnect?: () => void, onDisconnect?: () => void, timeout?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
+/** @type {{ url?: string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
 let _clientConfig = {};
 
 /** @type {boolean} */
@@ -1531,10 +1531,14 @@ let _replayingQueue = false;
 /**
  * Configure client-side connection hooks and offline queue.
  *
- * @param {{ onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * @param {{ url?: string, onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
 	_clientConfig = config;
+
+	if (config.url) {
+		_connect({ url: config.url });
+	}
 
 	if (!_configListenerAttached) {
 		_configListenerAttached = true;
