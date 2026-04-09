@@ -2102,7 +2102,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 			// Channel fast-path
 			if (/** @type {any} */ (fn).__isChannel) {
 				const emptyValue = streamOpts.merge === 'set' ? null : [];
-				return { id, ok: true, data: emptyValue, topic, merge: streamOpts.merge, key: streamOpts.key, max: streamOpts.max };
+				return { id, ok: true, data: emptyValue, topic, merge: streamOpts.merge, key: streamOpts.key, max: streamOpts.max, channel: true };
 			}
 
 			// Delta sync

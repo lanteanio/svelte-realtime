@@ -727,6 +727,187 @@ describe('__stream() hydrate', () => {
 	});
 });
 
+// -- __stream() hydrate + reconnect ------------------------------------------
+
+describe('__stream() hydrate reconnect', () => {
+	it('channel keeps hydrated data instead of overwriting with empty placeholder', async () => {
+		const store = __stream('hydrate/presence', { merge: 'presence' });
+		store.hydrate([{ key: 'u1', name: 'Alice' }]);
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		// Server responds with empty channel placeholder (channel: true)
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [],
+			topic: 'hydrate-presence',
+			merge: 'presence',
+			channel: true
+		});
+
+		// Store should still have the hydrated data, not []
+		const last = values[values.length - 1];
+		expect(last).toEqual([{ key: 'u1', name: 'Alice' }]);
+
+		unsub();
+	});
+
+	it('channel keeps hydrated data on WebSocket reconnect', async () => {
+		const store = __stream('hydrate/cursors', { merge: 'cursor', key: 'userId' });
+		store.hydrate([{ userId: 'u1', x: 10, y: 20 }]);
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, {
+			ok: true,
+			data: [],
+			topic: 'hydrate-cursors',
+			merge: 'cursor',
+			key: 'userId',
+			channel: true
+		});
+
+		// Hydrated value should persist
+		expect(values[values.length - 1]).toEqual([{ userId: 'u1', x: 10, y: 20 }]);
+
+		// Disconnect and reconnect
+		simulateStatus('closed');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent2.id, {
+			ok: true,
+			data: [],
+			topic: 'hydrate-cursors',
+			merge: 'cursor',
+			key: 'userId',
+			channel: true
+		});
+
+		// Still the hydrated data, not empty
+		expect(values[values.length - 1]).toEqual([{ userId: 'u1', x: 10, y: 20 }]);
+
+		unsub();
+	});
+
+	it('channel applies live events on top of hydrated data', async () => {
+		const store = __stream('hydrate/live', { merge: 'presence' });
+		store.hydrate([{ key: 'u1', name: 'Alice' }]);
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [],
+			topic: 'hydrate-live',
+			merge: 'presence',
+			channel: true
+		});
+
+		// Live event arrives on top of hydrated data
+		simulateTopicMessage('hydrate-live', { event: 'join', data: { key: 'u2', name: 'Bob' } });
+
+		const last = values[values.length - 1];
+		expect(last).toEqual([{ key: 'u1', name: 'Alice' }, { key: 'u2', name: 'Bob' }]);
+
+		unsub();
+	});
+
+	it('set-merge channel keeps hydrated value instead of null', async () => {
+		const store = __stream('hydrate/status', { merge: 'set' });
+		store.hydrate({ online: 5, queued: 12 });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: null,
+			topic: 'hydrate-status',
+			merge: 'set',
+			channel: true
+		});
+
+		// Should keep hydrated data, not null
+		expect(values[values.length - 1]).toEqual({ online: 5, queued: 12 });
+
+		unsub();
+	});
+
+	it('non-channel stream still updates with fresh loader data on reconnect', async () => {
+		const store = __stream('hydrate/stats', { merge: 'set' });
+		store.hydrate({ count: 100 });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, {
+			ok: true,
+			data: { count: 105 },
+			topic: 'hydrate-stats',
+			merge: 'set'
+		});
+
+		// Fresh loader data replaces hydrated data
+		expect(values[values.length - 1]).toEqual({ count: 105 });
+
+		// Disconnect and reconnect
+		simulateStatus('closed');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent2.id, {
+			ok: true,
+			data: { count: 110 },
+			topic: 'hydrate-stats',
+			merge: 'set'
+		});
+
+		// Updated again with latest loader data
+		expect(values[values.length - 1]).toEqual({ count: 110 });
+
+		unsub();
+	});
+
+	it('non-hydrated channel still starts with empty data', async () => {
+		const store = __stream('noh/presence', { merge: 'presence' });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [],
+			topic: 'noh-presence',
+			merge: 'presence',
+			channel: true
+		});
+
+		// No hydration, so the empty placeholder is used
+		expect(values[values.length - 1]).toEqual([]);
+
+		unsub();
+	});
+});
+
 // -- __stream() seq tracking (Phase 15) ---------------------------------------
 
 describe('__stream() seq tracking', () => {

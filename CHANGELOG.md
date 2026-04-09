@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.11] - 2026-04-09
+
+### Fixed
+
+- Hydrated channel streams no longer flash to empty on initial subscribe or WebSocket reconnect. Channel responses from the server return an empty placeholder (`null` or `[]`) since they have no loader. Previously this overwrote the hydrated SSR data, causing a visible glitch where derived values briefly dropped to zero or empty before live events arrived. The server now marks channel responses so the client can hold the existing value instead of replacing it.
+
 ## [0.4.10] - 2026-04-08
 
 ### Added

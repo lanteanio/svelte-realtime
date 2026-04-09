@@ -2388,7 +2388,7 @@ describe('live.channel()', () => {
 		expect(ch.__streamTopic({}, 'room1')).toBe('typing:room1');
 	});
 
-	it('responds immediately via handleRpc with empty data', async () => {
+	it('responds immediately via handleRpc with empty data and channel flag', async () => {
 		const ch = live.channel('typing:lobby', { merge: 'presence' });
 		__register('test/typing', ch);
 
@@ -2404,6 +2404,7 @@ describe('live.channel()', () => {
 		expect(platform.sent[0].data.data).toEqual([]);
 		expect(platform.sent[0].data.topic).toBe('typing:lobby');
 		expect(platform.sent[0].data.merge).toBe('presence');
+		expect(platform.sent[0].data.channel).toBe(true);
 		expect(ws._topics.has('typing:lobby')).toBe(true);
 	});
 
@@ -2420,6 +2421,7 @@ describe('live.channel()', () => {
 
 		expect(platform.sent[0].data.data).toBe(null);
 		expect(platform.sent[0].data.merge).toBe('set');
+		expect(platform.sent[0].data.channel).toBe(true);
 	});
 });
 

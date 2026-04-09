@@ -526,8 +526,6 @@ function _createStream(path, options, dynamicArgs) {
 	let subCount = 0;
 	let pendingId = null;
 
-	/** @type {boolean} */
-	let _hydrated = false;
 
 	/** @type {number | null} Last known sequence number for replay */
 	let _lastSeq = null;
@@ -928,6 +926,10 @@ function _createStream(path, options, dynamicArgs) {
 					for (const evt of response.data) {
 						_applyMerge(evt);
 					}
+				} else if (response.channel && currentValue !== undefined) {
+					// Channel fast-path returns an empty placeholder (null or []).
+					// Keep the existing value (hydrated SSR data or previously
+					// accumulated events) so the store never flashes to empty.
 				} else {
 					currentValue = response.data;
 				}
@@ -1223,7 +1225,6 @@ function _createStream(path, options, dynamicArgs) {
 			currentValue = initialData;
 			_rebuildIndex();
 			store.set(currentValue);
-			_hydrated = true;
 			return this;
 		},
 
