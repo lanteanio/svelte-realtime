@@ -845,6 +845,15 @@ describe('handleRpc() path validation', () => {
 		expect(platform.sent[0].data.ok).toBe(true);
 	});
 
+	it('allows hyphenated module names in paths', async () => {
+		const fn = live(async () => 'ok');
+		__register('email-queue/queueStats', fn);
+		const data = toArrayBuffer({ rpc: 'email-queue/queueStats', id: 'pv7', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.ok).toBe(true);
+	});
+
 	it('rejects invalid paths in batch entries', async () => {
 		const data = toArrayBuffer({
 			batch: [{ rpc: '../bad/path', id: 'pv6', args: [] }]

@@ -1,7 +1,7 @@
 // @ts-check
 
 const textDecoder = new TextDecoder();
-const _validPathRe = /^[a-zA-Z0-9_]+(?:\/[a-zA-Z0-9_]+)+$/;
+const _validPathRe = /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)+$/;
 const _validSegmentRe = /^[a-zA-Z0-9_]+$/;
 
 /** @type {Map<string, Function>} */
