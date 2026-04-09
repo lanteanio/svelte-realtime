@@ -1200,6 +1200,40 @@ describe('__directCall()', () => {
 		const result = await __directCall('dc/items', [], platform);
 		expect(result).toEqual([{ id: 1, name: 'Item' }]);
 	});
+
+	it('warns in dev when guard runs with ctx.user = null', async () => {
+		const guardFn = (ctx) => {};
+		guardFn.__isGuard = true;
+		__registerGuard('dc-nullwarn', guardFn);
+
+		const handler = live(async (ctx) => 'ok');
+		__register('dc-nullwarn/action', handler);
+
+		const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const platform = mockPlatform();
+		await __directCall('dc-nullwarn/action', [], platform);
+
+		expect(spy).toHaveBeenCalledWith(
+			expect.stringContaining('.load() is calling guard')
+		);
+		spy.mockRestore();
+	});
+
+	it('does not warn when user is provided', async () => {
+		const guardFn = (ctx) => {};
+		guardFn.__isGuard = true;
+		__registerGuard('dc-nowarn', guardFn);
+
+		const handler = live(async (ctx) => 'ok');
+		__register('dc-nowarn/action', handler);
+
+		const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const platform = mockPlatform();
+		await __directCall('dc-nowarn/action', [], platform, { user: { id: 1 } });
+
+		expect(spy).not.toHaveBeenCalled();
+		spy.mockRestore();
+	});
 });
 
 // -- live.cron() (Phase 14) ---------------------------------------------------

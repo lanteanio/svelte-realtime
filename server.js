@@ -13,6 +13,9 @@ const guards = new Map();
 /** @type {Set<Function>} Streams with onUnsubscribe hooks (for iterating static matches in close) */
 const _streamsWithUnsubscribe = new Set();
 
+/** @type {Set<string>} Paths that already warned about null ctx.user in __directCall */
+const _directCallWarned = new Set();
+
 /**
  * Tag a topic function with __topicUsesCtx by inspecting its first parameter name.
  *
@@ -2472,7 +2475,13 @@ export async function __directCall(path, args, platform, options) {
 	// Run module guard
 	const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 	const guardFn = await _resolveGuard(modulePath);
-	if (guardFn) await guardFn(ctx);
+	if (guardFn) {
+		if (ctx.user === null && typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production' && !_directCallWarned.has(path)) {
+			_directCallWarned.add(path);
+			console.warn(`[svelte-realtime] .load() is calling guard for '${path}' with ctx.user = null. Pass { user } in the options to provide user data:\n  stream.load(platform, { user: locals.user })\n  See: https://svti.me/ssr`);
+		}
+		await guardFn(ctx);
+	}
 
 	if (/** @type {any} */ (fn).__isStream) {
 		if (/** @type {any} */ (fn).__isGated) {

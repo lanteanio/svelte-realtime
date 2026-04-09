@@ -5,6 +5,18 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.13] - 2026-04-09
+
+### Fixed
+
+- `.load()` now warns in dev mode when a guarded module runs with `ctx.user = null`, which usually means `{ user }` was not passed in the options. The warning fires once per path and includes the fix: `stream.load(platform, { user: locals.user })`.
+- Generated `$types.d.ts` `.load()` signatures now include `user?` in the options type. Previously only `args?` was typed, so passing `{ user: locals.user }` triggered a TypeScript error even though it worked at runtime.
+
+### Changed
+
+- The SSR hydration example in the README now shows `{ user: locals.user }` being passed to `.load()`.
+- Expanded the cross-origin and native app usage section in the README with a standalone client example using `__rpc()` and `__stream()`, and a dual cookie/token auth pattern for the upgrade hook.
+
 ## [0.4.12] - 2026-04-09
 
 ### Fixed
