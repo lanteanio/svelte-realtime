@@ -5,6 +5,17 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.14] - 2026-04-10
+
+### Changed
+
+- Added "What the extensions handle" summary to the Redis multi-instance section, documenting cross-instance echo suppression, microtask-batched pipelines, distributed presence with zombie cleanup, replay buffer sequencing, cross-instance rate limiting, and circuit breakers.
+- Added "Failure modes" section documenting what happens when Redis goes down, an instance crashes, a client reconnects after a long disconnect, send buffers overflow, and batch/queue limits are hit.
+- Expanded "Clustering" section with worker architecture details: SO_REUSEPORT vs acceptor mode, batched cross-worker IPC, health monitoring with heartbeat/timeout, exponential backoff restart, and graceful shutdown behavior.
+- Renamed "Limits and gotchas" to "Production limits" and added per-limit behavior descriptions, plus previously undocumented limits: presence refs (10,000), rate-limit identities (5,000), throttle/debounce timers (5,000), and topic length (256 characters).
+- Mentioned Postgres LISTEN/NOTIFY as a peer alternative to Redis for cross-instance pub/sub.
+- Clarified the benchmarks section to describe what is being measured (full-stack overhead including serialization, routing, and context construction, not transport protocol latency).
+
 ## [0.4.13] - 2026-04-09
 
 ### Fixed

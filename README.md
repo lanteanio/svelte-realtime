@@ -1595,6 +1595,18 @@ export const message = createMessage({ platform: (p) => bus.wrap(p) });
 
 No changes needed in your live modules. `ctx.publish` delegates to whatever platform was passed in, so Redis wrapping is transparent.
 
+If you already run Postgres and don't need Redis, you can use the [LISTEN/NOTIFY bridge](#postgres-notify) instead for cross-instance pub/sub.
+
+### What the extensions handle
+
+When you add the Redis extensions from [svelte-adapter-uws-extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions), you get:
+
+- **Cross-instance pub/sub** with echo suppression (messages from the same instance are dropped on receive) and microtask-batched Redis pipelines (multiple publishes in one event loop tick become a single Redis roundtrip)
+- **Distributed presence** with heartbeat-based zombie cleanup -- dead sockets are detected by probing `getBufferedAmount()`, and stale Redis entries are cleaned server-side by a Lua script after a configurable TTL (default 90s)
+- **Replay buffers** with atomic sequence numbering via Lua `INCR` + sorted sets -- per-topic ordering is strict, and gap detection triggers a truncation event before replaying what's available
+- **Cross-instance rate limiting** via atomic Lua scripts that use `redis.call('TIME')` to avoid clock skew between app servers
+- **Circuit breakers** with a three-state machine (healthy / broken / probing) -- when Redis goes down, the breaker trips after a configurable failure threshold, local delivery continues, and a single probe request tests recovery before resuming full traffic
+
 ### Combined: Redis + rate limiting
 
 ```js
@@ -1653,9 +1665,37 @@ export const orders = live.stream('orders', async (ctx) => {
 
 ---
 
+## Failure modes
+
+### Redis goes down
+
+All Redis extensions accept an optional circuit breaker. The breaker trips after a configurable number of consecutive failures (default 5). Once broken, cross-instance pub/sub, presence writes, replay buffering, and distributed rate limiting are skipped entirely -- no retries, no queuing, no thundering herd. Local delivery continues normally: `ctx.publish()` still reaches subscribers on the same instance and across workers. After a configurable timeout (default 30s), the breaker enters a probing state where a single request is allowed through. If it succeeds, the breaker resets to healthy and all extensions resume.
+
+### Instance crashes mid-session
+
+The distributed presence extension runs a heartbeat cycle (default 30s) that probes each tracked WebSocket with `getBufferedAmount()`. Under mass disconnect, the runtime may drop close events entirely -- the heartbeat catches these and triggers a synchronous leave. On the Redis side, stale presence entries are cleaned by a server-side Lua script that scans the hash and removes fields older than the configurable TTL (default 90s). The `LEAVE_SCRIPT` atomically checks whether the same user is still connected on another instance before broadcasting a leave event, so users don't appear to leave and rejoin when a single instance restarts.
+
+### Client reconnects after a long disconnect
+
+Reconnection uses up to three tiers depending on what's available and how large the gap is. The replay buffer (configurable, default 1000 messages per topic) fills small gaps with strict per-topic ordering via atomic Lua sequence numbering. If the gap is too large for replay, delta sync kicks in -- the client sends its last known version, and the server returns only the changes since that version (or `{unchanged: true}` if nothing changed). If neither replay nor delta sync can cover the gap, the client falls back to a full refetch of the init function. All three paths are automatic and require no client-side code changes.
+
+### Send buffer overflow
+
+Each WebSocket connection has a send buffer limit (default 1MB, configurable via `maxBackpressure` in the adapter). When the buffer is full, messages are silently dropped. In dev mode, `handleRpc` logs a warning when a response fails to deliver. For streams that produce high-frequency output, wrap the source with `live.breaker()` or use `live.throttle()` / `live.debounce()` to control the publish rate.
+
+### Batch and queue limits
+
+A single `batch()` call is capped at 50 RPC calls -- the client rejects before sending, and the server enforces the same cap as a safety net. The adapter's client-side send queue holds up to 1000 messages; when full, the oldest item is dropped. The adapter rate-limits WebSocket upgrades per IP with a sliding window (default 10 per 10s) to prevent connection floods.
+
+---
+
 ## Clustering
 
-svelte-realtime works with the adapter's `CLUSTER_WORKERS` mode.
+svelte-realtime works with the adapter's `CLUSTER_WORKERS` mode. The adapter spawns N worker threads (default: number of CPUs). On Linux, workers share the port via `SO_REUSEPORT` and the kernel distributes incoming connections. On macOS and Windows, a primary thread accepts connections and routes them to workers via uWS child app descriptors.
+
+Cross-worker `ctx.publish()` calls are batched via microtask coalescing -- all publishes within one event loop tick are bundled into a single `postMessage` to the primary thread, which fans them out to other workers. This keeps IPC overhead constant regardless of publish volume.
+
+Workers are health-checked every 10 seconds. If a worker fails to respond within 30 seconds, it is terminated and restarted with exponential backoff (starting at 100ms, max 5s, up to 50 restart attempts before the process exits). On graceful shutdown (`SIGTERM` / `SIGINT`), the primary stops accepting connections, sends a shutdown signal to all workers, and waits for them to drain in-flight requests and close WebSocket connections with code 1001 (Going Away) so clients reconnect to another instance.
 
 | Method | Cross-worker? | Safe in `live()`? |
 |---|---|---|
@@ -1669,23 +1709,39 @@ svelte-realtime works with the adapter's `CLUSTER_WORKERS` mode.
 
 ---
 
-## Limits and gotchas
+## Production limits
 
 ### maxPayloadLength (default: 16KB)
 
-If an RPC request exceeds this, the adapter closes the connection silently (uWS behavior). If your app sends large payloads, increase `maxPayloadLength` in the adapter's websocket config.
+Maximum size of a single WebSocket message. If an RPC request exceeds this, the adapter closes the connection (uWS behavior). Increase `maxPayloadLength` in the adapter's websocket config if your app sends large payloads.
 
 ### maxBackpressure (default: 1MB)
 
-If a connection's send buffer exceeds this, messages are silently dropped. `handleRpc` checks the return value of `platform.send()` and warns in dev mode if a response was not delivered.
+Per-connection send buffer. When exceeded, messages are silently dropped. `handleRpc` checks the return value of `platform.send()` and warns in dev mode when a response is not delivered.
 
-### sendQueue cap (client-side, max 1000)
+### Client send queue (max 1000)
 
-The adapter's `sendQueued()` drops the oldest item if the queue exceeds 1000. Unlikely in practice, but worth knowing for offline-heavy apps.
+The adapter's `sendQueued()` drops the oldest item when the queue exceeds 1000 messages. This queue buffers messages while the WebSocket is reconnecting.
 
-### Batch size (max 50 calls)
+### Batch size (max 50)
 
 A single `batch()` call is limited to 50 RPC calls. The client rejects before sending if the limit is exceeded, and the server enforces the same limit as a safety net. Split into multiple `batch()` calls if you need more.
+
+### Presence refs (max 10,000)
+
+The server tracks presence join/leave refcounts in memory. When the map reaches 10,000 entries, suspended entries (those with a pending leave timer) are evicted first. If the map is still full after eviction, the join is dropped silently.
+
+### Rate-limit identities (max 5,000)
+
+Per-function rate limiting (`live.rateLimit()`) tracks sliding-window buckets in memory. When the bucket map reaches 5,000 entries, stale buckets are swept first. If still full, new identities are rejected with a `RATE_LIMITED` error. Existing identities are unaffected.
+
+### Throttle/debounce timers (max 5,000)
+
+The server tracks active throttle and debounce entries globally. When at capacity, new entries bypass the timer and publish immediately so data is never silently dropped.
+
+### Topic length (max 256 characters)
+
+The adapter rejects topic names longer than 256 characters or containing control characters (byte value < 32). This applies to subscribe, unsubscribe, and batch-subscribe messages.
 
 ### ws.subscribe() vs the subscribe hook
 
@@ -1939,7 +1995,7 @@ The plugin resolves `$live/chat` to `src/live/chat.js`, generates client stubs, 
 
 ## Benchmarks
 
-The benchmark suite measures overhead added by svelte-realtime on top of raw WebSocket messaging.
+The benchmark suite measures the full-stack overhead added by svelte-realtime on top of raw WebSocket messaging: JSON serialization, RPC path resolution, registry lookup, context construction, handler execution, and response encoding. These run in-process with mock objects and isolate the framework cost from network latency.
 
 Run with:
 
@@ -1962,7 +2018,7 @@ With high-frequency streams (e.g. 1000 cursors at 20 updates/sec), this reduces 
 
 In Node/SSR (tests, `__directCall`, etc.), events apply synchronously -- no batching overhead.
 
-These benchmarks run in-process with mock objects (no real network). They isolate the framework overhead from network latency. See [bench/rpc.js](bench/rpc.js) for the full source.
+See [bench/rpc.js](bench/rpc.js) for the full source.
 
 ---
 
