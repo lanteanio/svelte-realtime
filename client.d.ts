@@ -2,6 +2,17 @@ import type { Readable } from 'svelte/store';
 import type { WSEvent } from 'svelte-adapter-uws/client';
 
 /**
+ * A store that always holds `undefined`. Use as a fallback for conditional
+ * streams so you don't need to import `readable` from `svelte/store`:
+ *
+ * ```svelte
+ * import { todos, empty } from '$live/todos';
+ * const items = $derived(user ? todos(orgId) : empty);
+ * ```
+ */
+export const empty: Readable<undefined>;
+
+/**
  * Typed error for RPC failures.
  * Contains a `code` field for programmatic handling.
  */

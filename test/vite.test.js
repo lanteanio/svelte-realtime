@@ -92,6 +92,7 @@ export const messages = live.stream('messages', async (ctx) => {}, { merge: 'cru
 		expect(code).toContain('"merge":"crud"');
 		expect(code).toContain('"key":"id"');
 		expect(code).toContain('"prepend":true');
+		expect(code).toContain("export { empty } from 'svelte-realtime/client'");
 	});
 
 	it('generates mixed __rpc and __stream stubs', () => {
@@ -528,6 +529,7 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		expect(content).toContain('(...args: any[]) => Promise<any>');
 		expect(content).toContain('messages');
 		expect(content).toContain('StreamStore<any>');
+		expect(content).toContain('export const empty: Readable<undefined>');
 	});
 
 	it('generates typed declarations for TS files (strips ctx param)', () => {
@@ -778,7 +780,8 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
 		expect(content).toContain("StreamStore");
 		expect(content).toContain("from 'svelte-realtime/client'");
-		expect(content).not.toContain("from 'svelte/store'");
+		expect(content).toContain("import type { Readable } from 'svelte/store'");
+		expect(content).toContain("export const empty: Readable<undefined>");
 	});
 
 	it('generates .load() type on static stream declarations', () => {

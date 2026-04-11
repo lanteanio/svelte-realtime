@@ -102,6 +102,12 @@ beforeEach(async () => {
 				set(v) { value = v; for (const fn of subs) fn(v); },
 				subscribe(fn) { subs.add(fn); fn(value); return () => subs.delete(fn); }
 			};
+		},
+		readable: (initial) => {
+			const subs = new Set();
+			return {
+				subscribe(fn) { subs.add(fn); fn(initial); return () => subs.delete(fn); }
+			};
 		}
 	}));
 
@@ -2059,6 +2065,185 @@ describe('onDerived()', () => {
 		currentVal = 'b';
 		for (const fn of sourceSubs) fn('b');
 		expect(derived._getCurrentTopic()).toBe('room:b');
+		unsub();
+	});
+});
+
+// -- CRUD max trimming --------------------------------------------------------
+
+describe('__stream() CRUD max trimming', () => {
+	it('prepend mode drops oldest items from the end when exceeding max', async () => {
+		const store = __stream('feed/entries', { merge: 'crud', key: 'id', prepend: true, max: 3 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1 }, { id: 2 }, { id: 3 }],
+			topic: 'feed',
+			merge: 'crud',
+			key: 'id',
+			prepend: true,
+			max: 3
+		});
+
+		// Add a 4th item (prepend) -- oldest (id:3 at the end) should be dropped
+		simulateTopicMessage('feed', { event: 'created', data: { id: 4 } });
+
+		const last = values[values.length - 1];
+		expect(last).toHaveLength(3);
+		expect(last[0].id).toBe(4);
+		expect(last.map(i => i.id)).toEqual([4, 1, 2]);
+
+		unsub();
+	});
+
+	it('append mode drops oldest items from the start when exceeding max', async () => {
+		const store = __stream('log/entries', { merge: 'crud', key: 'id', max: 3 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1 }, { id: 2 }, { id: 3 }],
+			topic: 'log',
+			merge: 'crud',
+			key: 'id',
+			max: 3
+		});
+
+		// Add a 4th item (append) -- oldest (id:1 at the start) should be dropped
+		simulateTopicMessage('log', { event: 'created', data: { id: 4 } });
+
+		const last = values[values.length - 1];
+		expect(last).toHaveLength(3);
+		expect(last.map(i => i.id)).toEqual([2, 3, 4]);
+
+		unsub();
+	});
+
+	it('does not trim when max is 0 (unlimited)', async () => {
+		const store = __stream('all/items', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: Array.from({ length: 100 }, (_, i) => ({ id: i })),
+			topic: 'all',
+			merge: 'crud',
+			key: 'id'
+		});
+
+		// Add more items -- nothing should be trimmed
+		for (let i = 100; i < 110; i++) {
+			simulateTopicMessage('all', { event: 'created', data: { id: i } });
+		}
+
+		const last = values[values.length - 1];
+		expect(last).toHaveLength(110);
+
+		unsub();
+	});
+
+	it('updates still work on items after trimming', async () => {
+		const store = __stream('trim/update', { merge: 'crud', key: 'id', prepend: true, max: 2 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1, n: 'A' }, { id: 2, n: 'B' }],
+			topic: 'trim-u',
+			merge: 'crud',
+			key: 'id',
+			prepend: true,
+			max: 2
+		});
+
+		// Add id:3 (prepend), id:2 gets dropped (oldest at end)
+		simulateTopicMessage('trim-u', { event: 'created', data: { id: 3, n: 'C' } });
+
+		// Update id:1 which is still in the buffer
+		simulateTopicMessage('trim-u', { event: 'updated', data: { id: 1, n: 'A2' } });
+
+		const last = values[values.length - 1];
+		expect(last).toHaveLength(2);
+		const item1 = last.find(i => i.id === 1);
+		expect(item1.n).toBe('A2');
+
+		unsub();
+	});
+
+	it('duplicate created event does not trigger trim (in-place update)', async () => {
+		const store = __stream('dup/max', { merge: 'crud', key: 'id', max: 3 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1 }, { id: 2 }, { id: 3 }],
+			topic: 'dup',
+			merge: 'crud',
+			key: 'id',
+			max: 3
+		});
+
+		// Re-create existing item -- should update in place, not grow
+		simulateTopicMessage('dup', { event: 'created', data: { id: 2, extra: true } });
+
+		const last = values[values.length - 1];
+		expect(last).toHaveLength(3);
+		expect(last.find(i => i.id === 2).extra).toBe(true);
+
+		unsub();
+	});
+
+	it('server-provided max overrides build-time default', async () => {
+		const store = __stream('override/max', { merge: 'crud', key: 'id', prepend: true });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1 }, { id: 2 }],
+			topic: 'override',
+			merge: 'crud',
+			key: 'id',
+			prepend: true,
+			max: 2
+		});
+
+		simulateTopicMessage('override', { event: 'created', data: { id: 3 } });
+
+		const last = values[values.length - 1];
+		expect(last).toHaveLength(2);
+		expect(last[0].id).toBe(3);
+
+		unsub();
+	});
+});
+
+// -- empty store --------------------------------------------------------------
+
+describe('empty store', () => {
+	it('is a readable that holds undefined', async () => {
+		const { empty } = await import('../client.js');
+		const values = [];
+		const unsub = empty.subscribe((v) => values.push(v));
+		expect(values).toEqual([undefined]);
 		unsub();
 	});
 });

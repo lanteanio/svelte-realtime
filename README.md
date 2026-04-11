@@ -261,7 +261,7 @@ The `merge` option on `live.stream()` controls how live pub/sub events are appli
 
 ### crud (default)
 
-Handles `created`, `updated`, `deleted` events. The store maintains an array, keyed by `id` (configurable with `key`).
+Handles `created`, `updated`, `deleted` events. The store maintains an array, keyed by `id` (configurable with `key`). Set `max` to cap the buffer size and drop the oldest items when exceeded (useful for live feeds with `prepend: true`).
 
 ```js
 // Server
@@ -361,7 +361,7 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 | `merge` | `'crud'` | Merge strategy: `'crud'`, `'latest'`, `'set'`, `'presence'`, `'cursor'` |
 | `key` | `'id'` | Key field for `crud` mode |
 | `prepend` | `false` | Prepend new items instead of appending (`crud` mode) |
-| `max` | `50` | Max items to keep (`latest` mode) |
+| `max` | `50` / `0` | Max items to keep. Defaults to 50 for `latest`, 0 (unlimited) for `crud`. Oldest items are dropped when exceeded |
 | `replay` | `false` | Enable seq-based replay for gap-free reconnection |
 | `onSubscribe` | -- | Callback `(ctx, topic)` fired when a client subscribes |
 | `onUnsubscribe` | -- | Callback `(ctx, topic)` fired when a client disconnects |

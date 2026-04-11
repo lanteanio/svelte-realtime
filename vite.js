@@ -785,7 +785,9 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		? `import { ${[...imports].join(', ')} } from 'svelte-realtime/client';\n`
 		: '';
 
-	return importLine + lines.join('\n') + '\n';
+	const reexport = `export { empty } from 'svelte-realtime/client';\n`;
+
+	return importLine + reexport + lines.join('\n') + '\n';
 }
 
 /**
@@ -1712,10 +1714,12 @@ function _generateTypeDeclarations(liveDir, dir) {
 				if (needsRpcError) clientImports.push('RpcError');
 				declarations.push(`  import type { ${clientImports.join(', ')} } from 'svelte-realtime/client';`);
 			}
+			declarations.push(`  import type { Readable } from 'svelte/store';`);
 			if (needsStreamStore || needsRpcError) {
 				declarations.push('');
 			}
 			declarations.push(...exports);
+			declarations.push(`  export const empty: Readable<undefined>;`);
 			declarations.push('}');
 			declarations.push('');
 		}

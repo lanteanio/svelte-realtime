@@ -67,8 +67,10 @@ export interface StreamOptions {
 	prepend?: boolean;
 
 	/**
-	 * Maximum items to keep (latest mode only).
-	 * @default 50
+	 * Maximum items to keep. When the buffer exceeds this size, the oldest
+	 * items are dropped. Works with `crud` and `latest` merge strategies.
+	 *
+	 * For `latest`, defaults to 50. For `crud`, defaults to 0 (unlimited).
 	 */
 	max?: number;
 

@@ -5,6 +5,15 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.15] - 2026-04-11
+
+### Added
+
+- **`max` option for `crud` merge strategy.** When set, the client-side buffer drops the oldest items after a `created` event exceeds the cap. In prepend mode, items are trimmed from the end of the array. In append mode, items are trimmed from the start. The key index is maintained correctly after trimming. The default for `crud` is 0 (unlimited), so existing streams are unaffected. The `latest` default remains 50. Use `{ merge: 'crud', prepend: true, max: 200 }` to cap live feeds.
+- **`empty` store export.** A `Readable<undefined>` store is now exported from `svelte-realtime/client` and automatically re-exported from every generated `$live/` module. Use it as a fallback for conditional streams without needing `import { readable } from 'svelte/store'`. The generated `$types.d.ts` includes the typed export.
+
+---
+
 ## [0.4.14] - 2026-04-10
 
 ### Changed

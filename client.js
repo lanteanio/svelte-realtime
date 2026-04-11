@@ -1,6 +1,9 @@
 // @ts-check
 import { connect as _connect, on, status } from 'svelte-adapter-uws/client';
-import { writable } from 'svelte/store';
+import { writable, readable } from 'svelte/store';
+
+/** @type {import('svelte/store').Readable<undefined>} */
+export const empty = readable(undefined);
 
 const _textEncoder = new TextEncoder();
 
@@ -499,7 +502,7 @@ function _createStream(path, options, dynamicArgs) {
 	let merge = options?.merge || 'crud';
 	let key = options?.key || 'id';
 	let prepend = options?.prepend || false;
-	let max = options?.max || 50;
+	let max = options?.max || (merge === 'latest' ? 50 : 0);
 
 	/** @type {any} */
 	let currentValue;
@@ -637,9 +640,18 @@ function _createStream(path, options, dynamicArgs) {
 					currentValue.unshift(data);
 					for (const [k, i] of _index) _index.set(k, i + 1);
 					_index.set(data[key], 0);
+					if (max && currentValue.length > max) {
+						const removed = currentValue.splice(max);
+						for (const item of removed) _index.delete(item[key]);
+					}
 				} else {
 					_index.set(data[key], currentValue.length);
 					currentValue.push(data);
+					if (max && currentValue.length > max) {
+						const removed = currentValue.splice(0, currentValue.length - max);
+						for (const item of removed) _index.delete(item[key]);
+						_rebuildIndex();
+					}
 				}
 			} else if (event === 'updated') {
 				const idx = _index.get(data[key]);
