@@ -1369,8 +1369,24 @@ export function __registerDerived(path, fn) {
 	if (/** @type {any} */ (fn).__derivedDynamic) {
 		const sourceFactory = /** @type {any} */ (fn).__derivedSourceFactory;
 		const debounce = /** @type {any} */ (fn).__derivedDebounce || 0;
+
+		/** @type {Map<string, any[]>} */
+		const topicArgs = new Map();
+		const topicFn = (...args) => {
+			const t = path + '\x00' + args.map(a => String(a).replace(/\x00/g, '')).join('\x00');
+			topicArgs.set(t, args);
+			if (topicArgs.size > 10000) {
+				const iter = topicArgs.keys();
+				topicArgs.delete(iter.next().value);
+			}
+			return t;
+		};
+		/** @type {any} */ (topicFn).__topicUsesCtx = false;
+		/** @type {any} */ (fn).__streamTopic = topicFn;
+		/** @type {any} */ (fn).__derivedTopicArgs = topicArgs;
+
 		const entry = {
-			sources: null, sourceFactory, fn, topic: /** @type {any} */ (fn).__streamTopic,
+			sources: null, sourceFactory, fn, topic: topicFn,
 			debounce, timer: null, dynamic: true, instances: new Map()
 		};
 		derivedRegistry.set(path, entry);
@@ -1379,11 +1395,11 @@ export function __registerDerived(path, fn) {
 		return;
 	}
 
+	/** @type {any} */ (fn).__streamTopic = path;
 	const sources = /** @type {any} */ (fn).__derivedSources;
-	const topic = /** @type {any} */ (fn).__streamTopic;
 	const debounce = /** @type {any} */ (fn).__derivedDebounce || 0;
-	if (!sources || !topic) return;
-	derivedRegistry.set(path, { sources, fn, topic, debounce, timer: null });
+	if (!sources) return;
+	derivedRegistry.set(path, { sources, fn, topic: path, debounce, timer: null });
 	for (const src of sources) {
 		let set = _derivedBySource.get(src);
 		if (!set) { set = new Set(); _derivedBySource.set(src, set); }

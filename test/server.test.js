@@ -2711,10 +2711,11 @@ describe('live.channel()', () => {
 
 describe('derived stream handleRpc response', () => {
 	it('includes derived: true in the response', async () => {
-		const fn = async () => { return { total: 99 }; };
-		fn.__derivedTopic = 'derived-rpc-test';
-		const derivedFn = live.derived(['source1'], fn);
+		const derivedFn = live.derived(['source1'], async () => {
+			return { total: 99 };
+		});
 		__register('test/derivedRpc', derivedFn);
+		__registerDerived('test/derivedRpc', derivedFn);
 
 		const ws = mockWs({ id: 'u1' });
 		const platform = mockPlatform();
@@ -2729,8 +2730,45 @@ describe('derived stream handleRpc response', () => {
 		expect(platform.sent[0].data.derived).toBe(true);
 	});
 
+	it('uses stream path as topic instead of __derived: prefix', async () => {
+		const derivedFn = live.derived(['src'], async () => ({ v: 1 }));
+
+		// Before registration, topic uses the auto-generated __derived: prefix
+		expect(derivedFn.__streamTopic).toMatch(/^__derived:/);
+
+		__register('test/derivedTopic', derivedFn);
+		__registerDerived('test/derivedTopic', derivedFn);
+
+		// After registration, topic is overridden to the stream path
+		expect(derivedFn.__streamTopic).toBe('test/derivedTopic');
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const buf = toArrayBuffer({ rpc: 'test/derivedTopic', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.topic).toBe('test/derivedTopic');
+	});
+
+	it('dynamic derived uses path-based topic with args', async () => {
+		const derivedFn = live.derived(
+			(orgId) => [`src:${orgId}`],
+			async (ctx, orgId) => ({ orgId })
+		);
+		__register('test/dynamicTopic', derivedFn);
+		__registerDerived('test/dynamicTopic', derivedFn);
+
+		const resolved = derivedFn.__streamTopic('org_99');
+		expect(resolved).toContain('test/dynamicTopic');
+		expect(resolved).toContain('org_99');
+		expect(resolved).not.toContain('__derived');
+	});
+
 	it('non-derived stream does not include derived flag', async () => {
-		const fn = live(async () => [{ id: 1 }], { merge: 'crud', key: 'id' });
+		const fn = live.stream('test/regularTopic', async () => [{ id: 1 }], { merge: 'crud', key: 'id' });
 		__register('test/regularStream', fn);
 
 		const ws = mockWs({ id: 'u1' });
@@ -2743,6 +2781,25 @@ describe('derived stream handleRpc response', () => {
 		expect(platform.sent.length).toBe(1);
 		expect(platform.sent[0].data.ok).toBe(true);
 		expect(platform.sent[0].data.derived).toBeUndefined();
+	});
+
+	it('non-derived stream with __ prefix is still rejected', async () => {
+		const fn = async () => [{ id: 1 }];
+		fn.__isStream = true;
+		fn.__isLive = true;
+		fn.__streamTopic = '__internal:secret';
+		fn.__streamOptions = { merge: 'crud', key: 'id' };
+		__register('test/reservedTopic', fn);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const buf = toArrayBuffer({ rpc: 'test/reservedTopic', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
 	});
 });
 

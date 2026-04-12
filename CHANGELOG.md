@@ -5,11 +5,20 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.18] - 2026-04-12
+
+### Fixed
+
+- **`live.derived()` streams now subscribe correctly via RPC.** Derived streams were using an auto-generated `__derived:` topic prefix that collided with the reserved-prefix validation in the RPC handler, silently rejecting every subscription. `__registerDerived` now overrides the topic to use the stream path (e.g. `dashboard/stats` instead of `__derived:7`), which is consistent with how every other stream type works. Dynamic derived topics use the same path base with args appended (`dashboard/stats\x00orgId`). No special-case exemption needed in the validation layer.
+- **Hydrated `live.derived()` stores preserve SSR data through initial subscription.** The server marks derived stream responses with a `derived` flag so the client keeps the existing hydrated value instead of replacing it with a potentially stale result. Live updates via WebSocket still apply normally on top of the hydrated data.
+
+---
+
 ## [0.4.17] - 2026-04-12
 
 ### Fixed
 
-- **Hydrated `live.derived()` streams no longer flash to zero on client hydration.** When a derived stream was hydrated with SSR data via `.hydrate()`, the first RPC response from the server overwrote it with a stale result computed before the source topics had populated. The server now marks derived stream responses with a `derived` flag, and the client preserves the existing hydrated value instead of replacing it. Live updates via WebSocket still apply normally on top of the hydrated data.
+- **Hydrated channel and derived stores no longer flash to empty on initial subscribe.** Added the `derived` response flag to the server and extended the client-side hydration guard to cover derived streams alongside channels.
 
 ---
 
