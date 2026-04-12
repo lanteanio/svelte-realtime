@@ -1176,6 +1176,45 @@ export const summary = live.derived(['orders', 'inventory'], async () => {
 		expect(code).toContain("__register('stats/summary'");
 		expect(code).toContain("__registerDerived('stats/summary'");
 	});
+
+	it('generates dynamic __stream client stub for dynamic derived exports', () => {
+		setup({
+			'dashboard.js': [
+				"import { live } from 'svelte-realtime/server';",
+				'export const stats = live.derived(',
+				'  (orgId) => ["members:" + orgId, "emails:" + orgId],',
+				'  async (ctx, orgId) => {',
+				'    return { members: 42, emails: 100 };',
+				'  },',
+				'  { debounce: 100 }',
+				');'
+			].join('\n')
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:dashboard', {});
+
+		expect(code).toContain("__stream('dashboard/stats'");
+		expect(code).toContain(', true)');
+		expect(code).toContain("import { __stream }");
+	});
+
+	it('generates SSR factory for dynamic derived', () => {
+		setup({
+			'dashboard.js': [
+				"import { live } from 'svelte-realtime/server';",
+				'export const stats = live.derived(',
+				'  (orgId) => ["members:" + orgId],',
+				'  async (ctx, orgId) => ({ count: 0 })',
+				');'
+			].join('\n')
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:dashboard', { ssr: true });
+
+		expect(code).toContain('(...args)');
+	});
 });
 
 // -- live.room() client stubs -------------------------------------------------

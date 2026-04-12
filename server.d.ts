@@ -477,17 +477,35 @@ export namespace live {
 	/**
 	 * Create a server-side computed stream that recomputes when any source topic publishes.
 	 *
-	 * @param sources - Topic names to watch for changes
+	 * Static form: pass an array of topic names to watch.
+	 * Dynamic form: pass a function that receives runtime args and returns topic names.
+	 *
+	 * @param sources - Topic names to watch, or a factory function that receives runtime args
 	 * @param fn - Async function that computes the derived value
 	 * @param options - Merge mode and debounce settings
 	 *
 	 * @example
 	 * ```js
+	 * // Static sources
 	 * export const summary = live.derived(['orders', 'inventory'], async () => {
 	 *   return { totalOrders: await db.orders.count(), totalItems: await db.inventory.count() };
 	 * });
+	 *
+	 * // Dynamic sources (parameterized)
+	 * export const stats = live.derived(
+	 *   (orgId) => [`memberships:${orgId}`, `emails:${orgId}`],
+	 *   async (ctx, orgId) => {
+	 *     return { members: await countMembers(orgId), emails: await countEmails(orgId) };
+	 *   },
+	 *   { debounce: 100 }
+	 * );
 	 * ```
 	 */
+	function derived<T extends (...args: any[]) => any>(
+		sources: (...args: any[]) => string[],
+		fn: T,
+		options?: { merge?: string; debounce?: number }
+	): T;
 	function derived<T extends () => any>(
 		sources: string[],
 		fn: T,

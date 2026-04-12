@@ -108,6 +108,14 @@ function _copyStreamMeta(target, source) {
 	if (source.__streamVersion !== undefined) target.__streamVersion = source.__streamVersion;
 	if (source.__streamMigrate) target.__streamMigrate = source.__streamMigrate;
 	if (source.__isChannel) target.__isChannel = source.__isChannel;
+	if (source.__isDerived) target.__isDerived = source.__isDerived;
+	if (source.__derivedDynamic) {
+		target.__derivedDynamic = source.__derivedDynamic;
+		target.__derivedSourceFactory = source.__derivedSourceFactory;
+		target.__derivedTopicArgs = source.__derivedTopicArgs;
+		target.__derivedDebounce = source.__derivedDebounce;
+	}
+	if (source.__derivedSources) target.__derivedSources = source.__derivedSources;
 	if (source.__isGated) {
 		target.__isGated = true;
 		target.__gatePredicate = source.__gatePredicate;
@@ -720,27 +728,68 @@ const derivedRegistry = new Map();
 /**
  * Create a server-side computed stream that recomputes when any source topic publishes.
  *
- * @param {string[]} sources - Topic names to watch
+ * Static form: sources is a string[] of topic names.
+ * Dynamic form: sources is a function (...args) => string[] that resolves topics at subscribe time.
+ *
+ * @param {string[] | Function} sources - Topic names to watch, or a factory that receives runtime args
  * @param {Function} fn - Async function that computes the derived value
  * @param {{ merge?: string, debounce?: number }} [options]
  * @returns {Function}
  */
 live.derived = function derived(sources, fn, options) {
-	const topic = /** @type {any} */ (fn).__derivedTopic || ('__derived:' + (_derivedIdCounter++));
+	const baseTopic = /** @type {any} */ (fn).__derivedTopic || ('__derived:' + (_derivedIdCounter++));
 	const merge = options?.merge || 'set';
 	const debounce = options?.debounce || 0;
+	const dynamic = typeof sources === 'function';
 
 	/** @type {any} */ (fn).__isDerived = true;
 	/** @type {any} */ (fn).__isStream = true;
 	/** @type {any} */ (fn).__isLive = true;
-	/** @type {any} */ (fn).__streamTopic = topic;
 	/** @type {any} */ (fn).__streamOptions = { merge, key: 'id' };
-	/** @type {any} */ (fn).__derivedSources = sources;
 	/** @type {any} */ (fn).__derivedDebounce = debounce;
+
+	if (dynamic) {
+		/** @type {any} */ (fn).__derivedDynamic = true;
+		/** @type {any} */ (fn).__derivedSourceFactory = sources;
+		/** @type {Map<string, any[]>} */
+		const topicArgs = new Map();
+		const topicFn = (...args) => {
+			const t = baseTopic + '\x00' + args.map(a => String(a).replace(/\x00/g, '')).join('\x00');
+			topicArgs.set(t, args);
+			if (topicArgs.size > 10000) {
+				const iter = topicArgs.keys();
+				topicArgs.delete(iter.next().value);
+			}
+			return t;
+		};
+		/** @type {any} */ (topicFn).__topicUsesCtx = false;
+		/** @type {any} */ (fn).__streamTopic = topicFn;
+		/** @type {any} */ (fn).__derivedTopicArgs = topicArgs;
+
+		/** @type {any} */ (fn).__onSubscribe = function (_ctx, resolvedTopic) {
+			_activateDynamicDerived(fn, resolvedTopic);
+		};
+		/** @type {any} */ (fn).__onUnsubscribe = function (_ctx, resolvedTopic) {
+			_deactivateDynamicDerived(fn, resolvedTopic);
+		};
+	} else {
+		/** @type {any} */ (fn).__streamTopic = baseTopic;
+		/** @type {any} */ (fn).__derivedSources = sources;
+	}
+
 	return fn;
 };
 
 let _derivedIdCounter = 0;
+
+/** @type {boolean} Whether any dynamic derived streams have been registered */
+let _hasDynamicDerived = false;
+
+/** @type {Map<Function, object>} O(1) lookup from fn reference to dynamic derived registry entry */
+const _dynamicDerivedByFn = new Map();
+
+/** @type {import('svelte-adapter-uws').Platform | null} Captured platform for dynamic derived recomputation */
+let _derivedPlatform = null;
 
 /** @type {Map<string, { sources: string[], fn: Function, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
 const effectRegistry = new Map();
@@ -1316,6 +1365,20 @@ export function __registerDerived(path, fn) {
 		_lazyQueue.push({ type: 'derived', path, loader: fn });
 		return;
 	}
+
+	if (/** @type {any} */ (fn).__derivedDynamic) {
+		const sourceFactory = /** @type {any} */ (fn).__derivedSourceFactory;
+		const debounce = /** @type {any} */ (fn).__derivedDebounce || 0;
+		const entry = {
+			sources: null, sourceFactory, fn, topic: /** @type {any} */ (fn).__streamTopic,
+			debounce, timer: null, dynamic: true, instances: new Map()
+		};
+		derivedRegistry.set(path, entry);
+		_dynamicDerivedByFn.set(fn, entry);
+		_hasDynamicDerived = true;
+		return;
+	}
+
 	const sources = /** @type {any} */ (fn).__derivedSources;
 	const topic = /** @type {any} */ (fn).__streamTopic;
 	const debounce = /** @type {any} */ (fn).__derivedDebounce || 0;
@@ -1339,14 +1402,19 @@ export function __registerDerived(path, fn) {
 const _activatedPlatforms = new WeakSet();
 
 export function _activateDerived(platform) {
+	_derivedPlatform = platform;
 	if (_activatedPlatforms.has(platform)) return;
 
 	// Only wrap platform.publish if there are actual reactive registrations
-	if (_derivedBySource.size === 0 && _effectBySource.size === 0 && _aggregateBySource.size === 0) {
+	if (_derivedBySource.size === 0 && _effectBySource.size === 0 && _aggregateBySource.size === 0 && !_hasDynamicDerived) {
 		return;
 	}
 
 	_activatedPlatforms.add(platform);
+	_wrapPlatformPublish(platform);
+}
+
+function _wrapPlatformPublish(platform) {
 
 	const originalPublish = platform.publish.bind(platform);
 
@@ -1426,18 +1494,119 @@ export function _activateDerived(platform) {
 
 /**
  * Recompute a derived stream and publish the result.
- * @param {{ fn: Function, topic: string }} entry
+ * For dynamic instances, entry.args holds the runtime args and a ctx is built from the platform.
+ * @param {{ fn: Function, topic: string, args?: any[] }} entry
  * @param {import('svelte-adapter-uws').Platform} platform
  */
 async function _recomputeDerived(entry, platform) {
 	try {
-		const result = await entry.fn();
+		let result;
+		if (entry.args) {
+			const _h = _getCtxHelpers(platform);
+			const ctx = _buildCtx(null, null, platform, _h, null);
+			result = await entry.fn(ctx, ...entry.args);
+		} else {
+			result = await entry.fn();
+		}
 		platform.publish(entry.topic, 'set', result);
 	} catch (err) {
-		if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+		if (_serverErrorHandler) {
+			try { _serverErrorHandler('derived', err); } catch {}
+		} else if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
 			console.error(`[svelte-realtime] Derived stream '${entry.topic}' error:`, err);
 		}
 	}
+}
+
+/**
+ * Activate a dynamic derived instance for a resolved topic.
+ * Wires the instance's resolved sources into _derivedBySource so publishes trigger recomputation.
+ * @param {Function} fn - The derived compute function
+ * @param {string} resolvedTopic - The resolved output topic (e.g. '__derived:5:org_123')
+ */
+function _activateDynamicDerived(fn, resolvedTopic) {
+	const entry = _dynamicDerivedByFn.get(fn);
+	if (!entry) return;
+
+	const existing = entry.instances.get(resolvedTopic);
+	if (existing) {
+		existing.refCount++;
+		return;
+	}
+
+	// Late activation: if _activateDerived returned early before dynamic entries existed,
+	// wrap platform.publish now that we have something to watch.
+	if (_derivedPlatform && !_activatedPlatforms.has(_derivedPlatform)) {
+		_activatedPlatforms.add(_derivedPlatform);
+		_wrapPlatformPublish(_derivedPlatform);
+	}
+
+	const topicArgs = /** @type {any} */ (fn).__derivedTopicArgs;
+	const args = topicArgs && topicArgs.get(resolvedTopic);
+	if (!args) return;
+
+	const resolvedSources = entry.sourceFactory(...args);
+	if (!Array.isArray(resolvedSources) || resolvedSources.length === 0) {
+		if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+			console.warn(`[svelte-realtime] Dynamic derived sourceFactory returned empty sources for topic '${resolvedTopic}'`);
+		}
+		return;
+	}
+
+	const instance = {
+		fn: entry.fn,
+		args,
+		topic: resolvedTopic,
+		resolvedSources,
+		debounce: entry.debounce,
+		timer: null,
+		refCount: 1
+	};
+
+	entry.instances.set(resolvedTopic, instance);
+
+	for (const src of resolvedSources) {
+		let set = _derivedBySource.get(src);
+		if (!set) { set = new Set(); _derivedBySource.set(src, set); }
+		set.add(instance);
+		_watchedTopics.add(src);
+	}
+}
+
+/**
+ * Deactivate a dynamic derived instance when the last subscriber disconnects.
+ * Removes the instance from _derivedBySource and cleans up.
+ * @param {Function} fn - The derived compute function
+ * @param {string} resolvedTopic - The resolved output topic
+ */
+function _deactivateDynamicDerived(fn, resolvedTopic) {
+	const entry = _dynamicDerivedByFn.get(fn);
+	if (!entry) return;
+
+	const instance = entry.instances.get(resolvedTopic);
+	if (!instance) return;
+
+	instance.refCount--;
+	if (instance.refCount > 0) return;
+
+	if (instance.timer) clearTimeout(instance.timer);
+
+	for (const src of instance.resolvedSources) {
+		const set = _derivedBySource.get(src);
+		if (set) {
+			set.delete(instance);
+			if (set.size === 0) {
+				_derivedBySource.delete(src);
+				if (!_effectBySource.has(src) && !_aggregateBySource.has(src)) {
+					_watchedTopics.delete(src);
+				}
+			}
+		}
+	}
+
+	entry.instances.delete(resolvedTopic);
+	const topicArgs = /** @type {any} */ (fn).__derivedTopicArgs;
+	if (topicArgs) topicArgs.delete(resolvedTopic);
 }
 
 /**
@@ -1606,7 +1775,12 @@ export function _prepareHmr() {
 	};
 
 	// Clear debounce timers
-	for (const e of derivedRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
+	for (const e of derivedRegistry.values()) {
+		if (e.timer) clearTimeout(e.timer);
+		if (e.instances) {
+			for (const inst of e.instances.values()) { if (inst.timer) clearTimeout(inst.timer); }
+		}
+	}
 	for (const e of effectRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
 	for (const e of aggregateRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
 
@@ -1636,6 +1810,8 @@ export function _prepareHmr() {
 	_aggregateByTopic.clear();
 	_watchedTopics.clear();
 	_streamsWithUnsubscribe.clear();
+	_hasDynamicDerived = false;
+	_dynamicDerivedByFn.clear();
 
 	return snap;
 }
@@ -1662,11 +1838,27 @@ export function _restoreHmr(snap) {
 	for (const [k, v] of snap.derived) {
 		v.timer = null;
 		derivedRegistry.set(k, v);
-		for (const src of v.sources) {
-			let set = _derivedBySource.get(src);
-			if (!set) { set = new Set(); _derivedBySource.set(src, set); }
-			set.add(v);
-			_watchedTopics.add(src);
+		if (v.dynamic) {
+			_hasDynamicDerived = true;
+			_dynamicDerivedByFn.set(v.fn, v);
+			if (v.instances) {
+				for (const inst of v.instances.values()) {
+					inst.timer = null;
+					for (const src of inst.resolvedSources) {
+						let set = _derivedBySource.get(src);
+						if (!set) { set = new Set(); _derivedBySource.set(src, set); }
+						set.add(inst);
+						_watchedTopics.add(src);
+					}
+				}
+			}
+		} else {
+			for (const src of v.sources) {
+				let set = _derivedBySource.get(src);
+				if (!set) { set = new Set(); _derivedBySource.set(src, set); }
+				set.add(v);
+				_watchedTopics.add(src);
+			}
 		}
 	}
 

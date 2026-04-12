@@ -2059,6 +2059,245 @@ describe('derived stream activation', () => {
 	});
 });
 
+// -- Dynamic live.derived() --------------------------------------------------
+
+describe('dynamic live.derived()', () => {
+	it('marks function with __derivedDynamic and __derivedSourceFactory', () => {
+		const sourceFactory = (orgId) => [`members:${orgId}`, `emails:${orgId}`];
+		const fn = live.derived(sourceFactory, async (ctx, orgId) => ({ total: 0 }));
+		expect(fn.__isDerived).toBe(true);
+		expect(fn.__isStream).toBe(true);
+		expect(fn.__isLive).toBe(true);
+		expect(fn.__derivedDynamic).toBe(true);
+		expect(fn.__derivedSourceFactory).toBe(sourceFactory);
+		expect(fn.__derivedSources).toBeUndefined();
+		expect(fn.__streamOptions.merge).toBe('set');
+	});
+
+	it('generates a function topic instead of a string', () => {
+		const fn = live.derived(
+			(orgId) => [`members:${orgId}`],
+			async (ctx, orgId) => ({ count: 0 })
+		);
+		expect(typeof fn.__streamTopic).toBe('function');
+		const resolved = fn.__streamTopic('org_123');
+		expect(typeof resolved).toBe('string');
+		expect(resolved).toContain('org_123');
+	});
+
+	it('different args produce different topics', () => {
+		const fn = live.derived(
+			(orgId) => [`members:${orgId}`],
+			async (ctx, orgId) => ({ count: 0 })
+		);
+		const t1 = fn.__streamTopic('org_1');
+		const t2 = fn.__streamTopic('org_2');
+		expect(t1).not.toBe(t2);
+	});
+
+	it('avoids topic collision when args contain separator characters', () => {
+		const fn = live.derived(
+			(a, b) => [`src:${a}:${b}`],
+			async (ctx, a, b) => ({ a, b })
+		);
+		const t1 = fn.__streamTopic('org:123', 'feature');
+		const t2 = fn.__streamTopic('org', '123:feature');
+		expect(t1).not.toBe(t2);
+	});
+
+	it('sets __onSubscribe and __onUnsubscribe hooks', () => {
+		const fn = live.derived(
+			(orgId) => [`members:${orgId}`],
+			async (ctx, orgId) => ({ count: 0 })
+		);
+		expect(typeof fn.__onSubscribe).toBe('function');
+		expect(typeof fn.__onUnsubscribe).toBe('function');
+	});
+
+	it('accepts custom debounce', () => {
+		const fn = live.derived(
+			(orgId) => [`members:${orgId}`],
+			async (ctx, orgId) => [],
+			{ debounce: 300 }
+		);
+		expect(fn.__derivedDebounce).toBe(300);
+	});
+});
+
+describe('dynamic derived activation', () => {
+	it('recomputes when resolved source publishes', async () => {
+		let callCount = 0;
+		const fn = live.derived(
+			(orgId) => [`members:${orgId}`],
+			async (ctx, orgId) => {
+				callCount++;
+				return { orgId, count: callCount };
+			}
+		);
+
+		__registerDerived('test/dynamicDerived', fn);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		// Resolve the topic (simulates what _callTopicFn does during RPC)
+		const resolvedTopic = fn.__streamTopic('org_42');
+
+		// Activate the instance (simulates __onSubscribe hook)
+		fn.__onSubscribe({}, resolvedTopic);
+
+		// Publish on the resolved source
+		platform.publish('members:org_42', 'created', { id: 1 });
+
+		await new Promise(r => setTimeout(r, 30));
+
+		const derivedPubs = platform.published.filter(p => p.topic === resolvedTopic);
+		expect(derivedPubs.length).toBeGreaterThanOrEqual(1);
+		const last = derivedPubs[derivedPubs.length - 1];
+		expect(last.event).toBe('set');
+		expect(last.data.orgId).toBe('org_42');
+		expect(last.data.count).toBeGreaterThan(0);
+	});
+
+	it('multiple subscribers share one instance', async () => {
+		let callCount = 0;
+		const fn = live.derived(
+			(orgId) => [`members:${orgId}`],
+			async (ctx, orgId) => {
+				callCount++;
+				return { count: callCount };
+			}
+		);
+
+		__registerDerived('test/dynamicDerivedShared', fn);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		const resolvedTopic = fn.__streamTopic('org_shared');
+
+		// Two subscribers activate for the same topic
+		fn.__onSubscribe({}, resolvedTopic);
+		fn.__onSubscribe({}, resolvedTopic);
+
+		// First unsubscribe should not clean up (refCount > 0)
+		fn.__onUnsubscribe({}, resolvedTopic);
+
+		// Source publish should still trigger recomputation
+		callCount = 0;
+		platform.publish('members:org_shared', 'updated', {});
+
+		await new Promise(r => setTimeout(r, 30));
+
+		const derivedPubs = platform.published.filter(p => p.topic === resolvedTopic);
+		expect(derivedPubs.length).toBeGreaterThanOrEqual(1);
+
+		// Second unsubscribe cleans up
+		fn.__onUnsubscribe({}, resolvedTopic);
+
+		// Now the source topic should no longer trigger recomputation
+		const pubsBefore = platform.published.filter(p => p.topic === resolvedTopic).length;
+		platform.publish('members:org_shared', 'updated', {});
+		await new Promise(r => setTimeout(r, 30));
+		const pubsAfter = platform.published.filter(p => p.topic === resolvedTopic).length;
+		expect(pubsAfter).toBe(pubsBefore);
+	});
+
+	it('different args create independent instances', async () => {
+		let lastOrgId = null;
+		const fn = live.derived(
+			(orgId) => [`events:${orgId}`],
+			async (ctx, orgId) => {
+				lastOrgId = orgId;
+				return { orgId };
+			}
+		);
+
+		__registerDerived('test/dynamicDerivedIndependent', fn);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		const topicA = fn.__streamTopic('A');
+		const topicB = fn.__streamTopic('B');
+
+		fn.__onSubscribe({}, topicA);
+		fn.__onSubscribe({}, topicB);
+
+		// Publishing to org A's source should only recompute A
+		platform.publish('events:A', 'created', {});
+		await new Promise(r => setTimeout(r, 30));
+
+		const pubsA = platform.published.filter(p => p.topic === topicA && p.event === 'set');
+		const pubsB = platform.published.filter(p => p.topic === topicB && p.event === 'set');
+		expect(pubsA.length).toBeGreaterThanOrEqual(1);
+		expect(pubsB.length).toBe(0);
+	});
+
+	it('debounces per-instance', async () => {
+		let callCount = 0;
+		const fn = live.derived(
+			(orgId) => [`items:${orgId}`],
+			async (ctx, orgId) => {
+				callCount++;
+				return { count: callCount };
+			},
+			{ debounce: 50 }
+		);
+
+		__registerDerived('test/dynamicDerivedDebounce', fn);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		const topic = fn.__streamTopic('org_debounce');
+		fn.__onSubscribe({}, topic);
+
+		// Rapid-fire 5 publishes
+		callCount = 0;
+		for (let i = 0; i < 5; i++) {
+			platform.publish('items:org_debounce', 'updated', {});
+		}
+
+		await new Promise(r => setTimeout(r, 120));
+
+		const derivedPubs = platform.published.filter(p => p.topic === topic && p.event === 'set');
+		// Should have debounced to a single recomputation
+		expect(derivedPubs.length).toBe(1);
+	});
+
+	it('cleanup removes sources from _watchedTopics', async () => {
+		const fn = live.derived(
+			(orgId) => [`cleanup_src:${orgId}`],
+			async (ctx, orgId) => ({ orgId })
+		);
+
+		__registerDerived('test/dynamicDerivedCleanup', fn);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		const topic = fn.__streamTopic('org_cleanup');
+		fn.__onSubscribe({}, topic);
+
+		// Source topic should trigger recomputation
+		platform.publish('cleanup_src:org_cleanup', 'updated', {});
+		await new Promise(r => setTimeout(r, 30));
+		const pubsBefore = platform.published.filter(p => p.topic === topic && p.event === 'set').length;
+		expect(pubsBefore).toBeGreaterThanOrEqual(1);
+
+		// Unsubscribe
+		fn.__onUnsubscribe({}, topic);
+
+		// Publishing to the same source should not trigger recomputation
+		const totalBefore = platform.published.filter(p => p.topic === topic && p.event === 'set').length;
+		platform.publish('cleanup_src:org_cleanup', 'updated', {});
+		await new Promise(r => setTimeout(r, 30));
+		const totalAfter = platform.published.filter(p => p.topic === topic && p.event === 'set').length;
+		expect(totalAfter).toBe(totalBefore);
+	});
+});
+
 // -- Phase 24: live.room() ---------------------------------------------------
 
 describe('live.room()', () => {

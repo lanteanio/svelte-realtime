@@ -1222,6 +1222,40 @@ On the client, derived streams work like regular streams:
 <p>Orders: {$dashboardStats?.totalOrders}</p>
 ```
 
+### Dynamic derived streams
+
+When source topics depend on runtime arguments (e.g., an org ID, a room ID), pass a source factory function instead of a static array. The factory receives the same args the client passes at subscribe time:
+
+```js
+export const orgStats = live.derived(
+  (orgId) => [`memberships:${orgId}`, `emails:${orgId}`, `audit:${orgId}`],
+  async (ctx, orgId) => {
+    const [members, emails, auditCount] = await Promise.all([
+      db.query('SELECT count(*) FROM memberships WHERE org_id = $1', [orgId]),
+      db.query('SELECT count(*) FROM emails WHERE org_id = $1', [orgId]),
+      db.query('SELECT count(*) FROM audit_log WHERE org_id = $1', [orgId])
+    ]);
+    return { members, emails, auditCount };
+  },
+  { debounce: 100 }
+);
+```
+
+On the client, dynamic derived streams are called like functions:
+
+```svelte
+<script>
+  import { orgStats } from '$live/dashboard';
+  let { orgId } = $props();
+</script>
+
+<p>Members: {$orgStats(orgId)?.members}</p>
+```
+
+Each unique set of args creates an independent instance with its own source subscriptions. Instances are created when the first subscriber connects and cleaned up when the last subscriber disconnects.
+
+### Activation
+
 Call `_activateDerived(platform)` in your `open` hook to enable derived stream listeners:
 
 ```js
@@ -1916,7 +1950,7 @@ Import from `svelte-realtime/server`.
 | `live.binary(fn, options?)` | Mark a function as a binary RPC handler (`maxSize` limits payload, default 10MB) |
 | `live.validated(schema, fn)` | RPC with Zod/Valibot input validation |
 | `live.cron(schedule, topic, fn)` | Server-side scheduled function |
-| `live.derived(sources, fn, options?)` | Server-side computed stream |
+| `live.derived(sources, fn, options?)` | Server-side computed stream (static or dynamic sources) |
 | `live.effect(sources, fn, options?)` | Server-side reactive side effect |
 | `live.aggregate(source, reducers, options)` | Real-time incremental aggregation |
 | `live.room(config)` | Collaborative room (data + presence + cursors + actions) |

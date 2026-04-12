@@ -12,6 +12,7 @@ const DYNAMIC_STREAM_RE = /export\s+const\s+(\w+)\s*=\s*live\.stream\s*\(\s*(?:\
 const CRON_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.cron\s*\(/g;
 const BINARY_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.binary\s*\(/g;
 const DERIVED_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.derived\s*\(/g;
+const DYNAMIC_DERIVED_RE = /export\s+const\s+(\w+)\s*=\s*live\.derived\s*\(\s*(?:\([^)]*\)|[a-zA-Z_$][\w$]*)\s*=>/g;
 const ROOM_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.room\s*\(/g;
 const WEBHOOK_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.webhook\s*\(/g;
 const CHANNEL_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.channel\s*\(/g;
@@ -518,8 +519,8 @@ function _generateSsrStubs(filePath, modulePath) {
 	const dynamicNames = new Set();
 	let match;
 
-	// Detect dynamic (function-returning) streams and channels
-	for (const re of [DYNAMIC_STREAM_RE, DYNAMIC_CHANNEL_RE]) {
+	// Detect dynamic (function-returning) streams, channels, and derived
+	for (const re of [DYNAMIC_STREAM_RE, DYNAMIC_CHANNEL_RE, DYNAMIC_DERIVED_RE]) {
 		re.lastIndex = 0;
 		while ((match = re.exec(source)) !== null) {
 			dynamicNames.add(match[1]);
@@ -683,8 +684,12 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		if (!exportedNames.has(name)) {
 			exportedNames.add(name);
 			imports.add('__stream');
-			// Derived streams use 'set' merge by default
-			lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set', key: 'id' })});`);
+			const isDynamic = _isDynamicExport(source, name, 'live\\.derived');
+			if (isDynamic) {
+				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set', key: 'id' })}, true);`);
+			} else {
+				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set', key: 'id' })});`);
+			}
 		}
 	}
 
@@ -1645,14 +1650,25 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
-		// Detect live.derived() exports (read-only stream)
+		// Detect live.derived() exports (read-only stream, static or dynamic)
 		DERIVED_EXPORT_RE.lastIndex = 0;
 		while ((match = DERIVED_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
 				needsStreamStore = true;
-				exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };`);
+				const isDynamic = _isDynamicExport(source, name, 'live\\.derived');
+				const loadSig = `{ load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> }`;
+				if (isDynamic) {
+					if (isTS) {
+						const factoryParams = _extractDynamicFactoryParams(source, name, 'live\\.derived');
+						exports.push(`  export const ${name}: (${factoryParams} => StreamStore<any>) & ${loadSig};`);
+					} else {
+						exports.push(`  export const ${name}: ((...args: any[]) => StreamStore<any>) & ${loadSig};`);
+					}
+				} else {
+					exports.push(`  export const ${name}: StreamStore<any> & ${loadSig};`);
+				}
 			}
 		}
 

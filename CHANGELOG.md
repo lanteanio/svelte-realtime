@@ -5,6 +5,14 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.16] - 2026-04-12
+
+### Added
+
+- **Dynamic `live.derived()` streams.** Source topics can now be parameterized with runtime arguments. Pass a factory function instead of a static array as the first argument: `live.derived((orgId) => [\`members:\${orgId}\`], async (ctx, orgId) => { ... })`. Each unique set of args creates an independent server-side instance with its own source subscriptions and debounce timer. Instances are created when the first subscriber connects and cleaned up automatically when the last subscriber disconnects. On the client, dynamic derived streams are called as functions, just like dynamic `live.stream()`.
+
+---
+
 ## [0.4.15] - 2026-04-11
 
 ### Added
