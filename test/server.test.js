@@ -2707,6 +2707,45 @@ describe('live.channel()', () => {
 	});
 });
 
+// -- derived stream RPC response -----------------------------------------------
+
+describe('derived stream handleRpc response', () => {
+	it('includes derived: true in the response', async () => {
+		const fn = async () => { return { total: 99 }; };
+		fn.__derivedTopic = 'derived-rpc-test';
+		const derivedFn = live.derived(['source1'], fn);
+		__register('test/derivedRpc', derivedFn);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const buf = toArrayBuffer({ rpc: 'test/derivedRpc', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent.length).toBe(1);
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.data).toEqual({ total: 99 });
+		expect(platform.sent[0].data.derived).toBe(true);
+	});
+
+	it('non-derived stream does not include derived flag', async () => {
+		const fn = live(async () => [{ id: 1 }], { merge: 'crud', key: 'id' });
+		__register('test/regularStream', fn);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const buf = toArrayBuffer({ rpc: 'test/regularStream', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent.length).toBe(1);
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.derived).toBeUndefined();
+	});
+});
+
 // -- Phase 37: live.rateLimit() -----------------------------------------------
 
 describe('live.rateLimit()', () => {

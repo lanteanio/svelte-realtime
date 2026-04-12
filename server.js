@@ -2343,7 +2343,8 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 				id, ok: true, data: resultData, topic, merge: streamOpts.merge,
 				key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max,
 				hasMore: undefined, cursor: undefined, seq: undefined,
-				version: undefined, schemaVersion: undefined, replay: undefined
+				version: undefined, schemaVersion: undefined, replay: undefined,
+				derived: /** @type {any} */ (fn).__isDerived || undefined
 			};
 
 			if (isPaginated) {

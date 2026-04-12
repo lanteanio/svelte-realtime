@@ -914,6 +914,153 @@ describe('__stream() hydrate reconnect', () => {
 	});
 });
 
+// -- __stream() hydrate derived -----------------------------------------------
+
+describe('__stream() hydrate derived', () => {
+	it('keeps hydrated data when server returns stale derived result', async () => {
+		const store = __stream('hydrate/derived-stats', { merge: 'set' });
+		store.hydrate({ members: 42, audits: 566, emails: 57 });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: { members: 0, audits: 0, emails: 0 },
+			topic: 'derived-stats',
+			merge: 'set',
+			derived: true
+		});
+
+		expect(values[values.length - 1]).toEqual({ members: 42, audits: 566, emails: 57 });
+
+		unsub();
+	});
+
+	it('accepts live updates after initial hydration protection', async () => {
+		const store = __stream('hydrate/derived-live', { merge: 'set' });
+		store.hydrate({ count: 100 });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: { count: 0 },
+			topic: 'derived-live',
+			merge: 'set',
+			derived: true
+		});
+
+		expect(values[values.length - 1]).toEqual({ count: 100 });
+
+		simulateTopicMessage('derived-live', { event: 'set', data: { count: 120 } });
+
+		expect(values[values.length - 1]).toEqual({ count: 120 });
+
+		unsub();
+	});
+
+	it('keeps hydrated data on reconnect too since server marks derived responses', async () => {
+		const store = __stream('hydrate/derived-reconn', { merge: 'set' });
+		store.hydrate({ total: 50 });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent1.id, {
+			ok: true,
+			data: { total: 0 },
+			topic: 'derived-reconn',
+			merge: 'set',
+			derived: true
+		});
+
+		expect(values[values.length - 1]).toEqual({ total: 50 });
+
+		// Live update brings real data
+		simulateTopicMessage('derived-reconn', { event: 'set', data: { total: 75 } });
+
+		expect(values[values.length - 1]).toEqual({ total: 75 });
+
+		// Reconnect
+		simulateStatus('closed');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+
+		// Reconnect response also has derived: true, keeps current value (75)
+		simulateRpcResponse(sent2.id, {
+			ok: true,
+			data: { total: 0 },
+			topic: 'derived-reconn',
+			merge: 'set',
+			derived: true
+		});
+
+		expect(values[values.length - 1]).toEqual({ total: 75 });
+
+		unsub();
+	});
+
+	it('crud-merge derived keeps hydrated array', async () => {
+		const store = __stream('hydrate/derived-crud', { merge: 'crud', key: 'id' });
+		store.hydrate([{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }]);
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [],
+			topic: 'derived-crud',
+			merge: 'crud',
+			key: 'id',
+			derived: true
+		});
+
+		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'Alice' }, { id: 2, name: 'Bob' }]);
+
+		unsub();
+	});
+
+	it('non-hydrated derived stream still receives server data', async () => {
+		const store = __stream('no-hydrate/derived', { merge: 'set' });
+
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: { count: 42 },
+			topic: 'no-hydrate-derived',
+			merge: 'set',
+			derived: true
+		});
+
+		// No hydration, so currentValue is undefined -- derived protection does not apply
+		expect(values[values.length - 1]).toEqual({ count: 42 });
+
+		unsub();
+	});
+});
+
 // -- __stream() seq tracking (Phase 15) ---------------------------------------
 
 describe('__stream() seq tracking', () => {

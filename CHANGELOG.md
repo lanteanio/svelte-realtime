@@ -5,6 +5,14 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.17] - 2026-04-12
+
+### Fixed
+
+- **Hydrated `live.derived()` streams no longer flash to zero on client hydration.** When a derived stream was hydrated with SSR data via `.hydrate()`, the first RPC response from the server overwrote it with a stale result computed before the source topics had populated. The server now marks derived stream responses with a `derived` flag, and the client preserves the existing hydrated value instead of replacing it. Live updates via WebSocket still apply normally on top of the hydrated data.
+
+---
+
 ## [0.4.16] - 2026-04-12
 
 ### Added

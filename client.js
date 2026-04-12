@@ -938,10 +938,10 @@ function _createStream(path, options, dynamicArgs) {
 					for (const evt of response.data) {
 						_applyMerge(evt);
 					}
-				} else if (response.channel && currentValue !== undefined) {
-					// Channel fast-path returns an empty placeholder (null or []).
-					// Keep the existing value (hydrated SSR data or previously
-					// accumulated events) so the store never flashes to empty.
+				} else if ((response.channel || response.derived) && currentValue !== undefined) {
+					// Keep the existing value so the store never flashes to empty.
+					// Channels return an empty placeholder; derived streams may
+					// return stale data before their sources populate.
 				} else {
 					currentValue = response.data;
 				}
