@@ -639,7 +639,7 @@ function _validate(schema, input) {
 		const result = schema['~standard'].validate(input);
 		// Standard Schema validate() may return a Promise; we only support sync schemas here.
 		// If a Promise is returned, treat it as an unrecognized schema.
-		if (result && typeof result.then === 'function') {
+		if (result instanceof Promise) {
 			return {
 				ok: false,
 				message: 'Async Standard Schema schemas are not supported in live.validated(). Use a synchronous schema.',
@@ -650,7 +650,10 @@ function _validate(schema, input) {
 			return { ok: true, data: result.value };
 		}
 		const issues = result.issues.map((/** @type {any} */ i) => ({
-			path: (i.path || []).map((/** @type {any} */ p) => String(typeof p === 'object' ? p.key : p)),
+			path: (i.path || []).map((/** @type {any} */ p) => {
+				const key = typeof p === 'object' ? p.key : p;
+				return key != null ? String(key) : '';
+			}).filter(Boolean),
 			message: i.message || 'Validation failed'
 		}));
 		return { ok: false, message: 'Validation failed', issues };
