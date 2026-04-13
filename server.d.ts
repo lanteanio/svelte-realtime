@@ -370,16 +370,27 @@ export namespace live {
 	/**
 	 * Mark a function as RPC-callable with schema validation.
 	 * Validates args[0] against the schema before calling fn.
-	 * Supports Zod and Valibot schemas.
+	 * Supports any [Standard Schema](https://standardschema.dev/)–compliant schema,
+	 * including Zod, ArkType, Valibot v1+, and others.
 	 *
-	 * @param schema - Zod or Valibot schema
+	 * @param schema - A Standard Schema–compliant schema (or legacy Zod/Valibot schema)
 	 * @param fn - Handler function (ctx, validatedInput, ...rest)
 	 *
 	 * @example
 	 * ```js
+	 * import { z } from 'zod';
 	 * const SendSchema = z.object({ text: z.string().min(1) });
 	 * export const send = live.validated(SendSchema, async (ctx, input) => {
 	 *   // input is validated and typed
+	 * });
+	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * import { type } from 'arktype';
+	 * const SendSchema = type({ text: 'string>0' });
+	 * export const send = live.validated(SendSchema, async (ctx, input) => {
+	 *   // works with any Standard Schema–compliant validator
 	 * });
 	 * ```
 	 */

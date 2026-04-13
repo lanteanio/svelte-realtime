@@ -574,7 +574,7 @@ Same arguments return the same cached store instance. The cache is cleaned up wh
 
 ## Schema validation
 
-Use `live.validated(schema, fn)` to validate the first argument against a Zod or Valibot schema before the function runs.
+Use `live.validated(schema, fn)` to validate the first argument against a schema before the function runs. Any [Standard Schema](https://standardschema.dev/)–compliant validator is supported, including Zod, ArkType, Valibot, and others.
 
 ```js
 import { z } from 'zod';
@@ -592,7 +592,22 @@ export const addTodo = live.validated(CreateTodo, async (ctx, input) => {
 });
 ```
 
-On the client, validated exports work like regular `live()` calls. Validation errors are thrown as `RpcError` with `code: 'VALIDATION'` and an `issues` array. Valibot schemas are also supported -- the adapter detects the schema type automatically.
+Because `live.validated()` uses the [Standard Schema](https://standardschema.dev/) interface, you can swap in any compatible validator:
+
+```js
+import { type } from 'arktype';
+import { live } from 'svelte-realtime/server';
+
+const CreateTodo = type({ text: 'string>0', priority: '"low"|"medium"|"high"|undefined' });
+
+export const addTodo = live.validated(CreateTodo, async (ctx, input) => {
+  const todo = await db.todos.insert({ ...input, userId: ctx.user.id });
+  ctx.publish('todos', 'created', todo);
+  return todo;
+});
+```
+
+On the client, validated exports work like regular `live()` calls. Validation errors are thrown as `RpcError` with `code: 'VALIDATION'` and an `issues` array.
 
 ---
 
@@ -1948,7 +1963,7 @@ Import from `svelte-realtime/server`.
 | `live.stream(topic, initFn, options?)` | Create a reactive stream |
 | `live.channel(topic, options?)` | Create an ephemeral pub/sub channel |
 | `live.binary(fn, options?)` | Mark a function as a binary RPC handler (`maxSize` limits payload, default 10MB) |
-| `live.validated(schema, fn)` | RPC with Zod/Valibot input validation |
+| `live.validated(schema, fn)` | RPC with [Standard Schema](https://standardschema.dev/) input validation (Zod, ArkType, Valibot, etc.) |
 | `live.cron(schedule, topic, fn)` | Server-side scheduled function |
 | `live.derived(sources, fn, options?)` | Server-side computed stream (static or dynamic sources) |
 | `live.effect(sources, fn, options?)` | Server-side reactive side effect |
