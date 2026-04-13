@@ -5,6 +5,14 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.19] - 2026-04-13
+
+### Added
+
+- **Standard Schema support for `live.validated()`.** Any [Standard Schema](https://standardschema.dev/)-compatible validator now works out of the box -- Zod, ArkType, Valibot v1+, and others. The `~standard` interface is checked first; existing Zod `.safeParse` and Valibot `._run` paths are preserved as legacy fallbacks. Async schemas are rejected with a clear error. (PR #3 by @joshua1)
+
+---
+
 ## [0.4.18] - 2026-04-12
 
 ### Fixed

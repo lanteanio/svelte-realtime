@@ -600,9 +600,10 @@ live.rateLimit = function rateLimit(config, fn) {
 /**
  * Mark a function as RPC-callable with schema validation.
  * Validates args[0] against the schema before calling fn.
- * Supports Zod (.safeParse method on schema) and Valibot (safeParse as standalone).
+ * Supports any Standard Schema-compatible schema (https://standardschema.dev/),
+ * including Zod, ArkType, Valibot v1+, and others.
  *
- * @param {any} schema - Zod or Valibot schema
+ * @param {any} schema - Zod, ArkType, Valibot, or any Standard Schema-compatible schema
  * @param {Function} fn - Handler function (ctx, validatedInput, ...rest)
  * @returns {Function}
  */
@@ -626,13 +627,36 @@ live.validated = function validated(schema, fn) {
 };
 
 /**
- * Validate input against a Zod or Valibot schema.
+ * Validate input against a Standard Schema-compatible schema, with legacy Zod/Valibot fallbacks.
  * @param {any} schema
  * @param {any} input
  * @returns {{ ok: true, data: any } | { ok: false, message: string, issues: Array<{ path: string[], message: string }> }}
  */
 function _validate(schema, input) {
-	// Zod-style: schema has .safeParse method
+	// Standard Schema: schema exposes `~standard.validate` (https://standardschema.dev/)
+	if (schema?.['~standard'] && typeof schema['~standard'].validate === 'function') {
+		const result = schema['~standard'].validate(input);
+		if (result instanceof Promise) {
+			return {
+				ok: false,
+				message: 'Async schemas are not supported in live.validated(). Use a synchronous schema.',
+				issues: [{ path: [], message: 'Async schema not supported' }]
+			};
+		}
+		if (result.issues == null) {
+			return { ok: true, data: result.value };
+		}
+		const issues = result.issues.map((/** @type {any} */ i) => ({
+			path: (i.path || []).map((/** @type {any} */ p) => {
+				const key = typeof p === 'object' && p !== null && 'key' in p ? p.key : p;
+				return key != null ? String(key) : '';
+			}).filter((k) => k !== ''),
+			message: i.message || 'Validation failed'
+		}));
+		return { ok: false, message: 'Validation failed', issues };
+	}
+
+	// Zod legacy fallback: schema has .safeParse method
 	if (typeof schema?.safeParse === 'function') {
 		const result = schema.safeParse(input);
 		if (result.success) {
@@ -649,7 +673,7 @@ function _validate(schema, input) {
 		};
 	}
 
-	// Valibot-style: schema is passed to a standalone safeParse
+	// Valibot legacy fallback: schema is passed to a standalone safeParse
 	// In Valibot v1, schemas have a ._run or .pipe method
 	// Try to use the schema directly as a Valibot schema
 	if (schema?._run || schema?.pipe || schema?.type) {
@@ -675,7 +699,7 @@ function _validate(schema, input) {
 	// Unknown schema type -- reject. Passing unvalidated input through is a security risk.
 	return {
 		ok: false,
-		message: 'Unrecognized schema type passed to live.validated(). Supported: Zod (.safeParse), Valibot (._run).',
+		message: 'Unrecognized schema type passed to live.validated(). Supported: Standard Schema (https://standardschema.dev/), Zod (.safeParse), Valibot (._run).',
 		issues: [{ path: [], message: 'Unrecognized schema type' }]
 	};
 }

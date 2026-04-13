@@ -1147,6 +1147,124 @@ describe('live.validated()', () => {
 		expect(handler.__isValidated).toBe(true);
 		expect(handler.__schema).toBe(schema);
 	});
+
+	it('passes through when Standard Schema validates successfully', async () => {
+		const schema = {
+			'~standard': {
+				version: 1,
+				vendor: 'mock',
+				validate(input) {
+					if (input && typeof input.text === 'string') {
+						return { value: { text: input.text.trim() } };
+					}
+					return { issues: [{ message: 'text is required', path: [{ key: 'text' }] }] };
+				}
+			}
+		};
+
+		const handler = live.validated(schema, async (ctx, input) => {
+			return { received: input.text };
+		});
+		__register('val/std-ok', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'val/std-ok', id: 'vs1', args: [{ text: '  hello  ' }] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0];
+		expect(response.data.ok).toBe(true);
+		expect(response.data.data).toEqual({ received: 'hello' });
+	});
+
+	it('rejects with VALIDATION code and issues on Standard Schema failure', async () => {
+		const schema = {
+			'~standard': {
+				version: 1,
+				vendor: 'mock',
+				validate(input) {
+					return {
+						issues: [{ message: 'name is too short', path: [{ key: 'name' }] }]
+					};
+				}
+			}
+		};
+
+		const handler = live.validated(schema, async (ctx, input) => input);
+		__register('val/std-fail', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'val/std-fail', id: 'vs2', args: [{ name: '' }] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0];
+		expect(response.data.ok).toBe(false);
+		expect(response.data.code).toBe('VALIDATION');
+		expect(response.data.issues).toEqual([{ path: ['name'], message: 'name is too short' }]);
+	});
+
+	it('rejects async Standard Schema validators', async () => {
+		const schema = {
+			'~standard': {
+				version: 1,
+				vendor: 'mock',
+				validate(input) {
+					return Promise.resolve({ value: input });
+				}
+			}
+		};
+
+		const handler = live.validated(schema, async (ctx, input) => input);
+		__register('val/std-async', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'val/std-async', id: 'vs3', args: [{ text: 'hi' }] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0];
+		expect(response.data.ok).toBe(false);
+		expect(response.data.code).toBe('VALIDATION');
+		expect(response.data.issues[0].message).toBe('Async schema not supported');
+	});
+
+	it('prefers ~standard over .safeParse when both exist', async () => {
+		const schema = {
+			'~standard': {
+				version: 1,
+				vendor: 'mock',
+				validate(input) {
+					return { value: { text: input.text, via: 'standard' } };
+				}
+			},
+			safeParse(input) {
+				return { success: true, data: { text: input.text, via: 'zod' } };
+			}
+		};
+
+		const handler = live.validated(schema, async (ctx, input) => {
+			return input;
+		});
+		__register('val/std-priority', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'val/std-priority', id: 'vs4', args: [{ text: 'hello' }] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		const response = platform.sent[0];
+		expect(response.data.ok).toBe(true);
+		expect(response.data.data).toEqual({ text: 'hello', via: 'standard' });
+	});
 });
 
 // -- __directCall() (Phase 11) ------------------------------------------------
