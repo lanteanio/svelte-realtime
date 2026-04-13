@@ -651,9 +651,9 @@ function _validate(schema, input) {
 		}
 		const issues = result.issues.map((/** @type {any} */ i) => ({
 			path: (i.path || []).map((/** @type {any} */ p) => {
-				const key = typeof p === 'object' ? p.key : p;
+				const key = typeof p === 'object' && p !== null && 'key' in p ? p.key : p;
 				return key != null ? String(key) : '';
-			}).filter(Boolean),
+			}).filter((k) => k !== ''),
 			message: i.message || 'Validation failed'
 		}));
 		return { ok: false, message: 'Validation failed', issues };
