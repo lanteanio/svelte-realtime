@@ -2149,7 +2149,7 @@ describe('live.derived()', () => {
 
 // -- Phase 30: _activateDerived + __registerDerived --------------------------
 
-import { __registerDerived, _activateDerived } from '../server.js';
+import { __registerDerived, _activateDerived, _prepareHmr } from '../server.js';
 
 describe('derived stream activation', () => {
 	it('recomputes and publishes when source topic publishes', async () => {
@@ -2413,6 +2413,152 @@ describe('dynamic derived activation', () => {
 		await new Promise(r => setTimeout(r, 30));
 		const totalAfter = platform.published.filter(p => p.topic === topic && p.event === 'set').length;
 		expect(totalAfter).toBe(totalBefore);
+	});
+});
+
+describe('lazy __registerDerived sets _hasDynamicDerived', () => {
+	it('_activateDerived wraps platform.publish when only lazy derived entries exist', async () => {
+		const lazyLoader = async () => {
+			return live.derived(
+				(orgId) => [`lazy_src:${orgId}`],
+				async (ctx, orgId) => ({ orgId })
+			);
+		};
+		lazyLoader.__lazy = true;
+
+		__registerDerived('test/lazyDerived', lazyLoader);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		// platform.publish should have been wrapped (not the raw mock)
+		// Verify by checking that the function is no longer the original
+		expect(platform.publish.name).toBe('derivedPublish');
+	});
+});
+
+describe('derived recomputation receives subscriber user data', () => {
+	it('ctx.user is populated from the subscribing client during recomputation', async () => {
+		let capturedUser = undefined;
+		const fn = live.derived(
+			(orgId) => [`user_src:${orgId}`],
+			async (ctx, orgId) => {
+				capturedUser = ctx.user;
+				return { orgId };
+			}
+		);
+
+		__registerDerived('test/derivedUser', fn);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		const resolvedTopic = fn.__streamTopic('org_99');
+		const fakeUser = { id: 'user_1', organization_id: 'org_99' };
+		fn.__onSubscribe({ user: fakeUser }, resolvedTopic);
+
+		platform.publish('user_src:org_99', 'updated', {});
+		await new Promise(r => setTimeout(r, 30));
+
+		expect(capturedUser).toEqual(fakeUser);
+	});
+
+	it('ctx.user is null when no user was provided at subscribe time', async () => {
+		let capturedUser = undefined;
+		const fn = live.derived(
+			(orgId) => [`nulluser_src:${orgId}`],
+			async (ctx, orgId) => {
+				capturedUser = ctx.user;
+				return { orgId };
+			}
+		);
+
+		__registerDerived('test/derivedNullUser', fn);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		const resolvedTopic = fn.__streamTopic('org_77');
+		fn.__onSubscribe({}, resolvedTopic);
+
+		platform.publish('nulluser_src:org_77', 'updated', {});
+		await new Promise(r => setTimeout(r, 30));
+
+		expect(capturedUser).toBeNull();
+	});
+
+	it('static derived recomputation still works without user context', async () => {
+		let callCount = 0;
+		const fn = live.derived(['static_user_src'], async () => {
+			callCount++;
+			return { count: callCount };
+		});
+
+		__registerDerived('test/staticDerivedNoUser', fn);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		platform.publish('static_user_src', 'updated', {});
+		await new Promise(r => setTimeout(r, 30));
+
+		const pubs = platform.published.filter(p => p.topic === fn.__streamTopic && p.event === 'set');
+		expect(pubs.length).toBeGreaterThanOrEqual(1);
+		expect(pubs[0].data.count).toBe(1);
+	});
+});
+
+describe('missing _activateDerived warning', () => {
+	it('warns in dev mode when derived stream is subscribed without _activateDerived', async () => {
+		_prepareHmr();
+
+		const derivedFn = live.derived(['warn_src'], async () => ({ ok: true }));
+		__register('test/warnDerived', derivedFn);
+		__registerDerived('test/warnDerived', derivedFn);
+
+		const ws = mockWs({ id: 'warn_user' });
+		const platform = mockPlatform();
+
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		const buf = toArrayBuffer({ rpc: 'test/warnDerived', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+
+		await new Promise(r => setTimeout(r, 30));
+
+		const derivedWarnings = warnSpy.mock.calls.filter(
+			c => typeof c[0] === 'string' && c[0].includes('_activateDerived')
+		);
+		expect(derivedWarnings.length).toBe(1);
+		expect(derivedWarnings[0][0]).toContain('live.derived()');
+
+		warnSpy.mockRestore();
+	});
+
+	it('does not warn when _activateDerived was called', async () => {
+		_prepareHmr();
+
+		const derivedFn = live.derived(['nowarn_src'], async () => ({ ok: true }));
+		__register('test/noWarnDerived', derivedFn);
+		__registerDerived('test/noWarnDerived', derivedFn);
+
+		const ws = mockWs({ id: 'nowarn_user' });
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		const buf = toArrayBuffer({ rpc: 'test/noWarnDerived', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+
+		await new Promise(r => setTimeout(r, 30));
+
+		const derivedWarnings = warnSpy.mock.calls.filter(
+			c => typeof c[0] === 'string' && c[0].includes('_activateDerived')
+		);
+		expect(derivedWarnings.length).toBe(0);
+
+		warnSpy.mockRestore();
 	});
 });
 

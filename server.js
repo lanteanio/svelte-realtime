@@ -778,7 +778,7 @@ live.derived = function derived(sources, fn, options) {
 		/** @type {Map<string, any[]>} */
 		const topicArgs = new Map();
 		const topicFn = (...args) => {
-			const t = baseTopic + '\x00' + args.map(a => String(a).replace(/\x00/g, '')).join('\x00');
+			const t = baseTopic + '~' + args.map(a => String(a).replace(/~/g, '')).join('~');
 			topicArgs.set(t, args);
 			if (topicArgs.size > 10000) {
 				const iter = topicArgs.keys();
@@ -791,7 +791,7 @@ live.derived = function derived(sources, fn, options) {
 		/** @type {any} */ (fn).__derivedTopicArgs = topicArgs;
 
 		/** @type {any} */ (fn).__onSubscribe = function (_ctx, resolvedTopic) {
-			_activateDynamicDerived(fn, resolvedTopic);
+			_activateDynamicDerived(fn, resolvedTopic, _ctx && _ctx.user);
 		};
 		/** @type {any} */ (fn).__onUnsubscribe = function (_ctx, resolvedTopic) {
 			_deactivateDynamicDerived(fn, resolvedTopic);
@@ -814,6 +814,12 @@ const _dynamicDerivedByFn = new Map();
 
 /** @type {import('svelte-adapter-uws').Platform | null} Captured platform for dynamic derived recomputation */
 let _derivedPlatform = null;
+
+/** @type {boolean} Whether _activateDerived has been called at least once */
+let _activateDerivedCalled = false;
+
+/** @type {boolean} Whether the missing _activateDerived warning has already fired */
+let _warnedActivateDerived = false;
 
 /** @type {Map<string, { sources: string[], fn: Function, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
 const effectRegistry = new Map();
@@ -1387,6 +1393,7 @@ live.breaker = function breaker(options, fn) {
 export function __registerDerived(path, fn) {
 	if (/** @type {any} */ (fn).__lazy) {
 		_lazyQueue.push({ type: 'derived', path, loader: fn });
+		_hasDynamicDerived = true;
 		return;
 	}
 
@@ -1397,7 +1404,7 @@ export function __registerDerived(path, fn) {
 		/** @type {Map<string, any[]>} */
 		const topicArgs = new Map();
 		const topicFn = (...args) => {
-			const t = path + '\x00' + args.map(a => String(a).replace(/\x00/g, '')).join('\x00');
+			const t = path + '~' + args.map(a => String(a).replace(/~/g, '')).join('~');
 			topicArgs.set(t, args);
 			if (topicArgs.size > 10000) {
 				const iter = topicArgs.keys();
@@ -1443,6 +1450,7 @@ const _activatedPlatforms = new WeakSet();
 
 export function _activateDerived(platform) {
 	_derivedPlatform = platform;
+	_activateDerivedCalled = true;
 	if (_activatedPlatforms.has(platform)) return;
 
 	// Only wrap platform.publish if there are actual reactive registrations
@@ -1543,7 +1551,7 @@ async function _recomputeDerived(entry, platform) {
 		let result;
 		if (entry.args) {
 			const _h = _getCtxHelpers(platform);
-			const ctx = _buildCtx(null, null, platform, _h, null);
+			const ctx = _buildCtx(entry.user || null, null, platform, _h, null);
 			result = await entry.fn(ctx, ...entry.args);
 		} else {
 			result = await entry.fn();
@@ -1563,8 +1571,9 @@ async function _recomputeDerived(entry, platform) {
  * Wires the instance's resolved sources into _derivedBySource so publishes trigger recomputation.
  * @param {Function} fn - The derived compute function
  * @param {string} resolvedTopic - The resolved output topic (e.g. '__derived:5:org_123')
+ * @param {any} [user] - The subscribing client's user data, used for ctx during recomputation
  */
-function _activateDynamicDerived(fn, resolvedTopic) {
+function _activateDynamicDerived(fn, resolvedTopic, user) {
 	const entry = _dynamicDerivedByFn.get(fn);
 	if (!entry) return;
 
@@ -1600,7 +1609,8 @@ function _activateDynamicDerived(fn, resolvedTopic) {
 		resolvedSources,
 		debounce: entry.debounce,
 		timer: null,
-		refCount: 1
+		refCount: 1,
+		user: user || null
 	};
 
 	entry.instances.set(resolvedTopic, instance);
@@ -1852,6 +1862,8 @@ export function _prepareHmr() {
 	_streamsWithUnsubscribe.clear();
 	_hasDynamicDerived = false;
 	_dynamicDerivedByFn.clear();
+	_activateDerivedCalled = false;
+	_warnedActivateDerived = false;
 
 	return snap;
 }
@@ -2332,6 +2344,13 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 
 			if (/** @type {any} */ (fn).__onSubscribe) {
 				try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic); } catch {}
+			}
+
+			if (/** @type {any} */ (fn).__isDerived && !_activateDerivedCalled && !_warnedActivateDerived) {
+				if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+					_warnedActivateDerived = true;
+					console.warn('[svelte-realtime] live.derived() subscribed but _activateDerived(platform) was never called. Derived streams will not receive live updates.\n  Call _activateDerived(platform) in your WebSocket open hook.\n  See: https://svti.me/derived');
+				}
 			}
 
 			// Channel fast-path

@@ -5,6 +5,20 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.20] - 2026-04-14
+
+### Fixed
+
+- **`live.derived()` recomputation now receives `ctx.user` from the subscribing client.** Dynamic derived compute functions that check `ctx.user` (e.g. auth guards like `if (orgId !== ctx.user.organization_id)`) previously crashed with a TypeError because `ctx.user` was always null during recomputation. The user data from the first subscriber is now stored on the derived instance and passed through to the compute function.
+- **Lazy-registered derived streams no longer prevent `_activateDerived` from wrapping `platform.publish`.** When `__registerDerived` received a lazy loader, it returned before setting `_hasDynamicDerived = true`, causing `_activateDerived` to skip wrapping if called before the lazy queue resolved. The flag is now set eagerly when the lazy entry is queued.
+- **Dynamic derived topic separator changed from `\x00` to `~`.** The null byte separator was rejected by svelte-adapter-uws at multiple levels: the `esc()` envelope quoter throws on control characters, and subscribe validation silently drops topics containing them. Dynamic derived topics now use `~` (e.g. `dashboard/stats~org_123`), which is printable and compatible with the adapter's topic constraints.
+
+### Added
+
+- **Dev-mode warning when `_activateDerived(platform)` was not called.** When a client subscribes to a `live.derived()` stream and `_activateDerived` has never been called, a one-time console warning is emitted in non-production environments. This catches the silent misconfiguration where SSR hydration works but live updates never arrive.
+
+---
+
 ## [0.4.19] - 2026-04-13
 
 ### Added
@@ -17,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **`live.derived()` streams now subscribe correctly via RPC.** Derived streams were using an auto-generated `__derived:` topic prefix that collided with the reserved-prefix validation in the RPC handler, silently rejecting every subscription. `__registerDerived` now overrides the topic to use the stream path (e.g. `dashboard/stats` instead of `__derived:7`), which is consistent with how every other stream type works. Dynamic derived topics use the same path base with args appended (`dashboard/stats\x00orgId`). No special-case exemption needed in the validation layer.
+- **`live.derived()` streams now subscribe correctly via RPC.** Derived streams were using an auto-generated `__derived:` topic prefix that collided with the reserved-prefix validation in the RPC handler, silently rejecting every subscription. `__registerDerived` now overrides the topic to use the stream path (e.g. `dashboard/stats` instead of `__derived:7`), which is consistent with how every other stream type works. Dynamic derived topics use the same path base with args appended (`dashboard/stats~orgId`). No special-case exemption needed in the validation layer.
 - **Hydrated `live.derived()` stores preserve SSR data through initial subscription.** The server marks derived stream responses with a `derived` flag so the client keeps the existing hydrated value instead of replacing it with a potentially stale result. Live updates via WebSocket still apply normally on top of the hydrated data.
 
 ---

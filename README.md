@@ -1281,6 +1281,10 @@ export function open(ws, { platform }) {
 }
 ```
 
+Without this call, derived streams will still serve their initial SSR data but will never receive live updates. In dev mode, a console warning is emitted when a client subscribes to a derived stream and `_activateDerived` has not been called.
+
+Dynamic derived compute functions receive `ctx.user` from the subscribing client, so auth checks like `if (orgId !== ctx.user.organization_id) throw new LiveError("FORBIDDEN")` work the same as they do in regular stream handlers.
+
 | Option | Default | Description |
 |---|---|---|
 | `merge` | `'set'` | Merge strategy for the derived topic |
