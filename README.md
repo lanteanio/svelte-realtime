@@ -673,6 +673,32 @@ export async function load({ platform, locals }) {
 
 The hydrated store still subscribes for live updates on first render. It keeps the SSR data visible instead of showing `undefined` during the initial fetch. Guards still run during `.load()` calls. Pass `{ user }` as the second argument if your guard or init function needs user data.
 
+For dynamic streams (streams with a topic function), call the stream first to get the store, then hydrate:
+
+```js
+// src/routes/team/[id]/+page.server.js
+export async function load({ platform, locals, params }) {
+  const { invitations } = await import('$live/invitation');
+  const data = await invitations.load(platform, { args: [params.id], user: locals.user });
+  return { invitations: data };
+}
+```
+
+```svelte
+<!-- src/routes/team/[id]/+page.svelte -->
+<script>
+  import { invitations } from '$live/invitation';
+  import { page } from '$app/state';
+  let { data } = $props();
+
+  const invites = invitations(page.params.id).hydrate(data.invitations);
+</script>
+
+{#each $invites as invite (invite.id)}
+  <p>{invite.email}</p>
+{/each}
+```
+
 ---
 
 ## Batching
