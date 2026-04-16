@@ -934,6 +934,7 @@ Call `configure()` once at app startup. The hooks fire on state transitions only
 | Option | Description |
 |---|---|
 | `url` | Full WebSocket URL for cross-origin or native app usage (e.g. `'wss://api.example.com/ws'`) |
+| `auth` | `true` (or a custom path) to enable an HTTP preflight before each WebSocket upgrade so cookies set by the server's `authenticate` hook ride a normal HTTP response. Required behind Cloudflare Tunnel and other proxies that drop `Set-Cookie` on 101 responses. Requires `svelte-adapter-uws` >= 0.4.12. |
 | `onConnect()` | Called when the WebSocket connection opens after a reconnect |
 | `onDisconnect()` | Called when the WebSocket connection closes |
 | `beforeReconnect()` | Called before each reconnection attempt (can be async) |
@@ -984,6 +985,53 @@ The native client passes the token in the URL:
 ```js
 configure({ url: 'wss://my-sveltekit-app.com/ws?token=...' });
 ```
+
+### Refreshing session cookies on connect (Cloudflare Tunnel and friends)
+
+Cloudflare Tunnel and other strict edge proxies silently drop the `Set-Cookie` header on WebSocket `101 Switching Protocols` responses. The connection appears to open server-side, then the client immediately sees `close 1006` and never receives a single frame. The classic symptom for this in production: WebSockets work locally and on a bare server, then break the moment you put Cloudflare in front.
+
+Fix it in three pieces:
+
+1. Export an `authenticate` hook from `src/hooks.ws.{js,ts}`. It runs as a normal HTTP `POST /__ws/auth` before every upgrade (including reconnects), so cookies you set ride a `204 No Content` response that proxies route correctly.
+2. Opt into the client preflight with `configure({ auth: true })`.
+3. Use `svelte-adapter-uws` >= 0.4.12.
+
+```js
+// src/hooks.ws.js
+export { message, close, unsubscribe } from 'svelte-realtime/server';
+
+export function upgrade({ cookies }) {
+  const session = validateSession(cookies.session_id);
+  return session ? { id: session.userId, name: session.name } : false;
+}
+
+export function authenticate({ cookies }) {
+  const session = validateSession(cookies.get('session_id'));
+  if (!session) return false;
+
+  if (shouldRotate(session)) {
+    cookies.set('session_id', rotate(session), {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'lax',
+      path: '/'
+    });
+  }
+  return { id: session.userId, name: session.name };
+}
+```
+
+```svelte
+<!-- src/routes/+layout.svelte -->
+<script>
+  import { configure } from 'svelte-realtime/client';
+  configure({ auth: true });
+</script>
+```
+
+The client coalesces concurrent connects into a single in-flight preflight, treats `4xx` as terminal, and falls back to normal reconnect backoff on `5xx` and network errors.
+
+> **Detector:** if the client sees two consecutive WebSocket open->close cycles inside one second with no traffic, it logs a one-shot `console.warn` pointing at this section. That is the Cloudflare-Tunnel-eating-cookies fingerprint.
 
 ---
 

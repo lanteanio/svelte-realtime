@@ -133,22 +133,50 @@ function ensureListener() {
 /**
  * Attach a disconnect listener once.
  * Rejects all in-flight RPCs (already sent) with DISCONNECTED.
+ * Also detects the Cloudflare-Tunnel "Set-Cookie on 101" symptom: repeated
+ * fast open->close cycles with no time spent in the open state.
  */
 function ensureDisconnectListener() {
 	if (disconnectListenerAttached) return;
 	disconnectListenerAttached = true;
 
+	let lastOpenAt = 0;
+	let fastCloseCount = 0;
+	let cfTunnelWarned = false;
+
 	status.subscribe((s) => {
 		if (s === 'closed') {
-			const code = s === 'closed' ? 'DISCONNECTED' : 'CONNECTION_CLOSED';
 			for (const [id, entry] of pending) {
 				pending.delete(id);
 				if (entry.timer) clearTimeout(entry.timer);
-				entry.reject(new RpcError(code, 'WebSocket connection lost'));
+				entry.reject(new RpcError('DISCONNECTED', 'WebSocket connection lost'));
+			}
+
+			if (lastOpenAt > 0) {
+				const openDuration = Date.now() - lastOpenAt;
+				lastOpenAt = 0;
+				if (openDuration < 1000) {
+					fastCloseCount++;
+					if (fastCloseCount >= 2 && !cfTunnelWarned && !_clientConfig.auth) {
+						cfTunnelWarned = true;
+						console.warn(
+							'[svelte-realtime] WebSocket opened then closed in ' + openDuration + 'ms ' +
+							'with no traffic, repeatedly. This is the classic Cloudflare-Tunnel ' +
+							'"Set-Cookie on 101" symptom: the proxy silently drops cookies on ' +
+							'WebSocket upgrade responses.\n' +
+							'  Fix: add `configure({ auth: true })` on the client and an ' +
+							'`authenticate` hook in `hooks.ws.js` (svelte-adapter-uws >= 0.4.12).\n' +
+							'  See: https://svti.me/cf-cookies'
+						);
+					}
+				} else {
+					fastCloseCount = 0;
+				}
 			}
 		}
 		if (s === 'open') {
 			_terminated = false;
+			lastOpenAt = Date.now();
 		}
 	});
 
@@ -1559,7 +1587,7 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function }} OfflineEntry
  */
 
-/** @type {{ url?: string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
+/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
 let _clientConfig = {};
 
 /** @type {boolean} */
@@ -1577,13 +1605,17 @@ let _replayingQueue = false;
 /**
  * Configure client-side connection hooks and offline queue.
  *
- * @param {{ url?: string, onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
 	_clientConfig = config;
 
-	if (config.url) {
-		_connect({ url: config.url });
+	if (config.url !== undefined || config.auth !== undefined) {
+		/** @type {{ url?: string, auth?: boolean | string }} */
+		const connectArgs = {};
+		if (config.url !== undefined) connectArgs.url = config.url;
+		if (config.auth !== undefined) connectArgs.auth = config.auth;
+		_connect(connectArgs);
 	}
 
 	if (!_configListenerAttached) {

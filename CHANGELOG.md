@@ -5,6 +5,19 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.22] - 2026-04-17
+
+### Added
+
+- **`configure({ auth })` forwards to the adapter's connect preflight.** Pass `true` to use the default `/__ws/auth` path or a string to override it. Required behind Cloudflare Tunnel and other strict edge proxies that silently drop `Set-Cookie` on WebSocket `101 Switching Protocols` responses, and to opt into the `authenticate` hook shipped in `svelte-adapter-uws` 0.4.12. Fully backwards compatible -- callers that don't pass `auth` behave identically. Until now this required reaching past `svelte-realtime/client` to seed the adapter singleton manually.
+- **Cloudflare-Tunnel symptom detector.** When the client observes two consecutive WebSocket `open -> close` cycles inside one second with no time spent in the open state, it logs a one-shot `console.warn` pointing at `https://svti.me/cf-cookies` with the fix. The warning is suppressed when `configure({ auth })` is already set. This catches the silent-1006 production failure mode that traditionally takes hours to diagnose.
+
+### Changed
+
+- **Peer dependency `svelte-adapter-uws` bumped to `>=0.4.12`** so the new `auth` option and `authenticate` hook are guaranteed to be available. Older versions silently ignored unknown `connect()` options anyway, but pinning the floor makes the new docs trustworthy.
+
+---
+
 ## [0.4.21] - 2026-04-16
 
 ### Breaking Changes

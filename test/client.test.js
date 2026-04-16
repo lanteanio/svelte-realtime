@@ -1333,6 +1333,146 @@ describe('configure()', () => {
 		const urlCalls = connectFn.mock.calls.filter(c => c[0]?.url);
 		expect(urlCalls).toHaveLength(0);
 	});
+
+	it('forwards auth: true to the adapter connect()', () => {
+		connectFn.mockClear();
+		configure({ auth: true });
+
+		expect(connectFn).toHaveBeenCalledWith({ auth: true });
+	});
+
+	it('forwards a custom auth path string to the adapter connect()', () => {
+		connectFn.mockClear();
+		configure({ auth: '/custom/preflight' });
+
+		expect(connectFn).toHaveBeenCalledWith({ auth: '/custom/preflight' });
+	});
+
+	it('forwards both url and auth together', () => {
+		connectFn.mockClear();
+		configure({ url: 'wss://api.example.com/ws', auth: true });
+
+		expect(connectFn).toHaveBeenCalledWith({ url: 'wss://api.example.com/ws', auth: true });
+	});
+
+	it('omits the url key when only auth is configured', () => {
+		connectFn.mockClear();
+		configure({ auth: true });
+
+		expect(connectFn).toHaveBeenCalledTimes(1);
+		const arg = connectFn.mock.calls[0][0];
+		expect(Object.prototype.hasOwnProperty.call(arg, 'url')).toBe(false);
+	});
+
+	it('does not forward auth when not provided', () => {
+		connectFn.mockClear();
+		configure({ url: 'wss://api.example.com/ws' });
+
+		const arg = connectFn.mock.calls[0][0];
+		expect(Object.prototype.hasOwnProperty.call(arg, 'auth')).toBe(false);
+	});
+
+	it('does not call connect() at all when neither url nor auth is set', () => {
+		connectFn.mockClear();
+		configure({ onConnect() {} });
+
+		expect(connectFn).not.toHaveBeenCalled();
+	});
+
+	it('forwards auth: false explicitly when the user opts out', () => {
+		connectFn.mockClear();
+		configure({ auth: false });
+
+		expect(connectFn).toHaveBeenCalledWith({ auth: false });
+	});
+});
+
+// -- Cloudflare Tunnel symptom detector ---------------------------------------
+
+describe('CF Tunnel symptom detector', () => {
+	it('warns after two consecutive fast open->close cycles', async () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		// Trigger ensureDisconnectListener via an RPC call. The status mock
+		// fires 'open' synchronously on subscribe, so lastOpenAt is seeded.
+		__rpc('cf/ping')().catch(() => {});
+
+		simulateStatus('closed'); // first fast close
+		simulateStatus('open');
+		simulateStatus('closed'); // second fast close -> warn
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const msg = warnSpy.mock.calls[0][0];
+		expect(msg).toContain('Cloudflare-Tunnel');
+		expect(msg).toContain('configure({ auth: true })');
+		expect(msg).toContain('https://svti.me/cf-cookies');
+
+		warnSpy.mockRestore();
+	});
+
+	it('does not warn after a single fast cycle', () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		__rpc('cf/ping')().catch(() => {});
+		simulateStatus('closed');
+
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
+	});
+
+	it('does not warn when configure({ auth: true }) is set', () => {
+		configure({ auth: true });
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		__rpc('cf/ping')().catch(() => {});
+		simulateStatus('closed');
+		simulateStatus('open');
+		simulateStatus('closed');
+		simulateStatus('open');
+		simulateStatus('closed');
+
+		expect(warnSpy).not.toHaveBeenCalled();
+		warnSpy.mockRestore();
+	});
+
+	it('only warns once even after many cycles', () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		__rpc('cf/ping')().catch(() => {});
+		for (let i = 0; i < 10; i++) {
+			simulateStatus('closed');
+			simulateStatus('open');
+		}
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		warnSpy.mockRestore();
+	});
+
+	it('resets the counter when an open lasts longer than 1s', () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		const realNow = Date.now;
+		let now = 1_000_000;
+		Date.now = () => now;
+
+		try {
+			__rpc('cf/ping')().catch(() => {});
+			// Initial 'open' captured at now=1_000_000
+			simulateStatus('closed');                  // count=1
+			now += 5_000;                              // 5s gap
+			simulateStatus('open');
+			now += 2_000;                              // open lasted 2s
+			simulateStatus('closed');                  // slow close -> reset
+			now += 100;
+			simulateStatus('open');
+			simulateStatus('closed');                  // count=1 again, no warn
+
+			expect(warnSpy).not.toHaveBeenCalled();
+		} finally {
+			Date.now = realNow;
+			warnSpy.mockRestore();
+		}
+	});
 });
 
 // -- combine() ----------------------------------------------------------------

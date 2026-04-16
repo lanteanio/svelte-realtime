@@ -181,6 +181,22 @@ export function configure(config: {
 	 * @example 'wss://my-app.com/ws'
 	 */
 	url?: string;
+	/**
+	 * Run an HTTP preflight before each WebSocket upgrade so cookies set by the
+	 * server's `authenticate` hook ride a normal HTTP response (not a 101 Switching
+	 * Protocols frame). Required behind Cloudflare Tunnel and other strict edge
+	 * proxies that silently drop `Set-Cookie` on WebSocket upgrades.
+	 *
+	 * Pass `true` to use the default `/__ws/auth` path, or a string to override it
+	 * (must match the adapter's `websocket.authPath` option).
+	 *
+	 * Requires `svelte-adapter-uws` >= 0.4.12 and an `authenticate` export in
+	 * `src/hooks.ws.{js,ts}`.
+	 *
+	 * @default false
+	 * @example configure({ auth: true })
+	 */
+	auth?: boolean | string;
 	/** Called when the WebSocket connection opens (not on initial connect, only reconnects). */
 	onConnect?(): void;
 	/** Called when the WebSocket connection closes. */
