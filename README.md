@@ -147,8 +147,6 @@ export const messages = live.stream('messages', async (ctx) => {
 
 {#if $messages === undefined}
   <p>Loading...</p>
-{:else if $messages?.error}
-  <p>Failed to load: {$messages.error.message}</p>
 {:else}
   {#each $messages as msg (msg.id)}
     <p><b>{msg.userId}:</b> {msg.text}</p>
@@ -378,27 +376,46 @@ When the WebSocket reconnects, streams automatically refetch initial data and re
 
 ## Error handling
 
-Stream stores have three states:
+The data store value never changes shape. It is always your data type or `undefined` while loading. Errors and connection status live on separate reactive stores so a network failure can never crash your UI:
 
-| Value | Meaning |
-|---|---|
-| `undefined` | Loading (initial fetch in progress) |
-| `Array` / `any` | Data loaded and receiving live updates |
-| `{ error: RpcError }` | Initial fetch failed |
+| Property | Type | Description |
+|---|---|---|
+| `$store` | `T \| undefined` | Your data. Never replaced by an error object. On failure, the last loaded value is preserved. |
+| `store.error` | `Readable<RpcError \| null>` | Current error, or `null` when healthy. |
+| `store.status` | `Readable<'loading' \| 'connected' \| 'reconnecting' \| 'error'>` | Connection status. |
 
-Handle all three in your template:
+Handle loading in your template:
 
 ```svelte
 {#if $messages === undefined}
   <p>Loading...</p>
-{:else if $messages?.error}
-  <p>Failed: {$messages.error.message}</p>
 {:else}
   {#each $messages as msg (msg.id)}
     <p>{msg.text}</p>
   {/each}
 {/if}
 ```
+
+To show errors, subscribe to the `.error` store:
+
+```svelte
+<script>
+  import { messages } from '$live/chat';
+
+  const err = messages.error;
+  const status = messages.status;
+</script>
+
+{#if $err}
+  <p>Error: {$err.message} ({$err.code})</p>
+{/if}
+
+{#if $status === 'reconnecting'}
+  <p>Reconnecting...</p>
+{/if}
+```
+
+Defensive patterns like `($store ?? []).filter(...)` work correctly because `$store` is always an array or `undefined`.
 
 For RPC calls, errors are thrown as `RpcError` with a `code` field:
 
@@ -421,22 +438,23 @@ try {
 When the adapter's `ready()` promise rejects (terminal close codes 1008, 4401, 4403, exhausted retries, or explicit `close()`), svelte-realtime:
 
 - Rejects all pending RPCs immediately with `RpcError('CONNECTION_CLOSED', ...)`
-- Sets an `{ error }` state on all active stream stores
+- Sets `.error` on all active stream stores (the data value is preserved)
 - Drains the offline queue with errors
 
 RPCs called after a terminal close reject immediately without sending.
 
 ### Reusable error boundary component
 
-For Svelte 5, you can build a reusable boundary that handles all three stream states:
+For Svelte 5, you can build a reusable boundary that handles loading and error states:
 
 ```svelte
 <!-- src/lib/StreamView.svelte -->
 <script>
-  /** @type {{ store: import('svelte/store').Readable, children: import('svelte').Snippet, loading?: import('svelte').Snippet, error?: import('svelte').Snippet<[any]> }} */
+  /** @type {{ store: any, children: import('svelte').Snippet, loading?: import('svelte').Snippet, error?: import('svelte').Snippet<[any]> }} */
   let { store, children, loading, error } = $props();
 
   let value = $derived($store);
+  const err = store.error;
 </script>
 
 {#if value === undefined}
@@ -445,11 +463,11 @@ For Svelte 5, you can build a reusable boundary that handles all three stream st
   {:else}
     <p>Loading...</p>
   {/if}
-{:else if value?.error}
+{:else if $err}
   {#if error}
-    {@render error(value.error)}
+    {@render error($err)}
   {:else}
-    <p>Error: {value.error.message}</p>
+    <p>Error: {$err.message}</p>
   {/if}
 {:else}
   {@render children()}
@@ -492,7 +510,7 @@ With default slots, the minimal version is just:
 </StreamView>
 ```
 
-This removes the `{#if}/{:else if}/{:else}` boilerplate from every page that uses a stream.
+This removes the `{#if}/{:else}` boilerplate from every page that uses a stream.
 
 ---
 
@@ -2039,6 +2057,8 @@ Import from `svelte-realtime/client`.
 
 | Method/Property | Description |
 |---|---|
+| `error` | `Readable<RpcError \| null>` -- current error, or `null` when healthy |
+| `status` | `Readable<'loading' \| 'connected' \| 'reconnecting' \| 'error'>` -- connection status |
 | `optimistic(event, data)` | Apply instant UI update, returns rollback function |
 | `hydrate(initialData)` | Pre-populate with SSR data |
 | `loadMore(...extraArgs)` | Load next page (cursor-based) |

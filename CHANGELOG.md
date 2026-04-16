@@ -5,6 +5,30 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.21] - 2026-04-16
+
+### Breaking Changes
+
+- **Stream store errors no longer replace the data value.** Previously, connection failures, timeouts, and rejected fetches set the store value to `{ error: RpcError }`, replacing whatever data was there. This caused `($store ?? []).filter(...)` and similar patterns to crash with a TypeError because the error object is truthy but not an array. The store value now always holds your data type (or `undefined` while loading). Errors are surfaced on a separate `.error` store instead.
+
+  **Migration:** Replace `$store?.error` checks with `store.error` (a `Readable<RpcError | null>`):
+
+  ```diff
+  - {#if $messages?.error}
+  -   <p>{$messages.error.message}</p>
+  + const err = messages.error;
+  + {#if $err}
+  +   <p>{$err.message}</p>
+  ```
+
+  Code that only uses `$store === undefined` for loading and otherwise treats the value as data requires no changes.
+
+### Added
+
+- **`.error` and `.status` reactive stores on every stream.** `store.error` is a `Readable<RpcError | null>` that holds the current error (or `null` when healthy). `store.status` is a `Readable<'loading' | 'connected' | 'reconnecting' | 'error'>` that tracks connection state. Both clear automatically on successful reconnect and reset on cleanup.
+
+---
+
 ## [0.4.20] - 2026-04-14
 
 ### Fixed

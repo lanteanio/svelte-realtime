@@ -508,6 +508,28 @@ function _createStream(path, options, dynamicArgs) {
 	let currentValue;
 	const store = writable(undefined);
 
+	/** @type {RpcError | null} */
+	let _error = null;
+	const _errorStore = writable(null);
+
+	/** @type {'loading' | 'connected' | 'reconnecting' | 'error'} */
+	let _status = 'loading';
+	const _statusStore = writable(/** @type {'loading' | 'connected' | 'reconnecting' | 'error'} */ ('loading'));
+
+	function _setError(/** @type {RpcError} */ err) {
+		_error = err;
+		_errorStore.set(err);
+		_status = 'error';
+		_statusStore.set('error');
+	}
+
+	function _clearError() {
+		if (_error !== null) {
+			_error = null;
+			_errorStore.set(null);
+		}
+	}
+
 	/** @type {string | null} */
 	let topic = null;
 
@@ -841,7 +863,7 @@ function _createStream(path, options, dynamicArgs) {
 	function fetchAndSubscribe() {
 		if (fetching) return;
 		if (_terminated) {
-			store.set({ error: new RpcError('CONNECTION_CLOSED', 'Connection permanently closed') });
+			_setError(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 			return;
 		}
 		fetching = true;
@@ -871,13 +893,13 @@ function _createStream(path, options, dynamicArgs) {
 				pending.delete(id);
 				pendingId = null;
 				fetching = false;
-				store.set({ error: new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)') });
+				_setError(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
 				return;
 			}
 			pending.delete(id);
 			pendingId = null;
 			fetching = false;
-			store.set({ error: new RpcError('TIMEOUT', `Stream '${path}' timed out after 30s`) });
+			_setError(new RpcError('TIMEOUT', `Stream '${path}' timed out after 30s`));
 		}, _getTimeout());
 
 		pending.set(id, {
@@ -886,6 +908,9 @@ function _createStream(path, options, dynamicArgs) {
 				fetching = false;
 				pendingId = null;
 				_reconnectAttempts = 0;
+				_clearError();
+				_status = 'connected';
+				_statusStore.set('connected');
 				topic = response.topic || null;
 
 				// Track sequence number for replay
@@ -985,7 +1010,7 @@ function _createStream(path, options, dynamicArgs) {
 			reject(err) {
 				fetching = false;
 				pendingId = null;
-				store.set({ error: err instanceof RpcError ? err : new RpcError('STREAM_ERROR', err?.message || 'Stream failed') });
+				_setError(err instanceof RpcError ? err : new RpcError('STREAM_ERROR', err?.message || 'Stream failed'));
 			},
 			timer
 		});
@@ -1035,6 +1060,10 @@ function _createStream(path, options, dynamicArgs) {
 		buffer = [];
 		currentValue = undefined;
 		store.set(undefined);
+		_error = null;
+		_errorStore.set(null);
+		_status = 'loading';
+		_statusStore.set('loading');
 		_index.clear();
 		_history = [];
 		_historyIndex = -1;
@@ -1046,6 +1075,8 @@ function _createStream(path, options, dynamicArgs) {
 	let _pendingCleanup = false;
 
 	return {
+		error: { subscribe: _errorStore.subscribe },
+		status: { subscribe: _statusStore.subscribe },
 		subscribe(fn) {
 			if (subCount++ === 0) {
 				if (_pendingCleanup) {
@@ -1064,6 +1095,8 @@ function _createStream(path, options, dynamicArgs) {
 						return;
 					}
 					if (s === 'open' && subCount > 0) {
+						_status = 'reconnecting';
+						_statusStore.set('reconnecting');
 						if (_reconnectTimer) clearTimeout(_reconnectTimer);
 						let delay;
 						if (_reconnectAttempts < 2) {
@@ -1093,7 +1126,7 @@ function _createStream(path, options, dynamicArgs) {
 					if (conn && typeof conn.ready === 'function') {
 						conn.ready().catch((/** @type {any} */ err) => {
 							if (subCount > 0) {
-								store.set({ error: new RpcError(err?.code || 'CONNECTION_CLOSED', err?.message || 'Connection permanently closed') });
+								_setError(new RpcError(err?.code || 'CONNECTION_CLOSED', err?.message || 'Connection permanently closed'));
 							}
 						});
 					}

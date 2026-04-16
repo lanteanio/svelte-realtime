@@ -45,7 +45,9 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
  * - `undefined` while loading
  * - The initial data once loaded
  * - Automatically updated with live pub/sub events
- * - `{ error: RpcError }` if the initial fetch fails
+ *
+ * Errors never replace the store value. On failure, the last known data
+ * is preserved and the error is available via the `.error` store.
  *
  * @param path - Stream path (e.g. `'chat/messages'`)
  * @param options - Merge strategy and options
@@ -57,6 +59,10 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
  * SSR hydration, and cursor-based pagination.
  */
 export interface StreamStore<T = any> extends Readable<T> {
+	/** Reactive store holding the current error, or null when healthy. Errors never replace the data store value. */
+	readonly error: Readable<RpcError | null>;
+	/** Reactive store holding the connection status: 'loading', 'connected', 'reconnecting', or 'error'. */
+	readonly status: Readable<'loading' | 'connected' | 'reconnecting' | 'error'>;
 	/** Apply an instant UI update. Returns a rollback function. */
 	optimistic(event: string, data: any): () => void;
 	/** Pre-populate with SSR data to avoid loading spinners. */

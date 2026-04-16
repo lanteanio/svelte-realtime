@@ -291,7 +291,9 @@ describe('__stream()', () => {
 	it('reconnects after disconnect during initial load (Finding 3)', async () => {
 		const store = __stream('recover/data', { merge: 'set' });
 		const values = [];
+		const errors = [];
 		const unsub = store.subscribe((v) => values.push(v));
+		store.error.subscribe((v) => errors.push(v));
 
 		await flush();
 		const firstSent = sendQueuedFn.mock.calls[0][0];
@@ -300,9 +302,11 @@ describe('__stream()', () => {
 		simulateStatus('closed');
 
 		// The disconnect listener rejects pending entries
-		// Store should have an error
+		// Data store stays undefined, error is on .error store
 		const afterDisconnect = values[values.length - 1];
-		expect(afterDisconnect).toHaveProperty('error');
+		expect(afterDisconnect).toBeUndefined();
+		expect(errors[errors.length - 1]).not.toBe(null);
+		expect(errors[errors.length - 1].code).toBe('DISCONNECTED');
 
 		// Reconnect (debounced with jitter -- wait for it)
 		simulateStatus('open');
@@ -2380,6 +2384,183 @@ describe('__stream() CRUD max trimming', () => {
 		expect(last[0].id).toBe(3);
 
 		unsub();
+	});
+});
+
+// -- stream .error and .status stores -----------------------------------------
+
+describe('stream .error and .status', () => {
+	it('starts with status loading and error null', async () => {
+		const store = __stream('err/test', { merge: 'crud', key: 'id' });
+		const errors = [];
+		const statuses = [];
+		store.error.subscribe((v) => errors.push(v));
+		store.status.subscribe((v) => statuses.push(v));
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		expect(errors[0]).toBe(null);
+		expect(statuses[0]).toBe('loading');
+		unsub();
+	});
+
+	it('transitions to connected on successful fetch', async () => {
+		const store = __stream('err/ok', { merge: 'crud', key: 'id' });
+		const statuses = [];
+		store.status.subscribe((v) => statuses.push(v));
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true, data: [{ id: 1 }], topic: 'errok', merge: 'crud', key: 'id'
+		});
+
+		expect(statuses[statuses.length - 1]).toBe('connected');
+		unsub();
+	});
+
+	it('sets error store on reject without replacing data', async () => {
+		const store = __stream('err/reject', { merge: 'crud', key: 'id' });
+		const values = [];
+		const errors = [];
+		store.subscribe((v) => values.push(v));
+		store.error.subscribe((v) => errors.push(v));
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true, data: [{ id: 1, text: 'hi' }], topic: 'errreject', merge: 'crud', key: 'id'
+		});
+
+		expect(values[values.length - 1]).toEqual([{ id: 1, text: 'hi' }]);
+
+		simulateStatus('closed');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 120));
+		await flush();
+
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent2.id, { ok: false, code: 'STREAM_ERROR', error: 'Server down' });
+
+		expect(values[values.length - 1]).toEqual([{ id: 1, text: 'hi' }]);
+		const lastError = errors[errors.length - 1];
+		expect(lastError).not.toBe(null);
+		expect(lastError.code).toBe('STREAM_ERROR');
+	});
+
+	it('preserves hydrated data when initial fetch fails', async () => {
+		const store = __stream('err/hydrate', { merge: 'crud', key: 'id' });
+		store.hydrate([{ id: 1, name: 'ssr' }]);
+
+		const values = [];
+		const errors = [];
+		const statuses = [];
+		store.subscribe((v) => values.push(v));
+		store.error.subscribe((v) => errors.push(v));
+		store.status.subscribe((v) => statuses.push(v));
+
+		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'ssr' }]);
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'UNAUTHORIZED', error: 'Not logged in' });
+
+		expect(values[values.length - 1]).toEqual([{ id: 1, name: 'ssr' }]);
+		expect(errors[errors.length - 1]).not.toBe(null);
+		expect(errors[errors.length - 1].code).toBe('UNAUTHORIZED');
+		expect(statuses[statuses.length - 1]).toBe('error');
+	});
+
+	it('clears error on successful reconnect', async () => {
+		const store = __stream('err/reconnect', { merge: 'crud', key: 'id' });
+		const errors = [];
+		const statuses = [];
+		store.error.subscribe((v) => errors.push(v));
+		store.status.subscribe((v) => statuses.push(v));
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'STREAM_ERROR', error: 'fail' });
+
+		expect(errors[errors.length - 1]).not.toBe(null);
+		expect(statuses[statuses.length - 1]).toBe('error');
+
+		simulateStatus('closed');
+		simulateStatus('open');
+
+		expect(statuses[statuses.length - 1]).toBe('reconnecting');
+
+		await new Promise((r) => setTimeout(r, 120));
+		await flush();
+
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent2.id, {
+			ok: true, data: [{ id: 2 }], topic: 'errreconnect', merge: 'crud', key: 'id'
+		});
+
+		expect(errors[errors.length - 1]).toBe(null);
+		expect(statuses[statuses.length - 1]).toBe('connected');
+		unsub();
+	});
+
+	it('sets error on terminal close without replacing data', async () => {
+		const store = __stream('err/terminal', { merge: 'crud', key: 'id' });
+		const values = [];
+		const errors = [];
+		store.subscribe((v) => values.push(v));
+		store.error.subscribe((v) => errors.push(v));
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true, data: [{ id: 1 }], topic: 'errterminal', merge: 'crud', key: 'id'
+		});
+
+		expect(values[values.length - 1]).toEqual([{ id: 1 }]);
+
+		readyReject({ code: 'CONNECTION_CLOSED', message: 'gone' });
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(values[values.length - 1]).toEqual([{ id: 1 }]);
+		expect(errors[errors.length - 1]).not.toBe(null);
+		expect(errors[errors.length - 1].code).toBe('CONNECTION_CLOSED');
+	});
+
+	it('resets error and status on cleanup and re-subscribe', async () => {
+		const store = __stream('err/reset', { merge: 'crud', key: 'id' });
+		const errors = [];
+		const statuses = [];
+		store.error.subscribe((v) => errors.push(v));
+		store.status.subscribe((v) => statuses.push(v));
+
+		const unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'TIMEOUT', error: 'slow' });
+
+		expect(errors[errors.length - 1]).not.toBe(null);
+		unsub();
+
+		await new Promise((r) => queueMicrotask(r));
+
+		expect(errors[errors.length - 1]).toBe(null);
+		expect(statuses[statuses.length - 1]).toBe('loading');
+	});
+
+	it('dynamic streams expose .error and .status', async () => {
+		const factory = __stream('err/dynamic', { merge: 'crud', key: 'id' }, true);
+		const store = factory('org1');
+
+		expect(store.error).toBeDefined();
+		expect(typeof store.error.subscribe).toBe('function');
+		expect(store.status).toBeDefined();
+		expect(typeof store.status.subscribe).toBe('function');
+
+		const errors = [];
+		store.error.subscribe((v) => errors.push(v));
+		expect(errors[0]).toBe(null);
 	});
 });
 
