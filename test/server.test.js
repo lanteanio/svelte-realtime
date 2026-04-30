@@ -23,9 +23,24 @@ import {
 	enableSignals,
 	pipe
 } from '../server.js';
+import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { toArrayBuffer } from './helpers/encode.js';
+
+const noopRegistry = () => ({
+	counter: () => ({ inc() {} }),
+	histogram: () => ({ observe() {} }),
+	gauge: () => ({ inc() {}, dec() {} })
+});
+
+function adaptExtensionsRegistry(metrics) {
+	return {
+		counter:   ({ name, help, labelNames }) => metrics.counter(name, help, labelNames),
+		histogram: ({ name, help, labelNames }) => metrics.histogram(name, help, labelNames),
+		gauge:     ({ name, help, labelNames }) => metrics.gauge(name, help, labelNames)
+	};
+}
 
 // -- live() -------------------------------------------------------------------
 
@@ -4005,6 +4020,104 @@ describe('live.metrics()', () => {
 
 		// Reset
 		live.metrics({ counter: () => ({ inc() {} }), histogram: () => ({ observe() {} }), gauge: () => ({ inc() {}, dec() {} }) });
+	});
+});
+
+// -- live.metrics() integration with svelte-adapter-uws-extensions ------------
+//
+// Verifies the shim shown in the README "Prometheus metrics" section works
+// against the real createMetrics() registry from
+// svelte-adapter-uws-extensions/prometheus. If extensions ever renames an
+// export, changes the registry method shape, or drops a method, these tests
+// fail and the README + shim need to be updated together.
+
+describe('live.metrics() <-> svelte-adapter-uws-extensions/prometheus', () => {
+	afterEach(() => {
+		live.metrics(noopRegistry());
+	});
+
+	it('exports createMetrics from svelte-adapter-uws-extensions/prometheus', () => {
+		expect(typeof createMetrics).toBe('function');
+		const metrics = createMetrics();
+		expect(typeof metrics.counter).toBe('function');
+		expect(typeof metrics.histogram).toBe('function');
+		expect(typeof metrics.gauge).toBe('function');
+		expect(typeof metrics.serialize).toBe('function');
+	});
+
+	it('records RPC counter and histogram via the documented shim', async () => {
+		const metrics = createMetrics();
+		live.metrics(adaptExtensionsRegistry(metrics));
+
+		const ws = mockWs({ id: 'integ-rpc-user' });
+		const platform = mockPlatform();
+		const fn = live(async () => 'hi');
+		__register('integ/rpc-echo', fn);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'integ/rpc-echo', id: 'i1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const output = metrics.serialize();
+		expect(output).toContain('# TYPE svelte_realtime_rpc_total counter');
+		expect(output).toContain('path="integ/rpc-echo"');
+		expect(output).toContain('status="ok"');
+		expect(output).toContain('# TYPE svelte_realtime_rpc_duration_seconds histogram');
+		expect(output).toContain('svelte_realtime_rpc_duration_seconds_count{path="integ/rpc-echo"}');
+	});
+
+	it('increments and serializes the stream subscription gauge via the shim', async () => {
+		const metrics = createMetrics();
+		live.metrics(adaptExtensionsRegistry(metrics));
+
+		const ws = mockWs({ id: 'integ-stream-user' });
+		const platform = mockPlatform();
+		const stream = live.stream('integ-stream-items', async () => []);
+		__register('integ/stream-items', stream);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'integ/stream-items', id: 'is1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const output = metrics.serialize();
+		expect(output).toContain('# TYPE svelte_realtime_stream_subscriptions gauge');
+		expect(output).toMatch(/svelte_realtime_stream_subscriptions [1-9]/);
+	});
+
+	it('records RPC error counter when the handler throws LiveError', async () => {
+		const metrics = createMetrics();
+		live.metrics(adaptExtensionsRegistry(metrics));
+
+		const ws = mockWs({ id: 'integ-err-user' });
+		const platform = mockPlatform();
+		const fn = live(async () => { throw new LiveError('UNAUTHORIZED', 'nope'); });
+		__register('integ/rpc-bad', fn);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'integ/rpc-bad', id: 'ie1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const output = metrics.serialize();
+		expect(output).toContain('# TYPE svelte_realtime_rpc_errors_total counter');
+		expect(output).toContain('path="integ/rpc-bad"');
+		expect(output).toContain('code="UNAUTHORIZED"');
+	});
+
+	it('records cron counter via the shim when a cron job runs', async () => {
+		_clearCron();
+		const metrics = createMetrics();
+		live.metrics(adaptExtensionsRegistry(metrics));
+
+		const platform = mockPlatform();
+		setCronPlatform(platform);
+		const cronFn = live.cron('* * * * *', 'integ-cron-topic', async () => ({ ok: true }));
+		__registerCron('integ/cron-job', cronFn);
+		await _tickCron();
+		await new Promise((r) => setTimeout(r, 20));
+
+		const output = metrics.serialize();
+		expect(output).toContain('# TYPE svelte_realtime_cron_total counter');
+		expect(output).toContain('path="integ/cron-job"');
+		expect(output).toContain('status="ok"');
+
+		_clearCron();
 	});
 });
 

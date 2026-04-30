@@ -5,6 +5,19 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.23] - 2026-04-27
+
+### Fixed
+
+- **`live.metrics()` documentation now matches a working integration.** The README's "Prometheus metrics" example imported a non-existent `createMetricsRegistry` from `svelte-adapter-uws-extensions/prometheus`, and the `server.d.ts` JSDoc example imported a non-existent `createRegistry`. The real export is `createMetrics`, and its registry methods take positional args (`counter(name, help, labelNames)`) where `live.metrics()` calls them with options-object form (`counter({ name, help, labelNames })`). The README now shows a six-line adapter that bridges the two and is paired with `metrics.handler` for the `/metrics` endpoint. JSDoc and type declarations updated to match.
+
+### Added
+
+- **`MetricsRegistry` interface in `server.d.ts`.** TypeScript users now get autocomplete and structural validation on the registry shape passed to `live.metrics()`, replacing the previous `registry: any` signature.
+- **Integration test exercising the real extensions registry.** `test/server.test.js` now imports `createMetrics` from `svelte-adapter-uws-extensions/prometheus` and runs the documented adapter shim against it, asserting that RPC counters, the duration histogram, the error counter, the stream subscription gauge, and the cron counter all flow through to the registry's serialized output. Catches future regressions in either package's exports or method shape.
+
+---
+
 ## [0.4.22] - 2026-04-17
 
 ### Added

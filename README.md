@@ -1219,21 +1219,50 @@ export const message = createMessage({
 
 Opt-in instrumentation for RPC calls, stream subscriptions, and cron executions. Zero overhead if not called.
 
-```js
-import { live } from 'svelte-realtime/server';
-import { createMetricsRegistry } from 'svelte-adapter-uws-extensions/prometheus';
+`live.metrics(registry)` is a one-time setup call. The top of `src/hooks.ws.{js,ts}` is a natural place, since it loads once when the server boots. Pair it with the `createMetrics()` registry from `svelte-adapter-uws-extensions/prometheus`:
 
-const registry = createMetricsRegistry();
-live.metrics(registry);
+```js
+// src/hooks.ws.js
+import { live } from 'svelte-realtime/server';
+import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
+
+const metrics = createMetrics();
+
+live.metrics({
+  counter:   ({ name, help, labelNames }) => metrics.counter(name, help, labelNames),
+  histogram: ({ name, help, labelNames }) => metrics.histogram(name, help, labelNames),
+  gauge:     ({ name, help, labelNames }) => metrics.gauge(name, help, labelNames)
+});
+
+export { message, close, unsubscribe } from 'svelte-realtime/server';
 ```
 
-This registers counters/histograms for:
+Mount the metrics endpoint on your uWS app (typically in `svelte.config.js` or wherever you build the app):
+
+```js
+app.get('/metrics', metrics.handler);
+```
+
+The six-line shim adapts realtime's options-object call shape to the extensions registry's positional create methods. Once a metric is registered, every increment, observation, and gauge update flows directly to the extensions registry, so the emitted Prometheus output is exactly what `metrics.serialize()` produces.
+
+### Registered metrics
+
 - `svelte_realtime_rpc_total` -- RPC call count by path and status
 - `svelte_realtime_rpc_duration_seconds` -- RPC latency by path
 - `svelte_realtime_rpc_errors_total` -- RPC errors by path and code
-- `svelte_realtime_stream_subscriptions` -- active stream subscription gauge by topic
+- `svelte_realtime_stream_subscriptions` -- active stream subscription gauge
 - `svelte_realtime_cron_total` -- cron execution count by path and status
 - `svelte_realtime_cron_errors_total` -- cron errors by path
+
+### Registry shape
+
+`live.metrics()` accepts any object exposing:
+
+- `counter({ name, help, labelNames }) -> { inc(labels?) }`
+- `histogram({ name, help, labelNames }) -> { observe(labels, valueSeconds) }`
+- `gauge({ name, help }) -> { inc(), dec() }`
+
+If you prefer `prom-client`, wire it the same way: `counter: ({ name, help, labelNames }) => new client.Counter({ name, help, labelNames, registers: [register] })`, and likewise for `Histogram` and `Gauge`.
 
 ---
 
