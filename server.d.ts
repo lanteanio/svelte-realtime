@@ -119,14 +119,48 @@ export interface StreamOptions {
 	migrate?: Record<number, (item: any) => any>;
 
 	/**
-	 * Delta sync configuration for efficient reconnection.
-	 * When configured, the server sends only changes since the client's last known version.
+	 * Delta sync configuration for efficient reconnection. Two orthogonal modes:
+	 *
+	 * - **Schema-version delta** (`version` + `diff`): client sends its
+	 *   `version`; server compares and sends only the items that changed
+	 *   since that version. Useful when the data shape has a coarse
+	 *   version stamp (e.g., a `last_modified_at` aggregate).
+	 *
+	 * - **Seq-based delta** (`fromSeq`): the user-provided bridge for the
+	 *   middle tier of three-tier reconnect. When the bounded replay buffer
+	 *   cannot satisfy the gap (clientSeq is older than the oldest entry),
+	 *   the server calls `fromSeq(clientSeq)` to fetch missed events from
+	 *   the durable store (e.g., Postgres). Resolution order:
+	 *
+	 *   1. Replay buffer (bounded, fast) -- if `replay: true` is set.
+	 *   2. `delta.fromSeq(clientSeq)` -- this hook.
+	 *   3. Full rehydrate via the loader (always safe).
+	 *
+	 *   Returning `null`/`undefined` falls through to rehydrate. Returning
+	 *   `[]` means "nothing missed" (no-op for the client). Each event
+	 *   should carry a `seq` field so the client's `_lastSeq` advances.
 	 */
 	delta?: {
 		/** Return the current version/hash of the data. Must be fast. */
-		version(): any | Promise<any>;
+		version?(): any | Promise<any>;
 		/** Return only the items that changed since `sinceVersion`. Return null to force full refetch. */
-		diff(sinceVersion: any): any[] | Promise<any[] | null> | null;
+		diff?(sinceVersion: any): any[] | Promise<any[] | null> | null;
+		/**
+		 * Bridge tier for seq-based reconnect. Called when the replay buffer
+		 * cannot satisfy a gap. Returns the events the client missed, or
+		 * `null`/`undefined` to fall through to full rehydrate.
+		 *
+		 * @example
+		 * ```js
+		 * delta: {
+		 *   fromSeq: async (sinceSeq) => db.audit
+		 *     .where('seq', '>', sinceSeq)
+		 *     .orderBy('seq', 'asc')
+		 *     .get()
+		 * }
+		 * ```
+		 */
+		fromSeq?(sinceSeq: number): any[] | null | undefined | Promise<any[] | null | undefined>;
 	};
 
 	/**

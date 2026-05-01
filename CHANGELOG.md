@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`delta.fromSeq(sinceSeq)` on `live.stream()`** -- the user-provided bridge tier for three-tier reconnect. When a client reconnects with a `seq` older than the bounded replay buffer can satisfy, the server now calls `delta.fromSeq(clientSeq)` to fetch missed events from the durable store (typically Postgres) before falling back to a full rehydrate. Resolution order on subscribe-with-seq is now:
+
+  1. **Replay buffer** (`platform.replay.since`) -- bounded, fast.
+  2. **`delta.fromSeq(clientSeq)`** -- user-provided database query, unbounded.
+  3. **Full rehydrate** via the loader -- always safe.
+
+  Returning `null`/`undefined` falls through to the next tier. Returning `[]` means "nothing missed" (no-op for the client). Each event should carry a `seq` field so the client's `_lastSeq` advances; if events lack `seq`, the response's top-level `seq` falls back to `platform.replay.seq(topic)` when available.
+
+  ```js
+  export const auditFeed = live.stream(
+    (ctx, orgId) => `audit:${orgId}`,
+    async (ctx, orgId) => loadRecentAudit(orgId),
+    {
+      replay: true,
+      delta: {
+        fromSeq: async (sinceSeq) => db.audit
+          .where('seq', '>', sinceSeq)
+          .orderBy('seq', 'asc')
+          .get()
+      }
+    }
+  );
+  ```
+
+  Coexists with the existing schema-version `delta.version` / `delta.diff` (orthogonal -- schema vs event continuity).
+
 - **`coalesceBy` option on `live.stream()`** turns a stream into a latest-value stream under backpressure. With `coalesceBy: (data) => data.auctionId` set, every `ctx.publish(topic, event, data)` for that stream's topic fans out via the adapter's per-socket `sendCoalesced` instead of broadcasting via `publish`. Each subscriber holds at most one pending message per `(topic, coalesceBy(data))` key: if a newer publish arrives before the previous frame drains to the wire, the older value is dropped in place. Latest value wins. Use for high-frequency streams where intermediate values are noise: price ticks, cursor positions, presence state, scrub positions. For at-least-once delivery, leave the option unset and the broadcast path is byte-identical to today.
 
   ```js

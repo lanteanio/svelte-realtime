@@ -409,6 +409,20 @@ live.stream = function stream(topic, initFn, options) {
 	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
 		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
 	}
+	if (delta !== undefined) {
+		if (typeof delta !== 'object' || delta === null) {
+			throw new Error('[svelte-realtime] live.stream delta must be an object');
+		}
+		if (delta.version !== undefined && typeof delta.version !== 'function') {
+			throw new Error('[svelte-realtime] live.stream delta.version must be a function');
+		}
+		if (delta.diff !== undefined && typeof delta.diff !== 'function') {
+			throw new Error('[svelte-realtime] live.stream delta.diff must be a function');
+		}
+		if (delta.fromSeq !== undefined && typeof delta.fromSeq !== 'function') {
+			throw new Error('[svelte-realtime] live.stream delta.fromSeq must be a function (sinceSeq) => events[]');
+		}
+	}
 	const merged = { merge: 'crud', key: 'id', ...rest };
 	if (replay) /** @type {any} */ (initFn).__replay = typeof replay === 'object' ? replay : {};
 	if (delta) /** @type {any} */ (initFn).__delta = delta;
@@ -2567,13 +2581,38 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 				} catch {}
 			}
 
-			// Replay
+			// Replay (bounded recent buffer)
 			if (replayOpts && typeof clientSeq === 'number' && platform.replay) {
 				try {
 					const missed = await platform.replay.since(topic, clientSeq);
 					if (missed) {
 						const currentSeq = await platform.replay.seq(topic);
 						return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
+					}
+				} catch {}
+			}
+
+			// Seq-delta (user-provided bridge for older-than-buffer reconnects)
+			if (deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
+				try {
+					const events = await deltaOpts.fromSeq(clientSeq);
+					if (Array.isArray(events)) {
+						let respSeq;
+						if (events.length > 0) {
+							const last = events[events.length - 1];
+							if (last && typeof last.seq === 'number') respSeq = last.seq;
+						}
+						if (respSeq === undefined && platform.replay) {
+							try { respSeq = await platform.replay.seq(topic); } catch {}
+						}
+						const deltaResp = {
+							id, ok: true, data: events, topic,
+							merge: streamOpts.merge, key: streamOpts.key,
+							prepend: streamOpts.prepend, max: streamOpts.max,
+							replay: true
+						};
+						if (respSeq !== undefined) deltaResp.seq = respSeq;
+						return deltaResp;
 					}
 				} catch {}
 			}
