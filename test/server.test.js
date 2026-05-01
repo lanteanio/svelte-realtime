@@ -21,7 +21,8 @@ import {
 	close,
 	unsubscribe,
 	enableSignals,
-	pipe
+	pipe,
+	_resetIdempotencyStore
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -5036,5 +5037,301 @@ describe('rate limit bucket cap with existing identity', () => {
 		} catch (err) {
 			expect(err.code).toBe('RATE_LIMITED');
 		}
+	});
+});
+
+// -- live.idempotent() --------------------------------------------------------
+
+describe('live.idempotent()', () => {
+	beforeEach(() => {
+		_resetIdempotencyStore();
+	});
+
+	it('marks the wrapper with __isLive and __isIdempotent', () => {
+		const handler = live.idempotent({ keyFrom: () => 'k' }, async () => 'ok');
+		expect(handler.__isLive).toBe(true);
+		expect(handler.__isIdempotent).toBe(true);
+		expect(typeof handler.__idempotency).toBe('object');
+		expect(handler.__idempotency.ttl).toBe(172800);
+	});
+
+	it('runs handler when no key is available (no keyFrom, no envelope key)', async () => {
+		let calls = 0;
+		const handler = live.idempotent({}, async (ctx, x) => { calls++; return x * 2; });
+		__register('idem/nokey', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/nokey', id: '1', args: [3] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/nokey', id: '2', args: [3] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(2);
+		expect(platform.sent[0].data).toMatchObject({ ok: true, data: 6 });
+		expect(platform.sent[1].data).toMatchObject({ ok: true, data: 6 });
+	});
+
+	it('caches the result when keyFrom returns a key (sequential calls)', async () => {
+		let calls = 0;
+		const handler = live.idempotent(
+			{ keyFrom: (ctx, x) => `op:${x}` },
+			async (ctx, x) => { calls++; return x * 10; }
+		);
+		__register('idem/keyfrom', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/keyfrom', id: '1', args: [4] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/keyfrom', id: '2', args: [4] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1);
+		expect(platform.sent[0].data).toMatchObject({ ok: true, data: 40, id: '1' });
+		expect(platform.sent[1].data).toMatchObject({ ok: true, data: 40, id: '2' });
+	});
+
+	it('uses envelope idempotencyKey when keyFrom is absent', async () => {
+		let calls = 0;
+		const handler = live.idempotent(
+			{},
+			async (ctx, x) => { calls++; return x + 1; }
+		);
+		__register('idem/envelope', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const key = 'env-key-1';
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/envelope', id: 'a', args: [10], idempotencyKey: key }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/envelope', id: 'b', args: [10], idempotencyKey: key }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1);
+		expect(platform.sent[0].data.data).toBe(11);
+		expect(platform.sent[1].data.data).toBe(11);
+	});
+
+	it('keyFrom takes precedence over envelope idempotencyKey', async () => {
+		const seen = [];
+		const handler = live.idempotent(
+			{ keyFrom: (ctx, x) => `from:${x}` },
+			async (ctx, x) => { seen.push(x); return x; }
+		);
+		__register('idem/precedence', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Different envelope keys, same keyFrom-derived key -> single execution
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/precedence', id: '1', args: [7], idempotencyKey: 'env-X' }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/precedence', id: '2', args: [7], idempotencyKey: 'env-Y' }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(seen).toEqual([7]);
+	});
+
+	it('different keys -> separate cache entries', async () => {
+		let calls = 0;
+		const handler = live.idempotent(
+			{ keyFrom: (ctx, x) => `k:${x}` },
+			async (ctx, x) => { calls++; return x; }
+		);
+		__register('idem/distinct', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/distinct', id: '1', args: [1] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/distinct', id: '2', args: [2] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/distinct', id: '3', args: [1] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(2);
+		expect(platform.sent[0].data.data).toBe(1);
+		expect(platform.sent[1].data.data).toBe(2);
+		expect(platform.sent[2].data.data).toBe(1);
+	});
+
+	it('does NOT cache thrown errors (next call re-runs)', async () => {
+		let calls = 0;
+		const handler = live.idempotent(
+			{ keyFrom: () => 'flaky' },
+			async () => {
+				calls++;
+				if (calls === 1) throw new LiveError('INTERNAL_ERROR', 'boom');
+				return 'ok';
+			}
+		);
+		__register('idem/flaky', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/flaky', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/flaky', id: '2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(2);
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[1].data.ok).toBe(true);
+		expect(platform.sent[1].data.data).toBe('ok');
+	});
+
+	it('caches an undefined result (acquired flag is the discriminant, not result presence)', async () => {
+		let calls = 0;
+		const handler = live.idempotent(
+			{ keyFrom: () => 'undef' },
+			async () => { calls++; return undefined; }
+		);
+		const ws = mockWs();
+		const platform = mockPlatform();
+		__register('idem/undef', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/undef', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/undef', id: '2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1);
+	});
+
+	it('concurrent calls with the same key share one handler invocation', async () => {
+		let calls = 0;
+		let resolveInner;
+		const innerPromise = new Promise((r) => { resolveInner = r; });
+		const handler = live.idempotent(
+			{ keyFrom: () => 'concurrent' },
+			async () => { calls++; await innerPromise; return 'shared'; }
+		);
+		const ws = mockWs();
+		const platform = mockPlatform();
+		__register('idem/concurrent', handler);
+
+		// Fire two requests synchronously; both enter idempotency before commit.
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/concurrent', id: '1', args: [] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/concurrent', id: '2', args: [] }), platform);
+
+		// Yield to let both reach the inflight wait.
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toBe(1);
+
+		resolveInner('shared');
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1);
+		expect(platform.sent.length).toBe(2);
+		expect(platform.sent[0].data.data).toBe('shared');
+		expect(platform.sent[1].data.data).toBe('shared');
+	});
+
+	it('TTL=0 disables caching (handler re-runs on every call)', async () => {
+		let calls = 0;
+		const handler = live.idempotent(
+			{ keyFrom: () => 'zero', ttl: 0 },
+			async () => { calls++; return 'ok'; }
+		);
+		const ws = mockWs();
+		const platform = mockPlatform();
+		__register('idem/zero', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/zero', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/zero', id: '2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// ttl=0 -> entry expires immediately. Each call should re-run.
+		expect(calls).toBe(2);
+	});
+
+	it('uses a custom store when provided (default not consulted)', async () => {
+		const acquireCalls = [];
+		const customStore = {
+			async acquire(key, ttl) {
+				acquireCalls.push({ key, ttl });
+				return { result: 'from-custom-store' };
+			}
+		};
+		const handler = live.idempotent(
+			{ keyFrom: () => 'custom-key', store: customStore, ttl: 60 },
+			async () => 'from-handler-never-runs'
+		);
+		const ws = mockWs();
+		const platform = mockPlatform();
+		__register('idem/custom', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/custom', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(acquireCalls).toEqual([{ key: 'custom-key', ttl: 60 }]);
+		expect(platform.sent[0].data.data).toBe('from-custom-store');
+	});
+
+	it('throws CONFLICT when store returns pending', async () => {
+		const customStore = { async acquire() { return { pending: true }; } };
+		const handler = live.idempotent(
+			{ keyFrom: () => 'p', store: customStore },
+			async () => 'never'
+		);
+		const ws = mockWs();
+		const platform = mockPlatform();
+		__register('idem/pending', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/pending', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('CONFLICT');
+	});
+
+	it('composes with live.validated() (validation runs first)', async () => {
+		const schema = {
+			safeParse(input) {
+				if (input && typeof input.x === 'number') return { success: true, data: input };
+				return { success: false, error: { issues: [{ path: ['x'], message: 'required' }] } };
+			}
+		};
+		let calls = 0;
+		const handler = live.idempotent(
+			{ keyFrom: (ctx, input) => `v:${input.x}` },
+			live.validated(schema, async (ctx, input) => { calls++; return input.x * 2; })
+		);
+		const ws = mockWs();
+		const platform = mockPlatform();
+		__register('idem/composed', handler);
+
+		// Bad input -> validation rejects, no cache entry
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/composed', id: '1', args: [{}] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.code).toBe('VALIDATION');
+
+		// Good input -> handler runs, caches
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/composed', id: '2', args: [{ x: 5 }] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/composed', id: '3', args: [{ x: 5 }] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1);
+		expect(platform.sent[1].data.data).toBe(10);
+		expect(platform.sent[2].data.data).toBe(10);
+	});
+
+	it('rejects invalid config at registration time', () => {
+		expect(() => live.idempotent({ keyFrom: 'not-a-function' }, async () => 'ok'))
+			.toThrow(/keyFrom must be a function/);
+		expect(() => live.idempotent({ store: { foo: 'bar' } }, async () => 'ok'))
+			.toThrow(/store must implement acquire/);
+		expect(() => live.idempotent({ ttl: -1 }, async () => 'ok'))
+			.toThrow(/ttl must be a non-negative number/);
+		expect(() => live.idempotent({}, 'not a function'))
+			.toThrow(/requires a handler function/);
 	});
 });

@@ -233,7 +233,7 @@ function _buildDedupKey(path, args) {
  * Used by generated client stubs.
  *
  * @param {string} path - e.g. 'chat/sendMessage'
- * @returns {((...args: any[]) => Promise<any>) & { fresh: (...args: any[]) => Promise<any> }}
+ * @returns {((...args: any[]) => Promise<any>) & { fresh: (...args: any[]) => Promise<any>, with: (opts: { idempotencyKey?: string }) => (...args: any[]) => Promise<any> }}
  */
 export function __rpc(path) {
 	function rpcCall(...args) {
@@ -256,6 +256,31 @@ export function __rpc(path) {
 		return _sendRpc(path, args);
 	};
 
+	/**
+	 * Attach per-call options. Returns a callable bound to those options.
+	 * Currently supports `idempotencyKey` -- the server-side handler must be
+	 * wrapped with `live.idempotent({...})` for the key to take effect.
+	 * Calls with no key fall through to the standard `rpcCall` path.
+	 */
+	rpcCall.with = function withOptions(opts) {
+		const idempotencyKey = opts && opts.idempotencyKey;
+		if (!idempotencyKey) return rpcCall;
+		return function withCall(...args) {
+			if (!_batchCollector) {
+				// Same idempotency key + same microtask -> coalesce. Different keys
+				// (or no key on the base path) get separate buckets.
+				const dedupKey = path + '\0K' + idempotencyKey;
+				const existing = _dedupMap.get(dedupKey);
+				if (existing) return existing;
+				const promise = _sendRpc(path, args, idempotencyKey);
+				_dedupMap.set(dedupKey, promise);
+				queueMicrotask(() => _dedupMap.delete(dedupKey));
+				return promise;
+			}
+			return _sendRpc(path, args, idempotencyKey);
+		};
+	};
+
 	return rpcCall;
 }
 
@@ -263,9 +288,11 @@ export function __rpc(path) {
  * Internal: send an RPC request over the WebSocket.
  * @param {string} path
  * @param {any[]} args
+ * @param {string} [idempotencyKey] Optional envelope idempotency key. When set, the server-side
+ *   `live.idempotent` wrapper uses it to dedup against its store.
  * @returns {Promise<any>}
  */
-function _sendRpc(path, args) {
+function _sendRpc(path, args, idempotencyKey) {
 	ensureListener();
 	ensureDisconnectListener();
 
@@ -287,7 +314,7 @@ function _sendRpc(path, args) {
 				const dropped = _offlineQueue.shift();
 				if (dropped) dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow -- oldest mutation dropped'));
 			}
-			_offlineQueue.push({ path, args, queuedAt: Date.now(), resolve, reject });
+			_offlineQueue.push({ path, args, queuedAt: Date.now(), resolve, reject, idempotencyKey });
 		});
 	}
 
@@ -295,7 +322,7 @@ function _sendRpc(path, args) {
 
 	// If inside a batch() call, collect instead of sending
 	if (_batchCollector) {
-		_batchCollector.push({ rpc: path, id, args });
+		_batchCollector.push(idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args });
 		return new Promise((resolve, reject) => {
 			pending.set(id, { resolve, reject, timer: null });
 		});
@@ -309,7 +336,7 @@ function _sendRpc(path, args) {
 		const timer = setTimeout(() => {
 			if (Date.now() - _startTime > 90000) {
 				// Device was sleeping. Clean up the pending entry so it doesn't hang
-				// forever — the disconnect listener or reconnect will handle the actual error.
+				// forever -- the disconnect listener or reconnect will handle the actual error.
 				pending.delete(id);
 				_devtoolsEnd(id, false, 'SLEEP_TIMEOUT');
 				reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
@@ -325,7 +352,7 @@ function _sendRpc(path, args) {
 			reject(e) { _devtoolsEnd(id, false, e); reject(e); },
 			timer
 		});
-		conn.sendQueued({ rpc: path, id, args });
+		conn.sendQueued(idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args });
 	});
 }
 
@@ -1584,7 +1611,7 @@ function _checkArgs(path, args) {
 }
 
 /**
- * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function }} OfflineEntry
+ * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string }} OfflineEntry
  */
 
 /** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
@@ -1681,7 +1708,7 @@ async function _drainOfflineQueue() {
 		for (let i = 0; i < queue.length; i += concurrency) {
 			const chunk = queue.slice(i, i + concurrency);
 			const promises = chunk.map(entry => {
-				const promise = _sendRpc(entry.path, entry.args);
+				const promise = _sendRpc(entry.path, entry.args, entry.idempotencyKey);
 				promise.then(
 					(result) => entry.resolve(result),
 					(err) => {
@@ -1699,7 +1726,7 @@ async function _drainOfflineQueue() {
 		// Sequential strategy (default)
 		for (const entry of queue) {
 			try {
-				const result = await _sendRpc(entry.path, entry.args);
+				const result = await _sendRpc(entry.path, entry.args, entry.idempotencyKey);
 				entry.resolve(result);
 			} catch (err) {
 				if (onReplayError) {

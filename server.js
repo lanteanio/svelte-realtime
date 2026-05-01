@@ -231,15 +231,16 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 /**
  * Build a ctx object with a stable V8 hidden class.
  * All call sites must use this factory to ensure monomorphic property access.
- * Same property count, same order, same types at each slot → single hidden class.
+ * Same property count, same order, same types at each slot -> single hidden class.
  * @param {any} user
  * @param {any} ws
  * @param {import('svelte-adapter-uws').Platform} platform
  * @param {{ publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function }} helpers
  * @param {any} cursor
+ * @param {string | null} [idempotencyKey] Envelope-supplied idempotency key, or null. Internal use only.
  * @returns {any}
  */
-function _buildCtx(user, ws, platform, helpers, cursor) {
+function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 	return {
 		user,
 		ws,
@@ -249,7 +250,8 @@ function _buildCtx(user, ws, platform, helpers, cursor) {
 		throttle: helpers.throttle,
 		debounce: helpers.debounce,
 		signal: helpers.signal,
-		batch: helpers.batch
+		batch: helpers.batch,
+		_idempotencyKey: idempotencyKey || null
 	};
 }
 
@@ -593,6 +595,154 @@ live.rateLimit = function rateLimit(config, fn) {
 	/** @type {any} */ (wrapper).__isLive = true;
 	/** @type {any} */ (wrapper).__isRateLimited = true;
 	/** @type {any} */ (wrapper).__rateLimitPath = '';
+	/** @type {any} */ (wrapper).__wrappedFn = fn;
+	return wrapper;
+};
+
+/** @type {{ acquire: (key: string, ttlSec: number) => Promise<any> } | null} */
+let _defaultIdempotencyStore = null;
+
+/**
+ * Lazy in-process idempotency store. Three-state acquire matching the contract
+ * of `createIdempotencyStore` from svelte-adapter-uws-extensions, so swapping
+ * the default for a multi-instance backend is a one-line change.
+ * Bounded by maxEntries; lazy-sweeps expired records every 30s.
+ */
+function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
+	/** @type {Map<string, { value: any, expiresAt: number }>} */
+	const results = new Map();
+	/** @type {Map<string, Promise<any>>} */
+	const inflight = new Map();
+	let lastSweep = Date.now();
+
+	return {
+		async acquire(key, ttlSec) {
+			const now = Date.now();
+			if (now - lastSweep >= 30000) {
+				lastSweep = now;
+				for (const [k, e] of results) {
+					if (e.expiresAt <= now) results.delete(k);
+				}
+			}
+			const cached = results.get(key);
+			if (cached) {
+				if (cached.expiresAt > now) return { result: cached.value };
+				results.delete(key);
+			}
+			while (inflight.has(key)) {
+				try { await inflight.get(key); } catch {}
+				const re = results.get(key);
+				if (re && re.expiresAt > Date.now()) return { result: re.value };
+			}
+			let resolveInflight;
+			let rejectInflight;
+			const promise = new Promise((res, rej) => { resolveInflight = res; rejectInflight = rej; });
+			// Suppress unhandled-rejection logs when there are no waiters at the
+			// moment a handler aborts. Real awaiters attach their own handlers
+			// via `await inflight.get(key)`.
+			promise.catch(() => {});
+			inflight.set(key, promise);
+			if (results.size >= maxEntries) {
+				const drop = Math.max(1, Math.floor(maxEntries * 0.1));
+				let i = 0;
+				for (const k of results.keys()) {
+					results.delete(k);
+					if (++i >= drop) break;
+				}
+			}
+			const ttlMs = ttlSec * 1000;
+			return {
+				acquired: true,
+				async commit(value) {
+					if (ttlMs > 0) results.set(key, { value, expiresAt: Date.now() + ttlMs });
+					inflight.delete(key);
+					if (resolveInflight) resolveInflight(value);
+				},
+				async abort() {
+					inflight.delete(key);
+					if (rejectInflight) rejectInflight(new Error('ABORTED'));
+				}
+			};
+		}
+	};
+}
+
+function _getDefaultIdempotencyStore() {
+	if (_defaultIdempotencyStore) return _defaultIdempotencyStore;
+	_defaultIdempotencyStore = _createInMemoryIdempotencyStore();
+	return _defaultIdempotencyStore;
+}
+
+/**
+ * Reset the default in-process idempotency store. Tests only.
+ * @internal
+ */
+export function _resetIdempotencyStore() {
+	_defaultIdempotencyStore = null;
+}
+
+/**
+ * Wrap an RPC handler with idempotency: identical calls (by key) return the
+ * cached result without re-running the handler. Composes with live(),
+ * live.validated(), live.rateLimit(), etc.
+ *
+ * The key is derived from `config.keyFrom(ctx, ...args)` if provided, otherwise
+ * from the client envelope's `idempotencyKey` (set via the client's
+ * `rpc.with({ idempotencyKey })` helper). When neither is present, the call
+ * runs as if the wrapper were absent.
+ *
+ * Only successful results are cached. A throwing handler aborts the slot so
+ * the next caller re-runs.
+ *
+ * Default store is in-process (bounded). For multi-instance deployments,
+ * pass `store: createIdempotencyStore(redis)` from svelte-adapter-uws-extensions.
+ *
+ * @param {{ keyFrom?: (ctx: any, ...args: any[]) => string | null | undefined, store?: { acquire: (key: string, ttlSec: number) => Promise<any> }, ttl?: number }} config
+ * @param {Function} fn Handler function (ctx, ...args)
+ * @returns {Function}
+ */
+live.idempotent = function idempotent(config, fn) {
+	if (typeof fn !== 'function') {
+		throw new Error('[svelte-realtime] live.idempotent(config, fn) requires a handler function');
+	}
+	const cfg = config || {};
+	if (cfg.keyFrom !== undefined && typeof cfg.keyFrom !== 'function') {
+		throw new Error('[svelte-realtime] live.idempotent: keyFrom must be a function');
+	}
+	if (cfg.store !== undefined && (cfg.store === null || typeof cfg.store.acquire !== 'function')) {
+		throw new Error('[svelte-realtime] live.idempotent: store must implement acquire(key, ttlSec)');
+	}
+	if (cfg.ttl !== undefined && (typeof cfg.ttl !== 'number' || cfg.ttl < 0)) {
+		throw new Error('[svelte-realtime] live.idempotent: ttl must be a non-negative number of seconds');
+	}
+	const ttlSec = typeof cfg.ttl === 'number' ? cfg.ttl : 172800;
+	const keyFrom = cfg.keyFrom || null;
+	const customStore = cfg.store || null;
+
+	const wrapper = async function idempotentWrapper(ctx, ...args) {
+		const key = keyFrom ? keyFrom(ctx, ...args) : ctx._idempotencyKey;
+		if (!key) return fn(ctx, ...args);
+		const store = customStore || _getDefaultIdempotencyStore();
+		const slot = await store.acquire(key, ttlSec);
+		if (slot && slot.acquired) {
+			try {
+				const data = await fn(ctx, ...args);
+				await slot.commit(data);
+				return data;
+			} catch (err) {
+				try { await slot.abort(); } catch {}
+				throw err;
+			}
+		}
+		if (slot && slot.pending) {
+			throw new LiveError('CONFLICT', 'A request with this idempotency key is already in progress');
+		}
+		return slot.result;
+	};
+
+	/** @type {any} */ (wrapper).__isLive = true;
+	/** @type {any} */ (wrapper).__isIdempotent = true;
+	/** @type {any} */ (wrapper).__idempotency = { keyFrom, store: customStore, ttl: ttlSec };
 	/** @type {any} */ (wrapper).__wrappedFn = fn;
 	return wrapper;
 };
@@ -2304,7 +2454,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 	}
 
 	const _h = _getCtxHelpers(platform);
-	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null);
+	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey);
 	let _subscribedStreamTopic = null;
 
 	try {

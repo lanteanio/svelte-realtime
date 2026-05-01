@@ -368,6 +368,77 @@ export namespace live {
 	): T;
 
 	/**
+	 * Three-state idempotency store contract. Compatible with `createIdempotencyStore`
+	 * from `svelte-adapter-uws-extensions` (Redis + Postgres backends).
+	 */
+	interface IdempotencyStore {
+		acquire(key: string, ttlSec: number): Promise<
+			| { acquired: true; commit(value: any): Promise<void>; abort(): Promise<void> }
+			| { pending: true }
+			| { result: any }
+		>;
+	}
+
+	/**
+	 * Wrap an RPC handler with idempotency. Identical calls (matched by key)
+	 * return the cached result without re-running the handler. Composes with
+	 * `live()`, `live.validated()`, `live.rateLimit()`, etc.
+	 *
+	 * The key is derived from `config.keyFrom(ctx, ...args)` if provided, otherwise
+	 * from the client envelope's `idempotencyKey` (set on the client via
+	 * `rpc.with({ idempotencyKey })`). When neither is present the call runs
+	 * as if the wrapper were absent.
+	 *
+	 * Only successful results are cached. A throwing handler aborts the slot
+	 * so the next caller re-runs.
+	 *
+	 * Default store is in-process and bounded. For multi-instance deployments,
+	 * pass `store: createIdempotencyStore(redis)` from
+	 * `svelte-adapter-uws-extensions/idempotency`.
+	 *
+	 * @param config - Idempotency configuration
+	 * @param fn - Handler function (ctx, ...args)
+	 *
+	 * @example
+	 * ```js
+	 * // Server-derived key, default in-memory store, 24h TTL
+	 * export const createOrder = live.idempotent(
+	 *   {
+	 *     keyFrom: (ctx, input) => `order:${ctx.user.id}:${input.clientOrderId}`,
+	 *     ttl: 24 * 3600
+	 *   },
+	 *   live.validated(OrderSchema, async (ctx, input) => createOrder(ctx, input))
+	 * );
+	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * // Client-supplied key, multi-instance store
+	 * import { createIdempotencyStore } from 'svelte-adapter-uws-extensions/idempotency';
+	 * const store = createIdempotencyStore(redis);
+	 *
+	 * export const charge = live.idempotent(
+	 *   { store },
+	 *   async (ctx, input) => stripe.charge(input)
+	 * );
+	 *
+	 * // Client
+	 * await charge.with({ idempotencyKey: crypto.randomUUID() })(payload);
+	 * ```
+	 */
+	function idempotent<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
+		config: {
+			/** Derive the idempotency key from the call. Returning a falsy value disables idempotency for that call. */
+			keyFrom?(ctx: LiveContext<any>, ...args: any[]): string | null | undefined;
+			/** Idempotency store. Defaults to a bounded in-process map. */
+			store?: IdempotencyStore;
+			/** Cache TTL in seconds. Defaults to 172800 (48 hours). */
+			ttl?: number;
+		},
+		fn: T
+	): T;
+
+	/**
 	 * Mark a function as RPC-callable with schema validation.
 	 * Validates args[0] against the schema before calling fn.
 	 * Supports any [Standard Schema](https://standardschema.dev/)-compatible schema,

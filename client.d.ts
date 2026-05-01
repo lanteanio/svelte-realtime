@@ -35,6 +35,25 @@ export class RpcError extends Error {
 export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
 	/** Bypass deduplication -- always send a fresh request. */
 	fresh: (...args: any[]) => Promise<any>;
+	/**
+	 * Attach per-call options. Returns a callable bound to those options.
+	 *
+	 * `idempotencyKey` is forwarded in the wire envelope; the server-side
+	 * handler must be wrapped with `live.idempotent({...})` for the key to
+	 * take effect. Calls made via `.with({ idempotencyKey })` dedup against
+	 * each other within a microtask under that key, independent of the
+	 * default `(path, args)` dedup. Calling `.with({})` returns the base
+	 * callable unchanged.
+	 *
+	 * @example
+	 * ```js
+	 * import { createOrder } from '$live/orders';
+	 * const key = crypto.randomUUID();
+	 * await createOrder.with({ idempotencyKey: key })(payload);
+	 * // Retrying with the same key is safe -- the server returns the cached result.
+	 * ```
+	 */
+	with: (opts: { idempotencyKey?: string }) => (...args: any[]) => Promise<any>;
 };
 
 /**

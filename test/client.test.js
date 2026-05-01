@@ -2092,6 +2092,110 @@ describe('__rpc() dedup key collision', () => {
 	});
 });
 
+// -- __rpc() .with({ idempotencyKey }) ----------------------------------------
+
+describe('__rpc().with({ idempotencyKey })', () => {
+	it('forwards idempotencyKey on the wire envelope', async () => {
+		const call = __rpc('orders/create');
+		const promise = call.with({ idempotencyKey: 'ord-1' })({ qty: 2 });
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect(sent.rpc).toBe('orders/create');
+		expect(sent.idempotencyKey).toBe('ord-1');
+		expect(sent.args).toEqual([{ qty: 2 }]);
+
+		simulateRpcResponse(sent.id, { ok: true, data: { id: 7 } });
+		expect(await promise).toEqual({ id: 7 });
+	});
+
+	it('does not include idempotencyKey on plain calls', async () => {
+		const call = __rpc('plain/call');
+		call('x');
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect('idempotencyKey' in sent).toBe(false);
+	});
+
+	it('returns the base callable when no key is provided (.with({}) is a no-op)', () => {
+		const call = __rpc('noop/call');
+		expect(call.with({})).toBe(call);
+		expect(call.with(undefined)).toBe(call);
+	});
+
+	it('same key + same microtask -> coalesces into one envelope', async () => {
+		const call = __rpc('coalesce/test');
+		const bound = call.with({ idempotencyKey: 'shared' });
+
+		const p1 = bound('a');
+		const p2 = bound('a');
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		expect(p1).toBe(p2);
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: 'shared-result' });
+		expect(await p1).toBe('shared-result');
+	});
+
+	it('different keys -> separate envelopes', async () => {
+		const call = __rpc('distinct/test');
+
+		const p1 = call.with({ idempotencyKey: 'k1' })('x');
+		const p2 = call.with({ idempotencyKey: 'k2' })('x');
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+		const s1 = sendQueuedFn.mock.calls[0][0];
+		const s2 = sendQueuedFn.mock.calls[1][0];
+		expect(s1.idempotencyKey).toBe('k1');
+		expect(s2.idempotencyKey).toBe('k2');
+
+		simulateRpcResponse(s1.id, { ok: true, data: 'r1' });
+		simulateRpcResponse(s2.id, { ok: true, data: 'r2' });
+		expect(await p1).toBe('r1');
+		expect(await p2).toBe('r2');
+	});
+
+	it('keyed and unkeyed calls dedup independently within a microtask', async () => {
+		const call = __rpc('mixed/test');
+
+		const plain = call('x');
+		const keyed = call.with({ idempotencyKey: 'k' })('x');
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+		const s1 = sendQueuedFn.mock.calls[0][0];
+		const s2 = sendQueuedFn.mock.calls[1][0];
+		expect(s1.idempotencyKey).toBeUndefined();
+		expect(s2.idempotencyKey).toBe('k');
+
+		simulateRpcResponse(s1.id, { ok: true, data: 'plain' });
+		simulateRpcResponse(s2.id, { ok: true, data: 'keyed' });
+		expect(await plain).toBe('plain');
+		expect(await keyed).toBe('keyed');
+	});
+
+	it('forwards idempotencyKey inside batch()', async () => {
+		const a = __rpc('b/a');
+		const b = __rpc('b/b');
+
+		const result = batch(() => [
+			a.with({ idempotencyKey: 'ka' })('x'),
+			b('y')
+		]);
+
+		// One framed batch envelope
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect(Array.isArray(sent.batch)).toBe(true);
+		expect(sent.batch[0].idempotencyKey).toBe('ka');
+		expect('idempotencyKey' in sent.batch[1]).toBe(false);
+
+		simulateRpcResponse(sent.batch[0].id, { ok: true, data: 'A' });
+		simulateRpcResponse(sent.batch[1].id, { ok: true, data: 'B' });
+		expect(await result).toEqual(['A', 'B']);
+	});
+});
+
 // -- CRUD delete swap-remove --------------------------------------------------
 
 describe('__stream() CRUD delete swap-remove', () => {

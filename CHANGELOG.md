@@ -5,6 +5,18 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`live.idempotent({ keyFrom?, store?, ttl? }, fn)`** wraps an RPC handler so that retries with the same key return the cached result without re-running the handler. Two ways to supply the key:
+  - **Server-derived:** `keyFrom: (ctx, input) => \`order:${ctx.user.id}:${input.clientOrderId}\`` -- the framework computes the key, the client doesn't need to know about idempotency.
+  - **Client-supplied:** the client calls `createOrder.with({ idempotencyKey: crypto.randomUUID() })(payload)` and the key rides on the wire envelope.
+
+  Default TTL is 48 hours. Default store is a bounded in-process map (zero-config). Concurrent in-flight calls with the same key share one handler invocation; only successful results are cached, so a thrown handler aborts the slot and the next caller re-runs. Composes with `live()`, `live.validated()`, `live.rateLimit()`, and other wrappers. For multi-instance deployments, pass `store: createIdempotencyStore(redis)` from `svelte-adapter-uws-extensions/idempotency` -- the in-process store and the distributed store implement the same three-state `acquire(key, ttlSec)` contract, so the swap is a one-line change.
+
+  Until now, the only client-side dedup was a microtask-window collapse of identical RPC calls (`_dedupMap`). That helped against double-clicks but did nothing for a retry 200 ms later: the server happily re-ran the handler. This closes that gap.
+
 ## [0.4.22] - 2026-04-17
 
 ### Added
