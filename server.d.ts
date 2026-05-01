@@ -37,6 +37,23 @@ export interface LiveContext<UserData = unknown> {
 	debounce(topic: string, event: string, data: any, ms: number): void;
 	/** Send a point-to-point signal to a specific user. */
 	signal(userId: string, event: string, data: any): void;
+	/**
+	 * Pressure-aware shed check. Returns `true` if a request of the given
+	 * class of service should be shed under current `platform.pressure`.
+	 *
+	 * Returns `false` when admission has not been configured via
+	 * `live.admission({...})`, or when no `platform.pressure` snapshot is
+	 * available. Throws if `className` is not a registered class (typo defense).
+	 *
+	 * @example
+	 * ```js
+	 * export default live(async (ctx, input) => {
+	 *   if (ctx.shed('background')) throw new LiveError('OVERLOADED', 'try again later');
+	 *   return await heavyWork(input);
+	 * });
+	 * ```
+	 */
+	shed(className: string): boolean;
 }
 
 /**
@@ -162,6 +179,22 @@ export interface StreamOptions {
 		 */
 		fromSeq?(sinceSeq: number): any[] | null | undefined | Promise<any[] | null | undefined>;
 	};
+
+	/**
+	 * Class of service for pressure-aware shedding. Names a class registered
+	 * via `live.admission({ classes })`. When the adapter reports pressure
+	 * matching the class's rule, new subscribes to this stream are rejected
+	 * with `OVERLOADED`. Existing subscribers are unaffected.
+	 *
+	 * @example
+	 * ```js
+	 * export const browseList = live.stream('browse:list', loader, {
+	 *   merge: 'crud',
+	 *   classOfService: 'background'   // shed first under any pressure
+	 * });
+	 * ```
+	 */
+	classOfService?: string;
 
 	/**
 	 * Coalesce-key extractor for publishes to this stream's topic.
@@ -713,6 +746,54 @@ export namespace live {
 	 * ```
 	 */
 	function metrics(registry: any): void;
+
+	/**
+	 * One of the four pressure reasons emitted by the adapter, in fixed
+	 * precedence order: `MEMORY` > `PUBLISH_RATE` > `SUBSCRIBERS` > `NONE`.
+	 */
+	type PressureReason = 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY';
+
+	/**
+	 * Snapshot shape returned by `platform.pressure`. Mirrors the
+	 * `PressureSnapshot` interface from svelte-adapter-uws.
+	 */
+	interface PressureSnapshot {
+		active: boolean;
+		subscriberRatio: number;
+		publishRate: number;
+		memoryMB: number;
+		reason: PressureReason;
+	}
+
+	/**
+	 * Configure pressure-aware admission control. Each named class maps to
+	 * either an array of pressure reasons (shed when `platform.pressure.reason`
+	 * is in the array) or a `(snapshot) => boolean` predicate.
+	 *
+	 * Once configured, `ctx.shed(className)` evaluates the matching rule
+	 * against the current `platform.pressure`, and any
+	 * `live.stream({ classOfService })` auto-rejects new subscribes under
+	 * matching pressure with the `OVERLOADED` code.
+	 *
+	 * Pass `null` to clear (tests).
+	 *
+	 * Zero overhead when never called: `ctx.shed` returns `false` and
+	 * `classOfService` is a no-op.
+	 *
+	 * @example
+	 * ```js
+	 * live.admission({
+	 *   classes: {
+	 *     critical:    [],                                          // never shed
+	 *     interactive: ['MEMORY'],                                  // shed only on memory pressure
+	 *     background:  ['MEMORY', 'PUBLISH_RATE', 'SUBSCRIBERS']    // shed on any pressure
+	 *   }
+	 * });
+	 * ```
+	 */
+	function admission(config: {
+		classes: Record<string, PressureReason[] | ((snapshot: PressureSnapshot) => boolean)>;
+	} | null): void;
 
 	/**
 	 * Wrap a stream initFn call with a circuit breaker.

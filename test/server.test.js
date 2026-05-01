@@ -23,7 +23,8 @@ import {
 	enableSignals,
 	pipe,
 	_resetIdempotencyStore,
-	_resetCoalesceRegistry
+	_resetCoalesceRegistry,
+	_resetAdmission
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -5832,5 +5833,251 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 		const r1 = platform.sent[0].data;
 		expect(r1.unchanged).toBe(true);
 		expect(r1.version).toBe(7);
+	});
+});
+
+// -- live.admission() + ctx.shed() + classOfService ---------------------------
+
+describe('live.admission() + ctx.shed()', () => {
+	beforeEach(() => {
+		_resetAdmission();
+	});
+
+	it('rejects non-object config', () => {
+		expect(() => live.admission('nope')).toThrow(/config must be an object/);
+	});
+
+	it('rejects missing classes', () => {
+		expect(() => live.admission({})).toThrow(/config\.classes must be an object/);
+	});
+
+	it('rejects unknown pressure reason in array rule', () => {
+		expect(() => live.admission({ classes: { x: ['BOGUS'] } }))
+			.toThrow(/unknown pressure reason 'BOGUS'/);
+	});
+
+	it('rejects non-array, non-function rule value', () => {
+		expect(() => live.admission({ classes: { x: 42 } }))
+			.toThrow(/must be an array of pressure reasons or a/);
+	});
+
+	it('null clears the configuration', () => {
+		live.admission({ classes: { critical: ['MEMORY'] } });
+		live.admission(null);
+		// ctx.shed should now no-op (no config)
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform._setPressure({ reason: 'MEMORY', active: true });
+		const handler = live(async (ctx) => ctx.shed('critical'));
+		__register('shed/cleared', handler);
+		handleRpc(ws, toArrayBuffer({ rpc: 'shed/cleared', id: '1', args: [] }), platform);
+		return new Promise((r) => setTimeout(r, 10)).then(() => {
+			expect(platform.sent[0].data.data).toBe(false);
+		});
+	});
+
+	it('ctx.shed returns false when no admission configured', async () => {
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform._setPressure({ reason: 'MEMORY', active: true });
+		const handler = live(async (ctx) => ctx.shed('any'));
+		__register('shed/no-config', handler);
+		handleRpc(ws, toArrayBuffer({ rpc: 'shed/no-config', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.data).toBe(false);
+	});
+
+	it('ctx.shed returns true when pressure reason matches array rule', async () => {
+		live.admission({ classes: { background: ['MEMORY', 'PUBLISH_RATE'] } });
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform._setPressure({ reason: 'PUBLISH_RATE', active: true });
+		const handler = live(async (ctx) => ctx.shed('background'));
+		__register('shed/match', handler);
+		handleRpc(ws, toArrayBuffer({ rpc: 'shed/match', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.data).toBe(true);
+	});
+
+	it('ctx.shed returns false when pressure reason is not in the rule', async () => {
+		live.admission({ classes: { interactive: ['MEMORY'] } });
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform._setPressure({ reason: 'SUBSCRIBERS', active: true });
+		const handler = live(async (ctx) => ctx.shed('interactive'));
+		__register('shed/miss', handler);
+		handleRpc(ws, toArrayBuffer({ rpc: 'shed/miss', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.data).toBe(false);
+	});
+
+	it('ctx.shed returns false when reason is NONE', async () => {
+		live.admission({ classes: { background: ['MEMORY', 'PUBLISH_RATE', 'SUBSCRIBERS'] } });
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// Default pressure is { reason: 'NONE' }
+		const handler = live(async (ctx) => ctx.shed('background'));
+		__register('shed/none', handler);
+		handleRpc(ws, toArrayBuffer({ rpc: 'shed/none', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.data).toBe(false);
+	});
+
+	it('ctx.shed throws on unknown class (typo defense)', async () => {
+		live.admission({ classes: { background: ['MEMORY'] } });
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform._setPressure({ reason: 'MEMORY', active: true });
+		const handler = live(async (ctx) => ctx.shed('typo'));
+		__register('shed/typo', handler);
+		handleRpc(ws, toArrayBuffer({ rpc: 'shed/typo', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		// Throws inside handler -> non-LiveError -> INTERNAL_ERROR to client.
+		// Server logs the typo Error -- the contract is "this is a developer bug, not a client error."
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INTERNAL_ERROR');
+	});
+
+	it('predicate rule receives pressure snapshot and returns boolean', async () => {
+		const calls = [];
+		live.admission({
+			classes: {
+				background: (snapshot) => { calls.push(snapshot); return snapshot.memoryMB > 100; }
+			}
+		});
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform._setPressure({ reason: 'MEMORY', active: true, memoryMB: 200 });
+		const handler = live(async (ctx) => ctx.shed('background'));
+		__register('shed/pred', handler);
+		handleRpc(ws, toArrayBuffer({ rpc: 'shed/pred', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.data).toBe(true);
+		expect(calls).toHaveLength(1);
+		expect(calls[0].memoryMB).toBe(200);
+	});
+
+	it('returns false when platform has no pressure snapshot', async () => {
+		live.admission({ classes: { background: ['MEMORY'] } });
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// Strip pressure to simulate an older adapter
+		delete platform.pressure;
+		const handler = live(async (ctx) => ctx.shed('background'));
+		__register('shed/no-pressure', handler);
+		handleRpc(ws, toArrayBuffer({ rpc: 'shed/no-pressure', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.data).toBe(false);
+	});
+});
+
+describe('live.stream({ classOfService })', () => {
+	beforeEach(() => {
+		_resetAdmission();
+	});
+
+	it('rejects non-string classOfService at registration', () => {
+		expect(() => live.stream('cos/bad', async () => [], { classOfService: 42 }))
+			.toThrow(/classOfService must be a string/);
+	});
+
+	it('no-op when admission is not configured', async () => {
+		const stream = live.stream('cos/no-config', async () => [{ id: 1 }], {
+			merge: 'crud', key: 'id', classOfService: 'background'
+		});
+		__register('cos/no-config', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform._setPressure({ reason: 'MEMORY', active: true });
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'cos/no-config', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.data).toEqual([{ id: 1 }]);
+	});
+
+	it('rejects subscribe with OVERLOADED when pressure matches', async () => {
+		live.admission({ classes: { background: ['MEMORY', 'PUBLISH_RATE', 'SUBSCRIBERS'] } });
+
+		const stream = live.stream('cos/shed', async () => [{ id: 1 }], {
+			merge: 'crud', key: 'id', classOfService: 'background'
+		});
+		__register('cos/shed', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform._setPressure({ reason: 'MEMORY', active: true });
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'cos/shed', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('OVERLOADED');
+		// Subscription should NOT have happened
+		expect(ws.isSubscribed('cos/shed')).toBe(false);
+	});
+
+	it('admits when pressure does not match the class rule', async () => {
+		live.admission({ classes: { interactive: ['MEMORY'] } });
+
+		const stream = live.stream('cos/admit', async () => [{ id: 1 }], {
+			merge: 'crud', key: 'id', classOfService: 'interactive'
+		});
+		__register('cos/admit', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// Pressure reason SUBSCRIBERS, but class only sheds on MEMORY
+		platform._setPressure({ reason: 'SUBSCRIBERS', active: true });
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'cos/admit', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(ws.isSubscribed('cos/admit')).toBe(true);
+	});
+
+	it('rejects subscribe with INVALID_REQUEST when classOfService refers to an unknown class', async () => {
+		live.admission({ classes: { background: ['MEMORY'] } });
+
+		const stream = live.stream('cos/typo', async () => [{ id: 1 }], {
+			merge: 'crud', key: 'id', classOfService: 'background-typo'
+		});
+		__register('cos/typo', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform._setPressure({ reason: 'MEMORY', active: true });
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'cos/typo', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
+		expect(platform.sent[0].data.error).toMatch(/unknown class 'background-typo'/);
+	});
+
+	it('does NOT shed existing subscribers (only new subscribes are gated)', async () => {
+		const stream = live.stream('cos/existing', async () => [{ id: 1 }], {
+			merge: 'crud', key: 'id', classOfService: 'background'
+		});
+		__register('cos/existing', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Subscribe BEFORE admission is configured + before pressure
+		handleRpc(ws, toArrayBuffer({ rpc: 'cos/existing', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(ws.isSubscribed('cos/existing')).toBe(true);
+
+		// Now configure admission + raise pressure
+		live.admission({ classes: { background: ['MEMORY'] } });
+		platform._setPressure({ reason: 'MEMORY', active: true });
+
+		// Existing subscriber stays subscribed -- the gate fires only on new subscribe
+		expect(ws.isSubscribed('cos/existing')).toBe(true);
 	});
 });

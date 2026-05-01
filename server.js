@@ -152,14 +152,14 @@ function _unregisterCoalesce(ws, topic) {
 	if (entry.ws.size === 0) _topicCoalesce.delete(topic);
 }
 
-/** @type {WeakMap<any, { publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function }>} */
+/** @type {WeakMap<any, { publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function, shed: Function }>} */
 const _ctxHelpersCache = new WeakMap();
 
 /**
  * Get cached ctx helper methods for a platform.
  * Avoids creating new closures on every RPC call.
  * @param {import('svelte-adapter-uws').Platform} platform
- * @returns {{ publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function }}
+ * @returns {{ publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function, shed: Function }}
  */
 function _getCtxHelpers(platform) {
 	let helpers = _ctxHelpersCache.get(platform);
@@ -180,7 +180,8 @@ function _getCtxHelpers(platform) {
 			throttle: (topic, event, data, ms) => _throttlePublish(platform, topic, event, data, ms),
 			debounce: (topic, event, data, ms) => _debouncePublish(platform, topic, event, data, ms),
 			signal: (userId, event, data) => platform.publish('__signal:' + userId, event, data),
-			batch: (messages) => platform.batch ? platform.batch(messages) : messages.forEach(m => publish(m.topic, m.event, m.data, m.options))
+			batch: (messages) => platform.batch ? platform.batch(messages) : messages.forEach(m => publish(m.topic, m.event, m.data, m.options)),
+			shed: (className) => _shouldShed(platform, className)
 		};
 		_ctxHelpersCache.set(platform, helpers);
 	}
@@ -265,7 +266,7 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
  * @param {any} user
  * @param {any} ws
  * @param {import('svelte-adapter-uws').Platform} platform
- * @param {{ publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function }} helpers
+ * @param {{ publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function, shed: Function }} helpers
  * @param {any} cursor
  * @param {string | null} [idempotencyKey] Envelope-supplied idempotency key, or null. Internal use only.
  * @returns {any}
@@ -281,6 +282,7 @@ function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 		debounce: helpers.debounce,
 		signal: helpers.signal,
 		batch: helpers.batch,
+		shed: helpers.shed,
 		_idempotencyKey: idempotencyKey || null
 	};
 }
@@ -405,9 +407,12 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, ...rest } = options || {};
+	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, ...rest } = options || {};
 	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
 		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
+	}
+	if (classOfService !== undefined && typeof classOfService !== 'string') {
+		throw new Error('[svelte-realtime] live.stream classOfService must be a string naming a class registered via live.admission()');
 	}
 	if (delta !== undefined) {
 		if (typeof delta !== 'object' || delta === null) {
@@ -426,6 +431,7 @@ live.stream = function stream(topic, initFn, options) {
 	const merged = { merge: 'crud', key: 'id', ...rest };
 	if (replay) /** @type {any} */ (initFn).__replay = typeof replay === 'object' ? replay : {};
 	if (delta) /** @type {any} */ (initFn).__delta = delta;
+	if (classOfService) /** @type {any} */ (initFn).__classOfService = classOfService;
 	/** @type {any} */ (initFn).__isStream = true;
 	/** @type {any} */ (initFn).__isLive = true;
 	/** @type {any} */ (initFn).__streamTopic = topic;
@@ -1543,6 +1549,92 @@ live.room = function room(config) {
 /** @type {{ rpcCount?: any, rpcDuration?: any, rpcErrors?: any, streamGauge?: any, cronCount?: any, cronErrors?: any } | null} */
 let _metricsInstruments = null;
 
+/** Valid pressure reasons accepted in admission rules. Mirrors the adapter's PressureReason enum. */
+const _PRESSURE_REASONS = new Set(['NONE', 'PUBLISH_RATE', 'SUBSCRIBERS', 'MEMORY']);
+
+/** @type {{ classes: Record<string, string[] | ((snapshot: any) => boolean)> } | null} */
+let _admissionConfig = null;
+
+/**
+ * Configure pressure-aware admission control. Each named class maps to
+ * either an array of pressure reasons (shed when `platform.pressure.reason`
+ * is in the array) or a `(snapshot) => boolean` predicate (shed when truthy).
+ *
+ * Once configured, `ctx.shed(className)` evaluates the rule against the
+ * current `platform.pressure` snapshot, and any `live.stream({ classOfService })`
+ * auto-rejects new subscribes under matching pressure with `OVERLOADED`.
+ *
+ * Pass `null` to clear (tests).
+ *
+ * Zero overhead when never called: `ctx.shed` returns `false` and
+ * `classOfService` is a no-op.
+ *
+ * @param {{ classes: Record<string, string[] | ((snapshot: any) => boolean)> } | null} config
+ */
+live.admission = function admission(config) {
+	if (config === null || config === undefined) { _admissionConfig = null; return; }
+	if (typeof config !== 'object') {
+		throw new Error('[svelte-realtime] live.admission: config must be an object or null');
+	}
+	if (!config.classes || typeof config.classes !== 'object') {
+		throw new Error('[svelte-realtime] live.admission: config.classes must be an object');
+	}
+	const classes = {};
+	for (const [name, rule] of Object.entries(config.classes)) {
+		if (Array.isArray(rule)) {
+			for (const r of rule) {
+				if (!_PRESSURE_REASONS.has(r)) {
+					throw new Error(
+						`[svelte-realtime] live.admission: class '${name}' has unknown pressure reason '${r}'. ` +
+						`Valid: ${[..._PRESSURE_REASONS].join(', ')}`
+					);
+				}
+			}
+			classes[name] = rule;
+		} else if (typeof rule === 'function') {
+			classes[name] = rule;
+		} else {
+			throw new Error(
+				`[svelte-realtime] live.admission: class '${name}' must be an array of pressure reasons or a (snapshot) => boolean predicate`
+			);
+		}
+	}
+	_admissionConfig = { classes };
+};
+
+/**
+ * Reset the admission configuration. Tests only.
+ * @internal
+ */
+export function _resetAdmission() {
+	_admissionConfig = null;
+}
+
+/**
+ * Evaluate whether a request of the given class should be shed under
+ * current pressure. Returns `true` to shed, `false` to admit.
+ *
+ * - No admission configured -> always admit.
+ * - No `platform.pressure` snapshot -> always admit (no signal to act on).
+ * - Class not configured -> throws (typo defense).
+ *
+ * @param {any} platform
+ * @param {string} className
+ * @returns {boolean}
+ */
+function _shouldShed(platform, className) {
+	if (!_admissionConfig) return false;
+	const rule = _admissionConfig.classes[className];
+	if (rule === undefined) {
+		const known = Object.keys(_admissionConfig.classes).join(', ') || '<none>';
+		throw new Error(`[svelte-realtime] ctx.shed: unknown class '${className}'. Configured: ${known}`);
+	}
+	const snapshot = platform && platform.pressure;
+	if (!snapshot) return false;
+	if (typeof rule === 'function') return !!rule(snapshot);
+	return rule.includes(snapshot.reason);
+}
+
 /**
  * Opt-in Prometheus metrics integration.
  * Accepts a MetricsRegistry from `svelte-adapter-uws-extensions/prometheus`
@@ -2542,6 +2634,17 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 			const streamFilter = /** @type {any} */ (fn).__streamFilter;
 			if (streamFilter && !streamFilter(ctx)) {
 				return { id, ok: false, code: 'FORBIDDEN', error: 'Access denied' };
+			}
+
+			const classOfService = /** @type {any} */ (fn).__classOfService;
+			if (classOfService && _admissionConfig) {
+				try {
+					if (_shouldShed(platform, classOfService)) {
+						return { id, ok: false, code: 'OVERLOADED', error: `Stream class '${classOfService}' shed under pressure` };
+					}
+				} catch (err) {
+					return { id, ok: false, code: 'INVALID_REQUEST', error: /** @type {Error} */ (err).message };
+				}
 			}
 
 			try { ws.subscribe(topic); } catch { return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' }; }

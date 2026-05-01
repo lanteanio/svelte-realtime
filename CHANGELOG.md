@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`live.admission({ classes })` + `ctx.shed(className)` + `classOfService` option** -- pressure-aware shedding. Configure named classes of service, each mapped to either an array of pressure reasons or a `(snapshot) => boolean` predicate; the framework evaluates them against the adapter's `platform.pressure` snapshot.
+
+  Two ways to act on the result:
+
+  - **Manual**: `if (ctx.shed('background')) throw new LiveError('OVERLOADED', 'try again later');` -- the handler decides what to do (throw, return cached, log, etc.).
+  - **Declarative**: `live.stream(topic, loader, { classOfService: 'background' })` -- the server auto-rejects new subscribes to that stream with `OVERLOADED` when the class's rule matches current pressure. Existing subscribers are unaffected.
+
+  ```js
+  // hooks.server.js
+  import { live } from 'svelte-realtime';
+
+  live.admission({
+    classes: {
+      critical:    [],                                          // never shed
+      interactive: ['MEMORY'],                                  // shed only on memory pressure
+      background:  ['MEMORY', 'PUBLISH_RATE', 'SUBSCRIBERS']    // shed on any pressure
+    }
+  });
+
+  // src/live/browse-list.ts
+  export const browseList = live.stream('browse:list', loader, {
+    classOfService: 'background'
+  });
+  ```
+
+  Zero overhead when never called: `ctx.shed` returns `false` and `classOfService` is a no-op without `live.admission(...)`. Unknown class names throw at runtime (typo defense). Pressure reasons are validated at registration: `MEMORY`, `PUBLISH_RATE`, `SUBSCRIBERS`, `NONE` -- mirroring the adapter's enum.
+
 - **`delta.fromSeq(sinceSeq)` on `live.stream()`** -- the user-provided bridge tier for three-tier reconnect. When a client reconnects with a `seq` older than the bounded replay buffer can satisfy, the server now calls `delta.fromSeq(clientSeq)` to fetch missed events from the durable store (typically Postgres) before falling back to a full rehydrate. Resolution order on subscribe-with-seq is now:
 
   1. **Replay buffer** (`platform.replay.since`) -- bounded, fast.

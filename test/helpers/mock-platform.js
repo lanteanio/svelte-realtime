@@ -46,6 +46,11 @@ export function mockPlatform() {
 			p.published.length = 0;
 			p.sent.length = 0;
 			p.coalesced.length = 0;
+		},
+		// Default pressure snapshot. Tests override via _setPressure().
+		pressure: { active: false, subscriberRatio: 0, publishRate: 0, memoryMB: 0, reason: 'NONE' },
+		_setPressure(snapshot) {
+			p.pressure = { active: false, subscriberRatio: 0, publishRate: 0, memoryMB: 0, reason: 'NONE', ...snapshot };
 		}
 	};
 	return p;
