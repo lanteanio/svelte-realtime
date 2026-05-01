@@ -128,6 +128,38 @@ export interface StreamOptions {
 		/** Return only the items that changed since `sinceVersion`. Return null to force full refetch. */
 		diff(sinceVersion: any): any[] | Promise<any[] | null> | null;
 	};
+
+	/**
+	 * Coalesce-key extractor for publishes to this stream's topic.
+	 *
+	 * When set, every `ctx.publish(topic, event, data)` for this topic fans
+	 * out via the adapter's per-socket `sendCoalesced` instead of broadcasting
+	 * via `publish`. Each subscriber holds at most one pending message per
+	 * `(topic, coalesceBy(data))` key: if a newer publish for the same key
+	 * arrives before the previous frame drains to the wire, the older value
+	 * is dropped in place. Latest value wins.
+	 *
+	 * Use for high-frequency latest-value streams (auction prices, cursor
+	 * positions, presence state, scrub positions). For at-least-once delivery
+	 * leave this option unset.
+	 *
+	 * The extractor must be synchronous and total (no throws on valid data).
+	 * Returning `null` or `undefined` collapses to a single per-topic key.
+	 *
+	 * Subscribers tracked via the standard stream subscribe path are
+	 * fanned-out automatically. Manual `ws.subscribe()` to a coalescing
+	 * topic is unsupported.
+	 *
+	 * @example
+	 * ```js
+	 * export const auctionPrice = live.stream(
+	 *   (ctx, auctionId) => `auction:${auctionId}`,
+	 *   async (ctx, auctionId) => loadCurrentPrice(auctionId),
+	 *   { merge: 'set', coalesceBy: (data) => data.auctionId }
+	 * );
+	 * ```
+	 */
+	coalesceBy?(data: any): string | number | null | undefined;
 }
 
 /**

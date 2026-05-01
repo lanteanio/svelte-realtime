@@ -6,6 +6,7 @@ export function mockPlatform() {
 	const p = {
 		published: [],
 		sent: [],
+		coalesced: [],
 		connections: 0,
 		publish(topic, event, data, options) {
 			p.published.push({ topic, event, data, options });
@@ -14,6 +15,10 @@ export function mockPlatform() {
 		send(ws, topic, event, data) {
 			p.sent.push({ ws, topic, event, data });
 			return 1;
+		},
+		sendCoalesced(ws, payload) {
+			p.coalesced.push({ ws, ...payload });
+			return true;
 		},
 		sendTo(filter, topic, event, data) {
 			return 0;
@@ -40,6 +45,7 @@ export function mockPlatform() {
 		reset() {
 			p.published.length = 0;
 			p.sent.length = 0;
+			p.coalesced.length = 0;
 		}
 	};
 	return p;

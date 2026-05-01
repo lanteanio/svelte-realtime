@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`coalesceBy` option on `live.stream()`** turns a stream into a latest-value stream under backpressure. With `coalesceBy: (data) => data.auctionId` set, every `ctx.publish(topic, event, data)` for that stream's topic fans out via the adapter's per-socket `sendCoalesced` instead of broadcasting via `publish`. Each subscriber holds at most one pending message per `(topic, coalesceBy(data))` key: if a newer publish arrives before the previous frame drains to the wire, the older value is dropped in place. Latest value wins. Use for high-frequency streams where intermediate values are noise: price ticks, cursor positions, presence state, scrub positions. For at-least-once delivery, leave the option unset and the broadcast path is byte-identical to today.
+
+  ```js
+  export const auctionPrice = live.stream(
+    (ctx, auctionId) => `auction:${auctionId}`,
+    async (ctx, auctionId) => loadCurrentPrice(auctionId),
+    { merge: 'set', coalesceBy: (data) => data.auctionId }
+  );
+  ```
+
 - **`live.idempotent({ keyFrom?, store?, ttl? }, fn)`** wraps an RPC handler so that retries with the same key return the cached result without re-running the handler. Two ways to supply the key:
   - **Server-derived:** `keyFrom: (ctx, input) => \`order:${ctx.user.id}:${input.clientOrderId}\`` -- the framework computes the key, the client doesn't need to know about idempotency.
   - **Client-supplied:** the client calls `createOrder.with({ idempotencyKey: crypto.randomUUID() })(payload)` and the key rides on the wire envelope.

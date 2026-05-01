@@ -22,7 +22,8 @@ import {
 	unsubscribe,
 	enableSignals,
 	pipe,
-	_resetIdempotencyStore
+	_resetIdempotencyStore,
+	_resetCoalesceRegistry
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -5333,5 +5334,290 @@ describe('live.idempotent()', () => {
 			.toThrow(/ttl must be a non-negative number/);
 		expect(() => live.idempotent({}, 'not a function'))
 			.toThrow(/requires a handler function/);
+	});
+});
+
+// -- live.stream({ coalesceBy }) ----------------------------------------------
+
+describe('live.stream({ coalesceBy })', () => {
+	beforeEach(() => {
+		_resetCoalesceRegistry();
+	});
+
+	it('rejects non-function coalesceBy at registration', () => {
+		expect(() => live.stream('coal/bad', async () => [], { coalesceBy: 'nope' }))
+			.toThrow(/coalesceBy must be a function/);
+	});
+
+	it('default stream (no coalesceBy) publishes via platform.publish', async () => {
+		const stream = live.stream('coal/plain', async () => [{ id: 1 }], { merge: 'crud', key: 'id' });
+		__register('coal/plain', stream);
+
+		const handler = live(async (ctx) => { ctx.publish('coal/plain', 'updated', { id: 1, v: 2 }); return 'ok'; });
+		__register('coal/pub-plain', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/plain', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/pub-plain', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.published).toHaveLength(1);
+		expect(platform.coalesced).toHaveLength(0);
+	});
+
+	it('coalescing stream publishes via sendCoalesced once subscribed', async () => {
+		const stream = live.stream('coal/topic', async () => null, {
+			merge: 'set',
+			coalesceBy: (data) => data.k
+		});
+		__register('coal/topic', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('coal/topic', 'updated', { k: 'a', v: 1 });
+			return 'ok';
+		});
+		__register('coal/pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Before subscribe: publish falls through to platform.publish
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/pub', id: 'p0', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.published).toHaveLength(1);
+		expect(platform.coalesced).toHaveLength(0);
+		platform.reset();
+
+		// Subscribe via the stream RPC path
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/topic', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		// After subscribe: publish goes through sendCoalesced
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.published).toHaveLength(0);
+		expect(platform.coalesced).toHaveLength(1);
+		expect(platform.coalesced[0].topic).toBe('coal/topic');
+		expect(platform.coalesced[0].event).toBe('updated');
+		expect(platform.coalesced[0].data).toEqual({ k: 'a', v: 1 });
+		expect(platform.coalesced[0].key).toBe('coal/topic\0a');
+	});
+
+	it('fans out one sendCoalesced per subscribed ws', async () => {
+		const stream = live.stream('coal/multi', async () => null, {
+			merge: 'set',
+			coalesceBy: (data) => data.k
+		});
+		__register('coal/multi', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('coal/multi', 'updated', { k: 'x', v: 7 });
+			return 'ok';
+		});
+		__register('coal/multi-pub', handler);
+
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		const ws3 = mockWs({ id: 'u3' });
+		const platform = mockPlatform();
+
+		for (const w of [ws1, ws2, ws3]) {
+			handleRpc(w, toArrayBuffer({ rpc: 'coal/multi', id: 's', args: [], stream: true }), platform);
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		platform.reset();
+
+		handleRpc(ws1, toArrayBuffer({ rpc: 'coal/multi-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.coalesced).toHaveLength(3);
+		const wsRefs = platform.coalesced.map(c => c.ws);
+		expect(wsRefs).toContain(ws1);
+		expect(wsRefs).toContain(ws2);
+		expect(wsRefs).toContain(ws3);
+		// All share the same key/topic/event/data
+		for (const c of platform.coalesced) {
+			expect(c.key).toBe('coal/multi\0x');
+			expect(c.topic).toBe('coal/multi');
+			expect(c.event).toBe('updated');
+		}
+	});
+
+	it('null/undefined coalesceBy result collapses to a single per-topic key', async () => {
+		const stream = live.stream('coal/nullkey', async () => null, {
+			merge: 'set',
+			coalesceBy: () => null
+		});
+		__register('coal/nullkey', stream);
+
+		const handler = live(async (ctx) => { ctx.publish('coal/nullkey', 'updated', { v: 1 }); return 'ok'; });
+		__register('coal/nullkey-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/nullkey', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/nullkey-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.coalesced).toHaveLength(1);
+		expect(platform.coalesced[0].key).toBe('coal/nullkey\0');
+	});
+
+	it('unsubscribe(ws, topic) removes the ws from the coalesce set', async () => {
+		const stream = live.stream('coal/unsub', async () => null, {
+			merge: 'set',
+			coalesceBy: (d) => d.k
+		});
+		__register('coal/unsub', stream);
+
+		const handler = live(async (ctx) => { ctx.publish('coal/unsub', 'updated', { k: 'a' }); return 'ok'; });
+		__register('coal/unsub-pub', handler);
+
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		const platform = mockPlatform();
+
+		for (const w of [ws1, ws2]) {
+			handleRpc(w, toArrayBuffer({ rpc: 'coal/unsub', id: 's', args: [], stream: true }), platform);
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		platform.reset();
+
+		unsubscribe(ws1, 'coal/unsub', { platform });
+
+		handleRpc(ws2, toArrayBuffer({ rpc: 'coal/unsub-pub', id: 'p', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Only ws2 receives the coalesced message
+		expect(platform.coalesced).toHaveLength(1);
+		expect(platform.coalesced[0].ws).toBe(ws2);
+	});
+
+	it('close(ws) drops all of that ws\'s coalesce subscriptions', async () => {
+		const stream = live.stream('coal/close', async () => null, {
+			merge: 'set',
+			coalesceBy: (d) => d.k
+		});
+		__register('coal/close', stream);
+
+		const handler = live(async (ctx) => { ctx.publish('coal/close', 'updated', { k: 'a' }); return 'ok'; });
+		__register('coal/close-pub', handler);
+
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		const platform = mockPlatform();
+
+		for (const w of [ws1, ws2]) {
+			handleRpc(w, toArrayBuffer({ rpc: 'coal/close', id: 's', args: [], stream: true }), platform);
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		platform.reset();
+
+		close(ws1, { platform });
+
+		handleRpc(ws2, toArrayBuffer({ rpc: 'coal/close-pub', id: 'p', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.coalesced).toHaveLength(1);
+		expect(platform.coalesced[0].ws).toBe(ws2);
+
+		// Closing the last subscriber should leave the topic with no fan-out
+		// targets: subsequent publish falls back to platform.publish.
+		close(ws2, { platform });
+		platform.reset();
+
+		handleRpc(ws1, toArrayBuffer({ rpc: 'coal/close-pub', id: 'p2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.coalesced).toHaveLength(0);
+		expect(platform.published).toHaveLength(1);
+	});
+
+	it('repeated subscribes from the same ws do not double-count in the set', async () => {
+		const stream = live.stream('coal/repeat', async () => null, {
+			merge: 'set',
+			coalesceBy: (d) => d.k
+		});
+		__register('coal/repeat', stream);
+
+		const handler = live(async (ctx) => { ctx.publish('coal/repeat', 'updated', { k: 'a' }); return 'ok'; });
+		__register('coal/repeat-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Three subscribes from one ws -> Set still has just one entry
+		for (let i = 0; i < 3; i++) {
+			handleRpc(ws, toArrayBuffer({ rpc: 'coal/repeat', id: 's' + i, args: [], stream: true }), platform);
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		platform.reset();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/repeat-pub', id: 'p', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.coalesced).toHaveLength(1);
+	});
+
+	it('different keys produce different sendCoalesced keys', async () => {
+		const stream = live.stream('coal/keys', async () => null, {
+			merge: 'set',
+			coalesceBy: (d) => d.k
+		});
+		__register('coal/keys', stream);
+
+		const handler = live(async (ctx, k) => { ctx.publish('coal/keys', 'updated', { k, v: 1 }); return 'ok'; });
+		__register('coal/keys-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/keys', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/keys-pub', id: 'p1', args: ['a'] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/keys-pub', id: 'p2', args: ['b'] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.coalesced).toHaveLength(2);
+		expect(platform.coalesced[0].key).toBe('coal/keys\0a');
+		expect(platform.coalesced[1].key).toBe('coal/keys\0b');
+	});
+
+	it('rolls back coalesce registration when init throws', async () => {
+		const stream = live.stream('coal/throws', async () => { throw new LiveError('INTERNAL_ERROR', 'boom'); }, {
+			merge: 'set',
+			coalesceBy: (d) => d.k
+		});
+		__register('coal/throws', stream);
+
+		const handler = live(async (ctx) => { ctx.publish('coal/throws', 'updated', { k: 'a' }); return 'ok'; });
+		__register('coal/throws-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/throws', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// init failed -> rollback should have unregistered the coalesce entry
+		platform.reset();
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/throws-pub', id: 'p', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.coalesced).toHaveLength(0);
+		expect(platform.published).toHaveLength(1);
 	});
 });

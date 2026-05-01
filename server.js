@@ -122,21 +122,34 @@ function _copyStreamMeta(target, source) {
 	}
 }
 
-/** @type {WeakMap<any, Function>} Cache bound publish per platform to avoid repeated .bind() */
-const _boundPublishCache = new WeakMap();
-
 /**
- * Get a cached bound publish function for a platform.
- * @param {import('svelte-adapter-uws').Platform} platform
- * @returns {Function}
+ * Per-topic coalesce registry. When a stream registered with `coalesceBy`
+ * is subscribed, its topic is recorded here along with the live set of
+ * subscriber sockets. The publish helper uses this to decide between
+ * `platform.publish` (default broadcast) and per-socket
+ * `platform.sendCoalesced` fan-out.
+ *
+ * Hot-path cost on the default (no-coalesce) branch: one Map.get on an
+ * almost-always-empty map. See bench/publish.js for numbers.
+ *
+ * @type {Map<string, { coalesceBy: Function, ws: Set<any> }>}
  */
-function _getBoundPublish(platform) {
-	let bound = _boundPublishCache.get(platform);
-	if (!bound) {
-		bound = platform.publish.bind(platform);
-		_boundPublishCache.set(platform, bound);
+const _topicCoalesce = new Map();
+
+function _registerCoalesce(ws, topic, coalesceBy) {
+	let entry = _topicCoalesce.get(topic);
+	if (!entry) {
+		entry = { coalesceBy, ws: new Set() };
+		_topicCoalesce.set(topic, entry);
 	}
-	return bound;
+	entry.ws.add(ws);
+}
+
+function _unregisterCoalesce(ws, topic) {
+	const entry = _topicCoalesce.get(topic);
+	if (!entry) return;
+	entry.ws.delete(ws);
+	if (entry.ws.size === 0) _topicCoalesce.delete(topic);
 }
 
 /** @type {WeakMap<any, { publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function }>} */
@@ -151,7 +164,17 @@ const _ctxHelpersCache = new WeakMap();
 function _getCtxHelpers(platform) {
 	let helpers = _ctxHelpersCache.get(platform);
 	if (!helpers) {
-		const publish = _getBoundPublish(platform);
+		const publish = function publish(topic, event, data, options) {
+			const c = _topicCoalesce.get(topic);
+			if (!c) return platform.publish(topic, event, data, options);
+			const subKey = c.coalesceBy(data);
+			const fullKey = topic + '\0' + (subKey == null ? '' : subKey);
+			let last = true;
+			for (const ws of c.ws) {
+				last = platform.sendCoalesced(ws, { key: fullKey, topic, event, data });
+			}
+			return last;
+		};
 		helpers = {
 			publish,
 			throttle: (topic, event, data, ms) => _throttlePublish(platform, topic, event, data, ms),
@@ -181,9 +204,13 @@ function _trackStreamSub(ws, topic, fn) {
 	let topicMap = _wsStreamOwners.get(ws);
 	if (!topicMap) { topicMap = new Map(); _wsStreamOwners.set(ws, topicMap); }
 	let owners = topicMap.get(topic);
+	const isFirstSubForTopic = !owners;
 	if (!owners) { owners = []; topicMap.set(topic, owners); }
 	const existing = owners.find(o => o.fn === fn);
 	if (existing) { existing.count++; } else { owners.push({ fn, count: 1 }); }
+	if (isFirstSubForTopic && /** @type {any} */ (fn).__coalesceBy) {
+		_registerCoalesce(ws, topic, /** @type {any} */ (fn).__coalesceBy);
+	}
 	if (_metricsInstruments) _metricsInstruments.streamGauge.inc();
 }
 
@@ -215,7 +242,10 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 			if (idx >= 0) {
 				owners[idx].count--;
 				if (owners[idx].count <= 0) owners.splice(idx, 1);
-				if (owners.length === 0) topicMap.delete(topic);
+				if (owners.length === 0) {
+					topicMap.delete(topic);
+					_unregisterCoalesce(ws, topic);
+				}
 			}
 		}
 	}
@@ -362,7 +392,7 @@ export function live(fn) {
  * Topic can be a static string or a function of (ctx, ...args) => string for dynamic topics.
  * @param {string | Function} topic
  * @param {Function} initFn
- * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, replay?: boolean | { size?: number } }} [options]
+ * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, replay?: boolean | { size?: number }, coalesceBy?: (data: any) => string | number | null | undefined }} [options]
  * @returns {Function}
  */
 live.stream = function stream(topic, initFn, options) {
@@ -375,7 +405,10 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, ...rest } = options || {};
+	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, ...rest } = options || {};
+	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
+		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
+	}
 	const merged = { merge: 'crud', key: 'id', ...rest };
 	if (replay) /** @type {any} */ (initFn).__replay = typeof replay === 'object' ? replay : {};
 	if (delta) /** @type {any} */ (initFn).__delta = delta;
@@ -383,6 +416,7 @@ live.stream = function stream(topic, initFn, options) {
 	/** @type {any} */ (initFn).__isLive = true;
 	/** @type {any} */ (initFn).__streamTopic = topic;
 	/** @type {any} */ (initFn).__streamOptions = merged;
+	if (coalesceBy) /** @type {any} */ (initFn).__coalesceBy = coalesceBy;
 	if (onSubscribe) /** @type {any} */ (initFn).__onSubscribe = onSubscribe;
 	if (onUnsubscribe) /** @type {any} */ (initFn).__onUnsubscribe = onUnsubscribe;
 	// Subscribe-time access predicate: (ctx) => boolean
@@ -679,6 +713,14 @@ function _getDefaultIdempotencyStore() {
  */
 export function _resetIdempotencyStore() {
 	_defaultIdempotencyStore = null;
+}
+
+/**
+ * Reset the per-topic coalesce registry. Tests only.
+ * @internal
+ */
+export function _resetCoalesceRegistry() {
+	_topicCoalesce.clear();
 }
 
 /**
@@ -2962,6 +3004,7 @@ export function unsubscribe(ws, topic, { platform }) {
 		}
 	}
 	topicMap.delete(topic);
+	_unregisterCoalesce(ws, topic);
 
 	let fired = _firedUnsubscribes.get(ws);
 	if (!fired) { fired = new Set(); _firedUnsubscribes.set(ws, fired); }
@@ -2981,6 +3024,7 @@ export function close(ws, { platform, subscriptions }) {
 	// Drain tracked stream subscriptions (from the RPC subscribe path)
 	if (topicMap) {
 		for (const [topic, owners] of topicMap) {
+			_unregisterCoalesce(ws, topic);
 			if (alreadyFired && alreadyFired.has(topic)) continue;
 			for (const entry of owners) {
 				for (let i = 0; i < entry.count; i++) {
