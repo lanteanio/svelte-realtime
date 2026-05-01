@@ -38,22 +38,34 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
 	/**
 	 * Attach per-call options. Returns a callable bound to those options.
 	 *
-	 * `idempotencyKey` is forwarded in the wire envelope; the server-side
-	 * handler must be wrapped with `live.idempotent({...})` for the key to
-	 * take effect. Calls made via `.with({ idempotencyKey })` dedup against
-	 * each other within a microtask under that key, independent of the
-	 * default `(path, args)` dedup. Calling `.with({})` returns the base
+	 * - `idempotencyKey` is forwarded in the wire envelope; the server-side
+	 *   handler must be wrapped with `live.idempotent({...})` for the key
+	 *   to take effect. Calls made via `.with({ idempotencyKey })` dedup
+	 *   against each other within a microtask under that key, independent
+	 *   of the default `(path, args)` dedup.
+	 * - `timeout` overrides the global RPC timeout (default 30s) for this
+	 *   call only. Use for known-slow queries; the call waits up to
+	 *   `timeout` ms before rejecting with `RpcError('TIMEOUT', ...)`.
+	 *   Per-call `timeout` is ignored inside `batch(fn)` -- the
+	 *   batch-level timer governs all collected calls there.
+	 *
+	 * Calling `.with({})` (or omitting both options) returns the base
 	 * callable unchanged.
 	 *
 	 * @example
 	 * ```js
-	 * import { createOrder } from '$live/orders';
+	 * // Idempotent retry
 	 * const key = crypto.randomUUID();
 	 * await createOrder.with({ idempotencyKey: key })(payload);
-	 * // Retrying with the same key is safe -- the server returns the cached result.
+	 *
+	 * // Long-running query: wait up to 2 minutes
+	 * const report = await generateReport.with({ timeout: 120_000 })(params);
+	 *
+	 * // Both at once
+	 * await charge.with({ idempotencyKey: 'k1', timeout: 90_000 })(payload);
 	 * ```
 	 */
-	with: (opts: { idempotencyKey?: string }) => (...args: any[]) => Promise<any>;
+	with: (opts: { idempotencyKey?: string; timeout?: number }) => (...args: any[]) => Promise<any>;
 };
 
 /**

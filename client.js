@@ -258,26 +258,36 @@ export function __rpc(path) {
 
 	/**
 	 * Attach per-call options. Returns a callable bound to those options.
-	 * Currently supports `idempotencyKey` -- the server-side handler must be
-	 * wrapped with `live.idempotent({...})` for the key to take effect.
-	 * Calls with no key fall through to the standard `rpcCall` path.
+	 *
+	 * - `idempotencyKey` -- the server-side handler must be wrapped with
+	 *   `live.idempotent({...})` for the key to take effect. Calls bound
+	 *   to the same key dedup against each other within a microtask.
+	 * - `timeout` -- per-RPC override of the global timeout (default 30s).
+	 *   Use for known-slow queries; the call waits up to `timeout` ms
+	 *   before rejecting with `TIMEOUT`. Per-call `timeout` is ignored
+	 *   inside `batch(fn)` (the batch-level timer governs all collected
+	 *   calls there).
+	 *
+	 * Calling with no options returns the base callable unchanged.
 	 */
 	rpcCall.with = function withOptions(opts) {
 		const idempotencyKey = opts && opts.idempotencyKey;
-		if (!idempotencyKey) return rpcCall;
+		const timeout = opts && opts.timeout;
+		if (!idempotencyKey && !timeout) return rpcCall;
 		return function withCall(...args) {
-			if (!_batchCollector) {
-				// Same idempotency key + same microtask -> coalesce. Different keys
-				// (or no key on the base path) get separate buckets.
+			// Dedup only when an idempotency key is bound. Timeout-only calls
+			// bypass dedup -- the longer-waiting caller would otherwise be
+			// rejected at the shorter call's timeout.
+			if (!_batchCollector && idempotencyKey) {
 				const dedupKey = path + '\0K' + idempotencyKey;
 				const existing = _dedupMap.get(dedupKey);
 				if (existing) return existing;
-				const promise = _sendRpc(path, args, idempotencyKey);
+				const promise = _sendRpc(path, args, idempotencyKey, timeout);
 				_dedupMap.set(dedupKey, promise);
 				queueMicrotask(() => _dedupMap.delete(dedupKey));
 				return promise;
 			}
-			return _sendRpc(path, args, idempotencyKey);
+			return _sendRpc(path, args, idempotencyKey, timeout);
 		};
 	};
 
@@ -290,9 +300,11 @@ export function __rpc(path) {
  * @param {any[]} args
  * @param {string} [idempotencyKey] Optional envelope idempotency key. When set, the server-side
  *   `live.idempotent` wrapper uses it to dedup against its store.
+ * @param {number} [timeout] Per-RPC timeout override in ms. Falls back to
+ *   `configure({ timeout })` then to the 30s default.
  * @returns {Promise<any>}
  */
-function _sendRpc(path, args, idempotencyKey) {
+function _sendRpc(path, args, idempotencyKey, timeout) {
 	ensureListener();
 	ensureDisconnectListener();
 
@@ -314,13 +326,15 @@ function _sendRpc(path, args, idempotencyKey) {
 				const dropped = _offlineQueue.shift();
 				if (dropped) dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow -- oldest mutation dropped'));
 			}
-			_offlineQueue.push({ path, args, queuedAt: Date.now(), resolve, reject, idempotencyKey });
+			_offlineQueue.push({ path, args, queuedAt: Date.now(), resolve, reject, idempotencyKey, timeout });
 		});
 	}
 
 	const id = _nextId();
 
-	// If inside a batch() call, collect instead of sending
+	// If inside a batch() call, collect instead of sending. The batch-level
+	// timer governs all collected calls; per-call `timeout` is intentionally
+	// dropped here (documented limitation).
 	if (_batchCollector) {
 		_batchCollector.push(idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args });
 		return new Promise((resolve, reject) => {
@@ -330,11 +344,16 @@ function _sendRpc(path, args, idempotencyKey) {
 
 	_devtoolsStart(path, id, args);
 	const conn = _connect();
+	const effectiveTimeout = timeout || _getTimeout();
+	// Sleep-detect threshold scales with the effective timeout so longer
+	// timeouts don't misfire as SLEEP_TIMEOUT. Floor at 90s preserves the
+	// original heuristic for the 30s default case.
+	const sleepThreshold = Math.max(effectiveTimeout * 3, 90000);
 
 	return new Promise((resolve, reject) => {
 		const _startTime = Date.now();
 		const timer = setTimeout(() => {
-			if (Date.now() - _startTime > 90000) {
+			if (Date.now() - _startTime > sleepThreshold) {
 				// Device was sleeping. Clean up the pending entry so it doesn't hang
 				// forever -- the disconnect listener or reconnect will handle the actual error.
 				pending.delete(id);
@@ -344,8 +363,8 @@ function _sendRpc(path, args, idempotencyKey) {
 			}
 			pending.delete(id);
 			_devtoolsEnd(id, false, 'TIMEOUT');
-			reject(new RpcError('TIMEOUT', `RPC '${path}' timed out after 30s`));
-		}, _getTimeout());
+			reject(new RpcError('TIMEOUT', `RPC '${path}' timed out after ${Math.round(effectiveTimeout / 1000)}s`));
+		}, effectiveTimeout);
 
 		pending.set(id, {
 			resolve(v) { _devtoolsEnd(id, true, v); resolve(v); },
@@ -1611,7 +1630,7 @@ function _checkArgs(path, args) {
 }
 
 /**
- * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string }} OfflineEntry
+ * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number }} OfflineEntry
  */
 
 /** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
@@ -1708,7 +1727,7 @@ async function _drainOfflineQueue() {
 		for (let i = 0; i < queue.length; i += concurrency) {
 			const chunk = queue.slice(i, i + concurrency);
 			const promises = chunk.map(entry => {
-				const promise = _sendRpc(entry.path, entry.args, entry.idempotencyKey);
+				const promise = _sendRpc(entry.path, entry.args, entry.idempotencyKey, entry.timeout);
 				promise.then(
 					(result) => entry.resolve(result),
 					(err) => {
@@ -1726,7 +1745,7 @@ async function _drainOfflineQueue() {
 		// Sequential strategy (default)
 		for (const entry of queue) {
 			try {
-				const result = await _sendRpc(entry.path, entry.args, entry.idempotencyKey);
+				const result = await _sendRpc(entry.path, entry.args, entry.idempotencyKey, entry.timeout);
 				entry.resolve(result);
 			} catch (err) {
 				if (onReplayError) {

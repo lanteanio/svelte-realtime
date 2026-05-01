@@ -2819,3 +2819,116 @@ describe('empty store', () => {
 		unsub();
 	});
 });
+
+// -- __rpc().with({ timeout }) ----------------------------------------------
+
+describe('__rpc().with({ timeout })', () => {
+	it('returns the base callable when no options are provided', () => {
+		const call = __rpc('t/none');
+		expect(call.with({})).toBe(call);
+		expect(call.with(undefined)).toBe(call);
+	});
+
+	it('returns a wrapped callable when only timeout is provided', () => {
+		const call = __rpc('t/wrap');
+		expect(call.with({ timeout: 60_000 })).not.toBe(call);
+	});
+
+	it('rejects with TIMEOUT after the per-call timeout fires', async () => {
+		vi.useFakeTimers();
+		try {
+			const call = __rpc('t/fire');
+			const promise = call.with({ timeout: 1000 })('payload');
+			// Suppress unhandled rejection during the fake-timer advance
+			promise.catch(() => {});
+			expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+
+			await vi.advanceTimersByTimeAsync(1500);
+			await expect(promise).rejects.toMatchObject({ code: 'TIMEOUT' });
+			await expect(promise).rejects.toThrow(/timed out after 1s/);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('does NOT time out before the per-call timeout fires (overrides the 30s default)', async () => {
+		vi.useFakeTimers();
+		try {
+			const call = __rpc('t/wait');
+			const promise = call.with({ timeout: 60_000 })('x');
+
+			// Advance past the 30s default but well before the 60s override
+			await vi.advanceTimersByTimeAsync(35_000);
+
+			// Resolve the call before the override timer fires
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, { ok: true, data: 'late-but-fine' });
+			expect(await promise).toBe('late-but-fine');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('timeout-only calls do NOT dedup against the base path within a microtask', async () => {
+		const call = __rpc('t/no-dedup');
+		const p1 = call('x');
+		const p2 = call.with({ timeout: 60_000 })('x');
+
+		// Two distinct envelopes
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+		expect(p1).not.toBe(p2);
+
+		const s1 = sendQueuedFn.mock.calls[0][0];
+		const s2 = sendQueuedFn.mock.calls[1][0];
+		simulateRpcResponse(s1.id, { ok: true, data: 'plain' });
+		simulateRpcResponse(s2.id, { ok: true, data: 'timed' });
+		expect(await p1).toBe('plain');
+		expect(await p2).toBe('timed');
+	});
+
+	it('timeout + idempotencyKey compose: dedup by key, override timer', async () => {
+		vi.useFakeTimers();
+		try {
+			const call = __rpc('t/compose');
+			const bound = call.with({ idempotencyKey: 'k1', timeout: 90_000 });
+
+			const p1 = bound('a');
+			const p2 = bound('a');
+
+			// Same key + same microtask -> coalesced into one envelope
+			expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+			expect(p1).toBe(p2);
+
+			const sent = sendQueuedFn.mock.calls[0][0];
+			expect(sent.idempotencyKey).toBe('k1');
+
+			// Past the 30s default, well before the 90s override
+			await vi.advanceTimersByTimeAsync(45_000);
+			simulateRpcResponse(sent.id, { ok: true, data: 'composed' });
+			expect(await p1).toBe('composed');
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('per-call timeout is ignored inside batch() (batch-level timer governs)', async () => {
+		const a = __rpc('t/b1');
+		const b = __rpc('t/b2');
+
+		const result = batch(() => [
+			a.with({ timeout: 60_000 })('x'),
+			b('y')
+		]);
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect(Array.isArray(sent.batch)).toBe(true);
+		// timeout is NOT carried in the wire envelope (per-call timeout is
+		// a client-side timer concern, not a server protocol field)
+		expect('timeout' in sent.batch[0]).toBe(false);
+
+		simulateRpcResponse(sent.batch[0].id, { ok: true, data: 'A' });
+		simulateRpcResponse(sent.batch[1].id, { ok: true, data: 'B' });
+		expect(await result).toEqual(['A', 'B']);
+	});
+});

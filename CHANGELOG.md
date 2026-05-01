@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-RPC `timeout` override via `.with({ timeout })`.** Long-running queries no longer have to share the global 30s timeout. Pass a per-call override to wait longer:
+
+  ```js
+  // Wait up to 2 minutes for this report
+  const report = await generateReport.with({ timeout: 120_000 })(params);
+
+  // Composes with idempotency
+  await charge.with({ idempotencyKey: 'k1', timeout: 90_000 })(payload);
+  ```
+
+  Resolution order: per-call `timeout` > global `configure({ timeout })` > 30s default. Timeout-only `.with()` calls do NOT dedup against the base path within a microtask -- the longer-waiting caller would otherwise be rejected at the shorter call's timeout. Idempotency dedup still applies when `idempotencyKey` is set. Per-call `timeout` is ignored inside `batch(fn)` (the batch-level timer governs all collected calls).
+
+  The error message now reflects the actual timeout (`RPC 'foo/bar' timed out after 120s` instead of always saying "30s"), and the device-sleep detection threshold scales with the effective timeout so longer overrides don't misfire as `SLEEP_TIMEOUT`.
+
 - **Structured guard error codes + descriptive `.load()` error.** Two ergonomics fixes that work together:
 
   - **Bare `Error` thrown from a `guard()` is now auto-classified.** Previously, `throw new Error('login required')` from a guard reached the client as `INTERNAL_ERROR` (5xx-class, generic "Internal server error" message). Now it becomes `UNAUTHENTICATED` when `ctx.user` is null, `FORBIDDEN` when present -- 4xx-class with the matching generic message ("Authentication required" / "Access denied"). The original error is preserved on `.cause` for server-side logging without leaking to the wire. Throwing `new LiveError('FORBIDDEN', 'Account suspended')` directly continues to propagate code AND message verbatim, for guards that want a specific reason.
