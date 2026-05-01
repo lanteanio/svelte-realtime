@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Structured guard error codes + descriptive `.load()` error.** Two ergonomics fixes that work together:
+
+  - **Bare `Error` thrown from a `guard()` is now auto-classified.** Previously, `throw new Error('login required')` from a guard reached the client as `INTERNAL_ERROR` (5xx-class, generic "Internal server error" message). Now it becomes `UNAUTHENTICATED` when `ctx.user` is null, `FORBIDDEN` when present -- 4xx-class with the matching generic message ("Authentication required" / "Access denied"). The original error is preserved on `.cause` for server-side logging without leaking to the wire. Throwing `new LiveError('FORBIDDEN', 'Account suspended')` directly continues to propagate code AND message verbatim, for guards that want a specific reason.
+
+  - **`.load()` on a guarded stream now throws a descriptive Error when called without a user.** Previously it warned in dev and called the guard with `ctx.user = null`, producing a confusing downstream failure. Now omitting `user` entirely is treated as a developer mistake and surfaces immediately:
+
+    ```
+    [svelte-realtime] 'audit/feed' has a guard but .load() was called without a user.
+      Pass it explicitly:    stream.load(platform, { user: locals.user })
+      Or opt into anonymous: stream.load(platform, { user: null })
+      See: https://svti.me/ssr
+    ```
+
+    Passing `user: null` explicitly continues to bypass this check (anonymous opt-in), so apps that legitimately call guarded streams without a user (e.g., a public read with a permissive guard) keep working.
+
+  - **Access predicates now pick the right code too.** `live.stream({ access: () => false })` previously always returned `FORBIDDEN`; now returns `UNAUTHENTICATED` when `ctx.user` is null and `FORBIDDEN` otherwise.
+
+  Standard guard / framework codes are now documented on `LiveError`: `UNAUTHENTICATED`, `FORBIDDEN`, `RATE_LIMITED`, `VALIDATION`, `OVERLOADED`, `CONFLICT`, `SERVICE_UNAVAILABLE`, `NOT_FOUND`, `INVALID_REQUEST`, `INTERNAL_ERROR`. User-thrown codes (e.g. `INSUFFICIENT_FUNDS`) continue to pass through unchanged.
+
 - **`live.admission({ classes })` + `ctx.shed(className)` + `classOfService` option** -- pressure-aware shedding. Configure named classes of service, each mapped to either an array of pressure reasons or a `(snapshot) => boolean` predicate; the framework evaluates them against the adapter's `platform.pressure` snapshot.
 
   Two ways to act on the result:

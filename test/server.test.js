@@ -1299,7 +1299,9 @@ describe('__directCall()', () => {
 		__register('guarded/action', handler);
 
 		const platform = mockPlatform();
-		await __directCall('guarded/action', [], platform);
+		// Anonymous opt-in: pass user explicitly (even as null) to bypass the
+		// "guarded stream needs a user" descriptive error.
+		await __directCall('guarded/action', [], platform, { user: null });
 		expect(order).toEqual(['guard', 'handler']);
 	});
 
@@ -1322,7 +1324,7 @@ describe('__directCall()', () => {
 		expect(result).toEqual([{ id: 1, name: 'Item' }]);
 	});
 
-	it('warns in dev when guard runs with ctx.user = null', async () => {
+	it('throws a descriptive error when guard exists and user is omitted', async () => {
 		const guardFn = (ctx) => {};
 		guardFn.__isGuard = true;
 		__registerGuard('dc-nullwarn', guardFn);
@@ -1330,30 +1332,37 @@ describe('__directCall()', () => {
 		const handler = live(async (ctx) => 'ok');
 		__register('dc-nullwarn/action', handler);
 
-		const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		const platform = mockPlatform();
-		await __directCall('dc-nullwarn/action', [], platform);
-
-		expect(spy).toHaveBeenCalledWith(
-			expect.stringContaining('.load() is calling guard')
-		);
-		spy.mockRestore();
+		await expect(__directCall('dc-nullwarn/action', [], platform))
+			.rejects.toThrow(/has a guard but \.load\(\) was called without a user/);
 	});
 
-	it('does not warn when user is provided', async () => {
+	it('runs the guard without throwing when user is explicitly null (anonymous opt-in)', async () => {
+		let receivedUser = 'unset';
+		const guardFn = (ctx) => { receivedUser = ctx.user; };
+		guardFn.__isGuard = true;
+		__registerGuard('dc-anon', guardFn);
+
+		const handler = live(async () => 'ok');
+		__register('dc-anon/action', handler);
+
+		const platform = mockPlatform();
+		const result = await __directCall('dc-anon/action', [], platform, { user: null });
+		expect(result).toBe('ok');
+		expect(receivedUser).toBe(null);
+	});
+
+	it('does not throw when user is provided', async () => {
 		const guardFn = (ctx) => {};
 		guardFn.__isGuard = true;
 		__registerGuard('dc-nowarn', guardFn);
 
-		const handler = live(async (ctx) => 'ok');
+		const handler = live(async () => 'ok');
 		__register('dc-nowarn/action', handler);
 
-		const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		const platform = mockPlatform();
-		await __directCall('dc-nowarn/action', [], platform, { user: { id: 1 } });
-
-		expect(spy).not.toHaveBeenCalled();
-		spy.mockRestore();
+		const result = await __directCall('dc-nowarn/action', [], platform, { user: { id: 1 } });
+		expect(result).toBe('ok');
 	});
 });
 
@@ -4074,7 +4083,7 @@ describe('__directCall stream enforcement', () => {
 		expect(result).toBeNull();
 	});
 
-	it('throws FORBIDDEN when stream filter rejects', async () => {
+	it('throws FORBIDDEN when stream filter rejects an authenticated user', async () => {
 		const stream = live.stream('dc-filter-topic', async (ctx) => [{ id: 1 }], {
 			merge: 'crud',
 			access: (ctx) => ctx.user?.admin === true
@@ -4082,9 +4091,8 @@ describe('__directCall stream enforcement', () => {
 		__register('dcfilter/feed', stream);
 
 		const platform = mockPlatform();
-		await expect(__directCall('dcfilter/feed', [], platform)).rejects.toMatchObject({
-			code: 'FORBIDDEN'
-		});
+		await expect(__directCall('dcfilter/feed', [], platform, { user: { id: 1, admin: false } }))
+			.rejects.toMatchObject({ code: 'FORBIDDEN' });
 	});
 
 	it('allows gated stream when predicate passes', async () => {
@@ -6079,5 +6087,153 @@ describe('live.stream({ classOfService })', () => {
 
 		// Existing subscriber stays subscribed -- the gate fires only on new subscribe
 		expect(ws.isSubscribed('cos/existing')).toBe(true);
+	});
+});
+
+// -- Structured guard error codes --------------------------------------------
+
+describe('guard auto-classification', () => {
+	it('LiveError from guard propagates code and message verbatim', async () => {
+		const guardFn = guard(() => { throw new LiveError('FORBIDDEN', 'Specific reason'); });
+		__registerGuard('gc-live', guardFn);
+		const handler = live(async () => 'never');
+		__register('gc-live/action', handler);
+
+		const ws = mockWs({ id: 'u' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc-live/action', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+		expect(platform.sent[0].data.error).toBe('Specific reason');
+	});
+
+	it('bare Error from guard with user -> FORBIDDEN with generic message', async () => {
+		const guardFn = guard(() => { throw new Error('internal: missing column foo'); });
+		__registerGuard('gc-bare-user', guardFn);
+		const handler = live(async () => 'never');
+		__register('gc-bare-user/action', handler);
+
+		const ws = mockWs({ id: 'u' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc-bare-user/action', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+		expect(platform.sent[0].data.error).toBe('Access denied');
+		// Original message must NOT leak to the client
+		expect(JSON.stringify(platform.sent[0].data)).not.toContain('missing column');
+	});
+
+	it('bare Error from guard without user -> UNAUTHENTICATED with generic message', async () => {
+		const guardFn = guard(() => { throw new Error('whatever'); });
+		__registerGuard('gc-bare-anon', guardFn);
+		const handler = live(async () => 'never');
+		__register('gc-bare-anon/action', handler);
+
+		const ws = mockWs();   // no .id -> no user data
+		ws.getUserData = () => null;
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc-bare-anon/action', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.code).toBe('UNAUTHENTICATED');
+		expect(platform.sent[0].data.error).toBe('Authentication required');
+	});
+
+	it('non-LiveError from guard preserves original on .cause (server-side)', async () => {
+		const original = new Error('db timeout');
+		let capturedFromOnError = null;
+		const guardFn = guard(() => { throw original; });
+		__registerGuard('gc-cause', guardFn);
+		const handler = live(async () => 'never');
+		__register('gc-cause/action', handler);
+
+		const ws = mockWs({ id: 'u' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc-cause/action', id: '1', args: [] }), platform, {
+			onError: (path, err) => { capturedFromOnError = err; }
+		});
+		await new Promise((r) => setTimeout(r, 10));
+
+		// onError is called for non-LiveError; here the guard wrapper threw a LiveError,
+		// so onError is NOT invoked (it's reserved for unexpected handler throws).
+		// The point of this test: the wrapped error reached the client cleanly,
+		// AND the original is recoverable on .cause for server-side log integrations
+		// that walk the error chain (e.g. Sentry).
+		expect(capturedFromOnError).toBe(null);
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+		// The original is intentionally NOT exposed to the client. Server-side
+		// integrations would walk .cause via their own catch chain.
+	});
+
+	it('access predicate returning false with user -> FORBIDDEN', async () => {
+		const stream = live.stream('gc-access-user-topic', async () => [], {
+			merge: 'crud', key: 'id',
+			access: () => false
+		});
+		__register('gc/access-user', stream);
+
+		const ws = mockWs({ id: 'u' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc/access-user', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+		expect(platform.sent[0].data.error).toBe('Access denied');
+	});
+
+	it('access predicate returning false without user -> UNAUTHENTICATED', async () => {
+		const stream = live.stream('gc-access-anon-topic', async () => [], {
+			merge: 'crud', key: 'id',
+			access: () => false
+		});
+		__register('gc/access-anon', stream);
+
+		const ws = mockWs();
+		ws.getUserData = () => null;
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc/access-anon', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.code).toBe('UNAUTHENTICATED');
+		expect(platform.sent[0].data.error).toBe('Authentication required');
+	});
+
+	it('.load() streamFilter rejection picks UNAUTHENTICATED when user is null', async () => {
+		const stream = live.stream('gc-dc-anon-topic', async () => [], {
+			merge: 'crud', key: 'id',
+			access: () => false
+		});
+		__register('gc/dc-anon', stream);
+
+		const platform = mockPlatform();
+		await expect(__directCall('gc/dc-anon', [], platform, { user: null }))
+			.rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+	});
+
+	it('.load() streamFilter rejection picks FORBIDDEN when user is present', async () => {
+		const stream = live.stream('gc-dc-user-topic', async () => [], {
+			merge: 'crud', key: 'id',
+			access: () => false
+		});
+		__register('gc/dc-user', stream);
+
+		const platform = mockPlatform();
+		await expect(__directCall('gc/dc-user', [], platform, { user: { id: 'u' } }))
+			.rejects.toMatchObject({ code: 'FORBIDDEN' });
+	});
+
+	it('handler bare-error throws still become INTERNAL_ERROR (the wrapper applies to guards only)', async () => {
+		const handler = live(async () => { throw new Error('handler boom'); });
+		__register('gc-handler-throw/action', handler);
+
+		const ws = mockWs({ id: 'u' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc-handler-throw/action', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.code).toBe('INTERNAL_ERROR');
+		expect(platform.sent[0].data.error).toBe('Internal server error');
 	});
 });

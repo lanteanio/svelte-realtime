@@ -933,10 +933,16 @@ export namespace pipe {
 /**
  * Create a per-module guard that runs before every `live()` in the same module.
  *
+ * Bare `Error`s thrown from a guard are auto-classified to a typed
+ * `LiveError`: `UNAUTHENTICATED` when `ctx.user` is null, `FORBIDDEN`
+ * otherwise. Throw `new LiveError('FORBIDDEN', '...')` directly when you
+ * want a specific code or message.
+ *
  * @example
  * ```js
  * export const _guard = guard((ctx) => {
- *   if (ctx.user?.role !== 'admin') throw new LiveError('FORBIDDEN', 'Admin only');
+ *   if (!ctx.user) throw new Error('login required');                           // -> UNAUTHENTICATED
+ *   if (ctx.user.role !== 'admin') throw new LiveError('FORBIDDEN', 'Admin only');
  * });
  * ```
  */
@@ -947,7 +953,29 @@ export function guard(
 /**
  * Typed error that propagates `code` and `message` to the client.
  * Use this for expected errors (auth failures, validation, etc.).
- * Raw `Error` throws are caught and replaced with a generic `INTERNAL_ERROR`.
+ * Raw `Error` throws are caught and replaced with a generic `INTERNAL_ERROR`,
+ * EXCEPT when thrown from a guard -- those are auto-classified
+ * (see `guard()`).
+ *
+ * The framework recognises and emits these standard codes:
+ *
+ * - `UNAUTHENTICATED` -- caller has no user identity. From guards or
+ *   access predicates failing with `ctx.user == null`.
+ * - `FORBIDDEN` -- caller is identified but lacks permission. From guards
+ *   or access predicates failing with `ctx.user != null`.
+ * - `RATE_LIMITED` -- request rejected by `live.rateLimit({...})`.
+ * - `VALIDATION` -- input rejected by `live.validated(schema, ...)`.
+ * - `OVERLOADED` -- subscribe rejected by `live.stream({ classOfService })`
+ *   under pressure.
+ * - `CONFLICT` -- a request with the same idempotency key is already
+ *   in flight (multi-instance store only).
+ * - `SERVICE_UNAVAILABLE` -- circuit breaker open.
+ * - `NOT_FOUND` -- live function not registered at the requested path.
+ * - `INVALID_REQUEST` -- malformed envelope or args.
+ * - `INTERNAL_ERROR` -- non-LiveError throw from a handler (NOT a guard).
+ *
+ * Code strings are user-extensible -- throw your own (e.g. `INSUFFICIENT_FUNDS`)
+ * and the client receives them as-is via `RpcError.code`.
  */
 export class LiveError extends Error {
 	code: string;

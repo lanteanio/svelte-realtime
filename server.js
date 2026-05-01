@@ -13,9 +13,6 @@ const guards = new Map();
 /** @type {Set<Function>} Streams with onUnsubscribe hooks (for iterating static matches in close) */
 const _streamsWithUnsubscribe = new Set();
 
-/** @type {Set<string>} Paths that already warned about null ctx.user in __directCall */
-const _directCallWarned = new Set();
-
 /**
  * Tag a topic function with __topicUsesCtx by inspecting its first parameter name.
  *
@@ -2409,7 +2406,7 @@ live.webhook = function webhook(topic, config) {
 
 /**
  * Create a per-module guard. Accepts one or more middleware functions.
- * When multiple are provided, they run in order — if any throws, the chain stops.
+ * When multiple are provided, they run in order -- if any throws, the chain stops.
  * Earlier middleware can enrich `ctx` for later ones.
  * @param {...Function} fns
  * @returns {Function}
@@ -2426,6 +2423,39 @@ export function guard(...fns) {
 	};
 	/** @type {any} */ (composite).__isGuard = true;
 	return composite;
+}
+
+/**
+ * Run a per-module guard with auto-classification of non-LiveError throws.
+ *
+ * - LiveError thrown by the guard -> propagated as-is (caller-controlled
+ *   code AND message reach the client).
+ * - Bare Error / non-Error thrown -> wrapped as
+ *   `LiveError(UNAUTHENTICATED, 'Authentication required')` when
+ *   `ctx.user` is null, otherwise `LiveError(FORBIDDEN, 'Access denied')`.
+ *   The original error is preserved on `.cause` for server-side logging
+ *   but is NOT propagated to the client (avoids accidentally leaking
+ *   internal details like a DB error message through a guard).
+ *
+ * Net: a guard can `throw new Error('whatever')` and the client sees a
+ * 4xx-class typed error instead of `INTERNAL_ERROR` (5xx), without any
+ * raw error text reaching the wire. To surface a specific reason, throw
+ * `new LiveError('FORBIDDEN', 'Account suspended')` directly.
+ *
+ * @param {Function} guardFn
+ * @param {any} ctx
+ */
+async function _runGuard(guardFn, ctx) {
+	try {
+		await guardFn(ctx);
+	} catch (err) {
+		if (err instanceof LiveError) throw err;
+		const code = ctx && ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+		const msg = code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied';
+		const wrapped = new LiveError(code, msg);
+		/** @type {any} */ (wrapped).cause = err;
+		throw wrapped;
+	}
 }
 
 /**
@@ -2609,7 +2639,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 		const _result = await _runWithMiddleware(ctx, async () => {
 		const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 		const guardFn = await _resolveGuard(modulePath);
-		if (guardFn) await guardFn(ctx);
+		if (guardFn) await _runGuard(guardFn, ctx);
 
 		if (options?.beforeExecute) {
 			await options.beforeExecute(ws, path, args);
@@ -2633,7 +2663,8 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 
 			const streamFilter = /** @type {any} */ (fn).__streamFilter;
 			if (streamFilter && !streamFilter(ctx)) {
-				return { id, ok: false, code: 'FORBIDDEN', error: 'Access denied' };
+				const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+				return { id, ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 			}
 
 			const classOfService = /** @type {any} */ (fn).__classOfService;
@@ -2838,7 +2869,7 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 		await _runWithMiddleware(ctx, async () => {
 			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 			const guardFn = await _resolveGuard(modulePath);
-			if (guardFn) await guardFn(ctx);
+			if (guardFn) await _runGuard(guardFn, ctx);
 
 			if (options?.beforeExecute) {
 				await options.beforeExecute(ws, path, [payload, ...(extraArgs || [])]);
@@ -3053,8 +3084,14 @@ export async function __directCall(path, args, platform, options) {
 		throw new LiveError('NOT_FOUND', `Live function '${path}' not found`);
 	}
 
+	// Distinguish "user explicitly passed (even as null)" from "user omitted".
+	// Omitted + guarded stream is almost always a load() bug -- throw a
+	// descriptive Error so the SSR overlay surfaces the fix immediately.
+	const userExplicit = options ? ('user' in options) : false;
+	const userValue = userExplicit ? options.user : null;
+
 	const _h = _getCtxHelpers(platform);
-	const ctx = _buildCtx(options?.user || null, null, platform, _h, null);
+	const ctx = _buildCtx(userValue, null, platform, _h, null);
 
 	// Run global middleware chain, then guard, then execution
 	return _runWithMiddleware(ctx, async () => {
@@ -3062,11 +3099,15 @@ export async function __directCall(path, args, platform, options) {
 	const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 	const guardFn = await _resolveGuard(modulePath);
 	if (guardFn) {
-		if (ctx.user === null && typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production' && !_directCallWarned.has(path)) {
-			_directCallWarned.add(path);
-			console.warn(`[svelte-realtime] .load() is calling guard for '${path}' with ctx.user = null. Pass { user } in the options to provide user data:\n  stream.load(platform, { user: locals.user })\n  See: https://svti.me/ssr`);
+		if (!userExplicit) {
+			throw new Error(
+				`[svelte-realtime] '${path}' has a guard but .load() was called without a user.\n` +
+				`  Pass it explicitly:    stream.load(platform, { user: locals.user })\n` +
+				`  Or opt into anonymous: stream.load(platform, { user: null })\n` +
+				`  See: https://svti.me/ssr`
+			);
 		}
-		await guardFn(ctx);
+		await _runGuard(guardFn, ctx);
 	}
 
 	if (/** @type {any} */ (fn).__isStream) {
@@ -3076,7 +3117,8 @@ export async function __directCall(path, args, platform, options) {
 		}
 		const streamFilter = /** @type {any} */ (fn).__streamFilter;
 		if (streamFilter && !streamFilter(ctx)) {
-			throw new LiveError('FORBIDDEN', 'Access denied');
+			const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+			throw new LiveError(code, code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied');
 		}
 		return fn(ctx, ...args);
 	}
