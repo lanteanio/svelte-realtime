@@ -181,6 +181,31 @@ export interface StreamOptions {
 	};
 
 	/**
+	 * Schema validating the stream's arguments. Runs at subscribe time
+	 * BEFORE topic resolution -- prevents topic injection via malformed
+	 * dynamic-topic args. Accepts any Standard Schema-compatible schema
+	 * (https://standardschema.dev/), Zod, ArkType, Valibot v1+, etc.
+	 *
+	 * Schema validates the WHOLE args tuple (use `z.tuple([...])` or the
+	 * equivalent in your schema library). Validated/coerced args reach
+	 * the topic function and the loader.
+	 *
+	 * Validation failures reject the subscribe with code `VALIDATION` and
+	 * a populated `issues` array, matching the `live.validated()` shape.
+	 *
+	 * @example
+	 * ```js
+	 * import { z } from 'zod';
+	 * export const auditFeed = live.stream(
+	 *   (ctx, orgId) => `audit:${orgId}`,
+	 *   async (ctx, orgId) => loadFeed(orgId),
+	 *   { args: z.tuple([z.string().uuid()]) }
+	 * );
+	 * ```
+	 */
+	args?: any;
+
+	/**
 	 * Class of service for pressure-aware shedding. Names a class registered
 	 * via `live.admission({ classes })`. When the adapter reports pressure
 	 * matching the class's rule, new subscribes to this stream are rejected

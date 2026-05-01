@@ -102,6 +102,7 @@ function _copyStreamMeta(target, source) {
 	if (source.__onSubscribe) target.__onSubscribe = source.__onSubscribe;
 	if (source.__onUnsubscribe) target.__onUnsubscribe = source.__onUnsubscribe;
 	if (source.__streamFilter) target.__streamFilter = source.__streamFilter;
+	if (source.__streamArgs) target.__streamArgs = source.__streamArgs;
 	if (source.__streamVersion !== undefined) target.__streamVersion = source.__streamVersion;
 	if (source.__streamMigrate) target.__streamMigrate = source.__streamMigrate;
 	if (source.__isChannel) target.__isChannel = source.__isChannel;
@@ -404,12 +405,15 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, ...rest } = options || {};
+	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, ...rest } = options || {};
 	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
 		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
 	}
 	if (classOfService !== undefined && typeof classOfService !== 'string') {
 		throw new Error('[svelte-realtime] live.stream classOfService must be a string naming a class registered via live.admission()');
+	}
+	if (argsSchema !== undefined && (argsSchema === null || typeof argsSchema !== 'object')) {
+		throw new Error('[svelte-realtime] live.stream args must be a Standard Schema or Zod-compatible schema');
 	}
 	if (delta !== undefined) {
 		if (typeof delta !== 'object' || delta === null) {
@@ -434,6 +438,7 @@ live.stream = function stream(topic, initFn, options) {
 	/** @type {any} */ (initFn).__streamTopic = topic;
 	/** @type {any} */ (initFn).__streamOptions = merged;
 	if (coalesceBy) /** @type {any} */ (initFn).__coalesceBy = coalesceBy;
+	if (argsSchema) /** @type {any} */ (initFn).__streamArgs = argsSchema;
 	if (onSubscribe) /** @type {any} */ (initFn).__onSubscribe = onSubscribe;
 	if (onUnsubscribe) /** @type {any} */ (initFn).__onUnsubscribe = onUnsubscribe;
 	// Subscribe-time access predicate: (ctx) => boolean
@@ -2646,15 +2651,32 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 		}
 
 		if (isStream && /** @type {any} */ (fn).__isStream) {
+			// Validate args BEFORE topic resolution -- prevents topic injection
+			// via malformed dynamic-topic args (e.g. `audit:${orgId}` with
+			// orgId crafted to escape the topic namespace). The validated
+			// tuple is bound to a stream-branch-local `let` to keep the
+			// outer `args` const for the non-stream path's V8 inline cache.
+			let streamArgs = args;
+			const argsSchema = /** @type {any} */ (fn).__streamArgs;
+			if (argsSchema) {
+				const result = _validate(argsSchema, streamArgs);
+				if (!result.ok) {
+					const err = { id, ok: false, code: 'VALIDATION', error: result.message };
+					/** @type {any} */ (err).issues = result.issues;
+					return err;
+				}
+				if (Array.isArray(result.data)) streamArgs = result.data;
+			}
+
 			if (/** @type {any} */ (fn).__isGated) {
 				const predicate = /** @type {any} */ (fn).__gatePredicate;
-				if (!predicate(ctx, ...args)) {
+				if (!predicate(ctx, ...streamArgs)) {
 					return { id, ok: true, data: null, gated: true };
 				}
 			}
 
 			const rawTopic = /** @type {any} */ (fn).__streamTopic;
-			const topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, args) : rawTopic;
+			const topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, streamArgs) : rawTopic;
 			if (typeof topic === 'string' && topic.startsWith('__')) {
 				return { id, ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' };
 			}
@@ -2751,7 +2773,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 				} catch {}
 			}
 
-			const result = await fn(ctx, ...args);
+			const result = await fn(ctx, ...streamArgs);
 
 			const isPaginated = result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result;
 			let resultData = isPaginated ? result.data : result;
@@ -3111,6 +3133,17 @@ export async function __directCall(path, args, platform, options) {
 	}
 
 	if (/** @type {any} */ (fn).__isStream) {
+		const argsSchema = /** @type {any} */ (fn).__streamArgs;
+		if (argsSchema) {
+			const result = _validate(argsSchema, args);
+			if (!result.ok) {
+				const err = new LiveError('VALIDATION', result.message);
+				/** @type {any} */ (err).issues = result.issues;
+				throw err;
+			}
+			args = Array.isArray(result.data) ? result.data : args;
+		}
+
 		if (/** @type {any} */ (fn).__isGated) {
 			const predicate = /** @type {any} */ (fn).__gatePredicate;
 			if (!predicate(ctx, ...args)) return null;

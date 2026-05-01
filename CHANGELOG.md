@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`args` schema option on `live.stream()`.** Validates the stream's argument tuple at subscribe time, BEFORE the topic function runs -- prevents topic injection via malformed dynamic-topic args. Accepts any Standard Schema-compatible schema (Zod, ArkType, Valibot v1+, etc.); the schema validates the whole args tuple, so use `z.tuple([...])` or the equivalent.
+
+  ```js
+  import { z } from 'zod';
+
+  export const auditFeed = live.stream(
+    (ctx, orgId) => `audit:${orgId}`,
+    async (ctx, orgId) => loadFeed(orgId),
+    { args: z.tuple([z.string().uuid()]) }
+  );
+  ```
+
+  Validation failures reject the subscribe with code `VALIDATION` and a populated `issues` array, matching the existing `live.validated()` shape. Validated/coerced args reach the topic function and the loader, so Zod transforms (e.g. `z.string().toLowerCase()`) apply downstream. Streams without `args` are unaffected -- back-compat preserved. Works through `.load()` for SSR too.
+
 - **Per-RPC `timeout` override via `.with({ timeout })`.** Long-running queries no longer have to share the global 30s timeout. Pass a per-call override to wait longer:
 
   ```js

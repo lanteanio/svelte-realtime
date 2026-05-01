@@ -6237,3 +6237,224 @@ describe('guard auto-classification', () => {
 		expect(platform.sent[0].data.error).toBe('Internal server error');
 	});
 });
+
+// -- live.stream({ args }) -- argument validation -----------------------------
+
+describe('live.stream({ args })', () => {
+	const uuidSchema = {
+		safeParse(input) {
+			if (!Array.isArray(input)) {
+				return { success: false, error: { issues: [{ path: [], message: 'expected array' }] } };
+			}
+			if (input.length !== 1 || typeof input[0] !== 'string' || !/^[0-9a-f-]{36}$/.test(input[0])) {
+				return { success: false, error: { issues: [{ path: [0], message: 'expected uuid' }] } };
+			}
+			return { success: true, data: input };
+		}
+	};
+
+	it('rejects non-object schema at registration', () => {
+		expect(() => live.stream('a/x', async () => [], { args: 'nope' }))
+			.toThrow(/args must be a Standard Schema/);
+		expect(() => live.stream('a/y', async () => [], { args: null }))
+			.toThrow(/args must be a Standard Schema/);
+	});
+
+	it('passes when args validate (Zod-style)', async () => {
+		const stream = live.stream(
+			(ctx, orgId) => `audit:${orgId}`,
+			async (ctx, orgId) => [{ id: 1, org: orgId }],
+			{ merge: 'crud', key: 'id', args: uuidSchema }
+		);
+		__register('a/audit', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const validUuid = '12345678-1234-1234-1234-123456789abc';
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'a/audit', id: '1', args: [validUuid], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.topic).toBe(`audit:${validUuid}`);
+		expect(platform.sent[0].data.data).toEqual([{ id: 1, org: validUuid }]);
+	});
+
+	it('rejects with VALIDATION + issues when args fail (Zod-style)', async () => {
+		const stream = live.stream(
+			(ctx, orgId) => `audit:${orgId}`,
+			async () => [],
+			{ merge: 'crud', key: 'id', args: uuidSchema }
+		);
+		__register('a/audit-bad', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'a/audit-bad', id: '1', args: ['not-a-uuid'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const r = platform.sent[0].data;
+		expect(r.ok).toBe(false);
+		expect(r.code).toBe('VALIDATION');
+		expect(r.issues).toEqual([{ path: ['0'], message: 'expected uuid' }]);
+	});
+
+	it('runs args validation BEFORE topic resolution (no topic injection)', async () => {
+		let topicCalled = false;
+		const topicFn = (ctx, orgId) => {
+			topicCalled = true;
+			return `audit:${orgId}`;
+		};
+		const stream = live.stream(
+			topicFn,
+			async () => [],
+			{ merge: 'crud', key: 'id', args: uuidSchema }
+		);
+		__register('a/inject', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// Crafted attack input -- this string would create the topic
+		// `audit:org-x; subscribe-elsewhere` if it ever reached the topic fn.
+		const attack = 'org-x; subscribe-elsewhere';
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'a/inject', id: '1', args: [attack], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.code).toBe('VALIDATION');
+		expect(topicCalled).toBe(false);
+		expect(ws.isSubscribed(`audit:${attack}`)).toBe(false);
+	});
+
+	it('coerced/transformed args reach the loader', async () => {
+		// Schema that coerces strings to upper-case
+		const upperSchema = {
+			safeParse(input) {
+				if (!Array.isArray(input) || typeof input[0] !== 'string') {
+					return { success: false, error: { issues: [{ path: [], message: 'bad' }] } };
+				}
+				return { success: true, data: [input[0].toUpperCase()] };
+			}
+		};
+
+		let receivedArg = null;
+		const stream = live.stream(
+			(ctx, x) => `t:${x}`,
+			async (ctx, x) => { receivedArg = x; return []; },
+			{ merge: 'crud', key: 'id', args: upperSchema }
+		);
+		__register('a/coerce', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'a/coerce', id: '1', args: ['hello'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(receivedArg).toBe('HELLO');
+		expect(platform.sent[0].data.topic).toBe('t:HELLO');
+	});
+
+	it('works with Standard Schema', async () => {
+		const stdSchema = {
+			'~standard': {
+				version: 1,
+				vendor: 'mock',
+				validate(input) {
+					if (Array.isArray(input) && typeof input[0] === 'number' && input[0] > 0) {
+						return { value: input };
+					}
+					return { issues: [{ message: 'expected positive number', path: [{ key: 0 }] }] };
+				}
+			}
+		};
+
+		const stream = live.stream(
+			(ctx, n) => `n:${n}`,
+			async (ctx, n) => [{ id: n }],
+			{ merge: 'crud', key: 'id', args: stdSchema }
+		);
+		__register('a/std', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'a/std', id: '1', args: [-5], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.code).toBe('VALIDATION');
+
+		platform.reset();
+		handleRpc(ws, toArrayBuffer({ rpc: 'a/std', id: '2', args: [42], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.data).toEqual([{ id: 42 }]);
+	});
+
+	it('streams without args option are unaffected (back-compat)', async () => {
+		const stream = live.stream(
+			(ctx, x) => `b:${x}`,
+			async (ctx, x) => [{ x }],
+			{ merge: 'crud', key: 'id' }
+		);
+		__register('a/back-compat', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'a/back-compat', id: '1', args: ['anything'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.data).toEqual([{ x: 'anything' }]);
+	});
+
+	it('.load() validates args too (rejects with VALIDATION LiveError)', async () => {
+		const stream = live.stream(
+			(ctx, id) => `q:${id}`,
+			async (ctx, id) => [{ id }],
+			{ merge: 'crud', key: 'id', args: uuidSchema }
+		);
+		__register('a/dc-validate', stream);
+
+		const platform = mockPlatform();
+		await expect(__directCall('a/dc-validate', ['not-uuid'], platform, { user: { id: 1 } }))
+			.rejects.toMatchObject({ code: 'VALIDATION' });
+	});
+
+	it('.load() passes through validated/coerced args to the loader', async () => {
+		const upperSchema = {
+			safeParse(input) {
+				return { success: true, data: [String(input[0]).toUpperCase()] };
+			}
+		};
+		let receivedArg = null;
+		const stream = live.stream(
+			(ctx, x) => `dc:${x}`,
+			async (ctx, x) => { receivedArg = x; return []; },
+			{ merge: 'crud', key: 'id', args: upperSchema }
+		);
+		__register('a/dc-coerce', stream);
+
+		const platform = mockPlatform();
+		await __directCall('a/dc-coerce', ['mixed-case'], platform, { user: { id: 1 } });
+		expect(receivedArg).toBe('MIXED-CASE');
+	});
+
+	it('args option is preserved through wrapper composition (live.gate, etc)', async () => {
+		const stream = live.stream(
+			(ctx, x) => `g:${x}`,
+			async (ctx, x) => [{ id: x }],
+			{ merge: 'crud', key: 'id', args: uuidSchema }
+		);
+		const gated = live.gate(() => true, stream);
+		__register('a/gate-validated', gated);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Bad input -> validation rejects (would only happen if __streamArgs
+		// survived the gate wrapper)
+		handleRpc(ws, toArrayBuffer({ rpc: 'a/gate-validated', id: '1', args: ['nope'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.code).toBe('VALIDATION');
+	});
+});
