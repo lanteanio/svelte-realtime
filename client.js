@@ -133,6 +133,67 @@ export function _resetQuiescence() {
 	_quiescentStore.set(true);
 }
 
+/**
+ * System health tracking. Subscribes to the `__realtime` system topic
+ * on first consumer of the `health` store and translates server-side
+ * `degraded` / `recovered` events into a two-state Readable. The
+ * extensions package's pub/sub bus publishes these events when its
+ * circuit breaker trips and recovers; the realtime client surfaces
+ * them so apps can render a "real-time updates paused" banner without
+ * wiring the topic by hand.
+ */
+const _HEALTH_TOPIC = '__realtime';
+const _healthStore = writable(/** @type {'healthy' | 'degraded'} */ ('healthy'));
+/** @type {(() => void) | null} */
+let _healthUnsub = null;
+
+function _ensureHealthSubscription() {
+	if (_healthUnsub) return;
+	_healthUnsub = on(_HEALTH_TOPIC).subscribe((envelope) => {
+		if (!envelope) return;
+		if (envelope.event === 'degraded') _healthStore.set('degraded');
+		else if (envelope.event === 'recovered') _healthStore.set('healthy');
+	});
+}
+
+/**
+ * Reactive store reflecting the realtime system health, sourced from
+ * `degraded` / `recovered` events published on the `__realtime`
+ * topic by the extensions pub/sub bus's circuit breaker. Initial
+ * value is `'healthy'`; flips to `'degraded'` on a `degraded` event,
+ * back to `'healthy'` on `recovered`.
+ *
+ * Subscription is lazy: the realtime client subscribes to `__realtime`
+ * the first time any consumer subscribes to this store. Apps that
+ * never read `health` pay no cost for the subscription.
+ *
+ * The store deliberately exposes only the state, not the underlying
+ * payload. Apps that need richer detail (reason strings, timestamps,
+ * etc.) can listen to the topic directly via
+ * `import { on } from 'svelte-adapter-uws/client'; on('__realtime')`.
+ *
+ * @type {import('svelte/store').Readable<'healthy' | 'degraded'>}
+ */
+export const health = {
+	subscribe(fn) {
+		_ensureHealthSubscription();
+		return _healthStore.subscribe(fn);
+	}
+};
+
+/**
+ * Reset the health store and detach the system-topic subscription.
+ * Tests only.
+ * @internal
+ */
+export function _resetHealth() {
+	if (_healthUnsub) {
+		_healthUnsub();
+		_healthUnsub = null;
+	}
+	_healthStore.set('healthy');
+}
+
 function _registerTopicErrorSetter(topic, setError) {
 	let set = _streamErrorByTopic.get(topic);
 	if (!set) { set = new Set(); _streamErrorByTopic.set(topic, set); }

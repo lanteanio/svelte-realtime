@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`health` store on the client for system-wide degraded / recovered detection.** A new top-level Readable from `svelte-realtime/client` reflects the realtime system's health, sourced from `degraded` / `recovered` events on the `__realtime` topic. Apps can render a "real-time updates paused, reconnecting..." banner when the upstream pub/sub bus's circuit breaker trips, without wiring the system topic by hand:
+
+  ```svelte
+  <script>
+    import { health } from 'svelte-realtime/client';
+  </script>
+
+  {#if $health === 'degraded'}
+    <Banner severity="warn">Real-time updates paused, reconnecting...</Banner>
+  {/if}
+  ```
+
+  Initial value is `'healthy'`. Flips to `'degraded'` on a server-published `degraded` event, back to `'healthy'` on `recovered`. Subscription is lazy: the realtime client only subscribes to `__realtime` once a consumer first reads the store. Apps that never use `health` pay no cost for the subscription.
+
+  The store deliberately exposes only the state, not the underlying payload. Apps that need richer detail (reason strings, timestamps, etc.) can listen to the topic directly via `import { on } from 'svelte-adapter-uws/client'; on('__realtime').subscribe(...)`. Server-side wiring lives outside this package -- the extensions package's pub/sub bus publishes the events when its circuit breaker changes state; this is the consumer side.
+
 - **`store.mutate(asyncOp, optimisticChange)` for optimistic mutations with auto-rollback.** Wraps the existing per-stream `optimistic()` pattern with the missing async pairing: applies a local change synchronously, awaits the async operation, leaves the store as-is on success (server's confirming event reconciles), rolls back on failure. The asyncOp's result becomes the method's return value.
 
   ```js

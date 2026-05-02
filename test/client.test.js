@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence;
+let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth;
 let topicCallbacks;
 let statusCallbacks;
 let failureCallbacks;
@@ -163,6 +163,9 @@ beforeEach(async () => {
 	quiescent = mod.quiescent;
 	_resetQuiescence = mod._resetQuiescence;
 	_resetQuiescence();
+	health = mod.health;
+	_resetHealth = mod._resetHealth;
+	_resetHealth();
 });
 
 // -- __rpc (Finding 1 regression) ---------------------------------------------
@@ -2738,6 +2741,90 @@ describe('onDerived()', () => {
 		for (const fn of sourceSubs) fn('b');
 		expect(derived._getCurrentTopic()).toBe('room:b');
 		unsub();
+	});
+});
+
+// -- health store -------------------------------------------------------------
+
+describe('health store', () => {
+	it('starts at "healthy"', () => {
+		const values = [];
+		const unsub = health.subscribe((v) => values.push(v));
+		expect(values).toEqual(['healthy']);
+		unsub();
+	});
+
+	it('subscribes to the __realtime topic on first consumer (lazy)', () => {
+		// Before any consumer subscribes, the topic should not be active.
+		expect(topicCallbacks.has('__realtime')).toBe(false);
+
+		const unsub = health.subscribe(() => {});
+		expect(topicCallbacks.has('__realtime')).toBe(true);
+		unsub();
+	});
+
+	it('flips to "degraded" on a degraded event', () => {
+		const values = [];
+		const unsub = health.subscribe((v) => values.push(v));
+
+		simulateTopicMessage('__realtime', { event: 'degraded', data: { reason: 'redis-circuit-open' } });
+		expect(values[values.length - 1]).toBe('degraded');
+
+		unsub();
+	});
+
+	it('flips back to "healthy" on a recovered event', () => {
+		const values = [];
+		const unsub = health.subscribe((v) => values.push(v));
+
+		simulateTopicMessage('__realtime', { event: 'degraded', data: {} });
+		expect(values[values.length - 1]).toBe('degraded');
+
+		simulateTopicMessage('__realtime', { event: 'recovered', data: {} });
+		expect(values[values.length - 1]).toBe('healthy');
+
+		unsub();
+	});
+
+	it('ignores unknown event names on the system topic', () => {
+		const values = [];
+		const unsub = health.subscribe((v) => values.push(v));
+
+		simulateTopicMessage('__realtime', { event: 'something-else', data: {} });
+		expect(values).toEqual(['healthy']);
+
+		unsub();
+	});
+
+	it('ignores null / undefined envelopes on the system topic', () => {
+		const values = [];
+		const unsub = health.subscribe((v) => values.push(v));
+
+		simulateTopicMessage('__realtime', null);
+		simulateTopicMessage('__realtime', undefined);
+		expect(values).toEqual(['healthy']);
+
+		unsub();
+	});
+
+	it('multiple consumers see the same state transitions', () => {
+		const a = [];
+		const b = [];
+		const unsubA = health.subscribe((v) => a.push(v));
+		const unsubB = health.subscribe((v) => b.push(v));
+
+		simulateTopicMessage('__realtime', { event: 'degraded', data: {} });
+
+		expect(a[a.length - 1]).toBe('degraded');
+		expect(b[b.length - 1]).toBe('degraded');
+
+		unsubA();
+		unsubB();
+	});
+
+	it('does not subscribe to __realtime if no consumer ever subscribes to health', () => {
+		// Just importing health should not register the topic.
+		expect(topicCallbacks.has('__realtime')).toBe(false);
 	});
 });
 

@@ -522,3 +522,37 @@ export const failure: Readable<Failure | null>;
  * ```
  */
 export const quiescent: Readable<boolean>;
+
+/**
+ * Reactive store reflecting the realtime system's health, sourced from
+ * `degraded` / `recovered` events on the `__realtime` system topic.
+ * Initial value is `'healthy'`; flips to `'degraded'` on a server-
+ * published `degraded` event, back to `'healthy'` on `recovered`.
+ *
+ * Used to render a "real-time updates paused -- reconnecting" banner
+ * when the upstream pub/sub bus's circuit breaker trips. The
+ * extensions package's `createPubSubBus` publishes these events on
+ * the default `__realtime` channel; this store surfaces them on the
+ * client without wiring the topic by hand.
+ *
+ * Subscription is lazy: the realtime client only subscribes to
+ * `__realtime` once a consumer first subscribes to this store. Apps
+ * that never read `health` pay no cost for the subscription.
+ *
+ * The store deliberately exposes only the state, not the underlying
+ * payload. Apps that need richer detail (reason, timestamp, etc.)
+ * can listen to the topic directly:
+ * `import { on } from 'svelte-adapter-uws/client'; on('__realtime').subscribe(...)`.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { health } from 'svelte-realtime/client';
+ * </script>
+ *
+ * {#if $health === 'degraded'}
+ *   <Banner severity="warn">Real-time updates paused, reconnecting...</Banner>
+ * {/if}
+ * ```
+ */
+export const health: Readable<'healthy' | 'degraded'>;
