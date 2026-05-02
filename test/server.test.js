@@ -25,7 +25,8 @@ import {
 	_resetIdempotencyStore,
 	_resetCoalesceRegistry,
 	_resetAdmission,
-	_resetTransformRegistry
+	_resetTransformRegistry,
+	_resetRateLimits
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -3162,6 +3163,165 @@ describe('live.rateLimit()', () => {
 		await new Promise((r) => setTimeout(r, 10));
 		expect(platform.sent[1].data.ok).toBe(false);
 		expect(platform.sent[1].data.code).toBe('RATE_LIMITED');
+	});
+});
+
+// -- live.rateLimits() registry config ----------------------------------------
+
+describe('live.rateLimits() registry config', () => {
+	beforeEach(() => { _resetRateLimits(); });
+	afterEach(() => { _resetRateLimits(); });
+
+	it('throws on invalid config shape', () => {
+		expect(() => live.rateLimits('not-an-object')).toThrow(/must be an object/);
+		expect(() => live.rateLimits({ default: { points: 'x', window: 1000 } })).toThrow(/points must be a positive number/);
+		expect(() => live.rateLimits({ default: { points: 5, window: 0 } })).toThrow(/window must be a positive number/);
+		expect(() => live.rateLimits({ overrides: { 'p': { points: -1, window: 1000 } } })).toThrow(/positive number/);
+		expect(() => live.rateLimits({ exempt: 'not-array' })).toThrow(/must be an array/);
+		expect(() => live.rateLimits({ exempt: [123] })).toThrow(/must be strings/);
+	});
+
+	it('default rule rate-limits a registered handler with no per-handler wrapper', async () => {
+		live.rateLimits({ default: { points: 1, window: 10_000 } });
+
+		const fn = live(async (_ctx) => 'ok');
+		__register('rls/default', fn);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/default', id: 'a', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.ok).toBe(true);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/default', id: 'b', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[1].data.ok).toBe(false);
+		expect(platform.sent[1].data.code).toBe('RATE_LIMITED');
+		expect(platform.sent[1].data.retryAfter).toBeGreaterThan(0);
+	});
+
+	it('overrides rule wins over default', async () => {
+		live.rateLimits({
+			default: { points: 100, window: 10_000 },
+			overrides: { 'rls/strict': { points: 1, window: 10_000 } }
+		});
+
+		const fn = live(async () => 'ok');
+		__register('rls/strict', fn);
+
+		const ws = mockWs({ id: 'u2' });
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/strict', id: 'a', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.ok).toBe(true);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/strict', id: 'b', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[1].data.code).toBe('RATE_LIMITED');
+	});
+
+	it('exempt skips a path entirely', async () => {
+		live.rateLimits({
+			default: { points: 1, window: 10_000 },
+			exempt: ['rls/free']
+		});
+
+		const fn = live(async () => 'ok');
+		__register('rls/free', fn);
+
+		const ws = mockWs({ id: 'u3' });
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/free', id: 'a', args: [] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/free', id: 'b', args: [] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/free', id: 'c', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent.every((m) => m.data.ok === true)).toBe(true);
+	});
+
+	it('per-handler live.rateLimit wins over registry override', async () => {
+		// Registry says 1/window; per-handler says 5/window. Per-handler wins.
+		live.rateLimits({
+			overrides: { 'rls/handlerWins': { points: 1, window: 10_000 } }
+		});
+
+		const fn = live.rateLimit({ points: 5, window: 10_000 }, async () => 'ok');
+		__register('rls/handlerWins', fn);
+
+		const ws = mockWs({ id: 'u4' });
+		const platform = mockPlatform();
+
+		// Five calls all succeed (per-handler rule applies, registry skipped)
+		for (let i = 0; i < 5; i++) {
+			handleRpc(ws, toArrayBuffer({ rpc: 'rls/handlerWins', id: 'h' + i, args: [] }), platform);
+		}
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent.filter((m) => m.data.ok === true).length).toBe(5);
+	});
+
+	it('different users have independent buckets under registry config', async () => {
+		live.rateLimits({ default: { points: 1, window: 10_000 } });
+
+		const fn = live(async () => 'ok');
+		__register('rls/perUser', fn);
+
+		const ws1 = mockWs({ id: 'alice' });
+		const ws2 = mockWs({ id: 'bob' });
+		const platform = mockPlatform();
+
+		handleRpc(ws1, toArrayBuffer({ rpc: 'rls/perUser', id: 'a1', args: [] }), platform);
+		handleRpc(ws2, toArrayBuffer({ rpc: 'rls/perUser', id: 'b1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[1].data.ok).toBe(true);
+
+		// Each user's second call gets rate-limited independently
+		handleRpc(ws1, toArrayBuffer({ rpc: 'rls/perUser', id: 'a2', args: [] }), platform);
+		handleRpc(ws2, toArrayBuffer({ rpc: 'rls/perUser', id: 'b2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[2].data.code).toBe('RATE_LIMITED');
+		expect(platform.sent[3].data.code).toBe('RATE_LIMITED');
+	});
+
+	it('null clears the registry config (no rate limit applied)', async () => {
+		live.rateLimits({ default: { points: 1, window: 10_000 } });
+		live.rateLimits(null);
+
+		const fn = live(async () => 'ok');
+		__register('rls/cleared', fn);
+
+		const ws = mockWs({ id: 'u5' });
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/cleared', id: 'a', args: [] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/cleared', id: 'b', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[1].data.ok).toBe(true);
+	});
+
+	it('does not rate-limit stream subscribes', async () => {
+		live.rateLimits({ default: { points: 1, window: 10_000 } });
+
+		const stream = live.stream('rls-stream-topic', async () => [{ id: 1 }]);
+		__register('rls/stream', stream);
+
+		const ws = mockWs({ id: 'u6' });
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/stream', id: 's1', args: [], stream: true }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'rls/stream', id: 's2', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[1].data.ok).toBe(true);
 	});
 });
 

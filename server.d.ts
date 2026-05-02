@@ -526,6 +526,41 @@ export namespace live {
 	): T;
 
 	/**
+	 * Configure registry-level rate limits. The default rule applies to every
+	 * RPC path that doesn't have its own per-handler `live.rateLimit(...)`
+	 * wrapping; per-path overrides and per-path opt-outs (`exempt`) layer on top.
+	 *
+	 * Resolution order per RPC call:
+	 *   1. Path is in `exempt` -> no rate limit.
+	 *   2. Path has a per-handler `live.rateLimit(...)` wrapping -> per-handler
+	 *      rule applies (registry is bypassed entirely for that path).
+	 *   3. Path is in `overrides` -> override rule applies.
+	 *   4. `default` is set -> default rule applies.
+	 *   5. Otherwise -> no rate limit.
+	 *
+	 * Stream subscribes are NOT rate-limited by this primitive (subscribe-rate
+	 * shaping is the adapter's concern). Pass `null` to clear the registry.
+	 *
+	 * @example
+	 * ```js
+	 * // hooks.ws.js or a startup module
+	 * live.rateLimits({
+	 *   default: { points: 200, window: 10_000 },
+	 *   overrides: {
+	 *     'chat/sendMessage': { points: 50, window: 10_000 },
+	 *     'orders/create':    { points: 5,  window: 60_000 }
+	 *   },
+	 *   exempt: ['presence/moveCursor', 'cursor/move']
+	 * });
+	 * ```
+	 */
+	function rateLimits(config: {
+		default?: { points: number; window: number } | null;
+		overrides?: Record<string, { points: number; window: number }>;
+		exempt?: string[];
+	} | null): void;
+
+	/**
 	 * Three-state idempotency store contract. Compatible with `createIdempotencyStore`
 	 * from `svelte-adapter-uws-extensions` (Redis + Postgres backends).
 	 */

@@ -1193,6 +1193,26 @@ export const sendMessage = live.rateLimit({ points: 5, window: 10000 }, async (c
 });
 ```
 
+### Registry-level rate limiting
+
+For the common case of "a default for everyone, with a few path overrides and a few exemptions" you can configure the registry once at startup with `live.rateLimits()`:
+
+```js
+// hooks.ws.js or any startup module
+import { live } from 'svelte-realtime/server';
+
+live.rateLimits({
+  default: { points: 200, window: 10_000 },
+  overrides: {
+    'chat/sendMessage': { points: 50, window: 10_000 },
+    'orders/create':    { points: 5,  window: 60_000 }
+  },
+  exempt: ['presence/moveCursor', 'cursor/move']
+});
+```
+
+Resolution order per call: `exempt` -> per-handler `live.rateLimit(...)` wrapping (explicit wins over central) -> `overrides[path]` -> `default` -> none. Stream subscribes are not rate-limited by this primitive. Pass `null` to clear the registry.
+
 ### Global rate limiting with Redis
 
 Use the `beforeExecute` hook with the rate limit extension for global per-connection throttling:
@@ -2068,6 +2088,7 @@ Import from `svelte-realtime/server`.
 | `live.webhook(topic, config)` | HTTP webhook-to-stream bridge |
 | `live.gate(predicate, fn)` | Conditional stream activation |
 | `live.rateLimit(config, fn)` | Per-function sliding window rate limiter |
+| `live.rateLimits(config)` | Registry-level rate limits with `default` / `overrides` / `exempt` |
 | `live.middleware(fn)` | Global middleware (runs before guards) |
 | `live.access.*` | Subscribe-time access control helpers |
 | `guard(...fns)` | Per-module auth middleware |

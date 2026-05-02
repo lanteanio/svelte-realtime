@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`live.rateLimits({ default, overrides, exempt })` for registry-level RPC rate limiting.** Configure rate limits centrally instead of wrapping every handler with `live.rateLimit(...)`. The default rule applies to every RPC path that doesn't have its own per-handler wrapping; per-path overrides tighten or loosen specific paths; `exempt` opts paths out entirely.
+
+  ```js
+  // hooks.ws.js or a startup module
+  live.rateLimits({
+    default: { points: 200, window: 10_000 },
+    overrides: {
+      'chat/sendMessage': { points: 50, window: 10_000 },
+      'orders/create':    { points: 5,  window: 60_000 }
+    },
+    exempt: ['presence/moveCursor', 'cursor/move']
+  });
+  ```
+
+  Resolution order per call: `exempt` -> per-handler `live.rateLimit(...)` wrapping (explicit wins over central) -> `overrides[path]` -> `default` -> none. Per-path buckets are keyed by `(path, ctx.user.id)` and use the same sliding-window logic as the existing `live.rateLimit` decorator -- both share one bucket map and one sweep timer. Rejected calls return `{ ok: false, code: 'RATE_LIMITED', retryAfter }` matching the existing wrapper's failure shape.
+
+  Stream subscribes are not rate-limited by this primitive (subscribe-rate shaping is the adapter's concern). Pass `null` to clear the registry. Validation runs at registration: invalid `points` / `window` / unknown shape throws immediately so misconfiguration shows up at boot rather than mid-traffic.
+
 - **Automatic wire-level publish batching.** Every `ctx.publish()` made within one microtask now flushes as a single batched WebSocket frame to each subscriber, instead of one frame per call. A handler that publishes 50 items in a `for` loop produces ONE outbound frame per subscriber, not 50. No code change required -- handlers keep using `ctx.publish` exactly as before. Subscribers that don't advertise the `'batch'` capability fall back to per-event delivery automatically.
 
   ```js

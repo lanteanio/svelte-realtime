@@ -741,6 +741,72 @@ let _rateLimitLastSweep = Date.now();
 const _RATE_LIMIT_MAX = 5000;
 
 /**
+ * Sliding-window rate-limit bucket consume. Mutates the shared `_rateLimits` map.
+ * Returns `{ ok: true }` on accept, `{ ok: false, retryAfter }` on reject.
+ * Throws `LiveError('RATE_LIMITED', ...)` only when bucket-cap is exhausted
+ * (memory-pressure escape hatch). Shared by per-handler `live.rateLimit` and
+ * registry `live.rateLimits` configs.
+ *
+ * @param {string} bucketKey
+ * @param {number} points
+ * @param {number} windowMs
+ * @returns {{ ok: boolean, retryAfter?: number }}
+ */
+function _consumeRateLimitBucket(bucketKey, points, windowMs) {
+	const now = Date.now();
+
+	// Lazy sweep: prune stale entries every 30s, sweep all entries
+	if (now - _rateLimitLastSweep > 30000) {
+		_rateLimitLastSweep = now;
+		for (const [k, bucket] of _rateLimits) {
+			if (now - bucket.windowStart >= bucket.windowMs * 2) {
+				_rateLimits.delete(k);
+			}
+		}
+	}
+
+	let bucket = _rateLimits.get(bucketKey);
+
+	// Hard cap on new buckets only -- existing identities always pass through
+	if (!bucket && _rateLimits.size >= _RATE_LIMIT_MAX) {
+		for (const [k, b] of _rateLimits) {
+			if (now - b.windowStart >= b.windowMs * 2) _rateLimits.delete(k);
+		}
+		if (_rateLimits.size >= _RATE_LIMIT_MAX) {
+			throw new LiveError('RATE_LIMITED', 'Too many concurrent rate-limit identities');
+		}
+	}
+	if (!bucket) {
+		bucket = { prev: 0, curr: 0, windowStart: now, windowMs };
+		_rateLimits.set(bucketKey, bucket);
+	}
+
+	// Rotate windows if needed
+	const elapsed = now - bucket.windowStart;
+	if (elapsed >= windowMs * 2) {
+		bucket.prev = 0;
+		bucket.curr = 0;
+		bucket.windowStart = now;
+	} else if (elapsed >= windowMs) {
+		bucket.prev = bucket.curr;
+		bucket.curr = 0;
+		bucket.windowStart += windowMs;
+	}
+
+	// Estimate count in sliding window using weighted average
+	const windowElapsed = now - bucket.windowStart;
+	const weight = Math.max(0, 1 - windowElapsed / windowMs);
+	const estimated = bucket.prev * weight + bucket.curr;
+
+	if (estimated >= points) {
+		return { ok: false, retryAfter: Math.ceil(windowMs - windowElapsed) };
+	}
+
+	bucket.curr++;
+	return { ok: true };
+}
+
+/**
  * Declarative per-function rate limiting.
  * Wraps a live() function with a sliding window rate limiter.
  *
@@ -755,61 +821,12 @@ live.rateLimit = function rateLimit(config, fn) {
 	const wrapper = async function rateLimitedWrapper(ctx, ...args) {
 		const userKey = keyFn(ctx);
 		const bucketKey = /** @type {any} */ (wrapper).__rateLimitPath + '\0' + userKey;
-		const now = Date.now();
-
-		// Lazy sweep: prune stale entries every 30s, sweep all entries
-		if (now - _rateLimitLastSweep > 30000) {
-			_rateLimitLastSweep = now;
-			for (const [k, bucket] of _rateLimits) {
-				if (now - bucket.windowStart >= bucket.windowMs * 2) {
-					_rateLimits.delete(k);
-				}
-			}
-		}
-
-		let bucket = _rateLimits.get(bucketKey);
-
-		// Hard cap on new buckets only — existing identities always pass through
-		if (!bucket && _rateLimits.size >= _RATE_LIMIT_MAX) {
-			for (const [k, b] of _rateLimits) {
-				if (now - b.windowStart >= b.windowMs * 2) _rateLimits.delete(k);
-			}
-			if (_rateLimits.size >= _RATE_LIMIT_MAX) {
-				throw new LiveError('RATE_LIMITED', 'Too many concurrent rate-limit identities');
-			}
-		}
-		if (!bucket) {
-			bucket = { prev: 0, curr: 0, windowStart: now, windowMs };
-			_rateLimits.set(bucketKey, bucket);
-		}
-
-		// Rotate windows if needed
-		const elapsed = now - bucket.windowStart;
-		if (elapsed >= windowMs * 2) {
-			// Both windows expired, reset
-			bucket.prev = 0;
-			bucket.curr = 0;
-			bucket.windowStart = now;
-		} else if (elapsed >= windowMs) {
-			// Current window expired, rotate
-			bucket.prev = bucket.curr;
-			bucket.curr = 0;
-			bucket.windowStart += windowMs;
-		}
-
-		// Estimate count in sliding window using weighted average
-		const windowElapsed = now - bucket.windowStart;
-		const weight = Math.max(0, 1 - windowElapsed / windowMs);
-		const estimated = bucket.prev * weight + bucket.curr;
-
-		if (estimated >= points) {
-			const retryAfter = Math.ceil(windowMs - windowElapsed);
+		const result = _consumeRateLimitBucket(bucketKey, points, windowMs);
+		if (!result.ok) {
 			const err = new LiveError('RATE_LIMITED', 'Too many requests');
-			/** @type {any} */ (err).retryAfter = retryAfter;
+			/** @type {any} */ (err).retryAfter = result.retryAfter;
 			throw err;
 		}
-
-		bucket.curr++;
 		return fn(ctx, ...args);
 	};
 
@@ -819,6 +836,95 @@ live.rateLimit = function rateLimit(config, fn) {
 	/** @type {any} */ (wrapper).__wrappedFn = fn;
 	return wrapper;
 };
+
+/**
+ * Registry-level rate-limit config: default applies to every RPC path that
+ * doesn't have a per-handler `live.rateLimit(...)` wrapper, with per-path
+ * overrides and per-path opt-outs. Stream subscribes are not rate-limited
+ * by this primitive.
+ *
+ * @type {{ default: { points: number, window: number } | null, overrides: Map<string, { points: number, window: number }>, exempt: Set<string> } | null}
+ */
+let _rateLimitConfig = null;
+
+/**
+ * Configure registry-level rate limits. Pass `null` to clear.
+ *
+ * @example
+ * live.rateLimits({
+ *   default: { points: 200, window: 10_000 },
+ *   overrides: {
+ *     'chat/sendMessage': { points: 50, window: 10_000 },
+ *     'orders/create':    { points: 5,  window: 60_000 }
+ *   },
+ *   exempt: ['presence/moveCursor', 'cursor/move']
+ * });
+ *
+ * Resolution order (per RPC call):
+ *   1. Path is in `exempt` -> no rate limit.
+ *   2. Path has a per-handler `live.rateLimit(...)` wrapping -> per-handler
+ *      rule applies (this registry is bypassed entirely for that path).
+ *   3. Path is in `overrides` -> override config applies.
+ *   4. `default` is set -> default applies.
+ *   5. Otherwise -> no rate limit.
+ *
+ * @param {{ default?: { points: number, window: number } | null, overrides?: Record<string, { points: number, window: number }>, exempt?: string[] } | null} config
+ */
+live.rateLimits = function rateLimits(config) {
+	if (config === null) {
+		_rateLimitConfig = null;
+		return;
+	}
+	if (!config || typeof config !== 'object') {
+		throw new Error('[svelte-realtime] live.rateLimits: config must be an object or null');
+	}
+	const validateRule = (rule, label) => {
+		if (!rule || typeof rule !== 'object') throw new Error(`[svelte-realtime] live.rateLimits: ${label} must be an object`);
+		if (typeof rule.points !== 'number' || rule.points <= 0) throw new Error(`[svelte-realtime] live.rateLimits: ${label}.points must be a positive number`);
+		if (typeof rule.window !== 'number' || rule.window <= 0) throw new Error(`[svelte-realtime] live.rateLimits: ${label}.window must be a positive number (ms)`);
+	};
+	const def = config.default ? { points: config.default.points, window: config.default.window } : null;
+	if (def) validateRule(def, 'default');
+	const overrides = new Map();
+	if (config.overrides) {
+		if (typeof config.overrides !== 'object') throw new Error('[svelte-realtime] live.rateLimits: overrides must be an object keyed by path');
+		for (const [path, rule] of Object.entries(config.overrides)) {
+			validateRule(rule, `overrides[${path}]`);
+			overrides.set(path, { points: rule.points, window: rule.window });
+		}
+	}
+	const exempt = new Set();
+	if (config.exempt) {
+		if (!Array.isArray(config.exempt)) throw new Error('[svelte-realtime] live.rateLimits: exempt must be an array of paths');
+		for (const p of config.exempt) {
+			if (typeof p !== 'string') throw new Error('[svelte-realtime] live.rateLimits: exempt entries must be strings');
+			exempt.add(p);
+		}
+	}
+	_rateLimitConfig = { default: def, overrides, exempt };
+};
+
+/**
+ * Resolve the registry-level rate-limit rule for a given path, or null if none.
+ * Returns null if the path is exempt OR no default/override is configured.
+ * Caller is responsible for skipping when the handler has its own per-handler
+ * rate-limit wrapper (`fn.__isRateLimited`).
+ * @param {string} path
+ * @returns {{ points: number, window: number } | null}
+ */
+function _resolveRegistryRateLimit(path) {
+	if (!_rateLimitConfig) return null;
+	if (_rateLimitConfig.exempt.has(path)) return null;
+	const override = _rateLimitConfig.overrides.get(path);
+	if (override) return override;
+	return _rateLimitConfig.default;
+}
+
+/** Test-only reset of the registry rate-limit config. */
+export function _resetRateLimits() {
+	_rateLimitConfig = null;
+	_rateLimits.clear();
+}
 
 /** @type {{ acquire: (key: string, ttlSec: number) => Promise<any> } | null} */
 let _defaultIdempotencyStore = null;
@@ -3060,6 +3166,23 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 
 			return response;
 		} else {
+			// Registry-level rate limit. Per-handler `live.rateLimit(...)`
+			// wraps fn directly and runs its own check inside the wrapper, so
+			// we skip the registry check when __isRateLimited is set --
+			// "explicit per-handler wins over central config".
+			if (_rateLimitConfig && !(/** @type {any} */ (fn).__isRateLimited)) {
+				const rule = _resolveRegistryRateLimit(path);
+				if (rule) {
+					const userKey = _getIdentityKey(ctx);
+					const r = _consumeRateLimitBucket(path + '\0' + userKey, rule.points, rule.window);
+					if (!r.ok) {
+						/** @type {any} */
+						const out = { id, ok: false, code: 'RATE_LIMITED', error: 'Too many requests' };
+						out.retryAfter = r.retryAfter;
+						return out;
+					}
+				}
+			}
 			const result = await fn(ctx, ...args);
 			return { id, ok: true, data: result };
 		}
