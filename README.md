@@ -200,9 +200,11 @@ Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `re
 **Core**
 - [Getting started](#getting-started)
 - [Merge strategies](#merge-strategies)
+- [Connection state stores](#connection-state-stores)
 - [Error handling](#error-handling)
 - [Per-module auth](#per-module-auth)
 - [Dynamic topics](#dynamic-topics)
+- [Topic registry](#topic-registry)
 - [Schema validation](#schema-validation)
 - [Channels](#channels)
 - [SSR hydration](#ssr-hydration)
@@ -213,8 +215,10 @@ Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `re
 - [Stream pagination](#stream-pagination)
 - [Undo and redo](#undo-and-redo)
 - [Request deduplication](#request-deduplication)
+- [Idempotency keys](#idempotency-keys)
 - [Offline queue](#offline-queue)
 - [Connection hooks](#connection-hooks)
+- [SvelteKit transport](#sveltekit-transport)
 - [Combine stores](#combine-stores)
 
 **Server features**
@@ -223,6 +227,9 @@ Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `re
 - [Stream lifecycle hooks](#stream-lifecycle-hooks)
 - [Access control](#access-control)
 - [Rate limiting](#rate-limiting)
+- [Load shedding](#load-shedding)
+- [Concurrency control](#concurrency-control)
+- [Server-initiated push](#server-initiated-push)
 - [Cron scheduling](#cron-scheduling)
 - [Derived streams](#derived-streams)
 - [Effects](#effects)
@@ -362,8 +369,15 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 | `prepend` | `false` | Prepend new items instead of appending (`crud` mode) |
 | `max` | `50` / `0` | Max items to keep. Defaults to 50 for `latest`, 0 (unlimited) for `crud`. Oldest items are dropped when exceeded |
 | `replay` | `false` | Enable seq-based replay for gap-free reconnection |
+| `args` | -- | Standard Schema (Zod / ArkType / Valibot) for stream arguments. Validated before topic resolution -- prevents topic injection via malformed dynamic-topic args |
+| `transform` | -- | `(data) => projection` applied to BOTH initial-load data (per-item for arrays) AND every live publish for this topic. Ship a wide row from the database, emit a narrow shape on the wire |
+| `coalesceBy` | -- | `(data) => key` extractor. Publishes fan out via per-socket `sendCoalesced`; the latest value for each `(topic, key)` pair wins. For high-frequency latest-value streams (prices, cursors, presence). Cannot combine with `volatile` |
+| `volatile` | `false` | Mark messages fire-and-forget. Disables seq stamping for this topic so reconnects with `lastSeenSeq` won't try to backfill. Wire-level drop-on-backpressure is the adapter's default. For typing indicators, telemetry pings, cursors |
+| `staleAfterMs` | -- | Per-topic staleness watchdog. If no events arrive for N ms, the loader re-runs and the result broadcasts as a `refreshed` event. Useful for streams whose source can quietly stop emitting. See [Stream lifecycle hooks](#stream-lifecycle-hooks) |
+| `onError` | -- | `(err, ctx, topic)` per-stream observer. Fires on loader throws (subscribe / stale-reload / `.load()` SSR). Errors thrown inside are silently swallowed |
+| `classOfService` | -- | Names a class registered via `live.admission()`. New subscribes are shed under matching pressure. See [Load shedding](#load-shedding) |
 | `onSubscribe` | -- | Callback `(ctx, topic)` fired when a client subscribes |
-| `onUnsubscribe` | -- | Callback `(ctx, topic)` fired when a client disconnects |
+| `onUnsubscribe` | -- | Callback `(ctx, topic, remainingSubscribers)` fired when a client disconnects. `remainingSubscribers` counts OTHER WebSockets still on the topic -- use it to tear down upstream feeds at zero |
 | `filter` / `access` | -- | Per-connection publish filter (see [Access control](#access-control)) |
 | `delta` | -- | Delta sync config (see [Delta sync and replay](#delta-sync-and-replay)) |
 | `version` | -- | Schema version (see [Schema evolution](#schema-evolution)) |
@@ -372,6 +386,48 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 ### Reconnection
 
 When the WebSocket reconnects, streams automatically refetch initial data and resubscribe. The store keeps showing stale data during the refetch -- it does not reset to `undefined`.
+
+---
+
+## Connection state stores
+
+Four reactive stores re-export from `svelte-realtime/client` for rendering connection state without app-side WebSocket plumbing.
+
+```svelte
+<script>
+  import { status, failure, quiescent, health } from 'svelte-realtime/client';
+</script>
+
+{#if $health === 'degraded'}
+  <Banner severity="warn">Real-time updates paused, reconnecting...</Banner>
+{:else if $failure?.class === 'TERMINAL'}
+  <Banner severity="error">Session expired. <a href="/login">Sign in again</a></Banner>
+{:else if $failure?.class === 'THROTTLE'}
+  <Banner severity="warn">Server is busy. Reconnecting more slowly...</Banner>
+{:else if $status === 'disconnected'}
+  <Banner severity="info">Reconnecting...</Banner>
+{/if}
+
+{#if !$quiescent}
+  <Spinner />
+{/if}
+```
+
+| Store | Type | Behavior |
+|---|---|---|
+| `status` | `'connecting' \| 'open' \| 'suspended' \| 'disconnected' \| 'failed'` | Connection state machine. `suspended` = tab in background; `failed` = terminal (auth denied or `close()` called) |
+| `failure` | `{ kind, class, code, reason } \| null` | Cause of the most recent non-open transition. `class` is `TERMINAL` (auth) / `EXHAUSTED` (max retries) / `THROTTLE` (4429) / `RETRY` / `AUTH` (HTTP preflight). Cleared on next `'open'`. Not set on intentional `close()` |
+| `quiescent` | `Readable<boolean>` | `true` when every active stream has settled (initial load + all reconnects). Continuous signal -- a `false -> true` transition after a reconnect cycle marks "everything caught up" |
+| `health` | `'healthy' \| 'degraded'` | System-wide health, sourced from `degraded` / `recovered` events on the `__realtime` topic. Stays `'healthy'` until something publishes -- typically the extensions package's pub/sub bus circuit breaker |
+
+`failure` and `quiescent` are pure additions; apps that don't use them pay nothing. `health` lazily subscribes to `__realtime` only on first read; never reading it = no subscription.
+
+Apps that need richer health detail (reason strings, timestamps) can listen to the topic directly:
+
+```js
+import { on } from 'svelte-adapter-uws/client';
+on('__realtime').subscribe((envelope) => { /* full payload */ });
+```
 
 ---
 
@@ -591,6 +647,32 @@ Same arguments return the same cached store instance. The cache is cleaned up wh
 
 ---
 
+## Topic registry
+
+Centralize topic strings so the SQL trigger and the stream definition reference one source of truth. `defineTopics(map)` validates the map at boot and exposes `__patterns` for tooling.
+
+```js
+// src/lib/topics.js
+import { defineTopics } from 'svelte-realtime/server';
+
+export const TOPICS = defineTopics({
+  audit: (orgId) => `audit:${orgId}`,
+  security: (orgId) => `security:${orgId}`,
+  systemNotices: 'system:notices'
+});
+
+// Stream definitions reference the registry
+live.stream((ctx, orgId) => TOPICS.audit(orgId), loadAudit, { merge: 'crud' });
+
+// Tooling reads __patterns to derive shapes
+TOPICS.__patterns;
+// => { audit: 'audit:{arg0}', security: 'security:{arg0}', systemNotices: 'system:notices' }
+```
+
+Map values can be strings (static topics) or `(...args) => string` functions (dynamic topics). The helper validates non-empty strings and rejects reserved names (`__patterns`, `__definedTopics`). Pattern derivation calls each function with sentinel placeholders (`{arg0}`, `{arg1}`, ...) and falls back to `'<dynamic>'` if the function throws on placeholders or returns a non-string.
+
+---
+
 ## Schema validation
 
 Use `live.validated(schema, fn)` to validate the first argument against a schema before the function runs. Any [Standard Schema](https://standardschema.dev/)-compatible validator is supported, including Zod, ArkType, Valibot, and others.
@@ -627,6 +709,22 @@ export const addTodo = live.validated(CreateTodo, async (ctx, input) => {
 ```
 
 On the client, validated exports work like regular `live()` calls. Validation errors are thrown as `RpcError` with `code: 'VALIDATION'` and an `issues` array.
+
+### Validating stream arguments
+
+Stream arguments validate via the `args` option on `live.stream()`. Validation runs BEFORE topic resolution, so a malformed argument can never reach a dynamic topic function.
+
+```js
+import { z } from 'zod';
+
+export const auditFeed = live.stream(
+  (ctx, orgId) => `audit:${orgId}`,
+  async (ctx, orgId) => loadAudit(orgId),
+  { args: z.tuple([z.string().uuid()]) }
+);
+```
+
+Validation failures reject the subscribe RPC with `{ code: 'VALIDATION', issues }`. Both the WebSocket and `.load()` SSR paths apply the schema. Coerced values from the schema (e.g. Zod transforms) flow through to the loader and the topic function.
 
 ---
 
@@ -809,6 +907,26 @@ Apply changes to a stream store instantly, then roll back if the server call fai
 | `latest` | any event name | Appends data to the ring buffer. |
 | `set` | any event name | Replaces the entire value. |
 
+### Auto-rollback with `store.mutate()`
+
+`store.mutate(asyncOp, optimisticChange)` wraps the apply-await-rollback pattern. Applies the optimistic change synchronously, awaits the RPC, and on rejection restores the snapshot and re-throws.
+
+```js
+// Event-based: server's confirming event reconciles the placeholder by key
+const todo = await todos.mutate(
+  () => addTodo(text),
+  { event: 'created', data: { id: tempId(), text } }
+);
+
+// Free-form mutator: arbitrary local change, no merge-strategy assumptions
+await todos.mutate(
+  () => removeTodo(id),
+  (current) => current.filter((t) => t.id !== id)
+);
+```
+
+Returns the result of `asyncOp` on success. The snapshot is shallow: top-level array shape changes (push, pop, filter, splice) roll back; in-place item field mutations (`draft[0].name = 'x'`) do NOT, because the snapshot and the draft share item references. Replace whole items instead: `draft[i] = { ...draft[i], name: 'x' }`.
+
 ---
 
 ## Stream pagination
@@ -891,6 +1009,52 @@ To bypass deduplication and force a fresh request:
 ```js
 const result = await getUser.fresh(userId); // always sends a new request
 ```
+
+---
+
+## Idempotency keys
+
+Microtask deduplication only collapses calls within the same tick. For durable safety against retries that span reconnects, tab reloads, or offline replay, wrap the handler with `live.idempotent(config, fn)`. Identical calls (by key) return the cached result without re-running the handler.
+
+```js
+// Server: server-derived key (Stripe-style)
+import { live } from 'svelte-realtime/server';
+
+export const createOrder = live.idempotent(
+  { keyFrom: (ctx, input) => `order:${ctx.user.id}:${input.clientOrderId}`, ttl: 48 * 3600 },
+  live.validated(OrderSchema, async (ctx, input) => {
+    return db.orders.insert({ userId: ctx.user.id, ...input });
+  })
+);
+```
+
+```js
+// Client: envelope-supplied key (uuid per intent)
+import { createOrder } from '$live/orders';
+
+const intentId = crypto.randomUUID();
+const order = await createOrder.with({ idempotencyKey: intentId })(payload);
+```
+
+Resolution: `keyFrom(ctx, ...args)` if defined, otherwise the client envelope's `idempotencyKey`, otherwise the wrapper is a no-op. Only successful results cache; throwing handlers abort the slot so the next caller re-runs. Default store is in-process and bounded; for multi-instance deployments pass `store: createIdempotencyStore(redis)` from `svelte-adapter-uws-extensions`.
+
+| Option | Default | Description |
+|---|---|---|
+| `keyFrom` | -- | `(ctx, ...args) => string \| null \| undefined`. `null`/`undefined` falls back to the envelope key |
+| `store` | in-process | Any object exposing `acquire(key, ttlSec)` matching the extensions store contract |
+| `ttl` | `172800` (48h) | TTL in seconds. `0` skips the cache write (concurrent waiters re-run after the first finishes) |
+
+`__rpc().with({ ... })` composes options on the same surface:
+
+```js
+// Compose idempotency + per-call timeout
+await createOrder.with({ idempotencyKey: id, timeout: 60_000 })(payload);
+```
+
+| `.with({})` option | Description |
+|---|---|
+| `idempotencyKey` | Carried in the envelope for the server's `live.idempotent` wrapper |
+| `timeout` | Per-call timeout in ms; overrides the global `configure({ timeout })` default. Sleep-detect threshold scales with the override |
 
 ---
 
@@ -1048,6 +1212,36 @@ The client coalesces concurrent connects into a single in-flight preflight, trea
 
 ---
 
+## SvelteKit transport
+
+`realtimeTransport()` from `svelte-realtime/hooks` is a SvelteKit transport-hook preset that auto-registers `RpcError` and `LiveError` serialization across the SSR / client boundary. Without it, typed errors thrown from `+page.server.js` `load()` arrive at `+error.svelte` as plain `Error` instances and lose their `code` field.
+
+```js
+// src/hooks.js  (NOT hooks.server.js -- the shared hook is required)
+import { realtimeTransport } from 'svelte-realtime/hooks';
+
+export const transport = realtimeTransport();
+```
+
+Compose with app-defined types via the optional `extras` parameter (user entries appear after defaults so they win on key conflict):
+
+```js
+// src/hooks.js
+import { realtimeTransport } from 'svelte-realtime/hooks';
+import { Vector } from '$lib/geometry';
+
+export const transport = realtimeTransport({
+  Vector: {
+    encode: (v) => v instanceof Vector && [v.x, v.y],
+    decode: ([x, y]) => new Vector(x, y)
+  }
+});
+```
+
+Wire from `src/hooks.js`, NOT `hooks.server.js`. SvelteKit's transport primitive needs both encode (server-side) and decode (client-side hydration) visible at build time -- the wrong file silently half-works (encode runs but decode never reaches the client). `RpcError`'s optional `issues` field (carried by `live.validated()` failures) survives the round-trip. Validation runs at registration: malformed extras throw immediately so misconfiguration fails fast at app boot.
+
+---
+
 ## Combine stores
 
 Compose multiple stream stores into a single derived store. When any source updates, the combining function re-runs.
@@ -1128,8 +1322,9 @@ export const presence = live.stream('room:lobby', async (ctx) => {
   onSubscribe(ctx, topic) {
     ctx.publish(topic, 'join', { key: ctx.user.id, name: ctx.user.name });
   },
-  onUnsubscribe(ctx, topic) {
+  onUnsubscribe(ctx, topic, remainingSubscribers) {
     ctx.publish(topic, 'leave', { key: ctx.user.id });
+    if (remainingSubscribers === 0) stopUpstreamFeed(topic);
   }
 });
 ```
@@ -1141,6 +1336,35 @@ export { message, close, unsubscribe } from 'svelte-realtime/server';
 ```
 
 `onUnsubscribe` fires for both static and dynamic topics. For dynamic topics, the server tracks which stream produced each subscription and fires the correct hook. The `unsubscribe` hook fires as soon as the client drops a topic; `close` only fires for topics still active at disconnect time. There is no double-firing.
+
+The third argument `remainingSubscribers` counts OTHER WebSockets still holding a realtime-stream subscription to the topic after the current one drops. Use it to tear down upstream feeds (CDC connections, polling loops, external pub/sub follows) when the count reaches zero. Existing 2-argument `(ctx, topic) => ...` handlers continue to work; the third arg is silently ignored.
+
+### Staleness watchdog and per-stream `onError`
+
+Streams whose underlying source can quietly stop emitting (CDC drops, polling stalls, upstream cache evicts the key) declare `staleAfterMs` to arm a per-topic watchdog. Every `ctx.publish` to the topic resets the timer; if no events arrive for the configured duration, the realtime layer re-runs the loader and broadcasts the result as a `refreshed` event. The client merges `refreshed` as a full-state replacement across every merge strategy.
+
+```js
+export const auditFeed = live.stream(
+  (ctx, orgId) => `audit:${orgId}`,
+  async (ctx, orgId) => loadAudit(orgId),
+  {
+    merge: 'crud',
+    key: 'id',
+    staleAfterMs: 30_000,
+    onError: (err, ctx, topic) => log.warn({ err, topic }, 'audit stream error')
+  }
+);
+```
+
+Watchdog state is per-topic. Multiple subscribers share one timer; the timer arms on the first subscribe and clears when the last subscriber leaves. The reload uses the first subscriber's `ctx` and `args`, which is correct for shared topics since the loader's output is identical regardless of which subscriber's ctx triggers it.
+
+`onError(err, ctx, topic)` is observer-only. It fires on loader throws across three paths -- the initial subscribe, the staleness-driven reload, and the `.load()` SSR path. Errors thrown inside `onError` are silently swallowed so a buggy logger never breaks the original error path. Apps that want a topic-scoped degraded signal can publish a system event from inside the handler:
+
+```js
+onError: (err, ctx, topic) => {
+  ctx.publish(`__system:${topic}`, 'degraded', { reason: err.message });
+}
+```
 
 ---
 
@@ -1187,8 +1411,79 @@ export const myOrders = live.stream(
 | `live.access.owner(field?)` | Subscription allowed if `ctx.user[field]` is present (default: `'id'`) |
 | `live.access.team()` | Subscription allowed if `ctx.user.teamId` is present |
 | `live.access.role(map)` | Role-based: `{ admin: true, viewer: (ctx) => ... }` |
+| `live.access.org(opts?)` | Subscription allowed if `args[0]` matches `ctx.user.organization_id`. Configurable via `{ from, orgField }` |
+| `live.access.user(opts?)` | Subscription allowed if `args[0]` matches `ctx.user.user_id`. Configurable via `{ from, userField }` |
 | `live.access.any(...predicates)` | OR: any predicate returning true allows the subscription |
 | `live.access.all(...predicates)` | AND: all predicates must return true |
+
+`live.access.org` and `live.access.user` follow the SQL `[table]_id` convention. Override the field for non-default user shapes:
+
+```js
+// Stream that takes an orgId arg and verifies the caller belongs to that org
+export const auditFeed = live.stream(
+  (ctx, orgId) => `audit:${orgId}`,
+  async (ctx, orgId) => loadAudit(orgId),
+  { access: live.access.org() }
+);
+
+// Custom user-shape (e.g. SvelteKit locals.user with camelCase)
+access: live.access.org({ orgField: 'organizationId' })
+```
+
+### Authentication shorthand on guards
+
+`guard()` accepts an options object alongside the existing variadic-function shape. `{ authenticated: true }` rejects calls with no `ctx.user` as `UNAUTHENTICATED`:
+
+```js
+// src/live/_guard.js
+import { guard } from 'svelte-realtime/server';
+
+// Bare authenticated check
+export const _guard = guard({ authenticated: true });
+
+// Compose with custom predicates
+export const _guard = guard({ authenticated: true }, (ctx) => ctx.user.role === 'admin');
+```
+
+Bare `Error` throws from any guard auto-classify: thrown errors against an anonymous user produce `LiveError('UNAUTHENTICATED')`; thrown errors with a user produce `LiveError('FORBIDDEN')`. Original errors travel on `.cause` for server-side logging. Throw `LiveError(code, message)` explicitly to control the wire-visible code and message verbatim.
+
+### `live.scoped(predicate, fn)`
+
+Wrap an RPC handler with a per-call access predicate that throws `UNAUTHENTICATED` (no user) or `FORBIDDEN` (predicate rejects). Composes with `live.validated`, `live.rateLimit`, etc.
+
+```js
+export const editOrgSettings = live.scoped(
+  live.access.org(),
+  live.validated(SettingsSchema, async (ctx, orgId, patch) => {
+    return db.orgs.update(orgId, patch);
+  })
+);
+```
+
+For streams, use the `access` option directly. `live.scoped` is the RPC equivalent.
+
+### Subscribe-denial codes on stream stores
+
+When a server-side subscribe denial fires (guard rejection, access predicate, rate limit, invalid topic), the typed reason flows through the stream store's `error` slot as an `RpcError` with the canonical code:
+
+```svelte
+<script>
+  import { auditFeed } from '$live/audit';
+  const err = auditFeed.error;
+</script>
+
+{#if $err?.code === 'UNAUTHENTICATED'}
+  <p>Please sign in to view audit history.</p>
+{:else if $err?.code === 'FORBIDDEN'}
+  <p>You don't have access to this organization's audit log.</p>
+{:else if $err?.code === 'RATE_LIMITED'}
+  <p>Too many requests. Please wait a moment.</p>
+{:else if $err}
+  <p>Audit feed unavailable: {$err.message}</p>
+{/if}
+```
+
+Custom denial reasons returned from a server-side `subscribe` hook (e.g. `'KYC_PENDING'`) flow through verbatim as the `code` field. The same denial fans out to every stream subscribed to the topic.
 
 ---
 
@@ -1245,6 +1540,132 @@ export const message = createMessage({
   }
 });
 ```
+
+---
+
+## Load shedding
+
+Under sustained pressure, drop low-priority traffic before it reaches the handler. `live.admission(config)` registers named pressure rules; `ctx.shed(className)` checks them; the `classOfService` stream option gates new subscribes automatically.
+
+```js
+import { live } from 'svelte-realtime/server';
+
+// Register classes once at startup
+live.admission({
+  classes: {
+    background: ['PUBLISH_RATE', 'SUBSCRIBERS', 'MEMORY'],   // shed under any pressure
+    nonCritical: ['MEMORY'],                                  // shed only on memory pressure
+    realtime: (snapshot) => snapshot.publishRate > 8000      // custom predicate
+  }
+});
+
+// Stream gating: new subscribes shed under matching pressure
+export const browseList = live.stream('browse:list', loader, {
+  merge: 'crud',
+  classOfService: 'background'
+});
+
+// RPC gating: per-call decision
+export const expensiveSearch = live(async (ctx, query) => {
+  if (ctx.shed('background')) {
+    throw new LiveError('OVERLOADED', 'Server is busy, try again shortly');
+  }
+  return search(query);
+});
+```
+
+`platform.pressure.reason` is a precedence-ordered enum (`MEMORY > PUBLISH_RATE > SUBSCRIBERS > NONE`); class rules using a string-array match if the active reason is in the array. Predicate rules receive the full pressure snapshot. Existing subscribers are unaffected -- shedding applies to NEW subscribes and RPC calls only.
+
+`live.admission()` validates rules at registration; unknown reasons throw with a `[svelte-realtime]`-prefixed error so typos fail fast at boot. Pass `null` to clear.
+
+---
+
+## Concurrency control
+
+`live.lock(keyOrConfig, fn)` serializes concurrent RPC calls that resolve to the same key. Composes with `live.validated`, `live.idempotent`, `live.rateLimit`, etc.
+
+```js
+// Per-org leaderboard recompute: one in-flight per org, others wait for the result
+export const recomputeLeaderboard = live.lock(
+  (ctx) => `leaderboard:${ctx.user.organization_id}`,
+  async (ctx) => {
+    const rows = await db.expensive.recompute(ctx.user.organization_id);
+    ctx.publish(`org:${ctx.user.organization_id}:leaderboard`, 'set', rows);
+    return rows;
+  }
+);
+
+// Static key (single global section)
+export const rebuildSearchIndex = live.lock('search-index-rebuild', async (ctx) => {
+  return rebuildIndex();
+});
+
+// Distributed lock via the extensions package
+import { createDistributedLock } from 'svelte-adapter-uws-extensions/redis/lock';
+const distributedLock = createDistributedLock(redis);
+
+export const settleInvoice = live.lock(
+  { key: (ctx, id) => `invoice:${id}`, lock: distributedLock },
+  live.validated(InvoiceIdSchema, async (ctx, id) => settle(id))
+);
+```
+
+Concurrent callers wait in FIFO order for the holder's result. A `null` / `undefined` / empty key bypasses the lock (the handler runs unguarded for that call). Custom lock implementations need a single method: `withLock(key, fn) -> Promise<result>`.
+
+Default lock is in-process and bounded. For multi-instance deployments, pass `lock: createDistributedLock(redis)` from the extensions package -- any object exposing the `withLock(key, fn)` contract works.
+
+---
+
+## Server-initiated push
+
+`live.push({ userId }, event, data, options?)` sends a server-initiated request to a connected user and awaits the reply. Routes through a per-instance userId -> WebSocket registry maintained by a small pair of hooks.
+
+```js
+// hooks.ws.js -- wire the registry once
+import { pushHooks } from 'svelte-realtime/server';
+
+export const open = pushHooks.open;
+export const close = pushHooks.close;
+```
+
+```js
+// Anywhere on the server (admin RPC, cron, webhook receiver, etc.)
+import { live } from 'svelte-realtime/server';
+
+const reply = await live.push(
+  { userId: 'u-123' },
+  'confirm-delete',
+  { itemId: 42 },
+  { timeoutMs: 30_000 }
+);
+if (reply.confirmed) await actuallyDelete(42);
+```
+
+```svelte
+<!-- Client: register handlers per event -->
+<script>
+  import { onPush } from 'svelte-realtime/client';
+
+  onPush('confirm-delete', async ({ itemId }) => {
+    return { confirmed: confirm(`Delete item ${itemId}?`) };
+  });
+</script>
+```
+
+The default identifier reads `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`. Override for custom userData shapes:
+
+```js
+import { live } from 'svelte-realtime/server';
+live.configurePush({ identify: (ws) => ws.getUserData()?.account?.id });
+```
+
+Throws `LiveError('NOT_FOUND')` when no connection is registered for the userId. Propagates `Error('request timed out')` from the underlying primitive on the configurable `timeoutMs` (default 5000ms), and `Error('connection closed')` if the WebSocket closes before reply.
+
+Multi-device users see most-recent-connection-wins routing: a second connection by the same user replaces the first as the push target; older connections still receive topic publishes via their own subscriptions, only push routing flips. Anonymous connections (identify returning null/undefined) are silently skipped at registration so they cannot be push targets.
+
+`onPush(event, handler)` multiplexes multiple events over the adapter's single `onRequest` channel. Returning a value sends it as the reply; throwing rejects the server-side promise. Returns an unsubscribe function.
+
+Single-instance routing only in this slice: the user's connection must live on the same server process that calls `live.push`. Cluster-wide push (any instance routing to any user's WebSocket) requires the connection-registry primitive in the extensions package.
 
 ---
 
@@ -1732,6 +2153,32 @@ How it works:
 - If versions differ: server calls `diff(sinceVersion)` and sends only the changes
 - If diff returns `null`: falls back to full refetch
 
+### Three-tier reconnect with `delta.fromSeq`
+
+For seq-based reconnects where the bounded replay buffer cannot satisfy the gap (the client's `lastSeenSeq` is older than the oldest entry in the buffer), `delta.fromSeq(sinceSeq)` is the user-supplied bridge to the durable store. The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
+
+```js
+export const auditFeed = live.stream(
+  (ctx, orgId) => `audit:${orgId}`,
+  async (ctx, orgId) => loadAudit(orgId, { limit: 200 }),
+  {
+    merge: 'crud',
+    key: 'id',
+    replay: true,
+    delta: {
+      fromSeq: async (sinceSeq) => {
+        const events = await db.auditEvents.where('seq', '>', sinceSeq).orderBy('seq').limit(500);
+        if (events.length === 0) return [];        // nothing missed, no-op
+        if (events.length === 500) return null;     // too many -> fall through to full rehydrate
+        return events;
+      }
+    }
+  }
+);
+```
+
+Resolution order on reconnect-with-seq: replay buffer (bounded, fast) -> `delta.fromSeq(clientSeq)` (this hook) -> full rehydrate via the loader (always safe). Returning `[]` signals "nothing missed" (client no-op). Each event should carry a `seq` field so the client's `_lastSeq` advances; if the events come from a Postgres column with a `seq` per row, the client tracks correctly without extra plumbing.
+
 ### Replay
 
 Enable seq-based replay for gap-free stream reconnection. When a client reconnects, it sends its last known sequence number. If the server has the missed events buffered, it sends only those instead of a full refetch.
@@ -1957,6 +2404,26 @@ onError((path, error) => {
 ```
 
 > `onCronError` still works but is deprecated -- use `onError` instead.
+
+### Dev-mode publish rate warning
+
+In development, the framework samples `platform.pressure.topPublishers` at a configurable interval and logs a one-shot warning per topic when message rate crosses a threshold. Suggests `coalesceBy` and `volatile: true` mitigations and suppresses automatically when the topic is already configured with either.
+
+```js
+import { live } from 'svelte-realtime/server';
+
+// Defaults: enabled, threshold 200 events/sec, intervalMs 5000
+live.publishRateWarning({ threshold: 500, intervalMs: 10_000 });
+
+// Disable entirely
+live.publishRateWarning(false);
+```
+
+Production builds constant-fold the activation branch to dead code -- zero overhead. The sampler runs once per platform on the first ctx-helpers cache miss; per-publish cost is unchanged. Topics already in `_topicCoalesce` or `_topicVolatile` are skipped (the user has already addressed them).
+
+### Per-stream `onError` for loader observability
+
+For streams whose loader can fail, add `onError(err, ctx, topic)` to the stream options. See [Stream lifecycle hooks](#stream-lifecycle-hooks) for the full pattern. Per-stream observers fire alongside the global `onError` setter, not instead of it.
 
 ---
 
