@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`ctx.requestId` for correlation logging.** The adapter assigns a correlation id per WebSocket connection (stable across every event on that connection) and per HTTP request, honoring an inbound `X-Request-ID` when present. Surfaced on `LiveContext` and `CronContext` so handlers can structured-log the same id from every step of one user's interaction without piping it through their handler signatures.
+
+  ```js
+  export default live(async (ctx, input) => {
+    log.info({ requestId: ctx.requestId, userId: ctx.user?.id }, 'order received');
+    const order = await db.orders.create(input);
+    return order;
+  });
+  ```
+
+  Requires `svelte-adapter-uws@^0.5.0-next.4` (already the peer floor) for the underlying `platform.requestId`. Platforms that don't set it leave `ctx.requestId` as `undefined`.
+
 - **`volatile: true` option on `live.stream()` for fire-and-forget streams.** Marks a stream as intentionally drop-on-backpressure -- typing indicators, cursor positions, telemetry pings, anything where a missed frame is gone for good. Two effects:
 
   - Disables per-event seq stamping for the topic (passes `seq: false` through to the adapter). A reconnect carrying `lastSeenSeq` won't try to backfill the gaps, which is the correct semantic for these stream shapes.

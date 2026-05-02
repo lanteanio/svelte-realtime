@@ -463,6 +463,7 @@ function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 		signal: helpers.signal,
 		batch: helpers.batch,
 		shed: helpers.shed,
+		requestId: platform.requestId,
 		_idempotencyKey: idempotencyKey || null
 	};
 }

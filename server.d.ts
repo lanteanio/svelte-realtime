@@ -15,6 +15,12 @@ export interface CronContext {
 	debounce(topic: string, event: string, data: any, ms: number): void;
 	/** Send a point-to-point signal to a specific user. */
 	signal(userId: string, event: string, data: any): void;
+	/**
+	 * Correlation id from the adapter platform. May be `undefined` for cron
+	 * platforms that don't set one. See `LiveContext.requestId` for the
+	 * RPC-handler shape.
+	 */
+	requestId: string | undefined;
 }
 
 /**
@@ -54,6 +60,30 @@ export interface LiveContext<UserData = unknown> {
 	 * ```
 	 */
 	shed(className: string): boolean;
+	/**
+	 * Correlation id from the adapter platform. The adapter assigns one per
+	 * WebSocket connection (stable across all events on that connection)
+	 * and per HTTP request, honoring an inbound `X-Request-ID` header when
+	 * present. Threaded through the adapter's hooks, the realtime layer's
+	 * `ctx`, and (when used) downstream task-runner work via
+	 * `svelte-adapter-uws-extensions/task-runner` -- structured-log against
+	 * it to correlate every step of one request without piping the value
+	 * through your handler signatures.
+	 *
+	 * @example
+	 * ```js
+	 * export default live(async (ctx, input) => {
+	 *   log.info({ requestId: ctx.requestId, userId: ctx.user?.id }, 'order received');
+	 *   const order = await db.orders.create(input);
+	 *   return order;
+	 * });
+	 * ```
+	 *
+	 * On platforms that don't set `requestId` (some test mocks, custom
+	 * platform shims), this falls through as `undefined`. In production
+	 * against `svelte-adapter-uws@^0.5.0-next.4` it's always a string.
+	 */
+	requestId: string | undefined;
 }
 
 /**

@@ -7053,6 +7053,64 @@ describe('live.stream({ transform })', () => {
 	});
 });
 
+// -- ctx.requestId end-to-end correlation -------------------------------------
+
+describe('ctx.requestId', () => {
+	it('flows from platform.requestId to ctx.requestId on RPC handlers', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		platform.requestId = 'rid-abc-123';
+
+		let captured;
+		const handler = live(async (ctx) => {
+			captured = ctx.requestId;
+			return 'ok';
+		});
+		__register('rid/handler', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rid/handler', id: 'r1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(captured).toBe('rid-abc-123');
+	});
+
+	it('is also available on stream loaders', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		platform.requestId = 'rid-stream-456';
+
+		let captured;
+		const stream = live.stream('rid-stream', async (ctx) => {
+			captured = ctx.requestId;
+			return [{ id: 1 }];
+		});
+		__register('rid/stream', stream);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rid/stream', id: 'rs1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(captured).toBe('rid-stream-456');
+	});
+
+	it('is undefined when platform does not set it', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		platform.requestId = undefined;
+
+		let captured = 'unset';
+		const handler = live(async (ctx) => {
+			captured = ctx.requestId;
+			return 'ok';
+		});
+		__register('rid/missing', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rid/missing', id: 'rm1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(captured).toBeUndefined();
+	});
+});
+
 // -- live.stream({ volatile }) -----------------------------------------------
 
 function mockPlatformWithBatched_volatile() {

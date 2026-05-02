@@ -185,6 +185,7 @@ The `ctx` object passed to every server function contains:
 | `ctx.platform` | The adapter platform API |
 | `ctx.publish` | Shorthand for `platform.publish()` |
 | `ctx.cursor` | Cursor from a `loadMore()` call, or `null` |
+| `ctx.requestId` | Correlation id from `platform.requestId` (per WS connection or per HTTP request); honors `X-Request-ID` |
 | `ctx.throttle` | `(topic, event, data, ms)` -- publish at most once per `ms` ms |
 | `ctx.debounce` | `(topic, event, data, ms)` -- publish after `ms` ms of silence |
 | `ctx.signal` | `(userId, event, data)` -- point-to-point message |

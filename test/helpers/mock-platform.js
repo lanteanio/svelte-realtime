@@ -47,6 +47,8 @@ export function mockPlatform() {
 			p.sent.length = 0;
 			p.coalesced.length = 0;
 		},
+		// Default correlation id. Tests can override before handleRpc.
+		requestId: 'test-req',
 		// Default pressure snapshot. Tests override via _setPressure().
 		pressure: { active: false, subscriberRatio: 0, publishRate: 0, memoryMB: 0, reason: 'NONE' },
 		_setPressure(snapshot) {
