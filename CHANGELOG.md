@@ -17,6 +17,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`defineTopics(map)` helper for centralizing topic patterns.** A small registry helper so stream definitions and any out-of-band consumers (SQL triggers, Postgres NOTIFY shapes, doc generators, devtools panels) reference one source of truth instead of scattering string literals across the codebase.
+
+  ```js
+  // src/lib/topics.js
+  import { defineTopics } from 'svelte-realtime/server';
+
+  export const TOPICS = defineTopics({
+    audit:    (orgId)       => `audit:${orgId}`,
+    security: (orgId)       => `security:${orgId}`,
+    feed:     (orgId, kind) => `feed:${orgId}:${kind}`,
+    systemNotices: 'system:notices'
+  });
+  ```
+
+  Stream definitions reference the registry directly:
+
+  ```js
+  import { TOPICS } from '$lib/topics';
+  import { live } from 'svelte-realtime/server';
+
+  export const auditFeed = live.stream(
+    (ctx, orgId) => TOPICS.audit(orgId),
+    loadAudit
+  );
+  ```
+
+  Returned object exposes the same entries the input did, plus two non-enumerable metadata properties for tooling and docs:
+
+  - `__patterns` -- `name -> pattern string` map derived by calling each function with sentinel placeholders matching its arity (`{arg0}`, `{arg1}`, ...). Useful for generating SQL trigger comments or doc-site cross-references that won't drift from the live registry.
+  - `__definedTopics: true` -- runtime marker tools can use to detect a topic registry.
+
+  Validation runs at registration: empty entries, non-string-non-function entries, or use of reserved names (`__patterns`, `__definedTopics`) throws immediately so misconfiguration fails fast at app boot.
+
+  Doesn't solve the SQL/TypeScript boundary by itself, but makes mismatches greppable (one canonical reference per topic name) and registry-checkable (tooling can compare `TOPICS.__patterns` against the actual SQL or NOTIFY shapes).
+
 - **`onUnsubscribe(ctx, topic, remainingSubscribers)` -- third argument exposes the remaining subscriber count.** When the last consumer of a stream leaves, the hook can now tear down the upstream feed without app-side bookkeeping. Backwards-compatible: existing handlers ignoring the extra argument keep working unchanged.
 
   ```js

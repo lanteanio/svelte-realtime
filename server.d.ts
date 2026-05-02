@@ -435,6 +435,65 @@ export interface CreateMessageOptions {
  */
 export function live<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(fn: T): T;
 
+/**
+ * The shape of a single entry on a `defineTopics` map: either a static
+ * string or a function returning a string from one or more args.
+ */
+export type TopicEntry = string | ((...args: any[]) => string);
+
+/**
+ * The map type accepted by `defineTopics` -- a record of name -> entry.
+ */
+export type TopicMap = Record<string, TopicEntry>;
+
+/**
+ * The map returned by `defineTopics` -- the input map plus two
+ * non-enumerable metadata properties used by tooling and docs.
+ */
+export type DefinedTopics<M extends TopicMap> = M & {
+	readonly __patterns: Record<keyof M, string>;
+	readonly __definedTopics: true;
+};
+
+/**
+ * Centralize topic patterns so stream definitions and any out-of-band
+ * consumers (SQL triggers, NOTIFY shapes, doc generators, devtools)
+ * reference one source of truth. Each entry is either a string (a
+ * static topic) or a function returning a string from one or more
+ * args (a dynamic topic).
+ *
+ * The returned object exposes the same entries the input did, plus
+ * `__patterns` (a map of `name -> pattern string` derived by calling
+ * each function with sentinel placeholders matching its arity) and
+ * `__definedTopics: true` (a runtime marker for tooling).
+ *
+ * @example
+ * ```js
+ * // src/lib/topics.js
+ * import { defineTopics } from 'svelte-realtime/server';
+ *
+ * export const TOPICS = defineTopics({
+ *   audit:    (orgId)       => `audit:${orgId}`,
+ *   security: (orgId)       => `security:${orgId}`,
+ *   feed:     (orgId, kind) => `feed:${orgId}:${kind}`,
+ *   systemNotices: 'system:notices'
+ * });
+ *
+ * // Stream definition uses the same source of truth:
+ * import { TOPICS } from '$lib/topics';
+ * export const auditFeed = live.stream(
+ *   (ctx, orgId) => TOPICS.audit(orgId),
+ *   loadAudit
+ * );
+ *
+ * // Documentation / SQL comment generation:
+ * TOPICS.__patterns
+ * // => { audit: 'audit:{arg0}', security: 'security:{arg0}',
+ * //      feed: 'feed:{arg0}:{arg1}', systemNotices: 'system:notices' }
+ * ```
+ */
+export function defineTopics<M extends TopicMap>(map: M): DefinedTopics<M>;
+
 export namespace live {
 	/**
 	 * Mark a function as a stream provider with a static topic.

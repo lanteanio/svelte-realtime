@@ -22,6 +22,7 @@ import {
 	unsubscribe,
 	enableSignals,
 	pipe,
+	defineTopics,
 	_resetIdempotencyStore,
 	_resetCoalesceRegistry,
 	_resetAdmission,
@@ -7756,6 +7757,110 @@ describe('live.publishRateWarning()', () => {
 		expect(warnSpy).toHaveBeenCalledTimes(1);
 		expect(warnSpy.mock.calls[0][0]).toContain("'audit:hot'");
 		_resetCoalesceRegistry();
+	});
+});
+
+// -- defineTopics() -----------------------------------------------------------
+
+describe('defineTopics()', () => {
+	it('returns the input map with the same entries callable', () => {
+		const TOPICS = defineTopics({
+			audit: (orgId) => `audit:${orgId}`,
+			feed: (orgId, kind) => `feed:${orgId}:${kind}`,
+			systemNotices: 'system:notices'
+		});
+		expect(TOPICS.audit('o1')).toBe('audit:o1');
+		expect(TOPICS.feed('o1', 'priority')).toBe('feed:o1:priority');
+		expect(TOPICS.systemNotices).toBe('system:notices');
+	});
+
+	it('exposes __patterns derived from each entry', () => {
+		const TOPICS = defineTopics({
+			audit: (orgId) => `audit:${orgId}`,
+			feed: (orgId, kind) => `feed:${orgId}:${kind}`,
+			systemNotices: 'system:notices'
+		});
+		expect(TOPICS.__patterns).toEqual({
+			audit: 'audit:{arg0}',
+			feed: 'feed:{arg0}:{arg1}',
+			systemNotices: 'system:notices'
+		});
+	});
+
+	it('marks the map with __definedTopics', () => {
+		const TOPICS = defineTopics({ foo: 'foo:topic' });
+		expect(TOPICS.__definedTopics).toBe(true);
+	});
+
+	it('makes __patterns and __definedTopics non-enumerable', () => {
+		const TOPICS = defineTopics({ foo: 'foo:topic' });
+		expect(Object.keys(TOPICS)).toEqual(['foo']);
+	});
+
+	it('falls back to <dynamic> when a fn throws on sentinel args', () => {
+		const TOPICS = defineTopics({
+			weird: (input) => `prefix:${input.id.toUpperCase()}`
+		});
+		expect(TOPICS.__patterns.weird).toBe('<dynamic>');
+		// Function still works at runtime with real input
+		expect(TOPICS.weird({ id: 'abc' })).toBe('prefix:ABC');
+	});
+
+	it('falls back to <dynamic> when a fn returns a non-string', () => {
+		const TOPICS = defineTopics({
+			bad: () => /** @type {any} */ (42)
+		});
+		expect(TOPICS.__patterns.bad).toBe('<dynamic>');
+	});
+
+	it('rejects non-object input', () => {
+		expect(() => defineTopics(null)).toThrow(/non-array object map/);
+		expect(() => defineTopics(undefined)).toThrow(/non-array object map/);
+		expect(() => defineTopics('foo')).toThrow(/non-array object map/);
+		expect(() => defineTopics(42)).toThrow(/non-array object map/);
+		expect(() => defineTopics([])).toThrow(/non-array object map/);
+	});
+
+	it('rejects entries that are neither string nor function', () => {
+		expect(() => defineTopics({ bad: 42 })).toThrow(/must be a string or function/);
+		expect(() => defineTopics({ bad: null })).toThrow(/must be a string or function/);
+		expect(() => defineTopics({ bad: { topic: 'x' } })).toThrow(/must be a string or function/);
+	});
+
+	it('rejects empty string entries', () => {
+		expect(() => defineTopics({ bad: '' })).toThrow(/non-empty string/);
+	});
+
+	it('rejects reserved names', () => {
+		expect(() => defineTopics({ __patterns: 'x' })).toThrow(/reserved name/);
+		expect(() => defineTopics({ __definedTopics: 'x' })).toThrow(/reserved name/);
+	});
+
+	it('composes with live.stream as the topic resolver', async () => {
+		const TOPICS = defineTopics({
+			items: (orgId) => `items:${orgId}`
+		});
+		const stream = live.stream((ctx, orgId) => TOPICS.items(orgId), async () => [], {});
+		expect(typeof stream).toBe('function');
+		expect(stream.__streamTopic).toBeTypeOf('function');
+		// Topic resolver returns the right string for given args
+		expect(stream.__streamTopic({ user: { user_id: 'u' } }, 'org-42')).toBe('items:org-42');
+	});
+
+	it('handles a no-arg function entry (arity 0)', () => {
+		const TOPICS = defineTopics({
+			global: () => 'global:topic'
+		});
+		expect(TOPICS.global()).toBe('global:topic');
+		expect(TOPICS.__patterns.global).toBe('global:topic');
+	});
+
+	it('does not mutate the input map keys but adds metadata', () => {
+		const input = { a: 'a:1', b: 'b:1' };
+		const out = defineTopics(input);
+		expect(out).toBe(input); // returns same reference
+		expect(Object.keys(out)).toEqual(['a', 'b']);
+		expect(out.__definedTopics).toBe(true);
 	});
 });
 

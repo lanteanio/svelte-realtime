@@ -690,6 +690,106 @@ export function live(fn) {
 }
 
 /**
+ * Disallowed entry names on a `defineTopics` map -- these are reserved
+ * for tooling metadata. Names are checked at registration time.
+ */
+const _RESERVED_TOPIC_NAMES = new Set(['__patterns', '__definedTopics']);
+
+/**
+ * Derive a documentable pattern string from a topic entry. Strings are
+ * returned unchanged. Functions are called with sentinel placeholders
+ * matching their declared arity (`{arg0}`, `{arg1}`, ...) so the
+ * resulting string reads like a template the user could grep against
+ * (`'audit:{arg0}'`). Functions that destructure args or read fields
+ * may throw with the sentinels; in that case the pattern falls back
+ * to `'<dynamic>'` rather than failing registration.
+ *
+ * @param {string | ((...args: any[]) => string)} value
+ */
+function _deriveTopicPattern(value) {
+	if (typeof value === 'string') return value;
+	const arity = value.length;
+	const args = new Array(arity);
+	for (let i = 0; i < arity; i++) args[i] = '{arg' + i + '}';
+	try {
+		const result = value(...args);
+		return typeof result === 'string' ? result : '<dynamic>';
+	} catch {
+		return '<dynamic>';
+	}
+}
+
+/**
+ * Centralize topic patterns in one place so stream definitions and any
+ * out-of-band consumers (SQL triggers, Postgres NOTIFY shapes, doc
+ * generation, devtools panels) reference one source of truth. Each
+ * entry is either a string (a static topic) or a function returning a
+ * string from one or more args (a dynamic topic).
+ *
+ * Returned object exposes the same entries the input did, plus two
+ * non-enumerable metadata properties:
+ *   - `__definedTopics: true` -- runtime marker for tooling.
+ *   - `__patterns` -- map of `name -> pattern string`, derived from
+ *     each entry. Strings pass through; functions are called with
+ *     sentinel placeholders matching their arity (`{arg0}`, `{arg1}`,
+ *     ...). Useful for generating documentation comments alongside
+ *     SQL triggers or for greppable cross-references.
+ *
+ * @example
+ * ```js
+ * // src/lib/topics.js
+ * import { defineTopics } from 'svelte-realtime/server';
+ *
+ * export const TOPICS = defineTopics({
+ *   audit:    (orgId)       => `audit:${orgId}`,
+ *   security: (orgId)       => `security:${orgId}`,
+ *   feed:     (orgId, kind) => `feed:${orgId}:${kind}`,
+ *   systemNotices: 'system:notices'
+ * });
+ *
+ * // Stream definition references the same source of truth:
+ * import { TOPICS } from '$lib/topics';
+ * export const auditFeed = live.stream(
+ *   (ctx, orgId) => TOPICS.audit(orgId),
+ *   loadAudit,
+ *   { ... }
+ * );
+ *
+ * // Documentation / SQL comment generation:
+ * TOPICS.__patterns
+ * // => { audit: 'audit:{arg0}', security: 'security:{arg0}',
+ * //      feed: 'feed:{arg0}:{arg1}', systemNotices: 'system:notices' }
+ * ```
+ *
+ * @template {Record<string, string | ((...args: any[]) => string)>} M
+ * @param {M} map
+ * @returns {M & { readonly __patterns: Record<keyof M, string>, readonly __definedTopics: true }}
+ */
+export function defineTopics(map) {
+	if (!map || typeof map !== 'object' || Array.isArray(map)) {
+		throw new Error('[svelte-realtime] defineTopics: requires a non-array object map');
+	}
+	/** @type {Record<string, string>} */
+	const patterns = {};
+	for (const name of Object.keys(map)) {
+		if (_RESERVED_TOPIC_NAMES.has(name)) {
+			throw new Error(`[svelte-realtime] defineTopics: '${name}' is a reserved name`);
+		}
+		const value = /** @type {any} */ (map)[name];
+		if (typeof value !== 'string' && typeof value !== 'function') {
+			throw new Error(`[svelte-realtime] defineTopics: '${name}' must be a string or function (got ${typeof value})`);
+		}
+		if (typeof value === 'string' && value.length === 0) {
+			throw new Error(`[svelte-realtime] defineTopics: '${name}' must be a non-empty string`);
+		}
+		patterns[name] = _deriveTopicPattern(value);
+	}
+	Object.defineProperty(map, '__patterns', { value: patterns, enumerable: false, writable: false, configurable: false });
+	Object.defineProperty(map, '__definedTopics', { value: true, enumerable: false, writable: false, configurable: false });
+	return /** @type {any} */ (map);
+}
+
+/**
  * Mark a function as a stream provider.
  * Topic can be a static string or a function of (ctx, ...args) => string for dynamic topics.
  * @param {string | Function} topic
