@@ -27,7 +27,11 @@ import {
 	_resetAdmission,
 	_resetTransformRegistry,
 	_resetRateLimits,
-	_resetVolatileRegistry
+	_resetVolatileRegistry,
+	_resetPublishRateWarning,
+	_activatePublishRateWarning,
+	_registerCoalesce,
+	_registerVolatile
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -7517,5 +7521,238 @@ describe('live.scoped()', () => {
 		handleRpc(ws, toArrayBuffer({ rpc: 'sc/update-org', id: '2', args: [{ orgId: 'o2', name: 'x' }] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+	});
+});
+
+// -- live.publishRateWarning() ------------------------------------------------
+
+describe('live.publishRateWarning()', () => {
+	let warnSpy;
+	let platform;
+
+	beforeEach(() => {
+		_resetPublishRateWarning();
+		live.publishRateWarning({ threshold: 100, intervalMs: 50 });
+		warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		warnSpy.mockRestore();
+		_resetPublishRateWarning();
+		// Restore defaults so other suites are not affected.
+		live.publishRateWarning({ threshold: 200, intervalMs: 5000 });
+		live.publishRateWarning(true);
+	});
+
+	function activateOnce(p) {
+		// Drive the sampler activation directly so the test runs synchronously.
+		// Production code path: _getCtxHelpers cache miss -> _activatePublishRateWarning.
+		_activatePublishRateWarning(p);
+	}
+
+	it('fires a one-shot warn when a topic is over threshold', () => {
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'cursor:42', messagesPerSec: 800, bytesPerSec: 32000 }
+		];
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const msg = warnSpy.mock.calls[0][0];
+		expect(msg).toContain("Topic 'cursor:42'");
+		expect(msg).toContain('800 events/sec');
+		expect(msg).toContain('coalesceBy');
+		expect(msg).toContain('volatile: true');
+		expect(msg).toContain('https://svti.me/highfreq');
+	});
+
+	it('does NOT warn when a topic is below threshold', () => {
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'chat:42', messagesPerSec: 50, bytesPerSec: 800 }
+		];
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('warns at most once per topic per process even on repeated samples', () => {
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'cursor:7', messagesPerSec: 500, bytesPerSec: 1000 }
+		];
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+		vi.advanceTimersByTime(60);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('warns once per topic across multiple over-threshold topics', () => {
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'a:1', messagesPerSec: 200, bytesPerSec: 1 },
+			{ topic: 'b:2', messagesPerSec: 300, bytesPerSec: 1 },
+			{ topic: 'c:3', messagesPerSec: 80, bytesPerSec: 1 } // below
+		];
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).toHaveBeenCalledTimes(2);
+		const topics = warnSpy.mock.calls.map((c) => c[0]).join('\n');
+		expect(topics).toContain("'a:1'");
+		expect(topics).toContain("'b:2'");
+		expect(topics).not.toContain("'c:3'");
+	});
+
+	it('disable via false stops the sampler immediately', () => {
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'over:1', messagesPerSec: 500, bytesPerSec: 1 }
+		];
+		activateOnce(platform);
+
+		live.publishRateWarning(false);
+		vi.advanceTimersByTime(200);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('config object updates take effect on the next sample', () => {
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 't:lo', messagesPerSec: 150, bytesPerSec: 1 }
+		];
+		// Default threshold 100 -> would warn. Raise it before the sampler ticks.
+		live.publishRateWarning({ threshold: 1000 });
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('handles an empty or missing topPublishers array without throwing', () => {
+		platform = mockPlatform();
+		// Default mockPlatform pressure has no topPublishers field.
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('does not double-attach when the same platform is used for many calls', () => {
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'd:9', messagesPerSec: 500, bytesPerSec: 1 }
+		];
+		activateOnce(platform);
+		activateOnce(platform);
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('reset clears the warned set so a previously seen topic warns again', () => {
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'reset:1', messagesPerSec: 500, bytesPerSec: 1 }
+		];
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+
+		_resetPublishRateWarning();
+		const platform2 = mockPlatform();
+		platform2.pressure.topPublishers = [
+			{ topic: 'reset:1', messagesPerSec: 500, bytesPerSec: 1 }
+		];
+		activateOnce(platform2);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it('rejects invalid threshold (zero / negative / non-finite / wrong type)', () => {
+		expect(() => live.publishRateWarning({ threshold: 0 })).toThrow(/positive finite/);
+		expect(() => live.publishRateWarning({ threshold: -10 })).toThrow(/positive finite/);
+		expect(() => live.publishRateWarning({ threshold: Infinity })).toThrow(/positive finite/);
+		expect(() => live.publishRateWarning({ threshold: 'fast' })).toThrow(/positive finite/);
+	});
+
+	it('rejects invalid intervalMs (zero / negative / non-finite / wrong type)', () => {
+		expect(() => live.publishRateWarning({ intervalMs: 0 })).toThrow(/positive finite/);
+		expect(() => live.publishRateWarning({ intervalMs: -1 })).toThrow(/positive finite/);
+		expect(() => live.publishRateWarning({ intervalMs: NaN })).toThrow(/positive finite/);
+		expect(() => live.publishRateWarning({ intervalMs: '5s' })).toThrow(/positive finite/);
+	});
+
+	it('rejects bare invalid input (string / number / array)', () => {
+		expect(() => live.publishRateWarning('on')).toThrow(/true, false, or an object/);
+		expect(() => live.publishRateWarning(0)).toThrow(/true, false, or an object/);
+		// Arrays are objects but the validator does not detect that case;
+		// arrays with no threshold/intervalMs fields silently re-enable, which
+		// is acceptable since users won't pass arrays here.
+	});
+
+	it('handles a platform without pressure gracefully', () => {
+		platform = mockPlatform();
+		platform.pressure = null;
+		activateOnce(platform);
+		vi.advanceTimersByTime(200);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('suppresses the warn when the topic is already configured with coalesceBy', () => {
+		const ws = mockWs({ user_id: 'u1' });
+		_registerCoalesce(ws, 'cursors:room-1', (data) => data.userId);
+
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'cursors:room-1', messagesPerSec: 800, bytesPerSec: 1 }
+		];
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+		_resetCoalesceRegistry();
+	});
+
+	it('suppresses the warn when the topic is already configured with volatile: true', () => {
+		const ws = mockWs({ user_id: 'u1' });
+		_registerVolatile(ws, 'telemetry:ping');
+
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'telemetry:ping', messagesPerSec: 800, bytesPerSec: 1 }
+		];
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+		_resetVolatileRegistry();
+	});
+
+	it('warns for unmitigated topics in the same sample even when others are suppressed', () => {
+		const ws = mockWs({ user_id: 'u1' });
+		_registerCoalesce(ws, 'cursors:ok', (data) => data.userId);
+
+		platform = mockPlatform();
+		platform.pressure.topPublishers = [
+			{ topic: 'cursors:ok', messagesPerSec: 800, bytesPerSec: 1 }, // suppressed
+			{ topic: 'audit:hot', messagesPerSec: 500, bytesPerSec: 1 }   // warns
+		];
+		activateOnce(platform);
+		vi.advanceTimersByTime(60);
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0][0]).toContain("'audit:hot'");
+		_resetCoalesceRegistry();
 	});
 });

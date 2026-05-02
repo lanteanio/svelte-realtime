@@ -136,7 +136,8 @@ function _copyStreamMeta(target, source) {
  */
 const _topicCoalesce = new Map();
 
-function _registerCoalesce(ws, topic, coalesceBy) {
+/** @internal Exported only so tests can drive the coalesce registry without a full subscribe round-trip. */
+export function _registerCoalesce(ws, topic, coalesceBy) {
 	let entry = _topicCoalesce.get(topic);
 	if (!entry) {
 		entry = { coalesceBy, ws: new Set() };
@@ -220,7 +221,8 @@ const _topicVolatile = new Map();
 /** Per-ws set of topics where this ws has contributed a volatile refcount. */
 const _wsVolatileContrib = new WeakMap();
 
-function _registerVolatile(ws, topic) {
+/** @internal Exported only so tests can drive the volatile registry without a full subscribe round-trip. */
+export function _registerVolatile(ws, topic) {
 	let entry = _topicVolatile.get(topic);
 	if (!entry) {
 		entry = { refcount: 0 };
@@ -267,6 +269,89 @@ function _applyInitTransform(transform, data) {
 /** @type {WeakMap<any, { publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function, shed: Function }>} */
 const _ctxHelpersCache = new WeakMap();
 
+/** @type {boolean} */
+const _IS_DEV = typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production';
+
+/**
+ * Per-process state for the dev-mode publish-rate warning. Sampler is lazy:
+ * activated on the first ctx-helpers cache miss per platform, runs at the
+ * configured interval, reads `platform.pressure.topPublishers` (already
+ * computed by the adapter sampler), and emits one warn per topic per
+ * process when a topic is over threshold. Production has zero cost --
+ * `_IS_DEV` is constant-folded so the activation branch is dead code.
+ */
+const _publishRateConfig = {
+	enabled: true,
+	threshold: 200,
+	intervalMs: 5000
+};
+/** @type {Set<string>} */
+const _publishRateWarned = new Set();
+/** @type {WeakMap<any, ReturnType<typeof setInterval>>} */
+const _publishRateSamplers = new WeakMap();
+/** @type {Set<any>} Tracks platforms with active samplers so reset can clear them. */
+const _publishRateActivePlatforms = new Set();
+
+/**
+ * Activate the dev-mode publish-rate warning sampler for one platform.
+ * Idempotent per platform identity. Safe to call from any code path that
+ * sees a platform reference for the first time. Production has zero cost
+ * (returns immediately on the `_IS_DEV` gate). Exported with an
+ * underscore prefix so tests can drive activation deterministically
+ * without going through the async RPC path.
+ *
+ * @param {any} platform
+ */
+export function _activatePublishRateWarning(platform) {
+	if (!_IS_DEV) return;
+	if (!_publishRateConfig.enabled) return;
+	if (_publishRateSamplers.has(platform)) return;
+	if (typeof platform?.pressure !== 'object' || platform.pressure === null) return;
+	const sampler = setInterval(() => {
+		const top = platform.pressure?.topPublishers;
+		if (!Array.isArray(top)) return;
+		for (const entry of top) {
+			if (!entry || typeof entry.topic !== 'string') continue;
+			if (entry.messagesPerSec < _publishRateConfig.threshold) continue;
+			if (_publishRateWarned.has(entry.topic)) continue;
+			_publishRateWarned.add(entry.topic);
+			// Suppress the hint when the user has already chosen one of the
+			// two natural mitigations for this topic. Both registries are
+			// populated on subscribe; if either has the topic, the user knows
+			// it's high-frequency and picked their tool.
+			if (_topicCoalesce.has(entry.topic) || _topicVolatile.has(entry.topic)) continue;
+			console.warn(
+				`[svelte-realtime] Topic '${entry.topic}' is publishing ` +
+				`${Math.round(entry.messagesPerSec)} events/sec.\n` +
+				`  For high-frequency streams, consider one of:\n` +
+				`    live.stream(topic, loader, { coalesceBy: (data) => data.userId })  // latest-value-wins, queued per subscriber\n` +
+				`    live.stream(topic, loader, { volatile: true })                     // drop on backpressure, best-effort\n` +
+				`  See: https://svti.me/highfreq`
+			);
+		}
+	}, _publishRateConfig.intervalMs);
+	if (typeof sampler.unref === 'function') sampler.unref();
+	_publishRateSamplers.set(platform, sampler);
+	_publishRateActivePlatforms.add(platform);
+}
+
+/**
+ * Reset the dev-mode publish-rate warning state. Tests only. Clears the
+ * one-shot warned set, stops every active sampler, and removes the
+ * activation marker so the next ctx-helpers cache miss for a previously
+ * seen platform re-attaches a sampler. Does NOT reset config back to
+ * defaults -- tests that mutate config should restore it themselves.
+ */
+export function _resetPublishRateWarning() {
+	_publishRateWarned.clear();
+	for (const platform of _publishRateActivePlatforms) {
+		const sampler = _publishRateSamplers.get(platform);
+		if (sampler) clearInterval(sampler);
+		_publishRateSamplers.delete(platform);
+	}
+	_publishRateActivePlatforms.clear();
+}
+
 /**
  * Get cached ctx helper methods for a platform.
  * Avoids creating new closures on every RPC call.
@@ -276,6 +361,7 @@ const _ctxHelpersCache = new WeakMap();
 function _getCtxHelpers(platform) {
 	let helpers = _ctxHelpersCache.get(platform);
 	if (!helpers) {
+		if (_IS_DEV) _activatePublishRateWarning(platform);
 		// Per-platform microtask-scoped batch buffer. Every ctx.publish() that
 		// can route through platform.publishBatched (no per-topic coalesce or
 		// sendCoalesced fanout) is queued here; the buffer drains in one
@@ -1001,6 +1087,65 @@ export function _resetRateLimits() {
 	_rateLimitConfig = null;
 	_rateLimits.clear();
 }
+
+/**
+ * Configure the dev-mode publish-rate warning. Pass `false` to disable
+ * entirely; pass `{ threshold, intervalMs }` to override the defaults
+ * (200 events/sec, sampled every 5000 ms). Pass `true` (or omit args
+ * entirely; default is on) to re-enable with current settings.
+ *
+ * The warning fires once per topic per process when a topic's measured
+ * publish rate (read from `platform.pressure.topPublishers`) crosses the
+ * threshold within a sample window. Hard-gated to development builds --
+ * production has zero cost regardless of configuration.
+ *
+ * @example
+ * // Disable entirely (e.g. CLI tooling that uses live() without a UI):
+ * live.publishRateWarning(false);
+ *
+ * @example
+ * // Lower the bar for noisier insight:
+ * live.publishRateWarning({ threshold: 50 });
+ *
+ * @example
+ * // Sample more frequently (5s default is conservative):
+ * live.publishRateWarning({ threshold: 200, intervalMs: 1000 });
+ *
+ * @param {false | true | { threshold?: number, intervalMs?: number }} [config]
+ */
+live.publishRateWarning = function publishRateWarning(config) {
+	if (config === false) {
+		_publishRateConfig.enabled = false;
+		// Stop active samplers so disable takes effect immediately.
+		for (const platform of _publishRateActivePlatforms) {
+			const sampler = _publishRateSamplers.get(platform);
+			if (sampler) clearInterval(sampler);
+			_publishRateSamplers.delete(platform);
+		}
+		_publishRateActivePlatforms.clear();
+		return;
+	}
+	if (config === undefined || config === true) {
+		_publishRateConfig.enabled = true;
+		return;
+	}
+	if (typeof config !== 'object' || config === null) {
+		throw new Error('[svelte-realtime] live.publishRateWarning: config must be true, false, or an object');
+	}
+	if (config.threshold !== undefined) {
+		if (typeof config.threshold !== 'number' || config.threshold <= 0 || !Number.isFinite(config.threshold)) {
+			throw new Error('[svelte-realtime] live.publishRateWarning: threshold must be a positive finite number (events/sec)');
+		}
+		_publishRateConfig.threshold = config.threshold;
+	}
+	if (config.intervalMs !== undefined) {
+		if (typeof config.intervalMs !== 'number' || config.intervalMs <= 0 || !Number.isFinite(config.intervalMs)) {
+			throw new Error('[svelte-realtime] live.publishRateWarning: intervalMs must be a positive finite number (ms)');
+		}
+		_publishRateConfig.intervalMs = config.intervalMs;
+	}
+	_publishRateConfig.enabled = true;
+};
 
 /** @type {{ acquire: (key: string, ttlSec: number) => Promise<any> } | null} */
 let _defaultIdempotencyStore = null;

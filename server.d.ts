@@ -617,6 +617,42 @@ export namespace live {
 	} | null): void;
 
 	/**
+	 * Configure the dev-mode publish-rate warning. Off in production builds
+	 * regardless of configuration; on in development with sensible defaults.
+	 *
+	 * When enabled, every connected platform is sampled at `intervalMs`
+	 * (default 5000 ms). The first time a topic's measured publish rate
+	 * exceeds `threshold` (default 200 events/sec), a one-shot
+	 * `console.warn` fires pointing at the `coalesceBy` documentation. One
+	 * warning per topic per process. The sampler reads
+	 * `platform.pressure.topPublishers` directly -- the underlying counters
+	 * are already maintained by the adapter, so the cost in development is
+	 * a single `setInterval` per platform with no additional per-publish
+	 * overhead.
+	 *
+	 * Pass `false` to disable entirely (useful for noisy dev environments
+	 * or for CLI tools that mount `live()` without a UI). Pass `true` (or
+	 * call without arguments) to re-enable. Pass an object to override
+	 * threshold or interval; either field can be omitted to keep its
+	 * current value.
+	 *
+	 * @example
+	 * ```js
+	 * // Quiet the warning for a CLI script that doesn't need it
+	 * live.publishRateWarning(false);
+	 *
+	 * // Lower the bar for a noisier environment
+	 * live.publishRateWarning({ threshold: 50 });
+	 *
+	 * // Sample more frequently
+	 * live.publishRateWarning({ threshold: 200, intervalMs: 1000 });
+	 * ```
+	 */
+	function publishRateWarning(
+		config?: false | true | { threshold?: number; intervalMs?: number }
+	): void;
+
+	/**
 	 * Three-state idempotency store contract. Compatible with `createIdempotencyStore`
 	 * from `svelte-adapter-uws-extensions` (Redis + Postgres backends).
 	 */

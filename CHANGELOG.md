@@ -9,6 +9,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dev-mode publish-rate warning.** When a topic crosses 200 events/sec (default, configurable), a one-shot `console.warn` fires pointing at the two natural mitigations:
+
+  ```
+  [svelte-realtime] Topic 'cursor:42' is publishing 800 events/sec.
+    For high-frequency streams, consider one of:
+      live.stream(topic, loader, { coalesceBy: (data) => data.userId })  // latest-value-wins, queued per subscriber
+      live.stream(topic, loader, { volatile: true })                     // drop on backpressure, best-effort
+    See: https://svti.me/highfreq
+  ```
+
+  The two strategies have different intents: `coalesceBy` keeps the latest value per key and replaces the pending value on each new publish (best for cursors, prices, presence -- you want the latest value to land); `volatile: true` drops on backpressure with no buffering (best for typing indicators, telemetry pings -- a missed frame is gone for good). Pick the one that matches the topic's intent.
+
+  Topics already configured with EITHER `coalesceBy` or `volatile: true` are silently skipped -- the user has already chosen their tool, no need to nag. The warning surfaces a real optimization apps miss because they don't know it exists. It runs only in development builds (hard-gated to `NODE_ENV !== 'production'`); production has zero cost. One warning per topic per process so the output never gets noisy. The sampler reads `platform.pressure.topPublishers` which the adapter is already maintaining, so the only added cost in development is one `setInterval` per platform with no per-publish overhead.
+
+  Configurable via `live.publishRateWarning(...)`:
+
+  ```js
+  // hooks.ws.js or a startup module
+
+  // Disable entirely (CLI tooling, noisy environments)
+  live.publishRateWarning(false);
+
+  // Lower the bar for noisier insight
+  live.publishRateWarning({ threshold: 50 });
+
+  // Sample more frequently than the 5s default
+  live.publishRateWarning({ threshold: 200, intervalMs: 1000 });
+  ```
+
+  Validation runs at registration: invalid `threshold` / `intervalMs` (non-positive, non-finite, wrong type) throws immediately so misconfiguration fails fast.
+
 - **`failure` store on the client for typed reconnect-failure UI.** A new top-level export from `svelte-realtime/client` carries the cause of the most recent non-open connection-status transition, so apps can render targeted UI per failure class instead of decoding close codes themselves.
 
   ```svelte
