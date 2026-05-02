@@ -1384,6 +1384,85 @@ function _createStream(path, options, dynamicArgs) {
 		},
 
 		/**
+		 * Apply an optimistic update + run an async operation with auto-rollback.
+		 * The optimistic change applies synchronously; the asyncOp runs after.
+		 * If the asyncOp resolves, returns its result and leaves the store as-is
+		 * (the server's confirming event will reconcile via the merge strategy).
+		 * If the asyncOp rejects (or throws), the optimistic change is rolled
+		 * back and the rejection propagates to the caller.
+		 *
+		 * Two patterns for the optimistic change:
+		 *
+		 * 1. Event-based (uses the stream's merge strategy):
+		 *    `{ event: 'created', data: { id: tempId(), title: 'X' } }`
+		 *
+		 * 2. Free-form mutator (bypasses merge strategy; full control):
+		 *    `(current) => current.filter(t => t.id !== 'foo')`
+		 *    The mutator receives a copy of the current value. It can mutate
+		 *    and return undefined, OR return a new value. Both styles work.
+		 *
+		 * Replay-safety: this uses snapshot/restore. Concurrent optimistic
+		 * mutations or interleaved server events on the same stream can lose
+		 * state on rollback. For the typical pattern (client-generated UUIDs
+		 * with crud merge), the server's confirming event REPLACES the
+		 * optimistic placeholder via key match, so no conflict arises in
+		 * practice -- but apps mixing free-form mutate with concurrent server
+		 * activity should be aware.
+		 *
+		 * Snapshot is shallow (slice for arrays, object spread otherwise).
+		 * Top-level shape changes (push, pop, filter, splice) are rolled
+		 * back; in-place mutations of individual items
+		 * (e.g. `draft[0].name = 'x'`) are NOT -- the snapshot and draft
+		 * share item references. To mutate an item field, replace the whole
+		 * item: `draft[i] = { ...draft[i], name: 'x' }`.
+		 *
+		 * @template T
+		 * @param {() => Promise<T> | T} asyncOp Function returning a promise (or value).
+		 * @param {{ event: string, data: any } | ((current: any) => any)} optimisticChange
+		 * @returns {Promise<T>}
+		 */
+		async mutate(asyncOp, optimisticChange) {
+			if (typeof asyncOp !== 'function') {
+				throw new Error('[svelte-realtime] mutate(asyncOp, optimisticChange): asyncOp must be a function');
+			}
+			if (optimisticChange == null) {
+				throw new Error('[svelte-realtime] mutate(asyncOp, optimisticChange): optimisticChange is required (use { event, data } or (current) => newValue)');
+			}
+			const snapshot = Array.isArray(currentValue) ? currentValue.slice() : currentValue;
+			let optimisticKey = null;
+
+			if (typeof optimisticChange === 'function') {
+				const draft = Array.isArray(currentValue)
+					? currentValue.slice()
+					: (currentValue && typeof currentValue === 'object' ? { ...currentValue } : currentValue);
+				const result = optimisticChange(draft);
+				const next = result === undefined ? draft : result;
+				currentValue = next;
+				_rebuildIndex();
+				store.set(currentValue);
+			} else if (typeof optimisticChange === 'object' && typeof optimisticChange.event === 'string') {
+				const { event, data } = optimisticChange;
+				if (merge === 'crud' && data && data[key] !== undefined) {
+					_optimisticKeys.add(data[key]);
+					optimisticKey = data[key];
+				}
+				applyEvent({ event, data });
+			} else {
+				throw new Error('[svelte-realtime] mutate: optimisticChange must be { event, data } or a function (current) => newValue');
+			}
+
+			try {
+				return await asyncOp();
+			} catch (err) {
+				if (optimisticKey !== null) _optimisticKeys.delete(optimisticKey);
+				currentValue = snapshot;
+				_rebuildIndex();
+				store.set(currentValue);
+				throw err;
+			}
+		},
+
+		/**
 		 * Load the next page of data (cursor-based pagination).
 		 * The server must return `{ data, hasMore, cursor }` for this to work.
 		 *

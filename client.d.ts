@@ -125,6 +125,61 @@ export interface StreamStore<T = any> extends Readable<T> {
 	readonly status: Readable<'loading' | 'connected' | 'reconnecting' | 'error'>;
 	/** Apply an instant UI update. Returns a rollback function. */
 	optimistic(event: string, data: any): () => void;
+	/**
+	 * Apply an optimistic update + run an async operation with auto-rollback.
+	 * The optimistic change applies synchronously; the asyncOp runs after.
+	 * On success, returns the asyncOp's result and leaves the store as-is
+	 * (the server's confirming event will reconcile via the merge strategy).
+	 * On failure, the optimistic change is rolled back and the rejection
+	 * propagates to the caller.
+	 *
+	 * Two patterns for the optimistic change:
+	 *
+	 * 1. Event-based (uses the stream's merge strategy):
+	 *    `{ event: 'created', data: { id: tempId(), title: 'X' } }`
+	 *
+	 * 2. Free-form mutator (bypasses merge strategy; full control):
+	 *    `(current) => current.filter(t => t.id !== 'foo')`
+	 *    The mutator receives a copy of the current value. It can mutate
+	 *    and return undefined, OR return a new value.
+	 *
+	 * @example
+	 * ```js
+	 * // Event-based: server's confirming `created` event replaces the placeholder.
+	 * const todo = await todos.mutate(
+	 *   () => createTodo({ title: 'Buy milk' }),
+	 *   { event: 'created', data: { id: tempId(), title: 'Buy milk' } }
+	 * );
+	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * // Free-form: arbitrary local change with auto-rollback.
+	 * await todos.mutate(
+	 *   () => removeTodo('foo'),
+	 *   (current) => current.filter(t => t.id !== 'foo')
+	 * );
+	 * ```
+	 *
+	 * Replay-safety: snapshot/restore. Concurrent optimistic mutations or
+	 * interleaved server events on the same stream can lose state on
+	 * rollback. The typical client-generated-UUID pattern with `crud` merge
+	 * works correctly because the server event REPLACES the placeholder via
+	 * key match, so no rollback conflict arises in practice.
+	 *
+	 * Snapshot is shallow (slice for arrays). Top-level shape changes
+	 * (push, pop, filter, splice) are rolled back cleanly; in-place
+	 * mutations of individual items (e.g. `draft[0].name = 'x'`) are NOT,
+	 * because the snapshot array and the draft array share item references.
+	 * To mutate an item field, replace the whole item:
+	 * `draft[i] = { ...draft[i], name: 'x' }`.
+	 */
+	mutate<R>(
+		asyncOp: () => Promise<R> | R,
+		optimisticChange:
+			| { event: string; data: any }
+			| ((current: T) => T | void)
+	): Promise<R>;
 	/** Pre-populate with SSR data to avoid loading spinners. */
 	hydrate(initialData: T): StreamStore<T>;
 	/** Load the next page of data (cursor-based pagination). */

@@ -483,6 +483,171 @@ describe('__stream() optimistic', () => {
 	});
 });
 
+// -- __stream() mutate (optimistic + auto-rollback) ---------------------------
+
+describe('__stream() mutate', () => {
+	async function setupCrudStream(path, topic, initial = []) {
+		const store = __stream(path, { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: initial, topic, merge: 'crud', key: 'id' });
+		return { store, values, unsub, topic };
+	}
+
+	it('event-based: returns asyncOp result on success and leaves store at optimistic state', async () => {
+		const ctx = await setupCrudStream('mut/items', 'mut-items', [{ id: 1, name: 'A' }]);
+
+		const result = await ctx.store.mutate(
+			() => Promise.resolve({ id: 't1', name: 'New', serverField: true }),
+			{ event: 'created', data: { id: 't1', name: 'New' } }
+		);
+		expect(result).toEqual({ id: 't1', name: 'New', serverField: true });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, name: 'A' },
+			{ id: 't1', name: 'New' }
+		]);
+		ctx.unsub();
+	});
+
+	it('event-based: rolls back and throws when asyncOp rejects', async () => {
+		const ctx = await setupCrudStream('mut/fail', 'mut-fail', [{ id: 1, name: 'A' }]);
+
+		await expect(
+			ctx.store.mutate(
+				() => Promise.reject(new Error('rpc failed')),
+				{ event: 'created', data: { id: 't1', name: 'New' } }
+			)
+		).rejects.toThrow('rpc failed');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A' }]);
+		ctx.unsub();
+	});
+
+	it('event-based: server event with same key reconciles after asyncOp succeeds', async () => {
+		const ctx = await setupCrudStream('mut/recon', 'mut-recon', []);
+
+		const opPromise = ctx.store.mutate(
+			() => new Promise((r) => setTimeout(() => r({ id: 't1', name: 'Real' }), 10)),
+			{ event: 'created', data: { id: 't1', name: 'Pending' } }
+		);
+		// Optimistic value present immediately
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Pending' }]);
+
+		// Server publishes the confirmed version with the same key
+		simulateTopicMessage('mut-recon', { event: 'created', data: { id: 't1', name: 'Confirmed' } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Confirmed' }]);
+
+		await opPromise;
+		// Store still reflects the server's confirmed version (asyncOp success leaves it alone)
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Confirmed' }]);
+		ctx.unsub();
+	});
+
+	it('free-form mutator (returns new value) applies and rolls back on failure', async () => {
+		const ctx = await setupCrudStream('mut/free', 'mut-free', [{ id: 1, name: 'A' }, { id: 2, name: 'B' }]);
+
+		await expect(
+			ctx.store.mutate(
+				() => Promise.reject(new Error('boom')),
+				(current) => current.filter((t) => t.id !== 2)
+			)
+		).rejects.toThrow('boom');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A' }, { id: 2, name: 'B' }]);
+		ctx.unsub();
+	});
+
+	it('free-form mutator (in-place mutation, returns void) is supported', async () => {
+		const ctx = await setupCrudStream('mut/inplace', 'mut-inplace', [{ id: 1, name: 'A' }]);
+
+		const result = await ctx.store.mutate(
+			() => Promise.resolve('ok'),
+			(draft) => { draft.push({ id: 2, name: 'B' }); }
+		);
+		expect(result).toBe('ok');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A' }, { id: 2, name: 'B' }]);
+		ctx.unsub();
+	});
+
+	it('free-form mutator: in-place push is rolled back on failure', async () => {
+		// NOTE: snapshot is shallow (slice for arrays). Top-level shape changes
+		// (push, pop, filter, splice on the array) are rolled back; in-place
+		// mutations of individual items (e.g. draft[0].name = 'x') ARE NOT,
+		// because the snapshot and the items share references. Documented in
+		// the JSDoc; apps mutating item fields in place should return a new
+		// item object instead.
+		const ctx = await setupCrudStream('mut/inplace-fail', 'mut-inplace-fail', [{ id: 1 }, { id: 2 }]);
+
+		await expect(
+			ctx.store.mutate(
+				() => Promise.reject(new Error('nope')),
+				(draft) => { draft.push({ id: 3 }); }
+			)
+		).rejects.toThrow('nope');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+		ctx.unsub();
+	});
+
+	it('asyncOp returning a sync value works (Promise.resolve wrap)', async () => {
+		const ctx = await setupCrudStream('mut/sync', 'mut-sync');
+
+		const result = await ctx.store.mutate(
+			() => 42,
+			{ event: 'created', data: { id: 't1' } }
+		);
+		expect(result).toBe(42);
+		ctx.unsub();
+	});
+
+	it('asyncOp throwing synchronously rolls back and re-throws', async () => {
+		const ctx = await setupCrudStream('mut/throw', 'mut-throw', [{ id: 1 }]);
+
+		await expect(
+			ctx.store.mutate(
+				() => { throw new Error('sync throw'); },
+				{ event: 'created', data: { id: 't1' } }
+			)
+		).rejects.toThrow('sync throw');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }]);
+		ctx.unsub();
+	});
+
+	it('rejects missing asyncOp', async () => {
+		const ctx = await setupCrudStream('mut/no-op', 'mut-no-op');
+		await expect(ctx.store.mutate(null, { event: 'created', data: {} })).rejects.toThrow(/asyncOp must be a function/);
+		ctx.unsub();
+	});
+
+	it('rejects missing optimisticChange', async () => {
+		const ctx = await setupCrudStream('mut/no-change', 'mut-no-change');
+		await expect(ctx.store.mutate(() => 'x')).rejects.toThrow(/optimisticChange is required/);
+		ctx.unsub();
+	});
+
+	it('rejects malformed optimisticChange', async () => {
+		const ctx = await setupCrudStream('mut/bad-shape', 'mut-bad-shape');
+		await expect(ctx.store.mutate(() => 'x', { wrong: 'shape' })).rejects.toThrow(/{ event, data } or a function/);
+		ctx.unsub();
+	});
+
+	it('works on set merge with free-form mutator', async () => {
+		const store = __stream('mut/set', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: { count: 10 }, topic: 'mut-set-topic', merge: 'set' });
+
+		const result = await store.mutate(
+			() => Promise.resolve('ok'),
+			(current) => ({ ...current, count: 11 })
+		);
+		expect(result).toBe('ok');
+		expect(values[values.length - 1]).toEqual({ count: 11 });
+		unsub();
+	});
+});
+
 // -- __stream() dynamic topics ------------------------------------------------
 
 describe('__stream() dynamic topics', () => {

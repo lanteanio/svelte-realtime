@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`store.mutate(asyncOp, optimisticChange)` for optimistic mutations with auto-rollback.** Wraps the existing per-stream `optimistic()` pattern with the missing async pairing: applies a local change synchronously, awaits the async operation, leaves the store as-is on success (server's confirming event reconciles), rolls back on failure. The asyncOp's result becomes the method's return value.
+
+  ```js
+  // Event-based: server's confirming `created` event replaces the placeholder.
+  const todo = await todos.mutate(
+    () => createTodo({ title: 'Buy milk' }),
+    { event: 'created', data: { id: tempId(), title: 'Buy milk' } }
+  );
+
+  // Free-form mutator: bypass the merge strategy for arbitrary local changes.
+  await todos.mutate(
+    () => removeTodo('foo'),
+    (current) => current.filter(t => t.id !== 'foo')
+  );
+  ```
+
+  Two patterns for the optimistic change argument:
+
+  - **`{ event, data }`** uses the stream's merge strategy (`crud` / `set` / `latest` / `presence` / `cursor`) -- same path as the existing `store.optimistic(event, data)` returning a manual rollback. The typical client-generated-UUID pattern with crud merge composes naturally: the server's confirming `created` event replaces the placeholder via key match, leaving the store with the real server-assigned record.
+  - **`(current) => newValue`** runs a free-form mutator on a copy of the current value. Return the new value, OR mutate in place and return undefined (both styles work). Useful for changes that don't fit a single merge event (filters, multi-item rearrangements, complex updates).
+
+  The existing `store.optimistic(event, data)` returning a manual rollback is unchanged. `mutate()` is a higher-level wrapper for the common "RPC + matching local update + auto-rollback on failure" pattern.
+
+  Replay-safety caveat: snapshot/restore. Concurrent optimistic mutations or interleaved server events on the same stream can lose state on rollback. Snapshot is shallow (slice for arrays); top-level shape changes (push, pop, filter, splice) are rolled back cleanly, in-place mutations of individual item fields are NOT (the snapshot and draft share item references). Replace whole items rather than mutating fields: `draft[i] = { ...draft[i], name: 'x' }`.
+
 - **`defineTopics(map)` helper for centralizing topic patterns.** A small registry helper so stream definitions and any out-of-band consumers (SQL triggers, Postgres NOTIFY shapes, doc generators, devtools panels) reference one source of truth instead of scattering string literals across the codebase.
 
   ```js
