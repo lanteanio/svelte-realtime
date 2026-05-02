@@ -6806,8 +6806,8 @@ describe('live.access.org()', () => {
 		expect(pred({ user: { organization_id: 'o1' } })).toBe(false);
 	});
 
-	it('honors custom userField', () => {
-		const p = live.access.org({ userField: 'tenant_id' });
+	it('honors custom orgField', () => {
+		const p = live.access.org({ orgField: 'tenant_id' });
 		expect(p({ user: { tenant_id: 't1' } }, 't1')).toBe(true);
 		expect(p({ user: { tenant_id: 't1' } }, 't2')).toBe(false);
 	});

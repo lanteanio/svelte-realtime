@@ -635,18 +635,18 @@ live.access = {
 
 	/**
 	 * Org-scoped access: an extracted value (default arg 0) must equal
-	 * `ctx.user.organization_id` (default field). Returns false when
-	 * `ctx.user` is null. Use to close authorization-bypass holes
+	 * `ctx.user[orgField]` (default `'organization_id'`). Returns false
+	 * when `ctx.user` is null. Use to close authorization-bypass holes
 	 * around per-org streams and RPCs.
 	 *
-	 * @param {{ from?: (ctx: any, ...args: any[]) => any, userField?: string }} [opts]
+	 * @param {{ from?: (ctx: any, ...args: any[]) => any, orgField?: string }} [opts]
 	 * @returns {(ctx: any, ...args: any[]) => boolean}
 	 */
 	org(opts) {
-		const userField = (opts && opts.userField) || 'organization_id';
+		const orgField = (opts && opts.orgField) || 'organization_id';
 		const from = (opts && opts.from) || ((_ctx, ...args) => args[0]);
 		return (ctx, ...args) => {
-			const expected = ctx && ctx.user && ctx.user[userField];
+			const expected = ctx && ctx.user && ctx.user[orgField];
 			if (expected == null) return false;
 			const actual = from(ctx, ...args);
 			return actual != null && actual === expected;
@@ -655,11 +655,11 @@ live.access = {
 
 	/**
 	 * User-scoped access: an extracted value (default arg 0) must equal
-	 * `ctx.user.user_id` (default field, matching `[table]_id` convention).
-	 * Returns false when `ctx.user` is null. Use for streams/RPCs that
-	 * MUST belong to the calling user (e.g. private inbox); set `from`
-	 * for handlers where the relevant id lives in a non-default
-	 * position.
+	 * `ctx.user[userField]` (default `'user_id'`, matching `[table]_id`
+	 * convention). Returns false when `ctx.user` is null. Use for
+	 * streams/RPCs that MUST belong to the calling user (e.g. private
+	 * inbox); set `from` for handlers where the relevant id lives in
+	 * a non-default position.
 	 *
 	 * @param {{ from?: (ctx: any, ...args: any[]) => any, userField?: string }} [opts]
 	 * @returns {(ctx: any, ...args: any[]) => boolean}

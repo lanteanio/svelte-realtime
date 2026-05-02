@@ -903,8 +903,8 @@ export namespace live {
 		org(opts?: {
 			/** Extract the value to compare against. Default: arg 0. */
 			from?: (ctx: LiveContext<any>, ...args: any[]) => any;
-			/** Field on `ctx.user` to compare to. Default: `'organization_id'`. */
-			userField?: string;
+			/** Field on `ctx.user` that holds the org id. Default: `'organization_id'`. */
+			orgField?: string;
 		}): (ctx: LiveContext<any>, ...args: any[]) => boolean;
 		/**
 		 * User-scoped access: an extracted value (default arg 0) must equal
