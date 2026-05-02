@@ -419,3 +419,51 @@ export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AU
  * ```
  */
 export const failure: Readable<Failure | null>;
+
+/**
+ * Reactive store that emits `true` when every active stream has
+ * finished loading (or errored) and `false` while at least one is
+ * fetching or recovering. Initial value is `true` (no streams yet).
+ *
+ * Useful for rendering a single page-level loading state instead of
+ * per-stream spinners, and for detecting "all streams have caught up
+ * after a reconnect" -- watch for a `false -> true` transition while
+ * the adapter's connection status is `'open'`.
+ *
+ * Streams contribute to the in-flight count from their first
+ * subscriber until they reach `'connected'` or `'error'`. A stream
+ * with no consumers does not count.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { quiescent } from 'svelte-realtime/client';
+ *   import { auditFeed, presence, reactions } from '$live/dashboard';
+ *   const a = auditFeed.subscribe(/ * ... * /);
+ * </script>
+ *
+ * {#if !$quiescent}
+ *   <Spinner />
+ * {/if}
+ * <Dashboard />
+ * ```
+ *
+ * @example
+ * ```js
+ * // Detect "we just caught up after a reconnect"
+ * import { quiescent } from 'svelte-realtime/client';
+ * import { status } from 'svelte-adapter-uws/client';
+ *
+ * let prev = true;
+ * let sawDisconnect = false;
+ * status.subscribe((s) => { if (s !== 'open') sawDisconnect = true; });
+ * quiescent.subscribe((q) => {
+ *   if (q && !prev && sawDisconnect) {
+ *     sawDisconnect = false;
+ *     console.log('reconnected and all streams caught up');
+ *   }
+ *   prev = q;
+ * });
+ * ```
+ */
+export const quiescent: Readable<boolean>;

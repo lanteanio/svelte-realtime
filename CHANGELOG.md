@@ -17,6 +17,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`quiescent` store on the client for "all streams settled" detection.** A new top-level Readable from `svelte-realtime/client` emits `true` when every active stream has finished loading (or errored) and `false` while at least one is fetching or recovering. Drop a single page-level loading state at the moment all streams settle, instead of flickering one spinner per stream:
+
+  ```svelte
+  <script>
+    import { quiescent } from 'svelte-realtime/client';
+    import { auditFeed, presence, reactions } from '$live/dashboard';
+    const a = auditFeed.subscribe(/* ... */);
+    const p = presence.subscribe(/* ... */);
+    const r = reactions.subscribe(/* ... */);
+  </script>
+
+  {#if !$quiescent}
+    <Spinner />
+  {:else}
+    <Dashboard />
+  {/if}
+  ```
+
+  The same signal also detects "all streams have caught up after a reconnect" -- watch for a `false -> true` transition while the adapter's connection status is `'open'`. Pair with the `failure` store and the adapter's `status` store to render a complete connection state per page.
+
+  Streams contribute to the in-flight count from their first subscriber until they reach `'connected'` or `'error'`. A stream defined but never subscribed does not count. Initial value is `true` (no streams yet).
+
 - **`live.lock(keyOrConfig, fn)` for per-key serialization.** Wraps an RPC handler so concurrent calls that resolve to the same lock key run one at a time in FIFO order; calls on different keys run in parallel. Same composable shape as `live.validated` / `live.idempotent` / `live.rateLimit`.
 
   ```js

@@ -87,6 +87,52 @@ let denialsListenerAttached = false;
  */
 const _streamErrorByTopic = new Map();
 
+/**
+ * Quiescence tracking: count of streams currently in `'loading'` or
+ * `'reconnecting'` state. The `quiescent` store emits `true` when this
+ * counter is zero (no stream is fetching or recovering), and `false`
+ * otherwise. A multi-stream page can drop a single loading spinner at
+ * the moment all streams have settled, instead of flickering one
+ * spinner per stream.
+ *
+ * Streams self-register in their first-subscribe path (when
+ * `fetchAndSubscribe` runs) and self-deregister on cleanup or on
+ * settling (`'connected'` / `'error'`).
+ */
+let _inFlightCount = 0;
+const _quiescentStore = writable(true);
+
+function _addInFlight() {
+	if (_inFlightCount++ === 0) _quiescentStore.set(false);
+}
+function _removeInFlight() {
+	if (_inFlightCount === 0) return;
+	if (--_inFlightCount === 0) _quiescentStore.set(true);
+}
+
+/**
+ * Reactive store that emits `true` when every active stream has
+ * finished loading (or errored) and `false` while at least one is
+ * fetching or recovering. Initial value is `true` (no streams yet).
+ *
+ * Useful for rendering a single page-level loading state instead of
+ * per-stream spinners, and for detecting "all streams have caught up
+ * after a reconnect" -- watch for a `false -> true` transition while
+ * the adapter's connection status is `'open'`.
+ *
+ * @type {import('svelte/store').Readable<boolean>}
+ */
+export const quiescent = { subscribe: _quiescentStore.subscribe };
+
+/**
+ * Reset quiescence tracking. Tests only.
+ * @internal
+ */
+export function _resetQuiescence() {
+	_inFlightCount = 0;
+	_quiescentStore.set(true);
+}
+
 function _registerTopicErrorSetter(topic, setError) {
 	let set = _streamErrorByTopic.get(topic);
 	if (!set) { set = new Set(); _streamErrorByTopic.set(topic, set); }
@@ -672,6 +718,11 @@ function _createStream(path, options, dynamicArgs) {
 	/** @type {(() => void) | null} */
 	let statusUnsub = null;
 
+	/** @type {(() => void) | null} Per-stream subscriber that maintains the global in-flight counter. */
+	let _quiescenceUnsub = null;
+	/** @type {boolean} Whether this stream is currently counted in `_inFlightCount`. */
+	let _countedInFlight = false;
+
 	let subCount = 0;
 	let pendingId = null;
 
@@ -1172,6 +1223,14 @@ function _createStream(path, options, dynamicArgs) {
 			statusUnsub();
 			statusUnsub = null;
 		}
+		if (_quiescenceUnsub) {
+			_quiescenceUnsub();
+			_quiescenceUnsub = null;
+		}
+		if (_countedInFlight) {
+			_countedInFlight = false;
+			_removeInFlight();
+		}
 		if (_reconnectTimer) {
 			clearTimeout(_reconnectTimer);
 			_reconnectTimer = null;
@@ -1216,6 +1275,20 @@ function _createStream(path, options, dynamicArgs) {
 				// First subscriber - start the stream
 				fetchAndSubscribe();
 				_devtoolsStream(path, topic, subCount);
+
+				// Quiescence tracking: register this stream's contribution to
+				// the global in-flight counter. Subscriber fires synchronously
+				// with the current status so initial 'loading' is captured.
+				_quiescenceUnsub = _statusStore.subscribe((s) => {
+					const inFlight = s === 'loading' || s === 'reconnecting';
+					if (inFlight && !_countedInFlight) {
+						_countedInFlight = true;
+						_addInFlight();
+					} else if (!inFlight && _countedInFlight) {
+						_countedInFlight = false;
+						_removeInFlight();
+					}
+				});
 
 				// Listen for reconnects to refetch (debounced to avoid thundering herd)
 				let firstStatus = true;

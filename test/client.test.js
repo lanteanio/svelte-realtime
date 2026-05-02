@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure;
+let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence;
 let topicCallbacks;
 let statusCallbacks;
 let failureCallbacks;
@@ -160,6 +160,9 @@ beforeEach(async () => {
 	onSignal = mod.onSignal;
 	onDerived = mod.onDerived;
 	failure = mod.failure;
+	quiescent = mod.quiescent;
+	_resetQuiescence = mod._resetQuiescence;
+	_resetQuiescence();
 });
 
 // -- __rpc (Finding 1 regression) ---------------------------------------------
@@ -2664,6 +2667,135 @@ describe('subscribe-denial routing', () => {
 			expect(ctx.errorValues[ctx.errorValues.length - 1]).toBeNull();
 		}
 		ctx.cleanup();
+	});
+});
+
+// -- quiescent store ----------------------------------------------------------
+
+describe('quiescent store', () => {
+	it('starts true (no streams active)', () => {
+		const values = [];
+		const unsub = quiescent.subscribe((v) => values.push(v));
+		expect(values).toEqual([true]);
+		unsub();
+	});
+
+	it('flips to false when a stream subscribes and back to true on settle', async () => {
+		const values = [];
+		const unsub = quiescent.subscribe((v) => values.push(v));
+		expect(values[values.length - 1]).toBe(true);
+
+		const store = __stream('feed/items', { merge: 'crud', key: 'id' });
+		const dataUnsub = store.subscribe(() => {});
+		await flush();
+		// One stream loading -> not quiescent
+		expect(values[values.length - 1]).toBe(false);
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'feed:1', merge: 'crud', key: 'id' });
+		// Stream settled -> quiescent again
+		expect(values[values.length - 1]).toBe(true);
+
+		dataUnsub();
+		unsub();
+	});
+
+	it('stays false until ALL streams settle', async () => {
+		const values = [];
+		const unsub = quiescent.subscribe((v) => values.push(v));
+
+		const a = __stream('feed/a', { merge: 'crud', key: 'id' });
+		const b = __stream('feed/b', { merge: 'crud', key: 'id' });
+		const c = __stream('feed/c', { merge: 'crud', key: 'id' });
+		const subA = a.subscribe(() => {});
+		const subB = b.subscribe(() => {});
+		const subC = c.subscribe(() => {});
+		await flush();
+		expect(values[values.length - 1]).toBe(false);
+
+		// Subscribe RPCs are microtask-batched into one send.
+		const sent = sendQueuedFn.mock.calls[0][0];
+		const ids = sent.batch.map((c) => c.id);
+
+		// Settle two of three -- still not quiescent
+		simulateRpcResponse(ids[0], { ok: true, data: [], topic: 'a', merge: 'crud', key: 'id' });
+		simulateRpcResponse(ids[1], { ok: true, data: [], topic: 'b', merge: 'crud', key: 'id' });
+		expect(values[values.length - 1]).toBe(false);
+
+		// Settle the third -- now quiescent
+		simulateRpcResponse(ids[2], { ok: true, data: [], topic: 'c', merge: 'crud', key: 'id' });
+		expect(values[values.length - 1]).toBe(true);
+
+		subA(); subB(); subC();
+		unsub();
+	});
+
+	it('settles a stream that errored (not just connected)', async () => {
+		const values = [];
+		const unsub = quiescent.subscribe((v) => values.push(v));
+
+		const store = __stream('feed/err', { merge: 'crud', key: 'id' });
+		const sub = store.subscribe(() => {});
+		await flush();
+		expect(values[values.length - 1]).toBe(false);
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'FORBIDDEN', error: 'nope' });
+		// Errored counts as settled
+		expect(values[values.length - 1]).toBe(true);
+
+		sub();
+		unsub();
+	});
+
+	it('decrements when the only subscriber leaves before the stream settles', async () => {
+		const values = [];
+		const unsub = quiescent.subscribe((v) => values.push(v));
+
+		const store = __stream('feed/abandoned', { merge: 'crud', key: 'id' });
+		const sub = store.subscribe(() => {});
+		await flush();
+		expect(values[values.length - 1]).toBe(false);
+
+		// Leave before the stream settles. Cleanup is microtask-deferred.
+		sub();
+		await flush();
+		await flush();
+		expect(values[values.length - 1]).toBe(true);
+
+		unsub();
+	});
+
+	it('a stream with no consumers does not contribute to in-flight count', () => {
+		const values = [];
+		const unsub = quiescent.subscribe((v) => values.push(v));
+
+		// Create a stream but don't subscribe -- should stay quiescent
+		__stream('feed/uncalled', { merge: 'crud', key: 'id' });
+		expect(values[values.length - 1]).toBe(true);
+
+		unsub();
+	});
+
+	it('reconnect cycle: re-enters in-flight on re-subscribe attempt', async () => {
+		const values = [];
+		const unsub = quiescent.subscribe((v) => values.push(v));
+
+		const store = __stream('feed/recon', { merge: 'crud', key: 'id' });
+		const sub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'feed:r', merge: 'crud', key: 'id' });
+		expect(values[values.length - 1]).toBe(true);
+
+		// Simulate a reconnect: status flips to 'open' again, stream goes 'reconnecting'
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		// Stream listener kicks in, _status -> 'reconnecting', count -> 1
+		expect(values[values.length - 1]).toBe(false);
+
+		sub();
+		unsub();
 	});
 });
 
