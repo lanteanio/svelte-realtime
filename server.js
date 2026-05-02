@@ -104,6 +104,7 @@ function _copyStreamMeta(target, source) {
 	if (source.__streamFilter) target.__streamFilter = source.__streamFilter;
 	if (source.__streamArgs) target.__streamArgs = source.__streamArgs;
 	if (source.__streamTransform) target.__streamTransform = source.__streamTransform;
+	if (source.__streamVolatile) target.__streamVolatile = source.__streamVolatile;
 	if (source.__streamVersion !== undefined) target.__streamVersion = source.__streamVersion;
 	if (source.__streamMigrate) target.__streamMigrate = source.__streamMigrate;
 	if (source.__isChannel) target.__isChannel = source.__isChannel;
@@ -199,6 +200,54 @@ export function _resetTransformRegistry() {
 }
 
 /**
+ * Per-topic volatile registry. When a stream registered with `volatile: true`
+ * is subscribed, its topic is recorded here. The publish helper translates
+ * `volatile` topics + per-call `options.volatile === true` into the adapter's
+ * `seq: false` per-event option, so seq stamping is skipped for these
+ * messages -- a reconnect carrying `lastSeenSeq` won't try to backfill them.
+ *
+ * Wire-level "drop on backpressure" behavior is the adapter's job:
+ * platform.publish / platform.publishBatched / platform.send all skip a
+ * subscriber whose outbound buffer is over the configured maxBackpressure
+ * threshold (default 64 KB). This registry only governs seq stamping and
+ * intent declaration on the realtime side.
+ *
+ * Refcounted by ws-topic contributions, mirroring the transform registry.
+ * @type {Map<string, { refcount: number }>}
+ */
+const _topicVolatile = new Map();
+
+/** Per-ws set of topics where this ws has contributed a volatile refcount. */
+const _wsVolatileContrib = new WeakMap();
+
+function _registerVolatile(ws, topic) {
+	let entry = _topicVolatile.get(topic);
+	if (!entry) {
+		entry = { refcount: 0 };
+		_topicVolatile.set(topic, entry);
+	}
+	entry.refcount++;
+	let contrib = _wsVolatileContrib.get(ws);
+	if (!contrib) { contrib = new Set(); _wsVolatileContrib.set(ws, contrib); }
+	contrib.add(topic);
+}
+
+function _unregisterVolatile(ws, topic) {
+	const contrib = _wsVolatileContrib.get(ws);
+	if (!contrib || !contrib.has(topic)) return;
+	contrib.delete(topic);
+	const entry = _topicVolatile.get(topic);
+	if (!entry) return;
+	entry.refcount--;
+	if (entry.refcount <= 0) _topicVolatile.delete(topic);
+}
+
+/** Reset the per-topic volatile registry. Tests only. @internal */
+export function _resetVolatileRegistry() {
+	_topicVolatile.clear();
+}
+
+/**
  * Apply a transform function to initial-load data. Per-item for arrays
  * (covers crud/latest/presence/cursor merge), whole-value for
  * non-arrays (covers set merge).
@@ -243,18 +292,30 @@ function _getCtxHelpers(platform) {
 			if (batch && batch.length > 0) /** @type {any} */ (platform).publishBatched(batch);
 		};
 		const publish = function publish(topic, event, data, options) {
+			// Volatile option translation. Per-call `options.volatile` or a
+			// topic registered as volatile turns into `seq: false` on the wire
+			// so reconnect with `lastSeenSeq` won't try to backfill the gap.
+			// Wire-level drop-on-backpressure is the adapter's job
+			// (uWS maxBackpressure auto-skips backpressured subscribers); this
+			// only governs seq stamping and intent declaration. The check
+			// short-circuits when no caller passes volatile and no stream
+			// registered it -- no alloc on the common case.
+			let finalOptions = options;
+			if ((options && options.volatile) || (_topicVolatile.size > 0 && _topicVolatile.has(topic))) {
+				finalOptions = { ...(options || {}), seq: false };
+			}
 			// Fast path: no per-topic feature registry hits and adapter exposes
 			// publishBatched -> queue for microtask flush. The cross-worker
 			// relay already coalesces per-microtask postMessages; this lifts
 			// the same idea to the wire level so subscribers receive ONE frame
 			// per microtask containing every event they're entitled to.
 			if (_topicCoalesce.size === 0 && _topicTransform.size === 0) {
-				if (!_hasBatched) return platform.publish(topic, event, data, options);
+				if (!_hasBatched) return platform.publish(topic, event, data, finalOptions);
 				if (!pendingBatch) {
 					pendingBatch = [];
 					queueMicrotask(_flushBatch);
 				}
-				pendingBatch.push({ topic, event, data, options });
+				pendingBatch.push({ topic, event, data, options: finalOptions });
 				return true;
 			}
 			const c = _topicCoalesce.get(topic);
@@ -267,12 +328,12 @@ function _getCtxHelpers(platform) {
 			const wireData = t ? t.transform(data) : data;
 			if (!c) {
 				// Transform-only topic: stays on the queued batched path.
-				if (!_hasBatched) return platform.publish(topic, event, wireData, options);
+				if (!_hasBatched) return platform.publish(topic, event, wireData, finalOptions);
 				if (!pendingBatch) {
 					pendingBatch = [];
 					queueMicrotask(_flushBatch);
 				}
-				pendingBatch.push({ topic, event, data: wireData, options });
+				pendingBatch.push({ topic, event, data: wireData, options: finalOptions });
 				return true;
 			}
 			// coalesceBy topic: per-ws sendCoalesced replacement. Distinct
@@ -326,6 +387,9 @@ function _trackStreamSub(ws, topic, fn) {
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__streamTransform) {
 		_registerTransform(ws, topic, /** @type {any} */ (fn).__streamTransform);
 	}
+	if (isFirstSubForTopic && /** @type {any} */ (fn).__streamVolatile) {
+		_registerVolatile(ws, topic);
+	}
 	if (_metricsInstruments) _metricsInstruments.streamGauge.inc();
 }
 
@@ -361,6 +425,7 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 					topicMap.delete(topic);
 					_unregisterCoalesce(ws, topic);
 					_unregisterTransform(ws, topic);
+					_unregisterVolatile(ws, topic);
 				}
 			}
 		}
@@ -522,7 +587,7 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, ...rest } = options || {};
+	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, volatile: volatileOpt, ...rest } = options || {};
 	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
 		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
 	}
@@ -534,6 +599,15 @@ live.stream = function stream(topic, initFn, options) {
 	}
 	if (transform !== undefined && typeof transform !== 'function') {
 		throw new Error('[svelte-realtime] live.stream transform must be a function (data) => projection');
+	}
+	if (volatileOpt !== undefined && typeof volatileOpt !== 'boolean') {
+		throw new Error('[svelte-realtime] live.stream volatile must be a boolean');
+	}
+	if (volatileOpt && coalesceBy) {
+		throw new Error('[svelte-realtime] live.stream cannot combine volatile: true with coalesceBy -- volatile drops on backpressure, coalesceBy keeps the latest value queued. Pick one.');
+	}
+	if (volatileOpt && replay) {
+		throw new Error('[svelte-realtime] live.stream cannot combine volatile: true with replay -- volatile messages are intentionally not buffered for resume. Drop replay or drop volatile.');
 	}
 	if (delta !== undefined) {
 		if (typeof delta !== 'object' || delta === null) {
@@ -560,6 +634,7 @@ live.stream = function stream(topic, initFn, options) {
 	if (coalesceBy) /** @type {any} */ (initFn).__coalesceBy = coalesceBy;
 	if (argsSchema) /** @type {any} */ (initFn).__streamArgs = argsSchema;
 	if (transform) /** @type {any} */ (initFn).__streamTransform = transform;
+	if (volatileOpt) /** @type {any} */ (initFn).__streamVolatile = true;
 	if (onSubscribe) /** @type {any} */ (initFn).__onSubscribe = onSubscribe;
 	if (onUnsubscribe) /** @type {any} */ (initFn).__onUnsubscribe = onUnsubscribe;
 	// Subscribe-time access predicate: (ctx) => boolean
@@ -3608,6 +3683,7 @@ export function unsubscribe(ws, topic, { platform }) {
 	topicMap.delete(topic);
 	_unregisterCoalesce(ws, topic);
 	_unregisterTransform(ws, topic);
+	_unregisterVolatile(ws, topic);
 
 	let fired = _firedUnsubscribes.get(ws);
 	if (!fired) { fired = new Set(); _firedUnsubscribes.set(ws, fired); }
@@ -3629,6 +3705,7 @@ export function close(ws, { platform, subscriptions }) {
 		for (const [topic, owners] of topicMap) {
 			_unregisterCoalesce(ws, topic);
 			_unregisterTransform(ws, topic);
+			_unregisterVolatile(ws, topic);
 			if (alreadyFired && alreadyFired.has(topic)) continue;
 			for (const entry of owners) {
 				for (let i = 0; i < entry.count; i++) {

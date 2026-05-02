@@ -286,6 +286,32 @@ export interface StreamOptions {
 	 * ```
 	 */
 	coalesceBy?(data: any): string | number | null | undefined;
+
+	/**
+	 * Mark this stream as volatile -- intentionally fire-and-forget. Wire-level
+	 * "drop on backpressure" is the adapter's default behavior (uWS skips any
+	 * subscriber whose outbound buffer is over `maxBackpressure`, default
+	 * 64 KB), so volatile is mostly an intent declaration. The realtime side
+	 * uses it to disable per-event seq stamping for this topic, which means
+	 * a reconnect carrying `lastSeenSeq` won't try to backfill the gaps. That
+	 * is correct for typing indicators, cursor positions, telemetry pings,
+	 * and other streams where a missed frame is simply gone.
+	 *
+	 * Cannot combine with `coalesceBy` (latest-value-wins requires a queue;
+	 * volatile drops on backpressure -- the two are different intents).
+	 * Cannot combine with `replay` (volatile messages aren't buffered for
+	 * resume).
+	 *
+	 * @example
+	 * ```js
+	 * export const cursors = live.stream(
+	 *   (ctx, roomId) => `room:${roomId}:cursors`,
+	 *   loader,
+	 *   { merge: 'cursor', volatile: true }
+	 * );
+	 * ```
+	 */
+	volatile?: boolean;
 }
 
 /**

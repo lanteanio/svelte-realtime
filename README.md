@@ -659,6 +659,18 @@ export const cursors = live.channel(
 );
 ```
 
+For high-frequency streams where a missed frame is acceptable (typing indicators, telemetry pings, raw cursor positions you don't need replayed on reconnect), set `volatile: true` on the stream:
+
+```js
+export const cursors = live.stream(
+  (ctx, roomId) => `room:${roomId}:cursors`,
+  loader,
+  { merge: 'cursor', volatile: true }
+);
+```
+
+Two effects: per-event seq stamping is skipped for the topic (so reconnect with `lastSeenSeq` won't try to backfill), and the option declares intent at the call site. Wire-level "drop on backpressure" is the adapter's default behavior already -- uWS auto-skips a subscriber whose outbound buffer is over `maxBackpressure` (default 64 KB). Cannot combine with `coalesceBy` (queue vs drop -- different intents) or `replay` (volatile messages aren't buffered for resume).
+
 ---
 
 ## SSR hydration

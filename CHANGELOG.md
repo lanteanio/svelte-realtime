@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`volatile: true` option on `live.stream()` for fire-and-forget streams.** Marks a stream as intentionally drop-on-backpressure -- typing indicators, cursor positions, telemetry pings, anything where a missed frame is gone for good. Two effects:
+
+  - Disables per-event seq stamping for the topic (passes `seq: false` through to the adapter). A reconnect carrying `lastSeenSeq` won't try to backfill the gaps, which is the correct semantic for these stream shapes.
+  - Declares intent so the option's presence makes the stream's volatility self-documenting at the call site.
+
+  ```js
+  export const cursors = live.stream(
+    (ctx, roomId) => `room:${roomId}:cursors`,
+    async () => loadInitialCursors(),
+    { merge: 'cursor', volatile: true }
+  );
+
+  // Per-call form (e.g. inside an RPC handler that fires telemetry pings):
+  ctx.publish('telemetry/ping', 'tick', { ts: Date.now() }, { volatile: true });
+  ```
+
+  Wire-level "drop on backpressure" is the adapter's default behavior across `platform.publish`, `platform.publishBatched`, and `platform.send` -- uWS auto-skips any subscriber whose outbound buffer is over `maxBackpressure` (default 64 KB), per-connection, while non-backpressured subscribers still receive the frame. So `volatile: true` is mostly an intent-declaration + seq-stamping decision on this side; the actual frame-drop happens automatically below us.
+
+  Cannot combine with `coalesceBy` (latest-value-wins requires a queue; volatile drops on backpressure -- different intents) or `replay` (volatile messages aren't buffered for resume). Both combinations throw at registration with a guiding error message.
+
 - **Dev-mode shape check on `.hydrate()`.** When `.hydrate()` is called with a value that doesn't match the stream's merge strategy (`crud` / `latest` / `presence` / `cursor` expect arrays; `set` accepts anything), a one-shot `console.warn` fires with the stream path, the configured merge strategy, and the actual type that was passed. Caught early, the fix is usually a missing `.data` unwrap on a paginated SSR response or a typo in the merge option. Stripped from production builds via the existing `process.env.NODE_ENV` gate. `null` and `undefined` are treated as "no data yet" and never warn.
 
 - **`live.rateLimits({ default, overrides, exempt })` for registry-level RPC rate limiting.** Configure rate limits centrally instead of wrapping every handler with `live.rateLimit(...)`. The default rule applies to every RPC path that doesn't have its own per-handler wrapping; per-path overrides tighten or loosen specific paths; `exempt` opts paths out entirely.

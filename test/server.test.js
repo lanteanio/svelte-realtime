@@ -26,7 +26,8 @@ import {
 	_resetCoalesceRegistry,
 	_resetAdmission,
 	_resetTransformRegistry,
-	_resetRateLimits
+	_resetRateLimits,
+	_resetVolatileRegistry
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -7049,6 +7050,138 @@ describe('live.stream({ transform })', () => {
 		await new Promise((r) => setTimeout(r, 10));
 
 		expect(platform.sent[0].data.data).toEqual([{ id: 'x' }]);
+	});
+});
+
+// -- live.stream({ volatile }) -----------------------------------------------
+
+function mockPlatformWithBatched_volatile() {
+	const p = mockPlatform();
+	p.batched = [];
+	p.publishBatched = (messages) => { p.batched.push(messages); };
+	return p;
+}
+
+describe('live.stream({ volatile })', () => {
+	beforeEach(() => { _resetVolatileRegistry(); });
+	afterEach(() => { _resetVolatileRegistry(); });
+
+	it('rejects non-boolean volatile', () => {
+		expect(() => live.stream('t', () => [], { volatile: 1 })).toThrow(/volatile must be a boolean/);
+		expect(() => live.stream('t', () => [], { volatile: 'true' })).toThrow(/volatile must be a boolean/);
+	});
+
+	it('rejects volatile combined with coalesceBy', () => {
+		expect(() => live.stream('t', () => [], {
+			volatile: true,
+			coalesceBy: (d) => d.id
+		})).toThrow(/cannot combine volatile.*coalesceBy/);
+	});
+
+	it('rejects volatile combined with replay', () => {
+		expect(() => live.stream('t', () => [], { volatile: true, replay: true })).toThrow(/cannot combine volatile.*replay/);
+		expect(() => live.stream('t', () => [], { volatile: true, replay: { size: 100 } })).toThrow(/cannot combine volatile.*replay/);
+	});
+
+	it('stashes __streamVolatile on the stream fn', () => {
+		const stream = live.stream('vol-topic', () => [], { volatile: true });
+		expect(stream.__streamVolatile).toBe(true);
+	});
+
+	it('publishes for a volatile-registered topic carry seq: false', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched_volatile();
+
+		const stream = live.stream('vol-cursors', async () => [], {
+			merge: 'cursor',
+			volatile: true
+		});
+		__register('vol/cursors', stream);
+
+		// Subscribe so the topic gets registered as volatile
+		const subData = toArrayBuffer({ rpc: 'vol/cursors', id: 'vs1', args: [], stream: true });
+		handleRpc(ws, subData, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const handler = live(async (ctx) => {
+			ctx.publish('vol-cursors', 'move', { userId: 'u1', x: 10, y: 20 });
+			return 'ok';
+		});
+		__register('vol/move', handler);
+
+		platform.batched.length = 0;
+		handleRpc(ws, toArrayBuffer({ rpc: 'vol/move', id: 'vp1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched).toHaveLength(1);
+		expect(platform.batched[0][0].options).toMatchObject({ seq: false });
+	});
+
+	it('per-call options.volatile sets seq: false even on a non-volatile topic', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched_volatile();
+
+		const handler = live(async (ctx) => {
+			ctx.publish('any-topic', 'tick', { n: 1 }, { volatile: true });
+			return 'ok';
+		});
+		__register('vol/perCall', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'vol/perCall', id: 'vc1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched[0][0].options).toMatchObject({ seq: false });
+	});
+
+	it('non-volatile publishes do not have seq: false', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched_volatile();
+
+		const handler = live(async (ctx) => {
+			ctx.publish('regular-topic', 'event', { n: 1 });
+			return 'ok';
+		});
+		__register('vol/regular', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'vol/regular', id: 'vr1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched[0][0].options).toBeUndefined();
+	});
+
+	it('volatile registry evicts on last unsubscribe (HMR safety)', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched_volatile();
+
+		const stream = live.stream('vol-evict', async () => [], { volatile: true });
+		__register('vol/evict', stream);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'vol/evict', id: 'e1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// While subscribed: publishes carry seq: false
+		const handler = live(async (ctx) => {
+			ctx.publish('vol-evict', 'event', { n: 1 });
+			return 'ok';
+		});
+		__register('vol/evictPub', handler);
+
+		platform.batched.length = 0;
+		handleRpc(ws, toArrayBuffer({ rpc: 'vol/evictPub', id: 'ep1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.batched[0][0].options).toMatchObject({ seq: false });
+
+		// Close the connection so the volatile registration is unwound
+		close(ws, { platform, subscriptions: ws._subs || new Set() });
+
+		// Reset platform state but keep registries; new ws subscribes to a
+		// different topic, then publishes to 'vol-evict' with no volatile flag
+		// -- should NOT have seq: false anymore.
+		const ws2 = mockWs({ id: 'u2' });
+		platform.batched.length = 0;
+		handleRpc(ws2, toArrayBuffer({ rpc: 'vol/evictPub', id: 'ep2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.batched[0][0].options).toBeUndefined();
 	});
 });
 
