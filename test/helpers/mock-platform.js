@@ -31,6 +31,16 @@ export function mockPlatform() {
 				p.publish(msg.topic, msg.event, msg.data, msg.options);
 			}
 		},
+		requested: [],
+		_requestResolver: null,
+		async request(ws, event, data, options) {
+			p.requested.push({ ws, event, data, options });
+			if (typeof p._requestResolver === 'function') {
+				return await p._requestResolver(ws, event, data, options);
+			}
+			return undefined;
+		},
+		_setRequestResolver(fn) { p._requestResolver = fn; },
 		topic(t) {
 			return {
 				publish(event, data) { p.publish(t, event, data); },
@@ -46,6 +56,8 @@ export function mockPlatform() {
 			p.published.length = 0;
 			p.sent.length = 0;
 			p.coalesced.length = 0;
+			p.requested.length = 0;
+			p._requestResolver = null;
 		},
 		// Default correlation id. Tests can override before handleRpc.
 		requestId: 'test-req',

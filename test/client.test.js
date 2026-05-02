@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth;
+let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers;
 let topicCallbacks;
 let statusCallbacks;
 let failureCallbacks;
@@ -10,6 +10,10 @@ let denialsValue;
 let sendQueuedFn;
 let readyReject;
 let connectFn;
+/** @type {((event: string, data: any) => any | Promise<any>) | null} */
+let onRequestHandler;
+/** @type {Set<() => void>} */
+let onRequestUnsubs;
 
 /**
  * Simulate a failure store update from the adapter.
@@ -68,6 +72,8 @@ beforeEach(async () => {
 	denialsCallbacks = new Set();
 	denialsValue = null;
 	sendQueuedFn = vi.fn();
+	onRequestHandler = null;
+	onRequestUnsubs = new Set();
 
 	connectFn = vi.fn(() => ({
 		sendQueued: sendQueuedFn,
@@ -129,6 +135,15 @@ beforeEach(async () => {
 				fn(denialsValue);
 				return () => denialsCallbacks.delete(fn);
 			}
+		},
+		onRequest: (handler) => {
+			onRequestHandler = handler;
+			const unsub = () => {
+				if (onRequestHandler === handler) onRequestHandler = null;
+				onRequestUnsubs.delete(unsub);
+			};
+			onRequestUnsubs.add(unsub);
+			return unsub;
 		}
 	}));
 
@@ -166,6 +181,9 @@ beforeEach(async () => {
 	health = mod.health;
 	_resetHealth = mod._resetHealth;
 	_resetHealth();
+	onPush = mod.onPush;
+	_resetPushHandlers = mod._resetPushHandlers;
+	_resetPushHandlers();
 });
 
 // -- __rpc (Finding 1 regression) ---------------------------------------------
@@ -3580,5 +3598,82 @@ describe('__rpc().with({ timeout })', () => {
 		simulateRpcResponse(sent.batch[0].id, { ok: true, data: 'A' });
 		simulateRpcResponse(sent.batch[1].id, { ok: true, data: 'B' });
 		expect(await result).toEqual(['A', 'B']);
+	});
+});
+
+// -- onPush -------------------------------------------------------------------
+
+describe('onPush()', () => {
+	it('registers a handler that runs on incoming request frames', async () => {
+		const handler = vi.fn().mockReturnValue('reply');
+		onPush('event-a', handler);
+
+		expect(onRequestHandler).toBeTypeOf('function');
+		const reply = await onRequestHandler('event-a', { x: 1 });
+		expect(handler).toHaveBeenCalledWith({ x: 1 });
+		expect(reply).toBe('reply');
+	});
+
+	it('multiplexes multiple events over a single onRequest subscription', async () => {
+		onPush('event-a', () => 'a');
+		onPush('event-b', () => 'b');
+
+		// Only one dispatcher subscribed despite two registrations
+		expect(onRequestUnsubs.size).toBe(1);
+
+		expect(await onRequestHandler('event-a', null)).toBe('a');
+		expect(await onRequestHandler('event-b', null)).toBe('b');
+	});
+
+	it('replaces handler when same event re-registered', async () => {
+		onPush('e', () => 'first');
+		onPush('e', () => 'second');
+		expect(await onRequestHandler('e', null)).toBe('second');
+	});
+
+	it('returned unsubscribe removes only its own handler', async () => {
+		const offFirst = onPush('e', () => 'first');
+		onPush('e', () => 'second');
+		offFirst(); // no-op since the registered handler is no longer the first
+		expect(await onRequestHandler('e', null)).toBe('second');
+	});
+
+	it('rejects on the server side when event has no handler registered', async () => {
+		onPush('known', () => 'ok'); // ensures dispatcher is attached
+		await expect(onRequestHandler('unknown', null)).rejects.toThrow(/no push handler/);
+	});
+
+	it('handler errors propagate to the server', async () => {
+		onPush('e', async () => { throw new Error('boom'); });
+		await expect(onRequestHandler('e', null)).rejects.toThrow('boom');
+	});
+
+	it('async handlers resolve through to the reply', async () => {
+		onPush('e', async (data) => {
+			await new Promise((r) => setTimeout(r, 1));
+			return data.x * 2;
+		});
+		await expect(onRequestHandler('e', { x: 21 })).resolves.toBe(42);
+	});
+
+	it('detaches the adapter dispatcher when the last handler is removed', () => {
+		const off = onPush('e', () => 'ok');
+		expect(onRequestUnsubs.size).toBe(1);
+		off();
+		expect(onRequestUnsubs.size).toBe(0);
+	});
+
+	it('does not detach while other handlers remain', () => {
+		const offA = onPush('a', () => 'a');
+		onPush('b', () => 'b');
+		offA();
+		expect(onRequestUnsubs.size).toBe(1);
+	});
+
+	it('rejects malformed args', () => {
+		expect(() => onPush('', () => {})).toThrow(/event/);
+		expect(() => onPush(/** @type {any} */ (null), () => {})).toThrow(/event/);
+		expect(() => onPush('e', /** @type {any} */ (null))).toThrow(/handler/);
+		expect(() => onPush('e', /** @type {any} */ ('not-fn'))).toThrow(/handler/);
 	});
 });

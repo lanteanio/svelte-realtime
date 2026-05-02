@@ -84,6 +84,50 @@ function _callTopicFn(fn, ctx, args) {
 const _wsStreamOwners = new WeakMap();
 
 /**
+ * Per-userId connection registry. Source of truth for `live.push({ userId })`
+ * routing. Populated by `pushHooks.open`, drained by `pushHooks.close`.
+ * Stores the platform alongside the ws so the wrapper can call
+ * `platform.request(ws, ...)` without separate threading.
+ *
+ * Last-write-wins on multi-device: a second connection by the same user
+ * replaces the first as the push target. Older connections still receive
+ * topic publishes via their own subscriptions; only push routing flips.
+ * Cluster-wide push (any instance routing to any user's ws) is a separate
+ * primitive in the extensions package.
+ * @type {Map<string, { ws: any, platform: any }>}
+ */
+const _pushRegistry = new Map();
+
+/**
+ * Reverse index from ws back to its registered userId. Used by
+ * `pushHooks.close` to deregister without re-running identify(ws),
+ * which may not be reliable on close (some platforms clear userData).
+ * WeakMap so sockets remain GC-eligible if close is missed.
+ * @type {WeakMap<object, string>}
+ */
+const _wsToPushUserId = new WeakMap();
+
+/** @type {((ws: any) => string | null | undefined) | null} */
+let _pushIdentify = null;
+
+/**
+ * Default identify: read user_id then userId from ws.getUserData().
+ * Returns undefined for anonymous connections (skipped by pushHooks.open).
+ * @param {any} ws
+ * @returns {string | null | undefined}
+ */
+function _defaultPushIdentify(ws) {
+	let data;
+	try { data = ws.getUserData?.(); } catch { return undefined; }
+	if (!data) return undefined;
+	return data.user_id != null ? data.user_id : data.userId;
+}
+
+function _getPushIdentify() {
+	return _pushIdentify || _defaultPushIdentify;
+}
+
+/**
  * Per-topic set of WebSockets currently holding at least one realtime
  * stream subscription. Maintained as the source of truth for the
  * `remainingSubscribers` argument the realtime layer passes to
@@ -1589,6 +1633,190 @@ live.lock = function lock(keyOrConfig, fn) {
 	/** @type {any} */ (wrapper).__wrappedFn = fn;
 	return wrapper;
 };
+
+/**
+ * Configure how the push registry extracts the userId from a connecting
+ * WebSocket. Defaults to reading
+ * `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`.
+ *
+ * Pass `{ identify }` to override; pass `null` to restore the default.
+ * The identify function may return `null` or `undefined` for anonymous
+ * connections, in which case `pushHooks.open` skips registration.
+ *
+ * @param {{ identify: (ws: any) => string | null | undefined } | null} config
+ *
+ * @example
+ * ```js
+ * import { live } from 'svelte-realtime/server';
+ *
+ * // Custom userData shape:
+ * live.configurePush({ identify: (ws) => ws.getUserData()?.account?.id });
+ * ```
+ */
+live.configurePush = function configurePush(config) {
+	if (config === null) {
+		_pushIdentify = null;
+		return;
+	}
+	if (!config || typeof config !== 'object') {
+		throw new Error('[svelte-realtime] live.configurePush: config must be an object or null');
+	}
+	if (typeof config.identify !== 'function') {
+		throw new Error('[svelte-realtime] live.configurePush: identify must be a function');
+	}
+	_pushIdentify = config.identify;
+};
+
+/**
+ * Hook functions to wire from `hooks.ws.js` so `live.push({ userId })` can
+ * route to the right WebSocket. `open` registers the connection in the
+ * push registry; `close` deregisters it.
+ *
+ * @example
+ * ```js
+ * // hooks.ws.js
+ * import { pushHooks } from 'svelte-realtime/server';
+ *
+ * export const open = pushHooks.open;
+ * export const close = pushHooks.close;
+ * ```
+ *
+ * Compose with other hooks by calling pushHooks.open / pushHooks.close
+ * inside your own handlers.
+ */
+export const pushHooks = {
+	/**
+	 * Register the connection in the push registry. Reads identify(ws)
+	 * (defaulting to ws.getUserData()?.user_id / userId) and stores the
+	 * { ws, platform } pair keyed by userId. Anonymous connections
+	 * (identify returning null/undefined) are silently skipped.
+	 *
+	 * @param {any} ws
+	 * @param {{ platform: any }} ctx
+	 */
+	open(ws, ctx) {
+		if (!ctx || !ctx.platform) {
+			throw new Error('[svelte-realtime] pushHooks.open: missing platform on hook context');
+		}
+		const userId = _getPushIdentify()(ws);
+		if (userId == null || userId === '') return;
+		if (typeof userId !== 'string') {
+			throw new Error('[svelte-realtime] pushHooks.open: identify(ws) must return a string, null, or undefined (got ' + typeof userId + ')');
+		}
+		_pushRegistry.set(userId, { ws, platform: ctx.platform });
+		_wsToPushUserId.set(ws, userId);
+	},
+	/**
+	 * Deregister the connection from the push registry. Looks up the
+	 * userId via the reverse index so it works even when getUserData()
+	 * has been cleared by the platform.
+	 *
+	 * Only removes the registry entry if this exact ws is still the
+	 * registered one. Otherwise a fast laptop -> phone -> laptop sequence
+	 * could deregister the new connection when the old one's close fires.
+	 *
+	 * @param {any} ws
+	 */
+	close(ws) {
+		const userId = _wsToPushUserId.get(ws);
+		if (userId == null) return;
+		_wsToPushUserId.delete(ws);
+		const entry = _pushRegistry.get(userId);
+		if (entry && entry.ws === ws) _pushRegistry.delete(userId);
+	}
+};
+
+/**
+ * Send a server-initiated request to a connected user and await the reply.
+ * Routes through the push registry populated by `pushHooks.open` /
+ * `pushHooks.close`, so the user must have an active connection on this
+ * server instance.
+ *
+ * Returns whatever the client's `onPush(event, handler)` returns.
+ * Throws `LiveError('NOT_FOUND')` when no connection is registered for
+ * the userId. Propagates `Error('request timed out')` from the underlying
+ * platform primitive when the client does not reply within `timeoutMs`
+ * (default 5000), and `Error('connection closed')` if the WebSocket
+ * closes before reply.
+ *
+ * Multi-device users see most-recent-connection-wins routing. Cluster-wide
+ * push (routing from any instance to any user's ws) requires the
+ * connection-registry primitive in the extensions package.
+ *
+ * Requires `svelte-adapter-uws` >= 0.5.0-next.4 for `platform.request`.
+ *
+ * @param {{ userId: string }} target
+ * @param {string} event
+ * @param {any} [data]
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<any>}
+ *
+ * @example
+ * ```js
+ * // Inside an admin RPC handler:
+ * const reply = await live.push(
+ *   { userId: 'u-123' },
+ *   'confirm-delete',
+ *   { itemId: 42 },
+ *   { timeoutMs: 30_000 }
+ * );
+ * if (reply.confirmed) await actuallyDelete(42);
+ * ```
+ *
+ * @example
+ * ```js
+ * // hooks.ws.js -- wire the registry once:
+ * import { pushHooks } from 'svelte-realtime/server';
+ * export const open = pushHooks.open;
+ * export const close = pushHooks.close;
+ * ```
+ */
+live.push = async function push(target, event, data, options) {
+	if (!target || typeof target !== 'object') {
+		throw new Error('[svelte-realtime] live.push: target must be an object like { userId }');
+	}
+	if (typeof event !== 'string' || event.length === 0) {
+		throw new Error('[svelte-realtime] live.push: event must be a non-empty string');
+	}
+	if (options !== undefined && options !== null) {
+		if (typeof options !== 'object') {
+			throw new Error('[svelte-realtime] live.push: options must be an object');
+		}
+		if (options.timeoutMs !== undefined) {
+			if (typeof options.timeoutMs !== 'number' || !Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+				throw new Error('[svelte-realtime] live.push: options.timeoutMs must be a positive finite number');
+			}
+		}
+	}
+
+	const targetKeys = Object.keys(target);
+	const extraKeys = targetKeys.filter((k) => k !== 'userId');
+	if (extraKeys.length > 0) {
+		throw new Error('[svelte-realtime] live.push: unsupported target keys: ' + extraKeys.join(', '));
+	}
+	const userId = /** @type {any} */ (target).userId;
+	if (typeof userId !== 'string' || userId.length === 0) {
+		throw new Error('[svelte-realtime] live.push: target.userId must be a non-empty string');
+	}
+
+	const entry = _pushRegistry.get(userId);
+	if (!entry) {
+		throw new LiveError('NOT_FOUND', "no active connection for userId '" + userId + "'");
+	}
+	if (typeof entry.platform.request !== 'function') {
+		throw new Error('[svelte-realtime] live.push: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4');
+	}
+	return entry.platform.request(entry.ws, event, data, options || undefined);
+};
+
+/**
+ * Reset the push registry and identify config. Tests only.
+ * @internal
+ */
+export function _resetPushRegistry() {
+	_pushRegistry.clear();
+	_pushIdentify = null;
+}
 
 /**
  * Mark a function as RPC-callable with schema validation.

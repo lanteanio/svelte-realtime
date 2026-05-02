@@ -23,6 +23,7 @@ import {
 	enableSignals,
 	pipe,
 	defineTopics,
+	pushHooks,
 	_resetIdempotencyStore,
 	_resetCoalesceRegistry,
 	_resetAdmission,
@@ -34,7 +35,8 @@ import {
 	_registerCoalesce,
 	_registerVolatile,
 	_resetLock,
-	_resetTopicWsCounts
+	_resetTopicWsCounts,
+	_resetPushRegistry
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -8300,5 +8302,199 @@ describe('live.lock()', () => {
 		const wrapped = live.lock(() => 42, async () => 'x');
 		const ctx = { user: { user_id: 'u1' } };
 		await expect(wrapped(ctx)).rejects.toThrow(/return a string/);
+	});
+});
+
+// -- live.push() / pushHooks --------------------------------------------------
+
+describe('live.push() / pushHooks', () => {
+	beforeEach(() => {
+		_resetPushRegistry();
+	});
+
+	it('routes to the registered connection by userId', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
+		pushHooks.open(ws, { platform });
+
+		platform._setRequestResolver(async () => ({ confirmed: true }));
+		const reply = await live.push({ userId: 'u-1' }, 'confirm', { id: 7 });
+
+		expect(reply).toEqual({ confirmed: true });
+		expect(platform.requested).toHaveLength(1);
+		expect(platform.requested[0]).toMatchObject({ ws, event: 'confirm', data: { id: 7 } });
+	});
+
+	it('passes timeoutMs through to platform.request', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'ok');
+
+		await live.push({ userId: 'u-1' }, 'event', null, { timeoutMs: 30_000 });
+		expect(platform.requested[0].options).toEqual({ timeoutMs: 30_000 });
+	});
+
+	it('omits options when none are passed', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'ok');
+
+		await live.push({ userId: 'u-1' }, 'event', { x: 1 });
+		expect(platform.requested[0].options).toBeUndefined();
+	});
+
+	it('throws LiveError NOT_FOUND when no connection registered for userId', async () => {
+		await expect(live.push({ userId: 'u-missing' }, 'event')).rejects.toMatchObject({
+			code: 'NOT_FOUND',
+			message: expect.stringContaining('u-missing')
+		});
+	});
+
+	it('last-write-wins on multi-device: newer connection replaces older', async () => {
+		const platform = mockPlatform();
+		const wsA = { getUserData: () => ({ user_id: 'u-1' }) };
+		const wsB = { getUserData: () => ({ user_id: 'u-1' }) };
+		pushHooks.open(wsA, { platform });
+		pushHooks.open(wsB, { platform });
+
+		platform._setRequestResolver(async () => 'ok');
+		await live.push({ userId: 'u-1' }, 'event');
+		expect(platform.requested[0].ws).toBe(wsB);
+	});
+
+	it('close on a stale ws does not deregister the active connection', async () => {
+		const platform = mockPlatform();
+		const wsA = { getUserData: () => ({ user_id: 'u-1' }) };
+		const wsB = { getUserData: () => ({ user_id: 'u-1' }) };
+		pushHooks.open(wsA, { platform });
+		pushHooks.open(wsB, { platform });
+		pushHooks.close(wsA);
+
+		platform._setRequestResolver(async () => 'ok');
+		await expect(live.push({ userId: 'u-1' }, 'event')).resolves.toBe('ok');
+		expect(platform.requested[0].ws).toBe(wsB);
+	});
+
+	it('close on the active ws fully deregisters', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
+		pushHooks.open(ws, { platform });
+		pushHooks.close(ws);
+
+		await expect(live.push({ userId: 'u-1' }, 'event')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	});
+
+	it('default identify reads user_id then userId from getUserData', async () => {
+		const platform = mockPlatform();
+		const ws1 = { getUserData: () => ({ user_id: 'u-snake' }) };
+		const ws2 = { getUserData: () => ({ userId: 'u-camel' }) };
+		pushHooks.open(ws1, { platform });
+		pushHooks.open(ws2, { platform });
+		platform._setRequestResolver(async (ws) => (ws === ws1 ? 'snake' : 'camel'));
+
+		await expect(live.push({ userId: 'u-snake' }, 'event')).resolves.toBe('snake');
+		await expect(live.push({ userId: 'u-camel' }, 'event')).resolves.toBe('camel');
+	});
+
+	it('skips registration when getUserData has no userId (anonymous)', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({}) };
+		pushHooks.open(ws, { platform });
+		// No userId means the registry stays empty -- anonymous connections cannot be push targets.
+		await expect(live.push({ userId: 'anything' }, 'event')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	});
+
+	it('configurePush({ identify }) overrides the default extractor', async () => {
+		const platform = mockPlatform();
+		live.configurePush({ identify: (ws) => 'static-' + ws.token });
+		const ws = { token: 'abc' };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'ok');
+
+		await expect(live.push({ userId: 'static-abc' }, 'event')).resolves.toBe('ok');
+	});
+
+	it('configurePush(null) restores the default identifier', async () => {
+		const platform = mockPlatform();
+		live.configurePush({ identify: () => 'never-used' });
+		live.configurePush(null);
+		const ws = { getUserData: () => ({ user_id: 'u-default' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'ok');
+
+		await expect(live.push({ userId: 'u-default' }, 'event')).resolves.toBe('ok');
+	});
+
+	it('configurePush rejects malformed config', () => {
+		expect(() => live.configurePush('bad')).toThrow(/object or null/);
+		expect(() => live.configurePush({})).toThrow(/identify/);
+		expect(() => live.configurePush({ identify: 'not-fn' })).toThrow(/identify/);
+	});
+
+	it('pushHooks.open throws on missing platform', () => {
+		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
+		expect(() => pushHooks.open(ws, /** @type {any} */ ({}))).toThrow(/platform/);
+		expect(() => pushHooks.open(ws, /** @type {any} */ (null))).toThrow(/platform/);
+	});
+
+	it('pushHooks.open throws when identify returns a non-string', () => {
+		const platform = mockPlatform();
+		live.configurePush({ identify: () => /** @type {any} */ (42) });
+		expect(() => pushHooks.open({}, { platform })).toThrow(/string/);
+	});
+
+	it('rejects malformed live.push args', async () => {
+		await expect(live.push(/** @type {any} */ (null), 'evt')).rejects.toThrow(/target/);
+		await expect(live.push(/** @type {any} */ ({}), 'evt')).rejects.toThrow(/userId/);
+		await expect(live.push({ userId: '' }, 'evt')).rejects.toThrow(/userId/);
+		await expect(live.push({ userId: 'u-1' }, '')).rejects.toThrow(/event/);
+		await expect(live.push(/** @type {any} */ ({ userId: 'u-1', extra: 1 }), 'evt')).rejects.toThrow(/extra/);
+	});
+
+	it('rejects bad timeoutMs', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
+		pushHooks.open(ws, { platform });
+
+		await expect(live.push({ userId: 'u-1' }, 'event', null, { timeoutMs: -1 })).rejects.toThrow(/timeoutMs/);
+		await expect(live.push({ userId: 'u-1' }, 'event', null, { timeoutMs: 0 })).rejects.toThrow(/timeoutMs/);
+		await expect(live.push({ userId: 'u-1' }, 'event', null, /** @type {any} */ ({ timeoutMs: 'x' }))).rejects.toThrow(/timeoutMs/);
+		await expect(live.push({ userId: 'u-1' }, 'event', null, /** @type {any} */ ('bad'))).rejects.toThrow(/options/);
+	});
+
+	it('propagates platform.request rejections (timeout / connection closed)', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => { throw new Error('request timed out'); });
+
+		await expect(live.push({ userId: 'u-1' }, 'event')).rejects.toThrow('request timed out');
+	});
+
+	it('throws helpful error if platform lacks request method', async () => {
+		const platform = mockPlatform();
+		delete /** @type {any} */ (platform).request;
+		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
+		pushHooks.open(ws, { platform });
+
+		await expect(live.push({ userId: 'u-1' }, 'event')).rejects.toThrow(/svelte-adapter-uws/);
+	});
+
+	it('different users registered on different platforms route to their own platform', async () => {
+		const platformA = mockPlatform();
+		const platformB = mockPlatform();
+		const wsA = { getUserData: () => ({ user_id: 'u-A' }) };
+		const wsB = { getUserData: () => ({ user_id: 'u-B' }) };
+		pushHooks.open(wsA, { platform: platformA });
+		pushHooks.open(wsB, { platform: platformB });
+		platformA._setRequestResolver(async () => 'A');
+		platformB._setRequestResolver(async () => 'B');
+
+		await expect(live.push({ userId: 'u-A' }, 'event')).resolves.toBe('A');
+		await expect(live.push({ userId: 'u-B' }, 'event')).resolves.toBe('B');
+		expect(platformA.requested).toHaveLength(1);
+		expect(platformB.requested).toHaveLength(1);
 	});
 });

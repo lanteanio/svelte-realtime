@@ -356,6 +356,38 @@ export function onSignal(userId: string, callback: (event: string, data: any) =>
 export function onSignal(callback: (event: string, data: any) => void): () => void;
 
 /**
+ * Register a handler for a server-initiated push event. The server calls
+ * `live.push({ userId }, event, data)` and awaits a reply; the value
+ * returned (sync or async) is sent back as the reply. Throwing rejects
+ * the server-side promise.
+ *
+ * Multiple events register independently. Calling `onPush` again with the
+ * same event name replaces the previous handler. The returned function
+ * unregisters the handler if it is still the active one.
+ *
+ * Internally backed by the adapter's `onRequest`; the realtime client
+ * multiplexes by event name so apps install one handler per event without
+ * overwriting each other.
+ *
+ * @returns Unsubscribe function.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { onPush } from 'svelte-realtime/client';
+ *
+ *   onPush('confirm-delete', async ({ itemId }) => {
+ *     return { confirmed: confirm(`Delete item ${itemId}?`) };
+ *   });
+ * </script>
+ * ```
+ */
+export function onPush<TData = any, TReply = any>(
+	event: string,
+	handler: (data: TData) => TReply | Promise<TReply>
+): () => void;
+
+/**
  * Combine multiple stores into a single derived store.
  * When any source updates, the combining function re-runs.
  *

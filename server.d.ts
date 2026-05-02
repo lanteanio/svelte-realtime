@@ -494,6 +494,38 @@ export type DefinedTopics<M extends TopicMap> = M & {
  */
 export function defineTopics<M extends TopicMap>(map: M): DefinedTopics<M>;
 
+/**
+ * Hook functions to wire from `hooks.ws.js` so `live.push({ userId })` can
+ * route to the right WebSocket. `open` registers the connection; `close`
+ * deregisters it.
+ *
+ * Compose with other hooks by calling `pushHooks.open(ws, ctx)` /
+ * `pushHooks.close(ws)` from within your own handlers.
+ *
+ * @example
+ * ```js
+ * // hooks.ws.js
+ * import { pushHooks } from 'svelte-realtime/server';
+ *
+ * export const open = pushHooks.open;
+ * export const close = pushHooks.close;
+ * ```
+ */
+export const pushHooks: {
+	/**
+	 * Register the connection in the push registry. Anonymous connections
+	 * (identify(ws) returning null/undefined) are silently skipped.
+	 */
+	open(ws: any, ctx: { platform: any }): void;
+	/**
+	 * Deregister the connection from the push registry. Looks up the userId
+	 * via the reverse index so it works even when getUserData has been
+	 * cleared. Only removes the entry if this exact ws is still the
+	 * registered one (handles fast device-swap sequences correctly).
+	 */
+	close(ws: any): void;
+};
+
 export namespace live {
 	/**
 	 * Mark a function as a stream provider with a static topic.
@@ -879,6 +911,72 @@ export namespace live {
 			},
 		fn: T
 	): T;
+
+	/**
+	 * Configure how the push registry extracts the userId from a connecting
+	 * WebSocket. Defaults to reading
+	 * `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`. Pass `null` to
+	 * restore the default.
+	 *
+	 * The identify function may return `null` or `undefined` for anonymous
+	 * connections, in which case `pushHooks.open` skips registration.
+	 *
+	 * @example
+	 * ```js
+	 * import { live } from 'svelte-realtime/server';
+	 *
+	 * live.configurePush({ identify: (ws) => ws.getUserData()?.account?.id });
+	 * ```
+	 */
+	function configurePush(
+		config: { identify: (ws: any) => string | null | undefined } | null
+	): void;
+
+	/**
+	 * Send a server-initiated request to a connected user and await the reply.
+	 * Routes through the push registry populated by `pushHooks.open` /
+	 * `pushHooks.close`, so the user must have an active connection on this
+	 * server instance.
+	 *
+	 * Returns whatever the client's `onPush(event, handler)` returns. Throws
+	 * `LiveError('NOT_FOUND')` if no connection is registered for the userId.
+	 * Propagates `Error('request timed out')` from the underlying platform
+	 * primitive when the client does not reply within `timeoutMs` (default
+	 * 5000), and `Error('connection closed')` if the WebSocket closes before
+	 * reply.
+	 *
+	 * Multi-device users see most-recent-connection-wins routing. Cluster-wide
+	 * push (any instance routing to any user's ws) requires the connection
+	 * registry primitive in the extensions package.
+	 *
+	 * Requires `svelte-adapter-uws` >= 0.5.0-next.4 for `platform.request`.
+	 *
+	 * @example
+	 * ```js
+	 * // Inside an admin RPC handler:
+	 * const reply = await live.push(
+	 *   { userId: 'u-123' },
+	 *   'confirm-delete',
+	 *   { itemId: 42 },
+	 *   { timeoutMs: 30_000 }
+	 * );
+	 * if (reply.confirmed) await actuallyDelete(42);
+	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * // hooks.ws.js -- wire the registry once:
+	 * import { pushHooks } from 'svelte-realtime/server';
+	 * export const open = pushHooks.open;
+	 * export const close = pushHooks.close;
+	 * ```
+	 */
+	function push<TReply = unknown>(
+		target: { userId: string },
+		event: string,
+		data?: unknown,
+		options?: { timeoutMs?: number }
+	): Promise<TReply>;
 
 	/**
 	 * Mark a function as RPC-callable with schema validation.

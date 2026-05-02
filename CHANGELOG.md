@@ -17,6 +17,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Server-initiated push via `live.push()` and client-side `onPush()`.** New primitive on the `live` function namespace for sending a request to a connected user and awaiting their reply. Routes through a per-instance userId -> WebSocket registry maintained by a small pair of hooks.
+
+  ```js
+  // hooks.ws.js - wire the registry once
+  import { pushHooks } from 'svelte-realtime/server';
+  export const open = pushHooks.open;
+  export const close = pushHooks.close;
+  ```
+
+  ```js
+  // anywhere on the server (admin RPC, cron, webhook receiver, etc.)
+  import { live } from 'svelte-realtime/server';
+
+  const reply = await live.push(
+    { userId: 'u-123' },
+    'confirm-delete',
+    { itemId: 42 },
+    { timeoutMs: 30_000 }
+  );
+  if (reply.confirmed) await actuallyDelete(42);
+  ```
+
+  ```svelte
+  <script>
+    import { onPush } from 'svelte-realtime/client';
+
+    onPush('confirm-delete', async ({ itemId }) => {
+      return { confirmed: confirm(`Delete item ${itemId}?`) };
+    });
+  </script>
+  ```
+
+  Default identifier reads `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`. Override with `live.configurePush({ identify: (ws) => ... })` for custom userData shapes; pass `null` to restore the default. Anonymous connections (identify returning null/undefined) are silently skipped at registration so they cannot be push targets.
+
+  Returns whatever the client's `onPush` handler returns. Throws `LiveError('NOT_FOUND')` if no connection is registered for the userId. Propagates `Error('request timed out')` from the underlying platform primitive on the configurable `timeoutMs` (default 5000ms), and `Error('connection closed')` if the WebSocket closes before reply.
+
+  Multi-device users see most-recent-connection-wins routing: a second connection by the same user replaces the first as the push target; older connections still receive topic publishes via their own subscriptions, only push routing flips. The reverse index handles fast device-swap sequences correctly so `close` on a stale ws does not deregister the active connection.
+
+  Client-side `onPush(event, handler)` multiplexes multiple events over the adapter's single `onRequest` channel, so apps install one handler per event without overwriting each other. Returns an unsubscribe function. Throwing from a handler rejects the server-side promise.
+
+  Single-instance routing only in this slice: a user's connection must live on the same server process that calls `live.push`. Cluster-wide push (any instance routing to any user's WebSocket) requires the connection-registry primitive in the extensions package.
+
+  Requires `svelte-adapter-uws@^0.5.0-next.4` for the underlying `platform.request` and `onRequest` primitives.
+
 - **`realtimeTransport()` SvelteKit transport hook preset.** New `svelte-realtime/hooks` entry point. Auto-registers serialization for `RpcError` and `LiveError` across the SSR / client boundary so typed errors thrown during `+page.server.js` `load()` arrive at `+error.svelte` (and any client-side handler that rethrows them) preserved as the original class with `code` intact, rather than as plain `Error` instances.
 
   ```js
