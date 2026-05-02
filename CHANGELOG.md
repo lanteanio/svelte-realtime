@@ -17,6 +17,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`fallback` + `onError` options on `.load()` for partial SSR degradation.** When you wire many streams into a `+page.server.js` `load()`, a single failing loader currently throws and SvelteKit shows the error page, taking down every other stream on the page. The new opt-in options let one failure render an empty placeholder while the rest of the page loads:
+
+  ```js
+  // +page.server.js
+  import { auditFeed, presence, reactions } from '$live/dashboard';
+
+  export async function load({ locals, platform }) {
+    const [audit, presenceData, reacts] = await Promise.all([
+      auditFeed.load(platform, {
+        user: locals.user,
+        args: [locals.user.organization_id],
+        fallback: [],
+        onError: (err) => locals.log.error({ err }, 'audit feed SSR failed')
+      }),
+      presence.load(platform, { user: locals.user, fallback: {} }),
+      reactions.load(platform, { user: locals.user, fallback: [] })
+    ]);
+    return { audit, presenceData, reacts };
+  }
+  ```
+
+  The client hydrates the fallback value for the failing stream; the WebSocket subscribe attempts the load again on connect once the page is interactive, so the user sees a placeholder during SSR and the live stream once the connection comes up.
+
+  Opt-in via the PRESENCE of the `fallback` key -- the value itself can be anything (empty array, sentinel object, even `null` or `undefined`). Without `fallback`, errors propagate as before (back-compat). `onError` is optional; observer hooks throwing are silently swallowed so a buggy logger never breaks SSR. Errors caught: loader throws, validation, guard, access filter, missing handler. `null` returns from gated streams (`live.gate`) pass through unchanged -- the gate's "no data" decision is not treated as an error.
+
 - **`health` store on the client for system-wide degraded / recovered detection.** A new top-level Readable from `svelte-realtime/client` reflects the realtime system's health, sourced from `degraded` / `recovered` events on the `__realtime` topic. Apps can render a "real-time updates paused, reconnecting..." banner when the upstream pub/sub bus's circuit breaker trips, without wiring the system topic by hand:
 
   ```svelte

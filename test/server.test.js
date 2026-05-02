@@ -4435,6 +4435,131 @@ describe('__directCall stream enforcement', () => {
 	});
 });
 
+// -- __directCall fallback / onError ------------------------------------------
+
+describe('__directCall fallback / onError', () => {
+	it('throws as before when no fallback option is provided', async () => {
+		const stream = live.stream('fb-throw', async () => { throw new Error('loader boom'); }, { merge: 'crud' });
+		__register('fb/throw', stream);
+
+		const platform = mockPlatform();
+		await expect(__directCall('fb/throw', [], platform)).rejects.toThrow('loader boom');
+	});
+
+	it('returns the fallback value when the loader throws', async () => {
+		const stream = live.stream('fb-fb', async () => { throw new Error('boom'); }, { merge: 'crud' });
+		__register('fb/fb', stream);
+
+		const platform = mockPlatform();
+		const result = await __directCall('fb/fb', [], platform, { fallback: [] });
+		expect(result).toEqual([]);
+	});
+
+	it('calls onError with the caught error before returning the fallback', async () => {
+		const stream = live.stream('fb-onerr', async () => { throw new Error('explicit'); }, { merge: 'crud' });
+		__register('fb/onerr', stream);
+
+		const platform = mockPlatform();
+		const seen = [];
+		const result = await __directCall('fb/onerr', [], platform, {
+			fallback: { stale: true },
+			onError: (err) => seen.push(err.message)
+		});
+		expect(seen).toEqual(['explicit']);
+		expect(result).toEqual({ stale: true });
+	});
+
+	it('does NOT use the fallback when the loader succeeds', async () => {
+		const stream = live.stream('fb-ok', async () => [{ id: 1 }], { merge: 'crud' });
+		__register('fb/ok', stream);
+
+		const platform = mockPlatform();
+		const result = await __directCall('fb/ok', [], platform, { fallback: [] });
+		expect(result).toEqual([{ id: 1 }]);
+	});
+
+	it('passes through a null return from a gated stream (does NOT replace with fallback)', async () => {
+		const stream = live.stream('fb-gate', async () => [{ id: 1 }], { merge: 'crud' });
+		const gated = live.gate(() => false, stream);
+		__register('fb/gate', gated);
+
+		const platform = mockPlatform();
+		const result = await __directCall('fb/gate', [], platform, { fallback: ['SHOULD-NOT-USE'] });
+		expect(result).toBeNull();
+	});
+
+	it('returns the fallback when validation throws', async () => {
+		const schema = {
+			'~standard': { version: 1, vendor: 'test', validate: () => ({ issues: [{ message: 'bad' }] }) }
+		};
+		const stream = live.stream('fb-val', async () => [], { merge: 'crud', args: schema });
+		__register('fb/val', stream);
+
+		const platform = mockPlatform();
+		const result = await __directCall('fb/val', ['anything'], platform, { fallback: [] });
+		expect(result).toEqual([]);
+	});
+
+	it('returns the fallback when the access filter rejects', async () => {
+		const stream = live.stream('fb-acc', async () => [{ id: 1 }], {
+			merge: 'crud',
+			access: () => false
+		});
+		__register('fb/acc', stream);
+
+		const platform = mockPlatform();
+		const seen = [];
+		const result = await __directCall('fb/acc', [], platform, {
+			user: { id: 1 },
+			fallback: [],
+			onError: (err) => seen.push(err.code)
+		});
+		expect(seen).toEqual(['FORBIDDEN']);
+		expect(result).toEqual([]);
+	});
+
+	it('swallows errors thrown inside onError so SSR is not broken by an observer hook bug', async () => {
+		const stream = live.stream('fb-swallow', async () => { throw new Error('loader err'); }, { merge: 'crud' });
+		__register('fb/swallow', stream);
+
+		const platform = mockPlatform();
+		const result = await __directCall('fb/swallow', [], platform, {
+			fallback: 'placeholder',
+			onError: () => { throw new Error('observer crashed'); }
+		});
+		expect(result).toBe('placeholder');
+	});
+
+	it('opts in via key presence: { fallback: undefined } counts as opt-in', async () => {
+		const stream = live.stream('fb-undef', async () => { throw new Error('boom'); }, { merge: 'crud' });
+		__register('fb/undef', stream);
+
+		const platform = mockPlatform();
+		// Explicitly pass fallback: undefined -- should still catch + return undefined
+		const result = await __directCall('fb/undef', [], platform, { fallback: undefined });
+		expect(result).toBeUndefined();
+	});
+
+	it('returns the fallback when the path is not found', async () => {
+		const platform = mockPlatform();
+		const result = await __directCall('fb/never-registered', [], platform, { fallback: 'fb' });
+		expect(result).toBe('fb');
+	});
+
+	it('non-function onError is ignored without throwing', async () => {
+		const stream = live.stream('fb-bad-cb', async () => { throw new Error('boom'); }, { merge: 'crud' });
+		__register('fb/bad-cb', stream);
+
+		const platform = mockPlatform();
+		// onError is not a function -- should be ignored; fallback still returned
+		const result = await __directCall('fb/bad-cb', [], platform, {
+			fallback: [],
+			onError: 'not-a-function'
+		});
+		expect(result).toEqual([]);
+	});
+});
+
 // -- Room guard enforcement on presence/cursor sub-streams --------------------
 
 describe('room guard on sub-streams', () => {

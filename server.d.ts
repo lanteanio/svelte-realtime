@@ -1477,10 +1477,44 @@ export function createMessage(
  * Execute a live function directly (in-process), without WebSocket.
  * Used by SSR load functions to call live functions server-side.
  *
+ * Opt-in `fallback` / `onError` for partial-degradation:
+ * - When `fallback` is set in `options`, ANY error thrown during
+ *   execution (loader, validation, guard, filter) is caught,
+ *   `onError` is invoked with the error if provided, and the
+ *   `fallback` value is returned in place of the loader's result.
+ * - When `fallback` is NOT in `options`, errors propagate as before
+ *   (back-compat). The presence of the key opts in -- the value
+ *   itself can be anything (empty array, sentinel object, even
+ *   `null` or `undefined`).
+ *
+ * Apps wire `fallback` per-stream so a single failed loader on a
+ * multi-stream page renders an empty placeholder rather than taking
+ * down the entire `+page.server.js` `load()`.
+ *
+ * @example
+ * ```js
+ * // +page.server.js
+ * import { auditFeed, presence, reactions } from '$live/dashboard';
+ *
+ * export async function load({ locals, platform }) {
+ *   const [audit, presenceData, reacts] = await Promise.all([
+ *     auditFeed.load(platform, {
+ *       user: locals.user,
+ *       args: [locals.user.organization_id],
+ *       fallback: [],
+ *       onError: (err) => locals.log.error({ err }, 'audit feed SSR failed')
+ *     }),
+ *     presence.load(platform, { user: locals.user, fallback: {} }),
+ *     reactions.load(platform, { user: locals.user, fallback: [] })
+ *   ]);
+ *   return { audit, presenceData, reacts };
+ * }
+ * ```
+ *
  * @param path - RPC path (e.g. 'chat/messages')
  * @param args - Arguments to pass (excluding ctx)
  * @param platform - The platform API
- * @param options - Optional user data
+ * @param options - Optional config: user, fallback, onError
  *
  * @internal
  */
@@ -1488,7 +1522,22 @@ export function __directCall(
 	path: string,
 	args: any[],
 	platform: Platform,
-	options?: { user?: any }
+	options?: {
+		user?: any;
+		args?: any[];
+		/**
+		 * Value to return if the loader throws. Presence of the key opts
+		 * into fallback behavior (the value itself can be anything,
+		 * including null / undefined / arrays / objects).
+		 */
+		fallback?: any;
+		/**
+		 * Called with the caught error before the fallback is returned.
+		 * Errors thrown by `onError` itself are silently swallowed so
+		 * an observer hook never breaks SSR.
+		 */
+		onError?: (err: any) => void;
+	}
 ): Promise<any>;
 
 /**

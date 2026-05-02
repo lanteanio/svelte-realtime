@@ -3976,13 +3976,43 @@ function _respond(ws, platform, correlationId, payload) {
  * Execute a live function directly (in-process), without WebSocket.
  * Used by SSR load functions to call live functions server-side.
  *
+ * Opt-in `fallback` / `onError` for partial-degradation:
+ * - When `fallback` is set in `options`, ANY error thrown during
+ *   execution (loader, validation, guard, filter) is caught,
+ *   `onError` is invoked with the error if provided, and the
+ *   `fallback` value is returned in place of the loader's result.
+ * - When `fallback` is NOT in `options`, errors propagate as before
+ *   (back-compat). The presence of the key opts in -- the value
+ *   itself can be anything (empty array, sentinel object, even
+ *   `null` or `undefined`).
+ *
+ * Apps wire `fallback` per-stream so a single failed loader on a
+ * multi-stream page renders an empty placeholder rather than taking
+ * down the entire `+page.server.js` `load()`.
+ *
  * @param {string} path - RPC path (e.g. 'chat/messages')
  * @param {any[]} args - Arguments to pass (excluding ctx)
  * @param {import('svelte-adapter-uws').Platform} platform
- * @param {{ user?: any }} [options]
+ * @param {{ user?: any, fallback?: any, onError?: (err: any) => void }} [options]
  * @returns {Promise<any>}
  */
 export async function __directCall(path, args, platform, options) {
+	const hasFallback = options ? ('fallback' in options) : false;
+	const fallback = hasFallback ? options.fallback : undefined;
+	const onError = options && typeof options.onError === 'function' ? options.onError : null;
+
+	try {
+		return await _runDirectCall(path, args, platform, options);
+	} catch (err) {
+		if (!hasFallback) throw err;
+		if (onError) {
+			try { onError(err); } catch {}
+		}
+		return fallback;
+	}
+}
+
+async function _runDirectCall(path, args, platform, options) {
 	if (!_lazyResolved) await _resolveAllLazy();
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
