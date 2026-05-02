@@ -724,6 +724,82 @@ export namespace live {
 	): T;
 
 	/**
+	 * Lock contract: any object exposing `withLock(key, fn)` matching the
+	 * adapter's Lock plugin. The default in-process lock is created lazily;
+	 * pass a custom one for distributed mutex via Redis (`SET NX PX`) or any
+	 * other backing store.
+	 */
+	interface Lock {
+		withLock<T>(key: string, fn: () => T | Promise<T>): Promise<T>;
+	}
+
+	/**
+	 * Wrap an RPC handler with per-key serialization. Concurrent calls that
+	 * resolve to the same lock key run one at a time in FIFO order; calls on
+	 * different keys run in parallel. Composes with `live()`,
+	 * `live.validated()`, `live.idempotent()`, etc.
+	 *
+	 * The key is derived per-call: pass a string for a static lock, or a
+	 * function `(ctx, ...args) => string | null | undefined` to derive it
+	 * from the caller's context. A null / undefined key bypasses the lock
+	 * (the handler runs unguarded for that call).
+	 *
+	 * Default lock is in-process. For multi-instance deployments, pass
+	 * `lock: createDistributedLock(redis)` from
+	 * `svelte-adapter-uws-extensions/redis/lock` (or any object exposing
+	 * `withLock(key, fn)` matching the contract).
+	 *
+	 * Use for cron-ish triggers, expensive recompute, single-flight cache
+	 * fills, and atomic read-modify-write on shared records.
+	 *
+	 * @example
+	 * ```js
+	 * // Per-org leaderboard recompute: only one in-flight recompute per org
+	 * export const recomputeLeaderboard = live.lock(
+	 *   (ctx) => `leaderboard:${ctx.user.organization_id}`,
+	 *   async (ctx) => {
+	 *     const rows = await db.expensive.recompute(ctx.user.organization_id);
+	 *     ctx.publish(`org:${ctx.user.organization_id}:leaderboard`, 'set', rows);
+	 *     return rows;
+	 *   }
+	 * );
+	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * // Static key (single global section)
+	 * export const rebuildSearchIndex = live.lock(
+	 *   'search-index-rebuild',
+	 *   async (ctx) => { ... }
+	 * );
+	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * // Distributed lock (multi-instance) via the extensions package
+	 * import { createDistributedLock } from 'svelte-adapter-uws-extensions/redis/lock';
+	 * const distributedLock = createDistributedLock(redis);
+	 *
+	 * export const settleInvoice = live.lock(
+	 *   { key: (ctx, id) => `invoice:${id}`, lock: distributedLock },
+	 *   live.validated(InvoiceIdSchema, async (ctx, id) => settle(id))
+	 * );
+	 * ```
+	 */
+	function lock<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
+		keyOrConfig:
+			| string
+			| ((ctx: LiveContext<any>, ...args: any[]) => string | null | undefined)
+			| {
+				key:
+					| string
+					| ((ctx: LiveContext<any>, ...args: any[]) => string | null | undefined);
+				lock?: Lock;
+			},
+		fn: T
+	): T;
+
+	/**
 	 * Mark a function as RPC-callable with schema validation.
 	 * Validates args[0] against the schema before calling fn.
 	 * Supports any [Standard Schema](https://standardschema.dev/)-compatible schema,

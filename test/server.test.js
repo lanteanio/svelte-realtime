@@ -31,7 +31,8 @@ import {
 	_resetPublishRateWarning,
 	_activatePublishRateWarning,
 	_registerCoalesce,
-	_registerVolatile
+	_registerVolatile,
+	_resetLock
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -7754,5 +7755,166 @@ describe('live.publishRateWarning()', () => {
 		expect(warnSpy).toHaveBeenCalledTimes(1);
 		expect(warnSpy.mock.calls[0][0]).toContain("'audit:hot'");
 		_resetCoalesceRegistry();
+	});
+});
+
+// -- live.lock() --------------------------------------------------------------
+
+describe('live.lock()', () => {
+	beforeEach(() => { _resetLock(); });
+	afterEach(() => { _resetLock(); });
+
+	it('runs the handler and returns its result', async () => {
+		const wrapped = live.lock('one-key', async (ctx, n) => n * 2);
+		const ctx = { user: { user_id: 'u1' } };
+		expect(await wrapped(ctx, 5)).toBe(10);
+	});
+
+	it('serializes concurrent calls on the same key in FIFO order', async () => {
+		const events = [];
+		const wrapped = live.lock(
+			(ctx, id) => `acct:${id}`,
+			async (ctx, id, label, ms) => {
+				events.push(`${label}-start`);
+				await new Promise((r) => setTimeout(r, ms));
+				events.push(`${label}-end`);
+				return label;
+			}
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		const a = wrapped(ctx, 1, 'a', 30);
+		const b = wrapped(ctx, 1, 'b', 5);
+		const c = wrapped(ctx, 1, 'c', 5);
+		await Promise.all([a, b, c]);
+		expect(events).toEqual(['a-start', 'a-end', 'b-start', 'b-end', 'c-start', 'c-end']);
+	});
+
+	it('runs calls on different keys in parallel', async () => {
+		const events = [];
+		const wrapped = live.lock(
+			(ctx, key) => key,
+			async (ctx, key, ms) => {
+				events.push(`${key}-start`);
+				await new Promise((r) => setTimeout(r, ms));
+				events.push(`${key}-end`);
+			}
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		await Promise.all([wrapped(ctx, 'a', 20), wrapped(ctx, 'b', 5)]);
+		// b finishes before a (different keys, parallel execution)
+		expect(events).toEqual(['a-start', 'b-start', 'b-end', 'a-end']);
+	});
+
+	it('propagates handler errors and unblocks the next waiter', async () => {
+		const wrapped = live.lock('err-key', async (ctx, shouldThrow) => {
+			if (shouldThrow) throw new Error('boom');
+			return 'ok';
+		});
+		const ctx = { user: { user_id: 'u1' } };
+		await expect(wrapped(ctx, true)).rejects.toThrow('boom');
+		expect(await wrapped(ctx, false)).toBe('ok');
+	});
+
+	it('null/undefined/empty key bypasses the lock entirely', async () => {
+		let runs = 0;
+		const wrapped = live.lock(
+			(ctx, key) => key,
+			async (ctx, key, ms) => {
+				runs++;
+				await new Promise((r) => setTimeout(r, ms));
+				return key;
+			}
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		// All three calls return null/empty key -> bypass -> run in parallel
+		const t0 = Date.now();
+		await Promise.all([
+			wrapped(ctx, null, 20),
+			wrapped(ctx, undefined, 20),
+			wrapped(ctx, '', 20)
+		]);
+		const elapsed = Date.now() - t0;
+		expect(runs).toBe(3);
+		expect(elapsed).toBeLessThan(50); // serialized would be ~60ms
+	});
+
+	it('accepts a static string key', async () => {
+		let runs = 0;
+		const wrapped = live.lock('static', async (ctx) => {
+			runs++;
+			await new Promise((r) => setTimeout(r, 10));
+		});
+		const ctx = { user: { user_id: 'u1' } };
+		await Promise.all([wrapped(ctx), wrapped(ctx)]);
+		// Both used the same static key, so serialized
+		expect(runs).toBe(2);
+	});
+
+	it('accepts a custom lock implementation via { lock }', async () => {
+		const calls = [];
+		const customLock = {
+			withLock: async (key, fn) => {
+				calls.push({ key, kind: 'pre' });
+				const result = await fn();
+				calls.push({ key, kind: 'post' });
+				return result;
+			}
+		};
+		const wrapped = live.lock(
+			{ key: 'cust', lock: customLock },
+			async (ctx) => 'done'
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		expect(await wrapped(ctx)).toBe('done');
+		expect(calls).toEqual([
+			{ key: 'cust', kind: 'pre' },
+			{ key: 'cust', kind: 'post' }
+		]);
+	});
+
+	it('preserves wrapper metadata for composition', () => {
+		const inner = async (ctx) => 'x';
+		const wrapped = live.lock('k', inner);
+		expect(wrapped.__isLive).toBe(true);
+		expect(wrapped.__isLocked).toBe(true);
+		expect(wrapped.__wrappedFn).toBe(inner);
+	});
+
+	it('composes with live.validated', async () => {
+		const schema = { '~standard': { version: 1, vendor: 'test', validate: (v) => ({ value: v }) } };
+		const wrapped = live.lock('compose-key', live.validated(schema, async (ctx, input) => input * 2));
+		const ctx = { user: { user_id: 'u1' } };
+		expect(await wrapped(ctx, 7)).toBe(14);
+	});
+
+	it('rejects missing handler', () => {
+		expect(() => live.lock('k')).toThrow(/requires a handler function/);
+		expect(() => live.lock('k', null)).toThrow(/requires a handler function/);
+	});
+
+	it('rejects empty string key', () => {
+		expect(() => live.lock('', async () => {})).toThrow(/non-empty/);
+		expect(() => live.lock({ key: '' }, async () => {})).toThrow(/non-empty/);
+	});
+
+	it('rejects malformed first argument', () => {
+		expect(() => live.lock(42, async () => {})).toThrow(/key string, key function, or config object/);
+		expect(() => live.lock(null, async () => {})).toThrow(/key string, key function, or config object/);
+	});
+
+	it('rejects bad config.key shape', () => {
+		expect(() => live.lock({ key: 42 }, async () => {})).toThrow(/string or function/);
+		expect(() => live.lock({}, async () => {})).toThrow(/string or function/);
+	});
+
+	it('rejects custom lock that does not implement withLock', () => {
+		expect(() => live.lock({ key: 'k', lock: {} }, async () => {})).toThrow(/withLock/);
+		expect(() => live.lock({ key: 'k', lock: null }, async () => {})).toThrow(/withLock/);
+	});
+
+	it('throws if the key resolver returns a non-string', async () => {
+		const wrapped = live.lock(() => 42, async () => 'x');
+		const ctx = { user: { user_id: 'u1' } };
+		await expect(wrapped(ctx)).rejects.toThrow(/return a string/);
 	});
 });

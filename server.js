@@ -1238,6 +1238,63 @@ export function _resetCoalesceRegistry() {
 }
 
 /**
+ * Per-key serialization primitive. Mirrors the algorithm in the adapter's
+ * Lock plugin (`Map<string, Promise>` chain) inline to preserve server.js's
+ * no-imports profile. Custom Lock instances passed via `live.lock({ lock })`
+ * just need to expose `withLock(key, fn)` matching the adapter's contract.
+ *
+ * @returns {{ withLock: <T>(key: string, fn: () => T | Promise<T>) => Promise<T>, held: (key: string) => boolean, size: () => number, clear: () => void }}
+ */
+function _createInMemoryLock() {
+	/** @type {Map<string, Promise<unknown>>} */
+	const chain = new Map();
+	return {
+		withLock(key, fn) {
+			if (typeof key !== 'string' || key.length === 0) {
+				return Promise.reject(new Error('lock: key must be a non-empty string'));
+			}
+			if (typeof fn !== 'function') {
+				return Promise.reject(new Error('lock: fn must be a function'));
+			}
+			const prev = chain.get(key);
+			const ours = (async () => {
+				if (prev) {
+					try { await prev; } catch {}
+				}
+				return fn();
+			})();
+			chain.set(key, ours);
+			const release = () => {
+				if (chain.get(key) === ours) chain.delete(key);
+			};
+			ours.then(release, release);
+			return ours;
+		},
+		held(key) { return chain.has(key); },
+		size() { return chain.size; },
+		clear() { chain.clear(); }
+	};
+}
+
+/** @type {ReturnType<typeof _createInMemoryLock> | null} */
+let _defaultLock = null;
+
+function _getDefaultLock() {
+	if (_defaultLock) return _defaultLock;
+	_defaultLock = _createInMemoryLock();
+	return _defaultLock;
+}
+
+/**
+ * Reset the default in-process lock. Tests only.
+ * @internal
+ */
+export function _resetLock() {
+	if (_defaultLock) _defaultLock.clear();
+	_defaultLock = null;
+}
+
+/**
  * Wrap an RPC handler with idempotency: identical calls (by key) return the
  * cached result without re-running the handler. Composes with live(),
  * live.validated(), live.rateLimit(), etc.
@@ -1299,6 +1356,95 @@ live.idempotent = function idempotent(config, fn) {
 	/** @type {any} */ (wrapper).__isLive = true;
 	/** @type {any} */ (wrapper).__isIdempotent = true;
 	/** @type {any} */ (wrapper).__idempotency = { keyFrom, store: customStore, ttl: ttlSec };
+	/** @type {any} */ (wrapper).__wrappedFn = fn;
+	return wrapper;
+};
+
+/**
+ * Wrap an RPC handler with per-key serialization. Concurrent calls that
+ * resolve to the same lock key run one at a time in FIFO order; calls on
+ * different keys run in parallel. Composes with `live()`,
+ * `live.validated()`, `live.idempotent()`, etc.
+ *
+ * The key is derived per-call: pass a string for a static lock, or a
+ * function `(ctx, ...args) => string | null | undefined` to derive it
+ * from the caller's context. A null / undefined key bypasses the lock
+ * (the handler runs unguarded for that call).
+ *
+ * Default lock is in-process and bounded only by your active key set.
+ * For multi-instance deployments, pass `lock: createDistributedLock(...)`
+ * from `svelte-adapter-uws-extensions/redis/lock`. Any object that
+ * exposes `withLock(key, fn)` matching the adapter's Lock contract works.
+ *
+ * Use for cron-ish triggers, expensive recompute, single-flight cache
+ * fills, and atomic read-modify-write on shared records.
+ *
+ * @example
+ * ```js
+ * export const recomputeLeaderboard = live.lock(
+ *   (ctx) => `leaderboard:${ctx.user.organization_id}`,
+ *   async (ctx) => {
+ *     const rows = await db.expensive.recompute(ctx.user.organization_id);
+ *     ctx.publish(`org:${ctx.user.organization_id}:leaderboard`, 'set', rows);
+ *     return rows;
+ *   }
+ * );
+ * ```
+ *
+ * @param {string | ((ctx: any, ...args: any[]) => string | null | undefined) | { key: string | ((ctx: any, ...args: any[]) => string | null | undefined), lock?: { withLock: (key: string, fn: () => any) => Promise<any> } }} keyOrConfig
+ * @param {Function} fn Handler function (ctx, ...args)
+ * @returns {Function}
+ */
+live.lock = function lock(keyOrConfig, fn) {
+	if (typeof fn !== 'function') {
+		throw new Error('[svelte-realtime] live.lock(keyOrConfig, fn) requires a handler function');
+	}
+	let keyFrom;
+	let customLock = null;
+	if (typeof keyOrConfig === 'string') {
+		const staticKey = keyOrConfig;
+		if (staticKey.length === 0) {
+			throw new Error('[svelte-realtime] live.lock: key string must be non-empty');
+		}
+		keyFrom = () => staticKey;
+	} else if (typeof keyOrConfig === 'function') {
+		keyFrom = keyOrConfig;
+	} else if (keyOrConfig && typeof keyOrConfig === 'object') {
+		const cfg = keyOrConfig;
+		if (typeof cfg.key === 'string') {
+			const staticKey = cfg.key;
+			if (staticKey.length === 0) {
+				throw new Error('[svelte-realtime] live.lock: key string must be non-empty');
+			}
+			keyFrom = () => staticKey;
+		} else if (typeof cfg.key === 'function') {
+			keyFrom = cfg.key;
+		} else {
+			throw new Error('[svelte-realtime] live.lock: config.key must be a string or function');
+		}
+		if (cfg.lock !== undefined) {
+			if (!cfg.lock || typeof cfg.lock.withLock !== 'function') {
+				throw new Error('[svelte-realtime] live.lock: lock must implement withLock(key, fn)');
+			}
+			customLock = cfg.lock;
+		}
+	} else {
+		throw new Error('[svelte-realtime] live.lock: first argument must be a key string, key function, or config object');
+	}
+
+	const wrapper = async function lockedWrapper(ctx, ...args) {
+		const key = keyFrom(ctx, ...args);
+		if (key == null || key === '') return fn(ctx, ...args);
+		if (typeof key !== 'string') {
+			throw new Error('[svelte-realtime] live.lock: key resolver must return a string (or null/undefined to bypass)');
+		}
+		const lockInst = customLock || _getDefaultLock();
+		return lockInst.withLock(key, () => fn(ctx, ...args));
+	};
+
+	/** @type {any} */ (wrapper).__isLive = true;
+	/** @type {any} */ (wrapper).__isLocked = true;
+	/** @type {any} */ (wrapper).__lockConfig = { keyFrom, lock: customLock };
 	/** @type {any} */ (wrapper).__wrappedFn = fn;
 	return wrapper;
 };

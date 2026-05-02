@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`live.lock(keyOrConfig, fn)` for per-key serialization.** Wraps an RPC handler so concurrent calls that resolve to the same lock key run one at a time in FIFO order; calls on different keys run in parallel. Same composable shape as `live.validated` / `live.idempotent` / `live.rateLimit`.
+
+  ```js
+  // Per-org leaderboard recompute: only one in-flight recompute per org
+  export const recomputeLeaderboard = live.lock(
+    (ctx) => `leaderboard:${ctx.user.organization_id}`,
+    async (ctx) => {
+      const rows = await db.expensive.recompute(ctx.user.organization_id);
+      ctx.publish(`org:${ctx.user.organization_id}:leaderboard`, 'set', rows);
+      return rows;
+    }
+  );
+
+  // Static key (single global section)
+  export const rebuildSearchIndex = live.lock(
+    'search-index-rebuild',
+    async (ctx) => { /* ... */ }
+  );
+
+  // Custom lock implementation (multi-instance via Redis, etc.)
+  // Any object exposing withLock(key, fn) works.
+  export const settleInvoice = live.lock(
+    { key: (ctx, id) => `invoice:${id}`, lock: customLock },
+    live.validated(InvoiceIdSchema, async (ctx, id) => settle(id))
+  );
+  ```
+
+  Use for cron-ish triggers, expensive recompute, single-flight cache fills, and atomic read-modify-write on shared records.
+
+  Key resolver returning `null`, `undefined`, or `''` bypasses the lock entirely for that call (the handler runs unguarded). Handler errors propagate to the caller and do NOT block subsequent waiters. Composes with the rest of the `live.*` wrapper family.
+
+  Default lock is in-process. For multi-instance deployments, pass any object exposing `withLock(key, fn)` matching the contract via `{ lock }`.
+
 - **Typed subscribe-denial codes on stream `error` stores.** When the server's `subscribe` hook denies a stream subscription, the denial reason now arrives on the stream's existing `error` store as a typed `RpcError` whose `code` is the canonical denial code. Apps can render targeted UI per cause instead of decoding a generic `INTERNAL_ERROR`:
 
   ```svelte
