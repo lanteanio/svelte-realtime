@@ -1341,6 +1341,21 @@ function _createStream(path, options, dynamicArgs) {
 		 * @returns {{ subscribe: Function, optimistic: Function, hydrate: Function }}
 		 */
 		hydrate(initialData) {
+			// Dev-only shape check: keyed and array-shaped merge strategies
+			// (crud, latest, presence, cursor) hand later code an array; if a
+			// load() callsite returns the wrong shape (a forgotten `.data`
+			// unwrap, an object instead of an array, etc.), the failure surfaces
+			// downstream as a confusing TypeError. Warn early with the stream
+			// path and merge name so the fix is obvious. Stripped in production.
+			if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+				if (initialData != null && merge !== 'set' && !Array.isArray(initialData)) {
+					console.warn(
+						`[svelte-realtime] hydrate('${path}') merge='${merge}' expects an array, got ` +
+						(typeof initialData === 'object' ? initialData.constructor?.name || 'object' : typeof initialData) +
+						'.\n  See: https://svti.me/merge'
+					);
+				}
+			}
 			currentValue = initialData;
 			_rebuildIndex();
 			store.set(currentValue);

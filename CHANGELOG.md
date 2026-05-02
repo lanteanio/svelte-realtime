@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dev-mode shape check on `.hydrate()`.** When `.hydrate()` is called with a value that doesn't match the stream's merge strategy (`crud` / `latest` / `presence` / `cursor` expect arrays; `set` accepts anything), a one-shot `console.warn` fires with the stream path, the configured merge strategy, and the actual type that was passed. Caught early, the fix is usually a missing `.data` unwrap on a paginated SSR response or a typo in the merge option. Stripped from production builds via the existing `process.env.NODE_ENV` gate. `null` and `undefined` are treated as "no data yet" and never warn.
+
 - **`live.rateLimits({ default, overrides, exempt })` for registry-level RPC rate limiting.** Configure rate limits centrally instead of wrapping every handler with `live.rateLimit(...)`. The default rule applies to every RPC path that doesn't have its own per-handler wrapping; per-path overrides tighten or loosen specific paths; `exempt` opts paths out entirely.
 
   ```js

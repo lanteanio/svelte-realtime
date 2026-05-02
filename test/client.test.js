@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived;
 let topicCallbacks;
@@ -734,6 +734,76 @@ describe('__stream() hydrate', () => {
 		const store = __stream('ssr/chain', { merge: 'set' });
 		const result = store.hydrate({ count: 0 });
 		expect(result).toBe(store);
+	});
+
+	describe('shape validation (dev-only)', () => {
+		let warn;
+
+		beforeEach(() => {
+			warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		});
+
+		afterEach(() => {
+			warn.mockRestore();
+		});
+
+		it('warns when crud merge is hydrated with a non-array', () => {
+			const store = __stream('shape/crud', { merge: 'crud', key: 'id' });
+			store.hydrate({ id: 1, name: 'wrong' });
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toMatch(/hydrate\('shape\/crud'\)/);
+			expect(warn.mock.calls[0][0]).toMatch(/merge='crud'/);
+			expect(warn.mock.calls[0][0]).toMatch(/expects an array/);
+		});
+
+		it('warns when latest merge is hydrated with a non-array', () => {
+			const store = __stream('shape/latest', { merge: 'latest' });
+			store.hydrate({ items: [] });
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toMatch(/merge='latest'/);
+		});
+
+		it('warns when presence merge is hydrated with a non-array', () => {
+			const store = __stream('shape/presence', { merge: 'presence' });
+			store.hydrate({ alice: { online: true } });
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toMatch(/merge='presence'/);
+		});
+
+		it('warns when cursor merge is hydrated with a non-array', () => {
+			const store = __stream('shape/cursor', { merge: 'cursor' });
+			store.hydrate({});
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toMatch(/merge='cursor'/);
+		});
+
+		it('does not warn for set merge with arbitrary shapes', () => {
+			const store = __stream('shape/set', { merge: 'set' });
+			store.hydrate({ count: 0 });
+			store.hydrate(42);
+			store.hydrate('hello');
+			store.hydrate([1, 2, 3]);
+			expect(warn).not.toHaveBeenCalled();
+		});
+
+		it('does not warn when crud merge is hydrated with an array', () => {
+			const store = __stream('shape/crudArray', { merge: 'crud', key: 'id' });
+			store.hydrate([{ id: 1 }, { id: 2 }]);
+			expect(warn).not.toHaveBeenCalled();
+		});
+
+		it('does not warn for null or undefined hydration', () => {
+			const store = __stream('shape/nil', { merge: 'crud' });
+			store.hydrate(null);
+			store.hydrate(undefined);
+			expect(warn).not.toHaveBeenCalled();
+		});
+
+		it('warning includes svti.me/merge shortlink', () => {
+			const store = __stream('shape/link', { merge: 'crud' });
+			store.hydrate({});
+			expect(warn.mock.calls[0][0]).toMatch(/svti\.me\/merge/);
+		});
 	});
 });
 
