@@ -9,6 +9,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`failure` store on the client for typed reconnect-failure UI.** A new top-level export from `svelte-realtime/client` carries the cause of the most recent non-open connection-status transition, so apps can render targeted UI per failure class instead of decoding close codes themselves.
+
+  ```svelte
+  <script>
+    import { failure } from 'svelte-realtime/client';
+    import { status } from 'svelte-adapter-uws/client';
+  </script>
+
+  {#if $failure?.class === 'TERMINAL'}
+    <p class="error">Session expired. <a href="/login">Sign in again</a></p>
+  {:else if $failure?.class === 'EXHAUSTED'}
+    <button onclick={() => location.reload()}>Reconnect</button>
+  {:else if $failure?.class === 'THROTTLE'}
+    <p class="warn">Server is busy, retrying shortly...</p>
+  {:else if $failure?.class === 'AUTH'}
+    <p class="error">Could not authenticate (HTTP {$failure.status})</p>
+  {:else if $status === 'disconnected'}
+    <span>Reconnecting...</span>
+  {/if}
+  ```
+
+  Discriminated union on `kind`:
+
+  - `{ kind: 'ws-close', class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY', code, reason }` for WebSocket closes.
+  - `{ kind: 'auth-preflight', class: 'AUTH', status, reason }` for `configure({ auth: true })` preflight failures. HTTP `status` (not `code`) so `4401` close vs `401` preflight cannot be confused.
+
+  Five classes:
+
+  - `TERMINAL` -- server permanently rejected the client (1008 / 4401 / 4403). Retry loop stopped.
+  - `EXHAUSTED` -- `maxReconnectAttempts` hit; the network never recovered.
+  - `THROTTLE` -- server signalled rate-limiting (4429). Reconnect still scheduled, jumped ahead in the backoff curve.
+  - `RETRY` -- normal transient drop (1006 abnormal, network blip, server restart). Reconnect in progress.
+  - `AUTH` -- `configure({ auth: true })` HTTP preflight failed before the WebSocket was opened. 4xx is terminal; 5xx and network errors retry.
+
+  Lifecycle: `null` while connected (or before any failure), set on the failing transition, cleared on the next successful `'open'`. NOT set on intentional `close()` -- the deliberate-end state is `failure === null` paired with the underlying `status === 'failed'`. Types `Failure` and `FailureClass` are exported alongside.
+
+  Requires `svelte-adapter-uws@^0.5.0-next.5` (peer floor bumped from `next.4`); the store is a one-line re-export of the adapter's `failure` primitive with no transformation.
+
 - **`ctx.requestId` for correlation logging.** The adapter assigns a correlation id per WebSocket connection (stable across every event on that connection) and per HTTP request, honoring an inbound `X-Request-ID` when present. Surfaced on `LiveContext` and `CronContext` so handlers can structured-log the same id from every step of one user's interaction without piping it through their handler signatures.
 
   ```js

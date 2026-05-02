@@ -1940,3 +1940,14 @@ function _devtoolsStream(path, topic, subCount) {
  * you just want raw topic events keyed to a store value.
  */
 export { onDerived } from 'svelte-adapter-uws/client';
+
+/**
+ * Re-export `failure` from the adapter client.
+ * Reactive store carrying the cause of the most recent non-open status
+ * transition: `{ kind: 'ws-close', class: 'TERMINAL' | 'EXHAUSTED' |
+ * 'THROTTLE' | 'RETRY', code, reason }` for WebSocket closes, or
+ * `{ kind: 'auth-preflight', class: 'AUTH', status, reason }` for
+ * auth-preflight failures. `null` while connected. Cleared on the next
+ * successful `'open'`. Not set on intentional `close()`.
+ */
+export { failure } from 'svelte-adapter-uws/client';

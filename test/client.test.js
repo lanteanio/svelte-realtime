@@ -1,11 +1,21 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived;
+let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure;
 let topicCallbacks;
 let statusCallbacks;
+let failureCallbacks;
+let failureValue;
 let sendQueuedFn;
 let readyReject;
 let connectFn;
+
+/**
+ * Simulate a failure store update from the adapter.
+ */
+function simulateFailure(value) {
+	failureValue = value;
+	for (const cb of failureCallbacks) cb(value);
+}
 
 /**
  * Simulate an RPC response arriving from the server.
@@ -43,6 +53,8 @@ beforeEach(async () => {
 
 	topicCallbacks = new Map();
 	statusCallbacks = new Set();
+	failureCallbacks = new Set();
+	failureValue = null;
 	sendQueuedFn = vi.fn();
 
 	connectFn = vi.fn(() => ({
@@ -91,6 +103,13 @@ beforeEach(async () => {
 				fn('open');
 				return () => statusCallbacks.delete(fn);
 			}
+		},
+		failure: {
+			subscribe: (fn) => {
+				failureCallbacks.add(fn);
+				fn(failureValue);
+				return () => failureCallbacks.delete(fn);
+			}
 		}
 	}));
 
@@ -121,6 +140,7 @@ beforeEach(async () => {
 	combine = mod.combine;
 	onSignal = mod.onSignal;
 	onDerived = mod.onDerived;
+	failure = mod.failure;
 });
 
 // -- __rpc (Finding 1 regression) ---------------------------------------------
@@ -2530,6 +2550,69 @@ describe('onDerived()', () => {
 		currentVal = 'b';
 		for (const fn of sourceSubs) fn('b');
 		expect(derived._getCurrentTopic()).toBe('room:b');
+		unsub();
+	});
+});
+
+// -- failure re-export --------------------------------------------------------
+
+describe('failure store', () => {
+	it('is re-exported from the adapter client', () => {
+		expect(failure).toBeDefined();
+		expect(typeof failure.subscribe).toBe('function');
+	});
+
+	it('subscribers receive the current value (null while connected)', () => {
+		const values = [];
+		const unsub = failure.subscribe((v) => values.push(v));
+		expect(values).toEqual([null]);
+		unsub();
+	});
+
+	it('surfaces ws-close failure values from the adapter unchanged', () => {
+		const values = [];
+		const unsub = failure.subscribe((v) => values.push(v));
+		expect(values).toEqual([null]);
+
+		const f = { kind: 'ws-close', class: 'TERMINAL', code: 4401, reason: 'unauthorized' };
+		simulateFailure(f);
+		expect(values[1]).toBe(f);
+		unsub();
+	});
+
+	it('surfaces auth-preflight failure values from the adapter unchanged', () => {
+		const values = [];
+		const unsub = failure.subscribe((v) => values.push(v));
+		expect(values).toEqual([null]);
+
+		const f = { kind: 'auth-preflight', class: 'AUTH', status: 401, reason: 'invalid token' };
+		simulateFailure(f);
+		expect(values[1]).toBe(f);
+		unsub();
+	});
+
+	it('surfaces THROTTLE / EXHAUSTED / RETRY classes', () => {
+		const values = [];
+		const unsub = failure.subscribe((v) => values.push(v));
+
+		simulateFailure({ kind: 'ws-close', class: 'THROTTLE', code: 4429, reason: 'rate limited' });
+		simulateFailure({ kind: 'ws-close', class: 'EXHAUSTED', code: 1006, reason: 'max retries' });
+		simulateFailure({ kind: 'ws-close', class: 'RETRY', code: 1006, reason: 'transient' });
+
+		expect(values[1]?.class).toBe('THROTTLE');
+		expect(values[2]?.class).toBe('EXHAUSTED');
+		expect(values[3]?.class).toBe('RETRY');
+		unsub();
+	});
+
+	it('clears to null on the next successful open transition', () => {
+		const values = [];
+		const unsub = failure.subscribe((v) => values.push(v));
+
+		simulateFailure({ kind: 'ws-close', class: 'RETRY', code: 1006, reason: 'blip' });
+		simulateFailure(null);
+
+		expect(values[values.length - 1]).toBeNull();
 		unsub();
 	});
 });

@@ -329,3 +329,64 @@ export function onDerived<T = unknown>(
 	topicFn: (value: T) => string,
 	store: Readable<T>
 ): Readable<WSEvent | null>;
+
+/**
+ * Discriminated union describing the cause of the most recent non-open
+ * connection-status transition. The `kind` field tells you whether the
+ * failure came from a WebSocket close frame (`'ws-close'`, with a numeric
+ * `code`) or from the HTTP auth preflight (`'auth-preflight'`, with an
+ * HTTP `status`). Re-exported from `svelte-adapter-uws/client`.
+ *
+ * - `TERMINAL` -- server permanently rejected the client (1008 / 4401 / 4403). Retry loop stopped.
+ * - `EXHAUSTED` -- `maxReconnectAttempts` hit; the network never recovered.
+ * - `THROTTLE` -- server signalled rate-limiting (4429). Reconnect still scheduled, jumped ahead in the backoff curve.
+ * - `RETRY` -- normal transient drop (1006 abnormal, network blip, server restart). Reconnect in progress.
+ * - `AUTH` -- auth preflight (`{ auth: true }`) failed before the WebSocket was opened. 4xx is terminal; 5xx and network errors retry.
+ */
+export type Failure =
+	| { kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY'; code: number; reason: string }
+	| { kind: 'auth-preflight'; class: 'AUTH'; status: number; reason: string };
+
+/**
+ * The `class` field of a `Failure`. Re-exported from
+ * `svelte-adapter-uws/client` for apps that need to type a switch over
+ * the failure class without importing the full union.
+ */
+export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AUTH';
+
+/**
+ * Cause of the most recent non-open status transition. `null` while
+ * connected, or before any failure has occurred. Set on TERMINAL /
+ * THROTTLE / RETRY close codes, on the reconnect cap being exhausted
+ * (`'EXHAUSTED'`), and on auth-preflight failures (`'AUTH'`). Cleared
+ * on the next successful `'open'`. NOT set on an intentional `close()`
+ * call -- `failure === null` paired with the underlying status of
+ * `'failed'` is the deliberately-ended state.
+ *
+ * Pair with the connection status to render targeted UI per failure
+ * cause: "Session expired" for `class: 'TERMINAL'`, "Server is busy"
+ * for `'THROTTLE'`, generic "Reconnecting" for `'RETRY'`, etc.
+ *
+ * Re-exported from `svelte-adapter-uws/client`.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { failure } from 'svelte-realtime/client';
+ *   import { status } from 'svelte-adapter-uws/client';
+ * </script>
+ *
+ * {#if $failure?.class === 'TERMINAL'}
+ *   <p class="error">Session expired. <a href="/login">Sign in again</a></p>
+ * {:else if $failure?.class === 'EXHAUSTED'}
+ *   <button onclick={() => location.reload()}>Reconnect</button>
+ * {:else if $failure?.class === 'THROTTLE'}
+ *   <p class="warn">Server is busy, retrying shortly...</p>
+ * {:else if $failure?.class === 'AUTH'}
+ *   <p class="error">Could not authenticate (HTTP {$failure.status})</p>
+ * {:else if $status === 'disconnected'}
+ *   <span>Reconnecting...</span>
+ * {/if}
+ * ```
+ */
+export const failure: Readable<Failure | null>;
