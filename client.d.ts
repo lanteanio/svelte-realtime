@@ -90,7 +90,36 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
  * SSR hydration, and cursor-based pagination.
  */
 export interface StreamStore<T = any> extends Readable<T> {
-	/** Reactive store holding the current error, or null when healthy. Errors never replace the data store value. */
+	/**
+	 * Reactive store holding the current error, or null when healthy.
+	 * Errors never replace the data store value.
+	 *
+	 * Carries typed `code` for subscribe-denials surfaced by the
+	 * adapter's `denials` store: `'UNAUTHENTICATED'`, `'FORBIDDEN'`,
+	 * `'INVALID_TOPIC'`, `'RATE_LIMITED'`, or any custom string the
+	 * server's `subscribe` hook returned. RPC failures (timeouts,
+	 * connection drops, server-side `LiveError` throws) carry their
+	 * own canonical codes (`TIMEOUT`, `DISCONNECTED`, etc.) on the
+	 * same store.
+	 *
+	 * @example
+	 * ```svelte
+	 * <script>
+	 *   import { auditFeed } from '$live/audit';
+	 *   const err = auditFeed.error;
+	 * </script>
+	 *
+	 * {#if $err?.code === 'UNAUTHENTICATED'}
+	 *   <p>Please sign in to view audit history.</p>
+	 * {:else if $err?.code === 'FORBIDDEN'}
+	 *   <p>You don't have access to this organization's audit log.</p>
+	 * {:else if $err?.code === 'RATE_LIMITED'}
+	 *   <p>Too many requests. Please wait a moment.</p>
+	 * {:else if $err}
+	 *   <p>Audit feed unavailable: {$err.message}</p>
+	 * {/if}
+	 * ```
+	 */
 	readonly error: Readable<RpcError | null>;
 	/** Reactive store holding the connection status: 'loading', 'connected', 'reconnecting', or 'error'. */
 	readonly status: Readable<'loading' | 'connected' | 'reconnecting' | 'error'>;

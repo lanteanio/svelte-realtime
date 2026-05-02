@@ -5,6 +5,8 @@ let topicCallbacks;
 let statusCallbacks;
 let failureCallbacks;
 let failureValue;
+let denialsCallbacks;
+let denialsValue;
 let sendQueuedFn;
 let readyReject;
 let connectFn;
@@ -15,6 +17,14 @@ let connectFn;
 function simulateFailure(value) {
 	failureValue = value;
 	for (const cb of failureCallbacks) cb(value);
+}
+
+/**
+ * Simulate a subscribe-denial frame from the adapter.
+ */
+function simulateDenial(value) {
+	denialsValue = value;
+	for (const cb of denialsCallbacks) cb(value);
 }
 
 /**
@@ -55,6 +65,8 @@ beforeEach(async () => {
 	statusCallbacks = new Set();
 	failureCallbacks = new Set();
 	failureValue = null;
+	denialsCallbacks = new Set();
+	denialsValue = null;
 	sendQueuedFn = vi.fn();
 
 	connectFn = vi.fn(() => ({
@@ -109,6 +121,13 @@ beforeEach(async () => {
 				failureCallbacks.add(fn);
 				fn(failureValue);
 				return () => failureCallbacks.delete(fn);
+			}
+		},
+		denials: {
+			subscribe: (fn) => {
+				denialsCallbacks.add(fn);
+				fn(denialsValue);
+				return () => denialsCallbacks.delete(fn);
 			}
 		}
 	}));
@@ -2551,6 +2570,100 @@ describe('onDerived()', () => {
 		for (const fn of sourceSubs) fn('b');
 		expect(derived._getCurrentTopic()).toBe('room:b');
 		unsub();
+	});
+});
+
+// -- subscribe-denials routed to per-stream error stores ----------------------
+
+describe('subscribe-denial routing', () => {
+	async function setupStreamSubscribed(topic) {
+		const callsBefore = sendQueuedFn.mock.calls.length;
+		const store = __stream('feed/items', { merge: 'crud', key: 'id' });
+		const errorValues = [];
+		const errorUnsub = store.error.subscribe((v) => errorValues.push(v));
+		const dataUnsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[callsBefore][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic, merge: 'crud', key: 'id' });
+		return { store, errorValues, cleanup: () => { errorUnsub(); dataUnsub(); } };
+	}
+
+	it('routes a FORBIDDEN denial to the matching stream error store', async () => {
+		const ctx = await setupStreamSubscribed('feed:42');
+		expect(ctx.errorValues[ctx.errorValues.length - 1]).toBeNull();
+
+		simulateDenial({ topic: 'feed:42', reason: 'FORBIDDEN', ref: 1 });
+
+		const last = ctx.errorValues[ctx.errorValues.length - 1];
+		expect(last).toBeInstanceOf(RpcError);
+		expect(last.code).toBe('FORBIDDEN');
+		expect(last.message).toContain("'feed:42'");
+		ctx.cleanup();
+	});
+
+	it('routes UNAUTHENTICATED, INVALID_TOPIC, RATE_LIMITED with the same code passthrough', async () => {
+		for (const reason of ['UNAUTHENTICATED', 'INVALID_TOPIC', 'RATE_LIMITED']) {
+			const ctx = await setupStreamSubscribed(`t-${reason}`);
+			simulateDenial({ topic: `t-${reason}`, reason, ref: 1 });
+			const last = ctx.errorValues[ctx.errorValues.length - 1];
+			expect(last.code).toBe(reason);
+			ctx.cleanup();
+		}
+	});
+
+	it('passes through a custom (non-canonical) reason string verbatim as code', async () => {
+		const ctx = await setupStreamSubscribed('billing:42');
+		simulateDenial({ topic: 'billing:42', reason: 'PLAN_LOCKED', ref: 1 });
+		const last = ctx.errorValues[ctx.errorValues.length - 1];
+		expect(last.code).toBe('PLAN_LOCKED');
+		ctx.cleanup();
+	});
+
+	it('does not affect streams subscribed to a different topic', async () => {
+		const ctxA = await setupStreamSubscribed('topic:A');
+		const ctxB = await setupStreamSubscribed('topic:B');
+
+		simulateDenial({ topic: 'topic:A', reason: 'FORBIDDEN', ref: 1 });
+
+		expect(ctxA.errorValues[ctxA.errorValues.length - 1]?.code).toBe('FORBIDDEN');
+		expect(ctxB.errorValues[ctxB.errorValues.length - 1]).toBeNull();
+
+		ctxA.cleanup();
+		ctxB.cleanup();
+	});
+
+	it('falls back to FORBIDDEN code when reason is missing or empty', async () => {
+		const ctx = await setupStreamSubscribed('feed:bare');
+		simulateDenial({ topic: 'feed:bare', reason: '', ref: 1 });
+		const last = ctx.errorValues[ctx.errorValues.length - 1];
+		expect(last.code).toBe('FORBIDDEN');
+		ctx.cleanup();
+	});
+
+	it('ignores denials for topics with no registered streams', async () => {
+		const ctx = await setupStreamSubscribed('feed:active');
+		simulateDenial({ topic: 'feed:nobody', reason: 'FORBIDDEN', ref: 1 });
+
+		expect(ctx.errorValues[ctx.errorValues.length - 1]).toBeNull();
+		ctx.cleanup();
+	});
+
+	it('clears the error on a subsequent successful stream RPC', async () => {
+		const ctx = await setupStreamSubscribed('feed:retry');
+		simulateDenial({ topic: 'feed:retry', reason: 'FORBIDDEN', ref: 1 });
+		expect(ctx.errorValues[ctx.errorValues.length - 1]?.code).toBe('FORBIDDEN');
+
+		// A second successful RPC for the same stream clears the error.
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1];
+		// Drive a re-fetch by simulating a connection event the stream listens for.
+		simulateStatus('open');
+		await flush();
+		const followUp = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		if (followUp && followUp.id !== sent[0].id) {
+			simulateRpcResponse(followUp.id, { ok: true, data: [], topic: 'feed:retry', merge: 'crud', key: 'id' });
+			expect(ctx.errorValues[ctx.errorValues.length - 1]).toBeNull();
+		}
+		ctx.cleanup();
 	});
 });
 

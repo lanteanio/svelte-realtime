@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Typed subscribe-denial codes on stream `error` stores.** When the server's `subscribe` hook denies a stream subscription, the denial reason now arrives on the stream's existing `error` store as a typed `RpcError` whose `code` is the canonical denial code. Apps can render targeted UI per cause instead of decoding a generic `INTERNAL_ERROR`:
+
+  ```svelte
+  <script>
+    import { auditFeed } from '$live/audit';
+    const err = auditFeed.error;
+  </script>
+
+  {#if $err?.code === 'UNAUTHENTICATED'}
+    <p>Please sign in to view audit history.</p>
+  {:else if $err?.code === 'FORBIDDEN'}
+    <p>You don't have access to this organization's audit log.</p>
+  {:else if $err?.code === 'RATE_LIMITED'}
+    <p>Too many requests. Please wait a moment.</p>
+  {:else if $err?.code === 'INVALID_TOPIC'}
+    <p>Invalid feed identifier.</p>
+  {:else if $err}
+    <p>Audit feed unavailable: {$err.message}</p>
+  {/if}
+  ```
+
+  Canonical codes: `UNAUTHENTICATED`, `FORBIDDEN`, `INVALID_TOPIC`, `RATE_LIMITED`. Custom strings the server's `subscribe` hook returns are passed through verbatim as `code` (e.g. `KYC_PENDING`, `PLAN_LOCKED`), so apps can switch on app-specific reasons too. The denial routes via the adapter's `denials` Readable; `stream.error` is the existing `RpcError | null` store, no new public API.
+
+  Same denial naturally fans out to every stream subscribed to the same topic. Stream lifecycle handles the listener wiring: registers on first successful stream RPC (when the topic is known), deregisters on `cleanup()` so HMR / unsubscribe / re-subscribe behave predictably.
+
 - **Dev-mode publish-rate warning.** When a topic crosses 200 events/sec (default, configurable), a one-shot `console.warn` fires pointing at the two natural mitigations:
 
   ```

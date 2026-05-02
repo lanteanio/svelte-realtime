@@ -1,5 +1,5 @@
 // @ts-check
-import { connect as _connect, on, status } from 'svelte-adapter-uws/client';
+import { connect as _connect, on, status, denials } from 'svelte-adapter-uws/client';
 import { writable, readable } from 'svelte/store';
 
 /** @type {import('svelte/store').Readable<undefined>} */
@@ -71,6 +71,56 @@ let listenerAttached = false;
 
 /** @type {boolean} */
 let disconnectListenerAttached = false;
+
+/** @type {boolean} */
+let denialsListenerAttached = false;
+
+/**
+ * Topic -> set of stream-error setters. When the adapter emits a
+ * subscribe-denied frame for a topic, every stream subscribed to that
+ * topic gets its `error` store populated with a typed `RpcError` whose
+ * `code` is the canonical denial reason (`UNAUTHENTICATED` /
+ * `FORBIDDEN` / `INVALID_TOPIC` / `RATE_LIMITED`) or any custom string
+ * the server's `subscribe` hook returned.
+ *
+ * @type {Map<string, Set<(err: any) => void>>}
+ */
+const _streamErrorByTopic = new Map();
+
+function _registerTopicErrorSetter(topic, setError) {
+	let set = _streamErrorByTopic.get(topic);
+	if (!set) { set = new Set(); _streamErrorByTopic.set(topic, set); }
+	set.add(setError);
+}
+
+function _unregisterTopicErrorSetter(topic, setError) {
+	const set = _streamErrorByTopic.get(topic);
+	if (!set) return;
+	set.delete(setError);
+	if (set.size === 0) _streamErrorByTopic.delete(topic);
+}
+
+/**
+ * Attach the subscribe-denial listener once. Routes each adapter denial
+ * (`{topic, reason, ref}`) to the per-topic error setters registered by
+ * stream stores, so apps see a typed `error.code` (the denial reason)
+ * instead of the generic `INTERNAL_ERROR` the framework's pre-A6 error
+ * mapping produced.
+ */
+function ensureDenialsListener() {
+	if (denialsListenerAttached) return;
+	denialsListenerAttached = true;
+	denials.subscribe((denial) => {
+		if (!denial) return;
+		const setters = _streamErrorByTopic.get(denial.topic);
+		if (!setters || setters.size === 0) return;
+		const code = typeof denial.reason === 'string' && denial.reason
+			? denial.reason
+			: 'FORBIDDEN';
+		const message = `Subscribe to topic '${denial.topic}' denied: ${code}`;
+		for (const setError of setters) setError(new RpcError(code, message));
+	});
+}
 
 /** Terminal close codes that indicate a permanently-dead connection (no retry) */
 const _TERMINAL_CODES = new Set([1008, 4401, 4403]);
@@ -985,7 +1035,12 @@ function _createStream(path, options, dynamicArgs) {
 				_clearError();
 				_status = 'connected';
 				_statusStore.set('connected');
+				if (topic && topic !== response.topic) _unregisterTopicErrorSetter(topic, _setError);
 				topic = response.topic || null;
+				if (topic) {
+					_registerTopicErrorSetter(topic, _setError);
+					ensureDenialsListener();
+				}
 
 				// Track sequence number for replay
 				if (response.seq !== undefined) _lastSeq = response.seq;
@@ -1128,6 +1183,7 @@ function _createStream(path, options, dynamicArgs) {
 		_bufA.length = 0;
 		_bufB.length = 0;
 		_activeBuf = _bufA;
+		if (topic) _unregisterTopicErrorSetter(topic, _setError);
 		topic = null;
 		initialLoaded = false;
 		fetching = false;
