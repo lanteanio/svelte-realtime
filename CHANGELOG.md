@@ -17,6 +17,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`onUnsubscribe(ctx, topic, remainingSubscribers)` -- third argument exposes the remaining subscriber count.** When the last consumer of a stream leaves, the hook can now tear down the upstream feed without app-side bookkeeping. Backwards-compatible: existing handlers ignoring the extra argument keep working unchanged.
+
+  ```js
+  export const orderFeed = live.stream(
+    (ctx, orgId) => `orders:${orgId}`,
+    loadOrders,
+    {
+      onSubscribe: (ctx, topic) => upstream.subscribe(topic),
+      onUnsubscribe: (ctx, topic, remaining) => {
+        if (remaining === 0) upstream.unsubscribe(topic);
+      }
+    }
+  );
+  ```
+
+  `remainingSubscribers` is the count of OTHER WebSockets still holding a realtime-stream subscription to the topic after the current one drops. The hook fires once per logical subscription on the dropping connection (mirroring `onSubscribe` firings); every firing for one drain sees the same `remainingSubscribers` value, so the `=== 0` check inside the hook is meaningful regardless of how many logical subs the dropping ws had.
+
+  Replaces the common app-side pattern of "maintain my own per-topic ws set" -- the realtime layer was already tracking exactly this information for its own bookkeeping.
+
 - **`quiescent` store on the client for "all streams settled" detection.** A new top-level Readable from `svelte-realtime/client` emits `true` when every active stream has finished loading (or errored) and `false` while at least one is fetching or recovering. Drop a single page-level loading state at the moment all streams settle, instead of flickering one spinner per stream:
 
   ```svelte

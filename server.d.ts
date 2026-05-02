@@ -135,10 +135,32 @@ export interface StreamOptions {
 	onSubscribe?(ctx: LiveContext<any>, topic: string): void | Promise<void>;
 
 	/**
-	 * Called when a client disconnects from this stream.
-	 * Fires for both static and dynamic topics.
+	 * Called when a client disconnects from this stream. Fires for both
+	 * static and dynamic topics.
+	 *
+	 * `remainingSubscribers` is the count of OTHER WebSockets still
+	 * holding a realtime-stream subscription to this topic after the
+	 * current one drops. Use it to tear down upstream resources when
+	 * the last subscriber leaves:
+	 *
+	 * ```js
+	 * live.stream(
+	 *   (ctx, room) => `feed:${room}`,
+	 *   loader,
+	 *   {
+	 *     onSubscribe: (ctx, topic) => startUpstream(topic),
+	 *     onUnsubscribe: (ctx, topic, remaining) => {
+	 *       if (remaining === 0) stopUpstream(topic);
+	 *     }
+	 *   }
+	 * );
+	 * ```
+	 *
+	 * The hook fires once per logical subscription on the dropping
+	 * connection (mirroring the per-sub `onSubscribe` firings). Every
+	 * firing for one drain sees the same `remainingSubscribers` value.
 	 */
-	onUnsubscribe?(ctx: LiveContext<any>, topic: string): void | Promise<void>;
+	onUnsubscribe?(ctx: LiveContext<any>, topic: string, remainingSubscribers: number): void | Promise<void>;
 
 	/**
 	 * Subscribe-time access predicate. Checked once when a client subscribes.

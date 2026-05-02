@@ -32,7 +32,8 @@ import {
 	_activatePublishRateWarning,
 	_registerCoalesce,
 	_registerVolatile,
-	_resetLock
+	_resetLock,
+	_resetTopicWsCounts
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -7755,6 +7756,159 @@ describe('live.publishRateWarning()', () => {
 		expect(warnSpy).toHaveBeenCalledTimes(1);
 		expect(warnSpy.mock.calls[0][0]).toContain("'audit:hot'");
 		_resetCoalesceRegistry();
+	});
+});
+
+// -- onUnsubscribe remainingSubscribers ---------------------------------------
+
+describe('onUnsubscribe remainingSubscribers', () => {
+	let platform;
+
+	beforeEach(() => { _resetTopicWsCounts(); platform = mockPlatform(); });
+	afterEach(() => { _resetTopicWsCounts(); });
+
+	it('passes 0 when the only subscriber unsubscribes', async () => {
+		const calls = [];
+		const stream = live.stream('feed/solo', async () => [], {
+			onUnsubscribe: (ctx, topic, remaining) => calls.push({ topic, remaining })
+		});
+		__register('feed/solo', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		handleRpc(ws, toArrayBuffer({ rpc: 'feed/solo', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		unsubscribe(ws, 'feed/solo', { platform });
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toHaveLength(1);
+		expect(calls[0].topic).toBe('feed/solo');
+		expect(calls[0].remaining).toBe(0);
+	});
+
+	it('passes N when N other WebSockets still hold the topic', async () => {
+		const calls = [];
+		const stream = live.stream('feed/multi', async () => [], {
+			onUnsubscribe: (ctx, topic, remaining) => calls.push(remaining)
+		});
+		__register('feed/multi', stream);
+
+		const wsA = mockWs({ id: 'a' });
+		const wsB = mockWs({ id: 'b' });
+		const wsC = mockWs({ id: 'c' });
+		handleRpc(wsA, toArrayBuffer({ rpc: 'feed/multi', id: 'a', args: [], stream: true }), platform);
+		handleRpc(wsB, toArrayBuffer({ rpc: 'feed/multi', id: 'b', args: [], stream: true }), platform);
+		handleRpc(wsC, toArrayBuffer({ rpc: 'feed/multi', id: 'c', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// First ws leaves -> 2 others remain
+		unsubscribe(wsA, 'feed/multi', { platform });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls[0]).toBe(2);
+
+		// Second ws leaves -> 1 other remains
+		unsubscribe(wsB, 'feed/multi', { platform });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls[1]).toBe(1);
+
+		// Last ws leaves -> 0 others remain
+		unsubscribe(wsC, 'feed/multi', { platform });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls[2]).toBe(0);
+	});
+
+	it('every drain firing on a multi-sub ws sees the same remainingSubscribers value', async () => {
+		const calls = [];
+		const stream = live.stream('feed/twice', async () => [], {
+			onUnsubscribe: (ctx, topic, remaining) => calls.push(remaining)
+		});
+		__register('feed/twice', stream);
+
+		const wsA = mockWs({ id: 'a' });
+		const wsB = mockWs({ id: 'b' });
+		// Subscribe twice on wsA (two logical subs)
+		handleRpc(wsA, toArrayBuffer({ rpc: 'feed/twice', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(wsA, toArrayBuffer({ rpc: 'feed/twice', id: '2', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		// One sub on wsB
+		handleRpc(wsB, toArrayBuffer({ rpc: 'feed/twice', id: '3', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// wsA leaves: hook fires twice (one per logical sub), both should see remaining=1 (wsB still there)
+		unsubscribe(wsA, 'feed/twice', { platform });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toEqual([1, 1]);
+	});
+
+	it('passes accurate remaining on close() too', async () => {
+		const calls = [];
+		const stream = live.stream('feed/closepath', async () => [], {
+			onUnsubscribe: (ctx, topic, remaining) => calls.push(remaining)
+		});
+		__register('feed/closepath', stream);
+
+		const wsA = mockWs({ id: 'a' });
+		const wsB = mockWs({ id: 'b' });
+		handleRpc(wsA, toArrayBuffer({ rpc: 'feed/closepath', id: '1', args: [], stream: true }), platform);
+		handleRpc(wsB, toArrayBuffer({ rpc: 'feed/closepath', id: '2', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Close wsA -> should fire onUnsubscribe with remaining=1 (wsB still there)
+		close(wsA, { platform, subscriptions: new Set(['feed/closepath']) });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toEqual([1]);
+
+		// Close wsB -> remaining=0
+		close(wsB, { platform, subscriptions: new Set(['feed/closepath']) });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toEqual([1, 0]);
+	});
+
+	it('handles dynamic-topic streams (different topics on the same fn)', async () => {
+		const calls = [];
+		const stream = live.stream(
+			(ctx, room) => `room:${room}`,
+			async () => [],
+			{ onUnsubscribe: (ctx, topic, remaining) => calls.push({ topic, remaining }) }
+		);
+		__register('rooms/feed', stream);
+
+		const wsA = mockWs({ id: 'a' });
+		const wsB = mockWs({ id: 'b' });
+		// Both subscribe to room:1
+		handleRpc(wsA, toArrayBuffer({ rpc: 'rooms/feed', id: '1', args: [1], stream: true }), platform);
+		handleRpc(wsB, toArrayBuffer({ rpc: 'rooms/feed', id: '2', args: [1], stream: true }), platform);
+		// Only wsA subscribes to room:2
+		handleRpc(wsA, toArrayBuffer({ rpc: 'rooms/feed', id: '3', args: [2], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// wsA unsubscribes from room:1 -> wsB still there, remaining=1
+		unsubscribe(wsA, 'room:1', { platform });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toContainEqual({ topic: 'room:1', remaining: 1 });
+
+		// wsA unsubscribes from room:2 -> nobody else, remaining=0
+		unsubscribe(wsA, 'room:2', { platform });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toContainEqual({ topic: 'room:2', remaining: 0 });
+	});
+
+	it('topic with no subscribers returns no firing (defensive: unsubscribe on unknown topic)', async () => {
+		const calls = [];
+		const stream = live.stream('feed/known', async () => [], {
+			onUnsubscribe: (ctx, topic, remaining) => calls.push(remaining)
+		});
+		__register('feed/known', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		handleRpc(ws, toArrayBuffer({ rpc: 'feed/known', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Unsubscribe from a topic this ws never subscribed to
+		unsubscribe(ws, 'feed/never-subscribed', { platform });
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toEqual([]);
 	});
 });
 

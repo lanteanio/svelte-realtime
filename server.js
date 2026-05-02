@@ -83,6 +83,19 @@ function _callTopicFn(fn, ctx, args) {
  */
 const _wsStreamOwners = new WeakMap();
 
+/**
+ * Per-topic set of WebSockets currently holding at least one realtime
+ * stream subscription. Maintained as the source of truth for the
+ * `remainingSubscribers` argument the realtime layer passes to
+ * `__onUnsubscribe(ctx, topic, remainingSubscribers)` -- apps use this
+ * to decide "should I tear down the upstream feed?" once the count
+ * hits zero. Distinct from the adapter's own ws.isSubscribed bookkeeping
+ * because it tracks realtime-stream subscriptions specifically (not
+ * arbitrary `on(topic)` topic listeners).
+ * @type {Map<string, Set<object>>}
+ */
+const _topicWsCounts = new Map();
+
 /** @type {Array<(ctx: any, next: () => Promise<any>) => Promise<any>>} */
 const _globalMiddleware = [];
 
@@ -467,6 +480,11 @@ function _trackStreamSub(ws, topic, fn) {
 	if (!owners) { owners = []; topicMap.set(topic, owners); }
 	const existing = owners.find(o => o.fn === fn);
 	if (existing) { existing.count++; } else { owners.push({ fn, count: 1 }); }
+	if (isFirstSubForTopic) {
+		let wsSet = _topicWsCounts.get(topic);
+		if (!wsSet) { wsSet = new Set(); _topicWsCounts.set(topic, wsSet); }
+		wsSet.add(ws);
+	}
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__coalesceBy) {
 		_registerCoalesce(ws, topic, /** @type {any} */ (fn).__coalesceBy);
 	}
@@ -500,6 +518,7 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 	try { ws.unsubscribe(topic); } catch {}
 	if (_metricsInstruments) _metricsInstruments.streamGauge.dec();
 	const topicMap = _wsStreamOwners.get(ws);
+	let removedFromTopic = false;
 	if (topicMap) {
 		const owners = topicMap.get(topic);
 		if (owners) {
@@ -512,14 +531,28 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 					_unregisterCoalesce(ws, topic);
 					_unregisterTransform(ws, topic);
 					_unregisterVolatile(ws, topic);
+					removedFromTopic = true;
 				}
 			}
 		}
 	}
+	let remainingSubscribers = 0;
+	if (removedFromTopic) {
+		const wsSet = _topicWsCounts.get(topic);
+		if (wsSet) {
+			wsSet.delete(ws);
+			remainingSubscribers = wsSet.size;
+			if (wsSet.size === 0) _topicWsCounts.delete(topic);
+		}
+	} else {
+		const wsSet = _topicWsCounts.get(topic);
+		// This ws still owns other subs to this topic; count OTHER ws.
+		remainingSubscribers = wsSet ? wsSet.size - (wsSet.has(ws) ? 1 : 0) : 0;
+	}
 	if (/** @type {any} */ (fn).__onUnsubscribe && ctx) {
 		_rollingBack.add(ws);
 		Promise.resolve()
-			.then(() => /** @type {any} */ (fn).__onUnsubscribe(ctx, topic))
+			.then(() => /** @type {any} */ (fn).__onUnsubscribe(ctx, topic, remainingSubscribers))
 			.catch(() => {})
 			.finally(() => _rollingBack.delete(ws));
 	}
@@ -1235,6 +1268,14 @@ export function _resetIdempotencyStore() {
  */
 export function _resetCoalesceRegistry() {
 	_topicCoalesce.clear();
+}
+
+/**
+ * Reset the per-topic ws subscriber map. Tests only.
+ * @internal
+ */
+export function _resetTopicWsCounts() {
+	_topicWsCounts.clear();
 }
 
 /**
@@ -3963,12 +4004,24 @@ export function unsubscribe(ws, topic, { platform }) {
 	const user = ws.getUserData();
 	const unsubCtx = { user, ws, platform, publish: _getCtxHelpers(platform).publish, cursor: null };
 
+	// Compute remaining subscribers AFTER this ws fully drops the topic. The
+	// hook fires N times (one per logical sub on this ws) and every firing
+	// sees the same `remainingSubscribers` count -- the count of OTHER
+	// WebSockets still subscribed to this topic via realtime streams.
+	const wsSet = _topicWsCounts.get(topic);
+	let remainingSubscribers = 0;
+	if (wsSet) {
+		wsSet.delete(ws);
+		remainingSubscribers = wsSet.size;
+		if (wsSet.size === 0) _topicWsCounts.delete(topic);
+	}
+
 	// Drain every logical subscriber for this topic
 	for (const entry of owners) {
 		for (let i = 0; i < entry.count; i++) {
 			if (_metricsInstruments) _metricsInstruments.streamGauge.dec();
 			if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
-				Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(unsubCtx, topic)).catch(() => {});
+				Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(unsubCtx, topic, remainingSubscribers)).catch(() => {});
 			}
 		}
 	}
@@ -3998,12 +4051,21 @@ export function close(ws, { platform, subscriptions }) {
 			_unregisterCoalesce(ws, topic);
 			_unregisterTransform(ws, topic);
 			_unregisterVolatile(ws, topic);
+			// Account for this ws leaving the topic's ws-set so the
+			// remainingSubscribers count handed to user hooks is accurate.
+			const wsSet = _topicWsCounts.get(topic);
+			let remainingSubscribers = 0;
+			if (wsSet) {
+				wsSet.delete(ws);
+				remainingSubscribers = wsSet.size;
+				if (wsSet.size === 0) _topicWsCounts.delete(topic);
+			}
 			if (alreadyFired && alreadyFired.has(topic)) continue;
 			for (const entry of owners) {
 				for (let i = 0; i < entry.count; i++) {
 					if (_metricsInstruments) _metricsInstruments.streamGauge.dec();
 					if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
-						Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(closeCtx, topic)).catch(() => {});
+						Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(closeCtx, topic, remainingSubscribers)).catch(() => {});
 					}
 				}
 			}
@@ -4020,7 +4082,11 @@ export function close(ws, { platform, subscriptions }) {
 			if (!subSet.has(rawTopic)) continue;
 			if (alreadyFired && alreadyFired.has(rawTopic)) continue;
 			if (topicMap && topicMap.has(rawTopic)) continue; // already handled above
-			Promise.resolve().then(() => /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic)).catch(() => {});
+			// Static-topic streams that fell outside the tracked-RPC path:
+			// the ws-set may not include them, so remaining defaults to 0.
+			const staticWsSet = _topicWsCounts.get(rawTopic);
+			const staticRemaining = staticWsSet ? staticWsSet.size : 0;
+			Promise.resolve().then(() => /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic, staticRemaining)).catch(() => {});
 		}
 	}
 
