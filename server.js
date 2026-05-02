@@ -634,21 +634,65 @@ live.access = {
 	},
 
 	/**
+	 * Org-scoped access: an extracted value (default arg 0) must equal
+	 * `ctx.user.organization_id` (default field). Returns false when
+	 * `ctx.user` is null. Use to close authorization-bypass holes
+	 * around per-org streams and RPCs.
+	 *
+	 * @param {{ from?: (ctx: any, ...args: any[]) => any, userField?: string }} [opts]
+	 * @returns {(ctx: any, ...args: any[]) => boolean}
+	 */
+	org(opts) {
+		const userField = (opts && opts.userField) || 'organization_id';
+		const from = (opts && opts.from) || ((_ctx, ...args) => args[0]);
+		return (ctx, ...args) => {
+			const expected = ctx && ctx.user && ctx.user[userField];
+			if (expected == null) return false;
+			const actual = from(ctx, ...args);
+			return actual != null && actual === expected;
+		};
+	},
+
+	/**
+	 * User-scoped access: an extracted value (default arg 0) must equal
+	 * `ctx.user.user_id` (default field, matching `[table]_id` convention).
+	 * Returns false when `ctx.user` is null. Use for streams/RPCs that
+	 * MUST belong to the calling user (e.g. private inbox); set `from`
+	 * for handlers where the relevant id lives in a non-default
+	 * position.
+	 *
+	 * @param {{ from?: (ctx: any, ...args: any[]) => any, userField?: string }} [opts]
+	 * @returns {(ctx: any, ...args: any[]) => boolean}
+	 */
+	user(opts) {
+		const userField = (opts && opts.userField) || 'user_id';
+		const from = (opts && opts.from) || ((_ctx, ...args) => args[0]);
+		return (ctx, ...args) => {
+			const expected = ctx && ctx.user && ctx.user[userField];
+			if (expected == null) return false;
+			const actual = from(ctx, ...args);
+			return actual != null && actual === expected;
+		};
+	},
+
+	/**
 	 * OR logic: any predicate returning true allows the subscription.
-	 * @param {...((ctx: any) => boolean)} predicates
-	 * @returns {(ctx: any) => boolean}
+	 * Args are forwarded so args-aware predicates (`org`, `user`) compose.
+	 * @param {...((ctx: any, ...args: any[]) => boolean)} predicates
+	 * @returns {(ctx: any, ...args: any[]) => boolean}
 	 */
 	any(...predicates) {
-		return (ctx) => predicates.some(p => p(ctx));
+		return (ctx, ...args) => predicates.some(p => p(ctx, ...args));
 	},
 
 	/**
 	 * AND logic: all predicates must return true to allow the subscription.
-	 * @param {...((ctx: any) => boolean)} predicates
-	 * @returns {(ctx: any) => boolean}
+	 * Args are forwarded so args-aware predicates (`org`, `user`) compose.
+	 * @param {...((ctx: any, ...args: any[]) => boolean)} predicates
+	 * @returns {(ctx: any, ...args: any[]) => boolean}
 	 */
 	all(...predicates) {
-		return (ctx) => predicates.every(p => p(ctx));
+		return (ctx, ...args) => predicates.every(p => p(ctx, ...args));
 	}
 };
 
@@ -1294,6 +1338,53 @@ live.gate = function gate(predicate, fn) {
 	/** @type {any} */ (wrapper).__isGated = true;
 	/** @type {any} */ (wrapper).__gatePredicate = predicate;
 
+	return wrapper;
+};
+
+/**
+ * Wrap a live function with an authorization predicate. Throws when the
+ * predicate returns false: UNAUTHENTICATED if `ctx.user` is null,
+ * FORBIDDEN otherwise. Predicate may be sync or async.
+ *
+ * For STREAMS, prefer the `access` option on `live.stream({ access: ... })`
+ * so the gate fires before subscribe-side bookkeeping. Use `live.scoped`
+ * for RPC handlers, where there is no `access` option.
+ *
+ * Composes with `live.validated`, `live.rateLimit`, and other wrappers.
+ *
+ * @param {(ctx: any, ...args: any[]) => boolean | Promise<boolean>} predicate
+ * @param {Function} fn - Live function to wrap
+ * @returns {Function}
+ *
+ * @example
+ * ```js
+ * export const updateOrg = live.scoped(
+ *   live.access.org({ from: (ctx, input) => input.orgId }),
+ *   live.validated(schema, async (ctx, input) => updateOrg(input))
+ * );
+ * ```
+ */
+live.scoped = function scoped(predicate, fn) {
+	if (typeof predicate !== 'function') {
+		throw new Error('[svelte-realtime] live.scoped(predicate, fn) requires a predicate function');
+	}
+	if (typeof fn !== 'function') {
+		throw new Error('[svelte-realtime] live.scoped(predicate, fn) requires a handler function');
+	}
+	const wrapper = async function scopedWrapper(ctx, ...args) {
+		const ok = await predicate(ctx, ...args);
+		if (!ok) {
+			const code = ctx && ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+			throw new LiveError(code, code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied');
+		}
+		return fn(ctx, ...args);
+	};
+	/** @type {any} */ (wrapper).__isLive = true;
+	/** @type {any} */ (wrapper).__isScoped = true;
+	/** @type {any} */ (wrapper).__wrappedFn = fn;
+	if (/** @type {any} */ (fn).__isStream) {
+		_copyStreamMeta(wrapper, fn);
+	}
 	return wrapper;
 };
 
@@ -2496,13 +2587,39 @@ live.webhook = function webhook(topic, config) {
 };
 
 /**
- * Create a per-module guard. Accepts one or more middleware functions.
- * When multiple are provided, they run in order -- if any throws, the chain stops.
- * Earlier middleware can enrich `ctx` for later ones.
- * @param {...Function} fns
+ * Create a per-module guard. Accepts middleware functions (variadic) and/or
+ * a single declarative options object as the first argument:
+ *
+ * - `{ authenticated: true }` -- throws UNAUTHENTICATED unless `ctx.user`
+ *   is non-null. Cheaper to write than the equivalent function and harder
+ *   to forget.
+ *
+ * Function-style middleware composes: `guard({ authenticated: true }, customCheck)`
+ * runs the auth check first, then `customCheck(ctx)`. If any throws, the
+ * chain stops. Bare-error throws are auto-classified to LiveError
+ * (UNAUTHENTICATED if no user, FORBIDDEN otherwise) at the call site.
+ *
+ * @param {...(Function | { authenticated?: boolean })} parts
  * @returns {Function}
  */
-export function guard(...fns) {
+export function guard(...parts) {
+	const fns = [];
+	for (const part of parts) {
+		if (typeof part === 'function') {
+			fns.push(part);
+			continue;
+		}
+		if (part && typeof part === 'object') {
+			if (part.authenticated === true) {
+				fns.push(_guardAuthenticated);
+			}
+			continue;
+		}
+		throw new Error('[svelte-realtime] guard() accepts middleware functions or an options object');
+	}
+	if (fns.length === 0) {
+		throw new Error('[svelte-realtime] guard() requires at least one function or option');
+	}
 	if (fns.length === 1) {
 		/** @type {any} */ (fns[0]).__isGuard = true;
 		return fns[0];
@@ -2514,6 +2631,12 @@ export function guard(...fns) {
 	};
 	/** @type {any} */ (composite).__isGuard = true;
 	return composite;
+}
+
+async function _guardAuthenticated(ctx) {
+	if (!ctx || ctx.user == null) {
+		throw new LiveError('UNAUTHENTICATED', 'Authentication required');
+	}
 }
 
 /**
@@ -2770,7 +2893,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 			const replayOpts = /** @type {any} */ (fn).__replay;
 
 			const streamFilter = /** @type {any} */ (fn).__streamFilter;
-			if (streamFilter && !streamFilter(ctx)) {
+			if (streamFilter && !streamFilter(ctx, ...streamArgs)) {
 				const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 				return { id, ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 			}
@@ -3243,7 +3366,7 @@ export async function __directCall(path, args, platform, options) {
 			if (!predicate(ctx, ...args)) return null;
 		}
 		const streamFilter = /** @type {any} */ (fn).__streamFilter;
-		if (streamFilter && !streamFilter(ctx)) {
+		if (streamFilter && !streamFilter(ctx, ...args)) {
 			const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 			throw new LiveError(code, code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied');
 		}

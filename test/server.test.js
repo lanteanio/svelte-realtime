@@ -6731,3 +6731,280 @@ describe('live.stream({ transform })', () => {
 		expect(platform.sent[0].data.data).toEqual([{ id: 'x' }]);
 	});
 });
+
+// -- Declarative guard({ authenticated }) ------------------------------------
+
+describe('guard({ authenticated })', () => {
+	it('throws UNAUTHENTICATED when ctx.user is null', async () => {
+		const g = guard({ authenticated: true });
+		await expect(g({ user: null })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+	});
+
+	it('passes when ctx.user is non-null', async () => {
+		const g = guard({ authenticated: true });
+		await expect(g({ user: { user_id: 'u1' } })).resolves.toBeUndefined();
+	});
+
+	it('composes with function-style middleware (auth runs first)', async () => {
+		const order = [];
+		const g = guard(
+			{ authenticated: true },
+			(ctx) => { order.push('custom:' + ctx.user.role); }
+		);
+
+		await g({ user: { user_id: 'u1', role: 'admin' } });
+		expect(order).toEqual(['custom:admin']);
+
+		// No user -> auth check throws first; custom middleware never runs
+		order.length = 0;
+		await expect(g({ user: null })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+		expect(order).toEqual([]);
+	});
+
+	it('rejects empty argument list', () => {
+		expect(() => guard()).toThrow(/requires at least one function or option/);
+	});
+
+	it('rejects non-function, non-object args', () => {
+		expect(() => guard('nope')).toThrow(/accepts middleware functions or an options object/);
+	});
+
+	it('options object without authenticated: true is a no-op (no auth check added)', async () => {
+		// {} alone produces zero middleware -> guard() throws because no fns
+		expect(() => guard({})).toThrow(/requires at least one function or option/);
+
+		// {} alongside a function works -- the {} contributes nothing
+		const seen = [];
+		const g = guard({}, (ctx) => { seen.push(ctx.user); });
+		await g({ user: null });
+		expect(seen).toEqual([null]);  // no auth check ran; null user passed through to custom fn
+	});
+});
+
+// -- live.access.org() / live.access.user() ----------------------------------
+
+describe('live.access.org()', () => {
+	const pred = live.access.org();
+
+	it('returns true when arg 0 matches ctx.user.organization_id', () => {
+		expect(pred({ user: { organization_id: 'o1' } }, 'o1')).toBe(true);
+	});
+
+	it('returns false when arg 0 mismatches ctx.user.organization_id', () => {
+		expect(pred({ user: { organization_id: 'o1' } }, 'o2')).toBe(false);
+	});
+
+	it('returns false when ctx.user is null (anonymous never passes)', () => {
+		expect(pred({ user: null }, 'o1')).toBe(false);
+	});
+
+	it('returns false when ctx.user.organization_id is undefined', () => {
+		expect(pred({ user: { user_id: 'u1' } }, 'o1')).toBe(false);
+	});
+
+	it('returns false when arg 0 is missing', () => {
+		expect(pred({ user: { organization_id: 'o1' } })).toBe(false);
+	});
+
+	it('honors custom userField', () => {
+		const p = live.access.org({ userField: 'tenant_id' });
+		expect(p({ user: { tenant_id: 't1' } }, 't1')).toBe(true);
+		expect(p({ user: { tenant_id: 't1' } }, 't2')).toBe(false);
+	});
+
+	it('honors custom from extractor (e.g. RPC input.orgId)', () => {
+		const p = live.access.org({ from: (_ctx, input) => input.orgId });
+		expect(p({ user: { organization_id: 'o1' } }, { orgId: 'o1', name: 'x' })).toBe(true);
+		expect(p({ user: { organization_id: 'o1' } }, { orgId: 'o2', name: 'x' })).toBe(false);
+	});
+});
+
+describe('live.access.user()', () => {
+	const pred = live.access.user();
+
+	it('returns true when arg 0 matches ctx.user.user_id', () => {
+		expect(pred({ user: { user_id: 'u1' } }, 'u1')).toBe(true);
+	});
+
+	it('returns false when arg 0 mismatches', () => {
+		expect(pred({ user: { user_id: 'u1' } }, 'u2')).toBe(false);
+	});
+
+	it('returns false when ctx.user is null', () => {
+		expect(pred({ user: null }, 'u1')).toBe(false);
+	});
+
+	it('honors custom userField (e.g. legacy id)', () => {
+		const p = live.access.user({ userField: 'id' });
+		expect(p({ user: { id: 'u1' } }, 'u1')).toBe(true);
+	});
+
+	it('honors custom from extractor', () => {
+		const p = live.access.user({ from: (_ctx, input) => input.assigneeId });
+		expect(p({ user: { user_id: 'u1' } }, { assigneeId: 'u1' })).toBe(true);
+		expect(p({ user: { user_id: 'u1' } }, { assigneeId: 'u2' })).toBe(false);
+	});
+});
+
+describe('live.access.all() / .any() composition with org/user', () => {
+	it('all() forwards args so org/user predicates compose at distinct positions', () => {
+		// user() defaults to args[0]; specify org() to read args[1] for the
+		// composed (userId, orgId) signature.
+		const p = live.access.all(
+			live.access.user(),
+			live.access.org({ from: (_ctx, ..._args) => _args[1] })
+		);
+		expect(p({ user: { user_id: 'u1', organization_id: 'o1' } }, 'u1', 'o1')).toBe(true);
+		expect(p({ user: { user_id: 'u1', organization_id: 'o1' } }, 'u1', 'o2')).toBe(false);
+		expect(p({ user: { user_id: 'u1', organization_id: 'o1' } }, 'u2', 'o1')).toBe(false);
+	});
+
+	it('any() forwards args (role-or-org)', () => {
+		const isAdmin = (ctx) => ctx.user?.role === 'admin';
+		const p = live.access.any(isAdmin, live.access.org());
+		expect(p({ user: { organization_id: 'o1' } }, 'o1')).toBe(true);
+		expect(p({ user: { organization_id: 'o1', role: 'admin' } }, 'o2')).toBe(true);
+		expect(p({ user: { organization_id: 'o1' } }, 'o2')).toBe(false);
+	});
+});
+
+describe('live.access.org() integrated with live.stream({ access })', () => {
+	it('rejects subscribe with FORBIDDEN when org mismatches', async () => {
+		const stream = live.stream(
+			(ctx, orgId) => `audit:${orgId}`,
+			async () => [],
+			{ merge: 'crud', key: 'id', access: live.access.org() }
+		);
+		__register('sc/audit', stream);
+
+		const ws = mockWs({ user_id: 'u1', organization_id: 'o1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'sc/audit', id: '1', args: ['o2'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+	});
+
+	it('admits subscribe when org matches', async () => {
+		const stream = live.stream(
+			(ctx, orgId) => `audit:${orgId}`,
+			async (ctx, orgId) => [{ id: 1, org: orgId }],
+			{ merge: 'crud', key: 'id', access: live.access.org() }
+		);
+		__register('sc/audit-ok', stream);
+
+		const ws = mockWs({ user_id: 'u1', organization_id: 'o1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'sc/audit-ok', id: '1', args: ['o1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.data).toEqual([{ id: 1, org: 'o1' }]);
+	});
+
+	it('rejects with UNAUTHENTICATED when ctx.user is null', async () => {
+		const stream = live.stream(
+			(ctx, orgId) => `t:${orgId}`,
+			async () => [],
+			{ merge: 'crud', key: 'id', access: live.access.org() }
+		);
+		__register('sc/anon', stream);
+
+		const ws = mockWs();
+		ws.getUserData = () => null;
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'sc/anon', id: '1', args: ['o1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.code).toBe('UNAUTHENTICATED');
+	});
+});
+
+// -- live.scoped(predicate, fn) ----------------------------------------------
+
+describe('live.scoped()', () => {
+	it('rejects non-function predicate or fn', () => {
+		expect(() => live.scoped('nope', () => {})).toThrow(/requires a predicate function/);
+		expect(() => live.scoped(() => true, 'nope')).toThrow(/requires a handler function/);
+	});
+
+	it('runs handler when predicate returns true', async () => {
+		const handler = live.scoped(
+			() => true,
+			async (ctx, input) => ({ result: input * 2 })
+		);
+		__register('sc/run', handler);
+
+		const ws = mockWs({ user_id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'sc/run', id: '1', args: [21] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data).toMatchObject({ ok: true, data: { result: 42 } });
+	});
+
+	it('throws FORBIDDEN when predicate returns false and ctx.user is present', async () => {
+		const handler = live.scoped(
+			() => false,
+			async () => 'never'
+		);
+		__register('sc/forbid', handler);
+
+		const ws = mockWs({ user_id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'sc/forbid', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+	});
+
+	it('throws UNAUTHENTICATED when predicate returns false and ctx.user is null', async () => {
+		const handler = live.scoped(
+			() => false,
+			async () => 'never'
+		);
+		__register('sc/anon-deny', handler);
+
+		const ws = mockWs();
+		ws.getUserData = () => null;
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'sc/anon-deny', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.code).toBe('UNAUTHENTICATED');
+	});
+
+	it('awaits async predicates', async () => {
+		const handler = live.scoped(
+			async () => { await new Promise(r => setTimeout(r, 5)); return true; },
+			async () => 'ok'
+		);
+		__register('sc/async', handler);
+
+		const ws = mockWs({ user_id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'sc/async', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 30));
+		expect(platform.sent[0].data.data).toBe('ok');
+	});
+
+	it('composes with live.access.org for RPC org-scoping', async () => {
+		const handler = live.scoped(
+			live.access.org({ from: (ctx, input) => input.orgId }),
+			async (ctx, input) => ({ updated: input.orgId })
+		);
+		__register('sc/update-org', handler);
+
+		const ws = mockWs({ user_id: 'u1', organization_id: 'o1' });
+		const platform = mockPlatform();
+
+		// Same org -> ok
+		handleRpc(ws, toArrayBuffer({ rpc: 'sc/update-org', id: '1', args: [{ orgId: 'o1', name: 'x' }] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data).toMatchObject({ ok: true, data: { updated: 'o1' } });
+
+		platform.reset();
+
+		// Cross-org attempt -> FORBIDDEN
+		handleRpc(ws, toArrayBuffer({ rpc: 'sc/update-org', id: '2', args: [{ orgId: 'o2', name: 'x' }] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+	});
+});

@@ -885,11 +885,78 @@ export namespace live {
 		role(map: Record<string, true | ((ctx: LiveContext<any>) => boolean)>): (ctx: LiveContext<any>) => boolean;
 		/** Only allow subscription if `ctx.user.teamId` is present. */
 		team(): (ctx: LiveContext<any>) => boolean;
-		/** OR logic: any predicate returning true allows the subscription. */
-		any(...predicates: Array<(ctx: LiveContext<any>) => boolean>): (ctx: LiveContext<any>) => boolean;
-		/** AND logic: all predicates must return true. */
-		all(...predicates: Array<(ctx: LiveContext<any>) => boolean>): (ctx: LiveContext<any>) => boolean;
+		/**
+		 * Org-scoped access: an extracted value (default arg 0) must equal
+		 * `ctx.user.organization_id` (default field). Returns false when
+		 * `ctx.user` is null. Closes authorization-bypass holes around
+		 * per-org streams and RPCs without per-handler boilerplate.
+		 *
+		 * @example
+		 * ```js
+		 * live.stream(
+		 *   (ctx, orgId) => `audit:${orgId}`,
+		 *   loader,
+		 *   { access: live.access.org() }
+		 * );
+		 * ```
+		 */
+		org(opts?: {
+			/** Extract the value to compare against. Default: arg 0. */
+			from?: (ctx: LiveContext<any>, ...args: any[]) => any;
+			/** Field on `ctx.user` to compare to. Default: `'organization_id'`. */
+			userField?: string;
+		}): (ctx: LiveContext<any>, ...args: any[]) => boolean;
+		/**
+		 * User-scoped access: an extracted value (default arg 0) must equal
+		 * `ctx.user.user_id` (default field, matching `[table]_id`
+		 * convention). Returns false when `ctx.user` is null. Use for
+		 * resources that MUST belong to the calling user (private inbox,
+		 * personal settings).
+		 *
+		 * @example
+		 * ```js
+		 * live.stream(
+		 *   (ctx, userId) => `inbox:${userId}`,
+		 *   loader,
+		 *   { access: live.access.user() }
+		 * );
+		 * ```
+		 */
+		user(opts?: {
+			/** Extract the value to compare against. Default: arg 0. */
+			from?: (ctx: LiveContext<any>, ...args: any[]) => any;
+			/** Field on `ctx.user` to compare to. Default: `'user_id'`. */
+			userField?: string;
+		}): (ctx: LiveContext<any>, ...args: any[]) => boolean;
+		/** OR logic: any predicate returning true allows the subscription. Args are forwarded so `org`/`user` predicates compose. */
+		any(...predicates: Array<(ctx: LiveContext<any>, ...args: any[]) => boolean>): (ctx: LiveContext<any>, ...args: any[]) => boolean;
+		/** AND logic: all predicates must return true. Args are forwarded so `org`/`user` predicates compose. */
+		all(...predicates: Array<(ctx: LiveContext<any>, ...args: any[]) => boolean>): (ctx: LiveContext<any>, ...args: any[]) => boolean;
 	};
+
+	/**
+	 * Wrap a live function with an authorization predicate. Throws when
+	 * the predicate returns false: `UNAUTHENTICATED` if `ctx.user` is
+	 * null, `FORBIDDEN` otherwise. Predicate may be sync or async.
+	 *
+	 * For STREAMS, prefer the `access` option on `live.stream({ access: ... })`
+	 * so the gate fires before subscribe-side bookkeeping. Use `live.scoped`
+	 * for RPC handlers, where there is no `access` option.
+	 *
+	 * Composes with `live.validated`, `live.rateLimit`, and other wrappers.
+	 *
+	 * @example
+	 * ```js
+	 * export const updateOrg = live.scoped(
+	 *   live.access.org({ from: (ctx, input) => input.orgId }),
+	 *   live.validated(schema, async (ctx, input) => updateOrg(input))
+	 * );
+	 * ```
+	 */
+	function scoped<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
+		predicate: (ctx: LiveContext<any>, ...args: Parameters<T> extends [any, ...infer R] ? R : any[]) => boolean | Promise<boolean>,
+		fn: T
+	): T;
 }
 
 /**
@@ -992,21 +1059,42 @@ export namespace pipe {
 /**
  * Create a per-module guard that runs before every `live()` in the same module.
  *
+ * Accepts middleware functions (variadic) and/or a single declarative
+ * options object as the first argument:
+ *
+ * - `{ authenticated: true }` -- throws `UNAUTHENTICATED` unless
+ *   `ctx.user` is non-null. Cheaper to write than the equivalent
+ *   function and harder to forget.
+ *
+ * Function-style middleware composes: `guard({ authenticated: true }, customCheck)`
+ * runs the auth check first, then `customCheck(ctx)`. If any throws,
+ * the chain stops.
+ *
  * Bare `Error`s thrown from a guard are auto-classified to a typed
  * `LiveError`: `UNAUTHENTICATED` when `ctx.user` is null, `FORBIDDEN`
- * otherwise. Throw `new LiveError('FORBIDDEN', '...')` directly when you
- * want a specific code or message.
+ * otherwise. Throw `new LiveError('FORBIDDEN', '...')` directly when
+ * you want a specific code or message.
  *
  * @example
  * ```js
+ * // Declarative
+ * export const _guard = guard({ authenticated: true });
+ *
+ * // Imperative
  * export const _guard = guard((ctx) => {
- *   if (!ctx.user) throw new Error('login required');                           // -> UNAUTHENTICATED
+ *   if (!ctx.user) throw new Error('login required');                            // -> UNAUTHENTICATED
  *   if (ctx.user.role !== 'admin') throw new LiveError('FORBIDDEN', 'Admin only');
  * });
+ *
+ * // Composed
+ * export const _guard = guard(
+ *   { authenticated: true },
+ *   (ctx) => { if (ctx.user.role !== 'admin') throw new LiveError('FORBIDDEN'); }
+ * );
  * ```
  */
 export function guard(
-	...fns: Array<(ctx: LiveContext<any>) => void | Promise<void>>
+	...parts: Array<((ctx: LiveContext<any>) => void | Promise<void>) | { authenticated?: boolean }>
 ): (ctx: LiveContext<any>) => void | Promise<void>;
 
 /**

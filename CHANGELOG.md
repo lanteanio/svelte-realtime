@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Org/user-scoped access predicates + `guard({ authenticated })` + `live.scoped()`.** Four small pieces that close the most common authorization-bypass holes without per-handler boilerplate or magic auto-detection.
+
+  ```js
+  // Module-level auth declarative shorthand
+  export const _guard = guard({ authenticated: true });
+
+  // Stream: subscriber's org must match the topic arg
+  export const auditFeed = live.stream(
+    (ctx, orgId) => `audit:${orgId}`,
+    loader,
+    { access: live.access.org() }
+  );
+
+  // RPC: the input's orgId must match the caller's org
+  export const updateOrg = live.scoped(
+    live.access.org({ from: (ctx, input) => input.orgId }),
+    live.validated(schema, async (ctx, input) => updateOrg(input))
+  );
+
+  // Compose multiple predicates (e.g. own-user OR admin)
+  const isAdmin = (ctx) => ctx.user?.role === 'admin';
+  export const adminOrSelfFeed = live.stream(
+    (ctx, userId) => `notes:${userId}`,
+    loader,
+    { access: live.access.any(isAdmin, live.access.user()) }
+  );
+  ```
+
+  - **`guard({ authenticated: true })`** -- declarative shorthand. Throws `UNAUTHENTICATED` when `ctx.user` is null. Composes with function-style middleware via `guard(...)`'s variadic args: `guard({ authenticated: true }, customCheck)`.
+  - **`live.access.org(opts?)`** -- predicate returning `true` when an extracted value (default arg 0) equals `ctx.user.organization_id` (default field). Returns `false` for null users (anonymous never passes). Configurable via `from` and `userField`.
+  - **`live.access.user(opts?)`** -- predicate returning `true` when an extracted value (default arg 0) equals `ctx.user.user_id` (default field, matching `[table]_id` convention).
+  - **`live.scoped(predicate, fn)`** -- wraps an RPC handler with a predicate. Throws `UNAUTHENTICATED` (no user) or `FORBIDDEN` (user present) when the predicate returns false. Async predicates are awaited. Composes with `live.validated`, `live.rateLimit`, etc. Streams use the `access` option instead.
+  - **Stream `access` predicates now receive args.** `access(ctx, ...args)` lets the new args-aware helpers fire on the right value. Existing predicates that take only `ctx` are unaffected (extra args ignored).
+  - **`live.access.any` / `.all` forward args** so `org()` and `user()` predicates compose. Existing call sites are unchanged.
+
+  Defaults follow the SQL `[table]_id` convention (`user_id`, `organization_id`). Override per-helper if your data shape differs (e.g. `live.access.org({ userField: 'tenant_id' })`).
+
 - **`transform` option on `live.stream()` for server-side projection.** Define the wire shape once; the framework applies it to BOTH the initial loader result AND every subsequent live publish for that topic. Typical 80-90% payload reduction on data-heavy streams (audit logs, dashboards, anything where the database row has 30 columns and the client needs 4).
 
   ```js
