@@ -24,7 +24,8 @@ import {
 	pipe,
 	_resetIdempotencyStore,
 	_resetCoalesceRegistry,
-	_resetAdmission
+	_resetAdmission,
+	_resetTransformRegistry
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -6456,5 +6457,277 @@ describe('live.stream({ args })', () => {
 		handleRpc(ws, toArrayBuffer({ rpc: 'a/gate-validated', id: '1', args: ['nope'], stream: true }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 		expect(platform.sent[0].data.code).toBe('VALIDATION');
+	});
+});
+
+// -- live.stream({ transform }) ----------------------------------------------
+
+describe('live.stream({ transform })', () => {
+	beforeEach(() => {
+		_resetTransformRegistry();
+		_resetCoalesceRegistry();
+	});
+
+	it('rejects non-function transform at registration', () => {
+		expect(() => live.stream('tr/bad', async () => [], { transform: 'nope' }))
+			.toThrow(/transform must be a function/);
+	});
+
+	it('transforms initial data per-item for array results (crud merge)', async () => {
+		const stream = live.stream(
+			'tr/crud',
+			async () => [
+				{ record_id: 'a', operation: 'create', changed_at: 't1', big_blob: 'x'.repeat(1000) },
+				{ record_id: 'b', operation: 'update', changed_at: 't2', big_blob: 'y'.repeat(1000) }
+			],
+			{
+				merge: 'crud', key: 'id',
+				transform: (row) => ({ id: row.record_id, op: row.operation, at: row.changed_at })
+			}
+		);
+		__register('tr/crud', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/crud', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const r = platform.sent[0].data;
+		expect(r.ok).toBe(true);
+		expect(r.data).toEqual([
+			{ id: 'a', op: 'create', at: 't1' },
+			{ id: 'b', op: 'update', at: 't2' }
+		]);
+	});
+
+	it('transforms initial data as whole value for non-arrays (set merge)', async () => {
+		const stream = live.stream(
+			'tr/set',
+			async () => ({ outer: 1, inner: { a: 1, b: 2, big_blob: 'x'.repeat(500) } }),
+			{
+				merge: 'set',
+				transform: (data) => ({ outer: data.outer, inner_a: data.inner.a })
+			}
+		);
+		__register('tr/set', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/set', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.data).toEqual({ outer: 1, inner_a: 1 });
+	});
+
+	it('transforms .data of paginated loader responses', async () => {
+		const stream = live.stream(
+			'tr/page',
+			async () => ({ data: [{ x: 1, big: 'a' }, { x: 2, big: 'b' }], hasMore: true, cursor: 'c1' }),
+			{
+				merge: 'crud', key: 'id',
+				transform: (row) => ({ id: row.x })
+			}
+		);
+		__register('tr/page', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/page', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const r = platform.sent[0].data;
+		expect(r.data).toEqual([{ id: 1 }, { id: 2 }]);
+		expect(r.hasMore).toBe(true);
+		expect(r.cursor).toBe('c1');
+	});
+
+	it('applies transform to live publishes (default broadcast path)', async () => {
+		const stream = live.stream('tr/live', async () => [], {
+			merge: 'crud', key: 'id',
+			transform: (row) => ({ id: row.record_id, op: row.operation })
+		});
+		__register('tr/live', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('tr/live', 'created', { record_id: 'r1', operation: 'create', big_blob: 'x'.repeat(1000) });
+			return 'ok';
+		});
+		__register('tr/live-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Subscribe so the topic is registered in the transform registry
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/live', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/live-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.published).toHaveLength(1);
+		expect(platform.published[0].data).toEqual({ id: 'r1', op: 'create' });
+	});
+
+	it('applies transform to live publishes through the coalesce path', async () => {
+		const stream = live.stream('tr/co', async () => null, {
+			merge: 'set',
+			coalesceBy: (data) => data.k,
+			transform: (data) => ({ id: data.k, value: data.v })   // strips other fields
+		});
+		__register('tr/co', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('tr/co', 'updated', { k: 'a', v: 1, secret: 'should-not-leak' });
+			return 'ok';
+		});
+		__register('tr/co-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/co', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/co-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.coalesced).toHaveLength(1);
+		const c = platform.coalesced[0];
+		expect(c.data).toEqual({ id: 'a', value: 1 });
+		// coalesceBy reads ORIGINAL data, so the key is still derived from k='a'
+		expect(c.key).toBe('tr/co\0a');
+	});
+
+	it('publishes go straight through (no transform) before any subscriber arrives', async () => {
+		const stream = live.stream('tr/cold', async () => [], {
+			merge: 'crud', key: 'id',
+			transform: (row) => ({ id: row.record_id })
+		});
+		__register('tr/cold', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('tr/cold', 'created', { record_id: 'x', big: 'leak' });
+			return 'ok';
+		});
+		__register('tr/cold-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Publish BEFORE any subscribe -- transform isn't registered yet
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/cold-pub', id: 'p0', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Without registration, the transform doesn't apply -- documented behavior
+		// (consistent with coalesceBy which also requires an active subscriber to
+		// know about the transform).
+		expect(platform.published).toHaveLength(1);
+		expect(platform.published[0].data).toEqual({ record_id: 'x', big: 'leak' });
+	});
+
+	it('lifecycle: registry evicts the topic when the last subscriber leaves', async () => {
+		const stream = live.stream('tr/life', async () => [], {
+			merge: 'crud', key: 'id',
+			transform: (row) => ({ id: row.id })
+		});
+		__register('tr/life', stream);
+
+		const handler = live(async (ctx) => { ctx.publish('tr/life', 'updated', { id: 1, big: 'no' }); return 'ok'; });
+		__register('tr/life-pub', handler);
+
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		const platform = mockPlatform();
+
+		// Two subscribers
+		for (const w of [ws1, ws2]) {
+			handleRpc(w, toArrayBuffer({ rpc: 'tr/life', id: 's', args: [], stream: true }), platform);
+			await new Promise((r) => setTimeout(r, 5));
+		}
+		platform.reset();
+
+		// Both subscribed -> publish goes through transform
+		handleRpc(ws1, toArrayBuffer({ rpc: 'tr/life-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.published[0].data).toEqual({ id: 1 });
+		platform.reset();
+
+		// Drop ws1; ws2 still subscribed -> still transformed
+		close(ws1, { platform });
+		handleRpc(ws2, toArrayBuffer({ rpc: 'tr/life-pub', id: 'p2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.published[0].data).toEqual({ id: 1 });
+		platform.reset();
+
+		// Drop ws2; no subscribers left -> registry evicted, raw data flows
+		close(ws2, { platform });
+		handleRpc(ws1, toArrayBuffer({ rpc: 'tr/life-pub', id: 'p3', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.published[0].data).toEqual({ id: 1, big: 'no' });
+	});
+
+	it('streams without transform are byte-identical to baseline (back-compat)', async () => {
+		const stream = live.stream('tr/none', async () => [{ id: 1, big: 'kept' }], {
+			merge: 'crud', key: 'id'
+		});
+		__register('tr/none', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/none', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.data).toEqual([{ id: 1, big: 'kept' }]);
+	});
+
+	it('.load() applies transform to initial data', async () => {
+		const stream = live.stream(
+			(ctx, x) => `dc:${x}`,
+			async (ctx, x) => [{ raw_id: x, full_row: 'x'.repeat(500) }],
+			{
+				merge: 'crud', key: 'id',
+				transform: (row) => ({ id: row.raw_id })
+			}
+		);
+		__register('tr/dc', stream);
+
+		const platform = mockPlatform();
+		const result = await __directCall('tr/dc', ['hello'], platform, { user: { id: 'u' } });
+		expect(result).toEqual([{ id: 'hello' }]);
+	});
+
+	it('.load() applies transform to paginated initial data', async () => {
+		const stream = live.stream(
+			'tr/dc-page',
+			async () => ({ data: [{ raw: 1 }, { raw: 2 }], hasMore: false }),
+			{
+				merge: 'crud', key: 'id',
+				transform: (row) => ({ id: row.raw })
+			}
+		);
+		__register('tr/dc-page', stream);
+
+		const platform = mockPlatform();
+		const result = await __directCall('tr/dc-page', [], platform, { user: { id: 'u' } });
+		expect(result.data).toEqual([{ id: 1 }, { id: 2 }]);
+		expect(result.hasMore).toBe(false);
+	});
+
+	it('transform survives wrapper composition (live.gate, etc.)', async () => {
+		const stream = live.stream('tr/wrap', async () => [{ raw_id: 'x' }], {
+			merge: 'crud', key: 'id',
+			transform: (row) => ({ id: row.raw_id })
+		});
+		const gated = live.gate(() => true, stream);
+		__register('tr/wrap', gated);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/wrap', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.data).toEqual([{ id: 'x' }]);
 	});
 });

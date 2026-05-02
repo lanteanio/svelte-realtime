@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`transform` option on `live.stream()` for server-side projection.** Define the wire shape once; the framework applies it to BOTH the initial loader result AND every subsequent live publish for that topic. Typical 80-90% payload reduction on data-heavy streams (audit logs, dashboards, anything where the database row has 30 columns and the client needs 4).
+
+  ```js
+  export const auditFeed = live.stream(
+    (ctx, orgId) => `audit:${orgId}`,
+    async (ctx, orgId) => db.auditRows.recent(orgId, 50),
+    {
+      merge: 'crud', key: 'id',
+      transform: (row) => ({
+        id: row.record_id,
+        op: row.operation,
+        at: row.changed_at
+      })
+    }
+  );
+  ```
+
+  Applied per-item for array results (covers `crud` / `latest` / `presence` / `cursor` merge) and to the whole value for non-arrays (covers `set` merge). Paginated loader responses (`{ data, hasMore, cursor }`) transform `.data` only. Composes with `coalesceBy` (the key extractor sees ORIGINAL pre-transform data; subscribers see the transformed wire shape). Streams without `transform` are unaffected. Works through `.load()` for SSR. The transform must be synchronous.
+
+  Implementation note: pre-subscribe publishes for a topic go through raw (the per-topic transform registry is populated when the first subscriber arrives). For typical app patterns this is invisible since publishes follow subscribes.
+
 - **`args` schema option on `live.stream()`.** Validates the stream's argument tuple at subscribe time, BEFORE the topic function runs -- prevents topic injection via malformed dynamic-topic args. Accepts any Standard Schema-compatible schema (Zod, ArkType, Valibot v1+, etc.); the schema validates the whole args tuple, so use `z.tuple([...])` or the equivalent.
 
   ```js

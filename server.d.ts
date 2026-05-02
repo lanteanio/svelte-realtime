@@ -222,6 +222,40 @@ export interface StreamOptions {
 	classOfService?: string;
 
 	/**
+	 * Server-side projection applied to BOTH the initial loader result
+	 * AND every subsequent live publish for this stream's topic. Lets
+	 * you ship a wide row from the database and emit a narrow shape on
+	 * the wire (typically 80-90% payload reduction on data-heavy streams).
+	 *
+	 * Applied per-item for array data (covers `crud`, `latest`,
+	 * `presence`, `cursor` merges) and to the whole value for non-array
+	 * data (covers `set` merge). Paginated loader responses
+	 * (`{ data, hasMore, cursor }`) transform `.data` only.
+	 *
+	 * Must be synchronous. Runs before `coalesceBy` reads the wire data
+	 * (note: `coalesceBy` itself reads the ORIGINAL pre-transform data,
+	 * so the key extractor sees the un-projected fields it was written
+	 * against).
+	 *
+	 * @example
+	 * ```js
+	 * export const auditFeed = live.stream(
+	 *   (ctx, orgId) => `audit:${orgId}`,
+	 *   async (ctx, orgId) => db.auditRows.recent(orgId, 50),
+	 *   {
+	 *     merge: 'crud', key: 'id',
+	 *     transform: (row) => ({
+	 *       id: row.record_id,
+	 *       op: row.operation,
+	 *       at: row.changed_at
+	 *     })
+	 *   }
+	 * );
+	 * ```
+	 */
+	transform?(data: any): any;
+
+	/**
 	 * Coalesce-key extractor for publishes to this stream's topic.
 	 *
 	 * When set, every `ctx.publish(topic, event, data)` for this topic fans

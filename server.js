@@ -103,6 +103,7 @@ function _copyStreamMeta(target, source) {
 	if (source.__onUnsubscribe) target.__onUnsubscribe = source.__onUnsubscribe;
 	if (source.__streamFilter) target.__streamFilter = source.__streamFilter;
 	if (source.__streamArgs) target.__streamArgs = source.__streamArgs;
+	if (source.__streamTransform) target.__streamTransform = source.__streamTransform;
 	if (source.__streamVersion !== undefined) target.__streamVersion = source.__streamVersion;
 	if (source.__streamMigrate) target.__streamMigrate = source.__streamMigrate;
 	if (source.__isChannel) target.__isChannel = source.__isChannel;
@@ -150,6 +151,70 @@ function _unregisterCoalesce(ws, topic) {
 	if (entry.ws.size === 0) _topicCoalesce.delete(topic);
 }
 
+/**
+ * Per-topic transform registry. When a stream registered with `transform`
+ * is subscribed, its topic is recorded here. The publish helper applies
+ * the transform once per publish, BEFORE platform.publish (or the
+ * sendCoalesced fan-out), so subscribers see the projected wire shape.
+ *
+ * Refcounted by ws-topic contributions -- evicted when the last
+ * subscriber leaves so HMR-changed stream definitions can re-register.
+ *
+ * @type {Map<string, { transform: Function, refcount: number }>}
+ */
+const _topicTransform = new Map();
+
+/** Per-ws set of topics where this ws has contributed a transform refcount.
+ *  Lets the unregister side be idempotent and ws-aware. */
+const _wsTransformContrib = new WeakMap();
+
+function _registerTransform(ws, topic, transform) {
+	let entry = _topicTransform.get(topic);
+	if (!entry) {
+		entry = { transform, refcount: 0 };
+		_topicTransform.set(topic, entry);
+	}
+	entry.refcount++;
+	let contrib = _wsTransformContrib.get(ws);
+	if (!contrib) { contrib = new Set(); _wsTransformContrib.set(ws, contrib); }
+	contrib.add(topic);
+}
+
+function _unregisterTransform(ws, topic) {
+	const contrib = _wsTransformContrib.get(ws);
+	if (!contrib || !contrib.has(topic)) return;
+	contrib.delete(topic);
+	const entry = _topicTransform.get(topic);
+	if (!entry) return;
+	entry.refcount--;
+	if (entry.refcount <= 0) _topicTransform.delete(topic);
+}
+
+/**
+ * Reset the per-topic transform registry. Tests only.
+ * @internal
+ */
+export function _resetTransformRegistry() {
+	_topicTransform.clear();
+}
+
+/**
+ * Apply a transform function to initial-load data. Per-item for arrays
+ * (covers crud/latest/presence/cursor merge), whole-value for
+ * non-arrays (covers set merge).
+ * @param {Function} transform
+ * @param {any} data
+ * @returns {any}
+ */
+function _applyInitTransform(transform, data) {
+	if (Array.isArray(data)) {
+		const out = new Array(data.length);
+		for (let i = 0; i < data.length; i++) out[i] = transform(data[i]);
+		return out;
+	}
+	return transform(data);
+}
+
 /** @type {WeakMap<any, { publish: Function, throttle: Function, debounce: Function, signal: Function, batch: Function, shed: Function }>} */
 const _ctxHelpersCache = new WeakMap();
 
@@ -163,13 +228,26 @@ function _getCtxHelpers(platform) {
 	let helpers = _ctxHelpersCache.get(platform);
 	if (!helpers) {
 		const publish = function publish(topic, event, data, options) {
+			// Fast path: no per-topic registries populated anywhere -> straight
+			// broadcast. Two Map.size reads + AND + branch is faster than two
+			// Map.get calls in the common no-feature case, and pays for itself
+			// the moment any app uses neither coalesceBy nor transform.
+			if (_topicCoalesce.size === 0 && _topicTransform.size === 0) {
+				return platform.publish(topic, event, data, options);
+			}
 			const c = _topicCoalesce.get(topic);
-			if (!c) return platform.publish(topic, event, data, options);
-			const subKey = c.coalesceBy(data);
-			const fullKey = topic + '\0' + (subKey == null ? '' : subKey);
+			const t = _topicTransform.get(topic);
+			// coalesceBy reads the ORIGINAL data (before transform) so the key
+			// extractor sees the un-projected fields it was written against.
+			const coalesceKey = c ? c.coalesceBy(data) : undefined;
+			// Transform produces the wire data once -- applied here, before
+			// fan-out, so every subscriber sees the same projected shape.
+			const wireData = t ? t.transform(data) : data;
+			if (!c) return platform.publish(topic, event, wireData, options);
+			const fullKey = topic + '\0' + (coalesceKey == null ? '' : coalesceKey);
 			let last = true;
 			for (const ws of c.ws) {
-				last = platform.sendCoalesced(ws, { key: fullKey, topic, event, data });
+				last = platform.sendCoalesced(ws, { key: fullKey, topic, event, data: wireData });
 			}
 			return last;
 		};
@@ -210,6 +288,9 @@ function _trackStreamSub(ws, topic, fn) {
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__coalesceBy) {
 		_registerCoalesce(ws, topic, /** @type {any} */ (fn).__coalesceBy);
 	}
+	if (isFirstSubForTopic && /** @type {any} */ (fn).__streamTransform) {
+		_registerTransform(ws, topic, /** @type {any} */ (fn).__streamTransform);
+	}
 	if (_metricsInstruments) _metricsInstruments.streamGauge.inc();
 }
 
@@ -244,6 +325,7 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 				if (owners.length === 0) {
 					topicMap.delete(topic);
 					_unregisterCoalesce(ws, topic);
+					_unregisterTransform(ws, topic);
 				}
 			}
 		}
@@ -405,7 +487,7 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, ...rest } = options || {};
+	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, ...rest } = options || {};
 	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
 		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
 	}
@@ -414,6 +496,9 @@ live.stream = function stream(topic, initFn, options) {
 	}
 	if (argsSchema !== undefined && (argsSchema === null || typeof argsSchema !== 'object')) {
 		throw new Error('[svelte-realtime] live.stream args must be a Standard Schema or Zod-compatible schema');
+	}
+	if (transform !== undefined && typeof transform !== 'function') {
+		throw new Error('[svelte-realtime] live.stream transform must be a function (data) => projection');
 	}
 	if (delta !== undefined) {
 		if (typeof delta !== 'object' || delta === null) {
@@ -439,6 +524,7 @@ live.stream = function stream(topic, initFn, options) {
 	/** @type {any} */ (initFn).__streamOptions = merged;
 	if (coalesceBy) /** @type {any} */ (initFn).__coalesceBy = coalesceBy;
 	if (argsSchema) /** @type {any} */ (initFn).__streamArgs = argsSchema;
+	if (transform) /** @type {any} */ (initFn).__streamTransform = transform;
 	if (onSubscribe) /** @type {any} */ (initFn).__onSubscribe = onSubscribe;
 	if (onUnsubscribe) /** @type {any} */ (initFn).__onUnsubscribe = onUnsubscribe;
 	// Subscribe-time access predicate: (ctx) => boolean
@@ -2778,6 +2864,14 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 			const isPaginated = result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result;
 			let resultData = isPaginated ? result.data : result;
 
+			// Apply transform to initial data: per-item for arrays
+			// (crud/latest/presence/cursor merge), whole-value for non-arrays
+			// (set merge). Live-event transforms run separately at publish time.
+			const initTransform = /** @type {any} */ (fn).__streamTransform;
+			if (initTransform && resultData != null) {
+				resultData = _applyInitTransform(initTransform, resultData);
+			}
+
 			// Schema migration
 			const serverVersion = /** @type {any} */ (fn).__streamVersion;
 			const migrateFns = /** @type {any} */ (fn).__streamMigrate;
@@ -3153,7 +3247,17 @@ export async function __directCall(path, args, platform, options) {
 			const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 			throw new LiveError(code, code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied');
 		}
-		return fn(ctx, ...args);
+		let result = await fn(ctx, ...args);
+		const initTransform = /** @type {any} */ (fn).__streamTransform;
+		if (initTransform && result != null) {
+			// Match the WS subscribe path: paginated responses transform .data only.
+			if (result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result) {
+				result = { ...result, data: _applyInitTransform(initTransform, result.data) };
+			} else {
+				result = _applyInitTransform(initTransform, result);
+			}
+		}
+		return result;
 	}
 
 	return fn(ctx, ...args);
@@ -3222,6 +3326,7 @@ export function unsubscribe(ws, topic, { platform }) {
 	}
 	topicMap.delete(topic);
 	_unregisterCoalesce(ws, topic);
+	_unregisterTransform(ws, topic);
 
 	let fired = _firedUnsubscribes.get(ws);
 	if (!fired) { fired = new Set(); _firedUnsubscribes.set(ws, fired); }
@@ -3242,6 +3347,7 @@ export function close(ws, { platform, subscriptions }) {
 	if (topicMap) {
 		for (const [topic, owners] of topicMap) {
 			_unregisterCoalesce(ws, topic);
+			_unregisterTransform(ws, topic);
 			if (alreadyFired && alreadyFired.has(topic)) continue;
 			for (const entry of owners) {
 				for (let i = 0; i < entry.count; i++) {
