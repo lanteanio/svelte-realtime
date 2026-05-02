@@ -24,6 +24,7 @@ import {
 	pipe,
 	defineTopics,
 	pushHooks,
+	_resetStaleWatch,
 	_resetIdempotencyStore,
 	_resetCoalesceRegistry,
 	_resetAdmission,
@@ -8496,5 +8497,218 @@ describe('live.push() / pushHooks', () => {
 		await expect(live.push({ userId: 'u-B' }, 'event')).resolves.toBe('B');
 		expect(platformA.requested).toHaveLength(1);
 		expect(platformB.requested).toHaveLength(1);
+	});
+});
+
+// -- live.stream({ staleAfterMs, onError }) -----------------------------------
+
+describe('live.stream({ staleAfterMs })', () => {
+	beforeEach(() => {
+		_resetStaleWatch();
+		_resetTransformRegistry();
+		_resetCoalesceRegistry();
+		_resetVolatileRegistry();
+		_resetTopicWsCounts();
+		vi.useFakeTimers();
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	async function subscribeStream(ws, platform, msg = {}) {
+		const data = toArrayBuffer({ rpc: 'feed/stream', id: 's1', args: [], stream: true, ...msg });
+		handleRpc(ws, data, platform);
+		// Flush microtasks (handleRpc is fire-and-forget; the loader awaits resolve)
+		await vi.advanceTimersByTimeAsync(0);
+	}
+
+	it('rejects non-positive staleAfterMs at registration', () => {
+		expect(() => live.stream('t', async () => [], { staleAfterMs: -1 })).toThrow(/positive/);
+		expect(() => live.stream('t', async () => [], { staleAfterMs: 0 })).toThrow(/positive/);
+		expect(() => live.stream('t', async () => [], { staleAfterMs: /** @type {any} */ ('30s') })).toThrow(/positive/);
+		expect(() => live.stream('t', async () => [], { staleAfterMs: Infinity })).toThrow(/positive/);
+	});
+
+	it('stashes __streamStaleAfterMs on the init function', () => {
+		const fn = live.stream('t', async () => [], { staleAfterMs: 1000 });
+		expect(/** @type {any} */ (fn).__streamStaleAfterMs).toBe(1000);
+	});
+
+	it('reloads and publishes a refreshed event after staleAfterMs of silence', async () => {
+		let nthCall = 0;
+		const fn = live.stream('feed', async () => {
+			nthCall++;
+			return nthCall === 1 ? [{ id: 'a' }] : [{ id: 'a' }, { id: 'b' }];
+		}, { merge: 'crud', staleAfterMs: 5000 });
+		__register('feed/stream', fn);
+
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform);
+
+		expect(nthCall).toBe(1);
+		expect(platform.sent[0].data.ok).toBe(true);
+
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(nthCall).toBe(2);
+
+		const refreshes = platform.published.filter((p) => p.event === 'refreshed');
+		expect(refreshes).toHaveLength(1);
+		expect(refreshes[0].topic).toBe('feed');
+		expect(refreshes[0].data).toEqual([{ id: 'a' }, { id: 'b' }]);
+	});
+
+	it('resets the timer on each publish to the topic', async () => {
+		let nthCall = 0;
+		const fn = live.stream('feed', async () => { nthCall++; return []; }, { merge: 'crud', staleAfterMs: 5000 });
+		__register('feed/stream', fn);
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform);
+
+		// 4s pass within the 5s window -- a publish here should reset the timer
+		await vi.advanceTimersByTimeAsync(4000);
+
+		const poker = live(async (ctx) => { ctx.publish('feed', 'created', { id: 'x' }); });
+		__register('feed/poke', poker);
+		handleRpc(ws, toArrayBuffer({ rpc: 'feed/poke', id: 'p1', args: [] }), platform);
+		await vi.advanceTimersByTimeAsync(0);
+
+		// 4 more seconds (8s total since subscribe, but only 4s since the publish reset)
+		await vi.advanceTimersByTimeAsync(4000);
+		expect(nthCall).toBe(1); // watchdog has NOT fired -- timer was reset by publish
+		// 1.5s more crosses the 5s window from the publish
+		await vi.advanceTimersByTimeAsync(1500);
+		expect(nthCall).toBe(2);
+	});
+
+	it('clears the watchdog when the last subscriber leaves', async () => {
+		let nthCall = 0;
+		const fn = live.stream('feed', async () => { nthCall++; return []; }, { merge: 'crud', staleAfterMs: 1000 });
+		__register('feed/stream', fn);
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform);
+
+		close(ws, { platform });
+
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(nthCall).toBe(1); // loader did NOT fire post-close
+	});
+
+	it('does not double-arm when multiple subscribers join the same topic', async () => {
+		let nthCall = 0;
+		const fn = live.stream('feed', async () => { nthCall++; return []; }, { merge: 'crud', staleAfterMs: 1000 });
+		__register('feed/stream', fn);
+		const platform = mockPlatform();
+		const ws1 = mockWs({ user_id: 'u1' });
+		const ws2 = mockWs({ user_id: 'u2' });
+		await subscribeStream(ws1, platform);
+		await subscribeStream(ws2, platform, { id: 's2' });
+
+		await vi.advanceTimersByTimeAsync(1000);
+		// Initial-load ran once for each subscriber (2), plus one watchdog reload (1).
+		expect(nthCall).toBe(3);
+		// Only ONE refreshed broadcast despite two subscribers.
+		const refreshes = platform.published.filter((p) => p.event === 'refreshed');
+		expect(refreshes).toHaveLength(1);
+	});
+
+	it('routes loader throws to onError on the stale-reload path and re-arms', async () => {
+		const errors = [];
+		let nthCall = 0;
+		const fn = live.stream('feed', async () => {
+			nthCall++;
+			if (nthCall > 1) throw new Error('reload failed');
+			return [];
+		}, {
+			merge: 'crud',
+			staleAfterMs: 1000,
+			onError: (err, ctx, topic) => { errors.push({ msg: /** @type {Error} */ (err).message, topic }); }
+		});
+		__register('feed/stream', fn);
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform);
+
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(nthCall).toBe(2);
+		expect(errors).toEqual([{ msg: 'reload failed', topic: 'feed' }]);
+		expect(platform.published.filter((p) => p.event === 'refreshed')).toHaveLength(0);
+
+		// Watchdog re-armed: second tick fires another reload
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(nthCall).toBe(3);
+		expect(errors).toHaveLength(2);
+	});
+
+	it('routes loader throws to onError on the initial subscribe path', async () => {
+		const errors = [];
+		const fn = live.stream('feed', async () => { throw new Error('init failed'); }, {
+			merge: 'crud',
+			staleAfterMs: 1000,
+			onError: (err) => { errors.push(/** @type {Error} */ (err).message); }
+		});
+		__register('feed/stream', fn);
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform);
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INTERNAL_ERROR');
+		expect(errors).toEqual(['init failed']);
+	});
+
+	it('onError throws are silently swallowed', async () => {
+		let nthCall = 0;
+		const fn = live.stream('feed', async () => {
+			nthCall++;
+			if (nthCall > 1) throw new Error('reload failed');
+			return [];
+		}, {
+			merge: 'crud',
+			staleAfterMs: 1000,
+			onError: () => { throw new Error('observer crashed'); }
+		});
+		__register('feed/stream', fn);
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform);
+
+		// Watchdog runs reload, reload throws, onError throws. Both should be
+		// swallowed -- no rejection bubbles out of the timer callback. Then
+		// the watchdog re-arms and fires a second reload on the next tick.
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(nthCall).toBe(2);
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(nthCall).toBe(3);
+	});
+
+	it('applies stream transform to the refreshed payload (per-item for arrays)', async () => {
+		let nthCall = 0;
+		const fn = live.stream('feed', async () => {
+			nthCall++;
+			return nthCall === 1 ? [{ id: 'a', big: 'x'.repeat(100) }] : [{ id: 'a', big: 'y'.repeat(100) }];
+		}, {
+			merge: 'crud',
+			staleAfterMs: 1000,
+			transform: (row) => ({ id: row.id })
+		});
+		__register('feed/stream', fn);
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform);
+
+		expect(platform.sent[0].data.data).toEqual([{ id: 'a' }]); // initial loader transform applied per-item
+
+		await vi.advanceTimersByTimeAsync(1000);
+		const refreshes = platform.published.filter((p) => p.event === 'refreshed');
+		expect(refreshes).toHaveLength(1);
+		expect(refreshes[0].data).toEqual([{ id: 'a' }]); // reload payload projected, not full row
+	});
+
+	it('rejects non-function onError at registration', () => {
+		expect(() => live.stream('t', async () => [], { onError: /** @type {any} */ ('not a fn') })).toThrow(/onError/);
+		expect(() => live.stream('t', async () => [], { onError: /** @type {any} */ (42) })).toThrow(/onError/);
 	});
 });

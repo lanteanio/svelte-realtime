@@ -364,6 +364,77 @@ export interface StreamOptions {
 	 * ```
 	 */
 	volatile?: boolean;
+
+	/**
+	 * Per-topic staleness watchdog. If the topic is silent (no
+	 * `ctx.publish` to it) for `staleAfterMs`, the realtime layer
+	 * re-runs this stream's loader and broadcasts the result as a
+	 * `refreshed` event. The client merges `refreshed` as a full-state
+	 * replacement across every merge strategy.
+	 *
+	 * Watchdog state is per-topic, not per-subscriber. Multiple
+	 * subscribers to the same topic share one timer; the timer arms on
+	 * the first subscribe for the topic and clears when the last
+	 * subscriber leaves. The reload uses the first subscriber's `ctx`
+	 * and `args`, which is correct for shared topics (the loader's
+	 * output is identical regardless of which subscriber's ctx triggers
+	 * it).
+	 *
+	 * Every publish to the topic resets the watchdog -- a publish is
+	 * proof the topic is live. If the reload's loader throws, `onError`
+	 * fires (if configured) and the watchdog re-arms; transient
+	 * failures don't leave the topic permanently stale.
+	 *
+	 * Useful for streams whose underlying source can quietly stop
+	 * emitting (a CDC connection drops, a polling loop stalls, an
+	 * upstream cache evicts the key). Pairs naturally with `onError`
+	 * for observability into the reload itself.
+	 *
+	 * Must be a positive finite number of milliseconds.
+	 *
+	 * @example
+	 * ```js
+	 * export const auditFeed = live.stream(
+	 *   (ctx, orgId) => `audit:${orgId}`,
+	 *   async (ctx, orgId) => loadAudit(orgId),
+	 *   {
+	 *     merge: 'crud',
+	 *     key: 'id',
+	 *     staleAfterMs: 30_000,
+	 *     onError: (err, ctx, topic) => log.warn({ err, topic }, 'audit reload failed')
+	 *   }
+	 * );
+	 * ```
+	 */
+	staleAfterMs?: number;
+
+	/**
+	 * Per-stream error observer. Called when the loader throws, on
+	 * either the initial subscribe path, the staleness-driven reload
+	 * (if `staleAfterMs` is configured), or the `.load()` SSR path.
+	 * Receives the thrown error, the `ctx` available at the call site,
+	 * and the resolved topic string when available.
+	 *
+	 * Observer-only: errors thrown inside `onError` are silently
+	 * swallowed so a buggy logger never breaks the original error path.
+	 * The original error continues to propagate to the caller (or, on
+	 * stale-reload, drives the timer re-arm). Sibling to the global
+	 * `onError` setter -- per-stream observers fire alongside the
+	 * global one, not instead of it.
+	 *
+	 * Apps that want a topic-scoped degraded signal can `ctx.publish`
+	 * a `__system:<topic>` event from inside the handler:
+	 *
+	 * ```js
+	 * onError: (err, ctx, topic) => {
+	 *   ctx.publish(`__system:${topic}`, 'degraded', { reason: err.message });
+	 * }
+	 * ```
+	 *
+	 * Existing 2-argument `(err, ctx) => void` handlers continue to
+	 * work; the `topic` arg is silently ignored.
+	 */
+	onError?(err: unknown, ctx: LiveContext<any>, topic?: string): void | Promise<void>;
 }
 
 /**

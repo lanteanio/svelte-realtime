@@ -23,6 +23,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Stream staleness watchdog and per-stream `onError` boundary on `live.stream()`.** Two new `StreamOptions` fields for streams whose underlying source can quietly stop emitting (CDC drops, polling stalls, upstream cache evicts the key) or whose loader can fail mid-flight (database timeouts, transient backend errors).
+
+  ```js
+  // src/live/dashboard.js
+  export const auditFeed = live.stream(
+    (ctx, orgId) => `audit:${orgId}`,
+    async (ctx, orgId) => loadAudit(orgId),
+    {
+      merge: 'crud',
+      key: 'id',
+      staleAfterMs: 30_000,
+      onError: (err, ctx, topic) => log.warn({ err, topic }, 'audit stream error')
+    }
+  );
+  ```
+
+  `staleAfterMs` arms a per-topic watchdog on the first subscribe. Every `ctx.publish` to the topic resets the timer; if no events arrive for the configured duration, the realtime layer re-runs the stream's loader and broadcasts the result as a `refreshed` event. The client merges `refreshed` as a full-state replacement across every merge strategy: `crud` swaps the array and rebuilds its key index, `set` replaces the value, `latest` swaps the buffer, `presence` and `cursor` swap and rebuild indexes. Optimistic-key tracking from `store.optimistic()` / `store.mutate()` is cleared on receive (the server's snapshot is authoritative).
+
+  Watchdog state is per-topic, not per-subscriber. Multiple subscribers to the same topic share one timer; the timer arms on the first subscribe and clears when the last subscriber leaves. The reload uses the first subscriber's `ctx` and `args`, which is correct for shared topics since the loader's output is identical regardless of which subscriber's ctx triggers it.
+
+  `onError(err, ctx, topic)` is an observer-only hook: it fires when the loader throws on the initial subscribe path, on the staleness-driven reload, or on the `.load()` SSR path. Errors thrown inside `onError` are silently swallowed so a buggy logger never breaks the original error path. The original error continues to propagate to the caller (or, on stale-reload, drives the timer re-arm). Sibling to the global `onError` setter from `svelte-realtime/server` -- per-stream observers fire alongside the global one, not instead of it.
+
+  Apps that want a topic-scoped degraded signal can publish a system event from inside the handler:
+
+  ```js
+  onError: (err, ctx, topic) => {
+    ctx.publish(`__system:${topic}`, 'degraded', { reason: err.message });
+  }
+  ```
+
+  Both options are independent: a stream can declare `staleAfterMs` without `onError`, or vice versa. Apps that don't use either pay zero overhead -- the publish-helper's watchdog reset is gated behind a Map size check, and the loader try/catch only inspects `__streamOnError` when set.
+
+  Validation runs at registration: `staleAfterMs` must be a positive finite number; `onError` must be a function. Misconfiguration fails fast at app boot with a `[svelte-realtime]`-prefixed error.
+
 - **Server-initiated push via `live.push()` and client-side `onPush()`.** New primitive on the `live` function namespace for sending a request to a connected user and awaiting their reply. Routes through a per-instance userId -> WebSocket registry maintained by a small pair of hooks.
 
   ```js

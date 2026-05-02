@@ -883,6 +883,22 @@ function _createStream(path, options, dynamicArgs) {
 		if (envelope.seq !== undefined) _lastSeq = envelope.seq;
 		_dirty = true;
 
+		// `refreshed` is the universal full-state replace event, emitted by
+		// the server's stream staleness watchdog when a topic has been
+		// silent past its `staleAfterMs` window. Replaces currentValue with
+		// the server's freshly-loaded data and rebuilds the lookup index
+		// for keyed merges. Optimistic placeholders are dropped: the
+		// server's snapshot is authoritative, and any in-flight mutate
+		// rolls back to its own pre-mutate snapshot on failure.
+		if (event === 'refreshed') {
+			currentValue = data;
+			_optimisticKeys.clear();
+			if (merge === 'crud' || merge === 'presence' || merge === 'cursor') {
+				_rebuildIndex();
+			}
+			return true;
+		}
+
 		if (merge === 'crud') {
 			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
 

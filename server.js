@@ -140,6 +140,35 @@ function _getPushIdentify() {
  */
 const _topicWsCounts = new Map();
 
+/**
+ * Per-topic staleness watchdog. When a stream is configured with
+ * `staleAfterMs`, the realtime layer arms a timer on first subscribe
+ * for the topic. Every publish to the topic resets the timer (a
+ * publish proves the topic is live). When the timer fires, the
+ * realtime layer re-runs the stream's loader and broadcasts the new
+ * data as a `refreshed` event; the client merges it as a full-state
+ * replacement across every merge strategy.
+ *
+ * Captured ctx, args, fn, and platform reference are taken from the
+ * FIRST subscriber for the topic. Subsequent subscribers do not
+ * replace these (any subscriber's ctx works for a shared loader call
+ * since the topic identifies the data scope). When the topic's
+ * subscriber count drops to zero the watchdog clears; a new subscriber
+ * after that captures a fresh ctx.
+ *
+ * @type {Map<string, {
+ *   timerId: ReturnType<typeof setTimeout>,
+ *   staleAfterMs: number,
+ *   fn: Function,
+ *   ctx: any,
+ *   args: any[],
+ *   platform: any,
+ *   onError: Function | null,
+ *   reloading: boolean
+ * }>}
+ */
+const _topicStaleWatch = new Map();
+
 /** @type {Array<(ctx: any, next: () => Promise<any>) => Promise<any>>} */
 const _globalMiddleware = [];
 
@@ -164,6 +193,8 @@ function _copyStreamMeta(target, source) {
 	if (source.__streamVolatile) target.__streamVolatile = source.__streamVolatile;
 	if (source.__streamVersion !== undefined) target.__streamVersion = source.__streamVersion;
 	if (source.__streamMigrate) target.__streamMigrate = source.__streamMigrate;
+	if (source.__streamStaleAfterMs !== undefined) target.__streamStaleAfterMs = source.__streamStaleAfterMs;
+	if (source.__streamOnError) target.__streamOnError = source.__streamOnError;
 	if (source.__isChannel) target.__isChannel = source.__isChannel;
 	if (source.__isDerived) target.__isDerived = source.__isDerived;
 	if (source.__derivedDynamic) {
@@ -307,6 +338,101 @@ export function _resetVolatileRegistry() {
 }
 
 /**
+ * Arm the per-topic stale watchdog if `fn` declares `__streamStaleAfterMs`.
+ * Idempotent per topic: if a watchdog already exists (from an earlier
+ * subscriber), this is a no-op so we don't replace the captured ctx.
+ *
+ * @param {string} topic
+ * @param {any} fn The stream's init function (with __streamStaleAfterMs / __streamOnError stashed)
+ * @param {any} ctx
+ * @param {any[]} args
+ * @param {any} platform
+ */
+function _registerStaleWatch(topic, fn, ctx, args, platform) {
+	const staleMs = fn.__streamStaleAfterMs;
+	if (!staleMs) return;
+	if (_topicStaleWatch.has(topic)) return;
+	const entry = {
+		staleAfterMs: staleMs,
+		fn,
+		ctx,
+		args,
+		platform,
+		onError: fn.__streamOnError || null,
+		reloading: false,
+		timerId: setTimeout(() => _staleReload(topic), staleMs)
+	};
+	_topicStaleWatch.set(topic, entry);
+}
+
+/**
+ * Clear the per-topic stale watchdog. Called when the last subscriber for
+ * the topic leaves. No-op when no watchdog exists.
+ * @param {string} topic
+ */
+function _unregisterStaleWatch(topic) {
+	const entry = _topicStaleWatch.get(topic);
+	if (!entry) return;
+	clearTimeout(entry.timerId);
+	_topicStaleWatch.delete(topic);
+}
+
+/**
+ * Reset the watchdog timer for a topic. Called from the publish helper on
+ * every publish to that topic -- a publish proves the topic is live, so
+ * the staleness clock restarts.
+ * @param {string} topic
+ */
+function _resetStaleTimer(topic) {
+	const entry = _topicStaleWatch.get(topic);
+	if (!entry) return;
+	clearTimeout(entry.timerId);
+	entry.timerId = setTimeout(() => _staleReload(topic), entry.staleAfterMs);
+}
+
+/**
+ * Run the stale-reload for a topic: re-invoke the stream's loader with the
+ * captured ctx + args, broadcast the new data as a `refreshed` event, and
+ * re-arm the timer. Loader throws are routed to the stream's onError if
+ * configured; the timer always re-arms so transient failures do not leave
+ * the topic in a permanently-stale state.
+ *
+ * @param {string} topic
+ */
+async function _staleReload(topic) {
+	const entry = _topicStaleWatch.get(topic);
+	if (!entry) return;
+	if (entry.reloading) return;
+	entry.reloading = true;
+	try {
+		const result = await entry.fn(entry.ctx, ...entry.args);
+		const initTransform = /** @type {any} */ (entry.fn).__streamTransform;
+		const finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
+		try { entry.platform.publish(topic, 'refreshed', finalData); } catch {}
+	} catch (err) {
+		if (entry.onError) {
+			try { await entry.onError(err, entry.ctx, topic); } catch {}
+		}
+	} finally {
+		entry.reloading = false;
+		// Re-arm only if this entry is still registered. The last
+		// subscriber may have left during the async loader call, in
+		// which case _unregisterStaleWatch has already cleared the
+		// timer slot.
+		const stillThere = _topicStaleWatch.get(topic);
+		if (stillThere === entry) {
+			stillThere.timerId = setTimeout(() => _staleReload(topic), entry.staleAfterMs);
+		}
+	}
+}
+
+/** Reset the per-topic stale-watch registry. Tests only. @internal */
+export function _resetStaleWatch() {
+	for (const entry of _topicStaleWatch.values()) clearTimeout(entry.timerId);
+	_topicStaleWatch.clear();
+}
+
+/**
  * Apply a transform function to initial-load data. Per-item for arrays
  * (covers crud/latest/presence/cursor merge), whole-value for
  * non-arrays (covers set merge).
@@ -447,6 +573,10 @@ function _getCtxHelpers(platform) {
 			if ((options && options.volatile) || (_topicVolatile.size > 0 && _topicVolatile.has(topic))) {
 				finalOptions = { ...(options || {}), seq: false };
 			}
+			// Reset the staleness watchdog: a publish proves the topic is
+			// live, so the silence clock restarts. The size check makes
+			// this free for apps that don't use staleAfterMs.
+			if (_topicStaleWatch.size > 0) _resetStaleTimer(topic);
 			// Fast path: no per-topic feature registry hits and adapter exposes
 			// publishBatched -> queue for microtask flush. The cross-worker
 			// relay already coalesces per-microtask postMessages; this lifts
@@ -586,7 +716,10 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 		if (wsSet) {
 			wsSet.delete(ws);
 			remainingSubscribers = wsSet.size;
-			if (wsSet.size === 0) _topicWsCounts.delete(topic);
+			if (wsSet.size === 0) {
+				_topicWsCounts.delete(topic);
+				_unregisterStaleWatch(topic);
+			}
 		}
 	} else {
 		const wsSet = _topicWsCounts.get(topic);
@@ -851,7 +984,7 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, volatile: volatileOpt, ...rest } = options || {};
+	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, volatile: volatileOpt, staleAfterMs, onError: streamOnError, ...rest } = options || {};
 	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
 		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
 	}
@@ -872,6 +1005,14 @@ live.stream = function stream(topic, initFn, options) {
 	}
 	if (volatileOpt && replay) {
 		throw new Error('[svelte-realtime] live.stream cannot combine volatile: true with replay -- volatile messages are intentionally not buffered for resume. Drop replay or drop volatile.');
+	}
+	if (staleAfterMs !== undefined) {
+		if (typeof staleAfterMs !== 'number' || !Number.isFinite(staleAfterMs) || staleAfterMs <= 0) {
+			throw new Error('[svelte-realtime] live.stream staleAfterMs must be a positive finite number');
+		}
+	}
+	if (streamOnError !== undefined && typeof streamOnError !== 'function') {
+		throw new Error('[svelte-realtime] live.stream onError must be a function (err, ctx, topic) => void');
 	}
 	if (delta !== undefined) {
 		if (typeof delta !== 'object' || delta === null) {
@@ -899,6 +1040,8 @@ live.stream = function stream(topic, initFn, options) {
 	if (argsSchema) /** @type {any} */ (initFn).__streamArgs = argsSchema;
 	if (transform) /** @type {any} */ (initFn).__streamTransform = transform;
 	if (volatileOpt) /** @type {any} */ (initFn).__streamVolatile = true;
+	if (staleAfterMs) /** @type {any} */ (initFn).__streamStaleAfterMs = staleAfterMs;
+	if (streamOnError) /** @type {any} */ (initFn).__streamOnError = streamOnError;
 	if (onSubscribe) /** @type {any} */ (initFn).__onSubscribe = onSubscribe;
 	if (onUnsubscribe) /** @type {any} */ (initFn).__onUnsubscribe = onUnsubscribe;
 	// Subscribe-time access predicate: (ctx) => boolean
@@ -3859,7 +4002,23 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 				} catch {}
 			}
 
-			const result = await fn(ctx, ...streamArgs);
+			let result;
+			try {
+				result = await fn(ctx, ...streamArgs);
+			} catch (err) {
+				const streamOnError = /** @type {any} */ (fn).__streamOnError;
+				if (streamOnError) {
+					try { await streamOnError(err, ctx, topic); } catch {}
+				}
+				throw err;
+			}
+
+			// Arm the staleness watchdog now that the loader succeeded.
+			// Idempotent per topic, so multi-subscriber streams only ever
+			// run one watchdog regardless of how many subscribers join.
+			if (/** @type {any} */ (fn).__streamStaleAfterMs) {
+				_registerStaleWatch(topic, fn, ctx, streamArgs, platform);
+			}
 
 			const isPaginated = result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result;
 			let resultData = isPaginated ? result.data : result;
@@ -4294,7 +4453,23 @@ async function _runDirectCall(path, args, platform, options) {
 			const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 			throw new LiveError(code, code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied');
 		}
-		let result = await fn(ctx, ...args);
+		let result;
+		try {
+			result = await fn(ctx, ...args);
+		} catch (err) {
+			const streamOnError = /** @type {any} */ (fn).__streamOnError;
+			if (streamOnError) {
+				// Best-effort: resolve the topic for the error-handler so apps
+				// can log per-topic. Topic-resolution errors are swallowed.
+				let topic;
+				try {
+					const rawTopic = /** @type {any} */ (fn).__streamTopic;
+					topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, args) : rawTopic;
+				} catch {}
+				try { await streamOnError(err, ctx, topic); } catch {}
+			}
+			throw err;
+		}
 		const initTransform = /** @type {any} */ (fn).__streamTransform;
 		if (initTransform && result != null) {
 			// Match the WS subscribe path: paginated responses transform .data only.
@@ -4371,7 +4546,10 @@ export function unsubscribe(ws, topic, { platform }) {
 	if (wsSet) {
 		wsSet.delete(ws);
 		remainingSubscribers = wsSet.size;
-		if (wsSet.size === 0) _topicWsCounts.delete(topic);
+		if (wsSet.size === 0) {
+			_topicWsCounts.delete(topic);
+			_unregisterStaleWatch(topic);
+		}
 	}
 
 	// Drain every logical subscriber for this topic
@@ -4416,7 +4594,10 @@ export function close(ws, { platform, subscriptions }) {
 			if (wsSet) {
 				wsSet.delete(ws);
 				remainingSubscribers = wsSet.size;
-				if (wsSet.size === 0) _topicWsCounts.delete(topic);
+				if (wsSet.size === 0) {
+					_topicWsCounts.delete(topic);
+					_unregisterStaleWatch(topic);
+				}
 			}
 			if (alreadyFired && alreadyFired.has(topic)) continue;
 			for (const entry of owners) {

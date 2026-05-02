@@ -3601,6 +3601,164 @@ describe('__rpc().with({ timeout })', () => {
 	});
 });
 
+// -- refreshed event (stream staleness watchdog reload) ----------------------
+
+describe('refreshed event', () => {
+	it('replaces crud state with the new array and rebuilds the index', async () => {
+		const store = __stream('items/list', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1, name: 'A' }, { id: 2, name: 'B' }],
+			topic: 'items',
+			merge: 'crud',
+			key: 'id'
+		});
+
+		simulateTopicMessage('items', {
+			event: 'refreshed',
+			data: [{ id: 3, name: 'C' }, { id: 4, name: 'D' }]
+		});
+
+		const lastValue = values[values.length - 1];
+		expect(lastValue).toEqual([{ id: 3, name: 'C' }, { id: 4, name: 'D' }]);
+
+		// After refresh, the index is rebuilt for the new keys -- a follow-up
+		// updated event for an item from the refreshed set finds its slot.
+		simulateTopicMessage('items', {
+			event: 'updated',
+			data: { id: 3, name: 'C-updated' }
+		});
+
+		const final = values[values.length - 1];
+		expect(final).toEqual([{ id: 3, name: 'C-updated' }, { id: 4, name: 'D' }]);
+
+		unsub();
+	});
+
+	it('replaces set state with the new value', async () => {
+		const store = __stream('config/current', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: { theme: 'light', density: 'comfy' },
+			topic: 'config',
+			merge: 'set'
+		});
+
+		simulateTopicMessage('config', {
+			event: 'refreshed',
+			data: { theme: 'dark', density: 'compact', accent: 'blue' }
+		});
+
+		const lastValue = values[values.length - 1];
+		expect(lastValue).toEqual({ theme: 'dark', density: 'compact', accent: 'blue' });
+
+		unsub();
+	});
+
+	it('replaces latest state with the new array', async () => {
+		const store = __stream('events/recent', { merge: 'latest' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ ts: 1, msg: 'a' }, { ts: 2, msg: 'b' }],
+			topic: 'events',
+			merge: 'latest'
+		});
+
+		simulateTopicMessage('events', {
+			event: 'refreshed',
+			data: [{ ts: 10, msg: 'x' }]
+		});
+
+		const lastValue = values[values.length - 1];
+		expect(lastValue).toEqual([{ ts: 10, msg: 'x' }]);
+
+		unsub();
+	});
+
+	it('replaces presence state and rebuilds the index', async () => {
+		const store = __stream('room/presence', { merge: 'presence', key: 'key' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ key: 'u1', name: 'Alice' }],
+			topic: 'room/presence',
+			merge: 'presence',
+			key: 'key'
+		});
+
+		simulateTopicMessage('room/presence', {
+			event: 'refreshed',
+			data: [{ key: 'u2', name: 'Bob' }, { key: 'u3', name: 'Carol' }]
+		});
+
+		const lastValue = values[values.length - 1];
+		expect(lastValue).toEqual([{ key: 'u2', name: 'Bob' }, { key: 'u3', name: 'Carol' }]);
+
+		// Index is rebuilt -- a follow-up leave for one of the refreshed keys
+		// removes it correctly.
+		simulateTopicMessage('room/presence', {
+			event: 'leave',
+			data: { key: 'u2', name: 'Bob' }
+		});
+
+		const final = values[values.length - 1];
+		expect(final).toEqual([{ key: 'u3', name: 'Carol' }]);
+
+		unsub();
+	});
+
+	it('clears optimistic-key tracking on refresh', async () => {
+		const store = __stream('todos/list', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1, title: 'a' }],
+			topic: 'todos',
+			merge: 'crud',
+			key: 'id'
+		});
+
+		// Apply an optimistic placeholder (registers in _optimisticKeys)
+		store.optimistic('created', { id: 'temp-x', title: 'pending' });
+
+		// Refresh arrives -- server's authoritative state replaces everything,
+		// and the optimistic-key tracking is cleared.
+		simulateTopicMessage('todos', {
+			event: 'refreshed',
+			data: [{ id: 1, title: 'a' }, { id: 2, title: 'b' }]
+		});
+
+		const lastValue = values[values.length - 1];
+		expect(lastValue).toEqual([{ id: 1, title: 'a' }, { id: 2, title: 'b' }]);
+		// Optimistic was wiped -- the temp-x placeholder is gone, no stale dedup state.
+
+		unsub();
+	});
+});
+
 // -- onPush -------------------------------------------------------------------
 
 describe('onPush()', () => {
