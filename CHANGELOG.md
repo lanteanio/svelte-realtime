@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Automatic wire-level publish batching.** Every `ctx.publish()` made within one microtask now flushes as a single batched WebSocket frame to each subscriber, instead of one frame per call. A handler that publishes 50 items in a `for` loop produces ONE outbound frame per subscriber, not 50. No code change required -- handlers keep using `ctx.publish` exactly as before. Subscribers that don't advertise the `'batch'` capability fall back to per-event delivery automatically.
+
+  ```js
+  // Bulk import: 50 ctx.publish calls => 1 frame per subscriber
+  export const importItems = live(async (ctx, items) => {
+    const created = await db.bulkInsert('items', items);
+    for (const row of created) {
+      ctx.publish(`org:${ctx.user.organization_id}:items`, 'created', row);
+    }
+  });
+  ```
+
+  Behavior preserved across the existing per-topic features:
+
+  - Streams configured with `coalesceBy` continue to use `platform.sendCoalesced` per-subscriber (latest-value-wins replacement). Those publishes do not enter the batched path -- the two primitives produce different wire shapes intentionally.
+  - Streams configured with `transform` apply the projection BEFORE queuing into the batch. Subscribers see the projected wire data; `coalesceBy` extractors still see the original.
+  - `ctx.batch([msgs])` (the documented 0.4.0 list form) is unchanged.
+  - `ctx.throttle`, `ctx.debounce`, and `ctx.signal` retain their own scheduling and are not auto-batched.
+
+  Each `await` boundary inside a handler crosses a microtask, so publishes interleaved with awaits flush in their natural order rather than being held until handler exit -- the timing semantics every existing handler depends on still hold. Requires `svelte-adapter-uws@^0.5.0-next.4` for the underlying `platform.publishBatched` primitive; older adapters fall back transparently to per-event publishes.
+
 - **Org/user-scoped access predicates + `guard({ authenticated })` + `live.scoped()`.** Four small pieces that close the most common authorization-bypass holes without per-handler boilerplate or magic auto-detection.
 
   ```js

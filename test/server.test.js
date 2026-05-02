@@ -3839,6 +3839,166 @@ describe('ctx.batch', () => {
 	});
 });
 
+// -- ctx.publish auto microtask-batch via platform.publishBatched -------------
+
+/**
+ * Build a mock platform exposing publishBatched, so the auto-batch path
+ * activates in the publish helper. Records every batched call.
+ */
+function mockPlatformWithBatched() {
+	const p = mockPlatform();
+	p.batched = [];
+	p.publishBatched = (messages) => { p.batched.push(messages); };
+	return p;
+}
+
+describe('ctx.publish auto microtask-batch', () => {
+	it('queues sync ctx.publish() calls into one publishBatched per microtask', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			ctx.publish('t1', 'a', 1);
+			ctx.publish('t2', 'b', 2);
+			ctx.publish('t3', 'c', 3);
+			return 'ok';
+		});
+		__register('autobatch/sync', handler);
+
+		const data = toArrayBuffer({ rpc: 'autobatch/sync', id: 'ab1', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched).toHaveLength(1);
+		expect(platform.batched[0]).toHaveLength(3);
+		expect(platform.batched[0][0]).toMatchObject({ topic: 't1', event: 'a', data: 1 });
+		expect(platform.batched[0][2]).toMatchObject({ topic: 't3', event: 'c', data: 3 });
+		expect(platform.published).toHaveLength(0);
+	});
+
+	it('flushes a separate batch per microtask boundary (await splits)', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			ctx.publish('t', 'a', 1);
+			ctx.publish('t', 'b', 2);
+			await new Promise((r) => setTimeout(r, 0));
+			ctx.publish('t', 'c', 3);
+			return 'ok';
+		});
+		__register('autobatch/awaitsplit', handler);
+
+		const data = toArrayBuffer({ rpc: 'autobatch/awaitsplit', id: 'ab2', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(platform.batched).toHaveLength(2);
+		expect(platform.batched[0]).toHaveLength(2);
+		expect(platform.batched[1]).toHaveLength(1);
+		expect(platform.batched[1][0]).toMatchObject({ event: 'c' });
+	});
+
+	it('falls back to per-event publish when adapter has no publishBatched', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform(); // no publishBatched
+
+		const handler = live(async (ctx) => {
+			ctx.publish('t1', 'a', 1);
+			ctx.publish('t2', 'b', 2);
+			return 'ok';
+		});
+		__register('autobatch/fallback', handler);
+
+		const data = toArrayBuffer({ rpc: 'autobatch/fallback', id: 'ab3', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.published).toHaveLength(2);
+	});
+
+	it('coalesceBy topics bypass publishBatched (use sendCoalesced)', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const stream = live.stream('coalesce-topic', async () => [], {
+			merge: 'set',
+			coalesceBy: (data) => data.id
+		});
+		__register('autobatch/coalesce', stream);
+
+		const subData = toArrayBuffer({ rpc: 'autobatch/coalesce', id: 'cs1', args: [], stream: true });
+		handleRpc(ws, subData, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const handler = live(async (ctx) => {
+			ctx.publish('coalesce-topic', 'set', { id: 'a', n: 1 });
+			ctx.publish('coalesce-topic', 'set', { id: 'a', n: 2 });
+			return 'ok';
+		});
+		__register('autobatch/cpub', handler);
+
+		platform.batched.length = 0;
+		const data = toArrayBuffer({ rpc: 'autobatch/cpub', id: 'cp1', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched).toHaveLength(0);
+		expect(platform.coalesced.length).toBeGreaterThan(0);
+	});
+
+	it('transform topics still go through publishBatched with projected data', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const stream = live.stream('xform-topic', async () => [], {
+			merge: 'crud', key: 'id',
+			transform: (row) => ({ id: row.id, label: row.label })
+		});
+		__register('autobatch/xform', stream);
+
+		const subData = toArrayBuffer({ rpc: 'autobatch/xform', id: 'xs1', args: [], stream: true });
+		handleRpc(ws, subData, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const handler = live(async (ctx) => {
+			ctx.publish('xform-topic', 'created', { id: 1, label: 'L', secret: 'x' });
+			return 'ok';
+		});
+		__register('autobatch/xpub', handler);
+
+		platform.batched.length = 0;
+		const data = toArrayBuffer({ rpc: 'autobatch/xpub', id: 'xp1', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched).toHaveLength(1);
+		expect(platform.batched[0][0]).toMatchObject({
+			topic: 'xform-topic',
+			event: 'created',
+			data: { id: 1, label: 'L' }
+		});
+		expect(platform.batched[0][0].data).not.toHaveProperty('secret');
+	});
+
+	it('preserves options on each batched message', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			ctx.publish('t', 'e', 1, { seq: false });
+			return 'ok';
+		});
+		__register('autobatch/opts', handler);
+
+		const data = toArrayBuffer({ rpc: 'autobatch/opts', id: 'ao1', args: [] });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched[0][0]).toMatchObject({ options: { seq: false } });
+	});
+});
+
 // -- 0.4.0: live.breaker() ----------------------------------------------------
 
 describe('live.breaker()', () => {

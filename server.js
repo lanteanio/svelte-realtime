@@ -227,13 +227,35 @@ const _ctxHelpersCache = new WeakMap();
 function _getCtxHelpers(platform) {
 	let helpers = _ctxHelpersCache.get(platform);
 	if (!helpers) {
+		// Per-platform microtask-scoped batch buffer. Every ctx.publish() that
+		// can route through platform.publishBatched (no per-topic coalesce or
+		// sendCoalesced fanout) is queued here; the buffer drains in one
+		// queueMicrotask and is handed to the adapter as a single batched
+		// frame, fanning out as one WebSocket frame per subscriber. The
+		// adapter handles capability negotiation and per-event fallback for
+		// non-batch-capable subscribers, so the call is always safe.
+		/** @type {Array<{ topic: string, event: string, data: any, options: any }> | null} */
+		let pendingBatch = null;
+		const _hasBatched = typeof /** @type {any} */ (platform).publishBatched === 'function';
+		const _flushBatch = () => {
+			const batch = pendingBatch;
+			pendingBatch = null;
+			if (batch && batch.length > 0) /** @type {any} */ (platform).publishBatched(batch);
+		};
 		const publish = function publish(topic, event, data, options) {
-			// Fast path: no per-topic registries populated anywhere -> straight
-			// broadcast. Two Map.size reads + AND + branch is faster than two
-			// Map.get calls in the common no-feature case, and pays for itself
-			// the moment any app uses neither coalesceBy nor transform.
+			// Fast path: no per-topic feature registry hits and adapter exposes
+			// publishBatched -> queue for microtask flush. The cross-worker
+			// relay already coalesces per-microtask postMessages; this lifts
+			// the same idea to the wire level so subscribers receive ONE frame
+			// per microtask containing every event they're entitled to.
 			if (_topicCoalesce.size === 0 && _topicTransform.size === 0) {
-				return platform.publish(topic, event, data, options);
+				if (!_hasBatched) return platform.publish(topic, event, data, options);
+				if (!pendingBatch) {
+					pendingBatch = [];
+					queueMicrotask(_flushBatch);
+				}
+				pendingBatch.push({ topic, event, data, options });
+				return true;
 			}
 			const c = _topicCoalesce.get(topic);
 			const t = _topicTransform.get(topic);
@@ -243,7 +265,20 @@ function _getCtxHelpers(platform) {
 			// Transform produces the wire data once -- applied here, before
 			// fan-out, so every subscriber sees the same projected shape.
 			const wireData = t ? t.transform(data) : data;
-			if (!c) return platform.publish(topic, event, wireData, options);
+			if (!c) {
+				// Transform-only topic: stays on the queued batched path.
+				if (!_hasBatched) return platform.publish(topic, event, wireData, options);
+				if (!pendingBatch) {
+					pendingBatch = [];
+					queueMicrotask(_flushBatch);
+				}
+				pendingBatch.push({ topic, event, data: wireData, options });
+				return true;
+			}
+			// coalesceBy topic: per-ws sendCoalesced replacement. Distinct
+			// adapter primitive (latest-value-wins per-ws-per-key); not folded
+			// into publishBatched because the two have incompatible wire
+			// shapes (separate per-subscriber Map vs shared batched frame).
 			const fullKey = topic + '\0' + (coalesceKey == null ? '' : coalesceKey);
 			let last = true;
 			for (const ws of c.ws) {
@@ -256,7 +291,7 @@ function _getCtxHelpers(platform) {
 			throttle: (topic, event, data, ms) => _throttlePublish(platform, topic, event, data, ms),
 			debounce: (topic, event, data, ms) => _debouncePublish(platform, topic, event, data, ms),
 			signal: (userId, event, data) => platform.publish('__signal:' + userId, event, data),
-			batch: (messages) => platform.batch ? platform.batch(messages) : messages.forEach(m => publish(m.topic, m.event, m.data, m.options)),
+			batch: (messages) => platform.batch ? platform.batch(messages) : messages.forEach((m) => publish(m.topic, m.event, m.data, m.options)),
 			shed: (className) => _shouldShed(platform, className)
 		};
 		_ctxHelpersCache.set(platform, helpers);

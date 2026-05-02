@@ -145,7 +145,7 @@ function ensureDisconnectListener() {
 	let cfTunnelWarned = false;
 
 	status.subscribe((s) => {
-		if (s === 'closed') {
+		if (s === 'disconnected' || s === 'failed') {
 			for (const [id, entry] of pending) {
 				pending.delete(id);
 				if (entry.timer) clearTimeout(entry.timer);
@@ -1674,7 +1674,7 @@ export function configure(config) {
 				if (_clientConfig.onConnect) _clientConfig.onConnect();
 				_drainOfflineQueue();
 			}
-			if (s === 'closed') {
+			if (s === 'disconnected' || s === 'failed') {
 				_isOffline = true;
 				if (_clientConfig.onDisconnect) _clientConfig.onDisconnect();
 			}

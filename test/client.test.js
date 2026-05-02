@@ -299,7 +299,7 @@ describe('__stream()', () => {
 		const firstSent = sendQueuedFn.mock.calls[0][0];
 
 		// Disconnect before the initial load completes
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 
 		// The disconnect listener rejects pending entries
 		// Data store stays undefined, error is on .error store
@@ -788,7 +788,7 @@ describe('__stream() hydrate reconnect', () => {
 		expect(values[values.length - 1]).toEqual([{ userId: 'u1', x: 10, y: 20 }]);
 
 		// Disconnect and reconnect
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 250));
 
@@ -877,7 +877,7 @@ describe('__stream() hydrate reconnect', () => {
 		expect(values[values.length - 1]).toEqual({ count: 105 });
 
 		// Disconnect and reconnect
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 250));
 
@@ -997,7 +997,7 @@ describe('__stream() hydrate derived', () => {
 		expect(values[values.length - 1]).toEqual({ total: 75 });
 
 		// Reconnect
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 250));
 
@@ -1088,7 +1088,7 @@ describe('__stream() seq tracking', () => {
 		simulateTopicMessage('seq-topic', { event: 'created', data: { id: 2 }, seq: 11 });
 
 		// Disconnect and reconnect (debounced with jitter -- wait for it)
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 250));
 
@@ -1314,7 +1314,7 @@ describe('configure()', () => {
 		let disconnected = false;
 		configure({ onDisconnect() { disconnected = true; } });
 
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 
 		expect(disconnected).toBe(true);
 	});
@@ -1397,9 +1397,9 @@ describe('CF Tunnel symptom detector', () => {
 		// fires 'open' synchronously on subscribe, so lastOpenAt is seeded.
 		__rpc('cf/ping')().catch(() => {});
 
-		simulateStatus('closed'); // first fast close
+		simulateStatus('disconnected'); // first fast close
 		simulateStatus('open');
-		simulateStatus('closed'); // second fast close -> warn
+		simulateStatus('disconnected'); // second fast close -> warn
 
 		expect(warnSpy).toHaveBeenCalledTimes(1);
 		const msg = warnSpy.mock.calls[0][0];
@@ -1414,7 +1414,7 @@ describe('CF Tunnel symptom detector', () => {
 		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
 		__rpc('cf/ping')().catch(() => {});
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 
 		expect(warnSpy).not.toHaveBeenCalled();
 		warnSpy.mockRestore();
@@ -1425,11 +1425,11 @@ describe('CF Tunnel symptom detector', () => {
 		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
 		__rpc('cf/ping')().catch(() => {});
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 		simulateStatus('open');
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 		simulateStatus('open');
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 
 		expect(warnSpy).not.toHaveBeenCalled();
 		warnSpy.mockRestore();
@@ -1440,7 +1440,7 @@ describe('CF Tunnel symptom detector', () => {
 
 		__rpc('cf/ping')().catch(() => {});
 		for (let i = 0; i < 10; i++) {
-			simulateStatus('closed');
+			simulateStatus('disconnected');
 			simulateStatus('open');
 		}
 
@@ -1458,14 +1458,14 @@ describe('CF Tunnel symptom detector', () => {
 		try {
 			__rpc('cf/ping')().catch(() => {});
 			// Initial 'open' captured at now=1_000_000
-			simulateStatus('closed');                  // count=1
+			simulateStatus('disconnected');                  // count=1
 			now += 5_000;                              // 5s gap
 			simulateStatus('open');
 			now += 2_000;                              // open lasted 2s
-			simulateStatus('closed');                  // slow close -> reset
+			simulateStatus('disconnected');                  // slow close -> reset
 			now += 100;
 			simulateStatus('open');
-			simulateStatus('closed');                  // count=1 again, no warn
+			simulateStatus('disconnected');                  // count=1 again, no warn
 
 			expect(warnSpy).not.toHaveBeenCalled();
 		} finally {
@@ -2679,7 +2679,7 @@ describe('stream .error and .status', () => {
 
 		expect(values[values.length - 1]).toEqual([{ id: 1, text: 'hi' }]);
 
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 120));
 		await flush();
@@ -2731,7 +2731,7 @@ describe('stream .error and .status', () => {
 		expect(errors[errors.length - 1]).not.toBe(null);
 		expect(statuses[statuses.length - 1]).toBe('error');
 
-		simulateStatus('closed');
+		simulateStatus('disconnected');
 		simulateStatus('open');
 
 		expect(statuses[statuses.length - 1]).toBe('reconnecting');
