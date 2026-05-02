@@ -128,6 +128,109 @@ export const join = live(async (ctx) => {});
 	});
 });
 
+// -- client stub HMR self-accept ---------------------------------------------
+
+describe('client stub HMR self-accept', () => {
+	afterEach(teardown);
+
+	it('emits import.meta.hot.accept() for live() exports', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:chat', { ssr: false });
+
+		expect(code).toContain('import.meta.hot');
+		expect(code).toContain('import.meta.hot.accept()');
+	});
+
+	it('emits import.meta.hot.accept() for live.stream() exports', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const messages = live.stream('messages', async (ctx) => [], { merge: 'crud', key: 'id' });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:chat', { ssr: false });
+
+		expect(code).toContain('import.meta.hot.accept()');
+	});
+
+	it('emits import.meta.hot.accept() for live.room() exports', () => {
+		setup({
+			'doc.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.room({
+  topic: (ctx, id) => 'doc:' + id,
+  load: async () => ({ items: [] }),
+  presence: true,
+  cursors: true
+});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:doc', { ssr: false });
+
+		expect(code).toContain('import.meta.hot.accept()');
+	});
+
+	it('emits import.meta.hot.accept() even when the module has no live exports', () => {
+		setup({
+			'guard.js': `
+import { guard } from 'svelte-realtime/server';
+export const _guard = guard((ctx) => !!ctx.user);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:guard', { ssr: false });
+
+		expect(code).toContain('import.meta.hot.accept()');
+	});
+
+	it('emits the accept directive after the export statements (so re-evaluation runs them first)', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:chat', { ssr: false });
+
+		const acceptIdx = code.indexOf('import.meta.hot.accept()');
+		const exportIdx = code.indexOf("export const send = __rpc(");
+		expect(exportIdx).toBeGreaterThan(-1);
+		expect(acceptIdx).toBeGreaterThan(exportIdx);
+	});
+
+	it('guards the accept call so the directive is dead code outside dev / Vite', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:chat', { ssr: false });
+
+		// The accept call must be guarded by the truthy check on import.meta.hot
+		// so production builds (where import.meta.hot is undefined) skip it
+		// without throwing, and Vite's dead-code elimination strips it from
+		// the production bundle entirely.
+		expect(code).toMatch(/if\s*\(\s*import\.meta\.hot\s*\)\s*import\.meta\.hot\.accept\(\)/);
+	});
+});
+
 // -- load (SSR) ---------------------------------------------------------------
 
 describe('load (SSR)', () => {

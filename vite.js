@@ -792,7 +792,15 @@ function _generateClientStubs(filePath, modulePath, dir) {
 
 	const reexport = `export { empty } from 'svelte-realtime/client';\n`;
 
-	return importLine + reexport + lines.join('\n') + '\n';
+	// Self-accept HMR: when the source file changes, handleHotUpdate
+	// invalidates this virtual module and Vite re-executes it. The accept
+	// directive turns that re-execution into an HMR update instead of a
+	// full page reload. `import.meta.hot` is undefined in production /
+	// non-Vite contexts, so the conditional is dead code there and Vite
+	// strips it from the production bundle.
+	const hmrAccept = `if (import.meta.hot) import.meta.hot.accept();\n`;
+
+	return importLine + reexport + lines.join('\n') + '\n' + hmrAccept;
 }
 
 /**

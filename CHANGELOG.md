@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Editing a `src/live/*.js` file now triggers an HMR update instead of a full page reload.** The Vite plugin's generated client stubs (the virtual `$live/*` modules) now emit `if (import.meta.hot) import.meta.hot.accept();`, which lets Vite re-execute the stub in place when the source file changes. The server-side handler reload was already wired (the registry virtual module reloads via `_hmrReloadRegistry`); the client-side accept directive was the missing piece that made Vite fall back to a full page reload.
+
+  Wire from any consumer that already had HMR working (Svelte components, `+page.server.js` files): editing a handler updates without losing scroll position, form state, or open subscriptions. Pure addition to the generated stub output. Production builds dead-strip the `if (import.meta.hot)` block.
+
+  No API change; no per-app wiring needed. Apps that import from `$live/...` automatically benefit.
+
 - **Multi-stream page mounts now batch their wire-level subscribes into one frame.** When several streams subscribe in the same microtask (the typical multi-widget page mount), the underlying WebSocket subscribe frames now collapse into one `subscribe-batch` frame instead of N individual `subscribe` frames. Apps that wired their auth check via `hooks.ws.js`'s `subscribeBatch` export now see one auth call covering every topic on the page, instead of N per-topic `subscribe` calls.
 
   Wire-frame count for a 5-stream page mount drops from 6 (one batched RPC envelope plus 5 subscribe frames) to 2 (one batched RPC envelope plus one `subscribe-batch` frame). On reconnect the same shape was already emitted; this closes the gap on initial mount.
