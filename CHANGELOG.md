@@ -17,6 +17,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`realtimeTransport()` SvelteKit transport hook preset.** New `svelte-realtime/hooks` entry point. Auto-registers serialization for `RpcError` and `LiveError` across the SSR / client boundary so typed errors thrown during `+page.server.js` `load()` arrive at `+error.svelte` (and any client-side handler that rethrows them) preserved as the original class with `code` intact, rather than as plain `Error` instances.
+
+  ```js
+  // src/hooks.js
+  import { realtimeTransport } from 'svelte-realtime/hooks';
+
+  export const transport = realtimeTransport();
+  ```
+
+  Compose with app-defined types (user entries win on key conflict):
+
+  ```js
+  // src/hooks.js
+  import { realtimeTransport } from 'svelte-realtime/hooks';
+  import { Vector } from '$lib/geometry';
+
+  export const transport = realtimeTransport({
+    Vector: {
+      encode: (v) => v instanceof Vector && [v.x, v.y],
+      decode: ([x, y]) => new Vector(x, y)
+    }
+  });
+  ```
+
+  Wire from `src/hooks.js` (the shared hook), NOT `hooks.server.js`. SvelteKit's transport primitive needs both encode (server-side) and decode (client-side hydration) visible at build time. `RpcError`'s optional `issues` field (carried by `live.validated()` failures) survives the round-trip. Validation runs at registration: malformed extras (missing or non-function `encode`/`decode`) throw immediately so misconfiguration fails fast at app boot.
+
 - **`fallback` + `onError` options on `.load()` for partial SSR degradation.** When you wire many streams into a `+page.server.js` `load()`, a single failing loader currently throws and SvelteKit shows the error page, taking down every other stream on the page. The new opt-in options let one failure render an empty placeholder while the rest of the page loads:
 
   ```js

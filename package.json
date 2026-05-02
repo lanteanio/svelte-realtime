@@ -41,6 +41,10 @@
     "./test": {
       "types": "./test.d.ts",
       "default": "./test.js"
+    },
+    "./hooks": {
+      "types": "./hooks.d.ts",
+      "default": "./hooks.js"
     }
   },
   "files": [
@@ -54,6 +58,8 @@
     "test.d.ts",
     "devtools.js",
     "devtools.d.ts",
+    "hooks.js",
+    "hooks.d.ts",
     "cli.js",
     "cli-utils.js",
     "LICENSE",
