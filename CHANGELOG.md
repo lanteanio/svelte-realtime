@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DevTools Streams tab now shows merge strategy, last-event age, and per-stream error state.** The dev-mode overlay panel (toggle with `Ctrl+Shift+L`) gains three new fields per stream entry: `merge` (the configured merge strategy), `last:<event> <age>` (event name and relative age of the most recent pub/sub frame), and `err: <code> -- <message>` (when the stream is in the error state, cleared on recovery). Existing fields (path, topic, subscriber count) unchanged. The RPC and Connection tabs are unchanged.
+
+  Production builds are unaffected -- the overlay and its instrumentation are stripped via the `import.meta.env.PROD` gate.
+
 - **`rpc.createOptimistic(store, callArgs, optimisticChange)` shorthand on every generated RPC stub.** Sugar for `store.mutate(() => rpc(...callArgs), wrappedChange)` that threads `callArgs` into the optimistic-change callback so call sites don't have to capture them in a closure.
 
   ```js

@@ -2603,6 +2603,18 @@ This applies to all handler types -- `live()`, `live.stream()`, `live.cron()`, `
 
 In dev mode, the Vite plugin injects an in-browser overlay that shows active streams, RPC history, and connection status. Toggle with `Ctrl+Shift+L`.
 
+The Streams tab lists every store currently mounted on the page. For each one it shows:
+
+| Field | Meaning |
+|---|---|
+| topic | The wire topic the store is subscribed to (or `?` while loading). |
+| merge | The store's merge strategy (`crud`, `latest`, `set`, `presence`, `cursor`). |
+| subs | Active subscriber count; the entry disappears when this hits zero. |
+| last | Event name of the most recent pub/sub frame and its relative age (`12s ago`). |
+| err | Error code + message if the stream is in the error state; cleared on recovery. |
+
+The RPC tab shows pending calls (with elapsed time) and a 50-entry ring buffer of recent results (ok/err, duration). The Connection tab summarizes the same counters.
+
 The overlay is stripped from production builds. Disable it in dev with:
 
 ```js

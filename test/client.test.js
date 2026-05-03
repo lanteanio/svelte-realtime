@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers;
+let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools;
 let topicCallbacks;
 let statusCallbacks;
 let failureCallbacks;
@@ -194,6 +194,12 @@ beforeEach(async () => {
 	onPush = mod.onPush;
 	_resetPushHandlers = mod._resetPushHandlers;
 	_resetPushHandlers();
+	__devtools = mod.__devtools;
+	if (__devtools) {
+		__devtools.streams.clear();
+		__devtools.pending.clear();
+		for (let i = 0; i < __devtools.history.length; i++) __devtools.history[i] = null;
+	}
 });
 
 // -- __rpc (Finding 1 regression) ---------------------------------------------
@@ -781,6 +787,72 @@ describe('__rpc() createOptimistic', () => {
 		const r = __rpc('opt/bad');
 		const fakeStore = { mutate: () => {} };
 		expect(() => r.createOptimistic(fakeStore, [], null)).toThrow(/optimisticChange is required/);
+	});
+});
+
+// -- __devtools stream tracking ------------------------------------------------
+
+describe('__devtools stream tracking', () => {
+	it('records merge strategy on first subscribe', async () => {
+		if (!__devtools) return;
+		const store = __stream('dt/merge', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const entry = __devtools.streams.get('dt/merge');
+		expect(entry).toBeTruthy();
+		expect(entry.merge).toBe('crud');
+		expect(entry.subCount).toBe(1);
+		unsub();
+	});
+
+	it('records lastEvent + lastEventTime on each pub/sub event', async () => {
+		if (!__devtools) return;
+		const store = __stream('dt/events', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'dt-events', merge: 'crud', key: 'id' });
+
+		const before = __devtools.streams.get('dt/events');
+		expect(before.lastEventTime).toBeNull();
+		expect(before.lastEvent).toBeNull();
+
+		simulateTopicMessage('dt-events', { event: 'created', data: { id: 'a', name: 'A' } });
+
+		const after = __devtools.streams.get('dt/events');
+		expect(after.lastEvent).toBe('created');
+		expect(after.lastEventTime).toBeGreaterThan(0);
+		unsub();
+	});
+
+	it('records error state on stream failure', async () => {
+		if (!__devtools) return;
+		const store = __stream('dt/err', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'FORBIDDEN', error: 'no access' });
+
+		const errored = __devtools.streams.get('dt/err');
+		expect(errored.error).toEqual({ code: 'FORBIDDEN', message: 'no access' });
+		unsub();
+	});
+
+	it('removes the entry when the last subscriber leaves', async () => {
+		if (!__devtools) return;
+		const store = __stream('dt/gone', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		expect(__devtools.streams.has('dt/gone')).toBe(true);
+
+		unsub();
+		await new Promise((r) => setTimeout(r, 50));
+
+		expect(__devtools.streams.has('dt/gone')).toBe(false);
 	});
 });
 

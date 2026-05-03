@@ -178,12 +178,42 @@ function renderRpcs(el, dt) {
 	}
 }
 
+/**
+ * Format `lastEventTime` as a relative age string ("12s ago", "3m ago",
+ * "never"). Bucketed coarsely so the rendered HTML doesn't churn every
+ * tick of the 1s refresh.
+ * @param {number | null | undefined} t
+ * @returns {string}
+ */
+function _ageString(t) {
+	if (!t) return 'never';
+	const ms = Date.now() - t;
+	if (ms < 1000) return 'just now';
+	if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
+	if (ms < 3_600_000) return Math.floor(ms / 60_000) + 'm ago';
+	return Math.floor(ms / 3_600_000) + 'h ago';
+}
+
 /** @param {HTMLElement} el @param {any} dt */
 function renderStreams(el, dt) {
 	const streams = dt.streams ? Array.from(dt.streams.values()) : [];
 	let html = '<div style="margin-bottom:4px">Active (' + esc(String(streams.length)) + ')</div>';
 	for (const s of streams) {
-		html += `<div style="padding:2px 0">${esc(s.path)} <span style="color:#666">topic:${esc(s.topic || '?')} subs:${esc(String(s.subCount))}</span></div>`;
+		const merge = s.merge ? esc(s.merge) : '?';
+		const topic = esc(s.topic || '?');
+		const subs = esc(String(s.subCount));
+		const lastEvt = s.lastEvent
+			? `last:${esc(s.lastEvent)} ${esc(_ageString(s.lastEventTime))}`
+			: 'no events yet';
+		const errPart = s.error
+			? `<div style="padding:1px 0 1px 12px;color:#f44336">err: ${esc(s.error.code)} -- ${esc(s.error.message)}</div>`
+			: '';
+		html += `<div style="padding:4px 0;border-bottom:1px solid #2a2a3e">` +
+			`<div>${esc(s.path)}</div>` +
+			`<div style="padding:1px 0 1px 12px;color:#888">topic:${topic} merge:${merge} subs:${subs}</div>` +
+			`<div style="padding:1px 0 1px 12px;color:#666">${lastEvt}</div>` +
+			errPart +
+			`</div>`;
 	}
 	if (streams.length === 0) html += '<div style="color:#666">No active streams</div>';
 

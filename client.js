@@ -857,12 +857,14 @@ function _createStream(path, options, dynamicArgs) {
 		_errorStore.set(err);
 		_status = 'error';
 		_statusStore.set('error');
+		_devtoolsStreamError(path, err);
 	}
 
 	function _clearError() {
 		if (_error !== null) {
 			_error = null;
 			_errorStore.set(null);
+			_devtoolsStreamError(path, null);
 		}
 	}
 
@@ -1201,6 +1203,8 @@ function _createStream(path, options, dynamicArgs) {
 			return;
 		}
 
+		_devtoolsStreamEvent(path, envelope.event);
+
 		if (_useRAF) {
 			_activeBuf.push(envelope);
 			if (_rafId === null) {
@@ -1439,7 +1443,7 @@ function _createStream(path, options, dynamicArgs) {
 		_history = [];
 		_historyIndex = -1;
 		_reconnectAttempts = 0;
-		_devtoolsStream(path, null, 0);
+		_devtoolsStream(path, null, 0, merge);
 	}
 
 	/** @type {boolean} Whether a deferred cleanup is pending (prevents thrashing on rapid unsub+resub) */
@@ -1456,7 +1460,7 @@ function _createStream(path, options, dynamicArgs) {
 				} else {
 				// First subscriber - start the stream
 				fetchAndSubscribe();
-				_devtoolsStream(path, topic, subCount);
+				_devtoolsStream(path, topic, subCount, merge);
 
 				// Quiescence tracking: register this stream's contribution to
 				// the global in-flight counter. Subscriber fires synchronously
@@ -2416,10 +2420,10 @@ export function _resetPushHandlers() {
 	}
 }
 
-// -- DevTools instrumentation (dev-mode only) ---------------------------------
+// -- DevTools instrumentation (non-production only) ---------------------------
 
 /** @type {{ history: any[], streams: Map<string, any>, pending: Map<string, any> } | null} */
-export const __devtools = (typeof import.meta !== 'undefined' && import.meta.env?.DEV)
+export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.env?.PROD)
 	? { history: new Array(50).fill(null), streams: new Map(), pending: new Map() }
 	: null;
 
@@ -2468,14 +2472,49 @@ function _devtoolsEnd(id, ok, result) {
  * @param {string} path
  * @param {string | null} topic
  * @param {number} subCount
+ * @param {string} [merge] - merge strategy ('crud' | 'latest' | 'set' | 'presence' | 'cursor')
  */
-function _devtoolsStream(path, topic, subCount) {
+function _devtoolsStream(path, topic, subCount, merge) {
 	if (!__devtools) return;
 	if (subCount <= 0) {
 		__devtools.streams.delete(path);
 	} else {
-		__devtools.streams.set(path, { path, topic, subCount });
+		const existing = __devtools.streams.get(path);
+		__devtools.streams.set(path, {
+			path,
+			topic,
+			subCount,
+			merge: merge || existing?.merge || null,
+			lastEventTime: existing?.lastEventTime || null,
+			lastEvent: existing?.lastEvent || null,
+			error: existing?.error || null
+		});
 	}
+}
+
+/**
+ * Record a pub/sub event arrival for devtools.
+ * @param {string} path
+ * @param {string} eventType
+ */
+function _devtoolsStreamEvent(path, eventType) {
+	if (!__devtools) return;
+	const e = __devtools.streams.get(path);
+	if (!e) return;
+	e.lastEventTime = Date.now();
+	e.lastEvent = eventType;
+}
+
+/**
+ * Record (or clear) an error state on a stream for devtools.
+ * @param {string} path
+ * @param {{ code?: string, message?: string } | null} err
+ */
+function _devtoolsStreamError(path, err) {
+	if (!__devtools) return;
+	const e = __devtools.streams.get(path);
+	if (!e) return;
+	e.error = err ? { code: err.code || 'UNKNOWN', message: err.message || String(err) } : null;
 }
 
 /**
