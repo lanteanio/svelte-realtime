@@ -108,11 +108,31 @@ function _applyTestMerge(current, envelope, merge, key, opts) {
 }
 
 /**
+ * Seeded pseudo-random number generator (mulberry32 variant). Returns a
+ * function that produces deterministic [0, 1) sequences from a string seed.
+ * Used by the chaos harness so a `seed: 'bug-1234'` config replays the same
+ * drop pattern every test run.
+ * @param {string} seed
+ * @returns {() => number}
+ */
+function _seedRng(seed) {
+	let h = 0;
+	for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) | 0;
+	let t = h | 0;
+	return function next() {
+		t = (t + 0x6D2B79F5) | 0;
+		let r = Math.imul(t ^ (t >>> 15), 1 | t);
+		r = (r + Math.imul(r ^ (r >>> 7), 61 | r)) ^ r;
+		return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+	};
+}
+
+/**
  * Create a test environment for testing live functions.
  * Provides mock WebSockets, platform, and helper methods for calling live functions
  * and subscribing to streams without a real WebSocket connection.
  *
- * @param {{ dev?: boolean }} [options]
+ * @param {{ dev?: boolean, chaos?: { dropRate?: number, seed?: string } | null }} [options]
  * @returns {TestEnv}
  */
 export function createTestEnv(options) {
@@ -124,6 +144,43 @@ export function createTestEnv(options) {
 	/** @type {any[]} */
 	const allConnections = [];
 
+	/** @type {{ dropRate: number, seed: string | null } | null} Active chaos config; null disables. */
+	let chaosConfig = null;
+	/** @type {(() => number) | null} Seeded PRNG when seed is set; falls back to Math.random when null. */
+	let chaosRng = null;
+	/** @type {number} Running count of chaos-dropped publishes since last reset. */
+	let chaosDropped = 0;
+
+	function _applyChaos(config) {
+		if (config == null) {
+			chaosConfig = null;
+			chaosRng = null;
+			return;
+		}
+		if (typeof config !== 'object') {
+			throw new Error('[svelte-realtime] chaos config must be an object or null');
+		}
+		const dropRate = config.dropRate ?? 0;
+		if (typeof dropRate !== 'number' || !Number.isFinite(dropRate) || dropRate < 0 || dropRate > 1) {
+			throw new Error('[svelte-realtime] chaos.dropRate must be a finite number in [0, 1]');
+		}
+		const seed = config.seed != null ? String(config.seed) : null;
+		chaosConfig = { dropRate, seed };
+		chaosRng = seed ? _seedRng(seed) : null;
+	}
+
+	function _shouldChaosDropPublish() {
+		if (!chaosConfig || chaosConfig.dropRate === 0) return false;
+		const r = chaosRng ? chaosRng() : Math.random();
+		if (r < chaosConfig.dropRate) {
+			chaosDropped++;
+			return true;
+		}
+		return false;
+	}
+
+	if (options?.chaos != null) _applyChaos(options.chaos);
+
 	const platform = {
 		connections: 0,
 		/**
@@ -133,6 +190,7 @@ export function createTestEnv(options) {
 		 * @param {any} [opts]
 		 */
 		publish(topic, event, data, opts) {
+			if (_shouldChaosDropPublish()) return false;
 			const subs = topicSubscribers.get(topic);
 			if (!subs) return true;
 			for (const sub of subs) {
@@ -495,7 +553,15 @@ export function createTestEnv(options) {
 		platform.connections = 0;
 	}
 
-	return { register, connect, tick, cleanup, platform };
+	const chaos = {
+		set(config) { _applyChaos(config); },
+		disable() { _applyChaos(null); },
+		get config() { return chaosConfig; },
+		get dropped() { return chaosDropped; },
+		resetCounter() { chaosDropped = 0; }
+	};
+
+	return { register, connect, tick, cleanup, platform, chaos };
 }
 
 /**
@@ -505,6 +571,16 @@ export function createTestEnv(options) {
  * @property {(ms?: number) => void} tick
  * @property {() => void} cleanup
  * @property {any} platform
+ * @property {TestChaos} chaos
+ */
+
+/**
+ * @typedef {object} TestChaos
+ * @property {(config: { dropRate?: number, seed?: string } | null) => void} set
+ * @property {() => void} disable
+ * @property {{ dropRate: number, seed: string | null } | null} config
+ * @property {number} dropped
+ * @property {() => void} resetCounter
  */
 
 /**

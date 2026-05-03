@@ -2711,6 +2711,41 @@ describe('chat module', () => {
 | `hasMore` | Whether more pages are available |
 | `waitFor(predicate, timeout?)` | Wait for a value matching a predicate |
 
+### Chaos harness
+
+`createTestEnv({ chaos: { dropRate, seed } })` enables fault injection on `platform.publish` so tests can verify resilience to message drops without spinning a real cluster.
+
+```js
+import { createTestEnv } from 'svelte-realtime/test';
+
+// 50% drop rate, deterministic via seed
+const env = createTestEnv({
+  chaos: { dropRate: 0.5, seed: 'rep-1234' }
+});
+
+env.register('chat', chat);
+const client = env.connect({ id: 'u1' });
+const stream = client.subscribe('chat/messages');
+
+// Publish 100 events; ~50 of them get dropped.
+for (let i = 0; i < 100; i++) {
+  env.platform.publish('chat-messages', 'created', { id: i });
+}
+// Same seed -> same drop sequence across runs, so failures replay.
+```
+
+Runtime control via `env.chaos`:
+
+| Method/property | Description |
+|---|---|
+| `env.chaos.set({ dropRate?, seed? })` | Apply (or replace) chaos config mid-test. |
+| `env.chaos.disable()` | Equivalent to `set(null)`. |
+| `env.chaos.config` | Current `{ dropRate, seed }` or `null`. |
+| `env.chaos.dropped` | Running count of `platform.publish` drops. |
+| `env.chaos.resetCounter()` | Zero the counter without changing config. |
+
+Currently models the `drop-outbound` scenario only -- `platform.publish` events to subscribers are dropped at the platform layer. RPC replies (`platform.send`) are exempt because timing them out would just hang test code; the chaos harness is for testing pub/sub resilience, not RPC retry behavior.
+
 ### Asserting guard rejections
 
 `expectGuardRejects(promise, expectedCode?)` is a small ergonomic wrapper for the common "this call should be denied" pattern. It awaits the promise, asserts it rejected with a `LiveError` of the expected code (default `'FORBIDDEN'`), and returns the error so further assertions can run on it.

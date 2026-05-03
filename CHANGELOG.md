@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chaos harness on `createTestEnv`.** Pass `chaos: { dropRate, seed }` to drop a configurable fraction of `platform.publish` events at the platform layer; pair with a string `seed` for deterministic, replayable drop sequences. Used to write resilience tests against pub/sub message loss without spinning a real cluster.
+
+  ```js
+  import { createTestEnv } from 'svelte-realtime/test';
+
+  const env = createTestEnv({ chaos: { dropRate: 0.5, seed: 'rep-1234' } });
+  env.register('chat', chat);
+  // ... half of every publish dropped, same sequence across runs.
+
+  // Runtime control:
+  env.chaos.set({ dropRate: 1.0 }); // drop everything
+  env.chaos.disable();
+  env.chaos.dropped; // counter
+  env.chaos.resetCounter();
+  ```
+
+  Currently models the `drop-outbound` scenario only -- pub/sub events to subscribers are dropped. RPC replies (`platform.send`) are exempt because timing them out would just hang test code.
+
 - **`invalidateOn` option on `live.stream()` for topic-driven loader reruns.** Declare a glob-style pattern (or array of patterns) and any `ctx.publish` whose topic matches triggers a rerun of the stream's loader, with the result broadcast as a `refreshed` event so every subscriber gets the new state. Useful for mutations whose effects don't fit the merge-strategy model cleanly (bulk operations, server-side recomputation, cascading writes).
 
   ```js

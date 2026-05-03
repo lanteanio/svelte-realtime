@@ -3009,6 +3009,99 @@ describe('expectGuardRejects()', () => {
 	});
 });
 
+describe('createTestEnv() chaos harness', () => {
+	let env;
+	afterEach(() => env?.cleanup());
+
+	it('drops every publish when dropRate is 1.0', async () => {
+		env = createTestEnv({ chaos: { dropRate: 1.0 } });
+		const items = live.stream('chaos-1', async () => []);
+		env.register('cm', { items });
+
+		const client = env.connect({ id: 'u1' });
+		const stream = client.subscribe('cm/items');
+		await new Promise((r) => setTimeout(r, 20));
+
+		env.platform.publish('chaos-1', 'created', { id: 'a' });
+		env.platform.publish('chaos-1', 'created', { id: 'b' });
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(stream.events).toHaveLength(0);
+		expect(env.chaos.dropped).toBe(2);
+	});
+
+	it('does not drop publishes when dropRate is 0 (default)', async () => {
+		env = createTestEnv();
+		const items = live.stream('chaos-2', async () => []);
+		env.register('cm', { items });
+
+		const client = env.connect({ id: 'u1' });
+		const stream = client.subscribe('cm/items');
+		await new Promise((r) => setTimeout(r, 20));
+
+		env.platform.publish('chaos-2', 'created', { id: 'a' });
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(stream.events).toHaveLength(1);
+		expect(env.chaos.dropped).toBe(0);
+	});
+
+	it('seeded RNG produces deterministic drop sequences across runs', async () => {
+		const env1 = createTestEnv({ chaos: { dropRate: 0.5, seed: 'rep-1234' } });
+		const env2 = createTestEnv({ chaos: { dropRate: 0.5, seed: 'rep-1234' } });
+		const N = 50;
+		for (let i = 0; i < N; i++) {
+			env1.platform.publish('t', 'e', i);
+			env2.platform.publish('t', 'e', i);
+		}
+		expect(env1.chaos.dropped).toBe(env2.chaos.dropped);
+		env1.cleanup();
+		env2.cleanup();
+	});
+
+	it('runtime set/disable updates the active config', async () => {
+		env = createTestEnv();
+		expect(env.chaos.config).toBeNull();
+
+		env.chaos.set({ dropRate: 1.0 });
+		expect(env.chaos.config).toEqual({ dropRate: 1.0, seed: null });
+		env.platform.publish('t', 'e', 1);
+		expect(env.chaos.dropped).toBe(1);
+
+		env.chaos.disable();
+		expect(env.chaos.config).toBeNull();
+		env.platform.publish('t', 'e', 2);
+		expect(env.chaos.dropped).toBe(1);
+	});
+
+	it('resetCounter() zeroes the drop counter', () => {
+		env = createTestEnv({ chaos: { dropRate: 1.0 } });
+		env.platform.publish('t', 'e', 1);
+		env.platform.publish('t', 'e', 2);
+		expect(env.chaos.dropped).toBe(2);
+		env.chaos.resetCounter();
+		expect(env.chaos.dropped).toBe(0);
+	});
+
+	it('rejects non-numeric and out-of-range dropRate', () => {
+		expect(() => createTestEnv({ chaos: { dropRate: 'half' } })).toThrow(/dropRate must be a finite number/);
+		expect(() => createTestEnv({ chaos: { dropRate: -0.1 } })).toThrow(/dropRate must be a finite number/);
+		expect(() => createTestEnv({ chaos: { dropRate: 1.5 } })).toThrow(/dropRate must be a finite number/);
+		expect(() => createTestEnv({ chaos: { dropRate: Infinity } })).toThrow(/dropRate must be a finite number/);
+	});
+
+	it('does NOT drop RPC replies (platform.send)', async () => {
+		env = createTestEnv({ chaos: { dropRate: 1.0 } });
+		const greet = live(async () => 'hello');
+		env.register('cm', { greet });
+
+		// Even with full chaos, the RPC call still resolves -- platform.send is exempt.
+		const client = env.connect({ id: 'u1' });
+		const result = await client.call('cm/greet');
+		expect(result).toBe('hello');
+	});
+});
+
 // -- Phase 35: live.channel() -------------------------------------------------
 
 describe('live.channel()', () => {

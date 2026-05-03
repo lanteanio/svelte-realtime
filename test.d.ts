@@ -23,7 +23,10 @@ import { LiveError } from './server.js';
  * const result = await alice.call('chat/sendMessage', 'Hello!');
  * ```
  */
-export function createTestEnv(options?: { dev?: boolean }): TestEnv;
+export function createTestEnv(options?: {
+	dev?: boolean;
+	chaos?: { dropRate?: number; seed?: string } | null;
+}): TestEnv;
 
 /**
  * Assert that a promise rejects with a `LiveError` of the expected code.
@@ -76,6 +79,52 @@ export interface TestEnv {
 
 	/** The mock platform object. */
 	platform: any;
+
+	/** Chaos harness for fault-injection testing. See `TestChaos`. */
+	chaos: TestChaos;
+}
+
+/**
+ * Chaos harness exposed on `env.chaos`. Lets tests inject `platform.publish`
+ * drops at a configurable rate, optionally seeded for deterministic replay.
+ *
+ * Currently models the `drop-outbound` scenario only -- pub/sub events are
+ * dropped at the platform layer so subscribers receive nothing for the
+ * dropped frame. RPC replies (`platform.send`) are never dropped because
+ * timing them out would just hang test code.
+ *
+ * @example
+ * ```js
+ * const env = createTestEnv({ chaos: { dropRate: 0.5, seed: 'rep-1234' } });
+ *
+ * // Or runtime control:
+ * env.chaos.set({ dropRate: 1.0 });
+ * env.platform.publish('items', 'created', { id: 1 });
+ * expect(env.chaos.dropped).toBe(1);
+ *
+ * env.chaos.disable();
+ * env.platform.publish('items', 'created', { id: 1 });
+ * // ... subscribers receive this one.
+ * ```
+ */
+export interface TestChaos {
+	/**
+	 * Apply (or replace) the chaos config. Pass `null` to disable.
+	 * @param config - `{ dropRate?: number, seed?: string }` or `null`
+	 */
+	set(config: { dropRate?: number; seed?: string } | null): void;
+
+	/** Equivalent to `set(null)`. */
+	disable(): void;
+
+	/** Current chaos config, or `null` if disabled. */
+	readonly config: { dropRate: number; seed: string | null } | null;
+
+	/** Count of `platform.publish` calls dropped by chaos since the last reset. */
+	readonly dropped: number;
+
+	/** Reset the `dropped` counter. Does not change the active config. */
+	resetCounter(): void;
 }
 
 /**
