@@ -1,6 +1,44 @@
 // @ts-check
 import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, handleRpc, LiveError, _clearCron, _activateDerived, close, unsubscribe } from './server.js';
 
+/**
+ * Assert that a promise rejects with a `LiveError` of the expected code.
+ * Default expected code is `'FORBIDDEN'`, the code thrown by failing guards.
+ * Returns the rejected error so further assertions can be made on it.
+ *
+ * @example
+ * await expectGuardRejects(client.call('admin/destroyAll'));
+ * await expectGuardRejects(client.call('admin/destroyAll'), 'UNAUTHENTICATED');
+ * const err = await expectGuardRejects(client.call('foo'));
+ * expect(err.message).toBe('Custom denial');
+ *
+ * @param {Promise<any>} promise
+ * @param {string} [expectedCode]
+ * @returns {Promise<LiveError>}
+ */
+export async function expectGuardRejects(promise, expectedCode = 'FORBIDDEN') {
+	let err = /** @type {any} */ (null);
+	let resolved = false;
+	try {
+		await promise;
+		resolved = true;
+	} catch (e) {
+		err = e;
+	}
+	if (resolved) {
+		throw new Error(`[svelte-realtime] expectGuardRejects: promise resolved (expected LiveError "${expectedCode}")`);
+	}
+	if (!(err instanceof LiveError)) {
+		const got = err && err.constructor ? err.constructor.name : typeof err;
+		const detail = err && err.message ? `: ${err.message}` : '';
+		throw new Error(`[svelte-realtime] expectGuardRejects: expected LiveError "${expectedCode}", got ${got}${detail}`);
+	}
+	if (err.code !== expectedCode) {
+		throw new Error(`[svelte-realtime] expectGuardRejects: expected code "${expectedCode}", got "${err.code}": ${err.message}`);
+	}
+	return err;
+}
+
 const textEncoder = new TextEncoder();
 
 /**

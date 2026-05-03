@@ -17,6 +17,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`expectGuardRejects(promise, expectedCode?)` helper in `svelte-realtime/test`.** Ergonomic wrapper for the common "this call should be denied" assertion: awaits the promise, asserts it rejected with a `LiveError` of the expected code (default `'FORBIDDEN'`), and returns the rejected error so further assertions can run on it.
+
+  ```js
+  import { createTestEnv, expectGuardRejects } from 'svelte-realtime/test';
+
+  const env = createTestEnv();
+  env.register('admin', adminModule);
+
+  const user = env.connect({ role: 'viewer' });
+  await expectGuardRejects(user.call('admin/destroyAll'));
+  await expectGuardRejects(env.connect(null).call('admin/destroyAll'), 'UNAUTHENTICATED');
+
+  const err = await expectGuardRejects(user.call('admin/destroyAll'));
+  expect(err.message).toMatch(/admin role/);
+  ```
+
+  Throws a clear `[svelte-realtime]`-prefixed error if the promise resolves, rejects with a non-`LiveError`, or rejects with a different code. Pairs with the existing `createTestEnv()` harness; no separate setup needed.
+
 - **Dev-mode silent-topic warning via `live.silentTopicWarning()`.** When a stream subscribes to a topic and no events arrive within a configurable window (default 30 seconds), the framework logs a one-shot `console.warn` naming the topic and the common causes -- a missing `pg_notify` trigger, a missing handler-side `ctx.publish()`, or an intentionally low-traffic topic the user can suppress. Closes the most-common-by-far class of "the realtime stream isn't updating" debugging sessions.
 
   ```js

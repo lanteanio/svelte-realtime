@@ -2823,7 +2823,7 @@ describe('delta sync in streams', () => {
 
 // -- Phase 28: Test utilities ------------------------------------------------
 
-import { createTestEnv } from '../test.js';
+import { createTestEnv, expectGuardRejects } from '../test.js';
 
 describe('createTestEnv()', () => {
 	let env;
@@ -2931,6 +2931,80 @@ describe('createTestEnv()', () => {
 		expect(env.platform.connections).toBe(2);
 		c1.disconnect();
 		expect(env.platform.connections).toBe(1);
+	});
+});
+
+describe('expectGuardRejects()', () => {
+	let env;
+
+	beforeEach(() => {
+		env = createTestEnv();
+	});
+
+	afterEach(() => {
+		env.cleanup();
+	});
+
+	it('resolves silently when promise rejects with FORBIDDEN by default', async () => {
+		const _guard = guard((ctx) => {
+			if (!ctx.user?.admin) throw new LiveError('FORBIDDEN');
+		});
+		const action = live(async () => 'ok');
+		env.register('egr_default', { _guard, action });
+
+		const user = env.connect({ admin: false });
+		const err = await expectGuardRejects(user.call('egr_default/action'));
+		expect(err).toBeInstanceOf(LiveError);
+		expect(err.code).toBe('FORBIDDEN');
+	});
+
+	it('accepts a custom expected code', async () => {
+		const _guard = guard((ctx) => {
+			if (!ctx.user) throw new LiveError('UNAUTHENTICATED');
+		});
+		const action = live(async () => 'ok');
+		env.register('egr_unauth', { _guard, action });
+
+		const anon = env.connect(null);
+		const err = await expectGuardRejects(anon.call('egr_unauth/action'), 'UNAUTHENTICATED');
+		expect(err.code).toBe('UNAUTHENTICATED');
+	});
+
+	it('returns the rejected error so further assertions can run', async () => {
+		const _guard = guard(() => { throw new LiveError('FORBIDDEN', 'No write access'); });
+		const action = live(async () => 'ok');
+		env.register('egr_msg', { _guard, action });
+
+		const user = env.connect({ id: 'u1' });
+		const err = await expectGuardRejects(user.call('egr_msg/action'));
+		expect(err.message).toBe('No write access');
+	});
+
+	it('throws if the promise resolves instead of rejecting', async () => {
+		const action = live(async () => 'ok');
+		env.register('egr_ok', { action });
+
+		const user = env.connect({ id: 'u1' });
+		await expect(expectGuardRejects(user.call('egr_ok/action'))).rejects.toThrow(
+			/expectGuardRejects: promise resolved/
+		);
+	});
+
+	it('throws if the rejection is not a LiveError', async () => {
+		await expect(
+			expectGuardRejects(Promise.reject(new TypeError('boom')))
+		).rejects.toThrow(/expected LiveError "FORBIDDEN", got TypeError: boom/);
+	});
+
+	it('throws if the LiveError code does not match', async () => {
+		const _guard = guard(() => { throw new LiveError('UNAUTHENTICATED'); });
+		const action = live(async () => 'ok');
+		env.register('egr_mismatch', { _guard, action });
+
+		const user = env.connect({ id: 'u1' });
+		await expect(expectGuardRejects(user.call('egr_mismatch/action'))).rejects.toThrow(
+			/expected code "FORBIDDEN", got "UNAUTHENTICATED"/
+		);
 	});
 });
 

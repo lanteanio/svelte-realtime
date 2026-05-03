@@ -4,6 +4,8 @@
  * without a real WebSocket server.
  */
 
+import { LiveError } from './server.js';
+
 /**
  * Create a test environment for testing live functions.
  *
@@ -22,6 +24,28 @@
  * ```
  */
 export function createTestEnv(options?: { dev?: boolean }): TestEnv;
+
+/**
+ * Assert that a promise rejects with a `LiveError` of the expected code.
+ * Default expected code is `'FORBIDDEN'` (the code thrown by failing guards).
+ * Returns the rejected error so further assertions can be made on it.
+ *
+ * @param promise - A promise expected to reject (typically `client.call(...)` or a stream open).
+ * @param expectedCode - The error code to assert. Defaults to `'FORBIDDEN'`.
+ *
+ * @example
+ * ```js
+ * await expectGuardRejects(client.call('admin/destroyAll'));
+ * await expectGuardRejects(client.call('admin/destroyAll'), 'UNAUTHENTICATED');
+ *
+ * const err = await expectGuardRejects(client.call('foo'));
+ * expect(err.message).toBe('Custom denial');
+ * ```
+ */
+export function expectGuardRejects(
+	promise: Promise<any>,
+	expectedCode?: string
+): Promise<LiveError>;
 
 /**
  * Test environment returned by `createTestEnv()`.

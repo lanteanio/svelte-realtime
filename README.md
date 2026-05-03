@@ -2640,6 +2640,30 @@ describe('chat module', () => {
 | `hasMore` | Whether more pages are available |
 | `waitFor(predicate, timeout?)` | Wait for a value matching a predicate |
 
+### Asserting guard rejections
+
+`expectGuardRejects(promise, expectedCode?)` is a small ergonomic wrapper for the common "this call should be denied" pattern. It awaits the promise, asserts it rejected with a `LiveError` of the expected code (default `'FORBIDDEN'`), and returns the error so further assertions can run on it.
+
+```js
+import { createTestEnv, expectGuardRejects } from 'svelte-realtime/test';
+
+const env = createTestEnv();
+env.register('admin', adminModule);
+
+const user = env.connect({ role: 'viewer' });
+
+// Guards that throw FORBIDDEN are the default case
+await expectGuardRejects(user.call('admin/destroyAll'));
+
+// Anonymous calls typically reject with UNAUTHENTICATED
+const anon = env.connect(null);
+await expectGuardRejects(anon.call('admin/destroyAll'), 'UNAUTHENTICATED');
+
+// The rejected error is returned for further assertions
+const err = await expectGuardRejects(user.call('admin/destroyAll'));
+expect(err.message).toMatch(/admin role/);
+```
+
 ---
 
 ## Server API reference
