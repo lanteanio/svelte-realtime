@@ -1229,7 +1229,7 @@ function _createStream(path, options, dynamicArgs) {
 			return;
 		}
 
-		_devtoolsStreamEvent(path, envelope.event);
+		_devtoolsStreamEvent(path, envelope.event, envelope.data);
 
 		if (_useRAF) {
 			_activeBuf.push(envelope);
@@ -2467,10 +2467,69 @@ export function _resetPushHandlers() {
 
 // -- DevTools instrumentation (non-production only) ---------------------------
 
-/** @type {{ history: any[], streams: Map<string, any>, pending: Map<string, any> } | null} */
+/**
+ * Default key names whose values are replaced with `'[REDACTED]'` when
+ * captured into the per-stream payload preview. Case-insensitive match
+ * against the ENTIRE key (substring match would over-redact). Apps can
+ * override or extend via `__devtools.redactKeys = new Set([...])`
+ * (normalized to lowercase by `_devtoolsStreamEvent`).
+ */
+const _DEFAULT_REDACT_KEYS = new Set([
+	'password', 'token', 'apikey', 'api_key', 'secret', 'authorization',
+	'cookie', 'sessionid', 'session_id', 'csrf', 'csrftoken', 'csrf_token'
+]);
+
+const _MAX_STREAM_EVENTS = 20;
+
+/**
+ * @type {{
+ *   history: any[],
+ *   streams: Map<string, any>,
+ *   pending: Map<string, any>,
+ *   redactKeys: Set<string>,
+ *   paused: boolean
+ * } | null}
+ */
 export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.env?.PROD)
-	? { history: new Array(50).fill(null), streams: new Map(), pending: new Map() }
+	? {
+		history: new Array(50).fill(null),
+		streams: new Map(),
+		pending: new Map(),
+		redactKeys: new Set(_DEFAULT_REDACT_KEYS),
+		paused: false
+	}
 	: null;
+
+/**
+ * Walk a value, replacing matched keys with `'[REDACTED]'`. Caps recursion
+ * depth at 5 and array length at 50 so dev-only capture doesn't pin large
+ * payload graphs in memory. Tracks visited objects to handle cycles.
+ * @param {any} value
+ * @param {Set<string>} redactKeys
+ * @param {number} depth
+ * @param {WeakSet<object>} seen
+ * @returns {any}
+ */
+function _devtoolsRedact(value, redactKeys, depth, seen) {
+	if (depth > 5) return '[depth-cap]';
+	if (value === null || typeof value !== 'object') return value;
+	if (seen.has(value)) return '[cycle]';
+	seen.add(value);
+	if (Array.isArray(value)) {
+		const out = value.slice(0, 50).map((v) => _devtoolsRedact(v, redactKeys, depth + 1, seen));
+		if (value.length > 50) out.push('[+' + (value.length - 50) + ' more]');
+		return out;
+	}
+	const out = /** @type {Record<string, any>} */ ({});
+	for (const k of Object.keys(value)) {
+		if (redactKeys.has(k.toLowerCase())) {
+			out[k] = '[REDACTED]';
+		} else {
+			out[k] = _devtoolsRedact(value[k], redactKeys, depth + 1, seen);
+		}
+	}
+	return out;
+}
 
 /** Ring buffer index for devtools history (O(1) insertion, no array.shift) */
 let _devtoolsHistoryIdx = 0;
@@ -2532,22 +2591,35 @@ function _devtoolsStream(path, topic, subCount, merge) {
 			merge: merge || existing?.merge || null,
 			lastEventTime: existing?.lastEventTime || null,
 			lastEvent: existing?.lastEvent || null,
-			error: existing?.error || null
+			error: existing?.error || null,
+			recentEvents: existing?.recentEvents || []
 		});
 	}
 }
 
 /**
- * Record a pub/sub event arrival for devtools.
+ * Record a pub/sub event arrival for devtools, including a redacted +
+ * depth/array-capped snapshot of the payload pushed to a per-stream
+ * ring buffer (capped at `_MAX_STREAM_EVENTS`). Skips capture entirely
+ * when `__devtools.paused` is true.
  * @param {string} path
  * @param {string} eventType
+ * @param {any} [data]
  */
-function _devtoolsStreamEvent(path, eventType) {
+function _devtoolsStreamEvent(path, eventType, data) {
 	if (!__devtools) return;
 	const e = __devtools.streams.get(path);
 	if (!e) return;
 	e.lastEventTime = Date.now();
 	e.lastEvent = eventType;
+	if (__devtools.paused) return;
+	const redacted = data === undefined
+		? undefined
+		: _devtoolsRedact(data, __devtools.redactKeys, 0, new WeakSet());
+	e.recentEvents.push({ event: eventType, data: redacted, ts: e.lastEventTime });
+	if (e.recentEvents.length > _MAX_STREAM_EVENTS) {
+		e.recentEvents.splice(0, e.recentEvents.length - _MAX_STREAM_EVENTS);
+	}
 }
 
 /**

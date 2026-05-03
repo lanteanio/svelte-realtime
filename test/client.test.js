@@ -976,6 +976,106 @@ describe('__devtools stream tracking', () => {
 
 		expect(__devtools.streams.has('dt/gone')).toBe(false);
 	});
+
+	it('captures recentEvents on each pub/sub event up to the cap', async () => {
+		if (!__devtools) return;
+		__devtools.paused = false;
+		const store = __stream('dt/payload', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'dt-payload', merge: 'crud', key: 'id' });
+
+		simulateTopicMessage('dt-payload', { event: 'created', data: { id: 'a', name: 'A' } });
+		simulateTopicMessage('dt-payload', { event: 'updated', data: { id: 'a', name: 'A2' } });
+
+		const entry = __devtools.streams.get('dt/payload');
+		expect(entry.recentEvents).toHaveLength(2);
+		expect(entry.recentEvents[0]).toMatchObject({ event: 'created', data: { id: 'a', name: 'A' } });
+		expect(entry.recentEvents[1]).toMatchObject({ event: 'updated', data: { id: 'a', name: 'A2' } });
+		expect(typeof entry.recentEvents[0].ts).toBe('number');
+		unsub();
+	});
+
+	it('caps recentEvents per stream at 20 (oldest dropped)', async () => {
+		if (!__devtools) return;
+		__devtools.paused = false;
+		const store = __stream('dt/cap', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'dt-cap', merge: 'crud', key: 'id' });
+
+		for (let i = 0; i < 25; i++) {
+			simulateTopicMessage('dt-cap', { event: 'created', data: { id: i } });
+		}
+
+		const entry = __devtools.streams.get('dt/cap');
+		expect(entry.recentEvents).toHaveLength(20);
+		// Oldest five (ids 0-4) dropped; newest is id 24
+		expect(entry.recentEvents[0].data).toEqual({ id: 5 });
+		expect(entry.recentEvents[19].data).toEqual({ id: 24 });
+		unsub();
+	});
+
+	it('redacts default sensitive keys (case-insensitive) in captured payloads', async () => {
+		if (!__devtools) return;
+		__devtools.paused = false;
+		const store = __stream('dt/redact', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'dt-redact', merge: 'crud', key: 'id' });
+
+		simulateTopicMessage('dt-redact', {
+			event: 'created',
+			data: {
+				id: 'u1',
+				name: 'Alice',
+				password: 'p4ssw0rd',
+				Authorization: 'Bearer xyz',
+				profile: { token: 'inner-token', age: 30 }
+			}
+		});
+
+		const entry = __devtools.streams.get('dt/redact');
+		const captured = entry.recentEvents[0].data;
+		expect(captured.id).toBe('u1');
+		expect(captured.name).toBe('Alice');
+		expect(captured.password).toBe('[REDACTED]');
+		expect(captured.Authorization).toBe('[REDACTED]');
+		expect(captured.profile.token).toBe('[REDACTED]');
+		expect(captured.profile.age).toBe(30);
+		unsub();
+	});
+
+	it('respects __devtools.paused (no capture while paused)', async () => {
+		if (!__devtools) return;
+		const store = __stream('dt/pause', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'dt-pause', merge: 'crud', key: 'id' });
+
+		__devtools.paused = true;
+		simulateTopicMessage('dt-pause', { event: 'created', data: { id: 1 } });
+
+		const entry = __devtools.streams.get('dt/pause');
+		expect(entry.recentEvents).toHaveLength(0);
+		// lastEvent / lastEventTime still update so the panel shows live activity
+		expect(entry.lastEvent).toBe('created');
+
+		// Resume captures new events normally
+		__devtools.paused = false;
+		simulateTopicMessage('dt-pause', { event: 'updated', data: { id: 1, v: 2 } });
+		expect(entry.recentEvents).toHaveLength(1);
+		expect(entry.recentEvents[0].data).toEqual({ id: 1, v: 2 });
+		unsub();
+	});
 });
 
 // -- __stream() dynamic topics ------------------------------------------------

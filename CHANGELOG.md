@@ -40,6 +40,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **DevTools per-stream payload preview.** Click any stream row in the dev-mode overlay to expand a list of the 20 most recent pub/sub envelopes (time + event + JSON data). Pretty / Raw toggle controls JSON rendering verbosity (Pretty truncates at ~200 chars, Raw at ~500). Pause stops capture without affecting the live `last:` timestamp; Clear events drops every stream's ring buffer.
+
+  Captured payloads are walked once at write time with key-based redaction. Default redact list: `password`, `token`, `apiKey` / `api_key`, `secret`, `authorization`, `cookie`, `sessionid` / `session_id`, `csrf` / `csrftoken`. Match is case-insensitive and exact-key. Override at runtime:
+
+  ```js
+  import { __devtools } from 'svelte-realtime/client';
+  if (__devtools) __devtools.redactKeys.add('ssn');
+  ```
+
+  Recursion capped at depth 5 (deeper objects show `'[depth-cap]'`); arrays capped at 50 items (overflow shows `'[+N more]'`). Pretty/Raw and Pause states persist across reloads via `localStorage`. Production builds are unaffected: the entire instrumentation is gated behind `import.meta.env.PROD`.
+
 - **Curried form for `rpc.createOptimistic`.** Pass two arguments instead of three (`store, change`) and the call returns a `(...callArgs) => Promise` callable bound to that store + change. Useful when one optimistic-update setup applies to many call sites with different args.
 
   ```js

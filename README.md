@@ -2747,6 +2747,20 @@ The Streams tab lists every store currently mounted on the page. For each one it
 | last | Event name of the most recent pub/sub frame and its relative age (`12s ago`). |
 | err | Error code + message if the stream is in the error state; cleared on recovery. |
 
+**Click any stream row to expand a per-stream payload preview** -- the most recent 20 envelopes, time + event name + JSON data. Toggle Pretty / Raw via the header buttons (Raw shows full JSON up to ~500 chars; Pretty truncates at ~200 with overflow indicator). Pause stops capturing new events without affecting the live `last:` timestamp; Clear events drops every stream's ring buffer in one click. Pretty/Raw + Pause states persist across reloads via `localStorage`.
+
+**Privacy.** Captured payloads are walked once at write time with key-based redaction. The default redact list covers `password`, `token`, `apiKey` / `api_key`, `secret`, `authorization`, `cookie`, `sessionid` / `session_id`, `csrf` / `csrftoken`. Override or extend at runtime:
+
+```js
+import { __devtools } from 'svelte-realtime/client';
+if (__devtools) {
+  __devtools.redactKeys.add('paymentMethod');
+  __devtools.redactKeys.add('ssn');
+}
+```
+
+Match is case-insensitive and exact-key (no substring fuzz). Redacted values render as `'[REDACTED]'`. Recursion is capped at depth 5 (deeper structures show `'[depth-cap]'`) and arrays at 50 items so a malformed-large payload doesn't pin a graph in memory.
+
 The RPC tab shows pending calls (with elapsed time) and a 50-entry ring buffer of recent results (ok/err, duration). The Connection tab summarizes the same counters.
 
 The overlay is stripped from production builds. Disable it in dev with:
