@@ -40,6 +40,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Curried form for `rpc.createOptimistic`.** Pass two arguments instead of three (`store, change`) and the call returns a `(...callArgs) => Promise` callable bound to that store + change. Useful when one optimistic-update setup applies to many call sites with different args.
+
+  ```js
+  const optimisticSend = sendMessage.createOptimistic(
+    messages,
+    (current, args) => [...current, { id: tempId(), text: args[0] }]
+  );
+  await optimisticSend('Hello!');
+  await optimisticSend('There!');
+  ```
+
+  The three-argument direct form (`rpc.createOptimistic(store, callArgs, change)`) continues to work unchanged. Arity-2 vs arity-3 detection at call site.
+
+- **Stream-side `store.createOptimistic(rpc, callArgs, change)`.** Same flow as `rpc.createOptimistic(store, callArgs, change)`, expressed from the stream's perspective. Identical semantics; pick whichever reads more naturally for the call site.
+
 - **`createTestContext({ user })` builder in `svelte-realtime/test`.** Returns a `ctx`-shaped object suitable for direct unit tests of guards or predicates: `expect(myGuard(createTestContext({ user })))`. Mirrors the production `_buildCtx` shape; helper methods (`publish`, `throttle`, `signal`, `shed`, etc.) are no-ops returning sensible defaults so predicates that read `ctx.user` / `ctx.cursor` work without setup. Reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
 
 - **`stream.simulatePublish(event, data)` on the test stream return.** Discoverable shorthand for `env.platform.publish(stream.topic, event, data)` that lives where tests are already focused. Throws a clear error if called before the stream's topic is known (i.e. before the initial subscribe round-trip lands).

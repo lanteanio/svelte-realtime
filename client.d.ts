@@ -67,40 +67,54 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
 	 */
 	with: (opts: { idempotencyKey?: string; timeout?: number }) => (...args: any[]) => Promise<any>;
 	/**
-	 * Bind this RPC to a stream store as an optimistic mutation. Equivalent
-	 * to `store.mutate(() => rpc(...callArgs), wrapped)` where `wrapped`
-	 * forwards `callArgs` into a `(current, args)` callback so users don't
-	 * have to capture them in a closure at the call site.
+	 * Bind this RPC to a stream store as an optimistic mutation. Two
+	 * call shapes:
 	 *
-	 * @param store - Stream store from `$live/<module>` (must expose `.mutate`)
-	 * @param callArgs - Arguments to forward to the RPC (`rpc(...callArgs)`)
-	 * @param optimisticChange - Either `(current, args) => newValue` or `{ event, data }`
+	 * - **Direct**: `rpc.createOptimistic(store, callArgs, change)` runs
+	 *   immediately and returns the asyncOp's result Promise. Equivalent
+	 *   to `store.mutate(() => rpc(...callArgs), wrapped)` where `wrapped`
+	 *   forwards `callArgs` into a `(current, args)` callback so users
+	 *   don't have to capture them in a closure at the call site.
+	 * - **Curried**: `rpc.createOptimistic(store, change)` returns a
+	 *   `(...callArgs) => Promise` callable bound to that store +
+	 *   change. Useful when one optimistic-update setup applies to many
+	 *   call sites with different args.
 	 *
 	 * @example
 	 * ```js
 	 * import { sendMessage, messages } from '$live/chat';
 	 *
+	 * // Direct form -- one-shot
 	 * await sendMessage.createOptimistic(
 	 *   messages,
 	 *   ['Hello!'],
 	 *   (current, args) => [...current, { id: tempId(), text: args[0] }]
 	 * );
 	 *
-	 * // Or with the { event, data } pattern
-	 * await sendMessage.createOptimistic(
+	 * // Curried form -- bind once, call many times
+	 * const optimisticSend = sendMessage.createOptimistic(
 	 *   messages,
-	 *   ['Hello!'],
-	 *   { event: 'created', data: { id: tempId(), text: 'Hello!' } }
+	 *   (current, args) => [...current, { id: tempId(), text: args[0] }]
 	 * );
+	 * await optimisticSend('Hi');
+	 * await optimisticSend('There');
 	 * ```
 	 */
-	createOptimistic: (
-		store: { mutate: (asyncOp: () => Promise<any>, change: any) => Promise<any> },
-		callArgs: any[],
-		optimisticChange:
-			| ((current: any, args: any[]) => any)
-			| { event: string; data: any }
-	) => Promise<any>;
+	createOptimistic: {
+		(
+			store: { mutate: (asyncOp: () => Promise<any>, change: any) => Promise<any> },
+			callArgs: any[],
+			optimisticChange:
+				| ((current: any, args: any[]) => any)
+				| { event: string; data: any }
+		): Promise<any>;
+		(
+			store: { mutate: (asyncOp: () => Promise<any>, change: any) => Promise<any> },
+			optimisticChange:
+				| ((current: any, args: any[]) => any)
+				| { event: string; data: any }
+		): (...callArgs: any[]) => Promise<any>;
+	};
 };
 
 /**
@@ -215,6 +229,30 @@ export interface StreamStore<T = any> extends Readable<T> {
 			| { event: string; data: any }
 			| ((current: T) => T | void)
 	): Promise<R>;
+	/**
+	 * Stream-side counterpart to `rpc.createOptimistic`. Equivalent to
+	 * calling `rpc.createOptimistic(this, callArgs, change)`. Reads more
+	 * naturally when the call site is stream-focused and the RPC is the
+	 * variable being passed in.
+	 *
+	 * @example
+	 * ```js
+	 * import { sendMessage, messages } from '$live/chat';
+	 *
+	 * await messages.createOptimistic(
+	 *   sendMessage,
+	 *   ['Hello!'],
+	 *   (current, args) => [...current, { id: tempId(), text: args[0] }]
+	 * );
+	 * ```
+	 */
+	createOptimistic(
+		rpc: { createOptimistic: Function },
+		callArgs: any[],
+		optimisticChange:
+			| ((current: T, args: any[]) => T | void)
+			| { event: string; data: any }
+	): Promise<any>;
 	/** Pre-populate with SSR data to avoid loading spinners. */
 	hydrate(initialData: T): StreamStore<T>;
 	/** Load the next page of data (cursor-based pagination). */

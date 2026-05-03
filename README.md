@@ -1023,6 +1023,29 @@ store.mutate(() => rpc(...callArgs), wrappedChange);
 
 so behavior on success/rollback/server-confirmation is identical to `store.mutate()`. The shorthand is purely syntactic; reach for `store.mutate()` directly when the asyncOp isn't an RPC (third-party API call, multi-step flow, etc.).
 
+**Curried form** -- bind once, call many times. Pass two arguments instead of three (`store, change`) and `createOptimistic` returns a callable bound to that store + change:
+
+```js
+const optimisticSend = sendMessage.createOptimistic(
+  messages,
+  (current, args) => [...current, { id: tempId(), text: args[0] }]
+);
+await optimisticSend('Hello!');
+await optimisticSend('There!');
+```
+
+**Stream-side spelling** -- the same flow can be expressed from the stream's perspective via `store.createOptimistic(rpc, callArgs, change)`:
+
+```js
+await messages.createOptimistic(
+  sendMessage,
+  ['Hello!'],
+  (current, args) => [...current, { id: tempId(), text: args[0] }]
+);
+```
+
+Identical semantics to the RPC-side spelling; pick whichever reads more naturally for your call site (stream-focused code prefers `store.createOptimistic`; RPC-focused code prefers `rpc.createOptimistic`).
+
 ---
 
 ## Stream pagination

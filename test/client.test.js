@@ -788,6 +788,128 @@ describe('__rpc() createOptimistic', () => {
 		const fakeStore = { mutate: () => {} };
 		expect(() => r.createOptimistic(fakeStore, [], null)).toThrow(/optimisticChange is required/);
 	});
+
+	// Curry-form -------------------------------------------------------------
+
+	it('curry-form: 2 args returns a callable that runs the optimistic mutation', async () => {
+		const ctx = await setupCrudStream('curry/items', 'curry-items', [{ id: 1, name: 'A' }]);
+		const append = __rpc('curry/append');
+
+		const optimisticAppend = append.createOptimistic(
+			ctx.store,
+			(current, args) => [...current, { id: 'tmp', name: args[0] }]
+		);
+
+		expect(typeof optimisticAppend).toBe('function');
+
+		const promise = optimisticAppend('hello');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, name: 'A' },
+			{ id: 'tmp', name: 'hello' }
+		]);
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent.rpc).toBe('curry/append');
+		expect(sent.args).toEqual(['hello']);
+		simulateRpcResponse(sent.id, { ok: true, data: 'ok' });
+		await promise;
+		ctx.unsub();
+	});
+
+	it('curry-form: same callable handles many call sites with different args', async () => {
+		const ctx = await setupCrudStream('curry/many', 'curry-many', []);
+		const create = __rpc('curry/create');
+
+		const optimisticCreate = create.createOptimistic(
+			ctx.store,
+			{ event: 'created', data: { id: 'placeholder' } }
+		);
+
+		const p1 = optimisticCreate('first');
+		const sent1 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent1.args).toEqual(['first']);
+		simulateRpcResponse(sent1.id, { ok: true, data: { id: 'a' } });
+		await p1;
+
+		const p2 = optimisticCreate('second');
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.args).toEqual(['second']);
+		simulateRpcResponse(sent2.id, { ok: true, data: { id: 'b' } });
+		await p2;
+
+		ctx.unsub();
+	});
+
+	it('curry-form: throws if change is missing', () => {
+		const r = __rpc('curry/bad');
+		const fakeStore = { mutate: () => {} };
+		expect(() => r.createOptimistic(fakeStore, null)).toThrow(/optimisticChange is required/);
+	});
+
+	it('curry-form: still validates the store on the entry call', () => {
+		const r = __rpc('curry/bad');
+		expect(() => r.createOptimistic(null, () => {})).toThrow(/must be a stream store/);
+	});
+});
+
+describe('store.createOptimistic (stream-side counterpart)', () => {
+	async function setupCrudStream(path, topic, initial = []) {
+		const store = __stream(path, { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: initial, topic, merge: 'crud', key: 'id' });
+		return { store, values, unsub, topic };
+	}
+
+	it('forwards to rpc.createOptimistic with this as the store', async () => {
+		const ctx = await setupCrudStream('side/items', 'side-items', [{ id: 1, name: 'A' }]);
+		const create = __rpc('side/create');
+
+		const promise = ctx.store.createOptimistic(
+			create,
+			[{ name: 'B' }],
+			{ event: 'created', data: { id: 't1', name: 'B' } }
+		);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, name: 'A' },
+			{ id: 't1', name: 'B' }
+		]);
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent.rpc).toBe('side/create');
+		expect(sent.args).toEqual([{ name: 'B' }]);
+		simulateRpcResponse(sent.id, { ok: true, data: { id: 't1', name: 'B', server: true } });
+
+		const result = await promise;
+		expect(result).toEqual({ id: 't1', name: 'B', server: true });
+		ctx.unsub();
+	});
+
+	it('rolls back on RPC failure (forwarded behavior)', async () => {
+		const ctx = await setupCrudStream('side/fail', 'side-fail', [{ id: 1, name: 'A' }]);
+		const create = __rpc('side/create-fail');
+
+		const promise = ctx.store.createOptimistic(
+			create,
+			[{ name: 'B' }],
+			{ event: 'created', data: { id: 't1', name: 'B' } }
+		);
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'INTERNAL_ERROR', error: 'boom' });
+
+		await expect(promise).rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A' }]);
+		ctx.unsub();
+	});
+
+	it('throws when first arg is not an RPC stub', async () => {
+		const ctx = await setupCrudStream('side/bad', 'side-bad', []);
+		expect(() => ctx.store.createOptimistic(null, [], () => {})).toThrow(/RPC stub/);
+		expect(() => ctx.store.createOptimistic({}, [], () => {})).toThrow(/RPC stub/);
+		ctx.unsub();
+	});
 });
 
 // -- __devtools stream tracking ------------------------------------------------

@@ -458,15 +458,41 @@ export function __rpc(path) {
 	 * forwards `callArgs` into a `(current, args)` callback so tests and
 	 * helpers don't have to capture them in a closure.
 	 *
+	 * Two call shapes:
+	 * - **Direct**: `rpc.createOptimistic(store, callArgs, change)` -- runs
+	 *   immediately, returns the asyncOp's result Promise.
+	 * - **Curried**: `rpc.createOptimistic(store, change)` -- returns a
+	 *   `(...callArgs) => Promise` callable bound to that store + change.
+	 *   Useful when one optimistic-update setup applies to many call sites.
+	 *
 	 * @param {{ mutate: Function }} store - Stream store from `$live/<module>` (must expose `.mutate`)
-	 * @param {any[]} callArgs - Arguments to forward to the RPC (`rpc(...callArgs)`)
-	 * @param {((current: any, args: any[]) => any) | { event: string, data: any }} optimisticChange
-	 * @returns {Promise<any>}
+	 * @param {any[] | ((current: any, args: any[]) => any) | { event: string, data: any }} callArgsOrChange
+	 *   In the direct form, the RPC arguments array. In the curried form,
+	 *   the optimistic change (function or `{event, data}`).
+	 * @param {((current: any, args: any[]) => any) | { event: string, data: any }} [optimisticChange]
+	 *   Direct-form only: the optimistic change.
+	 * @returns {Promise<any> | ((...callArgs: any[]) => Promise<any>)}
+	 *   Direct form returns a Promise; curried form returns a callable.
 	 */
-	rpcCall.createOptimistic = function createOptimisticCall(store, callArgs, optimisticChange) {
+	rpcCall.createOptimistic = function createOptimisticCall(store, callArgsOrChange, optimisticChange) {
 		if (!store || typeof store.mutate !== 'function') {
 			throw new Error('[svelte-realtime] createOptimistic: first argument must be a stream store with a .mutate() method');
 		}
+		// Curry detection: 2 args means (store, change), return a callable.
+		if (arguments.length === 2) {
+			const change = callArgsOrChange;
+			if (change == null) {
+				throw new Error('[svelte-realtime] createOptimistic: optimisticChange is required (use { event, data } or (current, args) => newValue)');
+			}
+			return function curriedCreateOptimistic(...callArgs) {
+				const wrapped = typeof change === 'function'
+					? /** @param {any} current */ (current) => /** @type {any} */ (change)(current, callArgs)
+					: change;
+				return store.mutate(() => rpcCall(...callArgs), wrapped);
+			};
+		}
+		// Direct form: (store, callArgs, change)
+		const callArgs = callArgsOrChange;
 		if (!Array.isArray(callArgs)) {
 			throw new Error('[svelte-realtime] createOptimistic: callArgs must be an array (got ' + (callArgs === null ? 'null' : typeof callArgs) + ')');
 		}
@@ -1646,6 +1672,25 @@ function _createStream(path, options, dynamicArgs) {
 				store.set(currentValue);
 				throw err;
 			}
+		},
+
+		/**
+		 * Stream-side counterpart to `rpc.createOptimistic`. Equivalent to
+		 * `rpc.createOptimistic(this, callArgs, change)`, but reads more
+		 * naturally when the test or call site is stream-focused and the
+		 * RPC is the variable being passed in.
+		 *
+		 * @param {{ createOptimistic: Function }} rpc - RPC stub from
+		 *   `$live/<module>` (or returned by `__rpc()`).
+		 * @param {any[]} callArgs - Arguments to forward to the RPC.
+		 * @param {((current: any, args: any[]) => any) | { event: string, data: any }} change
+		 * @returns {Promise<any>}
+		 */
+		createOptimistic(rpc, callArgs, change) {
+			if (!rpc || typeof rpc.createOptimistic !== 'function') {
+				throw new Error('[svelte-realtime] store.createOptimistic: first argument must be an RPC stub with a .createOptimistic method (use the Vite-generated $live/* exports or __rpc()-built callables)');
+			}
+			return rpc.createOptimistic(this, callArgs, change);
 		},
 
 		/**
