@@ -390,6 +390,12 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 
 When the WebSocket reconnects, streams automatically refetch initial data and resubscribe. The store keeps showing stale data during the refetch -- it does not reset to `undefined`.
 
+**Mid-flight RPCs reject with `DISCONNECTED`.** If the WS drops while an RPC or `mutate` is awaiting a response, the corresponding promise rejects with `RpcError('DISCONNECTED')`. Callers that wrap the call in `mutate(asyncOp, change)` get auto-rollback for free: the optimistic-queue entry settles as failed, removing the placeholder from the displayed state. Concurrent in-flight mutates each roll back independently -- if A and B are both pending when the WS drops, both promises reject and both placeholders are removed in one display recompute.
+
+**Catch-up via initial fetch on resubscribe.** Once the WS reconnects, every active stream re-runs its loader and broadcasts the result through the same merge strategy used on first subscribe. Pub/sub events that fired during the disconnect window arrive as part of the fresh fetch (they're materialized in the loader's data source). For tighter "no-frame-loss" guarantees use the `delta` configuration (see [Delta sync and replay](#delta-sync-and-replay)), which fills small gaps via the per-topic seq-numbered replay buffer and falls back to delta sync for larger gaps.
+
+**Triggering reconnect.** The next RPC call after the WS drops triggers the adapter's reconnect logic. Most apps don't need to do anything special -- the user clicks something, the RPC fires, the adapter reconnects, the call lands. If you want to display a reconnecting banner, watch the `status` store from `svelte-adapter-uws/client` for the `'reconnecting'` -> `'open'` transition.
+
 ---
 
 ## Connection state stores
