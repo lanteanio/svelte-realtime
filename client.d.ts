@@ -66,6 +66,41 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
 	 * ```
 	 */
 	with: (opts: { idempotencyKey?: string; timeout?: number }) => (...args: any[]) => Promise<any>;
+	/**
+	 * Bind this RPC to a stream store as an optimistic mutation. Equivalent
+	 * to `store.mutate(() => rpc(...callArgs), wrapped)` where `wrapped`
+	 * forwards `callArgs` into a `(current, args)` callback so users don't
+	 * have to capture them in a closure at the call site.
+	 *
+	 * @param store - Stream store from `$live/<module>` (must expose `.mutate`)
+	 * @param callArgs - Arguments to forward to the RPC (`rpc(...callArgs)`)
+	 * @param optimisticChange - Either `(current, args) => newValue` or `{ event, data }`
+	 *
+	 * @example
+	 * ```js
+	 * import { sendMessage, messages } from '$live/chat';
+	 *
+	 * await sendMessage.createOptimistic(
+	 *   messages,
+	 *   ['Hello!'],
+	 *   (current, args) => [...current, { id: tempId(), text: args[0] }]
+	 * );
+	 *
+	 * // Or with the { event, data } pattern
+	 * await sendMessage.createOptimistic(
+	 *   messages,
+	 *   ['Hello!'],
+	 *   { event: 'created', data: { id: tempId(), text: 'Hello!' } }
+	 * );
+	 * ```
+	 */
+	createOptimistic: (
+		store: { mutate: (asyncOp: () => Promise<any>, change: any) => Promise<any> },
+		callArgs: any[],
+		optimisticChange:
+			| ((current: any, args: any[]) => any)
+			| { event: string; data: any }
+	) => Promise<any>;
 };
 
 /**

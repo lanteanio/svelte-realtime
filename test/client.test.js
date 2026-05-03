@@ -679,6 +679,111 @@ describe('__stream() mutate', () => {
 	});
 });
 
+// -- __rpc() createOptimistic --------------------------------------------------
+
+describe('__rpc() createOptimistic', () => {
+	async function setupCrudStream(path, topic, initial = []) {
+		const store = __stream(path, { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: initial, topic, merge: 'crud', key: 'id' });
+		return { store, values, unsub, topic };
+	}
+
+	it('event-form: applies optimistic event, sends RPC, returns server result', async () => {
+		const ctx = await setupCrudStream('opt/items', 'opt-items', [{ id: 1, name: 'A' }]);
+		const addItem = __rpc('opt/add');
+
+		const promise = addItem.createOptimistic(
+			ctx.store,
+			[{ name: 'New' }],
+			{ event: 'created', data: { id: 't1', name: 'New' } }
+		);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, name: 'A' },
+			{ id: 't1', name: 'New' }
+		]);
+
+		// Simulate the RPC reply for the createOptimistic-issued call
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent.rpc).toBe('opt/add');
+		expect(sent.args).toEqual([{ name: 'New' }]);
+		simulateRpcResponse(sent.id, { ok: true, data: { id: 't1', name: 'New', server: true } });
+
+		const result = await promise;
+		expect(result).toEqual({ id: 't1', name: 'New', server: true });
+		ctx.unsub();
+	});
+
+	it('callback-form: threads callArgs into the (current, args) callback', async () => {
+		const ctx = await setupCrudStream('opt/cb', 'opt-cb', [{ id: 1, name: 'A' }]);
+		const append = __rpc('opt/append');
+
+		const seenArgs = [];
+		const promise = append.createOptimistic(
+			ctx.store,
+			['hello', 42],
+			(current, args) => {
+				seenArgs.push(args);
+				return [...current, { id: 'tmp', name: args[0], n: args[1] }];
+			}
+		);
+		expect(seenArgs).toEqual([['hello', 42]]);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, name: 'A' },
+			{ id: 'tmp', name: 'hello', n: 42 }
+		]);
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent.args).toEqual(['hello', 42]);
+		simulateRpcResponse(sent.id, { ok: true, data: 'ok' });
+		await promise;
+		ctx.unsub();
+	});
+
+	it('rolls back the store when the RPC rejects', async () => {
+		const ctx = await setupCrudStream('opt/fail', 'opt-fail', [{ id: 1, name: 'A' }]);
+		const create = __rpc('opt/create');
+
+		const promise = create.createOptimistic(
+			ctx.store,
+			[{ name: 'New' }],
+			{ event: 'created', data: { id: 't1', name: 'New' } }
+		);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, name: 'A' },
+			{ id: 't1', name: 'New' }
+		]);
+
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'INTERNAL_ERROR', error: 'boom' });
+
+		await expect(promise).rejects.toMatchObject({ code: 'INTERNAL_ERROR' });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'A' }]);
+		ctx.unsub();
+	});
+
+	it('throws when first arg is not a store', () => {
+		const r = __rpc('opt/bad');
+		expect(() => r.createOptimistic(null, [], () => {})).toThrow(/must be a stream store/);
+		expect(() => r.createOptimistic({}, [], () => {})).toThrow(/must be a stream store/);
+	});
+
+	it('throws when callArgs is not an array', () => {
+		const r = __rpc('opt/bad');
+		const fakeStore = { mutate: () => {} };
+		expect(() => r.createOptimistic(fakeStore, 'not-an-array', () => {})).toThrow(/callArgs must be an array/);
+	});
+
+	it('throws when optimisticChange is missing', () => {
+		const r = __rpc('opt/bad');
+		const fakeStore = { mutate: () => {} };
+		expect(() => r.createOptimistic(fakeStore, [], null)).toThrow(/optimisticChange is required/);
+	});
+});
+
 // -- __stream() dynamic topics ------------------------------------------------
 
 describe('__stream() dynamic topics', () => {

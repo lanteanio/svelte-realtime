@@ -23,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`rpc.createOptimistic(store, callArgs, optimisticChange)` shorthand on every generated RPC stub.** Sugar for `store.mutate(() => rpc(...callArgs), wrappedChange)` that threads `callArgs` into the optimistic-change callback so call sites don't have to capture them in a closure.
+
+  ```js
+  import { sendMessage, messages } from '$live/chat';
+
+  await sendMessage.createOptimistic(
+    messages,
+    ['Hello!'],
+    (current, args) => [...current, { id: tempId(), text: args[0] }]
+  );
+  ```
+
+  `callArgs` is always an array (single-arg RPCs use `[arg]`). The third argument accepts the same two shapes as `store.mutate()`: a `(current, args) => newValue` function or a `{ event, data }` object. Behavior on success/rollback/server-confirmation is identical to `store.mutate()`; the shorthand is purely syntactic. Reach for `store.mutate()` directly when the asyncOp isn't an RPC (third-party API call, multi-step flow).
+
 - **Build-time `defineTopics` registry check in the Vite plugin.** When the plugin sees a `defineTopics({...})` call anywhere under `src/`, it parses the patterns and validates string-literal topics passed to `live.stream(...)` and `live.channel(...)` against the registry. A literal that does not match any registered pattern triggers a one-shot warning naming the file and the offending topic, suggesting either adding the topic to `defineTopics` or calling `TOPICS.<name>(...)` instead.
 
   ```

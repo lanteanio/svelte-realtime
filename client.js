@@ -452,6 +452,33 @@ export function __rpc(path) {
 		};
 	};
 
+	/**
+	 * Bind this RPC to a stream store as an optimistic mutation. Equivalent
+	 * to `store.mutate(() => rpc(...callArgs), wrapped)` where `wrapped`
+	 * forwards `callArgs` into a `(current, args)` callback so tests and
+	 * helpers don't have to capture them in a closure.
+	 *
+	 * @param {{ mutate: Function }} store - Stream store from `$live/<module>` (must expose `.mutate`)
+	 * @param {any[]} callArgs - Arguments to forward to the RPC (`rpc(...callArgs)`)
+	 * @param {((current: any, args: any[]) => any) | { event: string, data: any }} optimisticChange
+	 * @returns {Promise<any>}
+	 */
+	rpcCall.createOptimistic = function createOptimisticCall(store, callArgs, optimisticChange) {
+		if (!store || typeof store.mutate !== 'function') {
+			throw new Error('[svelte-realtime] createOptimistic: first argument must be a stream store with a .mutate() method');
+		}
+		if (!Array.isArray(callArgs)) {
+			throw new Error('[svelte-realtime] createOptimistic: callArgs must be an array (got ' + (callArgs === null ? 'null' : typeof callArgs) + ')');
+		}
+		if (optimisticChange == null) {
+			throw new Error('[svelte-realtime] createOptimistic: optimisticChange is required (use { event, data } or (current, args) => newValue)');
+		}
+		const wrapped = typeof optimisticChange === 'function'
+			? (current) => optimisticChange(current, callArgs)
+			: optimisticChange;
+		return store.mutate(() => rpcCall(...callArgs), wrapped);
+	};
+
 	return rpcCall;
 }
 

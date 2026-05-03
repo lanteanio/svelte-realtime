@@ -999,6 +999,28 @@ await todos.mutate(
 
 Returns the result of `asyncOp` on success. The snapshot is shallow: top-level array shape changes (push, pop, filter, splice) roll back; in-place item field mutations (`draft[0].name = 'x'`) do NOT, because the snapshot and the draft share item references. Replace whole items instead: `draft[i] = { ...draft[i], name: 'x' }`.
 
+### RPC-bound shorthand: `rpc.createOptimistic()`
+
+Every generated RPC stub also exposes a `.createOptimistic(store, callArgs, optimisticChange)` method. It threads `callArgs` into the optimistic-change callback so the call site doesn't have to capture them in a closure:
+
+```js
+import { sendMessage, messages } from '$live/chat';
+
+await sendMessage.createOptimistic(
+  messages,
+  ['Hello!'],
+  (current, args) => [...current, { id: tempId(), text: args[0] }]
+);
+```
+
+`callArgs` is always passed as an array (so multi-argument RPCs work the same as single-argument ones; pass `[arg]` for the single-arg case). The third argument accepts the same two shapes as `store.mutate()`: a `(current, args) => newValue` function or a `{ event, data }` object. Equivalent to:
+
+```js
+store.mutate(() => rpc(...callArgs), wrappedChange);
+```
+
+so behavior on success/rollback/server-confirmation is identical to `store.mutate()`. The shorthand is purely syntactic; reach for `store.mutate()` directly when the asyncOp isn't an RPC (third-party API call, multi-step flow, etc.).
+
 ---
 
 ## Stream pagination
