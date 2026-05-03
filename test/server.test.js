@@ -8856,6 +8856,113 @@ describe('live.push() / pushHooks', () => {
 		expect(platformA.requested).toHaveLength(1);
 		expect(platformB.requested).toHaveLength(1);
 	});
+
+	it('falls back to remoteRegistry.request when userId is not registered locally', async () => {
+		const calls = [];
+		const remoteRegistry = {
+			request: async (target, event, data, options) => {
+				calls.push({ target, event, data, options });
+				return { from: 'cluster', target };
+			}
+		};
+		live.configurePush({ remoteRegistry });
+
+		const reply = await live.push({ userId: 'u-elsewhere' }, 'confirm', { id: 7 }, { timeoutMs: 4000 });
+		expect(reply).toEqual({ from: 'cluster', target: 'u-elsewhere' });
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toEqual({
+			target: 'u-elsewhere',
+			event: 'confirm',
+			data: { id: 7 },
+			options: { timeoutMs: 4000 }
+		});
+	});
+
+	it('prefers the local registry over the remote registry when both have an entry', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-local' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'from-local');
+
+		const remoteCalls = [];
+		live.configurePush({
+			remoteRegistry: {
+				request: async (target, event, data) => {
+					remoteCalls.push({ target, event, data });
+					return 'from-remote';
+				}
+			}
+		});
+
+		await expect(live.push({ userId: 'u-local' }, 'event')).resolves.toBe('from-local');
+		expect(remoteCalls).toHaveLength(0);
+		expect(platform.requested).toHaveLength(1);
+	});
+
+	it('propagates errors from remoteRegistry.request as-is', async () => {
+		live.configurePush({
+			remoteRegistry: {
+				request: async () => { throw new Error('offline'); }
+			}
+		});
+
+		await expect(live.push({ userId: 'u-offline' }, 'event')).rejects.toThrow('offline');
+	});
+
+	it('configurePush({ remoteRegistry: null }) clears the binding', async () => {
+		live.configurePush({
+			remoteRegistry: { request: async () => 'unreachable' }
+		});
+
+		live.configurePush({ remoteRegistry: null });
+
+		await expect(live.push({ userId: 'u-cleared' }, 'event')).rejects.toMatchObject({
+			code: 'NOT_FOUND'
+		});
+	});
+
+	it('configurePush rejects a remoteRegistry without a request method', () => {
+		expect(() => live.configurePush({ remoteRegistry: {} })).toThrow(/request/);
+		expect(() => live.configurePush({ remoteRegistry: { request: 'not-fn' } })).toThrow(/request/);
+		expect(() => live.configurePush({ remoteRegistry: 'oops' })).toThrow(/request/);
+	});
+
+	it('configurePush({ identify, remoteRegistry }) sets both at once', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ account: { id: 'acct-1' } }) };
+		const remoteCalls = [];
+		live.configurePush({
+			identify: (w) => w.getUserData()?.account?.id,
+			remoteRegistry: {
+				request: async (target, event) => {
+					remoteCalls.push({ target, event });
+					return 'remote-reply';
+				}
+			}
+		});
+
+		// Local identify shape now reads account.id
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'local-reply');
+		await expect(live.push({ userId: 'acct-1' }, 'evt')).resolves.toBe('local-reply');
+
+		// And userIds not present locally fall through to remote
+		await expect(live.push({ userId: 'acct-elsewhere' }, 'evt')).resolves.toBe('remote-reply');
+		expect(remoteCalls).toEqual([{ target: 'acct-elsewhere', event: 'evt' }]);
+	});
+
+	it('configurePush(null) clears both identify and remoteRegistry', async () => {
+		live.configurePush({
+			identify: () => 'x',
+			remoteRegistry: { request: async () => 'r' }
+		});
+		live.configurePush(null);
+
+		// Without remoteRegistry, an unregistered userId throws NOT_FOUND again
+		await expect(live.push({ userId: 'u-x' }, 'event')).rejects.toMatchObject({
+			code: 'NOT_FOUND'
+		});
+	});
 });
 
 // -- live.stream({ staleAfterMs, onError }) -----------------------------------

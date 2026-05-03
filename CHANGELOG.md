@@ -13,6 +13,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`live.push({ userId }, ...)` gains cluster-routing fallback via `live.configurePush({ remoteRegistry })`.** When a `remoteRegistry` is configured (the connection registry from `svelte-adapter-uws-extensions/redis/registry` is the intended consumer), `live.push` falls back to `remoteRegistry.request(userId, event, data, options)` whenever the userId is not registered on the calling instance. The local in-process Map populated by `pushHooks.open` / `pushHooks.close` continues to win when an entry is present, so single-instance setups see no behavior change.
+
+  ```js
+  import { live } from 'svelte-realtime/server';
+  import { createConnectionRegistry } from 'svelte-adapter-uws-extensions/redis/registry';
+
+  const registry = createConnectionRegistry(redis, { identify: (ws) => ws.getUserData()?.userId });
+  live.configurePush({ remoteRegistry: registry });
+  // live.push({ userId: 'u-on-other-server' }, 'event', data) now reaches that user.
+  ```
+
+  `live.configurePush` accepts the new field independently of `identify`; both can be set in one call. Errors from the remote registry layer (offline / timeout / handler error) propagate as-is rather than being translated to `LiveError('NOT_FOUND')` so callers can distinguish "no connection anywhere in the cluster" from "connection found but the request failed in transit." Single-instance behavior (no registry configured, unknown userId) still throws `LiveError('NOT_FOUND')`.
+
 - **Transform throws on the publish path now route to per-stream `onError`.** When a `live.stream()` is configured with both `transform` and `onError`, an exception thrown from inside the transform on a `ctx.publish()` call now fires the configured `onError(err, null, topic)` observer (with `null` ctx, since the transform runs in the publish-helper closure rather than a handler context). The publish itself is dropped silently for that frame because the projected wire data is invalid.
 
   Streams configured with `transform` but no `onError` keep the prior behavior: the throw propagates up out of `ctx.publish()`, surfacing as an `INTERNAL_ERROR` on the originating RPC. Apps that haven't opted into the observer pattern still see failures the way they did before.

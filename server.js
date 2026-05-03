@@ -2151,15 +2151,32 @@ live.lock = function lock(keyOrConfig, fn) {
 };
 
 /**
- * Configure how the push registry extracts the userId from a connecting
- * WebSocket. Defaults to reading
- * `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`.
+ * Optional remote-registry surface used by `live.push` when the userId
+ * is not registered on this instance. The connection registry in
+ * `svelte-adapter-uws-extensions/redis/registry` conforms to this shape;
+ * pass it via `live.configurePush({ remoteRegistry })` to enable
+ * cluster-routed push.
  *
- * Pass `{ identify }` to override; pass `null` to restore the default.
- * The identify function may return `null` or `undefined` for anonymous
- * connections, in which case `pushHooks.open` skips registration.
+ * @type {{ request: (target: string, event: string, data?: any, options?: { timeoutMs?: number }) => Promise<any> } | null}
+ */
+let _remoteRegistry = null;
+
+/**
+ * Configure the push registry. Accepts two independent fields:
  *
- * @param {{ identify: (ws: any) => string | null | undefined } | null} config
+ * - `identify` -- override how `pushHooks.open` extracts the userId
+ *   from a connecting WebSocket. Defaults to reading
+ *   `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`. Pass a
+ *   function to override; pass `null` (in `config.identify`) to clear.
+ * - `remoteRegistry` -- an object with a
+ *   `request(userId, event, data, options)` method. When supplied,
+ *   `live.push({ userId })` falls back to `remoteRegistry.request(...)`
+ *   if the userId is not registered on this instance, enabling
+ *   cluster-routed push. Pass `null` to clear.
+ *
+ * The whole-config form `null` clears both slots.
+ *
+ * @param {{ identify?: ((ws: any) => string | null | undefined) | null, remoteRegistry?: { request: Function } | null } | null} config
  *
  * @example
  * ```js
@@ -2167,20 +2184,43 @@ live.lock = function lock(keyOrConfig, fn) {
  *
  * // Custom userData shape:
  * live.configurePush({ identify: (ws) => ws.getUserData()?.account?.id });
+ *
+ * // Wire cluster routing via the extensions connection registry:
+ * import { createConnectionRegistry } from 'svelte-adapter-uws-extensions/redis/registry';
+ * const registry = createConnectionRegistry(redis, { identify: (ws) => ws.getUserData()?.userId });
+ * live.configurePush({ remoteRegistry: registry });
  * ```
  */
 live.configurePush = function configurePush(config) {
 	if (config === null) {
 		_pushIdentify = null;
+		_remoteRegistry = null;
 		return;
 	}
-	if (!config || typeof config !== 'object') {
+	if (typeof config !== 'object') {
 		throw new Error('[svelte-realtime] live.configurePush: config must be an object or null');
 	}
-	if (typeof config.identify !== 'function') {
-		throw new Error('[svelte-realtime] live.configurePush: identify must be a function');
+	if (config.identify === undefined && config.remoteRegistry === undefined) {
+		throw new Error('[svelte-realtime] live.configurePush: config must include at least one of identify or remoteRegistry');
 	}
-	_pushIdentify = config.identify;
+	if (config.identify !== undefined) {
+		if (config.identify === null) {
+			_pushIdentify = null;
+		} else if (typeof config.identify !== 'function') {
+			throw new Error('[svelte-realtime] live.configurePush: identify must be a function or null');
+		} else {
+			_pushIdentify = config.identify;
+		}
+	}
+	if (config.remoteRegistry !== undefined) {
+		if (config.remoteRegistry === null) {
+			_remoteRegistry = null;
+		} else if (typeof config.remoteRegistry !== 'object' || typeof config.remoteRegistry.request !== 'function') {
+			throw new Error('[svelte-realtime] live.configurePush: remoteRegistry must expose a .request(userId, event, data, options) method');
+		} else {
+			_remoteRegistry = config.remoteRegistry;
+		}
+	}
 };
 
 /**
@@ -2244,20 +2284,28 @@ export const pushHooks = {
 
 /**
  * Send a server-initiated request to a connected user and await the reply.
- * Routes through the push registry populated by `pushHooks.open` /
- * `pushHooks.close`, so the user must have an active connection on this
- * server instance.
  *
- * Returns whatever the client's `onPush(event, handler)` returns.
- * Throws `LiveError('NOT_FOUND')` when no connection is registered for
- * the userId. Propagates `Error('request timed out')` from the underlying
- * platform primitive when the client does not reply within `timeoutMs`
- * (default 5000), and `Error('connection closed')` if the WebSocket
- * closes before reply.
+ * Lookup order:
+ * 1. **Local registry** -- the per-userId Map populated by `pushHooks.open` /
+ *    `pushHooks.close`. Resolves directly via `platform.request(ws, ...)` --
+ *    no I/O.
+ * 2. **Remote registry** -- the optional `remoteRegistry` configured via
+ *    `live.configurePush({ remoteRegistry })`. When the userId is not
+ *    registered on this instance and a registry is configured,
+ *    `live.push` falls through to `remoteRegistry.request(userId, ...)`
+ *    so a request from any instance reaches the user's owning instance
+ *    over the registry's transport.
  *
- * Multi-device users see most-recent-connection-wins routing. Cluster-wide
- * push (routing from any instance to any user's ws) requires the
- * connection-registry primitive in the extensions package.
+ * Returns whatever the client's `onPush(event, handler)` returns. Without
+ * a remote registry, throws `LiveError('NOT_FOUND')` when no local
+ * connection is registered. With a remote registry, errors come from
+ * the registry layer (commonly an offline rejection when the user has
+ * no active connection cluster-wide, or a timeout / handler-error when
+ * the request was routed but did not complete).
+ *
+ * Multi-device users see most-recent-connection-wins routing within
+ * each instance, and cluster-wide most-recent-wins via the registry's
+ * Redis hash.
  *
  * Requires `svelte-adapter-uws` >= 0.5.0-next.4 for `platform.request`.
  *
@@ -2281,10 +2329,18 @@ export const pushHooks = {
  *
  * @example
  * ```js
- * // hooks.ws.js -- wire the registry once:
+ * // hooks.ws.js -- wire the local registry once:
  * import { pushHooks } from 'svelte-realtime/server';
  * export const open = pushHooks.open;
  * export const close = pushHooks.close;
+ * ```
+ *
+ * @example
+ * ```js
+ * // For cluster routing, also wire the extensions connection registry:
+ * import { createConnectionRegistry } from 'svelte-adapter-uws-extensions/redis/registry';
+ * const registry = createConnectionRegistry(redis, { identify: (ws) => ws.getUserData()?.userId });
+ * live.configurePush({ remoteRegistry: registry });
  * ```
  */
 live.push = async function push(target, event, data, options) {
@@ -2316,22 +2372,27 @@ live.push = async function push(target, event, data, options) {
 	}
 
 	const entry = _pushRegistry.get(userId);
-	if (!entry) {
-		throw new LiveError('NOT_FOUND', "no active connection for userId '" + userId + "'");
+	if (entry) {
+		if (typeof entry.platform.request !== 'function') {
+			throw new Error('[svelte-realtime] live.push: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4');
+		}
+		return entry.platform.request(entry.ws, event, data, options || undefined);
 	}
-	if (typeof entry.platform.request !== 'function') {
-		throw new Error('[svelte-realtime] live.push: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4');
+	if (_remoteRegistry) {
+		return _remoteRegistry.request(userId, event, data, options || undefined);
 	}
-	return entry.platform.request(entry.ws, event, data, options || undefined);
+	throw new LiveError('NOT_FOUND', "no active connection for userId '" + userId + "'");
 };
 
 /**
- * Reset the push registry and identify config. Tests only.
+ * Reset the push registry, identify config, and remote registry binding.
+ * Tests only.
  * @internal
  */
 export function _resetPushRegistry() {
 	_pushRegistry.clear();
 	_pushIdentify = null;
+	_remoteRegistry = null;
 }
 
 /**

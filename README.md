@@ -1781,11 +1781,45 @@ live.configurePush({ identify: (ws) => ws.getUserData()?.account?.id });
 
 Throws `LiveError('NOT_FOUND')` when no connection is registered for the userId. Propagates `Error('request timed out')` from the underlying primitive on the configurable `timeoutMs` (default 5000ms), and `Error('connection closed')` if the WebSocket closes before reply.
 
-Multi-device users see most-recent-connection-wins routing: a second connection by the same user replaces the first as the push target; older connections still receive topic publishes via their own subscriptions, only push routing flips. Anonymous connections (identify returning null/undefined) are silently skipped at registration so they cannot be push targets.
+Multi-device users see most-recent-connection-wins routing within each instance, and cluster-wide most-recent-wins via the registry's Redis hash when cluster routing is configured (see [Cluster routing](#cluster-routing) below). Older connections still receive topic publishes via their own subscriptions; only push routing flips. Anonymous connections (identify returning null/undefined) are silently skipped at registration so they cannot be push targets.
 
 `onPush(event, handler)` multiplexes multiple events over the adapter's single `onRequest` channel. Returning a value sends it as the reply; throwing rejects the server-side promise. Returns an unsubscribe function.
 
-Single-instance routing only in this slice: the user's connection must live on the same server process that calls `live.push`. Cluster-wide push (any instance routing to any user's WebSocket) requires the connection-registry primitive in the extensions package.
+### Cluster routing
+
+For multi-instance deploys, wire the connection registry from `svelte-adapter-uws-extensions` so a `live.push` originating on any instance reaches the user's owning instance:
+
+```js
+// hooks.ws.js
+import { pushHooks, live } from 'svelte-realtime/server';
+import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
+import { createConnectionRegistry } from 'svelte-adapter-uws-extensions/redis/registry';
+
+const redis = createRedisClient({ url: process.env.REDIS_URL });
+const registry = createConnectionRegistry(redis, {
+  identify: (ws) => ws.getUserData()?.userId
+});
+
+// Tell live.push to fall back to the registry for cross-instance lookups
+live.configurePush({ remoteRegistry: registry });
+
+// Wire the registry's own connection hooks (NOT pushHooks.* in this mode --
+// the registry tracks ownership in Redis and short-circuits same-instance
+// requests internally).
+export const open = registry.hooks.open;
+export const close = registry.hooks.close;
+```
+
+Lookup order inside `live.push`:
+
+1. **Local registry** -- the per-instance Map populated by `pushHooks.open` / `pushHooks.close`. Resolves directly via `platform.request(ws, ...)` with no I/O.
+2. **Remote registry** -- when configured via `live.configurePush({ remoteRegistry })`, used as a fallback when the userId is not registered locally. The extensions registry looks up the owning instance in Redis and either short-circuits to a local `platform.request` or forwards the envelope on a per-instance push channel and awaits the reply.
+
+Errors with a remote registry come from the registry layer: typically an offline rejection when the user has no active connection cluster-wide, a timeout when routing succeeded but the client did not reply within `timeoutMs`, or a propagated handler error from the receiving instance. The realtime layer does NOT translate these to `LiveError('NOT_FOUND')`; let your caller distinguish and surface them.
+
+You can wire BOTH (`pushHooks.*` + `remoteRegistry`); the local Map wins when an entry is present and the remote registry is consulted only as fallback. In practice pick one of the two patterns -- the registry-only setup is simpler and the registry already does same-instance short-circuit on its own.
+
+Single-instance setups without a registry continue to throw `LiveError('NOT_FOUND')` for unknown userIds, unchanged.
 
 ---
 
