@@ -68,7 +68,8 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test --config test/e2e/playwright.config.js"
+    "test:e2e": "playwright test --config test/e2e/playwright.config.js",
+    "test:chaos": "playwright test --config test/chaos/playwright.config.js"
   },
   "engines": {
     "node": ">=20.0.0"

@@ -9,4 +9,4 @@ source
 test-results
 playwright-report
 .svelte-kit
-test/fixture/src/live/$types.d.ts
+test/fixture/src/live/$types.d.ts.chaos-ctx.json

@@ -914,6 +914,8 @@ function _generateSsrStubs(filePath, modulePath) {
 	const storeNames = [];
 	/** @type {Set<string>} */
 	const dynamicNames = new Set();
+	/** @type {Array<{ name: string, info: ReturnType<typeof _extractRoomInfo> }>} */
+	const rooms = [];
 	let match;
 
 	// Detect dynamic (function-returning) streams, channels, and derived
@@ -932,12 +934,25 @@ function _generateSsrStubs(filePath, modulePath) {
 		}
 	}
 
+	// Collect live.room() exports -- the SSR stub exposes a namespace object
+	// whose data/presence/cursors are always-undefined readables (factory-shaped
+	// when the topic is dynamic) and whose actions are no-op stubs returning
+	// undefined. Without these, SSR rendering of pages that call `board.data(id)`
+	// crashes because the source module's `board` export is the server-side
+	// roomExport (with __dataStream / __presenceStream) and lacks `data`.
+	ROOM_EXPORT_RE.lastIndex = 0;
+	while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		rooms.push({ name, info: _extractRoomInfo(source, name) });
+	}
+
 	// Escape paths for safe embedding in generated code
 	const safePath = JSON.stringify(normalized);
 	const safeModulePath = (name) => JSON.stringify(modulePath + '/' + name);
 
-	// If no store-like exports, simple re-export
-	if (storeNames.length === 0) {
+	// If no store-like or room exports, simple re-export
+	if (storeNames.length === 0 && rooms.length === 0) {
 		return `export * from ${safePath};\n`;
 	}
 
@@ -961,6 +976,30 @@ function _generateSsrStubs(filePath, modulePath) {
 			lines.push(`_${name}.load = (platform, options) => __directCall(${safeModulePath(name)}, options?.args || [], platform, options);`);
 			lines.push(`export { _${name} as ${name} };`);
 		}
+	}
+
+	for (const { name, info } of rooms) {
+		// Room namespace: always factory-shaped sub-streams (rooms are
+		// per-instance dynamic by design; the topic function takes the
+		// boardId-equivalent argument). Actions are no-op promise-returning
+		// stubs that resolve with undefined; they are never called during
+		// SSR (action handlers fire post-hydration on user interaction).
+		lines.push(`const _${name}_data = (...args) => { const s = readable(undefined); s.hydrate = (d) => readable(d); return s; };`);
+		lines.push(`_${name}_data.load = (platform, options) => __directCall(${JSON.stringify(modulePath + '/' + name + '/__data')}, options?.args || [], platform, options);`);
+		const subFactories = [`data: _${name}_data`];
+		if (info.hasPresence) {
+			lines.push(`const _${name}_presence = (...args) => readable(undefined);`);
+			subFactories.push(`presence: _${name}_presence`);
+		}
+		if (info.hasCursors) {
+			lines.push(`const _${name}_cursors = (...args) => readable(undefined);`);
+			subFactories.push(`cursors: _${name}_cursors`);
+		}
+		for (const action of info.actions) {
+			subFactories.push(`${action}: () => Promise.resolve(undefined)`);
+		}
+		lines.push(`const _${name} = { ${subFactories.join(', ')} };`);
+		lines.push(`export { _${name} as ${name} };`);
 	}
 
 	return lines.join('\n') + '\n';

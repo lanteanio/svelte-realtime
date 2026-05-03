@@ -3678,30 +3678,54 @@ const _activatedPlatforms = new WeakSet();
 export function _activateDerived(platform) {
 	_derivedPlatform = platform;
 	_activateDerivedCalled = true;
-	if (_activatedPlatforms.has(platform)) return;
 
 	// Only wrap platform.publish if there are actual reactive registrations
 	if (_derivedBySource.size === 0 && _effectBySource.size === 0 && _aggregateBySource.size === 0 && !_hasDynamicDerived) {
 		return;
 	}
 
-	_activatedPlatforms.add(platform);
-	_wrapPlatformPublish(platform);
+	// svelte-adapter-uws hands hooks a per-connection platform created via
+	// Object.create(basePlatform). Wrapping that per-connection object leaves
+	// every other connection's inherited publish / publishBatched untouched,
+	// because their lookups walk the prototype chain to the original base.
+	// Resolve to the base prototype so the wrap is visible to all connections
+	// that share it. Test mocks pass plain objects whose proto is
+	// Object.prototype - in that case wrap the object itself.
+	const target = _resolveWrapTarget(platform);
+	if (_activatedPlatforms.has(target)) return;
+	_activatedPlatforms.add(target);
+	_wrapPlatformPublish(target);
+}
+
+/**
+ * Walk one prototype hop to find the platform object that OWNS `publish`,
+ * so the wrap applies to every per-connection clone created via
+ * Object.create(basePlatform). Falls back to the input when there is no
+ * useful prototype (test mocks).
+ * @param {any} p
+ */
+function _resolveWrapTarget(p) {
+	const proto = Object.getPrototypeOf(p);
+	if (proto && proto !== Object.prototype && typeof proto.publish === 'function') {
+		return proto;
+	}
+	return p;
 }
 
 function _wrapPlatformPublish(platform) {
 
 	const originalPublish = platform.publish.bind(platform);
+	const originalPublishBatched = typeof /** @type {any} */ (platform).publishBatched === 'function'
+		? /** @type {any} */ (platform).publishBatched.bind(platform)
+		: null;
 
 	let _publishDepth = 0;
 
-	platform.publish = function derivedPublish(topic, event, data, opts) {
-		const result = originalPublish(topic, event, data, opts);
-
-		if (!_watchedTopics.has(topic)) return result;
+	function fireWatchers(topic, event, data) {
+		if (!_watchedTopics.has(topic)) return;
 
 		// Guard against infinite recursion (aggregate publishes back through this wrapper)
-		if (_publishDepth > 8) return result;
+		if (_publishDepth > 8) return;
 		_publishDepth++;
 
 		// Check if any derived stream watches this topic
@@ -3763,8 +3787,32 @@ function _wrapPlatformPublish(platform) {
 		}
 
 		_publishDepth--;
+	}
+
+	platform.publish = function derivedPublish(topic, event, data, opts) {
+		const result = originalPublish(topic, event, data, opts);
+		fireWatchers(topic, event, data);
 		return result;
 	};
+
+	if (originalPublishBatched) {
+		// Wrap publishBatched too: ctx.publish takes the batched fast path
+		// (queueMicrotask + platform.publishBatched) when no coalesce / transform
+		// is registered, which is the default with the uWS adapter. Without
+		// this wrap, derived / effect / aggregate watchers never fire on
+		// publishes from the batched path -- they only fire from the unbatched
+		// platform.publish path that some test mocks happen to use.
+		/** @type {any} */ (platform).publishBatched = function derivedPublishBatched(batch) {
+			const result = originalPublishBatched(batch);
+			if (Array.isArray(batch) && _watchedTopics.size > 0) {
+				for (const item of batch) {
+					if (!item || typeof item.topic !== 'string') continue;
+					fireWatchers(item.topic, item.event, item.data);
+				}
+			}
+			return result;
+		};
+	}
 }
 
 /**
@@ -4295,7 +4343,12 @@ function _cronFieldMatch(matcher, value) {
 
 /**
  * Create a webhook-to-stream bridge.
- * The Vite plugin detects `live.webhook()` exports and generates a SvelteKit `+server.js` endpoint.
+ *
+ * Webhooks are server-only utilities; the Vite plugin marks them as known
+ * exports (so they are not flagged as "not wrapped in live()") but does NOT
+ * generate a SvelteKit `+server.js` endpoint. Wire one yourself by importing
+ * the exported handler and calling its `.handle({ body, headers, platform })`
+ * inside a POST handler. See README "Webhooks" for the canonical example.
  *
  * @param {string} topic - Topic to publish events to
  * @param {{ verify: (req: { body: string, headers: Record<string, string> }) => any, transform: (event: any) => { event: string, data: any } | null }} config
