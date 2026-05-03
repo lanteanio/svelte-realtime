@@ -10,7 +10,7 @@ import { DEV_PORT, PROD_PORT } from './ports.js';
 // by the prod server.
 
 const projects = [];
-const specs = ['queue-replay.spec.js', 'lock.spec.js', 'smoke.spec.js'];
+const specs = ['queue-replay.spec.js', 'lock.spec.js', 'smoke.spec.js', 'multi-page.spec.js'];
 for (const spec of specs) {
 	const baseName = spec.replace('.spec.js', '');
 	projects.push({

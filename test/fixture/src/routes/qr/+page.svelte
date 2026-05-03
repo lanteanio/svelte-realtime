@@ -1,7 +1,20 @@
 <script>
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
+	import { status } from 'svelte-adapter-uws/client';
 	import { todos, ok, okWithPublish, fail, block, release, publishExternal, reset } from '$live/todos';
+
+	function waitForOpen() {
+		return new Promise((resolve) => {
+			let unsub;
+			unsub = status.subscribe((s) => {
+				if (s === 'open') {
+					if (unsub) unsub();
+					resolve();
+				}
+			});
+		});
+	}
 
 	function waitFor(predicate, timeoutMs = 5000) {
 		return new Promise((resolve, reject) => {
@@ -62,7 +75,18 @@
 	onMount(() => {
 		// @ts-ignore
 		window.__test = {
+			ready: async () => {
+				// Resolves when the WS is open AND the initial stream fetch
+				// has populated the store. Multi-page tests open several
+				// browser contexts in quick succession; on prod the server
+				// may take longer to handshake, and reading the store
+				// before initial fetch returns gives `undefined` and trips
+				// downstream predicates.
+				await waitForOpen();
+				await waitFor((v) => Array.isArray(v));
+			},
 			reset: async () => {
+				await waitForOpen();
 				await reset();
 				await waitFor((v) => Array.isArray(v) && v.length === 0);
 				// Allow any in-flight refreshed:[] frames from the reset's

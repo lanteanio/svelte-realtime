@@ -3,21 +3,29 @@
 	import { status } from 'svelte-adapter-uws/client';
 	import { ordered, bounded, readLog, resetLog } from '$live/lock';
 
+	function waitForOpen() {
+		return new Promise((resolve) => {
+			let unsub;
+			unsub = status.subscribe((s) => {
+				if (s === 'open') {
+					if (unsub) unsub();
+					resolve();
+				}
+			});
+		});
+	}
+
 	onMount(() => {
 		// @ts-ignore
 		window.__test = {
+			ready: () => waitForOpen(),
 			reset: async () => {
-				// Wait for the WS connection to be fully open before issuing
-				// the first RPC. The lock page has no stream subscription to
-				// keep the connection warm, so the very first RPC after
-				// page.goto can race the WS handshake (visible as a
-				// transient DISCONNECTED on the prod server's first call).
-				await new Promise((resolve) => {
-					const unsub = status.subscribe((s) => {
-						if (s === 'open') { unsub(); resolve(); }
-					});
-				});
+				await waitForOpen();
 				await resetLog();
+			},
+			readLog: async () => {
+				const r = await readLog();
+				return r.log;
 			},
 			fireThreeOrdered: async (holdMs) => {
 				await Promise.all([
