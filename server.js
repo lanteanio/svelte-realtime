@@ -247,15 +247,15 @@ function _copyStreamMeta(target, source) {
  * Hot-path cost on the default (no-coalesce) branch: one Map.get on an
  * almost-always-empty map. See bench/publish.js for numbers.
  *
- * @type {Map<string, { coalesceBy: Function, ws: Set<any> }>}
+ * @type {Map<string, { coalesceBy: Function, onError: Function | null, ws: Set<any> }>}
  */
 const _topicCoalesce = new Map();
 
 /** @internal Exported only so tests can drive the coalesce registry without a full subscribe round-trip. */
-export function _registerCoalesce(ws, topic, coalesceBy) {
+export function _registerCoalesce(ws, topic, coalesceBy, onError) {
 	let entry = _topicCoalesce.get(topic);
 	if (!entry) {
-		entry = { coalesceBy, ws: new Set() };
+		entry = { coalesceBy, onError: onError || null, ws: new Set() };
 		_topicCoalesce.set(topic, entry);
 	}
 	entry.ws.add(ws);
@@ -714,7 +714,22 @@ function _getCtxHelpers(platform) {
 			const t = _topicTransform.get(topic);
 			// coalesceBy reads the ORIGINAL data (before transform) so the key
 			// extractor sees the un-projected fields it was written against.
-			const coalesceKey = c ? c.coalesceBy(data) : undefined;
+			// Throws are routed to the registered stream's onError (if any),
+			// dropping the publish silently. Without an observer, the throw
+			// propagates so apps that haven't opted into the observer pattern
+			// still see failures.
+			let coalesceKey;
+			if (c) {
+				try {
+					coalesceKey = c.coalesceBy(data);
+				} catch (err) {
+					if (c.onError) {
+						try { c.onError(err, null, topic); } catch {}
+						return false;
+					}
+					throw err;
+				}
+			}
 			// Transform produces the wire data once -- applied here, before
 			// fan-out, so every subscriber sees the same projected shape.
 			// Throws are routed to the registered stream's onError (if any).
@@ -798,7 +813,12 @@ function _trackStreamSub(ws, topic, fn) {
 		wsSet.add(ws);
 	}
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__coalesceBy) {
-		_registerCoalesce(ws, topic, /** @type {any} */ (fn).__coalesceBy);
+		_registerCoalesce(
+			ws,
+			topic,
+			/** @type {any} */ (fn).__coalesceBy,
+			/** @type {any} */ (fn).__streamOnError || null
+		);
 	}
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__streamTransform) {
 		_registerTransform(

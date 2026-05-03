@@ -6162,6 +6162,102 @@ describe('live.stream({ coalesceBy })', () => {
 		expect(platform.coalesced).toHaveLength(0);
 		expect(platform.published).toHaveLength(1);
 	});
+
+	it('routes coalesceBy throws to per-stream onError and drops the publish', async () => {
+		const seen = [];
+		const stream = live.stream('coal/throw', async () => null, {
+			merge: 'set',
+			coalesceBy: (d) => {
+				if (d && d.bad) throw new Error('bad coalesce key');
+				return d.k;
+			},
+			onError: (err, ctx, topic) => {
+				seen.push({ message: err.message, ctx, topic });
+			}
+		});
+		__register('coal/throw', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('coal/throw', 'updated', { k: 'a' });
+			ctx.publish('coal/throw', 'updated', { k: 'b', bad: true });
+			ctx.publish('coal/throw', 'updated', { k: 'c' });
+			return 'ok';
+		});
+		__register('coal/throw-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/throw', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/throw-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(seen).toHaveLength(1);
+		expect(seen[0].message).toBe('bad coalesce key');
+		expect(seen[0].topic).toBe('coal/throw');
+		expect(seen[0].ctx).toBeNull();
+
+		// The two good publishes still went through; the bad one was dropped.
+		const keys = platform.coalesced.map(c => c.key);
+		expect(keys).toEqual(['coal/throw\0a', 'coal/throw\0c']);
+	});
+
+	it('coalesceBy throws propagate when no per-stream onError is configured', async () => {
+		const stream = live.stream('coal/throw-unobs', async () => null, {
+			merge: 'set',
+			coalesceBy: () => { throw new Error('unobserved'); }
+		});
+		__register('coal/throw-unobs', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('coal/throw-unobs', 'updated', { k: 'x' });
+			return 'ok';
+		});
+		__register('coal/throw-unobs-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/throw-unobs', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/throw-unobs-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const reply = platform.sent.find((s) => s.event === 'p1');
+		expect(reply.data.ok).toBe(false);
+		expect(reply.data.code).toBe('INTERNAL_ERROR');
+	});
+
+	it('observer throws are silently swallowed so a buggy onError does not break publishes', async () => {
+		const stream = live.stream('coal/throw-buggy', async () => null, {
+			merge: 'set',
+			coalesceBy: () => { throw new Error('coalesce bad'); },
+			onError: () => { throw new Error('observer bad'); }
+		});
+		__register('coal/throw-buggy', stream);
+
+		const handler = live(async (ctx) => {
+			const ok = ctx.publish('coal/throw-buggy', 'updated', { k: 'a' });
+			return { returned: ok };
+		});
+		__register('coal/throw-buggy-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/throw-buggy', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/throw-buggy-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const reply = platform.sent.find((s) => s.event === 'p1');
+		expect(reply.data.ok).toBe(true);
+		expect(reply.data.data).toEqual({ returned: false });
+	});
 });
 
 // -- Three-tier reconnect ----------------------------------------------------

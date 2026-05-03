@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Closes the documented remaining-delta from the per-stream `onError` boundary: loader throws were already routed (initial subscribe, stale-reload, `.load()` SSR), but per-publish transform throws went unobserved. Apps with a `transform` typo or unexpected null-field can now catch the failure once via `onError` instead of cascading into every RPC that touches the topic.
 
+- **`coalesceBy` extractor throws on the publish path now route to per-stream `onError`.** Symmetric closure of the same publish-path observability gap for the other user-supplied function in the closure. When a `live.stream()` is configured with both `coalesceBy` and `onError`, an exception thrown from inside the coalesce-key extractor on a `ctx.publish()` call now fires the configured `onError(err, null, topic)` observer (with `null` ctx, same contract as the transform path). The publish itself is dropped silently for that frame because there is no key to fan out under.
+
+  Streams configured with `coalesceBy` but no `onError` keep the prior behavior: the throw propagates up out of `ctx.publish()`, surfacing as an `INTERNAL_ERROR` on the originating RPC.
+
+  Apps with a `coalesceBy` extractor that may throw on edge-case payloads (null fields, unexpected shapes) can now catch the failure once via `onError` instead of cascading into every RPC that touches the topic.
+
 ### Added
 
 - **`expectGuardRejects(promise, expectedCode?)` helper in `svelte-realtime/test`.** Ergonomic wrapper for the common "this call should be denied" assertion: awaits the promise, asserts it rejected with a `LiveError` of the expected code (default `'FORBIDDEN'`), and returns the rejected error so further assertions can run on it.
