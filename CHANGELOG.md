@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.1] - 2026-05-03
+
 ### Fixed
 
 - **Rooms now SSR-render correctly.** The Vite plugin's `_generateSsrStubs` collected stream-like exports from `[STREAM_EXPORT_RE, CHANNEL_EXPORT_RE, DERIVED_EXPORT_RE, AGGREGATE_EXPORT_RE]` but had no case for `ROOM_EXPORT_RE`, so SSR fell through to `export * from <serverPath>` which re-exported the SERVER-side `live.room()` namespace (with `__dataStream`, `__presenceStream` etc.) instead of the CLIENT-shaped namespace (with `data: factory(...)`, `presence: factory(...)`, etc.). Pages that rendered `board.data(boardId)` during SvelteKit SSR crashed with `TypeError: board.data is not a function` and returned 500. The SSR generator now emits a per-room namespace stub: `data` / `presence` / `cursors` are factory-shaped readables (returning `readable(undefined)` with `.hydrate()`) and actions are no-op `() => Promise.resolve(undefined)` so they don't break post-hydration handler wiring.
