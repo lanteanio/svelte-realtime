@@ -945,6 +945,39 @@ function _createStream(path, options, dynamicArgs) {
 	/** @type {Map<any, number>} Key-to-index lookup for keyed merge strategies */
 	const _index = new Map();
 
+	/**
+	 * Always-on optimistic mutation queue. Each entry holds a pending
+	 * `mutate(asyncOp, change)` call: its change spec, the optimistic
+	 * key (when extractable from an event-shaped change), and a flag
+	 * tracking whether a matching server event has already absorbed it.
+	 *
+	 * When the queue is non-empty, the stream operates in "queue mode":
+	 * server events apply to `_serverValue` (the un-overlaid server state)
+	 * rather than `currentValue`, and `currentValue` is recomputed by
+	 * replaying the queue against `_serverValue` after each batch. When
+	 * the queue drains, `currentValue` becomes equal to `_serverValue`
+	 * and queue mode exits.
+	 *
+	 * @type {Array<{ change: any, optimisticKey: any, serverConfirmed: boolean }>}
+	 */
+	const _optimisticQueue = [];
+
+	/**
+	 * Un-overlaid server-side state when queue mode is active; null
+	 * otherwise. Initialized from `currentValue` on the first mutate
+	 * push and cleared when the queue drains.
+	 * @type {any}
+	 */
+	let _serverValue = null;
+
+	/**
+	 * Index Map parallel to `_index`, but for `_serverValue`. Tracks the
+	 * key-to-position mapping used by keyed merge strategies for the
+	 * un-overlaid server state.
+	 * @type {Map<any, number> | null}
+	 */
+	let _serverIndex = null;
+
 	/** @type {any[]} Undo/redo history stack */
 	let _history = [];
 	/** @type {number} Current position in history (-1 = no history) */
@@ -1178,20 +1211,150 @@ function _createStream(path, options, dynamicArgs) {
 	}
 
 	/**
-	 * Apply a merge event to currentValue / _index / _optimisticKeys (the
-	 * stream's authoritative state). Tracks `_lastSeq` and `_dirty`. Does
-	 * NOT call store.set or _recordHistory -- callers handle the publish.
+	 * Apply a merge event to the stream's authoritative state. In the
+	 * steady-state hot path (queue empty), mutates currentValue / _index /
+	 * _optimisticKeys directly. In queue mode (a `mutate(asyncOp, change)`
+	 * is in flight), routes to `_serverValue` / `_serverIndex` and runs
+	 * the optimistic-absorption check so a server event matching a
+	 * queue entry's key is recognised and the entry is graduated. Tracks
+	 * `_lastSeq` and `_dirty`. Does NOT call store.set or _recordHistory;
+	 * callers handle the publish.
 	 *
 	 * @param {{ event: string, data: any, seq?: number }} envelope
 	 * @returns {boolean} true if currentValue was replaced with a fresh
-	 *   reference (caller can skip the defensive `.slice()` before publish).
+	 *   reference (caller can skip the defensive `.slice()` before
+	 *   publish). Always false in queue mode -- caller should recompute
+	 *   the display via `_recomputeDisplay()` instead.
 	 */
 	function _applyMerge(envelope) {
 		if (envelope.seq !== undefined) _lastSeq = envelope.seq;
+		if (_optimisticQueue.length > 0) {
+			const result = _applyMergeFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), envelope, _optimisticKeys);
+			_serverValue = result.value;
+			_dirty = result.modified;
+			_absorbCheck(envelope);
+			return false;
+		}
 		const result = _applyMergeFn(currentValue, _index, envelope, _optimisticKeys);
 		currentValue = result.value;
 		_dirty = result.modified;
 		return result.replaced;
+	}
+
+	/**
+	 * Mark any queue entries whose `optimisticKey` matches the incoming
+	 * server event as `serverConfirmed`. The entry is then skipped during
+	 * `_replayQueue`, and on settle the entry is dropped (rather than
+	 * graduated) since the server already has the change.
+	 *
+	 * Only runs for keyed merge strategies (crud, presence, cursor) and
+	 * for "additive/idempotent" event names. A server `deleted` matching
+	 * an optimistic `created` is NOT treated as confirmation -- those
+	 * combinations are exotic races and fall through to graduate-on-
+	 * success, which is idempotent for crud's index-keyed updates.
+	 *
+	 * @param {{ event: string, data: any }} envelope
+	 */
+	function _absorbCheck(envelope) {
+		if (_optimisticQueue.length === 0) return;
+		const data = envelope.data;
+		if (!data || typeof data !== 'object') return;
+		const k = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
+		if (!k) return;
+		const dataKey = data[k];
+		if (dataKey === undefined) return;
+		let absorbing = false;
+		if (merge === 'crud') absorbing = envelope.event === 'created' || envelope.event === 'updated';
+		else if (merge === 'presence') absorbing = envelope.event === 'join';
+		else if (merge === 'cursor') absorbing = envelope.event === 'update';
+		if (!absorbing) return;
+		for (const entry of _optimisticQueue) {
+			if (entry.optimisticKey === dataKey) entry.serverConfirmed = true;
+		}
+	}
+
+	/**
+	 * Apply one queue entry's change to a (value, index) working pair.
+	 * Returns the new value reference (may be the same as the input
+	 * when mutated in place). Used by both `_replayQueue` (replay
+	 * onto a copy of `_serverValue`) and the success-graduate path
+	 * (apply directly onto `_serverValue` / `_serverIndex`).
+	 *
+	 * For function-shaped changes, the function receives a draft (a
+	 * shallow copy for arrays / objects) and may either mutate it in
+	 * place (returning undefined) or return a new value. The index is
+	 * rebuilt from the resulting value.
+	 *
+	 * For event-shaped changes, the change is applied via
+	 * `_applyMergeFn` -- same merge semantics that server events use.
+	 *
+	 * @param {any} value
+	 * @param {Map<any, number>} index
+	 * @param {any} change
+	 * @returns {any}
+	 */
+	function _applyChange(value, index, change) {
+		if (typeof change === 'function') {
+			const draft = Array.isArray(value)
+				? value.slice()
+				: (value && typeof value === 'object' ? { ...value } : value);
+			const result = change(draft);
+			const next = result === undefined ? draft : result;
+			_rebuildIndexFn(next, index);
+			return next;
+		}
+		const r = _applyMergeFn(value, index, change, _optimisticKeys);
+		return r.value;
+	}
+
+	/**
+	 * Replay the in-flight queue against a fresh copy of `_serverValue`,
+	 * skipping `serverConfirmed` entries. Returns the resulting (value,
+	 * index) pair. Caller writes them into `currentValue` / `_index`.
+	 *
+	 * @returns {{ value: any, index: Map<any, number> }}
+	 */
+	function _replayQueue() {
+		let value = Array.isArray(_serverValue) ? _serverValue.slice() : _serverValue;
+		const index = new Map(_serverIndex);
+		for (const entry of _optimisticQueue) {
+			if (entry.serverConfirmed) continue;
+			value = _applyChange(value, index, entry.change);
+		}
+		return { value, index };
+	}
+
+	/**
+	 * Replay the queue and write the result into `currentValue` / `_index`,
+	 * then publish to the store and record history. Called whenever queue
+	 * state changes during queue mode (mutate add, mutate settle, server
+	 * event arrives).
+	 */
+	function _recomputeDisplay() {
+		const replayed = _replayQueue();
+		currentValue = replayed.value;
+		_index.clear();
+		for (const [k, i] of replayed.index) _index.set(k, i);
+		store.set(currentValue);
+		_recordHistory();
+	}
+
+	/**
+	 * Exit queue mode. Promotes `_serverValue` to `currentValue`, clears
+	 * the parallel server-state slots, publishes to the store, and
+	 * records history. Called when the queue empties after a mutate
+	 * settles.
+	 */
+	function _drainQueue() {
+		currentValue = _serverValue;
+		_index.clear();
+		if (_serverIndex) {
+			for (const [k, i] of _serverIndex) _index.set(k, i);
+		}
+		_serverValue = null;
+		_serverIndex = null;
+		store.set(currentValue);
+		_recordHistory();
 	}
 
 	/** Double-buffer swap pattern: two pre-allocated arrays reused every frame */
@@ -1243,6 +1406,10 @@ function _createStream(path, options, dynamicArgs) {
 		queue.length = 0; // Reuse the array, don't allocate a new one
 		if (!_dirty) return;
 		_dirty = false;
+		if (_optimisticQueue.length > 0) {
+			_recomputeDisplay();
+			return;
+		}
 		if (Array.isArray(currentValue)) currentValue = currentValue.slice();
 		store.set(currentValue);
 		_recordHistory();
@@ -1262,7 +1429,7 @@ function _createStream(path, options, dynamicArgs) {
 		// Replay end marker (adapter 0.4.0 extensions): object with reqId
 		if (envelope.data && typeof envelope.data === 'object' && envelope.data.reqId !== undefined) {
 			if (envelope.data.truncated === true) {
-				// Cache miss — trigger a full refetch (reset seq so we get full data)
+				// Cache miss -- trigger a full refetch (reset seq so we get full data)
 				_lastSeq = null;
 				if (topicUnsub) { topicUnsub(); topicUnsub = null; }
 				initialLoaded = false;
@@ -1270,7 +1437,7 @@ function _createStream(path, options, dynamicArgs) {
 				buffer = [];
 				fetchAndSubscribe();
 			}
-			// Non-truncated end marker — replay complete, nothing to do
+			// Non-truncated end marker -- replay complete, nothing to do
 			return;
 		}
 
@@ -1283,9 +1450,13 @@ function _createStream(path, options, dynamicArgs) {
 			}
 		} else {
 			const replaced = _applyMerge(envelope);
-			if (!replaced && Array.isArray(currentValue)) currentValue = currentValue.slice();
-			store.set(currentValue);
-			_recordHistory();
+			if (_optimisticQueue.length > 0) {
+				_recomputeDisplay();
+			} else {
+				if (!replaced && Array.isArray(currentValue)) currentValue = currentValue.slice();
+				store.set(currentValue);
+				_recordHistory();
+			}
 		}
 	}
 
@@ -1526,7 +1697,7 @@ function _createStream(path, options, dynamicArgs) {
 		subscribe(fn) {
 			if (subCount++ === 0) {
 				if (_pendingCleanup) {
-					// Rapid resub — cancel the pending cleanup, subscription is still alive
+					// Rapid resub -- cancel the pending cleanup, subscription is still alive
 					_pendingCleanup = false;
 				} else {
 				// First subscriber - start the stream
@@ -1643,10 +1814,10 @@ function _createStream(path, options, dynamicArgs) {
 		/**
 		 * Apply an optimistic update + run an async operation with auto-rollback.
 		 * The optimistic change applies synchronously; the asyncOp runs after.
-		 * If the asyncOp resolves, returns its result and leaves the store as-is
-		 * (the server's confirming event will reconcile via the merge strategy).
-		 * If the asyncOp rejects (or throws), the optimistic change is rolled
-		 * back and the rejection propagates to the caller.
+		 * If the asyncOp resolves, returns its result and leaves the change
+		 * baked in (the server's confirming event will reconcile via the
+		 * merge strategy). If the asyncOp rejects (or throws), the optimistic
+		 * change is rolled back and the rejection propagates to the caller.
 		 *
 		 * Two patterns for the optimistic change:
 		 *
@@ -1658,20 +1829,25 @@ function _createStream(path, options, dynamicArgs) {
 		 *    The mutator receives a copy of the current value. It can mutate
 		 *    and return undefined, OR return a new value. Both styles work.
 		 *
-		 * Replay-safety: this uses snapshot/restore. Concurrent optimistic
-		 * mutations or interleaved server events on the same stream can lose
-		 * state on rollback. For the typical pattern (client-generated UUIDs
-		 * with crud merge), the server's confirming event REPLACES the
-		 * optimistic placeholder via key match, so no conflict arises in
-		 * practice -- but apps mixing free-form mutate with concurrent server
-		 * activity should be aware.
+		 * Replay-safety: pending mutations are tracked in an in-flight
+		 * queue and the displayed value is recomputed by replaying the
+		 * queue against the un-overlaid server state after every server
+		 * event and every settle. Concurrent failures roll back cleanly:
+		 * if mutate A and mutate B are both in flight and both fail, the
+		 * displayed state returns to the latest server state with no
+		 * phantom traces of either A or B. Server events with a key
+		 * matching a queue entry's optimistic key absorb the entry, so
+		 * the typical "client generates UUID, server confirms with same
+		 * id" flow does not flicker.
 		 *
-		 * Snapshot is shallow (slice for arrays, object spread otherwise).
-		 * Top-level shape changes (push, pop, filter, splice) are rolled
-		 * back; in-place mutations of individual items
-		 * (e.g. `draft[0].name = 'x'`) are NOT -- the snapshot and draft
-		 * share item references. To mutate an item field, replace the whole
-		 * item: `draft[i] = { ...draft[i], name: 'x' }`.
+		 * Free-form mutators receive a shallow copy of the current value
+		 * (slice for arrays, object spread otherwise). Top-level shape
+		 * changes (push, pop, filter, splice) participate in replay
+		 * cleanly; in-place mutations of individual items
+		 * (e.g. `draft[0].name = 'x'`) are NOT isolated -- the draft and
+		 * the prior items share references. To mutate an item field,
+		 * replace the whole item:
+		 * `draft[i] = { ...draft[i], name: 'x' }`.
 		 *
 		 * @template T
 		 * @param {() => Promise<T> | T} asyncOp Function returning a promise (or value).
@@ -1685,38 +1861,56 @@ function _createStream(path, options, dynamicArgs) {
 			if (optimisticChange == null) {
 				throw new Error('[svelte-realtime] mutate(asyncOp, optimisticChange): optimisticChange is required (use { event, data } or (current) => newValue)');
 			}
-			const snapshot = Array.isArray(currentValue) ? currentValue.slice() : currentValue;
-			let optimisticKey = null;
-
-			if (typeof optimisticChange === 'function') {
-				const draft = Array.isArray(currentValue)
-					? currentValue.slice()
-					: (currentValue && typeof currentValue === 'object' ? { ...currentValue } : currentValue);
-				const result = optimisticChange(draft);
-				const next = result === undefined ? draft : result;
-				currentValue = next;
-				_rebuildIndex();
-				store.set(currentValue);
-			} else if (typeof optimisticChange === 'object' && typeof optimisticChange.event === 'string') {
-				const { event, data } = optimisticChange;
-				if (merge === 'crud' && data && data[key] !== undefined) {
-					_optimisticKeys.add(data[key]);
-					optimisticKey = data[key];
-				}
-				applyEvent({ event, data });
-			} else {
+			const isFunction = typeof optimisticChange === 'function';
+			const isEvent = !isFunction
+				&& typeof optimisticChange === 'object'
+				&& typeof optimisticChange.event === 'string';
+			if (!isFunction && !isEvent) {
 				throw new Error('[svelte-realtime] mutate: optimisticChange must be { event, data } or a function (current) => newValue');
 			}
 
+			let optimisticKey = null;
+			if (isEvent) {
+				const k = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
+				if (k && optimisticChange.data && optimisticChange.data[k] !== undefined) {
+					optimisticKey = optimisticChange.data[k];
+					if (merge === 'crud') _optimisticKeys.add(optimisticKey);
+				}
+			}
+
+			if (_optimisticQueue.length === 0) {
+				_serverValue = Array.isArray(currentValue) ? currentValue.slice() : currentValue;
+				_serverIndex = new Map(_index);
+			}
+			const entry = { change: optimisticChange, optimisticKey, serverConfirmed: false };
+			_optimisticQueue.push(entry);
+			_recomputeDisplay();
+
+			/** @param {boolean} success */
+			const settle = (success) => {
+				const idx = _optimisticQueue.indexOf(entry);
+				if (idx >= 0) _optimisticQueue.splice(idx, 1);
+				if (entry.optimisticKey !== null) _optimisticKeys.delete(entry.optimisticKey);
+				if (success && !entry.serverConfirmed) {
+					_serverValue = _applyChange(
+						_serverValue,
+						/** @type {Map<any, number>} */ (_serverIndex),
+						entry.change
+					);
+				}
+				if (_optimisticQueue.length === 0) _drainQueue();
+				else _recomputeDisplay();
+			};
+
+			let value;
 			try {
-				return await asyncOp();
+				value = await asyncOp();
 			} catch (err) {
-				if (optimisticKey !== null) _optimisticKeys.delete(optimisticKey);
-				currentValue = snapshot;
-				_rebuildIndex();
-				store.set(currentValue);
+				settle(false);
 				throw err;
 			}
+			settle(true);
+			return value;
 		},
 
 		/**

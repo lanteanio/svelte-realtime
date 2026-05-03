@@ -983,7 +983,7 @@ Apply changes to a stream store instantly, then roll back if the server call fai
 
 ### Auto-rollback with `store.mutate()`
 
-`store.mutate(asyncOp, optimisticChange)` wraps the apply-await-rollback pattern. Applies the optimistic change synchronously, awaits the RPC, and on rejection restores the snapshot and re-throws.
+`store.mutate(asyncOp, optimisticChange)` wraps the apply-await-rollback pattern. Applies the optimistic change synchronously, awaits the RPC, and on rejection rolls back and re-throws.
 
 ```js
 // Event-based: server's confirming event reconciles the placeholder by key
@@ -999,7 +999,9 @@ await todos.mutate(
 );
 ```
 
-Returns the result of `asyncOp` on success. The snapshot is shallow: top-level array shape changes (push, pop, filter, splice) roll back; in-place item field mutations (`draft[0].name = 'x'`) do NOT, because the snapshot and the draft share item references. Replace whole items instead: `draft[i] = { ...draft[i], name: 'x' }`.
+Returns the result of `asyncOp` on success. The free-form mutator receives a shallow copy: top-level array shape changes (push, pop, filter, splice) roll back cleanly; in-place item field mutations (`draft[0].name = 'x'`) do NOT, because the draft and the prior items share item references. Replace whole items instead: `draft[i] = { ...draft[i], name: 'x' }`.
+
+**Concurrent mutates roll back independently.** Pending mutations are tracked in an in-flight queue and the displayed value is recomputed by replaying that queue against the un-overlaid server state after every server event and every settle. If `mutate` A and `mutate` B are both in flight and both fail, the displayed state returns to the latest server state with no phantom traces of either A or B. Server events with a key matching a queue entry's optimistic key absorb the entry, so the typical "client generates UUID, server confirms with same id" flow does not flicker.
 
 ### RPC-bound shorthand: `rpc.createOptimistic()`
 

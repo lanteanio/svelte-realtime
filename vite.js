@@ -66,7 +66,7 @@ function _warnUnsafeExports(source, filePath, alreadyHandled) {
  * Returns the decoded content between the quotes with standard JS escape
  * sequences resolved (\n, \t, \r, \b, \f, \v, \0, \\, \', \", \`,
  * \xNN, \uXXXX, \u{XXXXX}, and line continuations).
- * For backtick strings with `${…}` interpolation, returns null and emits
+ * For backtick strings with `${...}` interpolation, returns null and emits
  * a build warning so the user knows why defaults were used.
  * @param {string} s
  * @param {number} start
@@ -96,7 +96,7 @@ function _readStringLiteral(s, start) {
 			else if (next === 'f') { result += '\f'; j++; }
 			else if (next === 'v') { result += '\v'; j++; }
 			else if (next === '0' && !/[0-9]/.test(s[j + 2] || '')) { result += '\0'; j++; }
-			// \xNN — two hex digits
+			// \xNN -- two hex digits
 			else if (next === 'x') {
 				const hex = s.slice(j + 2, j + 4);
 				if (/^[0-9a-fA-F]{2}$/.test(hex)) {
@@ -104,7 +104,7 @@ function _readStringLiteral(s, start) {
 					j += 3;
 				} else { result += next; j++; }
 			}
-			// \uXXXX — four hex digits
+			// \uXXXX -- four hex digits
 			else if (next === 'u' && s[j + 2] !== '{') {
 				const hex = s.slice(j + 2, j + 6);
 				if (/^[0-9a-fA-F]{4}$/.test(hex)) {
@@ -112,7 +112,7 @@ function _readStringLiteral(s, start) {
 					j += 5;
 				} else { result += next; j++; }
 			}
-			// \u{XXXXX} — unicode code point
+			// \u{XXXXX} -- unicode code point
 			else if (next === 'u' && s[j + 2] === '{') {
 				const close = s.indexOf('}', j + 3);
 				if (close > j + 2) {
@@ -127,7 +127,7 @@ function _readStringLiteral(s, start) {
 			continue;
 		}
 		if (ch === q) return { value: result, end: j };
-		// For backtick strings, interpolation cannot be statically analyzed —
+		// For backtick strings, interpolation cannot be statically analyzed --
 		// throw a build error so codegen never silently emits wrong defaults.
 		if (q === '`' && ch === '$' && s[j + 1] === '{') {
 			const snippet = s.slice(start, Math.min(start + 40, s.length)).replace(/\n/g, '\\n');
@@ -143,7 +143,7 @@ function _readStringLiteral(s, start) {
 /**
  * Shared syntax skipper for all JS/TS source scanners.
  * From position `i` in `s`, if the current character starts a string (including
- * template literals with `${…}` interpolation), regex literal, or comment,
+ * template literals with `${...}` interpolation), regex literal, or comment,
  * returns the index of the last character consumed so the caller can resume at
  * `i + 1`. Returns -1 if the character at `i` is not a skippable construct.
  *
@@ -166,7 +166,7 @@ function _skipNonCode(s, i) {
 		return s.length - 1;
 	}
 
-	// Template literals — track ${…} interpolation depth
+	// Template literals -- track ${...} interpolation depth
 	if (ch === '`') {
 		let tmplDepth = 0;
 		for (let j = i + 1; j < s.length; j++) {
@@ -197,7 +197,7 @@ function _skipNonCode(s, i) {
 			for (let j = i + 1; j < s.length; j++) {
 				if (s[j] === '\\') { j++; continue; }
 				if (s[j] === '/') return j;
-				if (s[j] === '\n') break; // malformed — give up
+				if (s[j] === '\n') break; // malformed -- give up
 			}
 		}
 	}
@@ -1013,7 +1013,7 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		}
 	}
 
-	// Detect live.stream() exports — check for dynamic vs static topic
+	// Detect live.stream() exports -- check for dynamic vs static topic
 	STREAM_EXPORT_RE.lastIndex = 0;
 	while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
 		const name = match[1];
@@ -1165,7 +1165,7 @@ function _generateClientStubs(filePath, modulePath, dir) {
 	_warnUnsafeExports(source, `${dir}/${modulePath}`, exportedNames);
 
 	if (exportedNames.size === 0 && !hasGuard) {
-		// Only warn "no live exports" if the file truly has none —
+		// Only warn "no live exports" if the file truly has none --
 		// don't emit this when exports exist but were skipped due to invalid names
 		// (those already got their own warning from _warnUnsafeExports).
 		const hasAnyLiveExport = /export\s+const\s+[\w$]+\s*=\s*live[\s.(]/g.test(source);
@@ -1219,7 +1219,7 @@ function _extractLastOptions(s) {
 		if (ch === '(') { parenDepth++; continue; }
 		if (ch === ')') {
 			if (parenDepth > 0) { parenDepth--; continue; }
-			// Top-level ) — this closes the live.stream() call
+			// Top-level ) -- this closes the live.stream() call
 			return lastContent;
 		}
 		if (ch === '{') {
@@ -1251,7 +1251,7 @@ function _extractTopLevelBraceProp(body, keyName) {
 
 		const skip = _skipNonCode(body, i);
 		if (skip >= 0) {
-			// At depth 0, a skipped quote might be a quoted key — check before skipping
+			// At depth 0, a skipped quote might be a quoted key -- check before skipping
 			if (depth === 0 && (ch === '\'' || ch === '"')) {
 				const rest = body.slice(i);
 				const qm = rest.match(new RegExp(`^(['"])${keyName}\\1\\s*:\\s*`));
@@ -1804,7 +1804,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			if (!registered.has(name)) {
 				registered.add(name);
 				const importPath = JSON.stringify(normalizedPath);
-				// Register the data stream — inherit file-level guard via explicit module path
+				// Register the data stream -- inherit file-level guard via explicit module path
 				lines.push(`__register('${rel}/${name}/__data', __L(() => import(${importPath}).then(m => m.${name}.__dataStream)), '${rel}');`);
 				// Register presence stream if present
 				lines.push(`__register('${rel}/${name}/__presence', __L(() => import(${importPath}).then(m => m.${name}.__presenceStream)), '${rel}');`);
@@ -1970,7 +1970,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 	if (files.length === 0) return '';
 
 	const declarations = [
-		'// Auto-generated by svelte-realtime — do not edit',
+		'// Auto-generated by svelte-realtime -- do not edit',
 		'// Provides client-side types for $live/ imports',
 		''
 	];
@@ -2001,7 +2001,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
-		// Detect live.validated() exports — extract real types for TS
+		// Detect live.validated() exports -- extract real types for TS
 		VALIDATED_EXPORT_RE.lastIndex = 0;
 		while ((match = VALIDATED_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
@@ -2118,7 +2118,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
-		// Detect live.rateLimit() exports — extract real types for TS
+		// Detect live.rateLimit() exports -- extract real types for TS
 		RATE_LIMIT_EXPORT_RE.lastIndex = 0;
 		while ((match = RATE_LIMIT_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
@@ -2356,7 +2356,7 @@ function _stripParamDefaults(params) {
 
 function _isCtxParam(param) {
 	const trimmed = param.trim();
-	// Destructured first param — never auto-classify. We cannot distinguish
+	// Destructured first param -- never auto-classify. We cannot distinguish
 	// ctx destructuring from payload-object destructuring by property names.
 	if (trimmed.startsWith('{')) return false;
 	// Extract the bare name (strip type annotation, default value)
@@ -2449,7 +2449,7 @@ function _isFirstArgFunction(source, start) {
 					while (k < source.length && /\s/.test(source[k])) k++;
 					if (source[k] === '=' && source[k + 1] === '>') return true;
 					if (source[k] === ':') {
-						// Has return type — scan for => at depth 0
+						// Has return type -- scan for => at depth 0
 						k++;
 						let retDepth = 0;
 						for (; k < source.length; k++) {
@@ -2586,7 +2586,7 @@ function _parseCallbackSignature(source, start) {
 	while (scanIdx < source.length && /\s/.test(source[scanIdx])) scanIdx++;
 	let retType = null;
 	if (source[scanIdx] === ':') {
-		// Has return type annotation — scan for => at depth 0
+		// Has return type annotation -- scan for => at depth 0
 		scanIdx++; // skip ':'
 		while (scanIdx < source.length && /\s/.test(source[scanIdx])) scanIdx++;
 		const retStart = scanIdx;

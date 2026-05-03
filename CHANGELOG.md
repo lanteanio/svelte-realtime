@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`store.mutate(asyncOp, optimisticChange)` now uses always-on queue replay.** Pending mutations are tracked in an in-flight queue and the displayed value is recomputed by replaying that queue against the un-overlaid server state after every server event and every settle. The public API is unchanged; the win is that concurrent mutates roll back independently. If A and B are both in flight and both fail, the displayed state returns to the latest server state with no phantom traces of either A or B (the prior snapshot/restore approach could leak state between overlapping rollbacks). Server events with a key matching a queue entry's optimistic key absorb the entry, so the typical "client generates UUID, server confirms with same id" flow continues to reconcile without flicker.
+
+  Steady-state hot path is unchanged: when no `mutate` is in flight, the per-event work is identical to before plus a single `_optimisticQueue.length === 0` branch check. Free-form mutator semantics are also unchanged: shallow draft (slice for arrays, object spread otherwise), top-level shape changes participate in replay cleanly, in-place item field mutations are NOT isolated.
+
 ### Added
 
 - **Bounded wait for `live.lock` via `maxWaitMs`.** Pass `maxWaitMs` (in the config-object form) to bound how long a queued caller will wait before giving up. On timeout the wrapper rejects with `LiveError('LOCK_TIMEOUT', ...)` so the client receives a typed error with `.code === 'LOCK_TIMEOUT'`, plus `.key` and `.maxWaitMs` fields for observability. The current holder's handler is **not** interrupted; only the waiting caller gives up. Subsequent waiters on the same key are unaffected and continue in their original FIFO position.

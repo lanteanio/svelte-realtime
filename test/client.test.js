@@ -685,6 +685,427 @@ describe('__stream() mutate', () => {
 	});
 });
 
+// -- __stream() mutate queue-replay correctness -------------------------------
+//
+// Covers the always-on queue-replay machinery: server events apply to an
+// un-overlaid `_serverValue` while a mutate is in flight, the displayed
+// value is recomputed by replaying the queue against `_serverValue`, and
+// the queue drains back to single-value mode when all mutates settle. The
+// big correctness win is concurrent mutates: today's snapshot/restore loses
+// state when two overlapping mutates both fail; queue-replay does not.
+
+describe('__stream() mutate queue-replay correctness', () => {
+	async function setupCrudStream(path, topic, initial = []) {
+		const store = __stream(path, { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: initial, topic, merge: 'crud', key: 'id' });
+		return { store, values, unsub, topic };
+	}
+
+	function deferred() {
+		let resolve, reject;
+		const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+		return { promise, resolve, reject };
+	}
+
+	// -- concurrent mutate scenarios (the bug this design closes) ----------
+
+	it('concurrent: A and B both fail leaves no phantom traces', async () => {
+		const ctx = await setupCrudStream('qr/both-fail', 't-bf', [{ id: 1, name: 'X' }]);
+		const dA = deferred();
+		const dB = deferred();
+		const a = ctx.store.mutate(() => dA.promise, { event: 'created', data: { id: 'a', name: 'A' } });
+		const b = ctx.store.mutate(() => dB.promise, { event: 'created', data: { id: 'b', name: 'B' } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, name: 'X' }, { id: 'a', name: 'A' }, { id: 'b', name: 'B' }
+		]);
+
+		dA.reject(new Error('fail-a'));
+		await expect(a).rejects.toThrow('fail-a');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, name: 'X' }, { id: 'b', name: 'B' }
+		]);
+
+		dB.reject(new Error('fail-b'));
+		await expect(b).rejects.toThrow('fail-b');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, name: 'X' }]);
+		ctx.unsub();
+	});
+
+	it('concurrent: A succeeds, B fails leaves only A visible', async () => {
+		const ctx = await setupCrudStream('qr/a-ok-b-fail', 't-aobf', []);
+		const dA = deferred();
+		const dB = deferred();
+		const a = ctx.store.mutate(() => dA.promise, { event: 'created', data: { id: 'a', name: 'A' } });
+		const b = ctx.store.mutate(() => dB.promise, { event: 'created', data: { id: 'b', name: 'B' } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }
+		]);
+
+		dA.resolve('ok-a');
+		await a;
+		// 'a' graduated to server state; 'b' still in queue
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }
+		]);
+
+		dB.reject(new Error('fail-b'));
+		await expect(b).rejects.toThrow('fail-b');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 'a', name: 'A' }]);
+		ctx.unsub();
+	});
+
+	it('concurrent: A fails, B succeeds leaves only B visible', async () => {
+		const ctx = await setupCrudStream('qr/a-fail-b-ok', 't-afbo', []);
+		const dA = deferred();
+		const dB = deferred();
+		const a = ctx.store.mutate(() => dA.promise, { event: 'created', data: { id: 'a', name: 'A' } });
+		const b = ctx.store.mutate(() => dB.promise, { event: 'created', data: { id: 'b', name: 'B' } });
+
+		dA.reject(new Error('fail-a'));
+		await expect(a).rejects.toThrow('fail-a');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 'b', name: 'B' }]);
+
+		dB.resolve('ok-b');
+		await b;
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 'b', name: 'B' }]);
+		ctx.unsub();
+	});
+
+	it('concurrent: A and B both succeed leaves both visible (no double-apply)', async () => {
+		const ctx = await setupCrudStream('qr/both-ok', 't-bo', []);
+		const dA = deferred();
+		const dB = deferred();
+		const a = ctx.store.mutate(() => dA.promise, { event: 'created', data: { id: 'a', name: 'A' } });
+		const b = ctx.store.mutate(() => dB.promise, { event: 'created', data: { id: 'b', name: 'B' } });
+
+		dA.resolve(); dB.resolve();
+		await Promise.all([a, b]);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }
+		]);
+		ctx.unsub();
+	});
+
+	it('three concurrent mutates with mixed outcomes interleave correctly', async () => {
+		const ctx = await setupCrudStream('qr/three', 't-three', []);
+		const d1 = deferred(); const d2 = deferred(); const d3 = deferred();
+		const m1 = ctx.store.mutate(() => d1.promise, { event: 'created', data: { id: 1, n: 'one' } });
+		const m2 = ctx.store.mutate(() => d2.promise, { event: 'created', data: { id: 2, n: 'two' } });
+		const m3 = ctx.store.mutate(() => d3.promise, { event: 'created', data: { id: 3, n: 'three' } });
+
+		d2.reject(new Error('fail-2'));
+		await expect(m2).rejects.toThrow();
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, n: 'one' }, { id: 3, n: 'three' }
+		]);
+
+		d1.resolve(); await m1;
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, n: 'one' }, { id: 3, n: 'three' }
+		]);
+
+		d3.resolve(); await m3;
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, n: 'one' }, { id: 3, n: 'three' }
+		]);
+		ctx.unsub();
+	});
+
+	// -- server event interleaving while mutate is in flight ---------------
+
+	it('server event for unrelated key interleaves with optimistic mutate', async () => {
+		const ctx = await setupCrudStream('qr/interleave', 't-il', []);
+		const d = deferred();
+		const m = ctx.store.mutate(() => d.promise, { event: 'created', data: { id: 'opt', n: 'O' } });
+		simulateTopicMessage('t-il', { event: 'created', data: { id: 'srv', n: 'S' } });
+		// Both visible: server entry under 'srv', optimistic still under 'opt'
+		const last = ctx.values[ctx.values.length - 1];
+		expect(last.length).toBe(2);
+		expect(last.some((x) => x.id === 'opt')).toBe(true);
+		expect(last.some((x) => x.id === 'srv')).toBe(true);
+
+		d.resolve(); await m;
+		// After settle, server entry preserved AND graduated optimistic preserved
+		const final = ctx.values[ctx.values.length - 1];
+		expect(final.length).toBe(2);
+		expect(final.some((x) => x.id === 'opt')).toBe(true);
+		expect(final.some((x) => x.id === 'srv')).toBe(true);
+		ctx.unsub();
+	});
+
+	it('server event for matching key absorbs the optimistic entry (no flicker)', async () => {
+		const ctx = await setupCrudStream('qr/absorb', 't-ab', []);
+		const d = deferred();
+		const m = ctx.store.mutate(
+			() => d.promise,
+			{ event: 'created', data: { id: 't1', name: 'Pending' } }
+		);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Pending' }]);
+
+		simulateTopicMessage('t-ab', { event: 'created', data: { id: 't1', name: 'Confirmed' } });
+		// Server's value wins, optimistic absorbed
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Confirmed' }]);
+
+		d.resolve(); await m;
+		// asyncOp success on absorbed entry: just dropped, no graduate-overwrite
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Confirmed' }]);
+		ctx.unsub();
+	});
+
+	it('absorbed optimistic on asyncOp failure: server-confirmed value retained', async () => {
+		const ctx = await setupCrudStream('qr/abs-fail', 't-af', []);
+		const d = deferred();
+		const m = ctx.store.mutate(
+			() => d.promise,
+			{ event: 'created', data: { id: 't1', name: 'Pending' } }
+		);
+		simulateTopicMessage('t-af', { event: 'created', data: { id: 't1', name: 'Confirmed' } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Confirmed' }]);
+
+		d.reject(new Error('boom'));
+		await expect(m).rejects.toThrow('boom');
+		// Server already accepted; failure does not roll back the server's confirmation
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Confirmed' }]);
+		ctx.unsub();
+	});
+
+	it('server deleted event for matching key does NOT absorb optimistic created', async () => {
+		const ctx = await setupCrudStream('qr/del-no-absorb', 't-dna', [{ id: 1 }]);
+		const d = deferred();
+		const m = ctx.store.mutate(
+			() => d.promise,
+			{ event: 'created', data: { id: 't1', name: 'Opt' } }
+		);
+		// Server deletes a different key while optimistic in flight
+		simulateTopicMessage('t-dna', { event: 'deleted', data: { id: 1 } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Opt' }]);
+
+		d.resolve(); await m;
+		// Optimistic graduated; server delete persisted
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 't1', name: 'Opt' }]);
+		ctx.unsub();
+	});
+
+	it('refreshed event during in-flight mutate replaces server state but keeps optimistic on top', async () => {
+		const ctx = await setupCrudStream('qr/refresh', 't-rf', [{ id: 1, n: 'old' }]);
+		const d = deferred();
+		const m = ctx.store.mutate(
+			() => d.promise,
+			{ event: 'created', data: { id: 'opt', n: 'O' } }
+		);
+		simulateTopicMessage('t-rf', { event: 'refreshed', data: [{ id: 99, n: 'fresh' }] });
+		// _serverValue replaced; optimistic still applied on top
+		const after = ctx.values[ctx.values.length - 1];
+		expect(after.some((x) => x.id === 99 && x.n === 'fresh')).toBe(true);
+		expect(after.some((x) => x.id === 'opt')).toBe(true);
+		expect(after.length).toBe(2);
+
+		d.resolve(); await m;
+		const final = ctx.values[ctx.values.length - 1];
+		expect(final.some((x) => x.id === 99)).toBe(true);
+		expect(final.some((x) => x.id === 'opt')).toBe(true);
+		expect(final.length).toBe(2);
+		ctx.unsub();
+	});
+
+	// -- queue lifecycle / drain ------------------------------------------
+
+	it('queue empty before first mutate: hot path identical to today', async () => {
+		const ctx = await setupCrudStream('qr/hot', 't-hot', [{ id: 1 }]);
+		simulateTopicMessage('t-hot', { event: 'created', data: { id: 2 } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+		ctx.unsub();
+	});
+
+	it('queue drains to single-value mode after all mutates settle', async () => {
+		const ctx = await setupCrudStream('qr/drain', 't-drain', []);
+		await ctx.store.mutate(() => 'ok', { event: 'created', data: { id: 'a' } });
+		// After drain, server events take the hot path
+		simulateTopicMessage('t-drain', { event: 'created', data: { id: 'b' } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 'a' }, { id: 'b' }]);
+		ctx.unsub();
+	});
+
+	// -- free-form function changes ---------------------------------------
+
+	it('free-form mutator: concurrent fails leave no phantom changes', async () => {
+		const ctx = await setupCrudStream('qr/ff-fail', 't-ff', [{ id: 1, n: 'X' }]);
+		const dA = deferred(); const dB = deferred();
+		const a = ctx.store.mutate(() => dA.promise, (cur) => [...cur, { id: 'a', n: 'A' }]);
+		const b = ctx.store.mutate(() => dB.promise, (cur) => [...cur, { id: 'b', n: 'B' }]);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, n: 'X' }, { id: 'a', n: 'A' }, { id: 'b', n: 'B' }
+		]);
+
+		dA.reject(new Error('fa'));
+		await expect(a).rejects.toThrow();
+		expect(ctx.values[ctx.values.length - 1]).toEqual([
+			{ id: 1, n: 'X' }, { id: 'b', n: 'B' }
+		]);
+
+		dB.reject(new Error('fb'));
+		await expect(b).rejects.toThrow();
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1, n: 'X' }]);
+		ctx.unsub();
+	});
+
+	it('free-form mutator: success graduates the change onto server state', async () => {
+		const ctx = await setupCrudStream('qr/ff-ok', 't-ffo', [{ id: 1 }, { id: 2 }]);
+		await ctx.store.mutate(
+			() => 'ok',
+			(cur) => cur.filter((x) => x.id !== 2)
+		);
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }]);
+		// Server event after drain takes hot path on the post-graduate state
+		simulateTopicMessage('t-ffo', { event: 'created', data: { id: 3 } });
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }, { id: 3 }]);
+		ctx.unsub();
+	});
+
+	// -- per-merge-strategy: latest, set, presence, cursor ----------------
+
+	it('latest merge: optimistic push + concurrent fail rolls back cleanly', async () => {
+		const store = __stream('qr/latest', { merge: 'latest', max: 10 });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: ['x'], topic: 't-lat', merge: 'latest' });
+
+		const dA = deferred();
+		const dB = deferred();
+		const a = store.mutate(() => dA.promise, { event: 'push', data: 'a' });
+		const b = store.mutate(() => dB.promise, { event: 'push', data: 'b' });
+		expect(values[values.length - 1]).toEqual(['x', 'a', 'b']);
+
+		dA.reject(new Error('fa'));
+		await expect(a).rejects.toThrow();
+		expect(values[values.length - 1]).toEqual(['x', 'b']);
+
+		dB.reject(new Error('fb'));
+		await expect(b).rejects.toThrow();
+		expect(values[values.length - 1]).toEqual(['x']);
+		unsub();
+	});
+
+	it('set merge: optimistic replacement + fail rolls back to server state', async () => {
+		const store = __stream('qr/setm', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: { count: 10 }, topic: 't-set', merge: 'set' });
+
+		const d = deferred();
+		const p = store.mutate(() => d.promise, (cur) => ({ ...cur, count: 99 }));
+		expect(values[values.length - 1]).toEqual({ count: 99 });
+
+		d.reject(new Error('boom'));
+		await expect(p).rejects.toThrow();
+		expect(values[values.length - 1]).toEqual({ count: 10 });
+		unsub();
+	});
+
+	it('presence merge: optimistic join + matching server join absorbs', async () => {
+		const store = __stream('qr/pres', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 't-pres', merge: 'presence' });
+
+		const d = deferred();
+		const p = store.mutate(
+			() => d.promise,
+			{ event: 'join', data: { key: 'u1', name: 'Pending' } }
+		);
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', name: 'Pending' }]);
+
+		simulateTopicMessage('t-pres', { event: 'join', data: { key: 'u1', name: 'Confirmed' } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', name: 'Confirmed' }]);
+
+		d.resolve(); await p;
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', name: 'Confirmed' }]);
+		unsub();
+	});
+
+	it('presence merge: server leave during in-flight optimistic join does NOT absorb', async () => {
+		const store = __stream('qr/pres2', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ key: 'u0' }], topic: 't-pres2', merge: 'presence' });
+
+		const d = deferred();
+		const p = store.mutate(() => d.promise, { event: 'join', data: { key: 'u1', name: 'New' } });
+		simulateTopicMessage('t-pres2', { event: 'leave', data: { key: 'u0' } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', name: 'New' }]);
+
+		d.resolve(); await p;
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', name: 'New' }]);
+		unsub();
+	});
+
+	it('cursor merge: optimistic update + matching server update absorbs', async () => {
+		const store = __stream('qr/cur', { merge: 'cursor' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 't-cur', merge: 'cursor' });
+
+		const d = deferred();
+		const p = store.mutate(
+			() => d.promise,
+			{ event: 'update', data: { key: 'c1', x: 1 } }
+		);
+		simulateTopicMessage('t-cur', { event: 'update', data: { key: 'c1', x: 2 } });
+		expect(values[values.length - 1]).toEqual([{ key: 'c1', x: 2 }]);
+
+		d.resolve(); await p;
+		expect(values[values.length - 1]).toEqual([{ key: 'c1', x: 2 }]);
+		unsub();
+	});
+
+	// -- error propagation contract ---------------------------------------
+
+	it('asyncOp result is returned on success (Promise resolution preserved)', async () => {
+		const ctx = await setupCrudStream('qr/result', 't-res', []);
+		const result = await ctx.store.mutate(
+			() => Promise.resolve({ id: 't', server: true }),
+			{ event: 'created', data: { id: 't', client: true } }
+		);
+		expect(result).toEqual({ id: 't', server: true });
+		ctx.unsub();
+	});
+
+	it('asyncOp rejection is rethrown unchanged', async () => {
+		const ctx = await setupCrudStream('qr/reject', 't-rj', []);
+		const err = new Error('original');
+		await expect(
+			ctx.store.mutate(() => Promise.reject(err), { event: 'created', data: { id: 'x' } })
+		).rejects.toBe(err);
+		ctx.unsub();
+	});
+
+	it('asyncOp synchronous throw rolls back and rethrows', async () => {
+		const ctx = await setupCrudStream('qr/throw', 't-th', [{ id: 1 }]);
+		await expect(
+			ctx.store.mutate(
+				() => { throw new Error('sync-throw'); },
+				{ event: 'created', data: { id: 't' } }
+			)
+		).rejects.toThrow('sync-throw');
+		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }]);
+		ctx.unsub();
+	});
+});
+
 // -- __rpc() createOptimistic --------------------------------------------------
 
 describe('__rpc() createOptimistic', () => {
@@ -2479,7 +2900,7 @@ describe('stream pauseHistory / resumeHistory', () => {
 
 		store.pauseHistory();
 
-		// Several changes while paused — no snapshots
+		// Several changes while paused -- no snapshots
 		simulateTopicMessage('pause2', { event: 'set', data: 2 });
 		simulateTopicMessage('pause2', { event: 'set', data: 3 });
 		expect(value).toBe(3);
