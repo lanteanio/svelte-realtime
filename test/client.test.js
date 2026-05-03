@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fc from 'fast-check';
 
-let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest;
+let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters;
 let topicCallbacks;
 let statusCallbacks;
 let failureCallbacks;
@@ -205,6 +205,10 @@ beforeEach(async () => {
 	_setCapsForTest = mod._setCapsForTest;
 	_resetCapsForTest = mod._resetCapsForTest;
 	_resetCapsForTest();
+	assert = mod.assert;
+	getAssertionCounters = mod.getAssertionCounters;
+	_resetAssertCounters = mod._resetAssertCounters;
+	_resetAssertCounters();
 });
 
 // -- __rpc (Finding 1 regression) ---------------------------------------------
@@ -5296,5 +5300,41 @@ describe('MAX_OPTIMISTIC_QUEUE_DEPTH (REJECT)', () => {
 		await expect(op4).resolves.toEqual({ id: 't4' });
 
 		ctx.unsub();
+	});
+});
+
+// -- Production assertions (client) -------------------------------------------
+
+describe('assert() helper (client)', () => {
+	let errSpy;
+
+	beforeEach(() => {
+		_resetAssertCounters();
+		errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		errSpy.mockRestore();
+		_resetAssertCounters();
+	});
+
+	it('returns silently when condition is true', () => {
+		assert(true, 'realtime/test.cat-x');
+		expect(getAssertionCounters().get('realtime/test.cat-x')).toBeUndefined();
+		expect(errSpy).not.toHaveBeenCalled();
+	});
+
+	it('throws in test mode and increments counter on violation', () => {
+		expect(() => assert(false, 'realtime/test.cat-y', { v: 2 })).toThrow(/realtime\/test\.cat-y/);
+		expect(getAssertionCounters().get('realtime/test.cat-y')).toBe(1);
+		const logged = errSpy.mock.calls[0][0];
+		expect(logged).toContain('[realtime/assert]');
+		expect(logged).toContain('"v":2');
+	});
+
+	it('counter accumulates across violations per category', () => {
+		try { assert(false, 'realtime/test.cat-z'); } catch {}
+		try { assert(false, 'realtime/test.cat-z'); } catch {}
+		expect(getAssertionCounters().get('realtime/test.cat-z')).toBe(2);
 	});
 });

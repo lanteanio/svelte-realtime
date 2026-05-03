@@ -4,6 +4,70 @@ const textDecoder = new TextDecoder();
 const _validPathRe = /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)+$/;
 const _validSegmentRe = /^[a-zA-Z0-9_]+$/;
 
+// -- Production-assertion helper --------------------------------------------
+//
+// Mirror of the adapter / extensions assert shape from 0.5.0-next.8.
+// Categories use the `realtime/` prefix so the Prometheus counter
+// `svelte_realtime_assertion_violations_total{category}` does not collide
+// with the adapter's `extensions_assertion_violations_total{category}`.
+//
+// Behavior:
+//   - On violation: increments the per-category in-memory counter, fires the
+//     Prometheus counter (if wired via `live.metrics(...)`), and logs a
+//     structured `[realtime/assert] {...}` line.
+//   - In test mode (VITEST or NODE_ENV=test) the assert THROWS so vitest
+//     surfaces the failure as a test error.
+//   - In production it does NOT throw - a thrown exception inside a publish
+//     hot-path microtask or a subscribe callback could leave a half-applied
+//     bookkeeping update or a corrupted index. Counter + log give us
+//     observability without the corruption risk.
+
+const _IS_TEST_MODE = !!(typeof process !== 'undefined' && process && process.env && (process.env.VITEST || process.env.NODE_ENV === 'test'));
+
+/** @type {Map<string, number>} Per-category violation counts; survives the lifetime of the process. */
+const _assertCounters = new Map();
+
+/**
+ * Production-safe invariant check.
+ *
+ * @param {boolean} cond - The condition that should hold. Falsy = violation.
+ * @param {string} category - Stable category string for the metric label,
+ *   prefixed with `realtime/`. Convention: `realtime/<module>.<invariant>`.
+ * @param {Record<string, unknown>} [context] - Serialisable extra context
+ *   for the structured log entry. Caller responsibility to omit PII.
+ */
+export function assert(cond, category, context) {
+	if (cond) return;
+	_assertCounters.set(category, (_assertCounters.get(category) || 0) + 1);
+	if (_metricsInstruments && _metricsInstruments.assertions) {
+		try { _metricsInstruments.assertions.inc({ category }); } catch { /* metrics best-effort */ }
+	}
+	const payload = JSON.stringify(context === undefined ? { category } : { category, context });
+	console.error('[realtime/assert] ' + payload);
+	if (_IS_TEST_MODE) {
+		throw new Error('realtime assertion failed: ' + category + ' ' + payload);
+	}
+}
+
+/**
+ * Read the live counter Map for assertion violations. Useful for ops
+ * dashboards or tests that want to verify a category was hit without
+ * relying on log scraping.
+ *
+ * @returns {Map<string, number>}
+ */
+export function getAssertionCounters() {
+	return _assertCounters;
+}
+
+/**
+ * Reset the assertion counters. Tests only.
+ * @internal
+ */
+export function _resetAssertCounters() {
+	_assertCounters.clear();
+}
+
 // -- Bounded-by-default capacity caps (server side) -------------------------
 // Every per-process Map / Set with caller-driven growth is bounded. Numbers
 // are deliberately generous - far above any healthy single-instance workload
@@ -1096,6 +1160,10 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 	if (removedFromTopic) {
 		const wsSet = _topicWsCounts.get(topic);
 		if (wsSet) {
+			// subscription.bookkeeping invariant: if owners.length hit 0 for
+			// this ws+topic, the wsSet must have tracked this ws. Mismatch
+			// means a stale tracking entry or a double-remove.
+			assert(wsSet.has(ws), 'realtime/subscription.bookkeeping.ws-was-tracked', { topic, wsSetSize: wsSet.size });
 			wsSet.delete(ws);
 			remainingSubscribers = wsSet.size;
 			if (wsSet.size === 0) {
@@ -2059,6 +2127,9 @@ function _createInMemoryLock() {
 	function advance(key, state) {
 		while (state.queue.length > 0) {
 			const waiter = /** @type {_Waiter} */ (state.queue.shift());
+			// lock.waiter invariant: every queued waiter has resolve+reject
+			// captured at push time. Mismatch indicates corrupted queue state.
+			assert(typeof waiter.resolve === 'function' && typeof waiter.reject === 'function', 'realtime/lock.waiter.shape', { hasResolve: typeof waiter.resolve === 'function', hasReject: typeof waiter.reject === 'function' });
 			if (waiter.cancelled) continue;
 			if (waiter.timer != null) {
 				clearTimeout(waiter.timer);
@@ -2496,6 +2567,11 @@ export const pushHooks = {
 		if (userId == null) return;
 		_wsToPushUserId.delete(ws);
 		const entry = _pushRegistry.get(userId);
+		// push-registry invariant: if userId was tracked in _wsToPushUserId,
+		// the registry should still have an entry for that userId (possibly
+		// pointing at a different ws if the user reconnected on another
+		// device). Missing entry means an external mutation cleared it.
+		assert(entry !== undefined, 'realtime/push-registry.entry-tracked', { userIdLen: userId.length });
 		if (entry && entry.ws === ws) _pushRegistry.delete(userId);
 	}
 };
@@ -3398,7 +3474,7 @@ live.room = function room(config) {
 	return roomExport;
 };
 
-/** @type {{ rpcCount?: any, rpcDuration?: any, rpcErrors?: any, streamGauge?: any, cronCount?: any, cronErrors?: any } | null} */
+/** @type {{ rpcCount?: any, rpcDuration?: any, rpcErrors?: any, streamGauge?: any, cronCount?: any, cronErrors?: any, assertions?: any } | null} */
 let _metricsInstruments = null;
 
 /** Valid pressure reasons accepted in admission rules. Mirrors the adapter's PressureReason enum. */
@@ -3503,7 +3579,8 @@ live.metrics = function metrics(registry) {
 		rpcErrors: registry.counter({ name: 'svelte_realtime_rpc_errors_total', help: 'Total RPC errors', labelNames: ['path', 'code'] }),
 		streamGauge: registry.gauge({ name: 'svelte_realtime_stream_subscriptions', help: 'Active stream subscriptions' }),
 		cronCount: registry.counter({ name: 'svelte_realtime_cron_total', help: 'Total cron executions', labelNames: ['path', 'status'] }),
-		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] })
+		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] }),
+		assertions: registry.counter({ name: 'svelte_realtime_assertion_violations_total', help: 'Production-assertion violations by category', labelNames: ['category'] })
 	};
 };
 
@@ -4419,6 +4496,9 @@ export function handleRpc(ws, data, platform, options) {
 	}
 
 	if (typeof msg.rpc !== 'string' || typeof msg.id !== 'string') return false;
+
+	// envelope.shape invariant: rpc and id must be non-empty for routing
+	assert(msg.rpc.length > 0 && msg.id.length > 0, 'realtime/handleRpc.envelope.non-empty', { rpcLen: msg.rpc.length, idLen: msg.id.length });
 
 	// Validated as RPC - handle asynchronously, return true synchronously
 	_executeRpc(ws, msg, platform, options);

@@ -21,6 +21,43 @@ const _textEncoder = new TextEncoder();
 /** Max in-flight optimistic mutations per stream. REJECT on cap: `mutate()` throws synchronously. Bounds the worst-case display-recompute cost during slow-server scenarios. Matches svelte-adapter-uws `MAX_QUEUE_SIZE` (the per-connection client send queue) since both serve as UI-layer in-flight burglar alarms. */
 export const MAX_OPTIMISTIC_QUEUE_DEPTH = 1_000;
 
+// -- Production-assertion helper (client side) ------------------------------
+// Mirror of the server.js helper but without Prometheus wiring (the client
+// runs in the browser; metrics live on the server). Categories use the
+// `realtime/` prefix so clients piping logs to a backend can correlate
+// with the server's assertion categories.
+
+const _IS_TEST_MODE = !!(typeof process !== 'undefined' && process && process.env && (process.env.VITEST || process.env.NODE_ENV === 'test'));
+
+/** @type {Map<string, number>} */
+const _assertCounters = new Map();
+
+/**
+ * Production-safe invariant check for the client side.
+ * @param {boolean} cond
+ * @param {string} category - prefixed `realtime/`
+ * @param {Record<string, unknown>} [context]
+ */
+export function assert(cond, category, context) {
+	if (cond) return;
+	_assertCounters.set(category, (_assertCounters.get(category) || 0) + 1);
+	const payload = JSON.stringify(context === undefined ? { category } : { category, context });
+	console.error('[realtime/assert] ' + payload);
+	if (_IS_TEST_MODE) {
+		throw new Error('realtime assertion failed: ' + category + ' ' + payload);
+	}
+}
+
+/** @returns {Map<string, number>} */
+export function getAssertionCounters() {
+	return _assertCounters;
+}
+
+/** @internal */
+export function _resetAssertCounters() {
+	_assertCounters.clear();
+}
+
 let _maxOptimisticQueueDepth = MAX_OPTIMISTIC_QUEUE_DEPTH;
 
 /**
@@ -1258,6 +1295,10 @@ function _createStream(path, options, dynamicArgs) {
 	function _applyMerge(envelope) {
 		if (envelope.seq !== undefined) _lastSeq = envelope.seq;
 		if (_optimisticQueue.length > 0) {
+			// optimistic.queue invariant: when queue is non-empty the un-overlaid
+			// server state pair (_serverValue, _serverIndex) must be set. Both
+			// are paired across mutate-push and _drainQueue.
+			assert(_serverValue !== null && _serverIndex !== null, 'realtime/optimistic.queue.serverValue-iff-nonempty', { queueLen: _optimisticQueue.length, hasServerValue: _serverValue !== null, hasServerIndex: _serverIndex !== null });
 			const result = _applyMergeFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), envelope, _optimisticKeys);
 			_serverValue = result.value;
 			_dirty = result.modified;
@@ -1375,6 +1416,9 @@ function _createStream(path, options, dynamicArgs) {
 	 * settles.
 	 */
 	function _drainQueue() {
+		// drain-precondition invariant: _drainQueue is the queue-mode exit
+		// path; callers must only invoke it with an empty queue.
+		assert(_optimisticQueue.length === 0, 'realtime/optimistic.queue.drain-precondition', { queueLen: _optimisticQueue.length });
 		currentValue = _serverValue;
 		_index.clear();
 		if (_serverIndex) {
@@ -1928,6 +1972,10 @@ function _createStream(path, options, dynamicArgs) {
 
 			/** @param {boolean} success */
 			const settle = (success) => {
+				// optimistic.queue invariant: settle is the only consumer that
+				// removes its own entry; the queue-replay refactor relies on
+				// the entry shape staying intact between push and settle.
+				assert(entry.change != null && typeof entry.serverConfirmed === 'boolean', 'realtime/optimistic.queue.entry.shape', { hasChange: entry.change != null, serverConfirmedType: typeof entry.serverConfirmed });
 				const idx = _optimisticQueue.indexOf(entry);
 				if (idx >= 0) _optimisticQueue.splice(idx, 1);
 				if (entry.optimisticKey !== null) _optimisticKeys.delete(entry.optimisticKey);

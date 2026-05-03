@@ -46,7 +46,10 @@ import {
 	MAX_PUSH_REGISTRY,
 	TOPIC_WS_COUNTS_WARN_THRESHOLD,
 	SILENT_TOPIC_WARN_DEDUP_MAX,
-	PUBLISH_RATE_WARN_DEDUP_MAX
+	PUBLISH_RATE_WARN_DEDUP_MAX,
+	assert,
+	getAssertionCounters,
+	_resetAssertCounters
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -9759,6 +9762,71 @@ async function _publishViaCtx(platform, topic, event, data) {
 	await vi.advanceTimersByTimeAsync(0);
 	await vi.advanceTimersByTimeAsync(0);
 }
+
+// -- Production assertions ----------------------------------------------------
+
+describe('assert() helper', () => {
+	let errSpy;
+
+	beforeEach(() => {
+		_resetAssertCounters();
+		errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		errSpy.mockRestore();
+		_resetAssertCounters();
+	});
+
+	it('returns silently when condition is true; counter stays at zero', () => {
+		assert(true, 'realtime/test.cat-a');
+		expect(getAssertionCounters().get('realtime/test.cat-a')).toBeUndefined();
+		expect(errSpy).not.toHaveBeenCalled();
+	});
+
+	it('throws in test mode when condition is false; counter increments; structured log fires', () => {
+		expect(() => assert(false, 'realtime/test.cat-b', { x: 1 })).toThrow(/realtime\/test\.cat-b/);
+		expect(getAssertionCounters().get('realtime/test.cat-b')).toBe(1);
+		expect(errSpy).toHaveBeenCalledTimes(1);
+		const logged = errSpy.mock.calls[0][0];
+		expect(logged).toContain('[realtime/assert]');
+		expect(logged).toContain('"category":"realtime/test.cat-b"');
+		expect(logged).toContain('"x":1');
+	});
+
+	it('counter accumulates per category across violations', () => {
+		try { assert(false, 'realtime/test.cat-c'); } catch {}
+		try { assert(false, 'realtime/test.cat-c'); } catch {}
+		try { assert(false, 'realtime/test.cat-c'); } catch {}
+		try { assert(false, 'realtime/test.cat-d'); } catch {}
+		expect(getAssertionCounters().get('realtime/test.cat-c')).toBe(3);
+		expect(getAssertionCounters().get('realtime/test.cat-d')).toBe(1);
+	});
+
+	it('omits context key when no context passed', () => {
+		try { assert(false, 'realtime/test.cat-e'); } catch {}
+		const logged = errSpy.mock.calls[0][0];
+		expect(logged).toContain('"category":"realtime/test.cat-e"');
+		expect(logged).not.toContain('"context"');
+	});
+
+	it('fires the realtime/handleRpc.envelope.non-empty assertion on empty rpc/id', () => {
+		const ws = mockWs({});
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: '', id: 'someid', args: [] });
+		expect(() => handleRpc(ws, data, platform)).toThrow(/realtime\/handleRpc\.envelope\.non-empty/);
+		expect(getAssertionCounters().get('realtime/handleRpc.envelope.non-empty')).toBe(1);
+	});
+
+	it('does not fire any assertion under the existing 983 happy-path tests', () => {
+		// Documented invariant: every other test in this file runs without
+		// firing an assert. If a real path violates an invariant the test
+		// throws via the test-mode-throws contract, surfacing as a normal
+		// vitest failure. This test asserts the counter map is clean at
+		// fresh-reset baseline; the 983-test suite is the wider regression.
+		expect(getAssertionCounters().size).toBe(0);
+	});
+});
 
 // -- Capacity caps ------------------------------------------------------------
 

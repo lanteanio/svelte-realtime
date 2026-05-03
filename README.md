@@ -1884,6 +1884,42 @@ This registers counters/histograms for:
 - `svelte_realtime_stream_subscriptions` -- active stream subscription gauge by topic
 - `svelte_realtime_cron_total` -- cron execution count by path and status
 - `svelte_realtime_cron_errors_total` -- cron errors by path
+- `svelte_realtime_assertion_violations_total` -- production-assertion violations by category (see "Production assertions" below)
+
+---
+
+## Production assertions
+
+`svelte-realtime` instruments each internal invariant with `assert(cond, category, context)`. Behavior:
+
+- **In production**, a violation increments an in-memory per-category counter, fires the Prometheus counter `svelte_realtime_assertion_violations_total{category}` (when `live.metrics(...)` is wired), and logs a single `[realtime/assert] {...}` line at `console.error`. The assert does NOT throw -- a thrown exception inside a publish hot-path microtask or a subscribe callback could leave a half-applied bookkeeping update or a corrupted index. Counter + log give observability without the corruption risk.
+- **In test mode** (`process.env.VITEST` or `NODE_ENV === 'test'`) the assert THROWS so vitest surfaces the failure as a normal test error.
+
+Categories are stable strings prefixed `realtime/<module>.<invariant>` (so the Prometheus label cardinality is bounded and won't collide with the adapter's `extensions_assertion_violations_total`). Today's categories:
+
+| Category                                              | Where                                       |
+| ----------------------------------------------------- | ------------------------------------------- |
+| `realtime/handleRpc.envelope.non-empty`               | RPC frame has non-empty `rpc` and `id`      |
+| `realtime/subscription.bookkeeping.ws-was-tracked`    | Unsubscribe path: ws was in the topic set   |
+| `realtime/push-registry.entry-tracked`                | Close hook: registry entry exists for userId |
+| `realtime/lock.waiter.shape`                          | Dequeued lock waiter has resolve+reject     |
+| `realtime/optimistic.queue.serverValue-iff-nonempty`  | Server-merge path: `_serverValue` set when queue non-empty |
+| `realtime/optimistic.queue.drain-precondition`        | `_drainQueue` called only with empty queue  |
+| `realtime/optimistic.queue.entry.shape`               | Settle path: queue entry has expected fields |
+
+Read the live counter map programmatically:
+
+```js
+import { getAssertionCounters } from 'svelte-realtime/server';
+
+setInterval(() => {
+  for (const [category, count] of getAssertionCounters()) {
+    if (count > 0) console.warn(`assertion ${category}: ${count} violations`);
+  }
+}, 60_000);
+```
+
+The client-side assert helper is exported from `svelte-realtime/client` with the same shape (sans Prometheus wiring -- the browser has no metrics registry; use the in-memory counter or log shipping instead).
 
 ---
 
