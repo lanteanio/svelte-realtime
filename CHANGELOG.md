@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`createTestContext({ user })` builder in `svelte-realtime/test`.** Returns a `ctx`-shaped object suitable for direct unit tests of guards or predicates: `expect(myGuard(createTestContext({ user })))`. Mirrors the production `_buildCtx` shape; helper methods (`publish`, `throttle`, `signal`, `shed`, etc.) are no-ops returning sensible defaults so predicates that read `ctx.user` / `ctx.cursor` work without setup. Reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
+
+- **`stream.simulatePublish(event, data)` on the test stream return.** Discoverable shorthand for `env.platform.publish(stream.topic, event, data)` that lives where tests are already focused. Throws a clear error if called before the stream's topic is known (i.e. before the initial subscribe round-trip lands).
+
 - **Chaos harness on `createTestEnv`.** Pass `chaos: { dropRate, seed }` to drop a configurable fraction of `platform.publish` events at the platform layer; pair with a string `seed` for deterministic, replayable drop sequences. Used to write resilience tests against pub/sub message loss without spinning a real cluster.
 
   ```js

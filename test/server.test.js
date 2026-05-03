@@ -2824,7 +2824,7 @@ describe('delta sync in streams', () => {
 
 // -- Phase 28: Test utilities ------------------------------------------------
 
-import { createTestEnv, expectGuardRejects } from '../test.js';
+import { createTestEnv, expectGuardRejects, createTestContext } from '../test.js';
 
 describe('createTestEnv()', () => {
 	let env;
@@ -3099,6 +3099,86 @@ describe('createTestEnv() chaos harness', () => {
 		const client = env.connect({ id: 'u1' });
 		const result = await client.call('cm/greet');
 		expect(result).toBe('hello');
+	});
+});
+
+describe('createTestContext()', () => {
+	it('returns a ctx with the production shape', () => {
+		const ctx = createTestContext({ user: { id: 'u1', role: 'admin' } });
+		expect(ctx.user).toEqual({ id: 'u1', role: 'admin' });
+		expect(ctx.ws).toBeNull();
+		expect(ctx.platform).toBeNull();
+		expect(ctx.cursor).toBeNull();
+		expect(typeof ctx.publish).toBe('function');
+		expect(typeof ctx.throttle).toBe('function');
+		expect(typeof ctx.debounce).toBe('function');
+		expect(typeof ctx.signal).toBe('function');
+		expect(typeof ctx.batch).toBe('function');
+		expect(typeof ctx.shed).toBe('function');
+		expect(ctx.requestId).toBe('test-req');
+	});
+
+	it('helpers are no-ops with sensible defaults', () => {
+		const ctx = createTestContext();
+		expect(ctx.publish('t', 'e', {})).toBe(true);
+		expect(ctx.signal()).toBe(true);
+		expect(ctx.shed()).toBe(false);
+		expect(ctx.throttle()).toBeUndefined();
+		expect(ctx.debounce()).toBeUndefined();
+		expect(ctx.batch()).toBeUndefined();
+	});
+
+	it('user defaults to null for anonymous-context tests', () => {
+		const ctx = createTestContext();
+		expect(ctx.user).toBeNull();
+	});
+
+	it('exercises a guard predicate directly', () => {
+		const adminOnly = (ctx) => ctx.user?.role === 'admin';
+		expect(adminOnly(createTestContext({ user: { role: 'admin' } }))).toBe(true);
+		expect(adminOnly(createTestContext({ user: { role: 'viewer' } }))).toBe(false);
+		expect(adminOnly(createTestContext())).toBe(false);
+	});
+
+	it('overrides cursor and requestId when supplied', () => {
+		const ctx = createTestContext({
+			cursor: { id: 42 },
+			requestId: 'r-1234'
+		});
+		expect(ctx.cursor).toEqual({ id: 42 });
+		expect(ctx.requestId).toBe('r-1234');
+	});
+});
+
+describe('TestStream.simulatePublish()', () => {
+	let env;
+	beforeEach(() => { env = createTestEnv(); });
+	afterEach(() => { env.cleanup(); });
+
+	it('publishes to the stream topic without going through env.platform', async () => {
+		const items = live.stream('sim/items', async () => [{ id: 1, name: 'A' }]);
+		env.register('sim', { items });
+
+		const client = env.connect({ id: 'u1' });
+		const stream = client.subscribe('sim/items');
+		await new Promise((r) => setTimeout(r, 20));
+
+		stream.simulatePublish('created', { id: 2, name: 'B' });
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(stream.events).toHaveLength(1);
+		expect(stream.events[0]).toEqual({ event: 'created', data: { id: 2, name: 'B' } });
+	});
+
+	it('throws when the stream has no topic yet', async () => {
+		const items = live.stream('sim/none', async () => []);
+		env.register('sim', { items });
+
+		const client = env.connect({ id: 'u1' });
+		const stream = client.subscribe('sim/items-missing');
+		// No await -- subscribe hasn't received its initial reply, no topic yet.
+
+		expect(() => stream.simulatePublish('created', { id: 1 })).toThrow(/no topic/);
 	});
 });
 

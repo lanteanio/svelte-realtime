@@ -29,6 +29,44 @@ export function createTestEnv(options?: {
 }): TestEnv;
 
 /**
+ * Build a `ctx`-shaped object for direct unit tests of guards, predicates,
+ * or any function that takes `ctx` and synchronously returns a value.
+ * Mirrors the production `_buildCtx` shape; helper methods are no-ops.
+ *
+ * For full publish/subscribe round-trips, prefer `createTestEnv()`.
+ *
+ * @param options - Optional fields to override on the returned ctx
+ *
+ * @example
+ * ```js
+ * import { createTestContext } from 'svelte-realtime/test';
+ *
+ * const adminOnly = (ctx) => ctx.user?.role === 'admin';
+ * expect(adminOnly(createTestContext({ user: { role: 'admin' } }))).toBe(true);
+ * expect(adminOnly(createTestContext())).toBe(false);
+ * ```
+ */
+export function createTestContext(options?: {
+	user?: any;
+	ws?: any;
+	platform?: any;
+	requestId?: string;
+	cursor?: any;
+}): {
+	user: any;
+	ws: any;
+	platform: any;
+	publish: (topic: string, event: string, data: any, opts?: any) => boolean;
+	cursor: any;
+	throttle: () => void;
+	debounce: () => void;
+	signal: () => boolean;
+	batch: () => void;
+	shed: () => boolean;
+	requestId: string;
+};
+
+/**
  * Assert that a promise rejects with a `LiveError` of the expected code.
  * Default expected code is `'FORBIDDEN'` (the code thrown by failing guards).
  * Returns the rejected error so further assertions can be made on it.
@@ -180,4 +218,15 @@ export interface TestStream {
 	 * @param timeout - Maximum wait time in ms (default: 5000)
 	 */
 	waitFor(predicate: (value: any) => boolean, timeout?: number): Promise<any>;
+	/**
+	 * Simulate a server-side publish on this stream's topic. Equivalent to
+	 * calling `env.platform.publish(stream.topic, event, data)`, but
+	 * discoverable on the stream return where the test is already focused.
+	 * Throws if the stream's topic is not yet known (await the initial
+	 * subscribe before calling).
+	 *
+	 * @param event - Pub/sub event name (e.g. 'created', 'updated')
+	 * @param data - Event payload
+	 */
+	simulatePublish(event: string, data: any): void;
 }

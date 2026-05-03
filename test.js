@@ -2,6 +2,60 @@
 import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, handleRpc, LiveError, _clearCron, _activateDerived, close, unsubscribe } from './server.js';
 
 /**
+ * Build a `ctx`-shaped object suitable for direct unit tests of guards,
+ * predicates, or any function that takes `ctx` and synchronously
+ * returns a value. The shape mirrors the production `_buildCtx` (user,
+ * ws, platform, publish, cursor, throttle, debounce, signal, batch,
+ * shed, requestId) but every helper is a no-op so the context can be
+ * exercised without spinning up a harness.
+ *
+ * For full publish/subscribe round-trips, prefer `createTestEnv()` --
+ * this helper is for direct invocation patterns like
+ * `expect(myGuard(ctx)).toBe(false)`.
+ *
+ * @param {{ user?: any, ws?: any, platform?: any, requestId?: string, cursor?: any }} [options]
+ * @returns {{
+ *   user: any,
+ *   ws: any,
+ *   platform: any,
+ *   publish: (topic: string, event: string, data: any, opts?: any) => boolean,
+ *   cursor: any,
+ *   throttle: () => void,
+ *   debounce: () => void,
+ *   signal: () => boolean,
+ *   batch: () => void,
+ *   shed: () => boolean,
+ *   requestId: string
+ * }}
+ *
+ * @example
+ * ```js
+ * import { createTestContext } from 'svelte-realtime/test';
+ *
+ * const myGuard = (ctx) => ctx.user?.role === 'admin';
+ * expect(myGuard(createTestContext({ user: { role: 'admin' } }))).toBe(true);
+ * expect(myGuard(createTestContext({ user: { role: 'viewer' } }))).toBe(false);
+ * expect(myGuard(createTestContext())).toBe(false);
+ * ```
+ */
+export function createTestContext(options) {
+	const opts = options || {};
+	return {
+		user: opts.user ?? null,
+		ws: opts.ws ?? null,
+		platform: opts.platform ?? null,
+		publish: () => true,
+		cursor: opts.cursor ?? null,
+		throttle: () => {},
+		debounce: () => {},
+		signal: () => true,
+		batch: () => {},
+		shed: () => false,
+		requestId: opts.requestId ?? 'test-req'
+	};
+}
+
+/**
  * Assert that a promise rejects with a `LiveError` of the expected code.
  * Default expected code is `'FORBIDDEN'`, the code thrown by failing guards.
  * Returns the rejected error so further assertions can be made on it.
@@ -447,6 +501,20 @@ export function createTestEnv(options) {
 						await new Promise(r => setTimeout(r, 10));
 					}
 					throw new Error(`waitFor timed out after ${timeout}ms`);
+				},
+				/**
+				 * Simulate a server-side publish on this stream's topic. Resolves
+				 * the stream's `topic` (set after the server's initial reply) and
+				 * forwards the event to `env.platform.publish(topic, event, data)`.
+				 * Throws if the stream's topic is not yet known.
+				 * @param {string} event
+				 * @param {any} data
+				 */
+				simulatePublish(event, data) {
+					if (!state.topic) {
+						throw new Error('[svelte-realtime] simulatePublish: stream has no topic yet -- await the initial subscribe before publishing');
+					}
+					platform.publish(state.topic, event, data);
 				}
 			};
 		}
@@ -600,4 +668,5 @@ export function createTestEnv(options) {
  * @property {Array<{ event: string, data: any }>} events
  * @property {boolean} hasMore
  * @property {(predicate: (value: any) => boolean, timeout?: number) => Promise<any>} waitFor
+ * @property {(event: string, data: any) => void} simulatePublish
  */

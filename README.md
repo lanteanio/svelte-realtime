@@ -2796,6 +2796,7 @@ describe('chat module', () => {
 | `events` | All pub/sub events received |
 | `hasMore` | Whether more pages are available |
 | `waitFor(predicate, timeout?)` | Wait for a value matching a predicate |
+| `simulatePublish(event, data)` | Publish a server-side event to this stream's topic. Equivalent to `env.platform.publish(stream.topic, event, data)`, but discoverable on the stream return where the test is already focused. Throws if the topic is not yet known (await the initial subscribe first). |
 
 ### Chaos harness
 
@@ -2831,6 +2832,22 @@ Runtime control via `env.chaos`:
 | `env.chaos.resetCounter()` | Zero the counter without changing config. |
 
 Currently models the `drop-outbound` scenario only -- `platform.publish` events to subscribers are dropped at the platform layer. RPC replies (`platform.send`) are exempt because timing them out would just hang test code; the chaos harness is for testing pub/sub resilience, not RPC retry behavior.
+
+### Direct ctx unit tests
+
+`createTestContext({ user })` builds a `ctx`-shaped object suitable for direct unit tests of guards and predicates -- helper methods are no-ops, the user / cursor / requestId can be overridden. Use this when the function under test takes `ctx` and synchronously returns a value; reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
+
+```js
+import { createTestContext } from 'svelte-realtime/test';
+
+const adminOnly = (ctx) => ctx.user?.role === 'admin';
+
+expect(adminOnly(createTestContext({ user: { role: 'admin' } }))).toBe(true);
+expect(adminOnly(createTestContext({ user: { role: 'viewer' } }))).toBe(false);
+expect(adminOnly(createTestContext())).toBe(false);
+```
+
+The returned shape mirrors the production `_buildCtx`: `user`, `ws`, `platform`, `publish`, `cursor`, `throttle`, `debounce`, `signal`, `batch`, `shed`, `requestId`. Helpers default to no-op stubs (`publish` returns `true`, `shed` returns `false`, etc.), which is correct for predicates that only read `ctx.user` or `ctx.cursor`.
 
 ### Asserting guard rejections
 
