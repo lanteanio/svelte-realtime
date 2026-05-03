@@ -4,7 +4,7 @@ import { execSync } from 'child_process';
 import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { resolve, join } from 'path';
 import * as p from '@clack/prompts';
-import { detectAgent, parseArgs } from './cli-utils.js';
+import { detectAgent, parseArgs, VALID_NAME_RE } from './cli-utils.js';
 
 const DEMO_REPO = 'https://github.com/lanteanio/svelte-realtime-demo.git';
 
@@ -36,7 +36,7 @@ const name =
 			placeholder: 'my-app',
 			validate(value) {
 				if (!value) return 'Required.';
-				if (!/^[a-zA-Z0-9_-]+$/.test(value))
+				if (!VALID_NAME_RE.test(value))
 					return 'Use only letters, numbers, hyphens, and underscores.';
 				if (existsSync(resolve(process.cwd(), value))) return `Directory "${value}" already exists.`;
 			}

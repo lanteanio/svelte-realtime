@@ -1,6 +1,9 @@
 // @ts-check
 import { connect as _connect, on, status, denials, onRequest as _adapterOnRequest } from 'svelte-adapter-uws/client';
 import { writable, readable } from 'svelte/store';
+import { assert } from './shared/assert.js';
+export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
+import { mergeKeyField, rebuildIndex } from './shared/merge.js';
 // Namespace import lets .rune() access fromStore (Svelte 5 only) without
 // breaking the module under Svelte 4 - missing exports become undefined,
 // not module-load errors.
@@ -20,43 +23,6 @@ const _textEncoder = new TextEncoder();
 
 /** Max in-flight optimistic mutations per stream. REJECT on cap: `mutate()` throws synchronously. Bounds the worst-case display-recompute cost during slow-server scenarios. Matches svelte-adapter-uws `MAX_QUEUE_SIZE` (the per-connection client send queue) since both serve as UI-layer in-flight burglar alarms. */
 export const MAX_OPTIMISTIC_QUEUE_DEPTH = 1_000;
-
-// -- Production-assertion helper (client side) ------------------------------
-// Mirror of the server.js helper but without Prometheus wiring (the client
-// runs in the browser; metrics live on the server). Categories use the
-// `realtime/` prefix so clients piping logs to a backend can correlate
-// with the server's assertion categories.
-
-const _IS_TEST_MODE = !!(typeof process !== 'undefined' && process && process.env && (process.env.VITEST || process.env.NODE_ENV === 'test'));
-
-/** @type {Map<string, number>} */
-const _assertCounters = new Map();
-
-/**
- * Production-safe invariant check for the client side.
- * @param {boolean} cond
- * @param {string} category - prefixed `realtime/`
- * @param {Record<string, unknown>} [context]
- */
-export function assert(cond, category, context) {
-	if (cond) return;
-	_assertCounters.set(category, (_assertCounters.get(category) || 0) + 1);
-	const payload = JSON.stringify(context === undefined ? { category } : { category, context });
-	console.error('[realtime/assert] ' + payload);
-	if (_IS_TEST_MODE) {
-		throw new Error('realtime assertion failed: ' + category + ' ' + payload);
-	}
-}
-
-/** @returns {Map<string, number>} */
-export function getAssertionCounters() {
-	return _assertCounters;
-}
-
-/** @internal */
-export function _resetAssertCounters() {
-	_assertCounters.clear();
-}
 
 let _maxOptimisticQueueDepth = MAX_OPTIMISTIC_QUEUE_DEPTH;
 
@@ -1062,24 +1028,12 @@ function _createStream(path, options, dynamicArgs) {
 	let _reconnectAttempts = 0;
 
 	/**
-	 * Pure version of `_rebuildIndex` that operates on a (value, index) pair
-	 * supplied by the caller rather than the closure's currentValue / _index.
-	 * Used by `_applyMergeFn` and reused by the closure `_rebuildIndex`.
-	 *
+	 * Rebuild a (value, index) pair using the closure's merge / key.
 	 * @param {any} value
 	 * @param {Map<any, number>} index
 	 */
 	function _rebuildIndexFn(value, index) {
-		index.clear();
-		if (!Array.isArray(value)) return;
-		if (merge === 'set' || merge === 'latest') return;
-		const k = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
-		for (let i = 0; i < value.length; i++) {
-			const item = value[i];
-			if (item != null && item[k] !== undefined) {
-				index.set(item[k], i);
-			}
-		}
+		rebuildIndex(value, index, merge, key);
 	}
 
 	/**
@@ -1087,7 +1041,7 @@ function _createStream(path, options, dynamicArgs) {
 	 * Only meaningful for keyed merge strategies (crud, presence, cursor).
 	 */
 	function _rebuildIndex() {
-		_rebuildIndexFn(currentValue, _index);
+		rebuildIndex(currentValue, _index, merge, key);
 	}
 
 	/**
@@ -1329,7 +1283,7 @@ function _createStream(path, options, dynamicArgs) {
 		if (_optimisticQueue.length === 0) return;
 		const data = envelope.data;
 		if (!data || typeof data !== 'object') return;
-		const k = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
+		const k = mergeKeyField(merge, key);
 		if (!k) return;
 		const dataKey = data[k];
 		if (dataKey === undefined) return;
@@ -1454,7 +1408,7 @@ function _createStream(path, options, dynamicArgs) {
 
 		// RAF dedup: for keyed merge strategies, keep only the last idempotent event per key
 		if (queue.length > 1 && merge !== 'set' && merge !== 'latest') {
-			const keyField = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
+			const keyField = mergeKeyField(merge, key);
 			const seen = new Map();
 			for (let i = queue.length - 1; i >= 0; i--) {
 				if (!_IDEMPOTENT.has(queue[i].event)) continue;
@@ -1955,7 +1909,7 @@ function _createStream(path, options, dynamicArgs) {
 
 			let optimisticKey = null;
 			if (isEvent) {
-				const k = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
+				const k = mergeKeyField(merge, key);
 				if (k && optimisticChange.data && optimisticChange.data[k] !== undefined) {
 					optimisticKey = optimisticChange.data[k];
 					if (merge === 'crud') _optimisticKeys.add(optimisticKey);

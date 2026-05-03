@@ -1538,14 +1538,18 @@ export interface WebhookHandler {
 
 /**
  * A stream transform step created by `pipe.filter`, `pipe.sort`, etc.
+ * Each step contributes a `transformInit(data, ctx)` function that runs
+ * once per subscription against the loader's initial data. For per-event
+ * projection, use the `transform` option on `live.stream({ transform })`.
  */
 export interface PipeTransform {
 	transformInit?(data: any[], ctx: LiveContext<any>): any[] | Promise<any[]>;
-	transformEvent?(ctx: LiveContext<any>, event: string, data: any): boolean;
 }
 
 /**
- * Compose stream transforms that apply to initial data and live events.
+ * Compose stream transforms that apply to the initial data load. For
+ * per-event projection on live publishes, use the `transform` option on
+ * `live.stream({ transform })` instead.
  *
  * @param stream - The stream function to wrap
  * @param transforms - Transform steps
@@ -1562,7 +1566,7 @@ export interface PipeTransform {
  */
 export function pipe<T extends Function>(stream: T, ...transforms: PipeTransform[]): T;
 export namespace pipe {
-	/** Filter items from initial data and drop non-matching live events. */
+	/** Filter items from initial data. Does NOT apply to live events. */
 	function filter(predicate: (ctx: LiveContext<any>, item: any) => boolean): PipeTransform;
 	/** Sort initial data by a field. */
 	function sort(field: string, direction?: 'asc' | 'desc'): PipeTransform;

@@ -1523,7 +1523,7 @@ Errors thrown by the loader during an `invalidateOn` reload route through the sa
 
 ## Access control
 
-Use the `filter` / `access` option on `live.stream()` to control who can subscribe. The predicate receives `ctx` and is checked once at subscription time. If it returns `false`, the subscription is denied with `{ ok: false, code: 'FORBIDDEN', error: 'Access denied' }` and no data is sent. For per-event filtering, use `pipe.filter()`.
+Use the `filter` / `access` option on `live.stream()` to control who can subscribe. The predicate receives `ctx` and is checked once at subscription time. If it returns `false`, the subscription is denied with `{ ok: false, code: 'FORBIDDEN', error: 'Access denied' }` and no data is sent. For per-event projection or filtering on a live stream, use the `transform` option on `live.stream({ transform })`.
 
 ```js
 import { live } from 'svelte-realtime/server';

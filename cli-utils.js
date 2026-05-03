@@ -1,6 +1,6 @@
 // @ts-check
 
-const VALID_NAME_RE = /^[a-zA-Z0-9_-]+$/;
+export const VALID_NAME_RE = /^[a-zA-Z0-9_-]+$/;
 const VALID_TEMPLATES = ['minimal', 'example', 'demo'];
 
 /**

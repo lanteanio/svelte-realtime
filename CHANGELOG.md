@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal
+
+- **`shared/` directory for cross-cutting helpers.** Mirrors the `svelte-adapter-uws-extensions/shared/` layout. New `shared/assert.js` is the single source of truth for the `realtime/`-prefixed `assert` / `getAssertionCounters` / `_resetAssertCounters` API exported from both `server` and `client`; the server wires its Prometheus counter via `wireAssertionMetrics(...)` from the metrics-init site. New `shared/merge.js` exports `mergeKeyField(merge, defaultKey)` and `rebuildIndex(value, index, merge, defaultKey)` so the `(merge === 'presence' || merge === 'cursor') ? 'key' : key` literal stops appearing in four places and the index-rebuild logic has one home. Tests, public API surface, and runtime behavior unchanged; the package's `files` array now includes `shared`.
+
+- **`_executeSingleRpc` split into a stream / non-stream pair.** The 280-line monolith now hands the stream branch off to a module-level `_executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef)` helper. The catch-block rollback path now reads the subscribed-topic out of a `subscribedRef` container that the helper writes into on successful subscribe, so a throw mid-load still rolls back the registration. The non-stream branch keeps its original shape inline.
+
+- **`vite.js` export-detection compressed.** The five wrappers whose client stubs and registry entries are identical (`live` / `live.validated` / `live.lock` / `live.idempotent` / `live.rateLimit`) now drive a single `for (const re of [...])` loop in both `_buildTopicsRegistry` and the SSR registry generator, replacing five copies of the same 8-line `RE.lastIndex = 0; while ((match = RE.exec(source))...)` block in each pass. Roughly 80 lines deleted; behavior unchanged.
+
+- **`_topicInvalidationWatch` publish path now skips the regex engine on the common case.** Each pattern's compiled entry now carries its literal prefix and a `prefixOnly` flag (true for `prefix*` shapes). The publish hot path fast-fails with `topic.startsWith(entry.prefix)` before invoking `regex.test`, and skips the regex entirely when the pattern is `prefix*` and the topic has at least one character beyond the prefix. With N registered patterns and a high publish rate this turns N regex.test calls per publish into N startsWith calls plus regex.test only for the rare patterns that actually match the prefix.
+
+- **`process.env.NODE_ENV !== 'production'` checks consolidated.** Sixteen inline `typeof process !== 'undefined' && process.env(?.)?.NODE_ENV !== 'production'` checks across `server.js` now reference the existing `_IS_DEV` constant. Minifier-friendly and single-source.
+
+- **Dev-mode hoist in `_executeBatch`.** The lazy-resolve await is now called once at the top of a batch instead of once per entry; with 50-entry batches this drops 49 redundant microtask awaits.
+
+- **Stale JSDoc cleanup.** An orphaned JSDoc block that had drifted onto `_trackStreamSub` was removed; the misplaced `close()` JSDoc that was sitting above `enableSignals` was reattached to the actual `close()` definition.
+
+### Removed
+
+- **Dead `pipe.filter().transformEvent` field.** `pipe.filter()` returned `{ transformInit, transformEvent }` but `pipe()` only ever consumed `transformInit`, so the `transformEvent` field had no effect at runtime. The README at the access-control section also incorrectly suggested `pipe.filter()` for per-event filtering. The dead field is removed from `server.js` and `server.d.ts` (`PipeTransform` no longer declares `transformEvent`); the README pointer now correctly directs per-event projection to the `transform` option on `live.stream({ transform })`. The pipe table at "Server transforms" was already correct (filter / sort / limit / join are all "Initial data only").
+
 ## [0.5.0-next.1] - 2026-05-03
 
 ### Fixed

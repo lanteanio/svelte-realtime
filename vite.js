@@ -1026,57 +1026,14 @@ function _generateClientStubs(filePath, modulePath, dir) {
 
 	// Detect live() exports
 	let match;
-	LIVE_EXPORT_RE.lastIndex = 0;
-	while ((match = LIVE_EXPORT_RE.exec(source)) !== null) {
-		const name = match[1];
-		if (!/^\w+$/.test(name)) continue;
-		exportedNames.add(name);
-		imports.add('__rpc');
-		lines.push(`export const ${name} = __rpc('${modulePath}/${name}');`);
-	}
-
-	// Detect live.validated() exports (treated same as live() on the client)
-	VALIDATED_EXPORT_RE.lastIndex = 0;
-	while ((match = VALIDATED_EXPORT_RE.exec(source)) !== null) {
-		const name = match[1];
-		if (!/^\w+$/.test(name)) continue;
-		if (!exportedNames.has(name)) {
-			exportedNames.add(name);
-			imports.add('__rpc');
-			lines.push(`export const ${name} = __rpc('${modulePath}/${name}');`);
-		}
-	}
-
-	// Detect live.lock() exports (treated same as live() on the client)
-	LOCK_EXPORT_RE.lastIndex = 0;
-	while ((match = LOCK_EXPORT_RE.exec(source)) !== null) {
-		const name = match[1];
-		if (!/^\w+$/.test(name)) continue;
-		if (!exportedNames.has(name)) {
-			exportedNames.add(name);
-			imports.add('__rpc');
-			lines.push(`export const ${name} = __rpc('${modulePath}/${name}');`);
-		}
-	}
-
-	// Detect live.idempotent() exports (treated same as live() on the client)
-	IDEMPOTENT_EXPORT_RE.lastIndex = 0;
-	while ((match = IDEMPOTENT_EXPORT_RE.exec(source)) !== null) {
-		const name = match[1];
-		if (!/^\w+$/.test(name)) continue;
-		if (!exportedNames.has(name)) {
-			exportedNames.add(name);
-			imports.add('__rpc');
-			lines.push(`export const ${name} = __rpc('${modulePath}/${name}');`);
-		}
-	}
-
-	// Detect live.rateLimit() exports (treated same as live() on the client)
-	RATE_LIMIT_EXPORT_RE.lastIndex = 0;
-	while ((match = RATE_LIMIT_EXPORT_RE.exec(source)) !== null) {
-		const name = match[1];
-		if (!/^\w+$/.test(name)) continue;
-		if (!exportedNames.has(name)) {
+	// live() and the wrappers that pass through unchanged on the client
+	// (validated/lock/idempotent/rateLimit) all emit the same __rpc line.
+	for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE]) {
+		re.lastIndex = 0;
+		while ((match = re.exec(source)) !== null) {
+			const name = match[1];
+			if (!/^\w+$/.test(name)) continue;
+			if (exportedNames.has(name)) continue;
 			exportedNames.add(name);
 			imports.add('__rpc');
 			lines.push(`export const ${name} = __rpc('${modulePath}/${name}');`);
@@ -1770,53 +1727,14 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 		/** @type {Set<string>} */
 		const registered = new Set();
 		let match;
-		LIVE_EXPORT_RE.lastIndex = 0;
-		while ((match = LIVE_EXPORT_RE.exec(source)) !== null) {
-			const name = match[1];
-			if (!/^\w+$/.test(name)) continue;
-			registered.add(name);
-			lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
-		}
-
-		// Register live.validated() exports
-		VALIDATED_EXPORT_RE.lastIndex = 0;
-		while ((match = VALIDATED_EXPORT_RE.exec(source)) !== null) {
-			const name = match[1];
-			if (!/^\w+$/.test(name)) continue;
-			if (!registered.has(name)) {
-				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
-			}
-		}
-
-		// Register live.lock() exports
-		LOCK_EXPORT_RE.lastIndex = 0;
-		while ((match = LOCK_EXPORT_RE.exec(source)) !== null) {
-			const name = match[1];
-			if (!/^\w+$/.test(name)) continue;
-			if (!registered.has(name)) {
-				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
-			}
-		}
-
-		// Register live.idempotent() exports
-		IDEMPOTENT_EXPORT_RE.lastIndex = 0;
-		while ((match = IDEMPOTENT_EXPORT_RE.exec(source)) !== null) {
-			const name = match[1];
-			if (!/^\w+$/.test(name)) continue;
-			if (!registered.has(name)) {
-				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
-			}
-		}
-
-		// Register live.rateLimit() exports
-		RATE_LIMIT_EXPORT_RE.lastIndex = 0;
-		while ((match = RATE_LIMIT_EXPORT_RE.exec(source)) !== null) {
-			const name = match[1];
-			if (!/^\w+$/.test(name)) continue;
-			if (!registered.has(name)) {
+		// live() and the wrappers that share the plain __register line
+		// (validated/lock/idempotent/rateLimit).
+		for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE]) {
+			re.lastIndex = 0;
+			while ((match = re.exec(source)) !== null) {
+				const name = match[1];
+				if (!/^\w+$/.test(name)) continue;
+				if (registered.has(name)) continue;
 				registered.add(name);
 				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
 			}

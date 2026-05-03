@@ -62,6 +62,7 @@
     "hooks.d.ts",
     "cli.js",
     "cli-utils.js",
+    "shared",
     "LICENSE",
     "README.md"
   ],

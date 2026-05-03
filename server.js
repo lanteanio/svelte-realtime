@@ -1,72 +1,10 @@
 // @ts-check
+import { assert, wireAssertionMetrics } from './shared/assert.js';
+export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 
 const textDecoder = new TextDecoder();
 const _validPathRe = /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)+$/;
 const _validSegmentRe = /^[a-zA-Z0-9_]+$/;
-
-// -- Production-assertion helper --------------------------------------------
-//
-// Mirror of the adapter / extensions assert shape from 0.5.0-next.8.
-// Categories use the `realtime/` prefix so the Prometheus counter
-// `svelte_realtime_assertion_violations_total{category}` does not collide
-// with the adapter's `extensions_assertion_violations_total{category}`.
-//
-// Behavior:
-//   - On violation: increments the per-category in-memory counter, fires the
-//     Prometheus counter (if wired via `live.metrics(...)`), and logs a
-//     structured `[realtime/assert] {...}` line.
-//   - In test mode (VITEST or NODE_ENV=test) the assert THROWS so vitest
-//     surfaces the failure as a test error.
-//   - In production it does NOT throw - a thrown exception inside a publish
-//     hot-path microtask or a subscribe callback could leave a half-applied
-//     bookkeeping update or a corrupted index. Counter + log give us
-//     observability without the corruption risk.
-
-const _IS_TEST_MODE = !!(typeof process !== 'undefined' && process && process.env && (process.env.VITEST || process.env.NODE_ENV === 'test'));
-
-/** @type {Map<string, number>} Per-category violation counts; survives the lifetime of the process. */
-const _assertCounters = new Map();
-
-/**
- * Production-safe invariant check.
- *
- * @param {boolean} cond - The condition that should hold. Falsy = violation.
- * @param {string} category - Stable category string for the metric label,
- *   prefixed with `realtime/`. Convention: `realtime/<module>.<invariant>`.
- * @param {Record<string, unknown>} [context] - Serialisable extra context
- *   for the structured log entry. Caller responsibility to omit PII.
- */
-export function assert(cond, category, context) {
-	if (cond) return;
-	_assertCounters.set(category, (_assertCounters.get(category) || 0) + 1);
-	if (_metricsInstruments && _metricsInstruments.assertions) {
-		try { _metricsInstruments.assertions.inc({ category }); } catch { /* metrics best-effort */ }
-	}
-	const payload = JSON.stringify(context === undefined ? { category } : { category, context });
-	console.error('[realtime/assert] ' + payload);
-	if (_IS_TEST_MODE) {
-		throw new Error('realtime assertion failed: ' + category + ' ' + payload);
-	}
-}
-
-/**
- * Read the live counter Map for assertion violations. Useful for ops
- * dashboards or tests that want to verify a category was hit without
- * relying on log scraping.
- *
- * @returns {Map<string, number>}
- */
-export function getAssertionCounters() {
-	return _assertCounters;
-}
-
-/**
- * Reset the assertion counters. Tests only.
- * @internal
- */
-export function _resetAssertCounters() {
-	_assertCounters.clear();
-}
 
 // -- Bounded-by-default capacity caps (server side) -------------------------
 // Every per-process Map / Set with caller-driven growth is bounded. Numbers
@@ -531,15 +469,25 @@ export function _resetVolatileRegistry() {
 const _topicInvalidationWatch = new Map();
 
 /**
- * Convert an `invalidateOn` pattern into a regex. `*` matches any
+ * Convert an `invalidateOn` pattern into a fast matcher. `*` matches any
  * sequence of one or more characters (greedy, including colons); other
  * regex specials are escaped. Patterns must be non-empty strings.
+ *
+ * Returns the compiled regex along with the literal-prefix and `prefixOnly`
+ * flag so the publish hot path can short-circuit without entering the regex
+ * engine for the common `prefix*` shape.
+ *
  * @param {string} pattern
- * @returns {RegExp}
+ * @returns {{ regex: RegExp, prefix: string, prefixOnly: boolean }}
  */
 function _compileInvalidatePattern(pattern) {
 	const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.+');
-	return new RegExp('^' + escaped + '$');
+	const regex = new RegExp('^' + escaped + '$');
+	const firstStar = pattern.indexOf('*');
+	const prefix = firstStar === -1 ? pattern : pattern.slice(0, firstStar);
+	const lastStar = pattern.lastIndexOf('*');
+	const prefixOnly = firstStar !== -1 && lastStar === pattern.length - 1 && firstStar === lastStar;
+	return { regex, prefix, prefixOnly };
 }
 
 /**
@@ -561,7 +509,8 @@ function _registerInvalidationWatch(topic, fn, ctx, args, platform) {
 	for (const p of patterns) {
 		let entry = _topicInvalidationWatch.get(p);
 		if (!entry) {
-			entry = { regex: _compileInvalidatePattern(p), watchers: [] };
+			const { regex, prefix, prefixOnly } = _compileInvalidatePattern(p);
+			entry = { regex, prefix, prefixOnly, watchers: [] };
 			_topicInvalidationWatch.set(p, entry);
 		}
 		if (entry.watchers.some(w => w.topic === topic && w.fn === fn)) continue;
@@ -963,7 +912,15 @@ function _getCtxHelpers(platform) {
 			// that don't use the feature.
 			if (_topicInvalidationWatch.size > 0 && event !== 'refreshed') {
 				for (const entry of _topicInvalidationWatch.values()) {
-					if (!entry.regex.test(topic)) continue;
+					// Literal-prefix fast-fail: cheap startsWith filters the
+					// majority of unrelated patterns before we touch the
+					// regex engine. For `prefix*` patterns the regex is
+					// equivalent to startsWith + at-least-one-more-char, so
+					// we skip it entirely on the common case.
+					if (entry.prefix && !topic.startsWith(entry.prefix)) continue;
+					if (entry.prefixOnly) {
+						if (topic.length <= entry.prefix.length) continue;
+					} else if (!entry.regex.test(topic)) continue;
 					for (const watcher of entry.watchers) _invalidationReload(watcher);
 				}
 			}
@@ -1057,13 +1014,6 @@ function _getCtxHelpers(platform) {
 	return helpers;
 }
 
-/**
- * Roll back a stream subscription that was set up before the init function failed.
- * Unsubscribes the topic, removes dynamic mappings, and decrements the gauge.
- * @param {any} ws
- * @param {string} topic
- * @param {Function} fn
- */
 /**
  * Register a stream subscription in the per-socket ownership map.
  * @param {any} ws
@@ -3138,10 +3088,13 @@ live.scoped = function scoped(predicate, fn) {
 };
 
 /**
- * Compose stream transforms that apply to initial data (and optionally live events).
+ * Compose stream transforms that apply to the initial data load. Each
+ * transform's `transformInit(data, ctx)` runs once per subscription. For
+ * per-event projection on live publishes, use the `transform` option on
+ * `live.stream({ transform })` instead.
  *
  * @param {Function} stream - The stream function to wrap
- * @param {...{ transformInit?: Function, transformEvent?: Function }} transforms
+ * @param {...{ transformInit?: Function }} transforms
  * @returns {Function}
  */
 export function pipe(stream, ...transforms) {
@@ -3176,18 +3129,19 @@ export function pipe(stream, ...transforms) {
 }
 
 /**
- * Filter transform: removes items that don't match the predicate.
+ * Filter transform: removes items that don't match the predicate from
+ * the INITIAL data only. For per-event projection on a live stream,
+ * use the `transform` option on `live.stream({ transform })` -- it
+ * fires for both the initial load and every live publish.
+ *
  * @param {(ctx: any, item: any) => boolean} predicate
- * @returns {{ transformInit: Function, transformEvent: Function }}
+ * @returns {{ transformInit: Function }}
  */
 pipe.filter = function pipeFilter(predicate) {
 	return {
 		transformInit(data, ctx) {
 			if (!Array.isArray(data)) return data;
 			return data.filter(item => predicate(ctx, item));
-		},
-		transformEvent(ctx, event, data) {
-			return predicate(ctx, data);
 		}
 	};
 };
@@ -3437,7 +3391,7 @@ live.room = function room(config) {
 		/** @type {any} */ (roomExport).__actions = {};
 		for (const [name, fn] of Object.entries(actions)) {
 			if (!_validSegmentRe.test(name)) {
-				if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+				if (_IS_DEV) {
 					console.warn(`[svelte-realtime] Room action '${name}' contains invalid characters (only a-z, A-Z, 0-9, _ allowed) -- skipped\n  See: https://svti.me/rooms`);
 				}
 				continue;
@@ -3582,6 +3536,7 @@ live.metrics = function metrics(registry) {
 		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] }),
 		assertions: registry.counter({ name: 'svelte_realtime_assertion_violations_total', help: 'Production-assertion violations by category', labelNames: ['category'] })
 	};
+	wireAssertionMetrics((category) => _metricsInstruments.assertions.inc({ category }));
 };
 
 /**
@@ -3835,7 +3790,7 @@ async function _recomputeDerived(entry, platform) {
 	} catch (err) {
 		if (_serverErrorHandler) {
 			try { _serverErrorHandler('derived', err); } catch {}
-		} else if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+		} else if (_IS_DEV) {
 			console.error(`[svelte-realtime] Derived stream '${entry.topic}' error:`, err);
 		}
 	}
@@ -3871,7 +3826,7 @@ function _activateDynamicDerived(fn, resolvedTopic, user) {
 
 	const resolvedSources = entry.sourceFactory(...args);
 	if (!Array.isArray(resolvedSources) || resolvedSources.length === 0) {
-		if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+		if (_IS_DEV) {
 			console.warn(`[svelte-realtime] Dynamic derived sourceFactory returned empty sources for topic '${resolvedTopic}'`);
 		}
 		return;
@@ -3947,7 +3902,7 @@ async function _fireEffect(entry, event, data, platform) {
 	} catch (err) {
 		if (_serverErrorHandler) {
 			try { _serverErrorHandler('effect', err); } catch {}
-		} else if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+		} else if (_IS_DEV) {
 			console.error('[svelte-realtime] Effect error:', err);
 		}
 	}
@@ -4234,7 +4189,7 @@ export async function _tickCron() {
 		(async () => {
 			try {
 				if (!_cronPlatform) {
-					if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+					if (_IS_DEV) {
 						console.warn(`[svelte-realtime] Cron '${path}' fired but no platform captured. Call setCronPlatform(platform) in your open hook.\n  See: https://svti.me/cron`);
 					}
 					return;
@@ -4253,7 +4208,7 @@ export async function _tickCron() {
 				}
 				if (_serverErrorHandler) {
 					_serverErrorHandler(path, err);
-				} else if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+				} else if (_IS_DEV) {
 					console.error(`[svelte-realtime] Cron '${path}' error:`, err);
 				}
 			}
@@ -4519,7 +4474,7 @@ export function handleRpc(ws, data, platform, options) {
 					return true;
 				}
 			} catch (err) {
-				if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+				if (_IS_DEV) {
 					console.warn('[svelte-realtime] Failed to parse binary RPC header:', err, '\n  See: https://svti.me/binary');
 				}
 			}
@@ -4589,6 +4544,8 @@ async function _executeBatch(ws, msg, platform, options) {
 		return;
 	}
 
+	if (!_lazyResolved) await _resolveAllLazy();
+
 	/** @type {Array<{ id: string, ok: boolean, data?: any, code?: string, error?: string }>} */
 	let results;
 
@@ -4617,6 +4574,218 @@ async function _executeBatch(ws, msg, platform, options) {
 }
 
 /**
+ * Stream branch of `_executeSingleRpc`: validate args, gate, resolve topic,
+ * subscribe, run optional channel/delta/replay/seq-delta short-circuits, run
+ * the loader, apply transform/migration, build the response envelope.
+ *
+ * Mutates `subscribedRef.topic` on successful subscribe so the caller's
+ * catch block can roll the subscription back if a later step throws. May
+ * itself throw inside `fn(ctx, ...streamArgs)`; that bubbles up to the
+ * caller's catch.
+ *
+ * @param {any} ws
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @param {Function} fn
+ * @param {any} ctx
+ * @param {any[]} args
+ * @param {{ id: string, seq?: number, schemaVersion?: number, version?: any }} msg
+ * @param {{ topic: any }} subscribedRef
+ * @returns {Promise<any>}
+ */
+async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
+	const { id, seq: clientSeq, schemaVersion: clientSchemaVersion } = msg;
+
+	// Validate args BEFORE topic resolution -- prevents topic injection
+	// via malformed dynamic-topic args (e.g. `audit:${orgId}` with
+	// orgId crafted to escape the topic namespace). The validated
+	// tuple is bound to a stream-branch-local `let` to keep the
+	// outer `args` const for the non-stream path's V8 inline cache.
+	let streamArgs = args;
+	const argsSchema = /** @type {any} */ (fn).__streamArgs;
+	if (argsSchema) {
+		const result = _validate(argsSchema, streamArgs);
+		if (!result.ok) {
+			const err = { id, ok: false, code: 'VALIDATION', error: result.message };
+			/** @type {any} */ (err).issues = result.issues;
+			return err;
+		}
+		if (Array.isArray(result.data)) streamArgs = result.data;
+	}
+
+	if (/** @type {any} */ (fn).__isGated) {
+		const predicate = /** @type {any} */ (fn).__gatePredicate;
+		if (!predicate(ctx, ...streamArgs)) {
+			return { id, ok: true, data: null, gated: true };
+		}
+	}
+
+	const rawTopic = /** @type {any} */ (fn).__streamTopic;
+	const topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, streamArgs) : rawTopic;
+	if (typeof topic === 'string' && topic.startsWith('__')) {
+		return { id, ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' };
+	}
+	const streamOpts = /** @type {any} */ (fn).__streamOptions;
+	const replayOpts = /** @type {any} */ (fn).__replay;
+
+	const streamFilter = /** @type {any} */ (fn).__streamFilter;
+	if (streamFilter && !streamFilter(ctx, ...streamArgs)) {
+		const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+		return { id, ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
+	}
+
+	const classOfService = /** @type {any} */ (fn).__classOfService;
+	if (classOfService && _admissionConfig) {
+		try {
+			if (_shouldShed(platform, classOfService)) {
+				return { id, ok: false, code: 'OVERLOADED', error: `Stream class '${classOfService}' shed under pressure` };
+			}
+		} catch (err) {
+			return { id, ok: false, code: 'INVALID_REQUEST', error: /** @type {Error} */ (err).message };
+		}
+	}
+
+	try { ws.subscribe(topic); } catch { return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' }; }
+	_trackStreamSub(ws, topic, fn);
+	subscribedRef.topic = topic;
+
+	if (/** @type {any} */ (fn).__onSubscribe) {
+		try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic); } catch {}
+	}
+
+	if (/** @type {any} */ (fn).__isDerived && !_activateDerivedCalled && !_warnedActivateDerived) {
+		if (_IS_DEV) {
+			_warnedActivateDerived = true;
+			console.warn('[svelte-realtime] live.derived() subscribed but _activateDerived(platform) was never called. Derived streams will not receive live updates.\n  Call _activateDerived(platform) in your WebSocket open hook.\n  See: https://svti.me/derived');
+		}
+	}
+
+	// Channel fast-path
+	if (/** @type {any} */ (fn).__isChannel) {
+		const emptyValue = streamOpts.merge === 'set' ? null : [];
+		return { id, ok: true, data: emptyValue, topic, merge: streamOpts.merge, key: streamOpts.key, max: streamOpts.max, channel: true };
+	}
+
+	// Delta sync
+	const deltaOpts = /** @type {any} */ (fn).__delta;
+	const clientVersion = msg.version;
+	if (deltaOpts && clientVersion !== undefined && deltaOpts.version && deltaOpts.diff) {
+		try {
+			const currentVersion = await deltaOpts.version();
+			if (currentVersion === clientVersion) {
+				return { id, ok: true, data: [], topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, unchanged: true, version: currentVersion };
+			}
+			const diff = await deltaOpts.diff(clientVersion);
+			if (diff !== null && diff !== undefined) {
+				return { id, ok: true, data: diff, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, delta: true, version: currentVersion };
+			}
+		} catch {}
+	}
+
+	// Replay (bounded recent buffer)
+	if (replayOpts && typeof clientSeq === 'number' && platform.replay) {
+		try {
+			const missed = await platform.replay.since(topic, clientSeq);
+			if (missed) {
+				const currentSeq = await platform.replay.seq(topic);
+				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
+			}
+		} catch {}
+	}
+
+	// Seq-delta (user-provided bridge for older-than-buffer reconnects)
+	if (deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
+		try {
+			const events = await deltaOpts.fromSeq(clientSeq);
+			if (Array.isArray(events)) {
+				let respSeq;
+				if (events.length > 0) {
+					const last = events[events.length - 1];
+					if (last && typeof last.seq === 'number') respSeq = last.seq;
+				}
+				if (respSeq === undefined && platform.replay) {
+					try { respSeq = await platform.replay.seq(topic); } catch {}
+				}
+				const deltaResp = {
+					id, ok: true, data: events, topic,
+					merge: streamOpts.merge, key: streamOpts.key,
+					prepend: streamOpts.prepend, max: streamOpts.max,
+					replay: true
+				};
+				if (respSeq !== undefined) deltaResp.seq = respSeq;
+				return deltaResp;
+			}
+		} catch {}
+	}
+
+	let result;
+	try {
+		result = await fn(ctx, ...streamArgs);
+	} catch (err) {
+		const streamOnError = /** @type {any} */ (fn).__streamOnError;
+		if (streamOnError) {
+			try { await streamOnError(err, ctx, topic); } catch {}
+		}
+		throw err;
+	}
+
+	// Arm the staleness watchdog now that the loader succeeded.
+	// Idempotent per topic, so multi-subscriber streams only ever
+	// run one watchdog regardless of how many subscribers join.
+	if (/** @type {any} */ (fn).__streamStaleAfterMs) {
+		_registerStaleWatch(topic, fn, ctx, streamArgs, platform);
+	}
+
+	// Arm the topic-invalidation watcher(s). Same first-wins
+	// idempotence story as the stale watchdog -- duplicate
+	// (pattern, topic) registrations are a no-op inside
+	// _registerInvalidationWatch.
+	if (/** @type {any} */ (fn).__streamInvalidateOn) {
+		_registerInvalidationWatch(topic, fn, ctx, streamArgs, platform);
+	}
+
+	const isPaginated = result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result;
+	let resultData = isPaginated ? result.data : result;
+
+	// Apply transform to initial data: per-item for arrays
+	// (crud/latest/presence/cursor merge), whole-value for non-arrays
+	// (set merge). Live-event transforms run separately at publish time.
+	const initTransform = /** @type {any} */ (fn).__streamTransform;
+	if (initTransform && resultData != null) {
+		resultData = _applyInitTransform(initTransform, resultData);
+	}
+
+	// Schema migration
+	const serverVersion = /** @type {any} */ (fn).__streamVersion;
+	const migrateFns = /** @type {any} */ (fn).__streamMigrate;
+	if (serverVersion !== undefined && migrateFns && typeof clientSchemaVersion === 'number' && clientSchemaVersion < serverVersion) {
+		resultData = _migrateData(resultData, clientSchemaVersion, serverVersion, migrateFns);
+	}
+
+	const response = {
+		id, ok: true, data: resultData, topic, merge: streamOpts.merge,
+		key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max,
+		hasMore: undefined, cursor: undefined, seq: undefined,
+		version: undefined, schemaVersion: undefined, replay: undefined,
+		derived: /** @type {any} */ (fn).__isDerived || undefined
+	};
+
+	if (isPaginated) {
+		response.hasMore = result.hasMore;
+		if (result.cursor !== undefined) response.cursor = result.cursor;
+	}
+	if (replayOpts && platform.replay) {
+		try { response.seq = await platform.replay.seq(topic); } catch {}
+	}
+	if (typeof clientSeq === 'number') response.replay = false;
+	if (deltaOpts && deltaOpts.version) {
+		try { response.version = await deltaOpts.version(); } catch {}
+	}
+	if (serverVersion !== undefined) response.schemaVersion = serverVersion;
+
+	return response;
+}
+
+/**
  * Execute a single RPC call and return the result (used by batch and single execution).
  *
  * @param {any} ws
@@ -4626,7 +4795,7 @@ async function _executeBatch(ws, msg, platform, options) {
  * @returns {Promise<{ id: string, ok: boolean, data?: any, code?: string, error?: string }>}
  */
 async function _executeSingleRpc(ws, msg, platform, options) {
-	const { rpc: path, id, args: rawArgs, stream: isStream, seq: clientSeq, cursor: clientCursor, schemaVersion: clientSchemaVersion } = msg;
+	const { rpc: path, id, args: rawArgs, stream: isStream, cursor: clientCursor } = msg;
 	const _metricsStart = _metricsInstruments ? Date.now() : 0;
 
 	if (!_validPathRe.test(path)) {
@@ -4644,7 +4813,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 	const args = rawArgs || [];
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
-		if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+		if (_IS_DEV) {
 			console.warn(`[svelte-realtime] RPC call to '${path}' -- no such live function registered\n  See: https://svti.me/rpc`);
 		}
 		_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
@@ -4653,7 +4822,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 
 	const _h = _getCtxHelpers(platform);
 	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey);
-	let _subscribedStreamTopic = null;
+	const _subscribedRef = { topic: null };
 
 	try {
 		const _result = await _runWithMiddleware(ctx, async () => {
@@ -4666,194 +4835,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 		}
 
 		if (isStream && /** @type {any} */ (fn).__isStream) {
-			// Validate args BEFORE topic resolution -- prevents topic injection
-			// via malformed dynamic-topic args (e.g. `audit:${orgId}` with
-			// orgId crafted to escape the topic namespace). The validated
-			// tuple is bound to a stream-branch-local `let` to keep the
-			// outer `args` const for the non-stream path's V8 inline cache.
-			let streamArgs = args;
-			const argsSchema = /** @type {any} */ (fn).__streamArgs;
-			if (argsSchema) {
-				const result = _validate(argsSchema, streamArgs);
-				if (!result.ok) {
-					const err = { id, ok: false, code: 'VALIDATION', error: result.message };
-					/** @type {any} */ (err).issues = result.issues;
-					return err;
-				}
-				if (Array.isArray(result.data)) streamArgs = result.data;
-			}
-
-			if (/** @type {any} */ (fn).__isGated) {
-				const predicate = /** @type {any} */ (fn).__gatePredicate;
-				if (!predicate(ctx, ...streamArgs)) {
-					return { id, ok: true, data: null, gated: true };
-				}
-			}
-
-			const rawTopic = /** @type {any} */ (fn).__streamTopic;
-			const topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, streamArgs) : rawTopic;
-			if (typeof topic === 'string' && topic.startsWith('__')) {
-				return { id, ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' };
-			}
-			const streamOpts = /** @type {any} */ (fn).__streamOptions;
-			const replayOpts = /** @type {any} */ (fn).__replay;
-
-			const streamFilter = /** @type {any} */ (fn).__streamFilter;
-			if (streamFilter && !streamFilter(ctx, ...streamArgs)) {
-				const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
-				return { id, ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
-			}
-
-			const classOfService = /** @type {any} */ (fn).__classOfService;
-			if (classOfService && _admissionConfig) {
-				try {
-					if (_shouldShed(platform, classOfService)) {
-						return { id, ok: false, code: 'OVERLOADED', error: `Stream class '${classOfService}' shed under pressure` };
-					}
-				} catch (err) {
-					return { id, ok: false, code: 'INVALID_REQUEST', error: /** @type {Error} */ (err).message };
-				}
-			}
-
-			try { ws.subscribe(topic); } catch { return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' }; }
-			_trackStreamSub(ws, topic, fn);
-			_subscribedStreamTopic = topic;
-
-			if (/** @type {any} */ (fn).__onSubscribe) {
-				try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic); } catch {}
-			}
-
-			if (/** @type {any} */ (fn).__isDerived && !_activateDerivedCalled && !_warnedActivateDerived) {
-				if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
-					_warnedActivateDerived = true;
-					console.warn('[svelte-realtime] live.derived() subscribed but _activateDerived(platform) was never called. Derived streams will not receive live updates.\n  Call _activateDerived(platform) in your WebSocket open hook.\n  See: https://svti.me/derived');
-				}
-			}
-
-			// Channel fast-path
-			if (/** @type {any} */ (fn).__isChannel) {
-				const emptyValue = streamOpts.merge === 'set' ? null : [];
-				return { id, ok: true, data: emptyValue, topic, merge: streamOpts.merge, key: streamOpts.key, max: streamOpts.max, channel: true };
-			}
-
-			// Delta sync
-			const deltaOpts = /** @type {any} */ (fn).__delta;
-			const clientVersion = msg.version;
-			if (deltaOpts && clientVersion !== undefined && deltaOpts.version && deltaOpts.diff) {
-				try {
-					const currentVersion = await deltaOpts.version();
-					if (currentVersion === clientVersion) {
-						return { id, ok: true, data: [], topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, unchanged: true, version: currentVersion };
-					}
-					const diff = await deltaOpts.diff(clientVersion);
-					if (diff !== null && diff !== undefined) {
-						return { id, ok: true, data: diff, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, delta: true, version: currentVersion };
-					}
-				} catch {}
-			}
-
-			// Replay (bounded recent buffer)
-			if (replayOpts && typeof clientSeq === 'number' && platform.replay) {
-				try {
-					const missed = await platform.replay.since(topic, clientSeq);
-					if (missed) {
-						const currentSeq = await platform.replay.seq(topic);
-						return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
-					}
-				} catch {}
-			}
-
-			// Seq-delta (user-provided bridge for older-than-buffer reconnects)
-			if (deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
-				try {
-					const events = await deltaOpts.fromSeq(clientSeq);
-					if (Array.isArray(events)) {
-						let respSeq;
-						if (events.length > 0) {
-							const last = events[events.length - 1];
-							if (last && typeof last.seq === 'number') respSeq = last.seq;
-						}
-						if (respSeq === undefined && platform.replay) {
-							try { respSeq = await platform.replay.seq(topic); } catch {}
-						}
-						const deltaResp = {
-							id, ok: true, data: events, topic,
-							merge: streamOpts.merge, key: streamOpts.key,
-							prepend: streamOpts.prepend, max: streamOpts.max,
-							replay: true
-						};
-						if (respSeq !== undefined) deltaResp.seq = respSeq;
-						return deltaResp;
-					}
-				} catch {}
-			}
-
-			let result;
-			try {
-				result = await fn(ctx, ...streamArgs);
-			} catch (err) {
-				const streamOnError = /** @type {any} */ (fn).__streamOnError;
-				if (streamOnError) {
-					try { await streamOnError(err, ctx, topic); } catch {}
-				}
-				throw err;
-			}
-
-			// Arm the staleness watchdog now that the loader succeeded.
-			// Idempotent per topic, so multi-subscriber streams only ever
-			// run one watchdog regardless of how many subscribers join.
-			if (/** @type {any} */ (fn).__streamStaleAfterMs) {
-				_registerStaleWatch(topic, fn, ctx, streamArgs, platform);
-			}
-
-			// Arm the topic-invalidation watcher(s). Same first-wins
-			// idempotence story as the stale watchdog -- duplicate
-			// (pattern, topic) registrations are a no-op inside
-			// _registerInvalidationWatch.
-			if (/** @type {any} */ (fn).__streamInvalidateOn) {
-				_registerInvalidationWatch(topic, fn, ctx, streamArgs, platform);
-			}
-
-			const isPaginated = result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result;
-			let resultData = isPaginated ? result.data : result;
-
-			// Apply transform to initial data: per-item for arrays
-			// (crud/latest/presence/cursor merge), whole-value for non-arrays
-			// (set merge). Live-event transforms run separately at publish time.
-			const initTransform = /** @type {any} */ (fn).__streamTransform;
-			if (initTransform && resultData != null) {
-				resultData = _applyInitTransform(initTransform, resultData);
-			}
-
-			// Schema migration
-			const serverVersion = /** @type {any} */ (fn).__streamVersion;
-			const migrateFns = /** @type {any} */ (fn).__streamMigrate;
-			if (serverVersion !== undefined && migrateFns && typeof clientSchemaVersion === 'number' && clientSchemaVersion < serverVersion) {
-				resultData = _migrateData(resultData, clientSchemaVersion, serverVersion, migrateFns);
-			}
-
-			const response = {
-				id, ok: true, data: resultData, topic, merge: streamOpts.merge,
-				key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max,
-				hasMore: undefined, cursor: undefined, seq: undefined,
-				version: undefined, schemaVersion: undefined, replay: undefined,
-				derived: /** @type {any} */ (fn).__isDerived || undefined
-			};
-
-			if (isPaginated) {
-				response.hasMore = result.hasMore;
-				if (result.cursor !== undefined) response.cursor = result.cursor;
-			}
-			if (replayOpts && platform.replay) {
-				try { response.seq = await platform.replay.seq(topic); } catch {}
-			}
-			if (typeof clientSeq === 'number') response.replay = false;
-			if (deltaOpts && deltaOpts.version) {
-				try { response.version = await deltaOpts.version(); } catch {}
-			}
-			if (serverVersion !== undefined) response.schemaVersion = serverVersion;
-
-			return response;
+			return await _executeStreamRpc(ws, platform, fn, ctx, args, msg, _subscribedRef);
 		} else {
 			// Registry-level rate limit. Per-handler `live.rateLimit(...)`
 			// wraps fn directly and runs its own check inside the wrapper, so
@@ -4879,7 +4861,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart);
 		return _result;
 	} catch (err) {
-		if (_subscribedStreamTopic) _rollbackStreamSubscribe(ws, _subscribedStreamTopic, fn, ctx);
+		if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx);
 		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart);
 		if (err instanceof LiveError) {
 			/** @type {any} */
@@ -4890,7 +4872,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 		if (options?.onError) {
 			try { options.onError(path, err, ctx); } catch {}
 		}
-		if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+		if (_IS_DEV) {
 			console.warn(
 				`[svelte-realtime] '${path}' threw a non-LiveError:`,
 				err,
@@ -4973,7 +4955,7 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 			if (options?.onError) {
 				try { options.onError(path, err, ctx); } catch {}
 			}
-			if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+			if (_IS_DEV) {
 				console.error(`[svelte-realtime] Error in binary '${path}':`, err);
 			}
 			_respond(ws, platform, id, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
@@ -5120,7 +5102,7 @@ function _migrateItem(item, fromVersion, toVersion, migrateFns) {
 		const fn = migrateFns[v];
 		if (fn) {
 			result = fn(result);
-		} else if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+		} else if (_IS_DEV) {
 			console.warn(`[svelte-realtime] Missing migration function for version ${v} -> ${v + 1}\n  See: https://svti.me/schema`);
 		}
 	}
@@ -5128,7 +5110,7 @@ function _migrateItem(item, fromVersion, toVersion, migrateFns) {
 }
 
 function _respond(ws, platform, correlationId, payload) {
-	if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+	if (_IS_DEV) {
 		// Estimate size without double-serialization.
 		const data = payload.data;
 		if ((Array.isArray(data) && data.length > 100) || (typeof data === 'string' && data.length > 12000)) {
@@ -5140,14 +5122,14 @@ function _respond(ws, platform, correlationId, payload) {
 	}
 	try {
 		const result = platform.send(ws, '__rpc', correlationId, payload);
-		if (result === 0 && typeof process !== 'undefined' && process.env.NODE_ENV !== 'production') {
+		if (result === 0 && _IS_DEV) {
 			console.warn(
 				`[svelte-realtime] RPC response was not delivered (backpressure or closed connection)`
 			);
 		}
 	} catch (err) {
 		// uWS throws when accessing a closed WebSocket -- expected during mid-RPC disconnect.
-		if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+		if (_IS_DEV) {
 			console.warn(`[svelte-realtime] RPC response for '${correlationId}' could not be delivered (client likely disconnected)`);
 		}
 	}
@@ -5281,18 +5263,6 @@ async function _runDirectCall(path, args, platform, options) {
 }
 
 /**
- * Handle a WebSocket close event. Fires onUnsubscribe lifecycle hooks
- * for any stream functions that define them.
- *
- * Call this from your `close` hook in hooks.ws.js:
- * ```js
- * export { close } from 'svelte-realtime/server';
- * ```
- *
- * @param {any} ws
- * @param {{ platform: import('svelte-adapter-uws').Platform }} ctx
- */
-/**
  * Subscribe a WebSocket to its user's signal topic.
  * Call this in your `open` hook to enable `ctx.signal()` delivery.
  *
@@ -5370,6 +5340,18 @@ export function unsubscribe(ws, topic, { platform }) {
 /** @type {WeakMap<object, Set<string>>} Topics whose hooks already fired via unsubscribe() */
 const _firedUnsubscribes = new WeakMap();
 
+/**
+ * Handle a WebSocket close event. Fires onUnsubscribe lifecycle hooks
+ * for any stream functions that define them.
+ *
+ * Call this from your `close` hook in hooks.ws.js:
+ * ```js
+ * export { close } from 'svelte-realtime/server';
+ * ```
+ *
+ * @param {any} ws
+ * @param {{ platform: import('svelte-adapter-uws').Platform }} ctx
+ */
 export function close(ws, { platform, subscriptions }) {
 	const topicMap = _wsStreamOwners.get(ws);
 	const alreadyFired = _firedUnsubscribes.get(ws);
