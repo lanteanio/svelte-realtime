@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Internal
+
+- **Property-based test coverage for `store.mutate` queue-replay correctness.** Added `fast-check` as a dev dependency and 4 property tests under `__stream() mutate queue-replay property tests` that drive random sequences of (server-event, mutate-start, mutate-settle) operations against a real stream and compare the final displayed value to a brute-force reference model. The reference is a straight transcription of the design contract in plain JS: server events build a server-state, in-flight mutate-starts open queued entries, mutate-settles either graduate (success + not absorbed) or just remove the entry. Properties run 100 / 60 / 25 / 60 random iterations per `it` block (245 total per test run) covering: final-state matches reference, all-fail leaves only initial + applied server events (no phantoms), absorbed mutate yields the same state as the server event alone, post-drain server events apply via the hot path. No production code change.
+
 ### Changed
 
 - **`store.mutate(asyncOp, optimisticChange)` now uses always-on queue replay.** Pending mutations are tracked in an in-flight queue and the displayed value is recomputed by replaying that queue against the un-overlaid server state after every server event and every settle. The public API is unchanged; the win is that concurrent mutates roll back independently. If A and B are both in flight and both fail, the displayed state returns to the latest server state with no phantom traces of either A or B (the prior snapshot/restore approach could leak state between overlapping rollbacks). Server events with a key matching a queue entry's optimistic key absorb the entry, so the typical "client generates UUID, server confirms with same id" flow continues to reconcile without flicker.

@@ -81,6 +81,7 @@
     "svelte-adapter-uws": "^0.5.0-next.10"
   },
   "devDependencies": {
+    "fast-check": "^4.7.0",
     "vitest": "^4.0.18"
   },
   "keywords": [

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fc from 'fast-check';
 
 let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools;
 let topicCallbacks;
@@ -1104,6 +1105,317 @@ describe('__stream() mutate queue-replay correctness', () => {
 		expect(ctx.values[ctx.values.length - 1]).toEqual([{ id: 1 }]);
 		ctx.unsub();
 	});
+});
+
+// -- __stream() mutate queue-replay property tests (fast-check) ---------------
+//
+// Generates random sequences of (server-event, mutate-start, mutate-settle)
+// operations and asserts that the displayed value at the end of each
+// sequence matches a brute-force reference model. The reference is a
+// straight transcription of the design contract in plain JS: server events
+// build a server-state, mutate-starts open queued entries, mutate-settles
+// either graduate (success + not absorbed) or just remove the entry.
+//
+// The win over hand-written tier-1 tests: random sequences hit interleavings
+// that the unit tests miss, including races between in-flight mutates and
+// server events that share or do not share keys.
+//
+// Scope: event-based crud changes only. Free-form function changes and
+// non-crud merges are covered by tier-1 unit tests; modelling them in a
+// brute-force reference would just re-state the implementation.
+
+describe('__stream() mutate queue-replay property tests (fast-check)', () => {
+	let _streamSeq = 0;
+
+	async function setupCrudStream(initial) {
+		const seq = _streamSeq++;
+		const path = `qrp/s${seq}`;
+		const topic = `tqrp-${seq}`;
+		const store = __stream(path, { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: initial, topic, merge: 'crud', key: 'id' });
+		return { store, values, unsub, topic };
+	}
+
+	function deferred() {
+		let resolve, reject;
+		const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+		return { promise, resolve, reject };
+	}
+
+	/**
+	 * Brute-force reference model. Replays the operation sequence against a
+	 * plain-JS state machine that mirrors the design contract for crud
+	 * event-based mutates with key. Returns the expected final store value
+	 * after every operation has been processed and every mutate has settled.
+	 *
+	 * @param {Array<{id: number, name: string}>} initial
+	 * @param {Array<any>} ops
+	 * @returns {Array<{id: number, name: string}>}
+	 */
+	function reference(initial, ops) {
+		let serverState = initial.map((x) => ({ ...x }));
+		const findIdx = (state, id) => state.findIndex((x) => x.id === id);
+		/** @type {Map<number, { change: any, settled: boolean, success: boolean, absorbed: boolean, key: any }>} */
+		const mutates = new Map();
+
+		// Apply one merge event to (state) per the real _applyMergeFn semantics
+		// for crud: 'created' for missing key pushes; 'created' for existing key
+		// replaces; 'updated' is a no-op for missing key (does NOT insert);
+		// 'deleted' for missing key is a no-op.
+		const applyOne = (state, envelope) => {
+			const { event, data } = envelope;
+			const idx = findIdx(state, data.id);
+			if (event === 'created') {
+				if (idx >= 0) state[idx] = data;
+				else state.push(data);
+			} else if (event === 'updated') {
+				if (idx >= 0) state[idx] = data;
+			} else if (event === 'deleted') {
+				if (idx >= 0) state.splice(idx, 1);
+			}
+		};
+
+		for (const op of ops) {
+			if (op.type === 'server') {
+				applyOne(serverState, op.envelope);
+				// Absorb check: any in-flight mutate with matching key, regardless
+				// of whether the server event actually changed serverState.
+				const { event, data } = op.envelope;
+				if (event === 'created' || event === 'updated') {
+					for (const m of mutates.values()) {
+						if (!m.settled && m.key === data.id) m.absorbed = true;
+					}
+				}
+			} else if (op.type === 'mutate-start') {
+				mutates.set(op.id, {
+					change: op.change,
+					settled: false,
+					success: false,
+					absorbed: false,
+					key: op.change.data.id
+				});
+			} else if (op.type === 'mutate-settle') {
+				const m = mutates.get(op.id);
+				if (!m || m.settled) continue;
+				m.settled = true;
+				m.success = op.success;
+				if (op.success && !m.absorbed) {
+					applyOne(serverState, m.change);
+				}
+			}
+		}
+		return serverState;
+	}
+
+	/**
+	 * Generate an operation sequence as a fast-check arbitrary. The shape
+	 * is constrained so settle ops only reference previously-started
+	 * mutates. Each mutate has a small key space (1..6) so absorption
+	 * actually fires on a meaningful fraction of generated sequences.
+	 */
+	function opSeqArb() {
+		const eventName = fc.constantFrom('created', 'updated', 'deleted');
+		const idArb = fc.integer({ min: 1, max: 6 });
+		const nameArb = fc.constantFrom('A', 'B', 'C', 'D');
+		const dataArb = fc.record({ id: idArb, name: nameArb });
+		const envelopeArb = fc.record({ event: eventName, data: dataArb });
+
+		return fc.array(
+			fc.oneof(
+				{ weight: 4, arbitrary: fc.record({ tag: fc.constant('server'), envelope: envelopeArb }) },
+				{ weight: 3, arbitrary: fc.record({ tag: fc.constant('start'), change: envelopeArb }) },
+				{ weight: 2, arbitrary: fc.record({ tag: fc.constant('settle'), success: fc.boolean(), index: fc.integer({ min: 0, max: 99 }) }) }
+			),
+			{ minLength: 0, maxLength: 30 }
+		).map((raw) => {
+			// Resolve settle indices into actual mutate ids: settle 'index' picks
+			// from the unsettled mutates so far. Skip if none available.
+			const ops = [];
+			let nextId = 1;
+			const unsettled = [];
+			for (const r of raw) {
+				if (r.tag === 'server') {
+					ops.push({ type: 'server', envelope: r.envelope });
+				} else if (r.tag === 'start') {
+					const id = nextId++;
+					ops.push({ type: 'mutate-start', id, change: r.change });
+					unsettled.push(id);
+				} else if (r.tag === 'settle') {
+					if (unsettled.length === 0) continue;
+					const pickIdx = r.index % unsettled.length;
+					const id = unsettled.splice(pickIdx, 1)[0];
+					ops.push({ type: 'mutate-settle', id, success: r.success });
+				}
+			}
+			// Settle any remaining mutates so the final state is deterministic.
+			for (const id of unsettled) {
+				ops.push({ type: 'mutate-settle', id, success: true });
+			}
+			return ops;
+		});
+	}
+
+	/**
+	 * Drive a real stream through the operation sequence and return the
+	 * final displayed value.
+	 */
+	async function runOnRealStream(initial, ops) {
+		const ctx = await setupCrudStream(initial);
+		/** @type {Map<number, { d: ReturnType<typeof deferred>, p: Promise<any> }>} */
+		const liveMutates = new Map();
+
+		for (const op of ops) {
+			if (op.type === 'server') {
+				simulateTopicMessage(ctx.topic, op.envelope);
+			} else if (op.type === 'mutate-start') {
+				const d = deferred();
+				const p = ctx.store.mutate(() => d.promise, op.change).catch(() => {});
+				liveMutates.set(op.id, { d, p });
+			} else if (op.type === 'mutate-settle') {
+				const m = liveMutates.get(op.id);
+				if (!m) continue;
+				if (op.success) m.d.resolve('ok');
+				else m.d.reject(new Error('boom'));
+				await m.p;
+				liveMutates.delete(op.id);
+			}
+		}
+
+		// Drain any not-yet-settled (shouldn't happen given the arbitrary).
+		for (const m of liveMutates.values()) {
+			m.d.resolve('ok');
+			await m.p;
+		}
+
+		const final = ctx.values[ctx.values.length - 1];
+		ctx.unsub();
+		return final;
+	}
+
+	/**
+	 * Compare two crud arrays as multisets keyed by id (order does not
+	 * matter for crud merge -- entries can be reordered by swap-on-delete).
+	 */
+	function sameAsMultiset(a, b) {
+		if (!Array.isArray(a) || !Array.isArray(b)) return a === b;
+		if (a.length !== b.length) return false;
+		const aMap = new Map(a.map((x) => [x.id, x]));
+		for (const x of b) {
+			const m = aMap.get(x.id);
+			if (!m || m.name !== x.name) return false;
+		}
+		return true;
+	}
+
+	it('property: final state matches brute-force reference for random sequences', async () => {
+		await fc.assert(
+			fc.asyncProperty(opSeqArb(), async (ops) => {
+				const initial = [{ id: 100, name: 'Z' }];
+				const expected = reference(initial, ops);
+				const actual = await runOnRealStream(initial, ops);
+				if (!sameAsMultiset(actual, expected)) {
+					throw new Error(
+						'reference mismatch\nactual:   ' + JSON.stringify(actual) +
+						'\nexpected: ' + JSON.stringify(expected) +
+						'\nops:      ' + JSON.stringify(ops)
+					);
+				}
+				return true;
+			}),
+			{ numRuns: 100 }
+		);
+	}, 30000);
+
+	it('property: all mutates fail leaves only initial + applied server events (no phantoms)', async () => {
+		const allFailOpsArb = opSeqArb().map((ops) =>
+			ops.map((op) => (op.type === 'mutate-settle' ? { ...op, success: false } : op))
+		);
+		await fc.assert(
+			fc.asyncProperty(allFailOpsArb, async (ops) => {
+				const initial = [{ id: 100, name: 'Z' }];
+				// Reference with only server events (mutates filtered)
+				const serverOnly = ops.filter((op) => op.type === 'server');
+				const expected = reference(initial, serverOnly);
+				const actual = await runOnRealStream(initial, ops);
+				if (!sameAsMultiset(actual, expected)) {
+					throw new Error(
+						'reference mismatch\nactual:   ' + JSON.stringify(actual) +
+						'\nexpected: ' + JSON.stringify(expected) +
+						'\nops:      ' + JSON.stringify(ops)
+					);
+				}
+				return true;
+			}),
+			{ numRuns: 60 }
+		);
+	}, 30000);
+
+	it('property: a successful absorbed mutate yields the same state as the server event alone', async () => {
+		const scenarioArb = fc.record({
+			optimisticName: fc.constantFrom('Pending', 'Draft'),
+			confirmedName: fc.constantFrom('Confirmed', 'Done'),
+			delayServerBeforeSettle: fc.boolean()
+		});
+		await fc.assert(
+			fc.asyncProperty(scenarioArb, async (scenario) => {
+				const initial = [];
+				const opsAbsorb = [
+					{ type: 'mutate-start', id: 1, change: { event: 'created', data: { id: 7, name: scenario.optimisticName } } },
+					{ type: 'server', envelope: { event: 'created', data: { id: 7, name: scenario.confirmedName } } },
+					{ type: 'mutate-settle', id: 1, success: true }
+				];
+				const opsServerOnly = [
+					{ type: 'server', envelope: { event: 'created', data: { id: 7, name: scenario.confirmedName } } }
+				];
+				const a = await runOnRealStream(initial, opsAbsorb);
+				const b = await runOnRealStream(initial, opsServerOnly);
+				if (!sameAsMultiset(a, b)) {
+					throw new Error(
+						'absorb did not match server-only\nabsorb:     ' + JSON.stringify(a) +
+						'\nserverOnly: ' + JSON.stringify(b) +
+						'\nscenario:   ' + JSON.stringify(scenario)
+					);
+				}
+				return true;
+			}),
+			{ numRuns: 25 }
+		);
+	}, 30000);
+
+	it('property: queue mode exits cleanly: post-drain server event applies via the hot path', async () => {
+		// After all mutates settle, the queue should drain. A subsequent server
+		// event should apply directly to currentValue with no replay overhead.
+		// Observable signal: the displayed value matches the brute-force
+		// reference (which doesn't model queue mode at all).
+		const tailArb = fc.record({
+			body: opSeqArb(),
+			tailEvent: fc.record({
+				event: fc.constantFrom('created', 'updated'),
+				data: fc.record({ id: fc.integer({ min: 50, max: 60 }), name: fc.constantFrom('X', 'Y') })
+			})
+		});
+		await fc.assert(
+			fc.asyncProperty(tailArb, async (input) => {
+				const initial = [{ id: 100, name: 'Z' }];
+				const ops = [...input.body, { type: 'server', envelope: input.tailEvent }];
+				const expected = reference(initial, ops);
+				const actual = await runOnRealStream(initial, ops);
+				if (!sameAsMultiset(actual, expected)) {
+					throw new Error(
+						'reference mismatch\nactual:   ' + JSON.stringify(actual) +
+						'\nexpected: ' + JSON.stringify(expected) +
+						'\nops:      ' + JSON.stringify(ops)
+					);
+				}
+				return true;
+			}),
+			{ numRuns: 60 }
+		);
+	}, 30000);
 });
 
 // -- __rpc() createOptimistic --------------------------------------------------
