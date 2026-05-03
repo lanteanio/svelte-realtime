@@ -9,3 +9,4 @@ source
 test-results
 playwright-report
 .svelte-kit
+test/fixture/src/live/$types.d.ts

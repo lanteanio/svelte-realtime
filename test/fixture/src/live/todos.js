@@ -71,6 +71,18 @@ export const publishExternal = live(async (ctx, body) => {
 	return { ok: true };
 });
 
+// Test-only: schedule a server-side close of the calling client's
+// WebSocket. Used by reconnect e2e tests to deterministically force a
+// WS drop while a mutate is in flight (Playwright's setOffline does
+// not consistently close already-open WSs across browser versions).
+// Returns immediately so the calling RPC's response can land before
+// the close; the close fires on the next tick.
+export const killSelf = live(async (ctx) => {
+	const ws = ctx.ws;
+	setTimeout(() => { try { ws && ws.close(); } catch {} }, 5);
+	return { scheduled: true };
+});
+
 export const reset = live(async (ctx) => {
 	_state = [];
 	for (const w of _blocked.values()) w.reject(new LiveError('TEST_FAIL', 'reset'));

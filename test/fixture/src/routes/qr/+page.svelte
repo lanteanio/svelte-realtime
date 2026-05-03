@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { status } from 'svelte-adapter-uws/client';
-	import { todos, ok, okWithPublish, fail, block, release, publishExternal, reset } from '$live/todos';
+	import { todos, ok, okWithPublish, fail, block, release, publishExternal, reset, killSelf } from '$live/todos';
 
 	function waitForOpen() {
 		return new Promise((resolve) => {
@@ -122,6 +122,14 @@
 					return { ok: true };
 				} catch (err) {
 					return { ok: false, code: err?.code, message: err?.message };
+				}
+			},
+			killSelf: async () => {
+				try {
+					await killSelf();
+				} catch (err) {
+					// Likely DISCONNECTED if the close lands before the response
+					// is delivered. Either way the WS is going away.
 				}
 			},
 			publish: async ({ event, id, name }) => {
