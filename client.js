@@ -1,6 +1,10 @@
 // @ts-check
 import { connect as _connect, on, status, denials, onRequest as _adapterOnRequest } from 'svelte-adapter-uws/client';
 import { writable, readable } from 'svelte/store';
+// Namespace import lets .rune() access fromStore (Svelte 5 only) without
+// breaking the module under Svelte 4 - missing exports become undefined,
+// not module-load errors.
+import * as _svelteStore from 'svelte/store';
 
 /** @type {import('svelte/store').Readable<undefined>} */
 export const empty = readable(undefined);
@@ -721,6 +725,80 @@ export function __stream(path, options, isDynamic) {
 		};
 	}
 	return _createStream(path, options);
+}
+
+/**
+ * Wrap a subscribable in a `{ subscribe, rune, map }` object whose `.map()`
+ * projects per-item over the source's array (matching the
+ * `($source ?? []).map(fn)` semantic from the plan body).
+ *
+ * Lifecycle: lazy. Source is subscribed on first downstream consumer and
+ * unsubscribed on the last; the projection is recomputed per emission.
+ *
+ * Used by `StreamStore.map()` and chained from the returned mapped store
+ * itself (so `stream.map(a).map(b).rune()` composes cleanly).
+ *
+ * @template T, U
+ * @param {{ subscribe: (fn: (v: any) => void) => () => void }} source
+ * @param {(item: T) => U} fn
+ * @returns {{ subscribe: (fn: (v: U[]) => void) => () => void, rune: () => { readonly current: U[] }, map: <V>(g: (item: U) => V) => any }}
+ */
+function _createMappedStore(source, fn) {
+	const out = writable(/** @type {any} */ (undefined));
+	/** @type {(() => void) | null} */
+	let unsub = null;
+	let consumers = 0;
+
+	function activate() {
+		if (unsub) return;
+		unsub = source.subscribe((v) => {
+			if (v == null) {
+				out.set([]);
+			} else if (Array.isArray(v)) {
+				out.set(v.map(fn));
+			} else {
+				if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+					const tname = typeof v === 'object' ? (v.constructor?.name || 'object') : typeof v;
+					console.warn(
+						`[svelte-realtime] .map() expects an array source; got ${tname}.\n  See: https://svti.me/merge`
+					);
+				}
+				out.set([]);
+			}
+		});
+	}
+
+	function deactivate() {
+		if (unsub) {
+			unsub();
+			unsub = null;
+		}
+	}
+
+	return {
+		subscribe(consumer) {
+			if (consumers++ === 0) activate();
+			const unsubLocal = out.subscribe(consumer);
+			return () => {
+				unsubLocal();
+				if (--consumers === 0) deactivate();
+			};
+		},
+		rune() {
+			if (typeof _svelteStore.fromStore !== 'function') {
+				throw new Error(
+					'[svelte-realtime] .rune() requires Svelte 5 (svelte/store does not export fromStore)'
+				);
+			}
+			return _svelteStore.fromStore(this);
+		},
+		map(g) {
+			if (typeof g !== 'function') {
+				throw new Error('[svelte-realtime] .map(fn): fn must be a function');
+			}
+			return _createMappedStore(this, g);
+		}
+	};
 }
 
 /**
@@ -1741,6 +1819,79 @@ function _createStream(path, options, dynamicArgs) {
 			if (!_historyPaused) return;
 			_historyPaused = false;
 			_recordHistory();
+		},
+
+		/**
+		 * Return a Svelte 5 reactive object backed by this stream's value.
+		 *
+		 * Internally calls `fromStore` from `svelte/store` (Svelte 5 only):
+		 * the returned object exposes a single `current` getter; reading
+		 * `current` inside an effect or component subscribes via
+		 * `createSubscriber` for fine-grained reactivity, and reading it
+		 * outside an effect synchronously returns the latest value.
+		 *
+		 * Throws under Svelte 4 (where `fromStore` is not exported). Apps
+		 * still on Svelte 4 should use the existing `Readable<T>` interface
+		 * via the `$store` auto-subscribe syntax.
+		 *
+		 * @returns {{ readonly current: any }}
+		 *
+		 * @example
+		 * ```svelte
+		 * <script>
+		 *   import { todos } from '$live/todos';
+		 *   const items = todos.rune();
+		 * </script>
+		 *
+		 * <p>{items.current?.length ?? 0} items</p>
+		 * {#each items.current ?? [] as todo}<li>{todo.title}</li>{/each}
+		 * ```
+		 */
+		rune() {
+			if (typeof _svelteStore.fromStore !== 'function') {
+				throw new Error(
+					'[svelte-realtime] .rune() requires Svelte 5 (svelte/store does not export fromStore)'
+				);
+			}
+			return _svelteStore.fromStore(this);
+		},
+
+		/**
+		 * Project each item of the stream's array through `fn`. Returns a
+		 * mapped store with the same `{ subscribe, rune, map }` shape as the
+		 * source, so it composes both with `$`-prefix auto-subscription
+		 * (`$mapped`) and with `.rune()` for Svelte 5 fine-grained
+		 * reactivity, and chains via further `.map()` calls.
+		 *
+		 * Semantics match the documented `($stream ?? []).map(fn)` pattern:
+		 * a null or undefined source emits `[]`; an array source emits
+		 * `source.map(fn)`; a non-array source emits `[]` after a dev-mode
+		 * console.warn (set-merge streams and paginated wrappers are not
+		 * arrays at the top level - users should `.map()` over the array
+		 * field themselves).
+		 *
+		 * Avoids the `$derived(() => ...)` footgun: the value is a store,
+		 * not a function reference, so no rune-helper confusion is possible.
+		 *
+		 * @template T, U
+		 * @param {(item: T) => U} fn
+		 * @returns {{ subscribe: (fn: (v: U[]) => void) => () => void, rune: () => { readonly current: U[] }, map: <V>(g: (item: U) => V) => any }}
+		 *
+		 * @example
+		 * ```svelte
+		 * <script>
+		 *   import { todos } from '$live/todos';
+		 *   const titles = todos.map(t => t.title);
+		 * </script>
+		 *
+		 * {#each $titles as title}<li>{title}</li>{/each}
+		 * ```
+		 */
+		map(fn) {
+			if (typeof fn !== 'function') {
+				throw new Error('[svelte-realtime] .map(fn): fn must be a function');
+			}
+			return _createMappedStore(this, fn);
 		},
 
 		/**

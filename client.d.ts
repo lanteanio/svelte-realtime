@@ -202,6 +202,70 @@ export interface StreamStore<T = any> extends Readable<T> {
 	resumeHistory(): void;
 	/** Return a wrapper store that only activates when `condition` is truthy. Accepts a boolean, a Svelte store, or a getter function. Getter functions are evaluated once at subscribe time; for reactivity, pass a store. */
 	when(condition: boolean | Readable<any> | (() => any)): Readable<T | undefined>;
+	/**
+	 * Svelte 5: return a reactive object backed by this store's value.
+	 *
+	 * Internally calls `fromStore` from `svelte/store`: the returned object
+	 * exposes a single `current` getter; reading `current` inside an effect
+	 * or component subscribes via Svelte's `createSubscriber` for
+	 * fine-grained reactivity, and reading it outside an effect
+	 * synchronously returns the latest value.
+	 *
+	 * Throws under Svelte 4 (where `fromStore` is not exported). Apps still
+	 * on Svelte 4 should use the existing `Readable<T>` interface via the
+	 * `$store` auto-subscribe syntax.
+	 *
+	 * @example
+	 * ```svelte
+	 * <script>
+	 *   import { todos } from '$live/todos';
+	 *   const items = todos.rune();
+	 * </script>
+	 *
+	 * <p>{items.current?.length ?? 0} items</p>
+	 * {#each items.current ?? [] as todo}<li>{todo.title}</li>{/each}
+	 * ```
+	 */
+	rune(): { readonly current: T };
+	/**
+	 * Project each item of the stream's array through `fn`. Returns a mapped
+	 * store with the same `{ subscribe, rune, map }` shape as the source,
+	 * so it composes with `$`-prefix auto-subscription, with `.rune()`
+	 * for Svelte 5 fine-grained reactivity, and chains via further `.map()`.
+	 *
+	 * Semantics match the documented `($stream ?? []).map(fn)` pattern:
+	 * a null or undefined source emits `[]`; an array source emits
+	 * `source.map(fn)`; a non-array source emits `[]` after a dev-mode
+	 * console.warn (set-merge streams and paginated wrappers are not
+	 * arrays at the top level - users should `.map()` over the array
+	 * field themselves).
+	 *
+	 * Avoids the `$derived(() => ...)` footgun: the value is a store, not a
+	 * function reference, so no rune-helper confusion is possible.
+	 *
+	 * @example
+	 * ```svelte
+	 * <script>
+	 *   import { todos } from '$live/todos';
+	 *   const titles = todos.map(t => t.title);
+	 * </script>
+	 *
+	 * {#each $titles as title}<li>{title}</li>{/each}
+	 * ```
+	 */
+	map<U>(fn: (item: T extends (infer Item)[] ? Item : any) => U): MappedStore<U>;
+}
+
+/**
+ * The return value of `StreamStore.map(fn)`. Composes the same way as the
+ * source: subscribe via `$` auto-subscription, project further via `.map`,
+ * or read reactively in Svelte 5 via `.rune()`.
+ */
+export interface MappedStore<U> extends Readable<U[]> {
+	/** Svelte 5: return a reactive object backed by the mapped value. See `StreamStore.rune`. */
+	rune(): { readonly current: U[] };
+	/** Chain another projection. Same composability as `StreamStore.map`. */
+	map<V>(fn: (item: U) => V): MappedStore<V>;
 }
 
 export function __stream(

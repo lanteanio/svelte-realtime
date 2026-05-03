@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Svelte 5 store helpers `store.rune()` and `store.map(fn)` on every stream store.** Generated `$live/*` streams now expose a `.rune()` method that returns a Svelte-5 reactive object backed by the stream's value, and a `.map(fn)` method that projects each item of an array stream through `fn` and returns a composable mapped store.
+
+  ```svelte
+  <script>
+    import { todos } from '$live/todos';
+
+    // Svelte 5: reactive { current } via fromStore
+    const items = todos.rune();
+
+    // Per-item projection (works in both Svelte 4 and 5)
+    const titles = todos.map(t => t.title);
+
+    // Composes with rune() for Svelte 5 fine-grained reactivity
+    const titlesRune = todos.map(t => t.title).rune();
+  </script>
+
+  <p>{items.current?.length ?? 0} items</p>
+  {#each $titles as title}<li>{title}</li>{/each}
+  ```
+
+  `rune()` calls `fromStore` from `svelte/store` under the hood; reading `current` inside an effect or component subscribes via Svelte's `createSubscriber` for fine-grained reactivity, and reading it outside an effect synchronously returns the latest value. Throws under Svelte 4 (where `fromStore` is not exported) so apps still on Svelte 4 see a clear error instead of silent confusion -- they should keep using the existing `Readable<T>` interface via `$store` auto-subscribe.
+
+  `.map(fn)` returns an object with the same `{ subscribe, rune, map }` shape as the source, so it composes with `$`-prefix auto-subscription (`$mapped`), with `.rune()` for Svelte 5 fine-grained reactivity, and chains via further `.map()` calls. Semantics match the documented `($stream ?? []).map(fn)` pattern: a `null` or `undefined` source emits `[]`, an array source emits `source.map(fn)`, and a non-array source (set-merge stream, paginated wrapper) emits `[]` after a dev-mode `console.warn`. Subscriptions are lazy: the source is only subscribed while at least one mapped consumer is active. Sidesteps the `$derived(() => ...)` footgun where storing a function reference instead of its return value silently breaks rendering.
+
+  No new exports beyond the methods on the stream store. The existing `subscribe` interface is unchanged; apps that don't call `.rune()` or `.map()` see no behavior change.
+
 ### Changed
 
 - **Editing a `src/live/*.js` file now triggers an HMR update instead of a full page reload.** The Vite plugin's generated client stubs (the virtual `$live/*` modules) now emit `if (import.meta.hot) import.meta.hot.accept();`, which lets Vite re-execute the stub in place when the source file changes. The server-side handler reload was already wired (the registry virtual module reloads via `_hmrReloadRegistry`); the client-side accept directive was the missing piece that made Vite fall back to a full page reload.

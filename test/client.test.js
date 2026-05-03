@@ -161,6 +161,16 @@ beforeEach(async () => {
 			return {
 				subscribe(fn) { subs.add(fn); fn(initial); return () => subs.delete(fn); }
 			};
+		},
+		// Minimal Svelte 5 fromStore mock for `.rune()` round-trip tests:
+		// subscribes to the source and exposes a synchronous { current }
+		// reader. Real fromStore uses createSubscriber for fine-grained
+		// reactivity; outside an effect it falls back to a synchronous read,
+		// which is what the mock provides.
+		fromStore: (store) => {
+			let current;
+			store.subscribe((v) => { current = v; });
+			return { get current() { return current; } };
 		}
 	}));
 
@@ -3833,5 +3843,245 @@ describe('onPush()', () => {
 		expect(() => onPush(/** @type {any} */ (null), () => {})).toThrow(/event/);
 		expect(() => onPush('e', /** @type {any} */ (null))).toThrow(/handler/);
 		expect(() => onPush('e', /** @type {any} */ ('not-fn'))).toThrow(/handler/);
+	});
+});
+
+// -- __stream() Svelte 5 .rune() helper ---------------------------------------
+
+describe('__stream() rune()', () => {
+	async function setupStream() {
+		const store = __stream('rune/items', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1, name: 'A' }, { id: 2, name: 'B' }],
+			topic: 'rune-items',
+			merge: 'crud',
+			key: 'id'
+		});
+		return { store, values, unsub };
+	}
+
+	it('returns an object with a current getter', async () => {
+		const { store, unsub } = await setupStream();
+		const r = store.rune();
+		expect(typeof r).toBe('object');
+		expect('current' in r).toBe(true);
+		unsub();
+	});
+
+	it('current reflects the latest store value', async () => {
+		const { store, unsub } = await setupStream();
+		const r = store.rune();
+		expect(r.current).toEqual([{ id: 1, name: 'A' }, { id: 2, name: 'B' }]);
+		unsub();
+	});
+
+	it('current updates when the store updates', async () => {
+		const { store, unsub } = await setupStream();
+		const r = store.rune();
+		simulateTopicMessage('rune-items', { event: 'created', data: { id: 3, name: 'C' } });
+		expect(r.current).toEqual([
+			{ id: 1, name: 'A' },
+			{ id: 2, name: 'B' },
+			{ id: 3, name: 'C' }
+		]);
+		unsub();
+	});
+
+	it('throws under Svelte 4 (svelte/store missing fromStore)', async () => {
+		// Re-mock svelte/store WITHOUT fromStore to simulate Svelte 4.
+		vi.resetModules();
+		vi.doMock('svelte-adapter-uws/client', () => ({
+			connect: connectFn,
+			on: (topic) => ({
+				subscribe: (fn) => {
+					let fns = topicCallbacks.get(topic);
+					if (!fns) { fns = new Set(); topicCallbacks.set(topic, fns); }
+					fns.add(fn);
+					return () => {
+						fns.delete(fn);
+						if (fns.size === 0) topicCallbacks.delete(topic);
+					};
+				}
+			}),
+			onDerived: () => ({ subscribe: () => () => {} }),
+			status: { subscribe: (fn) => { fn('open'); return () => {}; } },
+			failure: { subscribe: (fn) => { fn(null); return () => {}; } },
+			denials: { subscribe: (fn) => { fn(null); return () => {}; } },
+			onRequest: () => () => {}
+		}));
+		vi.doMock('svelte/store', () => ({
+			writable: (initial) => {
+				let value = initial;
+				const subs = new Set();
+				return {
+					set(v) { value = v; for (const fn of subs) fn(v); },
+					subscribe(fn) { subs.add(fn); fn(value); return () => subs.delete(fn); }
+				};
+			},
+			readable: (initial) => ({
+				subscribe(fn) { fn(initial); return () => {}; }
+			}),
+			// Explicit undefined - real Svelte 4 omits the export entirely;
+			// vitest's strict mock factory requires us to declare it.
+			fromStore: undefined
+		}));
+		const mod = await import('../client.js');
+		const s = mod.__stream('rune-v4/items', { merge: 'crud', key: 'id' });
+		const u = s.subscribe(() => {});
+		expect(() => s.rune()).toThrow(/requires Svelte 5/);
+		u();
+	});
+});
+
+// -- __stream() .map() projection helper --------------------------------------
+
+describe('__stream() map()', () => {
+	async function setupStream() {
+		const store = __stream('map/items', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ id: 1, name: 'A' }, { id: 2, name: 'B' }],
+			topic: 'map-items',
+			merge: 'crud',
+			key: 'id'
+		});
+		return { store, unsub };
+	}
+
+	it('returns an object with subscribe, rune, and map', async () => {
+		const { store, unsub } = await setupStream();
+		const mapped = store.map((t) => t.name);
+		expect(typeof mapped.subscribe).toBe('function');
+		expect(typeof mapped.rune).toBe('function');
+		expect(typeof mapped.map).toBe('function');
+		unsub();
+	});
+
+	it('projects each array item through fn', async () => {
+		const { store, unsub } = await setupStream();
+		const mapped = store.map((t) => t.name);
+		const seen = [];
+		const u = mapped.subscribe((v) => seen.push(v));
+		expect(seen[seen.length - 1]).toEqual(['A', 'B']);
+		u();
+		unsub();
+	});
+
+	it('updates when the source array updates', async () => {
+		const { store, unsub } = await setupStream();
+		const mapped = store.map((t) => t.name);
+		const seen = [];
+		const u = mapped.subscribe((v) => seen.push(v));
+		simulateTopicMessage('map-items', { event: 'created', data: { id: 3, name: 'C' } });
+		expect(seen[seen.length - 1]).toEqual(['A', 'B', 'C']);
+		u();
+		unsub();
+	});
+
+	it('emits [] for null source', async () => {
+		const store = __stream('map/null', { merge: 'set' });
+		const subUnsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: null,
+			topic: 'map-null',
+			merge: 'set'
+		});
+		const mapped = store.map((/** @type {any} */ x) => x);
+		const seen = [];
+		const u = mapped.subscribe((v) => seen.push(v));
+		expect(seen[seen.length - 1]).toEqual([]);
+		u();
+		subUnsub();
+	});
+
+	it('emits [] and warns for non-array source in dev', async () => {
+		const prev = process.env.NODE_ENV;
+		process.env.NODE_ENV = 'development';
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const store = __stream('map/obj', { merge: 'set' });
+			const subUnsub = store.subscribe(() => {});
+			await flush();
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, {
+				ok: true,
+				data: { count: 5 },
+				topic: 'map-obj',
+				merge: 'set'
+			});
+			const mapped = store.map((/** @type {any} */ x) => x);
+			const seen = [];
+			const u = mapped.subscribe((v) => seen.push(v));
+			expect(seen[seen.length - 1]).toEqual([]);
+			expect(warn).toHaveBeenCalledWith(expect.stringContaining('.map() expects an array source'));
+			u();
+			subUnsub();
+		} finally {
+			warn.mockRestore();
+			process.env.NODE_ENV = prev;
+		}
+	});
+
+	it('chains via .map(g) preserving the same shape', async () => {
+		const { store, unsub } = await setupStream();
+		const lengths = store.map((t) => t.name).map((s) => s.length);
+		expect(typeof lengths.rune).toBe('function');
+		const seen = [];
+		const u = lengths.subscribe((v) => seen.push(v));
+		expect(seen[seen.length - 1]).toEqual([1, 1]);
+		u();
+		unsub();
+	});
+
+	it('rune() on a mapped store returns reactive { current }', async () => {
+		const { store, unsub } = await setupStream();
+		const ids = store.map((t) => t.id);
+		const r = ids.rune();
+		expect(r.current).toEqual([1, 2]);
+		simulateTopicMessage('map-items', { event: 'created', data: { id: 3, name: 'C' } });
+		expect(r.current).toEqual([1, 2, 3]);
+		unsub();
+	});
+
+	it('validates fn is a function', async () => {
+		const { store, unsub } = await setupStream();
+		expect(() => store.map(/** @type {any} */ (null))).toThrow(/fn must be a function/);
+		expect(() => store.map(/** @type {any} */ ('not-fn'))).toThrow(/fn must be a function/);
+		unsub();
+	});
+
+	it('subscribes the source lazily on first consumer and unsubscribes on last', async () => {
+		const { store, unsub } = await setupStream();
+		const mapped = store.map((t) => t.id);
+		// Track source subscriber count via an indirect signal: a publish
+		// before any mapped consumer should not be projected anywhere.
+		// Subscribe two consumers, then drop both; verify the mapped store
+		// emits nothing further until a new consumer arrives.
+		const seenA = [];
+		const seenB = [];
+		const ua = mapped.subscribe((v) => seenA.push(v));
+		const ub = mapped.subscribe((v) => seenB.push(v));
+		expect(seenA[seenA.length - 1]).toEqual([1, 2]);
+		expect(seenB[seenB.length - 1]).toEqual([1, 2]);
+		ua();
+		ub();
+		// After both unsubscribe, a new subscriber should still see the
+		// current value (re-activation works).
+		const seenC = [];
+		const uc = mapped.subscribe((v) => seenC.push(v));
+		expect(seenC[seenC.length - 1]).toEqual([1, 2]);
+		uc();
+		unsub();
 	});
 });

@@ -201,6 +201,7 @@ Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `re
 - [Getting started](#getting-started)
 - [Merge strategies](#merge-strategies)
 - [Connection state stores](#connection-state-stores)
+- [Svelte 5 store helpers](#svelte-5-store-helpers)
 - [Error handling](#error-handling)
 - [Per-module auth](#per-module-auth)
 - [Dynamic topics](#dynamic-topics)
@@ -428,6 +429,65 @@ Apps that need richer health detail (reason strings, timestamps) can listen to t
 import { on } from 'svelte-adapter-uws/client';
 on('__realtime').subscribe((envelope) => { /* full payload */ });
 ```
+
+---
+
+## Svelte 5 store helpers
+
+Generated `$live/*` stream stores work out of the box as Svelte 4 `Readable<T>` values via the `$store` auto-subscribe syntax. For Svelte 5 apps, two methods are exposed alongside the existing `subscribe` interface so component code stays terse without reaching for `$derived.by(() => $store ?? [])` boilerplate.
+
+### `store.rune()` -- Svelte 5 reactive object
+
+Returns an object with a single `current` getter, backed by Svelte's `fromStore` from `svelte/store`. Reading `current` inside an effect or component subscribes via Svelte's `createSubscriber` for fine-grained reactivity; reading it outside an effect synchronously returns the latest value.
+
+```svelte
+<script>
+  import { todos } from '$live/todos';
+  const items = todos.rune();
+</script>
+
+<p>{items.current?.length ?? 0} items</p>
+{#each items.current ?? [] as todo}
+  <li>{todo.title}</li>
+{/each}
+```
+
+`rune()` requires Svelte 5 (the `fromStore` export is not available in Svelte 4) and throws a descriptive error if called against an older runtime. Apps still on Svelte 4 use the `$store` auto-subscribe syntax instead.
+
+### `store.map(fn)` -- per-item projection
+
+Returns a mapped store with the same `{ subscribe, rune, map }` shape as the source. Idiomatic alternative to `$derived.by(() => ($stream ?? []).map(...))` and avoids the `$derived(() => ...)` footgun where storing a function reference instead of its return value silently breaks rendering.
+
+```svelte
+<script>
+  import { todos } from '$live/todos';
+  const titles = todos.map(t => t.title);
+  // Or compose with rune() for Svelte 5:
+  const titlesRune = todos.map(t => t.title).rune();
+</script>
+
+{#each $titles as title}<li>{title}</li>{/each}
+```
+
+Semantics match the documented `($stream ?? []).map(fn)` pattern: a `null` or `undefined` source emits `[]`; an array source emits `source.map(fn)`; a non-array source (set-merge stream, paginated wrapper) emits `[]` after a dev-mode `console.warn` pointing at the merge-strategy docs. Subscriptions are lazy: the source is only subscribed while at least one mapped consumer is active. Chains via further `.map()` calls preserve the same shape.
+
+### `empty` -- bundled placeholder store
+
+Every generated `$live/<name>.js` re-exports an `empty` store that holds `undefined`. Use it as the fallback for conditional streams without importing `readable` from `svelte/store`:
+
+```svelte
+<script>
+  import { todos, empty } from '$live/todos';
+  let { user, orgId } = $props();
+  const items = $derived(user ? todos(orgId) : empty);
+</script>
+
+{#each $items ?? [] as todo}
+  <li>{todo.title}</li>
+{/each}
+```
+
+Auto-imported alongside the stream itself; nothing extra to wire.
 
 ---
 
