@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fc from 'fast-check';
 
-let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools;
+let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest;
 let topicCallbacks;
 let statusCallbacks;
 let failureCallbacks;
@@ -201,6 +201,10 @@ beforeEach(async () => {
 		__devtools.pending.clear();
 		for (let i = 0; i < __devtools.history.length; i++) __devtools.history[i] = null;
 	}
+	MAX_OPTIMISTIC_QUEUE_DEPTH = mod.MAX_OPTIMISTIC_QUEUE_DEPTH;
+	_setCapsForTest = mod._setCapsForTest;
+	_resetCapsForTest = mod._resetCapsForTest;
+	_resetCapsForTest();
 });
 
 // -- __rpc (Finding 1 regression) ---------------------------------------------
@@ -5215,5 +5219,82 @@ describe('__stream() map()', () => {
 		expect(seenC[seenC.length - 1]).toEqual([1, 2]);
 		uc();
 		unsub();
+	});
+});
+
+// -- Capacity caps ------------------------------------------------------------
+
+describe('MAX_OPTIMISTIC_QUEUE_DEPTH (REJECT)', () => {
+	async function setupCrudStream(path, topic, initial = []) {
+		const store = __stream(path, { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await new Promise((r) => queueMicrotask(r));
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: initial, topic, merge: 'crud', key: 'id' });
+		return { store, values, unsub, topic };
+	}
+
+	it('exposes the documented default', () => {
+		expect(MAX_OPTIMISTIC_QUEUE_DEPTH).toBe(1_000);
+	});
+
+	it('throws synchronously when the in-flight queue depth exceeds the cap', async () => {
+		_setCapsForTest({ optimisticQueueDepth: 3 });
+		const ctx = await setupCrudStream('mut/cap', 'mut-cap');
+
+		// Fire 3 in-flight mutates that will not settle (no asyncOp resolution).
+		const promises = [];
+		for (let i = 0; i < 3; i++) {
+			promises.push(
+				ctx.store.mutate(
+					() => new Promise(() => {}),
+					{ event: 'created', data: { id: 't' + i, name: 'T' + i } }
+				)
+			);
+		}
+
+		// 4th mutate exceeds the cap and rejects synchronously (returned
+		// Promise rejects rather than throws because mutate is async).
+		await expect(
+			ctx.store.mutate(
+				() => new Promise(() => {}),
+				{ event: 'created', data: { id: 't4', name: 'T4' } }
+			)
+		).rejects.toThrow(/MAX_OPTIMISTIC_QUEUE_DEPTH=3/);
+
+		ctx.unsub();
+	});
+
+	it('allows a new mutate after a settled one drains the queue', async () => {
+		_setCapsForTest({ optimisticQueueDepth: 2 });
+		const ctx = await setupCrudStream('mut/drain', 'mut-drain');
+
+		let resolveOp;
+		const op = ctx.store.mutate(
+			() => new Promise((r) => { resolveOp = r; }),
+			{ event: 'created', data: { id: 't1', name: 'T1' } }
+		);
+		const op2 = ctx.store.mutate(
+			() => new Promise(() => {}),
+			{ event: 'created', data: { id: 't2', name: 'T2' } }
+		);
+		// Cap is 2; a 3rd would reject.
+		await expect(
+			ctx.store.mutate(() => new Promise(() => {}), { event: 'created', data: { id: 't3' } })
+		).rejects.toThrow(/MAX_OPTIMISTIC_QUEUE_DEPTH/);
+
+		// Settle the first one to drain a slot.
+		resolveOp({ id: 't1', name: 'T1', confirmed: true });
+		await op;
+
+		// Now a new mutate is admitted (queue had 2, one settled, slot free).
+		const op4 = ctx.store.mutate(
+			() => Promise.resolve({ id: 't4' }),
+			{ event: 'created', data: { id: 't4', name: 'T4' } }
+		);
+		await expect(op4).resolves.toEqual({ id: 't4' });
+
+		ctx.unsub();
 	});
 });

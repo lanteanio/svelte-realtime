@@ -4,6 +4,71 @@ const textDecoder = new TextDecoder();
 const _validPathRe = /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)+$/;
 const _validSegmentRe = /^[a-zA-Z0-9_]+$/;
 
+// -- Bounded-by-default capacity caps (server side) -------------------------
+// Every per-process Map / Set with caller-driven growth is bounded. Numbers
+// are deliberately generous - far above any healthy single-instance workload
+// - so they catch obvious bugs (subscribe-leak, register-without-deregister)
+// without biting real apps. Saturation behavior is one of:
+//
+//   REJECT      caller gets an explicit error or a silent skip
+//   WARN-ONLY   logs once per category; map keeps growing because eviction
+//               would corrupt routing
+//   FIFO-EVICT  drops oldest insertion-order entries; safe for dedup state
+//               where re-warn or duplicate is acceptable
+//
+// Existing caps not re-declared here (already enforced at their sites):
+//   _RATE_LIMIT_MAX        5000    REJECT after stale-sweep (per-identity)
+//   _THROTTLE_DEBOUNCE_MAX 5000    fall-back to direct publish (per-key)
+//   idempotency maxEntries 10000   FIFO 10% (in-process result store)
+//
+// See README "Capacity model" for the full taxonomy.
+
+/** Max distinct userIds tracked in the per-process push registry. WARN-then-skip on cap: new registrations are dropped (the connection still works, it just can't be the target of `live.push({ userId })` until existing entries clear). Matches the cluster-scale convention from svelte-adapter-uws-extensions (`MAX_REGISTRY_SESSIONS_PER_INSTANCE`). */
+export const MAX_PUSH_REGISTRY = 10_000_000;
+
+/** Threshold for the per-process topic-subscribers index. WARN-ONLY: the map keeps growing because eviction would corrupt subscribe / unsubscribe routing. Surfaces a structured warning the first time the threshold is crossed. Matches svelte-adapter-uws `TOPIC_SEQS_WARN_THRESHOLD`. */
+export const TOPIC_WS_COUNTS_WARN_THRESHOLD = 1_000_000;
+
+/** Max distinct topics in the dev-mode silent-topic warning dedup. FIFO-evict on cap: dropping the oldest entry just lets that topic re-warn on its next over-threshold subscribe. Matches svelte-adapter-uws `PUBLISH_WARN_DEDUP_MAX`. */
+export const SILENT_TOPIC_WARN_DEDUP_MAX = 1_000_000;
+
+/** Max distinct topics in the dev-mode publish-rate warning dedup. FIFO-evict on cap: dropping the oldest entry just lets that topic re-warn on its next sample tick. Matches svelte-adapter-uws `PUBLISH_WARN_DEDUP_MAX`. */
+export const PUBLISH_RATE_WARN_DEDUP_MAX = 1_000_000;
+
+// Mutable internal copies: the public `export const` values above are the
+// canonical defaults; tests use `_setCapsForTest` to lower them for fast
+// saturation scenarios. Production never touches these.
+let _maxPushRegistry = MAX_PUSH_REGISTRY;
+let _topicWsCountsWarnThreshold = TOPIC_WS_COUNTS_WARN_THRESHOLD;
+let _silentTopicWarnDedupMax = SILENT_TOPIC_WARN_DEDUP_MAX;
+let _publishRateWarnDedupMax = PUBLISH_RATE_WARN_DEDUP_MAX;
+
+/**
+ * Override capacity caps for testing. Pass any subset of the cap names
+ * (omit `MAX_` / `_THRESHOLD` / `_MAX` suffix; use `pushRegistry`,
+ * `topicWsCountsWarn`, `silentTopicWarnDedup`, `publishRateWarnDedup`).
+ * Pair with `_resetCapsForTest()` in afterEach.
+ * @internal
+ * @param {{ pushRegistry?: number, topicWsCountsWarn?: number, silentTopicWarnDedup?: number, publishRateWarnDedup?: number }} overrides
+ */
+export function _setCapsForTest(overrides) {
+	if (overrides.pushRegistry !== undefined) _maxPushRegistry = overrides.pushRegistry;
+	if (overrides.topicWsCountsWarn !== undefined) _topicWsCountsWarnThreshold = overrides.topicWsCountsWarn;
+	if (overrides.silentTopicWarnDedup !== undefined) _silentTopicWarnDedupMax = overrides.silentTopicWarnDedup;
+	if (overrides.publishRateWarnDedup !== undefined) _publishRateWarnDedupMax = overrides.publishRateWarnDedup;
+}
+
+/**
+ * Restore capacity caps to their default values.
+ * @internal
+ */
+export function _resetCapsForTest() {
+	_maxPushRegistry = MAX_PUSH_REGISTRY;
+	_topicWsCountsWarnThreshold = TOPIC_WS_COUNTS_WARN_THRESHOLD;
+	_silentTopicWarnDedupMax = SILENT_TOPIC_WARN_DEDUP_MAX;
+	_publishRateWarnDedupMax = PUBLISH_RATE_WARN_DEDUP_MAX;
+}
+
 /** @type {Map<string, Function>} */
 const registry = new Map();
 
@@ -106,6 +171,12 @@ const _pushRegistry = new Map();
  * @type {WeakMap<object, string>}
  */
 const _wsToPushUserId = new WeakMap();
+
+/** One-shot flag for the MAX_PUSH_REGISTRY warning. Reset by `_resetPushRegistry`. */
+let _pushRegistryWarnFired = false;
+
+/** One-shot flag for the TOPIC_WS_COUNTS_WARN_THRESHOLD warning. Reset by `_resetTopicWsCounts`. */
+let _topicWsCountsWarnFired = false;
 
 /** @type {((ws: any) => string | null | undefined) | null} */
 let _pushIdentify = null;
@@ -602,6 +673,10 @@ export function _armSilentTopicWatch(topic) {
 		timerId: setTimeout(() => {
 			const e = _silentTopicWatch.get(topic);
 			if (!e || e.sawEvent) return;
+			if (_silentTopicWarned.size >= _silentTopicWarnDedupMax && !_silentTopicWarned.has(topic)) {
+				const oldest = _silentTopicWarned.values().next().value;
+				if (oldest !== undefined) _silentTopicWarned.delete(oldest);
+			}
 			_silentTopicWarned.add(topic);
 			console.warn(
 				"[svelte-realtime] Topic '" + topic + "' has subscribers but no events arrived within " +
@@ -727,6 +802,10 @@ export function _activatePublishRateWarning(platform) {
 			if (!entry || typeof entry.topic !== 'string') continue;
 			if (entry.messagesPerSec < _publishRateConfig.threshold) continue;
 			if (_publishRateWarned.has(entry.topic)) continue;
+			if (_publishRateWarned.size >= _publishRateWarnDedupMax) {
+				const oldest = _publishRateWarned.values().next().value;
+				if (oldest !== undefined) _publishRateWarned.delete(oldest);
+			}
 			_publishRateWarned.add(entry.topic);
 			// Suppress the hint when the user has already chosen one of the
 			// two natural mitigations for this topic. Both registries are
@@ -937,7 +1016,18 @@ function _trackStreamSub(ws, topic, fn) {
 	if (existing) { existing.count++; } else { owners.push({ fn, count: 1 }); }
 	if (isFirstSubForTopic) {
 		let wsSet = _topicWsCounts.get(topic);
-		if (!wsSet) { wsSet = new Set(); _topicWsCounts.set(topic, wsSet); }
+		if (!wsSet) {
+			if (_topicWsCounts.size >= _topicWsCountsWarnThreshold && !_topicWsCountsWarnFired) {
+				_topicWsCountsWarnFired = true;
+				console.warn(
+					"[svelte-realtime] topic-subscribers index reached TOPIC_WS_COUNTS_WARN_THRESHOLD=" + _topicWsCountsWarnThreshold + " distinct topics.\n" +
+					"  Eviction would corrupt subscribe/unsubscribe routing, so the index keeps growing.\n" +
+					"  Check for runaway dynamic-topic generation (e.g. per-request topic strings) and prefer aggregating into stable topics."
+				);
+			}
+			wsSet = new Set();
+			_topicWsCounts.set(topic, wsSet);
+		}
 		wsSet.add(ws);
 	}
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__coalesceBy) {
@@ -1936,6 +2026,7 @@ export function _resetCoalesceRegistry() {
  */
 export function _resetTopicWsCounts() {
 	_topicWsCounts.clear();
+	_topicWsCountsWarnFired = false;
 }
 
 /**
@@ -2374,6 +2465,18 @@ export const pushHooks = {
 		if (typeof userId !== 'string') {
 			throw new Error('[svelte-realtime] pushHooks.open: identify(ws) must return a string, null, or undefined (got ' + typeof userId + ')');
 		}
+		if (!_pushRegistry.has(userId) && _pushRegistry.size >= _maxPushRegistry) {
+			if (!_pushRegistryWarnFired) {
+				_pushRegistryWarnFired = true;
+				console.warn(
+					"[svelte-realtime] push registry reached MAX_PUSH_REGISTRY=" + _maxPushRegistry +
+					"; new userIds will not be registered for `live.push({ userId })` until existing entries clear.\n" +
+					"  This usually indicates push registrations are not being released on disconnect.\n" +
+					"  Check that hooks.ws.js wires `pushHooks.close` and that the upstream identify(ws) is stable per-user."
+				);
+			}
+			return;
+		}
 		_pushRegistry.set(userId, { ws, platform: ctx.platform });
 		_wsToPushUserId.set(ws, userId);
 	},
@@ -2508,6 +2611,7 @@ export function _resetPushRegistry() {
 	_pushRegistry.clear();
 	_pushIdentify = null;
 	_remoteRegistry = null;
+	_pushRegistryWarnFired = false;
 }
 
 /**

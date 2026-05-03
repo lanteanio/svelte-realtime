@@ -2581,6 +2581,70 @@ Workers are health-checked every 10 seconds. If a worker fails to respond within
 
 ---
 
+## Capacity model
+
+Every internal Map / Set / array with caller-driven growth is bounded by default. Numbers are deliberately generous -- far above any healthy single-instance workload -- so they catch obvious bugs (subscribe-leak, register-without-deregister) without biting real apps.
+
+Each cap is one of three saturation behaviors:
+
+- **REJECT** -- caller gets an explicit error or a documented silent skip.
+- **WARN-ONLY** -- logs once per category; structure keeps growing because eviction would corrupt routing.
+- **FIFO-evict** -- drops oldest insertion-order entries; safe for dedup state where re-warn or duplicate is acceptable.
+
+| Cap                                  | Default     | Behavior     | Notes                                                               |
+| ------------------------------------ | ----------- | ------------ | ------------------------------------------------------------------- |
+| `MAX_PUSH_REGISTRY`                  | 10,000,000  | WARN+skip    | Per-userId connection registry for `live.push({ userId })`.         |
+| `TOPIC_WS_COUNTS_WARN_THRESHOLD`     | 1,000,000   | WARN-only    | Per-topic subscriber index. Eviction would corrupt routing.         |
+| `SILENT_TOPIC_WARN_DEDUP_MAX`        | 1,000,000   | FIFO-evict   | Dev-mode silent-topic warning dedup set.                            |
+| `PUBLISH_RATE_WARN_DEDUP_MAX`        | 1,000,000   | FIFO-evict   | Dev-mode publish-rate warning dedup set.                            |
+| `MAX_OPTIMISTIC_QUEUE_DEPTH`         | 1,000       | REJECT       | Per-stream in-flight `mutate()` queue depth.                        |
+| Rate-limit identities                | 5,000       | REJECT       | Per-function `live.rateLimit()` buckets after stale-sweep.          |
+| Throttle/debounce timers             | 5,000       | direct       | At cap, publishes immediately instead of dropping.                  |
+| Idempotency results                  | 10,000      | FIFO-evict   | In-process `live.idempotent()` store; evicts oldest 10%.            |
+| Presence refs                        | 10,000      | evict+drop   | Suspended entries evicted first; full -> join dropped silently.     |
+| Per-stream history                   | 50          | FIFO         | `store.history` undo/redo ring; configurable via `enableHistory`.   |
+| Per-stream devtools events           | 20          | FIFO         | Recent-events ring shown in `__devtools`.                           |
+
+The first five are exported as named constants from `svelte-realtime/server` and `svelte-realtime/client` so apps writing tools or dashboards can read them programmatically. The remaining caps are internal; their values are documented here for capacity planning.
+
+### MAX_PUSH_REGISTRY (10,000,000)
+
+Per-process Map of userId -> { ws, platform } populated by `pushHooks.open` and drained by `pushHooks.close`. When the registry reaches the cap, new userIds are not registered (the connection still works, it just can't be the target of `live.push({ userId })` until existing entries clear). A one-shot warning surfaces the saturation. Hitting this typically means push registrations are not being released on disconnect -- check `hooks.ws.js` wires `pushHooks.close`.
+
+### TOPIC_WS_COUNTS_WARN_THRESHOLD (1,000,000)
+
+Per-process Map<topic, Set<ws>> tracking which sockets hold an active stream subscription per topic. Used by the realtime layer to pass `remainingSubscribers` to `__onUnsubscribe`. Eviction would corrupt subscribe / unsubscribe routing, so this is WARN-ONLY: the map keeps growing past the threshold, but a one-shot warning surfaces. Hitting this typically means runaway dynamic-topic generation (per-request topic strings); prefer aggregating into stable topic names.
+
+### SILENT_TOPIC_WARN_DEDUP_MAX (1,000,000)
+
+Dev-mode set of topics that have already fired the silent-topic warning. FIFO-evicts at the cap (dropping the oldest topic just lets it re-warn on its next over-threshold subscribe). Dev-only; production code paths are constant-folded out.
+
+### PUBLISH_RATE_WARN_DEDUP_MAX (1,000,000)
+
+Dev-mode set of topics that have already fired the high-frequency publish-rate warning. FIFO-evicts at the cap (dropping the oldest topic just lets it re-warn on its next sample tick). Dev-only.
+
+### MAX_OPTIMISTIC_QUEUE_DEPTH (1,000)
+
+Per-stream upper bound on concurrent in-flight `store.mutate(asyncOp, change)` calls. When the queue depth equals the cap, the next `mutate()` rejects with `MAX_OPTIMISTIC_QUEUE_DEPTH=1000`. Hitting this means either the server is unresponsive (mutates are not settling), the call site is firing mutates faster than the server can confirm, or a bulk operation is being submitted as N individual mutates instead of one batch. For bulk actions over 1000 items, prefer `batch()` or a single bulk-RPC handler. The cap protects the worst-case display-recompute cost during slow-server scenarios; recompute walks the full queue on every server event so cost grows linearly.
+
+### Rate-limit identities (5,000)
+
+Per-function rate limiting (`live.rateLimit()`) tracks sliding-window buckets in memory. When the bucket map reaches the cap, stale buckets are swept first. If still full, new identities are rejected with a `RATE_LIMITED` error. Existing identities are unaffected.
+
+### Throttle/debounce timers (5,000)
+
+Active per-key throttle and debounce entries (`ctx.throttle()` / `ctx.debounce()`). At capacity, new entries bypass the timer and publish immediately so data is never silently dropped.
+
+### Presence refs (10,000)
+
+The server tracks presence join/leave refcounts in memory. When the map reaches the cap, suspended entries (those with a pending leave timer) are evicted first. If the map is still full after eviction, the join is dropped silently.
+
+### Idempotency results (10,000)
+
+In-process `live.idempotent()` store. At capacity, evicts the oldest 10% of entries to make room. The TTL set per-call also prunes expired entries every 30 seconds.
+
+---
+
 ## Production limits
 
 ### maxPayloadLength (default: 16KB)
@@ -2598,18 +2662,6 @@ The adapter's `sendQueued()` drops the oldest item when the queue exceeds 1000 m
 ### Batch size (max 50)
 
 A single `batch()` call is limited to 50 RPC calls. The client rejects before sending if the limit is exceeded, and the server enforces the same limit as a safety net. Split into multiple `batch()` calls if you need more.
-
-### Presence refs (max 10,000)
-
-The server tracks presence join/leave refcounts in memory. When the map reaches 10,000 entries, suspended entries (those with a pending leave timer) are evicted first. If the map is still full after eviction, the join is dropped silently.
-
-### Rate-limit identities (max 5,000)
-
-Per-function rate limiting (`live.rateLimit()`) tracks sliding-window buckets in memory. When the bucket map reaches 5,000 entries, stale buckets are swept first. If still full, new identities are rejected with a `RATE_LIMITED` error. Existing identities are unaffected.
-
-### Throttle/debounce timers (max 5,000)
-
-The server tracks active throttle and debounce entries globally. When at capacity, new entries bypass the timer and publish immediately so data is never silently dropped.
 
 ### Topic length (max 256 characters)
 

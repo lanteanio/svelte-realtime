@@ -11,6 +11,35 @@ export const empty = readable(undefined);
 
 const _textEncoder = new TextEncoder();
 
+// -- Bounded-by-default capacity caps (client side) -------------------------
+// Existing caps not re-declared (already enforced at their sites):
+//   _historyMax           50    FIFO    per-stream undo/redo
+//   _MAX_STREAM_EVENTS    20    FIFO    per-stream devtools event ring
+//   _DEVTOOLS_HISTORY_MAX 50    FIFO    devtools call history ring
+// See README "Capacity model" for the full taxonomy.
+
+/** Max in-flight optimistic mutations per stream. REJECT on cap: `mutate()` throws synchronously. Bounds the worst-case display-recompute cost during slow-server scenarios. Matches svelte-adapter-uws `MAX_QUEUE_SIZE` (the per-connection client send queue) since both serve as UI-layer in-flight burglar alarms. */
+export const MAX_OPTIMISTIC_QUEUE_DEPTH = 1_000;
+
+let _maxOptimisticQueueDepth = MAX_OPTIMISTIC_QUEUE_DEPTH;
+
+/**
+ * Override capacity caps for testing.
+ * @internal
+ * @param {{ optimisticQueueDepth?: number }} overrides
+ */
+export function _setCapsForTest(overrides) {
+	if (overrides.optimisticQueueDepth !== undefined) _maxOptimisticQueueDepth = overrides.optimisticQueueDepth;
+}
+
+/**
+ * Restore capacity caps to defaults.
+ * @internal
+ */
+export function _resetCapsForTest() {
+	_maxOptimisticQueueDepth = MAX_OPTIMISTIC_QUEUE_DEPTH;
+}
+
 /** Pre-allocated binary frame buffer for reuse across sequential binary RPC calls */
 let _binaryFrameBuffer = /** @type {Uint8Array | null} */ (null);
 let _binaryFrameSize = 0;
@@ -1867,6 +1896,17 @@ function _createStream(path, options, dynamicArgs) {
 				&& typeof optimisticChange.event === 'string';
 			if (!isFunction && !isEvent) {
 				throw new Error('[svelte-realtime] mutate: optimisticChange must be { event, data } or a function (current) => newValue');
+			}
+
+			if (_optimisticQueue.length >= _maxOptimisticQueueDepth) {
+				throw new Error(
+					'[svelte-realtime] mutate(): in-flight optimistic queue depth ' +
+					_optimisticQueue.length + ' exceeds MAX_OPTIMISTIC_QUEUE_DEPTH=' +
+					_maxOptimisticQueueDepth + '. ' +
+					'Either the server is unresponsive (mutates are not settling) or ' +
+					'the call site is firing mutates faster than the server can confirm. ' +
+					'Throttle the call site, or check WS health.'
+				);
 			}
 
 			let optimisticKey = null;

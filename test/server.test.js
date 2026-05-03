@@ -40,7 +40,13 @@ import {
 	_registerVolatile,
 	_resetLock,
 	_resetTopicWsCounts,
-	_resetPushRegistry
+	_resetPushRegistry,
+	_setCapsForTest,
+	_resetCapsForTest,
+	MAX_PUSH_REGISTRY,
+	TOPIC_WS_COUNTS_WARN_THRESHOLD,
+	SILENT_TOPIC_WARN_DEDUP_MAX,
+	PUBLISH_RATE_WARN_DEDUP_MAX
 } from '../server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -9753,3 +9759,203 @@ async function _publishViaCtx(platform, topic, event, data) {
 	await vi.advanceTimersByTimeAsync(0);
 	await vi.advanceTimersByTimeAsync(0);
 }
+
+// -- Capacity caps ------------------------------------------------------------
+
+describe('capacity caps', () => {
+	describe('MAX_PUSH_REGISTRY (WARN-then-skip)', () => {
+		let warnSpy;
+
+		beforeEach(() => {
+			_resetPushRegistry();
+			_resetCapsForTest();
+			warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		});
+
+		afterEach(() => {
+			warnSpy.mockRestore();
+			_resetPushRegistry();
+			_resetCapsForTest();
+		});
+
+		it('exposes the documented default', () => {
+			expect(MAX_PUSH_REGISTRY).toBe(10_000_000);
+		});
+
+		it('skips registration once the cap is hit and warns once', () => {
+			_setCapsForTest({ pushRegistry: 3 });
+			const platform = mockPlatform();
+			const ctx = { platform };
+
+			pushHooks.open(mockWs({ user_id: 'u1' }), ctx);
+			pushHooks.open(mockWs({ user_id: 'u2' }), ctx);
+			pushHooks.open(mockWs({ user_id: 'u3' }), ctx);
+			expect(warnSpy).not.toHaveBeenCalled();
+
+			pushHooks.open(mockWs({ user_id: 'u4' }), ctx);
+			pushHooks.open(mockWs({ user_id: 'u5' }), ctx);
+
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			expect(warnSpy.mock.calls[0][0]).toContain('MAX_PUSH_REGISTRY=3');
+		});
+
+		it('replaces an existing userId without checking the cap (last-write-wins)', () => {
+			_setCapsForTest({ pushRegistry: 2 });
+			const platform = mockPlatform();
+			const ctx = { platform };
+
+			pushHooks.open(mockWs({ user_id: 'u1' }), ctx);
+			pushHooks.open(mockWs({ user_id: 'u2' }), ctx);
+			pushHooks.open(mockWs({ user_id: 'u1' }), ctx); // re-register existing
+
+			expect(warnSpy).not.toHaveBeenCalled();
+		});
+
+		it('reset clears the warn-fired flag so the next saturation re-warns', () => {
+			_setCapsForTest({ pushRegistry: 1 });
+			const platform = mockPlatform();
+			const ctx = { platform };
+
+			pushHooks.open(mockWs({ user_id: 'u1' }), ctx);
+			pushHooks.open(mockWs({ user_id: 'u2' }), ctx);
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+
+			_resetPushRegistry();
+
+			pushHooks.open(mockWs({ user_id: 'u3' }), ctx);
+			pushHooks.open(mockWs({ user_id: 'u4' }), ctx);
+			expect(warnSpy).toHaveBeenCalledTimes(2);
+		});
+	});
+
+	describe('TOPIC_WS_COUNTS_WARN_THRESHOLD (WARN-ONLY)', () => {
+		let warnSpy;
+		let platform;
+
+		beforeEach(() => {
+			_resetTopicWsCounts();
+			_resetCapsForTest();
+			warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			platform = mockPlatform();
+		});
+
+		afterEach(() => {
+			warnSpy.mockRestore();
+			_resetTopicWsCounts();
+			_resetCapsForTest();
+		});
+
+		it('exposes the documented default', () => {
+			expect(TOPIC_WS_COUNTS_WARN_THRESHOLD).toBe(1_000_000);
+		});
+
+		it('warns once when the topic-subscribers index crosses the threshold; map keeps growing', async () => {
+			_setCapsForTest({ topicWsCountsWarn: 3 });
+
+			for (let i = 0; i < 5; i++) {
+				const stream = live.stream('feed/cap' + i, async () => [], {});
+				__register('feed/cap' + i, stream);
+				const ws = mockWs({ id: 'u' + i });
+				handleRpc(ws, toArrayBuffer({ rpc: 'feed/cap' + i, id: 's' + i, args: [], stream: true }), platform);
+			}
+			await new Promise((r) => setTimeout(r, 10));
+
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			expect(warnSpy.mock.calls[0][0]).toContain('TOPIC_WS_COUNTS_WARN_THRESHOLD=3');
+		});
+	});
+
+	describe('SILENT_TOPIC_WARN_DEDUP_MAX (FIFO-evict)', () => {
+		let warnSpy;
+		let platform;
+
+		beforeEach(() => {
+			_resetSilentTopicWarning();
+			_resetCapsForTest();
+			vi.useFakeTimers();
+			warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			platform = mockPlatform();
+		});
+
+		afterEach(() => {
+			warnSpy.mockRestore();
+			vi.useRealTimers();
+			_resetSilentTopicWarning();
+			_resetCapsForTest();
+		});
+
+		it('exposes the documented default', () => {
+			expect(SILENT_TOPIC_WARN_DEDUP_MAX).toBe(1_000_000);
+		});
+
+		it('keeps the dedup set bounded once the cap is reached without blocking new warns', () => {
+			_setCapsForTest({ silentTopicWarnDedup: 2 });
+			live.silentTopicWarning({ thresholdMs: 50 });
+
+			for (let i = 0; i < 5; i++) {
+				_armSilentTopicWatch('topic-' + i);
+			}
+			vi.advanceTimersByTime(60);
+
+			// 5 topics arm, 5 warns fire. The dedup cap is hit after the 3rd
+			// warn but FIFO-evict makes room without blocking new warns.
+			// Re-warn after eviction is unreachable in normal operation
+			// (`_silentTopicWatch.has(topic)` short-circuits) - the dedup
+			// exists for memory protection, not for re-warn semantics.
+			expect(warnSpy).toHaveBeenCalledTimes(5);
+		});
+	});
+
+	describe('PUBLISH_RATE_WARN_DEDUP_MAX (FIFO-evict)', () => {
+		let warnSpy;
+		let platform;
+
+		beforeEach(() => {
+			_resetPublishRateWarning();
+			_resetCapsForTest();
+			live.publishRateWarning({ threshold: 100, intervalMs: 50 });
+			vi.useFakeTimers();
+			warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+			warnSpy.mockRestore();
+			_resetPublishRateWarning();
+			_resetCapsForTest();
+			live.publishRateWarning({ threshold: 200, intervalMs: 5000 });
+			live.publishRateWarning(true);
+		});
+
+		it('exposes the documented default', () => {
+			expect(PUBLISH_RATE_WARN_DEDUP_MAX).toBe(1_000_000);
+		});
+
+		it('evicts oldest entry when dedup set saturates; evicted topic can re-warn', () => {
+			_setCapsForTest({ publishRateWarnDedup: 2 });
+			platform = mockPlatform();
+			platform.pressure.topPublishers = [
+				{ topic: 'a:1', messagesPerSec: 200, bytesPerSec: 1 },
+				{ topic: 'b:2', messagesPerSec: 200, bytesPerSec: 1 }
+			];
+			_activatePublishRateWarning(platform);
+			vi.advanceTimersByTime(60);
+			expect(warnSpy).toHaveBeenCalledTimes(2);
+
+			// Adding a third over-threshold topic FIFO-evicts a:1 from the dedup
+			// before adding c:3. The active sampler now warns for c:3.
+			platform.pressure.topPublishers = [
+				{ topic: 'c:3', messagesPerSec: 200, bytesPerSec: 1 }
+			];
+			vi.advanceTimersByTime(60);
+			expect(warnSpy).toHaveBeenCalledTimes(3);
+
+			// a:1 was evicted, so it re-warns when it shows up again.
+			platform.pressure.topPublishers = [
+				{ topic: 'a:1', messagesPerSec: 200, bytesPerSec: 1 }
+			];
+			vi.advanceTimersByTime(60);
+			expect(warnSpy).toHaveBeenCalledTimes(4);
+		});
+	});
+});

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Bounded-by-default capacity caps with documented saturation behavior.** Five new caps surface a "Capacity model" section in the README that maps every internal Map / Set / array with caller-driven growth to a default value plus a saturation behavior (REJECT, WARN-ONLY, FIFO-evict, or WARN-then-skip). New exports from `svelte-realtime/server`: `MAX_PUSH_REGISTRY` (10,000,000, WARN-then-skip on the per-userId connection registry), `TOPIC_WS_COUNTS_WARN_THRESHOLD` (1,000,000, WARN-only on the per-topic subscriber index since eviction would corrupt routing), `SILENT_TOPIC_WARN_DEDUP_MAX` (1,000,000, FIFO-evict), `PUBLISH_RATE_WARN_DEDUP_MAX` (1,000,000, FIFO-evict). New export from `svelte-realtime/client`: `MAX_OPTIMISTIC_QUEUE_DEPTH` (1,000, REJECT). All five mirror the canonical sizing from svelte-adapter-uws + svelte-adapter-uws-extensions so an app reading docs across the three packages sees consistent scales. Existing caps (rate-limit identities, throttle/debounce timers, idempotency results, presence refs, history, devtools rings) are now documented in the same section.
+
 ### Fixed
 
 - **Vite plugin now generates client stubs for `live.lock(...)` and `live.idempotent(...)` exports.** Previously the static-analysis regex only matched `= live(` / `= live.stream(` / `= live.validated(` / `= live.rateLimit(`, so a top-level export like `export const settleInvoice = live.lock(...)` was silently warned as "not wrapped in live()" and produced no client stub. The exports were callable from the server but not from any page that imported them via `$live/<module>`. The plugin now treats `live.lock` and `live.idempotent` exports identically to a plain `live(...)` export: client stub generated, registered in the live registry, type declarations emitted. The runtime side was already correct.
