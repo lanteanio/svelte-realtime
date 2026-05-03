@@ -963,20 +963,32 @@ function _createStream(path, options, dynamicArgs) {
 	let _reconnectAttempts = 0;
 
 	/**
+	 * Pure version of `_rebuildIndex` that operates on a (value, index) pair
+	 * supplied by the caller rather than the closure's currentValue / _index.
+	 * Used by `_applyMergeFn` and reused by the closure `_rebuildIndex`.
+	 *
+	 * @param {any} value
+	 * @param {Map<any, number>} index
+	 */
+	function _rebuildIndexFn(value, index) {
+		index.clear();
+		if (!Array.isArray(value)) return;
+		if (merge === 'set' || merge === 'latest') return;
+		const k = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
+		for (let i = 0; i < value.length; i++) {
+			const item = value[i];
+			if (item != null && item[k] !== undefined) {
+				index.set(item[k], i);
+			}
+		}
+	}
+
+	/**
 	 * Rebuild the key->index lookup map from currentValue.
 	 * Only meaningful for keyed merge strategies (crud, presence, cursor).
 	 */
 	function _rebuildIndex() {
-		_index.clear();
-		if (!Array.isArray(currentValue)) return;
-		if (merge === 'set' || merge === 'latest') return;
-		const k = (merge === 'presence' || merge === 'cursor') ? 'key' : key;
-		for (let i = 0; i < currentValue.length; i++) {
-			const item = currentValue[i];
-			if (item != null && item[k] !== undefined) {
-				_index.set(item[k], i);
-			}
-		}
+		_rebuildIndexFn(currentValue, _index);
 	}
 
 	/**
@@ -1010,143 +1022,176 @@ function _createStream(path, options, dynamicArgs) {
 	/** @type {boolean} Whether _applyMerge has changed currentValue since last flush */
 	let _dirty = false;
 
-	function _applyMerge(envelope) {
+	/**
+	 * Pure functional core of `_applyMerge`. Mutates the supplied `value`,
+	 * `index`, and `optimisticKeys` in place; closure constants
+	 * (`merge`, `key`, `prepend`, `max`) are captured from the enclosing
+	 * stream scope. Does not touch `currentValue`, `_index`, `_lastSeq`,
+	 * `_dirty`, the store, or history -- the closure wrapper is
+	 * responsible for those.
+	 *
+	 * Lifted out of `_applyMerge` so that future code paths can apply the
+	 * same merge semantics to alternative (value, index) pairs (e.g. an
+	 * unoverlaid server-side state held alongside the displayed value).
+	 *
+	 * @param {any} value
+	 * @param {Map<any, number>} index
+	 * @param {{ event: string, data: any }} envelope
+	 * @param {Set<any>} optimisticKeys
+	 * @returns {{ value: any, replaced: boolean, modified: boolean }}
+	 *   - `value`: the (possibly new) value reference. May be a fresh
+	 *     reference (e.g. after `data` replacement) or the same reference
+	 *     that was passed in (after in-place mutation).
+	 *   - `replaced`: true when `value` was assigned a fresh reference,
+	 *     so the caller does not need to clone before publishing.
+	 *   - `modified`: false only for the `set` strategy when the incoming
+	 *     `data` is reference-identical to the prior value (no-op);
+	 *     true in all other paths.
+	 */
+	function _applyMergeFn(value, index, envelope, optimisticKeys) {
 		const { event, data } = envelope;
 
-		if (envelope.seq !== undefined) _lastSeq = envelope.seq;
-		_dirty = true;
-
-		// `refreshed` is the universal full-state replace event, emitted by
-		// the server's stream staleness watchdog when a topic has been
-		// silent past its `staleAfterMs` window. Replaces currentValue with
-		// the server's freshly-loaded data and rebuilds the lookup index
-		// for keyed merges. Optimistic placeholders are dropped: the
-		// server's snapshot is authoritative, and any in-flight mutate
-		// rolls back to its own pre-mutate snapshot on failure.
 		if (event === 'refreshed') {
-			currentValue = data;
-			_optimisticKeys.clear();
+			value = data;
+			optimisticKeys.clear();
 			if (merge === 'crud' || merge === 'presence' || merge === 'cursor') {
-				_rebuildIndex();
+				_rebuildIndexFn(value, index);
 			}
-			return true;
+			return { value, replaced: true, modified: true };
 		}
 
 		if (merge === 'crud') {
-			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
+			if (!Array.isArray(value)) { value = []; index.clear(); }
 
 			if (data && data[key] !== undefined) {
-				_optimisticKeys.delete(data[key]);
+				optimisticKeys.delete(data[key]);
 			}
 
 			if (event === 'created') {
-				const idx = _index.get(data[key]);
+				const idx = index.get(data[key]);
 				if (idx !== undefined) {
-					currentValue[idx] = data;
+					value[idx] = data;
 				} else if (prepend) {
-					currentValue.unshift(data);
-					for (const [k, i] of _index) _index.set(k, i + 1);
-					_index.set(data[key], 0);
-					if (max && currentValue.length > max) {
-						const removed = currentValue.splice(max);
-						for (const item of removed) _index.delete(item[key]);
+					value.unshift(data);
+					for (const [k, i] of index) index.set(k, i + 1);
+					index.set(data[key], 0);
+					if (max && value.length > max) {
+						const removed = value.splice(max);
+						for (const item of removed) index.delete(item[key]);
 					}
 				} else {
-					_index.set(data[key], currentValue.length);
-					currentValue.push(data);
-					if (max && currentValue.length > max) {
-						const removed = currentValue.splice(0, currentValue.length - max);
-						for (const item of removed) _index.delete(item[key]);
-						_rebuildIndex();
+					index.set(data[key], value.length);
+					value.push(data);
+					if (max && value.length > max) {
+						const removed = value.splice(0, value.length - max);
+						for (const item of removed) index.delete(item[key]);
+						_rebuildIndexFn(value, index);
 					}
 				}
 			} else if (event === 'updated') {
-				const idx = _index.get(data[key]);
-				if (idx !== undefined) currentValue[idx] = data;
+				const idx = index.get(data[key]);
+				if (idx !== undefined) value[idx] = data;
 			} else if (event === 'deleted') {
-				const idx = _index.get(data[key]);
+				const idx = index.get(data[key]);
 				if (idx !== undefined) {
-					_index.delete(data[key]);
-					const last = currentValue.length - 1;
+					index.delete(data[key]);
+					const last = value.length - 1;
 					if (idx < last) {
-						const swapped = currentValue[last];
-						currentValue[idx] = swapped;
-						_index.set(swapped[key], idx);
+						const swapped = value[last];
+						value[idx] = swapped;
+						index.set(swapped[key], idx);
 					}
-					currentValue.length = last;
+					value.length = last;
 				}
 			}
-			return false;
+			return { value, replaced: false, modified: true };
 		} else if (merge === 'latest') {
-			if (!Array.isArray(currentValue)) currentValue = [];
-			currentValue.push(data);
-			if (currentValue.length > max) {
-				currentValue = currentValue.slice(-max);
-				return true;
+			if (!Array.isArray(value)) value = [];
+			value.push(data);
+			if (value.length > max) {
+				value = value.slice(-max);
+				return { value, replaced: true, modified: true };
 			}
-			return false;
+			return { value, replaced: false, modified: true };
 		} else if (merge === 'presence') {
-			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
+			if (!Array.isArray(value)) { value = []; index.clear(); }
 			if (event === 'join') {
-				const idx = _index.get(data.key);
+				const idx = index.get(data.key);
 				if (idx !== undefined) {
-					currentValue[idx] = data;
+					value[idx] = data;
 				} else {
-					_index.set(data.key, currentValue.length);
-					currentValue.push(data);
+					index.set(data.key, value.length);
+					value.push(data);
 				}
 			} else if (event === 'leave') {
-				const idx = _index.get(data.key);
+				const idx = index.get(data.key);
 				if (idx !== undefined) {
-					_index.delete(data.key);
-					const last = currentValue.length - 1;
+					index.delete(data.key);
+					const last = value.length - 1;
 					if (idx < last) {
-						const swapped = currentValue[last];
-						currentValue[idx] = swapped;
-						_index.set(swapped.key, idx);
+						const swapped = value[last];
+						value[idx] = swapped;
+						index.set(swapped.key, idx);
 					}
-					currentValue.length = last;
+					value.length = last;
 				}
 			} else if (event === 'set') {
-				currentValue = data;
-				_rebuildIndex();
-				return true;
+				value = data;
+				_rebuildIndexFn(value, index);
+				return { value, replaced: true, modified: true };
 			}
-			return false;
+			return { value, replaced: false, modified: true };
 		} else if (merge === 'cursor') {
-			if (!Array.isArray(currentValue)) { currentValue = []; _index.clear(); }
+			if (!Array.isArray(value)) { value = []; index.clear(); }
 			if (event === 'update') {
-				const idx = _index.get(data.key);
+				const idx = index.get(data.key);
 				if (idx !== undefined) {
-					currentValue[idx] = data;
+					value[idx] = data;
 				} else {
-					_index.set(data.key, currentValue.length);
-					currentValue.push(data);
+					index.set(data.key, value.length);
+					value.push(data);
 				}
 			} else if (event === 'remove') {
-				const idx = _index.get(data.key);
+				const idx = index.get(data.key);
 				if (idx !== undefined) {
-					_index.delete(data.key);
-					const last = currentValue.length - 1;
+					index.delete(data.key);
+					const last = value.length - 1;
 					if (idx < last) {
-						const swapped = currentValue[last];
-						currentValue[idx] = swapped;
-						_index.set(swapped.key, idx);
+						const swapped = value[last];
+						value[idx] = swapped;
+						index.set(swapped.key, idx);
 					}
-					currentValue.length = last;
+					value.length = last;
 				}
 			} else if (event === 'set') {
-				currentValue = data;
-				_rebuildIndex();
-				return true;
+				value = data;
+				_rebuildIndexFn(value, index);
+				return { value, replaced: true, modified: true };
 			}
-			return false;
+			return { value, replaced: false, modified: true };
 		} else if (merge === 'set') {
-			if (data === currentValue) { _dirty = false; return true; }
-			currentValue = data;
-			return true;
+			if (data === value) return { value, replaced: true, modified: false };
+			value = data;
+			return { value, replaced: true, modified: true };
 		}
-		return false;
+		return { value, replaced: false, modified: false };
+	}
+
+	/**
+	 * Apply a merge event to currentValue / _index / _optimisticKeys (the
+	 * stream's authoritative state). Tracks `_lastSeq` and `_dirty`. Does
+	 * NOT call store.set or _recordHistory -- callers handle the publish.
+	 *
+	 * @param {{ event: string, data: any, seq?: number }} envelope
+	 * @returns {boolean} true if currentValue was replaced with a fresh
+	 *   reference (caller can skip the defensive `.slice()` before publish).
+	 */
+	function _applyMerge(envelope) {
+		if (envelope.seq !== undefined) _lastSeq = envelope.seq;
+		const result = _applyMergeFn(currentValue, _index, envelope, _optimisticKeys);
+		currentValue = result.value;
+		_dirty = result.modified;
+		return result.replaced;
 	}
 
 	/** Double-buffer swap pattern: two pre-allocated arrays reused every frame */
