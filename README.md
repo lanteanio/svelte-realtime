@@ -231,6 +231,7 @@ Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `re
 - [Load shedding](#load-shedding)
 - [Concurrency control](#concurrency-control)
 - [Server-initiated push](#server-initiated-push)
+- [Request correlation](#request-correlation)
 - [Cron scheduling](#cron-scheduling)
 - [Derived streams](#derived-streams)
 - [Effects](#effects)
@@ -1828,6 +1829,57 @@ export const items = live.stream('items',
 ```
 
 If `fallback` is omitted and the circuit is open, the call throws `LiveError('SERVICE_UNAVAILABLE', ...)`.
+
+---
+
+## Request correlation
+
+Every live function receives `ctx.requestId` -- a stable identifier for the originating RPC envelope. The id flows in three directions automatically:
+
+- **From clients**: WebSocket clients tag every RPC envelope with a generated id; HTTP request handlers honor `X-Request-ID` headers (and generate one if absent). The adapter writes the resolved id to `platform.requestId`, and the realtime layer copies it to `ctx.requestId` for the duration of that handler.
+- **Through your handlers**: pass it to whatever you do downstream so log lines, traces, and persisted rows all share one key.
+- **Into background work**: the `svelte-adapter-uws-extensions` postgres tasks/jobs APIs persist `request_id` on every row. Pass it explicitly or pipe `ctx.platform` and the helpers extract it for you.
+
+```js
+import { live } from 'svelte-realtime/server';
+import { createTasks } from 'svelte-adapter-uws-extensions/postgres/tasks';
+import { createJobs } from 'svelte-adapter-uws-extensions/postgres/jobs';
+
+const tasks = createTasks({ client: pgClient });
+const jobs = createJobs({ client: pgClient });
+
+export const submitOrder = live(async (ctx, input) => {
+  // Option A: explicit -- works anywhere ctx.requestId is in scope
+  const order = await tasks.run('processOrder', input, {
+    requestId: ctx.requestId
+  });
+
+  // Option B: pipe ctx.platform; the helpers read platform.requestId for you
+  await jobs.enqueue('shipment-notice', { orderId: order.id }, {
+    platform: ctx.platform
+  });
+
+  return order;
+});
+```
+
+Once the rows land, you can join them back to the originating RPC for debugging or audit:
+
+```sql
+-- Trace one user request across the websocket -> task -> job pipeline
+SELECT
+  t.svti_tasks_id, t.name AS task_name, t.status, t.created_at AS task_created,
+  j.svti_jobs_id,  j.queue,             j.attempts,
+  t.request_id
+FROM ws_tasks t
+LEFT JOIN ws_jobs j ON j.request_id = t.request_id
+WHERE t.request_id = $1
+ORDER BY task_created;
+```
+
+The id passes opaquely -- no validation, no length cap from the realtime layer. If you generate ids with a structured prefix (`o-` for orders, `a-` for audits), every downstream record carries that prefix too.
+
+If you also instrument with [Prometheus metrics](#prometheus-metrics), include `requestId` in your log fields rather than as a metric label -- it's high-cardinality and would blow up your label space.
 
 ---
 

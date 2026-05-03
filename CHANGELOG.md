@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **New "Request correlation" section** documenting how `ctx.requestId` flows from the wire envelope (or `X-Request-ID` header) through `live()` handlers and into the `svelte-adapter-uws-extensions` postgres tasks/jobs APIs. Includes both call shapes (explicit `{ requestId: ctx.requestId }` and the `{ platform: ctx.platform }` auto-extract form), a SQL example showing how to join `ws_tasks` and `ws_jobs` rows back to the originating RPC, and a note about keeping the id out of Prometheus label sets to avoid cardinality blowup.
+
 ### Changed
 
 - **Transform throws on the publish path now route to per-stream `onError`.** When a `live.stream()` is configured with both `transform` and `onError`, an exception thrown from inside the transform on a `ctx.publish()` call now fires the configured `onError(err, null, topic)` observer (with `null` ctx, since the transform runs in the publish-helper closure rather than a handler context). The publish itself is dropped silently for that frame because the projected wire data is invalid.
