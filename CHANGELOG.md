@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dev-mode silent-topic warning via `live.silentTopicWarning()`.** When a stream subscribes to a topic and no events arrive within a configurable window (default 30 seconds), the framework logs a one-shot `console.warn` naming the topic and the common causes -- a missing `pg_notify` trigger, a missing handler-side `ctx.publish()`, or an intentionally low-traffic topic the user can suppress. Closes the most-common-by-far class of "the realtime stream isn't updating" debugging sessions.
+
+  ```js
+  import { live } from 'svelte-realtime/server';
+
+  // Lower the bar (default 30s)
+  live.silentTopicWarning({ thresholdMs: 5000 });
+
+  // Suppress per-topic for known-quiet streams
+  live.silentTopicWarning({ suppress: ['admin:audit', 'cron:reports'] });
+
+  // Disable globally
+  live.silentTopicWarning(false);
+  ```
+
+  Topics starting with `__` (system topics: `__realtime`, `__signal:*`, `__custom`) are skipped automatically; users don't need to populate `suppress` for them. Each topic warns at most once per process; the warning never fires for a topic that has seen at least one event, and re-subscribing after a warn does not re-fire. The watchdog arms on the first subscriber to a topic, observes every publish, and disarms when the last subscriber leaves.
+
+  Hard-gated to `NODE_ENV !== 'production'`: the activation gate is constant-folded by Vite/Rollup so production builds carry zero overhead regardless of configuration. The watchdog state is never touched in production paths.
+
+  Reuses the same lifecycle hook points as the existing staleness watchdog (`staleAfterMs`); apps using both features share the per-topic registry machinery.
+
 - **Svelte 5 store helpers `store.rune()` and `store.map(fn)` on every stream store.** Generated `$live/*` streams now expose a `.rune()` method that returns a Svelte-5 reactive object backed by the stream's value, and a `.map(fn)` method that projects each item of an array stream through `fn` and returns a composable mapped store.
 
   ```svelte

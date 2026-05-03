@@ -2481,6 +2481,39 @@ live.publishRateWarning(false);
 
 Production builds constant-fold the activation branch to dead code -- zero overhead. The sampler runs once per platform on the first ctx-helpers cache miss; per-publish cost is unchanged. Topics already in `_topicCoalesce` or `_topicVolatile` are skipped (the user has already addressed them).
 
+### Dev-mode silent-topic warning
+
+In development, the framework arms a one-shot timer when a stream first subscribes to a topic. If no events arrive within `thresholdMs` (default `30000`), it logs a warning naming the topic and the common causes:
+
+```
+[svelte-realtime] Topic 'audit:org-1' has subscribers but no events arrived within 30000ms.
+  Common causes:
+    - missing pg_notify trigger on the underlying table
+    - no ctx.publish() call in the relevant handler
+    - intentionally low-traffic topic (extend threshold or suppress)
+  Configure: live.silentTopicWarning({ thresholdMs: 60000 })
+  Suppress:  live.silentTopicWarning({ suppress: ['audit:org-1'] })
+  Disable:   live.silentTopicWarning(false)
+  See: https://svti.me/silent-topic
+```
+
+```js
+import { live } from 'svelte-realtime/server';
+
+// Lower the bar (default 30s)
+live.silentTopicWarning({ thresholdMs: 5000 });
+
+// Suppress per-topic for known-quiet streams (admin views, scheduled reports)
+live.silentTopicWarning({ suppress: ['admin:audit', 'cron:reports'] });
+
+// Disable globally
+live.silentTopicWarning(false);
+```
+
+Topics starting with `__` (system topics: `__realtime`, `__signal:*`, `__custom`) are always skipped automatically; you don't need to add them to `suppress`. Each topic warns at most once per process; the warning never fires for a topic that has been live, and re-subscribing after a warn does not re-fire. Hard-gated to development -- production builds constant-fold the activation branch to dead code, so apps not in dev mode pay zero cost regardless of configuration.
+
+The watchdog reuses the same lifecycle hooks as the staleness watchdog (`staleAfterMs`): arms on first sub for the topic, observed on every publish, disarms on last unsub. Apps using both features share the per-topic timer machinery without paying twice.
+
 ### Per-stream `onError` for loader observability
 
 For streams whose loader can fail, add `onError(err, ctx, topic)` to the stream options. See [Stream lifecycle hooks](#stream-lifecycle-hooks) for the full pattern. Per-stream observers fire alongside the global `onError` setter, not instead of it.

@@ -33,6 +33,8 @@ import {
 	_resetVolatileRegistry,
 	_resetPublishRateWarning,
 	_activatePublishRateWarning,
+	_resetSilentTopicWarning,
+	_armSilentTopicWatch,
 	_registerCoalesce,
 	_registerVolatile,
 	_resetLock,
@@ -8712,3 +8714,144 @@ describe('live.stream({ staleAfterMs })', () => {
 		expect(() => live.stream('t', async () => [], { onError: /** @type {any} */ (42) })).toThrow(/onError/);
 	});
 });
+
+describe('live.silentTopicWarning()', () => {
+	let warnSpy;
+
+	beforeEach(() => {
+		_resetSilentTopicWarning();
+		live.silentTopicWarning({ thresholdMs: 30 });
+		warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		warnSpy.mockRestore();
+		_resetSilentTopicWarning();
+	});
+
+	it('warns once when no events arrive within thresholdMs', async () => {
+		_armSilentTopicWatch('audit:org-1');
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const msg = warnSpy.mock.calls[0][0];
+		expect(msg).toContain("Topic 'audit:org-1'");
+		expect(msg).toContain('30ms');
+		expect(msg).toContain('pg_notify');
+		expect(msg).toContain('ctx.publish');
+		expect(msg).toContain('https://svti.me/silent-topic');
+	});
+
+	it('does NOT warn when an event arrives before the threshold', async () => {
+		const platform = mockPlatform();
+		_armSilentTopicWatch('chat:room-1');
+		await _publishViaCtx(platform, 'chat:room-1', 'msg', { x: 1 });
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('warns at most once per topic per process', async () => {
+		_armSilentTopicWatch('once:1');
+		await vi.advanceTimersByTimeAsync(50);
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+
+		// Re-arm after warn fires: warned-set dedups, no second warn.
+		_armSilentTopicWatch('once:1');
+		await vi.advanceTimersByTimeAsync(50);
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('skips system topics (__-prefixed) automatically', async () => {
+		_armSilentTopicWatch('__realtime');
+		_armSilentTopicWatch('__signal:user-42');
+		_armSilentTopicWatch('__custom:foo');
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('skips topics in the suppress list', async () => {
+		live.silentTopicWarning({ suppress: ['admin:audit', 'cron:reports'] });
+		_armSilentTopicWatch('admin:audit');
+		_armSilentTopicWatch('cron:reports');
+		_armSilentTopicWatch('chat:room-1');
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0][0]).toContain("'chat:room-1'");
+	});
+
+	it('disable via false stops armed timers immediately', async () => {
+		_armSilentTopicWatch('foo:1');
+		_armSilentTopicWatch('foo:2');
+
+		live.silentTopicWarning(false);
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('thresholdMs override takes effect on subsequent arms', async () => {
+		live.silentTopicWarning({ thresholdMs: 100 });
+		_armSilentTopicWatch('slow:1');
+		await vi.advanceTimersByTimeAsync(50);
+
+		// Old threshold (30) would have fired by now; new one (100) hasn't.
+		expect(warnSpy).not.toHaveBeenCalled();
+
+		await vi.advanceTimersByTimeAsync(60);
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('arming the same topic twice is a no-op', async () => {
+		_armSilentTopicWatch('dup:1');
+		_armSilentTopicWatch('dup:1');
+		_armSilentTopicWatch('dup:1');
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('rejects malformed config', () => {
+		expect(() => live.silentTopicWarning('not-an-object')).toThrow(/config must be/);
+		expect(() => live.silentTopicWarning(0)).toThrow(/config must be/);
+		expect(() => live.silentTopicWarning({ thresholdMs: 0 })).toThrow(/positive finite/);
+		expect(() => live.silentTopicWarning({ thresholdMs: -1 })).toThrow(/positive finite/);
+		expect(() => live.silentTopicWarning({ thresholdMs: Infinity })).toThrow(/positive finite/);
+		expect(() => live.silentTopicWarning({ thresholdMs: 'fast' })).toThrow(/positive finite/);
+		expect(() => live.silentTopicWarning({ suppress: 'admin' })).toThrow(/array/);
+		expect(() => live.silentTopicWarning({ suppress: [42] })).toThrow(/strings/);
+	});
+
+	it('publish via ctx.publish observes the topic and disarms the timer', async () => {
+		const platform = mockPlatform();
+		_armSilentTopicWatch('chat:room-2');
+		await _publishViaCtx(platform, 'chat:room-2', 'msg', { x: 1 });
+		await vi.advanceTimersByTimeAsync(50);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+});
+
+/**
+ * Helper: drive a real `ctx.publish(...)` against the cached helper so the
+ * publish-closure runs (where `_observeSilentTopicPublish` fires). Uses the
+ * same handleRpc path the production hot path takes; the registered handler
+ * just calls `ctx.publish` once and returns.
+ */
+async function _publishViaCtx(platform, topic, event, data) {
+	const handler = live(async (ctx) => {
+		ctx.publish(topic, event, data);
+		return { ok: true };
+	});
+	__register('test/silent-publish', handler);
+	const ws = mockWs({ user_id: 'u-silent' });
+	const msg = toArrayBuffer({ rpc: 'test/silent-publish', id: 'silent-1', args: [] });
+	handleRpc(ws, msg, platform);
+	// Drain microtasks so the handler resolves and ctx.publish runs.
+	await vi.advanceTimersByTimeAsync(0);
+	await vi.advanceTimersByTimeAsync(0);
+}

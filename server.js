@@ -169,6 +169,33 @@ const _topicWsCounts = new Map();
  */
 const _topicStaleWatch = new Map();
 
+/**
+ * Per-process state for the dev-mode silent-topic warning. Arms a one-shot
+ * timer on the first subscribe to a topic; if no event arrives within
+ * `thresholdMs`, logs a warning suggesting common causes (missing pg_notify
+ * trigger, missing handler-side publish, intentionally low-traffic topic).
+ *
+ * Hard-gated to development. Production-side cost: one boolean check on
+ * the publish hot path, constant-folded out by Vite/Rollup when
+ * `process.env.NODE_ENV === 'production'`.
+ *
+ * Shape mirrors `_topicStaleWatch` (per-topic timer + flags); the watchdog
+ * fires once per topic per process and dedupes via `_silentTopicWarned`
+ * so re-subscribes after a warn don't re-fire.
+ */
+const _silentTopicConfig = {
+	enabled: true,
+	thresholdMs: 30000,
+	/** @type {Set<string>} */
+	suppress: new Set()
+};
+
+/** @type {Map<string, { timerId: ReturnType<typeof setTimeout>, sawEvent: boolean }>} */
+const _silentTopicWatch = new Map();
+
+/** @type {Set<string>} Topics already warned about; prevents re-warning across re-subscribe cycles. */
+const _silentTopicWarned = new Set();
+
 /** @type {Array<(ctx: any, next: () => Promise<any>) => Promise<any>>} */
 const _globalMiddleware = [];
 
@@ -433,6 +460,87 @@ export function _resetStaleWatch() {
 }
 
 /**
+ * Arm the silent-topic watchdog for a topic on its first subscriber.
+ * Skips system topics (`__`-prefixed: `__realtime`, `__signal:*`, etc.)
+ * which are intentionally quiet until something publishes. Skips topics
+ * the user has explicitly suppressed and topics already warned about.
+ * Idempotent per topic; second-sub-on-same-topic is a no-op.
+ *
+ * @param {string} topic
+ */
+export function _armSilentTopicWatch(topic) {
+	if (!_IS_DEV) return;
+	if (!_silentTopicConfig.enabled) return;
+	if (_silentTopicWatch.has(topic)) return;
+	if (_silentTopicWarned.has(topic)) return;
+	if (_silentTopicConfig.suppress.has(topic)) return;
+	if (topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) return;
+	const entry = {
+		sawEvent: false,
+		timerId: setTimeout(() => {
+			const e = _silentTopicWatch.get(topic);
+			if (!e || e.sawEvent) return;
+			_silentTopicWarned.add(topic);
+			console.warn(
+				"[svelte-realtime] Topic '" + topic + "' has subscribers but no events arrived within " +
+				_silentTopicConfig.thresholdMs + "ms.\n" +
+				"  Common causes:\n" +
+				"    - missing pg_notify trigger on the underlying table\n" +
+				"    - no ctx.publish() call in the relevant handler\n" +
+				"    - intentionally low-traffic topic (extend threshold or suppress)\n" +
+				"  Configure: live.silentTopicWarning({ thresholdMs: 60000 })\n" +
+				"  Suppress:  live.silentTopicWarning({ suppress: ['" + topic + "'] })\n" +
+				"  Disable:   live.silentTopicWarning(false)\n" +
+				"  See: https://svti.me/silent-topic"
+			);
+		}, _silentTopicConfig.thresholdMs)
+	};
+	if (typeof (/** @type {any} */ (entry.timerId).unref) === 'function') {
+		/** @type {any} */ (entry.timerId).unref();
+	}
+	_silentTopicWatch.set(topic, entry);
+}
+
+/**
+ * Mark a topic as having seen an event. Called from the publish-helper
+ * closure on every publish. Once an event arrives, the watchdog is
+ * disarmed for that topic for the lifetime of the process (the warning
+ * never fires for a topic that has been live).
+ *
+ * @param {string} topic
+ */
+function _observeSilentTopicPublish(topic) {
+	const entry = _silentTopicWatch.get(topic);
+	if (!entry) return;
+	entry.sawEvent = true;
+	clearTimeout(entry.timerId);
+	_silentTopicWatch.delete(topic);
+}
+
+/**
+ * Clear the silent-topic watchdog when the last subscriber leaves the
+ * topic. Mirrors `_unregisterStaleWatch`. No-op when no watchdog exists.
+ *
+ * @param {string} topic
+ */
+function _disarmSilentTopicWatch(topic) {
+	const entry = _silentTopicWatch.get(topic);
+	if (!entry) return;
+	clearTimeout(entry.timerId);
+	_silentTopicWatch.delete(topic);
+}
+
+/** Reset the silent-topic watchdog state. Tests only. @internal */
+export function _resetSilentTopicWarning() {
+	for (const entry of _silentTopicWatch.values()) clearTimeout(entry.timerId);
+	_silentTopicWatch.clear();
+	_silentTopicWarned.clear();
+	_silentTopicConfig.enabled = true;
+	_silentTopicConfig.thresholdMs = 30000;
+	_silentTopicConfig.suppress.clear();
+}
+
+/**
  * Apply a transform function to initial-load data. Per-item for arrays
  * (covers crud/latest/presence/cursor merge), whole-value for
  * non-arrays (covers set merge).
@@ -577,6 +685,11 @@ function _getCtxHelpers(platform) {
 			// live, so the silence clock restarts. The size check makes
 			// this free for apps that don't use staleAfterMs.
 			if (_topicStaleWatch.size > 0) _resetStaleTimer(topic);
+			// Mark the topic as live for the silent-topic dev warning.
+			// One Map.size check on the publish hot path; constant-folded
+			// in production builds via the _IS_DEV gate when the registry
+			// is never armed.
+			if (_silentTopicWatch.size > 0) _observeSilentTopicPublish(topic);
 			// Fast path: no per-topic feature registry hits and adapter exposes
 			// publishBatched -> queue for microtask flush. The cross-worker
 			// relay already coalesces per-microtask postMessages; this lifts
@@ -668,6 +781,7 @@ function _trackStreamSub(ws, topic, fn) {
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__streamVolatile) {
 		_registerVolatile(ws, topic);
 	}
+	if (isFirstSubForTopic) _armSilentTopicWatch(topic);
 	if (_metricsInstruments) _metricsInstruments.streamGauge.inc();
 }
 
@@ -719,6 +833,7 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 			if (wsSet.size === 0) {
 				_topicWsCounts.delete(topic);
 				_unregisterStaleWatch(topic);
+				_disarmSilentTopicWatch(topic);
 			}
 		}
 	} else {
@@ -1465,6 +1580,74 @@ live.publishRateWarning = function publishRateWarning(config) {
 		_publishRateConfig.intervalMs = config.intervalMs;
 	}
 	_publishRateConfig.enabled = true;
+};
+
+/**
+ * Configure the dev-mode silent-topic warning. When a stream subscribes to a
+ * topic and no events arrive within `thresholdMs`, log a one-shot warning
+ * naming the topic and the common causes (missing pg_notify trigger,
+ * missing handler-side `ctx.publish()`, intentionally low-traffic topic).
+ *
+ * Pass `false` to disable; pass `true` (or omit args) to re-enable with
+ * current settings; pass `{ thresholdMs?, suppress? }` to override.
+ * `suppress` is an array of topic strings the warning will skip
+ * unconditionally (use for topics you know are intentionally quiet).
+ *
+ * Topics starting with `__` (system topics: `__realtime`, `__signal:*`,
+ * `__custom`) are always skipped automatically; you don't need to add
+ * them to `suppress`.
+ *
+ * Hard-gated to development. Production has zero cost regardless of
+ * configuration: the activation gate (`_IS_DEV`) is constant-folded by
+ * Vite/Rollup so the watchdog state is never touched.
+ *
+ * @example
+ * // Disable globally (e.g. in CI where stream emptiness is expected):
+ * live.silentTopicWarning(false);
+ *
+ * @example
+ * // Lower the bar for noisier insight:
+ * live.silentTopicWarning({ thresholdMs: 5000 });
+ *
+ * @example
+ * // Suppress per-topic for known-quiet streams:
+ * live.silentTopicWarning({ suppress: ['admin:audit', 'cron:reports'] });
+ *
+ * @param {false | true | { thresholdMs?: number, suppress?: string[] }} [config]
+ */
+live.silentTopicWarning = function silentTopicWarning(config) {
+	if (config === false) {
+		_silentTopicConfig.enabled = false;
+		// Disable takes effect immediately: clear any armed timers.
+		for (const entry of _silentTopicWatch.values()) clearTimeout(entry.timerId);
+		_silentTopicWatch.clear();
+		return;
+	}
+	if (config === undefined || config === true) {
+		_silentTopicConfig.enabled = true;
+		return;
+	}
+	if (typeof config !== 'object' || config === null) {
+		throw new Error('[svelte-realtime] live.silentTopicWarning: config must be true, false, or an object');
+	}
+	if (config.thresholdMs !== undefined) {
+		if (typeof config.thresholdMs !== 'number' || config.thresholdMs <= 0 || !Number.isFinite(config.thresholdMs)) {
+			throw new Error('[svelte-realtime] live.silentTopicWarning: thresholdMs must be a positive finite number');
+		}
+		_silentTopicConfig.thresholdMs = config.thresholdMs;
+	}
+	if (config.suppress !== undefined) {
+		if (!Array.isArray(config.suppress)) {
+			throw new Error('[svelte-realtime] live.silentTopicWarning: suppress must be an array of topic strings');
+		}
+		for (const topic of config.suppress) {
+			if (typeof topic !== 'string') {
+				throw new Error('[svelte-realtime] live.silentTopicWarning: suppress entries must be strings');
+			}
+		}
+		_silentTopicConfig.suppress = new Set(config.suppress);
+	}
+	_silentTopicConfig.enabled = true;
 };
 
 /** @type {{ acquire: (key: string, ttlSec: number) => Promise<any> } | null} */
@@ -4549,6 +4732,7 @@ export function unsubscribe(ws, topic, { platform }) {
 		if (wsSet.size === 0) {
 			_topicWsCounts.delete(topic);
 			_unregisterStaleWatch(topic);
+			_disarmSilentTopicWatch(topic);
 		}
 	}
 
@@ -4597,6 +4781,7 @@ export function close(ws, { platform, subscriptions }) {
 				if (wsSet.size === 0) {
 					_topicWsCounts.delete(topic);
 					_unregisterStaleWatch(topic);
+					_disarmSilentTopicWatch(topic);
 				}
 			}
 			if (alreadyFired && alreadyFired.has(topic)) continue;

@@ -837,6 +837,42 @@ export namespace live {
 	): void;
 
 	/**
+	 * Configure the dev-mode silent-topic warning. When a stream subscribes
+	 * to a topic and no events arrive within `thresholdMs` (default 30000),
+	 * the framework logs a one-shot `console.warn` naming the topic and
+	 * the common causes -- missing `pg_notify` trigger, missing
+	 * handler-side `ctx.publish()`, or an intentionally low-traffic topic
+	 * the user can suppress.
+	 *
+	 * Off in production builds regardless of configuration; on by default
+	 * in development. Topics starting with `__` (system topics like
+	 * `__realtime`, `__signal:*`, `__custom`) are skipped automatically;
+	 * users only need to populate `suppress` for application topics that
+	 * are intentionally quiet.
+	 *
+	 * Pass `false` to disable entirely (useful for CI runs or for CLI
+	 * tools that mount `live()` without subscribing). Pass `true` (or
+	 * call without arguments) to re-enable. Pass an object to override
+	 * threshold or per-topic suppression list; either field can be
+	 * omitted to keep its current value.
+	 *
+	 * @example
+	 * ```js
+	 * // Disable globally
+	 * live.silentTopicWarning(false);
+	 *
+	 * // Lower the bar for a noisier insight (5s instead of 30s)
+	 * live.silentTopicWarning({ thresholdMs: 5000 });
+	 *
+	 * // Suppress per-topic for known-quiet streams
+	 * live.silentTopicWarning({ suppress: ['admin:audit', 'cron:reports'] });
+	 * ```
+	 */
+	function silentTopicWarning(
+		config?: false | true | { thresholdMs?: number; suppress?: string[] }
+	): void;
+
+	/**
 	 * Three-state idempotency store contract. Compatible with `createIdempotencyStore`
 	 * from `svelte-adapter-uws-extensions` (Redis + Postgres backends).
 	 */
