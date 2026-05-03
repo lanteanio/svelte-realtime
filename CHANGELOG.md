@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.2] - 2026-05-03
+
 ### Internal
 
 - **`shared/` directory for cross-cutting helpers.** Mirrors the `svelte-adapter-uws-extensions/shared/` layout. New `shared/assert.js` is the single source of truth for the `realtime/`-prefixed `assert` / `getAssertionCounters` / `_resetAssertCounters` API exported from both `server` and `client`; the server wires its Prometheus counter via `wireAssertionMetrics(...)` from the metrics-init site. New `shared/merge.js` exports `mergeKeyField(merge, defaultKey)` and `rebuildIndex(value, index, merge, defaultKey)` so the `(merge === 'presence' || merge === 'cursor') ? 'key' : key` literal stops appearing in four places and the index-rebuild logic has one home. Tests, public API surface, and runtime behavior unchanged; the package's `files` array now includes `shared`.
