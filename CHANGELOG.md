@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.3] - 2026-05-03
+
+### Fixed
+
+- **`live.metrics()` documentation now matches a working integration.** Backport of the `0.4.23` fix from `main`: the README's "Prometheus metrics" example imported a non-existent `createMetricsRegistry` from `svelte-adapter-uws-extensions/prometheus`, and the `server.d.ts` JSDoc example imported a non-existent `createRegistry`. The real export is `createMetrics`, and its registry methods take positional args (`counter(name, help, labelNames)`) where `live.metrics()` calls them with options-object form (`counter({ name, help, labelNames })`). The README now shows a six-line adapter that bridges the two and is paired with `metrics.handler` for the `/metrics` endpoint. JSDoc and type declarations updated to match.
+
+### Added
+
+- **`MetricsRegistry` interface in `server.d.ts`.** Backport of `0.4.23`. TypeScript users now get autocomplete and structural validation on the registry shape passed to `live.metrics()`, replacing the previous `registry: any` signature.
+- **Integration test exercising the real extensions registry.** Backport of `0.4.23`. `test/server.test.js` now imports `createMetrics` from `svelte-adapter-uws-extensions/prometheus` and runs the documented adapter shim against it, asserting that RPC counters, the duration histogram, the error counter, the stream subscription gauge, and the cron counter all flow through to the registry's serialized output. The merge bumped the `svelte-adapter-uws-extensions` devDependency from `^0.4.2` (as pinned on `main`) to `^0.5.0-next.3` so it tracks the rest of the dev-line ecosystem.
+
 ## [0.5.0-next.2] - 2026-05-03
 
 ### Internal
