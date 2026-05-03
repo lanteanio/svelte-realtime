@@ -67,7 +67,8 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "playwright test --config test/e2e/playwright.config.js"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -81,6 +82,7 @@
     "svelte-adapter-uws": "^0.5.0-next.10"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "fast-check": "^4.7.0",
     "vitest": "^4.0.18"
   },

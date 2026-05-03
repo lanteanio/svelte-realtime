@@ -20,6 +20,14 @@ const DYNAMIC_CHANNEL_RE = /export\s+const\s+(\w+)\s*=\s*live\.channel\s*\(\s*(?
 const RATE_LIMIT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.rateLimit\s*\(/g;
 const EFFECT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.effect\s*\(/g;
 const AGGREGATE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.aggregate\s*\(/g;
+// `live.lock(...)` and `live.idempotent(...)` wrap an inner handler. From the
+// client's perspective they're plain RPCs (the lock / idempotency runs
+// server-side inside the wrapper), so the codegen treats them identically
+// to a `live(...)` export -- generate an `__rpc(...)` stub, register the
+// path. Without this, exports declared as `export const x = live.lock(...)`
+// would not be recognised and the client could not call them.
+const LOCK_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.lock\s*\(/g;
+const IDEMPOTENT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.idempotent\s*\(/g;
 
 const _validSegmentReVite = /^[a-zA-Z0-9_]+$/;
 
@@ -782,7 +790,6 @@ import('svelte-realtime/devtools');
 
 			// On first transform, load the registry to populate server-side state
 			let registryLoaded = false;
-			const originalLoad = this.load;
 
 			server.httpServer?.once('listening', async () => {
 				if (registryLoaded) return;
@@ -992,6 +999,30 @@ function _generateClientStubs(filePath, modulePath, dir) {
 	// Detect live.validated() exports (treated same as live() on the client)
 	VALIDATED_EXPORT_RE.lastIndex = 0;
 	while ((match = VALIDATED_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		if (!exportedNames.has(name)) {
+			exportedNames.add(name);
+			imports.add('__rpc');
+			lines.push(`export const ${name} = __rpc('${modulePath}/${name}');`);
+		}
+	}
+
+	// Detect live.lock() exports (treated same as live() on the client)
+	LOCK_EXPORT_RE.lastIndex = 0;
+	while ((match = LOCK_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		if (!exportedNames.has(name)) {
+			exportedNames.add(name);
+			imports.add('__rpc');
+			lines.push(`export const ${name} = __rpc('${modulePath}/${name}');`);
+		}
+	}
+
+	// Detect live.idempotent() exports (treated same as live() on the client)
+	IDEMPOTENT_EXPORT_RE.lastIndex = 0;
+	while ((match = IDEMPOTENT_EXPORT_RE.exec(source)) !== null) {
 		const name = match[1];
 		if (!/^\w+$/.test(name)) continue;
 		if (!exportedNames.has(name)) {
@@ -1719,6 +1750,28 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			}
 		}
 
+		// Register live.lock() exports
+		LOCK_EXPORT_RE.lastIndex = 0;
+		while ((match = LOCK_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			if (!/^\w+$/.test(name)) continue;
+			if (!registered.has(name)) {
+				registered.add(name);
+				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+			}
+		}
+
+		// Register live.idempotent() exports
+		IDEMPOTENT_EXPORT_RE.lastIndex = 0;
+		while ((match = IDEMPOTENT_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			if (!/^\w+$/.test(name)) continue;
+			if (!registered.has(name)) {
+				registered.add(name);
+				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+			}
+		}
+
 		// Register live.rateLimit() exports
 		RATE_LIMIT_EXPORT_RE.lastIndex = 0;
 		while ((match = RATE_LIMIT_EXPORT_RE.exec(source)) !== null) {
@@ -2126,6 +2179,38 @@ function _generateTypeDeclarations(liveDir, dir) {
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
 				if (isTS) {
 					const sig = _extractFunctionSignatureFor(source, name, 'live\\.rateLimit', 1);
+					exports.push(`  export const ${name}: ${sig};`);
+				} else {
+					exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);
+				}
+			}
+		}
+
+		// Detect live.lock() exports -- the inner handler is the second arg of
+		// live.lock(keyOrConfig, fn), so the function-signature extractor
+		// reads from arg index 1.
+		LOCK_EXPORT_RE.lastIndex = 0;
+		while ((match = LOCK_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				if (isTS) {
+					const sig = _extractFunctionSignatureFor(source, name, 'live\\.lock', 1);
+					exports.push(`  export const ${name}: ${sig};`);
+				} else {
+					exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);
+				}
+			}
+		}
+
+		// Detect live.idempotent() exports -- inner handler at arg index 1.
+		IDEMPOTENT_EXPORT_RE.lastIndex = 0;
+		while ((match = IDEMPOTENT_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				if (isTS) {
+					const sig = _extractFunctionSignatureFor(source, name, 'live\\.idempotent', 1);
 					exports.push(`  export const ${name}: ${sig};`);
 				} else {
 					exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);

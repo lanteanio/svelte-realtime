@@ -673,6 +673,8 @@ export const _guard = guard(
 
 Use a function instead of a string as the first argument to `live.stream()` for per-entity streams. The client-side stub becomes a factory function -- call it with arguments to get a cached store for that entity.
 
+> **The first argument's shape decides the client export.** If the first argument is a string, the export is a Svelte store and you read it as `$messages`. If the first argument is a function, the export is a factory that returns a store, and you must call it first: `const messages = roomMessages(data.roomId); ... $messages`. Forgetting the call gives `Svelte error: store_invalid_shape -- 'roomMessages' is not a store with a 'subscribe' method` during SSR. If the topic does not depend on arguments, prefer the string form.
+
 ```js
 // src/live/rooms.js
 import { live } from 'svelte-realtime/server';

@@ -6,3 +6,6 @@ coverage
 .DS_Store
 *.log
 source
+test-results
+playwright-report
+.svelte-kit
