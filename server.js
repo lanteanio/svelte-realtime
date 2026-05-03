@@ -3518,13 +3518,20 @@ function _shouldShed(platform, className) {
 }
 
 /**
- * Opt-in Prometheus metrics integration.
- * Accepts a MetricsRegistry from `svelte-adapter-uws-extensions/prometheus`
- * and instruments RPC calls, stream subscriptions, and cron executions.
+ * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
+ * subscriptions, and cron executions. Zero overhead if never called.
  *
- * Zero overhead if never called.
+ * Call once at server start (e.g. the top of `src/hooks.ws.{js,ts}`).
  *
- * @param {any} registry - A MetricsRegistry instance with counter(), histogram(), gauge()
+ * The registry is any object exposing:
+ *   counter({ name, help, labelNames }) -> { inc(labels?) }
+ *   histogram({ name, help, labelNames }) -> { observe(labels, valueSeconds) }
+ *   gauge({ name, help }) -> { inc(), dec() }
+ *
+ * See the README "Prometheus metrics" section for a working example that
+ * pairs this with `createMetrics()` from `svelte-adapter-uws-extensions/prometheus`.
+ *
+ * @param {any} registry - Object with counter, histogram, and gauge factories
  */
 live.metrics = function metrics(registry) {
 	_metricsInstruments = {

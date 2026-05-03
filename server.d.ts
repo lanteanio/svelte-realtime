@@ -490,6 +490,25 @@ export interface CreateMessageOptions {
 }
 
 /**
+ * Shape accepted by `live.metrics()`. Any object matching this contract works
+ * (hand-rolled, prom-client adapter, or the `createMetrics()` registry from
+ * `svelte-adapter-uws-extensions/prometheus` wrapped to forward options as
+ * positional args -- see the README "Prometheus metrics" section).
+ */
+export interface MetricsRegistry {
+	counter(opts: { name: string; help: string; labelNames?: string[] }): {
+		inc(labels?: Record<string, string | number>): void;
+	};
+	histogram(opts: { name: string; help: string; labelNames?: string[]; buckets?: number[] }): {
+		observe(labels: Record<string, string | number>, valueSeconds: number): void;
+	};
+	gauge(opts: { name: string; help: string; labelNames?: string[] }): {
+		inc(): void;
+		dec(): void;
+	};
+}
+
+/**
  * Mark a function as RPC-callable over WebSocket.
  *
  * The first argument is always `ctx: LiveContext`. Additional arguments
@@ -1306,21 +1325,29 @@ export namespace live {
 	function webhook(topic: string, config: WebhookConfig): WebhookHandler;
 
 	/**
-	 * Opt-in Prometheus metrics integration.
-	 * Accepts a MetricsRegistry from `svelte-adapter-uws-extensions/prometheus`
-	 * and instruments RPC calls, stream subscriptions, and cron executions.
+	 * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
+	 * subscriptions, and cron executions. Zero overhead if never called.
 	 *
-	 * Zero overhead if never called.
+	 * Call once at server start (e.g. the top of `src/hooks.ws.{js,ts}`).
+	 * See the README "Prometheus metrics" section for a working example
+	 * that pairs this with `createMetrics()` from
+	 * `svelte-adapter-uws-extensions/prometheus`.
 	 *
-	 * @param registry - A MetricsRegistry instance with counter(), histogram(), gauge()
+	 * @param registry - Object matching the {@link MetricsRegistry} shape
 	 *
 	 * @example
 	 * ```js
-	 * import { createRegistry } from 'svelte-adapter-uws-extensions/prometheus';
-	 * live.metrics(createRegistry());
+	 * import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
+	 *
+	 * const metrics = createMetrics();
+	 * live.metrics({
+	 *   counter:   ({ name, help, labelNames }) => metrics.counter(name, help, labelNames),
+	 *   histogram: ({ name, help, labelNames }) => metrics.histogram(name, help, labelNames),
+	 *   gauge:     ({ name, help, labelNames }) => metrics.gauge(name, help, labelNames)
+	 * });
 	 * ```
 	 */
-	function metrics(registry: any): void;
+	function metrics(registry: MetricsRegistry): void;
 
 	/**
 	 * One of the four pressure reasons emitted by the adapter, in fixed
