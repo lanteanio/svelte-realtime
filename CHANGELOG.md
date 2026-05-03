@@ -23,6 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Build-time `defineTopics` registry check in the Vite plugin.** When the plugin sees a `defineTopics({...})` call anywhere under `src/`, it parses the patterns and validates string-literal topics passed to `live.stream(...)` and `live.channel(...)` against the registry. A literal that does not match any registered pattern triggers a one-shot warning naming the file and the offending topic, suggesting either adding the topic to `defineTopics` or calling `TOPICS.<name>(...)` instead.
+
+  ```
+  [svelte-realtime] src/live/feed.js: live.stream topic 'mistyped-topic' is not in
+  your TOPICS registry. Either add it to defineTopics({...}) or call TOPICS.<name>(...)
+  instead of passing a string literal.
+  ```
+
+  Covers static-string patterns and arrow-return template literals; template interpolations are matched as `.+` so any value satisfies the placeholder. Dynamic values (function references, spreads) are silently skipped at parse time. Projects without any `defineTopics` call get no warnings -- the check is opt-in via adopting the registry helper.
+
+  Closes the most-common-by-far class of "I changed the SQL trigger but forgot to update the topic string" bugs at build time, without runtime overhead.
+
 - **`expectGuardRejects(promise, expectedCode?)` helper in `svelte-realtime/test`.** Ergonomic wrapper for the common "this call should be denied" assertion: awaits the promise, asserts it rejected with a `LiveError` of the expected code (default `'FORBIDDEN'`), and returns the rejected error so further assertions can run on it.
 
   ```js

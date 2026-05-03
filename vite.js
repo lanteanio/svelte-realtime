@@ -226,6 +226,394 @@ function _readCached(filePath) {
 }
 
 /**
+ * Find the index of the closing `}` matching the `{` at `openIdx`. Tracks
+ * string literals (skipping their contents) and line/block comments.
+ * Returns -1 if no match. Used by the topics registry parser.
+ * @param {string} s
+ * @param {number} openIdx
+ * @returns {number}
+ */
+/**
+ * Given `s[i]` is a string-opening quote (', ", or `), return the index
+ * of the matching closing quote/backtick. Tracks `${...}` interpolation
+ * depth inside template literals so embedded braces don't terminate the
+ * surrounding scope. Used by every lookahead that scans top-level
+ * structure of a defineTopics call.
+ * @param {string} s
+ * @param {number} i
+ * @returns {number}
+ */
+function _skipStringContent(s, i) {
+	const q = s[i];
+	if (q === '\'' || q === '"') {
+		let j = i + 1;
+		while (j < s.length && s[j] !== q) {
+			if (s[j] === '\\') j++;
+			j++;
+		}
+		return j;
+	}
+	if (q === '`') {
+		let j = i + 1;
+		while (j < s.length && s[j] !== '`') {
+			if (s[j] === '\\') { j += 2; continue; }
+			if (s[j] === '$' && s[j + 1] === '{') {
+				let d = 1;
+				j += 2;
+				while (j < s.length && d > 0) {
+					if (s[j] === '{') d++;
+					else if (s[j] === '}') { d--; if (d === 0) break; }
+					j++;
+				}
+			}
+			j++;
+		}
+		return j;
+	}
+	return i;
+}
+
+function _findMatchingBrace(s, openIdx) {
+	let depth = 1;
+	let i = openIdx + 1;
+	while (i < s.length) {
+		const ch = s[i];
+		if (ch === '/' && s[i + 1] === '/') {
+			while (i < s.length && s[i] !== '\n') i++;
+			continue;
+		}
+		if (ch === '/' && s[i + 1] === '*') {
+			i += 2;
+			while (i < s.length - 1 && !(s[i] === '*' && s[i + 1] === '/')) i++;
+			i += 2;
+			continue;
+		}
+		if (ch === '\'' || ch === '"' || ch === '`') {
+			i = _skipStringContent(s, i) + 1;
+			continue;
+		}
+		if (ch === '{') depth++;
+		else if (ch === '}') { depth--; if (depth === 0) return i; }
+		i++;
+	}
+	return -1;
+}
+
+/**
+ * Parse a template literal starting at `start` (the backtick), substituting
+ * `${expr}` interpolations with `{argN}` (where N is the index of `expr` in
+ * `params`) or `{argX}` if the expression isn't a simple parameter reference.
+ * Returns { pattern, end } where `end` is the index of the closing backtick.
+ * Returns null on unterminated input.
+ * @param {string} s
+ * @param {number} start
+ * @param {string[]} params
+ * @returns {{ pattern: string, end: number } | null}
+ */
+function _extractTemplatePattern(s, start, params) {
+	if (s[start] === '\'' || s[start] === '"') {
+		const lit = _readStringLiteral(s, start);
+		return lit ? { pattern: lit.value, end: lit.end } : null;
+	}
+	if (s[start] !== '`') return null;
+	let result = '';
+	let i = start + 1;
+	while (i < s.length) {
+		const ch = s[i];
+		if (ch === '`') return { pattern: result, end: i };
+		if (ch === '\\') {
+			const next = s[i + 1];
+			if (next === 'n') result += '\n';
+			else if (next === 't') result += '\t';
+			else if (next === '\\') result += '\\';
+			else if (next === '`') result += '`';
+			else if (next === '$') result += '$';
+			else if (next !== undefined) result += next;
+			i += 2;
+			continue;
+		}
+		if (ch === '$' && s[i + 1] === '{') {
+			let depth = 1;
+			let j = i + 2;
+			while (j < s.length && depth > 0) {
+				if (s[j] === '{') depth++;
+				else if (s[j] === '}') { depth--; if (depth === 0) break; }
+				j++;
+			}
+			if (depth !== 0) return null;
+			const expr = s.slice(i + 2, j).trim();
+			const idx = params.indexOf(expr);
+			result += idx >= 0 ? '{arg' + idx + '}' : '{argX}';
+			i = j + 1;
+			continue;
+		}
+		result += ch;
+		i++;
+	}
+	return null;
+}
+
+/**
+ * Parse an arrow function value of a defineTopics entry, returning the
+ * static template pattern of its return expression. Handles concise-body
+ * arrows and single-return block bodies, with simple-string and template
+ * literal returns. Returns null for shapes outside that envelope (the
+ * registry just skips them; warnings only fire for confidently parsed
+ * entries).
+ * @param {string} body
+ * @param {number} start
+ * @returns {{ pattern: string, end: number } | null}
+ */
+function _parseArrowReturnTemplate(body, start) {
+	let i = start;
+	if (body.slice(i, i + 6) === 'async ') i += 6;
+	while (i < body.length && /\s/.test(body[i])) i++;
+	const params = [];
+	if (body[i] === '(') {
+		let depth = 1;
+		const pStart = i + 1;
+		let j = i + 1;
+		while (j < body.length && depth > 0) {
+			if (body[j] === '(') depth++;
+			else if (body[j] === ')') { depth--; if (depth === 0) break; }
+			j++;
+		}
+		if (depth !== 0) return null;
+		const paramStr = body.slice(pStart, j).trim();
+		if (paramStr) {
+			for (const p of paramStr.split(',').map(s => s.trim())) {
+				const m = p.match(/^([\w$]+)/);
+				if (m) params.push(m[1]);
+			}
+		}
+		i = j + 1;
+	} else if (/[\w$]/.test(body[i])) {
+		const pStart = i;
+		while (i < body.length && /[\w$]/.test(body[i])) i++;
+		params.push(body.slice(pStart, i));
+	} else {
+		return null;
+	}
+	while (i < body.length && /\s/.test(body[i])) i++;
+	if (body.slice(i, i + 2) !== '=>') return null;
+	i += 2;
+	while (i < body.length && /\s/.test(body[i])) i++;
+	let hasOuterParen = false;
+	if (body[i] === '(') {
+		hasOuterParen = true;
+		i++;
+		while (i < body.length && /\s/.test(body[i])) i++;
+	}
+	if (body[i] === '{') {
+		const blockEnd = _findMatchingBrace(body, i);
+		if (blockEnd < 0) return null;
+		const blockBody = body.slice(i + 1, blockEnd);
+		const retIdx = blockBody.search(/(?:^|\s)return\s+/);
+		if (retIdx < 0) return null;
+		const afterReturn = blockBody.indexOf('return', retIdx) + 6;
+		let rs = afterReturn;
+		while (rs < blockBody.length && /\s/.test(blockBody[rs])) rs++;
+		if (blockBody[rs] !== '\'' && blockBody[rs] !== '"' && blockBody[rs] !== '`') return null;
+		const lit = _extractTemplatePattern(blockBody, rs, params);
+		if (!lit) return null;
+		return { pattern: lit.pattern, end: blockEnd };
+	}
+	if (body[i] !== '\'' && body[i] !== '"' && body[i] !== '`') return null;
+	const lit = _extractTemplatePattern(body, i, params);
+	if (!lit) return null;
+	let endIdx = lit.end;
+	if (hasOuterParen) {
+		let k = endIdx + 1;
+		while (k < body.length && /\s/.test(body[k])) k++;
+		if (body[k] === ')') endIdx = k;
+	}
+	return { pattern: lit.pattern, end: endIdx };
+}
+
+/**
+ * Parse the body of a defineTopics({...}) call, returning an array of
+ * `{ name, pattern }` entries for every entry that resolves to a static
+ * pattern. Entries whose values are dynamic (function references,
+ * spreads, etc.) are silently skipped.
+ * @param {string} body
+ * @returns {Array<{ name: string, pattern: string }>}
+ */
+function _parseTopicsEntries(body) {
+	const entries = [];
+	let i = 0;
+	while (i < body.length) {
+		while (i < body.length && /[\s,]/.test(body[i])) i++;
+		if (i >= body.length) break;
+		if (body[i] === '/' && body[i + 1] === '/') {
+			while (i < body.length && body[i] !== '\n') i++;
+			continue;
+		}
+		if (body[i] === '/' && body[i + 1] === '*') {
+			i += 2;
+			while (i < body.length - 1 && !(body[i] === '*' && body[i + 1] === '/')) i++;
+			i += 2;
+			continue;
+		}
+		let name = null;
+		if (/[a-zA-Z_$]/.test(body[i])) {
+			const start = i;
+			while (i < body.length && /[\w$]/.test(body[i])) i++;
+			name = body.slice(start, i);
+		} else if (body[i] === '\'' || body[i] === '"') {
+			const lit = _readStringLiteral(body, i);
+			if (!lit) { i++; continue; }
+			name = lit.value;
+			i = lit.end + 1;
+		} else {
+			i++;
+			continue;
+		}
+		while (i < body.length && /\s/.test(body[i])) i++;
+		if (body[i] !== ':') {
+			while (i < body.length && body[i] !== ',' && body[i] !== '\n') i++;
+			continue;
+		}
+		i++;
+		while (i < body.length && /\s/.test(body[i])) i++;
+		if (!name || !/^[a-zA-Z_$][\w$]*$/.test(name) || name === '__patterns' || name === '__definedTopics') {
+			let depth = 0;
+			while (i < body.length) {
+				const c = body[i];
+				if (c === '\'' || c === '"' || c === '`') { i = _skipStringContent(body, i) + 1; continue; }
+				if (c === '{' || c === '(' || c === '[') depth++;
+				else if (c === '}' || c === ')' || c === ']') { depth--; if (depth < 0) break; }
+				else if (c === ',' && depth === 0) break;
+				i++;
+			}
+			continue;
+		}
+		let parsed = null;
+		if (body[i] === '\'' || body[i] === '"' || body[i] === '`') {
+			const lit = _extractTemplatePattern(body, i, []);
+			if (lit) {
+				parsed = lit;
+				i = lit.end + 1;
+			}
+		} else {
+			parsed = _parseArrowReturnTemplate(body, i);
+			if (parsed) i = parsed.end + 1;
+		}
+		if (parsed) {
+			entries.push({ name, pattern: parsed.pattern });
+		} else {
+			let depth = 0;
+			while (i < body.length) {
+				const c = body[i];
+				if (c === '\'' || c === '"' || c === '`') { i = _skipStringContent(body, i) + 1; continue; }
+				if (c === '{' || c === '(' || c === '[') depth++;
+				else if (c === '}' || c === ')' || c === ']') { depth--; if (depth < 0) break; }
+				else if (c === ',' && depth === 0) break;
+				i++;
+			}
+		}
+	}
+	return entries;
+}
+
+/**
+ * Find every `defineTopics({...})` call in `source` and return the union
+ * of their parsed entries.
+ * @param {string} source
+ * @returns {Array<{ name: string, pattern: string }>}
+ */
+function _extractDefineTopicsPatterns(source) {
+	const all = [];
+	let from = 0;
+	while (from < source.length) {
+		const callIdx = source.indexOf('defineTopics(', from);
+		if (callIdx < 0) break;
+		const openIdx = source.indexOf('{', callIdx + 13);
+		if (openIdx < 0) break;
+		const before = source.slice(callIdx + 13, openIdx);
+		if (!/^\s*$/.test(before)) { from = callIdx + 13; continue; }
+		const closeIdx = _findMatchingBrace(source, openIdx);
+		if (closeIdx < 0) break;
+		const body = source.slice(openIdx + 1, closeIdx);
+		all.push(..._parseTopicsEntries(body));
+		from = closeIdx + 1;
+	}
+	return all;
+}
+
+/**
+ * Walk `srcDir` recursively (skipping node_modules, the live dir, and
+ * dotted entries) and return paths of `.js`/`.ts` files that contain a
+ * `defineTopics(` call.
+ * @param {string} srcDir
+ * @param {string} liveDir
+ * @returns {string[]}
+ */
+function _findTopicsFiles(srcDir, liveDir) {
+	const results = [];
+	if (!existsSync(srcDir)) return results;
+	const liveResolved = liveDir;
+	function walk(dir) {
+		let entries;
+		try { entries = readdirSync(dir); } catch { return; }
+		for (const name of entries) {
+			if (name.startsWith('.') || name === 'node_modules') continue;
+			const full = resolve(dir, name);
+			if (full === liveResolved) continue;
+			let s;
+			try { s = statSync(full); } catch { continue; }
+			if (s.isDirectory()) { walk(full); continue; }
+			if (!/\.[jt]s$/.test(name) || name.endsWith('.d.ts') || name.endsWith('.test.js') || name.endsWith('.test.ts')) continue;
+			let content;
+			try { content = readFileSync(full, 'utf-8'); } catch { continue; }
+			if (content.includes('defineTopics(')) results.push(full);
+		}
+	}
+	walk(srcDir);
+	return results;
+}
+
+/**
+ * Build the topics registry for the project: walk `srcDir` for files
+ * that call `defineTopics(...)`, parse each call, and return the union
+ * of patterns as both raw strings and pre-compiled regexes. Returns
+ * null when no `defineTopics` call exists anywhere -- callers use that
+ * as the signal to skip the unregistered-topic warning entirely.
+ * @param {string} srcDir
+ * @param {string} liveDir
+ * @returns {{ patterns: Array<{ name: string, pattern: string, regex: RegExp }> } | null}
+ */
+function _buildTopicsRegistry(srcDir, liveDir) {
+	const files = _findTopicsFiles(srcDir, liveDir);
+	if (files.length === 0) return null;
+	const seen = new Set();
+	const patterns = [];
+	for (const f of files) {
+		let src;
+		try { src = readFileSync(f, 'utf-8'); } catch { continue; }
+		const entries = _extractDefineTopicsPatterns(src);
+		for (const e of entries) {
+			const key = e.name + '\0' + e.pattern;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			const escaped = e.pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\\\{arg\w+\\\}/g, '.+');
+			patterns.push({ name: e.name, pattern: e.pattern, regex: new RegExp('^' + escaped + '$') });
+		}
+	}
+	return { patterns };
+}
+
+/**
+ * @param {string} topic
+ * @param {{ patterns: Array<{ regex: RegExp }> } | null} registry
+ * @returns {boolean}
+ */
+function _topicIsRegistered(topic, registry) {
+	if (!registry) return true;
+	for (const p of registry.patterns) if (p.regex.test(topic)) return true;
+	return false;
+}
+
+/**
  * Vite plugin for svelte-realtime.
  * Resolves `$live/` imports to virtual modules with auto-generated client stubs.
  *
@@ -291,7 +679,9 @@ export default function svelteRealtime(options) {
 
 			// Registry module
 			if (id === REGISTRY_ID) {
-				return _generateRegistry(liveDir, dir);
+				const srcDir = resolve(root, 'src');
+				const topicsRegistry = _buildTopicsRegistry(srcDir, liveDir);
+				return _generateRegistry(liveDir, dir, topicsRegistry);
 			}
 
 			// $live/ virtual module
@@ -1266,7 +1656,7 @@ function _extractBraceContent(str) {
  * @param {string} dir
  * @returns {string}
  */
-function _generateRegistry(liveDir, dir) {
+function _generateRegistry(liveDir, dir, topicsRegistry) {
 	if (!existsSync(liveDir)) return '// No live modules found\n';
 
 	const files = _findLiveFiles(liveDir);
@@ -1277,6 +1667,25 @@ function _generateRegistry(liveDir, dir) {
 
 	/** @type {Set<string>} */
 	const seenTopics = new Set();
+	/** @type {Set<string>} Track already-warned (file:topic) pairs to avoid duplicates */
+	const warnedUnregistered = new Set();
+	/**
+	 * @param {string} topic
+	 * @param {string} relPath
+	 * @param {string} apiName
+	 */
+	const _maybeWarnUnregistered = (topic, relPath, apiName) => {
+		if (!topicsRegistry) return;
+		if (_topicIsRegistered(topic, topicsRegistry)) return;
+		const k = relPath + '\0' + topic;
+		if (warnedUnregistered.has(k)) return;
+		warnedUnregistered.add(k);
+		console.warn(
+			`[svelte-realtime] ${dir}/${relPath}: ${apiName} topic '${topic}' is not in your TOPICS registry. ` +
+			`Either add it to defineTopics({...}) or call TOPICS.<name>(...) instead of passing a string literal.\n` +
+			`  See: https://svti.me/topics`
+		);
+	};
 
 	for (const filePath of files) {
 		const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
@@ -1346,6 +1755,7 @@ function _generateRegistry(liveDir, dir) {
 					);
 				}
 				seenTopics.add(topic);
+				_maybeWarnUnregistered(topic, rel, 'live.stream');
 			}
 		}
 
@@ -1419,6 +1829,13 @@ function _generateRegistry(liveDir, dir) {
 			if (!registered.has(name)) {
 				registered.add(name);
 				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+			}
+			const channelTopicPattern = new RegExp(
+				`export\\s+const\\s+${name}\\s*=\\s*live\\.channel\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]`
+			);
+			const channelTopicMatch = channelTopicPattern.exec(source);
+			if (channelTopicMatch) {
+				_maybeWarnUnregistered(channelTopicMatch[1], rel, 'live.channel');
 			}
 		}
 

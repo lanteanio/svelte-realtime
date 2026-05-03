@@ -339,6 +339,141 @@ export const helperFn = () => {};
 	});
 });
 
+// -- defineTopics static-analysis warning ------------------------------------
+
+describe('defineTopics static-analysis warning', () => {
+	afterEach(teardown);
+
+	function writeTopicsFile(relPath, content) {
+		const full = resolve(testRoot, relPath);
+		mkdirSync(resolve(full, '..'), { recursive: true });
+		writeFileSync(full, content);
+	}
+
+	function captureWarns(fn) {
+		const warns = [];
+		const orig = console.warn;
+		console.warn = (...args) => warns.push(args.join(' '));
+		try { fn(); } finally { console.warn = orig; }
+		return warns;
+	}
+
+	it('does not warn when no defineTopics call exists anywhere', () => {
+		setup({
+			'feed.js': `
+import { live } from 'svelte-realtime/server';
+export const items = live.stream('legacy:topic', async () => []);
+`
+		});
+
+		const plugin = createPlugin();
+		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		expect(warns.some(w => w.includes('not in your TOPICS registry'))).toBe(false);
+	});
+
+	it('warns when string-literal topic does not match any registered pattern', () => {
+		writeTopicsFile('src/lib/topics.js', `
+import { defineTopics } from 'svelte-realtime/server';
+export const TOPICS = defineTopics({
+  audit: (orgId) => \`audit:\${orgId}\`,
+  feed: 'feed:notices'
+});
+`);
+		setup({
+			'mystream.js': `
+import { live } from 'svelte-realtime/server';
+export const wrong = live.stream('mistyped-topic', async () => []);
+`
+		});
+
+		const plugin = createPlugin();
+		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		expect(warns.some(w => w.includes("topic 'mistyped-topic' is not in your TOPICS registry"))).toBe(true);
+	});
+
+	it('does not warn when literal matches a static-string pattern', () => {
+		writeTopicsFile('src/lib/topics.js', `
+import { defineTopics } from 'svelte-realtime/server';
+export const TOPICS = defineTopics({
+  feed: 'feed:notices'
+});
+`);
+		setup({
+			'feed.js': `
+import { live } from 'svelte-realtime/server';
+export const items = live.stream('feed:notices', async () => []);
+`
+		});
+
+		const plugin = createPlugin();
+		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		expect(warns.some(w => w.includes('not in your TOPICS registry'))).toBe(false);
+	});
+
+	it('does not warn when literal matches an arrow-function template pattern', () => {
+		writeTopicsFile('src/lib/topics.js', `
+import { defineTopics } from 'svelte-realtime/server';
+export const TOPICS = defineTopics({
+  audit: (orgId) => \`audit:\${orgId}\`,
+  rooms: (orgId, room) => \`room:\${orgId}:\${room}\`
+});
+`);
+		setup({
+			'audit.js': `
+import { live } from 'svelte-realtime/server';
+export const auditFeed = live.stream('audit:org-123', async () => []);
+`,
+			'rooms.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.stream('room:org-1:lobby', async () => []);
+`
+		});
+
+		const plugin = createPlugin();
+		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		const offending = warns.filter(w => w.includes('not in your TOPICS registry'));
+		expect(offending).toEqual([]);
+	});
+
+	it('warns on live.channel() literals using the same registry', () => {
+		writeTopicsFile('src/lib/topics.js', `
+import { defineTopics } from 'svelte-realtime/server';
+export const TOPICS = defineTopics({
+  typing: (room) => \`typing:\${room}\`
+});
+`);
+		setup({
+			'channel.js': `
+import { live } from 'svelte-realtime/server';
+export const wrong = live.channel('not-a-channel', { merge: 'presence' });
+`
+		});
+
+		const plugin = createPlugin();
+		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		expect(warns.some(w => w.includes("live.channel topic 'not-a-channel'") && w.includes('not in your TOPICS registry'))).toBe(true);
+	});
+
+	it('finds defineTopics calls in nested src subdirectories', () => {
+		writeTopicsFile('src/server/contracts/topics.js', `
+import { defineTopics } from 'svelte-realtime/server';
+export const TOPICS = defineTopics({ heartbeat: 'sys:heartbeat' });
+`);
+		setup({
+			'pulse.js': `
+import { live } from 'svelte-realtime/server';
+export const ok = live.stream('sys:heartbeat', async () => null);
+export const bad = live.stream('sys:wrongbeat', async () => null);
+`
+		});
+
+		const plugin = createPlugin();
+		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		expect(warns.some(w => w.includes("'sys:heartbeat'"))).toBe(false);
+		expect(warns.some(w => w.includes("'sys:wrongbeat'") && w.includes('not in your TOPICS registry'))).toBe(true);
+	});
+});
+
 // -- hooks.ws.js detection ----------------------------------------------------
 
 describe('hooks.ws.js detection', () => {

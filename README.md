@@ -731,6 +731,18 @@ TOPICS.__patterns;
 
 Map values can be strings (static topics) or `(...args) => string` functions (dynamic topics). The helper validates non-empty strings and rejects reserved names (`__patterns`, `__definedTopics`). Pattern derivation calls each function with sentinel placeholders (`{arg0}`, `{arg1}`, ...) and falls back to `'<dynamic>'` if the function throws on placeholders or returns a non-string.
 
+### Build-time registry check
+
+When the Vite plugin sees a `defineTopics({...})` call anywhere under `src/`, it builds a registry of patterns and validates string-literal topics passed to `live.stream(...)` and `live.channel(...)` against it. A literal that does not match any registered pattern triggers a one-shot warning per `(file, topic)` pair:
+
+```
+[svelte-realtime] src/live/feed.js: live.stream topic 'mistyped-topic' is not in
+your TOPICS registry. Either add it to defineTopics({...}) or call TOPICS.<name>(...)
+instead of passing a string literal.
+```
+
+The check covers static-string patterns (`feed: 'feed:notices'`) and arrow-return template literals (`audit: (orgId) => \`audit:${orgId}\``); template interpolations match `.+` so `'audit:org-123'` and `'audit:any-id'` both pass against the `audit` pattern. Function references and other dynamic value shapes are silently skipped at parse time -- the warning only fires for literal topics under a confidently parsed registry. If your project does not call `defineTopics` at all, the check is disabled.
+
 ---
 
 ## Schema validation
