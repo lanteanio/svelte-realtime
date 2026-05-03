@@ -7188,6 +7188,98 @@ describe('live.stream({ transform })', () => {
 
 		expect(platform.sent[0].data.data).toEqual([{ id: 'x' }]);
 	});
+
+	it('routes transform throws to per-stream onError and drops the publish', async () => {
+		const seen = [];
+		const stream = live.stream('tr/throw', async () => [], {
+			merge: 'crud', key: 'id',
+			transform: (row) => {
+				if (row && row.bad) throw new Error('bad row');
+				return { id: row.id };
+			},
+			onError: (err, ctx, topic) => {
+				seen.push({ message: err.message, ctx, topic });
+			}
+		});
+		__register('tr/throw', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('tr/throw', 'created', { id: 'a' });
+			ctx.publish('tr/throw', 'created', { id: 'b', bad: true });
+			ctx.publish('tr/throw', 'created', { id: 'c' });
+			return 'ok';
+		});
+		__register('tr/throw-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/throw', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/throw-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(seen).toHaveLength(1);
+		expect(seen[0].message).toBe('bad row');
+		expect(seen[0].topic).toBe('tr/throw');
+		expect(seen[0].ctx).toBeNull();
+
+		const published = platform.published.filter((p) => p.topic === 'tr/throw');
+		expect(published).toEqual([
+			{ topic: 'tr/throw', event: 'created', data: { id: 'a' }, options: undefined },
+			{ topic: 'tr/throw', event: 'created', data: { id: 'c' }, options: undefined }
+		]);
+	});
+
+	it('transform throws propagate when no per-stream onError is configured', async () => {
+		const stream = live.stream('tr/throw-unobs', async () => [], {
+			merge: 'crud', key: 'id',
+			transform: () => { throw new Error('unobserved'); }
+		});
+		__register('tr/throw-unobs', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('tr/throw-unobs', 'created', { id: 'x' });
+			return 'ok';
+		});
+		__register('tr/throw-unobs-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/throw-unobs', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/throw-unobs-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const reply = platform.sent.find((s) => s.event === 'p1');
+		expect(reply.data.ok).toBe(false);
+		expect(reply.data.code).toBe('INTERNAL_ERROR');
+	});
+
+	it('observer throws are silently swallowed so a buggy onError does not break publishes', async () => {
+		const stream = live.stream('tr/throw-buggy', async () => [], {
+			merge: 'crud', key: 'id',
+			transform: () => { throw new Error('transform bad'); },
+			onError: () => { throw new Error('observer bad'); }
+		});
+		__register('tr/throw-buggy', stream);
+
+		const handler = live(async (ctx) => {
+			const ok = ctx.publish('tr/throw-buggy', 'created', { id: 'a' });
+			return { returned: ok };
+		});
+		__register('tr/throw-buggy-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/throw-buggy', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'tr/throw-buggy-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const reply = platform.sent.find((s) => s.event === 'p1');
+		expect(reply.data.ok).toBe(true);
+		expect(reply.data.data).toEqual({ returned: false });
+	});
 });
 
 // -- ctx.requestId end-to-end correlation -------------------------------------

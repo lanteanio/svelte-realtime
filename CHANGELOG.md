@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Transform throws on the publish path now route to per-stream `onError`.** When a `live.stream()` is configured with both `transform` and `onError`, an exception thrown from inside the transform on a `ctx.publish()` call now fires the configured `onError(err, null, topic)` observer (with `null` ctx, since the transform runs in the publish-helper closure rather than a handler context). The publish itself is dropped silently for that frame because the projected wire data is invalid.
+
+  Streams configured with `transform` but no `onError` keep the prior behavior: the throw propagates up out of `ctx.publish()`, surfacing as an `INTERNAL_ERROR` on the originating RPC. Apps that haven't opted into the observer pattern still see failures the way they did before.
+
+  Closes the documented remaining-delta from the per-stream `onError` boundary: loader throws were already routed (initial subscribe, stale-reload, `.load()` SSR), but per-publish transform throws went unobserved. Apps with a `transform` typo or unexpected null-field can now catch the failure once via `onError` instead of cascading into every RPC that touches the topic.
+
 ### Added
 
 - **Dev-mode silent-topic warning via `live.silentTopicWarning()`.** When a stream subscribes to a topic and no events arrive within a configurable window (default 30 seconds), the framework logs a one-shot `console.warn` naming the topic and the common causes -- a missing `pg_notify` trigger, a missing handler-side `ctx.publish()`, or an intentionally low-traffic topic the user can suppress. Closes the most-common-by-far class of "the realtime stream isn't updating" debugging sessions.

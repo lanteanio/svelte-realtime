@@ -277,7 +277,13 @@ function _unregisterCoalesce(ws, topic) {
  * Refcounted by ws-topic contributions -- evicted when the last
  * subscriber leaves so HMR-changed stream definitions can re-register.
  *
- * @type {Map<string, { transform: Function, refcount: number }>}
+ * Each entry also carries the registering stream's `onError` reference
+ * (if configured). The publish helper wraps the transform call in
+ * try/catch and routes throws to that observer; without an observer,
+ * the throw propagates as before. First subscriber-for-topic wins on
+ * `onError` selection (same rule as for `transform` itself).
+ *
+ * @type {Map<string, { transform: Function, onError: Function | null, refcount: number }>}
  */
 const _topicTransform = new Map();
 
@@ -285,10 +291,10 @@ const _topicTransform = new Map();
  *  Lets the unregister side be idempotent and ws-aware. */
 const _wsTransformContrib = new WeakMap();
 
-function _registerTransform(ws, topic, transform) {
+function _registerTransform(ws, topic, transform, onError) {
 	let entry = _topicTransform.get(topic);
 	if (!entry) {
-		entry = { transform, refcount: 0 };
+		entry = { transform, onError: onError || null, refcount: 0 };
 		_topicTransform.set(topic, entry);
 	}
 	entry.refcount++;
@@ -711,7 +717,26 @@ function _getCtxHelpers(platform) {
 			const coalesceKey = c ? c.coalesceBy(data) : undefined;
 			// Transform produces the wire data once -- applied here, before
 			// fan-out, so every subscriber sees the same projected shape.
-			const wireData = t ? t.transform(data) : data;
+			// Throws are routed to the registered stream's onError (if any).
+			// With an observer set, the publish is dropped silently (return
+			// false) -- transform failure means the wire data is invalid, so
+			// fanning out wouldn't help. Without an observer, the throw
+			// propagates so apps that haven't opted into the observer pattern
+			// still see failures.
+			let wireData;
+			if (t) {
+				try {
+					wireData = t.transform(data);
+				} catch (err) {
+					if (t.onError) {
+						try { t.onError(err, null, topic); } catch {}
+						return false;
+					}
+					throw err;
+				}
+			} else {
+				wireData = data;
+			}
 			if (!c) {
 				// Transform-only topic: stays on the queued batched path.
 				if (!_hasBatched) return platform.publish(topic, event, wireData, finalOptions);
@@ -776,7 +801,12 @@ function _trackStreamSub(ws, topic, fn) {
 		_registerCoalesce(ws, topic, /** @type {any} */ (fn).__coalesceBy);
 	}
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__streamTransform) {
-		_registerTransform(ws, topic, /** @type {any} */ (fn).__streamTransform);
+		_registerTransform(
+			ws,
+			topic,
+			/** @type {any} */ (fn).__streamTransform,
+			/** @type {any} */ (fn).__streamOnError || null
+		);
 	}
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__streamVolatile) {
 		_registerVolatile(ws, topic);
