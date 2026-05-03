@@ -25,6 +25,7 @@ import {
 	defineTopics,
 	pushHooks,
 	_resetStaleWatch,
+	_resetInvalidationWatch,
 	_resetIdempotencyStore,
 	_resetCoalesceRegistry,
 	_resetAdmission,
@@ -8974,6 +8975,212 @@ describe('live.stream({ staleAfterMs })', () => {
 	it('rejects non-function onError at registration', () => {
 		expect(() => live.stream('t', async () => [], { onError: /** @type {any} */ ('not a fn') })).toThrow(/onError/);
 		expect(() => live.stream('t', async () => [], { onError: /** @type {any} */ (42) })).toThrow(/onError/);
+	});
+});
+
+// -- live.stream({ invalidateOn }) --------------------------------------------
+
+describe('live.stream({ invalidateOn })', () => {
+	beforeEach(() => {
+		_resetInvalidationWatch();
+		_resetTransformRegistry();
+		_resetCoalesceRegistry();
+		_resetVolatileRegistry();
+		_resetStaleWatch();
+		_resetTopicWsCounts();
+	});
+
+	async function subscribeStream(ws, platform, rpc, msg = {}) {
+		const data = toArrayBuffer({ rpc, id: 's1', args: [], stream: true, ...msg });
+		handleRpc(ws, data, platform);
+		await new Promise((r) => setTimeout(r, 10));
+	}
+
+	it('rejects non-string and non-array invalidateOn at registration', () => {
+		expect(() => live.stream('t', async () => [], { invalidateOn: 42 })).toThrow(/invalidateOn must be a non-empty string/);
+		expect(() => live.stream('t', async () => [], { invalidateOn: '' })).toThrow(/invalidateOn must be a non-empty string/);
+		expect(() => live.stream('t', async () => [], { invalidateOn: [''] })).toThrow(/invalidateOn must be a non-empty string/);
+		expect(() => live.stream('t', async () => [], { invalidateOn: ['ok', 7] })).toThrow(/invalidateOn must be a non-empty string/);
+	});
+
+	it('stashes __streamInvalidateOn as an array', () => {
+		const single = live.stream('t', async () => [], { invalidateOn: 'todos:*' });
+		expect(/** @type {any} */ (single).__streamInvalidateOn).toEqual(['todos:*']);
+		const multi = live.stream('u', async () => [], { invalidateOn: ['todos:*', 'users:*'] });
+		expect(/** @type {any} */ (multi).__streamInvalidateOn).toEqual(['todos:*', 'users:*']);
+	});
+
+	it('reruns the loader and publishes refreshed when a matching topic is published', async () => {
+		let nthCall = 0;
+		const fn = live.stream('todos', async () => {
+			nthCall++;
+			return nthCall === 1 ? [{ id: 'a' }] : [{ id: 'a' }, { id: 'b' }];
+		}, { merge: 'crud', invalidateOn: 'todos:*' });
+		__register('inv/todos', fn);
+
+		const handler = live(async (ctx) => { ctx.publish('todos:created', 'created', { id: 'b' }); return 'ok'; });
+		__register('inv/add', handler);
+
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform, 'inv/todos');
+		expect(nthCall).toBe(1);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'inv/add', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(nthCall).toBe(2);
+		const refreshes = platform.published.filter((p) => p.event === 'refreshed');
+		expect(refreshes).toHaveLength(1);
+		expect(refreshes[0].topic).toBe('todos');
+		expect(refreshes[0].data).toEqual([{ id: 'a' }, { id: 'b' }]);
+	});
+
+	it('does not rerun when the publish topic does not match', async () => {
+		let nthCall = 0;
+		const fn = live.stream('todos2', async () => { nthCall++; return []; }, {
+			merge: 'crud', invalidateOn: 'todos:*'
+		});
+		__register('inv/todos2', fn);
+
+		const handler = live(async (ctx) => { ctx.publish('users:created', 'created', { id: 'x' }); return 'ok'; });
+		__register('inv/users', handler);
+
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform, 'inv/todos2');
+		expect(nthCall).toBe(1);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'inv/users', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(nthCall).toBe(1);
+		expect(platform.published.filter((p) => p.event === 'refreshed')).toHaveLength(0);
+	});
+
+	it('accepts an array of patterns; any match triggers a reload', async () => {
+		let nthCall = 0;
+		const fn = live.stream('combined', async () => { nthCall++; return [nthCall]; }, {
+			merge: 'set', invalidateOn: ['todos:*', 'users:*']
+		});
+		__register('inv/combined', fn);
+
+		const fireUsers = live(async (ctx) => { ctx.publish('users:created', 'created', {}); return 'ok'; });
+		__register('inv/fireUsers', fireUsers);
+
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform, 'inv/combined');
+		expect(nthCall).toBe(1);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'inv/fireUsers', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(nthCall).toBe(2);
+	});
+
+	it('skips refreshed events to prevent self-publish loops', async () => {
+		let nthCall = 0;
+		// Greedy pattern that would match the stream's own topic
+		const fn = live.stream('loop', async () => { nthCall++; return [nthCall]; }, {
+			merge: 'set', invalidateOn: 'loop*'
+		});
+		__register('inv/loop', fn);
+
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform, 'inv/loop');
+		expect(nthCall).toBe(1);
+
+		// Manually publish a refreshed-event to the matching topic; it must
+		// NOT retrigger another reload.
+		platform.publish('loop', 'refreshed', [42]);
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(nthCall).toBe(1);
+	});
+
+	it('cleans up the registration when the last subscriber leaves', async () => {
+		let nthCall = 0;
+		const fn = live.stream('cleanup', async () => { nthCall++; return []; }, {
+			merge: 'crud', invalidateOn: 'cleanup:*'
+		});
+		__register('inv/cleanup', fn);
+
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform, 'inv/cleanup');
+		expect(nthCall).toBe(1);
+
+		close(ws, { platform });
+		await new Promise((r) => setTimeout(r, 5));
+
+		// After close, a publish to a previously-matching topic should not
+		// trigger any reload (no subscribers, no watcher entry).
+		platform.publish('cleanup:something', 'created', { id: 1 });
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(nthCall).toBe(1);
+	});
+
+	it('routes loader throws on the reload path through per-stream onError', async () => {
+		let nthCall = 0;
+		const seen = [];
+		const fn = live.stream('boom', async () => {
+			nthCall++;
+			if (nthCall > 1) throw new Error('reload bad');
+			return [];
+		}, {
+			merge: 'crud',
+			invalidateOn: 'boom:*',
+			onError: (err, ctx, topic) => { seen.push({ message: err.message, topic }); }
+		});
+		__register('inv/boom', fn);
+
+		const trigger = live(async (ctx) => { ctx.publish('boom:something', 'created', {}); return 'ok'; });
+		__register('inv/trigger', trigger);
+
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform, 'inv/boom');
+		expect(nthCall).toBe(1);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'inv/trigger', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(seen).toHaveLength(1);
+		expect(seen[0].message).toBe('reload bad');
+		expect(seen[0].topic).toBe('boom');
+	});
+
+	it('dedupes concurrent invalidation triggers via the reloading flag', async () => {
+		let nthCall = 0;
+		// Slow loader so two triggers arrive before the first reload completes
+		const fn = live.stream('slow', async () => {
+			nthCall++;
+			await new Promise((r) => setTimeout(r, 30));
+			return [nthCall];
+		}, { merge: 'set', invalidateOn: 'slow:*' });
+		__register('inv/slow', fn);
+
+		const trigger = live(async (ctx) => { ctx.publish('slow:e', 'created', {}); return 'ok'; });
+		__register('inv/slow-trigger', trigger);
+
+		const platform = mockPlatform();
+		const ws = mockWs({ user_id: 'u1' });
+		await subscribeStream(ws, platform, 'inv/slow');
+		await new Promise((r) => setTimeout(r, 35));
+		expect(nthCall).toBe(1);
+
+		// Two triggers in quick succession while the reload is in flight.
+		handleRpc(ws, toArrayBuffer({ rpc: 'inv/slow-trigger', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 5));
+		handleRpc(ws, toArrayBuffer({ rpc: 'inv/slow-trigger', id: 'p2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 50));
+
+		// First trigger started reload #2; second trigger during reload #2 was
+		// dropped (reloading flag). Total reload count: 2 (initial + 1 reload).
+		expect(nthCall).toBe(2);
 	});
 });
 

@@ -23,6 +23,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`invalidateOn` option on `live.stream()` for topic-driven loader reruns.** Declare a glob-style pattern (or array of patterns) and any `ctx.publish` whose topic matches triggers a rerun of the stream's loader, with the result broadcast as a `refreshed` event so every subscriber gets the new state. Useful for mutations whose effects don't fit the merge-strategy model cleanly (bulk operations, server-side recomputation, cascading writes).
+
+  ```js
+  export const todos = live.stream('todos', loadTodos, {
+    merge: 'crud',
+    invalidateOn: 'todos:*'
+  });
+
+  // Anywhere in your live functions:
+  ctx.publish('todos:bulk-imported', 'created', { count: 42 });
+  // -> matches 'todos:*', the todos loader reruns, the result is broadcast
+  //    as a 'refreshed' event, every subscriber gets the new state.
+  ```
+
+  `*` is the wildcard (matches any sequence of one or more characters; other regex specials are escaped). Multiple patterns are OR-ed. Reloads dedupe via a per-watcher `reloading` flag, so concurrent triggers while a reload is in flight collapse to one rerun. `refreshed` events are excluded from the invalidation check so a pattern that happens to match its own stream's topic does not loop.
+
+  Reuses the staleness-watchdog machinery for the rerun (captures the first subscriber's `ctx` + args, applies the init `transform` if configured, broadcasts as `refreshed`). Loader throws on the reload path route through the same `onError(err, ctx, topic)` observer as the staleness path.
+
 - **DevTools Streams tab now shows merge strategy, last-event age, and per-stream error state.** The dev-mode overlay panel (toggle with `Ctrl+Shift+L`) gains three new fields per stream entry: `merge` (the configured merge strategy), `last:<event> <age>` (event name and relative age of the most recent pub/sub frame), and `err: <code> -- <message>` (when the stream is in the error state, cleared on recovery). Existing fields (path, topic, subscriber count) unchanged. The RPC and Connection tabs are unchanged.
 
   Production builds are unaffected -- the overlay and its instrumentation are stripped via the `import.meta.env.PROD` gate.

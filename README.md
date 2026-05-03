@@ -375,6 +375,7 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 | `coalesceBy` | -- | `(data) => key` extractor. Publishes fan out via per-socket `sendCoalesced`; the latest value for each `(topic, key)` pair wins. For high-frequency latest-value streams (prices, cursors, presence). Cannot combine with `volatile` |
 | `volatile` | `false` | Mark messages fire-and-forget. Disables seq stamping for this topic so reconnects with `lastSeenSeq` won't try to backfill. Wire-level drop-on-backpressure is the adapter's default. For typing indicators, telemetry pings, cursors |
 | `staleAfterMs` | -- | Per-topic staleness watchdog. If no events arrive for N ms, the loader re-runs and the result broadcasts as a `refreshed` event. Useful for streams whose source can quietly stop emitting. See [Stream lifecycle hooks](#stream-lifecycle-hooks) |
+| `invalidateOn` | -- | String or array of glob-style topic patterns (e.g. `'todos:*'`). When `ctx.publish` hits a matching topic, the stream's loader reruns and the result broadcasts as a `refreshed` event. See [Stream lifecycle hooks](#stream-lifecycle-hooks) |
 | `onError` | -- | `(err, ctx, topic)` per-stream observer. Fires on loader throws (subscribe / stale-reload / `.load()` SSR). Errors thrown inside are silently swallowed |
 | `classOfService` | -- | Names a class registered via `live.admission()`. New subscribes are shed under matching pressure. See [Load shedding](#load-shedding) |
 | `onSubscribe` | -- | Callback `(ctx, topic)` fired when a client subscribes |
@@ -1459,6 +1460,30 @@ onError: (err, ctx, topic) => {
   ctx.publish(`__system:${topic}`, 'degraded', { reason: err.message });
 }
 ```
+
+### Topic-driven invalidation
+
+For mutations whose effects don't fit the merge-strategy model cleanly (bulk operations, server-side recomputation, cascading writes), declare an `invalidateOn` pattern so any matching `ctx.publish` triggers a loader rerun:
+
+```js
+export const todos = live.stream('todos', loadTodos, {
+  merge: 'crud',
+  invalidateOn: 'todos:*'
+});
+
+// Anywhere in your live functions:
+ctx.publish('todos:bulk-imported', 'created', { count: 42 });
+// -> matches 'todos:*', the todos loader reruns, the result is broadcast
+//    as a 'refreshed' event, and every subscriber gets the new state.
+```
+
+`invalidateOn` accepts a single string or an array of strings. `*` is a wildcard that matches any sequence of one or more characters; other regex specials are escaped. Multiple patterns are OR-ed (any match triggers the reload).
+
+The reload reuses the staleness machinery: it captures the first subscriber's `ctx` + args, applies any configured init `transform`, and publishes a `refreshed` event to the stream's own topic. The client merges `refreshed` as a full-state replacement.
+
+`refreshed` events are themselves excluded from the invalidation check, so a stream whose own topic happens to match its `invalidateOn` pattern (e.g., `'todos*'` matching topic `'todos'`) won't loop. Concurrent triggers while a reload is in flight are deduped via a per-watcher `reloading` flag.
+
+Errors thrown by the loader during an `invalidateOn` reload route through the same `onError(err, ctx, topic)` observer as staleness-driven reloads.
 
 ---
 

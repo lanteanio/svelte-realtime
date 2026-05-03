@@ -371,6 +371,122 @@ export function _resetVolatileRegistry() {
 }
 
 /**
+ * Per-topic invalidation registry. When a stream is registered with
+ * `invalidateOn: '<pattern>'`, an entry is created here keyed by the
+ * pattern's compiled regex. The publish helper checks every publish
+ * against these patterns and triggers a loader re-run for any stream
+ * whose pattern matches the publish topic. Distinct from the stale
+ * watchdog (timer-driven) -- this one is event-driven.
+ *
+ * Each watcher stores everything `_staleReload` needs to re-execute the
+ * loader: stream topic, init fn (with stashed __streamTransform /
+ * __streamOnError), captured ctx + args, and the platform reference
+ * for the publish path.
+ *
+ * @type {Map<string, { regex: RegExp, watchers: Array<{
+ *   topic: string,
+ *   fn: any,
+ *   ctx: any,
+ *   args: any[],
+ *   platform: any,
+ *   onError: Function | null,
+ *   reloading: boolean
+ * }> }>}
+ */
+const _topicInvalidationWatch = new Map();
+
+/**
+ * Convert an `invalidateOn` pattern into a regex. `*` matches any
+ * sequence of one or more characters (greedy, including colons); other
+ * regex specials are escaped. Patterns must be non-empty strings.
+ * @param {string} pattern
+ * @returns {RegExp}
+ */
+function _compileInvalidatePattern(pattern) {
+	const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.+');
+	return new RegExp('^' + escaped + '$');
+}
+
+/**
+ * Register the invalidation watchers for a stream's first subscriber.
+ * No-op when `fn.__streamInvalidateOn` is unset. Idempotent per
+ * (pattern, topic) pair: re-subscribing the same stream won't
+ * accumulate duplicate watchers.
+ *
+ * @param {string} topic
+ * @param {any} fn
+ * @param {any} ctx
+ * @param {any[]} args
+ * @param {any} platform
+ */
+function _registerInvalidationWatch(topic, fn, ctx, args, platform) {
+	const patterns = fn.__streamInvalidateOn;
+	if (!patterns) return;
+	const onError = fn.__streamOnError || null;
+	for (const p of patterns) {
+		let entry = _topicInvalidationWatch.get(p);
+		if (!entry) {
+			entry = { regex: _compileInvalidatePattern(p), watchers: [] };
+			_topicInvalidationWatch.set(p, entry);
+		}
+		if (entry.watchers.some(w => w.topic === topic && w.fn === fn)) continue;
+		entry.watchers.push({ topic, fn, ctx, args, platform, onError, reloading: false });
+	}
+}
+
+/**
+ * Drop a stream's invalidation watchers when its last subscriber
+ * leaves. Removes empty pattern entries so the size-zero fast path in
+ * the publish helper short-circuits cleanly.
+ *
+ * @param {string} topic
+ * @param {any} fn
+ */
+function _unregisterInvalidationWatch(topic, fn) {
+	const patterns = fn.__streamInvalidateOn;
+	if (!patterns) return;
+	for (const p of patterns) {
+		const entry = _topicInvalidationWatch.get(p);
+		if (!entry) continue;
+		const idx = entry.watchers.findIndex(w => w.topic === topic && w.fn === fn);
+		if (idx >= 0) entry.watchers.splice(idx, 1);
+		if (entry.watchers.length === 0) _topicInvalidationWatch.delete(p);
+	}
+}
+
+/** Reset the per-topic invalidation registry. Tests only. @internal */
+export function _resetInvalidationWatch() {
+	_topicInvalidationWatch.clear();
+}
+
+/**
+ * Re-run a stream's loader because an invalidation pattern matched.
+ * Mirrors `_staleReload` -- captures the same ctx+args, applies the
+ * init transform, and broadcasts the result as a `refreshed` event on
+ * the stream's own topic. Concurrent triggers are deduped via the
+ * `reloading` flag (we never queue or merge them; the next match after
+ * the in-flight reload completes will re-run regardless).
+ *
+ * @param {{ topic: string, fn: any, ctx: any, args: any[], platform: any, onError: Function | null, reloading: boolean }} watcher
+ */
+async function _invalidationReload(watcher) {
+	if (watcher.reloading) return;
+	watcher.reloading = true;
+	try {
+		const result = await watcher.fn(watcher.ctx, ...watcher.args);
+		const initTransform = /** @type {any} */ (watcher.fn).__streamTransform;
+		const finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
+		try { watcher.platform.publish(watcher.topic, 'refreshed', finalData); } catch {}
+	} catch (err) {
+		if (watcher.onError) {
+			try { await watcher.onError(err, watcher.ctx, watcher.topic); } catch {}
+		}
+	} finally {
+		watcher.reloading = false;
+	}
+}
+
+/**
  * Arm the per-topic stale watchdog if `fn` declares `__streamStaleAfterMs`.
  * Idempotent per topic: if a watchdog already exists (from an earlier
  * subscriber), this is a no-op so we don't replace the captured ctx.
@@ -696,6 +812,18 @@ function _getCtxHelpers(platform) {
 			// in production builds via the _IS_DEV gate when the registry
 			// is never armed.
 			if (_silentTopicWatch.size > 0) _observeSilentTopicPublish(topic);
+			// Topic-driven invalidation: every publish whose topic matches
+			// a registered `invalidateOn` pattern triggers a loader re-run
+			// for the watching stream. Skipped for `refreshed` events --
+			// those are emitted BY the reload itself, so honoring them
+			// would loop. Size-zero short-circuit keeps this free for apps
+			// that don't use the feature.
+			if (_topicInvalidationWatch.size > 0 && event !== 'refreshed') {
+				for (const entry of _topicInvalidationWatch.values()) {
+					if (!entry.regex.test(topic)) continue;
+					for (const watcher of entry.watchers) _invalidationReload(watcher);
+				}
+			}
 			// Fast path: no per-topic feature registry hits and adapter exposes
 			// publishBatched -> queue for microtask flush. The cross-worker
 			// relay already coalesces per-microtask postMessages; this lifts
@@ -883,6 +1011,7 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 			if (wsSet.size === 0) {
 				_topicWsCounts.delete(topic);
 				_unregisterStaleWatch(topic);
+				_unregisterInvalidationWatch(topic, fn);
 				_disarmSilentTopicWatch(topic);
 			}
 		}
@@ -1149,7 +1278,7 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, volatile: volatileOpt, staleAfterMs, onError: streamOnError, ...rest } = options || {};
+	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, volatile: volatileOpt, staleAfterMs, onError: streamOnError, invalidateOn, ...rest } = options || {};
 	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
 		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
 	}
@@ -1179,6 +1308,16 @@ live.stream = function stream(topic, initFn, options) {
 	if (streamOnError !== undefined && typeof streamOnError !== 'function') {
 		throw new Error('[svelte-realtime] live.stream onError must be a function (err, ctx, topic) => void');
 	}
+	let invalidatePatterns = null;
+	if (invalidateOn !== undefined) {
+		const list = Array.isArray(invalidateOn) ? invalidateOn : [invalidateOn];
+		for (const p of list) {
+			if (typeof p !== 'string' || p.length === 0) {
+				throw new Error('[svelte-realtime] live.stream invalidateOn must be a non-empty string or array of non-empty strings');
+			}
+		}
+		invalidatePatterns = list;
+	}
 	if (delta !== undefined) {
 		if (typeof delta !== 'object' || delta === null) {
 			throw new Error('[svelte-realtime] live.stream delta must be an object');
@@ -1207,6 +1346,7 @@ live.stream = function stream(topic, initFn, options) {
 	if (volatileOpt) /** @type {any} */ (initFn).__streamVolatile = true;
 	if (staleAfterMs) /** @type {any} */ (initFn).__streamStaleAfterMs = staleAfterMs;
 	if (streamOnError) /** @type {any} */ (initFn).__streamOnError = streamOnError;
+	if (invalidatePatterns) /** @type {any} */ (initFn).__streamInvalidateOn = invalidatePatterns;
 	if (onSubscribe) /** @type {any} */ (initFn).__onSubscribe = onSubscribe;
 	if (onUnsubscribe) /** @type {any} */ (initFn).__onUnsubscribe = onUnsubscribe;
 	// Subscribe-time access predicate: (ctx) => boolean
@@ -4253,6 +4393,14 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 				_registerStaleWatch(topic, fn, ctx, streamArgs, platform);
 			}
 
+			// Arm the topic-invalidation watcher(s). Same first-wins
+			// idempotence story as the stale watchdog -- duplicate
+			// (pattern, topic) registrations are a no-op inside
+			// _registerInvalidationWatch.
+			if (/** @type {any} */ (fn).__streamInvalidateOn) {
+				_registerInvalidationWatch(topic, fn, ctx, streamArgs, platform);
+			}
+
 			const isPaginated = result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result;
 			let resultData = isPaginated ? result.data : result;
 
@@ -4782,6 +4930,7 @@ export function unsubscribe(ws, topic, { platform }) {
 		if (wsSet.size === 0) {
 			_topicWsCounts.delete(topic);
 			_unregisterStaleWatch(topic);
+			for (const entry of owners) _unregisterInvalidationWatch(topic, entry.fn);
 			_disarmSilentTopicWatch(topic);
 		}
 	}
@@ -4831,6 +4980,7 @@ export function close(ws, { platform, subscriptions }) {
 				if (wsSet.size === 0) {
 					_topicWsCounts.delete(topic);
 					_unregisterStaleWatch(topic);
+					for (const entry of owners) _unregisterInvalidationWatch(topic, entry.fn);
 					_disarmSilentTopicWatch(topic);
 				}
 			}
