@@ -944,13 +944,22 @@ export namespace live {
 	): T;
 
 	/**
-	 * Lock contract: any object exposing `withLock(key, fn)` matching the
-	 * adapter's Lock plugin. The default in-process lock is created lazily;
-	 * pass a custom one for distributed mutex via Redis (`SET NX PX`) or any
-	 * other backing store.
+	 * Lock contract: any object exposing `withLock(key, fn, opts?)` matching
+	 * the adapter's Lock plugin. The default in-process lock is created
+	 * lazily; pass a custom one for distributed mutex via Redis
+	 * (`SET NX PX`) or any other backing store.
+	 *
+	 * The `opts.maxWaitMs` field, when set, rejects a queued caller with a
+	 * typed `LOCK_TIMEOUT` error if it does not acquire within that many
+	 * milliseconds. Custom Lock implementations are expected to honor it
+	 * (or ignore it for backends where bounded-wait does not apply).
 	 */
 	interface Lock {
-		withLock<T>(key: string, fn: () => T | Promise<T>): Promise<T>;
+		withLock<T>(
+			key: string,
+			fn: () => T | Promise<T>,
+			opts?: { maxWaitMs?: number }
+		): Promise<T>;
 	}
 
 	/**
@@ -1005,6 +1014,16 @@ export namespace live {
 	 *   live.validated(InvoiceIdSchema, async (ctx, id) => settle(id))
 	 * );
 	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * // Bounded wait: queued callers reject with LiveError('LOCK_TIMEOUT')
+	 * // after 5s instead of waiting indefinitely behind a slow holder.
+	 * export const recomputeReport = live.lock(
+	 *   { key: (ctx, id) => `report:${id}`, maxWaitMs: 5000 },
+	 *   async (ctx, id) => rebuild(id)
+	 * );
+	 * ```
 	 */
 	function lock<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
 		keyOrConfig:
@@ -1015,6 +1034,14 @@ export namespace live {
 					| string
 					| ((ctx: LiveContext<any>, ...args: any[]) => string | null | undefined);
 				lock?: Lock;
+				/**
+				 * When set, queued callers waiting for this lock are rejected
+				 * with `LiveError('LOCK_TIMEOUT', ...)` after this many
+				 * milliseconds. The current holder is not interrupted; only
+				 * the waiting caller gives up. Subsequent waiters on the same
+				 * key continue in their original order.
+				 */
+				maxWaitMs?: number;
 			},
 		fn: T
 	): T;

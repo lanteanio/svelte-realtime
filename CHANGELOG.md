@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Bounded wait for `live.lock` via `maxWaitMs`.** Pass `maxWaitMs` (in the config-object form) to bound how long a queued caller will wait before giving up. On timeout the wrapper rejects with `LiveError('LOCK_TIMEOUT', ...)` so the client receives a typed error with `.code === 'LOCK_TIMEOUT'`, plus `.key` and `.maxWaitMs` fields for observability. The current holder's handler is **not** interrupted; only the waiting caller gives up. Subsequent waiters on the same key are unaffected and continue in their original FIFO position.
+
+  ```js
+  export const settleInvoice = live.lock(
+    { key: (ctx, id) => `invoice:${id}`, maxWaitMs: 5000 },
+    async (ctx, id) => settle(id)
+  );
+  ```
+
+  The default in-process lock and `createDistributedLock` from the extensions package both honor it; for custom lock implementations, the option is forwarded as the third argument: `lockInst.withLock(key, fn, { maxWaitMs })`. Validation runs at registration: non-numeric, non-finite, or negative values throw with a `[svelte-realtime]`-prefixed error.
+
+### Changed
+
+- **Peer-dep bump: `svelte-adapter-uws` `^0.5.0-next.10`** (was `^0.5.0-next.7`). Required for the new `lock.withLock(key, fn, { maxWaitMs })` primitive consumed by `live.lock`'s `maxWaitMs` option above. The intervening `next.8` and `next.9` releases also ship framework invariant assertions, bounded-by-default capacity caps across adapter core and bundled plugins, and additional chaos scenarios on the test harness; consumers can opt into those independently. Heads-up if you call the adapter's lock plugin directly: `lock.clear()` now rejects pending waiters with a typed `LOCK_CLEARED` error instead of leaving them hanging, so any code that ignored `clear()`-driven rejections needs a `catch`.
+
+- **Default in-process lock backing `live.lock` rewritten as a per-key FIFO waiter queue.** Replaces the prior `Map<string, Promise>` chain so that `maxWaitMs` cancellations can skip cancelled waiters cleanly without breaking FIFO ordering for the rest of the queue. Behavior for existing call sites without `maxWaitMs` is identical: same FIFO, same parallelism across keys, same handler-error propagation that unblocks the next waiter.
+
 ### Documentation
 
 - **New "Request correlation" section** documenting how `ctx.requestId` flows from the wire envelope (or `X-Request-ID` header) through `live()` handlers and into the `svelte-adapter-uws-extensions` postgres tasks/jobs APIs. Includes both call shapes (explicit `{ requestId: ctx.requestId }` and the `{ platform: ctx.platform }` auto-extract form), a SQL example showing how to join `ws_tasks` and `ws_jobs` rows back to the originating RPC, and a note about keeping the id out of Prometheus label sets to avoid cardinality blowup.

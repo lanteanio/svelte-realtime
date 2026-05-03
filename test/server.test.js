@@ -8742,6 +8742,155 @@ describe('live.lock()', () => {
 		const ctx = { user: { user_id: 'u1' } };
 		await expect(wrapped(ctx)).rejects.toThrow(/return a string/);
 	});
+
+	// -- maxWaitMs (bounded wait) ---------------------------------------------
+
+	it('rejects non-numeric / non-finite / negative maxWaitMs at registration', () => {
+		const fn = async () => {};
+		expect(() => live.lock({ key: 'k', maxWaitMs: 'soon' }, fn)).toThrow(/non-negative finite number/);
+		expect(() => live.lock({ key: 'k', maxWaitMs: NaN }, fn)).toThrow(/non-negative finite number/);
+		expect(() => live.lock({ key: 'k', maxWaitMs: Infinity }, fn)).toThrow(/non-negative finite number/);
+		expect(() => live.lock({ key: 'k', maxWaitMs: -1 }, fn)).toThrow(/non-negative finite number/);
+	});
+
+	it('accepts maxWaitMs and surfaces it on __lockConfig', () => {
+		const wrapped = live.lock({ key: 'k', maxWaitMs: 100 }, async () => 'x');
+		expect(wrapped.__lockConfig.maxWaitMs).toBe(100);
+	});
+
+	it('happy path: lock acquired before timeout returns the handler result', async () => {
+		const wrapped = live.lock(
+			{ key: 'fast', maxWaitMs: 1000 },
+			async (ctx, n) => n + 1
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		expect(await wrapped(ctx, 41)).toBe(42);
+	});
+
+	it('rejects waiting caller with LiveError(LOCK_TIMEOUT) when wait exceeds maxWaitMs', async () => {
+		const wrapped = live.lock(
+			{ key: 'busy', maxWaitMs: 20 },
+			async (ctx, ms) => {
+				await new Promise((r) => setTimeout(r, ms));
+				return 'done';
+			}
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		const holder = wrapped(ctx, 80); // holds for ~80ms
+		// Give the holder a tick to acquire.
+		await new Promise((r) => setTimeout(r, 5));
+		const waiter = wrapped(ctx, 0);
+		const err = await waiter.catch((e) => e);
+		expect(err).toBeInstanceOf(LiveError);
+		expect(err.code).toBe('LOCK_TIMEOUT');
+		expect(err.key).toBe('busy');
+		expect(err.maxWaitMs).toBe(20);
+		// Holder still completes normally.
+		expect(await holder).toBe('done');
+	});
+
+	it('timed-out waiter does not block subsequent waiters in the FIFO queue', async () => {
+		const events = [];
+		const handler = async (ctx, label, ms) => {
+			events.push(`${label}-start`);
+			await new Promise((r) => setTimeout(r, ms));
+			events.push(`${label}-end`);
+			return label;
+		};
+		// Three wrappers share the same lock key. Only 'b' is bounded; 'a' and
+		// 'c' wait indefinitely. This isolates the FIFO-skip behaviour: we
+		// need 'c' to still be queued after 'b' cancels, then run when 'a'
+		// finishes.
+		const aWrap = live.lock({ key: 'queue' }, handler);
+		const bWrap = live.lock({ key: 'queue', maxWaitMs: 25 }, handler);
+		const cWrap = live.lock({ key: 'queue' }, handler);
+		const ctx = { user: { user_id: 'u1' } };
+
+		const a = aWrap(ctx, 'a', 80); // holds the lock for ~80ms
+		await new Promise((r) => setTimeout(r, 5));
+		const b = bWrap(ctx, 'b', 5); // enqueues, times out at +30ms
+		const c = cWrap(ctx, 'c', 5); // enqueues right after; unbounded
+
+		const bResult = await b.catch((e) => e);
+		expect(bResult).toBeInstanceOf(LiveError);
+		expect(bResult.code).toBe('LOCK_TIMEOUT');
+
+		await Promise.all([a, c]);
+		// 'b' never ran; queue advanced past the cancelled waiter to 'c'.
+		expect(events).toEqual(['a-start', 'a-end', 'c-start', 'c-end']);
+	});
+
+	it('forwards maxWaitMs to a custom lock implementation as the third argument', async () => {
+		/** @type {Array<any>} */
+		const observed = [];
+		const customLock = {
+			withLock: async (key, fn, opts) => {
+				observed.push({ key, opts });
+				return fn();
+			}
+		};
+		const wrapped = live.lock(
+			{ key: 'cust', lock: customLock, maxWaitMs: 250 },
+			async (ctx) => 'ok'
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		expect(await wrapped(ctx)).toBe('ok');
+		expect(observed).toEqual([{ key: 'cust', opts: { maxWaitMs: 250 } }]);
+	});
+
+	it('does not pass an opts object when maxWaitMs is unset (custom lock receives undefined)', async () => {
+		/** @type {Array<any>} */
+		const observed = [];
+		const customLock = {
+			withLock: async (key, fn, opts) => {
+				observed.push({ key, opts });
+				return fn();
+			}
+		};
+		const wrapped = live.lock(
+			{ key: 'no-cap', lock: customLock },
+			async (ctx) => 'ok'
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		await wrapped(ctx);
+		expect(observed).toEqual([{ key: 'no-cap', opts: undefined }]);
+	});
+
+	it('LOCK_TIMEOUT thrown by a custom lock is rewrapped as LiveError', async () => {
+		const customLock = {
+			withLock: async (key) => {
+				const err = /** @type {any} */ (new Error('custom timeout'));
+				err.code = 'LOCK_TIMEOUT';
+				err.key = key;
+				err.maxWaitMs = 7;
+				throw err;
+			}
+		};
+		const wrapped = live.lock(
+			{ key: 'cust', lock: customLock, maxWaitMs: 7 },
+			async () => 'never'
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		const err = await wrapped(ctx).catch((e) => e);
+		expect(err).toBeInstanceOf(LiveError);
+		expect(err.code).toBe('LOCK_TIMEOUT');
+		expect(err.key).toBe('cust');
+		expect(err.maxWaitMs).toBe(7);
+	});
+
+	it('non-LOCK_TIMEOUT errors from the lock propagate unchanged', async () => {
+		const customLock = {
+			withLock: async () => { throw new Error('io failure'); }
+		};
+		const wrapped = live.lock(
+			{ key: 'cust', lock: customLock },
+			async () => 'never'
+		);
+		const ctx = { user: { user_id: 'u1' } };
+		const err = await wrapped(ctx).catch((e) => e);
+		expect(err).not.toBeInstanceOf(LiveError);
+		expect(err.message).toBe('io failure');
+	});
 });
 
 // -- live.push() / pushHooks --------------------------------------------------

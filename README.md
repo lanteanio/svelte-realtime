@@ -1753,9 +1753,24 @@ export const settleInvoice = live.lock(
 );
 ```
 
-Concurrent callers wait in FIFO order for the holder's result. A `null` / `undefined` / empty key bypasses the lock (the handler runs unguarded for that call). Custom lock implementations need a single method: `withLock(key, fn) -> Promise<result>`.
+Concurrent callers wait in FIFO order for the holder's result. A `null` / `undefined` / empty key bypasses the lock (the handler runs unguarded for that call). Custom lock implementations need a single method: `withLock(key, fn, opts?) -> Promise<result>`.
 
-Default lock is in-process and bounded. For multi-instance deployments, pass `lock: createDistributedLock(redis)` from the extensions package -- any object exposing the `withLock(key, fn)` contract works.
+Default lock is in-process and bounded. For multi-instance deployments, pass `lock: createDistributedLock(redis)` from the extensions package -- any object exposing the `withLock(key, fn, opts?)` contract works.
+
+### Bounded wait with `maxWaitMs`
+
+Pass `maxWaitMs` (in the config-object form) to bound how long a queued caller will wait before giving up. On timeout the wrapper rejects with `LiveError('LOCK_TIMEOUT', ...)` so the client receives a typed error with `.code === 'LOCK_TIMEOUT'` (plus `.key` and `.maxWaitMs` fields for observability).
+
+```js
+export const settleInvoice = live.lock(
+  { key: (ctx, id) => `invoice:${id}`, maxWaitMs: 5000 },
+  async (ctx, id) => settle(id)
+);
+```
+
+The current holder is **not** interrupted when a waiter times out -- only the waiting caller gives up. Subsequent waiters on the same key are unaffected and continue in their original order. This is the right primitive for "fail fast under contention" rather than "cancel work in flight."
+
+For custom lock implementations, the option is forwarded as the third argument: `lockInst.withLock(key, fn, { maxWaitMs })`. The default in-process lock and `createDistributedLock` from the extensions package both honor it.
 
 ---
 
