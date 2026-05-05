@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.6] - 2026-05-05
+
+### Security
+
+- **Stream-RPC subscribes now consult the adapter's wire-level subscribe gate.** A `live.stream`/`live.room` subscribe used to run the loader, deliver its initial data, and (for rooms) publish the presence `'join'` event BEFORE the adapter's `subscribe` / `subscribeBatch` hook chain ever fired -- because that hook only fires on the client's follow-on `subscribe-batch` wire frame, which arrives AFTER the stream RPC has already returned. Apps gating private rooms via `subscribeBatch` (rather than via `live.stream({ access })` / `live.room({ guard })`) saw their loader output reach denied users, and `_presenceRef` accumulated phantom entries (one per denied visit, since the rollback path was unreachable -- nothing threw). For rooms with `init` returning `[]` the impact was cosmetic; for any non-trivial loader, it was a real data leak. `_executeStreamRpc` now calls `platform.checkSubscribe?.(ws, topic)` after `__streamFilter` and admission checks but before `ws.subscribe(topic)`, `__onSubscribe`, and the loader. A truthy denial early-exits with `{ ok: false, code: <denial>, error: ... }`. The `?.` keeps older adapters working: when the method isn't there (pre-`0.5.0-next.14`), the new gate degrades to current behavior and the in-realtime gates remain the only stream-RPC access checks. New regression tests cover (1) `FORBIDDEN` denial blocks loader/subscribe/onSubscribe; (2) `UNAUTHENTICATED` surfaces the right code+message; (3) older adapter (no `checkSubscribe`) degrades correctly.
+
+### Changed
+
+- **`svelte-adapter-uws` peerDependency bumped from `^0.5.0-next.10` to `^0.5.0-next.14`.** Required for the `platform.checkSubscribe` gate above. The adapter side ships the new method in `0.5.0-next.14` along with the matching `runSubscribeHook` / `runSubscribeBatchHook` precedence (batch hook wins, falls back to per-topic).
+
 ## [0.5.0-next.5] - 2026-05-05
 
 ### Fixed

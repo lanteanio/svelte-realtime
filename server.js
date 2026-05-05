@@ -4699,6 +4699,24 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		}
 	}
 
+	// Wire-level subscribe gate: ask the adapter's `subscribe` /
+	// `subscribeBatch` hook chain whether this (ws, topic) pair would be
+	// denied at the wire-level subscribe-batch frame. Without this gate,
+	// the loader would run, deliver initial data, and the room's
+	// __onSubscribe would publish a 'join' before the adapter's hook
+	// fires (which only fires on the client's follow-on subscribe-batch
+	// wire frame, AFTER the stream RPC returns). The optional-chain on
+	// `platform.checkSubscribe` keeps older adapters working: if the
+	// method isn't there, we fall through to the prior behavior and the
+	// in-realtime gates (`__streamFilter`, `live.room({ guard })`) remain
+	// the only stream-RPC access checks.
+	if (typeof platform.checkSubscribe === 'function') {
+		const denial = platform.checkSubscribe(ws, topic);
+		if (denial) {
+			return { id, ok: false, code: denial, error: denial === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
+		}
+	}
+
 	try { ws.subscribe(topic); } catch { return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' }; }
 	_trackStreamSub(ws, topic, fn);
 	subscribedRef.topic = topic;

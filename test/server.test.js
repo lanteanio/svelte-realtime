@@ -2668,6 +2668,131 @@ describe('live.room()', () => {
 		expect(room.__dataStream.__streamOptions.key).toBe('sku');
 	});
 
+	it('platform.checkSubscribe denial blocks the loader, ws.subscribe, and __onSubscribe', async () => {
+		// Wire-level gate: when the adapter's subscribe / subscribeBatch
+		// hook chain would deny this (ws, topic), the stream RPC must
+		// early-exit BEFORE running the loader, ws.subscribe(), or
+		// __onSubscribe (which publishes the room's 'join' and writes
+		// _presenceRef). This closes the data-leak hole where loader
+		// output reached the client before the wire-level deny fired.
+		let loaderRan = false;
+		const room = live.room({
+			topic: (ctx, roomId) => 'gate-room:' + roomId,
+			init: async () => { loaderRan = true; return [{ secret: 'do-not-leak' }]; },
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			topicArgs: 1
+		});
+		__register('gate-room/__data', room.__dataStream);
+
+		const ws = mockWs({ id: 'mallory' });
+		const platform = mockPlatform();
+		platform.checkSubscribe = (subWs, topic) => topic.startsWith('gate-room:') ? 'FORBIDDEN' : null;
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'gate-room/__data', id: 'g1', args: ['private'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		const resp = platform.sent.find((s) => s.topic === '__rpc' && s.event === 'g1');
+		expect(resp).toBeDefined();
+		expect(resp.data.ok).toBe(false);
+		expect(resp.data.code).toBe('FORBIDDEN');
+
+		// The loader must NOT have run -- otherwise its data was computed
+		// and could have leaked through any side effects.
+		expect(loaderRan).toBe(false);
+
+		// __onSubscribe (presence join) must NOT have fired.
+		const joins = platform.published.filter((p) => p.event === 'join');
+		expect(joins).toHaveLength(0);
+
+		// ws.subscribe must NOT have been called -- ws topics list stays empty.
+		expect(ws.getTopics().length).toBe(0);
+	});
+
+	it('platform.checkSubscribe returning UNAUTHENTICATED surfaces the right code', async () => {
+		const stream = live.stream('auth/feed', async () => []);
+		__register('auth/feed', stream);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		platform.checkSubscribe = () => 'UNAUTHENTICATED';
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'auth/feed', id: 'a1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		const resp = platform.sent.find((s) => s.topic === '__rpc' && s.event === 'a1');
+		expect(resp.data.ok).toBe(false);
+		expect(resp.data.code).toBe('UNAUTHENTICATED');
+		expect(resp.data.error).toBe('Authentication required');
+	});
+
+	it('platform without checkSubscribe degrades to current behavior (older adapter)', async () => {
+		// Older adapters predating 0.5.0-next.14 don't expose
+		// checkSubscribe. The optional check skips and the stream RPC
+		// proceeds normally. In-realtime gates (__streamFilter,
+		// live.room({ guard })) remain the access-control surface.
+		const stream = live.stream('legacy/feed', async () => [{ id: 1 }]);
+		__register('legacy/feed', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		// platform.checkSubscribe intentionally not set.
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'legacy/feed', id: 'l1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		const resp = platform.sent.find((s) => s.topic === '__rpc' && s.event === 'l1');
+		expect(resp.data.ok).toBe(true);
+		expect(resp.data.data).toEqual([{ id: 1 }]);
+	});
+
+	it('rollback after a guard-thrown denial cleans up _presenceRef (no phantom roster entries)', async () => {
+		// Regression: after N anonymous guard-denied visits, an authorized
+		// follow-up user must see ONLY themselves in the roster -- not
+		// phantom guest entries from the rolled-back subscribes. Verifies
+		// that _executeStreamRpc's catch path -> _rollbackStreamSubscribe
+		// -> __onUnsubscribe -> _rollingBack-fast-path actually deletes
+		// the _presenceRef entry the data-stream onSubscribe inserted
+		// before the loader-thrown denial.
+		const room = live.room({
+			topic: (ctx, roomId) => 'probe-room:' + roomId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name || 'anon' }),
+			guard: async (ctx) => {
+				if (!ctx.user?.id) throw new LiveError('UNAUTHENTICATED', 'login required');
+			},
+			topicArgs: 1
+		});
+		__register('probe-room/__data', room.__dataStream);
+		__register('probe-room/__presence', room.__presenceStream);
+
+		// 4 anonymous denied visits.
+		for (let i = 0; i < 4; i++) {
+			const wsAnon = mockWs();
+			const p = mockPlatform();
+			handleRpc(wsAnon, toArrayBuffer({ rpc: 'probe-room/__data', id: 'v' + i, args: ['private'], stream: true }), p);
+			await new Promise((r) => setTimeout(r, 20));
+		}
+		await new Promise((r) => setTimeout(r, 50));
+
+		// Authorized 5th user. Their data subscribe succeeds; their
+		// presence init returns the roster from the in-memory fallback.
+		const wsAlice = mockWs({ id: 'alice', name: 'Alice' });
+		const platform = mockPlatform();
+		handleRpc(wsAlice, toArrayBuffer({ rpc: 'probe-room/__data', id: 'a1', args: ['private'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+		handleRpc(wsAlice, toArrayBuffer({ rpc: 'probe-room/__presence', id: 'a2', args: ['private'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		const resp = platform.sent.find((s) => s.topic === '__rpc' && s.event === 'a2');
+		expect(resp).toBeDefined();
+		expect(resp.data.ok).toBe(true);
+		const list = resp.data.data;
+		expect(list).toHaveLength(1);
+		expect(list[0].key).toBe('alice');
+
+		close(wsAlice, { platform });
+	});
+
 	it('zero-config: subscriber alone in a room sees its own join in the initial presence list', async () => {
 		// The data stream's `onSubscribe` publishes the join BEFORE the
 		// user has subscribed to the `:presence` topic. Without an
