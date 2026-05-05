@@ -47,6 +47,7 @@ import {
 	TOPIC_WS_COUNTS_WARN_THRESHOLD,
 	SILENT_TOPIC_WARN_DEDUP_MAX,
 	PUBLISH_RATE_WARN_DEDUP_MAX,
+	MAX_PRESENCE_REF,
 	assert,
 	getAssertionCounters,
 	_resetAssertCounters
@@ -2665,6 +2666,83 @@ describe('live.room()', () => {
 
 		expect(room.__dataStream.__streamOptions.merge).toBe('latest');
 		expect(room.__dataStream.__streamOptions.key).toBe('sku');
+	});
+
+	it('zero-config: subscriber alone in a room sees its own join in the initial presence list', async () => {
+		// The data stream's `onSubscribe` publishes the join BEFORE the
+		// user has subscribed to the `:presence` topic. Without an
+		// in-memory fallback, the presence init would return [] and the
+		// user would never see itself. Production wires
+		// `platform.presence.list` (Redis-backed) for cluster correctness;
+		// dev should "just work" without any extra wiring.
+		const room = live.room({
+			topic: (ctx, roomId) => 'rooms-fallback:' + roomId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			topicArgs: 1
+		});
+
+		__register('rooms-fallback/__data', room.__dataStream);
+		__register('rooms-fallback/__presence', room.__presenceStream);
+
+		const ws = mockWs({ id: 'alice', name: 'Alice' });
+		const platform = mockPlatform();
+		// platform.presence is intentionally undefined -- this exercises
+		// the zero-config path the fallback covers.
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'rooms-fallback/__data', id: 'd1', args: ['r1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'rooms-fallback/__presence', id: 'p1', args: ['r1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const presenceResp = platform.sent.find((s) => s.topic === '__rpc' && s.event === 'p1');
+		expect(presenceResp).toBeDefined();
+		expect(presenceResp.data.ok).toBe(true);
+		expect(presenceResp.data.data).toEqual([{ key: 'alice', data: { name: 'Alice' } }]);
+
+		close(ws, { platform });
+	});
+
+	it('zero-config: a second subscriber sees both itself and the existing user', async () => {
+		const room = live.room({
+			topic: (ctx, roomId) => 'rooms-fallback2:' + roomId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			topicArgs: 1
+		});
+
+		__register('rooms-fallback2/__data', room.__dataStream);
+		__register('rooms-fallback2/__presence', room.__presenceStream);
+
+		const wsA = mockWs({ id: 'alice', name: 'Alice' });
+		const wsB = mockWs({ id: 'bob', name: 'Bob' });
+		const platform = mockPlatform();
+
+		// Alice subscribes to data + presence first.
+		handleRpc(wsA, toArrayBuffer({ rpc: 'rooms-fallback2/__data', id: 'da', args: ['r1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(wsA, toArrayBuffer({ rpc: 'rooms-fallback2/__presence', id: 'pa', args: ['r1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Bob subscribes; Bob's presence init should reconstruct both Alice and Bob.
+		handleRpc(wsB, toArrayBuffer({ rpc: 'rooms-fallback2/__data', id: 'db', args: ['r1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(wsB, toArrayBuffer({ rpc: 'rooms-fallback2/__presence', id: 'pb', args: ['r1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const bobsPresenceResp = platform.sent.find((s) => s.topic === '__rpc' && s.event === 'pb');
+		expect(bobsPresenceResp).toBeDefined();
+		expect(bobsPresenceResp.data.ok).toBe(true);
+		const list = bobsPresenceResp.data.data;
+		expect(list).toHaveLength(2);
+		const sorted = [...list].sort((a, b) => a.key.localeCompare(b.key));
+		expect(sorted).toEqual([
+			{ key: 'alice', data: { name: 'Alice' } },
+			{ key: 'bob', data: { name: 'Bob' } }
+		]);
+
+		close(wsA, { platform });
+		close(wsB, { platform });
 	});
 });
 
@@ -10137,6 +10215,52 @@ describe('capacity caps', () => {
 			];
 			vi.advanceTimersByTime(60);
 			expect(warnSpy).toHaveBeenCalledTimes(4);
+		});
+	});
+
+	describe('MAX_PRESENCE_REF (WARN-then-skip)', () => {
+		let warnSpy;
+
+		beforeEach(() => {
+			_resetCapsForTest();
+			warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		});
+
+		afterEach(() => {
+			warnSpy.mockRestore();
+			_resetCapsForTest();
+		});
+
+		it('exposes the documented default', () => {
+			expect(MAX_PRESENCE_REF).toBe(1_000_000);
+		});
+
+		it('skips registration once the cap is hit and warns once', async () => {
+			_setCapsForTest({ presenceRef: 2 });
+
+			const room = live.room({
+				topic: (ctx, roomId) => 'cap-pres:' + roomId,
+				init: async () => [],
+				presence: (ctx) => ({ name: ctx.user?.name }),
+				topicArgs: 1
+			});
+			__register('cap-pres/__data', room.__dataStream);
+
+			const platform = mockPlatform();
+			// Two distinct (user, room) pairs fit under the cap.
+			handleRpc(mockWs({ id: 'u1' }), toArrayBuffer({ rpc: 'cap-pres/__data', id: 's1', args: ['r1'], stream: true }), platform);
+			handleRpc(mockWs({ id: 'u2' }), toArrayBuffer({ rpc: 'cap-pres/__data', id: 's2', args: ['r1'], stream: true }), platform);
+			await new Promise((r) => setTimeout(r, 10));
+			expect(warnSpy).not.toHaveBeenCalled();
+
+			// Third user saturates -- no grace entries to evict, so silent skip + warn.
+			handleRpc(mockWs({ id: 'u3' }), toArrayBuffer({ rpc: 'cap-pres/__data', id: 's3', args: ['r1'], stream: true }), platform);
+			handleRpc(mockWs({ id: 'u4' }), toArrayBuffer({ rpc: 'cap-pres/__data', id: 's4', args: ['r1'], stream: true }), platform);
+			await new Promise((r) => setTimeout(r, 10));
+
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+			expect(warnSpy.mock.calls[0][0]).toContain('MAX_PRESENCE_REF=2');
+			expect(warnSpy.mock.calls[0][0]).toContain('platform.presence');
 		});
 	});
 });

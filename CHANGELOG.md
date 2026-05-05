@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.5] - 2026-05-05
+
+### Fixed
+
+- **`live.room` zero-config presence now shows the user themselves.** A subscriber alone in a room used to see presence count 0, and two users would each see only the other (never themselves). The race: the data stream's `onSubscribe` publishes a `join` to `${topic}:presence` synchronously, and only THEN does the client subscribe to that presence topic, so the user's own join was missed. The presence stream's init only consulted `platform.presence.list`, which isn't wired in zero-config dev. The init now falls back to reconstructing the roster from the in-memory `_presenceRef` map when `platform.presence.list` isn't a function. To make the reconstruction possible, `_presenceRef` entries now carry the user-supplied presence payload alongside `count` and `timer`. Production stays unchanged: when a Redis-backed `platform.presence.list` is wired, the fallback is bypassed and cluster-wide consistency takes over. New regression tests under `live.room()` cover the single-user and two-user cases.
+
+### Added
+
+- **`MAX_PRESENCE_REF` exported as a tunable cap (default 1,000,000).** The in-memory presence-ref map (`_presenceRef`) now joins the documented capacity-model taxonomy alongside `MAX_PUSH_REGISTRY`, `TOPIC_WS_COUNTS_WARN_THRESHOLD`, etc. Saturation behavior: entries with a pending leave timer are evicted first; if still full, the new join is dropped silently (no entry created, no `'join'` published) and a one-shot warning surfaces pointing at `platform.presence` wiring. The cap was previously an unexported `10_000` internal that bounded only refcount bookkeeping. Now that it backs the zero-config presence-roster fallback added above, it's correctness-load-bearing and deserves the same surface as the other caps. Wired into `_setCapsForTest({ presenceRef })` for fast saturation tests, and documented in the README "Capacity model" section.
+
 ## [0.5.0-next.4] - 2026-05-05
 
 ### Fixed

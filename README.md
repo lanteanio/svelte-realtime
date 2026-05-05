@@ -2668,15 +2668,15 @@ Each cap is one of three saturation behaviors:
 | `TOPIC_WS_COUNTS_WARN_THRESHOLD`     | 1,000,000   | WARN-only    | Per-topic subscriber index. Eviction would corrupt routing.         |
 | `SILENT_TOPIC_WARN_DEDUP_MAX`        | 1,000,000   | FIFO-evict   | Dev-mode silent-topic warning dedup set.                            |
 | `PUBLISH_RATE_WARN_DEDUP_MAX`        | 1,000,000   | FIFO-evict   | Dev-mode publish-rate warning dedup set.                            |
+| `MAX_PRESENCE_REF`                   | 1,000,000   | WARN+skip    | In-memory presence-ref map (single-instance dev / small-prod path). |
 | `MAX_OPTIMISTIC_QUEUE_DEPTH`         | 1,000       | REJECT       | Per-stream in-flight `mutate()` queue depth.                        |
 | Rate-limit identities                | 5,000       | REJECT       | Per-function `live.rateLimit()` buckets after stale-sweep.          |
 | Throttle/debounce timers             | 5,000       | direct       | At cap, publishes immediately instead of dropping.                  |
 | Idempotency results                  | 10,000      | FIFO-evict   | In-process `live.idempotent()` store; evicts oldest 10%.            |
-| Presence refs                        | 10,000      | evict+drop   | Suspended entries evicted first; full -> join dropped silently.     |
 | Per-stream history                   | 50          | FIFO         | `store.history` undo/redo ring; configurable via `enableHistory`.   |
 | Per-stream devtools events           | 20          | FIFO         | Recent-events ring shown in `__devtools`.                           |
 
-The first five are exported as named constants from `svelte-realtime/server` and `svelte-realtime/client` so apps writing tools or dashboards can read them programmatically. The remaining caps are internal; their values are documented here for capacity planning.
+The first six are exported as named constants from `svelte-realtime/server` and `svelte-realtime/client` so apps writing tools or dashboards can read them programmatically. The remaining caps are internal; their values are documented here for capacity planning.
 
 ### MAX_PUSH_REGISTRY (10,000,000)
 
@@ -2706,9 +2706,16 @@ Per-function rate limiting (`live.rateLimit()`) tracks sliding-window buckets in
 
 Active per-key throttle and debounce entries (`ctx.throttle()` / `ctx.debounce()`). At capacity, new entries bypass the timer and publish immediately so data is never silently dropped.
 
-### Presence refs (10,000)
+### MAX_PRESENCE_REF (1,000,000)
 
-The server tracks presence join/leave refcounts in memory. When the map reaches the cap, suspended entries (those with a pending leave timer) are evicted first. If the map is still full after eviction, the join is dropped silently.
+In-memory map of `${topic}\0${userId} -> { count, timer, data }` populated by `live.room`'s data-stream `onSubscribe` and drained on the 5-second grace timer set by `onUnsubscribe`. Two roles:
+
+1. Refcounts joins per (user, room) pair so multiple WebSocket subscriptions from the same user in the same room don't double-count, and so a brief disconnect-reconnect within the grace window doesn't fire a leave/rejoin pair.
+2. Backs the in-memory presence-roster fallback in `live.room`'s presence-stream init when `platform.presence.list` isn't wired (the zero-config dev / single-instance path). The user-supplied `presence(ctx)` payload is held alongside the refcount so a fresh subscriber can reconstruct the existing roster without a cluster-aware backend.
+
+When the map reaches the cap: entries with a pending leave timer are evicted first (they were already on their way out). If still full after eviction, the new join is dropped — no entry is created, no `'join'` is published — and a one-shot warning surfaces. New joiners in this state are invisible in any subscriber's roster until existing entries clear.
+
+For multi-instance deploys, wire a cluster-aware `platform.presence` (e.g. from `svelte-adapter-uws-extensions/presence`). When `platform.presence.list` is a function, the in-memory fallback is bypassed entirely and this cap stops mattering.
 
 ### Idempotency results (10,000)
 

@@ -37,6 +37,9 @@ export const SILENT_TOPIC_WARN_DEDUP_MAX = 1_000_000;
 /** Max distinct topics in the dev-mode publish-rate warning dedup. FIFO-evict on cap: dropping the oldest entry just lets that topic re-warn on its next sample tick. Matches svelte-adapter-uws `PUBLISH_WARN_DEDUP_MAX`. */
 export const PUBLISH_RATE_WARN_DEDUP_MAX = 1_000_000;
 
+/** Max distinct (user, room) pairs the in-memory presence-ref map holds. FIFO-evict graces first, then WARN-then-skip on cap: new joiners don't get registered, so they're invisible in any subscriber's roster until existing entries clear. Matches the per-process safety-net convention used by the other caps in this section. For multi-instance deploys, wire `platform.presence` (e.g. `svelte-adapter-uws-extensions/presence`) to bypass this map entirely. */
+export const MAX_PRESENCE_REF = 1_000_000;
+
 // Mutable internal copies: the public `export const` values above are the
 // canonical defaults; tests use `_setCapsForTest` to lower them for fast
 // saturation scenarios. Production never touches these.
@@ -44,20 +47,22 @@ let _maxPushRegistry = MAX_PUSH_REGISTRY;
 let _topicWsCountsWarnThreshold = TOPIC_WS_COUNTS_WARN_THRESHOLD;
 let _silentTopicWarnDedupMax = SILENT_TOPIC_WARN_DEDUP_MAX;
 let _publishRateWarnDedupMax = PUBLISH_RATE_WARN_DEDUP_MAX;
+let _maxPresenceRef = MAX_PRESENCE_REF;
 
 /**
  * Override capacity caps for testing. Pass any subset of the cap names
  * (omit `MAX_` / `_THRESHOLD` / `_MAX` suffix; use `pushRegistry`,
- * `topicWsCountsWarn`, `silentTopicWarnDedup`, `publishRateWarnDedup`).
- * Pair with `_resetCapsForTest()` in afterEach.
+ * `topicWsCountsWarn`, `silentTopicWarnDedup`, `publishRateWarnDedup`,
+ * `presenceRef`). Pair with `_resetCapsForTest()` in afterEach.
  * @internal
- * @param {{ pushRegistry?: number, topicWsCountsWarn?: number, silentTopicWarnDedup?: number, publishRateWarnDedup?: number }} overrides
+ * @param {{ pushRegistry?: number, topicWsCountsWarn?: number, silentTopicWarnDedup?: number, publishRateWarnDedup?: number, presenceRef?: number }} overrides
  */
 export function _setCapsForTest(overrides) {
 	if (overrides.pushRegistry !== undefined) _maxPushRegistry = overrides.pushRegistry;
 	if (overrides.topicWsCountsWarn !== undefined) _topicWsCountsWarnThreshold = overrides.topicWsCountsWarn;
 	if (overrides.silentTopicWarnDedup !== undefined) _silentTopicWarnDedupMax = overrides.silentTopicWarnDedup;
 	if (overrides.publishRateWarnDedup !== undefined) _publishRateWarnDedupMax = overrides.publishRateWarnDedup;
+	if (overrides.presenceRef !== undefined) _maxPresenceRef = overrides.presenceRef;
 }
 
 /**
@@ -69,6 +74,8 @@ export function _resetCapsForTest() {
 	_topicWsCountsWarnThreshold = TOPIC_WS_COUNTS_WARN_THRESHOLD;
 	_silentTopicWarnDedupMax = SILENT_TOPIC_WARN_DEDUP_MAX;
 	_publishRateWarnDedupMax = PUBLISH_RATE_WARN_DEDUP_MAX;
+	_maxPresenceRef = MAX_PRESENCE_REF;
+	_presenceRefWarnFired = false;
 }
 
 /** @type {Map<string, Function>} */
@@ -179,6 +186,9 @@ let _pushRegistryWarnFired = false;
 
 /** One-shot flag for the TOPIC_WS_COUNTS_WARN_THRESHOLD warning. Reset by `_resetTopicWsCounts`. */
 let _topicWsCountsWarnFired = false;
+
+/** One-shot flag for the MAX_PRESENCE_REF saturation warning. Reset by `_resetCapsForTest`. */
+let _presenceRefWarnFired = false;
 
 /** @type {((ws: any) => string | null | undefined) | null} */
 let _pushIdentify = null;
@@ -3215,13 +3225,17 @@ pipe.join = function pipeJoin(field, resolver, as) {
  */
 /**
  * Per topic+userId presence tracking.
- * Stores { count, timer } where count is the number of active connections
- * and timer is a pending grace-period leave (or null).
- * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null }>}
+ *  - `count`: number of active subscriptions for this user in this room.
+ *  - `timer`: pending grace-period leave (or null).
+ *  - `data`: the user-supplied presence payload (`presenceFn(ctx)` result),
+ *    held so the presence stream's init can reconstruct the roster from
+ *    in-memory state when `platform.presence.list` isn't wired (zero-config
+ *    dev path). Production wires a cluster-aware `platform.presence` and
+ *    bypasses this fallback. Memory: bounded by `_PRESENCE_REF_MAX`; entries
+ *    are dropped on the grace-timer expiry or under cap eviction.
+ * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any }>}
  */
 const _presenceRef = new Map();
-
-const _PRESENCE_REF_MAX = 10000;
 
 /** @type {WeakMap<object, string>} Stable guest ID per connection for anonymous users */
 const _guestIds = new WeakMap();
@@ -3304,7 +3318,7 @@ live.room = function room(config) {
 				return;
 			}
 
-			if (_presenceRef.size >= _PRESENCE_REF_MAX) {
+			if (_presenceRef.size >= _maxPresenceRef) {
 				for (const [k, r] of _presenceRef) {
 					if (r.timer) {
 						clearTimeout(r.timer);
@@ -3316,14 +3330,26 @@ live.room = function room(config) {
 						_presenceRef.delete(k);
 					}
 				}
-				if (_presenceRef.size >= _PRESENCE_REF_MAX) {
+				if (_presenceRef.size >= _maxPresenceRef) {
+					if (!_presenceRefWarnFired) {
+						_presenceRefWarnFired = true;
+						console.warn(
+							"[svelte-realtime] presence-ref map reached MAX_PRESENCE_REF=" + _maxPresenceRef +
+							"; new joiners will not appear in any subscriber's roster until existing entries clear.\n" +
+							"  For multi-instance deploys, wire `platform.presence` (e.g. svelte-adapter-uws-extensions/presence) so this in-memory fallback is bypassed.\n" +
+							"  See: https://svti.me/presence"
+						);
+					}
 					return;
 				}
 			}
 
-			_presenceRef.set(refKey, { count: 1, timer: null });
-
+			// Compute presence payload BEFORE storing the ref so the in-memory
+			// fallback in the presence stream's init can reconstruct the roster
+			// even when this user's join was published before they subscribed
+			// to the :presence topic.
 			const presenceData = presenceFn(ctx);
+			_presenceRef.set(refKey, { count: 1, timer: null, data: presenceData });
 			if (presenceData) {
 				ctx.publish(topic + ':presence', 'join', { key: userId, data: presenceData });
 			}
@@ -3372,11 +3398,25 @@ live.room = function room(config) {
 			(ctx, ...args) => topicFn(ctx, ...args) + ':presence',
 			async (ctx, ...args) => {
 				if (guardFn) await guardFn(ctx, ...args);
-				const presenceTopic = topicFn(ctx, ...args) + ':presence';
+				const dataTopic = topicFn(ctx, ...args);
 				if (ctx.platform.presence && typeof ctx.platform.presence.list === 'function') {
-					return ctx.platform.presence.list(presenceTopic);
+					return ctx.platform.presence.list(dataTopic + ':presence');
 				}
-				return [];
+				// In-memory fallback (zero-config dev path). Without this,
+				// the data stream's onSubscribe publishes the join BEFORE the
+				// user subscribes to :presence, so a user alone in a room
+				// would never see its own join. Reconstructs the roster from
+				// `_presenceRef`. Production wires `platform.presence.list`
+				// (Redis-backed) for cluster-wide consistency and bypasses
+				// this branch.
+				const prefix = dataTopic + '\0';
+				const result = [];
+				for (const [refKey, ref] of _presenceRef) {
+					if (!refKey.startsWith(prefix)) continue;
+					if (ref.data == null) continue;
+					result.push({ key: refKey.slice(prefix.length), data: ref.data });
+				}
+				return result;
 			},
 			{ merge: 'presence' }
 		);
