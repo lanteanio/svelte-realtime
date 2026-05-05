@@ -3222,9 +3222,9 @@ describe('live.channel()', () => {
 		expect(ch.__streamOptions).toEqual({ merge: 'cursor', key: 'userId' });
 	});
 
-	it('uses default options (merge: set, key: id)', () => {
+	it('uses default options (merge: set, no key default for non-crud)', () => {
 		const ch = live.channel('events');
-		expect(ch.__streamOptions).toEqual({ merge: 'set', key: 'id' });
+		expect(ch.__streamOptions).toEqual({ merge: 'set' });
 	});
 
 	it('supports dynamic topic function', () => {

@@ -1440,7 +1440,11 @@ live.stream = function stream(topic, initFn, options) {
 			throw new Error('[svelte-realtime] live.stream delta.fromSeq must be a function (sinceSeq) => events[]');
 		}
 	}
-	const merged = { merge: 'crud', key: 'id', ...rest };
+	// `key` only applies to `crud`. `set` and `latest` ignore it; `presence`
+	// and `cursor` use a fixed `'key'` field on the data shape. Stamping a
+	// default key on those just leaks dead bytes onto every subscribe response.
+	const merged = { merge: 'crud', ...rest };
+	if (merged.merge === 'crud' && merged.key === undefined) merged.key = 'id';
 	if (replay) /** @type {any} */ (initFn).__replay = typeof replay === 'object' ? replay : {};
 	if (delta) /** @type {any} */ (initFn).__delta = delta;
 	if (classOfService) /** @type {any} */ (initFn).__classOfService = classOfService;
@@ -1484,7 +1488,11 @@ live.channel = function channel(topic, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const merged = { merge: options?.merge || 'set', key: options?.key || 'id' };
+	const merge = options?.merge || 'set';
+	/** @type {any} */
+	const merged = { merge };
+	if (options?.key !== undefined) merged.key = options.key;
+	else if (merge === 'crud') merged.key = 'id';
 	if (options?.max !== undefined) merged.max = options.max;
 	const emptyValue = (merged.merge === 'set') ? null : [];
 
@@ -2812,7 +2820,7 @@ live.derived = function derived(sources, fn, options) {
 	/** @type {any} */ (fn).__isDerived = true;
 	/** @type {any} */ (fn).__isStream = true;
 	/** @type {any} */ (fn).__isLive = true;
-	/** @type {any} */ (fn).__streamOptions = { merge, key: 'id' };
+	/** @type {any} */ (fn).__streamOptions = merge === 'crud' ? { merge, key: 'id' } : { merge };
 	/** @type {any} */ (fn).__derivedDebounce = debounce;
 
 	if (dynamic) {
@@ -2956,7 +2964,7 @@ live.aggregate = function aggregate(source, reducers, options) {
 	/** @type {any} */ (initFn).__isStream = true;
 	/** @type {any} */ (initFn).__isLive = true;
 	/** @type {any} */ (initFn).__streamTopic = topic;
-	/** @type {any} */ (initFn).__streamOptions = { merge: 'set', key: 'id' };
+	/** @type {any} */ (initFn).__streamOptions = { merge: 'set' };
 	/** @type {any} */ (initFn).__aggregateSource = source;
 	/** @type {any} */ (initFn).__aggregateReducers = reducers;
 	/** @type {any} */ (initFn).__aggregateInitState = initState;

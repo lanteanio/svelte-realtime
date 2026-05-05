@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.4] - 2026-05-05
+
+### Fixed
+
+- **`live.stream` no longer fires a spurious unsubscribe + refetch on the first WS open.** When a stream subscribed during page hydration (the common case, since `_connect()` is lazy on the first subscriber), the WS was usually still `'connecting'` at that moment. The internal `firstStatus` flag flipped on the synchronous `'connecting'` callback, so the next transition to `'open'` -- the actual first connect, not a reconnect -- entered the reconnect branch and produced the wire sequence `subscribe -> subscribed -> unsubscribe -> __rpc(replay:true) -> subscribe -> subscribed`. Every stream paid one extra RPC round trip per page load, and `replay: true` streams immediately transitioned into resume-mode on first connect, masking the fresh-subscribe path. The status listener now filters on `'open'` first and tracks "has been open at least once" instead of "have we seen any callback", so the first `'open'` is the lifetime baseline. New regression test `__stream() initial-connect status handling` exercises the previously-uncovered mid-connect subscribe path; the existing test mock unconditionally fired `'open'` synchronously, which is why no test caught this before.
+
+### Internal
+
+- **`key` default no longer leaks onto non-`crud` streams.** `live.stream`, `live.channel`, `live.derived`, `live.aggregate`, plus the matching client-stub emitters in `vite.js` (`_extractStreamOptions`, `_extractChannelOptions`, `_extractRoomInfo`, plus the per-derived/aggregate/room `__stream(...)` literals) now only stamp `key: 'id'` when the merge strategy is actually `crud`. `set` and `latest` ignore key entirely; `presence` and `cursor` use a fixed `'key'` field on the data shape, not the option. Stamping the default everywhere just bloated each subscribe response with `"key":"id"` (~8 bytes per subscribe per non-crud stream). User-specified keys still flow through unchanged. Test `live.channel "uses default options"` updated to `{ merge: 'set' }`. No public-API change; client behavior unchanged because the client's runtime defaults already cover the omitted key.
+
 ## [0.5.0-next.3] - 2026-05-03
 
 ### Fixed

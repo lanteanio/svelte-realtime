@@ -1745,14 +1745,20 @@ function _createStream(path, options, dynamicArgs) {
 					}
 				});
 
-				// Listen for reconnects to refetch (debounced to avoid thundering herd)
-				let firstStatus = true;
+				// Listen for reconnects to refetch (debounced to avoid thundering herd).
+				// `status.subscribe` fires synchronously with the current value, which
+				// for a stream subscribing during page hydration is usually 'connecting'
+				// (since `_connect()` is lazy on the first subscriber). Filter on 'open'
+				// first and track whether we've ever seen one, so the FIRST 'open' is
+				// the lifetime baseline rather than treating it as a reconnect bounce.
+				let hasOpenedOnce = false;
 				statusUnsub = status.subscribe((s) => {
-					if (firstStatus) {
-						firstStatus = false;
+					if (s !== 'open') return;
+					if (!hasOpenedOnce) {
+						hasOpenedOnce = true;
 						return;
 					}
-					if (s === 'open' && subCount > 0) {
+					if (subCount > 0) {
 						_status = 'reconnecting';
 						_statusStore.set('reconnecting');
 						if (_reconnectTimer) clearTimeout(_reconnectTimer);

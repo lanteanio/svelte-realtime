@@ -1103,9 +1103,9 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			imports.add('__stream');
 			const isDynamic = _isDynamicExport(source, name, 'live\\.derived');
 			if (isDynamic) {
-				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set', key: 'id' })}, true);`);
+				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set' })}, true);`);
 			} else {
-				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set', key: 'id' })});`);
+				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set' })});`);
 			}
 		}
 	}
@@ -1126,10 +1126,10 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			roomLines.push(`export const ${name} = {`);
 			roomLines.push(`  data: __stream('${modulePath}/${name}/__data', ${JSON.stringify(roomInfo.dataOpts)}, true),`);
 			if (roomInfo.hasPresence) {
-				roomLines.push(`  presence: __stream('${modulePath}/${name}/__presence', ${JSON.stringify({ merge: 'presence', key: 'key' })}, true),`);
+				roomLines.push(`  presence: __stream('${modulePath}/${name}/__presence', ${JSON.stringify({ merge: 'presence' })}, true),`);
 			}
 			if (roomInfo.hasCursors) {
-				roomLines.push(`  cursors: __stream('${modulePath}/${name}/__cursors', ${JSON.stringify({ merge: 'cursor', key: 'key' })}, true),`);
+				roomLines.push(`  cursors: __stream('${modulePath}/${name}/__cursors', ${JSON.stringify({ merge: 'cursor' })}, true),`);
 			}
 			// Actions are RPCs
 			for (const action of roomInfo.actions) {
@@ -1166,7 +1166,7 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		if (!exportedNames.has(name)) {
 			exportedNames.add(name);
 			imports.add('__stream');
-			lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set', key: 'id' })});`);
+			lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set' })});`);
 		}
 	}
 
@@ -1524,7 +1524,7 @@ function _readTopLevelValue(body, start) {
  */
 function _extractStreamOptions(source, name) {
 	/** @type {any} */
-	const opts = { merge: 'crud', key: 'id' };
+	const opts = { merge: 'crud' };
 
 	// Try topic-string pattern first: live.stream('topic', ...)
 	const topicPattern = new RegExp(
@@ -1553,6 +1553,7 @@ function _extractStreamOptions(source, name) {
 	if (optStr) {
 		_applyParsedOptions(opts, optStr);
 	}
+	if (opts.merge === 'crud' && opts.key === undefined) opts.key = 'id';
 
 	return opts;
 }
@@ -1593,7 +1594,7 @@ function _applyParsedOptions(opts, optStr) {
  */
 function _extractChannelOptions(source, name) {
 	/** @type {any} */
-	const opts = { merge: 'set', key: 'id' };
+	const opts = { merge: 'set' };
 
 	// Look for the options object in live.channel(topic, { ... })
 	const pattern = new RegExp(
@@ -1609,6 +1610,7 @@ function _extractChannelOptions(source, name) {
 	if (optStr) {
 		_applyParsedOptions(opts, optStr);
 	}
+	if (opts.merge === 'crud' && opts.key === undefined) opts.key = 'id';
 
 	return opts;
 }
@@ -1620,7 +1622,8 @@ function _extractChannelOptions(source, name) {
  * @returns {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[] }}
  */
 function _extractRoomInfo(source, name) {
-	const info = { dataOpts: { merge: 'crud', key: 'id' }, hasPresence: false, hasCursors: false, actions: [] };
+	/** @type {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[] }} */
+	const info = { dataOpts: { merge: 'crud' }, hasPresence: false, hasCursors: false, actions: [] };
 
 	// Find the start of live.room({ ... }) call
 	const startPattern = new RegExp(
@@ -1642,6 +1645,7 @@ function _extractRoomInfo(source, name) {
 
 	const keyVal = _extractTopLevelStringProp(body, 'key');
 	if (keyVal) info.dataOpts.key = keyVal;
+	if (info.dataOpts.merge === 'crud' && info.dataOpts.key === undefined) info.dataOpts.key = 'id';
 
 	// Extract action names from the top-level actions property
 	const actionsBody = _extractTopLevelBraceProp(body, 'actions');

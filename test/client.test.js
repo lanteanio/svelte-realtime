@@ -4,6 +4,7 @@ import * as fc from 'fast-check';
 let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters;
 let topicCallbacks;
 let statusCallbacks;
+let statusInitialValue;
 let failureCallbacks;
 let failureValue;
 let denialsCallbacks;
@@ -68,6 +69,7 @@ beforeEach(async () => {
 
 	topicCallbacks = new Map();
 	statusCallbacks = new Set();
+	statusInitialValue = 'open';
 	failureCallbacks = new Set();
 	failureValue = null;
 	denialsCallbacks = new Set();
@@ -119,7 +121,7 @@ beforeEach(async () => {
 		status: {
 			subscribe: (fn) => {
 				statusCallbacks.add(fn);
-				fn('open');
+				fn(statusInitialValue);
 				return () => statusCallbacks.delete(fn);
 			}
 		},
@@ -2508,6 +2510,52 @@ describe('__stream() hydrate derived', () => {
 
 		// No hydration, so currentValue is undefined -- derived protection does not apply
 		expect(values[values.length - 1]).toEqual({ count: 42 });
+
+		unsub();
+	});
+});
+
+// -- __stream() WS-status baseline (regression: spurious reconnect on first open) --
+
+describe('__stream() initial-connect status handling', () => {
+	it('does not treat the first WS open as a reconnect when subscribed mid-connect', async () => {
+		// Page-load case: WS is still 'connecting' when the stream's
+		// internal status.subscribe runs synchronously. The previous
+		// implementation flipped its `firstStatus` flag on the
+		// 'connecting' callback, so the next 'open' (the actual first
+		// connect) hit the reconnect branch and produced a spurious
+		// unsubscribe + refetch round trip.
+		statusInitialValue = 'connecting';
+
+		const store = __stream('ws-baseline/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		expect(sendQueuedFn.mock.calls.length).toBe(1);
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, {
+			ok: true,
+			data: [{ id: 1 }],
+			topic: 'ws-baseline-topic',
+			merge: 'crud',
+			key: 'id'
+		});
+
+		// Now the WS finishes connecting -- this is the FIRST 'open'
+		// for this stream's lifetime. It must NOT be treated as a reconnect.
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+
+		// Only the original subscribe should have been sent.
+		expect(sendQueuedFn.mock.calls.length).toBe(1);
+
+		// Subsequent 'disconnected' -> 'open' IS a real reconnect and
+		// should fire the refetch path.
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		expect(sendQueuedFn.mock.calls.length).toBe(2);
 
 		unsub();
 	});
