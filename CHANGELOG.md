@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.7] - 2026-05-06
+
+### Added
+
+- **`live.cron` accepts 6-field expressions for sub-minute schedules.** A leading seconds field unlocks Quartz / node-cron-style sub-minute granularity: `live.cron('*/3 * * * * *', 'tick', ...)` fires every 3 seconds, `live.cron('30 * * * * *', 'half-min', ...)` fires at second `:30` of every minute. 5-field expressions parse and behave unchanged. Once any 6-field schedule is registered the cron tick adapts from 60s to 1Hz (sticky for the process lifetime; cleared by `_clearCron` for HMR). 5-field schedules running under the 1Hz tick fire only at second `:00` of any matching minute, so they keep their once-per-matching-minute semantics instead of bursting 60 times. Internal: `__cronParsed` is 5-element for 5-field input and 6-element for 6-field input; existing introspection of `__cronParsed[0]` (the minute matcher) on 5-field schedules is unchanged. Sub-second schedules are out of scope for cron syntax; a future `live.interval(ms, fn)` will be the primitive for that.
+
+### Fixed
+
+- **`live.cron` no longer fires concurrently with itself.** Previously a long-running cron handler whose schedule matched again before it finished would be invoked again in parallel (masked at the prior 60s tick because most jobs finish within a minute, but a real concurrency bug all the same). The tick now skips a path whose previous invocation is still in flight and increments `cronCount{status: 'skipped'}` so the overlap is visible in metrics. Single-flight applies to both 5-field and 6-field schedules.
+
 ## [0.5.0-next.6] - 2026-05-05
 
 ### Security

@@ -2771,6 +2771,23 @@ const cronRegistry = new Map();
 /** @type {ReturnType<typeof setInterval> | null} */
 let _cronInterval = null;
 
+/**
+ * Sticky-once-set: flips to true when a 6-field schedule (sub-minute
+ * resolution) gets registered. Causes `_ensureCronInterval` to use a
+ * 1-second tick instead of 60s. Never flips back inside a process
+ * lifetime; cleared by `_clearCron` (HMR + tests).
+ */
+let _cronAt1Hz = false;
+
+/**
+ * Set of cron paths whose previous invocation has not yet finished.
+ * Single-flight guard: a tick that matches a path already in this set
+ * skips with a `cronCount{status:'skipped'}` metric increment instead
+ * of running concurrently. Cleared by `_clearCron`.
+ * @type {Set<string>}
+ */
+const _cronRunning = new Set();
+
 /** @type {import('svelte-adapter-uws').Platform | null} */
 let _cronPlatform = null;
 
@@ -3978,6 +3995,9 @@ export function __registerCron(path, fn) {
 	const topic = /** @type {any} */ (fn).__cronTopic;
 	if (!parsed || !topic) return;
 	cronRegistry.set(path, { schedule: parsed, fn, topic });
+	// 6-field schedule means seconds-precision firing is required.
+	// Upgrade the tick to 1 Hz once any such schedule registers.
+	if (parsed.length === 6) _upgradeCronTo1Hz();
 	_ensureCronInterval();
 }
 
@@ -3997,9 +4017,24 @@ function _ensureCronInterval() {
 	if (_cronInterval) return;
 	// Set sentinel immediately to prevent duplicate timers from concurrent calls
 	_cronInterval = /** @type {any} */ (-1);
-	_cronInterval = setInterval(_tickCron, 60000);
+	_cronInterval = setInterval(_tickCron, _cronAt1Hz ? 1000 : 60000);
 	// Run an initial tick after a short delay to catch jobs on startup
 	_cronStartupTimer = setTimeout(_tickCron, 1000);
+}
+
+/**
+ * Switch the cron interval to 1 Hz (called when the first sub-minute
+ * job is registered). Sticky: subsequent calls are no-ops, and the
+ * tick stays at 1 Hz for the rest of the process lifetime even if all
+ * 6-field jobs are torn down. Cleared by `_clearCron` for HMR.
+ */
+function _upgradeCronTo1Hz() {
+	if (_cronAt1Hz) return;
+	_cronAt1Hz = true;
+	if (_cronInterval && _cronInterval !== /** @type {any} */ (-1)) {
+		clearInterval(_cronInterval);
+		_cronInterval = setInterval(_tickCron, 1000);
+	}
 }
 
 /**
@@ -4078,7 +4113,9 @@ export function __registerRoomActions(basePath, loader) {
 }
 
 /**
- * Clear all cron timers. Called during HMR to prevent orphan intervals.
+ * Clear all cron timers. Called during HMR to prevent orphan intervals,
+ * and from afterEach in tests. Also resets the sticky-1Hz flag and the
+ * single-flight set so the next registration round starts fresh.
  */
 export function _clearCron() {
 	if (_cronInterval) {
@@ -4090,6 +4127,8 @@ export function _clearCron() {
 		_cronStartupTimer = null;
 	}
 	cronRegistry.clear();
+	_cronAt1Hz = false;
+	_cronRunning.clear();
 }
 
 /**
@@ -4226,6 +4265,7 @@ export function _restoreHmr(snap) {
 export async function _tickCron() {
 	if (!_lazyResolved) await _resolveAllLazy();
 	const now = new Date();
+	const second = now.getSeconds();
 	const minute = now.getMinutes();
 	const hour = now.getHours();
 	const day = now.getDate();
@@ -4233,12 +4273,37 @@ export async function _tickCron() {
 	const weekday = now.getDay();
 
 	for (const [path, entry] of cronRegistry) {
-		const [mf, hf, df, monthf, wf] = entry.schedule;
+		const schedule = entry.schedule;
+		const isSixField = schedule.length === 6;
+
+		// 5-field schedules at 1 Hz tick: only fire at second :00 of the
+		// matching minute, otherwise they would re-fire 60 times during
+		// any matching minute. At the 60s tick this branch is skipped --
+		// the tick spacing already enforces once-per-minute granularity.
+		if (!isSixField && _cronAt1Hz && second !== 0) continue;
+
+		let sf, mf, hf, df, monthf, wf;
+		if (isSixField) {
+			[sf, mf, hf, df, monthf, wf] = schedule;
+			if (!_cronFieldMatch(sf, second)) continue;
+		} else {
+			[mf, hf, df, monthf, wf] = schedule;
+		}
 		if (!_cronFieldMatch(mf, minute)) continue;
 		if (!_cronFieldMatch(hf, hour)) continue;
 		if (!_cronFieldMatch(df, day)) continue;
 		if (!_cronFieldMatch(monthf, month)) continue;
 		if (!_cronFieldMatch(wf, weekday)) continue;
+
+		// Single-flight: a tick that matches a job whose previous run is
+		// still in flight skips with a 'skipped' metric label instead of
+		// invoking it again. Surfaces overlap to ops without breaking the
+		// invariant that one cron path runs at most once concurrently.
+		if (_cronRunning.has(path)) {
+			if (_metricsInstruments) _metricsInstruments.cronCount.inc({ path, status: 'skipped' });
+			continue;
+		}
+		_cronRunning.add(path);
 
 		// Match - run the job
 		(async () => {
@@ -4266,34 +4331,46 @@ export async function _tickCron() {
 				} else if (_IS_DEV) {
 					console.error(`[svelte-realtime] Cron '${path}' error:`, err);
 				}
+			} finally {
+				_cronRunning.delete(path);
 			}
 		})();
 	}
 }
 
 /**
- * Parse a 5-field cron expression into an array of field matchers.
- * Supports: *, N, N-M, N,M, and *\/N
+ * Parse a 5- or 6-field cron expression into an array of field matchers.
+ * 5-field form is `minute hour day month weekday` (fires at second `:00`
+ * of each matching minute). 6-field form prepends `seconds` (Quartz /
+ * node-cron convention) and unlocks sub-minute schedules; once any
+ * 6-field schedule is registered the cron tick adapts to 1 Hz so the
+ * seconds field is honored.
+ *
+ * Supports: *, N, N-M, N,M, and *\/N in every field.
  * @param {string} expr
  * @returns {any[]}
  */
 function _parseCron(expr) {
 	const parts = expr.trim().split(/\s+/);
-	if (parts.length !== 5) {
-		throw new Error(`[svelte-realtime] Invalid cron expression '${expr}' -- expected 5 fields (minute hour day month weekday)\n  See: https://svti.me/cron`);
+	if (parts.length !== 5 && parts.length !== 6) {
+		throw new Error(`[svelte-realtime] Invalid cron expression '${expr}' -- expected 5 fields (minute hour day month weekday) or 6 fields (seconds minute hour day month weekday)\n  See: https://svti.me/cron`);
 	}
-	return parts.map((field, idx) => _parseCronField(field, idx));
+	// Map each part to its semantic field index. 5-field input shifts
+	// by one (no seconds) so fields land at indices 1..5; 6-field input
+	// uses indices 0..5 directly.
+	const offset = parts.length === 5 ? 1 : 0;
+	return parts.map((field, idx) => _parseCronField(field, idx + offset));
 }
 
-/** Max values per cron field index: minute, hour, day, month, weekday */
-const _CRON_RANGES = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+/** Max values per cron field index: seconds, minute, hour, day, month, weekday */
+const _CRON_RANGES = [[0, 59], [0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
 
 /**
  * Parse a single cron field with validation.
  * Returns null for '*' (match all), or a Set of allowed values,
  * or { step: N } for step expressions.
  * @param {string} field
- * @param {number} idx - Field index (0=minute, 1=hour, 2=day, 3=month, 4=weekday)
+ * @param {number} idx - Semantic field index (0=seconds, 1=minute, 2=hour, 3=day, 4=month, 5=weekday)
  * @returns {any}
  */
 function _parseCronField(field, idx) {

@@ -1450,6 +1450,131 @@ describe('live.cron()', () => {
 		expect(() => live.cron('* *', 'bad', async () => {})).toThrow('expected 5 fields');
 	});
 
+	describe('6-field schedules (sub-minute resolution)', () => {
+		it('parses a 6-field expression with seconds field at index 0', () => {
+			const fn = live.cron('*/3 * * * * *', 'tick', async () => {});
+			expect(fn.__cronParsed).toHaveLength(6);
+			expect(fn.__cronParsed[0]).toEqual({ step: 3 });
+		});
+
+		it('accepts 0-59 in the seconds field', () => {
+			const fn = live.cron('30 * * * * *', 'half-min', async () => {});
+			expect(fn.__cronParsed).toHaveLength(6);
+			expect(fn.__cronParsed[0]).toBeInstanceOf(Set);
+			expect(fn.__cronParsed[0].has(30)).toBe(true);
+		});
+
+		it('rejects out-of-range seconds value', () => {
+			expect(() => live.cron('60 * * * * *', 'bad', async () => {})).toThrow();
+		});
+
+		it('parses a range in the seconds field', () => {
+			const fn = live.cron('0-9 * * * * *', 'first-ten', async () => {});
+			expect(fn.__cronParsed[0].has(0)).toBe(true);
+			expect(fn.__cronParsed[0].has(9)).toBe(true);
+			expect(fn.__cronParsed[0].has(10)).toBe(false);
+		});
+
+		it('error message mentions both the 5-field and 6-field forms', () => {
+			expect(() => live.cron('* *', 'bad', async () => {})).toThrow('6 fields');
+		});
+	});
+
+	describe('adaptive 1Hz tick + single-flight + 5-field-at-1Hz dedup', () => {
+		afterEach(() => {
+			_clearCron();
+		});
+
+		it('5-field schedule at 1Hz tick fires only at second :00 (not 60x per matching minute)', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			// Register a 6-field job so the tick gets upgraded to 1Hz.
+			__registerCron('cron-trigger-1hz', live.cron('* * * * * *', '1hz-marker', async () => {}));
+			// Then a 5-field job. At 1Hz the dedup must keep it at once-per-matching-minute.
+			__registerCron('cron-five-field', live.cron('* * * * *', 'five-min', async () => { runs++; }));
+
+			// Drive the tick at second != 0 manually -- the dedup should skip.
+			const realDate = global.Date;
+			try {
+				const fakeNow = new realDate('2026-05-06T12:34:17Z');
+				global.Date = /** @type {any} */ (function FakeDate(...args) {
+					if (args.length === 0) return fakeNow;
+					return new realDate(...args);
+				});
+				/** @type {any} */ (global.Date).now = () => fakeNow.getTime();
+				Object.setPrototypeOf(global.Date, realDate);
+				await _tickCron();
+				await new Promise((r) => setTimeout(r, 10));
+				expect(runs).toBe(0);
+
+				// Now drive at second :00 -- 5-field schedule should match.
+				const atSecondZero = new realDate('2026-05-06T12:34:00Z');
+				global.Date = /** @type {any} */ (function FakeDate(...args) {
+					if (args.length === 0) return atSecondZero;
+					return new realDate(...args);
+				});
+				/** @type {any} */ (global.Date).now = () => atSecondZero.getTime();
+				Object.setPrototypeOf(global.Date, realDate);
+				await _tickCron();
+				await new Promise((r) => setTimeout(r, 10));
+				expect(runs).toBe(1);
+			} finally {
+				global.Date = realDate;
+			}
+		});
+
+		it('single-flight: a long-running job does not run concurrently with itself', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let starts = 0;
+			let release;
+			const releasePromise = new Promise((r) => { release = r; });
+			__registerCron('cron-slow', live.cron('* * * * *', 'slow', async () => {
+				starts++;
+				await releasePromise;
+			}));
+
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 5));
+			// Second tick fires while the first invocation is still pending.
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 5));
+
+			expect(starts).toBe(1);
+			release();
+			await new Promise((r) => setTimeout(r, 10));
+			// Third tick AFTER release: the job is no longer in flight; the next
+			// tick can run it again.
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 10));
+			expect(starts).toBe(2);
+		});
+
+		it('single-flight: skipped firings do not call the function body', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let release;
+			const releasePromise = new Promise((r) => { release = r; });
+			let calls = 0;
+			__registerCron('cron-skip', live.cron('* * * * *', 'skip', async () => {
+				calls++;
+				await releasePromise;
+			}));
+
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 5));
+			await _tickCron();
+			await _tickCron();
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 5));
+			expect(calls).toBe(1);
+
+			release();
+			await new Promise((r) => setTimeout(r, 10));
+		});
+	});
+
 	describe('ctx and auto-publish', () => {
 		afterEach(() => {
 			_clearCron();
