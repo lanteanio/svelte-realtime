@@ -1835,11 +1835,11 @@ Multi-device users see most-recent-connection-wins routing within each instance,
 
 ### Cluster routing
 
-For multi-instance deploys, wire the connection registry from `svelte-adapter-uws-extensions` so a `live.push` originating on any instance reaches the user's owning instance:
+For multi-instance deploys, wire the connection registry from `svelte-adapter-uws-extensions` so a `live.push` originating on any instance reaches the user's owning instance. With `svelte-adapter-uws >= 0.5.0-next.15`, the `init({ platform })` hook is the recommended call site -- the Redis client is connected by then and the registry is wired before the first `upgrade` / `open` runs:
 
 ```js
 // hooks.ws.js
-import { pushHooks, live } from 'svelte-realtime/server';
+import { live } from 'svelte-realtime/server';
 import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
 import { createConnectionRegistry } from 'svelte-adapter-uws-extensions/redis/registry';
 
@@ -1848,8 +1848,10 @@ const registry = createConnectionRegistry(redis, {
   identify: (ws) => ws.getUserData()?.userId
 });
 
-// Tell live.push to fall back to the registry for cross-instance lookups
-live.configurePush({ remoteRegistry: registry });
+export function init({ platform }) {
+  // Tell live.push to fall back to the registry for cross-instance lookups.
+  live.configurePush({ remoteRegistry: registry });
+}
 
 // Wire the registry's own connection hooks (NOT pushHooks.* in this mode --
 // the registry tracks ownership in Redis and short-circuits same-instance
@@ -2067,7 +2069,58 @@ If the function returns a value, it is published as a `set` event (same as befor
 
 Cron expressions use 5 fields: `minute hour day month weekday`. Supported syntax: `*`, single values, ranges (`9-17`), lists (`0,15,30`), and steps (`*/5`).
 
-The platform is captured automatically from the first RPC call. If your app starts cron jobs before any WebSocket connections, call `setCronPlatform(platform)` in your `open` hook.
+### Wiring the platform
+
+Cron registers at module load but the tick can only publish once a `platform` reference has been captured. With `svelte-adapter-uws >= 0.5.0-next.15`, wire it from the new `init({ platform })` hook so the tick is ready from boot:
+
+```js
+// src/hooks.ws.js
+import { setCronPlatform, pushHooks, message, upgrade } from 'svelte-realtime/server';
+
+export { upgrade, message };
+export const open = pushHooks.open;
+export const close = pushHooks.close;
+
+export function init({ platform }) {
+  setCronPlatform(platform);
+}
+```
+
+On older adapters (`open(ws, platform)` is the only available hand-off point), call `setCronPlatform(platform)` from `open` instead. Cron ticks fired before the first connection log a single deduped warning and become no-ops.
+
+### Cluster mode
+
+Each worker process runs its own cron tick. In a single-process deployment that's exactly what you want. In a clustered deployment -- whether `CLUSTER_MODE=reuseport` on Linux (N kernel workers per replica), acceptor mode on Windows / macOS (N internal workers per process), or N Docker replicas, or any combination -- every worker fires every job in parallel by default. For "send the daily summary at 9am" jobs, that's almost certainly wrong.
+
+Wire a cluster-wide leader gate via `configureCron({ leader })`. The canonical implementation lives in `svelte-adapter-uws-extensions/redis/leader` and uses a Redis SETNX lease:
+
+```js
+// src/hooks.ws.js (clustered, with extensions)
+import { setCronPlatform, configureCron } from 'svelte-realtime/server';
+import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
+
+const redis = ...; // your shared Redis client
+
+const leader = createLeader(redis); // instanceId defaults to a random hex; override for diagnostics
+
+export function init({ platform }) {
+  setCronPlatform(platform);
+  configureCron({ leader: leader.isLeader });
+}
+
+export async function shutdown() {
+  // Best-effort lease release so a sibling can take over within renewMs
+  // (default 10s) instead of waiting for the full lease to expire.
+  await leader.stop();
+}
+```
+
+Behavior with a leader configured:
+- Only the worker whose `leader()` returns `true` proceeds with the tick. All other workers exit early and increment a `cron{status:'not-leader'}` metric.
+- A throwing `leader()` is fail-closed: this worker skips the tick and logs in dev. Better to miss a tick than to double-fire because the leader-election machinery is broken.
+- Single-flight, single-fire semantics still apply per cron path within the elected worker.
+
+Without a leader configured (the default), every worker fires every job. svelte-realtime stays cluster-agnostic by design; the cluster transport (Redis or otherwise) is the extensions package's domain.
 
 ---
 
@@ -3091,7 +3144,8 @@ Import from `svelte-realtime/server`.
 | `pipe(stream, ...transforms)` | Composable stream transforms |
 | `close` | Ready-made close hook (fires onUnsubscribe for remaining topics) |
 | `unsubscribe` | Ready-made unsubscribe hook (fires onUnsubscribe in real time) |
-| `setCronPlatform(platform)` | Capture platform for cron jobs |
+| `setCronPlatform(platform)` | Capture platform for cron jobs (call from `init({ platform })`) |
+| `configureCron({ leader })` | Cluster-mode leader gate for cron (default: every worker fires) |
 | `onError(handler)` | Global error handler for cron, effects, and derived |
 | `onCronError(handler)` | Deprecated alias for `onError` |
 | `enableSignals(ws)` | Enable point-to-point signal delivery |

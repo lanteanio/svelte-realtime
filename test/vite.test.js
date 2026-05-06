@@ -716,6 +716,216 @@ export const items = live.stream('items', async (ctx) => [], { merge: 'crud', ke
 		expect(code).toContain("export const items = __stream('items/items'");
 		expect(code).not.toContain('true);'); // no isDynamic flag
 	});
+
+	// Single-arity ctx-only topic-fn -- the secure-by-construction shape for
+	// per-user / per-tenant streams. Before the arity-aware fix these were
+	// classified as dynamic factories, leaving the natural `myStream.subscribe`
+	// call shape with a runtime TypeError. The runtime side already supports
+	// the static call (server _callTopicFn passes ctx and ignores empty args);
+	// only the plugin classification was wrong.
+	it('topic-fn with only a ctx param is treated as static', () => {
+		setup({
+			'events.js': `
+import { live } from 'svelte-realtime/server';
+export const myEvents = live.stream(
+  (ctx) => 'events:' + ctx.user.id,
+  async (ctx) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:events', { ssr: false });
+
+		expect(code).toContain("export const myEvents = __stream('events/myEvents'");
+		expect(code).not.toContain('true);');
+	});
+
+	it('topic-fn with zero params is treated as static', () => {
+		setup({
+			'global.js': `
+import { live } from 'svelte-realtime/server';
+export const everyone = live.stream(
+  () => 'global',
+  async (ctx) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:global', { ssr: false });
+
+		expect(code).toContain("export const everyone = __stream('global/everyone'");
+		expect(code).not.toContain('true);');
+	});
+
+	it('topic-fn named context (instead of ctx) is treated as static', () => {
+		setup({
+			'a.js': `
+import { live } from 'svelte-realtime/server';
+export const feed = live.stream(
+  (context) => 'feed:' + context.user.id,
+  async (ctx) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:a', { ssr: false });
+
+		expect(code).toContain("export const feed = __stream('a/feed'");
+		expect(code).not.toContain('true);');
+	});
+
+	it('topic-fn named _ctx (TS noUnusedParameters) is treated as static', () => {
+		setup({
+			'b.js': `
+import { live } from 'svelte-realtime/server';
+export const ping = live.stream(
+  (_ctx) => 'ping',
+  async (ctx) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:b', { ssr: false });
+
+		expect(code).toContain("export const ping = __stream('b/ping'");
+		expect(code).not.toContain('true);');
+	});
+
+	it('topic-fn typed as LiveContext is treated as static', () => {
+		setup({
+			'c.ts': `
+import { live } from 'svelte-realtime/server';
+import type { LiveContext } from 'svelte-realtime/server';
+export const inbox = live.stream(
+  (ctx: LiveContext) => 'inbox:' + ctx.user.id,
+  async (ctx) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:c', { ssr: false });
+
+		expect(code).toContain("export const inbox = __stream('c/inbox'");
+		expect(code).not.toContain('true);');
+	});
+
+	it('async single-arity ctx-only topic-fn is treated as static', () => {
+		setup({
+			'd.js': `
+import { live } from 'svelte-realtime/server';
+export const live_inbox = live.stream(
+  async (ctx) => 'inbox:' + ctx.user.id,
+  async (ctx) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:d', { ssr: false });
+
+		expect(code).toContain("export const live_inbox = __stream('d/live_inbox'");
+		expect(code).not.toContain('true);');
+	});
+
+	it('non-arrow function-expression with ctx param is treated as static', () => {
+		setup({
+			'e.js': `
+import { live } from 'svelte-realtime/server';
+export const profile = live.stream(
+  function (ctx) { return 'profile:' + ctx.user.id; },
+  async (ctx) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:e', { ssr: false });
+
+		expect(code).toContain("export const profile = __stream('e/profile'");
+		expect(code).not.toContain('true);');
+	});
+
+	// Single-param topic-fn where the param is NOT ctx-shaped: the server's
+	// arity dispatch interprets this as "user omitted ctx, single client arg".
+	// Plugin must agree -- emit a dynamic factory so the client passes args.
+	it('single non-ctx param is treated as dynamic (omitted-ctx + 1 client arg)', () => {
+		setup({
+			'f.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.stream(
+  (roomId) => 'room:' + roomId,
+  async (ctx, roomId) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:f', { ssr: false });
+
+		expect(code).toContain("export const room = __stream('f/room'");
+		expect(code).toContain('true);');
+	});
+
+	// Destructured first param is ambiguous (could be ctx or payload). Match
+	// the existing safe fallback in _extractDynamicFactoryParams: stay
+	// dynamic so the server's arity dispatch can call fn(payload).
+	it('destructured first param stays dynamic (ambiguity fallback)', () => {
+		setup({
+			'g.js': `
+import { live } from 'svelte-realtime/server';
+export const feed = live.stream(
+  ({ roomId }) => 'feed:' + roomId,
+  async (ctx, args) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:g', { ssr: false });
+
+		expect(code).toContain("export const feed = __stream('g/feed'");
+		expect(code).toContain('true);');
+	});
+
+	// Same arity logic must apply to the .d.ts emission so the typed surface
+	// matches the runtime stub. A static stub typed as a factory is the
+	// original bug; a static stub typed as StreamStore is the fix.
+	it('emits StreamStore (not factory) in .d.ts for single-arity ctx-only topic', () => {
+		setup({
+			'inbox.ts': `
+import { live } from 'svelte-realtime/server';
+import type { LiveContext } from 'svelte-realtime/server';
+export const inbox = live.stream(
+  (ctx: LiveContext) => 'inbox:' + ctx.user.id,
+  async (ctx) => [],
+  { merge: 'set' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("declare module '$live/inbox'");
+		// Static shape: bare StreamStore, no `(...) =>` factory wrapper before the &
+		expect(content).toMatch(/export const inbox: StreamStore<[^>]+> & \{ load\(/);
+		expect(content).not.toMatch(/export const inbox: \([^)]*\) => StreamStore/);
+	});
 });
 
 // -- path traversal (Finding 6) -----------------------------------------------

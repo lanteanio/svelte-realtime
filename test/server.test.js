@@ -16,6 +16,7 @@ import {
 	_tickCron,
 	__registerCron,
 	setCronPlatform,
+	configureCron,
 	onCronError,
 	onError,
 	close,
@@ -1657,6 +1658,239 @@ describe('live.cron()', () => {
 			expect(pub).toBeDefined();
 			expect(pub.event).toBe('set');
 			expect(pub.data).toBe('hello');
+		});
+	});
+
+	// Warn-once dedup for the platform-missing case. Without the dedup, a
+	// 6-field schedule + idle server emits the same warning every second.
+	// The warning is `_IS_DEV`-gated so this block only runs when NODE_ENV
+	// !== 'production' (default in vitest).
+	describe('platform-missing warning dedup', () => {
+		beforeEach(() => {
+			// _cronPlatform is intentionally NOT cleared by _clearCron (it
+			// survives HMR by design), so prior tests in this file have
+			// captured a platform we need to drop to exercise the
+			// missing-platform path. setCronPlatform(null) is the public
+			// reset.
+			setCronPlatform(null);
+		});
+
+		afterEach(() => {
+			_clearCron();
+			vi.restoreAllMocks();
+		});
+
+		it('warns at most once per process lifetime when no platform is captured', async () => {
+			// Do NOT call setCronPlatform -- exercise the missing-platform path.
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			__registerCron('test/no-platform', live.cron('* * * * *', 'no-plat-topic', async () => {}));
+			// Drive five ticks. Without dedup this would log five times.
+			await _tickCron();
+			await _tickCron();
+			await _tickCron();
+			await _tickCron();
+			await _tickCron();
+			// Async job invocation is fire-and-forget inside _tickCron, so
+			// give the microtask queue a chance to drain before counting.
+			await new Promise(r => setTimeout(r, 30));
+			const platformWarnings = warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('Cron registered but no platform captured')
+			);
+			expect(platformWarnings.length).toBe(1);
+		});
+
+		it('warning copy points at the init() hook as the canonical wire-up site', async () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			__registerCron('test/init-hint', live.cron('* * * * *', 'init-hint-topic', async () => {}));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			const msg = warnSpy.mock.calls.find(args =>
+				typeof args[0] === 'string' && args[0].includes('Cron registered but no platform captured')
+			)?.[0];
+			expect(msg).toBeDefined();
+			expect(msg).toContain('init({ platform })');
+			expect(msg).toContain('open(ws, platform)');
+			expect(msg).toContain('https://svti.me/cron');
+		});
+
+		it('warning re-arms after _clearCron so test isolation works', async () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			__registerCron('test/round-1', live.cron('* * * * *', 't1', async () => {}));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('no platform captured')
+			).length).toBe(1);
+			_clearCron();
+			__registerCron('test/round-2', live.cron('* * * * *', 't2', async () => {}));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			// Fresh round, so warn-once is re-armed and we should see another single line.
+			expect(warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('no platform captured')
+			).length).toBe(2);
+		});
+
+		it('setCronPlatform re-arms the warning so a future platform-loss can warn again', async () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const countWarns = () => warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('no platform captured')
+			).length;
+			__registerCron('test/loss', live.cron('* * * * *', 't', async () => {}));
+
+			// No platform: warns once.
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(countWarns()).toBe(1);
+
+			// Same tick, no platform still: deduped, count unchanged.
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(countWarns()).toBe(1);
+
+			// Capture a platform (re-arms the flag as a side effect, but
+			// that does not fire a warning because platform is set).
+			setCronPlatform(mockPlatform());
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(countWarns()).toBe(1);
+
+			// Drop platform via the public setter (defensive future case --
+			// platform never goes null in practice, but if it did, the
+			// re-armed flag means the user gets a fresh single warning).
+			setCronPlatform(null);
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(countWarns()).toBe(2);
+		});
+	});
+
+	// configureCron({ leader }) -- cluster-mode leader-election gate. The
+	// realtime layer ships only the consumption hook; the canonical
+	// implementation lives in svelte-adapter-uws-extensions. These tests
+	// exercise the gate's contract, not any specific leader implementation.
+	describe('configureCron({ leader })', () => {
+		afterEach(() => {
+			_clearCron();
+			configureCron({ leader: null });
+		});
+
+		it('default (no leader) fires every job on every worker', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			__registerCron('test/no-leader', live.cron('* * * * *', 't', async () => { runs++; }));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(1);
+		});
+
+		it('leader returning false skips the entire tick (no jobs fire)', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			configureCron({ leader: () => false });
+			__registerCron('test/follower', live.cron('* * * * *', 't', async () => { runs++; }));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(0);
+		});
+
+		it('leader returning true fires jobs as normal', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			configureCron({ leader: () => true });
+			__registerCron('test/leader', live.cron('* * * * *', 't', async () => { runs++; }));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(1);
+		});
+
+		it('leader is consulted on every tick (mid-process leadership change)', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			let amLeader = false;
+			configureCron({ leader: () => amLeader });
+			__registerCron('test/flip', live.cron('* * * * *', 't', async () => { runs++; }));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(0);
+			amLeader = true;
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(1);
+			amLeader = false;
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(1);
+		});
+
+		it('throwing leader is fail-closed (no fires + error logged)', async () => {
+			const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			configureCron({ leader: () => { throw new Error('redis down'); } });
+			__registerCron('test/throwing-leader', live.cron('* * * * *', 't', async () => { runs++; }));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(0);
+			expect(errSpy.mock.calls.some(args =>
+				typeof args[0] === 'string' && args[0].includes('configureCron leader function threw')
+			)).toBe(true);
+			errSpy.mockRestore();
+		});
+
+		it('non-boolean falsy return is treated as "not leader"', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			// e.g. a leader that returns undefined while initializing
+			configureCron({ leader: () => undefined });
+			__registerCron('test/undef-leader', live.cron('* * * * *', 't', async () => { runs++; }));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(0);
+		});
+
+		it('configureCron({ leader: null }) clears the gate and reverts to default', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			configureCron({ leader: () => false });
+			configureCron({ leader: null });
+			__registerCron('test/cleared', live.cron('* * * * *', 't', async () => { runs++; }));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(1);
+		});
+
+		it('configureCron(null) clears the gate', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			configureCron({ leader: () => false });
+			configureCron(null);
+			__registerCron('test/null-config', live.cron('* * * * *', 't', async () => { runs++; }));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+			expect(runs).toBe(1);
+		});
+
+		it('rejects {} (must include leader field)', () => {
+			expect(() => configureCron({})).toThrow('must include a leader field');
+		});
+
+		it('rejects non-object configs', () => {
+			expect(() => configureCron('nope')).toThrow('must be an object or null');
+			expect(() => configureCron(42)).toThrow('must be an object or null');
+		});
+
+		it('rejects non-function, non-null leader', () => {
+			expect(() => configureCron({ leader: 'not-a-fn' })).toThrow('leader must be a function or null');
+			expect(() => configureCron({ leader: 42 })).toThrow('leader must be a function or null');
 		});
 	});
 });

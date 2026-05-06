@@ -2328,8 +2328,37 @@ function _extractStreamReturnType(source, name) {
  * @returns {number} Index of the comma, or -1 if not found
  */
 /**
- * Check whether a live.stream() or live.channel() export is dynamic
- * (first argument is a function expression or arrow function, not a string topic).
+ * Check whether a live.stream() / live.channel() / live.derived() export
+ * needs a dynamic-factory client stub.
+ *
+ * String-topic form (`live.stream('items', ...)`) is always static.
+ *
+ * Function-topic form is classified by the topic-fn's arity, mirroring the
+ * server's `_callTopicFn` arity dispatch so the plugin and runtime agree:
+ *
+ *  - `() => topic`                  -- static (no ctx, no client args)
+ *  - `(ctx) => topic(ctx.user.id)`  -- static (topic derived purely from
+ *                                      authenticated ctx; secure-by-
+ *                                      construction since the client has
+ *                                      no input that could be tampered
+ *                                      with to reach another user's data)
+ *  - `(ctx, roomId) => topic(roomId)`  -- dynamic factory (1 client arg)
+ *  - `(roomId) => topic(roomId)`    -- dynamic factory (server interprets
+ *                                      single non-ctx param as omitted
+ *                                      ctx + 1 client arg)
+ *  - `({ user }) => topic(user.id)` -- dynamic (destructured first param
+ *                                      is ambiguous: could be ctx or
+ *                                      payload; safest is to assume
+ *                                      payload and emit the factory
+ *                                      shape, matching the existing
+ *                                      fallback in
+ *                                      _extractDynamicFactoryParams)
+ *
+ * Ctx detection uses `_isCtxParam` -- the same check that
+ * `_extractDynamicFactoryParams` uses to decide whether to drop the first
+ * param. Sharing that check keeps the dynamic/static decision consistent
+ * with the param-extraction step.
+ *
  * @param {string} source
  * @param {string} name
  * @param {string} apiName - e.g. 'live\\.stream', 'live\\.channel'
@@ -2342,7 +2371,18 @@ function _isDynamicExport(source, name, apiName) {
 	const m = pattern.exec(source);
 	if (!m) return false;
 	const afterOpen = m.index + m[0].length;
-	return _isFirstArgFunction(source, afterOpen);
+	if (!_isFirstArgFunction(source, afterOpen)) return false;
+
+	// Function-form first arg. Arity-classify to distinguish a topic
+	// derived purely from ctx (static) from a factory taking client args.
+	const argStart = _findNthArgStart(source, afterOpen, 0);
+	if (argStart < 0) return true;
+	const sig = _parseCallbackSignature(source, argStart);
+	if (!sig) return true;
+	const params = _splitParams(sig.paramsStr);
+	if (params.length === 0) return false;
+	if (params.length === 1 && _isCtxParam(params[0])) return false;
+	return true;
 }
 
 /**

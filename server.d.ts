@@ -1066,23 +1066,60 @@ export namespace live {
 	): T;
 
 	/**
-	 * Configure how the push registry extracts the userId from a connecting
-	 * WebSocket. Defaults to reading
-	 * `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`. Pass `null` to
-	 * restore the default.
+	 * Structural shape of the cluster-routing registry consumed by
+	 * `live.push`. The `ConnectionRegistry` exported by
+	 * `svelte-adapter-uws-extensions/redis/registry` conforms to this; any
+	 * other registry implementation is accepted as long as it exposes a
+	 * compatible `request(...)` method. Typed structurally so this package
+	 * does not take a hard dependency on the extensions package.
+	 */
+	interface PushRemoteRegistry {
+		request<TReply = unknown>(
+			target: string,
+			event: string,
+			data?: unknown,
+			options?: { timeoutMs?: number }
+		): Promise<TReply>;
+	}
+
+	/**
+	 * Configure the push registry. Accepts two independent fields:
 	 *
-	 * The identify function may return `null` or `undefined` for anonymous
-	 * connections, in which case `pushHooks.open` skips registration.
+	 * - `identify` -- override how `pushHooks.open` extracts the userId
+	 *   from a connecting WebSocket. Defaults to reading
+	 *   `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`. May return
+	 *   `null` / `undefined` for anonymous connections, in which case
+	 *   `pushHooks.open` skips registration. Pass `null` to clear an
+	 *   override and restore the default.
+	 *
+	 * - `remoteRegistry` -- wire a cluster-routing registry so `live.push`
+	 *   can reach users connected to other instances. When the userId is
+	 *   not registered locally, `live.push` falls through to
+	 *   `remoteRegistry.request(userId, ...)`. Pass `null` to clear.
+	 *
+	 * At least one of `identify` / `remoteRegistry` must be provided per
+	 * call; passing `{}` is a runtime error and rejected here at compile
+	 * time. Pass `null` (in place of the whole config object) to clear
+	 * both slots at once.
 	 *
 	 * @example
 	 * ```js
 	 * import { live } from 'svelte-realtime/server';
 	 *
+	 * // Custom userData shape:
 	 * live.configurePush({ identify: (ws) => ws.getUserData()?.account?.id });
+	 *
+	 * // Wire cluster routing:
+	 * import { createConnectionRegistry } from 'svelte-adapter-uws-extensions/redis/registry';
+	 * const registry = createConnectionRegistry(redis, { identify: (ws) => ws.getUserData()?.userId });
+	 * live.configurePush({ remoteRegistry: registry });
 	 * ```
 	 */
 	function configurePush(
-		config: { identify: (ws: any) => string | null | undefined } | null
+		config:
+			| { identify: ((ws: any) => string | null | undefined) | null; remoteRegistry?: PushRemoteRegistry | null }
+			| { identify?: ((ws: any) => string | null | undefined) | null; remoteRegistry: PushRemoteRegistry | null }
+			| null
 	): void;
 
 	/**
@@ -1805,9 +1842,90 @@ export function __directCall(
 
 /**
  * Capture a platform reference for cron jobs.
- * Call this in your `open` hook if you use `live.cron()`.
+ *
+ * **Recommended call site (svelte-adapter-uws >= 0.5.0-next.15):** the
+ * `init({ platform })` hook in `hooks.ws.js`. The adapter fires `init`
+ * exactly once per worker after the listen socket is bound and before
+ * any `upgrade` / `open` / `message` hook runs, so the cron tick has a
+ * platform from the very first scheduled fire.
+ *
+ * **Legacy / fallback call site:** the `open(ws, platform)` hook. Works
+ * but the platform is only captured on the first WebSocket connection,
+ * so cron ticks during the boot-to-first-connect window are no-ops and
+ * surface a single (deduped) warning.
+ *
+ * In clustered deployments, every worker captures its own platform
+ * independently. To get single-fire-across-the-cluster semantics for
+ * cron jobs, also wire a leader gate via
+ * `configureCron({ leader })`.
+ *
+ * @example
+ * ```js
+ * // src/hooks.ws.js (adapter next.15+)
+ * import { setCronPlatform, pushHooks, message, upgrade } from 'svelte-realtime/server';
+ *
+ * export { upgrade, message };
+ * export const open = pushHooks.open;
+ * export const close = pushHooks.close;
+ *
+ * export function init({ platform }: { platform: Platform }) {
+ *     setCronPlatform(platform);
+ * }
+ * ```
  */
 export function setCronPlatform(platform: Platform): void;
+
+/**
+ * Configure cron behavior across the cluster.
+ *
+ * The `leader` field is the cluster-mode opt-in. Without it, every
+ * worker fires every registered cron job on every matching tick (the
+ * single-process default; correct for dev and non-clustered apps). With
+ * it, only the worker whose `leader()` returns `true` for a given tick
+ * proceeds to evaluate per-job schedules and fire jobs.
+ *
+ * `leader` is called synchronously at the top of every cron tick and
+ * must be cheap (a cached boolean read). The canonical implementation
+ * lives in `svelte-adapter-uws-extensions/redis/leader`, which
+ * maintains a Redis SETNX lease in the background and exposes the
+ * cached state as `leader.isLeader`. svelte-realtime intentionally does
+ * not bundle the leader implementation; the cluster transport (Redis
+ * or otherwise) is the extensions package's domain.
+ *
+ * Pass `null` (in place of the whole config object) to clear the
+ * leader and revert to "every worker fires" behavior.
+ *
+ * Failure modes:
+ * - `leader()` throwing is treated as fail-closed: this worker skips
+ *   the tick and a metric `cron{status:'leader-error'}` increments,
+ *   plus a `console.error` line in dev. Better to miss a tick than to
+ *   double-fire because the leader-election machinery is broken.
+ * - `leader()` returning a non-boolean falsy value (e.g. `undefined`)
+ *   is treated as "not leader" -- skip the tick.
+ *
+ * @example
+ * ```js
+ * // src/hooks.ws.js (adapter next.15+, clustered deployment)
+ * import { setCronPlatform, configureCron } from 'svelte-realtime/server';
+ * import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
+ *
+ * const leader = createLeader(redis);
+ *
+ * export function init({ platform }: { platform: Platform }) {
+ *     setCronPlatform(platform);
+ *     configureCron({ leader: leader.isLeader });
+ * }
+ *
+ * export async function shutdown() {
+ *     // Best-effort lease release so a sibling can take over within
+ *     // renewMs (default 10s) instead of waiting for the full lease.
+ *     await leader.stop();
+ * }
+ * ```
+ */
+export function configureCron(
+	config: { leader: (() => boolean) | null } | null
+): void;
 
 /**
  * Register a live function. Called by the Vite-generated registry module.
