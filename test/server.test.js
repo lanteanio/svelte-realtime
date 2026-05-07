@@ -4761,6 +4761,230 @@ describe('live.aggregate() windowed -- root + per-window stream metadata', () =>
 	});
 });
 
+// -- _activateDerived late-activation contract -------------------------------
+//
+// The README's recommended call site for `_activateDerived(platform)` is the
+// adapter's `init({ platform })` hook -- which fires BEFORE the lazy queue
+// drains and BEFORE any WS connection. Without late-activation hooks across
+// every reactive registration path, the publish-wrap never installs and the
+// first cron-driven publish silently misses every watcher (aggregate /
+// effect / static derived). These tests pin the four contract points the
+// fix is meant to deliver.
+
+describe('_activateDerived late-activation', () => {
+	beforeEach(() => {
+		// Clean slate: clears registries, resets _hasDynamicDerived /
+		// _hasLazyReactive flags, drops _activatedPlatforms via fresh
+		// platforms below.
+		_prepareHmr();
+	});
+
+	afterEach(() => {
+		_resetAggregates();
+		_prepareHmr();
+	});
+
+	// 1. Static aggregate registered AFTER _activateDerived was called against
+	// an empty registry receives source-topic publishes. Pre-fix: silently
+	// dropped. The dev-mode SSR fallback path goes through this code shape.
+	it('static aggregate registered after _activateDerived (empty registry) still receives source publishes', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform); // registry is empty here
+
+		const fn = live.aggregate('post-activate:agg-src', {
+			count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc }
+		}, { topic: 'post-activate:agg-out' });
+		__register('agg/post-activate', fn);
+		__registerAggregate('agg/post-activate', fn);
+
+		platform.publish('post-activate:agg-src', 'inc', {});
+		platform.publish('post-activate:agg-src', 'inc', {});
+
+		const pubs = platform.published.filter(p => p.topic === 'post-activate:agg-out');
+		expect(pubs.length).toBe(2);
+		expect(pubs[1].data.count).toBe(2);
+	});
+
+	it('static derived registered after _activateDerived (empty registry) still recomputes on source publish', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		let counter = 0;
+		const derivedFn = live.derived(['post-activate:der-src'], async () => {
+			counter++;
+			return { count: counter };
+		});
+		__register('der/post-activate', derivedFn);
+		__registerDerived('der/post-activate', derivedFn);
+
+		platform.publish('post-activate:der-src', 'changed', {});
+		await new Promise(r => setTimeout(r, 20));
+
+		expect(counter).toBeGreaterThan(0);
+	});
+
+	it('live.effect registered after _activateDerived (empty registry) still fires on source publish', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		let fired = 0;
+		const effectFn = live.effect(['post-activate:fx-src'], async () => { fired++; });
+		__registerEffect('fx/post-activate', effectFn);
+
+		platform.publish('post-activate:fx-src', 'changed', {});
+		await new Promise(r => setTimeout(r, 20));
+
+		expect(fired).toBe(1);
+	});
+
+	it('windowed aggregate registered after _activateDerived (empty registry) publishes per-window output', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		const fn = live.aggregate('post-activate:win-src', {
+			count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc }
+		}, {
+			topic: 'post-activate:win-out',
+			windows: { lifetime: { type: 'lifetime' } }
+		});
+		__registerAggregate('agg/post-activate-win', fn);
+
+		platform.publish('post-activate:win-src', 'inc', {});
+		platform.publish('post-activate:win-src', 'inc', {});
+
+		const pubs = platform.published.filter(p => p.topic === 'post-activate:win-out:lifetime');
+		expect(pubs.length).toBe(2);
+		expect(pubs[1].data.count).toBe(2);
+	});
+
+	// 2. The realistic init() flow: lazy queue is loaded, _activateDerived
+	// fires while the queue is still un-drained. The eager flag set at
+	// queue-push time should keep `_activateDerived`'s gate open so the
+	// wrap installs immediately rather than waiting for the queue to drain.
+	it('lazy-pushed aggregate -> _activateDerived during the lazy window installs the wrap', async () => {
+		const platform = mockPlatform();
+
+		const fn = live.aggregate('lazy:agg-src', {
+			count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc }
+		}, { topic: 'lazy:agg-out' });
+
+		// Mimic the Vite registry virtual module: a lazy loader arrow
+		// (`__L(() => import(...).then(m => m.${name}))`) that resolves
+		// to the original aggregate init function. Setting __lazy = true
+		// on the loader is what makes __registerAggregate push to the
+		// lazy queue instead of registering immediately.
+		const lazyLoader = async () => fn;
+		/** @type {any} */ (lazyLoader).__lazy = true;
+		__register('agg/lazy', lazyLoader);
+		__registerAggregate('agg/lazy', lazyLoader);
+
+		// The eager flag should now be set even though the registry is empty.
+		// _activateDerived must NOT early-return.
+		_activateDerived(platform);
+
+		// Drain the lazy queue (production: first cron tick / RPC).
+		await __directCall('agg/lazy', [], platform);
+
+		platform.publish('lazy:agg-src', 'inc', {});
+		platform.publish('lazy:agg-src', 'inc', {});
+
+		const pubs = platform.published.filter(p => p.topic === 'lazy:agg-out');
+		expect(pubs.length).toBe(2);
+		expect(pubs[1].data.count).toBe(2);
+	});
+
+	// 3. Idempotency: repeated registrations must not double-wrap. The
+	// _maybeLateActivate helper must short-circuit on already-activated
+	// platforms (otherwise each registration would chain another wrap and
+	// every publish would pay N indirection costs).
+	it('multiple registrations do not double-wrap the platform', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		// First registration triggers the wrap install via _maybeLateActivate.
+		const fn0 = live.aggregate('idem:src', {
+			count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc }
+		}, { topic: 'idem:out-0' });
+		__register('agg/idem-0', fn0);
+		__registerAggregate('agg/idem-0', fn0);
+
+		// Capture the wrapped reference. Subsequent registrations must
+		// short-circuit in _maybeLateActivate (idempotency) and leave
+		// platform.publish unchanged.
+		const wrappedFirst = platform.publish;
+		expect(wrappedFirst.name).toBe('derivedPublish'); // sanity: wrap is in place
+		for (let i = 1; i < 3; i++) {
+			const fn = live.aggregate('idem:src', {
+				count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc }
+			}, { topic: `idem:out-${i}` });
+			__register(`agg/idem-${i}`, fn);
+			__registerAggregate(`agg/idem-${i}`, fn);
+		}
+		// Same wrapped function reference -- no re-wrap.
+		expect(platform.publish).toBe(wrappedFirst);
+
+		platform.publish('idem:src', 'inc', {});
+		// All three aggregates should have published exactly once.
+		expect(platform.published.filter(p => p.topic === 'idem:out-0').length).toBe(1);
+		expect(platform.published.filter(p => p.topic === 'idem:out-1').length).toBe(1);
+		expect(platform.published.filter(p => p.topic === 'idem:out-2').length).toBe(1);
+	});
+
+	// 4. Negative case: a registration that resolves WITHOUT _activateDerived
+	// having ever been called must not pre-emptively wrap. The user is still
+	// responsible for opting in via _activateDerived; the late-activation
+	// hook only patches the timing gap, it doesn't replace the explicit call.
+	it('does NOT wrap the platform if _activateDerived was never called', async () => {
+		const platform = mockPlatform();
+		const nativePublish = platform.publish;
+
+		const fn = live.aggregate('no-activate:src', {
+			count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc }
+		}, { topic: 'no-activate:out' });
+		__register('agg/no-activate', fn);
+		__registerAggregate('agg/no-activate', fn);
+
+		// Wrap was NOT installed -- the publish reference is still native.
+		expect(platform.publish).toBe(nativePublish);
+
+		platform.publish('no-activate:src', 'inc', {});
+		// And no fan-out happened -- the aggregate output topic stays empty.
+		const pubs = platform.published.filter(p => p.topic === 'no-activate:out');
+		expect(pubs.length).toBe(0);
+	});
+
+	// 5. Dynamic-derived bind path uses the same helper now (DRY win) --
+	// regression guard that replacing the open-coded copy at the bind site
+	// didn't break the dynamic-derived late-activation behavior.
+	it('dynamic-derived bind path still installs the wrap when activated against empty registry', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		let derivedRuns = 0;
+		const dynFn = live.derived(
+			(orgId) => [`dyn:${orgId}`],
+			async (ctx, orgId) => {
+				derivedRuns++;
+				return { orgId, runs: derivedRuns };
+			}
+		);
+		__register('der/dyn', dynFn);
+		__registerDerived('der/dyn', dynFn);
+
+		// Subscribing instantiates the dynamic instance and triggers the
+		// bind-path's _maybeLateActivate call.
+		const ws = mockWs({ id: 'u1' });
+		const data = toArrayBuffer({ rpc: 'der/dyn', id: 'r1', args: ['org-1'], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise(r => setTimeout(r, 10));
+
+		platform.publish('dyn:org-1', 'changed', {});
+		await new Promise(r => setTimeout(r, 50));
+
+		expect(derivedRuns).toBeGreaterThan(0);
+	});
+});
+
 // -- Phase 40: live.gate() ----------------------------------------------------
 
 describe('live.gate()', () => {

@@ -2931,6 +2931,27 @@ let _derivedIdCounter = 0;
 /** @type {boolean} Whether any dynamic derived streams have been registered */
 let _hasDynamicDerived = false;
 
+/**
+ * Eagerly set to `true` the moment any reactive registration (live.derived,
+ * live.effect, live.aggregate -- static or dynamic) hits the lazy queue,
+ * BEFORE the queue resolves and populates the source-watch indices.
+ *
+ * Why this exists: `_activateDerived(platform)` early-returns when every
+ * source-watch index is empty, to avoid wrapping `platform.publish` for
+ * apps that never use the reactive primitives. But the README's
+ * recommended call site for `_activateDerived` is `init({ platform })`,
+ * which fires BEFORE the lazy queue drains. So at activation time the
+ * indices look empty even though registrations are pending. Without this
+ * flag, the wrap never installs and the first cron-driven publish (or
+ * any publish that fires before the first WS connect) silently bypasses
+ * watchers. This eager flag tells `_activateDerived` "registrations are
+ * coming, install the wrap now" -- and `_maybeLateActivate` covers the
+ * symmetric case where activation runs *after* a registration resolves.
+ *
+ * @type {boolean}
+ */
+let _hasLazyReactive = false;
+
 /** @type {Map<Function, object>} O(1) lookup from fn reference to dynamic derived registry entry */
 const _dynamicDerivedByFn = new Map();
 
@@ -2971,6 +2992,7 @@ live.effect = function effect(sources, fn, options) {
 export function __registerEffect(path, fn) {
 	if (/** @type {any} */ (fn).__lazy) {
 		_lazyQueue.push({ type: 'effect', path, loader: fn });
+		_hasLazyReactive = true;
 		return;
 	}
 	const sources = /** @type {any} */ (fn).__effectSources;
@@ -2983,6 +3005,7 @@ export function __registerEffect(path, fn) {
 		set.add(effectRegistry.get(path));
 		_watchedTopics.add(src);
 	}
+	_maybeLateActivate();
 }
 
 /** @type {Map<string, { source: string, reducers: any, topic: string, state: any, snapshot: Function | null, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
@@ -3378,6 +3401,7 @@ function _computeAggregateState(state, reducers) {
 export function __registerAggregate(path, fn) {
 	if (/** @type {any} */ (fn).__lazy) {
 		_lazyQueue.push({ type: 'aggregate', path, loader: fn });
+		_hasLazyReactive = true;
 		return;
 	}
 	const windowsSpec = /** @type {any} */ (fn).__aggregateWindows;
@@ -3412,6 +3436,7 @@ export function __registerAggregate(path, fn) {
 	if (!srcSet) { srcSet = new Set(); _aggregateBySource.set(source, srcSet); }
 	srcSet.add(entry);
 	_watchedTopics.add(source);
+	_maybeLateActivate();
 }
 
 /**
@@ -3513,6 +3538,7 @@ function _registerWindowedAggregate(path, fn) {
 	if (!srcSet) { srcSet = new Set(); _aggregateBySource.set(source, srcSet); }
 	srcSet.add(entry);
 	_watchedTopics.add(source);
+	_maybeLateActivate();
 
 	// Schedule boundary / slide timers. Captured `entry` lets the timer
 	// re-arm itself across multiple boundaries without re-registering.
@@ -4259,6 +4285,7 @@ export function __registerDerived(path, fn) {
 	if (/** @type {any} */ (fn).__lazy) {
 		_lazyQueue.push({ type: 'derived', path, loader: fn });
 		_hasDynamicDerived = true;
+		_hasLazyReactive = true;
 		return;
 	}
 
@@ -4302,6 +4329,7 @@ export function __registerDerived(path, fn) {
 		set.add(derivedRegistry.get(path));
 		_watchedTopics.add(src);
 	}
+	_maybeLateActivate();
 }
 
 /**
@@ -4317,8 +4345,20 @@ export function _activateDerived(platform) {
 	_derivedPlatform = platform;
 	_activateDerivedCalled = true;
 
-	// Only wrap platform.publish if there are actual reactive registrations
-	if (_derivedBySource.size === 0 && _effectBySource.size === 0 && _aggregateBySource.size === 0 && !_hasDynamicDerived) {
+	// Only wrap platform.publish if there are actual reactive registrations,
+	// OR a lazy push has signaled "registrations are coming." Without the
+	// `_hasLazyReactive` clause, calling `_activateDerived` from
+	// `init({ platform })` (the README's recommended call site) would
+	// early-return on a still-empty registry and leave the wrap uninstalled
+	// -- so a cron-driven publish that fires before the lazy queue resolves
+	// (or before the first WS connection) silently bypasses every watcher.
+	if (
+		_derivedBySource.size === 0
+		&& _effectBySource.size === 0
+		&& _aggregateBySource.size === 0
+		&& !_hasDynamicDerived
+		&& !_hasLazyReactive
+	) {
 		return;
 	}
 
@@ -4330,6 +4370,30 @@ export function _activateDerived(platform) {
 	// that share it. Test mocks pass plain objects whose proto is
 	// Object.prototype - in that case wrap the object itself.
 	const target = _resolveWrapTarget(platform);
+	if (_activatedPlatforms.has(target)) return;
+	_activatedPlatforms.add(target);
+	_wrapPlatformPublish(target);
+}
+
+/**
+ * Install the publish wrap retroactively if `_activateDerived(platform)`
+ * was called against an empty registry and a registration has now landed
+ * to populate one. Idempotent: if the wrap is already installed (or no
+ * platform was ever activated), this is a no-op. Called from every
+ * registration path that populates a `_*BySource` index, including the
+ * dynamic-derived bind path.
+ *
+ * Without this hook, registrations that resolve via the lazy queue
+ * (which drains on first cron tick / RPC) -- or via direct
+ * `__registerXxx(path, fn)` calls in dev-mode SSR fallback -- would
+ * leave the platform unwrapped, and the very first publish from a
+ * cron firehose / startup task / autonomous worker would silently
+ * miss every watcher (aggregate / effect / static derived). Manifests
+ * as empty leaderboards and `silentTopicWarning` after 30s.
+ */
+function _maybeLateActivate() {
+	if (!_derivedPlatform) return;
+	const target = _resolveWrapTarget(_derivedPlatform);
 	if (_activatedPlatforms.has(target)) return;
 	_activatedPlatforms.add(target);
 	_wrapPlatformPublish(target);
@@ -4531,12 +4595,11 @@ function _activateDynamicDerived(fn, resolvedTopic, user) {
 		return;
 	}
 
-	// Late activation: if _activateDerived returned early before dynamic entries existed,
-	// wrap platform.publish now that we have something to watch.
-	if (_derivedPlatform && !_activatedPlatforms.has(_derivedPlatform)) {
-		_activatedPlatforms.add(_derivedPlatform);
-		_wrapPlatformPublish(_derivedPlatform);
-	}
+	// Late activation: if _activateDerived returned early before dynamic
+	// entries existed, wrap platform.publish now that we have something
+	// to watch. Shared with the static aggregate / effect / derived
+	// registration paths via `_maybeLateActivate`.
+	_maybeLateActivate();
 
 	const topicArgs = /** @type {any} */ (fn).__derivedTopicArgs;
 	const args = topicArgs && topicArgs.get(resolvedTopic);
@@ -4959,6 +5022,7 @@ export function _prepareHmr() {
 	_watchedTopics.clear();
 	_streamsWithUnsubscribe.clear();
 	_hasDynamicDerived = false;
+	_hasLazyReactive = false;
 	_dynamicDerivedByFn.clear();
 	_activateDerivedCalled = false;
 	_warnedActivateDerived = false;
