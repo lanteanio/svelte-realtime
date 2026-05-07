@@ -2536,17 +2536,32 @@ export const pushHooks = {
 		_wsToPushUserId.set(ws, userId);
 	},
 	/**
-	 * Deregister the connection from the push registry. Looks up the
-	 * userId via the reverse index so it works even when getUserData()
-	 * has been cleared by the platform.
-	 *
-	 * Only removes the registry entry if this exact ws is still the
-	 * registered one. Otherwise a fast laptop -> phone -> laptop sequence
-	 * could deregister the new connection when the old one's close fires.
+	 * Adapter close hook. Drains both the per-userId push registry AND
+	 * the realtime stream-subscription bookkeeping (per-topic ws-counts,
+	 * silent-topic watchdogs, `__onUnsubscribe` callbacks). Routes through
+	 * the module-scope `close` when the adapter passes a `ctx` -- which it
+	 * always does in production -- so a single
+	 * `export const close = pushHooks.close` re-export from hooks.ws.js
+	 * covers both concerns. Falls back to push-only behavior when called
+	 * directly without `ctx` (test setups, custom flows) so the historical
+	 * one-arg signature keeps working.
 	 *
 	 * @param {any} ws
+	 * @param {{ platform: any, subscriptions?: any } | undefined} [ctx]
 	 */
-	close(ws) {
+	close(ws, ctx) {
+		if (ctx) {
+			// Realtime close drains both stream subscriptions and the push
+			// registry. Idempotent across repeat calls and across users
+			// who compose pushHooks.close + the realtime close manually --
+			// a second pass finds nothing to remove.
+			close(ws, ctx);
+			return;
+		}
+		// Direct one-arg call (legacy, tests, custom flows): drain the
+		// push registry only. The stream-subscription bookkeeping path
+		// requires `ctx.platform` for `__onUnsubscribe` callbacks; without
+		// it, the safe behavior is "do what the original signature did."
 		const userId = _wsToPushUserId.get(ws);
 		if (userId == null) return;
 		_wsToPushUserId.delete(ws);
@@ -6438,6 +6453,23 @@ export function close(ws, { platform, subscriptions }) {
 
 	_wsStreamOwners.delete(ws);
 	_firedUnsubscribes.delete(ws);
+
+	// Drain the push registry so a single `export { close }` re-export from
+	// hooks.ws.js covers BOTH the stream-subscription cleanup that has
+	// always lived here AND the per-userId push-registry cleanup that
+	// previously required wiring `pushHooks.close` separately. Idempotent
+	// against repeat calls -- a second pass through finds the entry
+	// already removed.
+	const pushUserId = _wsToPushUserId.get(ws);
+	if (pushUserId != null) {
+		_wsToPushUserId.delete(ws);
+		const pushEntry = _pushRegistry.get(pushUserId);
+		// push-registry invariant: if userId was tracked in _wsToPushUserId,
+		// the registry should still have an entry for that userId. Missing
+		// entry means an external mutation cleared it.
+		assert(pushEntry !== undefined, 'realtime/push-registry.entry-tracked', { userIdLen: pushUserId.length });
+		if (pushEntry && pushEntry.ws === ws) _pushRegistry.delete(pushUserId);
+	}
 }
 
 /**

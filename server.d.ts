@@ -681,12 +681,18 @@ export const pushHooks: {
 	 */
 	open(ws: any, ctx: { platform: any }): void;
 	/**
-	 * Deregister the connection from the push registry. Looks up the userId
-	 * via the reverse index so it works even when getUserData has been
-	 * cleared. Only removes the entry if this exact ws is still the
-	 * registered one (handles fast device-swap sequences correctly).
+	 * Adapter close hook. Drains the per-userId push registry AND the
+	 * realtime stream-subscription bookkeeping (ws-counts, silent-topic
+	 * watchdogs, `__onUnsubscribe` callbacks) when the adapter passes a
+	 * `ctx` -- a single `export const close = pushHooks.close` covers both
+	 * concerns with no separate wiring needed. Falls back to push-only
+	 * behavior when called directly without `ctx` (test setups, custom
+	 * flows). Looks up the userId via the reverse index so it works even
+	 * when `getUserData` has been cleared. Only removes the push-registry
+	 * entry if this exact ws is still the registered one (handles fast
+	 * device-swap sequences correctly).
 	 */
-	close(ws: any): void;
+	close(ws: any, ctx?: { platform: any; subscriptions?: Set<string> | string[] }): void;
 };
 
 export namespace live {
@@ -2170,15 +2176,23 @@ export function unsubscribe(
 ): void;
 
 /**
- * Handle a WebSocket close event. Fires `onUnsubscribe` lifecycle hooks
- * for stream functions that define them.
+ * Handle a WebSocket close event. Drains stream-subscription bookkeeping
+ * (per-topic ws-counts, silent-topic watchdogs), fires `onUnsubscribe`
+ * lifecycle hooks for stream functions that define them, AND drains the
+ * per-userId push registry. A single re-export from `hooks.ws.js` covers
+ * both stream and push cleanup; no separate `pushHooks.close` wiring is
+ * needed.
  *
  * Re-export from your `hooks.ws.js`:
  * ```js
  * export { close } from 'svelte-realtime/server';
  * ```
+ *
+ * Or, if you already wire `pushHooks.close` (which now routes through
+ * this same function under the hood), keep that -- both shapes work
+ * and produce identical cleanup.
  */
 export function close(
 	ws: WebSocket<any>,
-	ctx: { platform: Platform }
+	ctx: { platform: Platform; subscriptions?: Set<string> | string[] }
 ): void;

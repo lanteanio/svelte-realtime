@@ -10505,6 +10505,120 @@ describe('live.push() / pushHooks', () => {
 			code: 'NOT_FOUND'
 		});
 	});
+
+	// Unified-close contract: a single hook re-export should drain BOTH
+	// the per-userId push registry AND the realtime stream-subscription
+	// bookkeeping (ws-counts, silent-topic watchdogs). Before this
+	// unification, `export const close = pushHooks.close` (the JSDoc
+	// example) only drained the push registry, leaving silent-topic
+	// watchdogs armed for 30s after every page closed -- producing
+	// warning floods in CI / e2e runs that the reporter saw.
+
+	it('pushHooks.close(ws, ctx) drains the silent-topic watchdog', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		// Subscribe a ws to a stream topic (arms the silent-topic watchdog).
+		const ws = mockWs({ id: 'u-uni-1' });
+		const streamFn = live.stream('uni:topic-A', async () => [], { merge: 'set' });
+		__register('uni/streamA', streamFn);
+		const data = toArrayBuffer({ rpc: 'uni/streamA', id: 'r1', args: [], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise(r => setTimeout(r, 10));
+
+		// Watchdog is armed. Closing via pushHooks.close with ctx should
+		// route through the realtime close and disarm.
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		pushHooks.close(ws, { platform, subscriptions: new Set(['uni:topic-A']) });
+
+		// Give the disarm logic a moment, then advance time well past the
+		// 30s threshold to confirm no warning fires.
+		vi.useFakeTimers();
+		try {
+			vi.advanceTimersByTime(35_000);
+			const silentWarnings = warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes("Topic 'uni:topic-A'")
+			);
+			expect(silentWarnings.length).toBe(0);
+		} finally {
+			vi.useRealTimers();
+			warnSpy.mockRestore();
+		}
+	});
+
+	it('pushHooks.close(ws, ctx) drains the push registry', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-uni-2' }) };
+		pushHooks.open(ws, { platform });
+
+		// Close with ctx (production adapter shape).
+		pushHooks.close(ws, { platform });
+
+		await expect(live.push({ userId: 'u-uni-2' }, 'event')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	});
+
+	it('pushHooks.close(ws) without ctx still drains push registry (legacy direct call)', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-uni-3' }) };
+		pushHooks.open(ws, { platform });
+
+		// Legacy one-arg call -- still works, push-only.
+		pushHooks.close(ws);
+
+		await expect(live.push({ userId: 'u-uni-3' }, 'event')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	});
+
+	it('realtime close(ws, ctx) drains the push registry too', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-uni-4' }) };
+		pushHooks.open(ws, { platform });
+
+		// Calling the top-level realtime close directly should also drain push.
+		close(ws, { platform, subscriptions: new Set() });
+
+		await expect(live.push({ userId: 'u-uni-4' }, 'event')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	});
+
+	it('manual composition of realtime close + pushHooks.close is idempotent', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		const ws = mockWs({ id: 'u-uni-5' });
+		// Push: register via pushHooks.open with the right userData shape.
+		ws.getUserData = () => ({ user_id: 'u-uni-5' });
+		pushHooks.open(ws, { platform });
+
+		// Stream: subscribe to a topic.
+		const streamFn = live.stream('uni:topic-B', async () => [], { merge: 'set' });
+		__register('uni/streamB', streamFn);
+		const data = toArrayBuffer({ rpc: 'uni/streamB', id: 'r5', args: [], stream: true });
+		handleRpc(ws, data, platform);
+		await new Promise(r => setTimeout(r, 10));
+
+		// User who composes both paths manually: realtime close THEN pushHooks.close.
+		// The realtime close already drains push; pushHooks.close should be a no-op
+		// the second time around. No throws, both registries clean.
+		expect(() => {
+			close(ws, { platform, subscriptions: new Set(['uni:topic-B']) });
+			pushHooks.close(ws, { platform, subscriptions: new Set() });
+		}).not.toThrow();
+
+		// Push registry clean.
+		await expect(live.push({ userId: 'u-uni-5' }, 'event')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	});
+
+	it('does NOT call into realtime close path when ctx is omitted', async () => {
+		// Sanity / behavior pin: the legacy one-arg direct call must not
+		// somehow trigger stream cleanup (which would crash on missing
+		// ctx.platform). This test just asserts no-throw and push-only
+		// drain when the user calls pushHooks.close(ws) directly.
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-uni-6' }) };
+		pushHooks.open(ws, { platform });
+
+		expect(() => pushHooks.close(ws)).not.toThrow();
+		await expect(live.push({ userId: 'u-uni-6' }, 'event')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	});
 });
 
 // -- live.stream({ staleAfterMs, onError }) -----------------------------------

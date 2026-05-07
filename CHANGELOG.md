@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.11] - 2026-05-07
+
+### Fixed
+
+- **`pushHooks.close` now drains stream-subscription bookkeeping in addition to the push registry, so a single hook re-export covers both concerns.** The `live.push` JSDoc and README examples have always recommended `export const close = pushHooks.close;` as the canonical wiring -- but `pushHooks.close` was push-only, leaving stream-subscription bookkeeping (`_topicWsCounts`, silent-topic watchdogs, `__onUnsubscribe` callbacks) un-drained. In short-lived test pages and e2e flows this manifested as a 30s-delayed flurry of `[svelte-realtime] Topic 'X' has subscribers but no events arrived within 30000ms` warnings firing AFTER every page closed -- one warning per topic the page had subscribed to. The disarm path itself was already correct (`_disarmSilentTopicWatch` at `server.js:746`, wired into both per-topic unsubscribe and hard-close at `server.js:1133` and `server.js:6406`); the gap was that the realtime `close` hook never ran for users who followed the JSDoc example. Two-line fix: (1) the realtime `close(ws, ctx)` now also drains the per-userId push registry, so a single `export { close } from 'svelte-realtime/server'` covers everything; (2) `pushHooks.close(ws, ctx)` routes through the realtime `close` when the adapter passes `ctx` (production), so the existing JSDoc-style `export const close = pushHooks.close` re-export gets the same full cleanup with no doc-ordained migration. Direct one-arg `pushHooks.close(ws)` calls (tests, custom flows) still work as push-only via a fallback branch. Idempotent across repeat calls and across users who explicitly compose both hooks; both registries are clean either way. Six new contract tests pin: pushHooks.close drains the silent-topic watchdog under ctx; pushHooks.close drains push registry; pushHooks.close(ws) without ctx still drains push (legacy call shape preserved); realtime `close(ws, ctx)` drains push too; manual composition of both is idempotent; ctx-omitted call doesn't crash on missing platform.
+
+### Changed
+
+- **`devDependencies` bump: `svelte-adapter-uws-extensions` `^0.5.0-next.6` -> `^0.5.0-next.8`.** Picks up `createLeader(redis, options?)` from extensions next.7 (the canonical implementation already referenced from this package's `configureCron({ leader })` JSDoc and README) and the task-runner observability surface from extensions next.8 (`tasks.ready/list/counts/takeover`, `onStateChange` callback, `createPgClient({ pool })` overload -- not consumed by this package directly, but available downstream now). All 1077 tests continue to pass under the new dev-dep tree.
+
+- **`peerDependencies` bump: `svelte-adapter-uws` `^0.5.0-next.14` -> `^0.5.0-next.15`.** Aligns the peer-dep range with the `init({ platform })` and `shutdown({ platform })` lifecycle hooks shipped in adapter next.15, which this package's `0.5.0-next.8` documented as the canonical wire-up site for `setCronPlatform` and `live.configurePush({ remoteRegistry })`. Apps still on adapter next.14 need to upgrade their adapter dep when they upgrade this one; the legacy `open(ws, platform)` wire-up path still works on either adapter version.
+
 ## [0.5.0-next.10] - 2026-05-07
 
 ### Fixed
