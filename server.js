@@ -3003,17 +3003,240 @@ const _aggregateBySource = new Map();
 const _watchedTopics = new Set();
 
 /**
+ * Maximum number of hop buckets a single sliding window may allocate.
+ * Sliding state is `O(bucketCount * per-bucket state)`, so a 10-hour
+ * sliding window with 1-minute slides already weighs in at 600 buckets;
+ * 1000 is a generous default that catches obviously-wrong configs
+ * (e.g. 1ms slide on a 1s window) at module load time. Override via
+ * `_setCapsForTest` if needed.
+ */
+export let MAX_AGGREGATE_BUCKETS = 1000;
+
+/**
+ * Validate a single window spec at module-load time. Throws on:
+ *  - unknown `type`
+ *  - tumbling without either `period` or `durationMs`
+ *  - tumbling `period` outside the supported set
+ *  - sliding without `durationMs` / `slideMs`, or with `slideMs > durationMs`
+ *  - sliding bucket count exceeding `MAX_AGGREGATE_BUCKETS`
+ *  - sliding without a `combine` field on every reducer that has `reduce`
+ *
+ * Failing fast at registration is the difference between "the demo never
+ * boots and prints a clear stack trace" and "the demo boots and starts
+ * silently dropping events into a bucket array that does not exist."
+ *
+ * @param {string} name
+ * @param {any} spec
+ * @param {Record<string, any>} reducers
+ */
+function _validateWindowSpec(name, spec, reducers) {
+	if (!spec || typeof spec !== 'object') {
+		throw new Error(`[svelte-realtime] live.aggregate window '${name}': spec must be an object`);
+	}
+	const type = spec.type;
+	if (type !== 'lifetime' && type !== 'tumbling' && type !== 'sliding') {
+		throw new Error(`[svelte-realtime] live.aggregate window '${name}': unknown type '${type}' (expected 'lifetime', 'tumbling', or 'sliding')`);
+	}
+	if (type === 'tumbling') {
+		const hasPeriod = typeof spec.period === 'string';
+		const hasDuration = typeof spec.durationMs === 'number' && spec.durationMs > 0;
+		if (hasPeriod === hasDuration) {
+			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling spec must have exactly one of 'period' or 'durationMs'`);
+		}
+		if (hasPeriod && !['minute', 'hour', 'daily', 'monthly'].includes(spec.period)) {
+			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling period '${spec.period}' is not supported (expected 'minute' | 'hour' | 'daily' | 'monthly')`);
+		}
+	}
+	if (type === 'sliding') {
+		if (typeof spec.durationMs !== 'number' || spec.durationMs <= 0) {
+			throw new Error(`[svelte-realtime] live.aggregate window '${name}': sliding requires a positive 'durationMs'`);
+		}
+		if (typeof spec.slideMs !== 'number' || spec.slideMs <= 0) {
+			throw new Error(`[svelte-realtime] live.aggregate window '${name}': sliding requires a positive 'slideMs'`);
+		}
+		if (spec.slideMs > spec.durationMs) {
+			throw new Error(`[svelte-realtime] live.aggregate window '${name}': slideMs (${spec.slideMs}) must be <= durationMs (${spec.durationMs})`);
+		}
+		const bucketCount = Math.ceil(spec.durationMs / spec.slideMs);
+		if (bucketCount > MAX_AGGREGATE_BUCKETS) {
+			throw new Error(`[svelte-realtime] live.aggregate window '${name}': sliding bucket count ${bucketCount} exceeds MAX_AGGREGATE_BUCKETS (${MAX_AGGREGATE_BUCKETS}). Increase slideMs or shorten durationMs.`);
+		}
+		// Sliding requires combine on every reducer that has a reduce(); otherwise
+		// the cross-bucket state cannot be recombined. Catch at module load.
+		for (const [field, r] of Object.entries(reducers)) {
+			if (r.reduce && typeof r.combine !== 'function') {
+				throw new Error(`[svelte-realtime] live.aggregate window '${name}' (sliding): reducer '${field}' has reduce() but no combine(). Sliding windows merge state across hop buckets and need an explicit combine. See built-in helpers: combineSum, combineCounts, combineMax, combineMin, combineMerge.`);
+			}
+		}
+	}
+}
+
+/**
+ * Compute the next boundary timestamp for a tumbling window of the
+ * given period in the given IANA time zone (default 'UTC'). Uses
+ * `Intl.DateTimeFormat` for zone-correct, DST-correct, leap-day-correct
+ * arithmetic without a third-party dependency.
+ *
+ * @param {number} now - epoch ms reference
+ * @param {'minute' | 'hour' | 'daily' | 'monthly'} period
+ * @param {string} tz
+ * @returns {number} epoch ms of the next boundary > now
+ */
+function _nextBoundaryForPeriod(now, period, tz = 'UTC') {
+	const fmt = new Intl.DateTimeFormat('en-US', {
+		timeZone: tz,
+		year: 'numeric', month: 'numeric', day: 'numeric',
+		hour: 'numeric', minute: 'numeric', second: 'numeric',
+		hour12: false
+	});
+	const parts = fmt.formatToParts(new Date(now));
+	const get = (k) => Number(parts.find(p => p.type === k)?.value);
+	let y = get('year'), mo = get('month'), d = get('day');
+	let h = get('hour'), mi = get('minute');
+	if (h === 24) h = 0; // some Intl impls render midnight as 24
+	// Compute the wall-clock of the next boundary in the target tz.
+	let nextY = y, nextMo = mo, nextD = d, nextH = h, nextMi = mi;
+	if (period === 'minute') {
+		nextMi = mi + 1;
+	} else if (period === 'hour') {
+		nextH = h + 1; nextMi = 0;
+	} else if (period === 'daily') {
+		nextD = d + 1; nextH = 0; nextMi = 0;
+	} else { // monthly
+		nextMo = mo + 1; nextD = 1; nextH = 0; nextMi = 0;
+	}
+	// Resolve the wall-clock back to an epoch ms in the target tz by
+	// constructing a UTC Date with the wall-clock fields, asking Intl
+	// for what tz it would render that as, computing the offset, and
+	// subtracting. Two-pass for DST-fall-back correctness (an offset
+	// that changes between iso-construction and now).
+	const isoMs = Date.UTC(nextY, nextMo - 1, nextD, nextH, nextMi, 0, 0);
+	const tzOffsetMs = isoMs - _wallClockUtcInTz(isoMs, tz);
+	return isoMs + tzOffsetMs;
+}
+
+/**
+ * Reverse of the formatter: given a UTC ms reference, what is the same
+ * wall-clock (year-month-day-hour-min-sec) but interpreted as if it
+ * were in `tz`? Returns the equivalent UTC ms. Used to compute the
+ * tz->UTC offset by subtracting from the input.
+ *
+ * @param {number} ms
+ * @param {string} tz
+ * @returns {number}
+ */
+function _wallClockUtcInTz(ms, tz) {
+	const fmt = new Intl.DateTimeFormat('en-US', {
+		timeZone: tz,
+		year: 'numeric', month: 'numeric', day: 'numeric',
+		hour: 'numeric', minute: 'numeric', second: 'numeric',
+		hour12: false
+	});
+	const parts = fmt.formatToParts(new Date(ms));
+	const get = (k) => Number(parts.find(p => p.type === k)?.value);
+	let h = get('hour'); if (h === 24) h = 0;
+	return Date.UTC(get('year'), get('month') - 1, get('day'), h, get('minute'), get('second'), 0);
+}
+
+/**
+ * Compute the next boundary for a tumbling window of fixed duration
+ * anchored at `anchor` (default UTC epoch).
+ *
+ * @param {number} now - epoch ms
+ * @param {number} durationMs
+ * @param {number} [anchor]
+ * @returns {number}
+ */
+function _nextBoundaryForDuration(now, durationMs, anchor = 0) {
+	const elapsed = now - anchor;
+	const periods = Math.floor(elapsed / durationMs) + 1;
+	return anchor + periods * durationMs;
+}
+
+/**
+ * Built-in `combine` helpers for the common reducer shapes. Pass any of
+ * these as `combine` on a reducer when using a sliding window:
+ *
+ * ```js
+ * counts: {
+ *   init: () => ({}),
+ *   reduce: (acc, event, data) => ({ ...acc, [data.id]: (acc[data.id] ?? 0) + 1 }),
+ *   combine: combineCounts
+ * }
+ * ```
+ *
+ * Hand-roll your own combine for non-trivial reducers (top-K, percentile
+ * sketches, custom state shapes). The escape hatch is fully intact.
+ */
+export const combineSum = (...buckets) => buckets.reduce((s, b) => s + (b ?? 0), 0);
+export const combineMax = (...buckets) => {
+	let best = -Infinity, seen = false;
+	for (const b of buckets) { if (b == null) continue; if (!seen || b > best) { best = b; seen = true; } }
+	return seen ? best : 0;
+};
+export const combineMin = (...buckets) => {
+	let best = Infinity, seen = false;
+	for (const b of buckets) { if (b == null) continue; if (!seen || b < best) { best = b; seen = true; } }
+	return seen ? best : 0;
+};
+export const combineCounts = (...buckets) => {
+	const merged = {};
+	for (const b of buckets) {
+		if (!b) continue;
+		for (const [k, v] of Object.entries(b)) merged[k] = (merged[k] ?? 0) + v;
+	}
+	return merged;
+};
+export const combineMerge = (...buckets) => {
+	const merged = {};
+	for (const b of buckets) { if (b) Object.assign(merged, b); }
+	return merged;
+};
+
+/**
  * Create a real-time incremental aggregation over a source topic.
  * Each event runs O(1) reducers instead of requerying the database.
  *
+ * **Single-state form** (no `windows`): the original behavior. One
+ * state slice per reducer field, one output topic, one snapshot.
+ *
+ * **Windowed form** (`windows: { ... }`): declarative time-windowed
+ * aggregation. One state slice per (reducer field x window), per-window
+ * output topic at `${topic}:${windowName}`, per-window debounce + snapshot.
+ * Supports three window types:
+ *
+ * - `lifetime` -- never resets; equivalent to a single-state aggregate
+ *   exposed as a named output for symmetry.
+ * - `tumbling` -- boundary-anchored. `period: 'minute' | 'hour' | 'daily'
+ *   | 'monthly'` resets at the configured tz's natural boundary;
+ *   `durationMs + anchor` resets at fixed intervals from a custom epoch.
+ *   On boundary cross, the closing window publishes one final pre-reset
+ *   state, then state is `init()`-cleared for the new window.
+ * - `sliding` -- hop-window with `durationMs / slideMs` buckets. Each
+ *   event reduces into the current hop; on each slide, drop the oldest
+ *   bucket and start a new current bucket. Reducers MUST provide a
+ *   `combine(...buckets)` field so cross-bucket state can be recomputed
+ *   on each publish; built-in helpers `combineSum`, `combineCounts`,
+ *   `combineMax`, `combineMin`, `combineMerge` cover the common shapes.
+ *
+ * **Cluster mode (important).** Today's aggregate runs on every worker
+ * fed by the source topic via the adapter's cluster bus. State converges
+ * across workers as long as the source topic fans out to every worker
+ * (the default). Sharded source topics (where each worker sees a
+ * partition rather than the full firehose) will produce divergent
+ * per-worker state and inconsistent per-window publishes. For sharded
+ * sources, layer a leader gate later (symmetric to `configureCron({
+ * leader })`) -- not shipped in this slice.
+ *
  * @param {string} source - Topic to watch for events
- * @param {Record<string, { init?: () => any, reduce?: (acc: any, event: string, data: any) => any, compute?: (state: any) => any }>} reducers
- * @param {{ topic: string, snapshot?: () => Promise<any>, debounce?: number }} options
+ * @param {Record<string, { init?: () => any, reduce?: (acc: any, event: string, data: any) => any, compute?: (state: any) => any, combine?: (...buckets: any[]) => any }>} reducers
+ * @param {{ topic: string, snapshot?: () => Promise<any>, snapshots?: Record<string, () => Promise<any>>, debounce?: number, windows?: Record<string, any> }} options
  * @returns {Function}
  */
 live.aggregate = function aggregate(source, reducers, options) {
 	const topic = options.topic;
 	const debounce = options?.debounce || 0;
+	const windowsSpec = options?.windows || null;
 
 	// Build initial state from init() functions
 	const initState = {};
@@ -3021,6 +3244,67 @@ live.aggregate = function aggregate(source, reducers, options) {
 		if (r.init) initState[field] = r.init();
 	}
 
+	// ---- Windowed form ----
+	if (windowsSpec) {
+		const windowKeys = Object.keys(windowsSpec);
+		if (windowKeys.length === 0) {
+			throw new Error('[svelte-realtime] live.aggregate: windows must declare at least one window');
+		}
+		for (const [name, spec] of Object.entries(windowsSpec)) {
+			_validateWindowSpec(name, spec, reducers);
+		}
+
+		// The "root" function. It is NOT a stream itself; the per-window
+		// streams attached as `__windowStreams` are what the Vite plugin
+		// generates client stubs for. Calling the root directly throws --
+		// the user's per-window subscribe path is the intended entry.
+		const root = function aggregateRoot() {
+			throw new Error('[svelte-realtime] Windowed aggregate is not a single stream; subscribe via its per-window children (e.g. `myAggregate.last10min`).');
+		};
+
+		/** @type {any} */ (root).__isAggregate = true;
+		/** @type {any} */ (root).__isLive = true;
+		/** @type {any} */ (root).__aggregateSource = source;
+		/** @type {any} */ (root).__aggregateReducers = reducers;
+		/** @type {any} */ (root).__aggregateInitState = initState;
+		/** @type {any} */ (root).__aggregateBaseTopic = topic;
+		/** @type {any} */ (root).__aggregateSnapshot = options?.snapshot || null;
+		/** @type {any} */ (root).__aggregateSnapshots = options?.snapshots || null;
+		/** @type {any} */ (root).__aggregateDebounce = debounce;
+		/** @type {any} */ (root).__aggregateWindows = windowsSpec;
+		/** @type {any} */ (root).__aggregateWindowKeys = windowKeys;
+
+		// Build per-window stream functions. Each is registered separately
+		// via the Vite plugin's per-window registry lines and exposed on
+		// the client as `myAggregate.windowName`.
+		const windowStreams = {};
+		for (const wn of windowKeys) {
+			const outputTopic = `${topic}:${wn}`;
+			const perWindowInit = async function aggregatePerWindowInit() {
+				const entry = _aggregateByTopic.get(topic);
+				if (!entry || !entry.windowStates) {
+					return _computeAggregateState(initState, reducers);
+				}
+				if (entry._hydrationPromise) await entry._hydrationPromise;
+				const winState = entry.windowStates.get(wn);
+				if (!winState) return _computeAggregateState(initState, reducers);
+				return _computeWindowState(winState, reducers);
+			};
+			/** @type {any} */ (perWindowInit).__isStream = true;
+			/** @type {any} */ (perWindowInit).__isLive = true;
+			/** @type {any} */ (perWindowInit).__isAggregateWindow = true;
+			/** @type {any} */ (perWindowInit).__streamTopic = outputTopic;
+			/** @type {any} */ (perWindowInit).__streamOptions = { merge: 'set' };
+			/** @type {any} */ (perWindowInit).__aggregateRoot = root;
+			/** @type {any} */ (perWindowInit).__aggregateWindowName = wn;
+			windowStreams[wn] = perWindowInit;
+		}
+		/** @type {any} */ (root).__windowStreams = windowStreams;
+
+		return root;
+	}
+
+	// ---- Single-state form (existing behavior, untouched) ----
 	const initFn = async function aggregateInit() {
 		const entry = _aggregateByTopic.get(topic);
 		if (entry) {
@@ -3043,6 +3327,32 @@ live.aggregate = function aggregate(source, reducers, options) {
 	/** @type {any} */ (initFn).__aggregateDebounce = debounce;
 	return initFn;
 };
+
+/**
+ * Compute the public-facing state for one window. For lifetime/tumbling
+ * windows this is just `_computeAggregateState(winState.state, reducers)`.
+ * For sliding windows the per-bucket state is collapsed via each reducer's
+ * `combine` first, then `compute` runs against the combined result.
+ *
+ * @param {any} winState
+ * @param {Record<string, any>} reducers
+ * @returns {any}
+ */
+function _computeWindowState(winState, reducers) {
+	if (winState.type === 'sliding') {
+		const merged = {};
+		for (const [field, r] of Object.entries(reducers)) {
+			if (r.combine) {
+				const slices = winState.buckets.map(b => b?.[field]);
+				merged[field] = r.combine(...slices);
+			} else if (r.init) {
+				merged[field] = r.init();
+			}
+		}
+		return _computeAggregateState(merged, reducers);
+	}
+	return _computeAggregateState(winState.state, reducers);
+}
 
 /**
  * Compute aggregate state including computed fields.
@@ -3068,6 +3378,11 @@ function _computeAggregateState(state, reducers) {
 export function __registerAggregate(path, fn) {
 	if (/** @type {any} */ (fn).__lazy) {
 		_lazyQueue.push({ type: 'aggregate', path, loader: fn });
+		return;
+	}
+	const windowsSpec = /** @type {any} */ (fn).__aggregateWindows;
+	if (windowsSpec) {
+		_registerWindowedAggregate(path, fn);
 		return;
 	}
 	const source = /** @type {any} */ (fn).__aggregateSource;
@@ -3097,6 +3412,258 @@ export function __registerAggregate(path, fn) {
 	if (!srcSet) { srcSet = new Set(); _aggregateBySource.set(source, srcSet); }
 	srcSet.add(entry);
 	_watchedTopics.add(source);
+}
+
+/**
+ * Register a windowed aggregate. Builds one entry that holds N window
+ * states (`entry.windowStates: Map<windowName, winState>`), schedules
+ * boundary timers (tumbling) and slide timers (sliding), and hydrates
+ * each window from its optional per-window snapshot.
+ *
+ * @param {string} path
+ * @param {Function} fn
+ */
+function _registerWindowedAggregate(path, fn) {
+	const source = /** @type {any} */ (fn).__aggregateSource;
+	const reducers = /** @type {any} */ (fn).__aggregateReducers;
+	const baseTopic = /** @type {any} */ (fn).__aggregateBaseTopic;
+	const initState = /** @type {any} */ (fn).__aggregateInitState;
+	const snapshots = /** @type {any} */ (fn).__aggregateSnapshots || {};
+	const legacySnapshot = /** @type {any} */ (fn).__aggregateSnapshot;
+	const debounce = /** @type {any} */ (fn).__aggregateDebounce || 0;
+	const windowsSpec = /** @type {any} */ (fn).__aggregateWindows;
+	if (!source || !baseTopic || !windowsSpec) return;
+
+	const _reducerEntries = Object.entries(reducers);
+	/** @type {Map<string, any>} */
+	const windowStates = new Map();
+	const entry = {
+		source,
+		reducers,
+		_reducerEntries,
+		baseTopic,
+		windowStates,
+		debounce,
+		_hydrationPromise: null,
+		windowed: true
+	};
+
+	const now = Date.now();
+	for (const [wn, spec] of Object.entries(windowsSpec)) {
+		const outputTopic = `${baseTopic}:${wn}`;
+		const winDebounce = (typeof spec.debounce === 'number' && spec.debounce >= 0) ? spec.debounce : debounce;
+		if (spec.type === 'lifetime') {
+			windowStates.set(wn, {
+				type: 'lifetime', spec, name: wn, outputTopic,
+				state: { ...initState },
+				debounce: winDebounce, timer: null
+			});
+		} else if (spec.type === 'tumbling') {
+			windowStates.set(wn, {
+				type: 'tumbling', spec, name: wn, outputTopic,
+				state: { ...initState },
+				debounce: winDebounce, timer: null,
+				boundaryTimer: null,
+				nextBoundary: spec.period
+					? _nextBoundaryForPeriod(now, spec.period, spec.tz || 'UTC')
+					: _nextBoundaryForDuration(now, spec.durationMs, spec.anchor || 0)
+			});
+		} else if (spec.type === 'sliding') {
+			const bucketCount = Math.ceil(spec.durationMs / spec.slideMs);
+			const buckets = [];
+			for (let i = 0; i < bucketCount; i++) {
+				const b = {};
+				for (const [field, r] of _reducerEntries) {
+					if (r.init) b[field] = r.init();
+				}
+				buckets.push(b);
+			}
+			windowStates.set(wn, {
+				type: 'sliding', spec, name: wn, outputTopic,
+				buckets,
+				bucketCount,
+				bucketIndex: 0,
+				debounce: winDebounce, timer: null,
+				slideTimer: null
+			});
+		}
+	}
+
+	// Hydrate per-window snapshots in parallel. Lifetime can also be fed
+	// by the legacy `snapshot` option for backwards compat with apps that
+	// adopted windows by adding a single `lifetime` slot.
+	const hydrationTasks = [];
+	for (const [wn, win] of windowStates) {
+		const perWindowSnap = snapshots[wn] || (wn === 'lifetime' ? legacySnapshot : null);
+		if (!perWindowSnap || win.type === 'sliding') continue;
+		hydrationTasks.push((async () => {
+			try {
+				const s = await perWindowSnap();
+				if (s && typeof s === 'object') Object.assign(win.state, s);
+			} catch {}
+		})());
+	}
+	if (hydrationTasks.length > 0) {
+		entry._hydrationPromise = Promise.all(hydrationTasks).then(() => { entry._hydrationPromise = null; });
+	}
+
+	aggregateRegistry.set(path, entry);
+	_aggregateByTopic.set(baseTopic, entry);
+	let srcSet = _aggregateBySource.get(source);
+	if (!srcSet) { srcSet = new Set(); _aggregateBySource.set(source, srcSet); }
+	srcSet.add(entry);
+	_watchedTopics.add(source);
+
+	// Schedule boundary / slide timers. Captured `entry` lets the timer
+	// re-arm itself across multiple boundaries without re-registering.
+	for (const win of windowStates.values()) {
+		if (win.type === 'tumbling') {
+			_scheduleNextBoundary(entry, win);
+		} else if (win.type === 'sliding') {
+			_scheduleNextSlide(entry, win);
+		}
+	}
+}
+
+/**
+ * Arm the boundary timer for a tumbling window. On fire: publish the
+ * closing-window final state, reset the per-reducer state via init(),
+ * recompute the next boundary, and re-arm. Self-rearming so a window
+ * keeps tumbling for the lifetime of the process.
+ *
+ * @param {any} entry
+ * @param {any} win
+ */
+function _scheduleNextBoundary(entry, win) {
+	const delay = Math.max(0, win.nextBoundary - Date.now());
+	win.boundaryTimer = setTimeout(() => {
+		win.boundaryTimer = null;
+		// Final publish of the closing window so subscribers see the
+		// pre-reset state before the new window starts. If a debounce is
+		// pending, flush it inline rather than letting the new state
+		// race the published value.
+		if (win.timer) {
+			clearTimeout(win.timer);
+			win.timer = null;
+		}
+		_publishWindow(entry, win);
+		// Reset state to init() for the new window.
+		const fresh = {};
+		for (const [field, r] of entry._reducerEntries) {
+			if (r.init) fresh[field] = r.init();
+		}
+		win.state = fresh;
+		// Compute the next boundary off the fired-at time, not Date.now(),
+		// so a slow/blocked event loop does not drift the schedule.
+		const now = Date.now();
+		win.nextBoundary = win.spec.period
+			? _nextBoundaryForPeriod(now, win.spec.period, win.spec.tz || 'UTC')
+			: _nextBoundaryForDuration(now, win.spec.durationMs, win.spec.anchor || 0);
+		_scheduleNextBoundary(entry, win);
+	}, delay);
+	// Don't keep the event loop alive solely for cron-like tumbling --
+	// matches the cron interval's implicit ref behavior; tests / clean
+	// shutdown can still kill the timer via `_clearAggregateTimers`.
+	if (typeof win.boundaryTimer.unref === 'function') win.boundaryTimer.unref();
+}
+
+/**
+ * Arm the slide timer for a sliding window. On fire: rotate the ring
+ * (advance bucketIndex; init() the new current bucket), publish the
+ * post-slide state, re-arm. The publish on every slide is what gives
+ * subscribers a smooth-decaying view rather than waiting for the next
+ * event after the eviction.
+ *
+ * @param {any} entry
+ * @param {any} win
+ */
+function _scheduleNextSlide(entry, win) {
+	win.slideTimer = setTimeout(() => {
+		win.slideTimer = null;
+		// Advance the ring head and clear the new current bucket.
+		win.bucketIndex = (win.bucketIndex + 1) % win.bucketCount;
+		const fresh = {};
+		for (const [field, r] of entry._reducerEntries) {
+			if (r.init) fresh[field] = r.init();
+		}
+		win.buckets[win.bucketIndex] = fresh;
+		// Publish the post-slide combined state so a subscriber sees
+		// values dropping out of the window even when no fresh events
+		// are arriving.
+		if (win.timer) {
+			clearTimeout(win.timer);
+			win.timer = null;
+		}
+		_publishWindow(entry, win);
+		_scheduleNextSlide(entry, win);
+	}, win.spec.slideMs);
+	if (typeof win.slideTimer.unref === 'function') win.slideTimer.unref();
+}
+
+/**
+ * Compute and publish a window's current state to its output topic.
+ * Honors `_cronPlatform` first (the captured publish path used by cron
+ * and by anything that runs outside an active connection), so boundary
+ * and slide timers can publish without an active publish wrapping them.
+ *
+ * Plain reduce-on-event publishes go through the wrapped
+ * `platform.publish` from the source-event handler -- that path
+ * captures `platform` directly and does not need this fallback.
+ *
+ * @param {any} entry
+ * @param {any} win
+ */
+function _publishWindow(entry, win) {
+	const platform = _cronPlatform;
+	if (!platform) return;
+	const computed = _computeWindowState(win, entry.reducers);
+	platform.publish(win.outputTopic, 'set', computed);
+}
+
+/**
+ * Tear down all timers belonging to a windowed aggregate entry. Called
+ * from HMR clear and tests.
+ *
+ * @param {any} entry
+ */
+function _clearAggregateTimers(entry) {
+	if (!entry || !entry.windowStates) return;
+	for (const win of entry.windowStates.values()) {
+		if (win.timer) { clearTimeout(win.timer); win.timer = null; }
+		if (win.boundaryTimer) { clearTimeout(win.boundaryTimer); win.boundaryTimer = null; }
+		if (win.slideTimer) { clearTimeout(win.slideTimer); win.slideTimer = null; }
+	}
+}
+
+/**
+ * Test-only helper. Clear every registered aggregate (windowed or
+ * single-state) and the source-watch index. Tests that register
+ * windowed aggregates should call this in their `afterEach` to prevent
+ * boundary / slide timers from leaking across cases.
+ */
+export function _resetAggregates() {
+	for (const e of aggregateRegistry.values()) {
+		if (e.timer) clearTimeout(e.timer);
+		_clearAggregateTimers(e);
+	}
+	aggregateRegistry.clear();
+	_aggregateByTopic.clear();
+	for (const [src, set] of _aggregateBySource) {
+		// Drop only aggregate entries; effects/derived may share the source.
+		if (set.size === 0) {
+			_aggregateBySource.delete(src);
+			if (!_derivedBySource.has(src) && !_effectBySource.has(src)) {
+				_watchedTopics.delete(src);
+			}
+		}
+	}
+	// Source-tracked watcher entries are entry-keyed; clearing the
+	// registry above already orphaned them. Drop the source map wholesale
+	// rather than iterating to keep this cheap and correct.
+	_aggregateBySource.clear();
+	if (_derivedBySource.size === 0 && _effectBySource.size === 0) {
+		_watchedTopics.clear();
+	}
 }
 
 /**
@@ -3836,7 +4403,42 @@ function _wrapPlatformPublish(platform) {
 		const aggregateEntries = _aggregateBySource.get(topic);
 		if (aggregateEntries) {
 			for (const entry of aggregateEntries) {
-				// Apply reducers
+				if (entry.windowed) {
+					// Windowed branch: each window holds its own state slice
+					// (or hop-bucket array for sliding) and publishes to its
+					// own output topic. Per-window debounce overrides the
+					// aggregate-level default.
+					for (const win of entry.windowStates.values()) {
+						if (win.type === 'sliding') {
+							const bucket = win.buckets[win.bucketIndex];
+							for (const [field, reducer] of entry._reducerEntries) {
+								if (reducer.reduce) {
+									bucket[field] = reducer.reduce(bucket[field], event, data);
+								}
+							}
+						} else {
+							for (const [field, reducer] of entry._reducerEntries) {
+								if (reducer.reduce) {
+									win.state[field] = reducer.reduce(win.state[field], event, data);
+								}
+							}
+						}
+						const computed = _computeWindowState(win, entry.reducers);
+						const winRef = win;
+						if (winRef.debounce > 0) {
+							if (winRef.timer) clearTimeout(winRef.timer);
+							winRef.timer = setTimeout(() => {
+								winRef.timer = null;
+								platform.publish(winRef.outputTopic, 'set', computed);
+							}, winRef.debounce);
+						} else {
+							platform.publish(winRef.outputTopic, 'set', computed);
+						}
+					}
+					continue;
+				}
+
+				// Apply reducers (single-state)
 				for (const [field, reducer] of entry._reducerEntries) {
 					if (reducer.reduce) {
 						entry.state[field] = reducer.reduce(entry.state[field], event, data);
@@ -4325,7 +4927,10 @@ export function _prepareHmr() {
 		}
 	}
 	for (const e of effectRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
-	for (const e of aggregateRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
+	for (const e of aggregateRegistry.values()) {
+		if (e.timer) clearTimeout(e.timer);
+		_clearAggregateTimers(e);
+	}
 
 	// Clear orphaned throttle/debounce timers to prevent stale platform.publish refs
 	for (const [, entry] of _throttles) clearTimeout(entry.timer);

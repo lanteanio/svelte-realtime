@@ -2245,6 +2245,95 @@ export const orderStats = live.aggregate('orders', {
 
 The aggregate publishes its state to the output topic on every event. Clients subscribe to the output topic as a regular stream.
 
+### Time windows
+
+Pass a `windows` option to maintain one state slice per declared window with its own output topic. Three window types:
+
+- **`lifetime`** -- never resets. Equivalent to a single-state aggregate, exposed as a named output for symmetry.
+- **`tumbling`** -- boundary-anchored. `period: 'minute' | 'hour' | 'daily' | 'monthly'` resets at the configured `tz`'s natural boundary; `durationMs + anchor` resets at fixed intervals from a custom epoch. On boundary cross, the closing window publishes one final pre-reset state, then state is `init()`-cleared for the new window.
+- **`sliding`** -- hop-window. `durationMs + slideMs` partitions state into `ceil(durationMs / slideMs)` hop buckets. Each event reduces into the current hop; on each slide tick, drop the oldest bucket and start a new one. Reducers MUST provide a `combine(...buckets)` field so cross-bucket state can be recomputed.
+
+```js
+import { live, combineCounts } from 'svelte-realtime/server';
+
+export const trending = live.aggregate('events:view', {
+  counts: {
+    init: () => ({}),
+    reduce: (acc, event, data) => event === 'viewed'
+      ? { ...acc, [data.itemId]: (acc[data.itemId] ?? 0) + 1 }
+      : acc,
+    combine: combineCounts
+  },
+  top: {
+    compute: (state) => Object.entries(state.counts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([itemId, count]) => ({ itemId, count }))
+  }
+}, {
+  topic: 'events:view:topk',
+  windows: {
+    last10min: { type: 'sliding',  durationMs: 600_000, slideMs: 30_000 },
+    today:     { type: 'tumbling', period: 'daily',   tz: 'UTC' },
+    thisMonth: { type: 'tumbling', period: 'monthly', tz: 'UTC' },
+    lifetime:  { type: 'lifetime' }
+  }
+});
+```
+
+Output topics: `events:view:topk:last10min`, `events:view:topk:today`, `events:view:topk:thisMonth`, `events:view:topk:lifetime`. The client export becomes a namespace object keyed by window name:
+
+```svelte
+<script>
+  import { trending } from '$live/topk';
+</script>
+
+<h2>Last 10 min</h2>
+<ul>{#each $trending.last10min?.top ?? [] as row}<li>{row.itemId}: {row.count}</li>{/each}</ul>
+
+<h2>Today</h2>
+<ul>{#each $trending.today?.top ?? [] as row}<li>{row.itemId}: {row.count}</li>{/each}</ul>
+```
+
+#### Built-in `combine` helpers
+
+For the common reducer shapes:
+
+| Helper            | Reducer state shape          |
+|-------------------|------------------------------|
+| `combineSum`      | `number`                     |
+| `combineMax`      | `number`                     |
+| `combineMin`      | `number`                     |
+| `combineCounts`   | `Record<string, number>`     |
+| `combineMerge`    | `Record<string, any>` (last-write-wins per key) |
+
+Hand-roll your own `combine(...buckets)` for non-trivial reducers (top-K, percentile sketches, custom shapes).
+
+#### Per-window snapshots
+
+The single `snapshot` option only restores the single-state form. For windowed aggregates, pass `snapshots` keyed by window name -- each restores one window's state on registration in parallel:
+
+```js
+{
+  topic: 'events:view:topk',
+  snapshots: {
+    today:    () => db.query('select counts_json from topk_daily where day = today()').then(r => r[0]?.counts_json ?? {}),
+    lifetime: () => db.query('select counts_json from topk_lifetime').then(r => r[0]?.counts_json ?? {})
+  },
+  windows: { /* ... */ }
+}
+```
+
+Sliding windows are not snapshot-restorable -- their bucket boundaries are tied to wall-clock time and would not survive a restart coherently. Pass tumbling and lifetime here.
+
+#### Cluster mode
+
+Today's aggregate runs on every worker, fed by the source topic via the adapter's cluster bus. State converges across workers as long as the source topic fans out to every worker (the default with `createPubSubBus`/`createShardedBus` from `svelte-adapter-uws-extensions`). For sharded source topics where each worker sees a partition rather than the full firehose, per-worker state diverges and per-window publishes will be inconsistent across instances. A `configureAggregate({ leader })` hook may land later (symmetric to `configureCron({ leader })`); for now, prefer fanout-to-every-worker source topics for windowed aggregates.
+
+#### Capacity bound
+
+`MAX_AGGREGATE_BUCKETS` (default 1000) caps a single sliding window's hop-bucket count. A 10-hour sliding window with 1-minute slides allocates 600 buckets -- well under the cap. Misconfigurations like a 1ms slide on a 1s window (1000 buckets) are caught at registration with a clear error pointing at the relevant window name.
+
 ---
 
 ## Gates

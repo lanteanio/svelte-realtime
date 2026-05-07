@@ -529,6 +529,79 @@ export function live<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(f
  * The shape of a single entry on a `defineTopics` map: either a static
  * string or a function returning a string from one or more args.
  */
+/**
+ * Time-window specification for `live.aggregate({ windows })`. Three
+ * discriminated variants, matching the three semantic models the
+ * primitive supports.
+ */
+export type WindowSpec =
+	| {
+		type: 'lifetime';
+		/** Per-window debounce override (defaults to the aggregate's top-level `debounce`). */
+		debounce?: number;
+	}
+	| {
+		type: 'tumbling';
+		/** Boundary-anchored period. Resets at the configured `tz`'s natural boundary. */
+		period: 'minute' | 'hour' | 'daily' | 'monthly';
+		/** IANA time zone for boundary calculation. Default 'UTC'. */
+		tz?: string;
+		debounce?: number;
+	}
+	| {
+		type: 'tumbling';
+		/** Fixed-duration tumbling. Resets every `durationMs` from `anchor`. */
+		durationMs: number;
+		/** Epoch-ms anchor for boundary alignment. Default 0 (UTC epoch). */
+		anchor?: number;
+		debounce?: number;
+	}
+	| {
+		type: 'sliding';
+		/** Total window duration in milliseconds. */
+		durationMs: number;
+		/** Hop interval in milliseconds. Bucket count = ceil(durationMs / slideMs). */
+		slideMs: number;
+		debounce?: number;
+	};
+
+/**
+ * Cluster-wide leader gate consumer signature for `live.aggregate`
+ * (reserved for a future `configureAggregate({ leader })` symmetric to
+ * `configureCron`). Exported for forward-compat type stability.
+ */
+export type AggregateLeader = () => boolean;
+
+/**
+ * Built-in `combine(...buckets)` helpers for sliding-window reducers.
+ * Pass any of these as `combine` on a reducer to recombine per-bucket
+ * state across hop boundaries. Hand-roll your own for non-trivial
+ * reducer shapes (top-K, percentile sketches, etc.).
+ *
+ * @example
+ * ```js
+ * import { combineCounts } from 'svelte-realtime/server';
+ *
+ * counts: {
+ *   init: () => ({}),
+ *   reduce: (acc, event, data) => ({ ...acc, [data.id]: (acc[data.id] ?? 0) + 1 }),
+ *   combine: combineCounts
+ * }
+ * ```
+ */
+export const combineSum: (...buckets: number[]) => number;
+export const combineMax: (...buckets: number[]) => number;
+export const combineMin: (...buckets: number[]) => number;
+export const combineCounts: (...buckets: Array<Record<string, number> | undefined>) => Record<string, number>;
+export const combineMerge: <T extends object>(...buckets: Array<T | undefined>) => T;
+
+/**
+ * Maximum number of hop buckets a single sliding window may allocate.
+ * Sliding state is `O(bucketCount * per-bucket state)`. Default 1000;
+ * override via test setup.
+ */
+export const MAX_AGGREGATE_BUCKETS: number;
+
 export type TopicEntry = string | ((...args: any[]) => string);
 
 /**
@@ -1238,15 +1311,52 @@ export namespace live {
 	 * Create a real-time incremental aggregation over a source topic.
 	 *
 	 * @param source - Topic to watch
-	 * @param reducers - Field definitions with init/reduce/compute functions
-	 * @param options - Output topic, optional snapshot, debounce
+	 * @param reducers - Field definitions with init/reduce/compute (and `combine` when using sliding windows)
+	 * @param options - Output topic, optional snapshot, debounce, optional `windows`
 	 *
 	 * @example
 	 * ```js
+	 * // Single-state aggregate (no windows)
 	 * export const orderStats = live.aggregate('orders', {
 	 *   count: { init: () => 0, reduce: (acc, event) => event === 'created' ? acc + 1 : acc },
 	 *   avgValue: { compute: (state) => state.count > 0 ? state.total / state.count : 0 }
 	 * }, { topic: 'order-stats' });
+	 * ```
+	 *
+	 * @example
+	 * ```js
+	 * // Windowed aggregate -- emits one output topic per window:
+	 * //   events:view:topk:last10min, events:view:topk:today,
+	 * //   events:view:topk:thisMonth, events:view:topk:lifetime
+	 * import { combineCounts } from 'svelte-realtime/server';
+	 *
+	 * export const trending = live.aggregate('events:view', {
+	 *   counts: {
+	 *     init: () => ({}),
+	 *     reduce: (acc, event, data) => event === 'viewed'
+	 *       ? { ...acc, [data.itemId]: (acc[data.itemId] ?? 0) + 1 }
+	 *       : acc,
+	 *     combine: combineCounts // required for sliding windows
+	 *   },
+	 *   top: {
+	 *     compute: (state) => Object.entries(state.counts)
+	 *       .sort((a, b) => b[1] - a[1])
+	 *       .slice(0, 10)
+	 *       .map(([itemId, count]) => ({ itemId, count }))
+	 *   }
+	 * }, {
+	 *   topic: 'events:view:topk',
+	 *   windows: {
+	 *     last10min: { type: 'sliding', durationMs: 600_000, slideMs: 30_000 },
+	 *     today:     { type: 'tumbling', period: 'daily', tz: 'UTC' },
+	 *     thisMonth: { type: 'tumbling', period: 'monthly', tz: 'UTC' },
+	 *     lifetime:  { type: 'lifetime' }
+	 *   }
+	 * });
+	 *
+	 * // Client-side: subscribe to whichever windows you care about
+	 * import { trending } from '$live/topk';
+	 * $: rows = $trending.last10min?.top ?? [];
 	 * ```
 	 */
 	function aggregate(
@@ -1255,11 +1365,39 @@ export namespace live {
 			init?(): any;
 			reduce?(acc: any, event: string, data: any): any;
 			compute?(state: Record<string, any>): any;
+			combine?(...buckets: any[]): any;
 		}>,
 		options: {
 			topic: string;
+			/**
+			 * Optional snapshot for the single-state form, OR (when `windows`
+			 * is set) a fallback restore for a window literally named
+			 * `lifetime`. For multi-window snapshots, prefer `snapshots`.
+			 */
 			snapshot?(): Promise<Record<string, any>>;
+			/**
+			 * Per-window snapshot loaders. Keyed by window name (must match
+			 * a key in `windows`). Each is awaited in parallel during
+			 * registration; failure is silent (logs only) so a missing
+			 * snapshot never blocks boot. Sliding windows are not
+			 * snapshot-restorable (the bucket ring's hop boundaries are
+			 * tied to wall-clock time and would not survive a restart
+			 * coherently); pass tumbling and lifetime here.
+			 */
+			snapshots?: Record<string, () => Promise<Record<string, any>>>;
+			/**
+			 * Default debounce in milliseconds for output publishes.
+			 * Per-window override available via `WindowSpec.debounce`.
+			 */
 			debounce?: number;
+			/**
+			 * Optional time-windowing. When set, the aggregate maintains
+			 * one state slice per declared window, emits one output topic
+			 * per window at `${topic}:${windowName}`, and the client
+			 * stub becomes a namespace object keyed by window name. Omit
+			 * for the single-state form (existing behavior, unchanged).
+			 */
+			windows?: Record<string, WindowSpec>;
 		}
 	): Function;
 

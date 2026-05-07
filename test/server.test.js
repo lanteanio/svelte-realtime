@@ -6,6 +6,13 @@ import {
 	handleRpc,
 	message,
 	createMessage,
+	combineSum,
+	combineMax,
+	combineMin,
+	combineCounts,
+	combineMerge,
+	_resetAggregates,
+	MAX_AGGREGATE_BUCKETS,
 	__register,
 	__registerGuard,
 	__registerEffect,
@@ -4353,6 +4360,404 @@ describe('live.aggregate()', () => {
 		const statsPubs = platform.published.filter(p => p.topic === 'computed-stats');
 		const lastState = statsPubs[statsPubs.length - 1].data;
 		expect(lastState.avg).toBe(150);
+	});
+});
+
+// -- live.aggregate() with windows --------------------------------------------
+
+describe('live.aggregate() combine helpers', () => {
+	it('combineSum sums numbers, treats null/undefined as 0', () => {
+		expect(combineSum(1, 2, 3)).toBe(6);
+		expect(combineSum(1, null, 3)).toBe(4);
+		expect(combineSum(undefined, undefined)).toBe(0);
+		expect(combineSum()).toBe(0);
+	});
+
+	it('combineMax / combineMin skip nullish, fall back to 0 on empty', () => {
+		expect(combineMax(1, 5, 3)).toBe(5);
+		expect(combineMax(1, null, undefined, 7)).toBe(7);
+		expect(combineMax()).toBe(0);
+		expect(combineMin(5, 1, 3)).toBe(1);
+		expect(combineMin(undefined, undefined)).toBe(0);
+	});
+
+	it('combineCounts merges Record<string, number> by sum-per-key', () => {
+		const merged = combineCounts({ a: 1, b: 2 }, { a: 3, c: 5 }, undefined, { c: 1 });
+		expect(merged).toEqual({ a: 4, b: 2, c: 6 });
+	});
+
+	it('combineMerge does last-write-wins object merge', () => {
+		expect(combineMerge({ a: 1 }, { a: 2, b: 3 })).toEqual({ a: 2, b: 3 });
+		expect(combineMerge(undefined, { x: 1 }, undefined)).toEqual({ x: 1 });
+	});
+});
+
+describe('live.aggregate() windowed -- validation', () => {
+	it('rejects an empty windows object', () => {
+		expect(() => live.aggregate('src', { c: { init: () => 0 } }, {
+			topic: 't', windows: {}
+		})).toThrow(/at least one window/);
+	});
+
+	it('rejects unknown window type', () => {
+		expect(() => live.aggregate('src', { c: { init: () => 0 } }, {
+			topic: 't', windows: { w: { type: 'wat' } }
+		})).toThrow(/unknown type/);
+	});
+
+	it('rejects tumbling without period or durationMs', () => {
+		expect(() => live.aggregate('src', { c: { init: () => 0 } }, {
+			topic: 't', windows: { w: { type: 'tumbling' } }
+		})).toThrow(/exactly one of 'period' or 'durationMs'/);
+	});
+
+	it('rejects tumbling with both period and durationMs', () => {
+		expect(() => live.aggregate('src', { c: { init: () => 0 } }, {
+			topic: 't', windows: { w: { type: 'tumbling', period: 'daily', durationMs: 1000 } }
+		})).toThrow(/exactly one of 'period' or 'durationMs'/);
+	});
+
+	it('rejects tumbling with unsupported period', () => {
+		expect(() => live.aggregate('src', { c: { init: () => 0 } }, {
+			topic: 't', windows: { w: { type: 'tumbling', period: 'fortnight' } }
+		})).toThrow(/period 'fortnight'/);
+	});
+
+	it('rejects sliding without slideMs', () => {
+		expect(() => live.aggregate('src', { c: { init: () => 0, reduce: (a) => a, combine: combineSum } }, {
+			topic: 't', windows: { w: { type: 'sliding', durationMs: 1000 } }
+		})).toThrow(/positive 'slideMs'/);
+	});
+
+	it('rejects sliding with slideMs > durationMs', () => {
+		expect(() => live.aggregate('src', { c: { init: () => 0, reduce: (a) => a, combine: combineSum } }, {
+			topic: 't', windows: { w: { type: 'sliding', durationMs: 1000, slideMs: 5000 } }
+		})).toThrow(/slideMs.*must be <=.*durationMs/);
+	});
+
+	it('rejects sliding bucket count over MAX_AGGREGATE_BUCKETS', () => {
+		// 1ms slide on a 100s window = 100,000 buckets -- well over the cap.
+		expect(() => live.aggregate('src', { c: { init: () => 0, reduce: (a) => a, combine: combineSum } }, {
+			topic: 't',
+			windows: { w: { type: 'sliding', durationMs: 100_000, slideMs: 1 } }
+		})).toThrow(new RegExp(`exceeds MAX_AGGREGATE_BUCKETS \\(${MAX_AGGREGATE_BUCKETS}\\)`));
+	});
+
+	it('rejects sliding when a reducer with reduce() lacks combine()', () => {
+		expect(() => live.aggregate('src', {
+			counts: { init: () => ({}), reduce: (acc) => acc /* no combine */ }
+		}, {
+			topic: 't',
+			windows: { w: { type: 'sliding', durationMs: 1000, slideMs: 100 } }
+		})).toThrow(/reducer 'counts' has reduce\(\) but no combine\(\)/);
+	});
+
+	it('accepts sliding when a reducer is compute-only (no reduce, no combine needed)', () => {
+		// compute()-only reducers (no reduce, no init) don't carry hop-bucket
+		// state, so combine is never consulted for them.
+		expect(() => live.aggregate('src', {
+			counts: { init: () => ({}), reduce: (acc) => acc, combine: combineCounts },
+			top: { compute: (s) => Object.keys(s.counts).length }
+		}, {
+			topic: 't',
+			windows: { w: { type: 'sliding', durationMs: 1000, slideMs: 100 } }
+		})).not.toThrow();
+	});
+});
+
+describe('live.aggregate() windowed -- per-window output topics + state isolation', () => {
+	afterEach(() => {
+		_resetAggregates();
+	});
+
+	it('publishes one envelope per window per source event, on per-window topics', async () => {
+		const fn = live.aggregate('events:hit', {
+			counts: {
+				init: () => ({}),
+				reduce: (acc, event, data) => event === 'inc'
+					? { ...acc, [data.id]: (acc[data.id] ?? 0) + 1 }
+					: acc,
+				combine: combineCounts
+			}
+		}, {
+			topic: 'events:hit:topk',
+			windows: {
+				lifetime: { type: 'lifetime' },
+				window5s:  { type: 'sliding', durationMs: 5000, slideMs: 1000 }
+			}
+		});
+
+		__registerAggregate('agg/win/topk', fn);
+		// Per-window child registrations are normally emitted by the Vite
+		// plugin; do them by hand here so the per-window stream paths
+		// resolve under SSR-side direct-call lookups (not exercised by
+		// this test, but mirrors the production wiring shape).
+		__register('agg/win/topk/__window/lifetime', fn.__windowStreams.lifetime);
+		__register('agg/win/topk/__window/window5s', fn.__windowStreams.window5s);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		platform.publish('events:hit', 'inc', { id: 'a' });
+		platform.publish('events:hit', 'inc', { id: 'a' });
+		platform.publish('events:hit', 'inc', { id: 'b' });
+
+		// Each event publishes once per window -> 3 events x 2 windows = 6.
+		const lifetimePubs = platform.published.filter(p => p.topic === 'events:hit:topk:lifetime');
+		const slidingPubs  = platform.published.filter(p => p.topic === 'events:hit:topk:window5s');
+		expect(lifetimePubs.length).toBe(3);
+		expect(slidingPubs.length).toBe(3);
+
+		// State across the two windows is isolated -- they happen to agree
+		// here because no slide tick fired, but they are computed off
+		// independent state slices.
+		expect(lifetimePubs[2].data.counts).toEqual({ a: 2, b: 1 });
+		expect(slidingPubs[2].data.counts).toEqual({ a: 2, b: 1 });
+	});
+
+	it('lifetime window matches the no-windows behavior (regression guard)', async () => {
+		const fn = live.aggregate('events:r', {
+			count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc }
+		}, {
+			topic: 'events:r:agg',
+			windows: { lifetime: { type: 'lifetime' } }
+		});
+
+		__registerAggregate('agg/win/lifetime', fn);
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		platform.publish('events:r', 'inc', {});
+		platform.publish('events:r', 'inc', {});
+
+		const pubs = platform.published.filter(p => p.topic === 'events:r:agg:lifetime');
+		expect(pubs.length).toBe(2);
+		expect(pubs[1].data.count).toBe(2);
+	});
+
+	it('per-window debounce overrides the aggregate-level default', async () => {
+		vi.useFakeTimers();
+		try {
+			const fn = live.aggregate('events:d', {
+				count: { init: () => 0, reduce: (acc) => acc + 1 }
+			}, {
+				topic: 'events:d:agg',
+				debounce: 50,
+				windows: {
+					hot:  { type: 'lifetime', debounce: 0 },
+					cold: { type: 'lifetime' /* inherits 50ms */ }
+				}
+			});
+
+			__registerAggregate('agg/win/debounce', fn);
+			const platform = mockPlatform();
+			_activateDerived(platform);
+
+			platform.publish('events:d', 'inc', {});
+			// Hot window publishes synchronously (debounce: 0).
+			expect(platform.published.filter(p => p.topic === 'events:d:agg:hot').length).toBe(1);
+			// Cold window has not yet fired -- debounce: 50 still pending.
+			expect(platform.published.filter(p => p.topic === 'events:d:agg:cold').length).toBe(0);
+
+			vi.advanceTimersByTime(60);
+			expect(platform.published.filter(p => p.topic === 'events:d:agg:cold').length).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
+describe('live.aggregate() windowed -- tumbling boundary', () => {
+	afterEach(() => {
+		_resetAggregates();
+		vi.useRealTimers();
+	});
+
+	it('publishes the closing-window final state on boundary, then resets state via init()', async () => {
+		vi.useFakeTimers({ now: 1_000_000 }); // arbitrary epoch ms
+		const fn = live.aggregate('events:t', {
+			count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc }
+		}, {
+			topic: 'events:t:agg',
+			// 1000ms tumbling, anchored at the fake-now epoch so the next
+			// boundary is exactly +1000ms.
+			windows: { bucket: { type: 'tumbling', durationMs: 1000, anchor: 1_000_000 } }
+		});
+
+		__registerAggregate('agg/win/tumb', fn);
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		// The boundary timer publishes via _cronPlatform; capture it.
+		setCronPlatform(platform);
+
+		platform.publish('events:t', 'inc', {});
+		platform.publish('events:t', 'inc', {});
+
+		const beforeBoundary = platform.published.filter(p => p.topic === 'events:t:agg:bucket');
+		expect(beforeBoundary[beforeBoundary.length - 1].data.count).toBe(2);
+
+		// Cross the boundary. The boundary publish should reflect the
+		// closing-window count (2), then state resets to init() so the
+		// next event lands as count=1.
+		vi.advanceTimersByTime(1100);
+
+		const allPubs = platform.published.filter(p => p.topic === 'events:t:agg:bucket');
+		// Expect at least: 2 from the inc events + 1 boundary publish.
+		expect(allPubs.length).toBeGreaterThanOrEqual(3);
+		// The publish at the boundary cross is the last one before the new event.
+		expect(allPubs[2].data.count).toBe(2);
+
+		platform.publish('events:t', 'inc', {});
+		const postReset = platform.published.filter(p => p.topic === 'events:t:agg:bucket').slice(-1)[0];
+		expect(postReset.data.count).toBe(1);
+	});
+});
+
+describe('live.aggregate() windowed -- sliding hop rotation', () => {
+	afterEach(() => {
+		_resetAggregates();
+		vi.useRealTimers();
+	});
+
+	it('drops events out of the window after durationMs (within slideMs precision)', async () => {
+		vi.useFakeTimers({ now: 0 });
+		const fn = live.aggregate('events:s', {
+			count: {
+				init: () => 0,
+				reduce: (acc, e) => e === 'inc' ? acc + 1 : acc,
+				combine: combineSum
+			}
+		}, {
+			topic: 'events:s:agg',
+			windows: { w: { type: 'sliding', durationMs: 1000, slideMs: 250 } }
+		});
+
+		__registerAggregate('agg/win/slide', fn);
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		setCronPlatform(platform);
+
+		// 4 events at t=0 land in bucket 0.
+		platform.publish('events:s', 'inc', {});
+		platform.publish('events:s', 'inc', {});
+		platform.publish('events:s', 'inc', {});
+		platform.publish('events:s', 'inc', {});
+
+		const initialPubs = platform.published.filter(p => p.topic === 'events:s:agg:w');
+		expect(initialPubs[initialPubs.length - 1].data.count).toBe(4);
+
+		// Advance past durationMs. At t > 1000, the original bucket has
+		// been fully evicted; combine across remaining (empty) buckets is 0.
+		vi.advanceTimersByTime(1100);
+		const afterEviction = platform.published.filter(p => p.topic === 'events:s:agg:w');
+		expect(afterEviction[afterEviction.length - 1].data.count).toBe(0);
+	});
+
+	it('events span buckets correctly: pushing to bucket 0, then 1, then 2 yields combined count', async () => {
+		vi.useFakeTimers({ now: 0 });
+		const fn = live.aggregate('events:sb', {
+			count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc, combine: combineSum }
+		}, {
+			topic: 'events:sb:agg',
+			windows: { w: { type: 'sliding', durationMs: 1000, slideMs: 200 } }
+		});
+
+		__registerAggregate('agg/win/slide-multi', fn);
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		setCronPlatform(platform);
+
+		platform.publish('events:sb', 'inc', {}); // bucket 0
+		vi.advanceTimersByTime(250);
+		platform.publish('events:sb', 'inc', {}); // bucket 1
+		vi.advanceTimersByTime(250);
+		platform.publish('events:sb', 'inc', {}); // bucket 2
+
+		const pubs = platform.published.filter(p => p.topic === 'events:sb:agg:w');
+		expect(pubs[pubs.length - 1].data.count).toBe(3);
+	});
+});
+
+describe('live.aggregate() windowed -- per-window snapshots', () => {
+	afterEach(() => {
+		_resetAggregates();
+	});
+
+	it('hydrates each window from its own snapshot', async () => {
+		const fn = live.aggregate('events:sn', {
+			count: { init: () => 0, reduce: (acc, e) => e === 'inc' ? acc + 1 : acc }
+		}, {
+			topic: 'events:sn:agg',
+			snapshots: {
+				today:    async () => ({ count: 42 }),
+				lifetime: async () => ({ count: 1000 })
+			},
+			windows: {
+				today:    { type: 'tumbling', durationMs: 86_400_000, anchor: 0 },
+				lifetime: { type: 'lifetime' }
+			}
+		});
+
+		__registerAggregate('agg/win/snap', fn);
+		// Direct-call init returns the per-window restored state.
+		const todayInit = await fn.__windowStreams.today();
+		const lifetimeInit = await fn.__windowStreams.lifetime();
+		expect(todayInit.count).toBe(42);
+		expect(lifetimeInit.count).toBe(1000);
+	});
+
+	it('windows without a snapshot start from init()', async () => {
+		const fn = live.aggregate('events:sn2', {
+			count: { init: () => 0, reduce: (acc) => acc + 1 }
+		}, {
+			topic: 'events:sn2:agg',
+			snapshots: { lifetime: async () => ({ count: 7 }) },
+			windows: {
+				lifetime: { type: 'lifetime' },
+				today: { type: 'tumbling', durationMs: 86_400_000, anchor: 0 }
+			}
+		});
+
+		__registerAggregate('agg/win/snap-partial', fn);
+		const lifetimeInit = await fn.__windowStreams.lifetime();
+		const todayInit = await fn.__windowStreams.today();
+		expect(lifetimeInit.count).toBe(7);
+		expect(todayInit.count).toBe(0);
+	});
+});
+
+describe('live.aggregate() windowed -- root + per-window stream metadata', () => {
+	afterEach(() => {
+		_resetAggregates();
+	});
+
+	it('root function carries window metadata; per-window streams have isStream + own topic', () => {
+		const fn = live.aggregate('events:m', {
+			count: { init: () => 0, reduce: (acc) => acc + 1 }
+		}, {
+			topic: 'events:m:agg',
+			windows: {
+				today: { type: 'tumbling', period: 'daily' },
+				lifetime: { type: 'lifetime' }
+			}
+		});
+
+		expect(fn.__isAggregate).toBe(true);
+		expect(fn.__aggregateWindows).toBeDefined();
+		expect(fn.__aggregateWindowKeys).toEqual(['today', 'lifetime']);
+		expect(fn.__windowStreams.today.__isStream).toBe(true);
+		expect(fn.__windowStreams.today.__streamTopic).toBe('events:m:agg:today');
+		expect(fn.__windowStreams.lifetime.__streamTopic).toBe('events:m:agg:lifetime');
+	});
+
+	it('calling the root function directly throws (subscribe via children)', () => {
+		const fn = live.aggregate('events:rc', {
+			count: { init: () => 0, reduce: (acc) => acc + 1 }
+		}, {
+			topic: 'events:rc:agg',
+			windows: { lifetime: { type: 'lifetime' } }
+		});
+		expect(() => fn()).toThrow(/per-window children/);
 	});
 });
 

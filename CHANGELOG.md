@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.9] - 2026-05-07
+
+### Added
+
+- **`live.aggregate({ windows })` for native time-windowed aggregations.** New optional `windows` config maintains one state slice per declared window with its own output topic at `${topic}:${windowName}`, replacing the 4-registrations-and-hand-rolled-bucketing dance every leaderboard / trending / activity-feed surface previously required. Three window types ship: `lifetime` (never resets; named output for symmetry), `tumbling` (boundary-anchored via `period: 'minute' | 'hour' | 'daily' | 'monthly'` with optional `tz` for IANA-zoned boundaries, or `durationMs + anchor` for arbitrary fixed periods anchored to a custom epoch), and `sliding` (hop-window with `durationMs + slideMs` partitioning state into `ceil(durationMs / slideMs)` buckets, rotating on each slide tick). On boundary cross the closing tumbling window publishes one final pre-reset state before `init()` clears it for the new window. Sliding windows are not snapshot-restorable (the hop ring is tied to wall-clock time); tumbling and lifetime accept per-window restore via the new `snapshots: { [windowName]: () => Promise<state> }` option that hydrates in parallel during registration. Per-window debounce overrides via `WindowSpec.debounce` (e.g. zero on `last10min` for real-time trending, 100ms on `today` where staleness does not matter). Boundary calculation uses `Intl.DateTimeFormat` for DST-correct, leap-day-correct, leap-second-irrelevant zone arithmetic with no third-party dependency. Both runtime stub generation and `.d.ts` emission in the Vite plugin handle the namespace-object shape so `import { trending } from '$live/topk'; trending.last10min.subscribe(...)` Just Works on the client; SSR stubs follow the same namespace shape with one `readable(undefined)` per window. Strict superset of the current API: `windows` defaults to absent and the single-state path is unchanged.
+
+- **`combineSum` / `combineMax` / `combineMin` / `combineCounts` / `combineMerge` exports** from `svelte-realtime/server`. Pass any of these as a reducer's `combine` field for sliding windows -- they cover the common reducer state shapes (number sum, number max/min, `Record<string, number>` aggregation, last-write-wins object merge). Hand-roll your own `combine(...buckets)` for non-trivial reducers (top-K, percentile sketches, custom shapes) -- the escape hatch is fully intact.
+
+- **`MAX_AGGREGATE_BUCKETS` capacity cap** (default 1000) caps a single sliding window's hop-bucket count. Validated at module-load time with a clear error pointing at the offending window name; refuses to register so a mistake like "1ms slide on a 1s window" never silently allocates an oversized ring. A 10-hour sliding window with 1-minute slides uses 600 buckets, well under the cap.
+
+- **Module-load validation for windowed aggregate configs.** Sliding windows without a `combine` on every reducer that has `reduce` throw at registration with the offending field name and a pointer to the built-in helpers. Tumbling specs require exactly one of `period` or `durationMs`. Unknown `type` values throw with the supported set in the message. Failing fast at module load is the difference between "the demo never boots and prints a clear stack trace" and "the demo boots and silently drops events into a non-existent bucket array."
+
+### Documentation
+
+- **README "Time windows" section under Aggregates** documents the three window types, the `combine`-helpers table, per-window snapshot semantics, the cluster-mode constraint (fanout-to-every-worker source topics required for cross-worker convergence; sharded sources will diverge until a future `configureAggregate({ leader })` lands), and the capacity bound.
+
 ## [0.5.0-next.8] - 2026-05-07
 
 ### Added

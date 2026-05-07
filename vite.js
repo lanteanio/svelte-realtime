@@ -916,6 +916,8 @@ function _generateSsrStubs(filePath, modulePath) {
 	const dynamicNames = new Set();
 	/** @type {Array<{ name: string, info: ReturnType<typeof _extractRoomInfo> }>} */
 	const rooms = [];
+	/** @type {Array<{ name: string, windows: string[] }>} */
+	const windowedAggregates = [];
 	let match;
 
 	// Detect dynamic (function-returning) streams, channels, and derived
@@ -926,11 +928,24 @@ function _generateSsrStubs(filePath, modulePath) {
 		}
 	}
 
-	// Collect all stream-like exports that need readable() wrappers for SSR
-	for (const re of [STREAM_EXPORT_RE, CHANNEL_EXPORT_RE, DERIVED_EXPORT_RE, AGGREGATE_EXPORT_RE]) {
+	// Collect all stream-like exports that need readable() wrappers for SSR.
+	// Aggregates with `windows: { ... }` are split out into a separate set --
+	// they need a namespace stub (one readable per window), not the
+	// single-readable shape that single-state aggregates take.
+	for (const re of [STREAM_EXPORT_RE, CHANNEL_EXPORT_RE, DERIVED_EXPORT_RE]) {
 		re.lastIndex = 0;
 		while ((match = re.exec(source)) !== null) {
 			storeNames.push(match[1]);
+		}
+	}
+	AGGREGATE_EXPORT_RE.lastIndex = 0;
+	while ((match = AGGREGATE_EXPORT_RE.exec(source)) !== null) {
+		const aggName = match[1];
+		const windowKeys = _extractAggregateWindows(source, aggName);
+		if (windowKeys && windowKeys.length > 0) {
+			windowedAggregates.push({ name: aggName, windows: windowKeys });
+		} else {
+			storeNames.push(aggName);
 		}
 	}
 
@@ -951,8 +966,8 @@ function _generateSsrStubs(filePath, modulePath) {
 	const safePath = JSON.stringify(normalized);
 	const safeModulePath = (name) => JSON.stringify(modulePath + '/' + name);
 
-	// If no store-like or room exports, simple re-export
-	if (storeNames.length === 0 && rooms.length === 0) {
+	// If no store-like / room / windowed-aggregate exports, simple re-export
+	if (storeNames.length === 0 && rooms.length === 0 && windowedAggregates.length === 0) {
 		return `export * from ${safePath};\n`;
 	}
 
@@ -976,6 +991,24 @@ function _generateSsrStubs(filePath, modulePath) {
 			lines.push(`_${name}.load = (platform, options) => __directCall(${safeModulePath(name)}, options?.args || [], platform, options);`);
 			lines.push(`export { _${name} as ${name} };`);
 		}
+	}
+
+	for (const { name, windows } of windowedAggregates) {
+		// Windowed aggregate namespace: each window is a static readable
+		// (the per-window output topic delivers one publish per window per
+		// event/boundary/slide, so factory-shaped is not needed). The
+		// `.load(platform)` direct-call path resolves to the per-window
+		// path so SSR can hydrate a specific window's initial state.
+		const memberDecls = [];
+		for (const wn of windows) {
+			memberDecls.push(`const _${name}_${wn} = readable(undefined);`);
+			memberDecls.push(`_${name}_${wn}.hydrate = (d) => readable(d);`);
+			memberDecls.push(`_${name}_${wn}.load = (platform, options) => __directCall(${JSON.stringify(modulePath + '/' + name + '/__window/' + wn)}, options?.args || [], platform, options);`);
+		}
+		lines.push(...memberDecls);
+		const ns = windows.map(wn => `${JSON.stringify(wn)}: _${name}_${wn}`).join(', ');
+		lines.push(`const _${name} = { ${ns} };`);
+		lines.push(`export { _${name} as ${name} };`);
 	}
 
 	for (const { name, info } of rooms) {
@@ -1166,7 +1199,23 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		if (!exportedNames.has(name)) {
 			exportedNames.add(name);
 			imports.add('__stream');
-			lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set' })});`);
+			const windowKeys = _extractAggregateWindows(source, name);
+			if (windowKeys && windowKeys.length > 0) {
+				// Windowed: emit a namespace object with one __stream per
+				// declared window. Each window gets its own path so the
+				// server registers it independently and clients subscribe
+				// to the per-window output topic.
+				const aggLines = [];
+				aggLines.push(`export const ${name} = {`);
+				for (const wn of windowKeys) {
+					const safeWn = JSON.stringify(wn);
+					aggLines.push(`  ${safeWn}: __stream('${modulePath}/${name}/__window/${wn}', ${JSON.stringify({ merge: 'set' })}),`);
+				}
+				aggLines.push(`};`);
+				lines.push(aggLines.join('\n'));
+			} else {
+				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set' })});`);
+			}
 		}
 	}
 
@@ -1621,6 +1670,39 @@ function _extractChannelOptions(source, name) {
  * @param {string} name
  * @returns {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[] }}
  */
+/**
+ * Detect a windowed `live.aggregate(...)` export and return the window
+ * names declared in its `windows: { ... }` option, or `null` if the
+ * export has no windows (single-state form). The plugin treats the
+ * presence/absence of windows as the discriminator between
+ * "single-stream stub" and "namespace stub" client surfaces.
+ *
+ * Reuses the same locate-options-block + top-level-keys pattern as
+ * `_extractRoomInfo` -- the plugin parser only ever needs to know which
+ * windows exist, not their type or duration. Window-spec validation
+ * (`type`, `durationMs`, `combine` requirement, etc.) lives at module
+ * load time on the server side, where the actual reducers and option
+ * objects are fully evaluated.
+ *
+ * @param {string} source
+ * @param {string} name
+ * @returns {string[] | null}
+ */
+function _extractAggregateWindows(source, name) {
+	const startPattern = new RegExp(
+		`export\\s+const\\s+${name}\\s*=\\s*live\\.aggregate\\s*\\(`
+	);
+	const startMatch = startPattern.exec(source);
+	if (!startMatch) return null;
+	const after = source.slice(startMatch.index + startMatch[0].length);
+	const optionsBody = _extractLastOptions(after);
+	if (!optionsBody) return null;
+	const windowsBody = _extractTopLevelBraceProp(optionsBody, 'windows');
+	if (!windowsBody) return null;
+	const keys = _extractTopLevelKeys(windowsBody).filter(k => /^[A-Za-z_$][\w$]*$/.test(k));
+	return keys.length > 0 ? keys : null;
+}
+
 function _extractRoomInfo(source, name) {
 	/** @type {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[] }} */
 	const info = { dataOpts: { merge: 'crud' }, hasPresence: false, hasCursors: false, actions: [] };
@@ -1871,8 +1953,23 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
-				lines.push(`__registerAggregate('${rel}/${name}', ${_lazy(name)});`);
+				const windowKeys = _extractAggregateWindows(source, name);
+				if (windowKeys && windowKeys.length > 0) {
+					// Windowed: register the watcher under the export's path
+					// (the watcher fans events to all windows on event); then
+					// register one stream path per window so clients can
+					// subscribe to per-window output topics. The per-window
+					// stream functions live on the root export as
+					// `__windowStreams[windowName]`.
+					const importPath = JSON.stringify(normalizedPath);
+					lines.push(`__registerAggregate('${rel}/${name}', ${_lazy(name)});`);
+					for (const wn of windowKeys) {
+						lines.push(`__register('${rel}/${name}/__window/${wn}', __L(() => import(${importPath}).then(m => m.${name}.__windowStreams[${JSON.stringify(wn)}])), '${rel}');`);
+					}
+				} else {
+					lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+					lines.push(`__registerAggregate('${rel}/${name}', ${_lazy(name)});`);
+				}
 			}
 		}
 
@@ -2118,7 +2215,17 @@ function _generateTypeDeclarations(liveDir, dir) {
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
 				needsStreamStore = true;
-				exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };`);
+				const windowKeys = _extractAggregateWindows(source, name);
+				if (windowKeys && windowKeys.length > 0) {
+					// Windowed: emit a namespace shape with one StreamStore
+					// per window. Each window has its own .load(platform).
+					const memberLines = windowKeys.map(wn =>
+						`    ${JSON.stringify(wn)}: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };`
+					).join('\n');
+					exports.push(`  export const ${name}: {\n${memberLines}\n  };`);
+				} else {
+					exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };`);
+				}
 			}
 		}
 
@@ -2860,8 +2967,18 @@ async function _loadRegistryDirect(server, liveDir, dir) {
 				} else if (/** @type {any} */ (fn)?.__isEffect) {
 					__registerEffect(rel + '/' + name, fn);
 				} else if (/** @type {any} */ (fn)?.__isAggregate) {
-					__register(rel + '/' + name, fn);
-					__registerAggregate(rel + '/' + name, fn);
+					if (/** @type {any} */ (fn).__windowStreams) {
+						// Windowed: register the watcher under the export
+						// path (the watcher fans events to all windows
+						// internally) and one stream path per window.
+						__registerAggregate(rel + '/' + name, fn);
+						for (const [wn, winFn] of Object.entries(/** @type {any} */ (fn).__windowStreams)) {
+							__register(rel + '/' + name + '/__window/' + wn, winFn, rel);
+						}
+					} else {
+						__register(rel + '/' + name, fn);
+						__registerAggregate(rel + '/' + name, fn);
+					}
 				} else if (/** @type {any} */ (fn)?.__isDerived) {
 					__register(rel + '/' + name, fn);
 					__registerDerived(rel + '/' + name, fn);
