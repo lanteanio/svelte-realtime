@@ -10,7 +10,7 @@
     "@sveltejs/kit": "^2.0.0",
     "ioredis": "^5.4.1",
     "svelte": "^5.0.0",
-    "svelte-adapter-uws": "^0.5.0-next.14",
+    "svelte-adapter-uws": "^0.5.0-next.19",
     "svelte-adapter-uws-extensions": "^0.5.0-next.6",
     "svelte-realtime": "file:../..",
     "ws": "^8.20.0"

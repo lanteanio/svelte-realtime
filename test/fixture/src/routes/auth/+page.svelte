@@ -2,12 +2,12 @@
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { status } from 'svelte-adapter-uws/client';
-	import { whoami, inbox as inboxFor, sendToInbox, adminAction, resetAuth } from '$live/auth';
+	import { whoami, inbox, sendToInbox, adminAction, resetAuth } from '$live/auth';
 
-	// `inbox` is a dynamic stream (topic derived from ctx.user.id on the
-	// server), so the client export is a factory that returns a store.
-	// Call it with no args -- the server resolves the topic.
-	const inbox = inboxFor();
+	// `inbox` is a static StreamStore from the client's perspective: the
+	// topic is derived purely from authenticated `ctx.user.id` server-side,
+	// no client args, so the import is the readable directly (vite plugin
+	// classifies single-arity ctx-only topics as static since 0.5.0-next.8).
 
 	function waitForOpen() {
 		return new Promise((resolve) => {

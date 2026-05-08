@@ -36,6 +36,7 @@ import {
 	_resetInvalidationWatch,
 	_resetIdempotencyStore,
 	_resetCoalesceRegistry,
+	_resetUploadAutoDiscovery,
 	_resetAdmission,
 	_resetTransformRegistry,
 	_resetRateLimits,
@@ -968,6 +969,555 @@ describe('handleRpc() binary payload size', () => {
 
 		expect(platform.sent[0].data.ok).toBe(true);
 		expect(platform.sent[0].data.data).toEqual({ size: 100 });
+	});
+});
+
+// -- live.upload() streaming uploads ------------------------------------------
+
+/**
+ * Build a 0x01 upload chunk frame.
+ * @param {{ streamId: number, seq: number, isLast?: boolean, args?: { rpc: string, args?: any[] }, payload?: ArrayBuffer | Uint8Array | null }} opts
+ */
+function buildUploadChunkFrame({ streamId, seq, isLast = false, args, payload = null }) {
+	const hasArgs = args !== undefined;
+	let argsBytes = null;
+	if (hasArgs) argsBytes = new TextEncoder().encode(JSON.stringify(args));
+	const argsLen = argsBytes ? argsBytes.length : 0;
+	const headerLen = hasArgs ? 12 + argsLen : 10;
+	const payloadView = payload
+		? (payload instanceof Uint8Array ? payload : new Uint8Array(payload))
+		: null;
+	const payloadLen = payloadView ? payloadView.byteLength : 0;
+	const buf = new ArrayBuffer(headerLen + payloadLen);
+	const u8 = new Uint8Array(buf);
+	const view = new DataView(buf);
+	view.setUint8(0, 0x01);
+	let flags = 0;
+	if (hasArgs) flags |= 0x01;
+	if (isLast) flags |= 0x02;
+	view.setUint8(1, flags);
+	view.setUint32(2, streamId, false);
+	view.setUint32(6, seq, false);
+	if (hasArgs) {
+		view.setUint16(10, argsLen, false);
+		u8.set(argsBytes, 12);
+		if (payloadView) u8.set(payloadView, 12 + argsLen);
+	} else if (payloadView) {
+		u8.set(payloadView, 10);
+	}
+	return buf;
+}
+
+/** Build a 0x02 cancel control frame. */
+function buildUploadCancelFrame(streamId) {
+	const buf = new ArrayBuffer(6);
+	const view = new DataView(buf);
+	view.setUint8(0, 0x02);
+	view.setUint8(1, 0x10);
+	view.setUint32(2, streamId, false);
+	return buf;
+}
+
+function uploadStreamIdHex(streamId) {
+	return (streamId >>> 0).toString(16).padStart(8, '0');
+}
+
+/** Wait for any in-flight microtasks/timers to settle. */
+async function flushUploadAsync(times = 5) {
+	for (let i = 0; i < times; i++) {
+		await new Promise((r) => setTimeout(r, 0));
+	}
+}
+
+/** Pull the most recent __upload response for a given streamId from platform.sent. */
+function lastUploadResponse(platform, streamId) {
+	const hex = uploadStreamIdHex(streamId);
+	for (let i = platform.sent.length - 1; i >= 0; i--) {
+		const m = platform.sent[i];
+		if (m.topic === '__upload' && m.event === hex) return m.data;
+	}
+	return null;
+}
+
+describe('live.upload()', () => {
+	let ws, platform;
+
+	beforeEach(() => {
+		ws = mockWs({ id: 'user1' });
+		platform = mockPlatform();
+		_resetUploadAutoDiscovery();
+	});
+
+	it('streams a single-chunk upload to the handler', async () => {
+		/** @type {Uint8Array[]} */
+		const received = [];
+		const fn = live.upload(async (ctx) => {
+			for await (const chunk of ctx.stream) received.push(chunk);
+			return { bytes: received.reduce((n, c) => n + c.byteLength, 0) };
+		});
+		__register('uploads/single', fn);
+
+		const payload = new Uint8Array([0xDE, 0xAD, 0xBE, 0xEF]);
+		const frame = buildUploadChunkFrame({
+			streamId: 1, seq: 0, isLast: true,
+			args: { rpc: 'uploads/single', args: [] },
+			payload
+		});
+		handleRpc(ws, frame, platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 1);
+		expect(resp).toEqual({ ok: true, data: { bytes: 4 } });
+		expect(received.length).toBe(1);
+		expect(Array.from(received[0])).toEqual([0xDE, 0xAD, 0xBE, 0xEF]);
+	});
+
+	it('streams a multi-chunk upload in arrival order', async () => {
+		/** @type {Uint8Array[]} */
+		const received = [];
+		const fn = live.upload(async (ctx) => {
+			for await (const chunk of ctx.stream) received.push(chunk);
+			let total = 0;
+			for (const c of received) total += c.byteLength;
+			return total;
+		});
+		__register('uploads/multi', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 7, seq: 0,
+			args: { rpc: 'uploads/multi', args: [] },
+			payload: new Uint8Array([1, 2, 3])
+		}), platform);
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 7, seq: 1,
+			payload: new Uint8Array([4, 5, 6])
+		}), platform);
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 7, seq: 2, isLast: true,
+			payload: new Uint8Array([7, 8])
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 7);
+		expect(resp).toEqual({ ok: true, data: 8 });
+		expect(received.length).toBe(3);
+	});
+
+	it('handles an empty upload (chunk 0 with isLast and no payload)', async () => {
+		const fn = live.upload(async (ctx) => {
+			let count = 0;
+			for await (const _ of ctx.stream) count++;
+			return { count };
+		});
+		__register('uploads/empty', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 2, seq: 0, isLast: true,
+			args: { rpc: 'uploads/empty', args: [] }
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 2);
+		expect(resp).toEqual({ ok: true, data: { count: 0 } });
+	});
+
+	it('passes positional args from the client through to the handler', async () => {
+		const fn = live.upload(async (ctx, name, mime) => {
+			let bytes = 0;
+			for await (const c of ctx.stream) bytes += c.byteLength;
+			return { name, mime, bytes };
+		});
+		__register('uploads/args', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 3, seq: 0, isLast: true,
+			args: { rpc: 'uploads/args', args: ['cat.png', 'image/png'] },
+			payload: new Uint8Array(10)
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 3);
+		expect(resp).toEqual({ ok: true, data: { name: 'cat.png', mime: 'image/png', bytes: 10 } });
+	});
+
+	it('rejects an out-of-order chunk', async () => {
+		const fn = live.upload(async (ctx) => {
+			for await (const _ of ctx.stream) {}
+			return 'unreached';
+		});
+		__register('uploads/order', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 4, seq: 0,
+			args: { rpc: 'uploads/order', args: [] },
+			payload: new Uint8Array([1])
+		}), platform);
+		// Skip seq 1, jump to seq 2
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 4, seq: 2, isLast: true,
+			payload: new Uint8Array([3])
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 4);
+		expect(resp.ok).toBe(false);
+		expect(resp.code).toBe('INVALID_REQUEST');
+		expect(resp.error).toMatch(/out-of-order/);
+	});
+
+	it('rejects a duplicate streamId while one is active', async () => {
+		const fn = live.upload(async (ctx) => {
+			for await (const _ of ctx.stream) {}
+			return 'ok';
+		});
+		__register('uploads/dup', fn);
+
+		// Open one upload (do not finish)
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 5, seq: 0,
+			args: { rpc: 'uploads/dup', args: [] }
+		}), platform);
+		await flushUploadAsync(1);
+
+		// Try to open another with the same streamId
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 5, seq: 0,
+			args: { rpc: 'uploads/dup', args: [] }
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 5);
+		expect(resp.ok).toBe(false);
+		expect(resp.code).toBe('INVALID_REQUEST');
+		expect(resp.error).toMatch(/already active/);
+	});
+
+	it('rejects unknown paths with NOT_FOUND', async () => {
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 8, seq: 0, isLast: true,
+			args: { rpc: 'uploads/missing', args: [] }
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 8);
+		expect(resp).toEqual({ ok: false, code: 'NOT_FOUND', error: 'Not found' });
+	});
+
+	it('rejects when the path is not a live.upload handler', async () => {
+		// Register a regular RPC, not an upload.
+		__register('uploads/notupload', async () => 'hi');
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 9, seq: 0, isLast: true,
+			args: { rpc: 'uploads/notupload', args: [] }
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 9);
+		expect(resp.ok).toBe(false);
+		expect(resp.code).toBe('INVALID_REQUEST');
+		expect(resp.error).toMatch(/Not an upload endpoint/);
+	});
+
+	it('rejects when initial payload exceeds maxSize', async () => {
+		const fn = live.upload(async (ctx) => 'unreached', { maxSize: 50 });
+		__register('uploads/limit-init', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 10, seq: 0, isLast: true,
+			args: { rpc: 'uploads/limit-init', args: [] },
+			payload: new Uint8Array(100)
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 10);
+		expect(resp).toEqual({ ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'upload exceeds maxSize' });
+	});
+
+	it('rejects mid-stream when total bytes exceed maxSize', async () => {
+		let aborted = false;
+		const fn = live.upload(async (ctx) => {
+			try {
+				for await (const _ of ctx.stream) {}
+			} catch {
+				aborted = true;
+				throw new LiveError('CANCELLED', 'aborted');
+			}
+			return 'unreached';
+		}, { maxSize: 100 });
+		__register('uploads/limit-mid', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 11, seq: 0,
+			args: { rpc: 'uploads/limit-mid', args: [] },
+			payload: new Uint8Array(60)
+		}), platform);
+		// Let the handler start so the second chunk hits the running phase and
+		// flows through the abortable async-iterable rather than being rejected
+		// at transition time.
+		await flushUploadAsync(1);
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 11, seq: 1, isLast: true,
+			payload: new Uint8Array(60)
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 11);
+		expect(resp).toEqual({ ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'upload exceeds maxSize' });
+		expect(aborted).toBe(true);
+	});
+
+	it('cancels via control frame and aborts the handler signal', async () => {
+		let signalAborted = false;
+		const fn = live.upload(async (ctx) => {
+			ctx.signal.addEventListener('abort', () => { signalAborted = true; });
+			try {
+				for await (const _ of ctx.stream) {}
+			} catch (err) {
+				throw err;
+			}
+			return 'unreached';
+		});
+		__register('uploads/cancel', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 12, seq: 0,
+			args: { rpc: 'uploads/cancel', args: [] },
+			payload: new Uint8Array([1, 2, 3])
+		}), platform);
+		await flushUploadAsync(1);
+
+		handleRpc(ws, buildUploadCancelFrame(12), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 12);
+		expect(resp).toEqual({ ok: false, code: 'CANCELLED', error: 'upload cancelled by client' });
+		expect(signalAborted).toBe(true);
+	});
+
+	it('aborts in-flight uploads on connection close', async () => {
+		let signalAborted = false;
+		const fn = live.upload(async (ctx) => {
+			ctx.signal.addEventListener('abort', () => { signalAborted = true; });
+			for await (const _ of ctx.stream) {}
+			return 'unreached';
+		});
+		__register('uploads/disconnect', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 13, seq: 0,
+			args: { rpc: 'uploads/disconnect', args: [] },
+			payload: new Uint8Array([9, 9])
+		}), platform);
+		await flushUploadAsync(1);
+
+		close(ws, { platform });
+		await flushUploadAsync();
+
+		expect(signalAborted).toBe(true);
+	});
+
+	it('enforces maxConcurrentPerSession', async () => {
+		const fn = live.upload(async (ctx) => {
+			for await (const _ of ctx.stream) {}
+			return 'ok';
+		}, { maxConcurrentPerSession: 1 });
+		__register('uploads/cap-session', fn);
+
+		// First upload occupies the slot (don't finish)
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 100, seq: 0,
+			args: { rpc: 'uploads/cap-session', args: [] }
+		}), platform);
+		await flushUploadAsync(1);
+
+		// Second upload should be rejected immediately
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 101, seq: 0, isLast: true,
+			args: { rpc: 'uploads/cap-session', args: [] }
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 101);
+		expect(resp.ok).toBe(false);
+		expect(resp.code).toBe('TOO_MANY_UPLOADS');
+	});
+
+	it('enforces maxBufferedChunks (FLOW_BACKPRESSURE)', async () => {
+		// Handler that never reads from the stream -- chunks pile up in the queue
+		const fn = live.upload(async (ctx) => {
+			// Wait long enough for chunks to fill the buffer
+			await new Promise((resolve) => {
+				ctx.signal.addEventListener('abort', resolve, { once: true });
+			});
+			throw new LiveError('CANCELLED', 'done');
+		}, { maxBufferedChunks: 2 });
+		__register('uploads/backpressure', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 200, seq: 0,
+			args: { rpc: 'uploads/backpressure', args: [] },
+			payload: new Uint8Array(10)
+		}), platform);
+		await flushUploadAsync(1);
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 200, seq: 1, payload: new Uint8Array(10)
+		}), platform);
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 200, seq: 2, payload: new Uint8Array(10)
+		}), platform);
+		// queue.length is now 2 (chunk 0 was consumed at start? actually no -- handler
+		// awaits abort instead of reading. So queue holds chunks from seq 1 and 2, both
+		// queued because handler never called .next()).
+		// Actually first chunk 0 payload was push()ed; seq 1 queued; queueLength now 2.
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 200, seq: 3, payload: new Uint8Array(10)
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 200);
+		expect(resp.ok).toBe(false);
+		expect(resp.code).toBe('FLOW_BACKPRESSURE');
+	});
+
+	it('propagates LiveError thrown by the handler', async () => {
+		const fn = live.upload(async (ctx) => {
+			for await (const _ of ctx.stream) {}
+			throw new LiveError('FORBIDDEN', 'no thanks');
+		});
+		__register('uploads/livethrow', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 14, seq: 0, isLast: true,
+			args: { rpc: 'uploads/livethrow', args: [] }
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 14);
+		expect(resp).toEqual({ ok: false, code: 'FORBIDDEN', error: 'no thanks' });
+	});
+
+	it('hides non-LiveError exceptions behind INTERNAL_ERROR', async () => {
+		const fn = live.upload(async () => { throw new Error('database is on fire'); });
+		__register('uploads/internal', fn);
+
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 15, seq: 0, isLast: true,
+			args: { rpc: 'uploads/internal', args: [] }
+		}), platform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(platform, 15);
+		expect(resp.ok).toBe(false);
+		expect(resp.code).toBe('INTERNAL_ERROR');
+		// The raw error message must not leak
+		expect(resp.error).not.toMatch(/database/);
+	});
+
+	it('drops malformed frames silently (reserved bits set)', async () => {
+		// Build a frame with reserved bits set in flags
+		const buf = new ArrayBuffer(10);
+		const view = new DataView(buf);
+		view.setUint8(0, 0x01);
+		view.setUint8(1, 0x80); // reserved bit set
+		view.setUint32(2, 99, false);
+		view.setUint32(6, 0, false);
+
+		const before = platform.sent.length;
+		handleRpc(ws, buf, platform);
+		await flushUploadAsync(2);
+		expect(platform.sent.length).toBe(before);
+	});
+
+	it('announces platform.maxPayloadLength via __cap on first response per WS', async () => {
+		const fn = live.upload(async () => 'ok');
+		__register('uploads/cap-announce', fn);
+
+		// Platform with maxPayloadLength set
+		const platformWithCap = mockPlatform();
+		/** @type {any} */ (platformWithCap).maxPayloadLength = 16384;
+
+		// First upload: response should carry __cap
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 400, seq: 0, isLast: true,
+			args: { rpc: 'uploads/cap-announce', args: [] }
+		}), platformWithCap);
+		await flushUploadAsync();
+
+		const first = lastUploadResponse(platformWithCap, 400);
+		expect(first).toMatchObject({ ok: true, data: 'ok', __cap: 16384 });
+
+		// Second upload on the SAME ws: response should NOT carry __cap
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 401, seq: 0, isLast: true,
+			args: { rpc: 'uploads/cap-announce', args: [] }
+		}), platformWithCap);
+		await flushUploadAsync();
+
+		const second = lastUploadResponse(platformWithCap, 401);
+		expect(second).toEqual({ ok: true, data: 'ok' });
+		expect(second).not.toHaveProperty('__cap');
+	});
+
+	it('omits __cap when platform does not expose maxPayloadLength', async () => {
+		const fn = live.upload(async () => 'ok');
+		__register('uploads/no-cap', fn);
+
+		// Use a fresh ws so prior tests' "informed" tracking doesn't apply
+		const localWs = mockWs({ id: 'user-no-cap' });
+		const localPlatform = mockPlatform();
+		// No maxPayloadLength set
+
+		handleRpc(localWs, buildUploadChunkFrame({
+			streamId: 402, seq: 0, isLast: true,
+			args: { rpc: 'uploads/no-cap', args: [] }
+		}), localPlatform);
+		await flushUploadAsync();
+
+		const resp = lastUploadResponse(localPlatform, 402);
+		expect(resp).toEqual({ ok: true, data: 'ok' });
+		expect(resp).not.toHaveProperty('__cap');
+	});
+
+	it('routes interleaved uploads to separate streams', async () => {
+		/** @type {Map<number, Uint8Array[]>} */
+		const seen = new Map();
+		const fn = live.upload(async (ctx, label) => {
+			/** @type {Uint8Array[]} */
+			const chunks = [];
+			for await (const c of ctx.stream) chunks.push(c);
+			seen.set(label, chunks);
+			let total = 0;
+			for (const c of chunks) total += c.byteLength;
+			return { label, total };
+		});
+		__register('uploads/multi-stream', fn);
+
+		// Open A
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 300, seq: 0,
+			args: { rpc: 'uploads/multi-stream', args: [1] },
+			payload: new Uint8Array([1, 1, 1])
+		}), platform);
+		// Open B
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 301, seq: 0,
+			args: { rpc: 'uploads/multi-stream', args: [2] },
+			payload: new Uint8Array([2, 2])
+		}), platform);
+		// Interleave
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 300, seq: 1, isLast: true, payload: new Uint8Array([1, 1])
+		}), platform);
+		handleRpc(ws, buildUploadChunkFrame({
+			streamId: 301, seq: 1, isLast: true, payload: new Uint8Array([2, 2, 2])
+		}), platform);
+		await flushUploadAsync();
+
+		const a = lastUploadResponse(platform, 300);
+		const b = lastUploadResponse(platform, 301);
+		expect(a).toEqual({ ok: true, data: { label: 1, total: 5 } });
+		expect(b).toEqual({ ok: true, data: { label: 2, total: 5 } });
 	});
 });
 

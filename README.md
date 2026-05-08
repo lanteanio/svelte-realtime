@@ -2461,6 +2461,139 @@ The wire format uses a compact binary frame: `0x00` marker byte + uint16 BE head
 
 ---
 
+## Streaming uploads
+
+Use `live.upload()` when `live.binary()`'s atomic-one-frame contract starts to hurt -- multi-megabyte files, slow connections, anywhere you want progress, cancellation, and bounded server memory. The handler consumes an async-iterable of chunks, returns a JSON-serialisable result when done, and gets an `AbortSignal` that fires on client cancel, WS disconnect, or capacity-cap rejection.
+
+```js
+// src/live/uploads.js
+import { live, LiveError } from 'svelte-realtime/server';
+import { open } from 'node:fs/promises';
+
+export const avatar = live.upload(async (ctx, name, mime) => {
+  if (!ctx.user) throw new LiveError('UNAUTHORIZED');
+
+  const sink = await open(`/var/uploads/${ctx.user.id}/${name}`, 'w');
+  let bytes = 0;
+  try {
+    for await (const chunk of ctx.stream) {
+      ctx.signal.throwIfAborted();
+      await sink.write(chunk);
+      bytes += chunk.byteLength;
+    }
+    return { url: `/uploads/${ctx.user.id}/${name}`, bytes, mime };
+  } finally {
+    await sink.close();
+  }
+}, {
+  maxSize: 50 * 1024 * 1024,         // hard cap per upload (default 100MB)
+  maxConcurrentPerSession: 2,         // protect a node from one chatty client (default 4)
+  maxConcurrentTotal: 1000,           // global cap (default unbounded; opt in)
+  maxBufferedChunks: 64               // backpressure -- chunks queued before refusing more (default 64)
+});
+```
+
+The handler signature is `(ctx, ...args)` like a regular RPC. `ctx` carries the usual fields plus three streaming extras:
+
+- `ctx.stream` -- `AsyncIterable<Uint8Array>` yielding chunks in arrival order.
+- `ctx.signal` -- `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, or `maxBufferedChunks` overflow. Wire any cleanup you need to it.
+- `ctx.upload` -- `{ id }` for log correlation.
+
+Guards and global middleware run once before the first chunk is consumed. An unauthorised client never gets to send bytes.
+
+### Client
+
+The Vite plugin generates a client stub for every `live.upload()` export in `src/live/`, so usage looks like a normal RPC import:
+
+```svelte
+<script>
+  import { avatar } from '$live/uploads';
+
+  let uploading = $state(false);
+  let percent = $state(0);
+  let pendingHandle = $state(null);
+
+  async function upload(file) {
+    uploading = true;
+    percent = 0;
+
+    const handle = avatar(file, file.name, file.type);
+    pendingHandle = handle;
+    handle.on('progress', (p) => { percent = (p.percent ?? 0) * 100; });
+
+    try {
+      const result = await handle;
+      console.log('uploaded:', result);
+    } catch (err) {
+      if (err.code !== 'CANCELLED') console.error('upload failed:', err);
+    } finally {
+      uploading = false;
+      pendingHandle = null;
+    }
+  }
+
+  function cancel() {
+    pendingHandle?.cancel();
+  }
+</script>
+
+<input type="file" onchange={(e) => upload(e.target.files[0])} disabled={uploading} />
+{#if uploading}
+  <progress value={percent} max="100"></progress>
+  <button onclick={cancel}>Cancel</button>
+{/if}
+```
+
+The handle is a thenable -- `await handle` resolves with the handler's return value or rejects with an `RpcError`. The same handle exposes:
+
+- **Events** via `handle.on(event, cb)` returning an unsubscribe:
+  - `progress` -- `{ sent, total?, percent?, chunks, bytesPerSec }`. `total` and `percent` are `undefined` for `ReadableStream` sources unless you compute the total yourself.
+  - `complete` -- the server's return value.
+  - `cancel` -- the cancel reason (fires immediately before `error` when cancelled).
+  - `error` -- the `RpcError`.
+- **Snapshot getters**: `handle.sent`, `handle.total`, `handle.chunks`, `handle.progress`, `handle.bytesPerSec`, `handle.streamId`, `handle.streamIdHex`.
+- **Cancellation**: `handle.cancel(reason?)` sends a control frame to the server and rejects the promise. Compose with `AbortController`:
+
+  ```js
+  ac.signal.addEventListener('abort', () => handle.cancel());
+  ```
+
+**Chunk size is auto-discovered.** The server announces its `platform.maxPayloadLength` on the first upload response per connection; subsequent uploads automatically use 90% of that as the chunk size. The first upload uses a conservative 12KB default that fits under the current adapter cap. To pin an explicit size (e.g. for memory-constrained clients), `configure({ upload: { chunkSize: 32 * 1024 } })` -- user-configured wins over discovery.
+
+The handle auto-starts but the first chunk is sent on the next microtask, so attaching listeners on the same line as construction (`const h = avatar(file); h.on('progress', ...);`) never misses early events.
+
+### Wire format
+
+Two frame markers join `0x00` (binary RPC) and `0x7B` (JSON RPC) on the existing realtime channel:
+
+```
+Chunk frame (client -> server):
+  [0]      0x01
+  [1]      flags
+            bit 0: hasArgs   (set on chunk 0 only)
+            bit 1: isLast
+            bits 2-7: reserved (must be 0)
+  [2..5]   streamId, big-endian uint32
+  [6..9]   seq, big-endian uint32 (0-indexed, contiguous)
+  [10..]   if hasArgs:  [10..11] argsLen u16  + JSON header { rpc, args }  + payload bytes
+           else:        payload bytes
+
+Cancel frame (client -> server):
+  [0]      0x02
+  [1]      0x10 (cancel)
+  [2..5]   streamId
+```
+
+Per-chunk overhead is 10 bytes (12 bytes + JSON args length on chunk 0). On 64KB chunks that's 0.015% wire overhead.
+
+Server -> client responses ride the existing `__upload` topic via `platform.send(ws, '__upload', streamIdHex, payload)`, with `payload` shaped as either `{ ok: true, data: <handler return> }` or `{ ok: false, code, error }`.
+
+### Status
+
+`live.upload` ships complete: server primitive with capacity caps + abort-on-disconnect, client `UploadHandle` with progress / cancel / events / AbortController integration, auto-discovery of the adapter's `maxPayloadLength` for chunk-size tuning, and Vite plugin generation of typed client stubs (`UploadHandle<T>` in `$live/<module>` types). Adapter follow-ups (raise default `maxPayloadLength`, expose `bufferedAmount(ws)` for true backpressure-aware pumping) are tracked separately and don't block this surface.
+
+---
+
 ## Rooms
 
 Bundle data, presence, cursors, and scoped actions into a single declaration.
@@ -3240,6 +3373,7 @@ Import from `svelte-realtime/server`.
 | `live.stream(topic, initFn, options?)` | Create a reactive stream |
 | `live.channel(topic, options?)` | Create an ephemeral pub/sub channel |
 | `live.binary(fn, options?)` | Mark a function as a binary RPC handler (`maxSize` limits payload, default 10MB) |
+| `live.upload(fn, options?)` | Streaming upload handler (chunked, abortable async-iterable; `maxSize` 100MB, `maxConcurrentPerSession` 4, `maxBufferedChunks` 64) |
 | `live.validated(schema, fn)` | RPC with [Standard Schema](https://standardschema.dev/) input validation (Zod, ArkType, Valibot, etc.) |
 | `live.cron(schedule, topic, fn)` | Server-side scheduled function |
 | `live.derived(sources, fn, options?)` | Server-side computed stream (static or dynamic sources) |
@@ -3278,8 +3412,9 @@ Import from `svelte-realtime/client`.
 | Export | Description |
 |---|---|
 | `RpcError` | Typed error with `code` field |
+| `UploadHandle<T>` | Type for `live.upload` client handles (thenable + events + cancel) |
 | `batch(fn, options?)` | Group RPC calls into one WebSocket frame |
-| `configure(config)` | Connection hooks and offline queue setup |
+| `configure(config)` | Connection hooks, offline queue, upload chunk size |
 | `combine(...stores, fn)` | Multi-store composition |
 | `onSignal(userId, callback)` | Listen for point-to-point signals |
 | `onDerived` | Re-exported from adapter: reactive derived topic subscription |

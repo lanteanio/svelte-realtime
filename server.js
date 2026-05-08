@@ -1531,6 +1531,36 @@ live.binary = function binary(fn, options) {
 };
 
 /**
+ * Register a streaming upload handler. The handler consumes an async-iterable
+ * of `Uint8Array` chunks and returns a JSON-serialisable result that's
+ * delivered to the client when the stream ends.
+ *
+ * Handler signature: `async (ctx, ...args) => result`. The standard `ctx`
+ * is augmented with:
+ *   - `ctx.stream`  -- AsyncIterable<Uint8Array> yielding chunks in arrival order
+ *   - `ctx.signal`  -- AbortSignal that fires on cancel / disconnect / cap exceeded
+ *   - `ctx.upload`  -- { id: string, total?: number, source: 'file'|'blob'|'buffer'|'stream' }
+ *
+ * Caps default to: 100MB per upload, 4 concurrent per session, unbounded
+ * globally, 64 buffered chunks before flow-control kicks in.
+ *
+ * @param {(ctx: any, ...args: any[]) => Promise<any>} fn
+ * @param {{ maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number }} [options]
+ * @returns {Function}
+ */
+live.upload = function upload(fn, options) {
+	/** @type {any} */ (fn).__isLive = true;
+	/** @type {any} */ (fn).__isUpload = true;
+	/** @type {any} */ (fn).__uploadOptions = {
+		maxSize: options?.maxSize ?? 104857600,
+		maxConcurrentPerSession: options?.maxConcurrentPerSession ?? 4,
+		maxConcurrentTotal: options?.maxConcurrentTotal ?? Infinity,
+		maxBufferedChunks: options?.maxBufferedChunks ?? 64
+	};
+	return fn;
+};
+
+/**
  * Register a global middleware that runs before per-module guards for every RPC/stream call.
  * Middleware receives `(ctx, next)` -- call `next()` to continue the chain.
  * Throw a LiveError to reject the call.
@@ -5697,6 +5727,18 @@ export function handleRpc(ws, data, platform, options) {
 		return false;
 	}
 
+	// Upload chunk: byte[0] = 0x01 (live.upload streaming)
+	if (bytes[0] === _UPLOAD_FRAME_CHUNK) {
+		_handleUploadChunkFrame(ws, data, platform, options);
+		return true;
+	}
+
+	// Upload control: byte[0] = 0x02 (cancel etc)
+	if (bytes[0] === _UPLOAD_FRAME_CONTROL) {
+		_handleUploadControlFrame(ws, data, platform);
+		return true;
+	}
+
 	// Text RPC: must start with {"r or {"b
 	if (data.byteLength < 10) return false;
 	// byte[0] = '{' (0x7B), byte[1] = '"' (0x22)
@@ -6196,6 +6238,574 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 	}
 }
 
+// -- Streaming uploads (live.upload) -----------------------------------------
+//
+// Wire format (client -> server):
+//
+//   Chunk frame (byte[0] = 0x01):
+//     [0]      0x01 -- chunk marker
+//     [1]      flags
+//                bit 0: hasArgs   (set on chunk 0 only)
+//                bit 1: isLast
+//                bits 2-7: reserved (must be 0)
+//     [2..5]   streamId, big-endian uint32
+//     [6..9]   seq, big-endian uint32 (0-indexed)
+//     [10..]   if hasArgs:
+//                [10..11] argsLen, big-endian uint16
+//                [12..12+argsLen-1] argsJson UTF-8: { rpc: path, args: [...] }
+//                [12+argsLen..] payload bytes
+//              else:
+//                [10..] payload bytes
+//
+//   Control frame (byte[0] = 0x02):
+//     [0]      0x02 -- control marker
+//     [1]      ctrlType (0x10 = client cancel)
+//     [2..5]   streamId
+//     [6..]    type-specific payload
+//
+// Wire format (server -> client):
+//   platform.send(ws, '__upload', streamIdHex, payload) where payload is one of:
+//     { ok: true, data: <handler return> }
+//     { ok: false, code, error }
+//
+// Per-chunk overhead is 10 bytes (12 + argsLen on chunk 0). For 64KB chunks
+// that's 0.015% overhead.
+
+const _UPLOAD_FRAME_CHUNK = 0x01;
+const _UPLOAD_FRAME_CONTROL = 0x02;
+const _UPLOAD_CTRL_CANCEL = 0x10;
+const _UPLOAD_FLAG_HAS_ARGS = 0x01;
+const _UPLOAD_FLAG_IS_LAST = 0x02;
+const _UPLOAD_FLAG_RESERVED_MASK = 0xFC;
+
+// Caps applied during the brief 'pending' window between chunk-0 arriving
+// and the handler being resolved. Two boundaries on memory:
+//   - _UPLOAD_PENDING_MAX_CHUNKS bounds the queue depth for tiny chunks.
+//   - _UPLOAD_PENDING_MAX_SIZE bounds total bytes for large chunks.
+// Once the handler is resolved, per-handler caps in __uploadOptions take over.
+const _UPLOAD_PENDING_MAX_CHUNKS = 64;
+const _UPLOAD_PENDING_MAX_SIZE = 16 * 1024 * 1024;
+
+/**
+ * Per-WS upload registry. WeakMap so connections that GC before close()
+ * don't leak entries.
+ * @type {WeakMap<any, Map<number, any>>}
+ */
+const _wsUploads = new WeakMap();
+
+/** Global counter for `maxConcurrentTotal` enforcement. */
+let _totalActiveUploads = 0;
+
+/**
+ * Cached `platform.maxPayloadLength` from whichever adapter is in use.
+ * Constant per-process, so we capture it the first time we see a platform
+ * with the field. Piggybacked onto the first upload response per WS so
+ * clients can compute an optimal chunk size automatically.
+ */
+let _uploadMaxFrameSize = 0;
+
+/** Per-WS set: clients that have already received the `__cap` hint. */
+const _informedAboutUploadCap = new WeakSet();
+
+function _captureUploadMaxFrameSize(platform) {
+	if (_uploadMaxFrameSize > 0) return;
+	if (platform && typeof platform.maxPayloadLength === 'number' && platform.maxPayloadLength > 0) {
+		_uploadMaxFrameSize = platform.maxPayloadLength;
+	}
+}
+
+/** @internal Reset auto-discovery cache. Test-only. */
+export function _resetUploadAutoDiscovery() {
+	_uploadMaxFrameSize = 0;
+}
+
+function _streamIdHex(streamId) {
+	return (streamId >>> 0).toString(16).padStart(8, '0');
+}
+
+function _respondUpload(ws, platform, streamId, payload) {
+	_captureUploadMaxFrameSize(platform);
+	let envelope = payload;
+	let willInform = false;
+	if (_uploadMaxFrameSize > 0 && !_informedAboutUploadCap.has(ws)) {
+		envelope = { ...payload, __cap: _uploadMaxFrameSize };
+		willInform = true;
+	}
+	try {
+		platform.send(ws, '__upload', _streamIdHex(streamId), envelope);
+		if (willInform) _informedAboutUploadCap.add(ws);
+	} catch {
+		// Closed connection -- same swallow as _respond
+	}
+}
+
+/**
+ * Parse an upload chunk frame. Returns null if the frame is malformed.
+ *
+ * @param {ArrayBuffer} data
+ */
+function _parseUploadChunkFrame(data) {
+	const byteLength = data.byteLength;
+	if (byteLength < 10) return null;
+
+	const view = new DataView(data);
+	const flags = view.getUint8(1);
+
+	// Reject any frame with reserved bits set so future versions can use them
+	// without breaking old clients (clients should send 0 for unknown bits).
+	if ((flags & _UPLOAD_FLAG_RESERVED_MASK) !== 0) return null;
+
+	const hasArgs = (flags & _UPLOAD_FLAG_HAS_ARGS) !== 0;
+	const isLast = (flags & _UPLOAD_FLAG_IS_LAST) !== 0;
+	const streamId = view.getUint32(2, false);
+	const seq = view.getUint32(6, false);
+
+	// Stream-shape invariant: chunk 0 carries the args header, later chunks don't.
+	if (seq === 0 && !hasArgs) return null;
+	if (seq !== 0 && hasArgs) return null;
+
+	let payloadOffset = 10;
+	let argsHeader = null;
+
+	if (hasArgs) {
+		if (byteLength < 12) return null;
+		const argsLen = view.getUint16(10, false);
+		if (argsLen === 0) return null;
+		payloadOffset = 12 + argsLen;
+		if (byteLength < payloadOffset) return null;
+		try {
+			const argsJson = textDecoder.decode(new Uint8Array(data, 12, argsLen));
+			argsHeader = JSON.parse(argsJson);
+		} catch {
+			return null;
+		}
+	}
+
+	const payload = byteLength > payloadOffset ? data.slice(payloadOffset) : null;
+	return { hasArgs, isLast, streamId, seq, argsHeader, payload };
+}
+
+/**
+ * Parse an upload control frame. Returns null if malformed.
+ *
+ * @param {ArrayBuffer} data
+ */
+function _parseUploadControlFrame(data) {
+	if (data.byteLength < 6) return null;
+	const view = new DataView(data);
+	return {
+		ctrlType: view.getUint8(1),
+		streamId: view.getUint32(2, false)
+	};
+}
+
+/**
+ * Create the async-iterable wrapper that the upload handler consumes via
+ * `for await (const chunk of ctx.stream)`.
+ *
+ * Wires `ctrl.signal` so any abort (cancel, disconnect, cap exceeded)
+ * causes a pending `next()` to reject and clears the queue.
+ *
+ * @param {AbortController} ctrl
+ */
+function _createUploadStream(ctrl) {
+	/** @type {Uint8Array[]} */
+	const queue = [];
+	/** @type {{ resolve: Function, reject: Function } | null} */
+	let pending = null;
+	let done = false;
+	/** @type {Error | null} */
+	let error = null;
+
+	function _resolveNext(value, isDone) {
+		if (!pending) return;
+		const r = pending; pending = null;
+		r.resolve({ value, done: isDone });
+	}
+	function _rejectNext(err) {
+		if (!pending) return;
+		const r = pending; pending = null;
+		r.reject(err);
+	}
+
+	function push(chunk) {
+		if (done) return;
+		if (pending) { _resolveNext(chunk, false); return; }
+		queue.push(chunk);
+	}
+
+	function end() {
+		if (done) return;
+		done = true;
+		if (pending && queue.length === 0) _resolveNext(undefined, true);
+	}
+
+	function abort(err) {
+		if (done) return;
+		done = true;
+		error = err;
+		queue.length = 0;
+		_rejectNext(err);
+	}
+
+	const onAbort = () => {
+		const reason = ctrl.signal.reason;
+		const err = reason instanceof Error
+			? reason
+			: new LiveError('CANCELLED', typeof reason === 'string' ? reason : 'upload cancelled');
+		abort(err);
+	};
+	if (ctrl.signal.aborted) onAbort();
+	else ctrl.signal.addEventListener('abort', onAbort, { once: true });
+
+	const stream = {
+		next() {
+			if (queue.length > 0) {
+				return Promise.resolve({ value: queue.shift(), done: false });
+			}
+			if (error) return Promise.reject(error);
+			if (done) return Promise.resolve({ value: undefined, done: true });
+			return new Promise((resolve, reject) => { pending = { resolve, reject }; });
+		},
+		return() {
+			done = true;
+			queue.length = 0;
+			_resolveNext(undefined, true);
+			return Promise.resolve({ value: undefined, done: true });
+		},
+		throw(err) {
+			abort(err);
+			return Promise.reject(err);
+		},
+		[Symbol.asyncIterator]() { return this; }
+	};
+
+	return {
+		stream,
+		push,
+		end,
+		abort,
+		get queueLength() { return queue.length; }
+	};
+}
+
+/**
+ * Remove an upload from the registry and decrement the global counter.
+ * Idempotent.
+ */
+function _cleanupUpload(ws, perWs, streamId) {
+	if (!perWs) return;
+	if (!perWs.has(streamId)) return;
+	perWs.delete(streamId);
+	if (perWs.size === 0) _wsUploads.delete(ws);
+	_totalActiveUploads = Math.max(0, _totalActiveUploads - 1);
+}
+
+/**
+ * Synchronously create a pending upload entry. The entry is registered in the
+ * per-WS map BEFORE the async start path begins so subsequent chunks arriving
+ * during setup are queued (in `pendingChunks`) instead of dropped.
+ *
+ * Phase transitions: 'pending' -> 'running' (after handler resolved) -> 'settled'.
+ * 'settled' is also reachable directly from 'pending' on capacity rejection,
+ * disconnect, or cancellation before the handler starts.
+ */
+function _createUploadEntry(ws, perWs, streamId, platform) {
+	/** @type {any} */
+	const upload = {
+		streamId,
+		phase: 'pending',
+		pendingChunks: [],
+		expectedSeq: 0,
+		bytesReceived: 0,
+		options: null,
+		streamWrap: null,
+		ctrl: null,
+		fail(code, error) {
+			if (upload.phase === 'settled') return;
+			upload.phase = 'settled';
+			if (upload.ctrl) {
+				try { upload.ctrl.abort(new LiveError(code, error)); } catch {}
+			}
+			_respondUpload(ws, platform, streamId, { ok: false, code, error });
+			_cleanupUpload(ws, perWs, streamId);
+		}
+	};
+	return upload;
+}
+
+/**
+ * Handle a 0x01 upload chunk frame.
+ *
+ * @param {any} ws
+ * @param {ArrayBuffer} data
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @param {{ beforeExecute?: Function, onError?: Function }} [options]
+ */
+function _handleUploadChunkFrame(ws, data, platform, options) {
+	const parsed = _parseUploadChunkFrame(data);
+	if (!parsed) {
+		if (_IS_DEV) console.warn('[svelte-realtime] Malformed upload chunk frame; dropping');
+		return;
+	}
+
+	const { isLast, streamId, seq, argsHeader, payload } = parsed;
+	let perWs = _wsUploads.get(ws);
+
+	if (seq === 0) {
+		if (perWs && perWs.has(streamId)) {
+			_respondUpload(ws, platform, streamId, {
+				ok: false, code: 'INVALID_REQUEST', error: 'streamId already active'
+			});
+			return;
+		}
+		if (!perWs) { perWs = new Map(); _wsUploads.set(ws, perWs); }
+
+		const upload = _createUploadEntry(ws, perWs, streamId, platform);
+		upload.bytesReceived = payload ? payload.byteLength : 0;
+		upload.expectedSeq = 1;
+		upload.pendingChunks.push({ payload, isLast });
+		perWs.set(streamId, upload);
+		_totalActiveUploads++;
+
+		_startUpload(ws, perWs, streamId, upload, argsHeader, platform, options);
+		return;
+	}
+
+	const upload = perWs?.get(streamId);
+	if (!upload || upload.phase === 'settled') {
+		// Late chunk for an upload that already finished or was cancelled.
+		// Drop silently -- common race when the handler returns early.
+		return;
+	}
+
+	if (seq !== upload.expectedSeq) {
+		upload.fail('INVALID_REQUEST', `out-of-order chunk: expected ${upload.expectedSeq}, got ${seq}`);
+		return;
+	}
+	upload.expectedSeq = seq + 1;
+
+	const payloadLen = payload ? payload.byteLength : 0;
+	if (payloadLen > 0) upload.bytesReceived += payloadLen;
+
+	if (upload.phase === 'pending') {
+		// Bound memory while the handler is being resolved.
+		if (upload.bytesReceived > _UPLOAD_PENDING_MAX_SIZE) {
+			upload.fail('PAYLOAD_TOO_LARGE', 'upload exceeds limit during start');
+			return;
+		}
+		if (upload.pendingChunks.length >= _UPLOAD_PENDING_MAX_CHUNKS) {
+			upload.fail('FLOW_BACKPRESSURE', 'too many chunks queued during upload start');
+			return;
+		}
+		upload.pendingChunks.push({ payload, isLast });
+		return;
+	}
+
+	// Running phase
+	if (upload.bytesReceived > upload.options.maxSize) {
+		upload.fail('PAYLOAD_TOO_LARGE', 'upload exceeds maxSize');
+		return;
+	}
+	if (payloadLen > 0) {
+		if (upload.streamWrap.queueLength >= upload.options.maxBufferedChunks) {
+			upload.fail('FLOW_BACKPRESSURE', 'upload buffer overflow -- handler not draining fast enough');
+			return;
+		}
+		upload.streamWrap.push(new Uint8Array(payload));
+	}
+	if (isLast) upload.streamWrap.end();
+}
+
+/**
+ * Handle a 0x02 upload control frame.
+ *
+ * @param {any} ws
+ * @param {ArrayBuffer} data
+ * @param {import('svelte-adapter-uws').Platform} platform
+ */
+function _handleUploadControlFrame(ws, data, platform) {
+	const parsed = _parseUploadControlFrame(data);
+	if (!parsed) {
+		if (_IS_DEV) console.warn('[svelte-realtime] Malformed upload control frame; dropping');
+		return;
+	}
+
+	const { ctrlType, streamId } = parsed;
+	const perWs = _wsUploads.get(ws);
+	const upload = perWs?.get(streamId);
+
+	if (ctrlType === _UPLOAD_CTRL_CANCEL) {
+		if (!upload || upload.phase === 'settled') return;
+		upload.fail('CANCELLED', 'upload cancelled by client');
+		return;
+	}
+
+	if (_IS_DEV) {
+		console.warn(`[svelte-realtime] Unknown upload control type 0x${ctrlType.toString(16)} for stream ${_streamIdHex(streamId)}`);
+	}
+}
+
+/**
+ * Resolve the registered live.upload handler, transition the upload from
+ * 'pending' to 'running', drain queued chunks, and drive the handler with the
+ * async-iterable. All response paths route through `upload.fail()` or the
+ * success branch exactly once (guarded by `upload.phase`).
+ *
+ * @param {any} ws
+ * @param {Map<number, any>} perWs
+ * @param {number} streamId
+ * @param {any} upload -- pre-registered pending entry from _handleUploadChunkFrame
+ * @param {any} argsHeader -- parsed { rpc, args } from chunk 0
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @param {{ beforeExecute?: Function, onError?: Function }} [options]
+ */
+async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, options) {
+	const _metricsStart = _metricsInstruments ? Date.now() : 0;
+	let path = '';
+	/** @type {any} */ let ctx = null;
+
+	try {
+		if (!argsHeader || typeof argsHeader.rpc !== 'string') {
+			_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
+			upload.fail('INVALID_REQUEST', 'missing rpc path');
+			return;
+		}
+
+		path = argsHeader.rpc;
+		const args = Array.isArray(argsHeader.args) ? argsHeader.args : [];
+
+		if (!_validPathRe.test(path)) {
+			_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
+			upload.fail('INVALID_REQUEST', 'Invalid path');
+			return;
+		}
+
+		if (!_lazyResolved) await _resolveAllLazy();
+		if (upload.phase === 'settled') return;
+
+		const fn = await _resolveRegistryEntry(path);
+		if (upload.phase === 'settled') return;
+
+		if (!fn) {
+			_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
+			upload.fail('NOT_FOUND', 'Not found');
+			return;
+		}
+		if (!/** @type {any} */ (fn).__isUpload) {
+			_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
+			upload.fail('INVALID_REQUEST', 'Not an upload endpoint');
+			return;
+		}
+
+		const uploadOptions = /** @type {any} */ (fn).__uploadOptions;
+
+		// Capacity caps. perWs and _totalActiveUploads already include this
+		// upload, so subtract one to count "others".
+		let othersInSession = 0;
+		for (const e of perWs.values()) if (e !== upload) othersInSession++;
+		if (othersInSession >= uploadOptions.maxConcurrentPerSession) {
+			_recordRpcMetrics(path, 'TOO_MANY_UPLOADS', _metricsStart);
+			upload.fail('TOO_MANY_UPLOADS', 'too many concurrent uploads on this session');
+			return;
+		}
+		if (_totalActiveUploads - 1 >= uploadOptions.maxConcurrentTotal) {
+			_recordRpcMetrics(path, 'TOO_MANY_UPLOADS', _metricsStart);
+			upload.fail('TOO_MANY_UPLOADS', 'too many concurrent uploads');
+			return;
+		}
+		if (upload.bytesReceived > uploadOptions.maxSize) {
+			_recordRpcMetrics(path, 'PAYLOAD_TOO_LARGE', _metricsStart);
+			upload.fail('PAYLOAD_TOO_LARGE', 'upload exceeds maxSize');
+			return;
+		}
+
+		// Transition to running phase and create the live iterable.
+		upload.options = uploadOptions;
+		upload.ctrl = new AbortController();
+		upload.streamWrap = _createUploadStream(upload.ctrl);
+		upload.phase = 'running';
+
+		// Drain chunks queued during the pending phase into the live stream.
+		const drained = upload.pendingChunks;
+		upload.pendingChunks = null;
+		for (let i = 0; i < drained.length; i++) {
+			const c = drained[i];
+			if (c.payload && c.payload.byteLength > 0) {
+				upload.streamWrap.push(new Uint8Array(c.payload));
+			}
+			if (c.isLast) upload.streamWrap.end();
+		}
+
+		const _h = _getCtxHelpers(platform);
+		ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null);
+		ctx.stream = upload.streamWrap.stream;
+		ctx.signal = upload.ctrl.signal;
+		ctx.upload = { id: _streamIdHex(streamId) };
+
+		await _runWithMiddleware(ctx, async () => {
+			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
+			const guardFn = await _resolveGuard(modulePath);
+			if (guardFn) await _runGuard(guardFn, ctx);
+
+			if (options?.beforeExecute) {
+				await options.beforeExecute(ws, path, args);
+			}
+
+			const result = await fn(ctx, ...args);
+			if (upload.phase !== 'settled') {
+				upload.phase = 'settled';
+				_respondUpload(ws, platform, streamId, { ok: true, data: result });
+			}
+		});
+		_recordRpcMetrics(path, '', _metricsStart);
+	} catch (err) {
+		if (upload.phase !== 'settled') {
+			upload.phase = 'settled';
+			const code = err instanceof LiveError ? err.code : 'INTERNAL_ERROR';
+			_recordRpcMetrics(path || '__invalid__', code, _metricsStart);
+			if (err instanceof LiveError) {
+				_respondUpload(ws, platform, streamId, { ok: false, code: err.code, error: err.message });
+			} else {
+				if (options?.onError) {
+					try { options.onError(path, err, ctx); } catch {}
+				}
+				if (_IS_DEV) console.error(`[svelte-realtime] Error in upload '${path}':`, err);
+				_respondUpload(ws, platform, streamId, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
+			}
+		} else {
+			_recordRpcMetrics(path || '__invalid__', err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart);
+		}
+		// Make sure any pending for-await wakes up if we exited via throw.
+		if (upload.ctrl && !upload.ctrl.signal.aborted) {
+			try { upload.ctrl.abort(err instanceof Error ? err : new Error(String(err))); } catch {}
+		}
+	} finally {
+		_cleanupUpload(ws, perWs, streamId);
+	}
+}
+
+/**
+ * Drain in-flight uploads owned by `ws`. Called from `close()`.
+ * Each upload's signal is aborted so the handler's `for await` wakes up
+ * and any cleanup the user wired runs. No response is sent (the WS is closed).
+ *
+ * @param {any} ws
+ */
+function _drainUploadsOnClose(ws) {
+	const perWs = _wsUploads.get(ws);
+	if (!perWs) return;
+	for (const upload of perWs.values()) {
+		if (upload.phase === 'settled') continue;
+		upload.phase = 'settled';
+		if (upload.ctrl) {
+			try { upload.ctrl.abort(new LiveError('DISCONNECTED', 'connection closed')); } catch {}
+		}
+		_totalActiveUploads = Math.max(0, _totalActiveUploads - 1);
+	}
+	_wsUploads.delete(ws);
+}
+
 /**
  * Run global middleware chain, then call `handler`.
  * If no middleware is registered, calls handler directly (zero overhead).
@@ -6644,6 +7254,9 @@ export function close(ws, { platform, subscriptions }) {
 
 	_wsStreamOwners.delete(ws);
 	_firedUnsubscribes.delete(ws);
+
+	// Drain in-flight uploads so handlers exit cleanly on disconnect.
+	_drainUploadsOnClose(ws);
 
 	// Drain the push registry so a single `export { close }` re-export from
 	// hooks.ws.js covers BOTH the stream-subscription cleanup that has

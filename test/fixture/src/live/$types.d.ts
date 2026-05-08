@@ -10,7 +10,7 @@ declare module '$live/auth' {
   export const adminAction: (...args: any[]) => Promise<any>;
   export const resetAuth: (...args: any[]) => Promise<any>;
   export type ErrorCode = 'FORBIDDEN';
-  export const inbox: ((...args: any[]) => StreamStore<any>) & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const inbox: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
   export const empty: Readable<undefined>;
 }
 
@@ -123,5 +123,15 @@ declare module '$live/todos' {
   export const reset: (...args: any[]) => Promise<any>;
   export type ErrorCode = 'TEST_FAIL';
   export const todos: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const empty: Readable<undefined>;
+}
+
+declare module '$live/uploads' {
+  import type { UploadHandle } from 'svelte-realtime/client';
+  import type { Readable } from 'svelte/store';
+
+  export const ping: (...args: any[]) => Promise<any>;
+  export const echoBytes: (source: Blob | ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array>, ...args: any[]) => UploadHandle<any>;
+  export const slowSink: (source: Blob | ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array>, ...args: any[]) => UploadHandle<any>;
   export const empty: Readable<undefined>;
 }

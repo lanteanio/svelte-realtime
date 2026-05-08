@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fc from 'fast-check';
 
-let __rpc, __stream, __binaryRpc, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters;
+let __rpc, __stream, __binaryRpc, __upload, _resetUploadAutoDiscovery, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters;
 let topicCallbacks;
 let statusCallbacks;
 let statusInitialValue;
@@ -12,6 +12,7 @@ let denialsValue;
 let sendQueuedFn;
 let readyReject;
 let connectFn;
+let mockBufferedAmount;
 /** @type {((event: string, data: any) => any | Promise<any>) | null} */
 let onRequestHandler;
 /** @type {Set<() => void>} */
@@ -77,10 +78,12 @@ beforeEach(async () => {
 	sendQueuedFn = vi.fn();
 	onRequestHandler = null;
 	onRequestUnsubs = new Set();
+	mockBufferedAmount = 0;
 
 	connectFn = vi.fn(() => ({
 		sendQueued: sendQueuedFn,
-		ready: () => new Promise((_resolve, reject) => { readyReject = reject; })
+		ready: () => new Promise((_resolve, reject) => { readyReject = reject; }),
+		get bufferedAmount() { return mockBufferedAmount; }
 	}));
 
 	vi.doMock('svelte-adapter-uws/client', () => ({
@@ -181,6 +184,9 @@ beforeEach(async () => {
 	__rpc = mod.__rpc;
 	__stream = mod.__stream;
 	__binaryRpc = mod.__binaryRpc;
+	__upload = mod.__upload;
+	_resetUploadAutoDiscovery = mod._resetUploadAutoDiscovery;
+	if (_resetUploadAutoDiscovery) _resetUploadAutoDiscovery();
 	RpcError = mod.RpcError;
 	batch = mod.batch;
 	configure = mod.configure;
@@ -2785,6 +2791,449 @@ describe('__binaryRpc()', () => {
 
 		const result = await promise;
 		expect(result).toEqual({ url: '/uploads/test.bin' });
+	});
+});
+
+// -- __upload() streaming uploads --------------------------------------------
+
+/** Drain enough microtasks for the upload pump to send all queued chunks. */
+async function flushUpload(times = 12) {
+	for (let i = 0; i < times; i++) {
+		await new Promise((r) => setTimeout(r, 0));
+	}
+}
+
+function parseUploadChunk(buf) {
+	const view = new DataView(buf);
+	const u8 = new Uint8Array(buf);
+	const frameType = view.getUint8(0);
+	const flags = view.getUint8(1);
+	const hasArgs = (flags & 0x01) !== 0;
+	const isLast = (flags & 0x02) !== 0;
+	const streamId = view.getUint32(2, false);
+	const seq = view.getUint32(6, false);
+	let payloadOffset = 10;
+	let argsHeader = null;
+	if (hasArgs) {
+		const argsLen = view.getUint16(10, false);
+		payloadOffset = 12 + argsLen;
+		argsHeader = JSON.parse(new TextDecoder().decode(u8.subarray(12, 12 + argsLen)));
+	}
+	const payload = buf.byteLength > payloadOffset ? u8.subarray(payloadOffset).slice() : null;
+	return { frameType, flags, hasArgs, isLast, streamId, seq, argsHeader, payload };
+}
+
+function parseUploadCancel(buf) {
+	const view = new DataView(buf);
+	return {
+		frameType: view.getUint8(0),
+		ctrlType: view.getUint8(1),
+		streamId: view.getUint32(2, false)
+	};
+}
+
+function simulateUploadResponse(streamId, data) {
+	const hex = (streamId >>> 0).toString(16).padStart(8, '0');
+	simulateTopicMessage('__upload', { event: hex, data });
+}
+
+describe('__upload()', () => {
+	it('sends a single-chunk upload and resolves on server success', async () => {
+		const avatar = __upload('uploads/single');
+		const handle = avatar(new Uint8Array([1, 2, 3, 4]).buffer, 'cat.png');
+		await flushUpload();
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		const frame = parseUploadChunk(sendQueuedFn.mock.calls[0][0]);
+		expect(frame.frameType).toBe(0x01);
+		expect(frame.hasArgs).toBe(true);
+		expect(frame.isLast).toBe(true);
+		expect(frame.seq).toBe(0);
+		expect(frame.argsHeader).toEqual({ rpc: 'uploads/single', args: ['cat.png'] });
+		expect(Array.from(frame.payload)).toEqual([1, 2, 3, 4]);
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: { url: '/u/cat.png' } });
+		await expect(handle).resolves.toEqual({ url: '/u/cat.png' });
+	});
+
+	it('streams a multi-chunk upload with sequential seq and isLast on the last frame', async () => {
+		configure({ upload: { chunkSize: 4 } });
+		const avatar = __upload('uploads/multi');
+		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9]).buffer);
+		await flushUpload();
+
+		// 9 bytes / 4 = 3 chunks (4, 4, 1)
+		expect(sendQueuedFn).toHaveBeenCalledTimes(3);
+		const frames = sendQueuedFn.mock.calls.map((c) => parseUploadChunk(c[0]));
+		expect(frames[0].seq).toBe(0);
+		expect(frames[0].hasArgs).toBe(true);
+		expect(frames[0].isLast).toBe(false);
+		expect(Array.from(frames[0].payload)).toEqual([1, 2, 3, 4]);
+
+		expect(frames[1].seq).toBe(1);
+		expect(frames[1].hasArgs).toBe(false);
+		expect(frames[1].isLast).toBe(false);
+		expect(Array.from(frames[1].payload)).toEqual([5, 6, 7, 8]);
+
+		expect(frames[2].seq).toBe(2);
+		expect(frames[2].hasArgs).toBe(false);
+		expect(frames[2].isLast).toBe(true);
+		expect(Array.from(frames[2].payload)).toEqual([9]);
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: 9 });
+		await expect(handle).resolves.toBe(9);
+	});
+
+	it('sends a single chunk-0 frame with isLast and no payload for an empty source', async () => {
+		const avatar = __upload('uploads/empty');
+		const handle = avatar(new Uint8Array(0).buffer);
+		await flushUpload();
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		const frame = parseUploadChunk(sendQueuedFn.mock.calls[0][0]);
+		expect(frame.hasArgs).toBe(true);
+		expect(frame.isLast).toBe(true);
+		expect(frame.payload).toBeNull();
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: { ok: true } });
+		await expect(handle).resolves.toEqual({ ok: true });
+	});
+
+	it('accepts ArrayBufferView (Uint8Array slice) as a source', async () => {
+		const avatar = __upload('uploads/view');
+		const big = new Uint8Array([10, 20, 30, 40, 50]);
+		const slice = big.subarray(1, 4); // [20, 30, 40]
+		const handle = avatar(slice);
+		await flushUpload();
+
+		const frame = parseUploadChunk(sendQueuedFn.mock.calls[0][0]);
+		expect(Array.from(frame.payload)).toEqual([20, 30, 40]);
+		simulateUploadResponse(handle.streamId, { ok: true, data: 'ok' });
+		await handle;
+	});
+
+	it('accepts a Blob source', async () => {
+		if (typeof Blob === 'undefined') return;
+		const avatar = __upload('uploads/blob');
+		const blob = new Blob([new Uint8Array([100, 101, 102])]);
+		const handle = avatar(blob, 'photo.jpg');
+		await flushUpload();
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		const frame = parseUploadChunk(sendQueuedFn.mock.calls[0][0]);
+		expect(frame.argsHeader).toEqual({ rpc: 'uploads/blob', args: ['photo.jpg'] });
+		expect(Array.from(frame.payload)).toEqual([100, 101, 102]);
+		expect(handle.total).toBe(3);
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: 'ok' });
+		await handle;
+	});
+
+	it('accepts a ReadableStream source and reports total as undefined', async () => {
+		if (typeof ReadableStream === 'undefined') return;
+		configure({ upload: { chunkSize: 4 } });
+		const stream = new ReadableStream({
+			start(ctrl) {
+				ctrl.enqueue(new Uint8Array([1, 2, 3]));
+				ctrl.enqueue(new Uint8Array([4, 5, 6, 7]));
+				ctrl.enqueue(new Uint8Array([8]));
+				ctrl.close();
+			}
+		});
+		const avatar = __upload('uploads/stream');
+		const handle = avatar(stream);
+		expect(handle.total).toBeUndefined();
+		expect(handle.progress).toBeUndefined();
+		await flushUpload();
+
+		// 3 + 4 + 1 = 8 bytes, chunkSize=4 -> 2 chunks
+		const frames = sendQueuedFn.mock.calls.map((c) => parseUploadChunk(c[0]));
+		const concat = [];
+		for (const f of frames) if (f.payload) concat.push(...f.payload);
+		expect(concat).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+		expect(frames[frames.length - 1].isLast).toBe(true);
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: concat.length });
+		await expect(handle).resolves.toBe(8);
+	});
+
+	it('rejects with RpcError on server error response', async () => {
+		const avatar = __upload('uploads/err');
+		const handle = avatar(new Uint8Array([1]).buffer);
+		await flushUpload();
+
+		simulateUploadResponse(handle.streamId, { ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'too big' });
+		await expect(handle).rejects.toThrow('too big');
+		await expect(handle).rejects.toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+	});
+
+	it('cancel() sends a 0x02 frame and rejects with CANCELLED', async () => {
+		const avatar = __upload('uploads/cancel');
+		const handle = avatar(new Uint8Array([1, 2, 3]).buffer);
+		await flushUpload();
+
+		const sentBefore = sendQueuedFn.mock.calls.length;
+		handle.cancel('user clicked stop');
+
+		// One more frame (the cancel)
+		expect(sendQueuedFn.mock.calls.length).toBe(sentBefore + 1);
+		const cancel = parseUploadCancel(sendQueuedFn.mock.calls[sentBefore][0]);
+		expect(cancel.frameType).toBe(0x02);
+		expect(cancel.ctrlType).toBe(0x10);
+		expect(cancel.streamId).toBe(handle.streamId);
+
+		await expect(handle).rejects.toMatchObject({ code: 'CANCELLED' });
+	});
+
+	it('rejects in-flight uploads with DISCONNECTED on status disconnected', async () => {
+		const avatar = __upload('uploads/disc');
+		const handle = avatar(new Uint8Array([1, 2, 3]).buffer);
+		await flushUpload();
+
+		simulateStatus('disconnected');
+		await expect(handle).rejects.toMatchObject({ code: 'DISCONNECTED' });
+	});
+
+	it('emits progress events with sent/total/percent/chunks', async () => {
+		configure({ upload: { chunkSize: 4 } });
+		const avatar = __upload('uploads/progress');
+		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer);
+		const events = [];
+		handle.on('progress', (p) => events.push(p));
+		await flushUpload();
+
+		expect(events.length).toBe(2);
+		expect(events[0]).toMatchObject({ sent: 4, total: 8, percent: 0.5, chunks: 1 });
+		expect(events[1]).toMatchObject({ sent: 8, total: 8, percent: 1, chunks: 2 });
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: 8 });
+		await handle;
+	});
+
+	it('emits complete with the server return value', async () => {
+		const avatar = __upload('uploads/done');
+		const handle = avatar(new Uint8Array([1]).buffer);
+		let completed = null;
+		handle.on('complete', (data) => { completed = data; });
+		await flushUpload();
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: { url: '/x' } });
+		await handle;
+		expect(completed).toEqual({ url: '/x' });
+	});
+
+	it('emits cancel and error when cancelled', async () => {
+		const avatar = __upload('uploads/cancel-evt');
+		const handle = avatar(new Uint8Array([1, 2, 3]).buffer);
+		const fired = [];
+		handle.on('cancel', (r) => fired.push(['cancel', r]));
+		handle.on('error', (e) => fired.push(['error', e.code]));
+		await flushUpload();
+
+		handle.cancel('stop');
+		await expect(handle).rejects.toThrow();
+		expect(fired).toEqual([['cancel', 'stop'], ['error', 'CANCELLED']]);
+	});
+
+	it('integrates with AbortController via cancel()', async () => {
+		const avatar = __upload('uploads/abort');
+		const handle = avatar(new Uint8Array([1, 2]).buffer);
+		const ac = new AbortController();
+		ac.signal.addEventListener('abort', () => handle.cancel('aborted'));
+		await flushUpload();
+
+		ac.abort();
+		await expect(handle).rejects.toMatchObject({ code: 'CANCELLED' });
+	});
+
+	it('assigns unique streamIds across concurrent uploads', async () => {
+		const avatar = __upload('uploads/many');
+		const a = avatar(new Uint8Array([1]).buffer);
+		const b = avatar(new Uint8Array([2]).buffer);
+		const c = avatar(new Uint8Array([3]).buffer);
+		expect(a.streamId).not.toBe(b.streamId);
+		expect(b.streamId).not.toBe(c.streamId);
+		expect(a.streamIdHex).toMatch(/^[0-9a-f]{8}$/);
+
+		await flushUpload();
+		simulateUploadResponse(a.streamId, { ok: true, data: 'a' });
+		simulateUploadResponse(b.streamId, { ok: true, data: 'b' });
+		simulateUploadResponse(c.streamId, { ok: true, data: 'c' });
+		expect(await a).toBe('a');
+		expect(await b).toBe('b');
+		expect(await c).toBe('c');
+	});
+
+	it('ignores envelopes for unknown streamIds', async () => {
+		const avatar = __upload('uploads/unknown');
+		const handle = avatar(new Uint8Array([1]).buffer);
+		await flushUpload();
+
+		// Wrong streamId -- should be silently ignored
+		simulateUploadResponse(handle.streamId + 12345, { ok: true, data: 'no' });
+
+		// Real response after a tick still resolves
+		simulateUploadResponse(handle.streamId, { ok: true, data: 'yes' });
+		await expect(handle).resolves.toBe('yes');
+	});
+
+	it('rejects with TypeError synchronously for unsupported source types', async () => {
+		const avatar = __upload('uploads/bad');
+		const handle = avatar(/** @type {any} */ ('not a buffer'));
+		await flushUpload();
+		await expect(handle).rejects.toMatchObject({ code: 'SOURCE_ERROR' });
+	});
+
+	it('uses the 12KB default chunk size when nothing is discovered or configured', async () => {
+		// 13000 bytes / 12288 default = 2 chunks (12288, 712)
+		const avatar = __upload('uploads/default-chunk');
+		const handle = avatar(new Uint8Array(13000).buffer);
+		await flushUpload();
+
+		const frames = sendQueuedFn.mock.calls.map((c) => parseUploadChunk(c[0]));
+		expect(frames.length).toBe(2);
+		expect(frames[0].payload.byteLength).toBe(12288);
+		expect(frames[1].payload.byteLength).toBe(712);
+		expect(frames[1].isLast).toBe(true);
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: 13000 });
+		await handle;
+	});
+
+	it('auto-discovers chunk size from server __cap on the next upload', async () => {
+		// First upload: default chunk size (12288)
+		const avatar = __upload('uploads/discover');
+		const handle1 = avatar(new Uint8Array(8000).buffer);
+		await flushUpload();
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+
+		// Server response carries __cap=1048576 (1MB adapter cap)
+		simulateUploadResponse(handle1.streamId, { ok: true, data: 'first', __cap: 1024 * 1024 });
+		await handle1;
+
+		// Second upload: should now use floor(1MB * 0.9) = 943718 bytes per chunk
+		// Sending 800KB (819200 bytes) should fit in ONE chunk under the new limit.
+		sendQueuedFn.mockClear();
+		const handle2 = avatar(new Uint8Array(800 * 1024).buffer);
+		await flushUpload();
+
+		const frames2 = sendQueuedFn.mock.calls.map((c) => parseUploadChunk(c[0]));
+		expect(frames2.length).toBe(1);
+		expect(frames2[0].isLast).toBe(true);
+		expect(frames2[0].payload.byteLength).toBe(800 * 1024);
+
+		simulateUploadResponse(handle2.streamId, { ok: true, data: 'second' });
+		await handle2;
+	});
+
+	it('user-configured chunkSize wins over auto-discovered cap', async () => {
+		const avatar = __upload('uploads/user-wins');
+
+		// First upload primes the discovery cache to 1MB
+		const h1 = avatar(new Uint8Array(100).buffer);
+		await flushUpload();
+		simulateUploadResponse(h1.streamId, { ok: true, data: 'ok', __cap: 1024 * 1024 });
+		await h1;
+
+		// User explicitly sets a smaller chunk size
+		configure({ upload: { chunkSize: 4 } });
+		sendQueuedFn.mockClear();
+
+		const h2 = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer);
+		await flushUpload();
+
+		// 8 bytes / 4 = 2 chunks (NOT 1, despite the discovered 1MB cap)
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+		simulateUploadResponse(h2.streamId, { ok: true, data: 'ok' });
+		await h2;
+	});
+
+	it('updates discovery from a response even after the handle settled', async () => {
+		const avatar = __upload('uploads/late-cap');
+
+		// First upload. Cancel before response arrives.
+		const h1 = avatar(new Uint8Array(8).buffer);
+		await flushUpload();
+		h1.cancel();
+		await expect(h1).rejects.toMatchObject({ code: 'CANCELLED' });
+
+		// A late server response still arrives (with __cap). Settled handle
+		// should still update the discovery cache.
+		simulateUploadResponse(h1.streamId, { ok: true, data: 'late', __cap: 1024 * 1024 });
+
+		// Next upload picks up the discovered value
+		sendQueuedFn.mockClear();
+		const h2 = avatar(new Uint8Array(500 * 1024).buffer);
+		await flushUpload();
+
+		const frames = sendQueuedFn.mock.calls.map((c) => parseUploadChunk(c[0]));
+		expect(frames.length).toBe(1);
+		expect(frames[0].payload.byteLength).toBe(500 * 1024);
+		simulateUploadResponse(h2.streamId, { ok: true, data: 'ok' });
+		await h2;
+	});
+
+	it('paces sends when conn.bufferedAmount exceeds the high-water mark, resumes when it drops below low-water', async () => {
+		// Tight watermarks so we can verify quickly
+		configure({ upload: { chunkSize: 4, highWaterMark: 100, lowWaterMark: 30 } });
+		const avatar = __upload('uploads/pace');
+		// 12 bytes = 3 chunks at chunkSize=4
+		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer);
+
+		// Simulate a backed-up WS: bufferedAmount is high after the first chunk goes out
+		mockBufferedAmount = 200;
+
+		// Let the pump send chunk 0 then enter the pacing wait
+		await new Promise((r) => setTimeout(r, 100));
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+
+		// Drop bufferedAmount below low-water; pump should resume and finish
+		mockBufferedAmount = 10;
+		// Pacing polls every 50ms; give it a couple of cycles
+		await new Promise((r) => setTimeout(r, 200));
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(3);
+		simulateUploadResponse(handle.streamId, { ok: true, data: 12 });
+		await handle;
+	});
+
+	it('does not pace when conn.bufferedAmount is undefined (older adapter)', async () => {
+		// Override the connect mock to omit bufferedAmount entirely
+		connectFn.mockImplementation(() => ({
+			sendQueued: sendQueuedFn,
+			ready: () => new Promise((_resolve, reject) => { readyReject = reject; })
+			// no bufferedAmount
+		}));
+		configure({ upload: { chunkSize: 4, highWaterMark: 100, lowWaterMark: 30 } });
+		const avatar = __upload('uploads/no-bp');
+		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer);
+		await flushUpload();
+
+		// All chunks should send back-to-back without pacing
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+		simulateUploadResponse(handle.streamId, { ok: true, data: 8 });
+		await handle;
+	});
+
+	it('pacing wait exits on cancel, rejecting with CANCELLED', async () => {
+		configure({ upload: { chunkSize: 4, highWaterMark: 50, lowWaterMark: 10 } });
+		const avatar = __upload('uploads/pace-cancel');
+		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer);
+
+		mockBufferedAmount = 100; // stuck above high-water
+
+		// Let the pump enter the pacing wait
+		await new Promise((r) => setTimeout(r, 80));
+
+		// Cancel mid-pace; the wait loop should exit promptly
+		handle.cancel('user stopped');
+		await expect(handle).rejects.toMatchObject({ code: 'CANCELLED' });
+
+		// We should have sent chunk 0 and the cancel control frame, no more
+		const cancelFrames = sendQueuedFn.mock.calls
+			.map((c) => new Uint8Array(c[0]))
+			.filter((u8) => u8[0] === 0x02);
+		expect(cancelFrames.length).toBe(1);
 	});
 });
 

@@ -402,6 +402,87 @@ export function batch<T extends Promise<any>[]>(
 export function __binaryRpc(path: string): (buffer: ArrayBuffer | ArrayBufferView, ...args: any[]) => Promise<any>;
 
 /**
+ * Progress event payload emitted by `UploadHandle.on('progress', ...)`.
+ */
+export interface UploadProgress {
+	/** Bytes sent so far. */
+	sent: number;
+	/** Total bytes if known (Blob/Buffer); undefined for ReadableStream. */
+	total: number | undefined;
+	/** 0..1 if total known; undefined otherwise. */
+	percent: number | undefined;
+	/** Chunks sent so far. */
+	chunks: number;
+	/** Smoothed throughput over the last ~1s, in bytes/sec. */
+	bytesPerSec: number;
+}
+
+/**
+ * Handle returned by an upload call. Thenable (`await handle`), event
+ * emitter (`handle.on(...)`), and abortable (`handle.cancel()`).
+ *
+ * Promise-shaped: `await handle` resolves with the server's return value
+ * or rejects with `RpcError`. Codes seen at this layer:
+ *   - `CANCELLED`            -- caller cancelled (or AbortSignal aborted)
+ *   - `DISCONNECTED`         -- WS closed mid-upload
+ *   - `CONNECTION_CLOSED`    -- WS terminated before start
+ *   - `SOURCE_ERROR`         -- the source iterator threw
+ *   - any code from the server (`PAYLOAD_TOO_LARGE`, `NOT_FOUND`, ...)
+ */
+export interface UploadHandle<T = any> extends Promise<T> {
+	/** Bytes sent so far. */
+	readonly sent: number;
+	/** Total bytes if known (Blob/Buffer); undefined for ReadableStream. */
+	readonly total: number | undefined;
+	/** Chunks sent so far. */
+	readonly chunks: number;
+	/** 0..1 if total known; undefined otherwise. */
+	readonly progress: number | undefined;
+	/** Smoothed throughput over the last ~1s, in bytes/sec. */
+	readonly bytesPerSec: number;
+	/** Numeric streamId (uint32 client-assigned). */
+	readonly streamId: number;
+	/** 8-char hex matching server-side `ctx.upload.id`. */
+	readonly streamIdHex: string;
+
+	/**
+	 * Subscribe to a handle event. Returns an unsubscribe function.
+	 */
+	on(event: 'progress', cb: (payload: UploadProgress) => void): () => void;
+	on(event: 'complete', cb: (result: T) => void): () => void;
+	on(event: 'error', cb: (err: RpcError) => void): () => void;
+	on(event: 'cancel', cb: (reason: string | undefined) => void): () => void;
+
+	/**
+	 * Cancel the upload. Sends a control frame to the server (best-effort)
+	 * and rejects the promise with `RpcError('CANCELLED')`. Idempotent.
+	 *
+	 * Compose with `AbortController`:
+	 *   `ac.signal.addEventListener('abort', () => handle.cancel())`
+	 */
+	cancel(reason?: string): void;
+}
+
+/**
+ * Create a callable upload function for a given path. The returned function
+ * takes `(source, ...args)` and returns an `UploadHandle`.
+ *
+ * Source types: `Blob` / `File` / `ArrayBuffer` / any `ArrayBufferView` /
+ * `ReadableStream<Uint8Array>`. Args are forwarded positionally to the
+ * server-side `live.upload(handler)` after `ctx`.
+ *
+ * Used by generated client stubs for `live.upload()` exports.
+ *
+ * @param path - RPC path (e.g. `'uploads/avatar'`)
+ *
+ * @internal
+ */
+export function __upload<T = any>(path: string): (
+	source: Blob | ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array>,
+	...args: any[]
+) => UploadHandle<T>;
+
+/**
  * Configure client-side connection hooks.
  *
  * @example

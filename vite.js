@@ -11,6 +11,7 @@ const GUARD_EXPORT_RE = /export\s+const\s+(_guard)\s*=\s*guard\s*\(/g;
 const DYNAMIC_STREAM_RE = /export\s+const\s+(\w+)\s*=\s*live\.stream\s*\(\s*(?:\([^)]*\)|[a-zA-Z_$][\w$]*)\s*=>/g;
 const CRON_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.cron\s*\(/g;
 const BINARY_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.binary\s*\(/g;
+const UPLOAD_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.upload\s*\(/g;
 const DERIVED_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.derived\s*\(/g;
 const DYNAMIC_DERIVED_RE = /export\s+const\s+(\w+)\s*=\s*live\.derived\s*\(\s*(?:\([^)]*\)|[a-zA-Z_$][\w$]*)\s*=>/g;
 const ROOM_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.room\s*\(/g;
@@ -920,22 +921,27 @@ function _generateSsrStubs(filePath, modulePath) {
 	const windowedAggregates = [];
 	let match;
 
-	// Detect dynamic (function-returning) streams, channels, and derived
-	for (const re of [DYNAMIC_STREAM_RE, DYNAMIC_CHANNEL_RE, DYNAMIC_DERIVED_RE]) {
-		re.lastIndex = 0;
-		while ((match = re.exec(source)) !== null) {
-			dynamicNames.add(match[1]);
-		}
-	}
-
-	// Collect all stream-like exports that need readable() wrappers for SSR.
+	// Collect stream-like exports and classify each as dynamic-factory or
+	// static-readable. This MUST agree with the client-side stub generation
+	// (which uses `_isDynamicExport` for the same decision) -- otherwise the
+	// SSR stub emits a factory while the client stub emits a readable, the
+	// page is compiled against the static client shape, and `$storeName`
+	// during SSR calls `factory.subscribe(...)` which crashes with
+	// "store.subscribe is not a function". One classifier, both call sites.
 	// Aggregates with `windows: { ... }` are split out into a separate set --
 	// they need a namespace stub (one readable per window), not the
 	// single-readable shape that single-state aggregates take.
-	for (const re of [STREAM_EXPORT_RE, CHANNEL_EXPORT_RE, DERIVED_EXPORT_RE]) {
+	const _streamApiByRe = [
+		[STREAM_EXPORT_RE, 'live\\.stream'],
+		[CHANNEL_EXPORT_RE, 'live\\.channel'],
+		[DERIVED_EXPORT_RE, 'live\\.derived']
+	];
+	for (const [re, apiName] of _streamApiByRe) {
 		re.lastIndex = 0;
 		while ((match = re.exec(source)) !== null) {
-			storeNames.push(match[1]);
+			const name = match[1];
+			storeNames.push(name);
+			if (_isDynamicExport(source, name, apiName)) dynamicNames.add(name);
 		}
 	}
 	AGGREGATE_EXPORT_RE.lastIndex = 0;
@@ -1123,6 +1129,18 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			exportedNames.add(name);
 			imports.add('__binaryRpc');
 			lines.push(`export const ${name} = __binaryRpc('${modulePath}/${name}');`);
+		}
+	}
+
+	// Detect live.upload() exports
+	UPLOAD_EXPORT_RE.lastIndex = 0;
+	while ((match = UPLOAD_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		if (!exportedNames.has(name)) {
+			exportedNames.add(name);
+			imports.add('__upload');
+			lines.push(`export const ${name} = __upload('${modulePath}/${name}');`);
 		}
 	}
 
@@ -1872,6 +1890,17 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			}
 		}
 
+		// Register live.upload() exports
+		UPLOAD_EXPORT_RE.lastIndex = 0;
+		while ((match = UPLOAD_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			if (!/^\w+$/.test(name)) continue;
+			if (!registered.has(name)) {
+				registered.add(name);
+				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+			}
+		}
+
 		// Register cron jobs
 		CRON_EXPORT_RE.lastIndex = 0;
 		while ((match = CRON_EXPORT_RE.exec(source)) !== null) {
@@ -2097,6 +2126,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 		const handledNames = new Set();
 		let needsStreamStore = false;
 		let needsRpcError = false;
+		let needsUploadHandle = false;
 
 		// Detect live() exports
 		let match;
@@ -2239,6 +2269,17 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
+		// Detect live.upload() exports
+		UPLOAD_EXPORT_RE.lastIndex = 0;
+		while ((match = UPLOAD_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				needsUploadHandle = true;
+				exports.push(`  export const ${name}: (source: Blob | ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array>, ...args: any[]) => UploadHandle<any>;`);
+			}
+		}
+
 		// Detect live.rateLimit() exports -- extract real types for TS
 		RATE_LIMIT_EXPORT_RE.lastIndex = 0;
 		while ((match = RATE_LIMIT_EXPORT_RE.exec(source)) !== null) {
@@ -2302,14 +2343,15 @@ function _generateTypeDeclarations(liveDir, dir) {
 
 		if (exports.length > 0) {
 			declarations.push(`declare module '$live/${rel}' {`);
-			if (needsStreamStore || needsRpcError) {
+			if (needsStreamStore || needsRpcError || needsUploadHandle) {
 				const clientImports = [];
 				if (needsStreamStore) clientImports.push('StreamStore');
 				if (needsRpcError) clientImports.push('RpcError');
+				if (needsUploadHandle) clientImports.push('UploadHandle');
 				declarations.push(`  import type { ${clientImports.join(', ')} } from 'svelte-realtime/client';`);
 			}
 			declarations.push(`  import type { Readable } from 'svelte/store';`);
-			if (needsStreamStore || needsRpcError) {
+			if (needsStreamStore || needsRpcError || needsUploadHandle) {
 				declarations.push('');
 			}
 			declarations.push(...exports);

@@ -126,6 +126,41 @@ export const join = live(async (ctx) => {});
 
 		expect(code).toContain("export const join = __rpc('rooms/lobby/join')");
 	});
+
+	it('generates __upload() stubs for live.upload() exports', () => {
+		setup({
+			'uploads.js': `
+import { live } from 'svelte-realtime/server';
+export const avatar = live.upload(async (ctx) => 'ok');
+export const document = live.upload(async (ctx, name) => ({ name }), { maxSize: 50 * 1024 * 1024 });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:uploads', { ssr: false });
+
+		expect(code).toContain("import { __upload } from 'svelte-realtime/client'");
+		expect(code).toContain("export const avatar = __upload('uploads/avatar')");
+		expect(code).toContain("export const document = __upload('uploads/document')");
+	});
+
+	it('mixes __binaryRpc and __upload in the same module', () => {
+		setup({
+			'mixed.js': `
+import { live } from 'svelte-realtime/server';
+export const small = live.binary(async (ctx, buffer) => 'ok');
+export const big = live.upload(async (ctx) => 'ok');
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:mixed', { ssr: false });
+
+		expect(code).toContain("export const small = __binaryRpc('mixed/small')");
+		expect(code).toContain("export const big = __upload('mixed/big')");
+		expect(code).toContain('__binaryRpc');
+		expect(code).toContain('__upload');
+	});
 });
 
 // -- client stub HMR self-accept ---------------------------------------------
@@ -980,6 +1015,25 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		expect(content).toContain('export const empty: Readable<undefined>');
 	});
 
+	it('emits UploadHandle types for live.upload() exports', () => {
+		setup({
+			'uploads.js': `
+import { live } from 'svelte-realtime/server';
+export const avatar = live.upload(async (ctx, name) => ({ name }));
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("declare module '$live/uploads'");
+		expect(content).toContain('UploadHandle');
+		expect(content).toContain("import type { UploadHandle } from 'svelte-realtime/client'");
+		expect(content).toMatch(/avatar:\s*\(source:\s*Blob\s*\|\s*ArrayBuffer/);
+		expect(content).toContain('UploadHandle<any>');
+	});
+
 	it('generates typed declarations for TS files (strips ctx param)', () => {
 		setup({
 			'chat.ts': `
@@ -1439,6 +1493,65 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 		expect(code).toContain("const _notes = (...args) => { const s = readable(undefined); s.hydrate = (d) => readable(d); return s; }");
 		expect(code).toContain('_notes.load = (platform, options) => __directCall("board/notes"');
 		expect(code).toContain("export { _notes as notes }");
+	});
+
+	it('SSR stub uses static readable shape for ctx-only topic (parity with client stub)', () => {
+		// Regression: vite.js's `_isDynamicExport` was updated in 0.5.0-next.8
+		// to classify single-arity ctx-only topics as static, but the SSR
+		// generator continued to use the older arity-blind regex. Result:
+		// client stub said "static StreamStore" while SSR stub said "factory
+		// function" -- pages compiled against the static shape would call
+		// `factory.subscribe(...)` during SSR and crash with "store.subscribe
+		// is not a function". This test pins them to agree.
+		setup({
+			'auth.js': `
+import { live } from 'svelte-realtime/server';
+export const inbox = live.stream(
+	(ctx) => 'inbox:' + ctx.user.id,
+	(ctx) => [],
+	{ merge: 'crud', key: 'id' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+
+		const ssrCode = plugin.load('\0live:auth', { ssr: true });
+		// Static SSR shape: a readable directly, NOT a factory
+		expect(ssrCode).toContain("const _inbox = readable(undefined)");
+		expect(ssrCode).not.toMatch(/const _inbox = \(\.\.\.args\) =>/);
+
+		const clientCode = plugin.load('\0live:auth', { ssr: false });
+		// Static client shape: __stream(path, options) -- NO trailing `, true`
+		// (which would mark it dynamic). The trailing arg is what
+		// _generateClientStubs emits for dynamic exports.
+		expect(clientCode).toMatch(/__stream\('auth\/inbox',\s*\{[^}]*\}\);/);
+		expect(clientCode).not.toMatch(/__stream\('auth\/inbox',[\s\S]*,\s*true\)/);
+	});
+
+	it('SSR stub uses factory shape for ctx + client-arg topic (parity with client stub)', () => {
+		// Mirror of the above for the genuinely-dynamic case: when the topic
+		// function takes a client arg in addition to ctx, both SSR and client
+		// stubs emit factory shape. Single source of truth via
+		// `_isDynamicExport`.
+		setup({
+			'rooms.js': `
+import { live } from 'svelte-realtime/server';
+export const messages = live.stream(
+	(ctx, roomId) => 'room:' + roomId,
+	(ctx, roomId) => [],
+	{ merge: 'crud', key: 'id' }
+);
+`
+		});
+
+		const plugin = createPlugin();
+
+		const ssrCode = plugin.load('\0live:rooms', { ssr: true });
+		expect(ssrCode).toContain("const _messages = (...args) =>");
+
+		const clientCode = plugin.load('\0live:rooms', { ssr: false });
+		expect(clientCode).toMatch(/__stream\('rooms\/messages',[\s\S]*,\s*true\);/);
 	});
 
 	it('simple re-export when module has no streams', () => {
