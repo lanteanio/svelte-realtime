@@ -1827,7 +1827,35 @@ import { live } from 'svelte-realtime/server';
 live.configurePush({ identify: (ws) => ws.getUserData()?.account?.id });
 ```
 
-Throws `LiveError('NOT_FOUND')` when no connection is registered for the userId. Propagates `Error('request timed out')` from the underlying primitive on the configurable `timeoutMs` (default 5000ms), and `Error('connection closed')` if the WebSocket closes before reply.
+Rejects with a typed `LiveError` so callers can discriminate via `err.code` instead of string-matching `err.message`:
+
+| `err.code`    | When                                                                                          |
+| ------------- | --------------------------------------------------------------------------------------------- |
+| `VALIDATION`  | Bad target / event / options / `timeoutMs` (caught at the call site, before any wire I/O).   |
+| `NOT_FOUND`   | No connection registered for the userId (and no `remoteRegistry` is configured).             |
+| `TIMEOUT`     | Recipient did not reply within `timeoutMs` (default 5000ms).                                  |
+
+```js
+import { live, LiveError } from 'svelte-realtime/server';
+
+try {
+  const reply = await live.push({ userId }, 'confirm-delete', { itemId }, { timeoutMs: 8000 });
+  // ...use reply...
+} catch (err) {
+  if (err instanceof LiveError) {
+    switch (err.code) {
+      case 'NOT_FOUND': /* user has no active connection */ break;
+      case 'TIMEOUT':   /* recipient saw the prompt but didn't respond */ break;
+      case 'VALIDATION': /* bad arguments -- programmer error, surface in dev only */ break;
+    }
+  }
+  // Anything else is either a recipient-thrown handler error (caller-defined
+  // shape) or `Error('connection closed')` from the adapter -- those pass
+  // through unchanged.
+}
+```
+
+Message text on the wrapped `TIMEOUT` is preserved verbatim from the underlying primitive (`'request timed out'`), so existing substring-matching callers keep working while they migrate to the structured `err.code`.
 
 Multi-device users see most-recent-connection-wins routing within each instance, and cluster-wide most-recent-wins via the registry's Redis hash when cluster routing is configured (see [Cluster routing](#cluster-routing) below). Older connections still receive topic publishes via their own subscriptions; only push routing flips. Anonymous connections (identify returning null/undefined) are silently skipped at registration so they cannot be push targets.
 
@@ -1880,7 +1908,7 @@ Lookup order inside `live.push`:
 1. **Local registry** -- the per-instance Map populated by `pushHooks.open` / `pushHooks.close`. Resolves directly via `platform.request(ws, ...)` with no I/O.
 2. **Remote registry** -- when configured via `live.configurePush({ remoteRegistry })`, used as a fallback when the userId is not registered locally. The extensions registry looks up the owning instance in Redis and either short-circuits to a local `platform.request` or forwards the envelope on a per-instance push channel and awaits the reply.
 
-Errors with a remote registry come from the registry layer: typically an offline rejection when the user has no active connection cluster-wide, a timeout when routing succeeded but the client did not reply within `timeoutMs`, or a propagated handler error from the receiving instance. The realtime layer does NOT translate these to `LiveError('NOT_FOUND')`; let your caller distinguish and surface them.
+Errors with a remote registry come from the registry layer: typically an offline rejection when the user has no active connection cluster-wide, a timeout when routing succeeded but the client did not reply within `timeoutMs`, or a propagated handler error from the receiving instance. The realtime layer translates "timed out" rejections from either path into `LiveError('TIMEOUT')` so callers see the same code regardless of whether the timeout originated in the local adapter primitive or the remote registry; offline / handler-error shapes pass through unchanged so the caller can distinguish them.
 
 You can wire BOTH (`pushHooks.*` + `remoteRegistry`); the local Map wins when an entry is present and the remote registry is consulted only as fallback. In practice pick one of the two patterns -- the registry-only setup is simpler and the registry already does same-instance short-circuit on its own.
 

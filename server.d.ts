@@ -1207,20 +1207,31 @@ export namespace live {
 	 * `pushHooks.close`, so the user must have an active connection on this
 	 * server instance.
 	 *
-	 * Returns whatever the client's `onPush(event, handler)` returns. Throws
-	 * `LiveError('NOT_FOUND')` if no connection is registered for the userId.
-	 * Propagates `Error('request timed out')` from the underlying platform
-	 * primitive when the client does not reply within `timeoutMs` (default
-	 * 5000), and `Error('connection closed')` if the WebSocket closes before
-	 * reply.
+	 * Returns whatever the client's `onPush(event, handler)` returns.
+	 *
+	 * **Error surface (all `LiveError` with discriminating `.code`):**
+	 *
+	 * - `VALIDATION` -- bad target / event / options / timeoutMs at the call site.
+	 * - `NOT_FOUND` -- no connection is registered for the userId
+	 *   (and no `remoteRegistry` is configured).
+	 * - `TIMEOUT` -- the client did not reply within `timeoutMs` (default 5000).
+	 *   Message text preserves the underlying primitive's wording (`'request
+	 *   timed out'`) so substring callers continue to match while migrating
+	 *   to `err.code === 'TIMEOUT'`.
+	 *
+	 * Other rejection sources pass through unchanged: a recipient handler that
+	 * throws (caller-defined error), `Error('connection closed')` from the
+	 * adapter when the ws closes mid-flight, or any non-timeout error from a
+	 * configured `remoteRegistry`.
 	 *
 	 * Multi-device users see most-recent-connection-wins routing. Cluster-wide
 	 * push (any instance routing to any user's ws) requires the connection
 	 * registry primitive in the extensions package.
 	 *
 	 * For fire-and-forget delivery (no reply expected), use `live.notify`
-	 * instead. `live.push({ timeoutMs: 0 })` throws synchronously --
-	 * `timeoutMs` must be a positive finite number on this primitive.
+	 * instead. `live.push({ timeoutMs: 0 })` rejects with
+	 * `LiveError('VALIDATION')` -- `timeoutMs` must be a positive finite
+	 * number on this primitive.
 	 *
 	 * Requires `svelte-adapter-uws` >= 0.5.0-next.4 for `platform.request`.
 	 *
@@ -1895,7 +1906,9 @@ export function guard(
  * - `CONFLICT` -- a request with the same idempotency key is already
  *   in flight (multi-instance store only).
  * - `SERVICE_UNAVAILABLE` -- circuit breaker open.
- * - `NOT_FOUND` -- live function not registered at the requested path.
+ * - `NOT_FOUND` -- live function not registered at the requested path,
+ *   or `live.push({ userId })` cannot find an active connection.
+ * - `TIMEOUT` -- `live.push` did not receive a reply within `timeoutMs`.
  * - `INVALID_REQUEST` -- malformed envelope or args.
  * - `INTERNAL_ERROR` -- non-LiveError throw from a handler (NOT a guard).
  *

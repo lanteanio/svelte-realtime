@@ -11096,32 +11096,67 @@ describe('live.push() / pushHooks', () => {
 		expect(() => pushHooks.open({}, { platform })).toThrow(/string/);
 	});
 
-	it('rejects malformed live.push args', async () => {
+	it('rejects malformed live.push args with LiveError(VALIDATION)', async () => {
+		await expect(live.push(/** @type {any} */ (null), 'evt')).rejects.toMatchObject({ code: 'VALIDATION' });
 		await expect(live.push(/** @type {any} */ (null), 'evt')).rejects.toThrow(/target/);
+		await expect(live.push(/** @type {any} */ ({}), 'evt')).rejects.toMatchObject({ code: 'VALIDATION' });
 		await expect(live.push(/** @type {any} */ ({}), 'evt')).rejects.toThrow(/userId/);
+		await expect(live.push({ userId: '' }, 'evt')).rejects.toMatchObject({ code: 'VALIDATION' });
 		await expect(live.push({ userId: '' }, 'evt')).rejects.toThrow(/userId/);
+		await expect(live.push({ userId: 'u-1' }, '')).rejects.toMatchObject({ code: 'VALIDATION' });
 		await expect(live.push({ userId: 'u-1' }, '')).rejects.toThrow(/event/);
+		await expect(live.push(/** @type {any} */ ({ userId: 'u-1', extra: 1 }), 'evt')).rejects.toMatchObject({ code: 'VALIDATION' });
 		await expect(live.push(/** @type {any} */ ({ userId: 'u-1', extra: 1 }), 'evt')).rejects.toThrow(/extra/);
 	});
 
-	it('rejects bad timeoutMs', async () => {
+	it('rejects bad timeoutMs with LiveError(VALIDATION)', async () => {
 		const platform = mockPlatform();
 		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
 		pushHooks.open(ws, { platform });
 
+		await expect(live.push({ userId: 'u-1' }, 'event', null, { timeoutMs: -1 })).rejects.toMatchObject({ code: 'VALIDATION' });
 		await expect(live.push({ userId: 'u-1' }, 'event', null, { timeoutMs: -1 })).rejects.toThrow(/timeoutMs/);
-		await expect(live.push({ userId: 'u-1' }, 'event', null, { timeoutMs: 0 })).rejects.toThrow(/timeoutMs/);
-		await expect(live.push({ userId: 'u-1' }, 'event', null, /** @type {any} */ ({ timeoutMs: 'x' }))).rejects.toThrow(/timeoutMs/);
+		await expect(live.push({ userId: 'u-1' }, 'event', null, { timeoutMs: 0 })).rejects.toMatchObject({ code: 'VALIDATION' });
+		await expect(live.push({ userId: 'u-1' }, 'event', null, /** @type {any} */ ({ timeoutMs: 'x' }))).rejects.toMatchObject({ code: 'VALIDATION' });
+		await expect(live.push({ userId: 'u-1' }, 'event', null, /** @type {any} */ ('bad'))).rejects.toMatchObject({ code: 'VALIDATION' });
 		await expect(live.push({ userId: 'u-1' }, 'event', null, /** @type {any} */ ('bad'))).rejects.toThrow(/options/);
 	});
 
-	it('propagates platform.request rejections (timeout / connection closed)', async () => {
+	it('translates platform.request "timed out" rejection to LiveError(TIMEOUT)', async () => {
 		const platform = mockPlatform();
 		const ws = { getUserData: () => ({ user_id: 'u-1' }) };
 		pushHooks.open(ws, { platform });
 		platform._setRequestResolver(async () => { throw new Error('request timed out'); });
 
+		// Structured discrimination via .code (the new contract).
+		await expect(live.push({ userId: 'u-1' }, 'event')).rejects.toMatchObject({ code: 'TIMEOUT' });
+		// Message text is preserved verbatim so substring callers still match
+		// during their migration.
 		await expect(live.push({ userId: 'u-1' }, 'event')).rejects.toThrow('request timed out');
+	});
+
+	it('does NOT translate non-timeout platform.request rejections', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-2' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => { throw new Error('connection closed'); });
+
+		// Plain Error passes through; no structured code.
+		const err = await live.push({ userId: 'u-2' }, 'event').catch(/** @param {any} e */ (e) => e);
+		expect(err.message).toBe('connection closed');
+		expect(err.code).toBeUndefined();
+	});
+
+	it('preserves a recipient handler-thrown LiveError (no double-wrap)', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-3' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => { throw new LiveError('FORBIDDEN', 'no thanks'); });
+
+		await expect(live.push({ userId: 'u-3' }, 'event')).rejects.toMatchObject({
+			code: 'FORBIDDEN',
+			message: 'no thanks'
+		});
 	});
 
 	it('throws helpful error if platform lacks request method', async () => {
@@ -11191,14 +11226,40 @@ describe('live.push() / pushHooks', () => {
 		expect(platform.requested).toHaveLength(1);
 	});
 
-	it('propagates errors from remoteRegistry.request as-is', async () => {
+	it('propagates non-timeout errors from remoteRegistry.request as-is', async () => {
 		live.configurePush({
 			remoteRegistry: {
 				request: async () => { throw new Error('offline'); }
 			}
 		});
 
-		await expect(live.push({ userId: 'u-offline' }, 'event')).rejects.toThrow('offline');
+		const err = await live.push({ userId: 'u-offline' }, 'event').catch(/** @param {any} e */ (e) => e);
+		expect(err.message).toBe('offline');
+		expect(err.code).toBeUndefined();
+	});
+
+	it('translates "timed out" rejection from remoteRegistry.request to LiveError(TIMEOUT)', async () => {
+		live.configurePush({
+			remoteRegistry: {
+				request: async () => { throw new Error('cluster request timed out after 8000ms'); }
+			}
+		});
+
+		await expect(live.push({ userId: 'u-cluster' }, 'event')).rejects.toMatchObject({ code: 'TIMEOUT' });
+		await expect(live.push({ userId: 'u-cluster' }, 'event')).rejects.toThrow('cluster request timed out after 8000ms');
+	});
+
+	it('preserves a typed LiveError thrown by remoteRegistry.request (no double-wrap)', async () => {
+		live.configurePush({
+			remoteRegistry: {
+				request: async () => { throw new LiveError('NOT_FOUND', 'no instance owns this user'); }
+			}
+		});
+
+		await expect(live.push({ userId: 'u-noinstance' }, 'event')).rejects.toMatchObject({
+			code: 'NOT_FOUND',
+			message: 'no instance owns this user'
+		});
 	});
 
 	it('configurePush({ remoteRegistry: null }) clears the binding', async () => {
@@ -11506,22 +11567,28 @@ describe('live.notify()', () => {
 	// Validation: programming errors must throw synchronously at the call
 	// site so they don't get swallowed by future .catch handlers (which
 	// notify users mostly won't write, since notify is fire-and-forget).
+	// Surfaced as LiveError(VALIDATION) for parity with live.push.
 	it('throws synchronously on bad target', () => {
+		expect(() => live.notify(null, 'evt')).toThrow(LiveError);
 		expect(() => live.notify(null, 'evt')).toThrow('target must be an object');
+		try { live.notify(null, 'evt'); } catch (e) { expect(/** @type {any} */ (e).code).toBe('VALIDATION'); }
 		expect(() => live.notify('u-1', 'evt')).toThrow('target must be an object');
 	});
 
 	it('throws synchronously on empty event name', () => {
 		expect(() => live.notify({ userId: 'u-1' }, '')).toThrow('event must be a non-empty string');
+		try { live.notify({ userId: 'u-1' }, ''); } catch (e) { expect(/** @type {any} */ (e).code).toBe('VALIDATION'); }
 		expect(() => live.notify({ userId: 'u-1' }, undefined)).toThrow('event must be a non-empty string');
 	});
 
 	it('throws synchronously on unsupported target keys', () => {
 		expect(() => live.notify({ userId: 'u-1', orgId: 'o-1' }, 'evt')).toThrow('unsupported target keys: orgId');
+		try { live.notify({ userId: 'u-1', orgId: 'o-1' }, 'evt'); } catch (e) { expect(/** @type {any} */ (e).code).toBe('VALIDATION'); }
 	});
 
 	it('throws synchronously on missing userId', () => {
 		expect(() => live.notify({}, 'evt')).toThrow('target.userId must be a non-empty string');
+		try { live.notify({}, 'evt'); } catch (e) { expect(/** @type {any} */ (e).code).toBe('VALIDATION'); }
 		expect(() => live.notify({ userId: '' }, 'evt')).toThrow('target.userId must be a non-empty string');
 		expect(() => live.notify({ userId: 42 }, 'evt')).toThrow('target.userId must be a non-empty string');
 	});

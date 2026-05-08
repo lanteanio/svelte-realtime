@@ -2619,12 +2619,23 @@ export const pushHooks = {
  *    so a request from any instance reaches the user's owning instance
  *    over the registry's transport.
  *
- * Returns whatever the client's `onPush(event, handler)` returns. Without
- * a remote registry, throws `LiveError('NOT_FOUND')` when no local
- * connection is registered. With a remote registry, errors come from
- * the registry layer (commonly an offline rejection when the user has
- * no active connection cluster-wide, or a timeout / handler-error when
- * the request was routed but did not complete).
+ * Returns whatever the client's `onPush(event, handler)` returns.
+ *
+ * Error surface (all `LiveError` with discriminating `.code`):
+ * - `VALIDATION` -- bad target / event / options / timeoutMs at the call site.
+ * - `NOT_FOUND` -- no connection registered for the userId (and no
+ *   `remoteRegistry` is configured).
+ * - `TIMEOUT` -- the recipient did not reply within `timeoutMs`. Wraps
+ *   the underlying `'request timed out'` Error from the adapter (and
+ *   any remote-registry shape that rejects with the same wording);
+ *   message text is preserved verbatim on `.message` and the original
+ *   error on `.cause`.
+ *
+ * Other rejection sources pass through unchanged: a recipient handler
+ * that throws (caller-defined error), `Error('connection closed')`
+ * from the adapter when the ws closes mid-flight, or any non-timeout
+ * error from a configured `remoteRegistry` (e.g. an offline rejection
+ * when the user has no active connection cluster-wide).
  *
  * Multi-device users see most-recent-connection-wins routing within
  * each instance, and cluster-wide most-recent-wins via the registry's
@@ -2668,18 +2679,18 @@ export const pushHooks = {
  */
 live.push = async function push(target, event, data, options) {
 	if (!target || typeof target !== 'object') {
-		throw new Error('[svelte-realtime] live.push: target must be an object like { userId }');
+		throw new LiveError('VALIDATION', '[svelte-realtime] live.push: target must be an object like { userId }');
 	}
 	if (typeof event !== 'string' || event.length === 0) {
-		throw new Error('[svelte-realtime] live.push: event must be a non-empty string');
+		throw new LiveError('VALIDATION', '[svelte-realtime] live.push: event must be a non-empty string');
 	}
 	if (options !== undefined && options !== null) {
 		if (typeof options !== 'object') {
-			throw new Error('[svelte-realtime] live.push: options must be an object');
+			throw new LiveError('VALIDATION', '[svelte-realtime] live.push: options must be an object');
 		}
 		if (options.timeoutMs !== undefined) {
 			if (typeof options.timeoutMs !== 'number' || !Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
-				throw new Error('[svelte-realtime] live.push: options.timeoutMs must be a positive finite number. For fire-and-forget delivery, use `live.notify(target, event, data)` instead.');
+				throw new LiveError('VALIDATION', '[svelte-realtime] live.push: options.timeoutMs must be a positive finite number. For fire-and-forget delivery, use `live.notify(target, event, data)` instead.');
 			}
 		}
 	}
@@ -2687,11 +2698,11 @@ live.push = async function push(target, event, data, options) {
 	const targetKeys = Object.keys(target);
 	const extraKeys = targetKeys.filter((k) => k !== 'userId');
 	if (extraKeys.length > 0) {
-		throw new Error('[svelte-realtime] live.push: unsupported target keys: ' + extraKeys.join(', '));
+		throw new LiveError('VALIDATION', '[svelte-realtime] live.push: unsupported target keys: ' + extraKeys.join(', '));
 	}
 	const userId = /** @type {any} */ (target).userId;
 	if (typeof userId !== 'string' || userId.length === 0) {
-		throw new Error('[svelte-realtime] live.push: target.userId must be a non-empty string');
+		throw new LiveError('VALIDATION', '[svelte-realtime] live.push: target.userId must be a non-empty string');
 	}
 
 	const entry = _pushRegistry.get(userId);
@@ -2699,13 +2710,54 @@ live.push = async function push(target, event, data, options) {
 		if (typeof entry.platform.request !== 'function') {
 			throw new Error('[svelte-realtime] live.push: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4');
 		}
-		return entry.platform.request(entry.ws, event, data, options || undefined);
+		try {
+			return await entry.platform.request(entry.ws, event, data, options || undefined);
+		} catch (err) {
+			throw _translatePushError(err);
+		}
 	}
 	if (_remoteRegistry) {
-		return _remoteRegistry.request(userId, event, data, options || undefined);
+		try {
+			return await _remoteRegistry.request(userId, event, data, options || undefined);
+		} catch (err) {
+			throw _translatePushError(err);
+		}
 	}
 	throw new LiveError('NOT_FOUND', "no active connection for userId '" + userId + "'");
 };
+
+/**
+ * Translate a low-level push delivery error into the typed LiveError
+ * surface. Today this only catches deadline expiry from the adapter's
+ * `platform.request` (`new Error('request timed out')`) and from
+ * remote-registry shapes that use the same "timed out" wording, and
+ * rethrows as `LiveError('TIMEOUT', ...)` so callers can discriminate
+ * via `err.code` instead of substring-matching `err.message`. Other
+ * errors (connection-closed, handler-thrown, registry offline, etc.)
+ * pass through unchanged so caller-defined error shapes are preserved.
+ *
+ * Already-typed `LiveError` rejections (e.g. `NOT_FOUND` from a remote
+ * registry) also pass through unchanged.
+ *
+ * Message text is preserved verbatim on the wrapped error so any
+ * existing substring callers continue to match while they migrate to
+ * the structured code. The original error is attached as `.cause`.
+ *
+ * @param {unknown} err
+ * @returns {unknown}
+ */
+function _translatePushError(err) {
+	if (err instanceof LiveError) return err;
+	const msg = err && typeof (/** @type {any} */ (err).message) === 'string'
+		? /** @type {any} */ (err).message
+		: '';
+	if (msg && /timed out/i.test(msg)) {
+		const wrapped = new LiveError('TIMEOUT', msg);
+		/** @type {any} */ (wrapped).cause = err;
+		return wrapped;
+	}
+	return err;
+}
 
 /**
  * Bounded internal timeout for the wire-level request that backs
@@ -2773,19 +2825,19 @@ const _NOTIFY_INTERNAL_TIMEOUT_MS = 1000;
  */
 live.notify = function notify(target, event, data) {
 	if (!target || typeof target !== 'object') {
-		throw new Error('[svelte-realtime] live.notify: target must be an object like { userId }');
+		throw new LiveError('VALIDATION', '[svelte-realtime] live.notify: target must be an object like { userId }');
 	}
 	if (typeof event !== 'string' || event.length === 0) {
-		throw new Error('[svelte-realtime] live.notify: event must be a non-empty string');
+		throw new LiveError('VALIDATION', '[svelte-realtime] live.notify: event must be a non-empty string');
 	}
 	const targetKeys = Object.keys(target);
 	const extraKeys = targetKeys.filter((k) => k !== 'userId');
 	if (extraKeys.length > 0) {
-		throw new Error('[svelte-realtime] live.notify: unsupported target keys: ' + extraKeys.join(', '));
+		throw new LiveError('VALIDATION', '[svelte-realtime] live.notify: unsupported target keys: ' + extraKeys.join(', '));
 	}
 	const userId = /** @type {any} */ (target).userId;
 	if (typeof userId !== 'string' || userId.length === 0) {
-		throw new Error('[svelte-realtime] live.notify: target.userId must be a non-empty string');
+		throw new LiveError('VALIDATION', '[svelte-realtime] live.notify: target.userId must be a non-empty string');
 	}
 
 	const entry = _pushRegistry.get(userId);

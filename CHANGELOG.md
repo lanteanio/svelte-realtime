@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.14] - 2026-05-08
+
+### Changed
+
+- **`live.push` now rejects with structured `LiveError` codes for every failure mode**, removing the message-substring sniff that callers needed for deadline expiry. Deadline expiry from the adapter primitive (`Error('request timed out')`) and any remote-registry rejection that uses the same wording are translated to `LiveError('TIMEOUT', ...)` -- message text is preserved verbatim on `.message` (so existing `err.message.includes('timed out')` callers keep working) and the original error rides on `.cause`. Argument-validation throws (bad target / event / options / `timeoutMs`) lift from plain `Error` to `LiveError('VALIDATION', ...)`; `live.notify`'s validation throws lift to the same code for parity. Other rejection sources are untouched: a recipient-thrown `LiveError` propagates as-is (no double-wrap), `Error('connection closed')` from the adapter passes through, and registry-layer offline rejections keep whatever shape the registry chose. With this slice the full `live.push` failure surface discriminates via `err.code` (`VALIDATION` / `NOT_FOUND` / `TIMEOUT` / caller-defined), matching the rest of the framework's error surface (`UNAUTHENTICATED` / `FORBIDDEN` / `RATE_LIMITED` / `LOCK_TIMEOUT` / etc). Six new tests pin the new contract: TIMEOUT translation on the local adapter path with verbatim message preservation, non-timeout adapter errors (e.g. `'connection closed'`) passing through unchanged, recipient-thrown `LiveError` not double-wrapping, TIMEOUT translation on the remote-registry path, non-timeout remote-registry errors passing through, and recipient-thrown `LiveError` from a remote-registry response not double-wrapping. Existing validation tests upgraded to also assert `code === 'VALIDATION'` (push) / synchronous `LiveError` instance (notify).
+
 ## [0.5.0-next.13] - 2026-05-08
 
 ### Added
