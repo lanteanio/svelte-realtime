@@ -10821,6 +10821,173 @@ describe('live.push() / pushHooks', () => {
 	});
 });
 
+// -- live.notify() ------------------------------------------------------------
+//
+// Fire-and-forget counterpart to live.push. Resolves immediately (no reply
+// awaited), never rejects in normal operation. Validation throws sync for
+// programming errors. The wire path uses the same platform.request as push
+// today (with a bounded internal timeout); the caller-side semantic is the
+// only thing that differs.
+
+describe('live.notify()', () => {
+	beforeEach(() => {
+		_resetPushRegistry();
+	});
+
+	it('dispatches via platform.request to the registered ws (same wire as push)', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-n-1' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'ignored');
+
+		const result = await live.notify({ userId: 'u-n-1' }, 'ping', { x: 1 });
+
+		// Returns Promise<void>; resolves with undefined.
+		expect(result).toBeUndefined();
+		// Wire-side, the request fired against the registered ws with our
+		// payload. The reply value (`'ignored'`) is intentionally not surfaced.
+		expect(platform.requested).toHaveLength(1);
+		expect(platform.requested[0]).toMatchObject({ ws, event: 'ping', data: { x: 1 } });
+	});
+
+	it('passes a bounded internal timeoutMs to platform.request (no caller-supplied timeout)', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-n-2' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => null);
+
+		await live.notify({ userId: 'u-n-2' }, 'evt');
+
+		// Internal timeout exists (so the adapter's request tracker reclaims
+		// the entry instead of leaking) but caller didn't supply one. Just
+		// assert it's a positive number; the exact value is a tuning knob,
+		// not a contract.
+		expect(platform.requested[0].options).toBeDefined();
+		expect(typeof platform.requested[0].options.timeoutMs).toBe('number');
+		expect(platform.requested[0].options.timeoutMs).toBeGreaterThan(0);
+	});
+
+	it('silently no-ops when the user is offline (no NOT_FOUND throw)', async () => {
+		// No pushHooks.open call -- userId not registered anywhere.
+		const result = await live.notify({ userId: 'u-offline' }, 'ping');
+		expect(result).toBeUndefined();
+		// And no platform request happened (we never resolved a target).
+	});
+
+	it('silently swallows a rejection from platform.request (timeout, handler throw)', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-n-3' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => { throw new Error('handler exploded'); });
+
+		// Even though the wire-level request rejects, the caller's promise
+		// resolves normally. Fire-and-forget contract.
+		await expect(live.notify({ userId: 'u-n-3' }, 'oops')).resolves.toBeUndefined();
+		// Give the platform.request promise a tick to settle so we can
+		// confirm it didn't surface as an unhandled rejection.
+		await new Promise(r => setTimeout(r, 10));
+	});
+
+	it('silently swallows a synchronous throw from platform.request', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-n-4' }) };
+		pushHooks.open(ws, { platform });
+		// Force platform.request to throw synchronously (mimics torn-down ws).
+		platform.request = () => { throw new Error('ws gone'); };
+
+		await expect(live.notify({ userId: 'u-n-4' }, 'event')).resolves.toBeUndefined();
+	});
+
+	it('falls through to remoteRegistry.request when userId is not registered locally', async () => {
+		const remoteCalls = [];
+		const remoteRegistry = {
+			request: async (target, event, data, options) => {
+				remoteCalls.push({ target, event, data, options });
+				return null;
+			}
+		};
+		live.configurePush({ remoteRegistry });
+
+		await live.notify({ userId: 'u-remote' }, 'evt', { y: 2 });
+
+		expect(remoteCalls).toHaveLength(1);
+		expect(remoteCalls[0]).toMatchObject({ target: 'u-remote', event: 'evt', data: { y: 2 } });
+		expect(typeof remoteCalls[0].options.timeoutMs).toBe('number');
+
+		live.configurePush(null);
+	});
+
+	it('silently swallows remoteRegistry.request rejections', async () => {
+		const remoteRegistry = {
+			request: async () => { throw new Error('redis offline'); }
+		};
+		live.configurePush({ remoteRegistry });
+
+		await expect(live.notify({ userId: 'u-remote' }, 'evt')).resolves.toBeUndefined();
+		await new Promise(r => setTimeout(r, 10));
+
+		live.configurePush(null);
+	});
+
+	it('prefers the local registry over the remote registry (same as push)', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-both' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'local');
+
+		const remoteCalls = [];
+		const remoteRegistry = {
+			request: async (target, event, data, options) => {
+				remoteCalls.push({ target, event, data, options });
+				return 'remote';
+			}
+		};
+		live.configurePush({ remoteRegistry });
+
+		await live.notify({ userId: 'u-both' }, 'evt');
+
+		// Local match short-circuits -- remote registry never consulted.
+		expect(platform.requested).toHaveLength(1);
+		expect(remoteCalls).toHaveLength(0);
+
+		live.configurePush(null);
+	});
+
+	// Validation: programming errors must throw synchronously at the call
+	// site so they don't get swallowed by future .catch handlers (which
+	// notify users mostly won't write, since notify is fire-and-forget).
+	it('throws synchronously on bad target', () => {
+		expect(() => live.notify(null, 'evt')).toThrow('target must be an object');
+		expect(() => live.notify('u-1', 'evt')).toThrow('target must be an object');
+	});
+
+	it('throws synchronously on empty event name', () => {
+		expect(() => live.notify({ userId: 'u-1' }, '')).toThrow('event must be a non-empty string');
+		expect(() => live.notify({ userId: 'u-1' }, undefined)).toThrow('event must be a non-empty string');
+	});
+
+	it('throws synchronously on unsupported target keys', () => {
+		expect(() => live.notify({ userId: 'u-1', orgId: 'o-1' }, 'evt')).toThrow('unsupported target keys: orgId');
+	});
+
+	it('throws synchronously on missing userId', () => {
+		expect(() => live.notify({}, 'evt')).toThrow('target.userId must be a non-empty string');
+		expect(() => live.notify({ userId: '' }, 'evt')).toThrow('target.userId must be a non-empty string');
+		expect(() => live.notify({ userId: 42 }, 'evt')).toThrow('target.userId must be a non-empty string');
+	});
+
+	// Foot-gun pin: live.push({ timeoutMs: 0 }) still rejects, AND the new
+	// error message points users at live.notify directly. live.push is
+	// async, so the validation throw surfaces as a promise rejection --
+	// which is exactly the case that .catch(() => {}) was silently
+	// swallowing. The new message gives users a one-line fix even if
+	// they never see the rejection.
+	it('live.push timeoutMs:0 error message points at live.notify', async () => {
+		await expect(live.push({ userId: 'u-1' }, 'evt', null, { timeoutMs: 0 }))
+			.rejects.toThrow(/use `live\.notify\(target, event, data\)` instead/);
+	});
+});
+
 // -- live.stream({ staleAfterMs, onError }) -----------------------------------
 
 describe('live.stream({ staleAfterMs })', () => {

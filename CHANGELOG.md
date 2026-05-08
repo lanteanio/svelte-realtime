@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`live.notify(target, event, data)` for fire-and-forget server-initiated delivery** -- the counterpart to `live.push` for cases where the caller doesn't need a reply (progress notifications, "upload complete" pings, "new message available" hints, cron-driven price ticks fanned out to many users). Returns `Promise<void>` that resolves once the envelope is dispatched. Never rejects in normal operation: offline user, timeout, client handler error, cluster-route failure -- all silent by design. The caller chose `notify` exactly because they don't want to deal with delivery state. Validation throws synchronously for programming errors (bad target, empty event name) -- those are bugs at the call site, not request failures, and should surface loud. Wire shape is identical to `live.push` today (same `onPush(event, handler)` dispatcher client-side); the implementation discards the reply via a bounded internal timeout. When the adapter ships a true no-reply primitive in a future release, internals swap with no caller-side change. The `live.push` validation error message now points at `live.notify` directly so users hitting `live.push({ timeoutMs: 0 })` (which throws because `timeoutMs` must be positive) get a one-line fix, instead of the silent foot-gun where wrapping the throw in `.catch(() => {})` swallowed it and the push never fired.
+
 ## [0.5.0-next.12] - 2026-05-08
 
 ### Added

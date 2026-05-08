@@ -1218,6 +1218,10 @@ export namespace live {
 	 * push (any instance routing to any user's ws) requires the connection
 	 * registry primitive in the extensions package.
 	 *
+	 * For fire-and-forget delivery (no reply expected), use `live.notify`
+	 * instead. `live.push({ timeoutMs: 0 })` throws synchronously --
+	 * `timeoutMs` must be a positive finite number on this primitive.
+	 *
 	 * Requires `svelte-adapter-uws` >= 0.5.0-next.4 for `platform.request`.
 	 *
 	 * @example
@@ -1246,6 +1250,52 @@ export namespace live {
 		data?: unknown,
 		options?: { timeoutMs?: number }
 	): Promise<TReply>;
+
+	/**
+	 * Send a server-initiated event to a connected user without awaiting
+	 * a reply. The fire-and-forget counterpart to `live.push`.
+	 *
+	 * **When to use which:**
+	 * - `live.push(target, event, data, { timeoutMs })` -- request/reply.
+	 *   You await a value back from the client's `onPush(event, handler)`.
+	 *   `timeoutMs` controls how long you wait. Throws on offline user,
+	 *   timeout, client handler error.
+	 * - `live.notify(target, event, data)` -- fire-and-forget. The client's
+	 *   `onPush(event, handler)` still fires (same wire path), but the
+	 *   handler's return value is discarded and the call resolves without
+	 *   waiting for it. Returns `Promise<void>` that resolves once the
+	 *   envelope is dispatched. Never rejects in normal operation: an
+	 *   offline user, a remote-registry failure, a client handler that
+	 *   throws -- all silent. The caller chose `notify` exactly because
+	 *   they don't want to deal with delivery state.
+	 *
+	 * Wire shape is identical to `live.push` today; the difference is
+	 * caller-side semantics. When the adapter ships a true no-reply
+	 * primitive, the internals swap without changing this caller API.
+	 *
+	 * **Don't use `live.push({ timeoutMs: 0 })` for fire-and-forget.** It
+	 * throws synchronously (timeoutMs must be positive). Wrapping the
+	 * throw in `.catch(() => {})` silently swallows it -- the push never
+	 * fires, the recipient never sees anything, no diagnostic anywhere.
+	 * Use `live.notify` instead.
+	 *
+	 * Validation throws SYNCHRONOUSLY for programming errors (bad target,
+	 * empty event name) -- those are bugs at the call site, not request-
+	 * scoped failures, and you want them surfaced loud.
+	 *
+	 * @example
+	 * ```js
+	 * // Inside an upload completion handler:
+	 * live.notify({ userId: upload.userId }, 'upload:complete', { id: upload.id });
+	 * // Fire-and-forget. Returns immediately. If the user is offline,
+	 * // silently drops -- they'll see the result on next page load.
+	 * ```
+	 */
+	function notify(
+		target: { userId: string },
+		event: string,
+		data?: unknown
+	): Promise<void>;
 
 	/**
 	 * Mark a function as RPC-callable with schema validation.

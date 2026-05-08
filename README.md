@@ -1833,6 +1833,21 @@ Multi-device users see most-recent-connection-wins routing within each instance,
 
 `onPush(event, handler)` multiplexes multiple events over the adapter's single `onRequest` channel. Returning a value sends it as the reply; throwing rejects the server-side promise. Returns an unsubscribe function.
 
+### Fire-and-forget: `live.notify`
+
+For server-initiated events where you don't need a reply -- progress notifications, "upload complete" pings, "new message available" hints, cron-driven price ticks fanned out to many users -- use `live.notify(target, event, data)` instead of `live.push`:
+
+```js
+// Inside an upload completion handler:
+live.notify({ userId: upload.userId }, 'upload:complete', { id: upload.id });
+// Returns Promise<void> immediately. No await needed.
+// If the user is offline, silently drops -- they'll see the result on next page load.
+```
+
+The wire path is identical to `live.push`: the client's `onPush(event, handler)` still fires for the event. The difference is caller-side -- `live.notify` returns immediately without waiting for the handler's return value, and it never rejects in normal operation (offline user, timeout, client handler error -- all silent). Validation throws synchronously for programming errors (bad target, empty event name) so those still surface loud at the call site.
+
+**Don't use `live.push({ timeoutMs: 0 })` for fire-and-forget.** It throws synchronously since `timeoutMs` must be positive. Wrapping the throw in `.catch(() => {})` silently swallows it -- the push never fires, the recipient never sees anything. Use `live.notify` instead.
+
 ### Cluster routing
 
 For multi-instance deploys, wire the connection registry from `svelte-adapter-uws-extensions` so a `live.push` originating on any instance reaches the user's owning instance. With `svelte-adapter-uws >= 0.5.0-next.15`, the `init({ platform })` hook is the recommended call site -- the Redis client is connected by then and the registry is wired before the first `upgrade` / `open` runs:

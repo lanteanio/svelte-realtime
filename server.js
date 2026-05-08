@@ -2649,7 +2649,7 @@ live.push = async function push(target, event, data, options) {
 		}
 		if (options.timeoutMs !== undefined) {
 			if (typeof options.timeoutMs !== 'number' || !Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
-				throw new Error('[svelte-realtime] live.push: options.timeoutMs must be a positive finite number');
+				throw new Error('[svelte-realtime] live.push: options.timeoutMs must be a positive finite number. For fire-and-forget delivery, use `live.notify(target, event, data)` instead.');
 			}
 		}
 	}
@@ -2675,6 +2675,130 @@ live.push = async function push(target, event, data, options) {
 		return _remoteRegistry.request(userId, event, data, options || undefined);
 	}
 	throw new LiveError('NOT_FOUND', "no active connection for userId '" + userId + "'");
+};
+
+/**
+ * Bounded internal timeout for the wire-level request that backs
+ * `live.notify`. The caller doesn't await the reply -- this only
+ * controls how long the adapter's per-request tracker holds the entry
+ * before reclaiming it. Long enough that a slow client roundtrip
+ * doesn't leak; short enough that the tracker doesn't accumulate stale
+ * entries under high notify volume. 1s is a deliberate "small but
+ * sufficient" pick -- can switch to a true noReply primitive in a
+ * future adapter bump without changing the live.notify caller API.
+ */
+const _NOTIFY_INTERNAL_TIMEOUT_MS = 1000;
+
+/**
+ * Send a server-initiated event to a connected user without awaiting a
+ * reply. The fire-and-forget counterpart to `live.push`.
+ *
+ * **When to use which:**
+ * - `live.push(target, event, data, { timeoutMs })` -- request/reply.
+ *   You await a value back from the client's `onPush(event, handler)`.
+ *   `timeoutMs` controls how long you wait. Throws on offline user,
+ *   timeout, client handler error.
+ * - `live.notify(target, event, data)` -- fire-and-forget. The client's
+ *   `onPush(event, handler)` still fires (same wire path), but the
+ *   handler's return value is discarded and the call resolves without
+ *   waiting for it. Returns `Promise<void>` that resolves once the
+ *   envelope is dispatched. Never rejects in normal operation: an
+ *   offline user, a remote-registry failure, a client handler that
+ *   throws -- all silent. The caller chose `notify` exactly because
+ *   they don't want to deal with delivery state.
+ *
+ * Wire shape is identical to `live.push` today; the difference is
+ * caller-side semantics (no await, no error surface). When the
+ * adapter ships a true no-reply primitive, the internal implementation
+ * swaps without changing this caller API.
+ *
+ * **Don't use `live.push({ timeoutMs: 0 })` for fire-and-forget.** It
+ * throws synchronously (timeoutMs must be positive). Wrapping the
+ * throw in `.catch(() => {})` silently swallows it -- the push never
+ * fires, the recipient never sees anything, no diagnostic anywhere.
+ * Use `live.notify` instead.
+ *
+ * @param {{ userId: string }} target
+ * @param {string} event
+ * @param {any} [data]
+ * @returns {Promise<void>}
+ *
+ * @example
+ * ```js
+ * // Inside an upload completion handler:
+ * live.notify({ userId: upload.userId }, 'upload:complete', { id: upload.id });
+ * // Fire-and-forget. Returns immediately. If the user is offline,
+ * // silently drops -- they'll see the result on next page load.
+ * ```
+ *
+ * @example
+ * ```js
+ * // Server-side (cron-driven) progress notifications:
+ * for (const userId of activeUsers) {
+ *   live.notify({ userId }, 'price:tick', { symbol, price });
+ * }
+ * // No accumulating timeouts to manage; no `Promise.all` rejection
+ * // boundary if some users are offline.
+ * ```
+ */
+live.notify = function notify(target, event, data) {
+	if (!target || typeof target !== 'object') {
+		throw new Error('[svelte-realtime] live.notify: target must be an object like { userId }');
+	}
+	if (typeof event !== 'string' || event.length === 0) {
+		throw new Error('[svelte-realtime] live.notify: event must be a non-empty string');
+	}
+	const targetKeys = Object.keys(target);
+	const extraKeys = targetKeys.filter((k) => k !== 'userId');
+	if (extraKeys.length > 0) {
+		throw new Error('[svelte-realtime] live.notify: unsupported target keys: ' + extraKeys.join(', '));
+	}
+	const userId = /** @type {any} */ (target).userId;
+	if (typeof userId !== 'string' || userId.length === 0) {
+		throw new Error('[svelte-realtime] live.notify: target.userId must be a non-empty string');
+	}
+
+	const entry = _pushRegistry.get(userId);
+	if (entry) {
+		if (typeof entry.platform.request !== 'function') {
+			// Same versioning constraint as live.push -- platform.request
+			// requires svelte-adapter-uws >= 0.5.0-next.4. Stay silent in
+			// production: notify is fire-and-forget; a missing platform
+			// primitive shouldn't surface at the call site as a sync throw.
+			if (_IS_DEV) {
+				console.warn('[svelte-realtime] live.notify: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4. Notify dispatch silently no-op.');
+			}
+			return Promise.resolve();
+		}
+		try {
+			entry.platform.request(entry.ws, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS })
+				.catch(() => {
+					// Discarded by design: notify never surfaces delivery
+					// state to the caller. Timeout, client handler error,
+					// connection close -- all silent.
+				});
+		} catch {
+			// platform.request can throw synchronously on a torn-down ws.
+			// Same fire-and-forget contract: silent.
+		}
+		return Promise.resolve();
+	}
+	if (_remoteRegistry) {
+		try {
+			_remoteRegistry.request(userId, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS })
+				.catch(() => {
+					// Cluster-route error (offline cluster-wide, transport
+					// failure, remote handler throw) -- silent.
+				});
+		} catch {
+			// Sync throw from registry shape -- silent.
+		}
+		return Promise.resolve();
+	}
+	// Offline + no cluster routing: silent no-op. The caller chose
+	// notify; "we couldn't reach the user" isn't an error in this
+	// contract -- they'll see the result next time they load.
+	return Promise.resolve();
 };
 
 /**
