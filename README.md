@@ -2092,26 +2092,30 @@ On older adapters (`open(ws, platform)` is the only available hand-off point), c
 
 Each worker process runs its own cron tick. In a single-process deployment that's exactly what you want. In a clustered deployment -- whether `CLUSTER_MODE=reuseport` on Linux (N kernel workers per replica), acceptor mode on Windows / macOS (N internal workers per process), or N Docker replicas, or any combination -- every worker fires every job in parallel by default. For "send the daily summary at 9am" jobs, that's almost certainly wrong.
 
-Wire a cluster-wide leader gate via `configureCron({ leader })`. The canonical implementation lives in `svelte-adapter-uws-extensions/redis/leader` and uses a Redis SETNX lease:
+Wire a cluster-wide leader gate via `configureCron({ leader, bus })`. The canonical leader implementation lives in `svelte-adapter-uws-extensions/redis/leader` (Redis SETNX lease) and the canonical bus is `svelte-adapter-uws-extensions/redis/pubsub`:
 
 ```js
 // src/hooks.ws.js (clustered, with extensions)
 import { setCronPlatform, configureCron } from 'svelte-realtime/server';
 import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
+import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
 
 const redis = ...; // your shared Redis client
 
 const leader = createLeader(redis); // instanceId defaults to a random hex; override for diagnostics
+const bus = createPubSubBus(redis);
 
-export function init({ platform }) {
+export async function init({ platform }) {
+  await bus.activate(platform);
   setCronPlatform(platform);
-  configureCron({ leader: leader.isLeader });
+  configureCron({ leader: leader.isLeader, bus });
 }
 
 export async function shutdown() {
   // Best-effort lease release so a sibling can take over within renewMs
   // (default 10s) instead of waiting for the full lease to expire.
   await leader.stop();
+  await bus.deactivate();
 }
 ```
 
@@ -2119,6 +2123,14 @@ Behavior with a leader configured:
 - Only the worker whose `leader()` returns `true` proceeds with the tick. All other workers exit early and increment a `cron{status:'not-leader'}` metric.
 - A throwing `leader()` is fail-closed: this worker skips the tick and logs in dev. Better to miss a tick than to double-fire because the leader-election machinery is broken.
 - Single-flight, single-fire semantics still apply per cron path within the elected worker.
+
+#### Why also pass `bus`?
+
+With only `leader` configured, the elected worker's cron publishes still go to uWS subscribers on that worker's process only. Subscribers connected to non-leader instances see nothing -- because no other worker independently produced the publish. Wiring `bus` routes every cron fire through `bus.wrap(platform)` so the leader's publishes relay over the bus's pubsub channel and reach every cluster instance. This applies to both the `return value` auto-publish and the cron handler's own `ctx.publish(...)`.
+
+`bus` is the extensions-package pubsub bus (`redis/pubsub` for the broadcast channel, `redis/sharded-pubsub` for per-shard channels at scale). svelte-realtime consumes it structurally as `{ wrap(platform): wrapped }` -- any pubsub primitive exposing that shape works.
+
+Setting `leader` without `bus` emits a single dev warning at `configureCron` time, since cluster intent without cluster fan-out is almost always a misconfig. Production deployments don't see the warning (it's `_IS_DEV`-gated like the rest of the cron diagnostics), so suppress is via fixing the wiring rather than via a config flag.
 
 Without a leader configured (the default), every worker fires every job. svelte-realtime stays cluster-agnostic by design; the cluster transport (Redis or otherwise) is the extensions package's domain.
 

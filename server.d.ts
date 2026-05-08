@@ -2047,28 +2047,54 @@ export function setCronPlatform(platform: Platform): void;
  * - `leader()` returning a non-boolean falsy value (e.g. `undefined`)
  *   is treated as "not leader" -- skip the tick.
  *
+ * **Cluster fan-out (`bus`).** With a leader configured, only the
+ * elected worker fires. By default that publish reaches uWS subscribers
+ * on the leader's worker only -- subscribers on other instances see
+ * nothing because no other worker independently produced the publish.
+ * The `bus` option plugs in the extensions-package pubsub bus
+ * (`svelte-adapter-uws-extensions/redis/pubsub` or
+ * `redis/sharded-pubsub`) so the leader's cron publishes relay to
+ * every cluster instance. Each cron fire wraps the captured platform
+ * with `bus.wrap(platform)` for both the auto-publish path AND the
+ * cron handler's `ctx.publish`. Mirror of
+ * `live.configurePush({ remoteRegistry })`. svelte-realtime stays
+ * cluster-transport-agnostic; the bus type is structural
+ * (`{ wrap(platform): wrapped }`) -- any pubsub primitive that exposes
+ * a wrap method works.
+ *
+ * Setting `leader` without `bus` emits a single dev warning at
+ * `configureCron` time pointing at this footgun: cluster intent
+ * declared, cluster fan-out missing.
+ *
  * @example
  * ```js
  * // src/hooks.ws.js (adapter next.15+, clustered deployment)
  * import { setCronPlatform, configureCron } from 'svelte-realtime/server';
  * import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
+ * import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
  *
  * const leader = createLeader(redis);
+ * const bus = createPubSubBus(redis);
  *
- * export function init({ platform }: { platform: Platform }) {
+ * export async function init({ platform }: { platform: Platform }) {
+ *     await bus.activate(platform);
  *     setCronPlatform(platform);
- *     configureCron({ leader: leader.isLeader });
+ *     configureCron({ leader: leader.isLeader, bus });
  * }
  *
  * export async function shutdown() {
- *     // Best-effort lease release so a sibling can take over within
- *     // renewMs (default 10s) instead of waiting for the full lease.
  *     await leader.stop();
+ *     await bus.deactivate();
  * }
  * ```
  */
 export function configureCron(
-	config: { leader: (() => boolean) | null } | null
+	config:
+		| {
+			leader?: (() => boolean) | null;
+			bus?: { wrap(platform: any): any } | null;
+		}
+		| null
 ): void;
 
 /**

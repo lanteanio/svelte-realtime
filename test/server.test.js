@@ -1887,7 +1887,7 @@ describe('live.cron()', () => {
 		});
 
 		it('rejects {} (must include leader field)', () => {
-			expect(() => configureCron({})).toThrow('must include a leader field');
+			expect(() => configureCron({})).toThrow('must include at least one of leader or bus');
 		});
 
 		it('rejects non-object configs', () => {
@@ -1898,6 +1898,206 @@ describe('live.cron()', () => {
 		it('rejects non-function, non-null leader', () => {
 			expect(() => configureCron({ leader: 'not-a-fn' })).toThrow('leader must be a function or null');
 			expect(() => configureCron({ leader: 42 })).toThrow('leader must be a function or null');
+		});
+	});
+
+	// configureCron({ bus }) -- cluster-wide cron fan-out. Wraps the captured
+	// platform with `bus.wrap(platform)` per cron fire so the leader's
+	// publishes relay across the cluster instead of staying on the leader's
+	// worker only. Mirror of configurePush({ remoteRegistry }).
+	describe('configureCron({ bus })', () => {
+		afterEach(() => {
+			_clearCron();
+			configureCron(null);
+		});
+
+		// A minimal bus stub that records what gets published through the
+		// wrapped platform. Mirrors the shape of
+		// `svelte-adapter-uws-extensions/redis/pubsub` but with no Redis
+		// actually involved -- pure recording for the contract test.
+		const makeMockBus = () => {
+			const wrappedPublishes = [];
+			return {
+				wrappedPublishes,
+				wrap(platform) {
+					return {
+						publish(topic, event, data, options) {
+							wrappedPublishes.push({ topic, event, data, options });
+							return platform.publish(topic, event, data, options);
+						}
+					};
+				}
+			};
+		};
+
+		it('cron fire publishes through bus.wrap(platform) when a bus is configured', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const bus = makeMockBus();
+			configureCron({ leader: () => true, bus });
+
+			__registerCron('test/bus', live.cron('* * * * *', 't:bus', async () => ({ count: 5 })));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+
+			// The auto-publish (return value) routed through bus.wrap, so
+			// the bus saw the relay AND the underlying platform saw the
+			// local fan-out call.
+			expect(bus.wrappedPublishes.length).toBe(1);
+			expect(bus.wrappedPublishes[0]).toMatchObject({ topic: 't:bus', event: 'set', data: { count: 5 } });
+			expect(platform.published.find(p => p.topic === 't:bus')).toBeDefined();
+		});
+
+		it('cron handler ctx.publish routes through the wrapped platform', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const bus = makeMockBus();
+			configureCron({ leader: () => true, bus });
+
+			__registerCron('test/bus-ctx', live.cron('* * * * *', 't:bus-ctx', async (ctx) => {
+				ctx.publish('t:bus-ctx', 'tick', { ms: 123 });
+				// Returning undefined skips auto-publish.
+			}));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+
+			// ctx.publish flowed through bus.wrap, so the bus recorded
+			// the cluster-relay envelope.
+			const relayed = bus.wrappedPublishes.find(p => p.event === 'tick');
+			expect(relayed).toBeDefined();
+			expect(relayed).toMatchObject({ topic: 't:bus-ctx', data: { ms: 123 } });
+			// And the platform saw the local publish too.
+			expect(platform.published.find(p => p.event === 'tick')).toBeDefined();
+		});
+
+		it('without a bus, cron publishes go to platform directly (no wrap)', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			configureCron({ leader: () => true });
+
+			__registerCron('test/no-bus', live.cron('* * * * *', 't:no-bus', async () => ({ ok: true })));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+
+			// No bus -> no bus-recorded publishes. Platform got the publish
+			// directly.
+			expect(platform.published.find(p => p.topic === 't:no-bus')).toBeDefined();
+		});
+
+		it('configureCron({ bus: null }) clears the bus (reverts to direct platform)', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const bus = makeMockBus();
+			configureCron({ leader: () => true, bus });
+			configureCron({ bus: null });
+
+			__registerCron('test/bus-cleared', live.cron('* * * * *', 't:bus-cleared', async () => ({ x: 1 })));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+
+			expect(bus.wrappedPublishes.length).toBe(0);
+			expect(platform.published.find(p => p.topic === 't:bus-cleared')).toBeDefined();
+		});
+
+		it('configureCron(null) clears both leader and bus', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const bus = makeMockBus();
+			configureCron({ leader: () => true, bus });
+			configureCron(null);
+
+			let runs = 0;
+			__registerCron('test/clear-all', live.cron('* * * * *', 't:clear-all', async () => { runs++; }));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+
+			// Leader cleared -> back to "every worker fires" -> ran.
+			expect(runs).toBe(1);
+			// Bus cleared -> no relay records.
+			expect(bus.wrappedPublishes.length).toBe(0);
+		});
+
+		it('warns once when configureCron({ leader }) is called without bus', () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			configureCron({ leader: () => true });
+			const matches = warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('configureCron({ leader }) was set without a `bus`')
+			);
+			expect(matches.length).toBe(1);
+			warnSpy.mockRestore();
+		});
+
+		it('does NOT warn when configureCron({ leader, bus }) is called together', () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const bus = makeMockBus();
+			configureCron({ leader: () => true, bus });
+			const matches = warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('without a `bus`')
+			);
+			expect(matches.length).toBe(0);
+			warnSpy.mockRestore();
+		});
+
+		it('does NOT warn when configureCron({ bus }) is called without leader', () => {
+			// No cluster intent (no leader) means no warning -- bus alone is
+			// a valid shape for "I want cron fan-out but every worker still fires."
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			const bus = makeMockBus();
+			configureCron({ bus });
+			const matches = warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('without a `bus`')
+			);
+			expect(matches.length).toBe(0);
+			warnSpy.mockRestore();
+		});
+
+		it('warning is dedup-ed across multiple configureCron calls (one per process)', () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			configureCron({ leader: () => true });
+			configureCron({ leader: () => false });
+			configureCron({ leader: () => true });
+			const matches = warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('without a `bus`')
+			);
+			expect(matches.length).toBe(1);
+			warnSpy.mockRestore();
+		});
+
+		it('warning re-arms after _clearCron so test isolation works', () => {
+			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			configureCron({ leader: () => true });
+			expect(warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('without a `bus`')
+			).length).toBe(1);
+
+			_clearCron();
+			configureCron({ leader: () => true });
+			expect(warnSpy.mock.calls.filter(args =>
+				typeof args[0] === 'string' && args[0].includes('without a `bus`')
+			).length).toBe(2);
+			warnSpy.mockRestore();
+		});
+
+		it('rejects bus without a wrap method', () => {
+			expect(() => configureCron({ bus: { foo: 'bar' } }))
+				.toThrow('bus must expose a .wrap(platform) method or be null');
+			expect(() => configureCron({ bus: 42 }))
+				.toThrow('bus must expose a .wrap(platform) method or be null');
+		});
+
+		it('accepts configureCron({ bus }) with no leader (every worker fires + relays)', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const bus = makeMockBus();
+			// No leader -> default "every worker fires" behavior preserved.
+			configureCron({ bus });
+
+			__registerCron('test/bus-only', live.cron('* * * * *', 't:bus-only', async () => ({ y: 2 })));
+			await _tickCron();
+			await new Promise(r => setTimeout(r, 20));
+
+			expect(bus.wrappedPublishes.length).toBe(1);
+			expect(bus.wrappedPublishes[0]).toMatchObject({ topic: 't:bus-only', event: 'set' });
 		});
 	});
 });

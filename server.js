@@ -2840,6 +2840,33 @@ let _cronPlatform = null;
 let _cronLeader = null;
 
 /**
+ * Optional cluster bus for cron fan-out. When set, every cron fire
+ * publishes through `_cronBus.wrap(_cronPlatform)` instead of through
+ * the raw platform, so leader-only ticks reach subscribers on
+ * non-leader instances via the bus's relay channel.
+ *
+ * Why this is cron-specific (not derived/effect/aggregate): derived /
+ * aggregate watchers re-publish through the realtime-wrapped
+ * `platform.publish` captured at activation time. Every instance sees
+ * the source-topic firehose via its own bus subscriber and computes
+ * its own derived locally; bus-relaying derived publishes would cause
+ * double delivery. Cron is different -- only the leader fires it, so
+ * the leader's publish must relay or remote subscribers see nothing.
+ *
+ * @type {{ wrap: (platform: any) => any } | null}
+ */
+let _cronBus = null;
+
+/**
+ * One-shot flag for the "configureCron leader without bus" warning.
+ * Setting `leader` declares cluster intent; not also wiring a bus
+ * means leader-only cron ticks fan out only on the leader's worker,
+ * which is almost certainly a config bug. Reset by `_clearCron` so
+ * HMR / tests get a fresh slate.
+ */
+let _cronClusterWarnFired = false;
+
+/**
  * One-shot flag for the "cron fired but no platform captured" warning.
  * Without dedup, a 6-field schedule + an idle server produces a per-second
  * stream of identical warnings until the first WS connection (or, post
@@ -4833,22 +4860,50 @@ export function setCronPlatform(platform) {
 export function configureCron(config) {
 	if (config === null) {
 		_cronLeader = null;
+		_cronBus = null;
 		return;
 	}
 	if (typeof config !== 'object') {
 		throw new Error('[svelte-realtime] configureCron: config must be an object or null');
 	}
-	if (config.leader === undefined) {
-		throw new Error('[svelte-realtime] configureCron: config must include a leader field');
+	if (config.leader === undefined && config.bus === undefined) {
+		throw new Error('[svelte-realtime] configureCron: config must include at least one of leader or bus');
 	}
-	if (config.leader === null) {
-		_cronLeader = null;
-		return;
+	if (config.leader !== undefined) {
+		if (config.leader === null) {
+			_cronLeader = null;
+		} else if (typeof config.leader !== 'function') {
+			throw new Error('[svelte-realtime] configureCron: leader must be a function or null');
+		} else {
+			_cronLeader = config.leader;
+		}
 	}
-	if (typeof config.leader !== 'function') {
-		throw new Error('[svelte-realtime] configureCron: leader must be a function or null');
+	if (config.bus !== undefined) {
+		if (config.bus === null) {
+			_cronBus = null;
+		} else if (typeof config.bus !== 'object' || typeof config.bus.wrap !== 'function') {
+			throw new Error('[svelte-realtime] configureCron: bus must expose a .wrap(platform) method or be null');
+		} else {
+			_cronBus = config.bus;
+		}
 	}
-	_cronLeader = config.leader;
+	// Diagnostic: cluster intent (leader) without cluster fan-out (bus)
+	// is almost always a misconfig. Leader-only cron ticks publish on the
+	// leader worker only -- subscribers on non-leader instances see
+	// nothing. The user typically wants both wired together. Warn once
+	// per process so the same hot-reload cycle doesn't spam.
+	if (_IS_DEV && _cronLeader !== null && _cronBus === null && !_cronClusterWarnFired) {
+		console.warn(
+			"[svelte-realtime] configureCron({ leader }) was set without a `bus`. " +
+			"Leader-only cron ticks publish on the elected worker only -- " +
+			"subscribers on other cluster instances will not see them. " +
+			"Wire `bus` from svelte-adapter-uws-extensions/redis/pubsub or " +
+			"sharded-pubsub:\n" +
+			"  configureCron({ leader: leader.isLeader, bus });\n" +
+			"  See: https://svti.me/cluster-cron"
+		);
+		_cronClusterWarnFired = true;
+	}
 }
 
 /** @type {ReturnType<typeof setTimeout> | null} */
@@ -4978,6 +5033,7 @@ export function _clearCron() {
 	_cronAt1Hz = false;
 	_cronRunning.clear();
 	_cronPlatformWarnFired = false;
+	_cronClusterWarnFired = false;
 }
 
 /**
@@ -5206,11 +5262,22 @@ export async function _tickCron() {
 					}
 					return;
 				}
-				const _h = _getCtxHelpers(_cronPlatform);
-				const ctx = _buildCtx(null, null, _cronPlatform, _h, null);
+				// Cluster fan-out: when a bus is wired via
+				// `configureCron({ bus })`, route the cron fire's
+				// publishes through `bus.wrap(platform)` so other cluster
+				// instances see them too. Without a bus, leader-only ticks
+				// only reach subscribers on the leader worker. Fresh wrap
+				// per fire is cheap (object literal allocation) and
+				// avoids any caching staleness around platform / bus
+				// mutation. Falls through to the raw platform when no bus
+				// is configured (single-instance dev, the canonical
+				// happy path).
+				const cronPub = _cronBus ? _cronBus.wrap(_cronPlatform) : _cronPlatform;
+				const _h = _getCtxHelpers(cronPub);
+				const ctx = _buildCtx(null, null, cronPub, _h, null);
 				const result = await entry.fn(ctx);
 				if (result !== undefined) {
-					_cronPlatform.publish(entry.topic, 'set', result);
+					cronPub.publish(entry.topic, 'set', result);
 				}
 				if (_metricsInstruments) _metricsInstruments.cronCount.inc({ path, status: 'ok' });
 			} catch (err) {
