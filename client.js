@@ -1386,7 +1386,7 @@ const _evictable = new Set();
  */
 export function __stream(path, options, isDynamic) {
 	if (isDynamic) {
-		return function dynamicStream(...args) {
+		const dynamicStream = function dynamicStream(...args) {
 			let cacheKey;
 			if (args.length === 1) {
 				const a = args[0];
@@ -1451,8 +1451,36 @@ export function __stream(path, options, isDynamic) {
 
 			return store;
 		};
+		// Stamp metadata so test-affordances like `subscribeAt` (from
+		// `svelte-realtime/test-client`) can construct a parallel store
+		// at a chosen `schemaVersion` without needing the user to pass
+		// the path string by hand.
+		/** @type {any} */ (dynamicStream).__streamPath = path;
+		/** @type {any} */ (dynamicStream).__streamOptions = options;
+		/** @type {any} */ (dynamicStream).__streamIsDynamic = true;
+		return dynamicStream;
 	}
 	return _createStream(path, options);
+}
+
+/**
+ * Test/demo affordance: create a parallel stream store at a chosen
+ * client-side `schemaVersion`. Walks the same wire path as a real
+ * subscribe -- the server sees a normal `subscribe { schemaVersion }`
+ * envelope, runs its registered migrate chain forward to the current
+ * server version, and returns the migrated payload, which this store
+ * renders. Used by `svelte-realtime/test-client`'s `subscribeAt`; not
+ * a production primitive.
+ *
+ * @internal
+ * @param {string} path
+ * @param {any} options
+ * @param {any[] | undefined} dynamicArgs
+ * @param {number | undefined} schemaVersion
+ * @returns {import('svelte/store').Readable<any>}
+ */
+export function _createStreamAtSchemaVersion(path, options, dynamicArgs, schemaVersion) {
+	return _createStream(path, options, dynamicArgs, schemaVersion);
 }
 
 /**
@@ -1535,7 +1563,16 @@ function _createMappedStore(source, fn) {
  * @param {any[]} [dynamicArgs]
  * @returns {any}
  */
-function _createStream(path, options, dynamicArgs) {
+/**
+ * @param {string} path
+ * @param {any} [options]
+ * @param {any[]} [dynamicArgs]
+ * @param {number} [initialSchemaVersion] Test/demo affordance: pre-seed
+ *   the closure-local `_schemaVersion` so the very first subscribe
+ *   envelope carries it. Production code never sets this; only the
+ *   `subscribeAt` helper from `svelte-realtime/test-client`.
+ */
+function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	let merge = options?.merge || 'crud';
 	let key = options?.key || 'id';
 	let prepend = options?.prepend || false;
@@ -1609,7 +1646,7 @@ function _createStream(path, options, dynamicArgs) {
 	let _loadingMore = false;
 
 	/** @type {number | undefined} Schema version from server */
-	let _schemaVersion = undefined;
+	let _schemaVersion = initialSchemaVersion;
 
 	/** @type {any} Last known version for delta sync */
 	let _lastVersion = undefined;
@@ -2362,6 +2399,13 @@ function _createStream(path, options, dynamicArgs) {
 	let _pendingCleanup = false;
 
 	return {
+		// Stamped metadata so test-affordances like `subscribeAt`
+		// (`svelte-realtime/test-client`) can construct a parallel store
+		// at a chosen schemaVersion without needing the user to pass the
+		// path string by hand. Not part of the public store contract.
+		__streamPath: path,
+		__streamOptions: options,
+		__streamArgs: dynamicArgs,
 		error: { subscribe: _errorStore.subscribe },
 		status: { subscribe: _statusStore.subscribe },
 		subscribe(fn) {

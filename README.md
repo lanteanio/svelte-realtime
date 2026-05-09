@@ -2770,6 +2770,44 @@ export const todos = live.stream('todos', async (ctx) => {
 
 The Vite plugin includes the stream version in the client stub. On reconnect, the client sends its version. If the server is ahead, migration functions chain in order (v1 -> v2 -> v3). If versions match, no migration runs.
 
+### Demo + e2e: `subscribeAt(stream, { schemaVersion })`
+
+The migration codepath only fires across a real deploy boundary -- a v1 server is replaced with a v2 server, a previously-connected v1 client reconnects, the cached `_schemaVersion` rides up. There's no path in a fresh tab to observe the migrate chain end-to-end, which makes demos and e2e tests awkward.
+
+`subscribeAt(stream, { schemaVersion })` from `svelte-realtime/test-client` creates a parallel store that subscribes pretending to be a stale client at the chosen version. The wire envelope carries `schemaVersion: N`, the server runs the registered migrate chain forward, and the parallel store renders the migrated payload. Use it for side-by-side demo panels and for e2e assertions on the migrate chain output.
+
+```svelte
+<script>
+  import { todos } from '$live/todos';
+  import { subscribeAt } from 'svelte-realtime/test-client';
+
+  // Production store at the current server version (no migration on its responses).
+  // Parallel stores pretending to be stale clients -- each triggers the migrate
+  // chain forward from its declared schemaVersion to the server's current version.
+  const todosAsV1 = subscribeAt(todos, { schemaVersion: 1 });
+  const todosAsV2 = subscribeAt(todos, { schemaVersion: 2 });
+</script>
+
+<section>
+  <h3>Live (v3): {JSON.stringify($todos)}</h3>
+  <h3>Stale v1 client would see: {JSON.stringify($todosAsV1)}</h3>
+  <h3>Stale v2 client would see: {JSON.stringify($todosAsV2)}</h3>
+</section>
+```
+
+For dynamic streams, call the factory first and pass the cached store:
+
+```js
+import { messages } from '$live/chat';
+import { subscribeAt } from 'svelte-realtime/test-client';
+
+const v1Messages = subscribeAt(messages('room-1'), { schemaVersion: 1 });
+```
+
+**Faithful production semantics.** Migration is applied ONCE on the initial subscribe response, just as in production. Subsequent live publishes arrive as raw current-version events and merge into the migrated base, exactly as a real reconnected stale client would experience -- the panel shows the migrated initial state, then forward-merges new events at the server's current shape.
+
+**Why this lives in `/test-client` and not the main client surface.** A public client-side API for "pin my schema version" would let production code chain through migrations on every fetch, which is wasteful and confusing. Schema migration is fundamentally about long-disconnected clients catching up, not opt-in version pinning. The `/test-client` import path makes the test/demo intent loud at every call site.
+
 ---
 
 ## Delta sync and replay
