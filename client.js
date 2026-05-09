@@ -99,6 +99,41 @@ let _batchCollector = null;
 /** @type {Map<string, Promise<any>>} */
 const _dedupMap = new Map();
 
+/**
+ * Per-path "have we warned about microtask dedup coalescing this path
+ * in this session?" gate. Dev-only, fires once per RPC path on the
+ * first coalesce so a developer running `Promise.allSettled([...rpc(),
+ * ...rpc()])` and expecting N parallel wire requests gets a one-line
+ * pointer to `rpc.fresh(...)`. Silent thereafter so a button-mash
+ * double-click on the same path doesn't spam the console. Stripped
+ * in production via the `_isDev()` gate at the call site.
+ *
+ * @type {Set<string>}
+ */
+const _dedupCoalesceWarned = new Set();
+
+/**
+ * Dev-mode check, mirrored from the `process.env.NODE_ENV` pattern
+ * used elsewhere in this file. Cached once at first call so the hot
+ * path is a single property read, not a chained typeof + env lookup.
+ * @returns {boolean}
+ */
+let _devGateCached = /** @type {boolean | null} */ (null);
+function _isDev() {
+	if (_devGateCached !== null) return _devGateCached;
+	_devGateCached = (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production');
+	return _devGateCached;
+}
+
+/**
+ * Reset the dedup-coalesce warned set. Tests only.
+ * @internal
+ */
+export function _resetDedupCoalesceWarned() {
+	_dedupCoalesceWarned.clear();
+	_devGateCached = null;
+}
+
 /** @type {Map<string, { resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout> | null }>} */
 const pending = new Map();
 
@@ -408,6 +443,30 @@ function ensureDisconnectListener() {
 }
 
 /**
+ * Dev-only: warn once per RPC path when the microtask dedup map
+ * collapses two or more identical calls into one wire request. Surfaces
+ * the silent surprise for stress tests and parallel-fan-out patterns
+ * (`Promise.allSettled([...].map(() => rpc()))`) that expect N wire
+ * requests but get one. Threshold is 1 (warn on first coalesce);
+ * dedup-keyed by path so a button-mash double-click on the same path
+ * warns once per session, not on every collapse.
+ *
+ * @param {string} path
+ */
+function _warnCoalesceOnce(path) {
+	if (!_isDev()) return;
+	if (_dedupCoalesceWarned.has(path)) return;
+	_dedupCoalesceWarned.add(path);
+	console.warn(
+		"[svelte-realtime] coalesced two or more identical calls to '" + path +
+		"' within one microtask -- only one wire request was sent and all callers " +
+		"received the same response. Dedup is intentional for accidental double-taps. " +
+		"If you wanted N parallel requests (stress test, fan-out), call `.fresh(...args)` " +
+		"on the rpc to bypass dedup. Warned once per path per session.\n  See: https://svti.me/dedup"
+	);
+}
+
+/**
  * Build a dedup key from path and args, avoiding JSON.stringify for common cases.
  * @param {string} path
  * @param {any[]} args
@@ -440,7 +499,10 @@ export function __rpc(path) {
 		if (!_batchCollector) {
 			const dedupKey = _buildDedupKey(path, args);
 			const existing = _dedupMap.get(dedupKey);
-			if (existing) return existing;
+			if (existing) {
+				_warnCoalesceOnce(path);
+				return existing;
+			}
 
 			const promise = _sendRpc(path, args);
 			_dedupMap.set(dedupKey, promise);
@@ -480,7 +542,10 @@ export function __rpc(path) {
 			if (!_batchCollector && idempotencyKey) {
 				const dedupKey = path + '\0K' + idempotencyKey;
 				const existing = _dedupMap.get(dedupKey);
-				if (existing) return existing;
+				if (existing) {
+					_warnCoalesceOnce(path);
+					return existing;
+				}
 				const promise = _sendRpc(path, args, idempotencyKey, timeout);
 				_dedupMap.set(dedupKey, promise);
 				queueMicrotask(() => _dedupMap.delete(dedupKey));

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.16] - 2026-05-09
+
+### Changed
+
+- **Loud-fail upgrade for two silent-fail edges in the wrapper / RPC surface.** Two unrelated paper cuts that both fall in the same shape: the primitive's contract is correct, but the failure mode is silent and surprising, costing every developer 10-20 min of debug the first time they hit it. (1) `live.idempotent` and `live.lock` now reject unknown config fields at registration time with a cross-helper hint specifically calling out the `key` / `keyFrom` divergence (`live.idempotent` uses `keyFrom`; `live.lock` uses `key`, which accepts a string OR a function). Mistakenly mirroring the wrong helper's shape used to silently fall through to the no-key bypass on idempotent (every call ran unguarded, the one-per-key guarantee broke without warning) or to a different validation error on lock (loud, but only for the specific `key`-required case; typos like `maxWait` for `maxWaitMs` were silent there too). The new error message includes the helper name, the unknown field, the allowed fields, and -- for the `key` / `keyFrom` case -- a one-line cross-helper note that converts the debug into a 2-second eye-scan. (2) The client-side microtask RPC dedup ([client.js:441](client.js#L441)) is correct and load-bearing for accidental double-taps, but `Promise.allSettled(Array.from({ length: 25 }, () => buyProduct('phone')))` collapses to one wire request with all 25 promises resolving to the same response and zero diagnostic. The client now logs a one-time `console.warn` on the first coalesce per RPC path per session, with a one-line pointer to `.fresh(...)` (the documented bypass). Dev-only (stripped under `NODE_ENV=production`); both the bare `__rpc` path and the `rpc.with({ idempotencyKey })` path go through the same warn-once gate; double-tap dedup on the same path warns once, never again. Eleven new tests pin: idempotent + lock unknown-field throws with cross-helper hints (4); dev-warn fires once on first coalesce with path + `.fresh` pointer (1); does not warn a second time on the same path within the session (1); does not warn when args differ / no coalesce happens (1); warns separately per path (1); also fires on the `.with({ idempotencyKey })` branch (1); silent under `NODE_ENV=production` (1); `.fresh()` bypasses dedup AND does not warn (1).
+
 ## [0.5.0-next.15] - 2026-05-09
 
 ### Added

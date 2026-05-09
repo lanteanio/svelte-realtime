@@ -1139,6 +1139,12 @@ To bypass deduplication and force a fresh request:
 const result = await getUser.fresh(userId); // always sends a new request
 ```
 
+> **Dev-mode coalesce warning.** Stress tests and parallel-fan-out patterns like `Promise.allSettled(Array.from({ length: 25 }, () => buyProduct('phone')))` expect N wire requests but get one -- all 25 promises resolve to the same response, the server-side state shows a single decrement, and the failure is silent. To make this discoverable, the client logs a one-time `console.warn` on the first coalesce per RPC path per session, with a one-line pointer to `.fresh(...)`. Dev-only (stripped under `NODE_ENV=production`); double-tap dedup on the same path warns once, never again.
+>
+> ```
+> [svelte-realtime] coalesced two or more identical calls to 'shop/buy' within one microtask -- only one wire request was sent and all callers received the same response. ... If you wanted N parallel requests (stress test, fan-out), call `.fresh(...args)` on the rpc to bypass dedup. Warned once per path per session.
+> ```
+
 ---
 
 ## Idempotency keys
@@ -1166,6 +1172,12 @@ const order = await createOrder.with({ idempotencyKey: intentId })(payload);
 ```
 
 Resolution: `keyFrom(ctx, ...args)` if defined, otherwise the client envelope's `idempotencyKey`, otherwise the wrapper is a no-op. Only successful results cache; throwing handlers abort the slot so the next caller re-runs. Default store is in-process and bounded; for multi-instance deployments pass `store: createIdempotencyStore(redis)` from `svelte-adapter-uws-extensions`.
+
+> **Field name divergence with `live.lock`.** `live.idempotent` uses `keyFrom`; `live.lock` uses `key` (which accepts a string OR a function). Mistakenly mirroring the wrong helper's shape used to silently fall through to the no-key bypass, breaking the one-per-key guarantee with no warning. Unknown config fields now throw at registration time with a cross-helper hint:
+>
+> ```
+> [svelte-realtime] live.idempotent: unknown config field 'key'. Allowed: keyFrom, store, ttl. Hint: live.lock uses 'key' but live.idempotent uses 'keyFrom' (the names diverged historically).
+> ```
 
 | Option | Default | Description |
 |---|---|---|

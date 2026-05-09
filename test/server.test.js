@@ -8114,6 +8114,33 @@ describe('live.idempotent()', () => {
 		expect(() => live.idempotent({}, 'not a function'))
 			.toThrow(/requires a handler function/);
 	});
+
+	// Silent-fail paper cut: a caller mirroring `live.lock`'s `{ key, ... }`
+	// shape would silently fall through to the no-key bypass branch (no
+	// validation error, no key from envelope, every call runs unguarded).
+	// Unknown-field validation now catches the typo at registration time
+	// with a cross-helper hint specifically calling out the divergence.
+	it('rejects unknown config fields with a cross-helper hint for "key"', () => {
+		expect(() => live.idempotent({ key: () => 'k' }, async () => 'ok'))
+			.toThrow(/unknown config field 'key'/);
+		expect(() => live.idempotent({ key: () => 'k' }, async () => 'ok'))
+			.toThrow(/Allowed: keyFrom, store, ttl/);
+		expect(() => live.idempotent({ key: () => 'k' }, async () => 'ok'))
+			.toThrow(/live\.lock uses 'key' but live\.idempotent uses 'keyFrom'/);
+	});
+
+	it('rejects arbitrary unknown fields without a cross-helper hint', () => {
+		expect(() => live.idempotent({ keyFrom: () => 'k', wrongField: 1 }, async () => 'ok'))
+			.toThrow(/unknown config field 'wrongField'/);
+		expect(() => live.idempotent({ keyFrom: () => 'k', wrongField: 1 }, async () => 'ok'))
+			.toThrow(/Allowed: keyFrom, store, ttl/);
+		// No "Hint:" line for fields that don't match a known cross-helper typo.
+		try {
+			live.idempotent({ keyFrom: () => 'k', wrongField: 1 }, async () => 'ok');
+		} catch (e) {
+			expect(/** @type {any} */ (e).message).not.toMatch(/Hint:/);
+		}
+	});
 });
 
 // -- live.stream({ coalesceBy }) ----------------------------------------------
@@ -10953,6 +10980,30 @@ describe('live.lock()', () => {
 		const err = await wrapped(ctx).catch((e) => e);
 		expect(err).not.toBeInstanceOf(LiveError);
 		expect(err.message).toBe('io failure');
+	});
+
+	// Symmetric guard against the same silent-fail class as live.idempotent.
+	// Catches typos like `maxWait` (vs `maxWaitMs`) and the cross-helper
+	// case `keyFrom` (vs `key`) at registration time.
+	it('rejects unknown config fields with a cross-helper hint for "keyFrom"', () => {
+		expect(() => live.lock(/** @type {any} */ ({ keyFrom: () => 'k' }), async () => {}))
+			.toThrow(/unknown config field 'keyFrom'/);
+		expect(() => live.lock(/** @type {any} */ ({ keyFrom: () => 'k' }), async () => {}))
+			.toThrow(/Allowed: key, lock, maxWaitMs/);
+		expect(() => live.lock(/** @type {any} */ ({ keyFrom: () => 'k' }), async () => {}))
+			.toThrow(/live\.idempotent uses 'keyFrom' but live\.lock uses 'key'/);
+	});
+
+	it('rejects arbitrary unknown fields without a cross-helper hint', () => {
+		expect(() => live.lock(/** @type {any} */ ({ key: 'k', maxWait: 100 }), async () => {}))
+			.toThrow(/unknown config field 'maxWait'/);
+		expect(() => live.lock(/** @type {any} */ ({ key: 'k', maxWait: 100 }), async () => {}))
+			.toThrow(/Allowed: key, lock, maxWaitMs/);
+		try {
+			live.lock(/** @type {any} */ ({ key: 'k', maxWait: 100 }), async () => {});
+		} catch (e) {
+			expect(/** @type {any} */ (e).message).not.toMatch(/Hint:/);
+		}
 	});
 });
 

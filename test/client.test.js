@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fc from 'fast-check';
 
-let __rpc, __stream, __binaryRpc, __upload, _resetUploadAutoDiscovery, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters;
+let __rpc, __stream, __binaryRpc, __upload, _resetUploadAutoDiscovery, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters, _resetDedupCoalesceWarned;
 let topicCallbacks;
 let statusCallbacks;
 let statusInitialValue;
@@ -217,6 +217,8 @@ beforeEach(async () => {
 	getAssertionCounters = mod.getAssertionCounters;
 	_resetAssertCounters = mod._resetAssertCounters;
 	_resetAssertCounters();
+	_resetDedupCoalesceWarned = mod._resetDedupCoalesceWarned;
+	if (_resetDedupCoalesceWarned) _resetDedupCoalesceWarned();
 });
 
 // -- __rpc (Finding 1 regression) ---------------------------------------------
@@ -4034,6 +4036,125 @@ describe('__rpc() dedup key collision', () => {
 		const sent = sendQueuedFn.mock.calls[0][0];
 		simulateRpcResponse(sent.id, { ok: true, data: 'result' });
 		expect(await p1).toBe('result');
+	});
+});
+
+// -- __rpc() dedup-coalesce dev-warn ------------------------------------------
+
+describe('__rpc() dedup-coalesce dev-warn', () => {
+	/** @type {ReturnType<typeof vi.spyOn>} */
+	let warnSpy;
+	beforeEach(() => {
+		warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	});
+	afterEach(() => {
+		warnSpy.mockRestore();
+	});
+
+	it('warns once on first coalesce, with the path and a pointer to .fresh', async () => {
+		const buy = __rpc('shop/buy');
+		const p1 = buy('phone');
+		const p2 = buy('phone');
+		expect(p1).toBe(p2); // dedup happened
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const msg = warnSpy.mock.calls[0][0];
+		expect(msg).toContain("'shop/buy'");
+		expect(msg).toContain('.fresh');
+		expect(msg).toContain('once per path per session');
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: 'ok' });
+		await p1;
+	});
+
+	it('does NOT warn a second time on the same path within the session', async () => {
+		const buy = __rpc('shop/buy');
+		buy('phone');
+		buy('phone'); // first coalesce -> warn
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+
+		await flush(); // dedup map clears across microtasks
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, { ok: true, data: 'ok' });
+
+		// Second microtask: another coalesce on the same path. Silent.
+		buy('phone');
+		buy('phone');
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+
+		const sent2 = sendQueuedFn.mock.calls[1][0];
+		simulateRpcResponse(sent2.id, { ok: true, data: 'ok' });
+	});
+
+	it('does NOT warn when args differ (no coalesce)', async () => {
+		const buy = __rpc('shop/buy');
+		buy('phone');
+		buy('laptop'); // different args -> different dedup key, no coalesce
+		expect(warnSpy).not.toHaveBeenCalled();
+
+		// Two separate wire requests went out.
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+		simulateRpcResponse(sendQueuedFn.mock.calls[0][0].id, { ok: true, data: 'ok' });
+		simulateRpcResponse(sendQueuedFn.mock.calls[1][0].id, { ok: true, data: 'ok' });
+	});
+
+	it('warns separately per path (one warn for path A, one for path B)', async () => {
+		const buy = __rpc('shop/buy');
+		const claim = __rpc('promo/claim');
+		buy('phone');
+		buy('phone'); // -> warn for shop/buy
+		claim('SAVE20');
+		claim('SAVE20'); // -> warn for promo/claim
+		expect(warnSpy).toHaveBeenCalledTimes(2);
+		expect(warnSpy.mock.calls[0][0]).toContain("'shop/buy'");
+		expect(warnSpy.mock.calls[1][0]).toContain("'promo/claim'");
+
+		simulateRpcResponse(sendQueuedFn.mock.calls[0][0].id, { ok: true, data: 'ok' });
+		simulateRpcResponse(sendQueuedFn.mock.calls[1][0].id, { ok: true, data: 'ok' });
+	});
+
+	it('also warns on .with({ idempotencyKey }) coalesce on the same path', async () => {
+		const claim = __rpc('promo/claim');
+		const bound = claim.with({ idempotencyKey: 'k-1' });
+		bound('SAVE20');
+		bound('SAVE20'); // coalesce via idempotency-key dedup
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		expect(warnSpy.mock.calls[0][0]).toContain("'promo/claim'");
+
+		simulateRpcResponse(sendQueuedFn.mock.calls[0][0].id, { ok: true, data: 'ok' });
+	});
+
+	it('does NOT warn when production (NODE_ENV=production)', async () => {
+		// Reload module under production env so the dev-gate caches false.
+		const prevEnv = process.env.NODE_ENV;
+		process.env.NODE_ENV = 'production';
+		try {
+			vi.resetModules();
+			const mod = await import('../client.js');
+			const buyProd = mod.__rpc('shop/buy');
+			const localWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				buyProd('phone');
+				buyProd('phone');
+				expect(localWarn).not.toHaveBeenCalled();
+			} finally {
+				localWarn.mockRestore();
+			}
+		} finally {
+			process.env.NODE_ENV = prevEnv;
+		}
+	});
+
+	it('rpc.fresh() bypasses dedup AND does not warn (the documented escape hatch)', async () => {
+		const buy = __rpc('shop/buy');
+		buy.fresh('phone');
+		buy.fresh('phone');
+		// Two wire requests went out (no dedup), so no coalesce, so no warn.
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+		expect(warnSpy).not.toHaveBeenCalled();
+
+		simulateRpcResponse(sendQueuedFn.mock.calls[0][0].id, { ok: true, data: 'ok' });
+		simulateRpcResponse(sendQueuedFn.mock.calls[1][0].id, { ok: true, data: 'ok' });
 	});
 });
 

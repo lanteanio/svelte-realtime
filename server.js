@@ -2234,6 +2234,49 @@ export function _resetLock() {
 }
 
 /**
+ * Allowed config-object fields per wrapper. Kept in sync with the JSDoc of
+ * each wrapper's config parameter; any unknown field at the call site
+ * throws with a "did you mean..." hint mapped from `_*_CONFIG_HINTS`.
+ *
+ * Why this matters: `live.idempotent` uses `keyFrom` while `live.lock` uses
+ * `key`; without unknown-field validation, a caller mirroring the other
+ * helper's shape would silently fall through to the default code path
+ * (idempotent: no key -> bypass cache; lock: no key -> different error).
+ * Either way the caller's intended one-per-key guarantee silently breaks.
+ * The hint table converts a 20-min debug into a 2-second eye-scan.
+ */
+const _IDEMPOTENT_CONFIG_FIELDS = ['keyFrom', 'store', 'ttl'];
+const _IDEMPOTENT_CONFIG_HINTS = {
+	key: "live.lock uses 'key' but live.idempotent uses 'keyFrom' (the names diverged historically)"
+};
+const _LOCK_CONFIG_FIELDS = ['key', 'lock', 'maxWaitMs'];
+const _LOCK_CONFIG_HINTS = {
+	keyFrom: "live.idempotent uses 'keyFrom' but live.lock uses 'key' (which accepts a string OR a function)"
+};
+
+/**
+ * Throw on any field in `cfg` not in `allowed`. Suggestions from `hints`
+ * (when present) include a one-line cross-helper note for the common
+ * "I mirrored the wrong helper's shape" case.
+ *
+ * @param {string} helperName e.g. 'live.idempotent'
+ * @param {Record<string, any>} cfg The user's config object.
+ * @param {string[]} allowed
+ * @param {Record<string, string>} hints
+ */
+function _assertConfigShape(helperName, cfg, allowed, hints) {
+	for (const k of Object.keys(cfg)) {
+		if (allowed.includes(k)) continue;
+		const hint = hints[k];
+		const suffix = hint ? ' Hint: ' + hint + '.' : '';
+		throw new Error(
+			'[svelte-realtime] ' + helperName + ": unknown config field '" + k +
+			"'. Allowed: " + allowed.join(', ') + '.' + suffix
+		);
+	}
+}
+
+/**
  * Wrap an RPC handler with idempotency: identical calls (by key) return the
  * cached result without re-running the handler. Composes with live(),
  * live.validated(), live.rateLimit(), etc.
@@ -2258,6 +2301,7 @@ live.idempotent = function idempotent(config, fn) {
 		throw new Error('[svelte-realtime] live.idempotent(config, fn) requires a handler function');
 	}
 	const cfg = config || {};
+	_assertConfigShape('live.idempotent', cfg, _IDEMPOTENT_CONFIG_FIELDS, _IDEMPOTENT_CONFIG_HINTS);
 	if (cfg.keyFrom !== undefined && typeof cfg.keyFrom !== 'function') {
 		throw new Error('[svelte-realtime] live.idempotent: keyFrom must be a function');
 	}
@@ -2369,6 +2413,7 @@ live.lock = function lock(keyOrConfig, fn) {
 		keyFrom = keyOrConfig;
 	} else if (keyOrConfig && typeof keyOrConfig === 'object') {
 		const cfg = keyOrConfig;
+		_assertConfigShape('live.lock', cfg, _LOCK_CONFIG_FIELDS, _LOCK_CONFIG_HINTS);
 		if (typeof cfg.key === 'string') {
 			const staticKey = cfg.key;
 			if (staticKey.length === 0) {
