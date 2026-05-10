@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.18] - 2026-05-10
+
+### Fixed
+
+- **`StreamOptions.filter` / `StreamOptions.access` / `live.gate` predicate return types widened to `boolean | Promise<boolean>`.** Runtime has been awaiting these predicates since the async-safety fix; the type declarations were stuck on sync-only `boolean`. TypeScript users with async predicates either had to assert their return type or risk the strict-mode error. The `live.gate` JSDoc claiming "Synchronous function checked before subscribing" was also stale; updated.
+
 ## [0.5.0-next.17] - 2026-05-10
 
 ### Changed

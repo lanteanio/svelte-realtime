@@ -164,16 +164,18 @@ export interface StreamOptions {
 
 	/**
 	 * Subscribe-time access predicate. Checked once when a client subscribes.
-	 * Return `false` to deny the subscription with an "Access denied" error.
-	 * For per-event filtering, use `pipe.filter()`.
+	 * Return `false` (or a `Promise` resolving to `false`) to deny the
+	 * subscription with an "Access denied" error. The framework awaits the
+	 * return before inspecting it, so async predicates that consult a DB
+	 * or session store are safe. For per-event filtering, use `pipe.filter()`.
 	 */
-	filter?(ctx: LiveContext<any>): boolean;
+	filter?(ctx: LiveContext<any>): boolean | Promise<boolean>;
 
 	/**
-	 * Subscribe-time access predicate (alias for `filter`).
+	 * Subscribe-time access predicate (alias for `filter`). Sync or async.
 	 * Use `live.access` helpers to build predicates.
 	 */
-	access?(ctx: LiveContext<any>): boolean;
+	access?(ctx: LiveContext<any>): boolean | Promise<boolean>;
 
 	/**
 	 * Schema version number. Increment when the data shape changes.
@@ -926,22 +928,24 @@ export namespace live {
 
 	/**
 	 * Wrap a stream with a server-side gate predicate.
-	 * If the predicate returns false, the client receives a graceful no-op
-	 * (`{ data: null, gated: true }`) instead of an error.
+	 * If the predicate returns false (or a `Promise` resolving to false),
+	 * the client receives a graceful no-op (`{ data: null, gated: true }`)
+	 * instead of an error.
 	 *
-	 * @param predicate - Synchronous function checked before subscribing
+	 * @param predicate - Function checked before subscribing. Sync or async;
+	 *                    the framework awaits the return.
 	 * @param fn - The stream function to gate
 	 *
 	 * @example
 	 * ```js
 	 * export const betaFeed = live.gate(
-	 *   (ctx) => ctx.user?.flags?.includes('beta'),
+	 *   async (ctx) => (await getFlags(ctx.user))?.includes('beta'),
 	 *   live.stream('beta-feed', async (ctx) => db.betaFeed.latest(50))
 	 * );
 	 * ```
 	 */
 	function gate<T extends Function>(
-		predicate: (ctx: LiveContext<any>, ...args: any[]) => boolean,
+		predicate: (ctx: LiveContext<any>, ...args: any[]) => boolean | Promise<boolean>,
 		fn: T
 	): T;
 
