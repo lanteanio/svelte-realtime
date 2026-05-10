@@ -32,7 +32,7 @@ function baseURLFromProject(testInfo) {
 	return 'http://localhost:' + (isProd ? PROD_PORT : DEV_PORT);
 }
 
-// 1 -- whoami returns each context's distinct user identity ----------------
+// 1 - whoami returns each context's distinct user identity ----------------
 
 test('whoami returns each context distinct identity', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -49,7 +49,7 @@ test('whoami returns each context distinct identity', async ({ browser }, testIn
 	}
 });
 
-// 2 -- Per-user inbox isolation: A's inbox topic is not B's ---------------
+// 2 - Per-user inbox isolation: A's inbox topic is not B's ---------------
 
 test('per-user inbox: A sends to A, B does NOT see', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -69,7 +69,7 @@ test('per-user inbox: A sends to A, B does NOT see', async ({ browser }, testInf
 			msg
 		);
 
-		// Bob does NOT see it -- separate topic.
+		// Bob does NOT see it - separate topic.
 		await b.page.waitForTimeout(150);
 		const bobInbox = await b.page.evaluate(() => window.__test.inbox());
 		expect(bobInbox).toEqual([]);
@@ -79,7 +79,7 @@ test('per-user inbox: A sends to A, B does NOT see', async ({ browser }, testInf
 	}
 });
 
-// 3 -- Cross-user routing: A sends to B, B sees, A does NOT ---------------
+// 3 - Cross-user routing: A sends to B, B sees, A does NOT ---------------
 
 test('cross-user routing: A sends to B, only B sees', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -105,7 +105,7 @@ test('cross-user routing: A sends to B, only B sees', async ({ browser }, testIn
 	}
 });
 
-// 4 -- Both directions: A->B and B->A, each sees only their own inbox ------
+// 4 - Both directions: A->B and B->A, each sees only their own inbox ------
 
 test('cross-user routing: bidirectional messages, each inbox isolated', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -132,7 +132,7 @@ test('cross-user routing: bidirectional messages, each inbox isolated', async ({
 	}
 });
 
-// 5 -- Role guard: regular user gets FORBIDDEN, admin user gets through ----
+// 5 - Role guard: regular user gets FORBIDDEN, admin user gets through ----
 
 test('admin guard: non-admin gets FORBIDDEN, admin succeeds', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -152,7 +152,7 @@ test('admin guard: non-admin gets FORBIDDEN, admin succeeds', async ({ browser }
 	}
 });
 
-// 6 -- Three users, mesh: A->B, A->C, B->C; each inbox isolated -----------
+// 6 - Three users, mesh: A->B, A->C, B->C; each inbox isolated -----------
 
 test('three-user mesh: each inbox contains only its own messages', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);

@@ -11,7 +11,7 @@ import { _createStreamAtSchemaVersion } from './client.js';
  * **Use cases:**
  *
  * - **Demo pages** that want to show "what would a stale v1 client see
- *   on reconnect right now?" -- render two side-by-side panels, one
+ *   on reconnect right now?" - render two side-by-side panels, one
  *   with the live store and one with `subscribeAt(stream, { schemaVersion: 1 })`.
  * - **e2e tests** that need to assert the migrate chain produces the
  *   expected v2-shape from a v1-cached subscribe, walking the real
@@ -27,7 +27,7 @@ import { _createStreamAtSchemaVersion } from './client.js';
  * **Faithful production semantics:** as in production, migration is
  * applied ONCE on the initial subscribe response. Subsequent live
  * publishes arrive as raw v2 events and merge into the migrated v1
- * base just as a real reconnected v1 client would experience -- the
+ * base just as a real reconnected v1 client would experience - the
  * panel shows the migrated initial state, then forward-merges new
  * events at the server's current shape.
  *
@@ -76,7 +76,7 @@ export function subscribeAt(stream, options) {
 	const path = /** @type {any} */ (stream).__streamPath;
 	if (typeof path !== 'string' || path.length === 0) {
 		throw new Error(
-			'[svelte-realtime] subscribeAt: argument is not a stream -- it carries no `__streamPath`. Pass an export from `$live/...` (e.g. `subscribeAt(counter, { schemaVersion: 1 })`), not a hand-rolled writable. If `counter` is a dynamic factory, call it first: `subscribeAt(messages("room-1"), { schemaVersion: 1 })`.'
+			'[svelte-realtime] subscribeAt: argument is not a stream - it carries no `__streamPath`. Pass an export from `$live/...` (e.g. `subscribeAt(counter, { schemaVersion: 1 })`), not a hand-rolled writable. If `counter` is a dynamic factory, call it first: `subscribeAt(messages("room-1"), { schemaVersion: 1 })`.'
 		);
 	}
 	if (!options || typeof options !== 'object') {

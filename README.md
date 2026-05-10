@@ -18,6 +18,8 @@
 
 Write server functions. Import them in components. Call them over WebSocket. No boilerplate, no manual pub/sub wiring, no protocol design.
 
+**Upgrading from 0.4.x?** See the [migration guide](./MIGRATION.md) for every breaking change between 0.4.x and 0.5.x.
+
 ---
 
 ## Quick start
@@ -45,10 +47,10 @@ npm install -D ws
 ```
 
 What each package does:
-- `svelte-adapter-uws` (>=0.4.0) -- the SvelteKit adapter that runs your app on uWebSockets.js with built-in WebSocket support
-- `svelte-realtime` -- this library (RPC + streams on top of the adapter)
-- `uWebSockets.js` -- the native C++ HTTP/WebSocket server (installed from GitHub, not npm)
-- `ws` -- dev dependency used by the adapter during `npm run dev` (not needed in production)
+- `svelte-adapter-uws` (>=0.4.0) - the SvelteKit adapter that runs your app on uWebSockets.js with built-in WebSocket support
+- `svelte-realtime` - this library (RPC + streams on top of the adapter)
+- `uWebSockets.js` - the native C++ HTTP/WebSocket server (installed from GitHub, not npm)
+- `ws` - dev dependency used by the adapter during `npm run dev` (not needed in production)
 
 ### Step 2: Configure the adapter
 
@@ -112,7 +114,7 @@ Create the `src/live/` directory. Every `.js` file in this directory becomes a m
 import { live, LiveError } from 'svelte-realtime/server';
 import { db } from '$lib/server/db';
 
-// A plain RPC function -- clients can call this like a regular async function
+// A plain RPC function - clients can call this like a regular async function
 export const sendMessage = live(async (ctx, text) => {
   if (!ctx.user) throw new LiveError('UNAUTHORIZED', 'Login required');
 
@@ -121,7 +123,7 @@ export const sendMessage = live(async (ctx, text) => {
   return msg;
 });
 
-// A stream -- clients get a Svelte store with initial data + live updates
+// A stream - clients get a Svelte store with initial data + live updates
 export const messages = live.stream('messages', async (ctx) => {
   return db.messages.latest(50);
 }, { merge: 'crud', key: 'id', prepend: true });
@@ -183,13 +185,13 @@ The `ctx` object passed to every server function contains:
 | `ctx.user` | Whatever `upgrade()` returned (your user data) |
 | `ctx.ws` | The raw WebSocket connection |
 | `ctx.platform` | The adapter platform API |
-| `ctx.publish` | Shorthand for `platform.publish()` |
+| `ctx.publish` | Shorthand for `platform.publish()`. Rejects `__`-prefixed topics with `LiveError('INVALID_TOPIC')` (those are framework-internal channels; use `ctx.platform.publish()` directly if you genuinely need to broadcast on one) |
 | `ctx.cursor` | Cursor from a `loadMore()` call, or `null` |
 | `ctx.requestId` | Correlation id from `platform.requestId` (per WS connection or per HTTP request); honors `X-Request-ID` |
-| `ctx.throttle` | `(topic, event, data, ms)` -- publish at most once per `ms` ms |
-| `ctx.debounce` | `(topic, event, data, ms)` -- publish after `ms` ms of silence |
-| `ctx.signal` | `(userId, event, data)` -- point-to-point message |
-| `ctx.batch` | `(messages)` -- publish multiple messages in one call via `platform.batch()` |
+| `ctx.throttle` | `(topic, event, data, ms)` - publish at most once per `ms` ms |
+| `ctx.debounce` | `(topic, event, data, ms)` - publish after `ms` ms of silence |
+| `ctx.signal` | `(userId, event, data)` - point-to-point message |
+| `ctx.batch` | `(messages)` - publish multiple messages in one call via `platform.batch()` |
 
 Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `remoteAddress`) in addition to whatever your `upgrade()` function returned. These are stripped automatically by the adapter before broadcasting to other clients.
 
@@ -371,30 +373,30 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 | `prepend` | `false` | Prepend new items instead of appending (`crud` mode) |
 | `max` | `50` / `0` | Max items to keep. Defaults to 50 for `latest`, 0 (unlimited) for `crud`. Oldest items are dropped when exceeded |
 | `replay` | `false` | Enable seq-based replay for gap-free reconnection |
-| `args` | -- | Standard Schema (Zod / ArkType / Valibot) for stream arguments. Validated before topic resolution -- prevents topic injection via malformed dynamic-topic args |
-| `transform` | -- | `(data) => projection` applied to BOTH initial-load data (per-item for arrays) AND every live publish for this topic. Ship a wide row from the database, emit a narrow shape on the wire |
-| `coalesceBy` | -- | `(data) => key` extractor. Publishes fan out via per-socket `sendCoalesced`; the latest value for each `(topic, key)` pair wins. For high-frequency latest-value streams (prices, cursors, presence). Cannot combine with `volatile` |
+| `args` | - | Standard Schema (Zod / ArkType / Valibot) for stream arguments. Validated before topic resolution - prevents topic injection via malformed dynamic-topic args |
+| `transform` | - | `(data) => projection` applied to BOTH initial-load data (per-item for arrays) AND every live publish for this topic. Ship a wide row from the database, emit a narrow shape on the wire |
+| `coalesceBy` | - | `(data) => key` extractor. Publishes fan out via per-socket `sendCoalesced`; the latest value for each `(topic, key)` pair wins. For high-frequency latest-value streams (prices, cursors, presence). Cannot combine with `volatile` |
 | `volatile` | `false` | Mark messages fire-and-forget. Disables seq stamping for this topic so reconnects with `lastSeenSeq` won't try to backfill. Wire-level drop-on-backpressure is the adapter's default. For typing indicators, telemetry pings, cursors |
-| `staleAfterMs` | -- | Per-topic staleness watchdog. If no events arrive for N ms, the loader re-runs and the result broadcasts as a `refreshed` event. Useful for streams whose source can quietly stop emitting. See [Stream lifecycle hooks](#stream-lifecycle-hooks) |
-| `invalidateOn` | -- | String or array of glob-style topic patterns (e.g. `'todos:*'`). When `ctx.publish` hits a matching topic, the stream's loader reruns and the result broadcasts as a `refreshed` event. See [Stream lifecycle hooks](#stream-lifecycle-hooks) |
-| `onError` | -- | `(err, ctx, topic)` per-stream observer. Fires on loader throws (subscribe / stale-reload / `.load()` SSR). Errors thrown inside are silently swallowed |
-| `classOfService` | -- | Names a class registered via `live.admission()`. New subscribes are shed under matching pressure. See [Load shedding](#load-shedding) |
-| `onSubscribe` | -- | Callback `(ctx, topic)` fired when a client subscribes |
-| `onUnsubscribe` | -- | Callback `(ctx, topic, remainingSubscribers)` fired when a client disconnects. `remainingSubscribers` counts OTHER WebSockets still on the topic -- use it to tear down upstream feeds at zero |
-| `filter` / `access` | -- | Per-connection publish filter (see [Access control](#access-control)) |
-| `delta` | -- | Delta sync config (see [Delta sync and replay](#delta-sync-and-replay)) |
-| `version` | -- | Schema version (see [Schema evolution](#schema-evolution)) |
-| `migrate` | -- | Migration functions (see [Schema evolution](#schema-evolution)) |
+| `staleAfterMs` | - | Per-topic staleness watchdog. If no events arrive for N ms, the loader re-runs and the result broadcasts as a `refreshed` event. Useful for streams whose source can quietly stop emitting. See [Stream lifecycle hooks](#stream-lifecycle-hooks) |
+| `invalidateOn` | - | String or array of glob-style topic patterns (e.g. `'todos:*'`). When `ctx.publish` hits a matching topic, the stream's loader reruns and the result broadcasts as a `refreshed` event. See [Stream lifecycle hooks](#stream-lifecycle-hooks) |
+| `onError` | - | `(err, ctx, topic)` per-stream observer. Fires on loader throws (subscribe / stale-reload / `.load()` SSR). Errors thrown inside are silently swallowed |
+| `classOfService` | - | Names a class registered via `live.admission()`. New subscribes are shed under matching pressure. See [Load shedding](#load-shedding) |
+| `onSubscribe` | - | Callback `(ctx, topic)` fired when a client subscribes |
+| `onUnsubscribe` | - | Callback `(ctx, topic, remainingSubscribers)` fired when a client disconnects. `remainingSubscribers` counts OTHER WebSockets still on the topic - use it to tear down upstream feeds at zero |
+| `filter` / `access` | - | Per-connection publish filter (see [Access control](#access-control)) |
+| `delta` | - | Delta sync config (see [Delta sync and replay](#delta-sync-and-replay)) |
+| `version` | - | Schema version (see [Schema evolution](#schema-evolution)) |
+| `migrate` | - | Migration functions (see [Schema evolution](#schema-evolution)) |
 
 ### Reconnection
 
-When the WebSocket reconnects, streams automatically refetch initial data and resubscribe. The store keeps showing stale data during the refetch -- it does not reset to `undefined`.
+When the WebSocket reconnects, streams automatically refetch initial data and resubscribe. The store keeps showing stale data during the refetch - it does not reset to `undefined`.
 
-**Mid-flight RPCs reject with `DISCONNECTED`.** If the WS drops while an RPC or `mutate` is awaiting a response, the corresponding promise rejects with `RpcError('DISCONNECTED')`. Callers that wrap the call in `mutate(asyncOp, change)` get auto-rollback for free: the optimistic-queue entry settles as failed, removing the placeholder from the displayed state. Concurrent in-flight mutates each roll back independently -- if A and B are both pending when the WS drops, both promises reject and both placeholders are removed in one display recompute.
+**Mid-flight RPCs reject with `DISCONNECTED`.** If the WS drops while an RPC or `mutate` is awaiting a response, the corresponding promise rejects with `RpcError('DISCONNECTED')`. Callers that wrap the call in `mutate(asyncOp, change)` get auto-rollback for free: the optimistic-queue entry settles as failed, removing the placeholder from the displayed state. Concurrent in-flight mutates each roll back independently - if A and B are both pending when the WS drops, both promises reject and both placeholders are removed in one display recompute.
 
 **Catch-up via initial fetch on resubscribe.** Once the WS reconnects, every active stream re-runs its loader and broadcasts the result through the same merge strategy used on first subscribe. Pub/sub events that fired during the disconnect window arrive as part of the fresh fetch (they're materialized in the loader's data source). For tighter "no-frame-loss" guarantees use the `delta` configuration (see [Delta sync and replay](#delta-sync-and-replay)), which fills small gaps via the per-topic seq-numbered replay buffer and falls back to delta sync for larger gaps.
 
-**Triggering reconnect.** The next RPC call after the WS drops triggers the adapter's reconnect logic. Most apps don't need to do anything special -- the user clicks something, the RPC fires, the adapter reconnects, the call lands. If you want to display a reconnecting banner, watch the `status` store from `svelte-adapter-uws/client` for the `'reconnecting'` -> `'open'` transition.
+**Triggering reconnect.** The next RPC call after the WS drops triggers the adapter's reconnect logic. Most apps don't need to do anything special - the user clicks something, the RPC fires, the adapter reconnects, the call lands. If you want to display a reconnecting banner, watch the `status` store from `svelte-adapter-uws/client` for the `'reconnecting'` -> `'open'` transition.
 
 ---
 
@@ -426,8 +428,8 @@ Four reactive stores re-export from `svelte-realtime/client` for rendering conne
 |---|---|---|
 | `status` | `'connecting' \| 'open' \| 'suspended' \| 'disconnected' \| 'failed'` | Connection state machine. `suspended` = tab in background; `failed` = terminal (auth denied or `close()` called) |
 | `failure` | `{ kind, class, code, reason } \| null` | Cause of the most recent non-open transition. `class` is `TERMINAL` (auth) / `EXHAUSTED` (max retries) / `THROTTLE` (4429) / `RETRY` / `AUTH` (HTTP preflight). Cleared on next `'open'`. Not set on intentional `close()` |
-| `quiescent` | `Readable<boolean>` | `true` when every active stream has settled (initial load + all reconnects). Continuous signal -- a `false -> true` transition after a reconnect cycle marks "everything caught up" |
-| `health` | `'healthy' \| 'degraded'` | System-wide health, sourced from `degraded` / `recovered` events on the `__realtime` topic. Stays `'healthy'` until something publishes -- typically the extensions package's pub/sub bus circuit breaker |
+| `quiescent` | `Readable<boolean>` | `true` when every active stream has settled (initial load + all reconnects). Continuous signal - a `false -> true` transition after a reconnect cycle marks "everything caught up" |
+| `health` | `'healthy' \| 'degraded'` | System-wide health, sourced from `degraded` / `recovered` events on the `__realtime` topic. Stays `'healthy'` until something publishes - typically the extensions package's pub/sub bus circuit breaker |
 
 `failure` and `quiescent` are pure additions; apps that don't use them pay nothing. `health` lazily subscribes to `__realtime` only on first read; never reading it = no subscription.
 
@@ -444,7 +446,7 @@ on('__realtime').subscribe((envelope) => { /* full payload */ });
 
 Generated `$live/*` stream stores work out of the box as Svelte 4 `Readable<T>` values via the `$store` auto-subscribe syntax. For Svelte 5 apps, two methods are exposed alongside the existing `subscribe` interface so component code stays terse without reaching for `$derived.by(() => $store ?? [])` boilerplate.
 
-### `store.rune()` -- Svelte 5 reactive object
+### `store.rune()` - Svelte 5 reactive object
 
 Returns an object with a single `current` getter, backed by Svelte's `fromStore` from `svelte/store`. Reading `current` inside an effect or component subscribes via Svelte's `createSubscriber` for fine-grained reactivity; reading it outside an effect synchronously returns the latest value.
 
@@ -462,7 +464,7 @@ Returns an object with a single `current` getter, backed by Svelte's `fromStore`
 
 `rune()` requires Svelte 5 (the `fromStore` export is not available in Svelte 4) and throws a descriptive error if called against an older runtime. Apps still on Svelte 4 use the `$store` auto-subscribe syntax instead.
 
-### `store.map(fn)` -- per-item projection
+### `store.map(fn)` - per-item projection
 
 Returns a mapped store with the same `{ subscribe, rune, map }` shape as the source. Idiomatic alternative to `$derived.by(() => ($stream ?? []).map(...))` and avoids the `$derived(() => ...)` footgun where storing a function reference instead of its return value silently breaks rendering.
 
@@ -479,7 +481,7 @@ Returns a mapped store with the same `{ subscribe, rune, map }` shape as the sou
 
 Semantics match the documented `($stream ?? []).map(fn)` pattern: a `null` or `undefined` source emits `[]`; an array source emits `source.map(fn)`; a non-array source (set-merge stream, paginated wrapper) emits `[]` after a dev-mode `console.warn` pointing at the merge-strategy docs. Subscriptions are lazy: the source is only subscribed while at least one mapped consumer is active. Chains via further `.map()` calls preserve the same shape.
 
-### `empty` -- bundled placeholder store
+### `empty` - bundled placeholder store
 
 Every generated `$live/<name>.js` re-exports an `empty` store that holds `undefined`. Use it as the fallback for conditional streams without importing `readable` from `svelte/store`:
 
@@ -551,7 +553,7 @@ try {
   await sendMessage(text);
 } catch (err) {
   if (err.code === 'VALIDATION') {
-    // handle validation error -- err.issues has details
+    // handle validation error - err.issues has details
   } else if (err.code === 'UNAUTHORIZED') {
     // redirect to login
   }
@@ -677,9 +679,9 @@ export const _guard = guard(
 
 ## Dynamic topics
 
-Use a function instead of a string as the first argument to `live.stream()` for per-entity streams. The client-side stub becomes a factory function -- call it with arguments to get a cached store for that entity.
+Use a function instead of a string as the first argument to `live.stream()` for per-entity streams. The client-side stub becomes a factory function - call it with arguments to get a cached store for that entity.
 
-> **The first argument's shape decides the client export.** If the first argument is a string, the export is a Svelte store and you read it as `$messages`. If the first argument is a function, the export is a factory that returns a store, and you must call it first: `const messages = roomMessages(data.roomId); ... $messages`. Forgetting the call gives `Svelte error: store_invalid_shape -- 'roomMessages' is not a store with a 'subscribe' method` during SSR. If the topic does not depend on arguments, prefer the string form.
+> **The first argument's shape decides the client export.** If the first argument is a string, the export is a Svelte store and you read it as `$messages`. If the first argument is a function, the export is a factory that returns a store, and you must call it first: `const messages = roomMessages(data.roomId); ... $messages`. Forgetting the call gives `Svelte error: store_invalid_shape - 'roomMessages' is not a store with a 'subscribe' method` during SSR. If the topic does not depend on arguments, prefer the string form.
 
 ```js
 // src/live/rooms.js
@@ -704,7 +706,7 @@ export const sendToRoom = live(async (ctx, roomId, text) => {
   import { roomMessages, sendToRoom } from '$live/rooms';
   let { data } = $props();
 
-  // roomMessages is a function -- call it with the room ID to get a store
+  // roomMessages is a function - call it with the room ID to get a store
   const messages = roomMessages(data.roomId);
 </script>
 
@@ -751,7 +753,7 @@ your TOPICS registry. Either add it to defineTopics({...}) or call TOPICS.<name>
 instead of passing a string literal.
 ```
 
-The check covers static-string patterns (`feed: 'feed:notices'`) and arrow-return template literals (`audit: (orgId) => \`audit:${orgId}\``); template interpolations match `.+` so `'audit:org-123'` and `'audit:any-id'` both pass against the `audit` pattern. Function references and other dynamic value shapes are silently skipped at parse time -- the warning only fires for literal topics under a confidently parsed registry. If your project does not call `defineTopics` at all, the check is disabled.
+The check covers static-string patterns (`feed: 'feed:notices'`) and arrow-return template literals (`audit: (orgId) => \`audit:${orgId}\``); template interpolations match `.+` so `'audit:org-123'` and `'audit:any-id'` both pass against the `audit` pattern. Function references and other dynamic value shapes are silently skipped at parse time - the warning only fires for literal topics under a confidently parsed registry. If your project does not call `defineTopics` at all, the check is disabled.
 
 ---
 
@@ -850,7 +852,7 @@ export const cursors = live.stream(
 );
 ```
 
-Two effects: per-event seq stamping is skipped for the topic (so reconnect with `lastSeenSeq` won't try to backfill), and the option declares intent at the call site. Wire-level "drop on backpressure" is the adapter's default behavior already -- uWS auto-skips a subscriber whose outbound buffer is over `maxBackpressure` (default 64 KB). Cannot combine with `coalesceBy` (queue vs drop -- different intents) or `replay` (volatile messages aren't buffered for resume).
+Two effects: per-event seq stamping is skipped for the topic (so reconnect with `lastSeenSeq` won't try to backfill), and the option declares intent at the call site. Wire-level "drop on backpressure" is the adapter's default behavior already - uWS auto-skips a subscriber whose outbound buffer is over `maxBackpressure` (default 64 KB). Cannot combine with `coalesceBy` (queue vs drop - different intents) or `replay` (volatile messages aren't buffered for resume).
 
 ---
 
@@ -873,7 +875,7 @@ export async function load({ platform, locals }) {
   import { messages } from '$live/chat';
   let { data } = $props();
 
-  // Pre-populate the store with SSR data -- no loading spinner
+  // Pre-populate the store with SSR data - no loading spinner
   const msgs = messages.hydrate(data.messages);
 </script>
 
@@ -940,7 +942,7 @@ const [board, column] = await batch(() => [
 ], { sequential: true });
 ```
 
-Each call resolves or rejects independently -- one failure does not cancel the others. Batches are limited to 50 calls -- enforced both client-side (rejects before sending) and server-side.
+Each call resolves or rejects independently - one failure does not cancel the others. Batches are limited to 50 calls - enforced both client-side (rejects before sending) and server-side.
 
 ### Server-side batching
 
@@ -1033,7 +1035,7 @@ store.mutate(() => rpc(...callArgs), wrappedChange);
 
 so behavior on success/rollback/server-confirmation is identical to `store.mutate()`. The shorthand is purely syntactic; reach for `store.mutate()` directly when the asyncOp isn't an RPC (third-party API call, multi-step flow, etc.).
 
-**Curried form** -- bind once, call many times. Pass two arguments instead of three (`store, change`) and `createOptimistic` returns a callable bound to that store + change:
+**Curried form** - bind once, call many times. Pass two arguments instead of three (`store, change`) and `createOptimistic` returns a callable bound to that store + change:
 
 ```js
 const optimisticSend = sendMessage.createOptimistic(
@@ -1044,7 +1046,7 @@ await optimisticSend('Hello!');
 await optimisticSend('There!');
 ```
 
-**Stream-side spelling** -- the same flow can be expressed from the stream's perspective via `store.createOptimistic(rpc, callArgs, change)`:
+**Stream-side spelling** - the same flow can be expressed from the stream's perspective via `store.createOptimistic(rpc, callArgs, change)`:
 
 ```js
 await messages.createOptimistic(
@@ -1126,10 +1128,10 @@ History is recorded after every mutation (both live events and optimistic update
 Identical RPC calls made within the same microtask are automatically coalesced into a single request.
 
 ```js
-// These two calls happen in the same microtask -- only one request is sent
+// These two calls happen in the same microtask - only one request is sent
 const [a, b] = await Promise.all([
   getUser(userId),
-  getUser(userId) // same call, same args -- reuses the first request
+  getUser(userId) // same call, same args - reuses the first request
 ]);
 ```
 
@@ -1139,10 +1141,10 @@ To bypass deduplication and force a fresh request:
 const result = await getUser.fresh(userId); // always sends a new request
 ```
 
-> **Dev-mode coalesce warning.** Stress tests and parallel-fan-out patterns like `Promise.allSettled(Array.from({ length: 25 }, () => buyProduct('phone')))` expect N wire requests but get one -- all 25 promises resolve to the same response, the server-side state shows a single decrement, and the failure is silent. To make this discoverable, the client logs a one-time `console.warn` on the first coalesce per RPC path per session, with a one-line pointer to `.fresh(...)`. Dev-only (stripped under `NODE_ENV=production`); double-tap dedup on the same path warns once, never again.
+> **Dev-mode coalesce warning.** Stress tests and parallel-fan-out patterns like `Promise.allSettled(Array.from({ length: 25 }, () => buyProduct('phone')))` expect N wire requests but get one - all 25 promises resolve to the same response, the server-side state shows a single decrement, and the failure is silent. To make this discoverable, the client logs a one-time `console.warn` on the first coalesce per RPC path per session, with a one-line pointer to `.fresh(...)`. Dev-only (stripped under `NODE_ENV=production`); double-tap dedup on the same path warns once, never again.
 >
 > ```
-> [svelte-realtime] coalesced two or more identical calls to 'shop/buy' within one microtask -- only one wire request was sent and all callers received the same response. ... If you wanted N parallel requests (stress test, fan-out), call `.fresh(...args)` on the rpc to bypass dedup. Warned once per path per session.
+> [svelte-realtime] coalesced two or more identical calls to 'shop/buy' within one microtask - only one wire request was sent and all callers received the same response. ... If you wanted N parallel requests (stress test, fan-out), call `.fresh(...args)` on the rpc to bypass dedup. Warned once per path per session.
 > ```
 
 ---
@@ -1181,7 +1183,7 @@ Resolution: `keyFrom(ctx, ...args)` if defined, otherwise the client envelope's 
 
 | Option | Default | Description |
 |---|---|---|
-| `keyFrom` | -- | `(ctx, ...args) => string \| null \| undefined`. `null`/`undefined` falls back to the envelope key |
+| `keyFrom` | - | `(ctx, ...args) => string \| null \| undefined`. `null`/`undefined` falls back to the envelope key |
 | `store` | in-process | Any object exposing `acquire(key, ttlSec)` matching the extensions store contract |
 | `ttl` | `172800` (48h) | TTL in seconds. `0` skips the cache write (concurrent waiters re-run after the first finishes) |
 
@@ -1275,7 +1277,7 @@ const messages = __stream('chat/messages', { merge: 'crud', key: 'id' });
 messages.subscribe((value) => console.log(value));
 ```
 
-The typed `$live/*` imports and stream hydration are generated by the Vite plugin and only work inside a SvelteKit project. Outside SvelteKit, use `__rpc()` and `__stream()` directly. You get the same reconnection, offline queue, and batching -- just without codegen and types.
+The typed `$live/*` imports and stream hydration are generated by the Vite plugin and only work inside a SvelteKit project. Outside SvelteKit, use `__rpc()` and `__stream()` directly. You get the same reconnection, offline queue, and batching - just without codegen and types.
 
 When `url` is set, the default same-origin WebSocket URL is bypassed entirely. Requires `svelte-adapter-uws` 0.4.8+.
 
@@ -1286,11 +1288,11 @@ Browser clients authenticate via cookies set during login. Native clients typica
 export { message } from 'svelte-realtime/server';
 
 export function upgrade({ cookies, url }) {
-  // Browser -- cookie auth
+  // Browser - cookie auth
   const session = cookies.session_id;
   if (session) return validateSession(session);
 
-  // Native app -- token auth via query string
+  // Native app - token auth via query string
   const token = new URL(url, 'http://n').searchParams.get('token');
   if (token) return validateToken(token);
 
@@ -1358,7 +1360,7 @@ The client coalesces concurrent connects into a single in-flight preflight, trea
 `realtimeTransport()` from `svelte-realtime/hooks` is a SvelteKit transport-hook preset that auto-registers `RpcError` and `LiveError` serialization across the SSR / client boundary. Without it, typed errors thrown from `+page.server.js` `load()` arrive at `+error.svelte` as plain `Error` instances and lose their `code` field.
 
 ```js
-// src/hooks.js  (NOT hooks.server.js -- the shared hook is required)
+// src/hooks.js  (NOT hooks.server.js - the shared hook is required)
 import { realtimeTransport } from 'svelte-realtime/hooks';
 
 export const transport = realtimeTransport();
@@ -1379,7 +1381,7 @@ export const transport = realtimeTransport({
 });
 ```
 
-Wire from `src/hooks.js`, NOT `hooks.server.js`. SvelteKit's transport primitive needs both encode (server-side) and decode (client-side hydration) visible at build time -- the wrong file silently half-works (encode runs but decode never reaches the client). `RpcError`'s optional `issues` field (carried by `live.validated()` failures) survives the round-trip. Validation runs at registration: malformed extras throw immediately so misconfiguration fails fast at app boot.
+Wire from `src/hooks.js`, NOT `hooks.server.js`. SvelteKit's transport primitive needs both encode (server-side) and decode (client-side hydration) visible at build time - the wrong file silently half-works (encode runs but decode never reaches the client). `RpcError`'s optional `issues` field (carried by `live.validated()` failures) survives the round-trip. Validation runs at registration: malformed extras throw immediately so misconfiguration fails fast at app boot.
 
 ---
 
@@ -1401,7 +1403,7 @@ Compose multiple stream stores into a single derived store. When any source upda
 <p>Pending: {$dashboard.pendingOrders}</p>
 ```
 
-`combine()` accepts 2-6 stores with typed overloads, plus a variadic fallback for more. Zero network overhead -- all computation happens client-side.
+`combine()` accepts 2-6 stores with typed overloads, plus a variadic fallback for more. Zero network overhead - all computation happens client-side.
 
 ---
 
@@ -1420,7 +1422,7 @@ live.middleware(async (ctx, next) => {
   return result;
 });
 
-// Auth middleware -- rejects unauthenticated requests globally
+// Auth middleware - rejects unauthenticated requests globally
 live.middleware(async (ctx, next) => {
   if (!ctx.user) throw new LiveError('UNAUTHORIZED', 'Login required');
   return next();
@@ -1499,7 +1501,7 @@ export const auditFeed = live.stream(
 
 Watchdog state is per-topic. Multiple subscribers share one timer; the timer arms on the first subscribe and clears when the last subscriber leaves. The reload uses the first subscriber's `ctx` and `args`, which is correct for shared topics since the loader's output is identical regardless of which subscriber's ctx triggers it.
 
-`onError(err, ctx, topic)` is observer-only. It fires on loader throws across three paths -- the initial subscribe, the staleness-driven reload, and the `.load()` SSR path. Errors thrown inside `onError` are silently swallowed so a buggy logger never breaks the original error path. Apps that want a topic-scoped degraded signal can publish a system event from inside the handler:
+`onError(err, ctx, topic)` is observer-only. It fires on loader throws across three paths - the initial subscribe, the staleness-driven reload, and the `.load()` SSR path. Errors thrown inside `onError` are silently swallowed so a buggy logger never breaks the original error path. Apps that want a topic-scoped degraded signal can publish a system event from inside the handler:
 
 ```js
 onError: (err, ctx, topic) => {
@@ -1563,7 +1565,7 @@ export const items = live.stream('items', async (ctx) => {
 For **per-user data isolation**, use dynamic topics so each user subscribes to their own topic:
 
 ```js
-// Each user gets their own topic -- no cross-user data leakage
+// Each user gets their own topic - no cross-user data leakage
 export const myOrders = live.stream(
   (ctx) => `orders:${ctx.user.id}`,
   async (ctx) => db.orders.forUser(ctx.user.id),
@@ -1739,7 +1741,7 @@ export const expensiveSearch = live(async (ctx, query) => {
 });
 ```
 
-`platform.pressure.reason` is a precedence-ordered enum (`MEMORY > PUBLISH_RATE > SUBSCRIBERS > NONE`); class rules using a string-array match if the active reason is in the array. Predicate rules receive the full pressure snapshot. Existing subscribers are unaffected -- shedding applies to NEW subscribes and RPC calls only.
+`platform.pressure.reason` is a precedence-ordered enum (`MEMORY > PUBLISH_RATE > SUBSCRIBERS > NONE`); class rules using a string-array match if the active reason is in the array. Predicate rules receive the full pressure snapshot. Existing subscribers are unaffected - shedding applies to NEW subscribes and RPC calls only.
 
 `live.admission()` validates rules at registration; unknown reasons throw with a `[svelte-realtime]`-prefixed error so typos fail fast at boot. Pass `null` to clear.
 
@@ -1777,7 +1779,7 @@ export const settleInvoice = live.lock(
 
 Concurrent callers wait in FIFO order for the holder's result. A `null` / `undefined` / empty key bypasses the lock (the handler runs unguarded for that call). Custom lock implementations need a single method: `withLock(key, fn, opts?) -> Promise<result>`.
 
-Default lock is in-process and bounded. For multi-instance deployments, pass `lock: createDistributedLock(redis)` from the extensions package -- any object exposing the `withLock(key, fn, opts?)` contract works.
+Default lock is in-process and bounded. For multi-instance deployments, pass `lock: createDistributedLock(redis)` from the extensions package - any object exposing the `withLock(key, fn, opts?)` contract works.
 
 ### Bounded wait with `maxWaitMs`
 
@@ -1790,7 +1792,7 @@ export const settleInvoice = live.lock(
 );
 ```
 
-The current holder is **not** interrupted when a waiter times out -- only the waiting caller gives up. Subsequent waiters on the same key are unaffected and continue in their original order. This is the right primitive for "fail fast under contention" rather than "cancel work in flight."
+The current holder is **not** interrupted when a waiter times out - only the waiting caller gives up. Subsequent waiters on the same key are unaffected and continue in their original order. This is the right primitive for "fail fast under contention" rather than "cancel work in flight."
 
 For custom lock implementations, the option is forwarded as the third argument: `lockInst.withLock(key, fn, { maxWaitMs })`. The default in-process lock and `createDistributedLock` from the extensions package both honor it.
 
@@ -1801,7 +1803,7 @@ For custom lock implementations, the option is forwarded as the third argument: 
 `live.push({ userId }, event, data, options?)` sends a server-initiated request to a connected user and awaits the reply. Routes through a per-instance userId -> WebSocket registry maintained by a small pair of hooks.
 
 ```js
-// hooks.ws.js -- wire the registry once
+// hooks.ws.js - wire the registry once
 import { pushHooks } from 'svelte-realtime/server';
 
 export const open = pushHooks.open;
@@ -1858,11 +1860,11 @@ try {
     switch (err.code) {
       case 'NOT_FOUND': /* user has no active connection */ break;
       case 'TIMEOUT':   /* recipient saw the prompt but didn't respond */ break;
-      case 'VALIDATION': /* bad arguments -- programmer error, surface in dev only */ break;
+      case 'VALIDATION': /* bad arguments - programmer error, surface in dev only */ break;
     }
   }
   // Anything else is either a recipient-thrown handler error (caller-defined
-  // shape) or `Error('connection closed')` from the adapter -- those pass
+  // shape) or `Error('connection closed')` from the adapter - those pass
   // through unchanged.
 }
 ```
@@ -1875,22 +1877,22 @@ Multi-device users see most-recent-connection-wins routing within each instance,
 
 ### Fire-and-forget: `live.notify`
 
-For server-initiated events where you don't need a reply -- progress notifications, "upload complete" pings, "new message available" hints, cron-driven price ticks fanned out to many users -- use `live.notify(target, event, data)` instead of `live.push`:
+For server-initiated events where you don't need a reply - progress notifications, "upload complete" pings, "new message available" hints, cron-driven price ticks fanned out to many users - use `live.notify(target, event, data)` instead of `live.push`:
 
 ```js
 // Inside an upload completion handler:
 live.notify({ userId: upload.userId }, 'upload:complete', { id: upload.id });
 // Returns Promise<void> immediately. No await needed.
-// If the user is offline, silently drops -- they'll see the result on next page load.
+// If the user is offline, silently drops - they'll see the result on next page load.
 ```
 
-The wire path is identical to `live.push`: the client's `onPush(event, handler)` still fires for the event. The difference is caller-side -- `live.notify` returns immediately without waiting for the handler's return value, and it never rejects in normal operation (offline user, timeout, client handler error -- all silent). Validation throws synchronously for programming errors (bad target, empty event name) so those still surface loud at the call site.
+The wire path is identical to `live.push`: the client's `onPush(event, handler)` still fires for the event. The difference is caller-side - `live.notify` returns immediately without waiting for the handler's return value, and it never rejects in normal operation (offline user, timeout, client handler error - all silent). Validation throws synchronously for programming errors (bad target, empty event name) so those still surface loud at the call site.
 
-**Don't use `live.push({ timeoutMs: 0 })` for fire-and-forget.** It throws synchronously since `timeoutMs` must be positive. Wrapping the throw in `.catch(() => {})` silently swallows it -- the push never fires, the recipient never sees anything. Use `live.notify` instead.
+**Don't use `live.push({ timeoutMs: 0 })` for fire-and-forget.** It throws synchronously since `timeoutMs` must be positive. Wrapping the throw in `.catch(() => {})` silently swallows it - the push never fires, the recipient never sees anything. Use `live.notify` instead.
 
 ### Cluster routing
 
-For multi-instance deploys, wire the connection registry from `svelte-adapter-uws-extensions` so a `live.push` originating on any instance reaches the user's owning instance. With `svelte-adapter-uws >= 0.5.0-next.15`, the `init({ platform })` hook is the recommended call site -- the Redis client is connected by then and the registry is wired before the first `upgrade` / `open` runs:
+For multi-instance deploys, wire the connection registry from `svelte-adapter-uws-extensions` so a `live.push` originating on any instance reaches the user's owning instance. With `svelte-adapter-uws >= 0.5.0-next.15`, the `init({ platform })` hook is the recommended call site - the Redis client is connected by then and the registry is wired before the first `upgrade` / `open` runs:
 
 ```js
 // hooks.ws.js
@@ -1917,12 +1919,12 @@ export const close = registry.hooks.close;
 
 Lookup order inside `live.push`:
 
-1. **Local registry** -- the per-instance Map populated by `pushHooks.open` / `pushHooks.close`. Resolves directly via `platform.request(ws, ...)` with no I/O.
-2. **Remote registry** -- when configured via `live.configurePush({ remoteRegistry })`, used as a fallback when the userId is not registered locally. The extensions registry looks up the owning instance in Redis and either short-circuits to a local `platform.request` or forwards the envelope on a per-instance push channel and awaits the reply.
+1. **Local registry** - the per-instance Map populated by `pushHooks.open` / `pushHooks.close`. Resolves directly via `platform.request(ws, ...)` with no I/O.
+2. **Remote registry** - when configured via `live.configurePush({ remoteRegistry })`, used as a fallback when the userId is not registered locally. The extensions registry looks up the owning instance in Redis and either short-circuits to a local `platform.request` or forwards the envelope on a per-instance push channel and awaits the reply.
 
 Errors with a remote registry come from the registry layer: typically an offline rejection when the user has no active connection cluster-wide, a timeout when routing succeeded but the client did not reply within `timeoutMs`, or a propagated handler error from the receiving instance. The realtime layer translates "timed out" rejections from either path into `LiveError('TIMEOUT')` so callers see the same code regardless of whether the timeout originated in the local adapter primitive or the remote registry; offline / handler-error shapes pass through unchanged so the caller can distinguish them.
 
-You can wire BOTH (`pushHooks.*` + `remoteRegistry`); the local Map wins when an entry is present and the remote registry is consulted only as fallback. In practice pick one of the two patterns -- the registry-only setup is simpler and the registry already does same-instance short-circuit on its own.
+You can wire BOTH (`pushHooks.*` + `remoteRegistry`); the local Map wins when an entry is present and the remote registry is consulted only as fallback. In practice pick one of the two patterns - the registry-only setup is simpler and the registry already does same-instance short-circuit on its own.
 
 Single-instance setups without a registry continue to throw `LiveError('NOT_FOUND')` for unknown userIds, unchanged.
 
@@ -1960,13 +1962,13 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 
 ### Registered metrics
 
-- `svelte_realtime_rpc_total` -- RPC call count by path and status
-- `svelte_realtime_rpc_duration_seconds` -- RPC latency by path
-- `svelte_realtime_rpc_errors_total` -- RPC errors by path and code
-- `svelte_realtime_stream_subscriptions` -- active stream subscription gauge
-- `svelte_realtime_cron_total` -- cron execution count by path and status
-- `svelte_realtime_cron_errors_total` -- cron errors by path
-- `svelte_realtime_assertion_violations_total` -- production-assertion violations by category (see "Production assertions" below)
+- `svelte_realtime_rpc_total` - RPC call count by path and status
+- `svelte_realtime_rpc_duration_seconds` - RPC latency by path
+- `svelte_realtime_rpc_errors_total` - RPC errors by path and code
+- `svelte_realtime_stream_subscriptions` - active stream subscription gauge
+- `svelte_realtime_cron_total` - cron execution count by path and status
+- `svelte_realtime_cron_errors_total` - cron errors by path
+- `svelte_realtime_assertion_violations_total` - production-assertion violations by category (see "Production assertions" below)
 
 ---
 
@@ -1974,7 +1976,7 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 
 `svelte-realtime` instruments each internal invariant with `assert(cond, category, context)`. Behavior:
 
-- **In production**, a violation increments an in-memory per-category counter, fires the Prometheus counter `svelte_realtime_assertion_violations_total{category}` (when `live.metrics(...)` is wired), and logs a single `[realtime/assert] {...}` line at `console.error`. The assert does NOT throw -- a thrown exception inside a publish hot-path microtask or a subscribe callback could leave a half-applied bookkeeping update or a corrupted index. Counter + log give observability without the corruption risk.
+- **In production**, a violation increments an in-memory per-category counter, fires the Prometheus counter `svelte_realtime_assertion_violations_total{category}` (when `live.metrics(...)` is wired), and logs a single `[realtime/assert] {...}` line at `console.error`. The assert does NOT throw - a thrown exception inside a publish hot-path microtask or a subscribe callback could leave a half-applied bookkeeping update or a corrupted index. Counter + log give observability without the corruption risk.
 - **In test mode** (`process.env.VITEST` or `NODE_ENV === 'test'`) the assert THROWS so vitest surfaces the failure as a normal test error.
 
 Categories are stable strings prefixed `realtime/<module>.<invariant>` (so the Prometheus label cardinality is bounded and won't collide with the adapter's `extensions_assertion_violations_total`). Today's categories:
@@ -2001,7 +2003,7 @@ setInterval(() => {
 }, 60_000);
 ```
 
-The client-side assert helper is exported from `svelte-realtime/client` with the same shape (sans Prometheus wiring -- the browser has no metrics registry; use the in-memory counter or log shipping instead).
+The client-side assert helper is exported from `svelte-realtime/client` with the same shape (sans Prometheus wiring - the browser has no metrics registry; use the in-memory counter or log shipping instead).
 
 ### Registry shape
 
@@ -2038,7 +2040,7 @@ If `fallback` is omitted and the circuit is open, the call throws `LiveError('SE
 
 ## Request correlation
 
-Every live function receives `ctx.requestId` -- a stable identifier for the originating RPC envelope. The id flows in three directions automatically:
+Every live function receives `ctx.requestId` - a stable identifier for the originating RPC envelope. The id flows in three directions automatically:
 
 - **From clients**: WebSocket clients tag every RPC envelope with a generated id; HTTP request handlers honor `X-Request-ID` headers (and generate one if absent). The adapter writes the resolved id to `platform.requestId`, and the realtime layer copies it to `ctx.requestId` for the duration of that handler.
 - **Through your handlers**: pass it to whatever you do downstream so log lines, traces, and persisted rows all share one key.
@@ -2053,7 +2055,7 @@ const tasks = createTasks({ client: pgClient });
 const jobs = createJobs({ client: pgClient });
 
 export const submitOrder = live(async (ctx, input) => {
-  // Option A: explicit -- works anywhere ctx.requestId is in scope
+  // Option A: explicit - works anywhere ctx.requestId is in scope
   const order = await tasks.run('processOrder', input, {
     requestId: ctx.requestId
   });
@@ -2081,9 +2083,9 @@ WHERE t.request_id = $1
 ORDER BY task_created;
 ```
 
-The id passes opaquely -- no validation, no length cap from the realtime layer. If you generate ids with a structured prefix (`o-` for orders, `a-` for audits), every downstream record carries that prefix too.
+The id passes opaquely - no validation, no length cap from the realtime layer. If you generate ids with a structured prefix (`o-` for orders, `a-` for audits), every downstream record carries that prefix too.
 
-If you also instrument with [Prometheus metrics](#prometheus-metrics), include `requestId` in your log fields rather than as a metric label -- it's high-cardinality and would blow up your label space.
+If you also instrument with [Prometheus metrics](#prometheus-metrics), include `requestId` in your log fields rather than as a metric label - it's high-cardinality and would blow up your label space.
 
 ---
 
@@ -2107,7 +2109,7 @@ export const stats = live.stream('stats', async (ctx) => {
 }, { merge: 'set' });
 ```
 
-The function receives a `ctx` object with `publish`, `throttle`, `debounce`, and `signal` -- the same helpers available in RPC handlers (minus `user` and `ws`, since cron runs outside a connection). Use `ctx.publish` for fine-grained control, e.g. publishing individual `created`/`deleted` events on a crud stream:
+The function receives a `ctx` object with `publish`, `throttle`, `debounce`, and `signal` - the same helpers available in RPC handlers (minus `user` and `ws`, since cron runs outside a connection). Use `ctx.publish` for fine-grained control, e.g. publishing individual `created`/`deleted` events on a crud stream:
 
 ```js
 export const cleanup = live.cron('0 * * * *', 'boards', async (ctx) => {
@@ -2120,7 +2122,7 @@ export const cleanup = live.cron('0 * * * *', 'boards', async (ctx) => {
 });
 ```
 
-If the function returns a value, it is published as a `set` event (same as before). If it returns `undefined`, no automatic publish happens -- this lets you use `ctx.publish` exclusively without an unwanted `set` event overwriting your crud updates.
+If the function returns a value, it is published as a `set` event (same as before). If it returns `undefined`, no automatic publish happens - this lets you use `ctx.publish` exclusively without an unwanted `set` event overwriting your crud updates.
 
 Cron expressions use 5 fields: `minute hour day month weekday`. Supported syntax: `*`, single values, ranges (`9-17`), lists (`0,15,30`), and steps (`*/5`).
 
@@ -2145,7 +2147,7 @@ On older adapters (`open(ws, platform)` is the only available hand-off point), c
 
 ### Cluster mode
 
-Each worker process runs its own cron tick. In a single-process deployment that's exactly what you want. In a clustered deployment -- whether `CLUSTER_MODE=reuseport` on Linux (N kernel workers per replica), acceptor mode on Windows / macOS (N internal workers per process), or N Docker replicas, or any combination -- every worker fires every job in parallel by default. For "send the daily summary at 9am" jobs, that's almost certainly wrong.
+Each worker process runs its own cron tick. In a single-process deployment that's exactly what you want. In a clustered deployment - whether `CLUSTER_MODE=reuseport` on Linux (N kernel workers per replica), acceptor mode on Windows / macOS (N internal workers per process), or N Docker replicas, or any combination - every worker fires every job in parallel by default. For "send the daily summary at 9am" jobs, that's almost certainly wrong.
 
 Wire a cluster-wide leader gate via `configureCron({ leader, bus })`. The canonical leader implementation lives in `svelte-adapter-uws-extensions/redis/leader` (Redis SETNX lease) and the canonical bus is `svelte-adapter-uws-extensions/redis/pubsub`:
 
@@ -2181,9 +2183,9 @@ Behavior with a leader configured:
 
 #### Why also pass `bus`?
 
-With only `leader` configured, the elected worker's cron publishes still go to uWS subscribers on that worker's process only. Subscribers connected to non-leader instances see nothing -- because no other worker independently produced the publish. Wiring `bus` routes every cron fire through `bus.wrap(platform)` so the leader's publishes relay over the bus's pubsub channel and reach every cluster instance. This applies to both the `return value` auto-publish and the cron handler's own `ctx.publish(...)`.
+With only `leader` configured, the elected worker's cron publishes still go to uWS subscribers on that worker's process only. Subscribers connected to non-leader instances see nothing - because no other worker independently produced the publish. Wiring `bus` routes every cron fire through `bus.wrap(platform)` so the leader's publishes relay over the bus's pubsub channel and reach every cluster instance. This applies to both the `return value` auto-publish and the cron handler's own `ctx.publish(...)`.
 
-`bus` is the extensions-package pubsub bus (`redis/pubsub` for the broadcast channel, `redis/sharded-pubsub` for per-shard channels at scale). svelte-realtime consumes it structurally as `{ wrap(platform): wrapped }` -- any pubsub primitive exposing that shape works.
+`bus` is the extensions-package pubsub bus (`redis/pubsub` for the broadcast channel, `redis/sharded-pubsub` for per-shard channels at scale). svelte-realtime consumes it structurally as `{ wrap(platform): wrapped }` - any pubsub primitive exposing that shape works.
 
 Setting `leader` without `bus` emits a single dev warning at `configureCron` time, since cluster intent without cluster fan-out is almost always a misconfig. Production deployments don't see the warning (it's `_IS_DEV`-gated like the rest of the cron diagnostics), so suppress is via fixing the wiring rather than via a config flag.
 
@@ -2278,7 +2280,7 @@ Dynamic derived compute functions receive `ctx.user` from the subscribing client
 
 ## Effects
 
-Server-side reactive side effects that fire when source topics publish. Fire-and-forget -- no topic, no client subscription.
+Server-side reactive side effects that fire when source topics publish. Fire-and-forget - no topic, no client subscription.
 
 ```js
 // src/live/notifications.js
@@ -2316,9 +2318,9 @@ The aggregate publishes its state to the output topic on every event. Clients su
 
 Pass a `windows` option to maintain one state slice per declared window with its own output topic. Three window types:
 
-- **`lifetime`** -- never resets. Equivalent to a single-state aggregate, exposed as a named output for symmetry.
-- **`tumbling`** -- boundary-anchored. `period: 'minute' | 'hour' | 'daily' | 'monthly'` resets at the configured `tz`'s natural boundary; `durationMs + anchor` resets at fixed intervals from a custom epoch. On boundary cross, the closing window publishes one final pre-reset state, then state is `init()`-cleared for the new window.
-- **`sliding`** -- hop-window. `durationMs + slideMs` partitions state into `ceil(durationMs / slideMs)` hop buckets. Each event reduces into the current hop; on each slide tick, drop the oldest bucket and start a new one. Reducers MUST provide a `combine(...buckets)` field so cross-bucket state can be recomputed.
+- **`lifetime`** - never resets. Equivalent to a single-state aggregate, exposed as a named output for symmetry.
+- **`tumbling`** - boundary-anchored. `period: 'minute' | 'hour' | 'daily' | 'monthly'` resets at the configured `tz`'s natural boundary; `durationMs + anchor` resets at fixed intervals from a custom epoch. On boundary cross, the closing window publishes one final pre-reset state, then state is `init()`-cleared for the new window.
+- **`sliding`** - hop-window. `durationMs + slideMs` partitions state into `ceil(durationMs / slideMs)` hop buckets. Each event reduces into the current hop; on each slide tick, drop the oldest bucket and start a new one. Reducers MUST provide a `combine(...buckets)` field so cross-bucket state can be recomputed.
 
 ```js
 import { live, combineCounts } from 'svelte-realtime/server';
@@ -2378,7 +2380,7 @@ Hand-roll your own `combine(...buckets)` for non-trivial reducers (top-K, percen
 
 #### Per-window snapshots
 
-The single `snapshot` option only restores the single-state form. For windowed aggregates, pass `snapshots` keyed by window name -- each restores one window's state on registration in parallel:
+The single `snapshot` option only restores the single-state form. For windowed aggregates, pass `snapshots` keyed by window name - each restores one window's state on registration in parallel:
 
 ```js
 {
@@ -2391,7 +2393,7 @@ The single `snapshot` option only restores the single-state form. For windowed a
 }
 ```
 
-Sliding windows are not snapshot-restorable -- their bucket boundaries are tied to wall-clock time and would not survive a restart coherently. Pass tumbling and lifetime here.
+Sliding windows are not snapshot-restorable - their bucket boundaries are tied to wall-clock time and would not survive a restart coherently. Pass tumbling and lifetime here.
 
 #### Cluster mode
 
@@ -2399,7 +2401,7 @@ Today's aggregate runs on every worker, fed by the source topic via the adapter'
 
 #### Capacity bound
 
-`MAX_AGGREGATE_BUCKETS` (default 1000) caps a single sliding window's hop-bucket count. A 10-hour sliding window with 1-minute slides allocates 600 buckets -- well under the cap. Misconfigurations like a 1ms slide on a 1s window (1000 buckets) are caught at registration with a clear error pointing at the relevant window name.
+`MAX_AGGREGATE_BUCKETS` (default 1000) caps a single sliding window's hop-bucket count. A 10-hour sliding window with 1-minute slides allocates 600 buckets - well under the cap. Misconfigurations like a 1ms slide on a 1s window (1000 buckets) are caught at registration with a clear error pointing at the relevant window name.
 
 ---
 
@@ -2503,7 +2505,7 @@ The wire format uses a compact binary frame: `0x00` marker byte + uint16 BE head
 
 ## Streaming uploads
 
-Use `live.upload()` when `live.binary()`'s atomic-one-frame contract starts to hurt -- multi-megabyte files, slow connections, anywhere you want progress, cancellation, and bounded server memory. The handler consumes an async-iterable of chunks, returns a JSON-serialisable result when done, and gets an `AbortSignal` that fires on client cancel, WS disconnect, or capacity-cap rejection.
+Use `live.upload()` when `live.binary()`'s atomic-one-frame contract starts to hurt - multi-megabyte files, slow connections, anywhere you want progress, cancellation, and bounded server memory. The handler consumes an async-iterable of chunks, returns a JSON-serialisable result when done, and gets an `AbortSignal` that fires on client cancel, WS disconnect, or capacity-cap rejection.
 
 ```js
 // src/live/uploads.js
@@ -2529,17 +2531,20 @@ export const avatar = live.upload(async (ctx, name, mime) => {
   maxSize: 50 * 1024 * 1024,         // hard cap per upload (default 100MB)
   maxConcurrentPerSession: 2,         // protect a node from one chatty client (default 4)
   maxConcurrentTotal: 1000,           // global cap (default unbounded; opt in)
-  maxBufferedChunks: 64               // backpressure -- chunks queued before refusing more (default 64)
+  maxBufferedChunks: 64,              // backpressure - chunks queued before refusing more (default 64)
+  reauthEvery: 5 * 1024 * 1024        // re-run module guards every 5 MB received (default unset)
 });
 ```
 
 The handler signature is `(ctx, ...args)` like a regular RPC. `ctx` carries the usual fields plus three streaming extras:
 
-- `ctx.stream` -- `AsyncIterable<Uint8Array>` yielding chunks in arrival order.
-- `ctx.signal` -- `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, or `maxBufferedChunks` overflow. Wire any cleanup you need to it.
-- `ctx.upload` -- `{ id }` for log correlation.
+- `ctx.stream` - `AsyncIterable<Uint8Array>` yielding chunks in arrival order.
+- `ctx.signal` - `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, or `maxBufferedChunks` overflow. Wire any cleanup you need to it.
+- `ctx.upload` - `{ id }` for log correlation.
 
 Guards and global middleware run once before the first chunk is consumed. An unauthorised client never gets to send bytes.
+
+For long uploads where the user's session can be revoked mid-stream (token expiry, explicit logout, role downgrade), pass `reauthEvery: <bytes>`. The module guard is re-run against the live `ctx` every N bytes received past the last re-auth; on rejection the upload aborts with the error code (`UNAUTHENTICATED` / `FORBIDDEN`) and the consumer observes `ctx.signal.aborted`. Default is unset (legacy single-check behavior at chunk-0). Reauth runs as a fire-and-forget task off the chunk-receive path so the receive loop stays sync; concurrent reauths on the same upload are coalesced.
 
 ### Client
 
@@ -2584,13 +2589,13 @@ The Vite plugin generates a client stub for every `live.upload()` export in `src
 {/if}
 ```
 
-The handle is a thenable -- `await handle` resolves with the handler's return value or rejects with an `RpcError`. The same handle exposes:
+The handle is a thenable - `await handle` resolves with the handler's return value or rejects with an `RpcError`. The same handle exposes:
 
 - **Events** via `handle.on(event, cb)` returning an unsubscribe:
-  - `progress` -- `{ sent, total?, percent?, chunks, bytesPerSec }`. `total` and `percent` are `undefined` for `ReadableStream` sources unless you compute the total yourself.
-  - `complete` -- the server's return value.
-  - `cancel` -- the cancel reason (fires immediately before `error` when cancelled).
-  - `error` -- the `RpcError`.
+  - `progress` - `{ sent, total?, percent?, chunks, bytesPerSec }`. `total` and `percent` are `undefined` for `ReadableStream` sources unless you compute the total yourself.
+  - `complete` - the server's return value.
+  - `cancel` - the cancel reason (fires immediately before `error` when cancelled).
+  - `error` - the `RpcError`.
 - **Snapshot getters**: `handle.sent`, `handle.total`, `handle.chunks`, `handle.progress`, `handle.bytesPerSec`, `handle.streamId`, `handle.streamIdHex`.
 - **Cancellation**: `handle.cancel(reason?)` sends a control frame to the server and rejects the promise. Compose with `AbortController`:
 
@@ -2598,7 +2603,7 @@ The handle is a thenable -- `await handle` resolves with the handler's return va
   ac.signal.addEventListener('abort', () => handle.cancel());
   ```
 
-**Chunk size is auto-discovered.** The server announces its `platform.maxPayloadLength` on the first upload response per connection; subsequent uploads automatically use 90% of that as the chunk size. The first upload uses a conservative 12KB default that fits under the current adapter cap. To pin an explicit size (e.g. for memory-constrained clients), `configure({ upload: { chunkSize: 32 * 1024 } })` -- user-configured wins over discovery.
+**Chunk size is auto-discovered.** The server announces its `platform.maxPayloadLength` on the first upload response per connection; subsequent uploads automatically use 90% of that as the chunk size. The first upload uses a conservative 12KB default that fits under the current adapter cap. To pin an explicit size (e.g. for memory-constrained clients), `configure({ upload: { chunkSize: 32 * 1024 } })` - user-configured wins over discovery.
 
 The handle auto-starts but the first chunk is sent on the next microtask, so attaching listeners on the same line as construction (`const h = avatar(file); h.on('progress', ...);`) never misses early events.
 
@@ -2784,7 +2789,7 @@ The Vite plugin includes the stream version in the client stub. On reconnect, th
 
 ### Demo + e2e: `subscribeAt(stream, { schemaVersion })`
 
-The migration codepath only fires across a real deploy boundary -- a v1 server is replaced with a v2 server, a previously-connected v1 client reconnects, the cached `_schemaVersion` rides up. There's no path in a fresh tab to observe the migrate chain end-to-end, which makes demos and e2e tests awkward.
+The migration codepath only fires across a real deploy boundary - a v1 server is replaced with a v2 server, a previously-connected v1 client reconnects, the cached `_schemaVersion` rides up. There's no path in a fresh tab to observe the migrate chain end-to-end, which makes demos and e2e tests awkward.
 
 `subscribeAt(stream, { schemaVersion })` from `svelte-realtime/test-client` creates a parallel store that subscribes pretending to be a stale client at the chosen version. The wire envelope carries `schemaVersion: N`, the server runs the registered migrate chain forward, and the parallel store renders the migrated payload. Use it for side-by-side demo panels and for e2e assertions on the migrate chain output.
 
@@ -2794,7 +2799,7 @@ The migration codepath only fires across a real deploy boundary -- a v1 server i
   import { subscribeAt } from 'svelte-realtime/test-client';
 
   // Production store at the current server version (no migration on its responses).
-  // Parallel stores pretending to be stale clients -- each triggers the migrate
+  // Parallel stores pretending to be stale clients - each triggers the migrate
   // chain forward from its declared schemaVersion to the server's current version.
   const todosAsV1 = subscribeAt(todos, { schemaVersion: 1 });
   const todosAsV2 = subscribeAt(todos, { schemaVersion: 2 });
@@ -2816,7 +2821,7 @@ import { subscribeAt } from 'svelte-realtime/test-client';
 const v1Messages = subscribeAt(messages('room-1'), { schemaVersion: 1 });
 ```
 
-**Faithful production semantics.** Migration is applied ONCE on the initial subscribe response, just as in production. Subsequent live publishes arrive as raw current-version events and merge into the migrated base, exactly as a real reconnected stale client would experience -- the panel shows the migrated initial state, then forward-merges new events at the server's current shape.
+**Faithful production semantics.** Migration is applied ONCE on the initial subscribe response, just as in production. Subsequent live publishes arrive as raw current-version events and merge into the migrated base, exactly as a real reconnected stale client would experience - the panel shows the migrated initial state, then forward-merges new events at the server's current shape.
 
 **Why this lives in `/test-client` and not the main client surface.** A public client-side API for "pin my schema version" would let production code chain through migrations on every fetch, which is wasteful and confusing. Schema migration is fundamentally about long-disconnected clients catching up, not opt-in version pinning. The `/test-client` import path makes the test/demo intent loud at every call site.
 
@@ -2925,10 +2930,10 @@ If you already run Postgres and don't need Redis, you can use the [LISTEN/NOTIFY
 When you add the Redis extensions from [svelte-adapter-uws-extensions](https://github.com/lanteanio/svelte-adapter-uws-extensions), you get:
 
 - **Cross-instance pub/sub** with echo suppression (messages from the same instance are dropped on receive) and microtask-batched Redis pipelines (multiple publishes in one event loop tick become a single Redis roundtrip)
-- **Distributed presence** with heartbeat-based zombie cleanup -- dead sockets are detected by probing `getBufferedAmount()`, and stale Redis entries are cleaned server-side by a Lua script after a configurable TTL (default 90s)
-- **Replay buffers** with atomic sequence numbering via Lua `INCR` + sorted sets -- per-topic ordering is strict, and gap detection triggers a truncation event before replaying what's available
+- **Distributed presence** with heartbeat-based zombie cleanup - dead sockets are detected by probing `getBufferedAmount()`, and stale Redis entries are cleaned server-side by a Lua script after a configurable TTL (default 90s)
+- **Replay buffers** with atomic sequence numbering via Lua `INCR` + sorted sets - per-topic ordering is strict, and gap detection triggers a truncation event before replaying what's available
 - **Cross-instance rate limiting** via atomic Lua scripts that use `redis.call('TIME')` to avoid clock skew between app servers
-- **Circuit breakers** with a three-state machine (healthy / broken / probing) -- when Redis goes down, the breaker trips after a configurable failure threshold, local delivery continues, and a single probe request tests recovery before resuming full traffic
+- **Circuit breakers** with a three-state machine (healthy / broken / probing) - when Redis goes down, the breaker trips after a configurable failure threshold, local delivery continues, and a single probe request tests recovery before resuming full traffic
 
 ### Combined: Redis + rate limiting
 
@@ -2976,7 +2981,7 @@ export function open(ws, { platform }) {
 ```
 
 ```js
-// src/live/orders.js -- no ctx.publish needed, the DB trigger handles it
+// src/live/orders.js - no ctx.publish needed, the DB trigger handles it
 export const createOrder = live(async (ctx, items) => {
   return db.orders.insert({ userId: ctx.user.id, items });
 });
@@ -2992,15 +2997,15 @@ export const orders = live.stream('orders', async (ctx) => {
 
 ### Redis goes down
 
-All Redis extensions accept an optional circuit breaker. The breaker trips after a configurable number of consecutive failures (default 5). Once broken, cross-instance pub/sub, presence writes, replay buffering, and distributed rate limiting are skipped entirely -- no retries, no queuing, no thundering herd. Local delivery continues normally: `ctx.publish()` still reaches subscribers on the same instance and across workers. After a configurable timeout (default 30s), the breaker enters a probing state where a single request is allowed through. If it succeeds, the breaker resets to healthy and all extensions resume.
+All Redis extensions accept an optional circuit breaker. The breaker trips after a configurable number of consecutive failures (default 5). Once broken, cross-instance pub/sub, presence writes, replay buffering, and distributed rate limiting are skipped entirely - no retries, no queuing, no thundering herd. Local delivery continues normally: `ctx.publish()` still reaches subscribers on the same instance and across workers. After a configurable timeout (default 30s), the breaker enters a probing state where a single request is allowed through. If it succeeds, the breaker resets to healthy and all extensions resume.
 
 ### Instance crashes mid-session
 
-The distributed presence extension runs a heartbeat cycle (default 30s) that probes each tracked WebSocket with `getBufferedAmount()`. Under mass disconnect, the runtime may drop close events entirely -- the heartbeat catches these and triggers a synchronous leave. On the Redis side, stale presence entries are cleaned by a server-side Lua script that scans the hash and removes fields older than the configurable TTL (default 90s). The `LEAVE_SCRIPT` atomically checks whether the same user is still connected on another instance before broadcasting a leave event, so users don't appear to leave and rejoin when a single instance restarts.
+The distributed presence extension runs a heartbeat cycle (default 30s) that probes each tracked WebSocket with `getBufferedAmount()`. Under mass disconnect, the runtime may drop close events entirely - the heartbeat catches these and triggers a synchronous leave. On the Redis side, stale presence entries are cleaned by a server-side Lua script that scans the hash and removes fields older than the configurable TTL (default 90s). The `LEAVE_SCRIPT` atomically checks whether the same user is still connected on another instance before broadcasting a leave event, so users don't appear to leave and rejoin when a single instance restarts.
 
 ### Client reconnects after a long disconnect
 
-Reconnection uses up to three tiers depending on what's available and how large the gap is. The replay buffer (configurable, default 1000 messages per topic) fills small gaps with strict per-topic ordering via atomic Lua sequence numbering. If the gap is too large for replay, delta sync kicks in -- the client sends its last known version, and the server returns only the changes since that version (or `{unchanged: true}` if nothing changed). If neither replay nor delta sync can cover the gap, the client falls back to a full refetch of the init function. All three paths are automatic and require no client-side code changes.
+Reconnection uses up to three tiers depending on what's available and how large the gap is. The replay buffer (configurable, default 1000 messages per topic) fills small gaps with strict per-topic ordering via atomic Lua sequence numbering. If the gap is too large for replay, delta sync kicks in - the client sends its last known version, and the server returns only the changes since that version (or `{unchanged: true}` if nothing changed). If neither replay nor delta sync can cover the gap, the client falls back to a full refetch of the init function. All three paths are automatic and require no client-side code changes.
 
 ### Send buffer overflow
 
@@ -3008,7 +3013,7 @@ Each WebSocket connection has a send buffer limit (default 1MB, configurable via
 
 ### Batch and queue limits
 
-A single `batch()` call is capped at 50 RPC calls -- the client rejects before sending, and the server enforces the same cap as a safety net. The adapter's client-side send queue holds up to 1000 messages; when full, the oldest item is dropped. The adapter rate-limits WebSocket upgrades per IP with a sliding window (default 10 per 10s) to prevent connection floods.
+A single `batch()` call is capped at 50 RPC calls - the client rejects before sending, and the server enforces the same cap as a safety net. The adapter's client-side send queue holds up to 1000 messages; when full, the oldest item is dropped. The adapter rate-limits WebSocket upgrades per IP with a sliding window (default 10 per 10s) to prevent connection floods.
 
 ---
 
@@ -3016,7 +3021,7 @@ A single `batch()` call is capped at 50 RPC calls -- the client rejects before s
 
 svelte-realtime works with the adapter's `CLUSTER_WORKERS` mode. The adapter spawns N worker threads (default: number of CPUs). On Linux, workers share the port via `SO_REUSEPORT` and the kernel distributes incoming connections. On macOS and Windows, a primary thread accepts connections and routes them to workers via uWS child app descriptors.
 
-Cross-worker `ctx.publish()` calls are batched via microtask coalescing -- all publishes within one event loop tick are bundled into a single `postMessage` to the primary thread, which fans them out to other workers. This keeps IPC overhead constant regardless of publish volume.
+Cross-worker `ctx.publish()` calls are batched via microtask coalescing - all publishes within one event loop tick are bundled into a single `postMessage` to the primary thread, which fans them out to other workers. This keeps IPC overhead constant regardless of publish volume.
 
 Workers are health-checked every 10 seconds. If a worker fails to respond within 30 seconds, it is terminated and restarted with exponential backoff (starting at 100ms, max 5s, up to 50 restart attempts before the process exits). On graceful shutdown (`SIGTERM` / `SIGINT`), the primary stops accepting connections, sends a shutdown signal to all workers, and waits for them to drain in-flight requests and close WebSocket connections with code 1001 (Going Away) so clients reconnect to another instance.
 
@@ -3028,19 +3033,19 @@ Workers are health-checked every 10 seconds. If a worker fails to respond within
 | `ctx.platform.subscribers()` | **No** (local only) | Use with caution |
 | `ctx.platform.connections` | **No** (local only) | Use with caution |
 
-`ctx.publish()` is always safe -- it relays across workers and, with Redis wrapping, across instances. For targeted messaging, prefer `publish()` with a user-specific topic over `sendTo()`.
+`ctx.publish()` is always safe - it relays across workers and, with Redis wrapping, across instances. For targeted messaging, prefer `publish()` with a user-specific topic over `sendTo()`.
 
 ---
 
 ## Capacity model
 
-Every internal Map / Set / array with caller-driven growth is bounded by default. Numbers are deliberately generous -- far above any healthy single-instance workload -- so they catch obvious bugs (subscribe-leak, register-without-deregister) without biting real apps.
+Every internal Map / Set / array with caller-driven growth is bounded by default. Numbers are deliberately generous - far above any healthy single-instance workload - so they catch obvious bugs (subscribe-leak, register-without-deregister) without biting real apps.
 
 Each cap is one of three saturation behaviors:
 
-- **REJECT** -- caller gets an explicit error or a documented silent skip.
-- **WARN-ONLY** -- logs once per category; structure keeps growing because eviction would corrupt routing.
-- **FIFO-evict** -- drops oldest insertion-order entries; safe for dedup state where re-warn or duplicate is acceptable.
+- **REJECT** - caller gets an explicit error or a documented silent skip.
+- **WARN-ONLY** - logs once per category; structure keeps growing because eviction would corrupt routing.
+- **FIFO-evict** - drops oldest insertion-order entries; safe for dedup state where re-warn or duplicate is acceptable.
 
 | Cap                                  | Default     | Behavior     | Notes                                                               |
 | ------------------------------------ | ----------- | ------------ | ------------------------------------------------------------------- |
@@ -3060,7 +3065,7 @@ The first six are exported as named constants from `svelte-realtime/server` and 
 
 ### MAX_PUSH_REGISTRY (10,000,000)
 
-Per-process Map of userId -> { ws, platform } populated by `pushHooks.open` and drained by `pushHooks.close`. When the registry reaches the cap, new userIds are not registered (the connection still works, it just can't be the target of `live.push({ userId })` until existing entries clear). A one-shot warning surfaces the saturation. Hitting this typically means push registrations are not being released on disconnect -- check `hooks.ws.js` wires `pushHooks.close`.
+Per-process Map of userId -> { ws, platform } populated by `pushHooks.open` and drained by `pushHooks.close`. When the registry reaches the cap, new userIds are not registered (the connection still works, it just can't be the target of `live.push({ userId })` until existing entries clear). A one-shot warning surfaces the saturation. Hitting this typically means push registrations are not being released on disconnect - check `hooks.ws.js` wires `pushHooks.close`.
 
 ### TOPIC_WS_COUNTS_WARN_THRESHOLD (1,000,000)
 
@@ -3093,7 +3098,7 @@ In-memory map of `${topic}\0${userId} -> { count, timer, data }` populated by `l
 1. Refcounts joins per (user, room) pair so multiple WebSocket subscriptions from the same user in the same room don't double-count, and so a brief disconnect-reconnect within the grace window doesn't fire a leave/rejoin pair.
 2. Backs the in-memory presence-roster fallback in `live.room`'s presence-stream init when `platform.presence.list` isn't wired (the zero-config dev / single-instance path). The user-supplied `presence(ctx)` payload is held alongside the refcount so a fresh subscriber can reconstruct the existing roster without a cluster-aware backend.
 
-When the map reaches the cap: entries with a pending leave timer are evicted first (they were already on their way out). If still full after eviction, the new join is dropped — no entry is created, no `'join'` is published — and a one-shot warning surfaces. New joiners in this state are invisible in any subscriber's roster until existing entries clear.
+When the map reaches the cap: entries with a pending leave timer are evicted first (they were already on their way out). If still full after eviction, the new join is dropped - no entry is created, no `'join'` is published - and a one-shot warning surfaces. New joiners in this state are invisible in any subscriber's roster until existing entries clear.
 
 For multi-instance deploys, wire a cluster-aware `platform.presence` (e.g. from `svelte-adapter-uws-extensions/presence`). When `platform.presence.list` is a function, the in-memory fallback is bypassed entirely and this cap stops mattering.
 
@@ -3105,9 +3110,9 @@ In-process `live.idempotent()` store. At capacity, evicts the oldest 10% of entr
 
 ## Production limits
 
-### maxPayloadLength (default: 16KB)
+### maxPayloadLength (default: 1MB)
 
-Maximum size of a single WebSocket message. If an RPC request exceeds this, the adapter closes the connection (uWS behavior). Increase `maxPayloadLength` in the adapter's websocket config if your app sends large payloads.
+Maximum size of a single WebSocket message. If an RPC request exceeds this, the adapter closes the connection (uWS behavior). Adjust `maxPayloadLength` in the adapter's websocket config if your app needs a different cap.
 
 ### maxBackpressure (default: 1MB)
 
@@ -3127,7 +3132,7 @@ The adapter rejects topic names longer than 256 characters or containing control
 
 ### ws.subscribe() vs the subscribe hook
 
-`live.stream()` calls `ws.subscribe(topic)` server-side, bypassing the adapter's `subscribe` hook entirely. This is correct -- stream topics are gated by `guard()`, not the subscribe hook.
+`live.stream()` calls `ws.subscribe(topic)` server-side, bypassing the adapter's `subscribe` hook entirely. This is correct - stream topics are gated by `guard()`, not the subscribe hook.
 
 ---
 
@@ -3160,7 +3165,7 @@ onError((path, error) => {
 });
 ```
 
-> `onCronError` still works but is deprecated -- use `onError` instead.
+> `onCronError` still works but is deprecated - use `onError` instead.
 
 ### Dev-mode publish rate warning
 
@@ -3176,7 +3181,7 @@ live.publishRateWarning({ threshold: 500, intervalMs: 10_000 });
 live.publishRateWarning(false);
 ```
 
-Production builds constant-fold the activation branch to dead code -- zero overhead. The sampler runs once per platform on the first ctx-helpers cache miss; per-publish cost is unchanged. Topics already in `_topicCoalesce` or `_topicVolatile` are skipped (the user has already addressed them).
+Production builds constant-fold the activation branch to dead code - zero overhead. The sampler runs once per platform on the first ctx-helpers cache miss; per-publish cost is unchanged. Topics already in `_topicCoalesce` or `_topicVolatile` are skipped (the user has already addressed them).
 
 ### Dev-mode silent-topic warning
 
@@ -3207,7 +3212,7 @@ live.silentTopicWarning({ suppress: ['admin:audit', 'cron:reports'] });
 live.silentTopicWarning(false);
 ```
 
-Topics starting with `__` (system topics: `__realtime`, `__signal:*`, `__custom`) are always skipped automatically; you don't need to add them to `suppress`. Each topic warns at most once per process; the warning never fires for a topic that has been live, and re-subscribing after a warn does not re-fire. Hard-gated to development -- production builds constant-fold the activation branch to dead code, so apps not in dev mode pay zero cost regardless of configuration.
+Topics starting with `__` (system topics: `__realtime`, `__signal:*`, `__custom`) are always skipped automatically; you don't need to add them to `suppress`. Each topic warns at most once per process; the warning never fires for a topic that has been live, and re-subscribing after a warn does not re-fire. Hard-gated to development - production builds constant-fold the activation branch to dead code, so apps not in dev mode pay zero cost regardless of configuration.
 
 The watchdog reuses the same lifecycle hooks as the staleness watchdog (`staleAfterMs`): arms on first sub for the topic, observed on every publish, disarms on last unsub. Apps using both features share the per-topic timer machinery without paying twice.
 
@@ -3252,7 +3257,7 @@ Changes to files in `src/live/` are hot-reloaded on the server without restartin
 2. Clears all server-side registrations (RPC handlers, guards, cron jobs, derived streams, effects, aggregates)
 3. Re-imports the registry module so every `__register*` call runs with the updated handler functions
 
-This applies to all handler types -- `live()`, `live.stream()`, `live.cron()`, `live.derived()`, `live.effect()`, `live.aggregate()`, `live.room()`, `guard()`, and everything else. Adding or deleting files in `src/live/` also triggers a full re-registration.
+This applies to all handler types - `live()`, `live.stream()`, `live.cron()`, `live.derived()`, `live.effect()`, `live.aggregate()`, `live.room()`, `guard()`, and everything else. Adding or deleting files in `src/live/` also triggers a full re-registration.
 
 **Error recovery:** if the edited file has a syntax error, the previous handlers are restored so the server keeps working. Fix the error and save again.
 
@@ -3276,7 +3281,7 @@ The Streams tab lists every store currently mounted on the page. For each one it
 | last | Event name of the most recent pub/sub frame and its relative age (`12s ago`). |
 | err | Error code + message if the stream is in the error state; cleared on recovery. |
 
-**Click any stream row to expand a per-stream payload preview** -- the most recent 20 envelopes, time + event name + JSON data. Toggle Pretty / Raw via the header buttons (Raw shows full JSON up to ~500 chars; Pretty truncates at ~200 with overflow indicator). Pause stops capturing new events without affecting the live `last:` timestamp; Clear events drops every stream's ring buffer in one click. Pretty/Raw + Pause states persist across reloads via `localStorage`.
+**Click any stream row to expand a per-stream payload preview** - the most recent 20 envelopes, time + event name + JSON data. Toggle Pretty / Raw via the header buttons (Raw shows full JSON up to ~500 chars; Pretty truncates at ~200 with overflow indicator). Pause stops capturing new events without affecting the live `last:` timestamp; Clear events drops every stream's ring buffer in one click. Pretty/Raw + Pause states persist across reloads via `localStorage`.
 
 **Privacy.** Captured payloads are walked once at write time with key-based redaction. The default redact list covers `password`, `token`, `apiKey` / `api_key`, `secret`, `authorization`, `cookie`, `sessionid` / `session_id`, `csrf` / `csrftoken`. Override or extend at runtime:
 
@@ -3397,11 +3402,11 @@ Runtime control via `env.chaos`:
 | `env.chaos.dropped` | Running count of `platform.publish` drops. |
 | `env.chaos.resetCounter()` | Zero the counter without changing config. |
 
-Currently models the `drop-outbound` scenario only -- `platform.publish` events to subscribers are dropped at the platform layer. RPC replies (`platform.send`) are exempt because timing them out would just hang test code; the chaos harness is for testing pub/sub resilience, not RPC retry behavior.
+Currently models the `drop-outbound` scenario only - `platform.publish` events to subscribers are dropped at the platform layer. RPC replies (`platform.send`) are exempt because timing them out would just hang test code; the chaos harness is for testing pub/sub resilience, not RPC retry behavior.
 
 ### Direct ctx unit tests
 
-`createTestContext({ user })` builds a `ctx`-shaped object suitable for direct unit tests of guards and predicates -- helper methods are no-ops, the user / cursor / requestId can be overridden. Use this when the function under test takes `ctx` and synchronously returns a value; reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
+`createTestContext({ user })` builds a `ctx`-shaped object suitable for direct unit tests of guards and predicates - helper methods are no-ops, the user / cursor / requestId can be overridden. Use this when the function under test takes `ctx` and synchronously returns a value; reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
 
 ```js
 import { createTestContext } from 'svelte-realtime/test';
@@ -3501,8 +3506,8 @@ Import from `svelte-realtime/client`.
 
 | Method/Property | Description |
 |---|---|
-| `error` | `Readable<RpcError \| null>` -- current error, or `null` when healthy |
-| `status` | `Readable<'loading' \| 'connected' \| 'reconnecting' \| 'error'>` -- connection status |
+| `error` | `Readable<RpcError \| null>` - current error, or `null` when healthy |
+| `status` | `Readable<'loading' \| 'connected' \| 'reconnecting' \| 'error'>` - connection status |
 | `optimistic(event, data)` | Apply instant UI update, returns rollback function |
 | `hydrate(initialData)` | Pre-populate with SSR data |
 | `loadMore(...extraArgs)` | Load next page (cursor-based) |
@@ -3547,7 +3552,7 @@ node bench/rpc.js
 ```
 
 What gets measured:
-- **RPC dispatch overhead**: time for `handleRpc` to parse, look up the registry, build ctx, execute, and respond -- compared to calling the function directly
+- **RPC dispatch overhead**: time for `handleRpc` to parse, look up the registry, build ctx, execute, and respond - compared to calling the function directly
 - **Stream merge throughput**: operations per second for each merge strategy (`crud`, `latest`, `set`, `presence`, `cursor`) applying events to arrays of varying sizes
 - **Fast-path rejection**: how quickly non-RPC messages are identified and skipped
 
@@ -3555,11 +3560,11 @@ Merge strategies use an internal `Map<key, index>` for O(1) lookups instead of l
 
 ### Event batching (browser)
 
-In the browser, incoming pub/sub events are queued and flushed once per `requestAnimationFrame` instead of triggering a Svelte store update per event. This is automatic -- no configuration needed.
+In the browser, incoming pub/sub events are queued and flushed once per `requestAnimationFrame` instead of triggering a Svelte store update per event. This is automatic - no configuration needed.
 
 With high-frequency streams (e.g. 1000 cursors at 20 updates/sec), this reduces reactive store updates from ~20,000/sec to ~60/sec (one per frame). All merge operations still run, but Svelte only diffs and re-renders once per frame.
 
-In Node/SSR (tests, `__directCall`, etc.), events apply synchronously -- no batching overhead.
+In Node/SSR (tests, `__directCall`, etc.), events apply synchronously - no batching overhead.
 
 See [bench/rpc.js](bench/rpc.js) for the full source.
 
@@ -3577,9 +3582,9 @@ npm test
 
 svelte-realtime works with Tauri and Capacitor without any static build or architectural changes.
 
-Both runtimes let you point their webview at a live URL instead of local files. Your SvelteKit app runs on the server as normal -- SSR, WebSocket hydration, live stores, RPC -- and the native wrapper adds platform APIs (camera, push notifications, filesystem, etc.) on top.
+Both runtimes let you point their webview at a live URL instead of local files. Your SvelteKit app runs on the server as normal - SSR, WebSocket hydration, live stores, RPC - and the native wrapper adds platform APIs (camera, push notifications, filesystem, etc.) on top.
 
-**Capacitor** -- `capacitor.config.ts`:
+**Capacitor** - `capacitor.config.ts`:
 
 ```ts
 import { CapacitorConfig } from '@capacitor/cli';
@@ -3595,7 +3600,7 @@ const config: CapacitorConfig = {
 export default config;
 ```
 
-**Tauri** -- `tauri.conf.json`:
+**Tauri** - `tauri.conf.json`:
 
 ```json
 {

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// Tier-4 chaos: two svelte-realtime instances connected to a shared
+// Multi-instance chaos: two svelte-realtime instances connected to a shared
 // Redis pubsub bus. Each browser context picks one of the two host
 // ports so `connection A` and `connection B` may land on different
 // instances. The bus relays publishes across instances so a

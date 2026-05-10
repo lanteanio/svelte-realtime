@@ -22,7 +22,7 @@ async function expectTodos(page, expected) {
 	expect(got).toEqual(norm);
 }
 
-// 1 -- single mutate happy path (no server publish; graduate-on-success) ----
+// 1 - single mutate happy path (no server publish; graduate-on-success) ----
 
 test('single mutate succeeds: optimistic stays, drains to server state', async ({ page }) => {
 	const r = await page.evaluate(() => window.__test.mutateOk({ id: 'a', name: 'A' }));
@@ -30,7 +30,7 @@ test('single mutate succeeds: optimistic stays, drains to server state', async (
 	await expectTodos(page, [{ id: 'a', name: 'A' }]);
 });
 
-// 2 -- single mutate failure: optimistic visible during in-flight, then rollback
+// 2 - single mutate failure: optimistic visible during in-flight, then rollback
 
 test('single mutate fails: rolls back', async ({ page }) => {
 	await page.evaluate(() => window.__test.startBlocked({ token: 'fb1', kind: 'create', id: 'b', name: 'B' }));
@@ -41,7 +41,7 @@ test('single mutate fails: rolls back', async ({ page }) => {
 	await expectTodos(page, []);
 });
 
-// 3 -- concurrent A+B both fail: no phantoms ------------------------------
+// 3 - concurrent A+B both fail: no phantoms ------------------------------
 
 test('concurrent A+B both fail leaves no phantom traces', async ({ page }) => {
 	await page.evaluate(() => window.__test.startBlocked({ token: 'a3', kind: 'create', id: 'a', name: 'A' }));
@@ -55,7 +55,7 @@ test('concurrent A+B both fail leaves no phantom traces', async ({ page }) => {
 	await expectTodos(page, []);
 });
 
-// 4 -- concurrent A succeeds, B fails: only A visible ----------------------
+// 4 - concurrent A succeeds, B fails: only A visible ----------------------
 
 test('concurrent A succeeds, B fails leaves only A visible', async ({ page }) => {
 	await page.evaluate(() => window.__test.startBlocked({ token: 'a4', kind: 'create', id: 'a', name: 'A' }));
@@ -70,7 +70,7 @@ test('concurrent A succeeds, B fails leaves only A visible', async ({ page }) =>
 	await expectTodos(page, [{ id: 'a', name: 'A' }]);
 });
 
-// 5 -- concurrent A fails, B succeeds: only B visible ----------------------
+// 5 - concurrent A fails, B succeeds: only B visible ----------------------
 
 test('concurrent A fails, B succeeds leaves only B visible', async ({ page }) => {
 	await page.evaluate(() => window.__test.startBlocked({ token: 'a5', kind: 'create', id: 'a', name: 'A' }));
@@ -83,7 +83,7 @@ test('concurrent A fails, B succeeds leaves only B visible', async ({ page }) =>
 	await expectTodos(page, [{ id: 'b', name: 'B' }]);
 });
 
-// 6 -- server confirm with matching key during in-flight absorbs -----------
+// 6 - server confirm with matching key during in-flight absorbs -----------
 
 test('server confirm with matching key during in-flight absorbs (no flicker on settle)', async ({ page }) => {
 	await page.evaluate(() => window.__test.startBlocked({ token: 'a6', kind: 'create', id: 'x', name: 'Pending' }));
@@ -97,7 +97,7 @@ test('server confirm with matching key during in-flight absorbs (no flicker on s
 	await expectTodos(page, [{ id: 'x', name: 'Confirmed' }]);
 });
 
-// 7 -- server unrelated event during in-flight: both visible ---------------
+// 7 - server unrelated event during in-flight: both visible ---------------
 
 test('server event for unrelated key during in-flight: both visible', async ({ page }) => {
 	await page.evaluate(() => window.__test.startBlocked({ token: 'a7', kind: 'create', id: 'opt', name: 'Opt' }));
@@ -110,7 +110,7 @@ test('server event for unrelated key during in-flight: both visible', async ({ p
 	await expectTodos(page, [{ id: 'opt', name: 'Opt' }, { id: 'srv', name: 'Srv' }]);
 });
 
-// 8 -- free-form mutate concurrent fail: no phantom ------------------------
+// 8 - free-form mutate concurrent fail: no phantom ------------------------
 
 test('free-form mutate concurrent fail: no phantom changes', async ({ page }) => {
 	await page.evaluate(() => window.__test.startBlocked({ token: 'fa', kind: 'ff', id: 'a', name: 'A' }));
@@ -124,7 +124,7 @@ test('free-form mutate concurrent fail: no phantom changes', async ({ page }) =>
 	await expectTodos(page, []);
 });
 
-// 9 -- three concurrent mutates with mixed outcomes ------------------------
+// 9 - three concurrent mutates with mixed outcomes ------------------------
 
 test('three concurrent mutates with mixed outcomes interleave correctly', async ({ page }) => {
 	await page.evaluate(() => window.__test.startBlocked({ token: 'A', kind: 'create', id: '1', name: 'one' }));
@@ -144,7 +144,7 @@ test('three concurrent mutates with mixed outcomes interleave correctly', async 
 	await expectTodos(page, [{ id: '1', name: 'one' }, { id: '3', name: 'three' }]);
 });
 
-// 10 -- mutate then drain then post-drain server event applies via hot path
+// 10 - mutate then drain then post-drain server event applies via hot path
 
 test('mutate -> drain -> post-drain server event applies via hot path', async ({ page }) => {
 	const r = await page.evaluate(() => window.__test.mutateOk({ id: 'first', name: 'first' }));

@@ -126,7 +126,7 @@ export interface TestEnv {
  * Chaos harness exposed on `env.chaos`. Lets tests inject `platform.publish`
  * drops at a configurable rate, optionally seeded for deterministic replay.
  *
- * Currently models the `drop-outbound` scenario only -- pub/sub events are
+ * Currently models the `drop-outbound` scenario only - pub/sub events are
  * dropped at the platform layer so subscribers receive nothing for the
  * dropped frame. RPC replies (`platform.send`) are never dropped because
  * timing them out would just hang test code.

@@ -13,7 +13,7 @@
 //   resetChannels()  -> publishes `refreshed: []` to every known topic
 //                       so subscribed clients drop accumulated state.
 //                       Channels are ephemeral (no DB), so there is no
-//                       server-side buffer to clear -- only the client
+//                       server-side buffer to clear - only the client
 //                       view needs to be reset.
 
 import { live } from 'svelte-realtime/server';

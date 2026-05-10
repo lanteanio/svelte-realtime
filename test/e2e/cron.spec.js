@@ -32,7 +32,7 @@ test.beforeEach(async ({ page }) => {
 	await page.evaluate(() => window.__test.reset());
 });
 
-// 1 -- Auto-publish via return value: cron returns an object and the
+// 1 - Auto-publish via return value: cron returns an object and the
 // framework publishes a `set` event the merge-set stream picks up.
 
 test('auto-publish: cron return value lands as a `set` event', async ({ page }) => {
@@ -45,14 +45,14 @@ test('auto-publish: cron return value lands as a `set` event', async ({ page }) 
 	expect(stats.tickCount).toBe(1);
 	expect(typeof stats.ts).toBe('number');
 
-	// Tick again -- counter increments and the set event replaces.
+	// Tick again - counter increments and the set event replaces.
 	await page.evaluate(() => window.__test.tickNow());
 	await page.evaluate(() => window.__test.waitStats('(v) => v && v.tickCount === 2'));
 	const counts = await page.evaluate(() => window.__test.getCounts());
 	expect(counts.ticks).toBe(2);
 });
 
-// 2 -- Manual ctx.publish inside the cron: cron returns undefined and
+// 2 - Manual ctx.publish inside the cron: cron returns undefined and
 // fires individual `created` events on a crud stream.
 
 test('manual ctx.publish: crud stream sees per-tick created events', async ({ page }) => {
@@ -73,7 +73,7 @@ test('manual ctx.publish: crud stream sees per-tick created events', async ({ pa
 	expect(counts.itemCount).toBe(3);
 });
 
-// 3 -- Multi-client fan-out: A and B both subscribe to stats; one tick
+// 3 - Multi-client fan-out: A and B both subscribe to stats; one tick
 // fans out to both clients with the same value.
 
 test('multi-client: stats publish fans out to A and B', async ({ browser }, testInfo) => {
@@ -97,7 +97,7 @@ test('multi-client: stats publish fans out to A and B', async ({ browser }, test
 	}
 });
 
-// 4 -- Late join: cron fires twice, then C subscribes; C's initial
+// 4 - Late join: cron fires twice, then C subscribes; C's initial
 // loader fetch returns the latest `_lastStats` value (the loader reads
 // the value the cron stored), proving the cron's state is observable
 // to fresh subscribers.
@@ -126,7 +126,7 @@ test('late join: C subscribes after ticks; initial fetch returns latest stats', 
 	}
 });
 
-// 5 -- Sanity: cron is independent of pubsub. Publishing to an unrelated
+// 5 - Sanity: cron is independent of pubsub. Publishing to an unrelated
 // topic does not advance the cron's internal counters. (We don't have a
 // publishExternal RPC on this fixture, so we assert the inverse: ticks
 // only advance via tickNow, never as a side effect of resetCron's

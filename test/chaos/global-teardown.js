@@ -1,4 +1,4 @@
-// Tier-4 chaos teardown: kills the two instance procs and brings
+// Multi-instance chaos teardown: kills the two instance procs and brings
 // docker-compose down. Tolerates missing __chaosCtx so the teardown
 // is safe to run twice or after a partial setup.
 

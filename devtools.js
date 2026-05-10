@@ -172,7 +172,7 @@ function init() {
 		if (dt) dt.paused = streamsPaused;
 	}
 
-	// Refresh managed by toggle() -- no idle timer when hidden
+	// Refresh managed by toggle() - no idle timer when hidden
 }
 
 /** @param {HTMLElement} el */
@@ -296,7 +296,7 @@ function renderStreams(el, dt) {
 			? `last:${esc(s.lastEvent)} ${esc(_ageString(s.lastEventTime))}`
 			: 'no events yet';
 		const errPart = s.error
-			? `<div style="padding:1px 0 1px 12px;color:#f44336">err: ${esc(s.error.code)} -- ${esc(s.error.message)}</div>`
+			? `<div style="padding:1px 0 1px 12px;color:#f44336">err: ${esc(s.error.code)} - ${esc(s.error.message)}</div>`
 			: '';
 		const expanded = expandedStreams.has(s.path);
 		const recentCount = (s.recentEvents && s.recentEvents.length) || 0;

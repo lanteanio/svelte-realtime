@@ -29,7 +29,7 @@ test.beforeEach(async ({ page }) => {
 	await page.evaluate(() => window.__test.reset());
 });
 
-// 1 -- static channel cross-client: A subscribes, B publishes, A receives
+// 1 - static channel cross-client: A subscribes, B publishes, A receives
 
 test('static channel cross-client: A receives event B published', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -48,7 +48,7 @@ test('static channel cross-client: A receives event B published', async ({ brows
 	}
 });
 
-// 2 -- presence channel: A and B both publish join, both see each other
+// 2 - presence channel: A and B both publish join, both see each other
 
 test('presence channel: A and B both join; both see each other (key-stable)', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -71,7 +71,7 @@ test('presence channel: A and B both join; both see each other (key-stable)', as
 	}
 });
 
-// 3 -- ephemeral semantics: late joiner does NOT see prior events
+// 3 - ephemeral semantics: late joiner does NOT see prior events
 
 test('ephemeral: late joiner does not see events published before subscribe', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -96,7 +96,7 @@ test('ephemeral: late joiner does not see events published before subscribe', as
 	}
 });
 
-// 4 -- dynamic channel topic isolation: r1 publish reaches r1 stores; r2 stays empty
+// 4 - dynamic channel topic isolation: r1 publish reaches r1 stores; r2 stays empty
 
 test('dynamic channel: r1 publish reaches r1 stores on every client; r2 stores stay empty', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -122,7 +122,7 @@ test('dynamic channel: r1 publish reaches r1 stores on every client; r2 stores s
 	}
 });
 
-// 5 -- multi-publish ordering: 5 events arrive in publish order
+// 5 - multi-publish ordering: 5 events arrive in publish order
 
 test('multi-publish ordering: A receives all 5 events B published in order', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -147,7 +147,7 @@ test('multi-publish ordering: A receives all 5 events B published in order', asy
 	}
 });
 
-// 6 -- single-client late join: initial state is empty (no init function)
+// 6 - single-client late join: initial state is empty (no init function)
 
 test('single client: fresh subscribe yields empty array (no replay buffer)', async ({ page }) => {
 	const lobby = await page.evaluate(() => window.__test.readLobby());

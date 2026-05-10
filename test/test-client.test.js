@@ -257,13 +257,13 @@ describe('subscribeAt() argument validation', () => {
 	it('throws on a stream-shaped object without __streamPath (e.g. a plain writable)', () => {
 		const fakeStore = { subscribe: () => () => {} };
 		expect(() => subscribeAt(fakeStore, { schemaVersion: 1 }))
-			.toThrow(/not a stream -- it carries no `__streamPath`/);
+			.toThrow(/not a stream - it carries no `__streamPath`/);
 	});
 
 	it('throws on a dynamic factory passed without calling it (path is stamped, but args are missing)', () => {
 		// The factory itself carries __streamPath but no __streamArgs.
 		// subscribeAt happily calls _createStream with undefined args,
-		// which reproduces a non-args dynamic subscribe -- not an error,
+		// which reproduces a non-args dynamic subscribe - not an error,
 		// but the resulting subscribe is sent without args. We DO accept
 		// this (it's symmetric with calling a dynamic-stream factory
 		// with no args), but assert the user got what they asked for.

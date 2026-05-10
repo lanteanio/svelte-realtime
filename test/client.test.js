@@ -221,7 +221,7 @@ beforeEach(async () => {
 	if (_resetDedupCoalesceWarned) _resetDedupCoalesceWarned();
 });
 
-// -- __rpc (Finding 1 regression) ---------------------------------------------
+// - __rpc (Finding 1 regression) ---------------------------------------------
 
 describe('__rpc()', () => {
 	it('resolves with unwrapped data.data for regular RPC', async () => {
@@ -250,7 +250,7 @@ describe('__rpc()', () => {
 	});
 });
 
-// -- __stream (Findings 1, 3, 4, 5) ------------------------------------------
+// - __stream (Findings 1, 3, 4, 5) ------------------------------------------
 
 describe('__stream()', () => {
 	it('resolves with full response (topic + data) for stream requests', async () => {
@@ -406,7 +406,7 @@ describe('__stream()', () => {
 		expect(errors[errors.length - 1]).not.toBe(null);
 		expect(errors[errors.length - 1].code).toBe('DISCONNECTED');
 
-		// Reconnect (debounced with jitter -- wait for it)
+		// Reconnect (debounced with jitter - wait for it)
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 250));
 
@@ -429,7 +429,7 @@ describe('__stream()', () => {
 	});
 });
 
-// -- __stream() optimistic updates (Phase 7) ----------------------------------
+// - __stream() optimistic updates ---------------------------------------------
 
 describe('__stream() optimistic', () => {
 	it('optimistic created immediately adds item to store', async () => {
@@ -539,7 +539,7 @@ describe('__stream() optimistic', () => {
 	});
 });
 
-// -- __stream() mutate (optimistic + auto-rollback) ---------------------------
+// - __stream() mutate (optimistic + auto-rollback) ---------------------------
 
 describe('__stream() mutate', () => {
 	async function setupCrudStream(path, topic, initial = []) {
@@ -704,7 +704,7 @@ describe('__stream() mutate', () => {
 	});
 });
 
-// -- __stream() mutate queue-replay correctness -------------------------------
+// - __stream() mutate queue-replay correctness -------------------------------
 //
 // Covers the always-on queue-replay machinery: server events apply to an
 // un-overlaid `_serverValue` while a mutate is in flight, the displayed
@@ -730,7 +730,7 @@ describe('__stream() mutate queue-replay correctness', () => {
 		return { promise, resolve, reject };
 	}
 
-	// -- concurrent mutate scenarios (the bug this design closes) ----------
+	// - concurrent mutate scenarios (the bug this design closes) ----------
 
 	it('concurrent: A and B both fail leaves no phantom traces', async () => {
 		const ctx = await setupCrudStream('qr/both-fail', 't-bf', [{ id: 1, name: 'X' }]);
@@ -834,7 +834,7 @@ describe('__stream() mutate queue-replay correctness', () => {
 		ctx.unsub();
 	});
 
-	// -- server event interleaving while mutate is in flight ---------------
+	// - server event interleaving while mutate is in flight ---------------
 
 	it('server event for unrelated key interleaves with optimistic mutate', async () => {
 		const ctx = await setupCrudStream('qr/interleave', 't-il', []);
@@ -931,7 +931,7 @@ describe('__stream() mutate queue-replay correctness', () => {
 		ctx.unsub();
 	});
 
-	// -- queue lifecycle / drain ------------------------------------------
+	// - queue lifecycle / drain ------------------------------------------
 
 	it('queue empty before first mutate: hot path identical to today', async () => {
 		const ctx = await setupCrudStream('qr/hot', 't-hot', [{ id: 1 }]);
@@ -949,7 +949,7 @@ describe('__stream() mutate queue-replay correctness', () => {
 		ctx.unsub();
 	});
 
-	// -- free-form function changes ---------------------------------------
+	// - free-form function changes ---------------------------------------
 
 	it('free-form mutator: concurrent fails leave no phantom changes', async () => {
 		const ctx = await setupCrudStream('qr/ff-fail', 't-ff', [{ id: 1, n: 'X' }]);
@@ -985,7 +985,7 @@ describe('__stream() mutate queue-replay correctness', () => {
 		ctx.unsub();
 	});
 
-	// -- per-merge-strategy: latest, set, presence, cursor ----------------
+	// - per-merge-strategy: latest, set, presence, cursor ----------------
 
 	it('latest merge: optimistic push + concurrent fail rolls back cleanly', async () => {
 		const store = __stream('qr/latest', { merge: 'latest', max: 10 });
@@ -1091,7 +1091,7 @@ describe('__stream() mutate queue-replay correctness', () => {
 		unsub();
 	});
 
-	// -- error propagation contract ---------------------------------------
+	// - error propagation contract ---------------------------------------
 
 	it('asyncOp result is returned on success (Promise resolution preserved)', async () => {
 		const ctx = await setupCrudStream('qr/result', 't-res', []);
@@ -1125,7 +1125,7 @@ describe('__stream() mutate queue-replay correctness', () => {
 	});
 });
 
-// -- __stream() mutate queue-replay property tests (fast-check) ---------------
+// - __stream() mutate queue-replay property tests (fast-check) ---------------
 //
 // Generates random sequences of (server-event, mutate-start, mutate-settle)
 // operations and asserts that the displayed value at the end of each
@@ -1316,7 +1316,7 @@ describe('__stream() mutate queue-replay property tests (fast-check)', () => {
 
 	/**
 	 * Compare two crud arrays as multisets keyed by id (order does not
-	 * matter for crud merge -- entries can be reordered by swap-on-delete).
+	 * matter for crud merge - entries can be reordered by swap-on-delete).
 	 */
 	function sameAsMultiset(a, b) {
 		if (!Array.isArray(a) || !Array.isArray(b)) return a === b;
@@ -1436,7 +1436,7 @@ describe('__stream() mutate queue-replay property tests (fast-check)', () => {
 	}, 30000);
 });
 
-// -- __rpc() createOptimistic --------------------------------------------------
+// - __rpc() createOptimistic --------------------------------------------------
 
 describe('__rpc() createOptimistic', () => {
 	async function setupCrudStream(path, topic, initial = []) {
@@ -1663,7 +1663,7 @@ describe('store.createOptimistic (stream-side counterpart)', () => {
 	});
 });
 
-// -- __devtools stream tracking ------------------------------------------------
+// - __devtools stream tracking ------------------------------------------------
 
 describe('__devtools stream tracking', () => {
 	it('records merge strategy on first subscribe', async () => {
@@ -1829,7 +1829,7 @@ describe('__devtools stream tracking', () => {
 	});
 });
 
-// -- __stream() dynamic topics ------------------------------------------------
+// - __stream() dynamic topics ------------------------------------------------
 
 describe('__stream() dynamic topics', () => {
 	it('returns a function when isDynamic is true', () => {
@@ -1868,7 +1868,7 @@ describe('__stream() dynamic topics', () => {
 	});
 });
 
-// -- batch() ------------------------------------------------------------------
+// - batch() ------------------------------------------------------------------
 
 describe('batch()', () => {
 	it('collects RPC calls and sends as single frame', async () => {
@@ -1945,7 +1945,7 @@ describe('batch()', () => {
 	});
 });
 
-// -- __stream() presence merge (Phase 9) --------------------------------------
+// - __stream() presence merge -------------------------------------------------
 
 describe('__stream() presence merge', () => {
 	it('join adds to presence list', async () => {
@@ -2035,7 +2035,7 @@ describe('__stream() presence merge', () => {
 	});
 });
 
-// -- __stream() cursor merge (Phase 9) ----------------------------------------
+// - __stream() cursor merge ---------------------------------------------------
 
 describe('__stream() cursor merge', () => {
 	it('update adds or replaces cursor entry', async () => {
@@ -2102,7 +2102,7 @@ describe('__stream() cursor merge', () => {
 	});
 });
 
-// -- __stream() hydrate (Phase 11) --------------------------------------------
+// - __stream() hydrate (Phase 11) --------------------------------------------
 
 describe('__stream() hydrate', () => {
 	it('sets initial data from SSR before subscribing to live updates', () => {
@@ -2195,7 +2195,7 @@ describe('__stream() hydrate', () => {
 	});
 });
 
-// -- __stream() hydrate + reconnect ------------------------------------------
+// - __stream() hydrate + reconnect ------------------------------------------
 
 describe('__stream() hydrate reconnect', () => {
 	it('channel keeps hydrated data instead of overwriting with empty placeholder', async () => {
@@ -2376,7 +2376,7 @@ describe('__stream() hydrate reconnect', () => {
 	});
 });
 
-// -- __stream() hydrate derived -----------------------------------------------
+// - __stream() hydrate derived -----------------------------------------------
 
 describe('__stream() hydrate derived', () => {
 	it('keeps hydrated data when server returns stale derived result', async () => {
@@ -2516,14 +2516,14 @@ describe('__stream() hydrate derived', () => {
 			derived: true
 		});
 
-		// No hydration, so currentValue is undefined -- derived protection does not apply
+		// No hydration, so currentValue is undefined - derived protection does not apply
 		expect(values[values.length - 1]).toEqual({ count: 42 });
 
 		unsub();
 	});
 });
 
-// -- __stream() WS-status baseline (regression: spurious reconnect on first open) --
+// - __stream() WS-status baseline (regression: spurious reconnect on first open) --
 
 describe('__stream() initial-connect status handling', () => {
 	it('does not treat the first WS open as a reconnect when subscribed mid-connect', async () => {
@@ -2550,7 +2550,7 @@ describe('__stream() initial-connect status handling', () => {
 			key: 'id'
 		});
 
-		// Now the WS finishes connecting -- this is the FIRST 'open'
+		// Now the WS finishes connecting - this is the FIRST 'open'
 		// for this stream's lifetime. It must NOT be treated as a reconnect.
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 250));
@@ -2569,7 +2569,7 @@ describe('__stream() initial-connect status handling', () => {
 	});
 });
 
-// -- __stream() seq tracking (Phase 15) ---------------------------------------
+// - __stream() seq tracking (Phase 15) ---------------------------------------
 
 describe('__stream() seq tracking', () => {
 	it('sends seq on reconnect request', async () => {
@@ -2591,7 +2591,7 @@ describe('__stream() seq tracking', () => {
 		// Simulate seq from a pub/sub event
 		simulateTopicMessage('seq-topic', { event: 'created', data: { id: 2 }, seq: 11 });
 
-		// Disconnect and reconnect (debounced with jitter -- wait for it)
+		// Disconnect and reconnect (debounced with jitter - wait for it)
 		simulateStatus('disconnected');
 		simulateStatus('open');
 		await new Promise((r) => setTimeout(r, 250));
@@ -2605,7 +2605,7 @@ describe('__stream() seq tracking', () => {
 	});
 });
 
-// -- __rpc() issues propagation -----------------------------------------------
+// - __rpc() issues propagation -----------------------------------------------
 
 describe('__rpc() issues', () => {
 	it('propagates issues array on RpcError', async () => {
@@ -2630,7 +2630,7 @@ describe('__rpc() issues', () => {
 	});
 });
 
-// -- Phase 16 Bug #4: Dynamic stream subscribe wrapper stability ---------------
+// - Phase 16 Bug #4: Dynamic stream subscribe wrapper stability ---------------
 
 describe('__stream() dynamic subscribe wrapper (Bug #4 fix)', () => {
 	it('does not nest wrappers on repeated cache hits', () => {
@@ -2644,7 +2644,7 @@ describe('__stream() dynamic subscribe wrapper (Bug #4 fix)', () => {
 		const store2 = factory('room-1');
 		expect(store2).toBe(store1);
 
-		// Subscribe again -- should not create nested wrappers
+		// Subscribe again - should not create nested wrappers
 		const unsub2 = store2.subscribe(() => {});
 
 		unsub1();
@@ -2652,7 +2652,7 @@ describe('__stream() dynamic subscribe wrapper (Bug #4 fix)', () => {
 	});
 });
 
-// -- Phase 16 Bug #5: batch() cleanup on throw --------------------------------
+// - Phase 16 Bug #5: batch() cleanup on throw --------------------------------
 
 describe('batch() cleanup on throw (Bug #5 fix)', () => {
 	it('cleans up if fn() throws synchronously', () => {
@@ -2667,7 +2667,7 @@ describe('batch() cleanup on throw (Bug #5 fix)', () => {
 	});
 });
 
-// -- Phase 19: Stream pagination (client) -------------------------------------
+// - Phase 19: Stream pagination (client) -------------------------------------
 
 describe('__stream() pagination', () => {
 	it('tracks hasMore and cursor from server response', async () => {
@@ -2757,7 +2757,7 @@ describe('__stream() pagination', () => {
 	});
 });
 
-// -- Phase 22: Binary RPC (client) --------------------------------------------
+// - Phase 22: Binary RPC (client) --------------------------------------------
 
 describe('__binaryRpc()', () => {
 	it('sends binary frame with header and payload', () => {
@@ -2796,7 +2796,7 @@ describe('__binaryRpc()', () => {
 	});
 });
 
-// -- __upload() streaming uploads --------------------------------------------
+// - __upload() streaming uploads --------------------------------------------
 
 /** Drain enough microtasks for the upload pump to send all queued chunks. */
 async function flushUpload(times = 12) {
@@ -3071,7 +3071,7 @@ describe('__upload()', () => {
 		const handle = avatar(new Uint8Array([1]).buffer);
 		await flushUpload();
 
-		// Wrong streamId -- should be silently ignored
+		// Wrong streamId - should be silently ignored
 		simulateUploadResponse(handle.streamId + 12345, { ok: true, data: 'no' });
 
 		// Real response after a tick still resolves
@@ -3239,7 +3239,7 @@ describe('__upload()', () => {
 	});
 });
 
-// -- Phase 23: configure() ---------------------------------------------------
+// - Phase 23: configure() ---------------------------------------------------
 
 describe('configure()', () => {
 	it('is a callable function', () => {
@@ -3334,7 +3334,7 @@ describe('configure()', () => {
 	});
 });
 
-// -- Cloudflare Tunnel symptom detector ---------------------------------------
+// - Cloudflare Tunnel symptom detector ---------------------------------------
 
 describe('CF Tunnel symptom detector', () => {
 	it('warns after two consecutive fast open->close cycles', async () => {
@@ -3422,7 +3422,7 @@ describe('CF Tunnel symptom detector', () => {
 	});
 });
 
-// -- combine() ----------------------------------------------------------------
+// - combine() ----------------------------------------------------------------
 
 describe('combine()', () => {
 	function makeStore(initial) {
@@ -3492,7 +3492,7 @@ describe('combine()', () => {
 		unsub2();
 		unsub3();
 
-		// Sources should be cleaned up -- set should not throw
+		// Sources should be cleaned up - set should not throw
 		a.set(100);
 	});
 
@@ -3537,7 +3537,7 @@ describe('combine()', () => {
 	});
 });
 
-// -- Undo/Redo (Phase 36) ----------------------------------------------------
+// - Undo/Redo (Phase 36) ----------------------------------------------------
 
 describe('stream undo/redo', () => {
 	it('canUndo is false before enableHistory', () => {
@@ -3673,7 +3673,7 @@ describe('stream undo/redo', () => {
 	});
 });
 
-// -- pauseHistory / resumeHistory (Phase 36) ----------------------------------
+// - pauseHistory / resumeHistory (Phase 36) ----------------------------------
 
 describe('stream pauseHistory / resumeHistory', () => {
 	it('pauseHistory suppresses undo snapshots while events still apply', async () => {
@@ -3719,7 +3719,7 @@ describe('stream pauseHistory / resumeHistory', () => {
 
 		store.pauseHistory();
 
-		// Several changes while paused -- no snapshots
+		// Several changes while paused - no snapshots
 		simulateTopicMessage('pause2', { event: 'set', data: 2 });
 		simulateTopicMessage('pause2', { event: 'set', data: 3 });
 		expect(value).toBe(3);
@@ -3793,7 +3793,7 @@ describe('stream pauseHistory / resumeHistory', () => {
 	});
 });
 
-// -- onSignal() (Phase 43) ----------------------------------------------------
+// - onSignal() (Phase 43) ----------------------------------------------------
 
 describe('onSignal()', () => {
 	it('fires callback when a signal is received', () => {
@@ -3862,7 +3862,7 @@ describe('onSignal()', () => {
 	});
 });
 
-// -- .when() (Phase 40: gate) -------------------------------------------------
+// - .when() (Phase 40: gate) -------------------------------------------------
 
 describe('.when(condition)', () => {
 	it('.when(false) keeps store as undefined and makes no RPC call', () => {
@@ -3974,7 +3974,7 @@ describe('.when(condition)', () => {
 		unsub();
 		await new Promise((r) => queueMicrotask(r)); // Wait for deferred cleanup
 
-		// Resubscribe -- should get undefined (stream was cleaned up), and a new RPC sent
+		// Resubscribe - should get undefined (stream was cleaned up), and a new RPC sent
 		const values2 = [];
 		const unsub2 = gated.subscribe((v) => values2.push(v));
 		expect(values2[0]).toBeUndefined();
@@ -3982,7 +3982,7 @@ describe('.when(condition)', () => {
 	});
 });
 
-// -- dedup key collision (null vs 'null') -------------------------------------
+// - dedup key collision (null vs 'null') -------------------------------------
 
 describe('__rpc() dedup key collision', () => {
 	it('null and string "null" are separate calls', async () => {
@@ -4039,7 +4039,7 @@ describe('__rpc() dedup key collision', () => {
 	});
 });
 
-// -- __rpc() dedup-coalesce dev-warn ------------------------------------------
+// - __rpc() dedup-coalesce dev-warn ------------------------------------------
 
 describe('__rpc() dedup-coalesce dev-warn', () => {
 	/** @type {ReturnType<typeof vi.spyOn>} */
@@ -4158,7 +4158,7 @@ describe('__rpc() dedup-coalesce dev-warn', () => {
 	});
 });
 
-// -- __rpc() .with({ idempotencyKey }) ----------------------------------------
+// - __rpc() .with({ idempotencyKey }) ----------------------------------------
 
 describe('__rpc().with({ idempotencyKey })', () => {
 	it('forwards idempotencyKey on the wire envelope', async () => {
@@ -4262,7 +4262,7 @@ describe('__rpc().with({ idempotencyKey })', () => {
 	});
 });
 
-// -- CRUD delete swap-remove --------------------------------------------------
+// - CRUD delete swap-remove --------------------------------------------------
 
 describe('__stream() CRUD delete swap-remove', () => {
 	it('delete from middle removes item without affecting others', async () => {
@@ -4346,7 +4346,7 @@ describe('__stream() CRUD delete swap-remove', () => {
 	});
 });
 
-// -- Terminated preflight on binary/batch/stream ------------------------------
+// - Terminated preflight on binary/batch/stream ------------------------------
 
 describe('terminated preflight', () => {
 	it('binary RPC rejects immediately when terminated', async () => {
@@ -4384,7 +4384,7 @@ describe('terminated preflight', () => {
 	});
 });
 
-// -- Multi-listener topic delivery --------------------------------------------
+// - Multi-listener topic delivery --------------------------------------------
 
 describe('multi-listener topic delivery', () => {
 	it('delivers events to two independent subscribers on the same topic', async () => {
@@ -4428,7 +4428,7 @@ describe('multi-listener topic delivery', () => {
 			}
 		}
 
-		// Publish on the shared topic -- both listeners should receive it
+		// Publish on the shared topic - both listeners should receive it
 		simulateTopicMessage('shared-topic', { event: 'set', data: 'broadcast' });
 
 		const last1 = values1[values1.length - 1];
@@ -4441,7 +4441,7 @@ describe('multi-listener topic delivery', () => {
 	});
 });
 
-// -- Batch response for stream subscribes (regression test) -------------------
+// - Batch response for stream subscribes (regression test) -------------------
 
 describe('batched stream subscribe responses', () => {
 	it('delivers initial data and events when streams are batched (set + latest)', async () => {
@@ -4485,7 +4485,7 @@ describe('batched stream subscribe responses', () => {
 	});
 });
 
-// -- onDerived re-export ------------------------------------------------------
+// - onDerived re-export ------------------------------------------------------
 
 describe('onDerived()', () => {
 	it('is re-exported from the adapter client', () => {
@@ -4530,7 +4530,7 @@ describe('onDerived()', () => {
 	});
 });
 
-// -- health store -------------------------------------------------------------
+// - health store -------------------------------------------------------------
 
 describe('health store', () => {
 	it('starts at "healthy"', () => {
@@ -4614,7 +4614,7 @@ describe('health store', () => {
 	});
 });
 
-// -- subscribe-denials routed to per-stream error stores ----------------------
+// - subscribe-denials routed to per-stream error stores ----------------------
 
 describe('subscribe-denial routing', () => {
 	async function setupStreamSubscribed(topic) {
@@ -4708,7 +4708,7 @@ describe('subscribe-denial routing', () => {
 	});
 });
 
-// -- quiescent store ----------------------------------------------------------
+// - quiescent store ----------------------------------------------------------
 
 describe('quiescent store', () => {
 	it('starts true (no streams active)', () => {
@@ -4755,12 +4755,12 @@ describe('quiescent store', () => {
 		const sent = sendQueuedFn.mock.calls[0][0];
 		const ids = sent.batch.map((c) => c.id);
 
-		// Settle two of three -- still not quiescent
+		// Settle two of three - still not quiescent
 		simulateRpcResponse(ids[0], { ok: true, data: [], topic: 'a', merge: 'crud', key: 'id' });
 		simulateRpcResponse(ids[1], { ok: true, data: [], topic: 'b', merge: 'crud', key: 'id' });
 		expect(values[values.length - 1]).toBe(false);
 
-		// Settle the third -- now quiescent
+		// Settle the third - now quiescent
 		simulateRpcResponse(ids[2], { ok: true, data: [], topic: 'c', merge: 'crud', key: 'id' });
 		expect(values[values.length - 1]).toBe(true);
 
@@ -4808,7 +4808,7 @@ describe('quiescent store', () => {
 		const values = [];
 		const unsub = quiescent.subscribe((v) => values.push(v));
 
-		// Create a stream but don't subscribe -- should stay quiescent
+		// Create a stream but don't subscribe - should stay quiescent
 		__stream('feed/uncalled', { merge: 'crud', key: 'id' });
 		expect(values[values.length - 1]).toBe(true);
 
@@ -4837,7 +4837,7 @@ describe('quiescent store', () => {
 	});
 });
 
-// -- failure re-export --------------------------------------------------------
+// - failure re-export --------------------------------------------------------
 
 describe('failure store', () => {
 	it('is re-exported from the adapter client', () => {
@@ -4900,7 +4900,7 @@ describe('failure store', () => {
 	});
 });
 
-// -- CRUD max trimming --------------------------------------------------------
+// - CRUD max trimming --------------------------------------------------------
 
 describe('__stream() CRUD max trimming', () => {
 	it('prepend mode drops oldest items from the end when exceeding max', async () => {
@@ -4920,7 +4920,7 @@ describe('__stream() CRUD max trimming', () => {
 			max: 3
 		});
 
-		// Add a 4th item (prepend) -- oldest (id:3 at the end) should be dropped
+		// Add a 4th item (prepend) - oldest (id:3 at the end) should be dropped
 		simulateTopicMessage('feed', { event: 'created', data: { id: 4 } });
 
 		const last = values[values.length - 1];
@@ -4947,7 +4947,7 @@ describe('__stream() CRUD max trimming', () => {
 			max: 3
 		});
 
-		// Add a 4th item (append) -- oldest (id:1 at the start) should be dropped
+		// Add a 4th item (append) - oldest (id:1 at the start) should be dropped
 		simulateTopicMessage('log', { event: 'created', data: { id: 4 } });
 
 		const last = values[values.length - 1];
@@ -4972,7 +4972,7 @@ describe('__stream() CRUD max trimming', () => {
 			key: 'id'
 		});
 
-		// Add more items -- nothing should be trimmed
+		// Add more items - nothing should be trimmed
 		for (let i = 100; i < 110; i++) {
 			simulateTopicMessage('all', { event: 'created', data: { id: i } });
 		}
@@ -5030,7 +5030,7 @@ describe('__stream() CRUD max trimming', () => {
 			max: 3
 		});
 
-		// Re-create existing item -- should update in place, not grow
+		// Re-create existing item - should update in place, not grow
 		simulateTopicMessage('dup', { event: 'created', data: { id: 2, extra: true } });
 
 		const last = values[values.length - 1];
@@ -5067,7 +5067,7 @@ describe('__stream() CRUD max trimming', () => {
 	});
 });
 
-// -- stream .error and .status stores -----------------------------------------
+// - stream .error and .status stores -----------------------------------------
 
 describe('stream .error and .status', () => {
 	it('starts with status loading and error null', async () => {
@@ -5244,7 +5244,7 @@ describe('stream .error and .status', () => {
 	});
 });
 
-// -- empty store --------------------------------------------------------------
+// - empty store --------------------------------------------------------------
 
 describe('empty store', () => {
 	it('is a readable that holds undefined', async () => {
@@ -5256,7 +5256,7 @@ describe('empty store', () => {
 	});
 });
 
-// -- __rpc().with({ timeout }) ----------------------------------------------
+// - __rpc().with({ timeout }) ----------------------------------------------
 
 describe('__rpc().with({ timeout })', () => {
 	it('returns the base callable when no options are provided', () => {
@@ -5369,7 +5369,7 @@ describe('__rpc().with({ timeout })', () => {
 	});
 });
 
-// -- refreshed event (stream staleness watchdog reload) ----------------------
+// - refreshed event (stream staleness watchdog reload) ----------------------
 
 describe('refreshed event', () => {
 	it('replaces crud state with the new array and rebuilds the index', async () => {
@@ -5395,7 +5395,7 @@ describe('refreshed event', () => {
 		const lastValue = values[values.length - 1];
 		expect(lastValue).toEqual([{ id: 3, name: 'C' }, { id: 4, name: 'D' }]);
 
-		// After refresh, the index is rebuilt for the new keys -- a follow-up
+		// After refresh, the index is rebuilt for the new keys - a follow-up
 		// updated event for an item from the refreshed set finds its slot.
 		simulateTopicMessage('items', {
 			event: 'updated',
@@ -5481,7 +5481,7 @@ describe('refreshed event', () => {
 		const lastValue = values[values.length - 1];
 		expect(lastValue).toEqual([{ key: 'u2', name: 'Bob' }, { key: 'u3', name: 'Carol' }]);
 
-		// Index is rebuilt -- a follow-up leave for one of the refreshed keys
+		// Index is rebuilt - a follow-up leave for one of the refreshed keys
 		// removes it correctly.
 		simulateTopicMessage('room/presence', {
 			event: 'leave',
@@ -5512,7 +5512,7 @@ describe('refreshed event', () => {
 		// Apply an optimistic placeholder (registers in _optimisticKeys)
 		store.optimistic('created', { id: 'temp-x', title: 'pending' });
 
-		// Refresh arrives -- server's authoritative state replaces everything,
+		// Refresh arrives - server's authoritative state replaces everything,
 		// and the optimistic-key tracking is cleared.
 		simulateTopicMessage('todos', {
 			event: 'refreshed',
@@ -5521,13 +5521,13 @@ describe('refreshed event', () => {
 
 		const lastValue = values[values.length - 1];
 		expect(lastValue).toEqual([{ id: 1, title: 'a' }, { id: 2, title: 'b' }]);
-		// Optimistic was wiped -- the temp-x placeholder is gone, no stale dedup state.
+		// Optimistic was wiped - the temp-x placeholder is gone, no stale dedup state.
 
 		unsub();
 	});
 });
 
-// -- onPush -------------------------------------------------------------------
+// - onPush -------------------------------------------------------------------
 
 describe('onPush()', () => {
 	it('registers a handler that runs on incoming request frames', async () => {
@@ -5604,7 +5604,7 @@ describe('onPush()', () => {
 	});
 });
 
-// -- __stream() Svelte 5 .rune() helper ---------------------------------------
+// - __stream() Svelte 5 .rune() helper ---------------------------------------
 
 describe('__stream() rune()', () => {
 	async function setupStream() {
@@ -5696,7 +5696,7 @@ describe('__stream() rune()', () => {
 	});
 });
 
-// -- __stream() .map() projection helper --------------------------------------
+// - __stream() .map() projection helper --------------------------------------
 
 describe('__stream() map()', () => {
 	async function setupStream() {
@@ -5844,7 +5844,7 @@ describe('__stream() map()', () => {
 	});
 });
 
-// -- Capacity caps ------------------------------------------------------------
+// - Capacity caps ------------------------------------------------------------
 
 describe('MAX_OPTIMISTIC_QUEUE_DEPTH (REJECT)', () => {
 	async function setupCrudStream(path, topic, initial = []) {
@@ -5921,7 +5921,7 @@ describe('MAX_OPTIMISTIC_QUEUE_DEPTH (REJECT)', () => {
 	});
 });
 
-// -- Production assertions (client) -------------------------------------------
+// - Production assertions (client) -------------------------------------------
 
 describe('assert() helper (client)', () => {
 	let errSpy;

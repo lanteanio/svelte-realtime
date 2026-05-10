@@ -26,7 +26,7 @@ export type TransportMap = Record<string, TransportEntry>;
  * (and any client-side handler that rethrows the load error) can render
  * targeted UI per cause.
  *
- * Wire from the shared `src/hooks.js` (NOT `hooks.server.js`) -- both
+ * Wire from the shared `src/hooks.js` (NOT `hooks.server.js`) - both
  * the server's `encode` and the client's `decode` need to be visible
  * during build, and SvelteKit's transport hook is a shared-context
  * primitive.
@@ -55,7 +55,7 @@ export type TransportMap = Record<string, TransportEntry>;
  *
  * @param extras Additional transport entries to merge alongside the
  *   built-in `RpcError` and `LiveError` registrations. User entries
- *   win on key conflict -- override the defaults if your app needs
+ *   win on key conflict - override the defaults if your app needs
  *   different serialization for either of them.
  */
 export function realtimeTransport(extras?: TransportMap): TransportMap;

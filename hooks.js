@@ -12,7 +12,7 @@ import { LiveError } from './server.js';
  * (and any client-side handler that rethrows the load error) can render
  * targeted UI per cause.
  *
- * Wire from the shared `src/hooks.js` (NOT `hooks.server.js`) -- both
+ * Wire from the shared `src/hooks.js` (NOT `hooks.server.js`) - both
  * the server's `encode` and the client's `decode` need to be visible
  * during build, and SvelteKit's transport hook is a shared-context
  * primitive.

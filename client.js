@@ -14,7 +14,7 @@ export const empty = readable(undefined);
 
 const _textEncoder = new TextEncoder();
 
-// -- Bounded-by-default capacity caps (client side) -------------------------
+// - Bounded-by-default capacity caps (client side) -------------------------
 // Existing caps not re-declared (already enforced at their sites):
 //   _historyMax           50    FIFO    per-stream undo/redo
 //   _MAX_STREAM_EVENTS    20    FIFO    per-stream devtools event ring
@@ -188,7 +188,7 @@ function _removeInFlight() {
  *
  * Useful for rendering a single page-level loading state instead of
  * per-stream spinners, and for detecting "all streams have caught up
- * after a reconnect" -- watch for a `false -> true` transition while
+ * after a reconnect" - watch for a `false -> true` transition while
  * the adapter's connection status is `'open'`.
  *
  * @type {import('svelte/store').Readable<boolean>}
@@ -437,7 +437,7 @@ function ensureDisconnectListener() {
 				});
 			}
 		} catch {
-			// _connect may not be callable yet (SSR) -- that's fine
+			// _connect may not be callable yet (SSR) - that's fine
 		}
 	}
 }
@@ -459,7 +459,7 @@ function _warnCoalesceOnce(path) {
 	_dedupCoalesceWarned.add(path);
 	console.warn(
 		"[svelte-realtime] coalesced two or more identical calls to '" + path +
-		"' within one microtask -- only one wire request was sent and all callers " +
+		"' within one microtask - only one wire request was sent and all callers " +
 		"received the same response. Dedup is intentional for accidental double-taps. " +
 		"If you wanted N parallel requests (stress test, fan-out), call `.fresh(...args)` " +
 		"on the rpc to bypass dedup. Warned once per path per session.\n  See: https://svti.me/dedup"
@@ -512,7 +512,7 @@ export function __rpc(path) {
 		return _sendRpc(path, args);
 	}
 
-	/** Bypass deduplication -- always send a fresh request. */
+	/** Bypass deduplication - always send a fresh request. */
 	rpcCall.fresh = function freshCall(...args) {
 		return _sendRpc(path, args);
 	};
@@ -520,10 +520,10 @@ export function __rpc(path) {
 	/**
 	 * Attach per-call options. Returns a callable bound to those options.
 	 *
-	 * - `idempotencyKey` -- the server-side handler must be wrapped with
+	 * - `idempotencyKey` - the server-side handler must be wrapped with
 	 *   `live.idempotent({...})` for the key to take effect. Calls bound
 	 *   to the same key dedup against each other within a microtask.
-	 * - `timeout` -- per-RPC override of the global timeout (default 30s).
+	 * - `timeout` - per-RPC override of the global timeout (default 30s).
 	 *   Use for known-slow queries; the call waits up to `timeout` ms
 	 *   before rejecting with `TIMEOUT`. Per-call `timeout` is ignored
 	 *   inside `batch(fn)` (the batch-level timer governs all collected
@@ -537,7 +537,7 @@ export function __rpc(path) {
 		if (!idempotencyKey && !timeout) return rpcCall;
 		return function withCall(...args) {
 			// Dedup only when an idempotency key is bound. Timeout-only calls
-			// bypass dedup -- the longer-waiting caller would otherwise be
+			// bypass dedup - the longer-waiting caller would otherwise be
 			// rejected at the shorter call's timeout.
 			if (!_batchCollector && idempotencyKey) {
 				const dedupKey = path + '\0K' + idempotencyKey;
@@ -562,9 +562,9 @@ export function __rpc(path) {
 	 * helpers don't have to capture them in a closure.
 	 *
 	 * Two call shapes:
-	 * - **Direct**: `rpc.createOptimistic(store, callArgs, change)` -- runs
+	 * - **Direct**: `rpc.createOptimistic(store, callArgs, change)` - runs
 	 *   immediately, returns the asyncOp's result Promise.
-	 * - **Curried**: `rpc.createOptimistic(store, change)` -- returns a
+	 * - **Curried**: `rpc.createOptimistic(store, change)` - returns a
 	 *   `(...callArgs) => Promise` callable bound to that store + change.
 	 *   Useful when one optimistic-update setup applies to many call sites.
 	 *
@@ -641,7 +641,7 @@ function _sendRpc(path, args, idempotencyKey, timeout) {
 			if (_offlineQueue.length >= maxQueue) {
 				// Drop oldest
 				const dropped = _offlineQueue.shift();
-				if (dropped) dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow -- oldest mutation dropped'));
+				if (dropped) dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped'));
 			}
 			_offlineQueue.push({ path, args, queuedAt: Date.now(), resolve, reject, idempotencyKey, timeout });
 		});
@@ -672,7 +672,7 @@ function _sendRpc(path, args, idempotencyKey, timeout) {
 		const timer = setTimeout(() => {
 			if (Date.now() - _startTime > sleepThreshold) {
 				// Device was sleeping. Clean up the pending entry so it doesn't hang
-				// forever -- the disconnect listener or reconnect will handle the actual error.
+				// forever - the disconnect listener or reconnect will handle the actual error.
 				pending.delete(id);
 				_devtoolsEnd(id, false, 'SLEEP_TIMEOUT');
 				reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
@@ -758,12 +758,12 @@ export function __binaryRpc(path) {
 	};
 }
 
-// -- Streaming uploads (live.upload) -----------------------------------------
+// - Streaming uploads (live.upload) -----------------------------------------
 //
 // Wire format mirrors the server side:
 //
 //   Chunk frame (client -> server):
-//     [0]      0x01 -- chunk marker
+//     [0]      0x01 - chunk marker
 //     [1]      flags  (bit 0: hasArgs, bit 1: isLast, bits 2-7: reserved=0)
 //     [2..5]   streamId, big-endian uint32
 //     [6..9]   seq, big-endian uint32 (0-indexed, contiguous)
@@ -804,7 +804,7 @@ let _discoveredUploadMaxFrameSize = 0;
 
 /**
  * Compute the chunk size for a new upload. Priority:
- *   1. User-configured `configure({ upload: { chunkSize } })` -- explicit wins.
+ *   1. User-configured `configure({ upload: { chunkSize } })` - explicit wins.
  *   2. Auto-discovered: 90% of the server's `maxPayloadLength` (leaves
  *      ~10% for the 12-byte frame header + chunk-0 args JSON).
  *   3. Conservative default 12KB.
@@ -853,7 +853,7 @@ function _streamIdHexClient(streamId) {
  * @param {number} seq
  * @param {boolean} isLast
  * @param {boolean} hasArgs
- * @param {string | null} argsJson -- pre-serialised JSON header for chunk 0
+ * @param {string | null} argsJson - pre-serialised JSON header for chunk 0
  * @param {Uint8Array | null} payload
  * @returns {ArrayBuffer}
  */
@@ -1140,17 +1140,17 @@ function _sendUploadChunk(conn, handle, seq, isLast, hasArgs, argsJson, payload)
  *
  * Promise-shaped: `await handle` resolves with the server's return value
  * or rejects with `RpcError`. Codes seen at this layer:
- *   - `CANCELLED`            -- caller cancelled (or AbortSignal aborted)
- *   - `DISCONNECTED`         -- WS closed mid-upload
- *   - `CONNECTION_CLOSED`    -- WS terminated before start
- *   - `SOURCE_ERROR`         -- the source iterator threw (filesystem, etc.)
+ *   - `CANCELLED`            - caller cancelled (or AbortSignal aborted)
+ *   - `DISCONNECTED`         - WS closed mid-upload
+ *   - `CONNECTION_CLOSED`    - WS terminated before start
+ *   - `SOURCE_ERROR`         - the source iterator threw (filesystem, etc.)
  *   - any code from the server (`PAYLOAD_TOO_LARGE`, `NOT_FOUND`, ...)
  *
  * Events:
- *   - `progress` -- { sent, total?, percent?, chunks, bytesPerSec }
- *   - `complete` -- the server's return value
- *   - `error`    -- the RpcError that caused rejection
- *   - `cancel`   -- the cancel reason (only if cancelled, fires before `error`)
+ *   - `progress` - { sent, total?, percent?, chunks, bytesPerSec }
+ *   - `complete` - the server's return value
+ *   - `error`    - the RpcError that caused rejection
+ *   - `cancel`   - the cancel reason (only if cancelled, fires before `error`)
  */
 class UploadHandle {
 	/**
@@ -1341,7 +1341,7 @@ class UploadHandle {
 			await _pumpUpload(this);
 		} catch (err) {
 			if (this._settled) return;
-			// Pump errored without a server response -- typically a source-iter
+			// Pump errored without a server response - typically a source-iter
 			// failure (fs read, ReadableStream throw). Send a cancel so the
 			// server doesn't keep waiting for chunks that won't arrive.
 			if (!this._cancelled) {
@@ -1531,7 +1531,7 @@ export function __stream(path, options, isDynamic) {
 /**
  * Test/demo affordance: create a parallel stream store at a chosen
  * client-side `schemaVersion`. Walks the same wire path as a real
- * subscribe -- the server sees a normal `subscribe { schemaVersion }`
+ * subscribe - the server sees a normal `subscribe { schemaVersion }`
  * envelope, runs its registered migrate chain forward to the current
  * server version, and returns the migrated payload, which this store
  * renders. Used by `svelte-realtime/test-client`'s `subscribeAt`; not
@@ -1825,7 +1825,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * `index`, and `optimisticKeys` in place; closure constants
 	 * (`merge`, `key`, `prepend`, `max`) are captured from the enclosing
 	 * stream scope. Does not touch `currentValue`, `_index`, `_lastSeq`,
-	 * `_dirty`, the store, or history -- the closure wrapper is
+	 * `_dirty`, the store, or history - the closure wrapper is
 	 * responsible for those.
 	 *
 	 * Lifted out of `_applyMerge` so that future code paths can apply the
@@ -1988,7 +1988,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * @param {{ event: string, data: any, seq?: number }} envelope
 	 * @returns {boolean} true if currentValue was replaced with a fresh
 	 *   reference (caller can skip the defensive `.slice()` before
-	 *   publish). Always false in queue mode -- caller should recompute
+	 *   publish). Always false in queue mode - caller should recompute
 	 *   the display via `_recomputeDisplay()` instead.
 	 */
 	function _applyMerge(envelope) {
@@ -2018,7 +2018,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 *
 	 * Only runs for keyed merge strategies (crud, presence, cursor) and
 	 * for "additive/idempotent" event names. A server `deleted` matching
-	 * an optimistic `created` is NOT treated as confirmation -- those
+	 * an optimistic `created` is NOT treated as confirmation - those
 	 * combinations are exotic races and fall through to graduate-on-
 	 * success, which is idempotent for crud's index-keyed updates.
 	 *
@@ -2055,7 +2055,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * rebuilt from the resulting value.
 	 *
 	 * For event-shaped changes, the change is applied via
-	 * `_applyMergeFn` -- same merge semantics that server events use.
+	 * `_applyMergeFn` - same merge semantics that server events use.
 	 *
 	 * @param {any} value
 	 * @param {Map<any, number>} index
@@ -2201,7 +2201,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		// Replay end marker (adapter 0.4.0 extensions): object with reqId
 		if (envelope.data && typeof envelope.data === 'object' && envelope.data.reqId !== undefined) {
 			if (envelope.data.truncated === true) {
-				// Cache miss -- trigger a full refetch (reset seq so we get full data)
+				// Cache miss - trigger a full refetch (reset seq so we get full data)
 				_lastSeq = null;
 				if (topicUnsub) { topicUnsub(); topicUnsub = null; }
 				initialLoaded = false;
@@ -2209,7 +2209,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				buffer = [];
 				fetchAndSubscribe();
 			}
-			// Non-truncated end marker -- replay complete, nothing to do
+			// Non-truncated end marker - replay complete, nothing to do
 			return;
 		}
 
@@ -2306,7 +2306,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				if (response.prepend !== undefined) prepend = response.prepend;
 				if (response.max !== undefined) max = response.max;
 
-				// Handle unchanged response (delta sync -- nothing changed)
+				// Handle unchanged response (delta sync - nothing changed)
 				if (response.unchanged === true) {
 					if (topic && !topicUnsub) {
 						const topicStore = on(topic);
@@ -2476,7 +2476,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		subscribe(fn) {
 			if (subCount++ === 0) {
 				if (_pendingCleanup) {
-					// Rapid resub -- cancel the pending cleanup, subscription is still alive
+					// Rapid resub - cancel the pending cleanup, subscription is still alive
 					_pendingCleanup = false;
 				} else {
 				// First subscriber - start the stream
@@ -2629,7 +2629,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		 * (slice for arrays, object spread otherwise). Top-level shape
 		 * changes (push, pop, filter, splice) participate in replay
 		 * cleanly; in-place mutations of individual items
-		 * (e.g. `draft[0].name = 'x'`) are NOT isolated -- the draft and
+		 * (e.g. `draft[0].name = 'x'`) are NOT isolated - the draft and
 		 * the prior items share references. To mutate an item field,
 		 * replace the whole item:
 		 * `draft[i] = { ...draft[i], name: 'x' }`.
@@ -3189,7 +3189,7 @@ function _checkArgs(path, args) {
 		const t = typeof arg;
 		if (t === 'function' || t === 'symbol' || t === 'bigint' || t === 'undefined') {
 			console.warn(
-				`[svelte-realtime] RPC '${path}' called with non-JSON-serializable argument at index ${i} (${t}) -- this will be lost during transmission\n  See: https://svti.me/rpc`
+				`[svelte-realtime] RPC '${path}' called with non-JSON-serializable argument at index ${i} (${t}) - this will be lost during transmission\n  See: https://svti.me/rpc`
 			);
 		}
 	}
@@ -3422,7 +3422,7 @@ export function onSignal(userId, callback) {
 	});
 }
 
-// -- onPush -------------------------------------------------------------------
+// - onPush -------------------------------------------------------------------
 //
 // Multiplexes server-initiated request frames by event name. The adapter's
 // onRequest takes a single (event, data) handler; we keep a Map<event, fn>
@@ -3504,7 +3504,7 @@ export function _resetPushHandlers() {
 	}
 }
 
-// -- DevTools instrumentation (non-production only) ---------------------------
+// - DevTools instrumentation (non-production only) ---------------------------
 
 /**
  * Default key names whose values are replaced with `'[REDACTED]'` when

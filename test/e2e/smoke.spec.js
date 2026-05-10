@@ -11,7 +11,7 @@ test.beforeEach(async ({ page }) => {
 	await page.evaluate(() => window.__test.reset());
 });
 
-// 11 -- stream subscribe + initial fetch renders ---------------------------
+// 11 - stream subscribe + initial fetch renders ---------------------------
 
 test('stream subscribe + initial fetch renders empty list', async ({ page }) => {
 	await expect.poll(async () => {
@@ -20,7 +20,7 @@ test('stream subscribe + initial fetch renders empty list', async ({ page }) => 
 	}, { timeout: 5000 }).toBe(0);
 });
 
-// 12 -- RPC roundtrip returns server response ------------------------------
+// 12 - RPC roundtrip returns server response ------------------------------
 
 test('echo RPC roundtrip returns server response', async ({ page }) => {
 	const r = await page.evaluate(() => window.__test.callEcho('hello'));
@@ -28,7 +28,7 @@ test('echo RPC roundtrip returns server response', async ({ page }) => {
 	expect(typeof r.at).toBe('number');
 });
 
-// 13 -- server publish reflected in subscribed UI --------------------------
+// 13 - server publish reflected in subscribed UI --------------------------
 
 test('server publish via RPC reflects in subscribed stream UI', async ({ page }) => {
 	const v = await page.evaluate(() => window.__test.publishOne());

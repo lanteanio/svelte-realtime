@@ -134,7 +134,14 @@ export default defineConfig({
 
 writeFileSync(
 	join(dest, 'src', 'hooks.ws.ts'),
-	`import { message } from 'svelte-realtime/server';
+	`// SECURITY: this scaffolded upgrade() hook authenticates every connection
+// with a random UUID - nobody is rejected and nobody is identified. It exists
+// to make the scaffold work out of the box. Before deploying anything that
+// touches a real session store, real users, or anything else worth protecting,
+// replace this with a real authentication step that validates a session
+// cookie / bearer token / signed handshake against your identity provider.
+// Returning false from upgrade() rejects the connection.
+import { message } from 'svelte-realtime/server';
 export { message };
 
 export function upgrade() {

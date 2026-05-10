@@ -25,7 +25,7 @@ export class RpcError extends Error {
 
 /**
  * Create a callable RPC function for a given path.
- * Used by generated client stubs -- not called directly by users.
+ * Used by generated client stubs - not called directly by users.
  *
  * @param path - RPC path (e.g. `'chat/sendMessage'`)
  * @returns An async function that sends the RPC and returns the result
@@ -33,7 +33,7 @@ export class RpcError extends Error {
  * @internal
  */
 export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
-	/** Bypass deduplication -- always send a fresh request. */
+	/** Bypass deduplication - always send a fresh request. */
 	fresh: (...args: any[]) => Promise<any>;
 	/**
 	 * Attach per-call options. Returns a callable bound to those options.
@@ -46,7 +46,7 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
 	 * - `timeout` overrides the global RPC timeout (default 30s) for this
 	 *   call only. Use for known-slow queries; the call waits up to
 	 *   `timeout` ms before rejecting with `RpcError('TIMEOUT', ...)`.
-	 *   Per-call `timeout` is ignored inside `batch(fn)` -- the
+	 *   Per-call `timeout` is ignored inside `batch(fn)` - the
 	 *   batch-level timer governs all collected calls there.
 	 *
 	 * Calling `.with({})` (or omitting both options) returns the base
@@ -84,14 +84,14 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
 	 * ```js
 	 * import { sendMessage, messages } from '$live/chat';
 	 *
-	 * // Direct form -- one-shot
+	 * // Direct form - one-shot
 	 * await sendMessage.createOptimistic(
 	 *   messages,
 	 *   ['Hello!'],
 	 *   (current, args) => [...current, { id: tempId(), text: args[0] }]
 	 * );
 	 *
-	 * // Curried form -- bind once, call many times
+	 * // Curried form - bind once, call many times
 	 * const optimisticSend = sendMessage.createOptimistic(
 	 *   messages,
 	 *   (current, args) => [...current, { id: tempId(), text: args[0] }]
@@ -119,7 +119,7 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
 
 /**
  * Create a reactive stream store for a given path.
- * Used by generated client stubs -- not called directly by users.
+ * Used by generated client stubs - not called directly by users.
  *
  * The store value is:
  * - `undefined` while loading
@@ -423,10 +423,10 @@ export interface UploadProgress {
  *
  * Promise-shaped: `await handle` resolves with the server's return value
  * or rejects with `RpcError`. Codes seen at this layer:
- *   - `CANCELLED`            -- caller cancelled (or AbortSignal aborted)
- *   - `DISCONNECTED`         -- WS closed mid-upload
- *   - `CONNECTION_CLOSED`    -- WS terminated before start
- *   - `SOURCE_ERROR`         -- the source iterator threw
+ *   - `CANCELLED`            - caller cancelled (or AbortSignal aborted)
+ *   - `DISCONNECTED`         - WS closed mid-upload
+ *   - `CONNECTION_CLOSED`    - WS terminated before start
+ *   - `SOURCE_ERROR`         - the source iterator threw
  *   - any code from the server (`PAYLOAD_TOO_LARGE`, `NOT_FOUND`, ...)
  */
 export interface UploadHandle<T = any> extends Promise<T> {
@@ -671,11 +671,11 @@ export function onDerived<T = unknown>(
  * `code`) or from the HTTP auth preflight (`'auth-preflight'`, with an
  * HTTP `status`). Re-exported from `svelte-adapter-uws/client`.
  *
- * - `TERMINAL` -- server permanently rejected the client (1008 / 4401 / 4403). Retry loop stopped.
- * - `EXHAUSTED` -- `maxReconnectAttempts` hit; the network never recovered.
- * - `THROTTLE` -- server signalled rate-limiting (4429). Reconnect still scheduled, jumped ahead in the backoff curve.
- * - `RETRY` -- normal transient drop (1006 abnormal, network blip, server restart). Reconnect in progress.
- * - `AUTH` -- auth preflight (`{ auth: true }`) failed before the WebSocket was opened. 4xx is terminal; 5xx and network errors retry.
+ * - `TERMINAL` - server permanently rejected the client (1008 / 4401 / 4403). Retry loop stopped.
+ * - `EXHAUSTED` - `maxReconnectAttempts` hit; the network never recovered.
+ * - `THROTTLE` - server signalled rate-limiting (4429). Reconnect still scheduled, jumped ahead in the backoff curve.
+ * - `RETRY` - normal transient drop (1006 abnormal, network blip, server restart). Reconnect in progress.
+ * - `AUTH` - auth preflight (`{ auth: true }`) failed before the WebSocket was opened. 4xx is terminal; 5xx and network errors retry.
  */
 export type Failure =
 	| { kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY'; code: number; reason: string }
@@ -694,7 +694,7 @@ export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AU
  * THROTTLE / RETRY close codes, on the reconnect cap being exhausted
  * (`'EXHAUSTED'`), and on auth-preflight failures (`'AUTH'`). Cleared
  * on the next successful `'open'`. NOT set on an intentional `close()`
- * call -- `failure === null` paired with the underlying status of
+ * call - `failure === null` paired with the underlying status of
  * `'failed'` is the deliberately-ended state.
  *
  * Pair with the connection status to render targeted UI per failure
@@ -732,7 +732,7 @@ export const failure: Readable<Failure | null>;
  *
  * Useful for rendering a single page-level loading state instead of
  * per-stream spinners, and for detecting "all streams have caught up
- * after a reconnect" -- watch for a `false -> true` transition while
+ * after a reconnect" - watch for a `false -> true` transition while
  * the adapter's connection status is `'open'`.
  *
  * Streams contribute to the in-flight count from their first
@@ -779,7 +779,7 @@ export const quiescent: Readable<boolean>;
  * Initial value is `'healthy'`; flips to `'degraded'` on a server-
  * published `degraded` event, back to `'healthy'` on `recovered`.
  *
- * Used to render a "real-time updates paused -- reconnecting" banner
+ * Used to render a "real-time updates paused - reconnecting" banner
  * when the upstream pub/sub bus's circuit breaker trips. The
  * extensions package's `createPubSubBus` publishes these events on
  * the default `__realtime` channel; this store surfaces them on the

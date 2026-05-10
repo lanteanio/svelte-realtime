@@ -29,7 +29,7 @@ test.beforeEach(async ({ page }) => {
 	await page.evaluate(() => window.__test.reset());
 });
 
-// 1 -- single client join then leave -------------------------------------
+// 1 - single client join then leave -------------------------------------
 
 test('single client: join then leave updates the roster', async ({ page }) => {
 	await page.evaluate(() => window.__test.join('Alpha'));
@@ -38,7 +38,7 @@ test('single client: join then leave updates the roster', async ({ page }) => {
 	await page.evaluate(() => window.__test.waitRoster([]));
 });
 
-// 2 -- A joins, B sees A in the roster (cross-client visibility) --------
+// 2 - A joins, B sees A in the roster (cross-client visibility) --------
 
 test('cross-client: A joins, B sees A in the roster', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -55,7 +55,7 @@ test('cross-client: A joins, B sees A in the roster', async ({ browser }, testIn
 	}
 });
 
-// 3 -- A and B both join, both see the full roster ---------------------
+// 3 - A and B both join, both see the full roster ---------------------
 
 test('A and B both join; both see the full roster', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -78,7 +78,7 @@ test('A and B both join; both see the full roster', async ({ browser }, testInfo
 	}
 });
 
-// 4 -- A leaves, B sees A removed --------------------------------------
+// 4 - A leaves, B sees A removed --------------------------------------
 
 test('A leaves explicitly; B sees A removed from the roster', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -102,7 +102,7 @@ test('A leaves explicitly; B sees A removed from the roster', async ({ browser }
 	}
 });
 
-// 5 -- Late join: C subscribes after A and B joined; sees the full roster
+// 5 - Late join: C subscribes after A and B joined; sees the full roster
 
 test('late join: C subscribes after A and B; initial fetch sees full roster', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -130,7 +130,7 @@ test('late join: C subscribes after A and B; initial fetch sees full roster', as
 	}
 });
 
-// 6 -- Re-join updates the entry's name (key is stable; merge replaces)
+// 6 - Re-join updates the entry's name (key is stable; merge replaces)
 
 test('rejoin with a new name updates the entry in place (key-stable)', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);

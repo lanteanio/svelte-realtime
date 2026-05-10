@@ -27,7 +27,7 @@ test.beforeEach(async ({ page }) => {
 	await page.evaluate(() => window.__test.reset());
 });
 
-// 1 -- single client move + remove ----------------------------------------
+// 1 - single client move + remove ----------------------------------------
 
 test('single client: move then remove updates the cursor list', async ({ page }) => {
 	await page.evaluate(() => window.__test.move({ x: 10, y: 20, color: '#ff0000' }));
@@ -38,7 +38,7 @@ test('single client: move then remove updates the cursor list', async ({ page })
 	await page.evaluate(() => window.__test.waitCursors([]));
 });
 
-// 2 -- A moves; B sees A's cursor (cross-client visibility) ---------------
+// 2 - A moves; B sees A's cursor (cross-client visibility) ---------------
 
 test('cross-client: A moves, B sees A cursor at the same position', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -57,7 +57,7 @@ test('cross-client: A moves, B sees A cursor at the same position', async ({ bro
 	}
 });
 
-// 3 -- A and B both move; both see each other ---------------------------
+// 3 - A and B both move; both see each other ---------------------------
 
 test('A and B both move; each side sees both cursors', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -80,7 +80,7 @@ test('A and B both move; each side sees both cursors', async ({ browser }, testI
 	}
 });
 
-// 4 -- repeated move from the same key updates in place -----------------
+// 4 - repeated move from the same key updates in place -----------------
 
 test('repeated move from A updates A cursor in place (key-stable)', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -103,7 +103,7 @@ test('repeated move from A updates A cursor in place (key-stable)', async ({ bro
 	}
 });
 
-// 5 -- A removes; B sees A's cursor disappear --------------------------
+// 5 - A removes; B sees A's cursor disappear --------------------------
 
 test('A removes; B sees A removed from the cursor list', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -129,7 +129,7 @@ test('A removes; B sees A removed from the cursor list', async ({ browser }, tes
 	}
 });
 
-// 6 -- late join: C subscribes after A and B; sees both cursors --------
+// 6 - late join: C subscribes after A and B; sees both cursors --------
 
 test('late join: C subscribes after A and B; initial fetch sees both cursors', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);

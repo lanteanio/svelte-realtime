@@ -29,7 +29,7 @@ test.beforeEach(async ({ page }) => {
 	await page.evaluate(() => window.__test.reset());
 });
 
-// 1 -- static sources cross-client: A subscribes, B publishes, A sees recompute
+// 1 - static sources cross-client: A subscribes, B publishes, A sees recompute
 
 test('static sources cross-client: A subscribes, B publishes, A sees recompute', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -49,7 +49,7 @@ test('static sources cross-client: A subscribes, B publishes, A sees recompute',
 	}
 });
 
-// 2 -- multi-source recompute: orders then users both trigger distinct recomputes
+// 2 - multi-source recompute: orders then users both trigger distinct recomputes
 
 test('multi-source: publishing to each source produces a distinct recompute', async ({ page }) => {
 	await page.evaluate(() => window.__test.incOrders());
@@ -66,7 +66,7 @@ test('multi-source: publishing to each source produces a distinct recompute', as
 	expect(afterUsers.recomputeCount).toBeGreaterThan(afterOrders.recomputeCount);
 });
 
-// 3 -- debounce: 5 rapid publishes within 50ms coalesce into a single recompute
+// 3 - debounce: 5 rapid publishes within 50ms coalesce into a single recompute
 
 test('debounce: rapid source publishes coalesce into a single recompute', async ({ page }) => {
 	const before = await page.evaluate(() => window.__test.getCounts());
@@ -94,7 +94,7 @@ test('debounce: rapid source publishes coalesce into a single recompute', async 
 	expect(debouncedValue.orders).toBe(5);
 });
 
-// 4 -- multi-client fan-out: one publish, both A and B see the recompute
+// 4 - multi-client fan-out: one publish, both A and B see the recompute
 
 test('multi-client fan-out: one source publish, both subscribers see the recompute', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -120,7 +120,7 @@ test('multi-client fan-out: one source publish, both subscribers see the recompu
 	}
 });
 
-// 5 -- dynamic derived: publishing to a different orgId does not recompute
+// 5 - dynamic derived: publishing to a different orgId does not recompute
 
 test('dynamic derived: publishing to a non-watched org leaves the watched org untouched', async ({ page }) => {
 	// Subscribe to o1 (already done by ready()). Confirm initial state.
@@ -128,14 +128,14 @@ test('dynamic derived: publishing to a non-watched org leaves the watched org un
 	const before = await page.evaluate(() => window.__test.getCounts());
 	const o1Before = (before.orgs && before.orgs.o1) || 0;
 
-	// Publish to o1's source -- recomputes orgStats('o1').
+	// Publish to o1's source - recomputes orgStats('o1').
 	await page.evaluate(() => window.__test.publishOrgSource('o1', 'memberships'));
 	await page.evaluate(
 		(target) => window.__test.waitOrg1('v && v.recomputed === ' + target),
 		o1Before + 1
 	);
 
-	// Publish to o2's source -- must NOT touch the o1 instance counter.
+	// Publish to o2's source - must NOT touch the o1 instance counter.
 	const beforeUntouched = await page.evaluate(() => window.__test.getCounts());
 	await page.evaluate(() => window.__test.publishOrgSource('o2', 'memberships'));
 	await page.waitForTimeout(300);
@@ -149,7 +149,7 @@ test('dynamic derived: publishing to a non-watched org leaves the watched org un
 	);
 });
 
-// 6 -- late join: B subscribes after A publishes; B's initial fetch reflects it
+// 6 - late join: B subscribes after A publishes; B's initial fetch reflects it
 
 test('late join: B subscribes after A publishes; initial fetch reflects derived', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);

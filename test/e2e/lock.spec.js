@@ -6,7 +6,7 @@ test.beforeEach(async ({ page }) => {
 	await page.evaluate(() => window.__test.reset());
 });
 
-// 14 -- live.lock serializes concurrent same-key calls in FIFO order -------
+// 14 - live.lock serializes concurrent same-key calls in FIFO order -------
 
 test('live.lock serializes concurrent same-key calls', async ({ page }) => {
 	const log = await page.evaluate(() => window.__test.fireThreeOrdered(60));
@@ -21,7 +21,7 @@ test('live.lock serializes concurrent same-key calls', async ({ page }) => {
 	}
 });
 
-// 15 -- live.lock with maxWaitMs rejects with LOCK_TIMEOUT ------------------
+// 15 - live.lock with maxWaitMs rejects with LOCK_TIMEOUT ------------------
 
 test('live.lock with maxWaitMs rejects waiting caller with LOCK_TIMEOUT', async ({ page }) => {
 	const settled = await page.evaluate(() => window.__test.fireBoundedContended(200));

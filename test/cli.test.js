@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { resolve, dirname } from 'node:path';
 import { parseArgs, detectAgent } from '../cli-utils.js';
 
-// -- parseArgs (in-process) ---------------------------------------------------
+const _here = dirname(fileURLToPath(import.meta.url));
+const _cliSrc = readFileSync(resolve(_here, '..', 'cli.js'), 'utf8');
+
+// - parseArgs (in-process) ---------------------------------------------------
 
 describe('parseArgs', () => {
 	it('returns help flag for --help', () => {
@@ -117,7 +123,7 @@ describe('parseArgs', () => {
 	});
 });
 
-// -- detectAgent (in-process) -------------------------------------------------
+// - detectAgent (in-process) -------------------------------------------------
 
 describe('detectAgent', () => {
 	it('detects pnpm', () => {
@@ -138,5 +144,28 @@ describe('detectAgent', () => {
 
 	it('defaults to npm for undefined', () => {
 		expect(detectAgent(undefined)).toBe('npm');
+	});
+});
+
+// - Scaffolded hooks.ws.ts carries a security warning header --------------
+
+describe('init scaffold security', () => {
+	it('writes hooks.ws.ts with a SECURITY warning above the no-auth upgrade()', () => {
+		// The scaffold's hooks.ws.ts assigns every connection a random
+		// UUID - there is no authentication. Apps that ship this to the
+		// public internet without replacing the upgrade hook would have
+		// no identity guarantee at all. The warning header tells the
+		// developer at the call site rather than relying on docs that
+		// may never get read.
+		expect(_cliSrc).toContain('// SECURITY:');
+		expect(_cliSrc).toContain('replace this with a real authentication step');
+		expect(_cliSrc).toContain('Returning false from upgrade() rejects the connection');
+	});
+
+	it('the SECURITY block precedes the upgrade() function in the scaffold template', () => {
+		const securityIdx = _cliSrc.indexOf('// SECURITY:');
+		const upgradeIdx = _cliSrc.indexOf('export function upgrade()');
+		expect(securityIdx).toBeGreaterThan(0);
+		expect(upgradeIdx).toBeGreaterThan(securityIdx);
 	});
 });

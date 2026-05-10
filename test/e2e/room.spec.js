@@ -83,7 +83,7 @@ test.beforeEach(async ({ page }) => {
 	await page.evaluate(() => window.__test.reset());
 });
 
-// 1 -- single client: data initial fetch + presence/cursor stream shapes -
+// 1 - single client: data initial fetch + presence/cursor stream shapes -
 
 test('single client: data initial fetch is the loader result; presence and cursor streams are arrays', async ({ page }) => {
 	// After reset, both data streams hold the loader's empty array.
@@ -105,7 +105,7 @@ test('single client: data initial fetch is the loader result; presence and curso
 	expect(cursors.length).toBe(0);
 });
 
-// 2 -- cross-client data: A addCard, B sees it via merge: 'crud' ---------
+// 2 - cross-client data: A addCard, B sees it via merge: 'crud' ---------
 
 test('cross-client data: A addCard publishes created; B sees the new card', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -126,7 +126,7 @@ test('cross-client data: A addCard publishes created; B sees the new card', asyn
 	}
 });
 
-// 3 -- cross-client presence: B joining publishes a `join` event that
+// 3 - cross-client presence: B joining publishes a `join` event that
 //      reaches A's presence stream.
 //
 // The most reliable cross-client presence assertion against the
@@ -158,7 +158,7 @@ test('cross-client presence: B joins after A; A presence stream picks up B', asy
 	}
 });
 
-// 4 -- cross-client cursors: A setCursor, B sees A on the cursor stream --
+// 4 - cross-client cursors: A setCursor, B sees A on the cursor stream --
 
 test('cross-client cursors: A setCursor publishes update; B sees A cursor', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -180,7 +180,7 @@ test('cross-client cursors: A setCursor publishes update; B sees A cursor', asyn
 	}
 });
 
-// 5 -- auto-leave: B closes its context; A eventually sees B removed -----
+// 5 - auto-leave: B closes its context; A eventually sees B removed -----
 
 test('auto-leave on disconnect: B closes context; A eventually sees B removed from presence', async ({ browser }, testInfo) => {
 	test.setTimeout(20000);
@@ -206,7 +206,7 @@ test('auto-leave on disconnect: B closes context; A eventually sees B removed fr
 	}
 });
 
-// 6 -- two rooms isolated: r1 addCard does not leak into r2 data stream --
+// 6 - two rooms isolated: r1 addCard does not leak into r2 data stream --
 
 test('two rooms isolated: A addCard1 does not affect B cards2 stream', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -239,7 +239,7 @@ test('two rooms isolated: A addCard1 does not affect B cards2 stream', async ({ 
 	}
 });
 
-// 7 -- removeCard publishes deleted; subscribed peer sees the card gone --
+// 7 - removeCard publishes deleted; subscribed peer sees the card gone --
 
 test('cross-client removeCard: A removes a card; B sees the card disappear', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);

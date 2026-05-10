@@ -7,11 +7,11 @@ import type { Platform, WebSocket } from 'svelte-adapter-uws';
 export interface CronContext {
 	/** The platform API (publish, send, topic helpers). */
 	platform: Platform;
-	/** Shorthand for `platform.publish` -- delegates to whatever platform was passed in. */
+	/** Shorthand for `platform.publish` - delegates to whatever platform was passed in. */
 	publish: Platform['publish'];
-	/** Throttled publish -- sends at most once per `ms` milliseconds. */
+	/** Throttled publish - sends at most once per `ms` milliseconds. */
 	throttle(topic: string, event: string, data: any, ms: number): void;
-	/** Debounced publish -- sends after `ms` milliseconds of silence. */
+	/** Debounced publish - sends after `ms` milliseconds of silence. */
 	debounce(topic: string, event: string, data: any, ms: number): void;
 	/** Send a point-to-point signal to a specific user. */
 	signal(userId: string, event: string, data: any): void;
@@ -33,13 +33,13 @@ export interface LiveContext<UserData = unknown> {
 	ws: WebSocket<UserData>;
 	/** The platform API (publish, send, topic helpers). */
 	platform: Platform;
-	/** Shorthand for `platform.publish` -- delegates to whatever platform was passed in. */
+	/** Shorthand for `platform.publish` - delegates to whatever platform was passed in. */
 	publish: Platform['publish'];
 	/** Cursor value sent by the client for paginated stream requests. `null` if not paginated. */
 	cursor: any;
-	/** Throttled publish -- sends at most once per `ms` milliseconds. */
+	/** Throttled publish - sends at most once per `ms` milliseconds. */
 	throttle(topic: string, event: string, data: any, ms: number): void;
-	/** Debounced publish -- sends after `ms` milliseconds of silence. */
+	/** Debounced publish - sends after `ms` milliseconds of silence. */
 	debounce(topic: string, event: string, data: any, ms: number): void;
 	/** Send a point-to-point signal to a specific user. */
 	signal(userId: string, event: string, data: any): void;
@@ -66,7 +66,7 @@ export interface LiveContext<UserData = unknown> {
 	 * and per HTTP request, honoring an inbound `X-Request-ID` header when
 	 * present. Threaded through the adapter's hooks, the realtime layer's
 	 * `ctx`, and (when used) downstream task-runner work via
-	 * `svelte-adapter-uws-extensions/task-runner` -- structured-log against
+	 * `svelte-adapter-uws-extensions/task-runner` - structured-log against
 	 * it to correlate every step of one request without piping the value
 	 * through your handler signatures.
 	 *
@@ -92,11 +92,11 @@ export interface LiveContext<UserData = unknown> {
 export interface StreamOptions {
 	/**
 	 * Merge strategy for live updates.
-	 * - `'crud'` -- append/update/delete by key (default)
-	 * - `'latest'` -- ring buffer of last N events
-	 * - `'set'` -- replace entire value
-	 * - `'presence'` -- presence join/leave tracking by key
-	 * - `'cursor'` -- cursor position tracking by key
+	 * - `'crud'` - append/update/delete by key (default)
+	 * - `'latest'` - ring buffer of last N events
+	 * - `'set'` - replace entire value
+	 * - `'presence'` - presence join/leave tracking by key
+	 * - `'cursor'` - cursor position tracking by key
 	 * @default 'crud'
 	 */
 	merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor';
@@ -201,8 +201,8 @@ export interface StreamOptions {
 	 *   the server calls `fromSeq(clientSeq)` to fetch missed events from
 	 *   the durable store (e.g., Postgres). Resolution order:
 	 *
-	 *   1. Replay buffer (bounded, fast) -- if `replay: true` is set.
-	 *   2. `delta.fromSeq(clientSeq)` -- this hook.
+	 *   1. Replay buffer (bounded, fast) - if `replay: true` is set.
+	 *   2. `delta.fromSeq(clientSeq)` - this hook.
 	 *   3. Full rehydrate via the loader (always safe).
 	 *
 	 *   Returning `null`/`undefined` falls through to rehydrate. Returning
@@ -234,7 +234,7 @@ export interface StreamOptions {
 
 	/**
 	 * Schema validating the stream's arguments. Runs at subscribe time
-	 * BEFORE topic resolution -- prevents topic injection via malformed
+	 * BEFORE topic resolution - prevents topic injection via malformed
 	 * dynamic-topic args. Accepts any Standard Schema-compatible schema
 	 * (https://standardschema.dev/), Zod, ArkType, Valibot v1+, etc.
 	 *
@@ -340,7 +340,7 @@ export interface StreamOptions {
 	coalesceBy?(data: any): string | number | null | undefined;
 
 	/**
-	 * Mark this stream as volatile -- intentionally fire-and-forget. Wire-level
+	 * Mark this stream as volatile - intentionally fire-and-forget. Wire-level
 	 * "drop on backpressure" is the adapter's default behavior (uWS skips any
 	 * subscriber whose outbound buffer is over `maxBackpressure`, default
 	 * 64 KB), so volatile is mostly an intent declaration. The realtime side
@@ -350,7 +350,7 @@ export interface StreamOptions {
 	 * and other streams where a missed frame is simply gone.
 	 *
 	 * Cannot combine with `coalesceBy` (latest-value-wins requires a queue;
-	 * volatile drops on backpressure -- the two are different intents).
+	 * volatile drops on backpressure - the two are different intents).
 	 * Cannot combine with `replay` (volatile messages aren't buffered for
 	 * resume).
 	 *
@@ -380,7 +380,7 @@ export interface StreamOptions {
 	 * output is identical regardless of which subscriber's ctx triggers
 	 * it).
 	 *
-	 * Every publish to the topic resets the watchdog -- a publish is
+	 * Every publish to the topic resets the watchdog - a publish is
 	 * proof the topic is live. If the reload's loader throws, `onError`
 	 * fires (if configured) and the watchdog re-arms; transient
 	 * failures don't leave the topic permanently stale.
@@ -419,7 +419,7 @@ export interface StreamOptions {
 	 * swallowed so a buggy logger never breaks the original error path.
 	 * The original error continues to propagate to the caller (or, on
 	 * stale-reload, drives the timer re-arm). Sibling to the global
-	 * `onError` setter -- per-stream observers fire alongside the
+	 * `onError` setter - per-stream observers fire alongside the
 	 * global one, not instead of it.
 	 *
 	 * Apps that want a topic-scoped degraded signal can `ctx.publish`
@@ -493,7 +493,7 @@ export interface CreateMessageOptions {
  * Shape accepted by `live.metrics()`. Any object matching this contract works
  * (hand-rolled, prom-client adapter, or the `createMetrics()` registry from
  * `svelte-adapter-uws-extensions/prometheus` wrapped to forward options as
- * positional args -- see the README "Prometheus metrics" section).
+ * positional args - see the README "Prometheus metrics" section).
  */
 export interface MetricsRegistry {
 	counter(opts: { name: string; help: string; labelNames?: string[] }): {
@@ -605,12 +605,12 @@ export const MAX_AGGREGATE_BUCKETS: number;
 export type TopicEntry = string | ((...args: any[]) => string);
 
 /**
- * The map type accepted by `defineTopics` -- a record of name -> entry.
+ * The map type accepted by `defineTopics` - a record of name -> entry.
  */
 export type TopicMap = Record<string, TopicEntry>;
 
 /**
- * The map returned by `defineTopics` -- the input map plus two
+ * The map returned by `defineTopics` - the input map plus two
  * non-enumerable metadata properties used by tooling and docs.
  */
 export type DefinedTopics<M extends TopicMap> = M & {
@@ -684,7 +684,7 @@ export const pushHooks: {
 	 * Adapter close hook. Drains the per-userId push registry AND the
 	 * realtime stream-subscription bookkeeping (ws-counts, silent-topic
 	 * watchdogs, `__onUnsubscribe` callbacks) when the adapter passes a
-	 * `ctx` -- a single `export const close = pushHooks.close` covers both
+	 * `ctx` - a single `export const close = pushHooks.close` covers both
 	 * concerns with no separate wiring needed. Falls back to push-only
 	 * behavior when called directly without `ctx` (test setups, custom
 	 * flows). Looks up the userId via the reverse index so it works even
@@ -694,6 +694,70 @@ export const pushHooks: {
 	 */
 	close(ws: any, ctx?: { platform: any; subscriptions?: Set<string> | string[] }): void;
 };
+
+/**
+ * Options for `live.upload()`.
+ */
+export interface UploadOptions {
+	/**
+	 * Hard cap on total bytes per upload. Bytes received past this point
+	 * abort the upload with `LiveError('PAYLOAD_TOO_LARGE')`.
+	 * @default 104857600 (100 MB)
+	 */
+	maxSize?: number;
+
+	/**
+	 * Maximum concurrent uploads per WebSocket connection. Excess upload
+	 * starts reject with `LiveError('OVERLOADED')`.
+	 * @default 4
+	 */
+	maxConcurrentPerSession?: number;
+
+	/**
+	 * Global cap on concurrent uploads across the worker. Default unset
+	 * (unbounded); set a value to enable capacity protection at the
+	 * worker scope.
+	 */
+	maxConcurrentTotal?: number;
+
+	/**
+	 * Backpressure cap. Chunks queued ahead of the handler's draining
+	 * are bounded to this count; overflow aborts with
+	 * `LiveError('FLOW_BACKPRESSURE')`.
+	 * @default 64
+	 */
+	maxBufferedChunks?: number;
+
+	/**
+	 * Re-run the module guard against the live `ctx` every N bytes
+	 * received past the last re-auth. On rejection the upload aborts
+	 * with the guard's error code (`UNAUTHENTICATED` / `FORBIDDEN`)
+	 * and the consumer observes `ctx.signal.aborted`.
+	 *
+	 * Default unset: the guard runs once at chunk-0 only. Pass a byte
+	 * threshold (e.g. `5 * 1024 * 1024`) for long uploads where the
+	 * user's session can be revoked mid-stream. Reauth runs as a fire-
+	 * and-forget task off the chunk-receive path; concurrent reauths on
+	 * the same upload are coalesced.
+	 */
+	reauthEvery?: number;
+}
+
+/**
+ * Context passed to `live.upload()` handlers. Extends `LiveContext` with
+ * three streaming-only fields.
+ */
+export interface UploadContext<UserData = unknown> extends LiveContext<UserData> {
+	/** Async iterable yielding `Uint8Array` chunks in arrival order. */
+	stream: AsyncIterable<Uint8Array>;
+	/**
+	 * Aborts on client cancel, WS disconnect, `maxSize` exceeded,
+	 * `maxBufferedChunks` overflow, or a `reauthEvery` rejection.
+	 */
+	signal: AbortSignal;
+	/** 8-char hex id matching the client-side `UploadHandle.streamIdHex`. */
+	upload: { id: string };
+}
 
 export namespace live {
 	/**
@@ -743,7 +807,7 @@ export namespace live {
 
 	/**
 	 * Create an ephemeral pub/sub channel with no database initialization.
-	 * Channels have no initFn -- clients subscribe and receive live events immediately.
+	 * Channels have no initFn - clients subscribe and receive live events immediately.
 	 *
 	 * @param topic - Static topic string
 	 * @param options - Merge strategy and options
@@ -796,8 +860,54 @@ export namespace live {
 	): T;
 
 	/**
+	 * Mark a function as a streaming upload handler.
+	 *
+	 * The handler consumes `ctx.stream` (an async iterable of `Uint8Array`
+	 * chunks), can react to `ctx.signal` for cancel / disconnect / cap-
+	 * exceeded events, and returns a JSON-serialisable result when done.
+	 * The Vite plugin generates a client stub returning `UploadHandle<T>`
+	 * (see `svelte-realtime/client`).
+	 *
+	 * Use `live.upload` over `live.binary` when:
+	 * - the file or payload is multi-megabyte
+	 * - you want progress / cancellation
+	 * - you need bounded server memory rather than "buffer the whole
+	 *   thing then call the handler"
+	 *
+	 * Errors thrown from the handler propagate to the client as
+	 * `RpcError`. Throw `LiveError(code, message)` for typed codes;
+	 * `ctx.publish('__*', ...)` from a handler throws
+	 * `LiveError('INVALID_TOPIC')` because `__`-prefixed topics are
+	 * reserved for framework-internal channels (use `ctx.platform.publish`
+	 * directly if a handler genuinely needs to broadcast on one).
+	 *
+	 * @param fn - Handler function. Receives an `UploadContext` plus
+	 *             positional args forwarded from the client call.
+	 * @param options - Optional caps and re-auth controls.
+	 *
+	 * @example
+	 * ```js
+	 * export const avatar = live.upload(async (ctx, name, mime) => {
+	 *   if (!ctx.user) throw new LiveError('UNAUTHENTICATED');
+	 *   for await (const chunk of ctx.stream) {
+	 *     ctx.signal.throwIfAborted();
+	 *     await sink.write(chunk);
+	 *   }
+	 *   return { url: `/uploads/${name}` };
+	 * }, {
+	 *   maxSize: 50 * 1024 * 1024,
+	 *   reauthEvery: 5 * 1024 * 1024
+	 * });
+	 * ```
+	 */
+	function upload<T extends (ctx: UploadContext<any>, ...args: any[]) => any>(
+		fn: T,
+		options?: UploadOptions
+	): T;
+
+	/**
 	 * Register a global middleware that runs before per-module guards for every RPC/stream call.
-	 * Middleware receives `(ctx, next)` -- call `next()` to continue the chain.
+	 * Middleware receives `(ctx, next)` - call `next()` to continue the chain.
 	 * Throw a LiveError to reject the call.
 	 *
 	 * @param fn - Middleware function
@@ -907,7 +1017,7 @@ export namespace live {
 	 * exceeds `threshold` (default 200 events/sec), a one-shot
 	 * `console.warn` fires pointing at the `coalesceBy` documentation. One
 	 * warning per topic per process. The sampler reads
-	 * `platform.pressure.topPublishers` directly -- the underlying counters
+	 * `platform.pressure.topPublishers` directly - the underlying counters
 	 * are already maintained by the adapter, so the cost in development is
 	 * a single `setInterval` per platform with no additional per-publish
 	 * overhead.
@@ -938,7 +1048,7 @@ export namespace live {
 	 * Configure the dev-mode silent-topic warning. When a stream subscribes
 	 * to a topic and no events arrive within `thresholdMs` (default 30000),
 	 * the framework logs a one-shot `console.warn` naming the topic and
-	 * the common causes -- missing `pg_notify` trigger, missing
+	 * the common causes - missing `pg_notify` trigger, missing
 	 * handler-side `ctx.publish()`, or an intentionally low-traffic topic
 	 * the user can suppress.
 	 *
@@ -1164,14 +1274,14 @@ export namespace live {
 	/**
 	 * Configure the push registry. Accepts two independent fields:
 	 *
-	 * - `identify` -- override how `pushHooks.open` extracts the userId
+	 * - `identify` - override how `pushHooks.open` extracts the userId
 	 *   from a connecting WebSocket. Defaults to reading
 	 *   `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`. May return
 	 *   `null` / `undefined` for anonymous connections, in which case
 	 *   `pushHooks.open` skips registration. Pass `null` to clear an
 	 *   override and restore the default.
 	 *
-	 * - `remoteRegistry` -- wire a cluster-routing registry so `live.push`
+	 * - `remoteRegistry` - wire a cluster-routing registry so `live.push`
 	 *   can reach users connected to other instances. When the userId is
 	 *   not registered locally, `live.push` falls through to
 	 *   `remoteRegistry.request(userId, ...)`. Pass `null` to clear.
@@ -1211,10 +1321,10 @@ export namespace live {
 	 *
 	 * **Error surface (all `LiveError` with discriminating `.code`):**
 	 *
-	 * - `VALIDATION` -- bad target / event / options / timeoutMs at the call site.
-	 * - `NOT_FOUND` -- no connection is registered for the userId
+	 * - `VALIDATION` - bad target / event / options / timeoutMs at the call site.
+	 * - `NOT_FOUND` - no connection is registered for the userId
 	 *   (and no `remoteRegistry` is configured).
-	 * - `TIMEOUT` -- the client did not reply within `timeoutMs` (default 5000).
+	 * - `TIMEOUT` - the client did not reply within `timeoutMs` (default 5000).
 	 *   Message text preserves the underlying primitive's wording (`'request
 	 *   timed out'`) so substring callers continue to match while migrating
 	 *   to `err.code === 'TIMEOUT'`.
@@ -1230,7 +1340,7 @@ export namespace live {
 	 *
 	 * For fire-and-forget delivery (no reply expected), use `live.notify`
 	 * instead. `live.push({ timeoutMs: 0 })` rejects with
-	 * `LiveError('VALIDATION')` -- `timeoutMs` must be a positive finite
+	 * `LiveError('VALIDATION')` - `timeoutMs` must be a positive finite
 	 * number on this primitive.
 	 *
 	 * Requires `svelte-adapter-uws` >= 0.5.0-next.4 for `platform.request`.
@@ -1249,7 +1359,7 @@ export namespace live {
 	 *
 	 * @example
 	 * ```js
-	 * // hooks.ws.js -- wire the registry once:
+	 * // hooks.ws.js - wire the registry once:
 	 * import { pushHooks } from 'svelte-realtime/server';
 	 * export const open = pushHooks.open;
 	 * export const close = pushHooks.close;
@@ -1267,17 +1377,17 @@ export namespace live {
 	 * a reply. The fire-and-forget counterpart to `live.push`.
 	 *
 	 * **When to use which:**
-	 * - `live.push(target, event, data, { timeoutMs })` -- request/reply.
+	 * - `live.push(target, event, data, { timeoutMs })` - request/reply.
 	 *   You await a value back from the client's `onPush(event, handler)`.
 	 *   `timeoutMs` controls how long you wait. Throws on offline user,
 	 *   timeout, client handler error.
-	 * - `live.notify(target, event, data)` -- fire-and-forget. The client's
+	 * - `live.notify(target, event, data)` - fire-and-forget. The client's
 	 *   `onPush(event, handler)` still fires (same wire path), but the
 	 *   handler's return value is discarded and the call resolves without
 	 *   waiting for it. Returns `Promise<void>` that resolves once the
 	 *   envelope is dispatched. Never rejects in normal operation: an
 	 *   offline user, a remote-registry failure, a client handler that
-	 *   throws -- all silent. The caller chose `notify` exactly because
+	 *   throws - all silent. The caller chose `notify` exactly because
 	 *   they don't want to deal with delivery state.
 	 *
 	 * Wire shape is identical to `live.push` today; the difference is
@@ -1286,12 +1396,12 @@ export namespace live {
 	 *
 	 * **Don't use `live.push({ timeoutMs: 0 })` for fire-and-forget.** It
 	 * throws synchronously (timeoutMs must be positive). Wrapping the
-	 * throw in `.catch(() => {})` silently swallows it -- the push never
+	 * throw in `.catch(() => {})` silently swallows it - the push never
 	 * fires, the recipient never sees anything, no diagnostic anywhere.
 	 * Use `live.notify` instead.
 	 *
 	 * Validation throws SYNCHRONOUSLY for programming errors (bad target,
-	 * empty event name) -- those are bugs at the call site, not request-
+	 * empty event name) - those are bugs at the call site, not request-
 	 * scoped failures, and you want them surfaced loud.
 	 *
 	 * @example
@@ -1299,7 +1409,7 @@ export namespace live {
 	 * // Inside an upload completion handler:
 	 * live.notify({ userId: upload.userId }, 'upload:complete', { id: upload.id });
 	 * // Fire-and-forget. Returns immediately. If the user is offline,
-	 * // silently drops -- they'll see the result on next page load.
+	 * // silently drops - they'll see the result on next page load.
 	 * ```
 	 */
 	function notify(
@@ -1353,7 +1463,7 @@ export namespace live {
 	 *
 	 * @example
 	 * ```js
-	 * // Return a value -- published as 'set' automatically
+	 * // Return a value - published as 'set' automatically
 	 * export const refreshStats = live.cron('*\/5 * * * *', 'stats', async () => {
 	 *   return db.stats();
 	 * });
@@ -1392,7 +1502,7 @@ export namespace live {
 	 *
 	 * @example
 	 * ```js
-	 * // Windowed aggregate -- emits one output topic per window:
+	 * // Windowed aggregate - emits one output topic per window:
 	 * //   events:view:topk:last10min, events:view:topk:today,
 	 * //   events:view:topk:thisMonth, events:view:topk:lifetime
 	 * import { combineCounts } from 'svelte-realtime/server';
@@ -1470,7 +1580,7 @@ export namespace live {
 
 	/**
 	 * Create a server-side reactive side effect.
-	 * Effects fire when source topics publish. Fire-and-forget -- no data, no topic.
+	 * Effects fire when source topics publish. Fire-and-forget - no data, no topic.
 	 *
 	 * @param sources - Topic names to watch
 	 * @param fn - Async function called on each matching publish
@@ -1851,7 +1961,7 @@ export namespace pipe {
  * Accepts middleware functions (variadic) and/or a single declarative
  * options object as the first argument:
  *
- * - `{ authenticated: true }` -- throws `UNAUTHENTICATED` unless
+ * - `{ authenticated: true }` - throws `UNAUTHENTICATED` unless
  *   `ctx.user` is non-null. Cheaper to write than the equivalent
  *   function and harder to forget.
  *
@@ -1890,29 +2000,33 @@ export function guard(
  * Typed error that propagates `code` and `message` to the client.
  * Use this for expected errors (auth failures, validation, etc.).
  * Raw `Error` throws are caught and replaced with a generic `INTERNAL_ERROR`,
- * EXCEPT when thrown from a guard -- those are auto-classified
+ * EXCEPT when thrown from a guard - those are auto-classified
  * (see `guard()`).
  *
  * The framework recognises and emits these standard codes:
  *
- * - `UNAUTHENTICATED` -- caller has no user identity. From guards or
+ * - `UNAUTHENTICATED` - caller has no user identity. From guards or
  *   access predicates failing with `ctx.user == null`.
- * - `FORBIDDEN` -- caller is identified but lacks permission. From guards
+ * - `FORBIDDEN` - caller is identified but lacks permission. From guards
  *   or access predicates failing with `ctx.user != null`.
- * - `RATE_LIMITED` -- request rejected by `live.rateLimit({...})`.
- * - `VALIDATION` -- input rejected by `live.validated(schema, ...)`.
- * - `OVERLOADED` -- subscribe rejected by `live.stream({ classOfService })`
+ * - `RATE_LIMITED` - request rejected by `live.rateLimit({...})`.
+ * - `VALIDATION` - input rejected by `live.validated(schema, ...)`.
+ * - `OVERLOADED` - subscribe rejected by `live.stream({ classOfService })`
  *   under pressure.
- * - `CONFLICT` -- a request with the same idempotency key is already
+ * - `CONFLICT` - a request with the same idempotency key is already
  *   in flight (multi-instance store only).
- * - `SERVICE_UNAVAILABLE` -- circuit breaker open.
- * - `NOT_FOUND` -- live function not registered at the requested path,
+ * - `SERVICE_UNAVAILABLE` - circuit breaker open.
+ * - `NOT_FOUND` - live function not registered at the requested path,
  *   or `live.push({ userId })` cannot find an active connection.
- * - `TIMEOUT` -- `live.push` did not receive a reply within `timeoutMs`.
- * - `INVALID_REQUEST` -- malformed envelope or args.
- * - `INTERNAL_ERROR` -- non-LiveError throw from a handler (NOT a guard).
+ * - `TIMEOUT` - `live.push` did not receive a reply within `timeoutMs`.
+ * - `INVALID_REQUEST` - malformed envelope or args.
+ * - `INVALID_TOPIC` - `ctx.publish()` called with a `__`-prefixed topic
+ *   (those are reserved for framework-internal channels; use
+ *   `ctx.platform.publish` directly if you genuinely need to broadcast
+ *   on one).
+ * - `INTERNAL_ERROR` - non-LiveError throw from a handler (NOT a guard).
  *
- * Code strings are user-extensible -- throw your own (e.g. `INSUFFICIENT_FUNDS`)
+ * Code strings are user-extensible - throw your own (e.g. `INSUFFICIENT_FUNDS`)
  * and the client receives them as-is via `RpcError.code`.
  */
 export class LiveError extends Error {
@@ -1990,7 +2104,7 @@ export function createMessage(
  *   `onError` is invoked with the error if provided, and the
  *   `fallback` value is returned in place of the loader's result.
  * - When `fallback` is NOT in `options`, errors propagate as before
- *   (back-compat). The presence of the key opts in -- the value
+ *   (back-compat). The presence of the key opts in - the value
  *   itself can be anything (empty array, sentinel object, even
  *   `null` or `undefined`).
  *
@@ -2108,11 +2222,11 @@ export function setCronPlatform(platform: Platform): void;
  *   plus a `console.error` line in dev. Better to miss a tick than to
  *   double-fire because the leader-election machinery is broken.
  * - `leader()` returning a non-boolean falsy value (e.g. `undefined`)
- *   is treated as "not leader" -- skip the tick.
+ *   is treated as "not leader" - skip the tick.
  *
  * **Cluster fan-out (`bus`).** With a leader configured, only the
  * elected worker fires. By default that publish reaches uWS subscribers
- * on the leader's worker only -- subscribers on other instances see
+ * on the leader's worker only - subscribers on other instances see
  * nothing because no other worker independently produced the publish.
  * The `bus` option plugs in the extensions-package pubsub bus
  * (`svelte-adapter-uws-extensions/redis/pubsub` or
@@ -2122,7 +2236,7 @@ export function setCronPlatform(platform: Platform): void;
  * cron handler's `ctx.publish`. Mirror of
  * `live.configurePush({ remoteRegistry })`. svelte-realtime stays
  * cluster-transport-agnostic; the bus type is structural
- * (`{ wrap(platform): wrapped }`) -- any pubsub primitive that exposes
+ * (`{ wrap(platform): wrapped }`) - any pubsub primitive that exposes
  * a wrap method works.
  *
  * Setting `leader` without `bus` emits a single dev warning at
@@ -2278,7 +2392,7 @@ export function unsubscribe(
  * ```
  *
  * Or, if you already wire `pushHooks.close` (which now routes through
- * this same function under the hood), keep that -- both shapes work
+ * this same function under the hood), keep that - both shapes work
  * and produce identical cleanup.
  */
 export function close(

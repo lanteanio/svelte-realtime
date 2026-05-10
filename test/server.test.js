@@ -59,7 +59,9 @@ import {
 	MAX_PRESENCE_REF,
 	assert,
 	getAssertionCounters,
-	_resetAssertCounters
+	_resetAssertCounters,
+	_resetMiddleware,
+	_getIdentityKey
 } from '../server.js';
 import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
 import { mockWs } from './helpers/mock-ws.js';
@@ -80,7 +82,7 @@ function adaptExtensionsRegistry(metrics) {
 	};
 }
 
-// -- live() -------------------------------------------------------------------
+// - live() -------------------------------------------------------------------
 
 describe('live()', () => {
 	it('returns the original function with __isLive = true', () => {
@@ -91,7 +93,7 @@ describe('live()', () => {
 	});
 });
 
-// -- live.stream() ------------------------------------------------------------
+// - live.stream() ------------------------------------------------------------
 
 describe('live.stream()', () => {
 	it('attaches stream metadata', () => {
@@ -111,7 +113,7 @@ describe('live.stream()', () => {
 	});
 });
 
-// -- guard() ------------------------------------------------------------------
+// - guard() ------------------------------------------------------------------
 
 describe('guard()', () => {
 	it('returns the function with __isGuard = true (single arg)', () => {
@@ -167,7 +169,7 @@ describe('guard()', () => {
 	});
 });
 
-// -- LiveError ----------------------------------------------------------------
+// - LiveError ----------------------------------------------------------------
 
 describe('LiveError', () => {
 	it('propagates code and message', () => {
@@ -183,7 +185,7 @@ describe('LiveError', () => {
 	});
 });
 
-// -- handleRpc() --------------------------------------------------------------
+// - handleRpc() --------------------------------------------------------------
 
 describe('handleRpc()', () => {
 	let ws, platform;
@@ -414,7 +416,7 @@ describe('handleRpc()', () => {
 	});
 });
 
-// -- Stream RPC ---------------------------------------------------------------
+// - Stream RPC ---------------------------------------------------------------
 
 describe('handleRpc() stream', () => {
 	let ws, platform;
@@ -450,7 +452,7 @@ describe('handleRpc() stream', () => {
 	});
 });
 
-// -- Dynamic topics -----------------------------------------------------------
+// - Dynamic topics -----------------------------------------------------------
 
 describe('handleRpc() dynamic topic', () => {
 	let ws, platform;
@@ -495,7 +497,7 @@ describe('handleRpc() dynamic topic', () => {
 	});
 });
 
-// -- message hook -------------------------------------------------------------
+// - message hook -------------------------------------------------------------
 
 describe('message', () => {
 	it('matches adapter message hook signature', () => {
@@ -528,7 +530,7 @@ describe('message', () => {
 	});
 });
 
-// -- createMessage() ----------------------------------------------------------
+// - createMessage() ----------------------------------------------------------
 
 describe('createMessage()', () => {
 	it('no args: behaves like message', async () => {
@@ -648,7 +650,7 @@ describe('createMessage()', () => {
 	});
 });
 
-// -- Batch RPC ----------------------------------------------------------------
+// - Batch RPC ----------------------------------------------------------------
 
 describe('handleRpc() batch', () => {
 	let ws, platform;
@@ -749,7 +751,7 @@ describe('handleRpc() batch', () => {
 	});
 });
 
-// -- Batch validation ---------------------------------------------------------
+// - Batch validation ---------------------------------------------------------
 
 describe('handleRpc() batch validation', () => {
 	let ws, platform;
@@ -846,7 +848,7 @@ describe('handleRpc() batch validation', () => {
 	});
 });
 
-// -- Path validation ----------------------------------------------------------
+// - Path validation ----------------------------------------------------------
 
 describe('handleRpc() path validation', () => {
 	let ws, platform;
@@ -919,7 +921,7 @@ describe('handleRpc() path validation', () => {
 	});
 });
 
-// -- Binary payload size limit ------------------------------------------------
+// - Binary payload size limit ------------------------------------------------
 
 describe('handleRpc() binary payload size', () => {
 	let ws, platform;
@@ -972,7 +974,7 @@ describe('handleRpc() binary payload size', () => {
 	});
 });
 
-// -- live.upload() streaming uploads ------------------------------------------
+// - live.upload() streaming uploads ------------------------------------------
 
 /**
  * Build a 0x01 upload chunk frame.
@@ -1344,7 +1346,7 @@ describe('live.upload()', () => {
 	});
 
 	it('enforces maxBufferedChunks (FLOW_BACKPRESSURE)', async () => {
-		// Handler that never reads from the stream -- chunks pile up in the queue
+		// Handler that never reads from the stream - chunks pile up in the queue
 		const fn = live.upload(async (ctx) => {
 			// Wait long enough for chunks to fill the buffer
 			await new Promise((resolve) => {
@@ -1366,7 +1368,7 @@ describe('live.upload()', () => {
 		handleRpc(ws, buildUploadChunkFrame({
 			streamId: 200, seq: 2, payload: new Uint8Array(10)
 		}), platform);
-		// queue.length is now 2 (chunk 0 was consumed at start? actually no -- handler
+		// queue.length is now 2 (chunk 0 was consumed at start? actually no - handler
 		// awaits abort instead of reading. So queue holds chunks from seq 1 and 2, both
 		// queued because handler never called .next()).
 		// Actually first chunk 0 payload was push()ed; seq 1 queued; queueLength now 2.
@@ -1519,9 +1521,88 @@ describe('live.upload()', () => {
 		expect(a).toEqual({ ok: true, data: { label: 1, total: 5 } });
 		expect(b).toEqual({ ok: true, data: { label: 2, total: 5 } });
 	});
+
+	// Pre-fix, every concurrent stream got its own 16 MB pre-handler
+	// buffer with no aggregate cap. N concurrent connections opening
+	// streamId 0 with a 16 MB chunk-0 payload each = 16*N MB worker
+	// memory before any handler-side cap could fire. Post-fix, an
+	// aggregate accumulator caps total pending bytes; the cap is a
+	// per-process knob settable via _setCapsForTest(uploadPendingMaxAggregate).
+	it('aggregate pre-handler buffer cap rejects further chunk-0 with OVERLOADED', async () => {
+		// Lower the aggregate cap so a single small chunk fills it. The
+		// per-stream chunk fits inside the per-stream 16 MB cap, so the
+		// rejection MUST come from the aggregate cap, not the per-stream.
+		_setCapsForTest({ uploadPendingMaxAggregate: 256 });
+		try {
+			const fn = live.upload(async (ctx) => {
+				for await (const _c of ctx.stream) {}
+				return 'ok';
+			});
+			__register('uploads/agg-cap', fn);
+
+			const big = new Uint8Array(200);
+			handleRpc(ws, buildUploadChunkFrame({
+				streamId: 400, seq: 0, isLast: true,
+				args: { rpc: 'uploads/agg-cap', args: [] },
+				payload: big
+			}), platform);
+
+			// Second concurrent stream pushes the aggregate over the cap.
+			handleRpc(ws, buildUploadChunkFrame({
+				streamId: 401, seq: 0, isLast: true,
+				args: { rpc: 'uploads/agg-cap', args: [] },
+				payload: big
+			}), platform);
+			await flushUploadAsync();
+
+			const second = lastUploadResponse(platform, 401);
+			expect(second).toEqual({
+				ok: false, code: 'OVERLOADED',
+				error: 'pending-upload aggregate buffer cap exceeded; retry shortly'
+			});
+		} finally {
+			_resetCapsForTest();
+		}
+	});
+
+	it('aggregate buffer is released when an upload transitions to running', async () => {
+		// Lower the aggregate cap to a tight bound. Stream A opens, the
+		// handler resolves and the buffer is released. Stream B can then
+		// fit even though A's bytes were initially counted. This proves
+		// the release path on pending -> running transition.
+		_setCapsForTest({ uploadPendingMaxAggregate: 256 });
+		try {
+			const fn = live.upload(async (ctx) => {
+				for await (const _c of ctx.stream) {}
+				return 'ok';
+			});
+			__register('uploads/agg-release', fn);
+
+			const big = new Uint8Array(200);
+
+			handleRpc(ws, buildUploadChunkFrame({
+				streamId: 410, seq: 0, isLast: true,
+				args: { rpc: 'uploads/agg-release', args: [] },
+				payload: big
+			}), platform);
+			await flushUploadAsync(); // handler resolves, bytes released
+
+			handleRpc(ws, buildUploadChunkFrame({
+				streamId: 411, seq: 0, isLast: true,
+				args: { rpc: 'uploads/agg-release', args: [] },
+				payload: big
+			}), platform);
+			await flushUploadAsync();
+
+			expect(lastUploadResponse(platform, 410)).toEqual({ ok: true, data: 'ok' });
+			expect(lastUploadResponse(platform, 411)).toEqual({ ok: true, data: 'ok' });
+		} finally {
+			_resetCapsForTest();
+		}
+	});
 });
 
-// -- Dynamic topic prefix guard -----------------------------------------------
+// - Dynamic topic prefix guard -----------------------------------------------
 
 describe('handleRpc() dynamic topic guard', () => {
 	let ws, platform;
@@ -1593,7 +1674,7 @@ describe('handleRpc() dynamic topic guard', () => {
 	});
 });
 
-// -- Batch dev-mode warnings --------------------------------------------------
+// - Batch dev-mode warnings --------------------------------------------------
 
 describe('handleRpc() batch dev warnings', () => {
 	let ws, platform;
@@ -1634,7 +1715,7 @@ describe('handleRpc() batch dev warnings', () => {
 	});
 });
 
-// -- Payload size warning -----------------------------------------------------
+// - Payload size warning -----------------------------------------------------
 
 describe('payload size warning', () => {
 	it('warns when RPC response payload exceeds 12KB', async () => {
@@ -1659,7 +1740,7 @@ describe('payload size warning', () => {
 	});
 });
 
-// -- platform.send() return value ---------------------------------------------
+// - platform.send() return value ---------------------------------------------
 
 describe('platform.send() return value', () => {
 	it('warns when send returns 0 (dev mode)', async () => {
@@ -1683,7 +1764,7 @@ describe('platform.send() return value', () => {
 	});
 });
 
-// -- live.validated() (Phase 12) ----------------------------------------------
+// - live.validated() (Phase 12) ----------------------------------------------
 
 describe('live.validated()', () => {
 	it('passes through when schema validates successfully (Zod-like)', async () => {
@@ -1869,7 +1950,7 @@ describe('live.validated()', () => {
 	});
 });
 
-// -- __directCall() (Phase 11) ------------------------------------------------
+// - __directCall() (Phase 11) ------------------------------------------------
 
 describe('__directCall()', () => {
 	it('calls a registered live function directly without WebSocket', async () => {
@@ -1965,7 +2046,7 @@ describe('__directCall()', () => {
 	});
 });
 
-// -- live.cron() (Phase 14) ---------------------------------------------------
+// - live.cron() (Phase 14) ---------------------------------------------------
 
 describe('live.cron()', () => {
 	it('marks function with cron metadata', () => {
@@ -2052,7 +2133,7 @@ describe('live.cron()', () => {
 			// Then a 5-field job. At 1Hz the dedup must keep it at once-per-matching-minute.
 			__registerCron('cron-five-field', live.cron('* * * * *', 'five-min', async () => { runs++; }));
 
-			// Drive the tick at second != 0 manually -- the dedup should skip.
+			// Drive the tick at second != 0 manually - the dedup should skip.
 			const realDate = global.Date;
 			try {
 				const fakeNow = new realDate('2026-05-06T12:34:17Z');
@@ -2066,7 +2147,7 @@ describe('live.cron()', () => {
 				await new Promise((r) => setTimeout(r, 10));
 				expect(runs).toBe(0);
 
-				// Now drive at second :00 -- 5-field schedule should match.
+				// Now drive at second :00 - 5-field schedule should match.
 				const atSecondZero = new realDate('2026-05-06T12:34:00Z');
 				global.Date = /** @type {any} */ (function FakeDate(...args) {
 					if (args.length === 0) return atSecondZero;
@@ -2202,7 +2283,7 @@ describe('live.cron()', () => {
 			expect(pubs[1]).toEqual({ topic: 'boards', event: 'deleted', data: { board_id: 'b' }, options: undefined });
 		});
 
-		it('backwards compatible -- no-arg cron still works', async () => {
+		it('backwards compatible - no-arg cron still works', async () => {
 			const platform = mockPlatform();
 			setCronPlatform(platform);
 			const fn = live.cron('* * * * *', 'compat-topic', async () => {
@@ -2238,7 +2319,7 @@ describe('live.cron()', () => {
 		});
 
 		it('warns at most once per process lifetime when no platform is captured', async () => {
-			// Do NOT call setCronPlatform -- exercise the missing-platform path.
+			// Do NOT call setCronPlatform - exercise the missing-platform path.
 			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 			__registerCron('test/no-platform', live.cron('* * * * *', 'no-plat-topic', async () => {}));
 			// Drive five ticks. Without dedup this would log five times.
@@ -2322,7 +2403,7 @@ describe('live.cron()', () => {
 		});
 	});
 
-	// configureCron({ leader }) -- cluster-mode leader-election gate. The
+	// configureCron({ leader }) - cluster-mode leader-election gate. The
 	// realtime layer ships only the consumption hook; the canonical
 	// implementation lives in svelte-adapter-uws-extensions. These tests
 	// exercise the gate's contract, not any specific leader implementation.
@@ -2451,7 +2532,7 @@ describe('live.cron()', () => {
 		});
 	});
 
-	// configureCron({ bus }) -- cluster-wide cron fan-out. Wraps the captured
+	// configureCron({ bus }) - cluster-wide cron fan-out. Wraps the captured
 	// platform with `bus.wrap(platform)` per cron fire so the leader's
 	// publishes relay across the cluster instead of staying on the leader's
 	// worker only. Mirror of configurePush({ remoteRegistry }).
@@ -2464,7 +2545,7 @@ describe('live.cron()', () => {
 		// A minimal bus stub that records what gets published through the
 		// wrapped platform. Mirrors the shape of
 		// `svelte-adapter-uws-extensions/redis/pubsub` but with no Redis
-		// actually involved -- pure recording for the contract test.
+		// actually involved - pure recording for the contract test.
 		const makeMockBus = () => {
 			const wrappedPublishes = [];
 			return {
@@ -2589,7 +2670,7 @@ describe('live.cron()', () => {
 		});
 
 		it('does NOT warn when configureCron({ bus }) is called without leader', () => {
-			// No cluster intent (no leader) means no warning -- bus alone is
+			// No cluster intent (no leader) means no warning - bus alone is
 			// a valid shape for "I want cron fan-out but every worker still fires."
 			const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 			const bus = makeMockBus();
@@ -2652,7 +2733,7 @@ describe('live.cron()', () => {
 	});
 });
 
-// -- Replay / seq handling (Phase 15) -----------------------------------------
+// - Replay / seq handling (Phase 15) -----------------------------------------
 
 describe('replay stream response', () => {
 	it('includes seq in response when replay is enabled and platform supports it', async () => {
@@ -2703,7 +2784,7 @@ describe('replay stream response', () => {
 	});
 });
 
-// -- Issues propagation -------------------------------------------------------
+// - Issues propagation -------------------------------------------------------
 
 describe('issues propagation', () => {
 	it('propagates issues array from LiveError to client response', async () => {
@@ -2727,7 +2808,7 @@ describe('issues propagation', () => {
 	});
 });
 
-// -- Phase 16: _clearCron() ---------------------------------------------------
+// - Phase 16: _clearCron() ---------------------------------------------------
 
 describe('_clearCron()', () => {
 	it('is a callable function', () => {
@@ -2736,7 +2817,7 @@ describe('_clearCron()', () => {
 	});
 });
 
-// -- Phase 16: onCronError() --------------------------------------------------
+// - Phase 16: onCronError() --------------------------------------------------
 
 describe('onCronError()', () => {
 	it('is a callable function', () => {
@@ -2745,7 +2826,7 @@ describe('onCronError()', () => {
 	});
 });
 
-// -- Phase 18: onError hook ---------------------------------------------------
+// - Phase 18: onError hook ---------------------------------------------------
 
 describe('handleRpc() onError', () => {
 	it('calls onError when a non-LiveError is thrown', async () => {
@@ -2797,7 +2878,7 @@ describe('handleRpc() onError', () => {
 	});
 });
 
-// -- Phase 18: createMessage with onError -------------------------------------
+// - Phase 18: createMessage with onError -------------------------------------
 
 describe('createMessage() with onError', () => {
 	it('passes onError through to handleRpc', async () => {
@@ -2827,7 +2908,7 @@ describe('createMessage() with onError', () => {
 	});
 });
 
-// -- Phase 19: Stream pagination ----------------------------------------------
+// - Phase 19: Stream pagination ----------------------------------------------
 
 describe('handleRpc() stream pagination', () => {
 	it('passes through hasMore and cursor from paginated initFn response', async () => {
@@ -2891,7 +2972,7 @@ describe('handleRpc() stream pagination', () => {
 	});
 });
 
-// -- Phase 20: Stream lifecycle hooks -----------------------------------------
+// - Phase 20: Stream lifecycle hooks -----------------------------------------
 
 describe('live.stream() lifecycle hooks', () => {
 	it('fires onSubscribe after ws.subscribe', async () => {
@@ -2916,7 +2997,7 @@ describe('live.stream() lifecycle hooks', () => {
 	});
 });
 
-// -- Phase 20: close() -------------------------------------------------------
+// - Phase 20: close() -------------------------------------------------------
 
 describe('close()', () => {
 	it('does not fire onUnsubscribe when socket was not subscribed to the topic', () => {
@@ -3013,7 +3094,7 @@ describe('close()', () => {
 	});
 });
 
-// -- Phase 21: Global middleware ----------------------------------------------
+// - Phase 21: Global middleware ----------------------------------------------
 
 describe('live.middleware()', () => {
 	it('runs before guard and handler', async () => {
@@ -3039,9 +3120,176 @@ describe('live.middleware()', () => {
 		expect(order).toEqual(['middleware', 'guard', 'handler']);
 		expect(platform.sent[0].data.ok).toBe(true);
 	});
+
+	describe('next() single-call guard', () => {
+		beforeEach(() => { _resetMiddleware(); });
+		afterEach(() => { _resetMiddleware(); });
+
+		it('runs the downstream handler exactly once when next() is called twice', async () => {
+			let handlerCalls = 0;
+			let secondNextRejection = null;
+			live.middleware(async (ctx, next) => {
+				const result = await next();
+				try { next(); } catch (err) { secondNextRejection = err; }
+				return result;
+			});
+
+			const handler = live(async (ctx) => { handlerCalls++; return 'ok'; });
+			__register('mw-double/test', handler);
+
+			const ws = mockWs();
+			const platform = mockPlatform();
+			handleRpc(ws, toArrayBuffer({ rpc: 'mw-double/test', id: 'd1', args: [] }), platform);
+
+			await new Promise((r) => setTimeout(r, 10));
+
+			expect(handlerCalls).toBe(1);
+			expect(secondNextRejection).toBeInstanceOf(Error);
+			expect(secondNextRejection.message).toMatch(/next\(\) called more than once/);
+		});
+
+		it('still serves the chain normally when each middleware calls next() once', async () => {
+			let handlerCalls = 0;
+			live.middleware(async (ctx, next) => next());
+			live.middleware(async (ctx, next) => next());
+
+			const handler = live(async (ctx) => { handlerCalls++; return { ok: true }; });
+			__register('mw-double/clean', handler);
+
+			const ws = mockWs();
+			const platform = mockPlatform();
+			handleRpc(ws, toArrayBuffer({ rpc: 'mw-double/clean', id: 'c1', args: [] }), platform);
+
+			await new Promise((r) => setTimeout(r, 10));
+
+			expect(handlerCalls).toBe(1);
+			expect(platform.sent[0].data.ok).toBe(true);
+		});
+	});
 });
 
-// -- Phase 22: Binary RPC ----------------------------------------------------
+// - ctx.publish reserves the `__` prefix --------------------------------
+
+describe('ctx.publish() reserves the `__` prefix', () => {
+	beforeEach(() => { _resetMiddleware(); });
+
+	it('rejects publishes to `__signal:userId` with INVALID_TOPIC', async () => {
+		const handler = live(async (ctx) => {
+			ctx.publish('__signal:victim', 'force-logout', { redirect: '/x' });
+			return 'unreachable';
+		});
+		__register('intopic/sig', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'intopic/sig', id: 't1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const reply = platform.sent.find((m) => m.event === 'reply' || m.data?.id === 't1') || platform.sent[0];
+		expect(reply?.data?.ok).toBe(false);
+		expect(reply?.data?.code).toBe('INVALID_TOPIC');
+	});
+
+	it('rejects publishes to `__rpc`', async () => {
+		const handler = live(async (ctx) => {
+			ctx.publish('__rpc', 'reply', { id: 'guess', ok: true, data: 'spoof' });
+			return 'unreachable';
+		});
+		__register('intopic/rpc', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'intopic/rpc', id: 't2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const reply = platform.sent[0];
+		expect(reply?.data?.ok).toBe(false);
+		expect(reply?.data?.code).toBe('INVALID_TOPIC');
+	});
+
+	it('still allows publishes to user-namespaced topics', async () => {
+		const handler = live(async (ctx) => {
+			ctx.publish('chat:room1', 'message', { from: 'a', body: 'hi' });
+			return 'ok';
+		});
+		__register('intopic/ok', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'intopic/ok', id: 't3', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const reply = platform.sent.find((m) => m.event === 'reply') || platform.sent[platform.sent.length - 1];
+		expect(reply?.data?.ok).toBe(true);
+		expect(reply?.data?.data).toBe('ok');
+	});
+});
+
+// - _getIdentityKey reads id / user_id / userId -------------------------
+
+describe('rate-limit identity probes id, user_id, and userId', () => {
+	it('returns ctx.user.id when present', () => {
+		expect(_getIdentityKey({ user: { id: 'u-1' } })).toBe('u-1');
+	});
+
+	it('falls back to ctx.user.user_id when id is missing', () => {
+		expect(_getIdentityKey({ user: { user_id: 'u-2' } })).toBe('u-2');
+	});
+
+	it('falls back to ctx.user.userId when id and user_id are missing', () => {
+		expect(_getIdentityKey({ user: { userId: 'u-3' } })).toBe('u-3');
+	});
+
+	it('prefers id over user_id and userId when all three are present', () => {
+		expect(_getIdentityKey({ user: { id: 'A', user_id: 'B', userId: 'C' } })).toBe('A');
+	});
+
+	it('coerces numeric ids to string', () => {
+		expect(_getIdentityKey({ user: { id: 42 } })).toBe('42');
+		expect(_getIdentityKey({ user: { user_id: 17 } })).toBe('17');
+	});
+
+	it('treats null/undefined ids as missing and uses the per-connection guest bucket', () => {
+		const ctxA = { user: { id: null }, ws: {} };
+		const ctxB = { user: { id: null }, ws: ctxA.ws };
+		// Same ws -> same guest bucket
+		expect(_getIdentityKey(ctxA)).toBe(_getIdentityKey(ctxB));
+		// Different ws -> different bucket
+		const ctxC = { user: { id: null }, ws: {} };
+		expect(_getIdentityKey(ctxA)).not.toBe(_getIdentityKey(ctxC));
+	});
+
+	it('returns "anon" when neither user nor ws is present', () => {
+		expect(_getIdentityKey({})).toBe('anon');
+	});
+});
+
+// - live.upload({ reauthEvery }) -----------------------------------------
+
+describe('live.upload({ reauthEvery })', () => {
+	it('rejects non-numeric / non-positive reauthEvery values', () => {
+		const fn = async (ctx) => {};
+		expect(() => live.upload(fn, { reauthEvery: -1 })).toThrow(/positive finite/);
+		expect(() => live.upload(fn, { reauthEvery: 0 })).toThrow(/positive finite/);
+		expect(() => live.upload(fn, { reauthEvery: NaN })).toThrow(/positive finite/);
+		expect(() => live.upload(fn, { reauthEvery: Infinity })).toThrow(/positive finite/);
+		expect(() => live.upload(fn, { reauthEvery: '1024' })).toThrow(/positive finite/);
+	});
+
+	it('accepts a positive finite reauthEvery and stamps the value onto __uploadOptions', () => {
+		const fn = async (ctx) => {};
+		const wrapped = live.upload(fn, { reauthEvery: 4096 });
+		expect(/** @type {any} */ (wrapped).__uploadOptions.reauthEvery).toBe(4096);
+	});
+
+	it('defaults reauthEvery to 0 (legacy: guard runs once at chunk-0 only)', () => {
+		const fn = async (ctx) => {};
+		const wrapped = live.upload(fn);
+		expect(/** @type {any} */ (wrapped).__uploadOptions.reauthEvery).toBe(0);
+	});
+});
+
+// - Phase 22: Binary RPC ----------------------------------------------------
 
 describe('handleRpc() binary', () => {
 	it('handles binary RPC frames', async () => {
@@ -3134,7 +3382,7 @@ describe('handleRpc() binary', () => {
 	});
 });
 
-// -- Phase 27: Throttle / Debounce -------------------------------------------
+// - Phase 27: Throttle / Debounce -------------------------------------------
 
 describe('ctx.throttle and ctx.debounce', () => {
 	let ws, platform;
@@ -3212,7 +3460,7 @@ describe('ctx.throttle and ctx.debounce', () => {
 	});
 });
 
-// -- Phase 26/32: live.access helpers ----------------------------------------
+// - Phase 26/32: live.access helpers ----------------------------------------
 
 describe('live.access', () => {
 	it('owner() checks ctx.user[field] is present', () => {
@@ -3266,7 +3514,7 @@ describe('live.access', () => {
 	});
 });
 
-// -- Phase 26/32: live.stream with filter/access option ----------------------
+// - Phase 26/32: live.stream with filter/access option ----------------------
 
 describe('live.stream() with filter/access', () => {
 	it('stores filter function from filter option', () => {
@@ -3289,7 +3537,7 @@ describe('live.stream() with filter/access', () => {
 	});
 });
 
-// -- Phase 30: live.derived() ------------------------------------------------
+// - Phase 30: live.derived() ------------------------------------------------
 
 describe('live.derived()', () => {
 	it('marks function with __isDerived and __isStream', () => {
@@ -3316,7 +3564,7 @@ describe('live.derived()', () => {
 	});
 });
 
-// -- Phase 30: _activateDerived + __registerDerived --------------------------
+// - Phase 30: _activateDerived + __registerDerived --------------------------
 
 import { __registerDerived, _activateDerived, _prepareHmr } from '../server.js';
 
@@ -3346,7 +3594,7 @@ describe('derived stream activation', () => {
 	});
 });
 
-// -- Dynamic live.derived() --------------------------------------------------
+// - Dynamic live.derived() --------------------------------------------------
 
 describe('dynamic live.derived()', () => {
 	it('marks function with __derivedDynamic and __derivedSourceFactory', () => {
@@ -3731,7 +3979,7 @@ describe('missing _activateDerived warning', () => {
 	});
 });
 
-// -- Phase 24: live.room() ---------------------------------------------------
+// - Phase 24: live.room() ---------------------------------------------------
 
 describe('live.room()', () => {
 	it('creates a room export with __isRoom and sub-streams', () => {
@@ -3812,7 +4060,7 @@ describe('live.room()', () => {
 		expect(resp.data.ok).toBe(false);
 		expect(resp.data.code).toBe('FORBIDDEN');
 
-		// The loader must NOT have run -- otherwise its data was computed
+		// The loader must NOT have run - otherwise its data was computed
 		// and could have leaked through any side effects.
 		expect(loaderRan).toBe(false);
 
@@ -3820,7 +4068,7 @@ describe('live.room()', () => {
 		const joins = platform.published.filter((p) => p.event === 'join');
 		expect(joins).toHaveLength(0);
 
-		// ws.subscribe must NOT have been called -- ws topics list stays empty.
+		// ws.subscribe must NOT have been called - ws topics list stays empty.
 		expect(ws.getTopics().length).toBe(0);
 	});
 
@@ -3863,7 +4111,7 @@ describe('live.room()', () => {
 
 	it('rollback after a guard-thrown denial cleans up _presenceRef (no phantom roster entries)', async () => {
 		// Regression: after N anonymous guard-denied visits, an authorized
-		// follow-up user must see ONLY themselves in the roster -- not
+		// follow-up user must see ONLY themselves in the roster - not
 		// phantom guest entries from the rolled-back subscribes. Verifies
 		// that _executeStreamRpc's catch path -> _rollbackStreamSubscribe
 		// -> __onUnsubscribe -> _rollingBack-fast-path actually deletes
@@ -3928,7 +4176,7 @@ describe('live.room()', () => {
 
 		const ws = mockWs({ id: 'alice', name: 'Alice' });
 		const platform = mockPlatform();
-		// platform.presence is intentionally undefined -- this exercises
+		// platform.presence is intentionally undefined - this exercises
 		// the zero-config path the fallback covers.
 
 		handleRpc(ws, toArrayBuffer({ rpc: 'rooms-fallback/__data', id: 'd1', args: ['r1'], stream: true }), platform);
@@ -3987,7 +4235,7 @@ describe('live.room()', () => {
 	});
 });
 
-// -- Phase 31: live.webhook() ------------------------------------------------
+// - Phase 31: live.webhook() ------------------------------------------------
 
 describe('live.webhook()', () => {
 	it('creates a webhook handler with metadata', () => {
@@ -4055,7 +4303,7 @@ describe('live.webhook()', () => {
 	});
 });
 
-// -- Phase 33: Delta sync (server side) --------------------------------------
+// - Phase 33: Delta sync (server side) --------------------------------------
 
 describe('delta sync in streams', () => {
 	let ws, platform;
@@ -4151,7 +4399,7 @@ describe('delta sync in streams', () => {
 		});
 		__register('delta/full', fn);
 
-		// No version field in request -- full refetch
+		// No version field in request - full refetch
 		const data = toArrayBuffer({ rpc: 'delta/full', id: 'dful1', args: [], stream: true });
 		handleRpc(ws, data, platform);
 
@@ -4165,7 +4413,7 @@ describe('delta sync in streams', () => {
 	});
 });
 
-// -- Phase 28: Test utilities ------------------------------------------------
+// - Phase 28: Test utilities ------------------------------------------------
 
 import { createTestEnv, expectGuardRejects, createTestContext } from '../test.js';
 
@@ -4438,7 +4686,7 @@ describe('createTestEnv() chaos harness', () => {
 		const greet = live(async () => 'hello');
 		env.register('cm', { greet });
 
-		// Even with full chaos, the RPC call still resolves -- platform.send is exempt.
+		// Even with full chaos, the RPC call still resolves - platform.send is exempt.
 		const client = env.connect({ id: 'u1' });
 		const result = await client.call('cm/greet');
 		expect(result).toBe('hello');
@@ -4519,13 +4767,13 @@ describe('TestStream.simulatePublish()', () => {
 
 		const client = env.connect({ id: 'u1' });
 		const stream = client.subscribe('sim/items-missing');
-		// No await -- subscribe hasn't received its initial reply, no topic yet.
+		// No await - subscribe hasn't received its initial reply, no topic yet.
 
 		expect(() => stream.simulatePublish('created', { id: 1 })).toThrow(/no topic/);
 	});
 });
 
-// -- Phase 35: live.channel() -------------------------------------------------
+// - Phase 35: live.channel() -------------------------------------------------
 
 describe('live.channel()', () => {
 	it('sets __isChannel, __isStream and __isLive flags', () => {
@@ -4589,7 +4837,7 @@ describe('live.channel()', () => {
 	});
 });
 
-// -- derived stream RPC response -----------------------------------------------
+// - derived stream RPC response -----------------------------------------------
 
 describe('derived stream handleRpc response', () => {
 	it('includes derived: true in the response', async () => {
@@ -4685,7 +4933,7 @@ describe('derived stream handleRpc response', () => {
 	});
 });
 
-// -- Phase 37: live.rateLimit() -----------------------------------------------
+// - Phase 37: live.rateLimit() -----------------------------------------------
 
 describe('live.rateLimit()', () => {
 	it('sets __isLive and __isRateLimited flags', () => {
@@ -4729,7 +4977,7 @@ describe('live.rateLimit()', () => {
 		const ctx2 = { user: { id: 'b' } };
 
 		await fn(ctx1);
-		await fn(ctx2); // should not throw -- different user
+		await fn(ctx2); // should not throw - different user
 	});
 
 	it('custom key function is used', async () => {
@@ -4770,7 +5018,7 @@ describe('live.rateLimit()', () => {
 	});
 });
 
-// -- live.rateLimits() registry config ----------------------------------------
+// - live.rateLimits() registry config ----------------------------------------
 
 describe('live.rateLimits() registry config', () => {
 	beforeEach(() => { _resetRateLimits(); });
@@ -4929,7 +5177,7 @@ describe('live.rateLimits() registry config', () => {
 	});
 });
 
-// -- Phase 38: live.effect() --------------------------------------------------
+// - Phase 38: live.effect() --------------------------------------------------
 
 describe('live.effect()', () => {
 	it('sets __isEffect flag and metadata', () => {
@@ -5004,7 +5252,7 @@ describe('live.effect()', () => {
 	});
 });
 
-// -- Phase 43: live.signal() --------------------------------------------------
+// - Phase 43: live.signal() --------------------------------------------------
 
 describe('live.signal()', () => {
 	it('ctx.signal publishes to __signal:{userId} topic', async () => {
@@ -5047,7 +5295,7 @@ describe('live.signal()', () => {
 	});
 });
 
-// -- Phase 39: live.aggregate() -----------------------------------------------
+// - Phase 39: live.aggregate() -----------------------------------------------
 
 describe('live.aggregate()', () => {
 	it('sets aggregate metadata', () => {
@@ -5113,7 +5361,7 @@ describe('live.aggregate()', () => {
 	});
 });
 
-// -- live.aggregate() with windows --------------------------------------------
+// - live.aggregate() with windows --------------------------------------------
 
 describe('live.aggregate() combine helpers', () => {
 	it('combineSum sums numbers, treats null/undefined as 0', () => {
@@ -5142,7 +5390,7 @@ describe('live.aggregate() combine helpers', () => {
 	});
 });
 
-describe('live.aggregate() windowed -- validation', () => {
+describe('live.aggregate() windowed - validation', () => {
 	it('rejects an empty windows object', () => {
 		expect(() => live.aggregate('src', { c: { init: () => 0 } }, {
 			topic: 't', windows: {}
@@ -5186,7 +5434,7 @@ describe('live.aggregate() windowed -- validation', () => {
 	});
 
 	it('rejects sliding bucket count over MAX_AGGREGATE_BUCKETS', () => {
-		// 1ms slide on a 100s window = 100,000 buckets -- well over the cap.
+		// 1ms slide on a 100s window = 100,000 buckets - well over the cap.
 		expect(() => live.aggregate('src', { c: { init: () => 0, reduce: (a) => a, combine: combineSum } }, {
 			topic: 't',
 			windows: { w: { type: 'sliding', durationMs: 100_000, slideMs: 1 } }
@@ -5215,7 +5463,7 @@ describe('live.aggregate() windowed -- validation', () => {
 	});
 });
 
-describe('live.aggregate() windowed -- per-window output topics + state isolation', () => {
+describe('live.aggregate() windowed - per-window output topics + state isolation', () => {
 	afterEach(() => {
 		_resetAggregates();
 	});
@@ -5258,7 +5506,7 @@ describe('live.aggregate() windowed -- per-window output topics + state isolatio
 		expect(lifetimePubs.length).toBe(3);
 		expect(slidingPubs.length).toBe(3);
 
-		// State across the two windows is isolated -- they happen to agree
+		// State across the two windows is isolated - they happen to agree
 		// here because no slide tick fired, but they are computed off
 		// independent state slices.
 		expect(lifetimePubs[2].data.counts).toEqual({ a: 2, b: 1 });
@@ -5306,7 +5554,7 @@ describe('live.aggregate() windowed -- per-window output topics + state isolatio
 			platform.publish('events:d', 'inc', {});
 			// Hot window publishes synchronously (debounce: 0).
 			expect(platform.published.filter(p => p.topic === 'events:d:agg:hot').length).toBe(1);
-			// Cold window has not yet fired -- debounce: 50 still pending.
+			// Cold window has not yet fired - debounce: 50 still pending.
 			expect(platform.published.filter(p => p.topic === 'events:d:agg:cold').length).toBe(0);
 
 			vi.advanceTimersByTime(60);
@@ -5317,7 +5565,7 @@ describe('live.aggregate() windowed -- per-window output topics + state isolatio
 	});
 });
 
-describe('live.aggregate() windowed -- tumbling boundary', () => {
+describe('live.aggregate() windowed - tumbling boundary', () => {
 	afterEach(() => {
 		_resetAggregates();
 		vi.useRealTimers();
@@ -5363,7 +5611,7 @@ describe('live.aggregate() windowed -- tumbling boundary', () => {
 	});
 });
 
-describe('live.aggregate() windowed -- sliding hop rotation', () => {
+describe('live.aggregate() windowed - sliding hop rotation', () => {
 	afterEach(() => {
 		_resetAggregates();
 		vi.useRealTimers();
@@ -5428,7 +5676,7 @@ describe('live.aggregate() windowed -- sliding hop rotation', () => {
 	});
 });
 
-describe('live.aggregate() windowed -- per-window snapshots', () => {
+describe('live.aggregate() windowed - per-window snapshots', () => {
 	afterEach(() => {
 		_resetAggregates();
 	});
@@ -5474,9 +5722,45 @@ describe('live.aggregate() windowed -- per-window snapshots', () => {
 		expect(lifetimeInit.count).toBe(7);
 		expect(todayInit.count).toBe(0);
 	});
+
+	// A snapshot returned from a backend (Redis cache, JSON payload, etc.)
+	// is a hostile-input boundary - the snapshot author is not always the
+	// framework author. Hydration must skip `__proto__` / `constructor`
+	// keys so a `JSON.parse('{"__proto__":{"polluted":1}}')` payload
+	// cannot stamp values on Object.prototype reachable from every other
+	// object in the process.
+	it('does not pollute Object.prototype when snapshot contains __proto__', async () => {
+		const fn = live.aggregate('events:sn-pp', {
+			count: { init: () => 0, reduce: (a) => a + 1 }
+		}, {
+			topic: 'events:sn-pp:agg',
+			snapshot: async () => JSON.parse('{"count":3,"__proto__":{"polluted":1},"constructor":"hostile"}')
+		});
+		__registerAggregate('agg/snap/pp', fn);
+		// Allow the hydration microtask kicked off inside __registerAggregate to flush.
+		await new Promise((r) => setTimeout(r, 10));
+		expect(/** @type {any} */ ({}).polluted).toBeUndefined();
+		expect(/** @type {any} */ ({}).constructor).not.toBe('hostile');
+	});
+
+	it('does not pollute Object.prototype from a windowed snapshot containing __proto__', async () => {
+		const fn = live.aggregate('events:sn-wpp', {
+			count: { init: () => 0, reduce: (a) => a + 1 }
+		}, {
+			topic: 'events:sn-wpp:agg',
+			snapshots: {
+				lifetime: async () => JSON.parse('{"count":3,"__proto__":{"polluted":1}}')
+			},
+			windows: { lifetime: { type: 'lifetime' } }
+		});
+		__registerAggregate('agg/snap/wpp', fn);
+		await fn.__windowStreams.lifetime();
+		await new Promise((r) => setTimeout(r, 10));
+		expect(/** @type {any} */ ({}).polluted).toBeUndefined();
+	});
 });
 
-describe('live.aggregate() windowed -- root + per-window stream metadata', () => {
+describe('live.aggregate() windowed - root + per-window stream metadata', () => {
 	afterEach(() => {
 		_resetAggregates();
 	});
@@ -5511,10 +5795,10 @@ describe('live.aggregate() windowed -- root + per-window stream metadata', () =>
 	});
 });
 
-// -- _activateDerived late-activation contract -------------------------------
+// - _activateDerived late-activation contract -------------------------------
 //
 // The README's recommended call site for `_activateDerived(platform)` is the
-// adapter's `init({ platform })` hook -- which fires BEFORE the lazy queue
+// adapter's `init({ platform })` hook - which fires BEFORE the lazy queue
 // drains and BEFORE any WS connection. Without late-activation hooks across
 // every reactive registration path, the publish-wrap never installs and the
 // first cron-driven publish silently misses every watcher (aggregate /
@@ -5670,7 +5954,7 @@ describe('_activateDerived late-activation', () => {
 			__register(`agg/idem-${i}`, fn);
 			__registerAggregate(`agg/idem-${i}`, fn);
 		}
-		// Same wrapped function reference -- no re-wrap.
+		// Same wrapped function reference - no re-wrap.
 		expect(platform.publish).toBe(wrappedFirst);
 
 		platform.publish('idem:src', 'inc', {});
@@ -5694,11 +5978,11 @@ describe('_activateDerived late-activation', () => {
 		__register('agg/no-activate', fn);
 		__registerAggregate('agg/no-activate', fn);
 
-		// Wrap was NOT installed -- the publish reference is still native.
+		// Wrap was NOT installed - the publish reference is still native.
 		expect(platform.publish).toBe(nativePublish);
 
 		platform.publish('no-activate:src', 'inc', {});
-		// And no fan-out happened -- the aggregate output topic stays empty.
+		// And no fan-out happened - the aggregate output topic stays empty.
 		const pubs = platform.published.filter(p => p.topic === 'no-activate:out');
 		expect(pubs.length).toBe(0);
 	});
@@ -5735,7 +6019,7 @@ describe('_activateDerived late-activation', () => {
 	});
 });
 
-// -- Phase 40: live.gate() ----------------------------------------------------
+// - Phase 40: live.gate() ----------------------------------------------------
 
 describe('live.gate()', () => {
 	it('sets gate metadata on the wrapped function', () => {
@@ -5826,7 +6110,7 @@ describe('live.gate()', () => {
 	});
 });
 
-// -- Stream filter/access enforcement -----------------------------------------
+// - Stream filter/access enforcement -----------------------------------------
 
 describe('stream filter/access', () => {
 	it('denies subscription when filter returns false', async () => {
@@ -5895,7 +6179,7 @@ describe('stream filter/access', () => {
 	});
 });
 
-// -- Phase 41: pipe() ---------------------------------------------------------
+// - Phase 41: pipe() ---------------------------------------------------------
 
 describe('pipe()', () => {
 	it('preserves stream metadata on piped function', () => {
@@ -5994,7 +6278,7 @@ describe('pipe()', () => {
 	});
 });
 
-// -- Phase 42: Schema Evolution -----------------------------------------------
+// - Phase 42: Schema Evolution -----------------------------------------------
 
 describe('schema evolution', () => {
 	it('stores version and migrate metadata on stream function', () => {
@@ -6113,7 +6397,7 @@ describe('schema evolution', () => {
 	});
 });
 
-// -- 0.4.0: unsubscribe() hook ------------------------------------------------
+// - 0.4.0: unsubscribe() hook ------------------------------------------------
 
 describe('unsubscribe()', () => {
 	let ws, platform;
@@ -6175,7 +6459,7 @@ describe('unsubscribe()', () => {
 	});
 });
 
-// -- 0.4.0: close() with ctx.subscriptions ------------------------------------
+// - 0.4.0: close() with ctx.subscriptions ------------------------------------
 
 describe('close() with ctx.subscriptions', () => {
 	it('uses subscriptions Set from ctx instead of ws.getTopics()', async () => {
@@ -6196,7 +6480,7 @@ describe('close() with ctx.subscriptions', () => {
 	});
 });
 
-// -- 0.4.0: ctx.batch ---------------------------------------------------------
+// - 0.4.0: ctx.batch ---------------------------------------------------------
 
 describe('ctx.batch', () => {
 	it('ctx.batch calls platform.batch with messages', async () => {
@@ -6225,7 +6509,7 @@ describe('ctx.batch', () => {
 	});
 });
 
-// -- ctx.publish auto microtask-batch via platform.publishBatched -------------
+// - ctx.publish auto microtask-batch via platform.publishBatched -------------
 
 /**
  * Build a mock platform exposing publishBatched, so the auto-batch path
@@ -6385,7 +6669,7 @@ describe('ctx.publish auto microtask-batch', () => {
 	});
 });
 
-// -- 0.4.0: live.breaker() ----------------------------------------------------
+// - 0.4.0: live.breaker() ----------------------------------------------------
 
 describe('live.breaker()', () => {
 	it('returns fallback when circuit is open', async () => {
@@ -6442,7 +6726,7 @@ describe('live.breaker()', () => {
 	});
 });
 
-// -- 0.4.0: live.room() .hooks property ---------------------------------------
+// - 0.4.0: live.room() .hooks property ---------------------------------------
 
 describe('live.room() .hooks', () => {
 	it('room export has a .hooks property with message, close, unsubscribe', () => {
@@ -6458,7 +6742,7 @@ describe('live.room() .hooks', () => {
 	});
 });
 
-// -- live.validated() rejects unrecognized schemas ----------------------------
+// - live.validated() rejects unrecognized schemas ----------------------------
 
 describe('live.validated() schema rejection', () => {
 	it('rejects calls when schema type is unrecognized', async () => {
@@ -6477,7 +6761,7 @@ describe('live.validated() schema rejection', () => {
 	});
 });
 
-// -- throttle/debounce per-entity keying --------------------------------------
+// - throttle/debounce per-entity keying --------------------------------------
 
 describe('throttle per-entity keying', () => {
 	it('does not collapse throttled publishes for different data.key values', async () => {
@@ -6505,7 +6789,7 @@ describe('throttle per-entity keying', () => {
 	});
 });
 
-// -- live.metrics() -----------------------------------------------------------
+// - live.metrics() -----------------------------------------------------------
 
 describe('live.metrics()', () => {
 	it('is a function on the live namespace', () => {
@@ -6567,7 +6851,7 @@ describe('live.metrics()', () => {
 	});
 });
 
-// -- live.metrics() integration with svelte-adapter-uws-extensions ------------
+// - live.metrics() integration with svelte-adapter-uws-extensions ------------
 //
 // Verifies the shim shown in the README "Prometheus metrics" section works
 // against the real createMetrics() registry from
@@ -6665,7 +6949,7 @@ describe('live.metrics() <-> svelte-adapter-uws-extensions/prometheus', () => {
 	});
 });
 
-// -- onError / onCronError alias ----------------------------------------------
+// - onError / onCronError alias ----------------------------------------------
 
 describe('onError()', () => {
 	it('is exported as a function', () => {
@@ -6677,7 +6961,7 @@ describe('onError()', () => {
 	});
 });
 
-// -- _copyStreamMeta via live.gate and pipe -----------------------------------
+// - _copyStreamMeta via live.gate and pipe -----------------------------------
 
 describe('metadata propagation', () => {
 	it('live.gate copies all stream metadata including version and migrate', () => {
@@ -6715,7 +6999,7 @@ describe('metadata propagation', () => {
 	});
 });
 
-// -- __directCall access/filter/gate enforcement ------------------------------
+// - __directCall access/filter/gate enforcement ------------------------------
 
 describe('__directCall stream enforcement', () => {
 	it('returns null for gated streams when predicate fails', async () => {
@@ -6751,7 +7035,7 @@ describe('__directCall stream enforcement', () => {
 	});
 });
 
-// -- __directCall fallback / onError ------------------------------------------
+// - __directCall fallback / onError ------------------------------------------
 
 describe('__directCall fallback / onError', () => {
 	it('throws as before when no fallback option is provided', async () => {
@@ -6851,7 +7135,7 @@ describe('__directCall fallback / onError', () => {
 		__register('fb/undef', stream);
 
 		const platform = mockPlatform();
-		// Explicitly pass fallback: undefined -- should still catch + return undefined
+		// Explicitly pass fallback: undefined - should still catch + return undefined
 		const result = await __directCall('fb/undef', [], platform, { fallback: undefined });
 		expect(result).toBeUndefined();
 	});
@@ -6867,7 +7151,7 @@ describe('__directCall fallback / onError', () => {
 		__register('fb/bad-cb', stream);
 
 		const platform = mockPlatform();
-		// onError is not a function -- should be ignored; fallback still returned
+		// onError is not a function - should be ignored; fallback still returned
 		const result = await __directCall('fb/bad-cb', [], platform, {
 			fallback: [],
 			onError: 'not-a-function'
@@ -6876,7 +7160,7 @@ describe('__directCall fallback / onError', () => {
 	});
 });
 
-// -- Room guard enforcement on presence/cursor sub-streams --------------------
+// - Room guard enforcement on presence/cursor sub-streams --------------------
 
 describe('room guard on sub-streams', () => {
 	it('presence stream runs guard and rejects unauthorized access', async () => {
@@ -6929,7 +7213,7 @@ describe('room guard on sub-streams', () => {
 	});
 });
 
-// -- Topic function ctx handling -----------------------------------------------
+// - Topic function ctx handling -----------------------------------------------
 
 describe('topic function ctx handling', () => {
 	it('no-ctx topic fn resolves correctly', async () => {
@@ -7055,7 +7339,7 @@ describe('topic function ctx handling', () => {
 	});
 });
 
-// -- Cron field validation ----------------------------------------------------
+// - Cron field validation ----------------------------------------------------
 
 describe('cron field validation', () => {
 	it('rejects */0 step', () => {
@@ -7084,7 +7368,7 @@ describe('cron field validation', () => {
 	});
 });
 
-// -- ctx.throttle / ctx.debounce via RPC --------------------------------------
+// - ctx.throttle / ctx.debounce via RPC --------------------------------------
 
 describe('ctx.throttle and ctx.debounce', () => {
 	it('throttle publishes immediately on first call', async () => {
@@ -7129,7 +7413,7 @@ describe('ctx.throttle and ctx.debounce', () => {
 	});
 });
 
-// -- Room action _guard enforcement -------------------------------------------
+// - Room action _guard enforcement -------------------------------------------
 
 describe('room action _guard enforcement', () => {
 	it('file-level guard runs before room action via __register modulePath', async () => {
@@ -7165,7 +7449,7 @@ describe('room action _guard enforcement', () => {
 	});
 });
 
-// -- Room action rate-limit path isolation ------------------------------------
+// - Room action rate-limit path isolation ------------------------------------
 
 describe('room action rate-limit isolation', () => {
 	it('rate-limited room actions get separate bucket keys', async () => {
@@ -7186,19 +7470,19 @@ describe('room action rate-limit isolation', () => {
 		const ws = mockWs({ id: 'rl-user1' });
 		const platform = mockPlatform();
 
-		// Call actionA -- should succeed (first call)
+		// Call actionA - should succeed (first call)
 		handleRpc(ws, toArrayBuffer({ rpc: 'rlroom/r1/__action/actionA', id: 'rla1', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 		expect(platform.sent[0]?.data.ok).toBe(true);
 
-		// Call actionB -- should ALSO succeed (different action, different bucket)
+		// Call actionB - should ALSO succeed (different action, different bucket)
 		handleRpc(ws, toArrayBuffer({ rpc: 'rlroom/r1/__action/actionB', id: 'rla2', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 		expect(platform.sent[1]?.data.ok).toBe(true);
 	});
 });
 
-// -- Topic fn with defaulted/rest no-ctx params -------------------------------
+// - Topic fn with defaulted/rest no-ctx params -------------------------------
 
 describe('topic fn with defaulted/rest no-ctx params', () => {
 	it('defaulted no-ctx param resolves correctly', async () => {
@@ -7273,7 +7557,7 @@ describe('topic fn with defaulted/rest no-ctx params', () => {
 	});
 });
 
-// -- validated(rateLimit(...)) bucket isolation --------------------------------
+// - validated(rateLimit(...)) bucket isolation --------------------------------
 
 describe('validated(rateLimit(...)) bucket isolation', () => {
 	it('two validated+rate-limited RPCs get separate buckets', async () => {
@@ -7294,19 +7578,19 @@ describe('validated(rateLimit(...)) bucket isolation', () => {
 		const ws = mockWs({ id: 'composed-user' });
 		const platform = mockPlatform();
 
-		// Call actionA -- should succeed
+		// Call actionA - should succeed
 		handleRpc(ws, toArrayBuffer({ rpc: 'composed/actionA', id: 'ca1', args: ['x'] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 		expect(platform.sent[0]?.data.ok).toBe(true);
 
-		// Call actionB -- should ALSO succeed (different path, different bucket)
+		// Call actionB - should ALSO succeed (different path, different bucket)
 		handleRpc(ws, toArrayBuffer({ rpc: 'composed/actionB', id: 'ca2', args: ['y'] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 		expect(platform.sent[1]?.data.ok).toBe(true);
 	});
 });
 
-// -- Room presence/cursor topic resolution ------------------------------------
+// - Room presence/cursor topic resolution ------------------------------------
 
 describe('room presence/cursor topic resolution', () => {
 	it('presence stream resolves correct topic with room args', async () => {
@@ -7346,7 +7630,7 @@ describe('room presence/cursor topic resolution', () => {
 	});
 });
 
-// -- ctx-aware dynamic topics with rest/default params ------------------------
+// - ctx-aware dynamic topics with rest/default params ------------------------
 
 describe('ctx-aware dynamic topics with rest/default params', () => {
 	it('(ctx, ...parts) resolves correctly', async () => {
@@ -7396,7 +7680,7 @@ describe('ctx-aware dynamic topics with rest/default params', () => {
 	});
 });
 
-// -- Room action validated(rateLimit(...)) bucket isolation --------------------
+// - Room action validated(rateLimit(...)) bucket isolation --------------------
 
 describe('room action validated(rateLimit(...)) bucket isolation', () => {
 	it('two room actions with validated+rateLimit get separate buckets', async () => {
@@ -7434,7 +7718,7 @@ describe('room action validated(rateLimit(...)) bucket isolation', () => {
 	});
 });
 
-// -- Room action topic arg slicing --------------------------------------------
+// - Room action topic arg slicing --------------------------------------------
 
 describe('room action topic arg slicing', () => {
 	it('action payload args do not leak into room topic', async () => {
@@ -7463,7 +7747,7 @@ describe('room action topic arg slicing', () => {
 	});
 });
 
-// -- ctx alias / destructured / typed topic params ----------------------------
+// - ctx alias / destructured / typed topic params ----------------------------
 
 describe('ctx alias and destructured topic params', () => {
 	it('(c, roomId) => ... uses fn.length heuristic (not rejected)', async () => {
@@ -7596,7 +7880,7 @@ describe('ctx alias and destructured topic params', () => {
 	});
 });
 
-// -- topicArgs required for ambiguous room topics with actions -----------------
+// - topicArgs required for ambiguous room topics with actions -----------------
 
 describe('topicArgs required for rooms with actions', () => {
 	it('throws when actions are defined without topicArgs', () => {
@@ -7686,7 +7970,7 @@ describe('topicArgs required for rooms with actions', () => {
 	});
 });
 
-// -- Topic function must return string ----------------------------------------
+// - Topic function must return string ----------------------------------------
 
 describe('topic function validation', () => {
 	it('rejects async topic functions at definition time', () => {
@@ -7723,7 +8007,7 @@ describe('topic function validation', () => {
 	});
 });
 
-// -- Topic fn with defaults and fn.length heuristic --------------------------
+// - Topic fn with defaults and fn.length heuristic --------------------------
 
 describe('topic fn with defaults uses fn.length heuristic', () => {
 	it('defaulted param uses fn.length (no source parsing)', async () => {
@@ -7786,7 +8070,7 @@ describe('topic fn with defaults uses fn.length heuristic', () => {
 	});
 });
 
-// -- Rate limit bucket cap with existing identity -----------------------------
+// - Rate limit bucket cap with existing identity -----------------------------
 
 describe('rate limit bucket cap with existing identity', () => {
 	it('existing identity passes, new identity rejected when map is full', async () => {
@@ -7820,7 +8104,7 @@ describe('rate limit bucket cap with existing identity', () => {
 	});
 });
 
-// -- live.idempotent() --------------------------------------------------------
+// - live.idempotent() --------------------------------------------------------
 
 describe('live.idempotent()', () => {
 	beforeEach(() => {
@@ -8051,8 +8335,103 @@ describe('live.idempotent()', () => {
 		handleRpc(ws, toArrayBuffer({ rpc: 'idem/custom', id: '1', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
-		expect(acquireCalls).toEqual([{ key: 'custom-key', ttl: 60 }]);
+		// Key is namespaced by registered RPC path so the same userKey
+		// across different RPCs cannot read each other's cached results.
+		expect(acquireCalls).toEqual([{ key: 'rpc:idem/custom:custom-key', ttl: 60 }]);
 		expect(platform.sent[0].data.data).toBe('from-custom-store');
+	});
+
+	// Pre-fix bug: live.idempotent() used the raw client envelope key
+	// as the cache slot. Two different RPCs with the same client-supplied
+	// idempotencyKey shared a slot - a public RPC returned a private
+	// RPC's cached result. Codex's round-5 PoC confirmed this end-to-end.
+	it('cross-RPC isolation: same userKey on two paths returns DIFFERENT cached results', async () => {
+		const acquireCalls = [];
+		const cachePerKey = new Map();
+		const customStore = {
+			async acquire(key) {
+				acquireCalls.push(key);
+				const cached = cachePerKey.get(key);
+				if (cached !== undefined) {
+					return { result: cached };
+				}
+				return {
+					acquired: true,
+					commit: async (val) => { cachePerKey.set(key, val); },
+					abort: async () => {}
+				};
+			}
+		};
+		const privateHandler = live.idempotent(
+			{ store: customStore },
+			async () => ({ from: 'private', secret: 'do-not-leak' })
+		);
+		const publicHandler = live.idempotent(
+			{ store: customStore },
+			async () => ({ from: 'public' })
+		);
+		__register('iso/private', privateHandler);
+		__register('iso/public', publicHandler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Caller A: privateHandler with idempotencyKey='abc'
+		handleRpc(ws, toArrayBuffer({
+			rpc: 'iso/private', id: '1', args: [], idempotencyKey: 'abc'
+		}), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Caller B: publicHandler with the SAME idempotencyKey='abc'
+		handleRpc(ws, toArrayBuffer({
+			rpc: 'iso/public', id: '2', args: [], idempotencyKey: 'abc'
+		}), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Two distinct cache keys: each handler ran exactly once.
+		expect(acquireCalls).toEqual([
+			'rpc:iso/private:abc',
+			'rpc:iso/public:abc'
+		]);
+		expect(platform.sent[0].data.data).toEqual({ from: 'private', secret: 'do-not-leak' });
+		expect(platform.sent[1].data.data).toEqual({ from: 'public' });
+		// Critically: the public response did NOT carry the private secret.
+		expect(platform.sent[1].data.data.secret).toBeUndefined();
+	});
+
+	it('rejects idempotencyKey longer than 256 chars with INVALID_REQUEST', async () => {
+		const handler = live.idempotent({}, async () => 'ok');
+		__register('idem/long', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const longKey = 'a'.repeat(300);
+
+		handleRpc(ws, toArrayBuffer({
+			rpc: 'idem/long', id: '1', args: [], idempotencyKey: longKey
+		}), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
+	});
+
+	it('rejects idempotencyKey from keyFrom callback longer than 256 chars', async () => {
+		const longKey = 'a'.repeat(300);
+		const handler = live.idempotent(
+			{ keyFrom: () => longKey },
+			async () => 'ok'
+		);
+		__register('idem/longkf', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/longkf', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
 	});
 
 	it('throws CONFLICT when store returns pending', async () => {
@@ -8143,7 +8522,7 @@ describe('live.idempotent()', () => {
 	});
 });
 
-// -- live.stream({ coalesceBy }) ----------------------------------------------
+// - live.stream({ coalesceBy }) ----------------------------------------------
 
 describe('live.stream({ coalesceBy })', () => {
 	beforeEach(() => {
@@ -8524,7 +8903,7 @@ describe('live.stream({ coalesceBy })', () => {
 	});
 });
 
-// -- Three-tier reconnect ----------------------------------------------------
+// - Three-tier reconnect ----------------------------------------------------
 
 describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 	it('rejects non-function delta.fromSeq at registration', () => {
@@ -8737,7 +9116,7 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 	});
 });
 
-// -- live.admission() + ctx.shed() + classOfService ---------------------------
+// - live.admission() + ctx.shed() + classOfService ---------------------------
 
 describe('live.admission() + ctx.shed()', () => {
 	beforeEach(() => {
@@ -8834,7 +9213,7 @@ describe('live.admission() + ctx.shed()', () => {
 		handleRpc(ws, toArrayBuffer({ rpc: 'shed/typo', id: '1', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 		// Throws inside handler -> non-LiveError -> INTERNAL_ERROR to client.
-		// Server logs the typo Error -- the contract is "this is a developer bug, not a client error."
+		// Server logs the typo Error - the contract is "this is a developer bug, not a client error."
 		expect(platform.sent[0].data.ok).toBe(false);
 		expect(platform.sent[0].data.code).toBe('INTERNAL_ERROR');
 	});
@@ -8978,12 +9357,12 @@ describe('live.stream({ classOfService })', () => {
 		live.admission({ classes: { background: ['MEMORY'] } });
 		platform._setPressure({ reason: 'MEMORY', active: true });
 
-		// Existing subscriber stays subscribed -- the gate fires only on new subscribe
+		// Existing subscriber stays subscribed - the gate fires only on new subscribe
 		expect(ws.isSubscribed('cos/existing')).toBe(true);
 	});
 });
 
-// -- Structured guard error codes --------------------------------------------
+// - Structured guard error codes --------------------------------------------
 
 describe('guard auto-classification', () => {
 	it('LiveError from guard propagates code and message verbatim', async () => {
@@ -9129,9 +9508,125 @@ describe('guard auto-classification', () => {
 		expect(platform.sent[0].data.code).toBe('INTERNAL_ERROR');
 		expect(platform.sent[0].data.error).toBe('Internal server error');
 	});
+
+	// Pre-fix bug: the wire path read `if (!streamFilter(ctx, ...))` and
+	// the SSR path read `if (!predicate(ctx, ...))` synchronously. An
+	// async predicate returns a Promise, which is truthy, which bypassed
+	// the `!` deny branch entirely. async-deny became async-allow. The
+	// fix is to await before the truthiness check.
+	it('async access predicate returning false denies on the wire path with FORBIDDEN', async () => {
+		const stream = live.stream('gc-access-async-user', async () => [], {
+			merge: 'crud', key: 'id',
+			access: async () => false
+		});
+		__register('gc/access-async-user', stream);
+
+		const ws = mockWs({ id: 'u' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc/access-async-user', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 30));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+		expect(platform.sent[0].data.error).toBe('Access denied');
+	});
+
+	it('async access predicate returning false denies on the wire path with UNAUTHENTICATED when no user', async () => {
+		const stream = live.stream('gc-access-async-anon', async () => [], {
+			merge: 'crud', key: 'id',
+			access: async () => false
+		});
+		__register('gc/access-async-anon', stream);
+
+		const ws = mockWs();
+		ws.getUserData = () => null;
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc/access-async-anon', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 30));
+
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('UNAUTHENTICATED');
+	});
+
+	it('async access predicate denies on .load() (SSR direct call) with FORBIDDEN when user present', async () => {
+		const stream = live.stream('gc-access-async-dc-user', async () => [], {
+			merge: 'crud', key: 'id',
+			access: async () => false
+		});
+		__register('gc/access-async-dc-user', stream);
+
+		const platform = mockPlatform();
+		await expect(__directCall('gc/access-async-dc-user', [], platform, { user: { id: 'u' } }))
+			.rejects.toMatchObject({ code: 'FORBIDDEN' });
+	});
+
+	it('async access predicate denies on .load() with UNAUTHENTICATED when user is null', async () => {
+		const stream = live.stream('gc-access-async-dc-anon', async () => [], {
+			merge: 'crud', key: 'id',
+			access: async () => false
+		});
+		__register('gc/access-async-dc-anon', stream);
+
+		const platform = mockPlatform();
+		await expect(__directCall('gc/access-async-dc-anon', [], platform, { user: null }))
+			.rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+	});
+
+	it('live.gate with async predicate returning false yields {gated:true} on wire path', async () => {
+		// Pre-fix bug: the !predicate check against an async predicate's
+		// Promise was always falsy (Promise is truthy), so async-gate
+		// always proceeded with the loader, leaking initial data.
+		const stream = live.stream('gated-async-stream', async () => [{ secret: 'do-not-leak' }], {
+			merge: 'crud', key: 'id'
+		});
+		const gated = live.gate(async () => false, stream);
+		__register('gated-async/stream', gated);
+
+		const ws = mockWs({ id: 'u' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gated-async/stream', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 30));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.gated).toBe(true);
+		expect(platform.sent[0].data.data).toBeNull();
+	});
+
+	it('live.gate with async predicate returning false yields null on .load() (SSR)', async () => {
+		const stream = live.stream('gated-async-stream-dc', async () => [{ secret: 'do-not-leak' }], {
+			merge: 'crud', key: 'id'
+		});
+		const gated = live.gate(async () => false, stream);
+		__register('gated-async-dc/stream', gated);
+
+		const platform = mockPlatform();
+		const result = await __directCall('gated-async-dc/stream', [], platform, { user: { id: 'u' } });
+		expect(result).toBeNull();
+	});
+
+	it('async streamFilter rejecting async hook DOES skip the loader (no data leak)', async () => {
+		// Verifies the loader is not called. Pre-fix bug let it run.
+		let loaderRan = false;
+		const stream = live.stream('gc-loader-not-leak', async () => {
+			loaderRan = true;
+			return [{ secret: 'leak' }];
+		}, {
+			merge: 'crud', key: 'id',
+			access: async () => false
+		});
+		__register('gc/loader-not-leak', stream);
+
+		const ws = mockWs({ id: 'u' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'gc/loader-not-leak', id: '1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 30));
+
+		expect(loaderRan).toBe(false);
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+	});
 });
 
-// -- live.stream({ args }) -- argument validation -----------------------------
+// - live.stream({ args }) - argument validation -----------------------------
 
 describe('live.stream({ args })', () => {
 	const uuidSchema = {
@@ -9208,7 +9703,7 @@ describe('live.stream({ args })', () => {
 
 		const ws = mockWs();
 		const platform = mockPlatform();
-		// Crafted attack input -- this string would create the topic
+		// Crafted attack input - this string would create the topic
 		// `audit:org-x; subscribe-elsewhere` if it ever reached the topic fn.
 		const attack = 'org-x; subscribe-elsewhere';
 
@@ -9352,7 +9847,7 @@ describe('live.stream({ args })', () => {
 	});
 });
 
-// -- live.stream({ transform }) ----------------------------------------------
+// - live.stream({ transform }) ----------------------------------------------
 
 describe('live.stream({ transform })', () => {
 	beforeEach(() => {
@@ -9508,11 +10003,11 @@ describe('live.stream({ transform })', () => {
 		const ws = mockWs();
 		const platform = mockPlatform();
 
-		// Publish BEFORE any subscribe -- transform isn't registered yet
+		// Publish BEFORE any subscribe - transform isn't registered yet
 		handleRpc(ws, toArrayBuffer({ rpc: 'tr/cold-pub', id: 'p0', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
-		// Without registration, the transform doesn't apply -- documented behavior
+		// Without registration, the transform doesn't apply - documented behavior
 		// (consistent with coalesceBy which also requires an active subscriber to
 		// know about the transform).
 		expect(platform.published).toHaveLength(1);
@@ -9716,7 +10211,7 @@ describe('live.stream({ transform })', () => {
 	});
 });
 
-// -- ctx.requestId end-to-end correlation -------------------------------------
+// - ctx.requestId end-to-end correlation -------------------------------------
 
 describe('ctx.requestId', () => {
 	it('flows from platform.requestId to ctx.requestId on RPC handlers', async () => {
@@ -9774,7 +10269,7 @@ describe('ctx.requestId', () => {
 	});
 });
 
-// -- live.stream({ volatile }) -----------------------------------------------
+// - live.stream({ volatile }) -----------------------------------------------
 
 function mockPlatformWithBatched_volatile() {
 	const p = mockPlatform();
@@ -9897,7 +10392,7 @@ describe('live.stream({ volatile })', () => {
 
 		// Reset platform state but keep registries; new ws subscribes to a
 		// different topic, then publishes to 'vol-evict' with no volatile flag
-		// -- should NOT have seq: false anymore.
+		// - should NOT have seq: false anymore.
 		const ws2 = mockWs({ id: 'u2' });
 		platform.batched.length = 0;
 		handleRpc(ws2, toArrayBuffer({ rpc: 'vol/evictPub', id: 'ep2', args: [] }), platform);
@@ -9906,7 +10401,7 @@ describe('live.stream({ volatile })', () => {
 	});
 });
 
-// -- Declarative guard({ authenticated }) ------------------------------------
+// - Declarative guard({ authenticated }) ------------------------------------
 
 describe('guard({ authenticated })', () => {
 	it('throws UNAUTHENTICATED when ctx.user is null', async () => {
@@ -9947,7 +10442,7 @@ describe('guard({ authenticated })', () => {
 		// {} alone produces zero middleware -> guard() throws because no fns
 		expect(() => guard({})).toThrow(/requires at least one function or option/);
 
-		// {} alongside a function works -- the {} contributes nothing
+		// {} alongside a function works - the {} contributes nothing
 		const seen = [];
 		const g = guard({}, (ctx) => { seen.push(ctx.user); });
 		await g({ user: null });
@@ -9955,7 +10450,7 @@ describe('guard({ authenticated })', () => {
 	});
 });
 
-// -- live.access.org() / live.access.user() ----------------------------------
+// - live.access.org() / live.access.user() ----------------------------------
 
 describe('live.access.org()', () => {
 	const pred = live.access.org();
@@ -10094,7 +10589,7 @@ describe('live.access.org() integrated with live.stream({ access })', () => {
 	});
 });
 
-// -- live.scoped(predicate, fn) ----------------------------------------------
+// - live.scoped(predicate, fn) ----------------------------------------------
 
 describe('live.scoped()', () => {
 	it('rejects non-function predicate or fn', () => {
@@ -10183,7 +10678,7 @@ describe('live.scoped()', () => {
 	});
 });
 
-// -- live.publishRateWarning() ------------------------------------------------
+// - live.publishRateWarning() ------------------------------------------------
 
 describe('live.publishRateWarning()', () => {
 	let warnSpy;
@@ -10416,7 +10911,7 @@ describe('live.publishRateWarning()', () => {
 	});
 });
 
-// -- defineTopics() -----------------------------------------------------------
+// - defineTopics() -----------------------------------------------------------
 
 describe('defineTopics()', () => {
 	it('returns the input map with the same entries callable', () => {
@@ -10520,7 +11015,7 @@ describe('defineTopics()', () => {
 	});
 });
 
-// -- onUnsubscribe remainingSubscribers ---------------------------------------
+// - onUnsubscribe remainingSubscribers ---------------------------------------
 
 describe('onUnsubscribe remainingSubscribers', () => {
 	let platform;
@@ -10673,7 +11168,7 @@ describe('onUnsubscribe remainingSubscribers', () => {
 	});
 });
 
-// -- live.lock() --------------------------------------------------------------
+// - live.lock() --------------------------------------------------------------
 
 describe('live.lock()', () => {
 	beforeEach(() => { _resetLock(); });
@@ -10833,7 +11328,7 @@ describe('live.lock()', () => {
 		await expect(wrapped(ctx)).rejects.toThrow(/return a string/);
 	});
 
-	// -- maxWaitMs (bounded wait) ---------------------------------------------
+	// - maxWaitMs (bounded wait) ---------------------------------------------
 
 	it('rejects non-numeric / non-finite / negative maxWaitMs at registration', () => {
 		const fn = async () => {};
@@ -11007,7 +11502,7 @@ describe('live.lock()', () => {
 	});
 });
 
-// -- live.push() / pushHooks --------------------------------------------------
+// - live.push() / pushHooks --------------------------------------------------
 
 describe('live.push() / pushHooks', () => {
 	beforeEach(() => {
@@ -11104,7 +11599,7 @@ describe('live.push() / pushHooks', () => {
 		const platform = mockPlatform();
 		const ws = { getUserData: () => ({}) };
 		pushHooks.open(ws, { platform });
-		// No userId means the registry stays empty -- anonymous connections cannot be push targets.
+		// No userId means the registry stays empty - anonymous connections cannot be push targets.
 		await expect(live.push({ userId: 'anything' }, 'event')).rejects.toMatchObject({ code: 'NOT_FOUND' });
 	});
 
@@ -11373,7 +11868,7 @@ describe('live.push() / pushHooks', () => {
 	// bookkeeping (ws-counts, silent-topic watchdogs). Before this
 	// unification, `export const close = pushHooks.close` (the JSDoc
 	// example) only drained the push registry, leaving silent-topic
-	// watchdogs armed for 30s after every page closed -- producing
+	// watchdogs armed for 30s after every page closed - producing
 	// warning floods in CI / e2e runs that the reporter saw.
 
 	it('pushHooks.close(ws, ctx) drains the silent-topic watchdog', async () => {
@@ -11424,7 +11919,7 @@ describe('live.push() / pushHooks', () => {
 		const ws = { getUserData: () => ({ user_id: 'u-uni-3' }) };
 		pushHooks.open(ws, { platform });
 
-		// Legacy one-arg call -- still works, push-only.
+		// Legacy one-arg call - still works, push-only.
 		pushHooks.close(ws);
 
 		await expect(live.push({ userId: 'u-uni-3' }, 'event')).rejects.toMatchObject({ code: 'NOT_FOUND' });
@@ -11483,7 +11978,7 @@ describe('live.push() / pushHooks', () => {
 	});
 });
 
-// -- live.notify() ------------------------------------------------------------
+// - live.notify() ------------------------------------------------------------
 //
 // Fire-and-forget counterpart to live.push. Resolves immediately (no reply
 // awaited), never rejects in normal operation. Validation throws sync for
@@ -11530,7 +12025,7 @@ describe('live.notify()', () => {
 	});
 
 	it('silently no-ops when the user is offline (no NOT_FOUND throw)', async () => {
-		// No pushHooks.open call -- userId not registered anywhere.
+		// No pushHooks.open call - userId not registered anywhere.
 		const result = await live.notify({ userId: 'u-offline' }, 'ping');
 		expect(result).toBeUndefined();
 		// And no platform request happened (we never resolved a target).
@@ -11608,7 +12103,7 @@ describe('live.notify()', () => {
 
 		await live.notify({ userId: 'u-both' }, 'evt');
 
-		// Local match short-circuits -- remote registry never consulted.
+		// Local match short-circuits - remote registry never consulted.
 		expect(platform.requested).toHaveLength(1);
 		expect(remoteCalls).toHaveLength(0);
 
@@ -11656,7 +12151,7 @@ describe('live.notify()', () => {
 	});
 });
 
-// -- live.stream({ staleAfterMs, onError }) -----------------------------------
+// - live.stream({ staleAfterMs, onError }) -----------------------------------
 
 describe('live.stream({ staleAfterMs })', () => {
 	beforeEach(() => {
@@ -11722,7 +12217,7 @@ describe('live.stream({ staleAfterMs })', () => {
 		const ws = mockWs({ user_id: 'u1' });
 		await subscribeStream(ws, platform);
 
-		// 4s pass within the 5s window -- a publish here should reset the timer
+		// 4s pass within the 5s window - a publish here should reset the timer
 		await vi.advanceTimersByTimeAsync(4000);
 
 		const poker = live(async (ctx) => { ctx.publish('feed', 'created', { id: 'x' }); });
@@ -11732,7 +12227,7 @@ describe('live.stream({ staleAfterMs })', () => {
 
 		// 4 more seconds (8s total since subscribe, but only 4s since the publish reset)
 		await vi.advanceTimersByTimeAsync(4000);
-		expect(nthCall).toBe(1); // watchdog has NOT fired -- timer was reset by publish
+		expect(nthCall).toBe(1); // watchdog has NOT fired - timer was reset by publish
 		// 1.5s more crosses the 5s window from the publish
 		await vi.advanceTimersByTimeAsync(1500);
 		expect(nthCall).toBe(2);
@@ -11832,7 +12327,7 @@ describe('live.stream({ staleAfterMs })', () => {
 		await subscribeStream(ws, platform);
 
 		// Watchdog runs reload, reload throws, onError throws. Both should be
-		// swallowed -- no rejection bubbles out of the timer callback. Then
+		// swallowed - no rejection bubbles out of the timer callback. Then
 		// the watchdog re-arms and fires a second reload on the next tick.
 		await vi.advanceTimersByTimeAsync(1000);
 		expect(nthCall).toBe(2);
@@ -11869,7 +12364,7 @@ describe('live.stream({ staleAfterMs })', () => {
 	});
 });
 
-// -- live.stream({ invalidateOn }) --------------------------------------------
+// - live.stream({ invalidateOn }) --------------------------------------------
 
 describe('live.stream({ invalidateOn })', () => {
 	beforeEach(() => {
@@ -12216,7 +12711,7 @@ async function _publishViaCtx(platform, topic, event, data) {
 	await vi.advanceTimersByTimeAsync(0);
 }
 
-// -- Production assertions ----------------------------------------------------
+// - Production assertions ----------------------------------------------------
 
 describe('assert() helper', () => {
 	let errSpy;
@@ -12281,7 +12776,7 @@ describe('assert() helper', () => {
 	});
 });
 
-// -- Capacity caps ------------------------------------------------------------
+// - Capacity caps ------------------------------------------------------------
 
 describe('capacity caps', () => {
 	describe('MAX_PUSH_REGISTRY (WARN-then-skip)', () => {
@@ -12515,7 +13010,7 @@ describe('capacity caps', () => {
 			await new Promise((r) => setTimeout(r, 10));
 			expect(warnSpy).not.toHaveBeenCalled();
 
-			// Third user saturates -- no grace entries to evict, so silent skip + warn.
+			// Third user saturates - no grace entries to evict, so silent skip + warn.
 			handleRpc(mockWs({ id: 'u3' }), toArrayBuffer({ rpc: 'cap-pres/__data', id: 's3', args: ['r1'], stream: true }), platform);
 			handleRpc(mockWs({ id: 'u4' }), toArrayBuffer({ rpc: 'cap-pres/__data', id: 's4', args: ['r1'], stream: true }), platform);
 			await new Promise((r) => setTimeout(r, 10));

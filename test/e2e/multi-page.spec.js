@@ -39,7 +39,7 @@ async function expectTodos(page, expected) {
 	expect(got).toEqual(norm);
 }
 
-// 1 -- Page A publishes via external RPC, Page B sees it -------------------
+// 1 - Page A publishes via external RPC, Page B sees it -------------------
 
 test('cross-client created: A publishes, B sees', async ({ browser }) => {
 	const a = await openQrPage(browser);
@@ -57,7 +57,7 @@ test('cross-client created: A publishes, B sees', async ({ browser }) => {
 	}
 });
 
-// 2 -- Cross-client updated: A updates an existing key, B sees the change --
+// 2 - Cross-client updated: A updates an existing key, B sees the change --
 
 test('cross-client updated: A updates, B sees the new value', async ({ browser }) => {
 	const a = await openQrPage(browser);
@@ -78,7 +78,7 @@ test('cross-client updated: A updates, B sees the new value', async ({ browser }
 	}
 });
 
-// 3 -- Cross-client deleted: A deletes, B sees the removal -----------------
+// 3 - Cross-client deleted: A deletes, B sees the removal -----------------
 
 test('cross-client deleted: A removes, B sees the removal', async ({ browser }) => {
 	const a = await openQrPage(browser);
@@ -99,7 +99,7 @@ test('cross-client deleted: A removes, B sees the removal', async ({ browser }) 
 	}
 });
 
-// 4 -- Local mutate that publishes server-side fans out to other clients ---
+// 4 - Local mutate that publishes server-side fans out to other clients ---
 
 test('mutateOkPublish: A local mutate publishes server-side; B sees', async ({ browser }) => {
 	const a = await openQrPage(browser);
@@ -123,7 +123,7 @@ test('mutateOkPublish: A local mutate publishes server-side; B sees', async ({ b
 	}
 });
 
-// 5 -- Local-only mutate (no publish) does NOT cross to other clients ------
+// 5 - Local-only mutate (no publish) does NOT cross to other clients ------
 
 test('mutateOk: A local mutate without publish does NOT reach B', async ({ browser }) => {
 	const a = await openQrPage(browser);
@@ -148,7 +148,7 @@ test('mutateOk: A local mutate without publish does NOT reach B', async ({ brows
 	}
 });
 
-// 6 -- Three clients all see the same publish ------------------------------
+// 6 - Three clients all see the same publish ------------------------------
 
 test('three clients all see the same publish', async ({ browser }) => {
 	const a = await openQrPage(browser);
@@ -169,7 +169,7 @@ test('three clients all see the same publish', async ({ browser }) => {
 	}
 });
 
-// 7 -- Cross-client absorb: A is in queue mode for id=x with optimistic
+// 7 - Cross-client absorb: A is in queue mode for id=x with optimistic
 //      'Pending'; B publishes 'created' for id=x with 'Confirmed'. A's
 //      entry is absorbed (no graduate-overwrite); both end up showing
 //      Confirmed regardless of A's release outcome.
@@ -219,7 +219,7 @@ test('cross-client absorb on failure: A optimistic absorbed by B publish; A fail
 	}
 });
 
-// 8 -- Late join: B opens after A published; B's initial fetch returns the
+// 8 - Late join: B opens after A published; B's initial fetch returns the
 //      server _state including A's earlier publishes.
 
 test('late join: B opens after A published; initial fetch shows server state', async ({ browser }) => {
@@ -247,7 +247,7 @@ test('late join: B opens after A published; initial fetch shows server state', a
 	}
 });
 
-// 9 -- Late join while A is in queue mode: B sees server-only state
+// 9 - Late join while A is in queue mode: B sees server-only state
 //      (A's local optimistic is NOT visible to B until A releases).
 
 test('late join during in-flight mutate: B sees server state, not A optimistic', async ({ browser }) => {
@@ -285,7 +285,7 @@ test('late join during in-flight mutate: B sees server state, not A optimistic',
 	}
 });
 
-// 10 -- Cross-client lock contention: A and B both fire ordered();
+// 10 - Cross-client lock contention: A and B both fire ordered();
 //       server's per-key lock serializes both clients into one FIFO queue.
 
 test('cross-client lock: ordered() from two clients serializes via shared lock', async ({ browser }) => {
@@ -323,7 +323,7 @@ test('cross-client lock: ordered() from two clients serializes via shared lock',
 	}
 });
 
-// 11 -- Cross-client lock with maxWaitMs: A holds the lock; B's bounded
+// 11 - Cross-client lock with maxWaitMs: A holds the lock; B's bounded
 //       call to the same lock-key times out with LOCK_TIMEOUT.
 
 test('cross-client maxWaitMs: A holds lock, B bounded times out', async ({ browser }) => {
@@ -349,7 +349,7 @@ test('cross-client maxWaitMs: A holds lock, B bounded times out', async ({ brows
 	}
 });
 
-// 12 -- Stress: A publishes 10 different keys rapidly; B sees all 10 in any
+// 12 - Stress: A publishes 10 different keys rapidly; B sees all 10 in any
 //       order. Proves the pub/sub fan-out does not lose events under
 //       sustained load.
 
@@ -381,7 +381,7 @@ test('stress: A publishes 10 keys rapidly; B observes all 10', async ({ browser 
 	}
 });
 
-// 13 -- Disconnect/reconnect-style: B closes mid-flight; A keeps publishing;
+// 13 - Disconnect/reconnect-style: B closes mid-flight; A keeps publishing;
 //       a fresh client (B') opens later and sees the full accumulated server
 //       state. (Not a real "reconnect" because each context has its own WS
 //       and Playwright closes them cleanly; this is the "B closes, B'

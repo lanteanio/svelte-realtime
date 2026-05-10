@@ -8,7 +8,7 @@ import { test, expect } from '@playwright/test';
 // We force the drop server-side via `__test.killSelf()` rather than
 // Playwright's `page.context().setOffline(true)` because setOffline
 // does not consistently close already-open WSs across browser
-// versions -- the WS stays open from the client's perspective even
+// versions - the WS stays open from the client's perspective even
 // though new requests are blocked. The killSelf RPC schedules
 // `ws.close()` on the calling connection a few ms after returning,
 // giving us a deterministic mid-flight drop.
@@ -29,7 +29,7 @@ async function expectTodos(page, expected) {
 	expect(got).toEqual(norm);
 }
 
-// 1 -- Mid-mutate disconnect: blocked mutate rejects, optimistic rolls back
+// 1 - Mid-mutate disconnect: blocked mutate rejects, optimistic rolls back
 
 test('mid-mutate disconnect: blocked asyncOp rejects with DISCONNECTED, optimistic rolls back', async ({ browser }) => {
 	const a = await openQrPage(browser);
@@ -51,7 +51,7 @@ test('mid-mutate disconnect: blocked asyncOp rejects with DISCONNECTED, optimist
 
 		await a.page.evaluate(() => window.__test.killSelf());
 
-		// Wait for the mutate to settle by polling todos -- replay drains
+		// Wait for the mutate to settle by polling todos - replay drains
 		// the queue entry on settle(false), so the displayed value
 		// becomes [] once the in-flight RPC rejects.
 		await a.page.evaluate(() => window.__test.waitTodos([]));
@@ -60,7 +60,7 @@ test('mid-mutate disconnect: blocked asyncOp rejects with DISCONNECTED, optimist
 	}
 });
 
-// 2 -- Three concurrent in-flight mutates all roll back on disconnect ------
+// 2 - Three concurrent in-flight mutates all roll back on disconnect ------
 
 test('three concurrent mutates all roll back when WS drops', async ({ browser }) => {
 	const a = await openQrPage(browser);
@@ -81,7 +81,7 @@ test('three concurrent mutates all roll back when WS drops', async ({ browser })
 	}
 });
 
-// 3 -- Disconnect + reconnect: A reconnects after offline, catches up via
+// 3 - Disconnect + reconnect: A reconnects after offline, catches up via
 //      replay on the server's missed events. While A is offline, B publishes.
 
 test('disconnect + reconnect: A catches up on B publishes via replay-on-reconnect', async ({ browser }) => {
@@ -127,7 +127,7 @@ test('disconnect + reconnect: A catches up on B publishes via replay-on-reconnec
 	}
 });
 
-// 4 -- Mid-mutate disconnect + reconnect: in-flight mutate rolls back on
+// 4 - Mid-mutate disconnect + reconnect: in-flight mutate rolls back on
 //      disconnect; AFTER reconnect, a fresh mutate works against the
 //      reconnected WS.
 

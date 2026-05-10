@@ -10,7 +10,7 @@ import type { Readable } from 'svelte/store';
  * **Use cases:**
  *
  * - **Demo pages** that want to show "what would a stale v1 client see
- *   on reconnect right now?" -- render two side-by-side panels, one
+ *   on reconnect right now?" - render two side-by-side panels, one
  *   with the live store and one with `subscribeAt(stream, { schemaVersion: 1 })`.
  * - **e2e tests** that need to assert the migrate chain produces the
  *   expected v2-shape from a v1-cached subscribe, walking the real

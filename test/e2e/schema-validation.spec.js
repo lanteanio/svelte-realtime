@@ -25,7 +25,7 @@ test.beforeEach(async ({ page }) => {
 	await page.evaluate(() => window.__test.ready());
 });
 
-// 1 -- valid flat payload succeeds with the server's response -------------
+// 1 - valid flat payload succeeds with the server's response -------------
 
 test('valid flat payload succeeds and echoes the received fields', async ({ page }) => {
 	const r = await page.evaluate(() => window.__test.submitFlat({ text: 'hi', count: 3 }));
@@ -34,7 +34,7 @@ test('valid flat payload succeeds and echoes the received fields', async ({ page
 	expect(typeof r.v.at).toBe('number');
 });
 
-// 2 -- missing required field rejects with VALIDATION + path -------------
+// 2 - missing required field rejects with VALIDATION + path -------------
 
 test('missing required field rejects with VALIDATION code and path issue', async ({ page }) => {
 	const r = await page.evaluate(() => window.__test.submitFlat({ text: 'hi' }));
@@ -45,7 +45,7 @@ test('missing required field rejects with VALIDATION code and path issue', async
 	expect(paths).toContain('count');
 });
 
-// 3 -- wrong type rejects with VALIDATION + multiple issues --------------
+// 3 - wrong type rejects with VALIDATION + multiple issues --------------
 
 test('wrong type for both fields rejects with VALIDATION and surfaces every issue', async ({ page }) => {
 	const r = await page.evaluate(() =>
@@ -58,7 +58,7 @@ test('wrong type for both fields rejects with VALIDATION and surfaces every issu
 	expect(paths).toContain('count');
 });
 
-// 4 -- out-of-range value rejects with VALIDATION ----------------------
+// 4 - out-of-range value rejects with VALIDATION ----------------------
 
 test('out-of-range count rejects with VALIDATION', async ({ page }) => {
 	const r = await page.evaluate(() => window.__test.submitFlat({ text: 'hi', count: -1 }));
@@ -67,7 +67,7 @@ test('out-of-range count rejects with VALIDATION', async ({ page }) => {
 	expect(r.issues.map((iss) => iss.path.join('.'))).toContain('count');
 });
 
-// 5 -- nested schema surfaces a deep path on failure -------------------
+// 5 - nested schema surfaces a deep path on failure -------------------
 
 test('nested schema rejects with the deep path in issues', async ({ page }) => {
 	const r = await page.evaluate(() =>
@@ -79,7 +79,7 @@ test('nested schema rejects with the deep path in issues', async ({ page }) => {
 	expect(paths).toContain('user.name');
 });
 
-// 6 -- nested array element failure surfaces the element index --------
+// 6 - nested array element failure surfaces the element index --------
 
 test('nested array element failure surfaces items.<index> in issues', async ({ page }) => {
 	const r = await page.evaluate(() =>
@@ -91,7 +91,7 @@ test('nested array element failure surfaces items.<index> in issues', async ({ p
 	expect(paths).toContain('items.1');
 });
 
-// 7 -- valid nested payload succeeds with full echo -------------------
+// 7 - valid nested payload succeeds with full echo -------------------
 
 test('valid nested payload succeeds', async ({ page }) => {
 	const r = await page.evaluate(() =>
@@ -101,7 +101,7 @@ test('valid nested payload succeeds', async ({ page }) => {
 	expect(r.v.received).toEqual({ user: { name: 'alice' }, items: ['x', 'y'] });
 });
 
-// 8 -- cross-client isolation: A's invalid does not affect B's valid --
+// 8 - cross-client isolation: A's invalid does not affect B's valid --
 
 test('cross-client: A submits invalid, B submits valid; both outcomes correct', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -122,7 +122,7 @@ test('cross-client: A submits invalid, B submits valid; both outcomes correct', 
 	}
 });
 
-// 9 -- non-object body rejects with VALIDATION at root path ----------
+// 9 - non-object body rejects with VALIDATION at root path ----------
 
 test('null body rejects with VALIDATION at root path', async ({ page }) => {
 	const r = await page.evaluate(() => window.__test.submitFlat(null));

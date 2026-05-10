@@ -29,7 +29,7 @@ function createPlugin(opts = {}) {
 	return plugin;
 }
 
-// -- resolveId ----------------------------------------------------------------
+// - resolveId ----------------------------------------------------------------
 
 describe('resolveId', () => {
 	it('resolves $live/chat to virtual module ID', () => {
@@ -54,7 +54,7 @@ describe('resolveId', () => {
 	});
 });
 
-// -- load (client stubs) ------------------------------------------------------
+// - load (client stubs) ------------------------------------------------------
 
 describe('load (client stubs)', () => {
 	afterEach(teardown);
@@ -72,8 +72,8 @@ export const deleteMessage = live(async (ctx, id) => {});
 		const code = plugin.load('\0live:chat', { ssr: false });
 
 		expect(code).toContain("import { __rpc } from 'svelte-realtime/client'");
-		expect(code).toContain("export const sendMessage = __rpc('chat/sendMessage')");
-		expect(code).toContain("export const deleteMessage = __rpc('chat/deleteMessage')");
+		expect(code).toContain('export const sendMessage = __rpc("chat/sendMessage")');
+		expect(code).toContain('export const deleteMessage = __rpc("chat/deleteMessage")');
 	});
 
 	it('generates __stream() stubs for live.stream() exports', () => {
@@ -88,7 +88,7 @@ export const messages = live.stream('messages', async (ctx) => {}, { merge: 'cru
 		const code = plugin.load('\0live:chat', { ssr: false });
 
 		expect(code).toContain("import { __stream } from 'svelte-realtime/client'");
-		expect(code).toContain("export const messages = __stream('chat/messages'");
+		expect(code).toContain('export const messages = __stream("chat/messages"');
 		expect(code).toContain('"merge":"crud"');
 		expect(code).toContain('"key":"id"');
 		expect(code).toContain('"prepend":true');
@@ -109,8 +109,8 @@ export const items = live.stream('items', async (ctx) => [], { merge: 'crud', ke
 
 		expect(code).toContain('__rpc');
 		expect(code).toContain('__stream');
-		expect(code).toContain("export const addItem = __rpc('items/addItem')");
-		expect(code).toContain("export const items = __stream('items/items'");
+		expect(code).toContain('export const addItem = __rpc("items/addItem")');
+		expect(code).toContain('export const items = __stream("items/items"');
 	});
 
 	it('handles nested directories', () => {
@@ -124,7 +124,7 @@ export const join = live(async (ctx) => {});
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:rooms/lobby', { ssr: false });
 
-		expect(code).toContain("export const join = __rpc('rooms/lobby/join')");
+		expect(code).toContain('export const join = __rpc("rooms/lobby/join")');
 	});
 
 	it('generates __upload() stubs for live.upload() exports', () => {
@@ -140,8 +140,8 @@ export const document = live.upload(async (ctx, name) => ({ name }), { maxSize: 
 		const code = plugin.load('\0live:uploads', { ssr: false });
 
 		expect(code).toContain("import { __upload } from 'svelte-realtime/client'");
-		expect(code).toContain("export const avatar = __upload('uploads/avatar')");
-		expect(code).toContain("export const document = __upload('uploads/document')");
+		expect(code).toContain('export const avatar = __upload("uploads/avatar")');
+		expect(code).toContain('export const document = __upload("uploads/document")');
 	});
 
 	it('mixes __binaryRpc and __upload in the same module', () => {
@@ -156,14 +156,14 @@ export const big = live.upload(async (ctx) => 'ok');
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:mixed', { ssr: false });
 
-		expect(code).toContain("export const small = __binaryRpc('mixed/small')");
-		expect(code).toContain("export const big = __upload('mixed/big')");
+		expect(code).toContain('export const small = __binaryRpc("mixed/small")');
+		expect(code).toContain('export const big = __upload("mixed/big")');
 		expect(code).toContain('__binaryRpc');
 		expect(code).toContain('__upload');
 	});
 });
 
-// -- client stub HMR self-accept ---------------------------------------------
+// - client stub HMR self-accept ---------------------------------------------
 
 describe('client stub HMR self-accept', () => {
 	afterEach(teardown);
@@ -266,7 +266,7 @@ export const send = live(async (ctx, text) => {});
 	});
 });
 
-// -- load (SSR) ---------------------------------------------------------------
+// - load (SSR) ---------------------------------------------------------------
 
 describe('load (SSR)', () => {
 	afterEach(teardown);
@@ -284,7 +284,7 @@ describe('load (SSR)', () => {
 	});
 });
 
-// -- registry module ----------------------------------------------------------
+// - registry module ----------------------------------------------------------
 
 describe('registry module', () => {
 	afterEach(teardown);
@@ -303,9 +303,9 @@ export const messages = live.stream('messages', async (ctx) => []);
 		const code = plugin.load('\0live:__registry', {});
 
 		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions } from 'svelte-realtime/server'");
-		expect(code).toContain("__register('chat/sendMessage'");
-		expect(code).toContain("__register('chat/messages'");
-		expect(code).toContain("__registerGuard('chat'");
+		expect(code).toContain('__register("chat/sendMessage"');
+		expect(code).toContain('__register("chat/messages"');
+		expect(code).toContain('__registerGuard("chat"');
 	});
 
 	it('handles multiple modules', () => {
@@ -317,8 +317,8 @@ export const messages = live.stream('messages', async (ctx) => []);
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:__registry', {});
 
-		expect(code).toContain("__register('admin/deleteUser'");
-		expect(code).toContain("__register('chat/send'");
+		expect(code).toContain('__register("admin/deleteUser"');
+		expect(code).toContain('__register("chat/send"');
 	});
 
 	it('returns empty comment when no live dir exists', () => {
@@ -330,7 +330,7 @@ export const messages = live.stream('messages', async (ctx) => []);
 	});
 });
 
-// -- warnings -----------------------------------------------------------------
+// - warnings -----------------------------------------------------------------
 
 describe('warnings', () => {
 	afterEach(teardown);
@@ -374,7 +374,7 @@ export const helperFn = () => {};
 	});
 });
 
-// -- defineTopics static-analysis warning ------------------------------------
+// - defineTopics static-analysis warning ------------------------------------
 
 describe('defineTopics static-analysis warning', () => {
 	afterEach(teardown);
@@ -509,7 +509,7 @@ export const bad = live.stream('sys:wrongbeat', async () => null);
 	});
 });
 
-// -- hooks.ws.js detection ----------------------------------------------------
+// - hooks.ws.js detection ----------------------------------------------------
 
 describe('hooks.ws.js detection', () => {
 	afterEach(teardown);
@@ -654,7 +654,7 @@ export function upgrade() { return {}; }
 	});
 });
 
-// -- resolveId: /@svelte-realtime-registry (Finding 2) ------------------------
+// - resolveId: /@svelte-realtime-registry (Finding 2) ------------------------
 
 describe('resolveId (registry URL)', () => {
 	it('resolves /@svelte-realtime-registry to the registry virtual module', () => {
@@ -663,7 +663,7 @@ describe('resolveId (registry URL)', () => {
 	});
 });
 
-// -- config hook (Finding 2) --------------------------------------------------
+// - config hook (Finding 2) --------------------------------------------------
 
 describe('config hook', () => {
 	it('injects registry when input is an object', () => {
@@ -712,7 +712,7 @@ describe('config hook', () => {
 	});
 });
 
-// -- dynamic topics (Phase 8) -------------------------------------------------
+// - dynamic topics ------------------------------------------------------------
 
 describe('dynamic topic detection', () => {
 	afterEach(teardown);
@@ -734,7 +734,7 @@ export const roomMessages = live.stream(
 
 		expect(code).toContain('__stream');
 		expect(code).toContain('true'); // isDynamic flag
-		expect(code).toContain("export const roomMessages = __stream('rooms/roomMessages'");
+		expect(code).toContain('export const roomMessages = __stream("rooms/roomMessages"');
 	});
 
 	it('static topic streams are NOT marked as dynamic', () => {
@@ -748,11 +748,11 @@ export const items = live.stream('items', async (ctx) => [], { merge: 'crud', ke
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:items', { ssr: false });
 
-		expect(code).toContain("export const items = __stream('items/items'");
+		expect(code).toContain('export const items = __stream("items/items"');
 		expect(code).not.toContain('true);'); // no isDynamic flag
 	});
 
-	// Single-arity ctx-only topic-fn -- the secure-by-construction shape for
+	// Single-arity ctx-only topic-fn - the secure-by-construction shape for
 	// per-user / per-tenant streams. Before the arity-aware fix these were
 	// classified as dynamic factories, leaving the natural `myStream.subscribe`
 	// call shape with a runtime TypeError. The runtime side already supports
@@ -773,7 +773,7 @@ export const myEvents = live.stream(
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:events', { ssr: false });
 
-		expect(code).toContain("export const myEvents = __stream('events/myEvents'");
+		expect(code).toContain('export const myEvents = __stream("events/myEvents"');
 		expect(code).not.toContain('true);');
 	});
 
@@ -792,7 +792,7 @@ export const everyone = live.stream(
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:global', { ssr: false });
 
-		expect(code).toContain("export const everyone = __stream('global/everyone'");
+		expect(code).toContain('export const everyone = __stream("global/everyone"');
 		expect(code).not.toContain('true);');
 	});
 
@@ -811,7 +811,7 @@ export const feed = live.stream(
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:a', { ssr: false });
 
-		expect(code).toContain("export const feed = __stream('a/feed'");
+		expect(code).toContain('export const feed = __stream("a/feed"');
 		expect(code).not.toContain('true);');
 	});
 
@@ -830,7 +830,7 @@ export const ping = live.stream(
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:b', { ssr: false });
 
-		expect(code).toContain("export const ping = __stream('b/ping'");
+		expect(code).toContain('export const ping = __stream("b/ping"');
 		expect(code).not.toContain('true);');
 	});
 
@@ -850,7 +850,7 @@ export const inbox = live.stream(
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:c', { ssr: false });
 
-		expect(code).toContain("export const inbox = __stream('c/inbox'");
+		expect(code).toContain('export const inbox = __stream("c/inbox"');
 		expect(code).not.toContain('true);');
 	});
 
@@ -869,7 +869,7 @@ export const live_inbox = live.stream(
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:d', { ssr: false });
 
-		expect(code).toContain("export const live_inbox = __stream('d/live_inbox'");
+		expect(code).toContain('export const live_inbox = __stream("d/live_inbox"');
 		expect(code).not.toContain('true);');
 	});
 
@@ -888,13 +888,13 @@ export const profile = live.stream(
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:e', { ssr: false });
 
-		expect(code).toContain("export const profile = __stream('e/profile'");
+		expect(code).toContain('export const profile = __stream("e/profile"');
 		expect(code).not.toContain('true);');
 	});
 
 	// Single-param topic-fn where the param is NOT ctx-shaped: the server's
 	// arity dispatch interprets this as "user omitted ctx, single client arg".
-	// Plugin must agree -- emit a dynamic factory so the client passes args.
+	// Plugin must agree - emit a dynamic factory so the client passes args.
 	it('single non-ctx param is treated as dynamic (omitted-ctx + 1 client arg)', () => {
 		setup({
 			'f.js': `
@@ -910,7 +910,7 @@ export const room = live.stream(
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:f', { ssr: false });
 
-		expect(code).toContain("export const room = __stream('f/room'");
+		expect(code).toContain('export const room = __stream("f/room"');
 		expect(code).toContain('true);');
 	});
 
@@ -932,7 +932,7 @@ export const feed = live.stream(
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:g', { ssr: false });
 
-		expect(code).toContain("export const feed = __stream('g/feed'");
+		expect(code).toContain('export const feed = __stream("g/feed"');
 		expect(code).toContain('true);');
 	});
 
@@ -963,7 +963,7 @@ export const inbox = live.stream(
 	});
 });
 
-// -- path traversal (Finding 6) -----------------------------------------------
+// - path traversal (Finding 6) -----------------------------------------------
 
 describe('path traversal prevention', () => {
 	afterEach(teardown);
@@ -986,7 +986,7 @@ describe('path traversal prevention', () => {
 	});
 });
 
-// -- Type declarations (Phase 5) ----------------------------------------------
+// - Type declarations ---------------------------------------------------------
 
 describe('type declarations', () => {
 	afterEach(teardown);
@@ -1353,7 +1353,7 @@ export const notifications = live.channel('notifications');
 	});
 });
 
-// -- live.validated() client stubs (Phase 12) ---------------------------------
+// - live.validated() client stubs (Phase 12) ---------------------------------
 
 describe('live.validated() stubs', () => {
 	afterEach(teardown);
@@ -1370,7 +1370,7 @@ export const submit = live.validated(schema, async (ctx, input) => {});
 		const code = plugin.load('\0live:forms', { ssr: false });
 
 		expect(code).toContain("import { __rpc } from 'svelte-realtime/client'");
-		expect(code).toContain("export const submit = __rpc('forms/submit')");
+		expect(code).toContain('export const submit = __rpc("forms/submit")');
 	});
 
 	it('does not duplicate when both live() and live.validated() match same name', () => {
@@ -1409,7 +1409,7 @@ export const send = live.validated(schema, async (ctx, input) => {});
 	});
 });
 
-// -- live.cron() registration (Phase 14) --------------------------------------
+// - live.cron() registration (Phase 14) --------------------------------------
 
 describe('live.cron() registration', () => {
 	afterEach(teardown);
@@ -1425,7 +1425,7 @@ export const refreshStats = live.cron('*/5 * * * *', 'stats', async () => {});
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:__registry', {});
 
-		expect(code).toContain("__registerCron('jobs/refreshStats'");
+		expect(code).toContain('__registerCron("jobs/refreshStats"');
 		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions }");
 	});
 
@@ -1447,14 +1447,14 @@ export const tick = live.cron('* * * * *', 'tick', async () => {});
 		console.warn = origWarn;
 
 		// Cron should not have an __rpc or __stream stub
-		expect(code).not.toContain("__rpc('cron/tick')");
-		expect(code).not.toContain("__stream('cron/tick')");
+		expect(code).not.toContain('__rpc("cron/tick")")');
+		expect(code).not.toContain('__stream("cron/tick")")');
 		// Should not warn about unwrapped export
 		expect(warns.some(w => w.includes("'tick'") && w.includes('not wrapped'))).toBe(false);
 	});
 });
 
-// -- SSR stubs with .load() (Phase 11) ----------------------------------------
+// - SSR stubs with .load() (Phase 11) ----------------------------------------
 
 describe('SSR stubs with .load()', () => {
 	afterEach(teardown);
@@ -1500,7 +1500,7 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 		// to classify single-arity ctx-only topics as static, but the SSR
 		// generator continued to use the older arity-blind regex. Result:
 		// client stub said "static StreamStore" while SSR stub said "factory
-		// function" -- pages compiled against the static shape would call
+		// function" - pages compiled against the static shape would call
 		// `factory.subscribe(...)` during SSR and crash with "store.subscribe
 		// is not a function". This test pins them to agree.
 		setup({
@@ -1522,11 +1522,11 @@ export const inbox = live.stream(
 		expect(ssrCode).not.toMatch(/const _inbox = \(\.\.\.args\) =>/);
 
 		const clientCode = plugin.load('\0live:auth', { ssr: false });
-		// Static client shape: __stream(path, options) -- NO trailing `, true`
+		// Static client shape: __stream(path, options) - NO trailing `, true`
 		// (which would mark it dynamic). The trailing arg is what
 		// _generateClientStubs emits for dynamic exports.
-		expect(clientCode).toMatch(/__stream\('auth\/inbox',\s*\{[^}]*\}\);/);
-		expect(clientCode).not.toMatch(/__stream\('auth\/inbox',[\s\S]*,\s*true\)/);
+		expect(clientCode).toMatch(/__stream\("auth\/inbox",\s*\{[^}]*\}\);/);
+		expect(clientCode).not.toMatch(/__stream\("auth\/inbox",[\s\S]*,\s*true\)/);
 	});
 
 	it('SSR stub uses factory shape for ctx + client-arg topic (parity with client stub)', () => {
@@ -1551,7 +1551,7 @@ export const messages = live.stream(
 		expect(ssrCode).toContain("const _messages = (...args) =>");
 
 		const clientCode = plugin.load('\0live:rooms', { ssr: false });
-		expect(clientCode).toMatch(/__stream\('rooms\/messages',[\s\S]*,\s*true\);/);
+		expect(clientCode).toMatch(/__stream\("rooms\/messages",[\s\S]*,\s*true\);/);
 	});
 
 	it('simple re-export when module has no streams', () => {
@@ -1598,7 +1598,7 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 	});
 });
 
-// -- Replay option extraction (Phase 15) --------------------------------------
+// - Replay option extraction (Phase 15) --------------------------------------
 
 describe('replay option extraction', () => {
 	afterEach(teardown);
@@ -1632,7 +1632,7 @@ export const feed = live.stream('feed', async (ctx) => [], { merge: 'latest', re
 	});
 });
 
-// -- DevTools injection (Phase 13) --------------------------------------------
+// - DevTools injection (Phase 13) --------------------------------------------
 
 describe('devtools injection', () => {
 	it('injects devtools middleware in dev mode via configureServer', () => {
@@ -1677,7 +1677,7 @@ describe('devtools injection', () => {
 	});
 });
 
-// -- live.validated() type declarations (Phase 12) ----------------------------
+// - live.validated() type declarations (Phase 12) ----------------------------
 
 describe('live.validated() type declarations', () => {
 	afterEach(teardown);
@@ -1699,7 +1699,7 @@ export const submit = live.validated(schema, async (ctx, input) => {});
 	});
 });
 
-// -- live.derived() client stubs and registry ---------------------------------
+// - live.derived() client stubs and registry ---------------------------------
 
 describe('live.derived() vite integration', () => {
 	afterEach(teardown);
@@ -1717,7 +1717,7 @@ export const summary = live.derived(['orders', 'inventory'], async () => {
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:stats', {});
 
-		expect(code).toContain("__stream('stats/summary'");
+		expect(code).toContain('__stream("stats/summary"');
 		expect(code).toContain("import { __stream }");
 	});
 
@@ -1734,8 +1734,8 @@ export const summary = live.derived(['orders', 'inventory'], async () => {
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:__registry', {});
 
-		expect(code).toContain("__register('stats/summary'");
-		expect(code).toContain("__registerDerived('stats/summary'");
+		expect(code).toContain('__register("stats/summary"');
+		expect(code).toContain('__registerDerived("stats/summary"');
 	});
 
 	it('generates dynamic __stream client stub for dynamic derived exports', () => {
@@ -1755,7 +1755,7 @@ export const summary = live.derived(['orders', 'inventory'], async () => {
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:dashboard', {});
 
-		expect(code).toContain("__stream('dashboard/stats'");
+		expect(code).toContain('__stream("dashboard/stats"');
 		expect(code).toContain(', true)');
 		expect(code).toContain("import { __stream }");
 	});
@@ -1778,7 +1778,7 @@ export const summary = live.derived(['orders', 'inventory'], async () => {
 	});
 });
 
-// -- live.room() client stubs -------------------------------------------------
+// - live.room() client stubs -------------------------------------------------
 
 describe('live.room() vite integration', () => {
 	afterEach(teardown);
@@ -1804,11 +1804,11 @@ export const board = live.room({
 		const code = plugin.load('\0live:collab', {});
 
 		expect(code).toContain("export const board = {");
-		expect(code).toContain("data: __stream('collab/board/__data'");
-		expect(code).toContain("presence: __stream('collab/board/__presence'");
-		expect(code).toContain("cursors: __stream('collab/board/__cursors'");
-		expect(code).toContain("addCard: __rpc('collab/board/__action/addCard')");
-		expect(code).toContain("removeCard: __rpc('collab/board/__action/removeCard')");
+		expect(code).toContain('data: __stream("collab/board/__data"');
+		expect(code).toContain('presence: __stream("collab/board/__presence"');
+		expect(code).toContain('cursors: __stream("collab/board/__cursors"');
+		expect(code).toContain('addCard: __rpc("collab/board/__action/addCard")');
+		expect(code).toContain('removeCard: __rpc("collab/board/__action/removeCard")');
 	});
 
 	it('registers room sub-streams in registry', () => {
@@ -1828,12 +1828,12 @@ export const chat = live.room({
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:__registry', {});
 
-		expect(code).toContain("__register('rooms/chat/__data'");
-		expect(code).toContain("__registerRoomActions('rooms/chat'");
+		expect(code).toContain('__register("rooms/chat/__data"');
+		expect(code).toContain('__registerRoomActions("rooms/chat"');
 	});
 });
 
-// -- Parser robustness --------------------------------------------------------
+// - Parser robustness --------------------------------------------------------
 
 describe('parser edge cases', () => {
 	afterEach(teardown);
@@ -1885,7 +1885,7 @@ export const board = live.room({
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:board', {});
 
-		expect(code).toContain("send: __rpc('board/board/__action/send')");
+		expect(code).toContain('send: __rpc("board/board/__action/send")');
 		expect(code).not.toContain('fake');
 	});
 
@@ -1907,8 +1907,8 @@ export const game = live.room({
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:room', {});
 
-		expect(code).toContain("presence: __stream('room/game/__presence'");
-		expect(code).toContain("move: __rpc('room/game/__action/move')");
+		expect(code).toContain('presence: __stream("room/game/__presence"');
+		expect(code).toContain('move: __rpc("room/game/__action/move")');
 	});
 
 	it('extracts room merge/key from quoted keys', () => {
@@ -1932,7 +1932,7 @@ export const board = live.room({
 	});
 });
 
-// -- live.channel() client stubs (Phase 35) -----------------------------------
+// - live.channel() client stubs (Phase 35) -----------------------------------
 
 describe('live.channel() vite integration', () => {
 	afterEach(teardown);
@@ -1949,7 +1949,7 @@ export const typing = live.channel('typing:lobby', { merge: 'presence' });
 		const code = plugin.load('\0live:collab', {});
 
 		expect(code).toContain("import { __stream } from 'svelte-realtime/client'");
-		expect(code).toContain("__stream('collab/typing'");
+		expect(code).toContain('__stream("collab/typing"');
 		expect(code).toContain('"merge":"presence"');
 	});
 
@@ -1964,7 +1964,7 @@ export const cursors = live.channel((ctx, docId) => 'cursors:' + docId, { merge:
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:collab', {});
 
-		expect(code).toContain("__stream('collab/cursors'");
+		expect(code).toContain('__stream("collab/cursors"');
 		expect(code).toContain(', true)');
 		expect(code).toContain('"merge":"cursor"');
 		expect(code).toContain('"key":"userId"');
@@ -1981,11 +1981,11 @@ export const typing = live.channel('typing:lobby', { merge: 'presence' });
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:__registry', {});
 
-		expect(code).toContain("__register('collab/typing'");
+		expect(code).toContain('__register("collab/typing"');
 	});
 });
 
-// -- live.webhook() client stubs ----------------------------------------------
+// - live.webhook() client stubs ----------------------------------------------
 
 describe('live.webhook() vite integration', () => {
 	afterEach(teardown);
@@ -2005,12 +2005,12 @@ export const stripe = live.webhook('payments', {
 		const code = plugin.load('\0live:hooks', {});
 
 		// Webhook should NOT produce client stubs
-		expect(code).not.toContain("__rpc('hooks/stripe'");
-		expect(code).not.toContain("__stream('hooks/stripe'");
+		expect(code).not.toContain('__rpc("hooks/stripe"');
+		expect(code).not.toContain('__stream("hooks/stripe"');
 	});
 });
 
-// -- Schema evolution (Phase 42) ----------------------------------------------
+// - Schema evolution (Phase 42) ----------------------------------------------
 
 describe('schema evolution', () => {
 	afterEach(teardown);
@@ -2033,11 +2033,11 @@ export const items = live.stream('todos', async (ctx) => [], {
 		const code = plugin.load('\0live:todos', {});
 
 		expect(code).toContain('"version":3');
-		expect(code).toContain("__stream('todos/items'");
+		expect(code).toContain('__stream("todos/items"');
 	});
 });
 
-// -- Balanced-brace option extraction -----------------------------------------
+// - Balanced-brace option extraction -----------------------------------------
 
 describe('stream option extraction with nested braces', () => {
 	afterEach(teardown);
@@ -2061,7 +2061,7 @@ export const items = live.stream('items', async (ctx) => {
 	});
 });
 
-// -- Server-side HMR ----------------------------------------------------------
+// - Server-side HMR ----------------------------------------------------------
 
 describe('handleHotUpdate (server-side HMR)', () => {
 	afterEach(teardown);
@@ -2230,7 +2230,7 @@ export const send = live(async (ctx, text) => {});
 	});
 });
 
-// -- Import path escaping -----------------------------------------------------
+// - Import path escaping -----------------------------------------------------
 
 describe('import path escaping', () => {
 	afterEach(teardown);
@@ -2253,7 +2253,90 @@ export const send = live(async (ctx, text) => {});
 	});
 });
 
-// -- Duplicate topic detection ------------------------------------------------
+// - Codegen path injection ----------------------------------------------
+
+describe('codegen path quoting (hostile module + relative paths)', () => {
+	afterEach(teardown);
+
+	it('JSON-quotes RPC module paths in client stubs (no single-quote interpolation)', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+export const fetch = live(async (ctx) => 'data');
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:chat', {});
+
+		// Pre-fix: __rpc('chat/send'); / __rpc('chat/fetch');
+		// Post-fix: __rpc("chat/send"); / __rpc("chat/fetch");
+		// The single-quote interpolation form is the BREACH point that lets
+		// a path containing `'` escape the literal.
+		expect(code).not.toMatch(/__rpc\('/);
+		expect(code).toMatch(/__rpc\("chat\/send"\)/);
+		expect(code).toMatch(/__rpc\("chat\/fetch"\)/);
+	});
+
+	it('JSON-quotes registration paths in the server registry (no single-quote interpolation)', () => {
+		setup({
+			'foo.js': `
+import { live, guard } from 'svelte-realtime/server';
+export const _guard = guard(() => {});
+export const handler = live(async (ctx) => 'ok');
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		// Pre-fix: __register('foo/handler', ...) / __registerGuard('foo', ...)
+		// Post-fix: __register("foo/handler", ...) / __registerGuard("foo", ...)
+		expect(code).not.toMatch(/__register\('/);
+		expect(code).not.toMatch(/__registerGuard\('/);
+		expect(code).toMatch(/__register\("foo\/handler"/);
+		expect(code).toMatch(/__registerGuard\("foo"/);
+	});
+
+	it('produces parseable JS even when the relative path contains a single quote', () => {
+		// Filenames containing `'` are legal on Windows and most Unixes; a
+		// hostile dependency or a co-developer's bad rename can introduce
+		// one. Pre-fix, that path got dropped verbatim into a single-quoted
+		// JS string literal in the generated registry, breaking out into a
+		// syntax error at best (build fails) and arbitrary expression at
+		// worst (Codex's PoC was an RCE in the generated server bundle).
+		setup({
+			"weird'name.js": `
+import { live } from 'svelte-realtime/server';
+export const handler = live(async (ctx) => 'ok');
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		// Treat the registry as a freshly-generated script and parse it.
+		// Pre-fix this throws a SyntaxError because the embedded `'` ends
+		// the string literal early; post-fix it parses cleanly because
+		// JSON.stringify wraps the path in `"..."` and escapes inner `"`.
+		// Strip the leading ESM `import` statement so the body parses
+		// inside `new Function` (which forbids ESM syntax). The lazy
+		// `__L` helper line is preserved as part of the body.
+		const body = code
+			.split('\n')
+			.filter((l) => !l.startsWith('import '))
+			.join('\n');
+		expect(() => new Function(
+			'__register', '__registerGuard', '__registerCron',
+			'__registerDerived', '__registerEffect', '__registerAggregate',
+			'__registerRoomActions',
+			body
+		)).not.toThrow();
+	});
+});
+
+// - Duplicate topic detection ------------------------------------------------
 
 describe('duplicate topic detection', () => {
 	afterEach(teardown);
@@ -2287,7 +2370,7 @@ export const feed = live.stream('__reserved', async () => [], { merge: 'crud' })
 	});
 });
 
-// -- Room sub-handler registry includes module path ---------------------------
+// - Room sub-handler registry includes module path ---------------------------
 
 describe('room sub-handler module path', () => {
 	afterEach(teardown);
@@ -2309,9 +2392,9 @@ export const myRoom = live.room({
 		const code = plugin.load('\0live:__registry', {});
 
 		// Room sub-handlers should get explicit module path 'rooms' (not 'rooms/myRoom')
-		expect(code).toContain("__register('rooms/myRoom/__data'");
-		expect(code).toContain(", 'rooms')");
-		expect(code).toContain("__register('rooms/myRoom/__presence'");
-		expect(code).toContain("__register('rooms/myRoom/__cursors'");
+		expect(code).toContain('__register("rooms/myRoom/__data"');
+		expect(code).toContain(', "rooms")');
+		expect(code).toContain('__register("rooms/myRoom/__presence"');
+		expect(code).toContain('__register("rooms/myRoom/__cursors"');
 	});
 });

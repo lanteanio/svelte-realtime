@@ -24,7 +24,7 @@ const AGGREGATE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.aggregate\s*\(/g
 // `live.lock(...)` and `live.idempotent(...)` wrap an inner handler. From the
 // client's perspective they're plain RPCs (the lock / idempotency runs
 // server-side inside the wrapper), so the codegen treats them identically
-// to a `live(...)` export -- generate an `__rpc(...)` stub, register the
+// to a `live(...)` export - generate an `__rpc(...)` stub, register the
 // path. Without this, exports declared as `export const x = live.lock(...)`
 // would not be recognised and the client could not call them.
 const LOCK_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.lock\s*\(/g;
@@ -47,7 +47,7 @@ function _isValidExportName(name, filePath) {
 	if (!_warnedExports.has(warnKey)) {
 		_warnedExports.add(warnKey);
 		console.warn(
-			`[svelte-realtime] ${filePath}: export '${name}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) -- skipped\n  See: https://svti.me/rpc`
+			`[svelte-realtime] ${filePath}: export '${name}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) - skipped\n  See: https://svti.me/rpc`
 		);
 	}
 	return false;
@@ -105,7 +105,7 @@ function _readStringLiteral(s, start) {
 			else if (next === 'f') { result += '\f'; j++; }
 			else if (next === 'v') { result += '\v'; j++; }
 			else if (next === '0' && !/[0-9]/.test(s[j + 2] || '')) { result += '\0'; j++; }
-			// \xNN -- two hex digits
+			// \xNN - two hex digits
 			else if (next === 'x') {
 				const hex = s.slice(j + 2, j + 4);
 				if (/^[0-9a-fA-F]{2}$/.test(hex)) {
@@ -113,7 +113,7 @@ function _readStringLiteral(s, start) {
 					j += 3;
 				} else { result += next; j++; }
 			}
-			// \uXXXX -- four hex digits
+			// \uXXXX - four hex digits
 			else if (next === 'u' && s[j + 2] !== '{') {
 				const hex = s.slice(j + 2, j + 6);
 				if (/^[0-9a-fA-F]{4}$/.test(hex)) {
@@ -121,7 +121,7 @@ function _readStringLiteral(s, start) {
 					j += 5;
 				} else { result += next; j++; }
 			}
-			// \u{XXXXX} -- unicode code point
+			// \u{XXXXX} - unicode code point
 			else if (next === 'u' && s[j + 2] === '{') {
 				const close = s.indexOf('}', j + 3);
 				if (close > j + 2) {
@@ -141,7 +141,7 @@ function _readStringLiteral(s, start) {
 		if (q === '`' && ch === '$' && s[j + 1] === '{') {
 			const snippet = s.slice(start, Math.min(start + 40, s.length)).replace(/\n/g, '\\n');
 			throw new Error(
-				`[svelte-realtime] Template literal with interpolation cannot be statically analyzed: ${snippet}... -- use a plain string ('...' or "...") instead\n  See: https://svti.me/vite`
+				`[svelte-realtime] Template literal with interpolation cannot be statically analyzed: ${snippet}... - use a plain string ('...' or "...") instead\n  See: https://svti.me/vite`
 			);
 		}
 		result += ch;
@@ -175,7 +175,7 @@ function _skipNonCode(s, i) {
 		return s.length - 1;
 	}
 
-	// Template literals -- track ${...} interpolation depth
+	// Template literals - track ${...} interpolation depth
 	if (ch === '`') {
 		let tmplDepth = 0;
 		for (let j = i + 1; j < s.length; j++) {
@@ -206,7 +206,7 @@ function _skipNonCode(s, i) {
 			for (let j = i + 1; j < s.length; j++) {
 				if (s[j] === '\\') { j++; continue; }
 				if (s[j] === '/') return j;
-				if (s[j] === '\n') break; // malformed -- give up
+				if (s[j] === '\n') break; // malformed - give up
 			}
 		}
 	}
@@ -585,7 +585,7 @@ function _findTopicsFiles(srcDir, liveDir) {
  * Build the topics registry for the project: walk `srcDir` for files
  * that call `defineTopics(...)`, parse each call, and return the union
  * of patterns as both raw strings and pre-compiled regexes. Returns
- * null when no `defineTopics` call exists anywhere -- callers use that
+ * null when no `defineTopics` call exists anywhere - callers use that
  * as the signal to skip the unregistered-topic warning entirely.
  * @param {string} srcDir
  * @param {string} liveDir
@@ -699,7 +699,7 @@ export default function svelteRealtime(options) {
 				const filePath = _resolveFile(liveDir, modulePath);
 
 				if (!filePath) {
-					this.error(`[svelte-realtime] Could not resolve $live/${modulePath} -- file not found in ${dir}/`);
+					this.error(`[svelte-realtime] Could not resolve $live/${modulePath} - file not found in ${dir}/`);
 					return null;
 				}
 
@@ -821,7 +821,7 @@ import('svelte-realtime/devtools');
 				} catch {}
 			});
 
-			// Watch for new or deleted files in src/live/ -- these don't trigger
+			// Watch for new or deleted files in src/live/ - these don't trigger
 			// handleHotUpdate since they're not in the module graph yet (add) or
 			// have already been removed (unlink).
 			for (const event of ['add', 'unlink']) {
@@ -923,7 +923,7 @@ function _generateSsrStubs(filePath, modulePath) {
 
 	// Collect stream-like exports and classify each as dynamic-factory or
 	// static-readable. This MUST agree with the client-side stub generation
-	// (which uses `_isDynamicExport` for the same decision) -- otherwise the
+	// (which uses `_isDynamicExport` for the same decision) - otherwise the
 	// SSR stub emits a factory while the client stub emits a readable, the
 	// page is compiled against the static client shape, and `$storeName`
 	// during SSR calls `factory.subscribe(...)` which crashes with
@@ -955,7 +955,7 @@ function _generateSsrStubs(filePath, modulePath) {
 		}
 	}
 
-	// Collect live.room() exports -- the SSR stub exposes a namespace object
+	// Collect live.room() exports - the SSR stub exposes a namespace object
 	// whose data/presence/cursors are always-undefined readables (factory-shaped
 	// when the topic is dynamic) and whose actions are no-op stubs returning
 	// undefined. Without these, SSR rendering of pages that call `board.data(id)`
@@ -1063,6 +1063,15 @@ function _generateClientStubs(filePath, modulePath, dir) {
 	/** @type {boolean} */
 	let hasGuard = false;
 
+	// Quote `modulePath/name` paths via JSON.stringify so an embedded `'`
+	// or `"` in modulePath cannot break out of the generated single- /
+	// double-quoted string literal in the client stub. modulePath is
+	// derived from a filesystem walk and can contain quote characters on
+	// platforms that allow them in filenames; routing through
+	// JSON.stringify closes that path-injection break-out.
+	/** @param {string} name */
+	const safeModulePath = (name) => JSON.stringify(modulePath + '/' + name);
+
 	// Detect live() exports
 	let match;
 	// live() and the wrappers that pass through unchanged on the client
@@ -1075,11 +1084,11 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			if (exportedNames.has(name)) continue;
 			exportedNames.add(name);
 			imports.add('__rpc');
-			lines.push(`export const ${name} = __rpc('${modulePath}/${name}');`);
+			lines.push(`export const ${name} = __rpc(${safeModulePath(name)});`);
 		}
 	}
 
-	// Detect live.stream() exports -- check for dynamic vs static topic
+	// Detect live.stream() exports - check for dynamic vs static topic
 	STREAM_EXPORT_RE.lastIndex = 0;
 	while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
 		const name = match[1];
@@ -1090,13 +1099,13 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		const isDynamic = _isDynamicExport(source, name, 'live\\.stream');
 		if (isDynamic) {
 			// Dynamic topic: generate a function wrapper that passes args
-			lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify(streamOptions)}, true);`);
+			lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify(streamOptions)}, true);`);
 		} else {
-			lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify(streamOptions)});`);
+			lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify(streamOptions)});`);
 		}
 	}
 
-	// Detect live.channel() exports -- treated as streams on the client
+	// Detect live.channel() exports - treated as streams on the client
 	CHANNEL_EXPORT_RE.lastIndex = 0;
 	while ((match = CHANNEL_EXPORT_RE.exec(source)) !== null) {
 		const name = match[1];
@@ -1107,9 +1116,9 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			const channelOpts = _extractChannelOptions(source, name);
 			const isDynamic = _isDynamicExport(source, name, 'live\\.channel');
 			if (isDynamic) {
-				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify(channelOpts)}, true);`);
+				lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify(channelOpts)}, true);`);
 			} else {
-				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify(channelOpts)});`);
+				lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify(channelOpts)});`);
 			}
 		}
 	}
@@ -1128,7 +1137,7 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		if (!exportedNames.has(name)) {
 			exportedNames.add(name);
 			imports.add('__binaryRpc');
-			lines.push(`export const ${name} = __binaryRpc('${modulePath}/${name}');`);
+			lines.push(`export const ${name} = __binaryRpc(${safeModulePath(name)});`);
 		}
 	}
 
@@ -1140,7 +1149,7 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		if (!exportedNames.has(name)) {
 			exportedNames.add(name);
 			imports.add('__upload');
-			lines.push(`export const ${name} = __upload('${modulePath}/${name}');`);
+			lines.push(`export const ${name} = __upload(${safeModulePath(name)});`);
 		}
 	}
 
@@ -1154,14 +1163,14 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			imports.add('__stream');
 			const isDynamic = _isDynamicExport(source, name, 'live\\.derived');
 			if (isDynamic) {
-				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set' })}, true);`);
+				lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify({ merge: 'set' })}, true);`);
 			} else {
-				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set' })});`);
+				lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify({ merge: 'set' })});`);
 			}
 		}
 	}
 
-	// Detect live.room() exports -- generates data stream + presence stream + cursor stream + actions
+	// Detect live.room() exports - generates data stream + presence stream + cursor stream + actions
 	ROOM_EXPORT_RE.lastIndex = 0;
 	while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
 		const name = match[1];
@@ -1175,16 +1184,16 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			const roomInfo = _extractRoomInfo(source, name);
 			const roomLines = [];
 			roomLines.push(`export const ${name} = {`);
-			roomLines.push(`  data: __stream('${modulePath}/${name}/__data', ${JSON.stringify(roomInfo.dataOpts)}, true),`);
+			roomLines.push(`  data: __stream(${JSON.stringify(modulePath + '/' + name + '/__data')}, ${JSON.stringify(roomInfo.dataOpts)}, true),`);
 			if (roomInfo.hasPresence) {
-				roomLines.push(`  presence: __stream('${modulePath}/${name}/__presence', ${JSON.stringify({ merge: 'presence' })}, true),`);
+				roomLines.push(`  presence: __stream(${JSON.stringify(modulePath + '/' + name + '/__presence')}, ${JSON.stringify({ merge: 'presence' })}, true),`);
 			}
 			if (roomInfo.hasCursors) {
-				roomLines.push(`  cursors: __stream('${modulePath}/${name}/__cursors', ${JSON.stringify({ merge: 'cursor' })}, true),`);
+				roomLines.push(`  cursors: __stream(${JSON.stringify(modulePath + '/' + name + '/__cursors')}, ${JSON.stringify({ merge: 'cursor' })}, true),`);
 			}
 			// Actions are RPCs
 			for (const action of roomInfo.actions) {
-				roomLines.push(`  ${action}: __rpc('${modulePath}/${name}/__action/${action}'),`);
+				roomLines.push(`  ${action}: __rpc(${JSON.stringify(modulePath + '/' + name + '/__action/' + action)}),`);
 			}
 			roomLines.push(`};`);
 			lines.push(roomLines.join('\n'));
@@ -1227,12 +1236,12 @@ function _generateClientStubs(filePath, modulePath, dir) {
 				aggLines.push(`export const ${name} = {`);
 				for (const wn of windowKeys) {
 					const safeWn = JSON.stringify(wn);
-					aggLines.push(`  ${safeWn}: __stream('${modulePath}/${name}/__window/${wn}', ${JSON.stringify({ merge: 'set' })}),`);
+					aggLines.push(`  ${safeWn}: __stream(${JSON.stringify(modulePath + '/' + name + '/__window/' + wn)}, ${JSON.stringify({ merge: 'set' })}),`);
 				}
 				aggLines.push(`};`);
 				lines.push(aggLines.join('\n'));
 			} else {
-				lines.push(`export const ${name} = __stream('${modulePath}/${name}', ${JSON.stringify({ merge: 'set' })});`);
+				lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify({ merge: 'set' })});`);
 			}
 		}
 	}
@@ -1246,12 +1255,12 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		if (name.startsWith('_')) {
 			// Reserved names starting with _ (except _guard)
 			console.warn(
-				`[svelte-realtime] ${dir}/${modulePath} exports '${name}' starting with _ -- reserved for internal use\n  See: https://svti.me/rpc`
+				`[svelte-realtime] ${dir}/${modulePath} exports '${name}' starting with _ - reserved for internal use\n  See: https://svti.me/rpc`
 			);
 			continue;
 		}
 		console.warn(
-			`[svelte-realtime] ${dir}/${modulePath} exports '${name}' which is not wrapped in live() -- it won't be callable from the client. Did you forget live()?\n  See: https://svti.me/rpc`
+			`[svelte-realtime] ${dir}/${modulePath} exports '${name}' which is not wrapped in live() - it won't be callable from the client. Did you forget live()?\n  See: https://svti.me/rpc`
 		);
 	}
 
@@ -1313,7 +1322,7 @@ function _extractLastOptions(s) {
 		if (ch === '(') { parenDepth++; continue; }
 		if (ch === ')') {
 			if (parenDepth > 0) { parenDepth--; continue; }
-			// Top-level ) -- this closes the live.stream() call
+			// Top-level ) - this closes the live.stream() call
 			return lastContent;
 		}
 		if (ch === '{') {
@@ -1345,7 +1354,7 @@ function _extractTopLevelBraceProp(body, keyName) {
 
 		const skip = _skipNonCode(body, i);
 		if (skip >= 0) {
-			// At depth 0, a skipped quote might be a quoted key -- check before skipping
+			// At depth 0, a skipped quote might be a quoted key - check before skipping
 			if (depth === 0 && (ch === '\'' || ch === '"')) {
 				const rest = body.slice(i);
 				const qm = rest.match(new RegExp(`^(['"])${keyName}\\1\\s*:\\s*`));
@@ -1405,7 +1414,7 @@ function _extractTopLevelKeys(body) {
 					if (/^[a-zA-Z0-9_]+$/.test(keyName)) {
 						keys.push(keyName);
 					} else if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-						console.warn(`[svelte-realtime] Action name '${keyName}' contains characters not allowed in RPC paths -- skipped\n  See: https://svti.me/rooms`);
+						console.warn(`[svelte-realtime] Action name '${keyName}' contains characters not allowed in RPC paths - skipped\n  See: https://svti.me/rooms`);
 					}
 					i = closeIdx + 1 + afterClose[0].length;
 					// If the match ended with '(' (quoted method shorthand), track depth
@@ -1429,7 +1438,7 @@ function _extractTopLevelKeys(body) {
 				if (/^[a-zA-Z0-9_]+$/.test(m[1])) {
 					keys.push(m[1]);
 				} else if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-					console.warn(`[svelte-realtime] Action name '${m[1]}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) -- skipped\n  See: https://svti.me/rooms`);
+					console.warn(`[svelte-realtime] Action name '${m[1]}' contains characters not allowed in RPC paths (only a-z, A-Z, 0-9, _ are valid) - skipped\n  See: https://svti.me/rooms`);
 				}
 				i += m[0].length;
 				// If the match ended with '(' (method shorthand), account for the
@@ -1696,7 +1705,7 @@ function _extractChannelOptions(source, name) {
  * "single-stream stub" and "namespace stub" client surfaces.
  *
  * Reuses the same locate-options-block + top-level-keys pattern as
- * `_extractRoomInfo` -- the plugin parser only ever needs to know which
+ * `_extractRoomInfo` - the plugin parser only ever needs to know which
  * windows exist, not their type or duration. Window-spec validation
  * (`type`, `durationMs`, `combine` requirement, etc.) lives at module
  * load time on the server side, where the actual reducers and option
@@ -1840,7 +1849,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 				if (!/^\w+$/.test(name)) continue;
 				if (registered.has(name)) continue;
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}
 		}
 
@@ -1849,7 +1858,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 		while ((match = STREAM_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
-			lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+			lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 
 			// Check for duplicate stream topics
 			const topicPattern = new RegExp(
@@ -1860,12 +1869,12 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 				const topic = topicMatch[1];
 				if (topic.startsWith('__')) {
 					throw new Error(
-						`[svelte-realtime] ${dir}/${rel} uses reserved topic '${topic}' -- topics starting with __ are reserved for internal use\n  See: https://svti.me/streams`
+						`[svelte-realtime] ${dir}/${rel} uses reserved topic '${topic}' - topics starting with __ are reserved for internal use\n  See: https://svti.me/streams`
 					);
 				}
 				if (seenTopics.has(topic)) {
 					throw new Error(
-						`[svelte-realtime] Duplicate stream topic '${topic}' in ${dir}/${rel} -- each topic must be unique across all modules\n  See: https://svti.me/streams`
+						`[svelte-realtime] Duplicate stream topic '${topic}' in ${dir}/${rel} - each topic must be unique across all modules\n  See: https://svti.me/streams`
 					);
 				}
 				seenTopics.add(topic);
@@ -1876,7 +1885,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 		// Register guard
 		GUARD_EXPORT_RE.lastIndex = 0;
 		if (GUARD_EXPORT_RE.exec(source) !== null) {
-			lines.push(`__registerGuard('${rel}', ${_lazy('_guard')});`);
+			lines.push(`__registerGuard(${JSON.stringify(rel)}, ${_lazy('_guard')});`);
 		}
 
 		// Register live.binary() exports
@@ -1886,7 +1895,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}
 		}
 
@@ -1897,7 +1906,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}
 		}
 
@@ -1906,7 +1915,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 		while ((match = CRON_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
 			if (!/^\w+$/.test(name)) continue;
-			lines.push(`__registerCron('${rel}/${name}', ${_lazy(name)});`);
+			lines.push(`__registerCron(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 		}
 
 		// Register live.derived() exports
@@ -1916,12 +1925,12 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
-				lines.push(`__registerDerived('${rel}/${name}', ${_lazy(name)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
+				lines.push(`__registerDerived(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}
 		}
 
-		// Register live.room() exports -- register sub-streams and actions lazily
+		// Register live.room() exports - register sub-streams and actions lazily
 		ROOM_EXPORT_RE.lastIndex = 0;
 		while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
@@ -1929,14 +1938,14 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			if (!registered.has(name)) {
 				registered.add(name);
 				const importPath = JSON.stringify(normalizedPath);
-				// Register the data stream -- inherit file-level guard via explicit module path
-				lines.push(`__register('${rel}/${name}/__data', __L(() => import(${importPath}).then(m => m.${name}.__dataStream)), '${rel}');`);
+				// Register the data stream - inherit file-level guard via explicit module path
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__data')}, __L(() => import(${importPath}).then(m => m.${name}.__dataStream)), ${JSON.stringify(rel)});`);
 				// Register presence stream if present
-				lines.push(`__register('${rel}/${name}/__presence', __L(() => import(${importPath}).then(m => m.${name}.__presenceStream)), '${rel}');`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__presence')}, __L(() => import(${importPath}).then(m => m.${name}.__presenceStream)), ${JSON.stringify(rel)});`);
 				// Register cursor stream if present
-				lines.push(`__register('${rel}/${name}/__cursors', __L(() => import(${importPath}).then(m => m.${name}.__cursorStream)), '${rel}');`);
-				// Register actions (deferred -- resolved on first RPC or cron tick)
-				lines.push(`__registerRoomActions('${rel}/${name}', ${_lazy(name)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursors')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorStream)), ${JSON.stringify(rel)});`);
+				// Register actions (deferred - resolved on first RPC or cron tick)
+				lines.push(`__registerRoomActions(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}
 		}
 
@@ -1953,7 +1962,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}
 			const channelTopicPattern = new RegExp(
 				`export\\s+const\\s+${name}\\s*=\\s*live\\.channel\\s*\\(\\s*['"\`]([^'"\`]+)['"\`]`
@@ -1971,7 +1980,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			if (!/^\w+$/.test(name)) continue;
 			if (!registered.has(name)) {
 				registered.add(name);
-				lines.push(`__registerEffect('${rel}/${name}', ${_lazy(name)});`);
+				lines.push(`__registerEffect(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}
 		}
 
@@ -1991,13 +2000,13 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 					// stream functions live on the root export as
 					// `__windowStreams[windowName]`.
 					const importPath = JSON.stringify(normalizedPath);
-					lines.push(`__registerAggregate('${rel}/${name}', ${_lazy(name)});`);
+					lines.push(`__registerAggregate(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 					for (const wn of windowKeys) {
-						lines.push(`__register('${rel}/${name}/__window/${wn}', __L(() => import(${importPath}).then(m => m.${name}.__windowStreams[${JSON.stringify(wn)}])), '${rel}');`);
+						lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__window/' + wn)}, __L(() => import(${importPath}).then(m => m.${name}.__windowStreams[${JSON.stringify(wn)}])), ${JSON.stringify(rel)});`);
 					}
 				} else {
-					lines.push(`__register('${rel}/${name}', ${_lazy(name)});`);
-					lines.push(`__registerAggregate('${rel}/${name}', ${_lazy(name)});`);
+					lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
+					lines.push(`__registerAggregate(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 				}
 			}
 		}
@@ -2051,7 +2060,7 @@ function _checkHooksFile(root, liveDir, dir) {
 
 	if (!found) {
 		console.warn(
-			`[svelte-realtime] Found live modules in ${dir}/ but no src/hooks.ws.js -- ` +
+			`[svelte-realtime] Found live modules in ${dir}/ but no src/hooks.ws.js - ` +
 			`WebSocket RPC will not work without it.\n` +
 			`  Create src/hooks.ws.js with at minimum:\n` +
 			`    export { message } from 'svelte-realtime/server';\n` +
@@ -2070,7 +2079,7 @@ function _checkHooksFile(root, liveDir, dir) {
 	if (!hasMessage) {
 		const name = found.endsWith('.ts') ? 'src/hooks.ws.ts' : 'src/hooks.ws.js';
 		console.warn(
-			`[svelte-realtime] ${name} exists but does not export a \`message\` handler -- ` +
+			`[svelte-realtime] ${name} exists but does not export a \`message\` handler - ` +
 			`WebSocket RPC calls from ${dir}/ will go unhandled.\n` +
 			`  Add: export { message } from 'svelte-realtime/server';\n` +
 			`  See: https://svti.me/hooks`
@@ -2110,7 +2119,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 	if (files.length === 0) return '';
 
 	const declarations = [
-		'// Auto-generated by svelte-realtime -- do not edit',
+		'// Auto-generated by svelte-realtime - do not edit',
 		'// Provides client-side types for $live/ imports',
 		''
 	];
@@ -2142,7 +2151,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
-		// Detect live.validated() exports -- extract real types for TS
+		// Detect live.validated() exports - extract real types for TS
 		VALIDATED_EXPORT_RE.lastIndex = 0;
 		while ((match = VALIDATED_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
@@ -2280,7 +2289,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
-		// Detect live.rateLimit() exports -- extract real types for TS
+		// Detect live.rateLimit() exports - extract real types for TS
 		RATE_LIMIT_EXPORT_RE.lastIndex = 0;
 		while ((match = RATE_LIMIT_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
@@ -2295,7 +2304,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
-		// Detect live.lock() exports -- the inner handler is the second arg of
+		// Detect live.lock() exports - the inner handler is the second arg of
 		// live.lock(keyOrConfig, fn), so the function-signature extractor
 		// reads from arg index 1.
 		LOCK_EXPORT_RE.lastIndex = 0;
@@ -2312,7 +2321,7 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
-		// Detect live.idempotent() exports -- inner handler at arg index 1.
+		// Detect live.idempotent() exports - inner handler at arg index 1.
 		IDEMPOTENT_EXPORT_RE.lastIndex = 0;
 		while ((match = IDEMPOTENT_EXPORT_RE.exec(source)) !== null) {
 			const name = match[1];
@@ -2485,17 +2494,17 @@ function _extractStreamReturnType(source, name) {
  * Function-topic form is classified by the topic-fn's arity, mirroring the
  * server's `_callTopicFn` arity dispatch so the plugin and runtime agree:
  *
- *  - `() => topic`                  -- static (no ctx, no client args)
- *  - `(ctx) => topic(ctx.user.id)`  -- static (topic derived purely from
+ *  - `() => topic`                  - static (no ctx, no client args)
+ *  - `(ctx) => topic(ctx.user.id)`  - static (topic derived purely from
  *                                      authenticated ctx; secure-by-
  *                                      construction since the client has
  *                                      no input that could be tampered
  *                                      with to reach another user's data)
- *  - `(ctx, roomId) => topic(roomId)`  -- dynamic factory (1 client arg)
- *  - `(roomId) => topic(roomId)`    -- dynamic factory (server interprets
+ *  - `(ctx, roomId) => topic(roomId)`  - dynamic factory (1 client arg)
+ *  - `(roomId) => topic(roomId)`    - dynamic factory (server interprets
  *                                      single non-ctx param as omitted
  *                                      ctx + 1 client arg)
- *  - `({ user }) => topic(user.id)` -- dynamic (destructured first param
+ *  - `({ user }) => topic(user.id)` - dynamic (destructured first param
  *                                      is ambiguous: could be ctx or
  *                                      payload; safest is to assume
  *                                      payload and emit the factory
@@ -2503,7 +2512,7 @@ function _extractStreamReturnType(source, name) {
  *                                      fallback in
  *                                      _extractDynamicFactoryParams)
  *
- * Ctx detection uses `_isCtxParam` -- the same check that
+ * Ctx detection uses `_isCtxParam` - the same check that
  * `_extractDynamicFactoryParams` uses to decide whether to drop the first
  * param. Sharing that check keeps the dynamic/static decision consistent
  * with the param-extraction step.
@@ -2591,7 +2600,7 @@ function _stripParamDefaults(params) {
 
 function _isCtxParam(param) {
 	const trimmed = param.trim();
-	// Destructured first param -- never auto-classify. We cannot distinguish
+	// Destructured first param - never auto-classify. We cannot distinguish
 	// ctx destructuring from payload-object destructuring by property names.
 	if (trimmed.startsWith('{')) return false;
 	// Extract the bare name (strip type annotation, default value)
@@ -2684,7 +2693,7 @@ function _isFirstArgFunction(source, start) {
 					while (k < source.length && /\s/.test(source[k])) k++;
 					if (source[k] === '=' && source[k + 1] === '>') return true;
 					if (source[k] === ':') {
-						// Has return type -- scan for => at depth 0
+						// Has return type - scan for => at depth 0
 						k++;
 						let retDepth = 0;
 						for (; k < source.length; k++) {
@@ -2821,7 +2830,7 @@ function _parseCallbackSignature(source, start) {
 	while (scanIdx < source.length && /\s/.test(source[scanIdx])) scanIdx++;
 	let retType = null;
 	if (source[scanIdx] === ':') {
-		// Has return type annotation -- scan for => at depth 0
+		// Has return type annotation - scan for => at depth 0
 		scanIdx++; // skip ':'
 		while (scanIdx < source.length && /\s/.test(source[scanIdx])) scanIdx++;
 		const retStart = scanIdx;
@@ -2964,10 +2973,10 @@ async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 		await server.ssrLoadModule('/@svelte-realtime-registry');
 		console.log(`[svelte-realtime] Hot-reloaded: ${dir}/${rel}`);
 	} catch (e) {
-		// Re-import failed -- restore old handlers so the server keeps working
+		// Re-import failed - restore old handlers so the server keeps working
 		serverMod._restoreHmr(snap);
 		console.error(`[svelte-realtime] HMR failed for ${dir}/${rel}:`, /** @type {Error} */ (e).message);
-		console.error('[svelte-realtime] Previous handlers restored -- fix the error and save again');
+		console.error('[svelte-realtime] Previous handlers restored - fix the error and save again');
 	}
 }
 

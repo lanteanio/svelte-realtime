@@ -6,7 +6,7 @@ const textDecoder = new TextDecoder();
 const _validPathRe = /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)+$/;
 const _validSegmentRe = /^[a-zA-Z0-9_]+$/;
 
-// -- Bounded-by-default capacity caps (server side) -------------------------
+// - Bounded-by-default capacity caps (server side) -------------------------
 // Every per-process Map / Set with caller-driven growth is bounded. Numbers
 // are deliberately generous - far above any healthy single-instance workload
 // - so they catch obvious bugs (subscribe-leak, register-without-deregister)
@@ -63,6 +63,7 @@ export function _setCapsForTest(overrides) {
 	if (overrides.silentTopicWarnDedup !== undefined) _silentTopicWarnDedupMax = overrides.silentTopicWarnDedup;
 	if (overrides.publishRateWarnDedup !== undefined) _publishRateWarnDedupMax = overrides.publishRateWarnDedup;
 	if (overrides.presenceRef !== undefined) _maxPresenceRef = overrides.presenceRef;
+	if (overrides.uploadPendingMaxAggregate !== undefined) _UPLOAD_PENDING_MAX_AGGREGATE = overrides.uploadPendingMaxAggregate;
 }
 
 /**
@@ -76,6 +77,8 @@ export function _resetCapsForTest() {
 	_publishRateWarnDedupMax = PUBLISH_RATE_WARN_DEDUP_MAX;
 	_maxPresenceRef = MAX_PRESENCE_REF;
 	_presenceRefWarnFired = false;
+	_UPLOAD_PENDING_MAX_AGGREGATE = 64 * 1024 * 1024;
+	_pendingUploadBytes = 0;
 }
 
 /** @type {Map<string, Function>} */
@@ -214,7 +217,7 @@ function _getPushIdentify() {
  * Per-topic set of WebSockets currently holding at least one realtime
  * stream subscription. Maintained as the source of truth for the
  * `remainingSubscribers` argument the realtime layer passes to
- * `__onUnsubscribe(ctx, topic, remainingSubscribers)` -- apps use this
+ * `__onUnsubscribe(ctx, topic, remainingSubscribers)` - apps use this
  * to decide "should I tear down the upstream feed?" once the count
  * hits zero. Distinct from the adapter's own ws.isSubscribed bookkeeping
  * because it tracks realtime-stream subscriptions specifically (not
@@ -284,7 +287,7 @@ const _globalMiddleware = [];
 
 /**
  * Copy stream metadata from a source function to a wrapper.
- * Single source of truth for all metadata properties -- add new fields here.
+ * Single source of truth for all metadata properties - add new fields here.
  * @param {any} target
  * @param {any} source
  */
@@ -357,7 +360,7 @@ function _unregisterCoalesce(ws, topic) {
  * the transform once per publish, BEFORE platform.publish (or the
  * sendCoalesced fan-out), so subscribers see the projected wire shape.
  *
- * Refcounted by ws-topic contributions -- evicted when the last
+ * Refcounted by ws-topic contributions - evicted when the last
  * subscriber leaves so HMR-changed stream definitions can re-register.
  *
  * Each entry also carries the registering stream's `onError` reference
@@ -409,7 +412,7 @@ export function _resetTransformRegistry() {
  * is subscribed, its topic is recorded here. The publish helper translates
  * `volatile` topics + per-call `options.volatile === true` into the adapter's
  * `seq: false` per-event option, so seq stamping is skipped for these
- * messages -- a reconnect carrying `lastSeenSeq` won't try to backfill them.
+ * messages - a reconnect carrying `lastSeenSeq` won't try to backfill them.
  *
  * Wire-level "drop on backpressure" behavior is the adapter's job:
  * platform.publish / platform.publishBatched / platform.send all skip a
@@ -459,7 +462,7 @@ export function _resetVolatileRegistry() {
  * pattern's compiled regex. The publish helper checks every publish
  * against these patterns and triggers a loader re-run for any stream
  * whose pattern matches the publish topic. Distinct from the stale
- * watchdog (timer-driven) -- this one is event-driven.
+ * watchdog (timer-driven) - this one is event-driven.
  *
  * Each watcher stores everything `_staleReload` needs to re-execute the
  * loader: stream topic, init fn (with stashed __streamTransform /
@@ -555,7 +558,7 @@ export function _resetInvalidationWatch() {
 
 /**
  * Re-run a stream's loader because an invalidation pattern matched.
- * Mirrors `_staleReload` -- captures the same ctx+args, applies the
+ * Mirrors `_staleReload` - captures the same ctx+args, applies the
  * init transform, and broadcasts the result as a `refreshed` event on
  * the stream's own topic. Concurrent triggers are deduped via the
  * `reloading` flag (we never queue or merge them; the next match after
@@ -622,7 +625,7 @@ function _unregisterStaleWatch(topic) {
 
 /**
  * Reset the watchdog timer for a topic. Called from the publish helper on
- * every publish to that topic -- a publish proves the topic is live, so
+ * every publish to that topic - a publish proves the topic is live, so
  * the staleness clock restarts.
  * @param {string} topic
  */
@@ -855,7 +858,7 @@ export function _activatePublishRateWarning(platform) {
  * one-shot warned set, stops every active sampler, and removes the
  * activation marker so the next ctx-helpers cache miss for a previously
  * seen platform re-attaches a sampler. Does NOT reset config back to
- * defaults -- tests that mutate config should restore it themselves.
+ * defaults - tests that mutate config should restore it themselves.
  */
 export function _resetPublishRateWarning() {
 	_publishRateWarned.clear();
@@ -893,6 +896,24 @@ function _getCtxHelpers(platform) {
 			if (batch && batch.length > 0) /** @type {any} */ (platform).publishBatched(batch);
 		};
 		const publish = function publish(topic, event, data, options) {
+			// Reserve the `__` prefix for framework-internal channels
+			// (`__signal:userId`, `__rpc`, `__upload`, plugin `__presence:*` /
+			// `__group:*` / `__replay:*`). User code that publishes to those
+			// channels can spoof framework-internal frames; combined with the
+			// wire-side block on subscribing to system topics, the only
+			// legitimate publisher of internal channels is the framework
+			// itself via the lower-level `platform.publish(...)`. Apps that
+			// genuinely need to broadcast on a `__`-prefixed topic should
+			// reach for the unwrapped `platform.publish` directly so the
+			// intent is explicit at the call site.
+			if (typeof topic === 'string' && topic.length >= 2 && topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) {
+				throw new LiveError(
+					'INVALID_TOPIC',
+					"ctx.publish() refuses '__'-prefixed topics; those are reserved for " +
+					'framework-internal channels. Use platform.publish(...) directly if ' +
+					'you genuinely need to broadcast on a system channel.'
+				);
+			}
 			// Volatile option translation. Per-call `options.volatile` or a
 			// topic registered as volatile turns into `seq: false` on the wire
 			// so reconnect with `lastSeenSeq` won't try to backfill the gap.
@@ -900,7 +921,7 @@ function _getCtxHelpers(platform) {
 			// (uWS maxBackpressure auto-skips backpressured subscribers); this
 			// only governs seq stamping and intent declaration. The check
 			// short-circuits when no caller passes volatile and no stream
-			// registered it -- no alloc on the common case.
+			// registered it - no alloc on the common case.
 			let finalOptions = options;
 			if ((options && options.volatile) || (_topicVolatile.size > 0 && _topicVolatile.has(topic))) {
 				finalOptions = { ...(options || {}), seq: false };
@@ -968,11 +989,11 @@ function _getCtxHelpers(platform) {
 					throw err;
 				}
 			}
-			// Transform produces the wire data once -- applied here, before
+			// Transform produces the wire data once - applied here, before
 			// fan-out, so every subscriber sees the same projected shape.
 			// Throws are routed to the registered stream's onError (if any).
 			// With an observer set, the publish is dropped silently (return
-			// false) -- transform failure means the wire data is invalid, so
+			// false) - transform failure means the wire data is invalid, so
 			// fanning out wouldn't help. Without an observer, the throw
 			// propagates so apps that haven't opted into the observer pattern
 			// still see failures.
@@ -1177,15 +1198,18 @@ function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 }
 
 /**
- * Walk a wrapper chain and set __rateLimitPath on any rate-limited function found.
- * Handles arbitrary nesting: validated(rateLimit(...)), room action wrappers, etc.
+ * Walk a wrapper chain (max depth 10) and stamp the registered RPC path
+ * on every rate-limit or idempotency frame. The path stamps let those
+ * wrappers namespace their state by RPC path so user-supplied keys
+ * cannot collide across different RPCs.
  * @param {any} fn
  * @param {string} path
  */
-function _propagateRateLimitPath(fn, path) {
+function _propagateWrapperPath(fn, path) {
 	let cur = fn;
 	for (let depth = 0; cur && depth < 10; depth++) {
 		if (cur.__isRateLimited) cur.__rateLimitPath = path;
+		if (cur.__isIdempotent) cur.__idempotencyPath = path;
 		cur = cur.__wrappedFn || null;
 	}
 }
@@ -1206,8 +1230,7 @@ export function __register(path, fn, modulePath) {
 	}
 	// Cache module path to avoid recomputing substring on every RPC call
 	/** @type {any} */ (fn).__modulePath = modulePath || path.substring(0, path.lastIndexOf('/'));
-	// Propagate rate-limit path through the wrapper chain
-	_propagateRateLimitPath(fn, path);
+	_propagateWrapperPath(fn, path);
 	if (/** @type {any} */ (fn).__isStream && /** @type {any} */ (fn).__onUnsubscribe) {
 		_streamsWithUnsubscribe.add(fn);
 	}
@@ -1231,7 +1254,7 @@ async function _resolveRegistryEntry(path) {
 	}
 	registry.set(path, fn);
 	/** @type {any} */ (fn).__modulePath = hint || path.substring(0, path.lastIndexOf('/'));
-	_propagateRateLimitPath(fn, path);
+	_propagateWrapperPath(fn, path);
 	if (/** @type {any} */ (fn).__isStream && /** @type {any} */ (fn).__onUnsubscribe) {
 		_streamsWithUnsubscribe.add(fn);
 	}
@@ -1279,7 +1302,7 @@ export function live(fn) {
 }
 
 /**
- * Disallowed entry names on a `defineTopics` map -- these are reserved
+ * Disallowed entry names on a `defineTopics` map - these are reserved
  * for tooling metadata. Names are checked at registration time.
  */
 const _RESERVED_TOPIC_NAMES = new Set(['__patterns', '__definedTopics']);
@@ -1317,8 +1340,8 @@ function _deriveTopicPattern(value) {
  *
  * Returned object exposes the same entries the input did, plus two
  * non-enumerable metadata properties:
- *   - `__definedTopics: true` -- runtime marker for tooling.
- *   - `__patterns` -- map of `name -> pattern string`, derived from
+ *   - `__definedTopics: true` - runtime marker for tooling.
+ *   - `__patterns` - map of `name -> pattern string`, derived from
  *     each entry. Strings pass through; functions are called with
  *     sentinel placeholders matching their arity (`{arg0}`, `{arg1}`,
  *     ...). Useful for generating documentation comments alongside
@@ -1392,7 +1415,7 @@ live.stream = function stream(topic, initFn, options) {
 	}
 	if (typeof topic === 'function') {
 		if (topic.constructor?.name === 'AsyncFunction') {
-			throw new Error(`[svelte-realtime] live.stream topic function must not be async -- topic resolution is synchronous\n  See: https://svti.me/streams`);
+			throw new Error(`[svelte-realtime] live.stream topic function must not be async - topic resolution is synchronous\n  See: https://svti.me/streams`);
 		}
 		_tagTopicFn(topic);
 	}
@@ -1413,10 +1436,10 @@ live.stream = function stream(topic, initFn, options) {
 		throw new Error('[svelte-realtime] live.stream volatile must be a boolean');
 	}
 	if (volatileOpt && coalesceBy) {
-		throw new Error('[svelte-realtime] live.stream cannot combine volatile: true with coalesceBy -- volatile drops on backpressure, coalesceBy keeps the latest value queued. Pick one.');
+		throw new Error('[svelte-realtime] live.stream cannot combine volatile: true with coalesceBy - volatile drops on backpressure, coalesceBy keeps the latest value queued. Pick one.');
 	}
 	if (volatileOpt && replay) {
-		throw new Error('[svelte-realtime] live.stream cannot combine volatile: true with replay -- volatile messages are intentionally not buffered for resume. Drop replay or drop volatile.');
+		throw new Error('[svelte-realtime] live.stream cannot combine volatile: true with replay - volatile messages are intentionally not buffered for resume. Drop replay or drop volatile.');
 	}
 	if (staleAfterMs !== undefined) {
 		if (typeof staleAfterMs !== 'number' || !Number.isFinite(staleAfterMs) || staleAfterMs <= 0) {
@@ -1482,7 +1505,7 @@ live.stream = function stream(topic, initFn, options) {
 
 /**
  * Create an ephemeral pub/sub channel with no database initialization.
- * Channels have no initFn -- clients subscribe to a topic and receive events immediately.
+ * Channels have no initFn - clients subscribe to a topic and receive events immediately.
  *
  * @param {string | Function} topic - Static topic string or function (ctx, ...args) => string for dynamic channels
  * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, max?: number }} [options]
@@ -1494,7 +1517,7 @@ live.channel = function channel(topic, options) {
 	}
 	if (typeof topic === 'function') {
 		if (topic.constructor?.name === 'AsyncFunction') {
-			throw new Error(`[svelte-realtime] live.channel topic function must not be async -- topic resolution is synchronous\n  See: https://svti.me/streams`);
+			throw new Error(`[svelte-realtime] live.channel topic function must not be async - topic resolution is synchronous\n  See: https://svti.me/streams`);
 		}
 		_tagTopicFn(topic);
 	}
@@ -1537,32 +1560,42 @@ live.binary = function binary(fn, options) {
  *
  * Handler signature: `async (ctx, ...args) => result`. The standard `ctx`
  * is augmented with:
- *   - `ctx.stream`  -- AsyncIterable<Uint8Array> yielding chunks in arrival order
- *   - `ctx.signal`  -- AbortSignal that fires on cancel / disconnect / cap exceeded
- *   - `ctx.upload`  -- { id: string, total?: number, source: 'file'|'blob'|'buffer'|'stream' }
+ *   - `ctx.stream`  - AsyncIterable<Uint8Array> yielding chunks in arrival order
+ *   - `ctx.signal`  - AbortSignal that fires on cancel / disconnect / cap exceeded
+ *   - `ctx.upload`  - { id: string, total?: number, source: 'file'|'blob'|'buffer'|'stream' }
  *
  * Caps default to: 100MB per upload, 4 concurrent per session, unbounded
  * globally, 64 buffered chunks before flow-control kicks in.
  *
  * @param {(ctx: any, ...args: any[]) => Promise<any>} fn
- * @param {{ maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number }} [options]
+ * @param {{ maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number, reauthEvery?: number }} [options]
  * @returns {Function}
  */
 live.upload = function upload(fn, options) {
 	/** @type {any} */ (fn).__isLive = true;
 	/** @type {any} */ (fn).__isUpload = true;
+	// reauthEvery (bytes): when >0, every N bytes received past the last
+	// re-auth, the chunk pump re-runs the module guard against the live
+	// `ctx` so an upload in flight cannot outlive the session that
+	// authorized it (token expiry, explicit logout, role downgrade). The
+	// default is unset (legacy behavior: guard runs once at chunk-0 only).
+	const reauthEvery = options?.reauthEvery;
+	if (reauthEvery !== undefined && (typeof reauthEvery !== 'number' || !(reauthEvery > 0) || !Number.isFinite(reauthEvery))) {
+		throw new Error('live.upload: reauthEvery must be a positive finite number of bytes');
+	}
 	/** @type {any} */ (fn).__uploadOptions = {
 		maxSize: options?.maxSize ?? 104857600,
 		maxConcurrentPerSession: options?.maxConcurrentPerSession ?? 4,
 		maxConcurrentTotal: options?.maxConcurrentTotal ?? Infinity,
-		maxBufferedChunks: options?.maxBufferedChunks ?? 64
+		maxBufferedChunks: options?.maxBufferedChunks ?? 64,
+		reauthEvery: reauthEvery ?? 0
 	};
 	return fn;
 };
 
 /**
  * Register a global middleware that runs before per-module guards for every RPC/stream call.
- * Middleware receives `(ctx, next)` -- call `next()` to continue the chain.
+ * Middleware receives `(ctx, next)` - call `next()` to continue the chain.
  * Throw a LiveError to reject the call.
  *
  * @param {(ctx: any, next: () => Promise<any>) => Promise<any>} fn
@@ -1570,6 +1603,11 @@ live.upload = function upload(fn, options) {
 live.middleware = function middleware(fn) {
 	_globalMiddleware.push(fn);
 };
+
+/** Test-only: clear all registered global middleware. */
+export function _resetMiddleware() {
+	_globalMiddleware.length = 0;
+}
 
 /**
  * Declarative access control helpers for subscribe-time gating.
@@ -1710,7 +1748,7 @@ function _consumeRateLimitBucket(bucketKey, points, windowMs) {
 
 	let bucket = _rateLimits.get(bucketKey);
 
-	// Hard cap on new buckets only -- existing identities always pass through
+	// Hard cap on new buckets only - existing identities always pass through
 	if (!bucket && _rateLimits.size >= _RATE_LIMIT_MAX) {
 		for (const [k, b] of _rateLimits) {
 			if (now - b.windowStart >= b.windowMs * 2) _rateLimits.delete(k);
@@ -2316,8 +2354,24 @@ live.idempotent = function idempotent(config, fn) {
 	const customStore = cfg.store || null;
 
 	const wrapper = async function idempotentWrapper(ctx, ...args) {
-		const key = keyFrom ? keyFrom(ctx, ...args) : ctx._idempotencyKey;
-		if (!key) return fn(ctx, ...args);
+		const userKey = keyFrom ? keyFrom(ctx, ...args) : ctx._idempotencyKey;
+		if (!userKey) return fn(ctx, ...args);
+		// Cap key length at 256 bytes - matches isValidWireTopic and
+		// keeps the cache key from growing into a per-attacker memory
+		// pressure or a Redis/Postgres B-tree depth amplifier.
+		if (typeof userKey !== 'string' || userKey.length > 256) {
+			throw new LiveError(
+				'INVALID_REQUEST',
+				'idempotencyKey must be a string no longer than 256 characters'
+			);
+		}
+		// Namespace the cache key by registered RPC path so the same
+		// userKey across different RPCs lands in different slots.
+		// Custom keyFrom callbacks must still encode tenant scope
+		// explicitly - the framework cannot guess the app's tenant
+		// shape - but path-scoping closes the cross-RPC class.
+		const path = /** @type {any} */ (wrapper).__idempotencyPath;
+		const key = path ? 'rpc:' + path + ':' + userKey : userKey;
 		const store = customStore || _getDefaultIdempotencyStore();
 		const slot = await store.acquire(key, ttlSec);
 		if (slot && slot.acquired) {
@@ -2484,11 +2538,11 @@ let _remoteRegistry = null;
 /**
  * Configure the push registry. Accepts two independent fields:
  *
- * - `identify` -- override how `pushHooks.open` extracts the userId
+ * - `identify` - override how `pushHooks.open` extracts the userId
  *   from a connecting WebSocket. Defaults to reading
  *   `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`. Pass a
  *   function to override; pass `null` (in `config.identify`) to clear.
- * - `remoteRegistry` -- an object with a
+ * - `remoteRegistry` - an object with a
  *   `request(userId, event, data, options)` method. When supplied,
  *   `live.push({ userId })` falls back to `remoteRegistry.request(...)`
  *   if the userId is not registered on this instance, enabling
@@ -2500,7 +2554,7 @@ let _remoteRegistry = null;
  * `init({ platform })` hook in `hooks.ws.js`, alongside
  * `setCronPlatform`. The Redis client is typically already connected by
  * the time `init` fires, and the hook completes before any `upgrade` /
- * `open` runs -- so the cluster-routing path is wired before the first
+ * `open` runs - so the cluster-routing path is wired before the first
  * request can reach `live.push`. Calling at module top-level also works
  * but is brittle if your Redis client is created inside an async setup
  * function or behind a module that imports lazily.
@@ -2522,7 +2576,7 @@ let _remoteRegistry = null;
  * @example
  * ```js
  * // Identify-only override (no cluster routing). Module top-level is
- * // fine for this case -- no async setup involved.
+ * // fine for this case - no async setup involved.
  * import { live } from 'svelte-realtime/server';
  * live.configurePush({ identify: (ws) => ws.getUserData()?.account?.id });
  * ```
@@ -2614,8 +2668,8 @@ export const pushHooks = {
 	 * Adapter close hook. Drains both the per-userId push registry AND
 	 * the realtime stream-subscription bookkeeping (per-topic ws-counts,
 	 * silent-topic watchdogs, `__onUnsubscribe` callbacks). Routes through
-	 * the module-scope `close` when the adapter passes a `ctx` -- which it
-	 * always does in production -- so a single
+	 * the module-scope `close` when the adapter passes a `ctx` - which it
+	 * always does in production - so a single
 	 * `export const close = pushHooks.close` re-export from hooks.ws.js
 	 * covers both concerns. Falls back to push-only behavior when called
 	 * directly without `ctx` (test setups, custom flows) so the historical
@@ -2654,10 +2708,10 @@ export const pushHooks = {
  * Send a server-initiated request to a connected user and await the reply.
  *
  * Lookup order:
- * 1. **Local registry** -- the per-userId Map populated by `pushHooks.open` /
+ * 1. **Local registry** - the per-userId Map populated by `pushHooks.open` /
  *    `pushHooks.close`. Resolves directly via `platform.request(ws, ...)` --
  *    no I/O.
- * 2. **Remote registry** -- the optional `remoteRegistry` configured via
+ * 2. **Remote registry** - the optional `remoteRegistry` configured via
  *    `live.configurePush({ remoteRegistry })`. When the userId is not
  *    registered on this instance and a registry is configured,
  *    `live.push` falls through to `remoteRegistry.request(userId, ...)`
@@ -2667,10 +2721,10 @@ export const pushHooks = {
  * Returns whatever the client's `onPush(event, handler)` returns.
  *
  * Error surface (all `LiveError` with discriminating `.code`):
- * - `VALIDATION` -- bad target / event / options / timeoutMs at the call site.
- * - `NOT_FOUND` -- no connection registered for the userId (and no
+ * - `VALIDATION` - bad target / event / options / timeoutMs at the call site.
+ * - `NOT_FOUND` - no connection registered for the userId (and no
  *   `remoteRegistry` is configured).
- * - `TIMEOUT` -- the recipient did not reply within `timeoutMs`. Wraps
+ * - `TIMEOUT` - the recipient did not reply within `timeoutMs`. Wraps
  *   the underlying `'request timed out'` Error from the adapter (and
  *   any remote-registry shape that rejects with the same wording);
  *   message text is preserved verbatim on `.message` and the original
@@ -2708,7 +2762,7 @@ export const pushHooks = {
  *
  * @example
  * ```js
- * // hooks.ws.js -- wire the local registry once:
+ * // hooks.ws.js - wire the local registry once:
  * import { pushHooks } from 'svelte-realtime/server';
  * export const open = pushHooks.open;
  * export const close = pushHooks.close;
@@ -2806,12 +2860,12 @@ function _translatePushError(err) {
 
 /**
  * Bounded internal timeout for the wire-level request that backs
- * `live.notify`. The caller doesn't await the reply -- this only
+ * `live.notify`. The caller doesn't await the reply - this only
  * controls how long the adapter's per-request tracker holds the entry
  * before reclaiming it. Long enough that a slow client roundtrip
  * doesn't leak; short enough that the tracker doesn't accumulate stale
  * entries under high notify volume. 1s is a deliberate "small but
- * sufficient" pick -- can switch to a true noReply primitive in a
+ * sufficient" pick - can switch to a true noReply primitive in a
  * future adapter bump without changing the live.notify caller API.
  */
 const _NOTIFY_INTERNAL_TIMEOUT_MS = 1000;
@@ -2821,17 +2875,17 @@ const _NOTIFY_INTERNAL_TIMEOUT_MS = 1000;
  * reply. The fire-and-forget counterpart to `live.push`.
  *
  * **When to use which:**
- * - `live.push(target, event, data, { timeoutMs })` -- request/reply.
+ * - `live.push(target, event, data, { timeoutMs })` - request/reply.
  *   You await a value back from the client's `onPush(event, handler)`.
  *   `timeoutMs` controls how long you wait. Throws on offline user,
  *   timeout, client handler error.
- * - `live.notify(target, event, data)` -- fire-and-forget. The client's
+ * - `live.notify(target, event, data)` - fire-and-forget. The client's
  *   `onPush(event, handler)` still fires (same wire path), but the
  *   handler's return value is discarded and the call resolves without
  *   waiting for it. Returns `Promise<void>` that resolves once the
  *   envelope is dispatched. Never rejects in normal operation: an
  *   offline user, a remote-registry failure, a client handler that
- *   throws -- all silent. The caller chose `notify` exactly because
+ *   throws - all silent. The caller chose `notify` exactly because
  *   they don't want to deal with delivery state.
  *
  * Wire shape is identical to `live.push` today; the difference is
@@ -2841,7 +2895,7 @@ const _NOTIFY_INTERNAL_TIMEOUT_MS = 1000;
  *
  * **Don't use `live.push({ timeoutMs: 0 })` for fire-and-forget.** It
  * throws synchronously (timeoutMs must be positive). Wrapping the
- * throw in `.catch(() => {})` silently swallows it -- the push never
+ * throw in `.catch(() => {})` silently swallows it - the push never
  * fires, the recipient never sees anything, no diagnostic anywhere.
  * Use `live.notify` instead.
  *
@@ -2855,7 +2909,7 @@ const _NOTIFY_INTERNAL_TIMEOUT_MS = 1000;
  * // Inside an upload completion handler:
  * live.notify({ userId: upload.userId }, 'upload:complete', { id: upload.id });
  * // Fire-and-forget. Returns immediately. If the user is offline,
- * // silently drops -- they'll see the result on next page load.
+ * // silently drops - they'll see the result on next page load.
  * ```
  *
  * @example
@@ -2888,7 +2942,7 @@ live.notify = function notify(target, event, data) {
 	const entry = _pushRegistry.get(userId);
 	if (entry) {
 		if (typeof entry.platform.request !== 'function') {
-			// Same versioning constraint as live.push -- platform.request
+			// Same versioning constraint as live.push - platform.request
 			// requires svelte-adapter-uws >= 0.5.0-next.4. Stay silent in
 			// production: notify is fire-and-forget; a missing platform
 			// primitive shouldn't surface at the call site as a sync throw.
@@ -2902,7 +2956,7 @@ live.notify = function notify(target, event, data) {
 				.catch(() => {
 					// Discarded by design: notify never surfaces delivery
 					// state to the caller. Timeout, client handler error,
-					// connection close -- all silent.
+					// connection close - all silent.
 				});
 		} catch {
 			// platform.request can throw synchronously on a torn-down ws.
@@ -2915,16 +2969,16 @@ live.notify = function notify(target, event, data) {
 			_remoteRegistry.request(userId, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS })
 				.catch(() => {
 					// Cluster-route error (offline cluster-wide, transport
-					// failure, remote handler throw) -- silent.
+					// failure, remote handler throw) - silent.
 				});
 		} catch {
-			// Sync throw from registry shape -- silent.
+			// Sync throw from registry shape - silent.
 		}
 		return Promise.resolve();
 	}
 	// Offline + no cluster routing: silent no-op. The caller chose
 	// notify; "we couldn't reach the user" isn't an error in this
-	// contract -- they'll see the result next time they load.
+	// contract - they'll see the result next time they load.
 	return Promise.resolve();
 };
 
@@ -3039,7 +3093,7 @@ function _validate(schema, input) {
 		}
 	}
 
-	// Unknown schema type -- reject. Passing unvalidated input through is a security risk.
+	// Unknown schema type - reject. Passing unvalidated input through is a security risk.
 	return {
 		ok: false,
 		message: 'Unrecognized schema type passed to live.validated(). Supported: Standard Schema (https://standardschema.dev/), Zod (.safeParse), Valibot (._run).',
@@ -3076,7 +3130,7 @@ let _cronPlatform = null;
 /**
  * Process-wide leader gate for cron. When set, every tick consults
  * `_cronLeader()` before invoking any registered job; if it returns
- * falsy, the tick exits without firing. `null` means "no gate" -- every
+ * falsy, the tick exits without firing. `null` means "no gate" - every
  * worker fires every job (the single-process default; correct behavior
  * for non-clustered deployments and dev).
  *
@@ -3101,7 +3155,7 @@ let _cronLeader = null;
  * `platform.publish` captured at activation time. Every instance sees
  * the source-topic firehose via its own bus subscriber and computes
  * its own derived locally; bus-relaying derived publishes would cause
- * double delivery. Cron is different -- only the leader fires it, so
+ * double delivery. Cron is different - only the leader fires it, so
  * the leader's publish must relay or remote subscribers see nothing.
  *
  * @type {{ wrap: (platform: any) => any } | null}
@@ -3226,7 +3280,7 @@ let _hasDynamicDerived = false;
 
 /**
  * Eagerly set to `true` the moment any reactive registration (live.derived,
- * live.effect, live.aggregate -- static or dynamic) hits the lazy queue,
+ * live.effect, live.aggregate - static or dynamic) hits the lazy queue,
  * BEFORE the queue resolves and populates the source-watch indices.
  *
  * Why this exists: `_activateDerived(platform)` early-returns when every
@@ -3238,7 +3292,7 @@ let _hasDynamicDerived = false;
  * flag, the wrap never installs and the first cron-driven publish (or
  * any publish that fires before the first WS connect) silently bypasses
  * watchers. This eager flag tells `_activateDerived` "registrations are
- * coming, install the wrap now" -- and `_maybeLateActivate` covers the
+ * coming, install the wrap now" - and `_maybeLateActivate` covers the
  * symmetric case where activation runs *after* a registration resolves.
  *
  * @type {boolean}
@@ -3262,7 +3316,7 @@ const effectRegistry = new Map();
 
 /**
  * Create a server-side reactive side effect.
- * Effects fire when source topics publish. They are fire-and-forget -- no data, no topic.
+ * Effects fire when source topics publish. They are fire-and-forget - no data, no topic.
  *
  * @param {string[]} sources - Topic names to watch
  * @param {Function} fn - Async function (event, data, platform) called on each matching publish
@@ -3510,6 +3564,23 @@ export const combineMerge = (...buckets) => {
 };
 
 /**
+ * Copy own enumerable properties from `src` into `dst`, skipping
+ * `__proto__` and `constructor`. Used to hydrate aggregate state from
+ * an external snapshot (Redis cache, JSON payload, etc.) without giving
+ * a hostile snapshot a path to set Object.prototype properties via
+ * `Object.assign(target, JSON.parse('{"__proto__":{"polluted":1}}'))`.
+ *
+ * @param {object} dst
+ * @param {object} src
+ */
+function _safeAssignSnapshot(dst, src) {
+	for (const k of Object.keys(src)) {
+		if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
+		dst[k] = /** @type {any} */ (src)[k];
+	}
+}
+
+/**
  * Create a real-time incremental aggregation over a source topic.
  * Each event runs O(1) reducers instead of requerying the database.
  *
@@ -3521,14 +3592,14 @@ export const combineMerge = (...buckets) => {
  * output topic at `${topic}:${windowName}`, per-window debounce + snapshot.
  * Supports three window types:
  *
- * - `lifetime` -- never resets; equivalent to a single-state aggregate
+ * - `lifetime` - never resets; equivalent to a single-state aggregate
  *   exposed as a named output for symmetry.
- * - `tumbling` -- boundary-anchored. `period: 'minute' | 'hour' | 'daily'
+ * - `tumbling` - boundary-anchored. `period: 'minute' | 'hour' | 'daily'
  *   | 'monthly'` resets at the configured tz's natural boundary;
  *   `durationMs + anchor` resets at fixed intervals from a custom epoch.
  *   On boundary cross, the closing window publishes one final pre-reset
  *   state, then state is `init()`-cleared for the new window.
- * - `sliding` -- hop-window with `durationMs / slideMs` buckets. Each
+ * - `sliding` - hop-window with `durationMs / slideMs` buckets. Each
  *   event reduces into the current hop; on each slide, drop the oldest
  *   bucket and start a new current bucket. Reducers MUST provide a
  *   `combine(...buckets)` field so cross-bucket state can be recomputed
@@ -3542,7 +3613,7 @@ export const combineMerge = (...buckets) => {
  * partition rather than the full firehose) will produce divergent
  * per-worker state and inconsistent per-window publishes. For sharded
  * sources, layer a leader gate later (symmetric to `configureCron({
- * leader })`) -- not shipped in this slice.
+ * leader })`) - not shipped in this slice.
  *
  * @param {string} source - Topic to watch for events
  * @param {Record<string, { init?: () => any, reduce?: (acc: any, event: string, data: any) => any, compute?: (state: any) => any, combine?: (...buckets: any[]) => any }>} reducers
@@ -3716,7 +3787,7 @@ export function __registerAggregate(path, fn) {
 			try {
 				const snapshotState = await snapshot();
 				if (snapshotState && typeof snapshotState === 'object') {
-					Object.assign(entry.state, snapshotState);
+					_safeAssignSnapshot(entry.state, snapshotState);
 				}
 			} catch {}
 			entry._hydrationPromise = null;
@@ -3817,7 +3888,7 @@ function _registerWindowedAggregate(path, fn) {
 		hydrationTasks.push((async () => {
 			try {
 				const s = await perWindowSnap();
-				if (s && typeof s === 'object') Object.assign(win.state, s);
+				if (s && typeof s === 'object') _safeAssignSnapshot(win.state, s);
 			} catch {}
 		})());
 	}
@@ -3926,7 +3997,7 @@ function _scheduleNextSlide(entry, win) {
  * and slide timers can publish without an active publish wrapping them.
  *
  * Plain reduce-on-event publishes go through the wrapped
- * `platform.publish` from the source-event handler -- that path
+ * `platform.publish` from the source-event handler - that path
  * captures `platform` directly and does not need this fallback.
  *
  * @param {any} entry
@@ -4096,7 +4167,7 @@ export function pipe(stream, ...transforms) {
 /**
  * Filter transform: removes items that don't match the predicate from
  * the INITIAL data only. For per-event projection on a live stream,
- * use the `transform` option on `live.stream({ transform })` -- it
+ * use the `transform` option on `live.stream({ transform })` - it
  * fires for both the initial load and every live publish.
  *
  * @param {(ctx: any, item: any) => boolean} predicate
@@ -4189,14 +4260,21 @@ const _guestIds = new WeakMap();
 let _guestIdCounter = 0;
 
 /**
- * Get a stable identity key for a connection. Uses ctx.user.id if present,
- * otherwise assigns a unique guest ID that persists for the connection lifetime.
+ * Get a stable identity key for a connection. Uses ctx.user.id (or the
+ * Postgres-convention `user_id` / camelCase `userId` aliases) if present,
+ * otherwise assigns a unique guest ID that persists for the connection
+ * lifetime. The id-key probe order mirrors `_defaultPushIdentify` so apps
+ * that expose `user_id` in their session shape rate-limit per-user instead
+ * of falling back to the per-connection bucket.
  * @param {any} ctx
  * @returns {string}
  */
-function _getIdentityKey(ctx) {
-	const id = ctx.user?.id;
-	if (id !== undefined && id !== null) return String(id);
+export function _getIdentityKey(ctx) {
+	const u = ctx.user;
+	if (u) {
+		const id = u.id ?? u.user_id ?? u.userId;
+		if (id !== undefined && id !== null) return String(id);
+	}
 	if (!ctx.ws) return 'anon';
 	let guestId = _guestIds.get(ctx.ws);
 	if (!guestId) {
@@ -4387,7 +4465,7 @@ live.room = function room(config) {
 		for (const [name, fn] of Object.entries(actions)) {
 			if (!_validSegmentRe.test(name)) {
 				if (_IS_DEV) {
-					console.warn(`[svelte-realtime] Room action '${name}' contains invalid characters (only a-z, A-Z, 0-9, _ allowed) -- skipped\n  See: https://svti.me/rooms`);
+					console.warn(`[svelte-realtime] Room action '${name}' contains invalid characters (only a-z, A-Z, 0-9, _ allowed) - skipped\n  See: https://svti.me/rooms`);
 				}
 				continue;
 			}
@@ -4643,7 +4721,7 @@ export function _activateDerived(platform) {
 	// `_hasLazyReactive` clause, calling `_activateDerived` from
 	// `init({ platform })` (the README's recommended call site) would
 	// early-return on a still-empty registry and leave the wrap uninstalled
-	// -- so a cron-driven publish that fires before the lazy queue resolves
+	// - so a cron-driven publish that fires before the lazy queue resolves
 	// (or before the first WS connection) silently bypasses every watcher.
 	if (
 		_derivedBySource.size === 0
@@ -4677,8 +4755,8 @@ export function _activateDerived(platform) {
  * dynamic-derived bind path.
  *
  * Without this hook, registrations that resolve via the lazy queue
- * (which drains on first cron tick / RPC) -- or via direct
- * `__registerXxx(path, fn)` calls in dev-mode SSR fallback -- would
+ * (which drains on first cron tick / RPC) - or via direct
+ * `__registerXxx(path, fn)` calls in dev-mode SSR fallback - would
  * leave the platform unwrapped, and the very first publish from a
  * cron firehose / startup task / autonomous worker would silently
  * miss every watcher (aggregate / effect / static derived). Manifests
@@ -4830,7 +4908,7 @@ function _wrapPlatformPublish(platform) {
 		// (queueMicrotask + platform.publishBatched) when no coalesce / transform
 		// is registered, which is the default with the uWS adapter. Without
 		// this wrap, derived / effect / aggregate watchers never fire on
-		// publishes from the batched path -- they only fire from the unbatched
+		// publishes from the batched path - they only fire from the unbatched
 		// platform.publish path that some test mocks happen to use.
 		/** @type {any} */ (platform).publishBatched = function derivedPublishBatched(batch) {
 			const result = originalPublishBatched(batch);
@@ -5021,7 +5099,7 @@ export function __registerCron(path, fn) {
  *
  * In clustered deployments (CLUSTER_MODE=reuseport on Linux, or
  * acceptor mode on Windows/macOS / multi-replica Docker), `init` fires
- * once per worker -- so every worker captures its own platform and
+ * once per worker - so every worker captures its own platform and
  * every worker's cron tick fires every job in parallel by default. To
  * get single-fire semantics across the cluster, also wire a leader gate
  * via `configureCron({ leader })` (see that function's docs for
@@ -5055,12 +5133,12 @@ export function setCronPlatform(platform) {
  *
  * Currently exposes a single field, `leader`, which gates whether this
  * worker fires its registered cron jobs. Without a leader configured,
- * every worker fires every job on every matching tick -- the correct
+ * every worker fires every job on every matching tick - the correct
  * single-process default, and the only sane default for dev. In
  * clustered deployments (whether SO_REUSEPORT on Linux with N kernel
  * workers per replica, or N replicas with internal acceptor-mode
  * cluster on Windows / macOS, or both compounded) this is almost never
- * what you want for "send the daily summary email at 9am" -- you want
+ * what you want for "send the daily summary email at 9am" - you want
  * exactly one fire across the cluster, regardless of how many JS heaps
  * are ticking.
  *
@@ -5072,7 +5150,7 @@ export function setCronPlatform(platform) {
  * background Redis SETNX lease (acquire-and-renew) and exposes the
  * cached "am I the leader right now" state as a synchronous getter.
  * svelte-realtime intentionally does not bundle the leader
- * implementation -- the cluster transport (Redis or otherwise) is the
+ * implementation - the cluster transport (Redis or otherwise) is the
  * extensions package's domain, and pulling Redis into the realtime
  * layer would force a dependency on every consumer including
  * single-process apps that do not need it.
@@ -5140,13 +5218,13 @@ export function configureCron(config) {
 	}
 	// Diagnostic: cluster intent (leader) without cluster fan-out (bus)
 	// is almost always a misconfig. Leader-only cron ticks publish on the
-	// leader worker only -- subscribers on non-leader instances see
+	// leader worker only - subscribers on non-leader instances see
 	// nothing. The user typically wants both wired together. Warn once
 	// per process so the same hot-reload cycle doesn't spam.
 	if (_IS_DEV && _cronLeader !== null && _cronBus === null && !_cronClusterWarnFired) {
 		console.warn(
 			"[svelte-realtime] configureCron({ leader }) was set without a `bus`. " +
-			"Leader-only cron ticks publish on the elected worker only -- " +
+			"Leader-only cron ticks publish on the elected worker only - " +
 			"subscribers on other cluster instances will not see them. " +
 			"Wire `bus` from svelte-adapter-uws-extensions/redis/pubsub or " +
 			"sharded-pubsub:\n" +
@@ -5200,7 +5278,7 @@ let _lazyResolved = false;
 
 /**
  * Resolve all deferred (lazy) cron/derived/effect/aggregate/room-action registrations.
- * Safe to call multiple times -- only the first call does work, concurrent callers
+ * Safe to call multiple times - only the first call does work, concurrent callers
  * await the same promise.
  */
 async function _resolveAllLazy() {
@@ -5323,7 +5401,7 @@ export function _prepareHmr() {
 	for (const [, timer] of _debounces) clearTimeout(timer);
 	_debounces.clear();
 
-	// Clear cron timers (but keep _cronPlatform -- it stays valid across HMR)
+	// Clear cron timers (but keep _cronPlatform - it stays valid across HMR)
 	_clearCron();
 
 	// Clear lazy queue and reset lazy init state
@@ -5426,7 +5504,7 @@ export async function _tickCron() {
 	if (!_lazyResolved) await _resolveAllLazy();
 
 	// Cluster-mode leader gate. Default (no leader configured) is "every
-	// worker fires" -- correct for single-process and dev. With a leader
+	// worker fires" - correct for single-process and dev. With a leader
 	// wired via `configureCron({ leader })` (canonical implementation
 	// in svelte-adapter-uws-extensions/redis/leader), only the
 	// elected worker proceeds to evaluate the per-job schedule match.
@@ -5505,7 +5583,7 @@ export async function _tickCron() {
 					// drowning out other diagnostics. Reset by `_clearCron`
 					// (HMR / tests) and by `setCronPlatform` so a fresh
 					// capture re-arms the warning if platform later goes
-					// missing again (defensive only -- platform is sticky
+					// missing again (defensive only - platform is sticky
 					// across HMR by design, but we don't want to assume).
 					if (_IS_DEV && !_cronPlatformWarnFired) {
 						console.warn(`[svelte-realtime] Cron registered but no platform captured. Wire setCronPlatform(platform) from your hooks.ws.js init({ platform }) hook (svelte-adapter-uws >= 0.5.0-next.15) or from your open(ws, platform) hook on older adapters.\n  See: https://svti.me/cron`);
@@ -5563,7 +5641,7 @@ export async function _tickCron() {
 function _parseCron(expr) {
 	const parts = expr.trim().split(/\s+/);
 	if (parts.length !== 5 && parts.length !== 6) {
-		throw new Error(`[svelte-realtime] Invalid cron expression '${expr}' -- expected 5 fields (minute hour day month weekday) or 6 fields (seconds minute hour day month weekday)\n  See: https://svti.me/cron`);
+		throw new Error(`[svelte-realtime] Invalid cron expression '${expr}' - expected 5 fields (minute hour day month weekday) or 6 fields (seconds minute hour day month weekday)\n  See: https://svti.me/cron`);
 	}
 	// Map each part to its semantic field index. 5-field input shifts
 	// by one (no seconds) so fields land at indices 1..5; 6-field input
@@ -5591,7 +5669,7 @@ function _parseCronField(field, idx) {
 	if (field.startsWith('*/')) {
 		const step = parseInt(field.slice(2), 10);
 		if (!Number.isFinite(step) || step < 1) {
-			throw new Error(`[svelte-realtime] Invalid cron step '${field}' -- step must be a positive integer\n  See: https://svti.me/cron`);
+			throw new Error(`[svelte-realtime] Invalid cron step '${field}' - step must be a positive integer\n  See: https://svti.me/cron`);
 		}
 		return { step };
 	}
@@ -5601,7 +5679,7 @@ function _parseCronField(field, idx) {
 		const a = parseInt(parts[0], 10);
 		const b = parseInt(parts[1], 10);
 		if (!Number.isFinite(a) || !Number.isFinite(b) || a < min || b > max || a > b) {
-			throw new Error(`[svelte-realtime] Invalid cron range '${field}' -- values must be ${min}-${max}\n  See: https://svti.me/cron`);
+			throw new Error(`[svelte-realtime] Invalid cron range '${field}' - values must be ${min}-${max}\n  See: https://svti.me/cron`);
 		}
 		const vals = new Set();
 		for (let i = a; i <= b; i++) vals.add(i);
@@ -5612,7 +5690,7 @@ function _parseCronField(field, idx) {
 		const nums = field.split(',').map(s => {
 			const n = parseInt(s, 10);
 			if (!Number.isFinite(n) || n < min || n > max) {
-				throw new Error(`[svelte-realtime] Invalid cron value '${s}' in '${field}' -- must be ${min}-${max}\n  See: https://svti.me/cron`);
+				throw new Error(`[svelte-realtime] Invalid cron value '${s}' in '${field}' - must be ${min}-${max}\n  See: https://svti.me/cron`);
 			}
 			return n;
 		});
@@ -5621,7 +5699,7 @@ function _parseCronField(field, idx) {
 
 	const n = parseInt(field, 10);
 	if (!Number.isFinite(n) || n < min || n > max) {
-		throw new Error(`[svelte-realtime] Invalid cron value '${field}' -- must be ${min}-${max}\n  See: https://svti.me/cron`);
+		throw new Error(`[svelte-realtime] Invalid cron value '${field}' - must be ${min}-${max}\n  See: https://svti.me/cron`);
 	}
 	return new Set([n]);
 }
@@ -5690,7 +5768,7 @@ live.webhook = function webhook(topic, config) {
  * Create a per-module guard. Accepts middleware functions (variadic) and/or
  * a single declarative options object as the first argument:
  *
- * - `{ authenticated: true }` -- throws UNAUTHENTICATED unless `ctx.user`
+ * - `{ authenticated: true }` - throws UNAUTHENTICATED unless `ctx.user`
  *   is non-null. Cheaper to write than the equivalent function and harder
  *   to forget.
  *
@@ -5949,7 +6027,7 @@ async function _executeBatch(ws, msg, platform, options) {
 async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
 	const { id, seq: clientSeq, schemaVersion: clientSchemaVersion } = msg;
 
-	// Validate args BEFORE topic resolution -- prevents topic injection
+	// Validate args BEFORE topic resolution - prevents topic injection
 	// via malformed dynamic-topic args (e.g. `audit:${orgId}` with
 	// orgId crafted to escape the topic namespace). The validated
 	// tuple is bound to a stream-branch-local `let` to keep the
@@ -5968,7 +6046,10 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 
 	if (/** @type {any} */ (fn).__isGated) {
 		const predicate = /** @type {any} */ (fn).__gatePredicate;
-		if (!predicate(ctx, ...streamArgs)) {
+		// Await the predicate so an async predicate that returns `false`
+		// is denied correctly. A sync predicate is awaited just the same
+		// (await unwraps non-Promise values transparently).
+		if (!(await predicate(ctx, ...streamArgs))) {
 			return { id, ok: true, data: null, gated: true };
 		}
 	}
@@ -5982,7 +6063,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	const replayOpts = /** @type {any} */ (fn).__replay;
 
 	const streamFilter = /** @type {any} */ (fn).__streamFilter;
-	if (streamFilter && !streamFilter(ctx, ...streamArgs)) {
+	if (streamFilter && !(await streamFilter(ctx, ...streamArgs))) {
 		const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 		return { id, ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 	}
@@ -6010,7 +6091,10 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// in-realtime gates (`__streamFilter`, `live.room({ guard })`) remain
 	// the only stream-RPC access checks.
 	if (typeof platform.checkSubscribe === 'function') {
-		const denial = platform.checkSubscribe(ws, topic);
+		// Await the gate so async user hooks (the idiomatic pattern when
+		// the gate consults a session store or DB) deny correctly when
+		// they return `false`. A sync return is awaited transparently.
+		const denial = await platform.checkSubscribe(ws, topic);
 		if (denial) {
 			return { id, ok: false, code: denial, error: denial === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 		}
@@ -6108,7 +6192,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	}
 
 	// Arm the topic-invalidation watcher(s). Same first-wins
-	// idempotence story as the stale watchdog -- duplicate
+	// idempotence story as the stale watchdog - duplicate
 	// (pattern, topic) registrations are a no-op inside
 	// _registerInvalidationWatch.
 	if (/** @type {any} */ (fn).__streamInvalidateOn) {
@@ -6186,7 +6270,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		if (_IS_DEV) {
-			console.warn(`[svelte-realtime] RPC call to '${path}' -- no such live function registered\n  See: https://svti.me/rpc`);
+			console.warn(`[svelte-realtime] RPC call to '${path}' - no such live function registered\n  See: https://svti.me/rpc`);
 		}
 		_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
 		return { id, ok: false, code: 'NOT_FOUND', error: 'Not found' };
@@ -6335,12 +6419,12 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 	}
 }
 
-// -- Streaming uploads (live.upload) -----------------------------------------
+// - Streaming uploads (live.upload) -----------------------------------------
 //
 // Wire format (client -> server):
 //
 //   Chunk frame (byte[0] = 0x01):
-//     [0]      0x01 -- chunk marker
+//     [0]      0x01 - chunk marker
 //     [1]      flags
 //                bit 0: hasArgs   (set on chunk 0 only)
 //                bit 1: isLast
@@ -6355,7 +6439,7 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 //                [10..] payload bytes
 //
 //   Control frame (byte[0] = 0x02):
-//     [0]      0x02 -- control marker
+//     [0]      0x02 - control marker
 //     [1]      ctrlType (0x10 = client cancel)
 //     [2..5]   streamId
 //     [6..]    type-specific payload
@@ -6376,12 +6460,19 @@ const _UPLOAD_FLAG_IS_LAST = 0x02;
 const _UPLOAD_FLAG_RESERVED_MASK = 0xFC;
 
 // Caps applied during the brief 'pending' window between chunk-0 arriving
-// and the handler being resolved. Two boundaries on memory:
-//   - _UPLOAD_PENDING_MAX_CHUNKS bounds the queue depth for tiny chunks.
-//   - _UPLOAD_PENDING_MAX_SIZE bounds total bytes for large chunks.
+// and the handler being resolved. Three boundaries on memory:
+//   - _UPLOAD_PENDING_MAX_CHUNKS bounds queue depth for tiny chunks.
+//   - _UPLOAD_PENDING_MAX_SIZE bounds total bytes per stream.
+//   - _UPLOAD_PENDING_MAX_AGGREGATE bounds total bytes across ALL streams
+//     in the pending phase, so an attacker cannot multiply per-stream
+//     caps by opening many concurrent connections / streamIds. Apps
+//     with large legitimate concurrent uploads can raise it via
+//     _setUploadCapsForTest in tests, or via a future runtime knob.
 // Once the handler is resolved, per-handler caps in __uploadOptions take over.
 const _UPLOAD_PENDING_MAX_CHUNKS = 64;
 const _UPLOAD_PENDING_MAX_SIZE = 16 * 1024 * 1024;
+let _UPLOAD_PENDING_MAX_AGGREGATE = 64 * 1024 * 1024;
+let _pendingUploadBytes = 0;
 
 /**
  * Per-WS upload registry. WeakMap so connections that GC before close()
@@ -6432,7 +6523,7 @@ function _respondUpload(ws, platform, streamId, payload) {
 		platform.send(ws, '__upload', _streamIdHex(streamId), envelope);
 		if (willInform) _informedAboutUploadCap.add(ws);
 	} catch {
-		// Closed connection -- same swallow as _respond
+		// Closed connection - same swallow as _respond
 	}
 }
 
@@ -6587,12 +6678,27 @@ function _createUploadStream(ctrl) {
 }
 
 /**
+ * Release pre-handler-resolution bytes attributed to an upload back to
+ * the aggregate accumulator. Idempotent: zeros _pendingAggBytes after
+ * release so a second call is a no-op. Called on transition out of
+ * the pending phase and on every cleanup path that might short-circuit
+ * the normal pending -> running transition.
+ */
+function _releasePendingUploadBytes(upload) {
+	if (!upload || !upload._pendingAggBytes) return;
+	_pendingUploadBytes = Math.max(0, _pendingUploadBytes - upload._pendingAggBytes);
+	upload._pendingAggBytes = 0;
+}
+
+/**
  * Remove an upload from the registry and decrement the global counter.
  * Idempotent.
  */
 function _cleanupUpload(ws, perWs, streamId) {
 	if (!perWs) return;
-	if (!perWs.has(streamId)) return;
+	const upload = perWs.get(streamId);
+	if (!upload) return;
+	_releasePendingUploadBytes(upload);
 	perWs.delete(streamId);
 	if (perWs.size === 0) _wsUploads.delete(ws);
 	_totalActiveUploads = Math.max(0, _totalActiveUploads - 1);
@@ -6618,6 +6724,15 @@ function _createUploadEntry(ws, perWs, streamId, platform) {
 		options: null,
 		streamWrap: null,
 		ctrl: null,
+		// Re-auth state. Populated by `_startUpload` once the guard has
+		// resolved when `live.upload({ reauthEvery })` opt-in is set; left
+		// unset (0 / null) for legacy uploads so the chunk pump's cheap
+		// numeric check stays a single comparison on the hot path.
+		_reauthEvery: 0,
+		_reauthGuardFn: null,
+		_reauthCtx: null,
+		_lastReauthBytes: 0,
+		_reauthInflight: null,
 		fail(code, error) {
 			if (upload.phase === 'settled') return;
 			upload.phase = 'settled';
@@ -6656,12 +6771,29 @@ function _handleUploadChunkFrame(ws, data, platform, options) {
 			});
 			return;
 		}
+		// Aggregate pre-handler-resolution memory cap. Reject chunk-0
+		// BEFORE allocating the pending entry so the registry does not
+		// even hold a record of the rejected upload. Worst-case attack
+		// pre-fix: N concurrent WS opening streamId 0 with a 16 MB
+		// payload each = 16 * N MB held until a handler resolves, with
+		// no handler-side cap able to fire. Post-fix: aggregate is
+		// bounded by _UPLOAD_PENDING_MAX_AGGREGATE regardless of N.
+		const initialBytes = payload ? payload.byteLength : 0;
+		if (_pendingUploadBytes + initialBytes > _UPLOAD_PENDING_MAX_AGGREGATE) {
+			_respondUpload(ws, platform, streamId, {
+				ok: false, code: 'OVERLOADED',
+				error: 'pending-upload aggregate buffer cap exceeded; retry shortly'
+			});
+			return;
+		}
 		if (!perWs) { perWs = new Map(); _wsUploads.set(ws, perWs); }
 
 		const upload = _createUploadEntry(ws, perWs, streamId, platform);
-		upload.bytesReceived = payload ? payload.byteLength : 0;
+		upload.bytesReceived = initialBytes;
 		upload.expectedSeq = 1;
 		upload.pendingChunks.push({ payload, isLast });
+		upload._pendingAggBytes = initialBytes;
+		_pendingUploadBytes += initialBytes;
 		perWs.set(streamId, upload);
 		_totalActiveUploads++;
 
@@ -6672,7 +6804,7 @@ function _handleUploadChunkFrame(ws, data, platform, options) {
 	const upload = perWs?.get(streamId);
 	if (!upload || upload.phase === 'settled') {
 		// Late chunk for an upload that already finished or was cancelled.
-		// Drop silently -- common race when the handler returns early.
+		// Drop silently - common race when the handler returns early.
 		return;
 	}
 
@@ -6695,7 +6827,15 @@ function _handleUploadChunkFrame(ws, data, platform, options) {
 			upload.fail('FLOW_BACKPRESSURE', 'too many chunks queued during upload start');
 			return;
 		}
+		// Aggregate cap also applies to follow-on chunks while pending.
+		// upload.fail() releases the bytes via _releasePendingUploadBytes.
+		if (_pendingUploadBytes + payloadLen > _UPLOAD_PENDING_MAX_AGGREGATE) {
+			upload.fail('OVERLOADED', 'pending-upload aggregate buffer cap exceeded');
+			return;
+		}
 		upload.pendingChunks.push({ payload, isLast });
+		upload._pendingAggBytes += payloadLen;
+		_pendingUploadBytes += payloadLen;
 		return;
 	}
 
@@ -6706,10 +6846,37 @@ function _handleUploadChunkFrame(ws, data, platform, options) {
 	}
 	if (payloadLen > 0) {
 		if (upload.streamWrap.queueLength >= upload.options.maxBufferedChunks) {
-			upload.fail('FLOW_BACKPRESSURE', 'upload buffer overflow -- handler not draining fast enough');
+			upload.fail('FLOW_BACKPRESSURE', 'upload buffer overflow - handler not draining fast enough');
 			return;
 		}
 		upload.streamWrap.push(new Uint8Array(payload));
+	}
+	// reauthEvery: re-run the module guard against the live ctx whenever
+	// the upload crosses a configured byte threshold. The check is
+	// fire-and-forget because the receive path is sync and the guard is
+	// async; if the guard rejects, upload.fail aborts the stream and the
+	// handler observes the abort signal. A re-auth already in flight is
+	// honored to avoid running parallel guards on the same ctx (the most
+	// recent one is what matters; the sync byte counter does the
+	// scheduling).
+	if (upload._reauthEvery > 0 && upload._reauthGuardFn && !upload._reauthInflight) {
+		const sinceLast = upload.bytesReceived - upload._lastReauthBytes;
+		if (sinceLast >= upload._reauthEvery) {
+			upload._lastReauthBytes = upload.bytesReceived;
+			upload._reauthInflight = (async () => {
+				try {
+					await _runGuard(upload._reauthGuardFn, upload._reauthCtx);
+				} catch (err) {
+					if (upload.phase !== 'settled') {
+						const code = (err && /** @type {any} */ (err).code) || 'UNAUTHENTICATED';
+						const msg = (err && /** @type {any} */ (err).message) || 'reauth failed';
+						upload.fail(code, msg);
+					}
+				} finally {
+					upload._reauthInflight = null;
+				}
+			})();
+		}
 	}
 	if (isLast) upload.streamWrap.end();
 }
@@ -6752,8 +6919,8 @@ function _handleUploadControlFrame(ws, data, platform) {
  * @param {any} ws
  * @param {Map<number, any>} perWs
  * @param {number} streamId
- * @param {any} upload -- pre-registered pending entry from _handleUploadChunkFrame
- * @param {any} argsHeader -- parsed { rpc, args } from chunk 0
+ * @param {any} upload - pre-registered pending entry from _handleUploadChunkFrame
+ * @param {any} argsHeader - parsed { rpc, args } from chunk 0
  * @param {import('svelte-adapter-uws').Platform} platform
  * @param {{ beforeExecute?: Function, onError?: Function }} [options]
  */
@@ -6823,6 +6990,11 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		upload.streamWrap = _createUploadStream(upload.ctrl);
 		upload.phase = 'running';
 
+		// The bytes are now under the user's per-handler maxSize cap, not
+		// the pre-handler aggregate cap. Release the aggregate accounting
+		// here so other concurrent uploads can use the budget.
+		_releasePendingUploadBytes(upload);
+
 		// Drain chunks queued during the pending phase into the live stream.
 		const drained = upload.pendingChunks;
 		upload.pendingChunks = null;
@@ -6844,6 +7016,17 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 			const guardFn = await _resolveGuard(modulePath);
 			if (guardFn) await _runGuard(guardFn, ctx);
+
+			// Capture guard + ctx for reauthEvery so the chunk pump can
+			// re-run the same gate against the live ctx without re-resolving
+			// the module path. Stored on the upload entry so the receive
+			// path can fire it from a non-async context.
+			if (uploadOptions.reauthEvery > 0 && guardFn) {
+				upload._reauthGuardFn = guardFn;
+				upload._reauthCtx = ctx;
+				upload._reauthEvery = uploadOptions.reauthEvery;
+				upload._lastReauthBytes = upload.bytesReceived;
+			}
 
 			if (options?.beforeExecute) {
 				await options.beforeExecute(ws, path, args);
@@ -6914,16 +7097,36 @@ function _runWithMiddleware(ctx, handler) {
 	if (_globalMiddleware.length === 0) return handler();
 
 	let idx = 0;
-	function next() {
-		if (idx < _globalMiddleware.length) {
-			return _globalMiddleware[idx++](ctx, next);
-		}
-		return handler();
+	// Each frame creates its own one-shot `next()` closure. Calling `next`
+	// twice from the same middleware would re-enter the chain and run the
+	// downstream handler twice (double-charge customer, double-send email,
+	// double-bump counter). The audit calls this out as a bug-causing-bug:
+	// it only fires when a middleware author writes `next().then(() =>
+	// next())`, but every release lands shoulder-to-shoulder with new
+	// middleware that may exhibit the pattern. Throwing on the second call
+	// gives a loud, actionable signal at the call site instead of a silent
+	// duplicate side effect.
+	function dispatch() {
+		if (idx >= _globalMiddleware.length) return handler();
+		const fn = _globalMiddleware[idx++];
+		let called = false;
+		const next = () => {
+			if (called) {
+				throw new Error(
+					'middleware: next() called more than once. Each middleware must call ' +
+					'next() at most once; calling it twice would re-enter the chain and ' +
+					'run the downstream handler more than once.'
+				);
+			}
+			called = true;
+			return dispatch();
+		};
+		return fn(ctx, next);
 	}
-	return next();
+	return dispatch();
 }
 
-// -- Throttle / Debounce infrastructure ----------------------------------------
+// - Throttle / Debounce infrastructure ----------------------------------------
 
 /** Hard cap on throttle/debounce entries to prevent memory exhaustion */
 const _THROTTLE_DEBOUNCE_MAX = 5000;
@@ -6952,7 +7155,7 @@ function _throttlePublish(platform, topic, event, data, ms) {
 
 	if (!existing) {
 		if (_throttles.size >= _THROTTLE_DEBOUNCE_MAX) {
-			// At capacity -- publish immediately without a trailing-edge timer
+			// At capacity - publish immediately without a trailing-edge timer
 			// so data is never silently dropped
 			platform.publish(topic, event, data);
 			return;
@@ -6973,7 +7176,7 @@ function _throttlePublish(platform, topic, event, data, ms) {
 		return;
 	}
 
-	// Subsequent calls within the window -- store for trailing edge
+	// Subsequent calls within the window - store for trailing edge
 	existing.lastData = data;
 	existing.lastEvent = event;
 }
@@ -6994,7 +7197,7 @@ function _debouncePublish(platform, topic, event, data, ms) {
 	if (existing) clearTimeout(existing);
 
 	if (!existing && _debounces.size >= _THROTTLE_DEBOUNCE_MAX) {
-		// At capacity -- publish immediately instead of evicting an active timer
+		// At capacity - publish immediately instead of evicting an active timer
 		platform.publish(topic, event, data);
 		return;
 	}
@@ -7055,7 +7258,7 @@ function _respond(ws, platform, correlationId, payload) {
 		const data = payload.data;
 		if ((Array.isArray(data) && data.length > 100) || (typeof data === 'string' && data.length > 12000)) {
 			console.warn(
-				`[svelte-realtime] RPC response for '${correlationId}' contains ${data.length} items -- ` +
+				`[svelte-realtime] RPC response for '${correlationId}' contains ${data.length} items - ` +
 				'large responses may exceed maxPayloadLength (16KB). Increase maxPayloadLength in adapter config if needed.\n  See: https://svti.me/adapter-config'
 			);
 		}
@@ -7068,7 +7271,7 @@ function _respond(ws, platform, correlationId, payload) {
 			);
 		}
 	} catch (err) {
-		// uWS throws when accessing a closed WebSocket -- expected during mid-RPC disconnect.
+		// uWS throws when accessing a closed WebSocket - expected during mid-RPC disconnect.
 		if (_IS_DEV) {
 			console.warn(`[svelte-realtime] RPC response for '${correlationId}' could not be delivered (client likely disconnected)`);
 		}
@@ -7085,7 +7288,7 @@ function _respond(ws, platform, correlationId, payload) {
  *   `onError` is invoked with the error if provided, and the
  *   `fallback` value is returned in place of the loader's result.
  * - When `fallback` is NOT in `options`, errors propagate as before
- *   (back-compat). The presence of the key opts in -- the value
+ *   (back-compat). The presence of the key opts in - the value
  *   itself can be anything (empty array, sentinel object, even
  *   `null` or `undefined`).
  *
@@ -7123,7 +7326,7 @@ async function _runDirectCall(path, args, platform, options) {
 	}
 
 	// Distinguish "user explicitly passed (even as null)" from "user omitted".
-	// Omitted + guarded stream is almost always a load() bug -- throw a
+	// Omitted + guarded stream is almost always a load() bug - throw a
 	// descriptive Error so the SSR overlay surfaces the fix immediately.
 	const userExplicit = options ? ('user' in options) : false;
 	const userValue = userExplicit ? options.user : null;
@@ -7162,10 +7365,13 @@ async function _runDirectCall(path, args, platform, options) {
 
 		if (/** @type {any} */ (fn).__isGated) {
 			const predicate = /** @type {any} */ (fn).__gatePredicate;
-			if (!predicate(ctx, ...args)) return null;
+			// Await for parity with the wire-level path: an async predicate
+			// that returns `false` would otherwise produce a truthy Promise
+			// here and be treated as "allow".
+			if (!(await predicate(ctx, ...args))) return null;
 		}
 		const streamFilter = /** @type {any} */ (fn).__streamFilter;
-		if (streamFilter && !streamFilter(ctx, ...args)) {
+		if (streamFilter && !(await streamFilter(ctx, ...args))) {
 			const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 			throw new LiveError(code, code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied');
 		}
@@ -7243,7 +7449,7 @@ export function unsubscribe(ws, topic, { platform }) {
 
 	// Compute remaining subscribers AFTER this ws fully drops the topic. The
 	// hook fires N times (one per logical sub on this ws) and every firing
-	// sees the same `remainingSubscribers` count -- the count of OTHER
+	// sees the same `remainingSubscribers` count - the count of OTHER
 	// WebSockets still subscribed to this topic via realtime streams.
 	const wsSet = _topicWsCounts.get(topic);
 	let remainingSubscribers = 0;
@@ -7359,7 +7565,7 @@ export function close(ws, { platform, subscriptions }) {
 	// hooks.ws.js covers BOTH the stream-subscription cleanup that has
 	// always lived here AND the per-userId push-registry cleanup that
 	// previously required wiring `pushHooks.close` separately. Idempotent
-	// against repeat calls -- a second pass through finds the entry
+	// against repeat calls - a second pass through finds the entry
 	// already removed.
 	const pushUserId = _wsToPushUserId.get(ws);
 	if (pushUserId != null) {

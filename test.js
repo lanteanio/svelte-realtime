@@ -512,7 +512,7 @@ export function createTestEnv(options) {
 				 */
 				simulatePublish(event, data) {
 					if (!state.topic) {
-						throw new Error('[svelte-realtime] simulatePublish: stream has no topic yet -- await the initial subscribe before publishing');
+						throw new Error('[svelte-realtime] simulatePublish: stream has no topic yet - await the initial subscribe before publishing');
 					}
 					platform.publish(state.topic, event, data);
 				}
@@ -607,7 +607,7 @@ export function createTestEnv(options) {
 	}
 
 	/**
-	 * Advance fake cron timers (not implemented -- cron uses real timers).
+	 * Advance fake cron timers (not implemented - cron uses real timers).
 	 * @param {number} [_ms]
 	 */
 	function tick(_ms) {

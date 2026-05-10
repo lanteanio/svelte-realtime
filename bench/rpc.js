@@ -169,7 +169,7 @@ function benchCrudMerge(arraySize) {
 			const idx = index.get(item[key]);
 			if (idx !== undefined) arr[idx] = item;
 		} else {
-			// deleted (swap-remove) -- then re-add to keep size stable
+			// deleted (swap-remove) - then re-add to keep size stable
 			const targetId = i % arraySize;
 			const idx = index.get(targetId);
 			if (idx !== undefined) {
