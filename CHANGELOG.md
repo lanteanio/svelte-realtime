@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.19] - 2026-05-13
+
+### Security
+
+- **`live.access.any(...)` / `live.access.all(...)` no longer fail open when sub-predicates are async (HIGH).** Pre-fix, both helpers iterated sub-predicates via `Array.prototype.some` / `every`, which read a `Promise<false>` as truthy and either short-circuited to allow (`any`) or fell through to allow (`all`). Apps composing async predicates inside `any` / `all` (`live.access.any(asyncCheck1, asyncCheck2)`) silently bypassed every gate the developer wrote. The runtime fix from the audit closed this for the TOP-LEVEL predicate but not for composed sub-predicates inside `any` / `all`; the docs page carried an "open finding" callout warning users away from this composition pattern. The helpers now return `Promise<boolean>` and `await` each sub-predicate in order, preserving the correct short-circuit semantics: `any` returns `true` on the first truthy sub-predicate (sync or async), `all` returns `false` on the first falsy sub-predicate. Sync predicates work transparently because `await` unwraps non-Promise values.
+
+  Type signatures for `live.access.any` and `live.access.all` widened from `(...predicates: Sync) => Sync` to `(...predicates: Sync | Async) => Async`. Runtime impact: callers using these helpers as a stream `access` option are unaffected (the runtime already awaits the top-level predicate). Callers invoking the returned predicate manually must `await` the result. The `live.access.org` / `live.access.user` / `live.access.role` / `live.access.owner` / `live.access.team` leaf helpers are unchanged (still sync) - the change is composition-only.
+
 ## [0.5.0-next.18] - 2026-05-10
 
 ### Fixed
@@ -18,7 +26,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Bumped `engines.node` to `>=22.0.0` (was `>=20.0.0`).** Tracks `svelte-adapter-uws` 0.5, which pins `uWebSockets.js` v20.67.0 (Node 20 dropped upstream). Node 22 LTS, Node 24 current, and Node 26 supported. Also bumped `devDependencies.svelte-adapter-uws-extensions` from `^0.5.0-next.8` to `^0.5.0-next.9` to match current published version. See `MIGRATION.md` for the runtime-bump checklist.
-- **Bumped `peerDependencies.@sveltejs/kit` from `^2.0.0` to `^2.59.0`.** Tightens the floor from "any kit 2.x" to a recent stable that picks up cumulative kit fixes. Apps still on kit 2.0.x to 2.58.x will see a peer-dep warning at install; bump kit to `^2.59.0` to clear it. One transitive advisory persists (`cookie<0.7.0` via kit's own pin) and is unfixable from this side.
 - **Refreshed `node_modules` and ran `npm audit fix` to bump transitive `picomatch`, `postcss`, and `vite` past their CVE-affected ranges.** No source change; remaining low-severity advisories all trace to `cookie<0.7.0` via `@sveltejs/kit`.
 
 ### Security

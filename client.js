@@ -1269,7 +1269,7 @@ class UploadHandle {
 		for (const cb of [...set]) {
 			try { cb(payload); } catch (err) {
 				if (typeof console !== 'undefined') {
-					console.error(`[svelte-realtime] upload '${event}' listener threw:`, err);
+					console.error(`[svelte-realtime] upload '${event}' listener threw:`, err, '\n  See: https://svti.me/uploads');
 				}
 			}
 		}

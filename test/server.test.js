@@ -3494,23 +3494,74 @@ describe('live.access', () => {
 		expect(filter({ user: {} })).toBe(false);
 	});
 
-	it('any() returns true if any predicate matches', () => {
+	it('any() returns true if any predicate matches', async () => {
 		const filter = live.access.any(
 			live.access.owner(),
 			live.access.role({ admin: true })
 		);
-		expect(filter({ user: { id: 'u1' } })).toBe(true);
-		expect(filter({ user: { role: 'admin' } })).toBe(true);
-		expect(filter({ user: { role: 'viewer' } })).toBe(false);
+		expect(await filter({ user: { id: 'u1' } })).toBe(true);
+		expect(await filter({ user: { role: 'admin' } })).toBe(true);
+		expect(await filter({ user: { role: 'viewer' } })).toBe(false);
 	});
 
-	it('all() returns true only if all predicates match', () => {
+	it('all() returns true only if all predicates match', async () => {
 		const filter = live.access.all(
 			live.access.owner(),
 			live.access.role({ admin: true })
 		);
-		expect(filter({ user: { id: 'u1', role: 'admin' } })).toBe(true);
-		expect(filter({ user: { id: 'u1', role: 'viewer' } })).toBe(false);
+		expect(await filter({ user: { id: 'u1', role: 'admin' } })).toBe(true);
+		expect(await filter({ user: { id: 'u1', role: 'viewer' } })).toBe(false);
+	});
+
+	it('any() awaits async sub-predicates (no fail-open on Promise<false>)', async () => {
+		const asyncDeny = async () => false;
+		const asyncAllow = async () => true;
+		const sync = (ctx) => ctx.user?.role === 'admin';
+
+		// All sub-predicates async-deny -> top-level denies
+		expect(await live.access.any(asyncDeny, asyncDeny)({ user: {} })).toBe(false);
+		// One async-allow -> top-level allows
+		expect(await live.access.any(asyncDeny, asyncAllow)({ user: {} })).toBe(true);
+		// Mix sync + async, mid-list async-allow -> top-level allows
+		expect(await live.access.any(sync, asyncAllow, asyncDeny)({ user: { role: 'viewer' } })).toBe(true);
+		// All async-deny mixed with sync-deny -> top-level denies
+		expect(await live.access.any(asyncDeny, sync)({ user: { role: 'viewer' } })).toBe(false);
+	});
+
+	it('all() awaits async sub-predicates (no fail-open on Promise<truthy>)', async () => {
+		const asyncDeny = async () => false;
+		const asyncAllow = async () => true;
+		const sync = (ctx) => ctx.user?.id != null;
+
+		// All async-allow -> top-level allows
+		expect(await live.access.all(asyncAllow, asyncAllow)({ user: {} })).toBe(true);
+		// One async-deny among allows -> top-level denies
+		expect(await live.access.all(asyncAllow, asyncDeny)({ user: {} })).toBe(false);
+		// Sync allow + async deny -> top-level denies (was the fail-open bug)
+		expect(await live.access.all(sync, asyncDeny)({ user: { id: 'u1' } })).toBe(false);
+		// All allow with mixed sync/async -> allows
+		expect(await live.access.all(sync, asyncAllow)({ user: { id: 'u1' } })).toBe(true);
+	});
+
+	it('any() short-circuits on the first truthy sub-predicate', async () => {
+		let calls = 0;
+		const counting = async () => { calls++; return true; };
+		const sync = () => true;
+		// First sync-true should short-circuit; counting() should not run
+		expect(await live.access.any(sync, counting)({ user: {} })).toBe(true);
+		expect(calls).toBe(0);
+		// First async-true short-circuits as well
+		await live.access.any(counting, counting)({ user: {} });
+		expect(calls).toBe(1);
+	});
+
+	it('all() short-circuits on the first falsy sub-predicate', async () => {
+		let calls = 0;
+		const counting = async () => { calls++; return true; };
+		const syncDeny = () => false;
+		// First sync-false should short-circuit; counting() should not run
+		expect(await live.access.all(syncDeny, counting)({ user: {} })).toBe(false);
+		expect(calls).toBe(0);
 	});
 });
 
@@ -10516,24 +10567,24 @@ describe('live.access.user()', () => {
 });
 
 describe('live.access.all() / .any() composition with org/user', () => {
-	it('all() forwards args so org/user predicates compose at distinct positions', () => {
+	it('all() forwards args so org/user predicates compose at distinct positions', async () => {
 		// user() defaults to args[0]; specify org() to read args[1] for the
 		// composed (userId, orgId) signature.
 		const p = live.access.all(
 			live.access.user(),
 			live.access.org({ from: (_ctx, ..._args) => _args[1] })
 		);
-		expect(p({ user: { user_id: 'u1', organization_id: 'o1' } }, 'u1', 'o1')).toBe(true);
-		expect(p({ user: { user_id: 'u1', organization_id: 'o1' } }, 'u1', 'o2')).toBe(false);
-		expect(p({ user: { user_id: 'u1', organization_id: 'o1' } }, 'u2', 'o1')).toBe(false);
+		expect(await p({ user: { user_id: 'u1', organization_id: 'o1' } }, 'u1', 'o1')).toBe(true);
+		expect(await p({ user: { user_id: 'u1', organization_id: 'o1' } }, 'u1', 'o2')).toBe(false);
+		expect(await p({ user: { user_id: 'u1', organization_id: 'o1' } }, 'u2', 'o1')).toBe(false);
 	});
 
-	it('any() forwards args (role-or-org)', () => {
+	it('any() forwards args (role-or-org)', async () => {
 		const isAdmin = (ctx) => ctx.user?.role === 'admin';
 		const p = live.access.any(isAdmin, live.access.org());
-		expect(p({ user: { organization_id: 'o1' } }, 'o1')).toBe(true);
-		expect(p({ user: { organization_id: 'o1', role: 'admin' } }, 'o2')).toBe(true);
-		expect(p({ user: { organization_id: 'o1' } }, 'o2')).toBe(false);
+		expect(await p({ user: { organization_id: 'o1' } }, 'o1')).toBe(true);
+		expect(await p({ user: { organization_id: 'o1', role: 'admin' } }, 'o2')).toBe(true);
+		expect(await p({ user: { organization_id: 'o1' } }, 'o2')).toBe(false);
 	});
 });
 

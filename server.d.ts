@@ -1827,10 +1827,20 @@ export namespace live {
 			/** Field on `ctx.user` to compare to. Default: `'user_id'`. */
 			userField?: string;
 		}): (ctx: LiveContext<any>, ...args: any[]) => boolean;
-		/** OR logic: any predicate returning true allows the subscription. Args are forwarded so `org`/`user` predicates compose. */
-		any(...predicates: Array<(ctx: LiveContext<any>, ...args: any[]) => boolean>): (ctx: LiveContext<any>, ...args: any[]) => boolean;
-		/** AND logic: all predicates must return true. Args are forwarded so `org`/`user` predicates compose. */
-		all(...predicates: Array<(ctx: LiveContext<any>, ...args: any[]) => boolean>): (ctx: LiveContext<any>, ...args: any[]) => boolean;
+		/**
+		 * OR logic: any predicate returning true allows the subscription.
+		 * Args are forwarded so `org` / `user` predicates compose. Sub-predicates
+		 * may be sync OR async; each is awaited in order. Returns a Promise<boolean>
+		 * (the runtime awaits the top-level predicate, so this composes with
+		 * `live.stream({ access })`, `pipe.filter()`, and `live.gate(...)`).
+		 */
+		any(...predicates: Array<(ctx: LiveContext<any>, ...args: any[]) => boolean | Promise<boolean>>): (ctx: LiveContext<any>, ...args: any[]) => Promise<boolean>;
+		/**
+		 * AND logic: all predicates must return true. Args are forwarded so
+		 * `org` / `user` predicates compose. Sub-predicates may be sync OR async;
+		 * each is awaited in order. Returns a Promise<boolean>.
+		 */
+		all(...predicates: Array<(ctx: LiveContext<any>, ...args: any[]) => boolean | Promise<boolean>>): (ctx: LiveContext<any>, ...args: any[]) => Promise<boolean>;
 	};
 
 	/**

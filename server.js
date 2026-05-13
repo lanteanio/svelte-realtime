@@ -1067,7 +1067,8 @@ function _trackStreamSub(ws, topic, fn) {
 				console.warn(
 					"[svelte-realtime] topic-subscribers index reached TOPIC_WS_COUNTS_WARN_THRESHOLD=" + _topicWsCountsWarnThreshold + " distinct topics.\n" +
 					"  Eviction would corrupt subscribe/unsubscribe routing, so the index keeps growing.\n" +
-					"  Check for runaway dynamic-topic generation (e.g. per-request topic strings) and prefer aggregating into stable topics."
+					"  Check for runaway dynamic-topic generation (e.g. per-request topic strings) and prefer aggregating into stable topics.\n" +
+					"  See: https://svti.me/topic-cardinality"
 				);
 			}
 			wsSet = new Set();
@@ -1694,21 +1695,37 @@ live.access = {
 	/**
 	 * OR logic: any predicate returning true allows the subscription.
 	 * Args are forwarded so args-aware predicates (`org`, `user`) compose.
-	 * @param {...((ctx: any, ...args: any[]) => boolean)} predicates
-	 * @returns {(ctx: any, ...args: any[]) => boolean}
+	 * Sub-predicates may be sync or async; each is awaited in order so
+	 * a Promise<false> correctly denies instead of short-circuiting on a
+	 * truthy Promise object.
+	 * @param {...((ctx: any, ...args: any[]) => boolean | Promise<boolean>)} predicates
+	 * @returns {(ctx: any, ...args: any[]) => Promise<boolean>}
 	 */
 	any(...predicates) {
-		return (ctx, ...args) => predicates.some(p => p(ctx, ...args));
+		return async (ctx, ...args) => {
+			for (const p of predicates) {
+				if (await p(ctx, ...args)) return true;
+			}
+			return false;
+		};
 	},
 
 	/**
 	 * AND logic: all predicates must return true to allow the subscription.
 	 * Args are forwarded so args-aware predicates (`org`, `user`) compose.
-	 * @param {...((ctx: any, ...args: any[]) => boolean)} predicates
-	 * @returns {(ctx: any, ...args: any[]) => boolean}
+	 * Sub-predicates may be sync or async; each is awaited in order so
+	 * a Promise<false> correctly denies instead of falling through on a
+	 * truthy Promise object.
+	 * @param {...((ctx: any, ...args: any[]) => boolean | Promise<boolean>)} predicates
+	 * @returns {(ctx: any, ...args: any[]) => Promise<boolean>}
 	 */
 	all(...predicates) {
-		return (ctx, ...args) => predicates.every(p => p(ctx, ...args));
+		return async (ctx, ...args) => {
+			for (const p of predicates) {
+				if (!(await p(ctx, ...args))) return false;
+			}
+			return true;
+		};
 	}
 };
 
@@ -2656,7 +2673,8 @@ export const pushHooks = {
 					"[svelte-realtime] push registry reached MAX_PUSH_REGISTRY=" + _maxPushRegistry +
 					"; new userIds will not be registered for `live.push({ userId })` until existing entries clear.\n" +
 					"  This usually indicates push registrations are not being released on disconnect.\n" +
-					"  Check that hooks.ws.js wires `pushHooks.close` and that the upstream identify(ws) is stable per-user."
+					"  Check that hooks.ws.js wires `pushHooks.close` and that the upstream identify(ws) is stable per-user.\n" +
+					"  See: https://svti.me/push-registry"
 				);
 			}
 			return;
@@ -2947,7 +2965,7 @@ live.notify = function notify(target, event, data) {
 			// production: notify is fire-and-forget; a missing platform
 			// primitive shouldn't surface at the call site as a sync throw.
 			if (_IS_DEV) {
-				console.warn('[svelte-realtime] live.notify: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4. Notify dispatch silently no-op.');
+				console.warn('[svelte-realtime] live.notify: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4. Notify dispatch silently no-op.\n  See: https://svti.me/migration');
 			}
 			return Promise.resolve();
 		}
@@ -4944,7 +4962,7 @@ async function _recomputeDerived(entry, platform) {
 		if (_serverErrorHandler) {
 			try { _serverErrorHandler('derived', err); } catch {}
 		} else if (_IS_DEV) {
-			console.error(`[svelte-realtime] Derived stream '${entry.topic}' error:`, err);
+			console.error(`[svelte-realtime] Derived stream '${entry.topic}' error:`, err, '\n  See: https://svti.me/derived');
 		}
 	}
 }
@@ -4979,7 +4997,7 @@ function _activateDynamicDerived(fn, resolvedTopic, user) {
 	const resolvedSources = entry.sourceFactory(...args);
 	if (!Array.isArray(resolvedSources) || resolvedSources.length === 0) {
 		if (_IS_DEV) {
-			console.warn(`[svelte-realtime] Dynamic derived sourceFactory returned empty sources for topic '${resolvedTopic}'`);
+			console.warn(`[svelte-realtime] Dynamic derived sourceFactory returned empty sources for topic '${resolvedTopic}'\n  See: https://svti.me/derived`);
 		}
 		return;
 	}
@@ -5521,7 +5539,7 @@ export async function _tickCron() {
 			// the safe default: better to skip a tick than to double-fire
 			// a job because the leader-election machinery is broken.
 			if (_IS_DEV) {
-				console.error('[svelte-realtime] configureCron leader function threw; skipping tick:', err);
+				console.error('[svelte-realtime] configureCron leader function threw; skipping tick:', err, '\n  See: https://svti.me/cron');
 			}
 			if (_metricsInstruments) _metricsInstruments.cronCount.inc({ path: '*', status: 'leader-error' });
 			return;
@@ -5617,7 +5635,7 @@ export async function _tickCron() {
 				if (_serverErrorHandler) {
 					_serverErrorHandler(path, err);
 				} else if (_IS_DEV) {
-					console.error(`[svelte-realtime] Cron '${path}' error:`, err);
+					console.error(`[svelte-realtime] Cron '${path}' error:`, err, '\n  See: https://svti.me/cron');
 				}
 			} finally {
 				_cronRunning.delete(path);
@@ -6412,7 +6430,7 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 				try { options.onError(path, err, ctx); } catch {}
 			}
 			if (_IS_DEV) {
-				console.error(`[svelte-realtime] Error in binary '${path}':`, err);
+				console.error(`[svelte-realtime] Error in binary '${path}':`, err, '\n  See: https://svti.me/binary');
 			}
 			_respond(ws, platform, id, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
 		}
@@ -6757,7 +6775,7 @@ function _createUploadEntry(ws, perWs, streamId, platform) {
 function _handleUploadChunkFrame(ws, data, platform, options) {
 	const parsed = _parseUploadChunkFrame(data);
 	if (!parsed) {
-		if (_IS_DEV) console.warn('[svelte-realtime] Malformed upload chunk frame; dropping');
+		if (_IS_DEV) console.warn('[svelte-realtime] Malformed upload chunk frame; dropping\n  See: https://svti.me/uploads');
 		return;
 	}
 
@@ -6891,7 +6909,7 @@ function _handleUploadChunkFrame(ws, data, platform, options) {
 function _handleUploadControlFrame(ws, data, platform) {
 	const parsed = _parseUploadControlFrame(data);
 	if (!parsed) {
-		if (_IS_DEV) console.warn('[svelte-realtime] Malformed upload control frame; dropping');
+		if (_IS_DEV) console.warn('[svelte-realtime] Malformed upload control frame; dropping\n  See: https://svti.me/uploads');
 		return;
 	}
 
@@ -6906,7 +6924,7 @@ function _handleUploadControlFrame(ws, data, platform) {
 	}
 
 	if (_IS_DEV) {
-		console.warn(`[svelte-realtime] Unknown upload control type 0x${ctrlType.toString(16)} for stream ${_streamIdHex(streamId)}`);
+		console.warn(`[svelte-realtime] Unknown upload control type 0x${ctrlType.toString(16)} for stream ${_streamIdHex(streamId)}\n  See: https://svti.me/uploads`);
 	}
 }
 
@@ -7050,7 +7068,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				if (options?.onError) {
 					try { options.onError(path, err, ctx); } catch {}
 				}
-				if (_IS_DEV) console.error(`[svelte-realtime] Error in upload '${path}':`, err);
+				if (_IS_DEV) console.error(`[svelte-realtime] Error in upload '${path}':`, err, '\n  See: https://svti.me/uploads');
 				_respondUpload(ws, platform, streamId, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
 			}
 		} else {

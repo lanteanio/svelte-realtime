@@ -34,6 +34,19 @@ This creates a SvelteKit project with svelte-realtime fully wired: adapter, vite
 
 ---
 
+## Version compatibility
+
+The three ecosystem packages move together. Bump them as a group:
+
+| `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |
+|---|---|---|---|
+| `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |
+| `^0.5.0` | `^0.5.0` | `^0.5.0` | Current. Node 22+ required. See `MIGRATION.md` if upgrading from 0.4. |
+
+Mixed-version installs are rejected at install time with a peer-dep warning.
+
+---
+
 ## Manual setup
 
 Starting from a SvelteKit project. If you do not have one yet, run `npx sv create my-app && cd my-app && npm install` first.

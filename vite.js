@@ -1274,7 +1274,7 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		const hasAnyLiveExport = /export\s+const\s+[\w$]+\s*=\s*live[\s.(]/g.test(source);
 		if (!hasAnyLiveExport) {
 			console.warn(
-				`[svelte-realtime] ${dir}/${modulePath} has no live() or live.stream() exports`
+				`[svelte-realtime] ${dir}/${modulePath} has no live() or live.stream() exports\n  See: https://svti.me/start`
 			);
 		}
 	}
