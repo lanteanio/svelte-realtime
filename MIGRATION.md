@@ -290,13 +290,39 @@ export const avatar = live.upload(
 );
 ```
 
-### Auto-discovery of adapter `maxPayloadLength` for upload chunk sizing
+### Auto-discovery of adapter `maxPayloadLength` for upload frame sizing
 
-**What changed.** The server piggybacks `platform.maxPayloadLength` on the first upload-response envelope per WS via a `__cap` field; the client caches the value globally and computes `chunkSize = floor(maxPayloadLength * 0.9)` on every new upload. The first upload uses the conservative 12KB default; the second upload onwards uses near-optimal chunks.
+**What changed.** The server piggybacks `platform.maxPayloadLength` on the first upload-response envelope per WS via a `__cap` field; the client caches the value globally and uses it as the wire frame size for subsequent uploads, subtracting envelope overhead (10 bytes on chunks 1+, `12 + argsLen` on chunk 0) per chunk internally. The first upload uses the conservative 12KB default; the second upload onwards uses the full discovered cap.
 
-User-configured `configure({ upload: { chunkSize } })` always wins over discovery.
+User-configured `configure({ upload: { frameSize } })` always wins over discovery, but is silently clamped down to the discovered cap with a one-time dev warn if it exceeds the adapter's limit. The framework guarantees no wire frame ever exceeds `platform.maxPayloadLength`; without this clamp the adapter would close the connection with code 1009.
 
-**How to migrate.** No action required. If you pinned `chunkSize` to 12KB by hand, drop the override and let auto-discovery upgrade chunks on adapters with `maxPayloadLength: 1MB` (the new default).
+**How to migrate.** No action required. If you pinned `chunkSize` to 12KB by hand, drop the override and let auto-discovery upgrade frames on adapters with `maxPayloadLength: 1MB` (the 0.5.x default).
+
+### `configure({ upload: { chunkSize } })` renamed to `frameSize`; `chunkSize` accepted as deprecated alias
+
+**Why the rename.** Pre-rename, the `chunkSize` knob was raw payload bytes per chunk with no clamp and no warn. A user reading "the adapter cap is 1MB" and setting `chunkSize: 1024 * 1024` was correctly following the docs and silently built frames slightly over the cap (the envelope overhead added `12 + argsLen` bytes); uWS evaluated frame size on receive and closed the connection with code 1009. The failure was silent: the client error path never fired because the connection close beat the chunk send-ack.
+
+**What changed.**
+
+- The knob is renamed to `frameSize` and means "max wire frame bytes," matching `platform.maxPayloadLength`'s semantic 1:1. The framework subtracts envelope overhead per chunk internally; user code does no envelope arithmetic.
+- A hard ceiling clamps user input to the discovered adapter cap, with a one-time dev warn when clamping kicks in. Overflow is now structurally impossible.
+- The auto path drops the old 0.9 safety factor: frame size auto-defaults to the FULL discovered cap (the safety factor was a workaround for the missing per-chunk overhead subtraction; that's now done correctly).
+- `chunkSize` is accepted as a deprecated alias for `frameSize`. Existing config still works; a one-time dev warn points at the rename. Both fields take the same numeric value.
+- When both `frameSize` and `chunkSize` are set, `frameSize` wins and no deprecation warn fires.
+
+**How to migrate.**
+
+- Existing apps with `configure({ upload: { chunkSize: N } })` keep working. To silence the deprecation warn, rename the field to `frameSize`. The numeric value passes through unchanged.
+- Existing apps that set `chunkSize` to the adapter's `maxPayloadLength` (the silent-overflow case) are now correctly clamped down by the envelope overhead. Effective payload-per-chunk drops by ~12 + `argsLen` bytes (typically ~30-50 bytes); throughput change is invisible (~0.003% on a 1MB cap).
+- New apps should use `frameSize`. The mental model is: "this is the wire frame budget; the framework slices payload to fit."
+
+```js
+// Before
+configure({ upload: { chunkSize: 1024 * 1024 } }); // silently overflows on 1MB cap
+
+// After
+configure({ upload: { frameSize: 1024 * 1024 } }); // safe; framework subtracts envelope per chunk
+```
 
 ### `RpcError` and `LiveError` SvelteKit transport (opt-in)
 

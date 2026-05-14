@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0-next.20] - 2026-05-14
+
+### Changed
+
+- **`live.upload`: `configure({ upload: { chunkSize } })` renamed to `frameSize`; framework now guarantees no wire frame ever exceeds the adapter's `maxPayloadLength`.** Pre-rename, `chunkSize` was raw payload bytes per chunk, with no clamp and no warn. A user reading "the adapter cap is 1MB" and setting `chunkSize: 1024 * 1024` was correctly following the docs and silently built frames slightly over the cap (envelope overhead added `12 + argsLen` bytes); uWS evaluated frame size on receive and closed the connection with code 1009. The failure was silent: the client error path never fired because the connection close beat the chunk send-ack. The fix shifts the knob's semantic to wire frame size (matching `platform.maxPayloadLength` 1:1), enforces a hard ceiling at the discovered adapter cap (with a one-time dev warn when clamping kicks in), and subtracts envelope overhead per chunk internally (10 bytes on chunks 1+, `12 + argsLen` on chunk 0; `argsLen` is computed once per upload from the actual args, not budgeted statically). `chunkSize` is accepted as a deprecated alias with a one-time dev warn pointing at the rename; existing config keeps working. The auto path drops the old 0.9 safety factor: frame size auto-defaults to the FULL discovered cap, since envelope subtraction is now done correctly. Eight new tests pin: clamp-down with one-time warn (1); does not warn a second time when the same clamp recurs (1); `chunkSize` alias works + emits one-time deprecation warn (1); `frameSize` wins when both fields set + no deprecation warn (1); per-chunk envelope overhead computed correctly (chunk 0 fills `frameSize` exactly, chunks 1+ leave `2 + argsLen` bytes unused) (1); longer args reduce per-chunk payload size (1); cold-start uses 12KB default + frames fit under it (1); post-discovery uses full cap not 90% (1). Six existing tests updated to use the new `frameSize` semantics via a `frameSizeForPayload(path, args, payloadBytes)` helper that computes the right frame value for a target payload size (replaces hard-coded `chunkSize: 4` patterns). See `MIGRATION.md` for the rationale and migration shape; the value passes through unchanged in nearly all cases.
+
 ## [0.5.0-next.19] - 2026-05-13
 
 ### Security

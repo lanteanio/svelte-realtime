@@ -783,12 +783,26 @@ export function __binaryRpc(path) {
 // where streamIdHex is the 8-char hex of the uint32 streamId. Payload is
 // either { ok: true, data } or { ok: false, code, error }.
 
-/** Default chunk size in bytes when neither user-configured nor server-discovered.
- * Tuned to fit under svelte-adapter-uws's old default `maxPayloadLength` (16KB)
- * with room for the frame header and args JSON. Discovery via the server's
- * `__cap` hint upgrades this automatically on first response (e.g. to ~943KB
- * under the next.19+ adapter default of 1MB). */
-const _DEFAULT_UPLOAD_CHUNK_SIZE = 12 * 1024;
+/** Default wire-frame size in bytes when neither user-configured nor
+ * server-discovered. Tuned to fit under `svelte-adapter-uws`'s old default
+ * `maxPayloadLength` (16KB) with room for the frame header and args JSON.
+ * Discovery via the server's `__cap` hint upgrades this automatically on
+ * the first upload response (e.g. to 1MB under the adapter's 0.5.x default).
+ *
+ * "Frame size" is the maximum wire frame bytes the framework will emit;
+ * payload bytes per chunk are derived by subtracting envelope overhead
+ * (10 bytes on chunks 1+, `12 + argsLen` on chunk 0). */
+const _DEFAULT_UPLOAD_FRAME_SIZE = 12 * 1024;
+
+/** Per-chunk envelope overhead. Chunks 1+ are 10 bytes (frame header).
+ * Chunk 0 is 12 bytes (frame header + argsLen uint16) plus the args JSON
+ * itself (`argsLen` bytes). Pre-fix, the chunk size knob was used as raw
+ * payload bytes per chunk: `frame = chunkSize + overhead` could overflow
+ * the adapter's `maxPayloadLength` cap, and the adapter closed the
+ * connection with code 1009. Post-fix, the knob is the frame size and
+ * the framework subtracts overhead per chunk -- no overflow possible. */
+const _UPLOAD_FRAME_HEADER_BYTES = 10;
+const _UPLOAD_FRAME_HEADER_WITH_ARGS_BYTES = 12;
 
 /** High-water mark for the WS send queue, in bytes. When `conn.bufferedAmount`
  * (svelte-adapter-uws/client next.19+) exceeds this, the upload pump pauses
@@ -802,28 +816,99 @@ const _UPLOAD_DRAIN_POLL_MS = 50;
  * response arrives carrying `__cap`. 0 = not yet discovered. */
 let _discoveredUploadMaxFrameSize = 0;
 
+/** @type {boolean} Dev-warn dedup: clamp-against-adapter-cap warning. */
+let _uploadFrameSizeClampWarned = false;
+/** @type {boolean} Dev-warn dedup: deprecated `chunkSize` field warning. */
+let _uploadChunkSizeDeprecatedWarned = false;
+
 /**
- * Compute the chunk size for a new upload. Priority:
- *   1. User-configured `configure({ upload: { chunkSize } })` - explicit wins.
- *   2. Auto-discovered: 90% of the server's `maxPayloadLength` (leaves
- *      ~10% for the 12-byte frame header + chunk-0 args JSON).
- *   3. Conservative default 12KB.
+ * Compute the upload frame size (max wire frame bytes per chunk). Priority:
+ *   1. User-configured `configure({ upload: { frameSize } })` (or the
+ *      deprecated alias `chunkSize`) -- clamped to the discovered cap.
+ *   2. Auto-discovered: the server's `maxPayloadLength`, used as-is. The
+ *      framework subtracts envelope overhead per chunk; no 0.9 safety
+ *      factor is needed because frame size IS the cap.
+ *   3. Conservative default `_DEFAULT_UPLOAD_FRAME_SIZE` (12KB) -- only
+ *      used for the very first upload after page load, before discovery.
  *
  * Re-evaluated at every upload start so the SECOND upload picks up the
  * value discovered on the first.
+ *
+ * **Hard invariant:** the returned frame size never exceeds the discovered
+ * adapter cap. User input above the cap is silently clamped down with a
+ * one-time dev-mode warning. The adapter would close the connection with
+ * code 1009 if any frame exceeded its cap, so the framework enforces this
+ * ceiling structurally rather than trusting user input.
+ *
+ * @returns {number}
  */
-function _computeUploadChunkSize() {
-	const userOverride = _clientConfig.upload?.chunkSize;
-	if (typeof userOverride === 'number' && userOverride > 0) return userOverride;
-	if (_discoveredUploadMaxFrameSize > 0) {
-		return Math.max(1024, Math.floor(_discoveredUploadMaxFrameSize * 0.9));
+function _computeUploadFrameSize() {
+	const cfg = _clientConfig.upload;
+
+	// Resolve the user-supplied value, preferring `frameSize` over the
+	// deprecated `chunkSize` alias. Warn once per session if the deprecated
+	// name is used so existing apps get a migration pointer in dev.
+	/** @type {number | undefined} */
+	let userFrameSize;
+	if (cfg && typeof cfg.frameSize === 'number' && cfg.frameSize > 0) {
+		userFrameSize = cfg.frameSize;
+	} else if (cfg && typeof cfg.chunkSize === 'number' && cfg.chunkSize > 0) {
+		userFrameSize = cfg.chunkSize;
+		if (_isDev() && !_uploadChunkSizeDeprecatedWarned) {
+			_uploadChunkSizeDeprecatedWarned = true;
+			console.warn(
+				"[svelte-realtime] configure({ upload: { chunkSize } }) is deprecated -- " +
+				"rename to `frameSize`. The new name reflects the actual semantic: maximum " +
+				"wire frame size, from which the framework subtracts envelope overhead " +
+				"automatically. The value passes through unchanged."
+			);
+		}
 	}
-	return _DEFAULT_UPLOAD_CHUNK_SIZE;
+
+	const discoveredCap = _discoveredUploadMaxFrameSize > 0 ? _discoveredUploadMaxFrameSize : Infinity;
+
+	if (userFrameSize !== undefined) {
+		if (userFrameSize > discoveredCap) {
+			if (_isDev() && !_uploadFrameSizeClampWarned) {
+				_uploadFrameSizeClampWarned = true;
+				console.warn(
+					"[svelte-realtime] configure({ upload: { frameSize: " + userFrameSize + " } }) " +
+					"exceeds the adapter's discovered maxPayloadLength (" + discoveredCap + " bytes); " +
+					"clamping to the adapter cap. Without this clamp the adapter would close the " +
+					"connection (code 1009). Either lower frameSize or raise the adapter's " +
+					"`maxPayloadLength` config to match. Warned once per session."
+				);
+			}
+			return discoveredCap;
+		}
+		return userFrameSize;
+	}
+
+	if (_discoveredUploadMaxFrameSize > 0) return _discoveredUploadMaxFrameSize;
+	return _DEFAULT_UPLOAD_FRAME_SIZE;
 }
 
-/** @internal Reset auto-discovered state. Test-only. */
+/**
+ * Derive the per-chunk payload size from a frame size and the chunk-0
+ * args JSON length. The same payload size is used for every chunk in the
+ * upload; chunk 0 fills its frame exactly (`payload + 12 + argsLen = frame`)
+ * while chunks 1+ leave `2 + argsLen` bytes of frame budget unused. The
+ * waste is ~0.01% on a 1MB-cap adapter with typical 100-byte args -- well
+ * worth the simplicity of one chunk size for the whole upload.
+ *
+ * @param {number} frameSize
+ * @param {number} argsLen
+ * @returns {number}
+ */
+function _payloadSizeForFrame(frameSize, argsLen) {
+	return Math.max(1, frameSize - _UPLOAD_FRAME_HEADER_WITH_ARGS_BYTES - argsLen);
+}
+
+/** @internal Reset auto-discovered state and warn dedup flags. Test-only. */
 export function _resetUploadAutoDiscovery() {
 	_discoveredUploadMaxFrameSize = 0;
+	_uploadFrameSizeClampWarned = false;
+	_uploadChunkSizeDeprecatedWarned = false;
 }
 
 /** @type {Map<number, UploadHandle>} */
@@ -1051,11 +1136,7 @@ function ensureUploadListener() {
  * @param {UploadHandle} handle
  */
 async function _pumpUpload(handle) {
-	const args = handle._args;
-	const argsJson = JSON.stringify({
-		rpc: handle._path,
-		args: args.length > 0 ? args : undefined
-	});
+	const argsJson = handle._argsJson;
 	const conn = _connect();
 
 	const iter = _chunkUploadSource(handle._source, handle._chunkSize)[Symbol.asyncIterator]();
@@ -1157,7 +1238,7 @@ class UploadHandle {
 	 * @param {string} path
 	 * @param {any} source
 	 * @param {any[]} args
-	 * @param {{ chunkSize: number, streamId: number, total: number | undefined }} options
+	 * @param {{ chunkSize: number, streamId: number, total: number | undefined, argsJson: string }} options
 	 */
 	constructor(path, source, args, options) {
 		this._path = path;
@@ -1166,6 +1247,7 @@ class UploadHandle {
 		this._chunkSize = options.chunkSize;
 		this._streamId = options.streamId;
 		this._total = options.total;
+		this._argsJson = options.argsJson;
 		this._sent = 0;
 		this._chunks = 0;
 		/** @type {Map<string, Set<(payload: any) => void>>} */
@@ -1379,10 +1461,19 @@ class UploadHandle {
  */
 export function __upload(path) {
 	return function uploadCall(source, ...args) {
-		const chunkSize = _computeUploadChunkSize();
+		// Pre-compute args JSON + argsLen so the chunk-0 envelope overhead
+		// is known statically for the whole upload. This lets us guarantee
+		// every wire frame fits inside the adapter's maxPayloadLength cap.
+		const argsJson = JSON.stringify({
+			rpc: path,
+			args: args.length > 0 ? args : undefined
+		});
+		const argsLen = _textEncoder.encode(argsJson).length;
+		const frameSize = _computeUploadFrameSize();
+		const chunkSize = _payloadSizeForFrame(frameSize, argsLen);
 		const streamId = _nextUploadStreamId();
 		const total = _uploadSourceTotal(source);
-		return new UploadHandle(path, source, args, { chunkSize, streamId, total });
+		return new UploadHandle(path, source, args, { chunkSize, streamId, total, argsJson });
 	};
 }
 
@@ -3199,7 +3290,7 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number }} OfflineEntry
  */
 
-/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, upload?: { chunkSize?: number, highWaterMark?: number, lowWaterMark?: number }, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
+/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, upload?: { frameSize?: number, chunkSize?: number, highWaterMark?: number, lowWaterMark?: number }, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
 let _clientConfig = {};
 
 /** @type {boolean} */

@@ -2616,7 +2616,9 @@ The handle is a thenable - `await handle` resolves with the handler's return val
   ac.signal.addEventListener('abort', () => handle.cancel());
   ```
 
-**Chunk size is auto-discovered.** The server announces its `platform.maxPayloadLength` on the first upload response per connection; subsequent uploads automatically use 90% of that as the chunk size. The first upload uses a conservative 12KB default that fits under the current adapter cap. To pin an explicit size (e.g. for memory-constrained clients), `configure({ upload: { chunkSize: 32 * 1024 } })` - user-configured wins over discovery.
+**Frame size is auto-discovered, hard-capped, and structurally safe.** The server announces its `platform.maxPayloadLength` on the first upload response per connection; subsequent uploads use that value as the wire frame size, with the framework subtracting envelope overhead (10 bytes on chunks 1+, `12 + argsLen` on chunk 0) per chunk internally. The first upload uses a conservative 12KB default that fits under any realistic adapter cap. To pin an explicit value (e.g. for memory-constrained clients), `configure({ upload: { frameSize: 32 * 1024 } })` -- user-configured wins over discovery, but is silently clamped down to the discovered cap with a one-time dev warn if it exceeds the adapter's limit. The framework guarantees no wire frame ever exceeds the adapter's `maxPayloadLength`, eliminating the silent close-with-1009 failure mode that the pre-rename `chunkSize` knob could trigger when a user mirrored the adapter's cap value verbatim.
+
+The `chunkSize` field is accepted as a deprecated alias for `frameSize`; existing config still works, with a one-time dev warn pointing at the rename. See `MIGRATION.md` for the rationale and migration shape.
 
 The handle auto-starts but the first chunk is sent on the next microtask, so attaching listeners on the same line as construction (`const h = avatar(file); h.on('progress', ...);`) never misses early events.
 
@@ -3510,7 +3512,7 @@ Import from `svelte-realtime/client`.
 | `RpcError` | Typed error with `code` field |
 | `UploadHandle<T>` | Type for `live.upload` client handles (thenable + events + cancel) |
 | `batch(fn, options?)` | Group RPC calls into one WebSocket frame |
-| `configure(config)` | Connection hooks, offline queue, upload chunk size |
+| `configure(config)` | Connection hooks, offline queue, upload frame size |
 | `combine(...stores, fn)` | Multi-store composition |
 | `onSignal(userId, callback)` | Listen for point-to-point signals |
 | `onDerived` | Re-exported from adapter: reactive derived topic subscription |

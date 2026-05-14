@@ -2805,6 +2805,22 @@ async function flushUpload(times = 12) {
 	}
 }
 
+/**
+ * Compute the `frameSize` value that produces a target per-chunk payload
+ * size, accounting for the chunk-0 envelope overhead (12 bytes header +
+ * argsLen). Used by tests that exercise multi-chunk behavior and want
+ * deterministic payload sizes regardless of the path string length.
+ *
+ * Pre-rename, tests passed `chunkSize: <payloadBytes>` directly because
+ * the old semantic was "payload bytes per chunk." Post-rename, frameSize
+ * is wire frame bytes; payload per chunk is `frameSize - 12 - argsLen`.
+ */
+function frameSizeForPayload(path, args, payloadBytes) {
+	const argsJson = JSON.stringify({ rpc: path, args: args.length > 0 ? args : undefined });
+	const argsLen = new TextEncoder().encode(argsJson).length;
+	return 12 + argsLen + payloadBytes;
+}
+
 function parseUploadChunk(buf) {
 	const view = new DataView(buf);
 	const u8 = new Uint8Array(buf);
@@ -2859,7 +2875,10 @@ describe('__upload()', () => {
 	});
 
 	it('streams a multi-chunk upload with sequential seq and isLast on the last frame', async () => {
-		configure({ upload: { chunkSize: 4 } });
+		// Post-rename: `frameSize` is wire frame bytes; payload-per-chunk is
+		// derived by subtracting envelope overhead (12 + argsLen). Compute the
+		// frame size that yields 4-byte payloads regardless of path length.
+		configure({ upload: { frameSize: frameSizeForPayload('uploads/multi', [], 4) } });
 		const avatar = __upload('uploads/multi');
 		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9]).buffer);
 		await flushUpload();
@@ -2933,7 +2952,7 @@ describe('__upload()', () => {
 
 	it('accepts a ReadableStream source and reports total as undefined', async () => {
 		if (typeof ReadableStream === 'undefined') return;
-		configure({ upload: { chunkSize: 4 } });
+		configure({ upload: { frameSize: frameSizeForPayload('uploads/stream', [], 4) } });
 		const stream = new ReadableStream({
 			start(ctrl) {
 				ctrl.enqueue(new Uint8Array([1, 2, 3]));
@@ -2997,7 +3016,7 @@ describe('__upload()', () => {
 	});
 
 	it('emits progress events with sent/total/percent/chunks', async () => {
-		configure({ upload: { chunkSize: 4 } });
+		configure({ upload: { frameSize: frameSizeForPayload('uploads/progress', [], 4) } });
 		const avatar = __upload('uploads/progress');
 		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer);
 		const events = [];
@@ -3086,24 +3105,30 @@ describe('__upload()', () => {
 		await expect(handle).rejects.toMatchObject({ code: 'SOURCE_ERROR' });
 	});
 
-	it('uses the 12KB default chunk size when nothing is discovered or configured', async () => {
-		// 13000 bytes / 12288 default = 2 chunks (12288, 712)
+	it('uses the 12KB default frame size when nothing is discovered or configured', async () => {
+		// Default frame size is 12288 bytes (wire frame, NOT payload). With
+		// 12 + argsLen envelope overhead, payload-per-chunk is slightly under
+		// 12288. A 13000-byte source still fits in 2 chunks.
 		const avatar = __upload('uploads/default-chunk');
 		const handle = avatar(new Uint8Array(13000).buffer);
 		await flushUpload();
 
 		const frames = sendQueuedFn.mock.calls.map((c) => parseUploadChunk(c[0]));
 		expect(frames.length).toBe(2);
-		expect(frames[0].payload.byteLength).toBe(12288);
-		expect(frames[1].payload.byteLength).toBe(712);
+		// Hard invariant: every wire frame fits inside the 12KB default cap.
+		expect(sendQueuedFn.mock.calls[0][0].byteLength).toBeLessThanOrEqual(12 * 1024);
+		expect(sendQueuedFn.mock.calls[1][0].byteLength).toBeLessThanOrEqual(12 * 1024);
 		expect(frames[1].isLast).toBe(true);
+		// Total payload bytes round-trip exactly the source size.
+		const totalPayload = frames.reduce((acc, f) => acc + (f.payload?.byteLength ?? 0), 0);
+		expect(totalPayload).toBe(13000);
 
 		simulateUploadResponse(handle.streamId, { ok: true, data: 13000 });
 		await handle;
 	});
 
-	it('auto-discovers chunk size from server __cap on the next upload', async () => {
-		// First upload: default chunk size (12288)
+	it('auto-discovers frame size from server __cap on the next upload', async () => {
+		// First upload: default frame size (12288)
 		const avatar = __upload('uploads/discover');
 		const handle1 = avatar(new Uint8Array(8000).buffer);
 		await flushUpload();
@@ -3113,8 +3138,10 @@ describe('__upload()', () => {
 		simulateUploadResponse(handle1.streamId, { ok: true, data: 'first', __cap: 1024 * 1024 });
 		await handle1;
 
-		// Second upload: should now use floor(1MB * 0.9) = 943718 bytes per chunk
-		// Sending 800KB (819200 bytes) should fit in ONE chunk under the new limit.
+		// Second upload: post-rename, the framework uses the FULL discovered
+		// cap as the frame size (no 0.9 safety factor). Per-chunk payload is
+		// 1MB minus envelope overhead, which still comfortably fits 800KB in
+		// one chunk; the wire frame stays at or below 1MB.
 		sendQueuedFn.mockClear();
 		const handle2 = avatar(new Uint8Array(800 * 1024).buffer);
 		await flushUpload();
@@ -3123,6 +3150,8 @@ describe('__upload()', () => {
 		expect(frames2.length).toBe(1);
 		expect(frames2[0].isLast).toBe(true);
 		expect(frames2[0].payload.byteLength).toBe(800 * 1024);
+		// Hard invariant: wire frame never exceeds the discovered adapter cap.
+		expect(sendQueuedFn.mock.calls[0][0].byteLength).toBeLessThanOrEqual(1024 * 1024);
 
 		simulateUploadResponse(handle2.streamId, { ok: true, data: 'second' });
 		await handle2;
@@ -3137,8 +3166,10 @@ describe('__upload()', () => {
 		simulateUploadResponse(h1.streamId, { ok: true, data: 'ok', __cap: 1024 * 1024 });
 		await h1;
 
-		// User explicitly sets a smaller chunk size
-		configure({ upload: { chunkSize: 4 } });
+		// User explicitly sets a smaller frame size (well under the 1MB cap).
+		// Verifies that user override beats auto-discovery; the 4-byte payload
+		// math accounts for the chunk-0 envelope overhead (12 + argsLen).
+		configure({ upload: { frameSize: frameSizeForPayload('uploads/user-wins', [], 4) } });
 		sendQueuedFn.mockClear();
 
 		const h2 = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer);
@@ -3177,9 +3208,9 @@ describe('__upload()', () => {
 
 	it('paces sends when conn.bufferedAmount exceeds the high-water mark, resumes when it drops below low-water', async () => {
 		// Tight watermarks so we can verify quickly
-		configure({ upload: { chunkSize: 4, highWaterMark: 100, lowWaterMark: 30 } });
+		configure({ upload: { frameSize: frameSizeForPayload('uploads/pace', [], 4), highWaterMark: 100, lowWaterMark: 30 } });
 		const avatar = __upload('uploads/pace');
-		// 12 bytes = 3 chunks at chunkSize=4
+		// 12 bytes = 3 chunks at 4-byte payload per chunk
 		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer);
 
 		// Simulate a backed-up WS: bufferedAmount is high after the first chunk goes out
@@ -3206,7 +3237,7 @@ describe('__upload()', () => {
 			ready: () => new Promise((_resolve, reject) => { readyReject = reject; })
 			// no bufferedAmount
 		}));
-		configure({ upload: { chunkSize: 4, highWaterMark: 100, lowWaterMark: 30 } });
+		configure({ upload: { frameSize: frameSizeForPayload('uploads/no-bp', [], 4), highWaterMark: 100, lowWaterMark: 30 } });
 		const avatar = __upload('uploads/no-bp');
 		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer);
 		await flushUpload();
@@ -3218,7 +3249,7 @@ describe('__upload()', () => {
 	});
 
 	it('pacing wait exits on cancel, rejecting with CANCELLED', async () => {
-		configure({ upload: { chunkSize: 4, highWaterMark: 50, lowWaterMark: 10 } });
+		configure({ upload: { frameSize: frameSizeForPayload('uploads/pace-cancel', [], 4), highWaterMark: 50, lowWaterMark: 10 } });
 		const avatar = __upload('uploads/pace-cancel');
 		const handle = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]).buffer);
 
@@ -3236,6 +3267,230 @@ describe('__upload()', () => {
 			.map((c) => new Uint8Array(c[0]))
 			.filter((u8) => u8[0] === 0x02);
 		expect(cancelFrames.length).toBe(1);
+	});
+});
+
+// -- __upload() frameSize hard cap + chunkSize alias deprecation --------------
+//
+// Rationale: pre-rename, `chunkSize` was raw payload bytes per chunk, with
+// no clamp and no warn. A user setting chunkSize == adapter.maxPayloadLength
+// silently produced frames slightly over the cap (the envelope overhead
+// added 12+argsLen bytes), and uWS closed the connection with code 1009.
+// The fix renames the knob to `frameSize` (= max wire frame bytes), enforces
+// a hard ceiling at the discovered adapter cap, and subtracts envelope
+// overhead per chunk internally.
+
+describe('__upload() frameSize hard cap + chunkSize alias', () => {
+	/** @type {ReturnType<typeof vi.spyOn>} */
+	let warnSpy;
+	beforeEach(() => {
+		warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	});
+	afterEach(() => {
+		warnSpy.mockRestore();
+	});
+
+	it('clamps frameSize down to the discovered adapter cap with a one-time warn', async () => {
+		const avatar = __upload('uploads/clamp');
+		// First upload primes discovery to a 1KB cap (small for test brevity).
+		const h1 = avatar(new Uint8Array(100).buffer);
+		await flushUpload();
+		simulateUploadResponse(h1.streamId, { ok: true, data: 'ok', __cap: 1024 });
+		await h1;
+
+		// User sets frameSize 100 KB -- way above the discovered 1KB cap.
+		configure({ upload: { frameSize: 100 * 1024 } });
+		sendQueuedFn.mockClear();
+
+		// One-time warn fires.
+		const h2 = avatar(new Uint8Array(2000).buffer);
+		await flushUpload();
+		const clampWarns = warnSpy.mock.calls
+			.map((c) => c[0])
+			.filter((m) => typeof m === 'string' && m.includes('exceeds the adapter'));
+		expect(clampWarns.length).toBe(1);
+		expect(clampWarns[0]).toContain('clamping to the adapter cap');
+		expect(clampWarns[0]).toContain('1024');
+
+		// Hard invariant: every wire frame fits inside the discovered cap.
+		for (const call of sendQueuedFn.mock.calls) {
+			expect(call[0].byteLength).toBeLessThanOrEqual(1024);
+		}
+
+		simulateUploadResponse(h2.streamId, { ok: true, data: 'ok' });
+		await h2;
+	});
+
+	it('does NOT warn a second time when the same clamp condition recurs', async () => {
+		const avatar = __upload('uploads/clamp-once');
+		const h1 = avatar(new Uint8Array(100).buffer);
+		await flushUpload();
+		simulateUploadResponse(h1.streamId, { ok: true, data: 'ok', __cap: 1024 });
+		await h1;
+
+		configure({ upload: { frameSize: 100 * 1024 } });
+		sendQueuedFn.mockClear();
+
+		// Two more uploads, both with frameSize over cap.
+		const h2 = avatar(new Uint8Array(500).buffer);
+		await flushUpload();
+		simulateUploadResponse(h2.streamId, { ok: true, data: 'ok' });
+		await h2;
+		const h3 = avatar(new Uint8Array(500).buffer);
+		await flushUpload();
+		simulateUploadResponse(h3.streamId, { ok: true, data: 'ok' });
+		await h3;
+
+		const clampWarns = warnSpy.mock.calls
+			.map((c) => c[0])
+			.filter((m) => typeof m === 'string' && m.includes('exceeds the adapter'));
+		expect(clampWarns.length).toBe(1);
+	});
+
+	it('treats the deprecated `chunkSize` field as an alias for frameSize and warns once', async () => {
+		const avatar = __upload('uploads/alias');
+		// Set via the deprecated alias.
+		configure({ upload: { chunkSize: frameSizeForPayload('uploads/alias', [], 4) } });
+
+		const h = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer);
+		await flushUpload();
+
+		const deprecationWarns = warnSpy.mock.calls
+			.map((c) => c[0])
+			.filter((m) => typeof m === 'string' && m.includes('is deprecated'));
+		expect(deprecationWarns.length).toBe(1);
+		expect(deprecationWarns[0]).toContain('chunkSize');
+		expect(deprecationWarns[0]).toContain('frameSize');
+
+		// Behavior: same as if user had set frameSize directly.
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+
+		simulateUploadResponse(h.streamId, { ok: true, data: 'ok' });
+		await h;
+	});
+
+	it('frameSize takes precedence when both frameSize and chunkSize are set; no deprecation warn', async () => {
+		const avatar = __upload('uploads/precedence');
+		configure({
+			upload: {
+				frameSize: frameSizeForPayload('uploads/precedence', [], 4),
+				chunkSize: 999999 // would overflow if used, but frameSize wins
+			}
+		});
+
+		const h = avatar(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer);
+		await flushUpload();
+
+		// frameSize wins -> 4-byte payload chunks -> 2 chunks.
+		expect(sendQueuedFn).toHaveBeenCalledTimes(2);
+
+		// No deprecation warn because the user set frameSize too.
+		const deprecationWarns = warnSpy.mock.calls
+			.map((c) => c[0])
+			.filter((m) => typeof m === 'string' && m.includes('is deprecated'));
+		expect(deprecationWarns.length).toBe(0);
+
+		simulateUploadResponse(h.streamId, { ok: true, data: 'ok' });
+		await h;
+	});
+
+	it('per-chunk envelope overhead is computed correctly: chunk 0 has 12+argsLen, chunks 1+ have 10', async () => {
+		// Cap at 64 bytes for clarity. argsLen for 'uploads/overhead' (no
+		// extra args) is `{"rpc":"uploads/overhead"}`.length = 26 bytes.
+		// Frame budget per chunk is 64 bytes.
+		// Chunk-0 payload-per-chunk = 64 - 12 - 26 = 26 bytes.
+		// All chunks use that payload size (one chunk size for the whole upload).
+		// Chunk 0 frame = 26 + 12 + 26 = 64 bytes (exactly at cap).
+		// Chunks 1+ frame = 26 + 10 = 36 bytes (under cap, room to spare).
+		configure({ upload: { frameSize: 64 } });
+		const avatar = __upload('uploads/overhead');
+		const handle = avatar(new Uint8Array(60).buffer); // forces 3 chunks (26, 26, 8)
+		await flushUpload();
+
+		const wireFrames = sendQueuedFn.mock.calls.map((c) => c[0].byteLength);
+		// Hard invariant: no wire frame exceeds the configured frameSize.
+		for (const len of wireFrames) {
+			expect(len).toBeLessThanOrEqual(64);
+		}
+		// Chunk 0 fills the frame budget (or near to it).
+		expect(wireFrames[0]).toBe(64);
+		// Chunks 1+ are smaller (no args overhead, just 10-byte header).
+		expect(wireFrames[1]).toBe(36);
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: 'ok' });
+		await handle;
+	});
+
+	it('a longer args payload reduces the per-chunk payload size correspondingly', async () => {
+		// Chunk-0 envelope = 12 + argsLen. Same upload with vs. without big
+		// args should produce different chunk counts on the same frameSize.
+		const FRAME_SIZE = 100;
+		const SOURCE_BYTES = 200;
+
+		configure({ upload: { frameSize: FRAME_SIZE } });
+		const noArgs = __upload('uploads/short');
+		const h1 = noArgs(new Uint8Array(SOURCE_BYTES).buffer);
+		await flushUpload();
+		const noArgsChunks = sendQueuedFn.mock.calls.length;
+		simulateUploadResponse(h1.streamId, { ok: true, data: 'ok' });
+		await h1;
+
+		// All wire frames stay under the cap regardless of args size.
+		for (const c of sendQueuedFn.mock.calls) {
+			expect(c[0].byteLength).toBeLessThanOrEqual(FRAME_SIZE);
+		}
+
+		sendQueuedFn.mockClear();
+
+		const longArgsString = 'x'.repeat(40); // adds ~50 bytes to argsLen
+		const withArgs = __upload('uploads/short');
+		const h2 = withArgs(new Uint8Array(SOURCE_BYTES).buffer, longArgsString);
+		await flushUpload();
+		const withArgsChunks = sendQueuedFn.mock.calls.length;
+		simulateUploadResponse(h2.streamId, { ok: true, data: 'ok' });
+		await h2;
+
+		// Bigger args -> smaller payload-per-chunk -> more chunks.
+		expect(withArgsChunks).toBeGreaterThan(noArgsChunks);
+		// Hard invariant still holds.
+		for (const c of sendQueuedFn.mock.calls) {
+			expect(c[0].byteLength).toBeLessThanOrEqual(FRAME_SIZE);
+		}
+	});
+
+	it('cold start (no discovery, no config) uses the 12KB default and frames fit under it', async () => {
+		const avatar = __upload('uploads/cold');
+		const handle = avatar(new Uint8Array(50_000).buffer);
+		await flushUpload();
+
+		// All wire frames fit inside 12KB.
+		for (const c of sendQueuedFn.mock.calls) {
+			expect(c[0].byteLength).toBeLessThanOrEqual(12 * 1024);
+		}
+		simulateUploadResponse(handle.streamId, { ok: true, data: 'ok' });
+		await handle;
+	});
+
+	it('post-discovery uses the FULL discovered cap as frameSize (no 0.9 safety factor)', async () => {
+		const avatar = __upload('uploads/full-cap');
+		const h1 = avatar(new Uint8Array(100).buffer);
+		await flushUpload();
+		simulateUploadResponse(h1.streamId, { ok: true, data: 'ok', __cap: 4096 });
+		await h1;
+
+		sendQueuedFn.mockClear();
+		// Source size chosen to exercise 1 chunk that fills the budget.
+		// Chunk-0 payload = 4096 - 12 - argsLen ~= 4060. So a 4000-byte
+		// source fits in 1 chunk; the wire frame is at or just under 4096.
+		const handle = avatar(new Uint8Array(4000).buffer);
+		await flushUpload();
+		expect(sendQueuedFn.mock.calls.length).toBe(1);
+		expect(sendQueuedFn.mock.calls[0][0].byteLength).toBeLessThanOrEqual(4096);
+		// And the frame is RIGHT around the cap, not 90% of it.
+		expect(sendQueuedFn.mock.calls[0][0].byteLength).toBeGreaterThan(4000);
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: 'ok' });
+		await handle;
 	});
 });
 
