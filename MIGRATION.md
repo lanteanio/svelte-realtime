@@ -176,6 +176,38 @@ The store value now always holds your data type (or `undefined` while loading). 
 
 Code that uses `$store === undefined` for loading and otherwise treats the value as data needs no changes.
 
+### Auto-replay routing for `live.stream({ replay: true })` -- bespoke `wrapWithReplay` proxies must opt out via `WRAPPED_FOR_REPLAY` or be dropped
+
+**What changed.** Pre-fix, the user was responsible for wrapping the platform with a `wrapWithReplay` proxy at every seam (`createMessage({ platform: wrapWithReplay })` AND `setCronPlatform(wrapWithReplay(platform))`). The docs showed the wrap only on the RPC seam, so cron-published events to a `replay: true` topic silently bypassed the buffer; reconnecting clients never saw missed cron ticks even when the documented three-tier reconnect (`replay -> delta.fromSeq -> rehydrate`) was correctly declared on the stream.
+
+The fix moves replay routing into the framework. `live.stream(topic, loader, { replay: true })` registers the topic at declaration time (or at first-subscribe time for dynamic topic factories). When `platform.replay` is exposed by the adapter, the framework auto-routes every publish to a registered topic through `platform.replay.publish(...)` -- regardless of which seam the publisher sits on. Cron auto-publish, `ctx.publish` from RPC handlers, `ctx.publish` from cron handlers, all flow through the same routing helper. The buffer is populated end-to-end with no user wiring beyond `replay: true`.
+
+**This is observable for two user shapes:**
+
+1. **Apps without a custom `wrapWithReplay` proxy:** the framework now Just Works. Cron-published events to replay-eligible topics get buffered automatically; reconnecting clients see missed events on resume. No action required; this fixes the silent bug.
+
+2. **Apps with a custom `wrapWithReplay` proxy:** the framework's auto-routing runs alongside the user proxy's routing and DOUBLE-WRITES to Redis. To preserve old behavior, mark the proxy with `[WRAPPED_FOR_REPLAY] = true` so the framework defers entirely:
+
+   ```js
+   import { WRAPPED_FOR_REPLAY } from 'svelte-realtime/server';
+
+   function wrapWithReplay(p) {
+       const wrapped = new Proxy(p, { /* ...your intercepts... */ });
+       wrapped[WRAPPED_FOR_REPLAY] = true; // explicit opt-out
+       return wrapped;
+   }
+   ```
+
+   Or drop the wrap entirely (recommended -- the framework now owns the same job). Most bespoke `wrapWithReplay` proxies were doing exactly what the framework now does built-in: matching topics against a regex and routing to `replay.publish`. The framework's registry-from-declaration approach is more precise (topics are sourced from `live.stream({ replay: true })`, not regex patterns) and removes the asymmetry between seams.
+
+**Dev-mode misconfiguration warning.** If `replay: true` is declared on a stream but `platform.replay` is undefined when the first publish to that topic happens, the framework logs a one-time `console.warn` per topic with the install pointer for the replay extension. Catches the "I declared `replay: true` but never installed the extension" footgun loudly. Production runs silently.
+
+**How to migrate.**
+
+- Most apps: do nothing. Cron + RPC + derived publishes to `replay: true` topics now reach the buffer automatically.
+- Apps with a custom `wrapWithReplay` proxy: add `[WRAPPED_FOR_REPLAY] = true` to keep the proxy authoritative, OR drop the proxy and let the framework own routing.
+- Apps that wired cron-side replay separately via `setCronPlatform(wrapWithReplay(platform))`: drop the cron-side wrap. The framework now routes cron auto-publishes through replay automatically. Bus wrapping still needs `configureCron({ bus })` for cluster fan-out (orthogonal concern).
+
 ### `live.upload` aggregate pre-handler buffer cap raised; chunk-0 frames may be rejected with `OVERLOADED`
 
 **What changed.** Pre-fix, every concurrent upload stream got its own 16 MB pre-handler-resolution buffer with no aggregate cap. N concurrent connections opening streamId 0 with a 16 MB chunk-0 payload each could allocate `16 * N` MB of worker memory before any handler-side cap could fire. The default aggregate cap is now 64 MB across all in-flight pending uploads; chunk-0 frames that would exceed are rejected with `OVERLOADED` and the streamId is never registered.

@@ -61,7 +61,9 @@ import {
 	getAssertionCounters,
 	_resetAssertCounters,
 	_resetMiddleware,
-	_getIdentityKey
+	_getIdentityKey,
+	_resetReplayRouting,
+	WRAPPED_FOR_REPLAY
 } from '../server.js';
 import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
 import { mockWs } from './helpers/mock-ws.js';
@@ -9164,6 +9166,335 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 		const r1 = platform.sent[0].data;
 		expect(r1.unchanged).toBe(true);
 		expect(r1.version).toBe(7);
+	});
+});
+
+// - Auto-replay routing for replay: true streams ----------------------------
+//
+// Pre-fix, the user was responsible for wrapping the platform with a
+// `wrapWithReplay` proxy at every seam (createMessage AND setCronPlatform).
+// Cron-published events to a replay-eligible topic silently bypassed the
+// buffer when the user wrapped only the RPC seam (the documented pattern).
+// The fix moves replay routing into the framework: `live.stream(topic,
+// loader, { replay: true })` registers the topic; the publish surface
+// (ctx.publish + cron auto-publish) auto-routes through `platform.replay
+// .publish` when the adapter exposes it. User-managed replay proxies opt
+// out via the `WRAPPED_FOR_REPLAY` marker for back-compat.
+
+describe('auto-replay routing', () => {
+	beforeEach(() => {
+		_resetReplayRouting();
+	});
+
+	/** Build a fake platform.replay surface that records all calls. */
+	function fakeReplay() {
+		const calls = [];
+		return {
+			calls,
+			publish: async (platform, topic, event, data) => {
+				calls.push({ topic, event, data });
+				// Mirror the production extension: replay.publish does the
+				// local broadcast itself via platform.publish.
+				platform.publish(topic, event, data);
+				return true;
+			},
+			seq: async () => calls.length,
+			since: async () => calls.slice()
+		};
+	}
+
+	it('static topic: ctx.publish to a replay-eligible topic auto-routes through platform.replay.publish', async () => {
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		const stream = live.stream('cron/auto-replay', async () => [], { merge: 'crud', key: 'id', replay: true });
+		__register('cron/auto-replay', stream);
+
+		// Use a plain handler (not cron) to test ctx.publish routing.
+		const handler = live(async (ctx) => {
+			ctx.publish('cron/auto-replay', 'created', { id: 1 });
+			return 'ok';
+		});
+		__register('emit/auto-replay', handler);
+		const ws = mockWs();
+		handleRpc(ws, toArrayBuffer({ rpc: 'emit/auto-replay', id: 'r1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.replay.calls).toEqual([{ topic: 'cron/auto-replay', event: 'created', data: { id: 1 } }]);
+		// Local broadcast still happened (via the fake replay's internal platform.publish).
+		expect(platform.published).toEqual([{ topic: 'cron/auto-replay', event: 'created', data: { id: 1 }, options: undefined }]);
+	});
+
+	it('non-eligible topic: ctx.publish goes via platform.publish, NOT platform.replay.publish', async () => {
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		// No live.stream for this topic, so it's not registered.
+		const handler = live(async (ctx) => {
+			ctx.publish('not/registered', 'created', { id: 1 });
+			return 'ok';
+		});
+		__register('emit/not-registered', handler);
+		const ws = mockWs();
+		handleRpc(ws, toArrayBuffer({ rpc: 'emit/not-registered', id: 'r1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.replay.calls).toEqual([]);
+		// publish goes via platform.publish (single call).
+		expect(platform.published.length).toBeGreaterThan(0);
+	});
+
+	it('cron auto-publish to a replay-eligible topic also auto-routes', async () => {
+		_clearCron();
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		setCronPlatform(platform);
+		// Register a cron + a stream sharing the topic.
+		const stream = live.stream('cron-auto/topic', async () => [], { merge: 'set', replay: true });
+		__register('cron-auto/topic', stream);
+		const cronFn = live.cron('* * * * *', 'cron-auto/topic', async () => ({ value: 42 }));
+		__registerCron('cron-auto/cron', cronFn);
+
+		// Tick the cron; the captured platform is wired and the topic is registered.
+		await _tickCron(new Date(Date.UTC(2026, 0, 1, 0, 0, 0)));
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.replay.calls).toEqual([
+			{ topic: 'cron-auto/topic', event: 'set', data: { value: 42 } }
+		]);
+		// Local broadcast happened too (via the fake replay's internal platform.publish).
+		expect(platform.published).toEqual([
+			{ topic: 'cron-auto/topic', event: 'set', data: { value: 42 }, options: undefined }
+		]);
+	});
+
+	it('cron auto-publish to a NON-replay-eligible topic uses bare platform.publish', async () => {
+		_clearCron();
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		setCronPlatform(platform);
+		// Cron publishes but no replay: true stream registered for the topic.
+		const cronFn = live.cron('* * * * *', 'cron-bare/topic', async () => ({ value: 1 }));
+		__registerCron('cron-bare/cron', cronFn);
+
+		await _tickCron(new Date(Date.UTC(2026, 0, 1, 0, 0, 0)));
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.replay.calls).toEqual([]);
+		expect(platform.published.length).toBe(1);
+		expect(platform.published[0].topic).toBe('cron-bare/topic');
+	});
+
+	it('dev-warns ONCE per topic when replay: true is declared but platform.replay is missing', async () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const platform = mockPlatform();
+			// Intentionally NO platform.replay set.
+			const stream = live.stream('warn/no-extension', async () => [], { merge: 'crud', key: 'id', replay: true });
+			__register('warn/no-extension', stream);
+
+			const handler = live(async (ctx) => {
+				ctx.publish('warn/no-extension', 'created', { id: 1 });
+				ctx.publish('warn/no-extension', 'created', { id: 2 });
+				return 'ok';
+			});
+			__register('emit/warn', handler);
+			const ws = mockWs();
+			handleRpc(ws, toArrayBuffer({ rpc: 'emit/warn', id: 'r1', args: [] }), platform);
+			await new Promise((r) => setTimeout(r, 10));
+
+			const replayWarns = warnSpy.mock.calls
+				.map((c) => c[0])
+				.filter((m) => typeof m === 'string' && m.includes("'warn/no-extension'") && m.includes('platform.replay'));
+			expect(replayWarns.length).toBe(1);
+			expect(replayWarns[0]).toContain('Install the replay extension');
+			expect(replayWarns[0]).toContain('once per topic per session');
+			// Local broadcast still happens; replay misconfig must not block delivery.
+			expect(platform.published.length).toBe(2);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	it('user-marked WRAPPED_FOR_REPLAY platform: framework defers, no double-write', async () => {
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		// User opts out of framework auto-routing because their own proxy
+		// already routes replay-eligible publishes through replay.publish.
+		platform[WRAPPED_FOR_REPLAY] = true;
+
+		const stream = live.stream('marker/owned', async () => [], { merge: 'crud', key: 'id', replay: true });
+		__register('marker/owned', stream);
+		const handler = live(async (ctx) => {
+			ctx.publish('marker/owned', 'created', { id: 1 });
+			return 'ok';
+		});
+		__register('emit/marker', handler);
+		const ws = mockWs();
+		handleRpc(ws, toArrayBuffer({ rpc: 'emit/marker', id: 'r1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Framework did NOT call replay.publish; deferred to user proxy.
+		expect(platform.replay.calls).toEqual([]);
+		// platform.publish was still called (the user proxy's own routing
+		// would route through replay.publish, which calls platform.publish
+		// internally; in this test we don't simulate the proxy itself, so
+		// we just verify the framework didn't double-publish).
+		expect(platform.published.length).toBe(1);
+	});
+
+	it('dynamic-topic stream: replay topic is registered at first-subscribe time', async () => {
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		const stream = live.stream(
+			(ctx, roomId) => 'rooms:' + roomId,
+			async (ctx, roomId) => [],
+			{ merge: 'crud', key: 'id', replay: true }
+		);
+		__register('dyn/room', stream);
+
+		// BEFORE any subscribe: a publish to this topic does NOT auto-route
+		// (the dynamic topic hasn't been resolved yet).
+		const handler = live(async (ctx) => {
+			ctx.publish('rooms:42', 'created', { id: 1 });
+			return 'ok';
+		});
+		__register('emit/dyn', handler);
+		const ws = mockWs();
+		handleRpc(ws, toArrayBuffer({ rpc: 'emit/dyn', id: 'r1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.replay.calls).toEqual([]);
+
+		// First subscribe to the dynamic topic resolves it -> registers it.
+		platform.reset();
+		handleRpc(ws, toArrayBuffer({ rpc: 'dyn/room', id: 's1', args: [42], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Now subsequent publishes DO auto-route.
+		platform.replay.calls.length = 0;
+		platform.published.length = 0;
+		handleRpc(ws, toArrayBuffer({ rpc: 'emit/dyn', id: 'r2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(platform.replay.calls).toEqual([
+			{ topic: 'rooms:42', event: 'created', data: { id: 1 } }
+		]);
+	});
+
+	it('publishBatched fast path is bypassed for replay-eligible topics', async () => {
+		const platform = mockPlatform();
+		// Add publishBatched so the fast path is available.
+		platform.publishBatched = vi.fn((batch) => {
+			for (const m of batch) platform.publish(m.topic, m.event, m.data, m.options);
+		});
+		platform.replay = fakeReplay();
+
+		const stream = live.stream('batch/replay', async () => [], { merge: 'crud', key: 'id', replay: true });
+		__register('batch/replay', stream);
+		const handler = live(async (ctx) => {
+			ctx.publish('batch/replay', 'created', { id: 1 });
+			ctx.publish('batch/replay', 'created', { id: 2 });
+			return 'ok';
+		});
+		__register('emit/batch', handler);
+		const ws = mockWs();
+		handleRpc(ws, toArrayBuffer({ rpc: 'emit/batch', id: 'r1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Both events went through replay (per-call, not batched).
+		expect(platform.replay.calls.length).toBe(2);
+		// publishBatched should NOT have been called for the replay-eligible
+		// publishes -- the per-call replay.publish path stamps the seq
+		// envelope individually.
+		expect(platform.publishBatched).not.toHaveBeenCalled();
+	});
+
+	it('non-eligible topics still use the publishBatched fast path', async () => {
+		const platform = mockPlatform();
+		platform.publishBatched = vi.fn((batch) => {
+			for (const m of batch) platform.publish(m.topic, m.event, m.data, m.options);
+		});
+		platform.replay = fakeReplay();
+		// Note: NO live.stream registered for 'batch/no-replay', so it's not eligible.
+
+		const handler = live(async (ctx) => {
+			ctx.publish('batch/no-replay', 'created', { id: 1 });
+			ctx.publish('batch/no-replay', 'created', { id: 2 });
+			return 'ok';
+		});
+		__register('emit/batch-no-replay', handler);
+		const ws = mockWs();
+		handleRpc(ws, toArrayBuffer({ rpc: 'emit/batch-no-replay', id: 'r1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Replay was not consulted.
+		expect(platform.replay.calls).toEqual([]);
+		// publishBatched fast path engaged.
+		expect(platform.publishBatched).toHaveBeenCalledTimes(1);
+	});
+
+	it('synchronous throw from replay.publish falls back to platform.publish (no event lost)', async () => {
+		const platform = mockPlatform();
+		platform.replay = {
+			publish: () => { throw new Error('redis exploded'); },
+			seq: async () => 0,
+			since: async () => []
+		};
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const stream = live.stream('throw/sync', async () => [], { merge: 'crud', key: 'id', replay: true });
+			__register('throw/sync', stream);
+
+			const handler = live(async (ctx) => {
+				ctx.publish('throw/sync', 'created', { id: 1 });
+				return 'ok';
+			});
+			__register('emit/throw-sync', handler);
+			const ws = mockWs();
+			handleRpc(ws, toArrayBuffer({ rpc: 'emit/throw-sync', id: 'r1', args: [] }), platform);
+			await new Promise((r) => setTimeout(r, 10));
+
+			// Local broadcast still happened (sync-throw fallback).
+			expect(platform.published.length).toBe(1);
+			expect(platform.published[0].topic).toBe('throw/sync');
+			// Dev warn surfaces the throw so the misconfig is visible.
+			expect(warnSpy.mock.calls.some((c) => typeof c[0] === 'string' && c[0].includes('threw synchronously'))).toBe(true);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	it('async rejection from replay.publish surfaces as a dev warn but does not break the publisher', async () => {
+		const platform = mockPlatform();
+		platform.replay = {
+			publish: async (p, topic, event, data) => {
+				p.publish(topic, event, data);
+				throw new Error('redis hiccup');
+			},
+			seq: async () => 0,
+			since: async () => []
+		};
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const stream = live.stream('throw/async', async () => [], { merge: 'crud', key: 'id', replay: true });
+			__register('throw/async', stream);
+
+			const handler = live(async (ctx) => {
+				ctx.publish('throw/async', 'created', { id: 1 });
+				return 'ok';
+			});
+			__register('emit/throw-async', handler);
+			const ws = mockWs();
+			handleRpc(ws, toArrayBuffer({ rpc: 'emit/throw-async', id: 'r1', args: [] }), platform);
+			await new Promise((r) => setTimeout(r, 10));
+
+			expect(platform.published.length).toBe(1);
+			expect(warnSpy.mock.calls.some((c) => typeof c[0] === 'string' && c[0].includes('failed'))).toBe(true);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	it('exports a stable WRAPPED_FOR_REPLAY symbol via Symbol.for', () => {
+		expect(typeof WRAPPED_FOR_REPLAY).toBe('symbol');
+		expect(WRAPPED_FOR_REPLAY).toBe(Symbol.for('svelte-realtime.wrapped-for-replay'));
 	});
 });
 

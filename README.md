@@ -2911,6 +2911,28 @@ Replay requires the replay extension from `svelte-adapter-uws-extensions`. When 
 
 With adapter 0.4.0+, the replay end marker sends `{ reqId }` (replay complete) or `{ reqId, truncated: true }` (cache miss). When truncated, the client automatically resets its sequence number and triggers a full refetch.
 
+#### Auto-routing: `replay: true` is the only declaration you need
+
+Once `platform.replay` is exposed (the standard install pattern is `platform.replay = createReplay(redisClient)` in your hooks), the framework auto-routes every publish to a replay-eligible topic through `platform.replay.publish` regardless of which seam the publisher sits on. `live.stream(topic, loader, { replay: true })` registers the topic at declaration time; static topics are registered up-front and dynamic topics are registered at first-subscribe time when they resolve.
+
+This applies to every framework publish surface — `ctx.publish` from RPC handlers, cron auto-publish (`live.cron('* * * * * *', topic, async (ctx) => result)` where `result !== undefined`), and `ctx.publish` from inside cron handlers — without the user wiring anything beyond `replay: true`. Pre-fix, the user was responsible for wrapping the platform with a `wrapWithReplay` proxy at every seam (the docs showed it on `createMessage` only; cron was a separate `setCronPlatform(platform)` capture, and cron-published events silently bypassed the buffer because the wrap was missing there). The auto-routing makes that asymmetry impossible by construction.
+
+If you need to keep your own platform-wrapping proxy (custom topic patterns, additional intercepts), set `[WRAPPED_FOR_REPLAY] = true` on the proxy:
+
+```js
+import { WRAPPED_FOR_REPLAY } from 'svelte-realtime/server';
+
+function wrapWithReplay(p) {
+  const wrapped = new Proxy(p, { /* ...your intercepts... */ });
+  wrapped[WRAPPED_FOR_REPLAY] = true; // tell the framework "I own replay routing"
+  return wrapped;
+}
+```
+
+The framework defers entirely when this marker is present (no double-write to Redis). Without the marker, the framework's auto-routing runs alongside the user proxy's routing and will issue duplicate Redis writes — explicit opt-out is required.
+
+If `replay: true` is declared but `platform.replay` is never set, dev-mode logs a one-time `console.warn` per topic on the first publish, with the install pointer for the replay extension. Production runs silently (no per-publish overhead) and the local broadcast still happens.
+
 ---
 
 ## Redis multi-instance
