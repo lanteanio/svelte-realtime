@@ -4237,6 +4237,106 @@ describe('.when(condition)', () => {
 	});
 });
 
+// - cleanup() resets session-resume cursors ---------------------------------
+
+describe('cleanup resets session-resume cursors', () => {
+	it('does not send stale seq on re-subscribe after deferred cleanup', async () => {
+		const store = __stream('resume/seq', { merge: 'crud', key: 'id', replay: true });
+		const unsub = store.subscribe(() => {});
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		expect(first.seq).toBeUndefined();
+		simulateRpcResponse(first.id, {
+			ok: true, data: [{ id: 1 }], topic: 'resume-seq', merge: 'crud', key: 'id', seq: 42
+		});
+
+		unsub();
+		await new Promise((r) => queueMicrotask(r));
+
+		sendQueuedFn.mockClear();
+		const unsub2 = store.subscribe(() => {});
+		await flush();
+		const second = sendQueuedFn.mock.calls[0][0];
+		expect(second.seq).toBeUndefined();
+		unsub2();
+	});
+
+	it('repopulates currentValue when server returns empty replay after re-subscribe', async () => {
+		const store = __stream('resume/empty-replay', { merge: 'crud', key: 'id', replay: true });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, {
+			ok: true, data: [{ id: 1, text: 'a' }], topic: 'resume-empty', merge: 'crud', key: 'id', seq: 5
+		});
+
+		expect(values[values.length - 1]).toEqual([{ id: 1, text: 'a' }]);
+
+		unsub();
+		await new Promise((r) => queueMicrotask(r));
+
+		sendQueuedFn.mockClear();
+		const values2 = [];
+		const unsub2 = store.subscribe((v) => values2.push(v));
+		await flush();
+
+		expect(values2[0]).toBeUndefined();
+		const second = sendQueuedFn.mock.calls[0][0];
+		expect(second.seq).toBeUndefined();
+		simulateRpcResponse(second.id, {
+			ok: true, data: [{ id: 1, text: 'a' }, { id: 2, text: 'b' }], topic: 'resume-empty', merge: 'crud', key: 'id', seq: 7
+		});
+
+		expect(values2[values2.length - 1]).toEqual([{ id: 1, text: 'a' }, { id: 2, text: 'b' }]);
+	});
+
+	it('does not send stale version on re-subscribe', async () => {
+		const store = __stream('resume/version', { merge: 'set' });
+		const unsub = store.subscribe(() => {});
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, {
+			ok: true, data: { hello: 'world' }, topic: 'resume-version', merge: 'set', version: 'v1'
+		});
+
+		unsub();
+		await new Promise((r) => queueMicrotask(r));
+
+		sendQueuedFn.mockClear();
+		const unsub2 = store.subscribe(() => {});
+		await flush();
+		const second = sendQueuedFn.mock.calls[0][0];
+		expect(second.version).toBeUndefined();
+		unsub2();
+	});
+
+	it('does not send stale schemaVersion on re-subscribe', async () => {
+		const store = __stream('resume/schema', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		expect(first.schemaVersion).toBeUndefined();
+		simulateRpcResponse(first.id, {
+			ok: true, data: [{ id: 1 }], topic: 'resume-schema', merge: 'crud', key: 'id', schemaVersion: 3
+		});
+
+		unsub();
+		await new Promise((r) => queueMicrotask(r));
+
+		sendQueuedFn.mockClear();
+		const unsub2 = store.subscribe(() => {});
+		await flush();
+		const second = sendQueuedFn.mock.calls[0][0];
+		expect(second.schemaVersion).toBeUndefined();
+		unsub2();
+	});
+});
+
 // - dedup key collision (null vs 'null') -------------------------------------
 
 describe('__rpc() dedup key collision', () => {

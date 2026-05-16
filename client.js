@@ -2562,6 +2562,23 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_history = [];
 		_historyIndex = -1;
 		_reconnectAttempts = 0;
+		// Reset session-resume cursors. Cleanup means the stream is being
+		// abandoned (last subscriber gone, deferred-cleanup microtask fired);
+		// the next subscribe must start fresh, not falsely resume from
+		// whatever seq / version / cursor the prior session left behind.
+		// Without these resets, an unmount/remount cycle (e.g. browser back
+		// then forward) sends a stale `seq` to the server, the server
+		// responds with a since-seq delta (often empty), and the client's
+		// reset `currentValue = undefined` never gets repopulated -- the
+		// store stays undefined and any `{#if $store === undefined}` spinner
+		// hangs forever. In-session WS reconnects do NOT go through cleanup,
+		// so the replay-buffer gap-fill optimization is preserved for those.
+		_lastSeq = null;
+		_lastVersion = undefined;
+		_schemaVersion = initialSchemaVersion;
+		_cursor = null;
+		_hasMore = false;
+		_loadingMore = false;
 		_devtoolsStream(path, null, 0, merge);
 	}
 

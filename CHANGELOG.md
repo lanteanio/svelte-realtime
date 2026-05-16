@@ -5,6 +5,14 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.5.0.1] - 2026-05-16
+
+### Fixed
+
+- **Client stream `cleanup()` now resets session-resume cursors (`_lastSeq`, `_lastVersion`, `_schemaVersion`, `_cursor`, `_hasMore`, `_loadingMore`) alongside `currentValue`.** Pre-fix, when a dynamic-topic stream's last subscriber unsubscribed (e.g. a SvelteKit page unmounted), the deferred-cleanup microtask reset `currentValue = undefined` and `store.set(undefined)` but left the resume cursors set to their prior-session values. On the next mount (e.g. browser back / forward to the same page) the cached store's first subscribe sent the stale `seq` to the server, the server's `_executeStreamRpc` treated it as a session-resume, ran `platform.replay.since(topic, clientSeq)` which legitimately returned an empty array (no events occurred between unmount and remount on a quiet topic), and responded `{ data: [], replay: true, seq: currentSeq }`. The client's replay branch then looped over the empty array (zero `_applyMerge` calls) and called `store.set(currentValue)` -- but `currentValue` was still `undefined` from cleanup. Any `{#if $store === undefined}` spinner hung forever. Even when events DID occur during the unmount window (replay returned non-empty), the result was wrong: the user got only the delta since their last seen seq, not the full snapshot they expected on remount. The fix resets all session-resume state inside `cleanup()` so the next subscribe is genuinely fresh. In-session WS reconnects do NOT go through `cleanup()` (the reconnect path at the `status === 'open'` handler keeps `_lastSeq` so the replay-buffer gap-fill works for sleep/wake and transient drops), so the optimization is preserved for the cases it was designed for. Reproducer: open a board page with `{ replay: true }` streams, browser-back, click the same board link -- pre-fix hangs on spinner forever, post-fix loads cleanly.
+
 ## [0.5.0-next.22] - 2026-05-16
 
 ### Added
