@@ -455,6 +455,21 @@ export interface HandleRpcOptions {
 	 * Use for error reporting (Sentry, logging, etc.).
 	 */
 	onError?(path: string, error: unknown, ctx: LiveContext<any>): void;
+
+	/**
+	 * Maximum nesting depth allowed in an inbound RPC envelope. Envelopes
+	 * whose parsed JSON has any descendant deeper than this are dropped at
+	 * ingress (the same path as malformed JSON). Defense in depth against
+	 * downstream handlers / instrumentation that recursively walk the
+	 * parsed object and would stack-overflow on pathological depth.
+	 *
+	 * The adapter's `maxPayloadLength` (default 1 MB) is the primary cap
+	 * - it bounds the bytes `JSON.parse` ever sees. This is a second
+	 * line of defense for the post-parse shape.
+	 *
+	 * @default 64
+	 */
+	maxEnvelopeDepth?: number;
 }
 
 /**

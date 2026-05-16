@@ -216,6 +216,62 @@ describe('handleRpc()', () => {
 		expect(handleRpc(ws, data, platform)).toBe(false);
 	});
 
+	describe('envelope depth cap', () => {
+		function nested(depth) {
+			let inner = { rpc: 'x/y', id: 'i', args: [] };
+			for (let i = 0; i < depth; i++) inner = { wrap: inner };
+			return inner;
+		}
+
+		it('accepts shallow RPC envelopes', () => {
+			const handler = live(async () => 'ok');
+			__register('x/y', handler);
+			const data = toArrayBuffer({ rpc: 'x/y', id: 'i', args: [{ a: { b: { c: 1 } } }] });
+			expect(handleRpc(ws, data, platform)).toBe(true);
+		});
+
+		it('rejects envelopes deeper than the default 64-level cap', () => {
+			// 200-deep wrapper rejects at ingress.
+			const data = toArrayBuffer(nested(200));
+			expect(handleRpc(ws, data, platform)).toBe(false);
+		});
+
+		it('honors a custom maxEnvelopeDepth (lower)', () => {
+			const handler = live(async () => 'ok');
+			__register('shallow/fn', handler);
+			const flat = { rpc: 'shallow/fn', id: 'i', args: [{ a: { b: { c: { d: 1 } } } }] };
+			expect(handleRpc(ws, toArrayBuffer(flat), platform, { maxEnvelopeDepth: 3 })).toBe(false);
+		});
+
+		it('honors a custom maxEnvelopeDepth (higher)', () => {
+			const handler = live(async () => 'ok');
+			__register('x/y', handler);
+			// Top-level RPC shape with a 100-deep payload nested into args.
+			// Default cap (64) rejects; raised cap (200) accepts.
+			let payload = { leaf: true };
+			for (let i = 0; i < 100; i++) payload = { wrap: payload };
+			const data = toArrayBuffer({ rpc: 'x/y', id: 'i', args: [payload] });
+			expect(handleRpc(ws, data, platform)).toBe(false);
+			expect(handleRpc(ws, data, platform, { maxEnvelopeDepth: 200 })).toBe(true);
+		});
+
+		it('does not stack-overflow on pathologically deep input (iterative check)', () => {
+			// 100k-deep envelope. The iterative depth checker bounds its own
+			// memory at the depth-walked stack; a recursive checker would
+			// stack-overflow here.
+			let deep = { rpc: 'x/y', id: 'i', args: [] };
+			for (let i = 0; i < 100_000; i++) deep = { w: deep };
+			// JSON.stringify itself recurses, so use a manual encode for very
+			// deep shapes. Build the JSON as a string instead.
+			let json = '{"rpc":"x/y","id":"i","args":[]}';
+			for (let i = 0; i < 5000; i++) json = '{"w":' + json + '}';
+			const buf = new TextEncoder().encode(json).buffer;
+			// Should not throw - returns false (rejected by depth cap).
+			expect(() => handleRpc(ws, buf, platform)).not.toThrow();
+			expect(handleRpc(ws, buf, platform)).toBe(false);
+		});
+	});
+
 	it('returns true and responds for valid RPC calls', async () => {
 		const handler = live(async (ctx, text) => ({ id: 1, text }));
 		__register('chat/send', handler);
@@ -3227,6 +3283,87 @@ describe('ctx.publish() reserves the `__` prefix', () => {
 	});
 });
 
+// - userId validation across signal / push / enableSignals --------------
+
+describe('userId validation for system-topic builders', () => {
+	beforeEach(() => { _resetMiddleware(); });
+
+	let _sigCounter = 0;
+	function callSignal(userId, eventName = 'evt', data = {}) {
+		const path = 'uidval/sig' + (++_sigCounter);
+		const handler = live(async (ctx) => {
+			ctx.signal(userId, eventName, data);
+			return 'ok';
+		});
+		__register(path, handler);
+		const ws = mockWs();
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: path, id: 'sg', args: [] }), platform);
+		return new Promise((r) => setTimeout(r, 10)).then(() => ({ ws, platform }));
+	}
+
+	it('ctx.signal rejects empty / non-string / oversized / control-char userIds', async () => {
+		for (const bad of ['', null, 42, {}, 'a'.repeat(300), 'has\nnewline', 'has\rcr', 'has"quote', 'has\\backslash', 'has nul', 'hasdel']) {
+			const { platform } = await callSignal(bad);
+			const reply = platform.sent.find((m) => m.event === 'sg');
+			expect(reply?.data?.ok, `should reject ${JSON.stringify(bad)}`).toBe(false);
+			expect(reply?.data?.code).toBe('INVALID_USER_ID');
+		}
+	});
+
+	it('ctx.signal accepts a clean userId', async () => {
+		const { platform } = await callSignal('user-123');
+		const sigPublish = platform.published.find((p) => p.topic === '__signal:user-123');
+		expect(sigPublish).toBeDefined();
+		expect(sigPublish.event).toBe('evt');
+	});
+
+	it('ctx.signal accepts non-ASCII userId (parity with adapter allowNonAsciiTopics)', async () => {
+		const { platform } = await callSignal('user-Jose-é');
+		const sigPublish = platform.published.find((p) => p.topic === '__signal:user-Jose-é');
+		expect(sigPublish).toBeDefined();
+	});
+
+	it('pushHooks.open throws on control-char / quote / oversized userId', () => {
+		const platform = mockPlatform();
+		for (const bad of ['has\nnewline', 'has"quote', 'a'.repeat(300)]) {
+			// default identify reads userData.user_id / userData.userId
+			const ws = mockWs({ user_id: bad });
+			expect(() => pushHooks.open(ws, { platform }), `should reject ${JSON.stringify(bad)}`).toThrow(/pushHooks\.open/);
+		}
+	});
+
+	it('pushHooks.open still skips silently for null / empty (anonymous)', () => {
+		const platform = mockPlatform();
+		expect(() => pushHooks.open(mockWs({ user_id: null }), { platform })).not.toThrow();
+		expect(() => pushHooks.open(mockWs({ user_id: '' }), { platform })).not.toThrow();
+		expect(() => pushHooks.open(mockWs({ user_id: undefined }), { platform })).not.toThrow();
+	});
+
+	it('pushHooks.open still throws on non-string types', () => {
+		const platform = mockPlatform();
+		expect(() => pushHooks.open(mockWs({ user_id: 42 }), { platform })).toThrow(/must be a string/);
+	});
+
+	it('enableSignals throws on control-char / quote / oversized userId in userData', () => {
+		for (const bad of ['has\nnewline', 'has"quote', 'a'.repeat(300)]) {
+			const ws = mockWs({ id: bad });
+			expect(() => enableSignals(ws), `should reject ${JSON.stringify(bad)}`).toThrow(/enableSignals/);
+		}
+	});
+
+	it('enableSignals silently skips for null / undefined (anonymous connection)', () => {
+		expect(() => enableSignals(mockWs({ id: null }))).not.toThrow();
+		expect(() => enableSignals(mockWs({ id: undefined }))).not.toThrow();
+	});
+
+	it('enableSignals accepts a clean userId and subscribes to __signal:<id>', () => {
+		const ws = mockWs({ id: 'user-42' });
+		enableSignals(ws);
+		expect(ws.getTopics()).toContain('__signal:user-42');
+	});
+});
+
 // - _getIdentityKey reads id / user_id / userId -------------------------
 
 describe('rate-limit identity probes id, user_id, and userId', () => {
@@ -4140,6 +4277,63 @@ describe('live.room()', () => {
 		expect(resp.data.ok).toBe(false);
 		expect(resp.data.code).toBe('UNAUTHENTICATED');
 		expect(resp.data.error).toBe('Authentication required');
+	});
+
+	it('stream RPC routes through platform.subscribe so the adapter sees the subscription', async () => {
+		// Regression for the codex H1 audit finding: the stream RPC path
+		// must call `platform.subscribe(ws, topic)` (atomic gate + ws.subscribe
+		// + cap + adapter-side state update) rather than raw `ws.subscribe`.
+		// Without this, the adapter's `MAX_SUBSCRIPTIONS_PER_CONNECTION`
+		// cap is bypassed and stream-RPC subscriptions are invisible to
+		// the close-hook's `ctx.subscriptions` set and to `totalSubscriptions`.
+		const stream = live.stream('acct/feed', async () => [{ id: 1 }]);
+		__register('acct/feed', stream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		const subscribeCalls = [];
+		const origSubscribe = platform.subscribe;
+		platform.subscribe = async (subWs, topic) => {
+			subscribeCalls.push({ ws: subWs, topic });
+			return await origSubscribe(subWs, topic);
+		};
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'acct/feed', id: 'p1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(subscribeCalls).toHaveLength(1);
+		expect(subscribeCalls[0].topic).toBe('acct/feed');
+		expect(subscribeCalls[0].ws).toBe(ws);
+		// The ws ended up subscribed (atomic subscribe via platform.subscribe).
+		expect(ws.getTopics()).toContain('acct/feed');
+	});
+
+	it('platform.subscribe returning a denial blocks the loader, __onSubscribe, and the response is the denial', async () => {
+		// Regression: platform.subscribe denial path mirrors the prior
+		// platform.checkSubscribe denial semantics.
+		let loaderRan = false;
+		const room = live.room({
+			topic: (ctx, roomId) => 'cap-room:' + roomId,
+			init: async () => { loaderRan = true; return []; },
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			topicArgs: 1
+		});
+		__register('cap-room/__data', room.__dataStream);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		platform.subscribe = async () => 'RATE_LIMITED';
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'cap-room/__data', id: 'r1', args: ['x'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		const resp = platform.sent.find((s) => s.topic === '__rpc' && s.event === 'r1');
+		expect(resp.data.ok).toBe(false);
+		expect(resp.data.code).toBe('RATE_LIMITED');
+		expect(loaderRan).toBe(false);
+		const joins = platform.published.filter((p) => p.event === 'join');
+		expect(joins).toHaveLength(0);
+		expect(ws.getTopics().length).toBe(0);
 	});
 
 	it('platform without checkSubscribe degrades to current behavior (older adapter)', async () => {

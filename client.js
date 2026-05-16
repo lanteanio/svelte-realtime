@@ -4,6 +4,7 @@ import { writable, readable } from 'svelte/store';
 import { assert } from './shared/assert.js';
 export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 import { mergeKeyField, rebuildIndex } from './shared/merge.js';
+import { sanitizeRowData } from './shared/safe-assign.js';
 // Namespace import lets .rune() access fromStore (Svelte 5 only) without
 // breaking the module under Svelte 4 - missing exports become undefined,
 // not module-load errors.
@@ -83,7 +84,10 @@ export class RpcError extends Error {
 	}
 }
 
-/** Incrementing counter for short correlation IDs, prefixed to avoid cross-tab collision */
+// Incrementing counter for short correlation IDs, prefixed to avoid cross-tab
+// collision. Math.random is the right primitive: this prefix is response-routing
+// bookkeeping, not a session token or any value that crosses a trust boundary.
+// Not security-relevant; collision-avoidance only.
 const _idPrefix = Math.random().toString(36).slice(2, 6);
 let idCounter = 0;
 
@@ -1938,7 +1942,17 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 *     true in all other paths.
 	 */
 	function _applyMergeFn(value, index, envelope, optimisticKeys) {
-		const { event, data } = envelope;
+		const { event } = envelope;
+		// Defense-in-depth: strip prototype-pollution keys (`__proto__`,
+		// `constructor`, `prototype`) from envelope data at ingress for
+		// keyed merge strategies. The framework does not currently spread
+		// or `Object.assign` stored items, so the live exploit surface is
+		// host-app code that later iterates the array. The sanitizer is a
+		// no-op (zero allocation) when the danger keys are absent, which
+		// is every legitimate envelope.
+		const data = (merge === 'crud' || merge === 'presence' || merge === 'cursor')
+			? sanitizeRowData(envelope.data)
+			: envelope.data;
 
 		if (event === 'refreshed') {
 			value = data;
@@ -2606,6 +2620,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 						_statusStore.set('reconnecting');
 						if (_reconnectTimer) clearTimeout(_reconnectTimer);
 						let delay;
+						// Reconnect jitter: spread a fleet's reconnect attempts across the
+						// window so a server restart does not get a thundering-herd retry
+						// spike. Math.random is the right primitive here - jitter does not
+						// need crypto-quality entropy. Not security-relevant.
 						if (_reconnectAttempts < 2) {
 							delay = 20 + Math.floor(Math.random() * 80);
 						} else {

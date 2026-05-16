@@ -372,6 +372,138 @@ export const helperFn = () => {};
 
 		expect(warns.some(w => w.includes("'helperFn'") && w.includes('not wrapped in live()'))).toBe(true);
 	});
+
+	describe('no-_guard build-time nudge', () => {
+		function captureWarns(fn) {
+			const warns = [];
+			const orig = console.warn;
+			console.warn = (...args) => warns.push(args.join(' '));
+			try { fn(); } finally { console.warn = orig; }
+			return warns;
+		}
+
+		it('warns when a module has live() exports but no _guard', () => {
+			setup({
+				'open.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, msg) => {});
+export const sendBeacon = live(async (ctx, beacon) => {});
+`
+			});
+
+			const plugin = createPlugin();
+			const warns = captureWarns(() => plugin.load('\0live:open', { ssr: false }));
+			expect(warns.some(w => w.includes('but no _guard'))).toBe(true);
+			expect(warns.some(w => w.includes('live.public'))).toBe(true);
+			expect(warns.some(w => w.includes('realtime-allow-public'))).toBe(true);
+		});
+
+		it('does not warn when _guard is exported', () => {
+			setup({
+				'gated.js': `
+import { live, guard } from 'svelte-realtime/server';
+export const _guard = guard((ctx) => ctx.user != null);
+export const send = live(async (ctx, msg) => {});
+`
+			});
+
+			const plugin = createPlugin();
+			const warns = captureWarns(() => plugin.load('\0live:gated', { ssr: false }));
+			expect(warns.some(w => w.includes('but no _guard'))).toBe(false);
+		});
+
+		it('does not warn when the module uses live.public()', () => {
+			setup({
+				'public.js': `
+import { live } from 'svelte-realtime/server';
+export const serverTime = live.public(async () => ({ now: Date.now() }));
+`
+			});
+
+			const plugin = createPlugin();
+			const warns = captureWarns(() => plugin.load('\0live:public', { ssr: false }));
+			expect(warns.some(w => w.includes('but no _guard'))).toBe(false);
+		});
+
+		it('does not warn when the module has a // realtime-allow-public comment', () => {
+			setup({
+				'opted-out.js': `
+// realtime-allow-public
+import { live } from 'svelte-realtime/server';
+export const ping = live(async () => 'pong');
+export const echo = live(async (ctx, msg) => msg);
+`
+			});
+
+			const plugin = createPlugin();
+			const warns = captureWarns(() => plugin.load('\0live:opted-out', { ssr: false }));
+			expect(warns.some(w => w.includes('but no _guard'))).toBe(false);
+		});
+
+		it('also accepts block-style /* realtime-allow-public */ comments', () => {
+			setup({
+				'opted-out-block.js': `
+/* realtime-allow-public */
+import { live } from 'svelte-realtime/server';
+export const ping = live(async () => 'pong');
+`
+			});
+
+			const plugin = createPlugin();
+			const warns = captureWarns(() => plugin.load('\0live:opted-out-block', { ssr: false }));
+			expect(warns.some(w => w.includes('but no _guard'))).toBe(false);
+		});
+
+		it('does not warn when the module has only live.stream exports', () => {
+			// Stream-only modules without a guard get the warning too -
+			// streams are still authenticated-but-unauthorized handlers.
+			setup({
+				'stream-only.js': `
+import { live } from 'svelte-realtime/server';
+export const items = live.stream('items:*', async (ctx) => []);
+`
+			});
+
+			const plugin = createPlugin();
+			const warns = captureWarns(() => plugin.load('\0live:stream-only', { ssr: false }));
+			expect(warns.some(w => w.includes('but no _guard'))).toBe(true);
+		});
+
+		it('warning names both opt-out paths and the URL', () => {
+			setup({
+				'verbose.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async () => {});
+`
+			});
+
+			const plugin = createPlugin();
+			const warns = captureWarns(() => plugin.load('\0live:verbose', { ssr: false }));
+			const w = warns.find(w => w.includes('but no _guard'));
+			expect(w).toBeDefined();
+			expect(w).toContain('_guard = guard(');
+			expect(w).toContain('live.public(');
+			expect(w).toContain('realtime-allow-public');
+			expect(w).toContain('https://svti.me/guard');
+		});
+
+		it('mixed-shape module: one live() + one live.public() still warns the live()-only handler', () => {
+			// With ANY live.public() in the module, we suppress per-module.
+			// The audit's design intent: live.public() is module-level intent
+			// signal; per-handler discipline is the dev's call.
+			setup({
+				'mixed.js': `
+import { live } from 'svelte-realtime/server';
+export const serverTime = live.public(async () => ({ now: Date.now() }));
+export const send = live(async (ctx, msg) => {});
+`
+			});
+
+			const plugin = createPlugin();
+			const warns = captureWarns(() => plugin.load('\0live:mixed', { ssr: false }));
+			expect(warns.some(w => w.includes('but no _guard'))).toBe(false);
+		});
+	});
 });
 
 // - defineTopics static-analysis warning ------------------------------------

@@ -28,6 +28,18 @@ const AGGREGATE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.aggregate\s*\(/g
 // path. Without this, exports declared as `export const x = live.lock(...)`
 // would not be recognised and the client could not call them.
 const LOCK_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.lock\s*\(/g;
+// `live.public(...)` is a runtime no-op wrapper (returns the handler
+// unchanged) whose only job is to declare intent: "this RPC is
+// intentionally public; do not warn about a missing _guard." The
+// codegen treats it identically to `live(...)` for emission and uses
+// the presence of any `live.public` export as a module-level suppression
+// for the "no _guard" build-time warning.
+const PUBLIC_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.public\s*\(/g;
+// Module-level escape hatch: a `// realtime-allow-public` comment
+// anywhere in the source suppresses the "no _guard" warning for the
+// whole module. Use this when several or all live() exports in a
+// module are intentionally public.
+const PUBLIC_COMMENT_RE = /(?:\/\/|\/\*)\s*realtime-allow-public\b/;
 const IDEMPOTENT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.idempotent\s*\(/g;
 
 const _validSegmentReVite = /^[a-zA-Z0-9_]+$/;
@@ -1074,9 +1086,18 @@ function _generateClientStubs(filePath, modulePath, dir) {
 
 	// Detect live() exports
 	let match;
+	// Track whether any live.public() export is present in the module - used
+	// alongside the `// realtime-allow-public` comment to suppress the
+	// "no _guard" build-time warning.
+	let hasPublicExport = false;
+	PUBLIC_EXPORT_RE.lastIndex = 0;
+	if (PUBLIC_EXPORT_RE.exec(source) !== null) {
+		hasPublicExport = true;
+	}
+	const hasPublicComment = PUBLIC_COMMENT_RE.test(source);
 	// live() and the wrappers that pass through unchanged on the client
-	// (validated/lock/idempotent/rateLimit) all emit the same __rpc line.
-	for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE]) {
+	// (validated/lock/idempotent/rateLimit/public) all emit the same __rpc line.
+	for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE, PUBLIC_EXPORT_RE]) {
 		re.lastIndex = 0;
 		while ((match = re.exec(source)) !== null) {
 			const name = match[1];
@@ -1277,6 +1298,30 @@ function _generateClientStubs(filePath, modulePath, dir) {
 				`[svelte-realtime] ${dir}/${modulePath} has no live() or live.stream() exports\n  See: https://svti.me/start`
 			);
 		}
+	}
+
+	// Build-time nudge: a module with live() exports but no `_guard`
+	// is opting into the framework's default-allow posture (every
+	// authenticated WS can invoke any registered handler). That is the
+	// correct default for "Hello, world" but is a foot-gun for apps that
+	// forget to add an auth gate.
+	//
+	// Suppression:
+	//   - export at least one `live.public(...)` (per-export intent, recommended)
+	//   - add `// realtime-allow-public` anywhere in the source (module-wide opt-out)
+	//   - export `_guard = guard(...)` (the framework auth gate)
+	//
+	// The warning is a soft nudge, not a hard error - runtime semantics
+	// are unchanged.
+	if (exportedNames.size > 0 && !hasGuard && !hasPublicExport && !hasPublicComment) {
+		console.warn(
+			`[svelte-realtime] ${dir}/${modulePath} has live() / live.stream() exports but no _guard. ` +
+			`Every authenticated WS can invoke any handler in this module. ` +
+			`Add 'export const _guard = guard(...)' to gate access, ` +
+			`mark individual handlers as 'live.public(...)' to declare them intentionally open, ` +
+			`or add '// realtime-allow-public' to the file to suppress this warning.\n` +
+			`  See: https://svti.me/guard`
+		);
 	}
 
 	const importLine = imports.size > 0

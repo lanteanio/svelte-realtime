@@ -1,10 +1,53 @@
 // @ts-check
 import { assert, wireAssertionMetrics } from './shared/assert.js';
+import { safeAssign as _safeAssignSnapshot } from './shared/safe-assign.js';
 export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 
 const textDecoder = new TextDecoder();
 const _validPathRe = /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)+$/;
 const _validSegmentRe = /^[a-zA-Z0-9_]+$/;
+
+/**
+ * Max accepted length for a userId that flows into a topic name via
+ * `__signal:${userId}` / `__push:${userId}` and similar server-built
+ * system topics. 256 chars is generous for any realistic identifier
+ * (UUIDs, opaque session tokens, prefixed-by-tenant ids) without
+ * bloating log lines or stressing the adapter's wire-topic budget.
+ */
+const _MAX_USER_ID_LENGTH = 256;
+
+/**
+ * Validate that a userId is safe to interpolate into a system topic
+ * name. Returns `null` if valid, otherwise a short error reason string
+ * suitable for embedding in a thrown LiveError / Error message.
+ *
+ * Server-side helpers that build `__signal:${userId}` / `__push:${userId}`
+ * topic names from caller-supplied identifiers go through this gate so
+ * malformed identifiers (control bytes, CR/LF, NUL, quotes, backslash,
+ * empty, non-string, oversized) cannot poison the topic namespace,
+ * corrupt log lines, or escape the system-topic prefix into the
+ * user-topic space. Non-ASCII bytes are allowed for parity with the
+ * adapter's `allowNonAsciiTopics` opt-in; the server-side builder
+ * trusts identifier shapes set by upgrade hooks.
+ *
+ * @param {unknown} userId
+ * @returns {string | null}
+ */
+function _validUserIdReason(userId) {
+	if (typeof userId !== 'string') return 'userId must be a string (got ' + (typeof userId) + ')';
+	if (userId.length === 0) return 'userId must be non-empty';
+	if (userId.length > _MAX_USER_ID_LENGTH) return 'userId exceeds maximum length ' + _MAX_USER_ID_LENGTH + ' (got ' + userId.length + ')';
+	for (let i = 0; i < userId.length; i++) {
+		const c = userId.charCodeAt(i);
+		// Reject ASCII C0 controls (0x00-0x1F), DEL (0x7F), and the two
+		// characters the adapter's wire-topic validator forbids:
+		// 0x22 (double-quote), 0x5C (backslash).
+		if (c < 0x20 || c === 0x7F || c === 0x22 || c === 0x5C) {
+			return 'userId contains invalid character at index ' + i + ' (charCode ' + c + ')';
+		}
+	}
+	return null;
+}
 
 // - Bounded-by-default capacity caps (server side) -------------------------
 // Every per-process Map / Set with caller-driven growth is bounded. Numbers
@@ -1182,7 +1225,11 @@ function _getCtxHelpers(platform) {
 			publish,
 			throttle: (topic, event, data, ms) => _throttlePublish(platform, topic, event, data, ms),
 			debounce: (topic, event, data, ms) => _debouncePublish(platform, topic, event, data, ms),
-			signal: (userId, event, data) => platform.publish('__signal:' + userId, event, data),
+			signal: (userId, event, data) => {
+				const reason = _validUserIdReason(userId);
+				if (reason !== null) throw new LiveError('INVALID_USER_ID', 'ctx.signal: ' + reason);
+				return platform.publish('__signal:' + userId, event, data);
+			},
 			batch: (messages) => platform.batch ? platform.batch(messages) : messages.forEach((m) => publish(m.topic, m.event, m.data, m.options)),
 			shed: (className) => _shouldShed(platform, className)
 		};
@@ -1960,6 +2007,36 @@ function _consumeRateLimitBucket(bucketKey, points, windowMs) {
 
 /**
  * Declarative per-function rate limiting.
+ * Marker wrapper that declares an RPC is intentionally public (no
+ * `_guard` required). Returns the inner handler unchanged at runtime;
+ * the vite codegen detects `live.public(...)` in source and
+ * suppresses the build-time "no _guard" warning for that module.
+ *
+ * Use per-export to flag handlers that genuinely accept any
+ * authenticated client (e.g. server-time, public health probes,
+ * unauthenticated read-only endpoints). For module-wide public RPCs,
+ * the `// realtime-allow-public` source comment is the lighter
+ * alternative.
+ *
+ * @param {Function} fn - Handler function (ctx, ...args)
+ * @returns {Function}
+ *
+ * @example
+ * ```js
+ * // src/lib/realtime/health.js
+ * import { live } from 'svelte-realtime';
+ *
+ * export const serverTime = live.public(async () => ({ now: Date.now() }));
+ * ```
+ */
+live.public = function publicMarker(fn) {
+	if (typeof fn !== 'function') {
+		throw new Error('[svelte-realtime] live.public(fn) requires a handler function');
+	}
+	return fn;
+};
+
+/**
  * Wraps a live() function with a sliding window rate limiter.
  *
  * @param {{ points: number, window: number, key?: (ctx: any) => string }} config
@@ -2817,8 +2894,9 @@ export const pushHooks = {
 		}
 		const userId = _getPushIdentify()(ws);
 		if (userId == null || userId === '') return;
-		if (typeof userId !== 'string') {
-			throw new Error('[svelte-realtime] pushHooks.open: identify(ws) must return a string, null, or undefined (got ' + typeof userId + ')');
+		const reason = _validUserIdReason(userId);
+		if (reason !== null) {
+			throw new Error('[svelte-realtime] pushHooks.open: ' + reason + '. identify(ws) must return a non-empty userId string that is safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for anonymous connections.');
 		}
 		if (!_pushRegistry.has(userId) && _pushRegistry.size >= _maxPushRegistry) {
 			if (!_pushRegistryWarnFired) {
@@ -3735,22 +3813,6 @@ export const combineMerge = (...buckets) => {
 	return merged;
 };
 
-/**
- * Copy own enumerable properties from `src` into `dst`, skipping
- * `__proto__` and `constructor`. Used to hydrate aggregate state from
- * an external snapshot (Redis cache, JSON payload, etc.) without giving
- * a hostile snapshot a path to set Object.prototype properties via
- * `Object.assign(target, JSON.parse('{"__proto__":{"polluted":1}}'))`.
- *
- * @param {object} dst
- * @param {object} src
- */
-function _safeAssignSnapshot(dst, src) {
-	for (const k of Object.keys(src)) {
-		if (k === '__proto__' || k === 'constructor' || k === 'prototype') continue;
-		dst[k] = /** @type {any} */ (src)[k];
-	}
-}
 
 /**
  * Create a real-time incremental aggregation over a source topic.
@@ -6043,12 +6105,53 @@ export class LiveError extends Error {
 }
 
 /**
+ * Default maximum nesting depth allowed in an inbound RPC envelope.
+ * Anything deeper than this is rejected at ingress. 64 is well past any
+ * realistic application shape (typical envelopes nest one or two levels
+ * deep for `{args: [...]}` and an args payload) but well short of where
+ * any host-app recursive walker would stack-overflow. Override per-call
+ * via `handleRpc(ws, data, platform, { maxEnvelopeDepth })`.
+ */
+const _DEFAULT_MAX_ENVELOPE_DEPTH = 64;
+
+/**
+ * Iterative depth walk over a parsed JSON value. Returns true when the
+ * value (or any descendant) sits at a nesting depth greater than `max`.
+ * Stack-based so a pathological depth cannot itself stack-overflow the
+ * checker. Short-circuits on the first over-depth descendant found.
+ *
+ * @param {unknown} root
+ * @param {number} max
+ */
+function exceedsEnvelopeDepth(root, max) {
+	if (root === null || typeof root !== 'object') return false;
+	/** @type {Array<{ obj: any, depth: number }>} */
+	const stack = [{ obj: root, depth: 1 }];
+	while (stack.length > 0) {
+		const { obj, depth } = /** @type {{ obj: any, depth: number }} */ (stack.pop());
+		if (depth > max) return true;
+		if (Array.isArray(obj)) {
+			for (let i = 0; i < obj.length; i++) {
+				const v = obj[i];
+				if (v !== null && typeof v === 'object') stack.push({ obj: v, depth: depth + 1 });
+			}
+		} else {
+			for (const k of Object.keys(obj)) {
+				const v = obj[k];
+				if (v !== null && typeof v === 'object') stack.push({ obj: v, depth: depth + 1 });
+			}
+		}
+	}
+	return false;
+}
+
+/**
  * Check whether a raw WebSocket message is an RPC request and handle it.
  *
  * @param {any} ws
  * @param {ArrayBuffer} data - Raw message data from the adapter message hook
  * @param {import('svelte-adapter-uws').Platform} platform
- * @param {{ beforeExecute?: (ws: any, rpcPath: string, args: any[]) => Promise<void> | void, onError?: (path: string, error: unknown, ctx: any) => void }} [options]
+ * @param {{ beforeExecute?: (ws: any, rpcPath: string, args: any[]) => Promise<void> | void, onError?: (path: string, error: unknown, ctx: any) => void, maxEnvelopeDepth?: number }} [options]
  * @returns {boolean} true if the message was an RPC request
  */
 export function handleRpc(ws, data, platform, options) {
@@ -6104,6 +6207,16 @@ export function handleRpc(ws, data, platform, options) {
 	try {
 		msg = JSON.parse(textDecoder.decode(data));
 	} catch {
+		return false;
+	}
+
+	// Post-parse depth cap. The adapter's `maxPayloadLength` (default 1 MB)
+	// already bounds the bytes JSON.parse ever sees, so this is defense
+	// in depth against downstream handlers / instrumentation that recursively
+	// walk the parsed object and could stack-overflow on pathological depth.
+	// Iterative stack so the check itself never overflows.
+	const maxEnvelopeDepth = (options && options.maxEnvelopeDepth) || _DEFAULT_MAX_ENVELOPE_DEPTH;
+	if (exceedsEnvelopeDepth(msg, maxEnvelopeDepth)) {
 		return false;
 	}
 
@@ -6264,28 +6377,35 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		}
 	}
 
-	// Wire-level subscribe gate: ask the adapter's `subscribe` /
-	// `subscribeBatch` hook chain whether this (ws, topic) pair would be
-	// denied at the wire-level subscribe-batch frame. Without this gate,
+	// Wire-level subscribe gate + atomic subscribe. `platform.subscribe`
+	// runs the adapter's `subscribe` / `subscribeBatch` hook chain,
+	// enforces `MAX_SUBSCRIPTIONS_PER_CONNECTION`, and updates the
+	// adapter-side per-connection subscription state (the `subs` Set,
+	// `totalSubscriptions` counter, and the close-hook's
+	// `ctx.subscriptions` parameter). Without going through this path,
 	// the loader would run, deliver initial data, and the room's
 	// __onSubscribe would publish a 'join' before the adapter's hook
 	// fires (which only fires on the client's follow-on subscribe-batch
-	// wire frame, AFTER the stream RPC returns). The optional-chain on
-	// `platform.checkSubscribe` keeps older adapters working: if the
-	// method isn't there, we fall through to the prior behavior and the
-	// in-realtime gates (`__streamFilter`, `live.room({ guard })`) remain
-	// the only stream-RPC access checks.
-	if (typeof platform.checkSubscribe === 'function') {
-		// Await the gate so async user hooks (the idiomatic pattern when
-		// the gate consults a session store or DB) deny correctly when
-		// they return `false`. A sync return is awaited transparently.
-		const denial = await platform.checkSubscribe(ws, topic);
-		if (denial) {
-			return { id, ok: false, code: denial, error: denial === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
+	// wire frame, AFTER the stream RPC returns), AND the resulting
+	// subscription would be invisible to the adapter's observability
+	// surface (close-hook subscriptions set, per-conn cap). The
+	// optional-chain on `platform.subscribe` keeps older adapters
+	// working: if the method isn't there, we fall back to raw
+	// `ws.subscribe` and only the in-realtime gates (`__streamFilter`,
+	// `live.room({ guard })`) remain the stream-RPC access checks.
+	let _subscribeDenial = null;
+	try {
+		if (typeof platform.subscribe === 'function') {
+			_subscribeDenial = await platform.subscribe(ws, topic);
+		} else {
+			ws.subscribe(topic);
 		}
+	} catch {
+		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
 	}
-
-	try { ws.subscribe(topic); } catch { return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' }; }
+	if (_subscribeDenial) {
+		return { id, ok: false, code: _subscribeDenial, error: _subscribeDenial === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
+	}
 	_trackStreamSub(ws, topic, fn);
 	subscribedRef.topic = topic;
 
@@ -7604,9 +7724,15 @@ export function enableSignals(ws, options) {
 	const idField = options?.idField || 'id';
 	const userData = ws.getUserData();
 	const userId = userData?.[idField];
-	if (userId !== undefined && userId !== null) {
-		ws.subscribe('__signal:' + userId);
+	// null / undefined = anonymous connection, silently skip (no signal
+	// subscription wired). This preserves the documented pattern of
+	// calling `enableSignals(ws)` unconditionally in the open hook.
+	if (userId === undefined || userId === null) return;
+	const reason = _validUserIdReason(userId);
+	if (reason !== null) {
+		throw new Error('[svelte-realtime] enableSignals: ' + reason + '. The userData field "' + idField + '" must be a non-empty string safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for anonymous connections.');
 	}
+	ws.subscribe('__signal:' + userId);
 }
 
 /**

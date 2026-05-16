@@ -1,5 +1,6 @@
 // @ts-check
 import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, handleRpc, LiveError, _clearCron, _activateDerived, close, unsubscribe } from './server.js';
+import { sanitizeRowData } from './shared/safe-assign.js';
 
 /**
  * Build a `ctx`-shaped object suitable for direct unit tests of guards,
@@ -104,9 +105,16 @@ const textEncoder = new TextEncoder();
  * @returns {any}
  */
 function _applyTestMerge(current, envelope, merge, key, opts) {
-	const { event, data } = envelope;
+	const { event } = envelope;
 	const prepend = opts?.prepend || false;
 	const max = opts?.max || 50;
+
+	// Mirror the client's defense-in-depth: strip prototype-pollution
+	// keys at envelope ingress for keyed merges so test fixtures match
+	// the wire-shape clients actually observe.
+	const data = (merge === 'crud' || merge === 'presence' || merge === 'cursor')
+		? sanitizeRowData(envelope.data)
+		: envelope.data;
 
 	if (merge === 'set') return data;
 
@@ -225,6 +233,10 @@ export function createTestEnv(options) {
 
 	function _shouldChaosDropPublish() {
 		if (!chaosConfig || chaosConfig.dropRate === 0) return false;
+		// Chaos drop check: simulated network loss for test scenarios. chaosRng
+		// is a seeded PRNG when the caller configured `chaos: { seed }`; without
+		// a seed we fall back to Math.random for the unseeded shape. Test-only
+		// code path. Not security-relevant.
 		const r = chaosRng ? chaosRng() : Math.random();
 		if (r < chaosConfig.dropRate) {
 			chaosDropped++;
@@ -270,6 +282,18 @@ export function createTestEnv(options) {
 		},
 		subscribers(topic) {
 			return topicSubscribers.get(topic)?.size || 0;
+		},
+		// platform.subscribe / platform.checkSubscribe mirrors of the real
+		// adapter shape. The test platform has no user subscribe hooks, so
+		// these just delegate to ws.subscribe and report null (allow). Tests
+		// that need to exercise gate-denial paths can replace this mock
+		// with a custom platform.
+		async subscribe(ws, topic) {
+			try { ws.subscribe(topic); } catch { return 'CONNECTION_CLOSED'; }
+			return null;
+		},
+		async checkSubscribe() {
+			return null;
 		},
 		topic(t) {
 			return {

@@ -1815,6 +1815,8 @@ For custom lock implementations, the option is forwarded as the third argument: 
 
 `live.push({ userId }, event, data, options?)` sends a server-initiated request to a connected user and awaits the reply. Routes through a per-instance userId -> WebSocket registry maintained by a small pair of hooks.
 
+> **Trust model:** `live.push` and `live.notify` are **server-trust primitives**. The `userId` you pass is whatever you pass; the framework does NOT check that the calling context is allowed to address that user. If your call site interpolates a wire-supplied value, read [Trust model: target.userId is whatever the caller passes](#trust-model-targetuserid-is-whatever-the-caller-passes) below before shipping.
+
 ```js
 // hooks.ws.js - wire the registry once
 import { pushHooks } from 'svelte-realtime/server';
@@ -1887,6 +1889,60 @@ Message text on the wrapped `TIMEOUT` is preserved verbatim from the underlying 
 Multi-device users see most-recent-connection-wins routing within each instance, and cluster-wide most-recent-wins via the registry's Redis hash when cluster routing is configured (see [Cluster routing](#cluster-routing) below). Older connections still receive topic publishes via their own subscriptions; only push routing flips. Anonymous connections (identify returning null/undefined) are silently skipped at registration so they cannot be push targets.
 
 `onPush(event, handler)` multiplexes multiple events over the adapter's single `onRequest` channel. Returning a value sends it as the reply; throwing rejects the server-side promise. Returns an unsubscribe function.
+
+### Trust model: target.userId is whatever the caller passes
+
+`live.push` and `live.notify` are **server-trust primitives**. Calling `live.push({ userId: someId }, event, data)` delivers `event` to whichever connection is registered under `someId`, full stop. The framework does NOT check that the server context invoking the push is allowed to address that user. It cannot - your authorization model lives outside the framework.
+
+This matters most when a message handler interpolates a wire-supplied target:
+
+```js
+// BUG: `msg.to` is client-controlled. Any authenticated user can push
+// arbitrary events to any other user - including admins, including
+// users in other tenants.
+export const dm = live(async (ctx, msg) => {
+  await live.notify({ userId: msg.to }, 'message', {
+    from: ctx.user.id,
+    text: msg.text
+  });
+});
+```
+
+The exploit shape is one line of client code: `dm.invoke({ to: 'admin-1', text: 'fake admin notification' })`. The fix is a tiny ownership check at the handler boundary - keep it generic and reuse it everywhere the handler routes to a `userId` from the wire:
+
+```js
+import { live, RpcError } from 'svelte-realtime/server';
+
+function mustOwnUser(ctx, targetUserId) {
+  if (ctx.user?.id === targetUserId) return;        // self-targeted (allowed)
+  if (ctx.user?.role === 'admin') return;           // admins can address anyone
+  if (sameTenant(ctx.user, targetUserId)) return;   // tenant peers
+  throw new RpcError('FORBIDDEN', 'You cannot push to that user');
+}
+
+export const dm = live(async (ctx, msg) => {
+  mustOwnUser(ctx, msg.to); // <-- decision lives here, not in live.push
+  await live.notify({ userId: msg.to }, 'message', {
+    from: ctx.user.id,
+    text: msg.text
+  });
+});
+```
+
+The rule of thumb: every `userId` you hand to `live.push` / `live.notify` must come from a value the **server** trusts. Safe sources:
+
+- `ctx.user.id` - you put it there in `upgrade()`; the framework guarantees provenance.
+- A database row your server just looked up (the DB is server-trusted).
+- A cron job's iteration target (cron payloads are server-authored).
+- A webhook payload **after** you've verified the source and confirmed it's allowed to address that userId. The userId field of an unverified third-party webhook is just another wire value.
+
+Unsafe sources without an ownership check:
+
+- `msg.targetUserId`, `payload.to`, `args.recipient` - any field that arrived on the WebSocket wire.
+- `searchParams.get('user')` on a webhook endpoint - same shape, different transport.
+- A row id chosen by a client even if you fetched the row server-side - the row is trusted, but the choice of WHICH row to fetch was not.
+
+The same contract applies to any future push-target shape (`{ group, role, tenant }`, etc.): the framework treats the target as an instruction, not as an authorization claim. Authorization is your handler's job; the framework is the delivery primitive.
 
 ### Fire-and-forget: `live.notify`
 

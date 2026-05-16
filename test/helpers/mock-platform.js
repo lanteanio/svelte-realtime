@@ -31,6 +31,20 @@ export function mockPlatform() {
 				p.publish(msg.topic, msg.event, msg.data, msg.options);
 			}
 		},
+		// platform.subscribe + platform.checkSubscribe mirrors of the real
+		// adapter. Default subscribe consults checkSubscribe (if a test
+		// has overridden it) before falling through to the bare
+		// ws.subscribe. Tests that want to assert denial-from-gate
+		// behavior set p.checkSubscribe; tests that want to assert
+		// legacy-adapter behavior delete p.subscribe before handleRpc.
+		async subscribe(ws, topic) {
+			if (typeof p.checkSubscribe === 'function') {
+				const denial = await p.checkSubscribe(ws, topic);
+				if (denial) return denial;
+			}
+			try { ws.subscribe(topic); } catch { return 'CONNECTION_CLOSED'; }
+			return null;
+		},
 		requested: [],
 		_requestResolver: null,
 		async request(ws, event, data, options) {
