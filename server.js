@@ -4518,6 +4518,131 @@ export function _getIdentityKey(ctx) {
 	return guestId;
 }
 
+/**
+ * Cluster-shared presence-ref store. Used by `live.room({ presence })` when
+ * `platform.redis` is wired by the host app (raw ioredis-shaped client with
+ * hincrby / hset / hdel / hgetall / expire). Falls back to the in-process
+ * `_presenceRef` Map when absent, preserving zero-config dev behavior.
+ *
+ * Storage layout (one Redis HASH per topic):
+ *   key:    `__live-presence:{topic}`
+ *   fields: 'c:{userKey}' -> integer (cluster-wide subscriber count)
+ *           'd:{userKey}' -> JSON-stringified presence data
+ *
+ * Cluster semantics:
+ * - First replica to take a user's count from 0->1 publishes 'join' (cluster-
+ *   wide isFirst). Subsequent replicas just increment.
+ * - Last replica to take a user's count from 1->0 publishes 'leave'.
+ * - Loader returns the full HGETALL view so any replica's new subscriber sees
+ *   all users from all replicas, not just the locally-attached ones.
+ *
+ * Per-replica refcount (multiple tabs of the same user on the same replica)
+ * and grace-timer behavior stay in the existing _presenceRef Map. The cluster
+ * helpers only fire at the local 0<->1 transitions, so a quick reconnect
+ * burst on a single replica doesn't churn the cluster counter.
+ */
+const _PRESENCE_KEY_PREFIX = '__live-presence:';
+const _PRESENCE_TTL_SEC = 3600;
+
+/**
+ * Bump the cluster-wide count for (topic, key). Returns isFirst=true when
+ * this acquire took the count from 0 to 1 cluster-wide, signaling that the
+ * caller should publish a 'join' event. Falls through to a no-op stub when
+ * platform.redis is missing (single-replica dev path).
+ */
+async function _clusterPresenceAcquire(platform, topic, key, data) {
+	const redis = platform && platform.redis;
+	if (!redis || typeof redis.hincrby !== 'function') return { isFirst: true };
+	const hKey = _PRESENCE_KEY_PREFIX + topic;
+	const countField = 'c:' + key;
+	const dataField = 'd:' + key;
+	let serialized;
+	try { serialized = JSON.stringify(data); } catch { serialized = 'null'; }
+	try {
+		// Write the data field BEFORE bumping the count. A concurrent
+		// `_clusterPresenceList` (e.g. the same user's own :presence stream
+		// loader racing the data stream's acquire) reads data fields only;
+		// if HINCRBY ran first the loader could observe a count without a
+		// data field and return an empty roster, missing the user's own
+		// entry. Writing data first guarantees the loader sees the entry
+		// as soon as the count is visible.
+		await redis.hset(hKey, dataField, serialized);
+		const count = await redis.hincrby(hKey, countField, 1);
+		if (count === 1) {
+			await redis.expire(hKey, _PRESENCE_TTL_SEC);
+			return { isFirst: true };
+		}
+		// Refresh TTL on activity so the hash doesn't expire under a busy room.
+		try { await redis.expire(hKey, _PRESENCE_TTL_SEC); } catch { /* best-effort */ }
+		return { isFirst: false };
+	} catch {
+		// Redis blip: treat as first so we publish a join. Worst case a duplicate
+		// 'join' merges idempotently by key on the client.
+		return { isFirst: true };
+	}
+}
+
+/**
+ * Decrement the cluster-wide count for (topic, key). Returns isLast=true when
+ * this release took the count from 1 to 0 cluster-wide, signaling that the
+ * caller should publish a 'leave' event. Falls through to isLast=true when
+ * platform.redis is missing (single-replica dev path treats every grace-timer
+ * expiry as the final leave).
+ */
+async function _clusterPresenceRelease(platform, topic, key) {
+	const redis = platform && platform.redis;
+	if (!redis || typeof redis.hincrby !== 'function') return { isLast: true };
+	const hKey = _PRESENCE_KEY_PREFIX + topic;
+	const countField = 'c:' + key;
+	const dataField = 'd:' + key;
+	try {
+		const count = await redis.hincrby(hKey, countField, -1);
+		if (count <= 0) {
+			await redis.hdel(hKey, countField, dataField);
+			return { isLast: true };
+		}
+		return { isLast: false };
+	} catch {
+		// Redis blip: assume last so we publish a leave. A late observer reading
+		// HGETALL might still see the stale field until the next acquire repairs
+		// the count (or the hash TTL expires).
+		return { isLast: true };
+	}
+}
+
+/**
+ * Return the cluster-wide presence roster for a topic as `[{key, data}, ...]`.
+ * Falls through to the local _presenceRef iteration when platform.redis is
+ * missing.
+ */
+async function _clusterPresenceList(platform, topic) {
+	const redis = platform && platform.redis;
+	if (!redis || typeof redis.hgetall !== 'function') {
+		const prefix = topic + '\0';
+		const out = [];
+		for (const [refKey, ref] of _presenceRef) {
+			if (!refKey.startsWith(prefix)) continue;
+			if (ref.data == null) continue;
+			out.push({ key: refKey.slice(prefix.length), data: ref.data });
+		}
+		return out;
+	}
+	const hKey = _PRESENCE_KEY_PREFIX + topic;
+	try {
+		const all = await redis.hgetall(hKey);
+		const out = [];
+		for (const field of Object.keys(all)) {
+			if (field.length < 3 || field[0] !== 'd' || field[1] !== ':') continue;
+			const key = field.slice(2);
+			try { out.push({ key, data: JSON.parse(all[field]) }); }
+			catch { /* skip corrupt entry */ }
+		}
+		return out;
+	} catch {
+		return [];
+	}
+}
+
 live.room = function room(config) {
 	const {
 		topic: topicFn,
@@ -4562,7 +4687,7 @@ live.room = function room(config) {
 	}, {
 		merge: mergeMode,
 		key: keyField,
-		onSubscribe: presenceFn ? (ctx, topic) => {
+		onSubscribe: presenceFn ? async (ctx, topic) => {
 			const userId = _getIdentityKey(ctx);
 			const refKey = topic + '\0' + userId;
 
@@ -4582,7 +4707,13 @@ live.room = function room(config) {
 					if (r.timer) {
 						clearTimeout(r.timer);
 						const [t, u] = k.split('\0');
-						ctx.publish(t + ':presence', 'leave', { key: u });
+						// Cluster release runs eagerly here too: an evicted entry
+						// would otherwise leak a phantom counter on Redis.
+						_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
+							if (res.isLast) {
+								ctx.publish(t + ':presence', 'leave', { key: u });
+							}
+						}).catch(() => {});
 						if (onLeave) {
 							Promise.resolve().then(() => onLeave(ctx, t)).catch(() => {});
 						}
@@ -4595,7 +4726,7 @@ live.room = function room(config) {
 						console.warn(
 							"[svelte-realtime] presence-ref map reached MAX_PRESENCE_REF=" + _maxPresenceRef +
 							"; new joiners will not appear in any subscriber's roster until existing entries clear.\n" +
-							"  For multi-instance deploys, wire `platform.presence` (e.g. svelte-adapter-uws-extensions/presence) so this in-memory fallback is bypassed.\n" +
+							"  For multi-instance deploys, wire `platform.redis` (raw ioredis client) so the cluster-shared Redis presence is bypasses the in-memory cap.\n" +
 							"  See: https://svti.me/presence"
 						);
 					}
@@ -4609,8 +4740,14 @@ live.room = function room(config) {
 			// to the :presence topic.
 			const presenceData = presenceFn(ctx);
 			_presenceRef.set(refKey, { count: 1, timer: null, data: presenceData });
+			// Cluster transition: bump shared count; only the first replica to
+			// reach 1 publishes 'join'. With no platform.redis the helper
+			// returns isFirst=true unconditionally, matching the in-memory path.
 			if (presenceData) {
-				ctx.publish(topic + ':presence', 'join', { key: userId, data: presenceData });
+				const { isFirst } = await _clusterPresenceAcquire(ctx.platform, topic, userId, presenceData);
+				if (isFirst) {
+					ctx.publish(topic + ':presence', 'join', { key: userId, data: presenceData });
+				}
 			}
 		} : undefined,
 		onUnsubscribe: presenceFn ? (ctx, topic) => {
@@ -4623,11 +4760,17 @@ live.room = function room(config) {
 			ref.count--;
 			if (ref.count > 0) return;
 
-			// On rollback (failed stream init), skip grace and leave immediately
+			// On rollback (failed stream init), skip grace and release
+			// immediately. Cluster release decides whether this was the LAST
+			// subscriber across the cluster - only then do we publish 'leave'.
 			if (ctx.ws && _rollingBack.has(ctx.ws)) {
 				if (ref.timer) clearTimeout(ref.timer);
 				_presenceRef.delete(refKey);
-				ctx.publish(topic + ':presence', 'leave', { key: userId });
+				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
+					if (res.isLast) {
+						ctx.publish(topic + ':presence', 'leave', { key: userId });
+					}
+				}).catch(() => {});
 				if (onLeave) {
 					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
 				}
@@ -4636,7 +4779,11 @@ live.room = function room(config) {
 
 			ref.timer = setTimeout(() => {
 				_presenceRef.delete(refKey);
-				ctx.publish(topic + ':presence', 'leave', { key: userId });
+				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
+					if (res.isLast) {
+						ctx.publish(topic + ':presence', 'leave', { key: userId });
+					}
+				}).catch(() => {});
 				if (onLeave) {
 					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
 				}
@@ -4658,24 +4805,12 @@ live.room = function room(config) {
 			async (ctx, ...args) => {
 				if (guardFn) await guardFn(ctx, ...args);
 				const dataTopic = topicFn(ctx, ...args);
-				if (ctx.platform.presence && typeof ctx.platform.presence.list === 'function') {
-					return ctx.platform.presence.list(dataTopic + ':presence');
-				}
-				// In-memory fallback (zero-config dev path). Without this,
-				// the data stream's onSubscribe publishes the join BEFORE the
-				// user subscribes to :presence, so a user alone in a room
-				// would never see its own join. Reconstructs the roster from
-				// `_presenceRef`. Production wires `platform.presence.list`
-				// (Redis-backed) for cluster-wide consistency and bypasses
-				// this branch.
-				const prefix = dataTopic + '\0';
-				const result = [];
-				for (const [refKey, ref] of _presenceRef) {
-					if (!refKey.startsWith(prefix)) continue;
-					if (ref.data == null) continue;
-					result.push({ key: refKey.slice(prefix.length), data: ref.data });
-				}
-				return result;
+				// Cluster-shared roster when `platform.redis` is wired; falls
+				// back to the local _presenceRef iteration otherwise. The
+				// loader reconstructs the roster even when this user's join
+				// was published before they subscribed to :presence (the live
+				// merge takes over from here).
+				return _clusterPresenceList(ctx.platform, dataTopic);
 			},
 			{ merge: 'presence' }
 		);

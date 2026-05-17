@@ -13593,7 +13593,7 @@ describe('capacity caps', () => {
 
 			expect(warnSpy).toHaveBeenCalledTimes(1);
 			expect(warnSpy.mock.calls[0][0]).toContain('MAX_PRESENCE_REF=2');
-			expect(warnSpy.mock.calls[0][0]).toContain('platform.presence');
+			expect(warnSpy.mock.calls[0][0]).toContain('platform.redis');
 		});
 	});
 });
