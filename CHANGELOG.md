@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.5.0.1] - 2026-05-16
+## [0.5.2] - 2026-05-17
+
+### Fixed
+
+- **`live.webhook(...).handle()` now `await`s `config.verify` and `config.transform`.** Pre-fix, both were called synchronously, so an async `verify` (e.g. one that consults a Redis-backed shared-secret store) or an async `transform` (e.g. one that RPUSHes the incoming payload into a cluster-shared list before publishing) returned a Promise that the framework treated as a synchronous result. The subsequent `req.platform.publish(topic, mapped.event, mapped.data)` then read `mapped.event` / `mapped.data` from a Promise (undefined for both), which crashed the adapter's wire-envelope builder in `esc(undefined)`. The original sync-only contract was undocumented and unenforced - any author whose verify or transform happened to call `await` would silently break webhook delivery without any framework-side error. The fix adds `await` to both call sites; sync handlers keep working unchanged because `await` on a non-Promise value resolves to the value itself.
+
+- **Client `mutate()` defaults `_serverValue` to `[]` when `currentValue` is undefined and the merge type expects an array (`crud` / `presence` / `cursor` / `latest`).** Pre-fix, an optimistic mutate fired before the stream's loader had resolved (e.g. on a fast-clicking user, or a loader with a real-Redis round-trip that takes a few ms) captured `_serverValue = currentValue = undefined`. `_replayQueue()`'s `_applyChange(undefined, ...)` then ran the page's optimistic change function with `current = undefined`; idiomatic optimistic changes like `(current) => [...current, item]` throw synchronously on `[...undefined]`. The mutate rejected before the RPC was ever sent, the optimistic UI never appeared, and `tryMutate` style error toasts flashed-and-disappeared faster than test timeouts. The fix treats undefined as an empty array baseline for array-merge types, so the optimistic change has something sensible to spread. The eventual loader response replaces `currentValue` cleanly via the response path, and any still-in-flight optimistic entry replays against the new `_serverValue` when the server's confirming event arrives. Non-array merges (`set`) keep their original behaviour (`_serverValue = undefined`); the page's change function for a set-merge stream gets `current === undefined` and is already expected to handle it.
+
+## [0.5.1] - 2026-05-16
 
 ### Fixed
 

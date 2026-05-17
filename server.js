@@ -5986,12 +5986,12 @@ live.webhook = function webhook(topic, config) {
 		async handle(req) {
 			let event;
 			try {
-				event = config.verify({ body: req.body, headers: req.headers });
+				event = await config.verify({ body: req.body, headers: req.headers });
 			} catch {
 				return { status: 400, body: 'Verification failed' };
 			}
 
-			const mapped = config.transform(event);
+			const mapped = await config.transform(event);
 			if (!mapped) return { status: 200, body: 'Ignored' };
 
 			if (req.platform) {

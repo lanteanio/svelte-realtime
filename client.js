@@ -2801,7 +2801,18 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			}
 
 			if (_optimisticQueue.length === 0) {
-				_serverValue = Array.isArray(currentValue) ? currentValue.slice() : currentValue;
+				// Default to [] for array-merge types when the loader has not
+				// resolved yet (currentValue still undefined). Without this,
+				// an early-click optimistic change that does e.g.
+				// `(current) => [...current, item]` throws synchronously on
+				// `[...undefined]`, the mutate rejects, and the user sees
+				// nothing land. The eventual loader response replaces
+				// currentValue cleanly via the response path, and the still-
+				// in-flight optimistic entry replays against the new
+				// _serverValue when the server's confirming event arrives.
+				const isArrayMerge = merge === 'crud' || merge === 'presence' || merge === 'cursor' || merge === 'latest';
+				const baseline = currentValue === undefined && isArrayMerge ? [] : currentValue;
+				_serverValue = Array.isArray(baseline) ? baseline.slice() : baseline;
 				_serverIndex = new Map(_index);
 			}
 			const entry = { change: optimisticChange, optimisticKey, serverConfirmed: false };
