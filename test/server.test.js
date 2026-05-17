@@ -1776,12 +1776,14 @@ describe('handleRpc() batch dev warnings', () => {
 // - Payload size warning -----------------------------------------------------
 
 describe('payload size warning', () => {
-	it('warns when RPC response payload exceeds 12KB', async () => {
+	it('warns when RPC response payload exceeds the string threshold (800k chars)', async () => {
 		const ws = mockWs();
 		const platform = mockPlatform();
 
-		// Generate a large response (> 12KB)
-		const bigData = 'x'.repeat(13000);
+		// Threshold was raised in 0.5.x to match the post-0.5 default
+		// maxPayloadLength of 1 MB. A 12 KB payload no longer triggers
+		// the dev warning; 850k chars (~850 KB) does.
+		const bigData = 'x'.repeat(850_000);
 		const handler = live(async () => bigData);
 		__register('big/test', handler);
 

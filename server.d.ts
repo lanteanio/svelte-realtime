@@ -619,6 +619,23 @@ export const combineMerge: <T extends object>(...buckets: Array<T | undefined>) 
  */
 export const MAX_AGGREGATE_BUCKETS: number;
 
+/**
+ * Maximum entries in the per-userId connection registry that backs
+ * `live.push({ userId })` / `live.notify`. Saturation behaviour is
+ * WARN-once and skip new registrations; existing entries continue to
+ * route. Default 10,000,000.
+ */
+export const MAX_PUSH_REGISTRY: number;
+
+/**
+ * Maximum entries in the in-memory presence-ref map that backs
+ * `live.room({ presence })` on the single-instance / dev path. When
+ * `platform.presence.list` is wired (e.g. via the Redis presence
+ * extension), this cap is bypassed. Saturation behaviour is WARN-once
+ * and skip new entries. Default 1,000,000.
+ */
+export const MAX_PRESENCE_REF: number;
+
 export type TopicEntry = string | ((...args: any[]) => string);
 
 /**

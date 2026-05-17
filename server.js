@@ -982,8 +982,16 @@ const _publishRateConfig = {
 const _publishRateWarned = new Set();
 /** @type {WeakMap<any, ReturnType<typeof setInterval>>} */
 const _publishRateSamplers = new WeakMap();
-/** @type {Set<any>} Tracks platforms with active samplers so reset can clear them. */
-const _publishRateActivePlatforms = new Set();
+/**
+ * Bumped by `_resetPublishRateWarning` and by `live.publishRateWarning(false)`.
+ * Each sampler captures its activation-time epoch and self-clears on the next
+ * fire when the epoch no longer matches. Pattern used in place of the prior
+ * strong-reference `Set<platform>` because that Set held every dev-mode
+ * platform alive across the process lifetime, defeating the WeakMap above and
+ * leaking the platform + all captured helpers/closures on every per-call
+ * wrap pattern (e.g. cron tick wrapping a fresh `bus.wrap(platform)` per fire).
+ */
+let _publishRateEpoch = 0;
 
 /**
  * Activate the dev-mode publish-rate warning sampler for one platform.
@@ -993,6 +1001,15 @@ const _publishRateActivePlatforms = new Set();
  * underscore prefix so tests can drive activation deterministically
  * without going through the async RPC path.
  *
+ * The sampler closure must NOT strongly capture `platform`. Node's timer
+ * queue holds the `setInterval` Timer alive until clearInterval fires; if
+ * the closure captured `platform` directly, every platform ever passed in
+ * would stay reachable forever, leaking the entire helpers+closures graph.
+ * The `WeakRef` wrapper here breaks that retention: on each tick the
+ * sampler derefs, and a null deref (platform GC'd elsewhere) self-clears
+ * the timer. Net effect: at most one stale tick after platform GC, then
+ * the entry vanishes.
+ *
  * @param {any} platform
  */
 export function _activatePublishRateWarning(platform) {
@@ -1000,8 +1017,22 @@ export function _activatePublishRateWarning(platform) {
 	if (!_publishRateConfig.enabled) return;
 	if (_publishRateSamplers.has(platform)) return;
 	if (typeof platform?.pressure !== 'object' || platform.pressure === null) return;
+	const platformRef = new WeakRef(platform);
+	const epoch = _publishRateEpoch;
 	const sampler = setInterval(() => {
-		const top = platform.pressure?.topPublishers;
+		// Self-clear on disable / reset / platform-GC. Any of the three
+		// makes the sampler stale; clearInterval here lets Node drop the
+		// Timer from the queue on the next event-loop turn.
+		if (!_publishRateConfig.enabled || epoch !== _publishRateEpoch) {
+			clearInterval(sampler);
+			return;
+		}
+		const p = platformRef.deref();
+		if (!p) {
+			clearInterval(sampler);
+			return;
+		}
+		const top = p.pressure?.topPublishers;
 		if (!Array.isArray(top)) return;
 		for (const entry of top) {
 			if (!entry || typeof entry.topic !== 'string') continue;
@@ -1029,24 +1060,24 @@ export function _activatePublishRateWarning(platform) {
 	}, _publishRateConfig.intervalMs);
 	if (typeof sampler.unref === 'function') sampler.unref();
 	_publishRateSamplers.set(platform, sampler);
-	_publishRateActivePlatforms.add(platform);
 }
 
 /**
  * Reset the dev-mode publish-rate warning state. Tests only. Clears the
- * one-shot warned set, stops every active sampler, and removes the
- * activation marker so the next ctx-helpers cache miss for a previously
- * seen platform re-attaches a sampler. Does NOT reset config back to
- * defaults - tests that mutate config should restore it themselves.
+ * one-shot warned set and bumps the per-process epoch so every existing
+ * sampler self-clears on its next fire. Stale samplers stop within one
+ * `intervalMs` of the reset (default 5s); a same-platform re-activation
+ * after reset gets a fresh sampler because the old WeakMap entry's
+ * sampler will self-clear on its next tick and never write state again.
+ *
+ * If a test needs synchronous teardown (e.g. to assert no extra warns
+ * fire after reset within the same tick), call this AND assert that
+ * `_publishRateConfig.enabled` is false; samplers short-circuit on the
+ * disabled flag without doing any work.
  */
 export function _resetPublishRateWarning() {
 	_publishRateWarned.clear();
-	for (const platform of _publishRateActivePlatforms) {
-		const sampler = _publishRateSamplers.get(platform);
-		if (sampler) clearInterval(sampler);
-		_publishRateSamplers.delete(platform);
-	}
-	_publishRateActivePlatforms.clear();
+	_publishRateEpoch++;
 }
 
 /**
@@ -2183,13 +2214,13 @@ export function _resetRateLimits() {
 live.publishRateWarning = function publishRateWarning(config) {
 	if (config === false) {
 		_publishRateConfig.enabled = false;
-		// Stop active samplers so disable takes effect immediately.
-		for (const platform of _publishRateActivePlatforms) {
-			const sampler = _publishRateSamplers.get(platform);
-			if (sampler) clearInterval(sampler);
-			_publishRateSamplers.delete(platform);
-		}
-		_publishRateActivePlatforms.clear();
+		// Existing samplers self-clear on their next fire via the
+		// `_publishRateConfig.enabled` check at the top of the callback.
+		// Bumping the epoch is belt-and-suspenders: a sampler whose
+		// callback is in flight when the flag flips still sees the
+		// epoch mismatch on its NEXT scheduled fire. Worst case is one
+		// stale interval (default 5s) before the timer goes idle.
+		_publishRateEpoch++;
 		return;
 	}
 	if (config === undefined || config === true) {
@@ -7696,10 +7727,10 @@ function _respond(ws, platform, correlationId, payload) {
 	if (_IS_DEV) {
 		// Estimate size without double-serialization.
 		const data = payload.data;
-		if ((Array.isArray(data) && data.length > 100) || (typeof data === 'string' && data.length > 12000)) {
+		if ((Array.isArray(data) && data.length > 5000) || (typeof data === 'string' && data.length > 800_000)) {
 			console.warn(
 				`[svelte-realtime] RPC response for '${correlationId}' contains ${data.length} items - ` +
-				'large responses may exceed maxPayloadLength (16KB). Increase maxPayloadLength in adapter config if needed.\n  See: https://svti.me/adapter-config'
+				"large responses may exceed maxPayloadLength (default 1 MB; raise `websocket.maxPayloadLength` in svelte.config.js if needed).\n  See: https://svti.me/adapter-config"
 			);
 		}
 	}
