@@ -1271,6 +1271,27 @@ Call `configure()` once at app startup. The hooks fire on state transitions only
 | `onConnect()` | Called when the WebSocket connection opens after a reconnect |
 | `onDisconnect()` | Called when the WebSocket connection closes |
 | `beforeReconnect()` | Called before each reconnection attempt (can be async) |
+| `timeout` | Default RPC timeout in ms (default `30000`). Per-call `.with({ timeout })` overrides. |
+| `resumeGraceMs` | Stream resume-grace window in ms (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to disable. |
+
+### Pause and resume without re-rehydrating
+
+When the last subscriber of a stream unsubs, the stream releases its WebSocket subscription immediately (giving the server back its slot, dropping the in-flight counter) but keeps the in-memory data model -- `currentValue`, the last seen `seq` / `version`, the pagination `cursor`, and any history -- for `resumeGraceMs` (default 60 seconds). If a new `subscribe()` lands inside that window, the stream re-attaches its listeners and sends the retained cursor on the resume envelope, so the server can fill the gap from its bounded replay buffer (or `delta.fromSeq`, or a truncated-cache fall-through to a full rehydrate) instead of cold-starting.
+
+This is the default for two reasons:
+
+1. **Pause/resume UIs work for free.** A `{#if active} <SubscribedComponent /> {/if}` toggle, or an `$effect` whose subscribe-arm flips on user action, can pause and resume the subscription without re-loading from scratch. The events that arrived during the pause stream in via the replay buffer.
+2. **Browser back/forward feels instant.** Navigating away and back within the grace window restores the previous data immediately, and any events the user missed are gap-filled by the server.
+
+If the grace expires without a new subscriber, the data model resets and the next subscribe is a true cold start. Apps that prefer aggressive memory reclamation can shorten or disable the grace:
+
+```js
+configure({ resumeGraceMs: 0 });        // every unsub is a full reset (pre-grace behavior)
+configure({ resumeGraceMs: 5_000 });    // 5s grace covers brief toggles
+configure({ resumeGraceMs: 300_000 });  // 5min grace for navigation-heavy apps
+```
+
+The grace only affects local data retention. The server's replay buffer and `delta.fromSeq` window are independent and govern how far back the gap-fill can reach.
 
 ### Cross-origin and native app usage
 

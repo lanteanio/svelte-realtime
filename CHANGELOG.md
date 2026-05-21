@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-05-21
+
+### Added
+
+- **`configure({ resumeGraceMs })` on the client + resume-grace by default for every stream.** When the last subscriber of a stream unsubs, the stream now releases its WebSocket subscription immediately (releases the server slot, decrements quiescence) but keeps its in-memory data model -- `currentValue`, `_lastSeq`, `_lastVersion`, `_cursor`, `_hasMore`, `_schemaVersion`, history -- for `resumeGraceMs` (default `60000`). A new `subscribe()` inside the window re-attaches the lifecycle listeners and calls `fetchAndSubscribe()` with the retained cursors on the resume envelope, so the server fills the gap from its bounded replay buffer (or `delta.fromSeq`, or a truncated -> full rehydrate fallback) instead of cold-rehydrating. After the grace expires with no new subscriber, the data model is reset and the next subscribe is a true cold start. Set `resumeGraceMs: 0` to opt out and revert to pre-grace immediate-reset behavior; raise it to retain across longer navigation gaps. The grace only governs local retention; the server's replay-buffer and `delta.fromSeq` windows are independent.
+
+### Fixed
+
+- **Pause/resume on a stream-backed UI (e.g. `{#if active} <Sub /> {/if}` toggles, `$effect`-driven subscribe/unsubscribe, browser back-and-forward) now engages the gap-fill chain instead of cold-rehydrating.** Pre-fix (0.5.1 through 0.5.4), the deferred-cleanup microtask reset `_lastSeq` / `_lastVersion` / `_cursor` alongside `currentValue` (0.5.1 added this to fix a separate unmount/remount spinner-hang where a stale seq + reset currentValue + empty since-seq delta left `{#if $store === undefined}` spinners hanging forever). The 0.5.1 fix was correct for the back/forward spinner-hang but it killed the path that pause/resume UIs relied on: every resume sent no seq, the server treated it as a fresh subscribe, the loader ran, the recent window came back tagged `rehydrate`, and any rows the page had already shown got re-tagged via the by-id merge. Reproducer: `svelte-realtime-demo`'s `/demos/from-seq` page, Pause for 5-10s, Resume; pre-fix the rehydrate banner reappears, post-fix the events the server published during the pause stream in tagged `live`. The new resume-grace fixes both: state AND cursors are retained together for `resumeGraceMs`, so the server's delta merges into populated state (no spinner-hang, no false cold-start). The pre-0.5.1 back/forward bug stays fixed -- past the grace window the next subscribe is a true cold start with no stale seq.
+
 ## [0.5.4] - 2026-05-17
 
 ### Fixed

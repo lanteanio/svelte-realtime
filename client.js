@@ -314,6 +314,25 @@ function _getTimeout() {
 	return _clientConfig.timeout || _DEFAULT_TIMEOUT;
 }
 
+const _DEFAULT_RESUME_GRACE_MS = 60000;
+
+/**
+ * Stream resume-grace window in ms. When the last subscriber unsubs, the
+ * stream releases its WS subscription immediately but keeps the in-memory
+ * data model (currentValue, _lastSeq, _lastVersion, _cursor) for this
+ * long. A new subscribe() within the window resumes from the retained
+ * cursor so the server can fill the gap from its replay buffer instead
+ * of cold-rehydrating. Set to 0 to disable the grace window (every
+ * cleanup is a full reset).
+ *
+ * @returns {number}
+ */
+function _getResumeGraceMs() {
+	const v = _clientConfig.resumeGraceMs;
+	if (typeof v === 'number' && v >= 0) return v;
+	return _DEFAULT_RESUME_GRACE_MS;
+}
+
 /** @type {boolean} Whether the connection is permanently dead (terminal close code, exhausted retries, or explicit close) */
 let _terminated = false;
 
@@ -2509,9 +2528,16 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	}
 
 	/**
-	 * Clean up subscriptions.
+	 * Tear down WS-level subscription handles, transient flags, and any
+	 * in-flight subscribe request. Leaves the in-memory data model
+	 * (currentValue, _index, _history, _lastSeq, _lastVersion, _cursor,
+	 * _hasMore, _schemaVersion, topic) intact so that a subscribe() call
+	 * landing during the resume-grace window can reattach listeners,
+	 * call fetchAndSubscribe() with the retained seq/version/cursor, and
+	 * let the server fill the gap from its replay buffer (or fromSeq, or
+	 * a truncated -> full rehydrate fallback) instead of cold-starting.
 	 */
-	function cleanup() {
+	function _releaseSubscription() {
 		if (pendingId) {
 			const entry = pending.get(pendingId);
 			if (entry) {
@@ -2547,10 +2573,19 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_bufA.length = 0;
 		_bufB.length = 0;
 		_activeBuf = _bufA;
+		fetching = false;
+	}
+
+	/**
+	 * Reset the in-memory data model and error state. Runs when the
+	 * resume-grace window expires with no new subscriber, or immediately
+	 * on cleanup when resumeGraceMs is 0. After this runs, the next
+	 * subscribe() is a true cold start.
+	 */
+	function _resetSession() {
 		if (topic) _unregisterTopicErrorSetter(topic, _setError);
 		topic = null;
 		initialLoaded = false;
-		fetching = false;
 		buffer = [];
 		currentValue = undefined;
 		store.set(undefined);
@@ -2562,17 +2597,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_history = [];
 		_historyIndex = -1;
 		_reconnectAttempts = 0;
-		// Reset session-resume cursors. Cleanup means the stream is being
-		// abandoned (last subscriber gone, deferred-cleanup microtask fired);
-		// the next subscribe must start fresh, not falsely resume from
-		// whatever seq / version / cursor the prior session left behind.
-		// Without these resets, an unmount/remount cycle (e.g. browser back
-		// then forward) sends a stale `seq` to the server, the server
-		// responds with a since-seq delta (often empty), and the client's
-		// reset `currentValue = undefined` never gets repopulated -- the
-		// store stays undefined and any `{#if $store === undefined}` spinner
-		// hangs forever. In-session WS reconnects do NOT go through cleanup,
-		// so the replay-buffer gap-fill optimization is preserved for those.
 		_lastSeq = null;
 		_lastVersion = undefined;
 		_schemaVersion = initialSchemaVersion;
@@ -2582,8 +2606,95 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_devtoolsStream(path, null, 0, merge);
 	}
 
-	/** @type {boolean} Whether a deferred cleanup is pending (prevents thrashing on rapid unsub+resub) */
+	/**
+	 * Full cleanup: release WS handles AND reset session state. Equivalent
+	 * to the pre-grace cleanup; used when resumeGraceMs is 0 (opt-out) or
+	 * when grace expires.
+	 */
+	function cleanup() {
+		_releaseSubscription();
+		_resetSession();
+	}
+
+	/** @type {boolean} Whether a microtask-deferred cleanup is pending (handles rapid sync unsub+resub) */
 	let _pendingCleanup = false;
+	/** @type {ReturnType<typeof setTimeout> | null} Resume-grace expiry timer; non-null while state is being retained for a possible resume */
+	let _resumeGraceTimer = null;
+	/** @type {boolean} Whether the stream is in the resume-grace window (released WS, retained data) */
+	let _inGracePeriod = false;
+
+	/**
+	 * Wire up the per-subscribe lifecycle listeners: quiescence tracking
+	 * (registers the stream with the global in-flight counter) and the
+	 * reconnect-on-open watcher. Shared between first-subscribe and
+	 * resume-from-grace so both paths get the same listener setup.
+	 */
+	function _attachLifecycleListeners() {
+		_quiescenceUnsub = _statusStore.subscribe((s) => {
+			const inFlight = s === 'loading' || s === 'reconnecting';
+			if (inFlight && !_countedInFlight) {
+				_countedInFlight = true;
+				_addInFlight();
+			} else if (!inFlight && _countedInFlight) {
+				_countedInFlight = false;
+				_removeInFlight();
+			}
+		});
+
+		// `status.subscribe` fires synchronously with the current value, which
+		// for a stream subscribing during page hydration is usually 'connecting'
+		// (since `_connect()` is lazy on the first subscriber). Filter on 'open'
+		// first and track whether we've ever seen one, so the FIRST 'open' is
+		// the lifetime baseline rather than treating it as a reconnect bounce.
+		let hasOpenedOnce = false;
+		statusUnsub = status.subscribe((s) => {
+			if (s !== 'open') return;
+			if (!hasOpenedOnce) {
+				hasOpenedOnce = true;
+				return;
+			}
+			if (subCount > 0) {
+				_status = 'reconnecting';
+				_statusStore.set('reconnecting');
+				if (_reconnectTimer) clearTimeout(_reconnectTimer);
+				let delay;
+				// Reconnect jitter: spread a fleet's reconnect attempts across the
+				// window so a server restart does not get a thundering-herd retry
+				// spike. Math.random is the right primitive here - jitter does not
+				// need crypto-quality entropy. Not security-relevant.
+				if (_reconnectAttempts < 2) {
+					delay = 20 + Math.floor(Math.random() * 80);
+				} else {
+					const base = Math.min(1000 * Math.pow(2.2, _reconnectAttempts - 2), 300000);
+					delay = Math.floor(base * (0.75 + Math.random() * 0.5));
+				}
+				_reconnectAttempts++;
+				_reconnectTimer = setTimeout(() => {
+					_reconnectTimer = null;
+					if (topicUnsub) {
+						topicUnsub();
+						topicUnsub = null;
+					}
+					initialLoaded = false;
+					fetching = false;
+					buffer = [];
+					fetchAndSubscribe();
+				}, delay);
+			}
+		});
+
+		// Surface terminal close as an error on the stream (adapter 0.4.0)
+		try {
+			const conn = _connect();
+			if (conn && typeof conn.ready === 'function') {
+				conn.ready().catch((/** @type {any} */ err) => {
+					if (subCount > 0) {
+						_setError(new RpcError(err?.code || 'CONNECTION_CLOSED', err?.message || 'Connection permanently closed'));
+					}
+				});
+			}
+		} catch {}
+	}
 
 	return {
 		// Stamped metadata so test-affordances like `subscribeAt`
@@ -2598,83 +2709,35 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		subscribe(fn) {
 			if (subCount++ === 0) {
 				if (_pendingCleanup) {
-					// Rapid resub - cancel the pending cleanup, subscription is still alive
+					// Rapid sync resub (same microtask) - cancel the pending cleanup,
+					// WS subscription is still attached.
 					_pendingCleanup = false;
+				} else if (_inGracePeriod) {
+					// Resume during the grace window: WS handles were released but
+					// session state (currentValue, _lastSeq, _lastVersion, _cursor)
+					// is intact. Re-attach lifecycle listeners and call
+					// fetchAndSubscribe(); the retained cursors ride along on the
+					// subscribe envelope so the server can fill the gap from its
+					// replay buffer (or fromSeq, or truncated -> full rehydrate).
+					if (_resumeGraceTimer) {
+						clearTimeout(_resumeGraceTimer);
+						_resumeGraceTimer = null;
+					}
+					_inGracePeriod = false;
+					// Flip status back to 'loading' so the newly-attached quiescence
+					// subscriber sees us as in-flight while the resume envelope is
+					// outstanding (it fires synchronously with the current value).
+					_status = 'loading';
+					_statusStore.set('loading');
+					_attachLifecycleListeners();
+					fetchAndSubscribe();
+					_devtoolsStream(path, topic, subCount, merge);
 				} else {
-				// First subscriber - start the stream
-				fetchAndSubscribe();
-				_devtoolsStream(path, topic, subCount, merge);
-
-				// Quiescence tracking: register this stream's contribution to
-				// the global in-flight counter. Subscriber fires synchronously
-				// with the current status so initial 'loading' is captured.
-				_quiescenceUnsub = _statusStore.subscribe((s) => {
-					const inFlight = s === 'loading' || s === 'reconnecting';
-					if (inFlight && !_countedInFlight) {
-						_countedInFlight = true;
-						_addInFlight();
-					} else if (!inFlight && _countedInFlight) {
-						_countedInFlight = false;
-						_removeInFlight();
-					}
-				});
-
-				// Listen for reconnects to refetch (debounced to avoid thundering herd).
-				// `status.subscribe` fires synchronously with the current value, which
-				// for a stream subscribing during page hydration is usually 'connecting'
-				// (since `_connect()` is lazy on the first subscriber). Filter on 'open'
-				// first and track whether we've ever seen one, so the FIRST 'open' is
-				// the lifetime baseline rather than treating it as a reconnect bounce.
-				let hasOpenedOnce = false;
-				statusUnsub = status.subscribe((s) => {
-					if (s !== 'open') return;
-					if (!hasOpenedOnce) {
-						hasOpenedOnce = true;
-						return;
-					}
-					if (subCount > 0) {
-						_status = 'reconnecting';
-						_statusStore.set('reconnecting');
-						if (_reconnectTimer) clearTimeout(_reconnectTimer);
-						let delay;
-						// Reconnect jitter: spread a fleet's reconnect attempts across the
-						// window so a server restart does not get a thundering-herd retry
-						// spike. Math.random is the right primitive here - jitter does not
-						// need crypto-quality entropy. Not security-relevant.
-						if (_reconnectAttempts < 2) {
-							delay = 20 + Math.floor(Math.random() * 80);
-						} else {
-							const base = Math.min(1000 * Math.pow(2.2, _reconnectAttempts - 2), 300000);
-							delay = Math.floor(base * (0.75 + Math.random() * 0.5));
-						}
-						_reconnectAttempts++;
-						_reconnectTimer = setTimeout(() => {
-							_reconnectTimer = null;
-							if (topicUnsub) {
-								topicUnsub();
-								topicUnsub = null;
-							}
-							initialLoaded = false;
-							fetching = false;
-							buffer = [];
-							fetchAndSubscribe();
-						}, delay);
-					}
-				});
-
-				// Surface terminal close as an error on the stream (adapter 0.4.0)
-				try {
-					const conn = _connect();
-					if (conn && typeof conn.ready === 'function') {
-						conn.ready().catch((/** @type {any} */ err) => {
-							if (subCount > 0) {
-								_setError(new RpcError(err?.code || 'CONNECTION_CLOSED', err?.message || 'Connection permanently closed'));
-							}
-						});
-					}
-				} catch {}
-
-			} // end else (not _pendingCleanup)
+					// First subscriber - start the stream
+					fetchAndSubscribe();
+					_devtoolsStream(path, topic, subCount, merge);
+					_attachLifecycleListeners();
+				}
 			}
 
 			const unsub = store.subscribe(fn);
@@ -2686,7 +2749,24 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					queueMicrotask(() => {
 						if (_pendingCleanup && subCount === 0) {
 							_pendingCleanup = false;
-							cleanup();
+							const graceMs = _getResumeGraceMs();
+							if (graceMs > 0) {
+								// Release WS handles immediately (give server back the
+								// subscription, stop counting toward quiescence) but
+								// retain session state for graceMs to support pause/resume
+								// and back/forward navigation patterns. If a new
+								// subscribe() lands before the timer fires, it resumes
+								// from the retained seq via fetchAndSubscribe.
+								_releaseSubscription();
+								_inGracePeriod = true;
+								_resumeGraceTimer = setTimeout(() => {
+									_resumeGraceTimer = null;
+									_inGracePeriod = false;
+									_resetSession();
+								}, graceMs);
+							} else {
+								cleanup();
+							}
 						}
 					});
 				}
@@ -3336,7 +3416,7 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number }} OfflineEntry
  */
 
-/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, upload?: { frameSize?: number, chunkSize?: number, highWaterMark?: number, lowWaterMark?: number }, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
+/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, upload?: { frameSize?: number, chunkSize?: number, highWaterMark?: number, lowWaterMark?: number }, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
 let _clientConfig = {};
 
 /** @type {boolean} */
@@ -3352,9 +3432,15 @@ let _isOffline = false;
 let _replayingQueue = false;
 
 /**
- * Configure client-side connection hooks and offline queue.
+ * Configure client-side connection hooks, RPC timeout, stream resume
+ * grace window, and offline queue.
  *
- * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * `resumeGraceMs` (default 60000) controls how long a stream retains its
+ * data model after the last subscriber unsubs. A new subscribe within the
+ * window resumes from the retained seq/version/cursor so the server can
+ * gap-fill instead of cold-rehydrating. Set to 0 to disable.
+ *
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
 	_clientConfig = config;

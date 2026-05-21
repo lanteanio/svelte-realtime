@@ -1714,18 +1714,27 @@ describe('__devtools stream tracking', () => {
 		unsub();
 	});
 
-	it('removes the entry when the last subscriber leaves', async () => {
+	it('removes the entry once the resume-grace window expires after the last subscriber leaves', async () => {
 		if (!__devtools) return;
-		const store = __stream('dt/gone', { merge: 'crud', key: 'id' });
-		const unsub = store.subscribe(() => {});
-		await flush();
+		vi.useFakeTimers();
+		try {
+			const store = __stream('dt/gone', { merge: 'crud', key: 'id' });
+			const unsub = store.subscribe(() => {});
+			await flush();
 
-		expect(__devtools.streams.has('dt/gone')).toBe(true);
+			expect(__devtools.streams.has('dt/gone')).toBe(true);
 
-		unsub();
-		await new Promise((r) => setTimeout(r, 50));
+			unsub();
+			await flush();
+			// Entry persists during grace (state is being retained for resume)
+			expect(__devtools.streams.has('dt/gone')).toBe(true);
 
-		expect(__devtools.streams.has('dt/gone')).toBe(false);
+			// Advance past the 60s default grace
+			await vi.advanceTimersByTimeAsync(60_001);
+			expect(__devtools.streams.has('dt/gone')).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('captures recentEvents on each pub/sub event up to the cap', async () => {
@@ -3907,24 +3916,33 @@ describe('stream undo/redo', () => {
 		unsub();
 	});
 
-	it('history is cleared on cleanup/unsubscribe', async () => {
-		const store = __stream('undo/test6', { merge: 'set' });
-		let value;
-		const unsub = store.subscribe(v => { value = v; });
+	it('history is cleared once the resume-grace window expires after unsubscribe', async () => {
+		vi.useFakeTimers();
+		try {
+			const store = __stream('undo/test6', { merge: 'set' });
+			let value;
+			const unsub = store.subscribe(v => { value = v; });
 
-		await flush();
-		const sent = sendQueuedFn.mock.calls[0][0];
-		simulateRpcResponse(sent.id, {
-			ok: true, data: 'init', topic: 'undo6', merge: 'set'
-		});
+			await flush();
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, {
+				ok: true, data: 'init', topic: 'undo6', merge: 'set'
+			});
 
-		store.enableHistory();
-		simulateTopicMessage('undo6', { event: 'set', data: 'changed' });
-		expect(store.canUndo).toBe(true);
+			store.enableHistory();
+			simulateTopicMessage('undo6', { event: 'set', data: 'changed' });
+			expect(store.canUndo).toBe(true);
 
-		unsub();
-		await new Promise((r) => queueMicrotask(r)); // Wait for deferred cleanup
-		expect(store.canUndo).toBe(false);
+			unsub();
+			await flush();
+			// History persists during grace (state retained for resume)
+			expect(store.canUndo).toBe(true);
+
+			await vi.advanceTimersByTimeAsync(60_001);
+			expect(store.canUndo).toBe(false);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
@@ -4213,34 +4231,48 @@ describe('.when(condition)', () => {
 		unsub();
 	});
 
-	it('unsubscribing from gated store cleans up underlying stream', async () => {
-		const store = __stream('gate/cleanup', { merge: 'set' });
-		const gated = store.when(true);
-		const values = [];
-		const unsub = gated.subscribe((v) => values.push(v));
+	it('unsubscribing from gated store cleans up underlying stream once resume-grace expires', async () => {
+		vi.useFakeTimers();
+		try {
+			const store = __stream('gate/cleanup', { merge: 'set' });
+			const gated = store.when(true);
+			const values = [];
+			const unsub = gated.subscribe((v) => values.push(v));
 
-		await flush();
-		const sent = sendQueuedFn.mock.calls[0][0];
-		simulateRpcResponse(sent.id, {
-			ok: true, data: 'data', topic: 'gate-cleanup-t', merge: 'set'
-		});
+			await flush();
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, {
+				ok: true, data: 'data', topic: 'gate-cleanup-t', merge: 'set'
+			});
 
-		expect(values[values.length - 1]).toBe('data');
-		unsub();
-		await new Promise((r) => queueMicrotask(r)); // Wait for deferred cleanup
+			expect(values[values.length - 1]).toBe('data');
+			unsub();
+			await flush();
+			await vi.advanceTimersByTimeAsync(60_001);
 
-		// Resubscribe - should get undefined (stream was cleaned up), and a new RPC sent
-		const values2 = [];
-		const unsub2 = gated.subscribe((v) => values2.push(v));
-		expect(values2[0]).toBeUndefined();
-		unsub2();
+			// Resubscribe after grace expiry - cold start: undefined first, new RPC sent
+			const values2 = [];
+			const unsub2 = gated.subscribe((v) => values2.push(v));
+			expect(values2[0]).toBeUndefined();
+			unsub2();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
-// - cleanup() resets session-resume cursors ---------------------------------
+// - stream resume-grace window (pause/resume gap-fill) ---------------------
+//
+// Default behavior: when the last subscriber unsubs, the stream releases
+// its WS subscription immediately but keeps the in-memory data model
+// (currentValue, _lastSeq, _lastVersion, _cursor, _schemaVersion) for
+// resumeGraceMs (default 60000). A new subscribe within the window resumes
+// from the retained cursor so the server can fill the gap from its replay
+// buffer. After the grace timer fires, the next subscribe is a cold start.
+// `configure({ resumeGraceMs: 0 })` disables the grace window entirely.
 
-describe('cleanup resets session-resume cursors', () => {
-	it('does not send stale seq on re-subscribe after deferred cleanup', async () => {
+describe('stream resume-grace window', () => {
+	it('sends retained seq on resume within grace window', async () => {
 		const store = __stream('resume/seq', { merge: 'crud', key: 'id', replay: true });
 		const unsub = store.subscribe(() => {});
 
@@ -4252,48 +4284,17 @@ describe('cleanup resets session-resume cursors', () => {
 		});
 
 		unsub();
-		await new Promise((r) => queueMicrotask(r));
+		await flush();
 
 		sendQueuedFn.mockClear();
 		const unsub2 = store.subscribe(() => {});
 		await flush();
 		const second = sendQueuedFn.mock.calls[0][0];
-		expect(second.seq).toBeUndefined();
+		expect(second.seq).toBe(42);
 		unsub2();
 	});
 
-	it('repopulates currentValue when server returns empty replay after re-subscribe', async () => {
-		const store = __stream('resume/empty-replay', { merge: 'crud', key: 'id', replay: true });
-		const values = [];
-		const unsub = store.subscribe((v) => values.push(v));
-
-		await flush();
-		const first = sendQueuedFn.mock.calls[0][0];
-		simulateRpcResponse(first.id, {
-			ok: true, data: [{ id: 1, text: 'a' }], topic: 'resume-empty', merge: 'crud', key: 'id', seq: 5
-		});
-
-		expect(values[values.length - 1]).toEqual([{ id: 1, text: 'a' }]);
-
-		unsub();
-		await new Promise((r) => queueMicrotask(r));
-
-		sendQueuedFn.mockClear();
-		const values2 = [];
-		const unsub2 = store.subscribe((v) => values2.push(v));
-		await flush();
-
-		expect(values2[0]).toBeUndefined();
-		const second = sendQueuedFn.mock.calls[0][0];
-		expect(second.seq).toBeUndefined();
-		simulateRpcResponse(second.id, {
-			ok: true, data: [{ id: 1, text: 'a' }, { id: 2, text: 'b' }], topic: 'resume-empty', merge: 'crud', key: 'id', seq: 7
-		});
-
-		expect(values2[values2.length - 1]).toEqual([{ id: 1, text: 'a' }, { id: 2, text: 'b' }]);
-	});
-
-	it('does not send stale version on re-subscribe', async () => {
+	it('sends retained version on resume within grace window', async () => {
 		const store = __stream('resume/version', { merge: 'set' });
 		const unsub = store.subscribe(() => {});
 
@@ -4304,17 +4305,17 @@ describe('cleanup resets session-resume cursors', () => {
 		});
 
 		unsub();
-		await new Promise((r) => queueMicrotask(r));
+		await flush();
 
 		sendQueuedFn.mockClear();
 		const unsub2 = store.subscribe(() => {});
 		await flush();
 		const second = sendQueuedFn.mock.calls[0][0];
-		expect(second.version).toBeUndefined();
+		expect(second.version).toBe('v1');
 		unsub2();
 	});
 
-	it('does not send stale schemaVersion on re-subscribe', async () => {
+	it('sends retained schemaVersion on resume within grace window', async () => {
 		const store = __stream('resume/schema', { merge: 'crud', key: 'id' });
 		const unsub = store.subscribe(() => {});
 
@@ -4326,13 +4327,200 @@ describe('cleanup resets session-resume cursors', () => {
 		});
 
 		unsub();
-		await new Promise((r) => queueMicrotask(r));
+		await flush();
 
 		sendQueuedFn.mockClear();
 		const unsub2 = store.subscribe(() => {});
 		await flush();
 		const second = sendQueuedFn.mock.calls[0][0];
-		expect(second.schemaVersion).toBeUndefined();
+		expect(second.schemaVersion).toBe(3);
+		unsub2();
+	});
+
+	it('preserves currentValue across pause+resume within grace', async () => {
+		const store = __stream('resume/preserve', { merge: 'crud', key: 'id', replay: true });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, {
+			ok: true, data: [{ id: 1, text: 'a' }], topic: 'resume-preserve', merge: 'crud', key: 'id', seq: 5
+		});
+		expect(values[values.length - 1]).toEqual([{ id: 1, text: 'a' }]);
+
+		unsub();
+		await flush();
+
+		// Resume within grace: the first emission should be the preserved
+		// state, NOT undefined (no spinner-hang, no cold start).
+		sendQueuedFn.mockClear();
+		const values2 = [];
+		const unsub2 = store.subscribe((v) => values2.push(v));
+		await flush();
+
+		expect(values2[0]).toEqual([{ id: 1, text: 'a' }]);
+		const second = sendQueuedFn.mock.calls[0][0];
+		expect(second.seq).toBe(5);
+
+		// Server gap-fills with one new event; merged into preserved state.
+		simulateRpcResponse(second.id, {
+			ok: true, data: [{ id: 1, text: 'a' }, { id: 2, text: 'b' }], topic: 'resume-preserve', merge: 'crud', key: 'id', seq: 7
+		});
+		expect(values2[values2.length - 1]).toEqual([{ id: 1, text: 'a' }, { id: 2, text: 'b' }]);
+
+		unsub2();
+	});
+
+	it('reattaches topic listener on resume so live events apply to preserved state', async () => {
+		const store = __stream('resume/livefill', { merge: 'crud', key: 'id', replay: true });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, {
+			ok: true, data: [{ id: 1, text: 'a' }], topic: 'resume-livefill', merge: 'crud', key: 'id', seq: 5
+		});
+
+		unsub();
+		await flush();
+
+		// Topic listener was released on unsub (subCount -> 0).
+		expect(topicCallbacks.has('resume-livefill')).toBe(false);
+
+		// Resume: server replies with same baseline (replay-buffer covered gap).
+		const values2 = [];
+		const unsub2 = store.subscribe((v) => values2.push(v));
+		await flush();
+		const second = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(second.id, {
+			ok: true, data: [{ id: 1, text: 'a' }], topic: 'resume-livefill', merge: 'crud', key: 'id', seq: 5
+		});
+
+		// Topic listener back in place; live events apply.
+		expect(topicCallbacks.has('resume-livefill')).toBe(true);
+		simulateTopicMessage('resume-livefill', { event: 'created', data: { id: 2, text: 'b' }, seq: 6 });
+		expect(values2[values2.length - 1]).toEqual([{ id: 1, text: 'a' }, { id: 2, text: 'b' }]);
+
+		unsub2();
+	});
+
+	it('resets session state (seq, currentValue) after grace window expires', async () => {
+		vi.useFakeTimers();
+		try {
+			const store = __stream('resume/expire', { merge: 'crud', key: 'id', replay: true });
+			const unsub = store.subscribe(() => {});
+
+			await flush();
+			const first = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(first.id, {
+				ok: true, data: [{ id: 1 }], topic: 'resume-expire', merge: 'crud', key: 'id', seq: 9
+			});
+
+			unsub();
+			await flush();
+			// Advance past the 60s default grace
+			await vi.advanceTimersByTimeAsync(60_001);
+
+			sendQueuedFn.mockClear();
+			const values2 = [];
+			const unsub2 = store.subscribe((v) => values2.push(v));
+			await flush();
+
+			// First emission after grace expiry is undefined (cold start).
+			expect(values2[0]).toBeUndefined();
+			const second = sendQueuedFn.mock.calls[0][0];
+			expect(second.seq).toBeUndefined();
+			unsub2();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('configure({ resumeGraceMs: 0 }) performs immediate full cleanup', async () => {
+		configure({ resumeGraceMs: 0 });
+
+		const store = __stream('resume/disabled', { merge: 'crud', key: 'id', replay: true });
+		const unsub = store.subscribe(() => {});
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, {
+			ok: true, data: [{ id: 1 }], topic: 'resume-disabled', merge: 'crud', key: 'id', seq: 12
+		});
+
+		unsub();
+		await flush();
+
+		sendQueuedFn.mockClear();
+		const values2 = [];
+		const unsub2 = store.subscribe((v) => values2.push(v));
+		await flush();
+
+		// With grace disabled, resume is a cold start: no seq, undefined first emission.
+		expect(values2[0]).toBeUndefined();
+		const second = sendQueuedFn.mock.calls[0][0];
+		expect(second.seq).toBeUndefined();
+		unsub2();
+	});
+
+	it('custom resumeGraceMs is honored', async () => {
+		vi.useFakeTimers();
+		try {
+			configure({ resumeGraceMs: 5_000 });
+
+			const store = __stream('resume/custom', { merge: 'crud', key: 'id', replay: true });
+			const unsub = store.subscribe(() => {});
+
+			await flush();
+			const first = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(first.id, {
+				ok: true, data: [{ id: 1 }], topic: 'resume-custom', merge: 'crud', key: 'id', seq: 3
+			});
+
+			unsub();
+			await flush();
+
+			// 4s in: still within custom grace, seq retained.
+			await vi.advanceTimersByTimeAsync(4_000);
+			sendQueuedFn.mockClear();
+			const unsub2 = store.subscribe(() => {});
+			await flush();
+			expect(sendQueuedFn.mock.calls[0][0].seq).toBe(3);
+			unsub2();
+			await flush();
+
+			// Another 6s: grace fired, next subscribe is cold.
+			await vi.advanceTimersByTimeAsync(6_000);
+			sendQueuedFn.mockClear();
+			const unsub3 = store.subscribe(() => {});
+			await flush();
+			expect(sendQueuedFn.mock.calls[0][0].seq).toBeUndefined();
+			unsub3();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('synchronous unsub+resub still skips the round-trip (microtask grace short-circuit)', async () => {
+		const store = __stream('resume/sync', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, {
+			ok: true, data: [{ id: 1 }], topic: 'resume-sync', merge: 'crud', key: 'id', seq: 1
+		});
+
+		// Synchronous unsub+resub within the same microtask: no new envelope,
+		// topic subscription stays attached.
+		sendQueuedFn.mockClear();
+		unsub();
+		const unsub2 = store.subscribe(() => {});
+		await flush();
+		expect(sendQueuedFn).not.toHaveBeenCalled();
+		expect(topicCallbacks.has('resume-sync')).toBe(true);
 		unsub2();
 	});
 });
@@ -5563,25 +5751,34 @@ describe('stream .error and .status', () => {
 		expect(errors[errors.length - 1].code).toBe('CONNECTION_CLOSED');
 	});
 
-	it('resets error and status on cleanup and re-subscribe', async () => {
-		const store = __stream('err/reset', { merge: 'crud', key: 'id' });
-		const errors = [];
-		const statuses = [];
-		store.error.subscribe((v) => errors.push(v));
-		store.status.subscribe((v) => statuses.push(v));
+	it('resets error and status once the resume-grace window expires', async () => {
+		vi.useFakeTimers();
+		try {
+			const store = __stream('err/reset', { merge: 'crud', key: 'id' });
+			const errors = [];
+			const statuses = [];
+			store.error.subscribe((v) => errors.push(v));
+			store.status.subscribe((v) => statuses.push(v));
 
-		const unsub = store.subscribe(() => {});
-		await flush();
-		const sent = sendQueuedFn.mock.calls[0][0];
-		simulateRpcResponse(sent.id, { ok: false, code: 'TIMEOUT', error: 'slow' });
+			const unsub = store.subscribe(() => {});
+			await flush();
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, { ok: false, code: 'TIMEOUT', error: 'slow' });
 
-		expect(errors[errors.length - 1]).not.toBe(null);
-		unsub();
+			expect(errors[errors.length - 1]).not.toBe(null);
+			unsub();
+			await flush();
 
-		await new Promise((r) => queueMicrotask(r));
+			// Error/status preserved during grace
+			expect(errors[errors.length - 1]).not.toBe(null);
 
-		expect(errors[errors.length - 1]).toBe(null);
-		expect(statuses[statuses.length - 1]).toBe('loading');
+			await vi.advanceTimersByTimeAsync(60_001);
+
+			expect(errors[errors.length - 1]).toBe(null);
+			expect(statuses[statuses.length - 1]).toBe('loading');
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('dynamic streams expose .error and .status', async () => {

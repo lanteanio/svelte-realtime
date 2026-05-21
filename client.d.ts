@@ -534,6 +534,20 @@ export function configure(config: {
 	onConnect?(): void;
 	/** Called when the WebSocket connection closes. */
 	onDisconnect?(): void;
+	/** Default RPC timeout in ms; per-call `.with({ timeout })` overrides. @default 30000 */
+	timeout?: number;
+	/**
+	 * Stream resume-grace window in ms. When the last subscriber of a stream
+	 * unsubs, the WS subscription is released immediately but the data model
+	 * (currentValue, seq, version, cursor) is kept for this long. A new
+	 * subscribe within the window resumes from the retained cursor so the
+	 * server can fill the gap from its replay buffer (or fromSeq, or
+	 * truncated -> full rehydrate) instead of cold-rehydrating. Covers
+	 * pause/resume UIs and browser back/forward navigation. Set to 0 to
+	 * disable the grace window.
+	 * @default 60000
+	 */
+	resumeGraceMs?: number;
 	/** Offline mutation queue configuration. */
 	offline?: {
 		/** Enable queuing RPCs when disconnected. */
