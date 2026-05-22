@@ -2239,7 +2239,7 @@ On older adapters (`open(ws, platform)` is the only available hand-off point), c
 
 Each worker process runs its own cron tick. In a single-process deployment that's exactly what you want. In a clustered deployment - whether `CLUSTER_MODE=reuseport` on Linux (N kernel workers per replica), acceptor mode on Windows / macOS (N internal workers per process), or N Docker replicas, or any combination - every worker fires every job in parallel by default. For "send the daily summary at 9am" jobs, that's almost certainly wrong.
 
-Wire a cluster-wide leader gate via `configureCron({ leader, bus })`. The canonical leader implementation lives in `svelte-adapter-uws-extensions/redis/leader` (Redis SETNX lease) and the canonical bus is `svelte-adapter-uws-extensions/redis/pubsub`:
+Wire a cluster-wide leader gate via `configureCron({ leader, bus })` (or via the higher-level `realtime({ bus, leader })` factory described in [Redis multi-instance](#redis-multi-instance) - same outcome, one fewer wiring step). The canonical leader implementation lives in `svelte-adapter-uws-extensions/redis/leader` (Redis SETNX lease) and the canonical bus is `svelte-adapter-uws-extensions/redis/pubsub`:
 
 ```js
 // src/hooks.ws.js (clustered, with extensions)
@@ -3014,28 +3014,70 @@ If `replay: true` is declared but `platform.replay` is never set, dev-mode logs 
 
 ## Redis multi-instance
 
-Use `createMessage` with the Redis pub/sub bus for multi-instance deployments. `ctx.publish` automatically goes through Redis when the platform is wrapped.
+One declaration of cluster intent reaches every framework publish surface. `realtime({ bus, leader })` (added in 0.5.6) wires `ctx.publish` for RPC, the cron tick, the reactive watcher path (`live.effect`, `live.derived`, `live.aggregate`, `live.webhook`), and the top-level `publish()` helper in one call. Handler code (`src/live/*.js`) is byte-identical between single-replica and cluster - you opt in by passing `bus` and `leader` at the top of `hooks.ws.js`, nothing else changes.
 
 ```js
 // src/hooks.ws.js
-import { createMessage } from 'svelte-realtime/server';
-import { createRedis, createPubSubBus } from 'svelte-adapter-uws-extensions/redis';
+import { realtime } from 'svelte-realtime/server';
+import { createRedis, createPubSubBus, createLeader } from 'svelte-adapter-uws-extensions/redis';
 
 const redis = createRedis();
 const bus = createPubSubBus(redis);
+const leader = createLeader(redis);
 
-export function open(ws, { platform }) {
-  bus.activate(platform);
+export const { open, close, message, init } = realtime({
+  bus,
+  leader: leader.isLeader,
+});
+
+export function upgrade({ cookies }) {
+  return validateSession(cookies.session_id) || false;
+}
+```
+
+Single-replica is the same file with no config:
+
+```js
+// src/hooks.ws.js (single-replica)
+import { realtime } from 'svelte-realtime/server';
+export const { open, close, message, init } = realtime();
+export function upgrade({ cookies }) {
+  return validateSession(cookies.session_id) || false;
+}
+```
+
+### Layer 1: manual wiring (experts)
+
+`realtime()` is sugar over the existing primitives. If you want fine control - per-route bus, custom hook composition, conditional cluster wiring - drop down to the building blocks. The pre-0.5.6 pattern still works unchanged, and as of 0.5.6 it routes through the same compose-at-publish-time pipeline, so reactive handlers (`live.effect`, `live.derived`, `live.aggregate`) pick up cluster relay automatically once a bus is wired:
+
+```js
+// src/hooks.ws.js (manual primitives)
+import { setBus, setCronPlatform, _activateDerived, configureCron, pushHooks, message } from 'svelte-realtime/server';
+import { createRedis, createPubSubBus, createLeader } from 'svelte-adapter-uws-extensions/redis';
+
+const redis = createRedis();
+const bus = createPubSubBus(redis);
+const leader = createLeader(redis);
+
+setBus(bus);                          // process-wide bus; reactive seam + RPC auto-wrap + publish() helper all use it
+configureCron({ leader: leader.isLeader });
+
+export { message };
+export const open = pushHooks.open;
+export const close = pushHooks.close;
+export function init({ platform }) {
+  setCronPlatform(platform);
+  _activateDerived(platform);
 }
 
 export function upgrade({ cookies }) {
   return validateSession(cookies.session_id) || false;
 }
-
-export const message = createMessage({ platform: (p) => bus.wrap(p) });
 ```
 
-No changes needed in your live modules. `ctx.publish` delegates to whatever platform was passed in, so Redis wrapping is transparent.
+`setBus(bus)` and `configureCron({ bus })` write the same backing state; pick whichever reads better at the call site. `getBus()`, `getPlatform()`, and `publish(topic, event, data)` are exported for diagnostics and for publishing from outside a framework handler (e.g. a `+server.js` HTTP endpoint).
+
+No changes needed in your live modules either way. `ctx.publish` delegates to whatever composed platform reached the handler, so cluster relay is transparent to user code.
 
 If you already run Postgres and don't need Redis, you can use the [LISTEN/NOTIFY bridge](#postgres-notify) instead for cross-instance pub/sub.
 
@@ -3051,19 +3093,23 @@ When you add the Redis extensions from [svelte-adapter-uws-extensions](https://g
 
 ### Combined: Redis + rate limiting
 
+`realtime()` returns the standard hook set; for the cross-cutting `beforeExecute` rate-limit gate, swap `realtime()`'s `message` for a `createMessage` you composed yourself. The bus is still wired once via `setBus`, so the reactive seam and cron tick stay cluster-correct without a per-hook bus callback:
+
 ```js
-import { createMessage, LiveError } from 'svelte-realtime/server';
-import { createRedis, createPubSubBus, createRateLimit } from 'svelte-adapter-uws-extensions/redis';
+import { realtime, createMessage, setBus, LiveError } from 'svelte-realtime/server';
+import { createRedis, createPubSubBus, createLeader, createRateLimit } from 'svelte-adapter-uws-extensions/redis';
 
 const redis = createRedis();
 const bus = createPubSubBus(redis);
+const leader = createLeader(redis);
 const limiter = createRateLimit(redis, { points: 30, interval: 10000 });
 
-export function open(ws, { platform }) { bus.activate(platform); }
+setBus(bus);
+
+export const { open, close, init } = realtime({ leader: leader.isLeader });
 export function upgrade({ cookies }) { return validateSession(cookies.session_id) || false; }
 
 export const message = createMessage({
-  platform: (p) => bus.wrap(p),
   async beforeExecute(ws, rpcPath) {
     const { allowed, resetMs } = await limiter.consume(ws);
     if (!allowed)
@@ -3071,6 +3117,8 @@ export const message = createMessage({
   }
 });
 ```
+
+Without a `platform` callback, `createMessage` auto-wraps with whatever `setBus(...)` wired - one source of truth, no double-wrap.
 
 ---
 
@@ -3586,13 +3634,18 @@ Import from `svelte-realtime/server`.
 | `guard(...fns)` | Per-module auth middleware |
 | `LiveError(code, message?)` | Typed error (propagates to client) |
 | `handleRpc(ws, data, platform, options?)` | Low-level RPC handler |
-| `message` | Ready-made message hook |
-| `createMessage(options?)` | Custom message hook factory |
+| `message` | Ready-made message hook (auto bus-wraps when `setBus` is wired) |
+| `createMessage(options?)` | Custom message hook factory (auto bus-wraps unless `options.platform` is provided) |
+| `realtime(config?)` | One-call setup returning `{ open, close, message, init, upgrade? }` - wires bus + leader + platform from a single declaration of cluster intent |
+| `setBus(bus)` | Configure the process-wide bus consulted by every framework publish surface (alias for `configureCron({ bus })`) |
+| `getBus()` | Read the process-wide bus, or `null` |
+| `getPlatform()` | Read the framework-owned composed platform after `init` has captured it |
+| `publish(topic, event, data, options?)` | Top-level publish helper (routes through the composed platform; relays via bus when wired) |
 | `pipe(stream, ...transforms)` | Composable stream transforms |
 | `close` | Ready-made close hook (fires onUnsubscribe for remaining topics) |
 | `unsubscribe` | Ready-made unsubscribe hook (fires onUnsubscribe in real time) |
 | `setCronPlatform(platform)` | Capture platform for cron jobs (call from `init({ platform })`) |
-| `configureCron({ leader })` | Cluster-mode leader gate for cron (default: every worker fires) |
+| `configureCron({ leader, bus })` | Cluster-mode leader gate for cron (default: every worker fires); `bus` also wires the process-wide bus |
 | `onError(handler)` | Global error handler for cron, effects, and derived |
 | `onCronError(handler)` | Deprecated alias for `onError` |
 | `enableSignals(ws)` | Enable point-to-point signal delivery |

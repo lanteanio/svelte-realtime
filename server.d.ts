@@ -2445,3 +2445,123 @@ export function close(
 	ws: WebSocket<any>,
 	ctx: { platform: Platform; subscriptions?: Set<string> | string[] }
 ): void;
+
+// ---------------------------------------------------------------------------
+// Cluster wiring + realtime() convenience factory
+// ---------------------------------------------------------------------------
+
+/**
+ * Cluster bus contract. Any object exposing `wrap(platform)` matches.
+ * The canonical implementation is `redisBus()` from
+ * `svelte-adapter-uws-extensions/redis/pubsub`; sharded-pubsub and
+ * test buses conform to the same shape.
+ */
+export interface ClusterBus {
+	wrap(platform: Platform): Platform;
+}
+
+/**
+ * Configure the process-wide cluster bus. One declaration of cluster
+ * intent reaches every framework publish surface in lockstep: RPC
+ * `ctx.publish` (auto-wrapped by `message` / `createMessage`), cron
+ * tick publishes, the reactive watcher publish wrap (`live.effect`,
+ * `live.derived`, `live.aggregate`, `live.webhook`), and the top-level
+ * `publish()` helper.
+ *
+ * Pass `null` to clear and revert to single-replica behaviour.
+ *
+ * `configureCron({ bus })` is equivalent for the bus field - they
+ * write the same backing state. Most apps reach for
+ * `realtime({ bus, leader })` instead and never call this directly.
+ */
+export function setBus(bus: ClusterBus | null): void;
+
+/** Read the process-wide bus, or `null` when none is configured. */
+export function getBus(): ClusterBus | null;
+
+/**
+ * Read the framework-owned composed platform - the same reference
+ * handed to every reactive handler. Returns `null` before the adapter's
+ * `init({ platform })` hook has captured it on this worker.
+ */
+export function getPlatform(): Platform | null;
+
+/**
+ * Publish from outside a framework handler (e.g. a `+server.js` HTTP
+ * handler). Routes through the composed platform so the publish reaches
+ * every local subscriber, fires every reactive watcher, and relays to
+ * other cluster instances when a bus is wired. Throws when called
+ * before the platform has been captured.
+ */
+export function publish(topic: string, event: string, data?: unknown, options?: unknown): void;
+
+/**
+ * Configuration accepted by `realtime()`.
+ */
+export interface RealtimeConfig {
+	/**
+	 * Cluster bus. Pass `redisBus()` or any object exposing
+	 * `wrap(platform)` to enable cluster fan-out. Omit (or pass `null`)
+	 * for single-replica.
+	 */
+	bus?: ClusterBus | null;
+	/**
+	 * Cluster leader gate for cron's "exactly once across the cluster"
+	 * semantics. Pass `redisLeader().isLeader` (or any function returning
+	 * the current leader status). Omit for single-replica or for the
+	 * "every worker fires" default.
+	 */
+	leader?: (() => boolean) | null;
+	/**
+	 * Optional `upgrade` hook handed straight back out as part of the
+	 * returned hook set. Lets you write a single one-import-one-
+	 * destructure `hooks.ws.js`. Omit and export your own `upgrade`
+	 * separately if you prefer.
+	 */
+	upgrade?: (...args: any[]) => any;
+	/**
+	 * Optional error handler for cron / effect / derived failures.
+	 * Equivalent to calling `onError(handler)`.
+	 */
+	onError?: (path: string, error: unknown) => void;
+}
+
+/**
+ * Shape returned by `realtime()`. Spread into `hooks.ws.js` exports.
+ * `upgrade` is present only when the caller passed one in the config.
+ */
+export interface RealtimeHooks {
+	open(ws: any, ctx: { platform: Platform }): void;
+	close(ws: any, ctx: { platform: Platform; subscriptions?: Set<string> | string[] }): void;
+	message(ws: any, ctx: { data: ArrayBuffer; platform: Platform }): void;
+	init(ctx: { platform: Platform }): void;
+	upgrade?: (...args: any[]) => any;
+}
+
+/**
+ * One-call setup that wires every framework seam from a single
+ * declaration of cluster intent. Returns the standard adapter hook
+ * set so `hooks.ws.js` is a one-import-one-destructure file.
+ *
+ * Single-replica:
+ * ```js
+ * import { realtime } from 'svelte-realtime/server';
+ * export const { open, close, message, init } = realtime();
+ * export function upgrade({ cookies }) { ... }
+ * ```
+ *
+ * Cluster:
+ * ```js
+ * import { realtime } from 'svelte-realtime/server';
+ * import { redisBus, redisLeader } from 'svelte-adapter-uws-extensions/redis';
+ * export const { open, close, message, init } = realtime({
+ *   bus: redisBus(),
+ *   leader: redisLeader().isLeader,
+ * });
+ * export function upgrade({ cookies }) { ... }
+ * ```
+ *
+ * Handler-level code is byte-identical between the two modes; the only
+ * difference is whether `bus` and `leader` are passed at the top.
+ */
+export function realtime(config?: RealtimeConfig): RealtimeHooks;

@@ -3426,22 +3426,79 @@ let _cronPlatform = null;
 let _cronLeader = null;
 
 /**
- * Optional cluster bus for cron fan-out. When set, every cron fire
- * publishes through `_cronBus.wrap(_cronPlatform)` instead of through
- * the raw platform, so leader-only ticks reach subscribers on
- * non-leader instances via the bus's relay channel.
+ * Process-wide cluster bus. Single source of truth consulted by every
+ * publish surface in the framework (RPC `ctx.publish`, cron tick,
+ * reactive watchers' publish wrap, top-level `publish()` helper). When
+ * set, outbound publishes relay to other cluster instances via
+ * `bus.wrap(platform).publish`; inbound relays from other instances
+ * arrive through the bus's own subscriber and are broadcast on this
+ * instance via the wrapped surrogate's `publish`.
  *
- * Why this is cron-specific (not derived/effect/aggregate): derived /
- * aggregate watchers re-publish through the realtime-wrapped
- * `platform.publish` captured at activation time. Every instance sees
- * the source-topic firehose via its own bus subscriber and computes
- * its own derived locally; bus-relaying derived publishes would cause
- * double delivery. Cron is different - only the leader fires it, so
- * the leader's publish must relay or remote subscribers see nothing.
+ * Written by `setBus(bus)`, `configureCron({ bus })`, and the
+ * `realtime({ bus })` factory. Read via `getBus()` and consulted at
+ * publish-time by every framework seam so a single declaration of
+ * deployment intent covers all of them. Without a bus, every seam
+ * publishes locally (the single-replica default).
+ *
+ * Composition discipline: `bus.wrap(...)` is applied at publish time
+ * over a snapshot of the raw adapter publish (the "surrogate"). The
+ * reactive seam mutates `platform.publish` to a `derivedPublish` that
+ * routes through the wrapped surrogate when a bus is configured, so
+ * the same publish call fires reactive watchers AND relays to the
+ * cluster in one step. Inbound relays from other instances arrive via
+ * the wrapped surrogate's publish (which runs the local broadcast + the
+ * watcher fan-out without re-relaying), so derived / effect /
+ * aggregate handlers on receiving instances see the cross-cluster
+ * stream the same way they see local publishes.
  *
  * @type {{ wrap: (platform: any) => any } | null}
  */
+let _bus = null;
+/**
+ * Legacy alias retained so the existing `_cronBus` references in the
+ * cron tick read the canonical bus without surgery. Always equal to
+ * `_bus` (the setter writes both in lockstep). Treat as read-only.
+ */
 let _cronBus = null;
+
+/**
+ * Sentinel attached to platforms that have been wrapped with the
+ * process-wide bus. Lets the framework detect already-wrapped inputs
+ * and skip re-wrapping, so a user who passes a manually `bus.wrap`-ed
+ * platform via `createMessage({ platform })` is not double-wrapped by
+ * the auto-wrap path.
+ */
+const _BUS_WRAPPED = Symbol.for('svelte-realtime.busWrapped');
+
+/**
+ * Write the process-wide bus. Validated like `configureCron({ bus })`
+ * - must expose `.wrap(platform)` or be `null`. Mirrored into the
+ * legacy `_cronBus` alias so the existing cron tick keeps reading the
+ * canonical value without surgery. Bumps `_busEpoch` so memoized
+ * `bus.wrap(...)` caches (per-platform, computed lazily by the
+ * reactive wrap and the RPC message hooks) invalidate on swap.
+ * @param {{ wrap: (platform: any) => any } | null} bus
+ */
+function _setBus(bus) {
+	if (bus !== null && (typeof bus !== 'object' || typeof bus.wrap !== 'function')) {
+		throw new Error('[svelte-realtime] setBus: bus must expose a .wrap(platform) method or be null');
+	}
+	_bus = bus;
+	_cronBus = bus;
+	_busEpoch++;
+}
+
+/** Read the process-wide bus (or null when no cluster intent is wired). */
+function _getBus() {
+	return _bus;
+}
+
+/**
+ * Monotonic counter bumped on every bus swap. Used by per-platform
+ * `bus.wrap(...)` caches to detect "the bus changed under me, re-wrap"
+ * without holding a strong reference to the old bus.
+ */
+let _busEpoch = 0;
 
 /**
  * One-shot flag for the "configureCron leader without bus" warning.
@@ -5192,6 +5249,49 @@ function _wrapPlatformPublish(platform) {
 		? /** @type {any} */ (platform).publishBatched.bind(platform)
 		: null;
 
+	// Memoized bus-wrapped surrogate. Recomputed when the process-wide
+	// bus changes (detected via `_busEpoch`). The surrogate's `publish`
+	// is `derivedPublishLocal` (local broadcast + watcher fan-out, no
+	// re-relay), so inbound bus deliveries fire watchers on the
+	// receiving instance without bouncing the message back out onto the
+	// bus. The wrapped surrogate's `publish` (set up by the extension's
+	// `bus.wrap`) does relay + delegate-to-surrogate; outbound publishes
+	// from user code go through `derivedPublish` below, which routes via
+	// this cache when a bus is configured.
+	let _cachedBusEpoch = -1;
+	/** @type {((topic: string, event: string, data: any, opts?: any) => any) | null} */
+	let _busPublish = null;
+	/** @type {((batch: any) => any) | null} */
+	let _busPublishBatched = null;
+	function _refreshBusCache() {
+		if (_cachedBusEpoch === _busEpoch) return;
+		_cachedBusEpoch = _busEpoch;
+		const bus = _getBus();
+		if (!bus) {
+			_busPublish = null;
+			_busPublishBatched = null;
+			return;
+		}
+		// Surrogate holds derivedPublishLocal as its publish so inbound
+		// cluster relays still fire reactive watchers on this instance
+		// but do not bounce back out. Spread carries the rest of the
+		// platform surface (subscribe, send, redis, replay, ...) so the
+		// extensions's bus.wrap sees a complete platform shape.
+		/** @type {any} */
+		const surrogate = Object.assign(Object.create(Object.getPrototypeOf(platform)), platform);
+		surrogate.publish = derivedPublishLocal;
+		if (originalPublishBatched) surrogate.publishBatched = derivedPublishBatchedLocal;
+		const wrapped = bus.wrap(surrogate);
+		// Tag so a downstream auto-wrap pass (e.g. message hook) can
+		// detect "already wrapped by us" and skip re-wrapping. The tag
+		// records the bus identity so a later swap re-wraps cleanly.
+		/** @type {any} */ (wrapped)[_BUS_WRAPPED] = bus;
+		_busPublish = typeof wrapped.publish === 'function' ? wrapped.publish.bind(wrapped) : null;
+		_busPublishBatched = typeof /** @type {any} */ (wrapped).publishBatched === 'function'
+			? /** @type {any} */ (wrapped).publishBatched.bind(wrapped)
+			: null;
+	}
+
 	let _publishDepth = 0;
 
 	function fireWatchers(topic, event, data) {
@@ -5297,10 +5397,37 @@ function _wrapPlatformPublish(platform) {
 		_publishDepth--;
 	}
 
-	platform.publish = function derivedPublish(topic, event, data, opts) {
+	// Inner publish used by the bus-wrap surrogate. Does the local
+	// broadcast + watcher fan-out but NEVER relays - relay is the
+	// outer `derivedPublish`'s job (via the wrapped surrogate). This
+	// is also what runs when an inbound message arrives from another
+	// instance, so cluster-relayed events fire derived / effect /
+	// aggregate watchers on the receiving instance.
+	function derivedPublishLocal(topic, event, data, opts) {
 		const result = originalPublish(topic, event, data, opts);
 		fireWatchers(topic, event, data);
 		return result;
+	}
+
+	function derivedPublishBatchedLocal(batch) {
+		const result = originalPublishBatched ? originalPublishBatched(batch) : undefined;
+		if (Array.isArray(batch) && _watchedTopics.size > 0) {
+			for (const item of batch) {
+				if (!item || typeof item.topic !== 'string') continue;
+				fireWatchers(item.topic, item.event, item.data);
+			}
+		}
+		return result;
+	}
+
+	// Outbound user-facing publish. When a bus is configured, routes
+	// through the wrapped surrogate so the publish both broadcasts
+	// locally (with watchers) and relays to the cluster in one step.
+	// Without a bus, identical to the legacy local-only path.
+	platform.publish = function derivedPublish(topic, event, data, opts) {
+		_refreshBusCache();
+		if (_busPublish) return _busPublish(topic, event, data, opts);
+		return derivedPublishLocal(topic, event, data, opts);
 	};
 
 	if (originalPublishBatched) {
@@ -5311,14 +5438,9 @@ function _wrapPlatformPublish(platform) {
 		// publishes from the batched path - they only fire from the unbatched
 		// platform.publish path that some test mocks happen to use.
 		/** @type {any} */ (platform).publishBatched = function derivedPublishBatched(batch) {
-			const result = originalPublishBatched(batch);
-			if (Array.isArray(batch) && _watchedTopics.size > 0) {
-				for (const item of batch) {
-					if (!item || typeof item.topic !== 'string') continue;
-					fireWatchers(item.topic, item.event, item.data);
-				}
-			}
-			return result;
+			_refreshBusCache();
+			if (_busPublishBatched) return _busPublishBatched(batch);
+			return derivedPublishBatchedLocal(batch);
 		};
 	}
 }
@@ -5589,7 +5711,7 @@ export function setCronPlatform(platform) {
 export function configureCron(config) {
 	if (config === null) {
 		_cronLeader = null;
-		_cronBus = null;
+		_setBus(null);
 		return;
 	}
 	if (typeof config !== 'object') {
@@ -5608,13 +5730,15 @@ export function configureCron(config) {
 		}
 	}
 	if (config.bus !== undefined) {
-		if (config.bus === null) {
-			_cronBus = null;
-		} else if (typeof config.bus !== 'object' || typeof config.bus.wrap !== 'function') {
+		// Routes through `_setBus` so the canonical `_bus` (consulted by
+		// the reactive wrap, the RPC auto-wrap, and the top-level
+		// `publish()` helper) stays in lockstep with the legacy
+		// `_cronBus` alias - one declaration of cluster intent covers
+		// every framework seam, not just cron.
+		if (config.bus !== null && (typeof config.bus !== 'object' || typeof config.bus.wrap !== 'function')) {
 			throw new Error('[svelte-realtime] configureCron: bus must expose a .wrap(platform) method or be null');
-		} else {
-			_cronBus = config.bus;
 		}
+		_setBus(config.bus);
 	}
 	// Diagnostic: cluster intent (leader) without cluster fan-out (bus)
 	// is almost always a misconfig. Leader-only cron ticks publish on the
@@ -8057,7 +8181,50 @@ export function close(ws, { platform, subscriptions }) {
 }
 
 /**
+ * Per-platform cache of the bus-wrapped surrogate used by the RPC hook
+ * (`message` / `createMessage`). Keyed on the raw adapter platform, with
+ * the bus identity stored alongside so a `setBus(differentBus)` swap is
+ * detected and re-wrapped without holding a strong reference to the old
+ * bus. WeakMap so the entry clears when the platform is GC-eligible.
+ * @type {WeakMap<object, { bus: any, wrapped: any, epoch: number }>}
+ */
+const _rpcBusWrapCache = new WeakMap();
+
+/**
+ * Resolve the platform handed to `handleRpc` from the WS message path.
+ * When a process-wide bus is configured (via `setBus`,
+ * `configureCron({ bus })`, or `realtime({ bus })`), the raw adapter
+ * platform is wrapped on first use and memoized for subsequent
+ * messages on the same platform. When the user manually pre-wraps via
+ * `createMessage({ platform })`, this is bypassed (their callback
+ * runs first) so we never double-wrap.
+ *
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @returns {import('svelte-adapter-uws').Platform}
+ */
+function _autoBusWrap(platform) {
+	const bus = _getBus();
+	if (!bus) return platform;
+	// Idempotence: if the input has already been wrapped by this
+	// framework against the current bus, return it untouched.
+	if (/** @type {any} */ (platform)[_BUS_WRAPPED] === bus) return platform;
+	const entry = _rpcBusWrapCache.get(/** @type {any} */ (platform));
+	if (entry && entry.bus === bus && entry.epoch === _busEpoch) return entry.wrapped;
+	const wrapped = bus.wrap(platform);
+	/** @type {any} */ (wrapped)[_BUS_WRAPPED] = bus;
+	_rpcBusWrapCache.set(/** @type {any} */ (platform), { bus, wrapped, epoch: _busEpoch });
+	return wrapped;
+}
+
+/**
  * Ready-made message hook. Re-export from hooks.ws.js for zero-config RPC routing.
+ *
+ * When a process-wide bus is configured (via `setBus`,
+ * `configureCron({ bus })`, or `realtime({ bus })`), this hook auto-
+ * wraps the adapter platform so RPC `ctx.publish` relays to other
+ * cluster instances without any per-hook wiring. Without a bus,
+ * publishes stay local - the single-replica default with zero
+ * overhead.
  *
  * Signature matches the adapter's message hook exactly.
  *
@@ -8065,7 +8232,7 @@ export function close(ws, { platform, subscriptions }) {
  * @param {{ data: ArrayBuffer, platform: import('svelte-adapter-uws').Platform }} ctx
  */
 export function message(ws, { data, platform }) {
-	handleRpc(ws, data, platform);
+	handleRpc(ws, data, _autoBusWrap(platform));
 }
 
 /**
@@ -8086,10 +8253,205 @@ export function createMessage(options) {
 	const hasRpcOpts = beforeExecute || onError;
 
 	return function customMessage(ws, { data, platform }) {
-		const p = transformPlatform ? transformPlatform(platform) : platform;
+		// User-supplied `platform` callback signals "I am wiring the
+		// transform myself"; we run it as-is and skip the auto bus
+		// wrap so we never double-wrap. Without the callback, we
+		// route through `_autoBusWrap` so the process-wide bus
+		// reaches RPC handlers with zero per-hook config.
+		const p = transformPlatform ? transformPlatform(platform) : _autoBusWrap(platform);
 		const handled = handleRpc(ws, data, p, hasRpcOpts ? rpcOpts : undefined);
 		if (!handled && onUnhandled) {
 			onUnhandled(ws, data, p);
 		}
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Cluster wiring: process-wide bus + composed-platform accessors
+// ---------------------------------------------------------------------------
+
+/**
+ * Configure the process-wide cluster bus. Consumed by every framework
+ * publish surface in lockstep: RPC `ctx.publish` (via the `message` /
+ * `createMessage` auto-wrap), cron tick publishes, reactive watchers'
+ * publish wrap (`live.effect`, `live.derived`, `live.aggregate`,
+ * `live.webhook`), and the top-level `publish()` helper. One
+ * declaration of cluster intent covers all of them.
+ *
+ * Pass a bus exposing `.wrap(platform)` (e.g. `redisBus()` from
+ * `svelte-adapter-uws-extensions/redis/pubsub`) to enable cluster
+ * fan-out. Pass `null` to clear and revert to single-replica behaviour.
+ *
+ * `configureCron({ bus })` is equivalent to `setBus(bus)` for the bus
+ * field - they write the same backing state. Pick whichever reads more
+ * naturally at the call site; the typical app uses
+ * `realtime({ bus, leader })` instead and never calls either directly.
+ *
+ * @param {{ wrap: (platform: any) => any } | null} bus
+ *
+ * @example
+ * ```js
+ * // hooks.ws.js (Layer 1 / expert wiring)
+ * import { setBus, setCronPlatform, _activateDerived, configureCron, message } from 'svelte-realtime/server';
+ * import { redisBus, redisLeader } from 'svelte-adapter-uws-extensions/redis';
+ *
+ * const bus = redisBus();
+ * setBus(bus);
+ * configureCron({ leader: redisLeader() });
+ *
+ * export { message };
+ * export function init({ platform }) {
+ *   setCronPlatform(platform);
+ *   _activateDerived(platform);
+ * }
+ * ```
+ */
+export function setBus(bus) {
+	_setBus(bus);
+}
+
+/**
+ * Read the process-wide bus, or `null` when none is configured. Useful
+ * for diagnostics, conditional cluster-only wiring, and tests.
+ *
+ * @returns {{ wrap: (platform: any) => any } | null}
+ */
+export function getBus() {
+	return _getBus();
+}
+
+/**
+ * Read the framework-owned composed platform - the same reference handed
+ * to every `live.effect` / `live.derived` / `live.aggregate` handler and
+ * threaded through `ctx.platform` in RPC / cron / webhook contexts.
+ *
+ * Returns `null` before `setCronPlatform(platform)` /
+ * `_activateDerived(platform)` / `realtime().init({ platform })` has
+ * captured the adapter platform on this worker.
+ *
+ * Use for publish from outside a framework handler (e.g. a `+server.js`
+ * HTTP handler) when you want the same cluster semantics. Most callers
+ * should reach for the top-level `publish()` helper instead.
+ *
+ * @returns {import('svelte-adapter-uws').Platform | null}
+ */
+export function getPlatform() {
+	return _derivedPlatform || _cronPlatform || null;
+}
+
+/**
+ * Publish from outside a framework handler. Routes through the
+ * framework-owned composed platform, so the same publish reaches every
+ * local subscriber, fires every reactive watcher (`live.effect`,
+ * `live.derived`, `live.aggregate`), and relays to other cluster
+ * instances when a bus is wired - identical semantics to a publish
+ * inside an RPC, cron, or effect handler.
+ *
+ * Throws when the platform has not yet been captured (called before
+ * the adapter's `init({ platform })` hook fires, or in a process where
+ * no svelte-realtime wiring ran). For the rare case where you genuinely
+ * want a no-op when the platform is absent (e.g. a shared utility
+ * that may run in non-realtime contexts), guard with `getPlatform()`.
+ *
+ * @param {string} topic
+ * @param {string} event
+ * @param {unknown} data
+ * @param {unknown} [options]
+ *
+ * @example
+ * ```js
+ * // src/routes/webhooks/+server.js
+ * import { publish } from 'svelte-realtime/server';
+ *
+ * export async function POST({ request }) {
+ *   const payload = await request.json();
+ *   publish('audit', 'webhook', payload);
+ *   return new Response();
+ * }
+ * ```
+ */
+export function publish(topic, event, data, options) {
+	const platform = getPlatform();
+	if (!platform) {
+		throw new Error('[svelte-realtime] publish: platform has not been captured yet. Wire `realtime({ ... }).init` (or `setCronPlatform` + `_activateDerived`) from your hooks.ws.js init({ platform }) hook before calling publish() at module scope.');
+	}
+	return platform.publish(topic, event, data, options);
+}
+
+// ---------------------------------------------------------------------------
+// realtime() - Layer 2 convenience factory
+// ---------------------------------------------------------------------------
+
+/**
+ * One-call setup that wires every framework seam from a single
+ * declaration of cluster intent. Returns the standard adapter hook
+ * set (`open`, `close`, `message`, `init`) plus optional `upgrade`,
+ * so `hooks.ws.js` is a one-import-one-destructure file:
+ *
+ * ```js
+ * // src/hooks.ws.js (single-replica)
+ * import { realtime } from 'svelte-realtime/server';
+ * export const { upgrade, open, close, message, init } = realtime({
+ *   upgrade: ({ cookies }) => validate(cookies),
+ * });
+ * ```
+ *
+ * ```js
+ * // src/hooks.ws.js (cluster)
+ * import { realtime } from 'svelte-realtime/server';
+ * import { redisBus, redisLeader } from 'svelte-adapter-uws-extensions/redis';
+ *
+ * export const { upgrade, open, close, message, init } = realtime({
+ *   bus: redisBus(),
+ *   leader: redisLeader().isLeader,
+ *   upgrade: ({ cookies }) => validate(cookies),
+ * });
+ * ```
+ *
+ * Handler-level code (`live.rpc`, `live.effect`, `live.derived`,
+ * `live.aggregate`, `live.cron`, `live.webhook`, ...) is byte-identical
+ * between the two modes - the only difference between single-replica
+ * and cluster is whether `bus` and `leader` are passed at the top.
+ *
+ * `realtime()` is sugar over the existing primitives. Internally it
+ * calls `setBus(bus)`, `configureCron({ leader })`,
+ * `setCronPlatform(platform)`, and `_activateDerived(platform)` in the
+ * right order when the adapter's `init` hook fires. Mixing `realtime()`
+ * with direct calls to those primitives is supported - the primitives
+ * remain first-class and write the same backing state.
+ *
+ * @param {{
+ *   bus?: { wrap: (platform: any) => any } | null,
+ *   leader?: (() => boolean) | null,
+ *   upgrade?: (...args: any[]) => any,
+ *   onError?: (path: string, error: unknown) => void,
+ * }} [config]
+ */
+export function realtime(config) {
+	const cfg = config || {};
+	const { bus, leader, upgrade: upgradeFn, onError } = cfg;
+
+	if (bus !== undefined) _setBus(bus);
+	if (leader !== undefined) configureCron({ leader });
+	if (typeof onError === 'function') {
+		// Routes through the existing module-level setter so the
+		// behaviour matches a direct `onError(handler)` call - one
+		// source of truth for the cron / effect / derived error path.
+		_serverErrorHandler = onError;
+	}
+
+	const hooks = {
+		open: pushHooks.open,
+		close: pushHooks.close,
+		message,
+		init(ctx) {
+			if (!ctx || !ctx.platform) {
+				throw new Error('[svelte-realtime] realtime().init: missing platform on hook context (expected adapter init({ platform }) signature)');
+			}
+			setCronPlatform(ctx.platform);
+			_activateDerived(ctx.platform);
+		},
+	};
+	if (typeof upgradeFn === 'function') /** @type {any} */ (hooks).upgrade = upgradeFn;
+	return hooks;
 }

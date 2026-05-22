@@ -6,6 +6,11 @@ import {
 	handleRpc,
 	message,
 	createMessage,
+	realtime,
+	setBus,
+	getBus,
+	getPlatform,
+	publish,
 	combineSum,
 	combineMax,
 	combineMin,
@@ -2790,6 +2795,387 @@ describe('live.cron()', () => {
 			expect(bus.wrappedPublishes.length).toBe(1);
 			expect(bus.wrappedPublishes[0]).toMatchObject({ topic: 't:bus-only', event: 'set' });
 		});
+	});
+});
+
+// - Process-wide bus (setBus / getBus) + composed-platform accessors ---------
+//
+// The 0.5.6 unification: one declaration of cluster intent (the bus) is
+// consumed by every framework publish surface. setBus and configureCron({ bus })
+// write the same backing state; the reactive seam (live.effect /
+// live.derived / live.aggregate), the cron tick, and the RPC message hook
+// all consult that state at publish time. Existing apps wired via
+// configureCron({ bus }) pick up the reactive-seam fix for free; new apps
+// reach for realtime({ bus, leader }) instead.
+
+describe('setBus / getBus + cross-seam bus routing', () => {
+	const makeRecordingBus = () => {
+		const relays = [];
+		return {
+			relays,
+			wrap(platform) {
+				return {
+					...platform,
+					publish(topic, event, data, options) {
+						relays.push({ topic, event, data, options });
+						return platform.publish(topic, event, data, options);
+					},
+					publishBatched(batch) {
+						if (Array.isArray(batch)) for (const item of batch) {
+							if (item && typeof item.topic === 'string') {
+								relays.push({ topic: item.topic, event: item.event, data: item.data, options: item.options, _batched: true });
+							}
+						}
+						if (typeof platform.publishBatched === 'function') return platform.publishBatched(batch);
+						return undefined;
+					}
+				};
+			}
+		};
+	};
+
+	afterEach(() => {
+		// configureCron(null) clears both leader and bus; ensures the
+		// process-wide bus is unwired between tests.
+		_clearCron();
+		configureCron(null);
+		setBus(null);
+	});
+
+	it('setBus stores the bus and getBus returns it', () => {
+		const bus = makeRecordingBus();
+		expect(getBus()).toBe(null);
+		setBus(bus);
+		expect(getBus()).toBe(bus);
+		setBus(null);
+		expect(getBus()).toBe(null);
+	});
+
+	it('configureCron({ bus }) writes the same backing state as setBus', () => {
+		const bus = makeRecordingBus();
+		configureCron({ bus });
+		expect(getBus()).toBe(bus);
+	});
+
+	it('rejects buses without a .wrap method', () => {
+		expect(() => setBus({ foo: 1 })).toThrow('bus must expose a .wrap(platform) method');
+		expect(() => setBus(42)).toThrow('bus must expose a .wrap(platform) method');
+	});
+
+	it('live.effect handler publish relays via the bus when configured (regression for the demo bug)', async () => {
+		// The exact bug from the report: a live.effect handler called
+		// platform.publish(audit, ...) and platform.publish(notifications,
+		// ...) and those publishes stayed local instead of relaying to
+		// other replicas. Post-fix, the reactive wrap consults the
+		// process-wide bus at publish time and routes through bus.wrap.
+		const bus = makeRecordingBus();
+		setBus(bus);
+
+		const fx = live.effect(['orders-bus-fx'], async (event, data, platform) => {
+			platform.publish('audit-bus-fx', 'order', { id: data.id });
+			platform.publish('notifications-bus-fx', 'order', { id: data.id });
+		});
+		__registerEffect('fx/bus-relay', fx);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		platform.publish('orders-bus-fx', 'created', { id: 7 });
+		await new Promise((r) => setTimeout(r, 20));
+
+		// The audit + notifications publishes from inside the effect
+		// handler both reached the bus relay - they would have stayed
+		// local pre-fix.
+		const auditRelay = bus.relays.find((r) => r.topic === 'audit-bus-fx');
+		const notifRelay = bus.relays.find((r) => r.topic === 'notifications-bus-fx');
+		expect(auditRelay).toBeDefined();
+		expect(notifRelay).toBeDefined();
+		expect(auditRelay.data).toEqual({ id: 7 });
+		expect(notifRelay.data).toEqual({ id: 7 });
+	});
+
+	it('without a bus, effect handler publishes stay local (no relay) and watchers still fire', async () => {
+		// The single-replica default: no bus configured -> publishes
+		// take the legacy local-only path with zero overhead.
+		const calls = [];
+		const fx = live.effect(['orders-no-bus'], async (event, data, platform) => {
+			calls.push({ event, data });
+			platform.publish('audit-no-bus', 'order', { id: data.id });
+		});
+		__registerEffect('fx/no-bus', fx);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		platform.publish('orders-no-bus', 'created', { id: 9 });
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(calls.length).toBe(1);
+		// Audit publish landed on the platform directly (no bus to record it on).
+		expect(platform.published.find((p) => p.topic === 'audit-no-bus')).toBeDefined();
+	});
+
+	it('default message hook auto-wraps the platform with the bus (RPC ctx.publish relays)', async () => {
+		const bus = makeRecordingBus();
+		setBus(bus);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('rpc-bus-topic', 'hi', { from: 'rpc' });
+			return 'ok';
+		});
+		__register('bus/rpc', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'bus/rpc', id: 'b-rpc-1', args: [] });
+
+		message(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 20));
+
+		const relayed = bus.relays.find((r) => r.topic === 'rpc-bus-topic' && r.event === 'hi');
+		expect(relayed).toBeDefined();
+		expect(relayed.data).toEqual({ from: 'rpc' });
+	});
+
+	it('createMessage({ platform: callback }) bypasses auto-wrap (back-compat for manual wiring)', async () => {
+		// Existing 0.5.x users who wired bus.wrap themselves via
+		// `createMessage({ platform: (p) => bus.wrap(p) })` must not be
+		// double-wrapped by the auto-bus-wrap path. Their callback is
+		// the sole transform; the framework stays out of the way.
+		const userBus = makeRecordingBus();
+		const globalBus = makeRecordingBus();
+		setBus(globalBus);
+
+		const hook = createMessage({
+			platform: (p) => userBus.wrap(p),
+		});
+
+		const handler = live(async (ctx) => {
+			ctx.publish('rpc-userbus-topic', 'hi', { x: 1 });
+			return 'ok';
+		});
+		__register('bus/rpc-userbus', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'bus/rpc-userbus', id: 'b-rpc-2', args: [] });
+
+		hook(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 20));
+
+		// User's bus saw the relay (their callback is doing the wrap).
+		const userRelay = userBus.relays.find((r) => r.topic === 'rpc-userbus-topic');
+		expect(userRelay).toBeDefined();
+		// Global bus did NOT also see it - no double-wrap.
+		const globalRelay = globalBus.relays.find((r) => r.topic === 'rpc-userbus-topic');
+		expect(globalRelay).toBeUndefined();
+	});
+
+	it('createMessage() without platform callback auto-wraps with global bus', async () => {
+		const bus = makeRecordingBus();
+		setBus(bus);
+
+		// createMessage with NO platform callback should auto-wrap.
+		const hook = createMessage({
+			async beforeExecute() { /* present, but no platform transform */ },
+		});
+
+		const handler = live(async (ctx) => {
+			ctx.publish('rpc-auto-topic', 'hi', { y: 2 });
+			return 'ok';
+		});
+		__register('bus/rpc-auto', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'bus/rpc-auto', id: 'b-rpc-3', args: [] });
+
+		hook(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 20));
+
+		const relayed = bus.relays.find((r) => r.topic === 'rpc-auto-topic');
+		expect(relayed).toBeDefined();
+	});
+
+	it('getPlatform returns the captured platform after _activateDerived', () => {
+		// _derivedPlatform / _cronPlatform are intentionally process-wide
+		// (see `_clearCron` docs) so they survive HMR; tests can only
+		// assert the post-capture state, not the pre-capture null.
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		expect(getPlatform()).toBe(platform);
+	});
+
+	it('publish() routes through the composed platform (relays via bus when configured)', async () => {
+		const bus = makeRecordingBus();
+		setBus(bus);
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		publish('publish-helper-topic', 'evt', { z: 3 });
+		await new Promise((r) => setTimeout(r, 10));
+
+		const relayed = bus.relays.find((r) => r.topic === 'publish-helper-topic');
+		expect(relayed).toBeDefined();
+		expect(relayed.data).toEqual({ z: 3 });
+	});
+
+	it('bus swap (setBus -> different bus) updates the reactive seam without restart', async () => {
+		const busA = makeRecordingBus();
+		const busB = makeRecordingBus();
+		setBus(busA);
+
+		const fx = live.effect(['orders-swap'], async (event, data, platform) => {
+			platform.publish('audit-swap', 'order', data);
+		});
+		__registerEffect('fx/bus-swap', fx);
+
+		const platform = mockPlatform();
+		_activateDerived(platform);
+
+		platform.publish('orders-swap', 'created', { id: 1 });
+		await new Promise((r) => setTimeout(r, 20));
+		expect(busA.relays.find((r) => r.topic === 'audit-swap')).toBeDefined();
+		expect(busB.relays.find((r) => r.topic === 'audit-swap')).toBeUndefined();
+
+		// Swap to bus B; the next publish should route through B.
+		setBus(busB);
+		platform.publish('orders-swap', 'created', { id: 2 });
+		await new Promise((r) => setTimeout(r, 20));
+		const relayB = busB.relays.find((r) => r.topic === 'audit-swap' && r.data.id === 2);
+		expect(relayB).toBeDefined();
+	});
+});
+
+// - realtime() Layer-2 convenience factory -----------------------------------
+
+describe('realtime() factory', () => {
+	const makeRecordingBus = () => {
+		const relays = [];
+		return {
+			relays,
+			wrap(platform) {
+				return {
+					...platform,
+					publish(topic, event, data, options) {
+						relays.push({ topic, event, data, options });
+						return platform.publish(topic, event, data, options);
+					}
+				};
+			}
+		};
+	};
+
+	afterEach(() => {
+		_clearCron();
+		configureCron(null);
+		setBus(null);
+	});
+
+	it('returns the standard hook set (open, close, message, init)', () => {
+		const hooks = realtime();
+		expect(typeof hooks.open).toBe('function');
+		expect(typeof hooks.close).toBe('function');
+		expect(typeof hooks.message).toBe('function');
+		expect(typeof hooks.init).toBe('function');
+		expect(hooks.upgrade).toBeUndefined();
+	});
+
+	it('returns upgrade when provided in config', () => {
+		const upgrade = () => ({ id: 'u1' });
+		const hooks = realtime({ upgrade });
+		expect(hooks.upgrade).toBe(upgrade);
+	});
+
+	it('wires bus via _setBus on call', () => {
+		const bus = makeRecordingBus();
+		realtime({ bus });
+		expect(getBus()).toBe(bus);
+	});
+
+	it('init({ platform }) captures the platform for cron + derived', () => {
+		const hooks = realtime();
+		const platform = mockPlatform();
+		hooks.init({ platform });
+		expect(getPlatform()).toBe(platform);
+	});
+
+	it('init throws when called without a platform', () => {
+		const hooks = realtime();
+		expect(() => hooks.init({})).toThrow('missing platform on hook context');
+		expect(() => hooks.init(null)).toThrow('missing platform on hook context');
+	});
+
+	it('end-to-end: realtime({ bus, leader }) + effect handler publish relays correctly', async () => {
+		// The "best DX" promise: a 5-line hooks.ws.js wires bus +
+		// leader, and every framework seam picks it up automatically.
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus, leader: () => true });
+
+		const fx = live.effect(['orders-e2e'], async (event, data, platform) => {
+			platform.publish('audit-e2e', 'order', { id: data.id });
+		});
+		__registerEffect('fx/e2e', fx);
+
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		platform.publish('orders-e2e', 'created', { id: 42 });
+		await new Promise((r) => setTimeout(r, 20));
+
+		const relayed = bus.relays.find((r) => r.topic === 'audit-e2e');
+		expect(relayed).toBeDefined();
+		expect(relayed.data).toEqual({ id: 42 });
+	});
+
+	it('end-to-end: cron tick on the leader relays through the bus', async () => {
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus, leader: () => true });
+
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		__registerCron('test/e2e-cron', live.cron('* * * * *', 'cron-e2e-topic', async () => ({ tick: 1 })));
+		await _tickCron();
+		await new Promise((r) => setTimeout(r, 20));
+
+		const relayed = bus.relays.find((r) => r.topic === 'cron-e2e-topic');
+		expect(relayed).toBeDefined();
+	});
+
+	it('single-replica path: realtime() with no bus/leader publishes locally only', async () => {
+		const hooks = realtime();
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		const fx = live.effect(['orders-single'], async (event, data, p) => {
+			p.publish('audit-single', 'order', { id: data.id });
+		});
+		__registerEffect('fx/single', fx);
+
+		platform.publish('orders-single', 'created', { id: 100 });
+		await new Promise((r) => setTimeout(r, 20));
+
+		// No bus -> no relay records, but the local publish landed.
+		expect(getBus()).toBe(null);
+		expect(platform.published.find((p) => p.topic === 'audit-single')).toBeDefined();
+	});
+
+	it('onError option wires into the global error handler', async () => {
+		const errors = [];
+		const hooks = realtime({ onError: (path, err) => errors.push({ path, err: err.message }) });
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		const fx = live.effect(['orders-err'], async () => { throw new Error('boom-realtime'); });
+		__registerEffect('fx/err', fx);
+
+		platform.publish('orders-err', 'created', { id: 1 });
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(errors.length).toBe(1);
+		expect(errors[0].path).toBe('effect');
+		expect(errors[0].err).toBe('boom-realtime');
 	});
 });
 
