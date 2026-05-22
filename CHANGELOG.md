@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-05-22
+
+### Added
+
+- **`createMessage({ onJsonMessage(ws, msg, platform) })` callback for plugin-layer JSON envelope dispatch.** Plugin frames (cursor `{type:'cursor',...}`, future presence/typing) reach a single callback with the parsed value, so user wiring doesn't re-parse on every frame. Two-tier lookup: (1) fast path uses the parsed `msg` field forwarded by `svelte-adapter-uws` (when prefix matched, parse succeeded, and no control type matched), avoiding a second parse; (2) fallback parses locally for frames the adapter didn't fast-path (older adapter, > 8 KiB frame, or non-`{"ty` prefix). The depth cap `maxJsonDepth` (default 64) mirrors `handleRpc`'s envelope-depth defense; deeper envelopes fall through to `onUnhandled` with raw bytes. No size cap here - the adapter's `maxPayloadLength` (default 1 MB) is the structural ceiling. `onUnhandled` continues to work for binary frames / non-JSON / parse-fail / depth-bust. Existing `createMessage({ onUnhandled })` wiring is unaffected; opt in by replacing `onUnhandled` with `onJsonMessage` where you currently re-parse manually. Type added to `CreateMessageOptions` in `server.d.ts`.
+
+  **Bench (`bench/onjsonmessage.js`, 7 rounds x 50K iterations, median):**
+  - small cursor envelope (~60 bytes): 470 -> 66 ns/dispatch, **7.15x speedup**
+  - presence-snapshot envelope (~40 bytes): 341 -> 46 ns/dispatch, **7.35x speedup**
+  - 400-byte chat-shaped envelope: 828 -> 99 ns/dispatch, **8.35x speedup**
+
+  At cursor scale (1000 movers x 60 Hz = 60K dispatches/sec), the baseline burns ~28 ms/sec on parsing alone; the variant burns ~4 ms/sec. The structural cost saving compounds with every plugin that adds direct-wire frames.
+
+- **`ctx.skip(key, ms)` per-key handler gate primitive on `LiveContext` (`LiveContext.skip` / `CronContext` does not include it - cron handlers don't have a `key` concept since they fire on a schedule, not on per-request input).** Pairs with `ctx.shed` semantically (both return `true` to early-return). Use inside a handler body to drop calls within a per-key cooldown window:
+
+  ```js
+  export const moveNote = live(async (ctx, noteId, x, y) => {
+    if (ctx.skip(`move:${noteId}`, 16)) return;  // drop calls within 16ms
+    await dbUpdateNote(noteId, x, y);
+    ctx.publish(TOPICS.notes, 'updated', { noteId, x, y });
+  });
+  ```
+
+  State is per-replica (CPU/DB shed, not cluster-wide rate limit; for cross-replica gating use `live.rateLimit({ store: 'redis' })`). Capped at `_THROTTLE_DEBOUNCE_MAX` (5000) entries; on overflow the gate fails open (returns `false`, dev-warns once) so a runaway dynamic-key generator cannot silently start blocking legitimate calls. Throws `LiveError('INVALID_ARG', ...)` on `key` not a string or `ms` not a positive finite number (matches `ctx.signal` / `ctx.shed` precedent of throw-on-misuse for new APIs with no back-compat exposure).
+
+- **`ctx.publishThrottled(topic, event, data, ms)` and `ctx.publishDebounced(topic, event, data, ms)` as canonical names for the existing `ctx.throttle` / `ctx.debounce` helpers.** Pre-change, the names "throttle" and "debounce" in JS-land typically mean "gate a function's execution" (lodash, RxJS, Underscore). The realtime helpers actually scheduled outbound publishes - misreading the name as a gate led to calls like `ctx.throttle('move:noteId', 50)` (intending to gate the handler) which silently published garbage at full rate to a topic nobody subscribed to. Renaming to `publishThrottled` / `publishDebounced` puts "publish" central in the name so the misread becomes structurally impossible. Behavior is identical to the old names; same 4-arg shape `(topic: string, event: string, data: any, ms: number)`.
+
+### Changed
+
+- **`ctx.throttle` / `ctx.debounce` soft-deprecated in favour of `ctx.publishThrottled` / `ctx.publishDebounced`.** The old names keep working as aliases with identical behaviour; a one-time dev warning per process points at the new names. The aliases are kept indefinitely (no sunset date) to preserve existing deployments. MIGRATION.md has the rename guidance.
+
+- **`ctx.publishThrottled` / `ctx.publishDebounced` (and the deprecated `throttle` / `debounce` aliases) emit a one-time dev warning per helper name when called with args that don't match the publish-helper shape `(topic: string, event: string, data: any, ms: number > 0)`.** Pre-change, calls like `ctx.throttle('move:id', 50)` (developer thought it was a handler gate) silently passed `event=50` (number), `data=undefined`, `ms=undefined` to `setTimeout` (coerced to 0), publishing junk frames to a non-existent topic at the full client rate. With the new warning, dev sees the issue immediately; production behaviour is unchanged (no throw) so existing deployments don't crash on upgrade. The warning points at `ctx.skip(key, ms)` for the actual gate primitive and `live.rateLimit()` for handler-wide rate limiting.
+
 ## [0.5.8] - 2026-05-22
 
 ### Added
@@ -45,7 +78,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`batch()` sends a bare RPC frame when only one call was collected, skipping the batch envelope.** Pre-fix, `batch(() => [oneCall()])` always wrote `{batch: [{rpc, id, args}], sequential?}` to the wire and the server responded with `__batch` envelope `{batch: [result]}`. Defensive callers that wrap single writes in `batch()` for API symmetry - or codepaths that conditionally aggregate but happen to collect one call - paid envelope cost on every call. At the wire, a batch-of-1 is semantically identical to a bare RPC: there is no ordering to enforce, no batch-level response shape to consume, and `Promise.all([p])` resolves to `[await p]` either way. Post-fix, when `collected.length === 1`, the client sends the bare `{rpc, id, args}` frame and attaches a per-call timer to the pending entry (collected entries are created with `timer: null` inside the `__rpc` collector branch, so without this the batch-level timer would be the only timeout). The server's existing single-RPC path handles the frame and responds via `_respond(ws, id, ...)` directly - no protocol change. Batches of 2+ keep the existing envelope. Public API unchanged: `batch(fn)` still returns `Promise<any[]>` with results in declaration order and rejection still bubbles through `Promise.all`. Three new tests in `test/client.test.js` cover the bare-frame shape (`sent.rpc` set, `sent.batch` undefined), array-shape preservation on the return value, and rejection propagation through the single-element `Promise.all`. The existing `sequential` flag tests were rewritten to use 2-call batches since `sequential` is meaningless for a single call.
 
-- **Peer dependency `svelte-adapter-uws` floor raised to `^0.5.2` (from `^0.5.1`); dev dependency `svelte-adapter-uws-extensions` floor raised to `^0.5.2` (from `^0.5.1`).** Picks up the cursor-plugin wire-format split (catalog/positions channels) + the new client-side `move(topic, data)` helper from adapter-uws 0.5.2, plus the Redis cursor's coalesced HSET tick from extensions 0.5.2. Cursor-plugin perf wins land transitively; no code changes required in apps that consume the official `cursor(topic)` client store. Apps that render cursor frames directly off the wire need to merge `catalog` (key -> user) with `positions` (key -> data) at draw time - see svelte-adapter-uws 0.5.2 CHANGELOG.
+- **Peer dependency `svelte-adapter-uws` floor raised to `^0.5.3` (from `^0.5.1`); dev dependency `svelte-adapter-uws-extensions` floor raised to `^0.5.3` (from `^0.5.1`).** Picks up two coordinated upstream releases:
+  - **0.5.2** - cursor plugin wire-format split (`catalog` / `join` roster channel + `update` / `bulk` / `remove` positions channel) so user metadata flows once per (ws, topic) instead of per frame; new `topicThrottle` option (default 16ms) coalesces dirty movers per topic; per-cursor throttle default lowered from 50ms to 16ms; new client-side `move(topic, data)` helper on `svelte-adapter-uws/plugins/cursor/client` that skips the RPC pipeline entirely and coalesces high-DPI mouse traffic via `requestAnimationFrame`. Extensions side: Redis cursor matches the split wire format; HSET writes coalesced onto a 100ms snapshot tick (~100x fewer HSETs at 1000 movers x 60Hz); cross-replica relay decoupled from per-call HSET success.
+  - **0.5.3** - `plugins/presence/client.js` sends a `{type:'presence-snapshot', topic}` text frame on every `status === 'open'` (initial + reconnect) so per-board presence self-heals across reconnects, symmetric to the existing `cursor-snapshot` path; matching server-side handler ships in extensions 0.5.3 (`presence.hooks.message` re-emits a `presence_state` to the requesting ws). The adapter also adds an optional `ctx.msg` field on `MessageContext` carrying the pre-parsed JSON envelope from the adapter's control-frame detection - dispatchers wired through `createMessage({ onUnhandled })` no longer pay a second `TextDecoder + JSON.parse` on the same frame (svelte-realtime's `handleRpc` does its own parse on the raw `ArrayBuffer` today; opportunistic adoption of `ctx.msg` is a future slice).
+
+  Cursor-plugin and presence-plugin perf + reconnect wins land transitively; no code changes required in apps that consume the official `cursor(topic)` / `createPresence()` client stores. Apps that render cursor frames directly off the wire need to merge `catalog` (key -> user) with `positions` (key -> data) at draw time - see svelte-adapter-uws 0.5.2 CHANGELOG.
 
 ## [0.5.7] - 2026-05-22
 

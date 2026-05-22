@@ -9,9 +9,32 @@ export interface CronContext {
 	platform: Platform;
 	/** Shorthand for `platform.publish` - delegates to whatever platform was passed in. */
 	publish: Platform['publish'];
-	/** Throttled publish - sends at most once per `ms` milliseconds. */
+	/**
+	 * Publish a value to a topic at most once per `ms` milliseconds.
+	 * The latest value always arrives (trailing edge). Outbound publish
+	 * helper - does NOT gate handler execution. For per-key handler gating
+	 * use `ctx.skip(key, ms)`.
+	 */
+	publishThrottled(topic: string, event: string, data: any, ms: number): void;
+	/**
+	 * Publish a value to a topic after `ms` milliseconds of silence. Outbound
+	 * publish helper - does NOT gate handler execution. For per-key handler
+	 * gating use `ctx.skip(key, ms)`.
+	 */
+	publishDebounced(topic: string, event: string, data: any, ms: number): void;
+	/**
+	 * @deprecated Renamed to `publishThrottled`. The old name reads like a
+	 * handler gate, but it is a publish helper. For per-key handler gating
+	 * use `ctx.skip(key, ms)`. Kept as a soft-deprecated alias indefinitely;
+	 * a one-time dev warning fires on first call.
+	 */
 	throttle(topic: string, event: string, data: any, ms: number): void;
-	/** Debounced publish - sends after `ms` milliseconds of silence. */
+	/**
+	 * @deprecated Renamed to `publishDebounced`. The old name reads like a
+	 * handler gate, but it is a publish helper. For per-key handler gating
+	 * use `ctx.skip(key, ms)`. Kept as a soft-deprecated alias indefinitely;
+	 * a one-time dev warning fires on first call.
+	 */
 	debounce(topic: string, event: string, data: any, ms: number): void;
 	/** Send a point-to-point signal to a specific user. */
 	signal(userId: string, event: string, data: any): void;
@@ -37,12 +60,58 @@ export interface LiveContext<UserData = unknown> {
 	publish: Platform['publish'];
 	/** Cursor value sent by the client for paginated stream requests. `null` if not paginated. */
 	cursor: any;
-	/** Throttled publish - sends at most once per `ms` milliseconds. */
+	/**
+	 * Publish a value to a topic at most once per `ms` milliseconds.
+	 * The latest value always arrives (trailing edge). Outbound publish
+	 * helper - does NOT gate handler execution. For per-key handler gating
+	 * use `ctx.skip(key, ms)`.
+	 */
+	publishThrottled(topic: string, event: string, data: any, ms: number): void;
+	/**
+	 * Publish a value to a topic after `ms` milliseconds of silence. Outbound
+	 * publish helper - does NOT gate handler execution. For per-key handler
+	 * gating use `ctx.skip(key, ms)`.
+	 */
+	publishDebounced(topic: string, event: string, data: any, ms: number): void;
+	/**
+	 * @deprecated Renamed to `publishThrottled`. The old name reads like a
+	 * handler gate, but it is a publish helper. For per-key handler gating
+	 * use `ctx.skip(key, ms)`. Kept as a soft-deprecated alias indefinitely;
+	 * a one-time dev warning fires on first call.
+	 */
 	throttle(topic: string, event: string, data: any, ms: number): void;
-	/** Debounced publish - sends after `ms` milliseconds of silence. */
+	/**
+	 * @deprecated Renamed to `publishDebounced`. The old name reads like a
+	 * handler gate, but it is a publish helper. For per-key handler gating
+	 * use `ctx.skip(key, ms)`. Kept as a soft-deprecated alias indefinitely;
+	 * a one-time dev warning fires on first call.
+	 */
 	debounce(topic: string, event: string, data: any, ms: number): void;
 	/** Send a point-to-point signal to a specific user. */
 	signal(userId: string, event: string, data: any): void;
+	/**
+	 * Per-key handler gate. Returns `true` to skip the call (key is within
+	 * its cooldown window), `false` to run it (no entry, or window elapsed).
+	 * Pair with an early `return` inside the handler body.
+	 *
+	 * State is per-replica - this is a CPU/DB shed, not a cluster-wide rate
+	 * limit. For cross-replica gating use `live.rateLimit({ store: 'redis' })`
+	 * or `redis/ratelimit` from svelte-adapter-uws-extensions.
+	 *
+	 * Throws `LiveError('INVALID_ARG', ...)` if `key` isn't a string or `ms`
+	 * isn't a positive finite number. Capped at 5000 active entries with
+	 * fail-open semantics on overflow (returns `false`, dev-warns once).
+	 *
+	 * @example
+	 * ```js
+	 * export const moveNote = live(async (ctx, noteId, x, y) => {
+	 *   if (ctx.skip(`move:${noteId}`, 16)) return;  // drop calls within 16ms
+	 *   await dbUpdateNote(noteId, x, y);
+	 *   ctx.publish(TOPICS.notes, 'updated', { noteId, x, y });
+	 * });
+	 * ```
+	 */
+	skip(key: string, ms: number): boolean;
 	/**
 	 * Pressure-aware shed check. Returns `true` if a request of the given
 	 * class of service should be shed under current `platform.pressure`.
@@ -500,7 +569,48 @@ export interface CreateMessageOptions {
 	onError?(path: string, error: unknown, ctx: LiveContext<any>): void;
 
 	/**
-	 * Called when a message is not an RPC request.
+	 * Called when a non-RPC text frame parses as a JSON object envelope.
+	 * The framework runs `TextDecoder + JSON.parse` once (or, when the
+	 * adapter already parsed the frame for its own control-message routing,
+	 * uses the adapter-forwarded value directly - one parse total), and
+	 * hands the parsed value to this callback.
+	 *
+	 * Dispatch by `msg.type` inside the callback. Plugin-layer hooks
+	 * (`cursor.hooks.message`, future presence/typing) consume the parsed
+	 * value so user wiring doesn't re-parse on every frame.
+	 *
+	 * Frames that don't look like a JSON object (first byte not `{`),
+	 * fail to parse, or sit at nesting depth greater than `maxJsonDepth`,
+	 * fall through to `onUnhandled` with the original raw bytes.
+	 *
+	 * The adapter's `websocket.maxPayloadLength` already bounds the bytes
+	 * `JSON.parse` ever sees, so there's no separate size cap here.
+	 *
+	 * @example
+	 * ```js
+	 * createMessage({
+	 *   onJsonMessage(ws, msg, platform) {
+	 *     if (msg.type === 'cursor') cursor.hooks.message(ws, { data: msg, platform });
+	 *     else if (msg.type === 'presence-snapshot') presence.hooks.message(ws, { data: msg, platform });
+	 *   }
+	 * })
+	 * ```
+	 */
+	onJsonMessage?(ws: WebSocket<any>, msg: any, platform: Platform): void;
+
+	/**
+	 * Maximum nesting depth allowed in a parsed `onJsonMessage` envelope.
+	 * Frames deeper than this fall through to `onUnhandled` unparsed.
+	 * Mirrors `handleRpc`'s `maxEnvelopeDepth` semantics; same default.
+	 *
+	 * @default 64
+	 */
+	maxJsonDepth?: number;
+
+	/**
+	 * Called when a message is not an RPC request and either no
+	 * `onJsonMessage` is set, or the frame is binary / non-JSON / parses
+	 * to a non-object / exceeds `maxJsonDepth`.
 	 * Use for mixing RPC with custom message handling.
 	 */
 	onUnhandled?(ws: WebSocket<any>, data: ArrayBuffer, platform: Platform): void;

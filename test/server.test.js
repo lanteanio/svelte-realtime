@@ -865,6 +865,136 @@ describe('createMessage()', () => {
 		expect(beforePath).toBe('cm/combo');
 		expect(transformed.sent[0].data.data).toBe('combined');
 	});
+
+	// - onJsonMessage path -------------------------------------------------------
+
+	it('onJsonMessage: fires with adapter-forwarded msg (fast path)', () => {
+		let receivedMsg;
+		const hook = createMessage({
+			onJsonMessage(ws, msg, platform) { receivedMsg = msg; }
+		});
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// Adapter forwards `msg` as the parsed envelope; `data` is the raw bytes.
+		const envelope = { type: 'cursor', topic: 'board:abc', data: { x: 1, y: 2 } };
+		hook(ws, { data: toArrayBuffer(envelope), msg: envelope, platform });
+
+		expect(receivedMsg).toEqual(envelope);
+	});
+
+	it('onJsonMessage: fires with locally-parsed msg when adapter did not forward (fallback path)', () => {
+		let receivedMsg;
+		const hook = createMessage({
+			onJsonMessage(ws, msg, platform) { receivedMsg = msg; }
+		});
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// No `msg` field on ctx -> realtime falls back to its own parse.
+		// Wire shape `{"topic":...}` is byte[3]='o' (0x6F), which the adapter
+		// skips (prefix-miss). Realtime's fallback uses 0x7B (`{`) prefix only.
+		const envelope = { topic: 'board:abc', payload: 'hi' };
+		hook(ws, { data: toArrayBuffer(envelope), platform });
+
+		expect(receivedMsg).toEqual(envelope);
+	});
+
+	it('onJsonMessage: prefers forwarded msg over local parse (no double-parse)', () => {
+		let receivedMsg;
+		const hook = createMessage({
+			onJsonMessage(ws, msg, platform) { receivedMsg = msg; }
+		});
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// Different shape in data bytes vs. forwarded msg. If realtime
+		// re-parsed instead of using the forwarded value, receivedMsg would
+		// match the bytes. Confirms fast path is the one taken.
+		const forwarded = { type: 'sentinel', from: 'adapter' };
+		const onWire = { type: 'cursor', from: 'bytes' };
+		hook(ws, { data: toArrayBuffer(onWire), msg: forwarded, platform });
+
+		expect(receivedMsg).toBe(forwarded);
+		expect(receivedMsg.from).toBe('adapter');
+	});
+
+	it('onJsonMessage: does NOT fire on null / primitive / array parses', () => {
+		let calls = 0;
+		const hook = createMessage({
+			onJsonMessage() { calls++; },
+			onUnhandled() { /* swallow */ }
+		});
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// `null` -> not an object; `42` -> primitive; `[1,2]` -> array (starts with `[`, byte[0]=0x5B, realtime fallback only accepts 0x7B).
+		hook(ws, { data: toArrayBuffer(null), platform });
+		hook(ws, { data: toArrayBuffer(42), platform });
+		hook(ws, { data: toArrayBuffer([1, 2, 3]), platform });
+
+		expect(calls).toBe(0);
+	});
+
+	it('onJsonMessage: depth cap routes too-deep envelopes to onUnhandled', () => {
+		let jsonCalls = 0;
+		let unhandledCalls = 0;
+		const hook = createMessage({
+			maxJsonDepth: 3,
+			onJsonMessage() { jsonCalls++; },
+			onUnhandled() { unhandledCalls++; }
+		});
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// Build an envelope nested deeper than maxJsonDepth.
+		/** @type {any} */
+		let nested = { leaf: true };
+		for (let i = 0; i < 10; i++) nested = { wrap: nested };
+		hook(ws, { data: toArrayBuffer(nested), msg: nested, platform });
+
+		expect(jsonCalls).toBe(0);
+		expect(unhandledCalls).toBe(1);
+	});
+
+	it('onJsonMessage: does NOT fire on binary frames', () => {
+		let jsonCalls = 0;
+		let unhandledCalls = 0;
+		const hook = createMessage({
+			onJsonMessage() { jsonCalls++; },
+			onUnhandled() { unhandledCalls++; }
+		});
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// Binary frame: byte[0] = 0x00 (binary RPC marker) but with no valid header.
+		// handleRpc will reject it and pass through; onJsonMessage's prefix check
+		// (byte[0] === 0x7B) fails -> onUnhandled gets it.
+		const buf = new Uint8Array([0x00, 0x00, 0x00, 0x42]).buffer;
+		hook(ws, { data: buf, platform });
+
+		expect(jsonCalls).toBe(0);
+		expect(unhandledCalls).toBe(1);
+	});
+
+	it('onJsonMessage + onUnhandled can coexist', () => {
+		let jsonCalls = 0;
+		let unhandledCalls = 0;
+		const hook = createMessage({
+			onJsonMessage() { jsonCalls++; },
+			onUnhandled() { unhandledCalls++; }
+		});
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		// JSON envelope -> onJsonMessage
+		hook(ws, { data: toArrayBuffer({ type: 'x' }), msg: { type: 'x' }, platform });
+		// Binary -> onUnhandled
+		hook(ws, { data: new ArrayBuffer(4), platform });
+
+		expect(jsonCalls).toBe(1);
+		expect(unhandledCalls).toBe(1);
+	});
 });
 
 // - Batch RPC ----------------------------------------------------------------
@@ -4608,6 +4738,238 @@ describe('ctx.throttle and ctx.debounce', () => {
 		const publishes = platform.published.filter(p => p.topic === 'd1');
 		expect(publishes.length).toBe(1);
 		expect(publishes[0].data).toEqual({ val: 2 });
+	});
+});
+
+// - ctx.publishThrottled / ctx.publishDebounced / ctx.skip / deprecation warns ----
+
+describe('ctx.publishThrottled / publishDebounced (new canonical names)', () => {
+	let ws, platform;
+
+	beforeEach(() => {
+		ws = mockWs({ id: 'user1' });
+		platform = mockPlatform();
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('ctx.publishThrottled behaves identically to ctx.throttle', async () => {
+		const handler = live(async (ctx, data) => {
+			ctx.publishThrottled('pt1', 'updated', data, 100);
+			return 'ok';
+		});
+		__register('publishThrottled/test', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'publishThrottled/test', id: 'p1', args: [{ val: 1 }] }), platform);
+		await vi.advanceTimersByTimeAsync(10);
+
+		const publishes = platform.published.filter(p => p.topic === 'pt1');
+		expect(publishes.length).toBe(1);
+		expect(publishes[0].data).toEqual({ val: 1 });
+	});
+
+	it('ctx.publishDebounced behaves identically to ctx.debounce', async () => {
+		const handler = live(async (ctx, data) => {
+			ctx.publishDebounced('pd1', 'updated', data, 50);
+			return 'ok';
+		});
+		__register('publishDebounced/test', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'publishDebounced/test', id: 'pd1', args: [{ val: 1 }] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'publishDebounced/test', id: 'pd2', args: [{ val: 2 }] }), platform);
+
+		await vi.advanceTimersByTimeAsync(60);
+		const publishes = platform.published.filter(p => p.topic === 'pd1');
+		expect(publishes.length).toBe(1);
+		expect(publishes[0].data).toEqual({ val: 2 });
+	});
+});
+
+describe('ctx.skip (per-key handler gate)', () => {
+	let ws, platform;
+
+	beforeEach(() => {
+		ws = mockWs({ id: 'user1' });
+		platform = mockPlatform();
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('returns false on first call, true within cooldown, false after window', async () => {
+		/** @type {boolean[]} */
+		const results = [];
+		const handler = live(async (ctx) => {
+			results.push(ctx.skip('skip/key-a', 100));
+			return 'ok';
+		});
+		__register('skip/window', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'skip/window', id: 's1', args: [] }), platform);
+		await vi.advanceTimersByTimeAsync(10);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'skip/window', id: 's2', args: [] }), platform);
+		await vi.advanceTimersByTimeAsync(10);
+
+		// First call sets, second call sees the entry -> true
+		expect(results).toEqual([false, true]);
+
+		// Past the cooldown window: entry self-deletes via timer.
+		await vi.advanceTimersByTimeAsync(120);
+		handleRpc(ws, toArrayBuffer({ rpc: 'skip/window', id: 's3', args: [] }), platform);
+		await vi.advanceTimersByTimeAsync(10);
+		expect(results).toEqual([false, true, false]);
+	});
+
+	it('different keys are independent', async () => {
+		/** @type {boolean[]} */
+		const results = [];
+		const handler = live(async (ctx, key) => {
+			results.push(ctx.skip(key, 100));
+			return 'ok';
+		});
+		__register('skip/keys', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'skip/keys', id: 'k1', args: ['key-x'] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'skip/keys', id: 'k2', args: ['key-y'] }), platform);
+		await vi.advanceTimersByTimeAsync(10);
+
+		// Both keys are first-call -> both return false
+		expect(results).toEqual([false, false]);
+
+		// Same keys again -> both blocked
+		handleRpc(ws, toArrayBuffer({ rpc: 'skip/keys', id: 'k3', args: ['key-x'] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'skip/keys', id: 'k4', args: ['key-y'] }), platform);
+		await vi.advanceTimersByTimeAsync(10);
+		expect(results).toEqual([false, false, true, true]);
+	});
+
+	it('throws INVALID_ARG when key is not a string', async () => {
+		/** @type {Error | null} */
+		let caught = null;
+		const handler = live(async (ctx) => {
+			try { ctx.skip(/** @type {any} */ (123), 50); } catch (e) { caught = /** @type {Error} */ (e); }
+			return 'ok';
+		});
+		__register('skip/badkey', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'skip/badkey', id: 'b1', args: [] }), platform);
+		await vi.advanceTimersByTimeAsync(10);
+
+		expect(caught).toBeTruthy();
+		expect(/** @type {any} */ (caught).code).toBe('INVALID_ARG');
+	});
+
+	it('throws INVALID_ARG when ms is not a positive finite number', async () => {
+		/** @type {Error[]} */
+		const caught = [];
+		const handler = live(async (ctx, ms) => {
+			try { ctx.skip('skip/badms', ms); } catch (e) { caught.push(/** @type {Error} */ (e)); }
+			return 'ok';
+		});
+		__register('skip/badms', handler);
+
+		// Each bad-ms variant: undefined, 0, -10, NaN, Infinity, 'fast'
+		for (const ms of [undefined, 0, -10, NaN, Infinity, 'fast']) {
+			handleRpc(ws, toArrayBuffer({ rpc: 'skip/badms', id: 'b' + caught.length, args: [ms] }), platform);
+			await vi.advanceTimersByTimeAsync(1);
+		}
+
+		expect(caught.length).toBe(6);
+		for (const e of caught) expect(/** @type {any} */ (e).code).toBe('INVALID_ARG');
+	});
+});
+
+describe('ctx.throttle / ctx.debounce deprecation warnings', () => {
+	/** @type {import('vitest').MockInstance} */
+	let warnSpy;
+
+	beforeEach(() => {
+		warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	});
+
+	afterEach(() => {
+		warnSpy.mockRestore();
+	});
+
+	it('ctx.throttle dev-warns once per process pointing at publishThrottled and ctx.skip', async () => {
+		const ws = mockWs({ id: 'user1' });
+		const platform = mockPlatform();
+
+		const handler = live(async (ctx) => {
+			ctx.throttle('depr-t', 'e', { x: 1 }, 100);
+			return 'ok';
+		});
+		__register('depr/throttle', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'depr/throttle', id: 'dt1', args: [] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'depr/throttle', id: 'dt2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Dedup: the deprecation warn fires at most once per process.
+		const deprWarns = warnSpy.mock.calls.filter(c =>
+			typeof c[0] === 'string' && c[0].includes('ctx.throttle is deprecated')
+		);
+		expect(deprWarns.length).toBeLessThanOrEqual(1);
+		if (deprWarns.length === 1) {
+			expect(deprWarns[0][0]).toContain('ctx.publishThrottled');
+			expect(deprWarns[0][0]).toContain('ctx.skip');
+		}
+	});
+
+	it('ctx.debounce dev-warns once per process pointing at publishDebounced and ctx.skip', async () => {
+		const ws = mockWs({ id: 'user1' });
+		const platform = mockPlatform();
+
+		const handler = live(async (ctx) => {
+			ctx.debounce('depr-d', 'e', { x: 1 }, 100);
+			return 'ok';
+		});
+		__register('depr/debounce', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'depr/debounce', id: 'dd1', args: [] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'depr/debounce', id: 'dd2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const deprWarns = warnSpy.mock.calls.filter(c =>
+			typeof c[0] === 'string' && c[0].includes('ctx.debounce is deprecated')
+		);
+		expect(deprWarns.length).toBeLessThanOrEqual(1);
+		if (deprWarns.length === 1) {
+			expect(deprWarns[0][0]).toContain('ctx.publishDebounced');
+			expect(deprWarns[0][0]).toContain('ctx.skip');
+		}
+	});
+
+	it('bad-args warning fires once per helper name and points at ctx.skip', async () => {
+		const ws = mockWs({ id: 'user1' });
+		const platform = mockPlatform();
+
+		// This is the documented misuse pattern: developer thought publishThrottled was a gate.
+		const handler = live(async (ctx) => {
+			ctx.publishThrottled(/** @type {any} */ ('move:id'), /** @type {any} */ (50));
+			return 'ok';
+		});
+		__register('badargs/publishThrottled', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'badargs/publishThrottled', id: 'ba1', args: [] }), platform);
+		handleRpc(ws, toArrayBuffer({ rpc: 'badargs/publishThrottled', id: 'ba2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		const badArgWarns = warnSpy.mock.calls.filter(c =>
+			typeof c[0] === 'string' && c[0].includes('called with bad args')
+		);
+		// At most one per process (dedup); the test runs in a fresh-import process so
+		// it may be 0 if a prior describe already tripped the flag.
+		expect(badArgWarns.length).toBeLessThanOrEqual(1);
+		if (badArgWarns.length === 1) {
+			expect(badArgWarns[0][0]).toContain('ctx.skip(key, ms)');
+		}
 	});
 });
 

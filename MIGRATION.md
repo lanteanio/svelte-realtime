@@ -287,6 +287,56 @@ Saturation behavior: entries with a pending leave timer are evicted first; if st
 
 Not required. Adopting these gets you the full 0.5 experience.
 
+### `ctx.skip(key, ms)` for per-key handler gating
+
+**What's new.** A per-key gate primitive on `LiveContext`. Returns `true` to skip the call (key is within its cooldown window), `false` to run it. Pairs with `ctx.shed` semantically so call sites read uniformly with an early `return`:
+
+```js
+export const moveNote = live(async (ctx, noteId, x, y) => {
+  if (ctx.shed('background')) return;           // pressure shed
+  if (ctx.skip(`move:${noteId}`, 16)) return;   // per-key handler gate
+  await dbUpdateNote(noteId, x, y);
+  ctx.publish(TOPICS.notes, 'updated', { noteId, x, y });
+});
+```
+
+State is per-replica (CPU/DB shed, not cluster-wide rate limit; for cross-replica gating use `live.rateLimit({ store: 'redis' })` or the `redis/ratelimit` extension). Capped at 5000 active entries with fail-open semantics on overflow (returns `false`, dev-warns once). Throws `LiveError('INVALID_ARG', ...)` on `key` not a string or `ms` not a positive finite number.
+
+This is the primitive developers were reaching for when they wrote `ctx.throttle('move:id', 50)` thinking it gated handler execution. The old `ctx.throttle` / `ctx.debounce` are outbound publish helpers (renamed to `publishThrottled` / `publishDebounced` - see [Cosmetic](#cosmetic)); the new `ctx.skip` is the actual handler gate.
+
+### `createMessage({ onJsonMessage(ws, msg, platform) })` for plugin-layer JSON dispatch
+
+**What's new.** A callback on `createMessage` that receives the parsed envelope when a non-RPC text frame parses as a JSON object. Replaces the manual `TextDecoder + JSON.parse + dispatch` pattern that plugins like `cursor.hooks.message` previously required in user `hooks.ws.js`.
+
+```js
+// Before
+import { createMessage } from 'svelte-realtime/server';
+import { cursor } from '$lib/server/redis';
+
+export const message = createMessage({
+  onUnhandled(ws, data, platform) {
+    if (!(data instanceof ArrayBuffer) || data.byteLength < 2) return;
+    let msg;
+    try { msg = JSON.parse(new TextDecoder().decode(data)); } catch { return; }
+    if (!msg || typeof msg !== 'object') return;
+    if (msg.type === 'cursor') {
+      cursor.hooks.message(ws, { data: msg, platform });
+    }
+  }
+});
+
+// After
+export const message = createMessage({
+  onJsonMessage(ws, msg, platform) {
+    if (msg.type === 'cursor') cursor.hooks.message(ws, { data: msg, platform });
+  }
+});
+```
+
+Two-tier lookup: (1) fast path uses the `msg` field forwarded by `svelte-adapter-uws@^0.5.3` (one parse total); (2) fallback parses locally for frames the adapter didn't fast-path (older adapter, > 8 KiB frame, or non-`{"ty` prefix). Frames that aren't JSON, can't parse, parse to a non-object, or exceed the depth cap (`maxJsonDepth`, default 64) fall through to `onUnhandled` with the original raw bytes. The adapter's `maxPayloadLength` (default 1 MB) is the structural size ceiling.
+
+Both `onJsonMessage` and `onUnhandled` can be set together for mixed JSON / binary frame handling.
+
 ### Move `setCronPlatform` and `live.configurePush({ remoteRegistry })` to `init({ platform })`
 
 **What changed.** Both functions used to be wired from `open(ws, platform)`. The recommended call site is now the adapter's `init({ platform })` lifecycle hook, which fires once per worker after the listen socket is bound and before any upgrade / open / message hook runs. This eliminates the boot-to-first-connect window where cron ticks were no-ops and `live.push` could not reach cross-instance users.
@@ -375,6 +425,26 @@ export const transport = realtimeTransport();
 ## Cosmetic
 
 Type-only changes, deprecations, dead code removed. No action required for most apps.
+
+### `ctx.throttle` / `ctx.debounce` renamed to `ctx.publishThrottled` / `ctx.publishDebounced`; old names accepted as soft-deprecated aliases
+
+**What changed.** The names `throttle` / `debounce` in JS-land (lodash, RxJS, Underscore) typically mean "gate a function's execution." The realtime helpers actually scheduled outbound publishes - misreading the name as a gate led to calls like `ctx.throttle('move:noteId', 50)` (developer intent: "gate this handler") which silently published junk frames to a topic nobody subscribed to at the full client rate (`event=50` (number), `data=undefined`, `ms=undefined` -> `setTimeout(_, 0)` -> zero-ms window -> next call publishes again). The new names `publishThrottled` / `publishDebounced` put "publish" central so the misread becomes structurally impossible.
+
+For the gate-handler use case the developer was actually after, `ctx.skip(key, ms)` is the new primitive (see [Recommended new patterns](#recommended-new-patterns)).
+
+**How to migrate.** Optional rename for new code:
+
+```diff
+- ctx.throttle(topic, event, data, ms)
++ ctx.publishThrottled(topic, event, data, ms)
+
+- ctx.debounce(topic, event, data, ms)
++ ctx.publishDebounced(topic, event, data, ms)
+```
+
+The old names keep working as aliases indefinitely. A one-time dev warning per process per name fires on first call to the old name; production behaviour is unchanged. To silence the dev warning, rename. `live.cron()` and `live()` contexts both gained the new names; both keep the old aliases.
+
+If you wrote `ctx.throttle('move:id', 50)` thinking it would gate handler execution, the fix is `if (ctx.skip('move:id', 50)) return` at the top of the handler body. See the `ctx.skip` migration entry in [Recommended new patterns](#recommended-new-patterns).
 
 ### `pushHooks.close` now drains stream-subscription bookkeeping when called with `ctx`
 
