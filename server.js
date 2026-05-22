@@ -3462,15 +3462,6 @@ let _bus = null;
 let _cronBus = null;
 
 /**
- * Sentinel attached to platforms that have been wrapped with the
- * process-wide bus. Lets the framework detect already-wrapped inputs
- * and skip re-wrapping, so a user who passes a manually `bus.wrap`-ed
- * platform via `createMessage({ platform })` is not double-wrapped by
- * the auto-wrap path.
- */
-const _BUS_WRAPPED = Symbol.for('svelte-realtime.busWrapped');
-
-/**
  * Write the process-wide bus. Validated like `configureCron({ bus })`
  * - must expose `.wrap(platform)` or be `null`. Mirrored into the
  * legacy `_cronBus` alias so the existing cron tick keeps reading the
@@ -5166,41 +5157,71 @@ export function __registerDerived(path, fn) {
  * triggered externally when the platform fires publish.
  * @param {import('svelte-adapter-uws').Platform} platform
  */
-/** @type {WeakSet<object>} Guard against double-wrapping platform.publish during HMR */
+/**
+ * Tracks platforms whose `publish` has been swapped to `derivedPublish`
+ * by `_wrapPlatformPublish`. WeakSet so per-connection platform clones
+ * inherit the mutation via prototype chain without forcing the base
+ * platform to live longer than the adapter intends - entries clear
+ * naturally when the platform itself becomes GC-eligible. The WeakSet
+ * is the single source of truth for "is this platform's publish path
+ * framework-owned?" - consulted by `_ensureWrap` (the universal idempotent
+ * installer), referenced indirectly by every publish surface (RPC, cron,
+ * reactive, top-level `publish()`).
+ *
+ * @type {WeakSet<object>}
+ */
 const _activatedPlatforms = new WeakSet();
 
-export function _activateDerived(platform) {
-	_derivedPlatform = platform;
-	_activateDerivedCalled = true;
-
-	// Only wrap platform.publish if there are actual reactive registrations,
-	// OR a lazy push has signaled "registrations are coming." Without the
-	// `_hasLazyReactive` clause, calling `_activateDerived` from
-	// `init({ platform })` (the README's recommended call site) would
-	// early-return on a still-empty registry and leave the wrap uninstalled
-	// - so a cron-driven publish that fires before the lazy queue resolves
-	// (or before the first WS connection) silently bypasses every watcher.
-	if (
-		_derivedBySource.size === 0
-		&& _effectBySource.size === 0
-		&& _aggregateBySource.size === 0
-		&& !_hasDynamicDerived
-		&& !_hasLazyReactive
-	) {
-		return;
-	}
-
+/**
+ * Universal install point for the framework's publish wrap. Idempotent
+ * against `_activatedPlatforms`, safe under HMR, called from every site
+ * that captures or first sees a platform reference:
+ * - `setCronPlatform(platform)` - call from `realtime().init` or
+ *   directly from `hooks.ws.js`'s `init({ platform })`.
+ * - `_activateDerived(platform)` - same call site, alternative entry.
+ * - The default `message` hook + `createMessage` returned hook - first
+ *   message per platform installs the wrap, so apps that wire only
+ *   `setBus(bus)` and re-export `message` (no init hook, no
+ *   `_activateDerived` call) still get cluster routing on first RPC.
+ *
+ * Single install site eliminates the entire class of "outer wrap stacks
+ * on inner wrap" bugs: there is only ONE `bus.wrap(...)` call in the
+ * whole framework (inside `_wrapPlatformPublish`'s `_refreshBusCache`)
+ * and it's composed with everything else (reactive watchers, batched
+ * fast path, replay routing) at publish time via the mutated
+ * `derivedPublish` / `derivedPublishBatched`.
+ *
+ * @param {any} platform
+ */
+function _ensureWrap(platform) {
+	if (!platform) return;
 	// svelte-adapter-uws hands hooks a per-connection platform created via
-	// Object.create(basePlatform). Wrapping that per-connection object leaves
-	// every other connection's inherited publish / publishBatched untouched,
-	// because their lookups walk the prototype chain to the original base.
-	// Resolve to the base prototype so the wrap is visible to all connections
-	// that share it. Test mocks pass plain objects whose proto is
-	// Object.prototype - in that case wrap the object itself.
+	// Object.create(basePlatform). Wrapping that per-connection object would
+	// leave every other connection's inherited publish / publishBatched
+	// untouched, because their lookups walk the prototype chain to the
+	// original base. Resolve to the base prototype so the wrap is visible
+	// to all connections that share it. Test mocks pass plain objects whose
+	// proto is Object.prototype - in that case wrap the object itself.
 	const target = _resolveWrapTarget(platform);
 	if (_activatedPlatforms.has(target)) return;
 	_activatedPlatforms.add(target);
 	_wrapPlatformPublish(target);
+}
+
+export function _activateDerived(platform) {
+	_derivedPlatform = platform;
+	_activateDerivedCalled = true;
+	// Install the framework's publish wrap unconditionally. Pre-0.5.7 this
+	// was gated on "any reactive primitives registered?" to avoid wrap
+	// overhead on apps that didn't use derived/effect/aggregate. With the
+	// wrap now also responsible for bus routing (every publish surface
+	// consults `_getBus()` via `derivedPublish`), gating would create a
+	// window where a publish escapes routing - the late-activation race
+	// from the 0.5.6 audit. The per-publish overhead of an empty wrap is
+	// one function call plus a `Map.has` check on an empty Map (`O(1)`,
+	// branch-predicted to false); the install cost is one closure scope
+	// per platform, paid once at init.
+	_ensureWrap(platform);
 }
 
 /**
@@ -5221,10 +5242,7 @@ export function _activateDerived(platform) {
  */
 function _maybeLateActivate() {
 	if (!_derivedPlatform) return;
-	const target = _resolveWrapTarget(_derivedPlatform);
-	if (_activatedPlatforms.has(target)) return;
-	_activatedPlatforms.add(target);
-	_wrapPlatformPublish(target);
+	_ensureWrap(_derivedPlatform);
 }
 
 /**
@@ -5282,10 +5300,6 @@ function _wrapPlatformPublish(platform) {
 		surrogate.publish = derivedPublishLocal;
 		if (originalPublishBatched) surrogate.publishBatched = derivedPublishBatchedLocal;
 		const wrapped = bus.wrap(surrogate);
-		// Tag so a downstream auto-wrap pass (e.g. message hook) can
-		// detect "already wrapped by us" and skip re-wrapping. The tag
-		// records the bus identity so a later swap re-wraps cleanly.
-		/** @type {any} */ (wrapped)[_BUS_WRAPPED] = bus;
 		_busPublish = typeof wrapped.publish === 'function' ? wrapped.publish.bind(wrapped) : null;
 		_busPublishBatched = typeof /** @type {any} */ (wrapped).publishBatched === 'function'
 			? /** @type {any} */ (wrapped).publishBatched.bind(wrapped)
@@ -5648,6 +5662,12 @@ export function setCronPlatform(platform) {
 	// Re-arm the dedup so a subsequent platform-loss (defensive only --
 	// platform never goes null in practice) gets one fresh warning.
 	_cronPlatformWarnFired = false;
+	// Install the framework's publish wrap here too: pure-cron apps that
+	// never call `_activateDerived` (no reactive primitives wired) still
+	// need cluster routing when a bus is configured. The wrap is idempotent
+	// via `_activatedPlatforms`, so when `realtime().init` calls both
+	// `setCronPlatform` and `_activateDerived` the second call is a no-op.
+	if (platform) _ensureWrap(platform);
 }
 
 /**
@@ -6115,17 +6135,15 @@ export async function _tickCron() {
 					}
 					return;
 				}
-				// Cluster fan-out: when a bus is wired via
-				// `configureCron({ bus })`, route the cron fire's
-				// publishes through `bus.wrap(platform)` so other cluster
-				// instances see them too. Without a bus, leader-only ticks
-				// only reach subscribers on the leader worker. Fresh wrap
-				// per fire is cheap (object literal allocation) and
-				// avoids any caching staleness around platform / bus
-				// mutation. Falls through to the raw platform when no bus
-				// is configured (single-instance dev, the canonical
-				// happy path).
-				const cronPub = _cronBus ? _cronBus.wrap(_cronPlatform) : _cronPlatform;
+				// Cluster fan-out is the framework's publish wrap's job
+				// now (one wrap site for the whole framework, installed
+				// by `_ensureWrap` from `setCronPlatform`). The cron tick
+				// uses the captured `_cronPlatform` directly - its
+				// `publish` is `derivedPublish`, which consults the
+				// process-wide bus at publish time. No outer `bus.wrap(...)`
+				// here, which eliminates the 0.5.6 double-relay class of
+				// bugs by construction.
+				const cronPub = _cronPlatform;
 				const _h = _getCtxHelpers(cronPub);
 				const ctx = _buildCtx(null, null, cronPub, _h, null);
 				const result = await entry.fn(ctx);
@@ -8181,50 +8199,43 @@ export function close(ws, { platform, subscriptions }) {
 }
 
 /**
- * Per-platform cache of the bus-wrapped surrogate used by the RPC hook
- * (`message` / `createMessage`). Keyed on the raw adapter platform, with
- * the bus identity stored alongside so a `setBus(differentBus)` swap is
- * detected and re-wrapped without holding a strong reference to the old
- * bus. WeakMap so the entry clears when the platform is GC-eligible.
- * @type {WeakMap<object, { bus: any, wrapped: any, epoch: number }>}
+ * One-shot dev-mode flag for the "createMessage({ platform: callback })
+ * is redundant" warning. A user-supplied `platform` callback in
+ * `createMessage` was the pre-0.5.6 way to wire bus.wrap into the RPC
+ * hook. With 0.5.7+ the framework installs a single publish wrap on the
+ * adapter platform (via `_ensureWrap`, called from
+ * `setCronPlatform` / `_activateDerived` / first message), and that
+ * wrap is the sole `bus.wrap(...)` site. A manual callback that wraps
+ * with `bus.wrap` stacks an outer relay on top of the inner one and
+ * double-delivers every RPC publish to other replicas. We can't detect
+ * the manual-wrap case from the callback's output (user-built wraps
+ * don't carry our sentinel), but the input platform is the activated
+ * adapter platform, so we warn at receive time when both conditions
+ * hold. Module-level so a user creating multiple message hooks sees
+ * one warning total.
  */
-const _rpcBusWrapCache = new WeakMap();
+let _manualPlatformCallbackWarnFired = false;
 
 /**
- * Resolve the platform handed to `handleRpc` from the WS message path.
- * When a process-wide bus is configured (via `setBus`,
- * `configureCron({ bus })`, or `realtime({ bus })`), the raw adapter
- * platform is wrapped on first use and memoized for subsequent
- * messages on the same platform. When the user manually pre-wraps via
- * `createMessage({ platform })`, this is bypassed (their callback
- * runs first) so we never double-wrap.
- *
- * @param {import('svelte-adapter-uws').Platform} platform
- * @returns {import('svelte-adapter-uws').Platform}
+ * Reset the one-shot dev-warn flag for tests. Production deployments
+ * don't need this - the warning is meant to fire once per process and
+ * the flag never needs resetting outside test isolation.
  */
-function _autoBusWrap(platform) {
-	const bus = _getBus();
-	if (!bus) return platform;
-	// Idempotence: if the input has already been wrapped by this
-	// framework against the current bus, return it untouched.
-	if (/** @type {any} */ (platform)[_BUS_WRAPPED] === bus) return platform;
-	const entry = _rpcBusWrapCache.get(/** @type {any} */ (platform));
-	if (entry && entry.bus === bus && entry.epoch === _busEpoch) return entry.wrapped;
-	const wrapped = bus.wrap(platform);
-	/** @type {any} */ (wrapped)[_BUS_WRAPPED] = bus;
-	_rpcBusWrapCache.set(/** @type {any} */ (platform), { bus, wrapped, epoch: _busEpoch });
-	return wrapped;
+export function _resetManualPlatformCallbackWarn() {
+	_manualPlatformCallbackWarnFired = false;
 }
 
 /**
- * Ready-made message hook. Re-export from hooks.ws.js for zero-config RPC routing.
+ * Ready-made message hook. Re-export from hooks.ws.js for zero-config
+ * RPC routing.
  *
- * When a process-wide bus is configured (via `setBus`,
- * `configureCron({ bus })`, or `realtime({ bus })`), this hook auto-
- * wraps the adapter platform so RPC `ctx.publish` relays to other
- * cluster instances without any per-hook wiring. Without a bus,
- * publishes stay local - the single-replica default with zero
- * overhead.
+ * First call per platform installs the framework's publish wrap via
+ * `_ensureWrap` (idempotent), so apps that wire `setBus(bus)` and
+ * re-export `message` but never call `_activateDerived` /
+ * `setCronPlatform` themselves still get cluster routing on first
+ * RPC. Subsequent calls are no-ops on the wrap path. Without a bus,
+ * the wrap's per-publish overhead is one function call plus a
+ * `Map.has` check on an empty Map - well below noise.
  *
  * Signature matches the adapter's message hook exactly.
  *
@@ -8232,7 +8243,8 @@ function _autoBusWrap(platform) {
  * @param {{ data: ArrayBuffer, platform: import('svelte-adapter-uws').Platform }} ctx
  */
 export function message(ws, { data, platform }) {
-	handleRpc(ws, data, _autoBusWrap(platform));
+	_ensureWrap(platform);
+	handleRpc(ws, data, platform);
 }
 
 /**
@@ -8253,12 +8265,39 @@ export function createMessage(options) {
 	const hasRpcOpts = beforeExecute || onError;
 
 	return function customMessage(ws, { data, platform }) {
-		// User-supplied `platform` callback signals "I am wiring the
-		// transform myself"; we run it as-is and skip the auto bus
-		// wrap so we never double-wrap. Without the callback, we
-		// route through `_autoBusWrap` so the process-wide bus
-		// reaches RPC handlers with zero per-hook config.
-		const p = transformPlatform ? transformPlatform(platform) : _autoBusWrap(platform);
+		// Install the framework's publish wrap on the platform (idempotent
+		// per platform). After this returns, `platform.publish` is
+		// `derivedPublish`, which is the single bus-routing site for the
+		// whole framework. Done BEFORE any transform callback so the
+		// callback sees the wrapped publish path (correct ordering for
+		// non-bus transforms like metrics instrumentation; double-wrap
+		// detected and warned for legacy bus.wrap callbacks).
+		_ensureWrap(platform);
+		let p;
+		if (transformPlatform) {
+			// Dev-only nudge: a `platform` callback against an
+			// already-activated platform with a process-wide bus wired
+			// almost always means a legacy `(p) => bus.wrap(p)` callback
+			// is layered on top of `derivedPublish`'s inner bus.wrap,
+			// which double-relays every RPC publish. Warn once per
+			// process; users with a non-bus transform (e.g. metrics
+			// instrumentation) can ignore.
+			if (_IS_DEV
+				&& !_manualPlatformCallbackWarnFired
+				&& _getBus()
+			) {
+				_manualPlatformCallbackWarnFired = true;
+				console.warn(
+					"[svelte-realtime] createMessage({ platform: callback }) is redundant when `setBus(...)` is wired: " +
+					"the framework already routes ctx.publish through the bus, so a manual `bus.wrap(p)` callback double-relays every RPC publish to other replicas. " +
+					"Drop the `platform` option to fix. If your callback does a non-bus transform (e.g. metrics) you can ignore this warning.\n" +
+					"  See: https://svti.me/cluster-relay"
+				);
+			}
+			p = transformPlatform(platform);
+		} else {
+			p = platform;
+		}
 		const handled = handleRpc(ws, data, p, hasRpcOpts ? rpcOpts : undefined);
 		if (!handled && onUnhandled) {
 			onUnhandled(ws, data, p);

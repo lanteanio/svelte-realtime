@@ -11,6 +11,7 @@ import {
 	getBus,
 	getPlatform,
 	publish,
+	_resetManualPlatformCallbackWarn,
 	combineSum,
 	combineMax,
 	combineMin,
@@ -2809,6 +2810,10 @@ describe('live.cron()', () => {
 // reach for realtime({ bus, leader }) instead.
 
 describe('setBus / getBus + cross-seam bus routing', () => {
+	// Mirrors the extensions' `redis/pubsub` wrap impl: records a relay
+	// for each publish where `options.relay !== false`. Inbound bus
+	// deliveries pass `{ relay: false }` so they MUST NOT add a record
+	// (proves no inbound-loop on the receiving instance).
 	const makeRecordingBus = () => {
 		const relays = [];
 		return {
@@ -2817,17 +2822,23 @@ describe('setBus / getBus + cross-seam bus routing', () => {
 				return {
 					...platform,
 					publish(topic, event, data, options) {
-						relays.push({ topic, event, data, options });
-						return platform.publish(topic, event, data, options);
+						const result = platform.publish(topic, event, data, options);
+						if (!options || options.relay !== false) {
+							relays.push({ topic, event, data, options });
+						}
+						return result;
 					},
 					publishBatched(batch) {
-						if (Array.isArray(batch)) for (const item of batch) {
-							if (item && typeof item.topic === 'string') {
-								relays.push({ topic: item.topic, event: item.event, data: item.data, options: item.options, _batched: true });
-							}
+						let result;
+						if (typeof platform.publishBatched === 'function') {
+							result = platform.publishBatched(batch);
 						}
-						if (typeof platform.publishBatched === 'function') return platform.publishBatched(batch);
-						return undefined;
+						if (Array.isArray(batch)) for (const item of batch) {
+							if (!item || typeof item.topic !== 'string') continue;
+							if (item.options && item.options.relay === false) continue;
+							relays.push({ topic: item.topic, event: item.event, data: item.data, options: item.options, _batched: true });
+						}
+						return result;
 					}
 				};
 			}
@@ -3176,6 +3187,466 @@ describe('realtime() factory', () => {
 		expect(errors.length).toBe(1);
 		expect(errors[0].path).toBe('effect');
 		expect(errors[0].err).toBe('boom-realtime');
+	});
+});
+
+// - 0.5.7 single-wrap invariant ----------------------------------------------
+//
+// 0.5.6 had two `bus.wrap(...)` sites that stacked: the RPC message hook
+// (`_autoBusWrap`) and the cron tick (`_cronBus.wrap(_cronPlatform)`)
+// both wrapped on top of `_wrapPlatformPublish`'s inner wrap. Each layer
+// called `scheduleRelay` independently, so every publish double-delivered
+// to other replicas. The reporter's `/demos/effect` deploy saw
+// `orders=5, audit=10, notif=10` on a 2-replica setup.
+//
+// 0.5.7 collapses the wrap to ONE site: `_wrapPlatformPublish`. The
+// `_ensureWrap` helper installs it idempotently from `setCronPlatform`,
+// `_activateDerived`, and the first call to the message hook - whichever
+// fires first per platform. Outer wraps (`_autoBusWrap`,
+// `_cronBus.wrap(_cronPlatform)`) are deleted. Pre-0.5.6 deployments that
+// wired `configureCron({ bus })` + `createMessage({ platform })` still
+// work, but the manual `platform` callback is now redundant and emits a
+// one-shot dev warn (it stacks on the framework wrap and would double-
+// relay).
+//
+// These tests pin the invariant: every framework publish site relays
+// exactly once per logical publish, across every wiring shape.
+
+describe('0.5.7 single-wrap invariant (every publish relays exactly once)', () => {
+	// Mirrors the extensions' `redis/pubsub` wrap impl: records a relay
+	// for each publish where `options.relay !== false`. Inbound bus
+	// deliveries pass `{ relay: false }` so they MUST NOT add a record
+	// (proves no inbound-loop on the receiving instance).
+	const makeRecordingBus = () => {
+		const relays = [];
+		return {
+			relays,
+			wrap(platform) {
+				return {
+					...platform,
+					publish(topic, event, data, options) {
+						const result = platform.publish(topic, event, data, options);
+						if (!options || options.relay !== false) {
+							relays.push({ topic, event, data, options });
+						}
+						return result;
+					},
+					publishBatched(batch) {
+						let result;
+						if (typeof platform.publishBatched === 'function') {
+							result = platform.publishBatched(batch);
+						}
+						if (Array.isArray(batch)) for (const item of batch) {
+							if (!item || typeof item.topic !== 'string') continue;
+							if (item.options && item.options.relay === false) continue;
+							relays.push({ topic: item.topic, event: item.event, data: item.data, options: item.options, _batched: true });
+						}
+						return result;
+					}
+				};
+			}
+		};
+	};
+
+	afterEach(() => {
+		_clearCron();
+		configureCron(null);
+		setBus(null);
+		_resetManualPlatformCallbackWarn();
+	});
+
+	it('realtime({ bus }) + RPC ctx.publish relays EXACTLY ONCE (the demo bug)', async () => {
+		// The demo's `/demos/effect` page: 5 placeOrder RPCs over 2 replicas
+		// observed orders=5, audit=10, notif=10 pre-fix. Post-fix the
+		// framework's single publish wrap (installed by `_ensureWrap`) is
+		// the only `bus.wrap(...)` site, so each ctx.publish issues one
+		// `scheduleRelay`.
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus, leader: () => true });
+
+		const handler = live(async (ctx) => {
+			ctx.publish('demo-rpc-topic', 'placed', { orderId: 42 });
+			return 'ok';
+		});
+		__register('demo/placeOrder', handler);
+
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		const ws = mockWs();
+		const data = toArrayBuffer({ rpc: 'demo/placeOrder', id: 'd-1', args: [] });
+		hooks.message(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 20));
+
+		const relays = bus.relays.filter((r) => r.topic === 'demo-rpc-topic' && r.event === 'placed');
+		expect(relays.length).toBe(1);
+		expect(relays[0].data).toEqual({ orderId: 42 });
+	});
+
+	it('realtime({ bus, leader }) + cron tick relays EXACTLY ONCE', async () => {
+		// Cron tick uses `_cronPlatform` directly - its `publish` is
+		// `derivedPublish` after `setCronPlatform` installed the wrap. No
+		// outer `_cronBus.wrap(...)` per fire any more; single relay.
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus, leader: () => true });
+
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		__registerCron('regress/cron', live.cron('* * * * *', 'cron-regress-topic', async () => ({ tick: 1 })));
+		await _tickCron();
+		await new Promise((r) => setTimeout(r, 20));
+
+		const relays = bus.relays.filter((r) => r.topic === 'cron-regress-topic');
+		expect(relays.length).toBe(1);
+	});
+
+	it('realtime({ bus }) + RPC handler that triggers a live.effect relays each output ONCE', async () => {
+		// End-to-end shape mirroring the demo: an RPC fires ctx.publish
+		// on a source topic; an effect handler watches that topic and
+		// publishes onto two downstream topics. Each of the three publishes
+		// (source + audit + notifications) relays exactly once.
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus, leader: () => true });
+
+		const fx = live.effect(['orders-regress'], async (event, data, p) => {
+			p.publish('audit-regress', 'order', { id: data.id });
+			p.publish('notifications-regress', 'order', { id: data.id });
+		});
+		__registerEffect('fx/regress', fx);
+
+		const placeOrder = live(async (ctx, id) => {
+			ctx.publish('orders-regress', 'created', { id });
+			return id;
+		});
+		__register('regress/placeOrder', placeOrder);
+
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		const ws = mockWs();
+		const data = toArrayBuffer({ rpc: 'regress/placeOrder', id: 'r-1', args: [101] });
+		hooks.message(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 30));
+
+		expect(bus.relays.filter((r) => r.topic === 'orders-regress').length).toBe(1);
+		expect(bus.relays.filter((r) => r.topic === 'audit-regress').length).toBe(1);
+		expect(bus.relays.filter((r) => r.topic === 'notifications-regress').length).toBe(1);
+	});
+
+	it('pure-RPC path (no setCronPlatform / _activateDerived) still relays exactly once', async () => {
+		// User wires `setBus(bus)` and uses the default `message` hook
+		// only - no init hook, no `_activateDerived`. The first call to
+		// `message` installs the wrap via `_ensureWrap`, so cluster
+		// routing works on first RPC without per-hook config.
+		const bus = makeRecordingBus();
+		setBus(bus);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('pure-rpc-topic', 'hi', { ok: true });
+			return 'ok';
+		});
+		__register('pure/rpc', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+		const data = toArrayBuffer({ rpc: 'pure/rpc', id: 'pr-1', args: [] });
+		message(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 20));
+
+		const relays = bus.relays.filter((r) => r.topic === 'pure-rpc-topic');
+		expect(relays.length).toBe(1);
+	});
+
+	it('pure-cron path (no _activateDerived) still relays exactly once', async () => {
+		// `setCronPlatform(platform)` calls `_ensureWrap` internally, so
+		// the cron tick's `_cronPlatform.publish` is `derivedPublish` and
+		// the single relay site handles cluster routing.
+		const bus = makeRecordingBus();
+		const platform = mockPlatform();
+		setCronPlatform(platform);
+		configureCron({ leader: () => true, bus });
+
+		__registerCron('pure/cron', live.cron('* * * * *', 'pure-cron-topic', async () => ({ y: 7 })));
+		await _tickCron();
+		await new Promise((r) => setTimeout(r, 20));
+
+		const relays = bus.relays.filter((r) => r.topic === 'pure-cron-topic');
+		expect(relays.length).toBe(1);
+	});
+
+	it('createMessage({ platform: callback }) against an activated platform with a bus logs a one-shot dev warn', async () => {
+		// Catches the manual-wrap migration case: a user kept their
+		// pre-0.5.6 `platform: (p) => bus.wrap(p)` callback after
+		// upgrading. The framework can't detect bus-style wraps from
+		// inspection (the user's output doesn't carry a sentinel), so
+		// it warns whenever a callback is supplied while a bus is wired.
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus, leader: () => true });
+		const platform = mockPlatform();
+		hooks.init({ platform });   // activates the platform
+
+		const hook = createMessage({
+			platform: (p) => bus.wrap(p)   // legacy manual wrap
+		});
+
+		const handler = live(async (ctx) => {
+			ctx.publish('legacy-wrap-topic', 'evt', { x: 1 });
+			return 'ok';
+		});
+		__register('legacy/manual', handler);
+
+		const ws = mockWs();
+		const data = toArrayBuffer({ rpc: 'legacy/manual', id: 'lm-1', args: [] });
+		hook(ws, { data, platform });
+		// Fire a second message to confirm the warning is one-shot.
+		const data2 = toArrayBuffer({ rpc: 'legacy/manual', id: 'lm-2', args: [] });
+		hook(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 20));
+
+		const matches = warnSpy.mock.calls.filter(args =>
+			typeof args[0] === 'string' && args[0].includes('createMessage({ platform: callback }) is redundant')
+		);
+		expect(matches.length).toBe(1);
+		warnSpy.mockRestore();
+	});
+
+	it('createMessage({ platform: (p) => p }) (no-op callback) still single-relays; warn DOES fire (documented false positive)', async () => {
+		// A no-op callback returns the same activated platform, so the
+		// single-relay invariant holds. But the warning fires because
+		// we can't distinguish "no-op" from "metrics wrap" from "legacy
+		// bus.wrap" by inspecting the callback alone. Documented in the
+		// warning text; users with non-bus callbacks (no-op or metrics)
+		// can ignore. Test pins the trade-off.
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus, leader: () => true });
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		const hook = createMessage({
+			platform: (p) => p   // no-op
+		});
+
+		const handler = live(async (ctx) => {
+			ctx.publish('noop-cb-topic', 'evt', { x: 1 });
+			return 'ok';
+		});
+		__register('legacy/noop', handler);
+
+		const ws = mockWs();
+		const data = toArrayBuffer({ rpc: 'legacy/noop', id: 'no-1', args: [] });
+		hook(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 20));
+
+		// The publish must relay exactly once (the user's no-op
+		// callback prevented _autoBusWrap, derivedPublish's inner wrap
+		// is the single relay).
+		const relays = bus.relays.filter((r) => r.topic === 'noop-cb-topic');
+		expect(relays.length).toBe(1);
+
+		// Warn DOES fire (documented false positive). Test pins the
+		// trade-off so the trigger doesn't silently change.
+		const matches = warnSpy.mock.calls.filter(args =>
+			typeof args[0] === 'string' && args[0].includes('createMessage({ platform: callback }) is redundant')
+		);
+		expect(matches.length).toBe(1);
+		warnSpy.mockRestore();
+	});
+
+	it('first call to `message` installs the wrap (proves _ensureWrap covers the pure-RPC path)', async () => {
+		// Sanity check that the install path is the message hook itself
+		// when nothing else has run. After one message, `platform.publish`
+		// should be `derivedPublish` (different identity from raw publish).
+		setBus(makeRecordingBus());
+
+		const platform = mockPlatform();
+		const rawPublish = platform.publish;
+
+		const handler = live(async () => 'ok');
+		__register('install/check', handler);
+
+		const ws = mockWs();
+		const data = toArrayBuffer({ rpc: 'install/check', id: 'i-1', args: [] });
+		message(ws, { data, platform });
+
+		expect(platform.publish).not.toBe(rawPublish);
+		expect(platform.publish.name).toBe('derivedPublish');
+	});
+
+	it('first call to `setCronPlatform` installs the wrap (proves _ensureWrap covers the pure-cron path)', () => {
+		// Sanity check that setCronPlatform alone installs the wrap.
+		setBus(makeRecordingBus());
+
+		const platform = mockPlatform();
+		const rawPublish = platform.publish;
+
+		setCronPlatform(platform);
+
+		expect(platform.publish).not.toBe(rawPublish);
+		expect(platform.publish.name).toBe('derivedPublish');
+	});
+
+	it('late reactive registration during an in-flight RPC does NOT cause a double-relay window', async () => {
+		// The 0.5.6 audit identified a narrow race: if _activateDerived
+		// gated out (empty registry, no lazy queue) and the wrap was
+		// installed LATER by `_maybeLateActivate` (triggered by a runtime
+		// `__registerEffect` from inside an RPC handler), the in-flight
+		// RPC's microtask-flush publish would double-relay because the
+		// outer wrap had already cached a wrapped platform output. With
+		// the single-wrap design, `_ensureWrap` installs at the first
+		// touch (message hook), so even a mid-RPC registration cannot
+		// open a race window - the wrap is already on the raw platform
+		// and there's no outer wrap to stack on it.
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus });
+
+		const platform = mockPlatform();
+		hooks.init({ platform });   // installs wrap immediately
+
+		// RPC dynamically registers an effect during its handling and
+		// then publishes. With the single-wrap design, this is a single
+		// relay regardless of registration timing.
+		const handler = live(async (ctx) => {
+			const fx = live.effect(['race-source'], async (event, data, p) => {
+				p.publish('race-audit', 'evt', { id: data.id });
+			});
+			__registerEffect('fx/race', fx);
+			ctx.publish('race-source', 'created', { id: 7 });
+			return 'ok';
+		});
+		__register('race/place', handler);
+
+		const ws = mockWs();
+		const data = toArrayBuffer({ rpc: 'race/place', id: 'race-1', args: [] });
+		hooks.message(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 30));
+
+		// Each topic relayed exactly once. With the 0.5.6 design and a
+		// late-activation race, the source topic would have relayed twice.
+		expect(bus.relays.filter((r) => r.topic === 'race-source').length).toBe(1);
+		expect(bus.relays.filter((r) => r.topic === 'race-audit').length).toBe(1);
+	});
+
+	it('100 publishes on a hot loop relay exactly 100 times (no fan-out drift)', async () => {
+		// Volume sanity check: prove the single-relay invariant holds
+		// under concurrent batched publishes. With the 0.5.6 double-wrap,
+		// this would show roughly 200 relays.
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus, leader: () => true });
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		const handler = live(async (ctx, n) => {
+			ctx.publish('hot-topic', 'tick', { n });
+			return n;
+		});
+		__register('hot/publish', handler);
+
+		const ws = mockWs();
+		for (let i = 0; i < 100; i++) {
+			const data = toArrayBuffer({ rpc: 'hot/publish', id: 'hot-' + i, args: [i] });
+			hooks.message(ws, { data, platform });
+		}
+		await new Promise((r) => setTimeout(r, 60));
+
+		const hotRelays = bus.relays.filter((r) => r.topic === 'hot-topic');
+		expect(hotRelays.length).toBe(100);
+	});
+
+	it('inbound bus delivery with { relay: false } does NOT re-relay (no infinite loop)', async () => {
+		// Simulates the cluster receiving an inbound message: the
+		// extensions' `bus.activate` calls `activePlatform.publish` with
+		// `{ relay: false }` on inbound. After `_ensureWrap`, that
+		// `activePlatform.publish` IS `derivedPublish` (single-wrap
+		// design). `derivedPublish` must propagate `{ relay: false }`
+		// through to the inner `bus.wrap` output's publish, which
+		// respects the flag and skips re-relay. Without this
+		// invariant, two clustered replicas would ping-pong every
+		// relay forever.
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus });
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		const beforeRelays = bus.relays.length;
+
+		// Simulate the bus's inbound delivery: it calls platform.publish
+		// (which is now derivedPublish) with { relay: false }.
+		platform.publish('inbound-topic', 'evt', { from: 'other-replica' }, { relay: false });
+		await new Promise((r) => setTimeout(r, 20));
+
+		// No new relay record - the inbound publish did NOT trigger a
+		// re-relay outbound. The local broadcast still happened.
+		expect(bus.relays.length).toBe(beforeRelays);
+		expect(platform.published.find((p) => p.topic === 'inbound-topic')).toBeDefined();
+	});
+
+	it('inbound bus delivery fires reactive watchers on the receiving replica (cluster reactive correctness)', async () => {
+		// The other half of the inbound invariant: cluster-relayed
+		// messages must fire `live.effect` / `live.derived` /
+		// `live.aggregate` watchers on the receiving replica. This
+		// works because derivedPublish routes inbound through
+		// `_busPublish` -> bus.wrap output's publish -> surrogate.publish
+		// (= derivedPublishLocal) which calls fireWatchers.
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus });
+
+		const handlerCalls = [];
+		const fx = live.effect(['cluster-source'], async (event, data) => {
+			handlerCalls.push({ event, data });
+		});
+		__registerEffect('fx/cluster-inbound', fx);
+
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		// Simulate cluster inbound: another replica's relay arrives
+		// here, the bus subscriber delivers via platform.publish with
+		// { relay: false }.
+		platform.publish('cluster-source', 'created', { id: 99 }, { relay: false });
+		await new Promise((r) => setTimeout(r, 20));
+
+		// Effect handler fired on the receiving replica.
+		expect(handlerCalls.length).toBe(1);
+		expect(handlerCalls[0].event).toBe('created');
+		expect(handlerCalls[0].data).toEqual({ id: 99 });
+
+		// And the inbound did NOT re-relay (relay: false was respected).
+		expect(bus.relays.find((r) => r.topic === 'cluster-source')).toBeUndefined();
+	});
+
+	it('memory: removing the bus and re-issuing publishes drops cluster relay overhead to zero', async () => {
+		// Sanity check that `setBus(null)` actually disables relay (no
+		// dangling references in the wrap's bus cache). With a bus
+		// wired then cleared, subsequent publishes go through
+		// `derivedPublishLocal` only (no bus.wrap call).
+		const bus = makeRecordingBus();
+		const hooks = realtime({ bus });
+		const platform = mockPlatform();
+		hooks.init({ platform });
+
+		const handler = live(async (ctx) => {
+			ctx.publish('mem-topic', 'evt', { x: 1 });
+			return 'ok';
+		});
+		__register('mem/publish', handler);
+
+		const ws = mockWs();
+		const data = toArrayBuffer({ rpc: 'mem/publish', id: 'm-1', args: [] });
+		hooks.message(ws, { data, platform });
+		await new Promise((r) => setTimeout(r, 20));
+		expect(bus.relays.filter((r) => r.topic === 'mem-topic').length).toBe(1);
+
+		setBus(null);
+		const data2 = toArrayBuffer({ rpc: 'mem/publish', id: 'm-2', args: [] });
+		hooks.message(ws, { data: data2, platform });
+		await new Promise((r) => setTimeout(r, 20));
+		// No new relays after clearing the bus.
+		expect(bus.relays.filter((r) => r.topic === 'mem-topic').length).toBe(1);
 	});
 });
 
