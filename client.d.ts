@@ -115,6 +115,31 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
 				| { event: string; data: any }
 		): (...callArgs: any[]) => Promise<any>;
 	};
+	/**
+	 * Send a fire-and-forget RPC. Returns `void` synchronously - no Promise,
+	 * no pending entry, no timeout, no devtools-pending. The wire frame is
+	 * `{rpc, args}` with no `id` field; the server runs the full handler
+	 * chain but does not write a response. Errors are silently dropped on
+	 * the wire.
+	 *
+	 * Pair with `live.volatile(fn)` server-side. Use for high-frequency
+	 * one-way RPCs - cursor moves, drag updates, typing indicators,
+	 * telemetry beacons, heartbeats.
+	 *
+	 * Safety:
+	 * - Offline: silent no-op (no offline queue).
+	 * - Backpressure: dropped when `conn.bufferedAmount` exceeds the
+	 *   configured `volatileBackpressureBytes` (default 4 MB);
+	 *   `__devtools.volatileDropped` ticks.
+	 * - Inside `batch()`: throws in dev, no-op in prod.
+	 *
+	 * @example
+	 * ```js
+	 * import { moveCursor } from '$live/cursors';
+	 * moveCursor.fireAndForget('board-1', { x, y });
+	 * ```
+	 */
+	fireAndForget: (...args: any[]) => void;
 };
 
 /**
@@ -548,6 +573,16 @@ export function configure(config: {
 	 * @default 60000
 	 */
 	resumeGraceMs?: number;
+	/**
+	 * `WS.bufferedAmount` threshold (in bytes) at which `.fireAndForget()`
+	 * sends are dropped silently and `__devtools.volatileDropped` ticks.
+	 * Sized for 120Hz cursor + drag traffic; raise it if your app
+	 * legitimately bursts above 4 MB of in-flight volatile traffic,
+	 * lower it on mobile-constrained targets where the OS send buffer
+	 * is tighter.
+	 * @default 4_194_304 (4 MB)
+	 */
+	volatileBackpressureBytes?: number;
 	/** Offline mutation queue configuration. */
 	offline?: {
 		/** Enable queuing RPCs when disconnected. */

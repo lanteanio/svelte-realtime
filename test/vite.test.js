@@ -76,6 +76,21 @@ export const deleteMessage = live(async (ctx, id) => {});
 		expect(code).toContain('export const deleteMessage = __rpc("chat/deleteMessage")');
 	});
 
+	it('generates __rpc() stubs for live.volatile() exports', () => {
+		setup({
+			'cursors.js': `
+import { live } from 'svelte-realtime/server';
+export const moveCursor = live.volatile(async (ctx, boardId, pos) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:cursors', { ssr: false });
+
+		expect(code).toContain("import { __rpc } from 'svelte-realtime/client'");
+		expect(code).toContain('export const moveCursor = __rpc("cursors/moveCursor")');
+	});
+
 	it('generates __stream() stubs for live.stream() exports', () => {
 		setup({
 			'chat.js': `

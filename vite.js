@@ -41,6 +41,11 @@ const PUBLIC_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.public\s*\(/g;
 // module are intentionally public.
 const PUBLIC_COMMENT_RE = /(?:\/\/|\/\*)\s*realtime-allow-public\b/;
 const IDEMPOTENT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.idempotent\s*\(/g;
+// `live.volatile(...)` is the fire-and-forget RPC marker. From the client's
+// perspective the export is a normal RPC stub - the `.fireAndForget()` method
+// is attached by the `__rpc()` factory itself - so the codegen emits the same
+// `__rpc(...)` line as a plain `live()` export.
+const VOLATILE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.volatile\s*\(/g;
 
 const _validSegmentReVite = /^[a-zA-Z0-9_]+$/;
 
@@ -1097,7 +1102,7 @@ function _generateClientStubs(filePath, modulePath, dir) {
 	const hasPublicComment = PUBLIC_COMMENT_RE.test(source);
 	// live() and the wrappers that pass through unchanged on the client
 	// (validated/lock/idempotent/rateLimit/public) all emit the same __rpc line.
-	for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE, PUBLIC_EXPORT_RE]) {
+	for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE, PUBLIC_EXPORT_RE, VOLATILE_EXPORT_RE]) {
 		re.lastIndex = 0;
 		while ((match = re.exec(source)) !== null) {
 			const name = match[1];
@@ -1886,8 +1891,8 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 		const registered = new Set();
 		let match;
 		// live() and the wrappers that share the plain __register line
-		// (validated/lock/idempotent/rateLimit).
-		for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE]) {
+		// (validated/lock/idempotent/rateLimit/volatile).
+		for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE, VOLATILE_EXPORT_RE]) {
 			re.lastIndex = 0;
 			while ((match = re.exec(source)) !== null) {
 				const name = match[1];
@@ -2374,6 +2379,24 @@ function _generateTypeDeclarations(liveDir, dir) {
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
 				if (isTS) {
 					const sig = _extractFunctionSignatureFor(source, name, 'live\\.idempotent', 1);
+					exports.push(`  export const ${name}: ${sig};`);
+				} else {
+					exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);
+				}
+			}
+		}
+
+		// Detect live.volatile() exports - inner handler at arg index 0
+		// (same shape as plain live()). The .fireAndForget(...) method is
+		// attached by the __rpc(...) factory itself, so the generated stub
+		// types as the plain RPC signature; users get the method at runtime.
+		VOLATILE_EXPORT_RE.lastIndex = 0;
+		while ((match = VOLATILE_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				if (isTS) {
+					const sig = _extractFunctionSignatureFor(source, name, 'live\\.volatile', 0);
 					exports.push(`  export const ${name}: ${sig};`);
 				} else {
 					exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);

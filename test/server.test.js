@@ -480,6 +480,159 @@ describe('handleRpc()', () => {
 	});
 });
 
+// - Volatile (fire-and-forget) RPC ------------------------------------------
+
+describe('handleRpc() volatile (no-id frame)', () => {
+	let ws, platform;
+
+	beforeEach(() => {
+		ws = mockWs({ id: 'user1' });
+		platform = mockPlatform();
+	});
+
+	it('runs the handler when frame has no id', async () => {
+		let called = false;
+		let receivedArg = null;
+		const handler = live.volatile(async (_ctx, arg) => {
+			called = true;
+			receivedArg = arg;
+			return 'discarded';
+		});
+		__register('vol/move', handler);
+
+		const data = toArrayBuffer({ rpc: 'vol/move', args: [{ x: 1, y: 2 }] });
+		expect(handleRpc(ws, data, platform)).toBe(true);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(called).toBe(true);
+		expect(receivedArg).toEqual({ x: 1, y: 2 });
+	});
+
+	it('does NOT send a response frame back to the client', async () => {
+		const handler = live.volatile(async () => 'whatever');
+		__register('vol/silent', handler);
+
+		const data = toArrayBuffer({ rpc: 'vol/silent', args: [] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent).toHaveLength(0);
+	});
+
+	it('does NOT send a response when the handler throws', async () => {
+		const handler = live.volatile(async () => { throw new Error('boom'); });
+		__register('vol/throws', handler);
+
+		const data = toArrayBuffer({ rpc: 'vol/throws', args: [] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent).toHaveLength(0);
+	});
+
+	it('runs guards on volatile calls (forbidden errors still rejected by gate)', async () => {
+		let handlerCalled = false;
+		const guardFn = guard(() => { throw new LiveError('FORBIDDEN', 'no'); });
+		const handler = live.volatile(async () => { handlerCalled = true; });
+		__registerGuard('volguarded', guardFn);
+		__register('volguarded/move', handler);
+
+		const data = toArrayBuffer({ rpc: 'volguarded/move', args: [] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(handlerCalled).toBe(false);
+		expect(platform.sent).toHaveLength(0);
+	});
+
+	it('accepts a no-id frame on a non-volatile handler too (per-call wire shape is the contract)', async () => {
+		let called = false;
+		const handler = live(async () => { called = true; return 'noop'; });
+		__register('plain/handler', handler);
+
+		const data = toArrayBuffer({ rpc: 'plain/handler', args: [] });
+		expect(handleRpc(ws, data, platform)).toBe(true);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(called).toBe(true);
+		expect(platform.sent).toHaveLength(0);
+	});
+
+	it('rejects frames with empty rpc path', () => {
+		const data = toArrayBuffer({ rpc: '', args: [] });
+		expect(handleRpc(ws, data, platform)).toBe(false);
+	});
+
+	it('rejects frames with non-string id (regression: only undefined id triggers volatile)', () => {
+		const data = toArrayBuffer({ rpc: 'something', id: 123, args: [] });
+		expect(handleRpc(ws, data, platform)).toBe(false);
+	});
+
+	it('runs middleware on volatile calls', async () => {
+		_resetMiddleware();
+		const order = [];
+		live.middleware(async (_ctx, next) => {
+			order.push('mw');
+			return next();
+		});
+		const handler = live.volatile(async () => { order.push('handler'); });
+		__register('vol/mw', handler);
+
+		const data = toArrayBuffer({ rpc: 'vol/mw', args: [] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(order).toEqual(['mw', 'handler']);
+		expect(platform.sent).toHaveLength(0);
+
+		_resetMiddleware();
+	});
+
+	it('does NOT dev-warn when volatile is wrapped by live.rateLimit', async () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const inner = live.volatile(async () => undefined);
+		const wrapped = live.rateLimit({ points: 1000, window: 60_000 }, inner);
+		__register('vol/wrapped', wrapped);
+
+		const data = toArrayBuffer({ rpc: 'vol/wrapped', args: [] });
+		handleRpc(ws, data, platform);
+
+		await new Promise((r) => setTimeout(r, 10));
+
+		const volatileWarns = warnSpy.mock.calls.filter((args) =>
+			/not marked live\.volatile/.test(args[0] || '')
+		);
+		expect(volatileWarns).toHaveLength(0);
+		warnSpy.mockRestore();
+	});
+});
+
+describe('live.volatile()', () => {
+	it('stamps __isLive and __volatileRpc', () => {
+		const fn = live.volatile(async () => {});
+		expect(/** @type {any} */ (fn).__isLive).toBe(true);
+		expect(/** @type {any} */ (fn).__volatileRpc).toBe(true);
+	});
+
+	it('throws when given a non-function', () => {
+		expect(() => /** @type {any} */ (live.volatile)('not a function')).toThrow();
+		expect(() => /** @type {any} */ (live.volatile)(null)).toThrow();
+		expect(() => /** @type {any} */ (live.volatile)(undefined)).toThrow();
+	});
+
+	it('returns the same function reference (no wrapping)', () => {
+		const fn = async () => {};
+		const out = live.volatile(fn);
+		expect(out).toBe(fn);
+	});
+});
+
 // - Stream RPC ---------------------------------------------------------------
 
 describe('handleRpc() stream', () => {

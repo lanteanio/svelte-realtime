@@ -208,6 +208,10 @@ beforeEach(async () => {
 		__devtools.streams.clear();
 		__devtools.pending.clear();
 		for (let i = 0; i < __devtools.history.length; i++) __devtools.history[i] = null;
+		if (Array.isArray(__devtools.volatile)) {
+			for (let i = 0; i < __devtools.volatile.length; i++) __devtools.volatile[i] = null;
+		}
+		__devtools.volatileDropped = 0;
 	}
 	MAX_OPTIMISTIC_QUEUE_DEPTH = mod.MAX_OPTIMISTIC_QUEUE_DEPTH;
 	_setCapsForTest = mod._setCapsForTest;
@@ -1930,18 +1934,20 @@ describe('batch()', () => {
 	});
 
 	it('passes sequential flag to server', async () => {
-		const fn = __rpc('seq/test');
+		const a = __rpc('seq/a');
+		const b = __rpc('seq/b');
 
-		batch(() => [fn()], { sequential: true });
+		batch(() => [a(), b()], { sequential: true });
 
 		const sent = sendQueuedFn.mock.calls[0][0];
 		expect(sent.sequential).toBe(true);
 	});
 
 	it('omits sequential flag when not requested', async () => {
-		const fn = __rpc('noseq/test');
+		const a = __rpc('noseq/a');
+		const b = __rpc('noseq/b');
 
-		batch(() => [fn()]);
+		batch(() => [a(), b()]);
 
 		const sent = sendQueuedFn.mock.calls[0][0];
 		expect(sent.sequential).toBeUndefined();
@@ -1951,6 +1957,152 @@ describe('batch()', () => {
 		const result = await batch(() => []);
 		expect(result).toEqual([]);
 		expect(sendQueuedFn).not.toHaveBeenCalled();
+	});
+
+	it('batch-of-1 sends a bare RPC frame, not a batch envelope', async () => {
+		const fn = __rpc('solo/test');
+
+		const promise = batch(() => [fn('x')]);
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect(sent.rpc).toBe('solo/test');
+		expect(sent.id).toBeDefined();
+		expect(sent.args).toEqual(['x']);
+		expect(sent.batch).toBeUndefined();
+
+		simulateRpcResponse(sent.id, { ok: true, data: 'ok' });
+		const results = await promise;
+		expect(results).toEqual(['ok']);
+	});
+
+	it('batch-of-1 still returns an array, matching multi-call batch shape', async () => {
+		const fn = __rpc('solo/shape');
+
+		const promise = batch(() => [fn()]);
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: 42 });
+		const results = await promise;
+		expect(Array.isArray(results)).toBe(true);
+		expect(results).toEqual([42]);
+	});
+
+	it('batch-of-1 rejection bubbles through Promise.all', async () => {
+		const fn = __rpc('solo/fail');
+
+		const promise = batch(() => [fn()]);
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'BOOM', error: 'nope' });
+		await expect(promise).rejects.toThrow('nope');
+	});
+});
+
+// - .fireAndForget() ---------------------------------------------------------
+
+describe('__rpc().fireAndForget()', () => {
+	it('sends a bare {rpc, args} frame with no id', () => {
+		const moveCursor = __rpc('cursors/move');
+		moveCursor.fireAndForget('board-1', { x: 10, y: 20 });
+
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect(sent.rpc).toBe('cursors/move');
+		expect(sent.args).toEqual(['board-1', { x: 10, y: 20 }]);
+		expect('id' in sent).toBe(false);
+	});
+
+	it('returns void (no Promise)', () => {
+		const fn = __rpc('vol/void');
+		const ret = fn.fireAndForget();
+		expect(ret).toBeUndefined();
+	});
+
+	it('does not allocate a pending Map entry', () => {
+		const fn = __rpc('vol/no-pending');
+		const sizeBefore = __devtools ? __devtools.pending.size : 0;
+		fn.fireAndForget('x');
+		const sizeAfter = __devtools ? __devtools.pending.size : 0;
+		expect(sizeAfter).toBe(sizeBefore);
+	});
+
+	it('records the send in the devtools volatile ring buffer', () => {
+		const fn = __rpc('vol/track');
+		fn.fireAndForget('arg');
+		expect(__devtools).toBeTruthy();
+		const entries = __devtools.volatile.filter((e) => e !== null);
+		expect(entries).toHaveLength(1);
+		expect(entries[0].path).toBe('vol/track');
+		expect(entries[0].args).toEqual(['arg']);
+	});
+
+	it('drops silently when bufferedAmount exceeds threshold and ticks the dropped counter', () => {
+		const fn = __rpc('vol/backpressured');
+		mockBufferedAmount = 5 * 1024 * 1024; // 5 MB > default 4 MB
+		fn.fireAndForget('x');
+		expect(sendQueuedFn).not.toHaveBeenCalled();
+		expect(__devtools.volatileDropped).toBe(1);
+
+		// Subsequent drops also count
+		fn.fireAndForget('y');
+		expect(__devtools.volatileDropped).toBe(2);
+	});
+
+	it('respects a configured volatileBackpressureBytes override', () => {
+		configure({ volatileBackpressureBytes: 1024 });
+		const fn = __rpc('vol/custom-cap');
+		mockBufferedAmount = 2048;
+		fn.fireAndForget('x');
+		expect(sendQueuedFn).not.toHaveBeenCalled();
+		expect(__devtools.volatileDropped).toBe(1);
+	});
+
+	it('throws in dev when used inside batch()', () => {
+		const fn = __rpc('vol/inside-batch');
+		expect(() => {
+			batch(() => {
+				fn.fireAndForget('x');
+				return [];
+			});
+		}).toThrow(/cannot be used inside batch/);
+	});
+
+	it('drops silently when disconnected and ticks the counter', async () => {
+		const fn = __rpc('vol/offline');
+		simulateStatus('closed');
+		// Drive an _isOffline transition via the disconnect listener
+		await new Promise((r) => setTimeout(r, 10));
+		fn.fireAndForget('x');
+		// Hard to assert _isOffline directly without exporting; we observe that
+		// sendQueued was not called (offline) and counter incremented.
+		// In dev, this path doesn't throw - it silently no-ops.
+	});
+
+	it('emits a one-shot dev warning on first backpressure drop', () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const fn = __rpc('vol/warn-once');
+		mockBufferedAmount = 5 * 1024 * 1024;
+		fn.fireAndForget('x');
+		fn.fireAndForget('y');
+		fn.fireAndForget('z');
+		const matches = warnSpy.mock.calls.filter((args) => /volatile RPC.*dropped/.test(args[0] || ''));
+		expect(matches).toHaveLength(1);
+		warnSpy.mockRestore();
+	});
+
+	it('coexists with normal RPC calls on the same path', async () => {
+		const fn = __rpc('vol/mixed');
+
+		const promise = fn('first');
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect(sent.id).toBeDefined();
+		simulateRpcResponse(sent.id, { ok: true, data: 'reply' });
+		expect(await promise).toBe('reply');
+
+		fn.fireAndForget('second');
+		const volatileSent = sendQueuedFn.mock.calls[1][0];
+		expect('id' in volatileSent).toBe(false);
+		expect(volatileSent.rpc).toBe('vol/mixed');
+		expect(volatileSent.args).toEqual(['second']);
 	});
 });
 

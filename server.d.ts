@@ -959,6 +959,35 @@ export namespace live {
 	function middleware(fn: (ctx: LiveContext<any>, next: () => Promise<any>) => Promise<any>): void;
 
 	/**
+	 * Mark a handler as fire-and-forget (volatile). The server still runs
+	 * the full middleware / guard / rate-limit / validation chain, but does
+	 * NOT write a response frame back. The matching client surface is
+	 * `rpc.fireAndForget(...args)`, which sends a no-id wire frame and
+	 * returns void synchronously.
+	 *
+	 * Use for high-frequency one-way RPCs where the caller has no reply
+	 * to await: cursor moves, drag updates, typing indicators, telemetry
+	 * beacons, heartbeats.
+	 *
+	 * Errors on a volatile call still run through the handler's error
+	 * path (metrics, server logs) but are not transmitted - per the
+	 * fire-and-forget contract.
+	 *
+	 * @param fn - Handler function (ctx, ...args)
+	 *
+	 * @example
+	 * ```js
+	 * export const moveCursor = live.volatile(async (ctx, boardId, pos) => {
+	 *   cursor.update(ctx.ws, `board:${boardId}`, pos, ctx.platform);
+	 * });
+	 *
+	 * // Client:
+	 * moveCursor.fireAndForget('board-1', { x: 100, y: 200 });
+	 * ```
+	 */
+	function volatile<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(fn: T): T;
+
+	/**
 	 * Wrap a stream with a server-side gate predicate.
 	 * If the predicate returns false (or a `Promise` resolving to false),
 	 * the client receives a graceful no-op (`{ data: null, gated: true }`)

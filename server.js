@@ -2068,6 +2068,62 @@ live.public = function publicMarker(fn) {
 };
 
 /**
+ * Mark a handler as fire-and-forget (volatile). The server still runs the
+ * full middleware / guard / rate-limit / validation chain, but does NOT
+ * write a response frame back. The client calls the handler via
+ * `.fireAndForget(...args)`, which sends a no-id wire frame and returns
+ * void synchronously.
+ *
+ * Use for high-frequency one-way RPCs where the caller has no reply to
+ * await: cursor moves, drag updates, typing indicators, telemetry beacons,
+ * heartbeats. The handler-level marker is intent + documentation; the wire
+ * shape (no `id` field) is the actual contract, so calling
+ * `.fireAndForget()` on a non-volatile handler also works (server processes
+ * it, just skips the reply). The marker exists so reviewers can see at a
+ * glance that a handler is intentionally one-way and that errors will not
+ * surface to the caller.
+ *
+ * Errors on a volatile call still run through the handler's error path
+ * (metrics, server logs) but are not transmitted - per the fire-and-forget
+ * contract. Pair with `live.rateLimit` + `ctx.shed` for admission control;
+ * shed volatile calls naturally have no caller to inform.
+ *
+ * @param {Function} fn - Handler function (ctx, ...args)
+ * @returns {Function}
+ *
+ * @example
+ * ```js
+ * // src/lib/realtime/cursors.js
+ * import { live } from 'svelte-realtime';
+ *
+ * export const moveCursor = live.volatile(async (ctx, boardId, pos) => {
+ *   cursor.update(ctx.ws, `board:${boardId}`, pos, ctx.platform);
+ * });
+ *
+ * // Client:
+ * import { moveCursor } from '$live/cursors';
+ * moveCursor.fireAndForget('board-1', { x: 100, y: 200 });  // no await, no reply
+ * ```
+ */
+live.volatile = function volatileMarker(fn) {
+	if (typeof fn !== 'function') {
+		throw new Error('[svelte-realtime] live.volatile(fn) requires a handler function');
+	}
+	/** @type {any} */ (fn).__isLive = true;
+	/** @type {any} */ (fn).__volatileRpc = true;
+	return fn;
+};
+
+/**
+ * Dev-mode warn dedup for fire-and-forget calls against non-volatile
+ * handlers. Bounded so a script-driven barrage doesn't anchor unbounded
+ * memory; first 256 distinct paths warn once each, then quiet.
+ * @type {Set<string>}
+ */
+const _volatileWarnSet = new Set();
+const _VOLATILE_WARN_CAP = 256;
+
+/**
  * Wraps a live() function with a sliding window rate limiter.
  *
  * @param {{ points: number, window: number, key?: (ctx: any) => string }} config
@@ -6534,7 +6590,20 @@ export function handleRpc(ws, data, platform, options) {
 		return true;
 	}
 
-	if (typeof msg.rpc !== 'string' || typeof msg.id !== 'string') return false;
+	if (typeof msg.rpc !== 'string') return false;
+
+	// Volatile (fire-and-forget) RPC: frames with no `id` field signal
+	// "no reply expected". Server runs the full handler chain but skips
+	// the response emit. The wire shape (id absent) is the contract; the
+	// matching client surface is `rpc.fireAndForget(...)` plus the
+	// `live.volatile()` server-side marker.
+	if (msg.id === undefined) {
+		if (msg.rpc.length === 0) return false;
+		_executeVolatileRpc(ws, msg, platform, options);
+		return true;
+	}
+
+	if (typeof msg.id !== 'string') return false;
 
 	// envelope.shape invariant: rpc and id must be non-empty for routing
 	assert(msg.rpc.length > 0 && msg.id.length > 0, 'realtime/handleRpc.envelope.non-empty', { rpcLen: msg.rpc.length, idLen: msg.id.length });
@@ -6553,6 +6622,58 @@ export function handleRpc(ws, data, platform, options) {
 async function _executeRpc(ws, msg, platform, options) {
 	const result = await _executeSingleRpc(ws, msg, platform, options);
 	_respond(ws, platform, msg.id, result);
+}
+
+/**
+ * Execute a fire-and-forget RPC. Runs the full handler chain (middleware,
+ * guards, rate limits, validation) but does NOT write a response frame.
+ * `msg.id` is absent on the wire; an internal correlation id is synthesized
+ * so metrics, devtools, and `_executeSingleRpc`'s response shape stay
+ * uniform without leaking onto the wire.
+ *
+ * Dev-mode warns once per non-volatile handler that receives a fire-and-forget
+ * call (bounded by `_VOLATILE_WARN_CAP` distinct paths) so accidental
+ * `.fireAndForget()` calls against handlers that have a meaningful return
+ * value surface in the server log.
+ *
+ * @param {any} ws
+ * @param {{ rpc: string, args?: any[] }} msg
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @param {{ beforeExecute?: (ws: any, rpcPath: string, args: any[]) => Promise<void> | void, onError?: (path: string, error: unknown, ctx: any) => void }} [options]
+ */
+async function _executeVolatileRpc(ws, msg, platform, options) {
+	if (_IS_DEV) {
+		const path = msg.rpc;
+		const fn = await _resolveRegistryEntry(path);
+		if (fn && !_hasVolatileMarker(fn) && !_volatileWarnSet.has(path)) {
+			if (_volatileWarnSet.size < _VOLATILE_WARN_CAP) _volatileWarnSet.add(path);
+			console.warn(
+				`[svelte-realtime] handler '${path}' received a fire-and-forget call but is not marked live.volatile(). ` +
+				"Errors will be silently dropped (no reply is sent). Wrap the handler with live.volatile() to make this intent explicit.\n  See: https://svti.me/volatile"
+			);
+		}
+	}
+	/** @type {any} */ (msg).id = '__volatile';
+	await _executeSingleRpc(ws, /** @type {any} */ (msg), platform, options);
+	// No _respond - fire-and-forget contract.
+}
+
+/**
+ * Walk the `__wrappedFn` chain produced by `live.rateLimit` / `live.idempotent`
+ * / `live.breaker` / `live.validated` / `live.lock` to find an inner
+ * `__volatileRpc` marker. Lets users wrap a `live.volatile(handler)` core
+ * with any combination of the other markers in any order without tripping
+ * the dev-mode "not marked volatile" warning. Bounded walk (depth 8) so a
+ * pathological cycle cannot loop forever.
+ * @param {any} fn
+ */
+function _hasVolatileMarker(fn) {
+	let cur = fn;
+	for (let i = 0; cur && i < 8; i++) {
+		if (cur.__volatileRpc) return true;
+		cur = cur.__wrappedFn;
+	}
+	return false;
 }
 
 /**

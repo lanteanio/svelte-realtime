@@ -15,6 +15,11 @@ export const empty = readable(undefined);
 
 const _textEncoder = new TextEncoder();
 
+/** Dev-mode flag. True when not running under a Vite production build
+ * (and true under vitest, where `import.meta.env.PROD` is undefined).
+ * Gates dev-only warnings and devtools instrumentation. */
+const _IS_DEV = typeof import.meta === 'undefined' || !import.meta.env || !import.meta.env.PROD;
+
 // - Bounded-by-default capacity caps (client side) -------------------------
 // Existing caps not re-declared (already enforced at their sites):
 //   _historyMax           50    FIFO    per-stream undo/redo
@@ -541,6 +546,70 @@ export function __rpc(path) {
 	};
 
 	/**
+	 * Send a fire-and-forget RPC. Returns `void` synchronously - no Promise,
+	 * no pending entry, no timeout, no devtools-pending. The wire frame is
+	 * `{rpc, args}` with no `id` field; the server runs the full handler
+	 * chain (middleware, guards, rate limits, validation) but does not
+	 * write a response. Errors are silently dropped on the wire.
+	 *
+	 * Pair with `live.volatile(fn)` server-side. Use for high-frequency
+	 * one-way RPCs - cursor moves, drag updates, typing indicators,
+	 * telemetry beacons, heartbeats. Skips: `_nextId()`, the Promise
+	 * allocation, the dedup map, the pending Map entry, the timer
+	 * allocation, the devtools-pending entry.
+	 *
+	 * Safety:
+	 * - **Offline:** silent no-op while disconnected. No offline-queue
+	 *   entry. Lossy under disconnect IS the contract.
+	 * - **Backpressure:** if `conn.bufferedAmount` exceeds
+	 *   `volatileBackpressureBytes` (default 4 MB - see `configure(...)`),
+	 *   the send is dropped and the drop counter ticks. Prevents the WS
+	 *   send queue from growing unbounded on a stuck connection.
+	 * - **Inside `batch()`:** dev-mode throws; production no-op. Volatile
+	 *   bypasses batching by design.
+	 *
+	 * @param {...any} args - Arguments forwarded to the handler
+	 * @returns {void}
+	 *
+	 * @example
+	 * ```js
+	 * import { moveCursor } from '$live/cursors';
+	 * moveCursor.fireAndForget('board-1', { x, y });
+	 * ```
+	 */
+	rpcCall.fireAndForget = function fireAndForget(...args) {
+		if (_terminated) return;
+		if (_isOffline) { _volatileDropped++; return; }
+		if (_batchCollector) {
+			if (_IS_DEV) {
+				throw new Error(
+					`[svelte-realtime] '${path}'.fireAndForget() cannot be used inside batch() - volatile RPCs bypass batching.\n  See: https://svti.me/volatile`
+				);
+			}
+			return;
+		}
+		ensureListener();
+		ensureDisconnectListener();
+		const conn = _connect();
+		const cap = _clientConfig.volatileBackpressureBytes || _DEFAULT_VOLATILE_BACKPRESSURE_BYTES;
+		if (typeof conn.bufferedAmount === 'number' && conn.bufferedAmount > cap) {
+			_volatileDropped++;
+			if (__devtools) __devtools.volatileDropped = _volatileDropped;
+			if (_IS_DEV && !_volatileBackpressureWarned) {
+				_volatileBackpressureWarned = true;
+				console.warn(
+					`[svelte-realtime] volatile RPC '${path}' dropped: WS bufferedAmount (${conn.bufferedAmount} bytes) exceeded volatileBackpressureBytes (${cap}). ` +
+					`This warning fires once per session; subsequent drops increment __devtools.volatileDropped silently. ` +
+					`Raise the threshold via configure({ volatileBackpressureBytes }) if your app legitimately bursts above 4 MB of in-flight WS traffic.\n  See: https://svti.me/volatile`
+				);
+			}
+			return;
+		}
+		_devtoolsVolatileSent(path, args);
+		conn.sendQueued({ rpc: path, args });
+	};
+
+	/**
 	 * Attach per-call options. Returns a callable bound to those options.
 	 *
 	 * - `idempotencyKey` - the server-side handler must be wrapped with
@@ -834,6 +903,23 @@ const _UPLOAD_FRAME_HEADER_WITH_ARGS_BYTES = 12;
 const _DEFAULT_UPLOAD_HIGH_WATER_MARK = 4 * 1024 * 1024;
 const _DEFAULT_UPLOAD_LOW_WATER_MARK = 1 * 1024 * 1024;
 const _UPLOAD_DRAIN_POLL_MS = 50;
+
+/** Default backpressure threshold for `.fireAndForget()`. When `conn.bufferedAmount`
+ * exceeds this, the volatile send is dropped silently and the drop counter
+ * ticks. Sized for 120Hz cursor + drag traffic (~24 KB/sec per client on
+ * volatile paths): 4 MB gives ~170s of buffer headroom before drops kick
+ * in - healthy demos never trip it; a genuinely dead connection does
+ * before browser OOM. Override via `configure({ volatileBackpressureBytes })`. */
+const _DEFAULT_VOLATILE_BACKPRESSURE_BYTES = 4 * 1024 * 1024;
+
+/** Volatile-send drop counter. Incremented when a `.fireAndForget()` call is
+ * dropped (offline, backpressure, terminated). Exposed to devtools as
+ * `__devtools.volatileDropped`. */
+let _volatileDropped = 0;
+
+/** Dev-warn dedup: one-shot warn when the first volatile backpressure drop
+ * happens, so apps notice in development that they're hitting the cap. */
+let _volatileBackpressureWarned = false;
 
 /** Server-discovered `platform.maxPayloadLength`. Updated whenever an upload
  * response arrives carrying `__cap`. 0 = not yet discovered. */
@@ -3363,6 +3449,35 @@ export function batch(fn, options) {
 		return Promise.reject(new RpcError('INVALID_REQUEST', 'Batch exceeds maximum of 50 calls'));
 	}
 
+	const conn = _connect();
+	const effectiveTimeout = _getTimeout();
+
+	// Batch-of-1: send the bare RPC frame instead of wrapping in a batch
+	// envelope. Defensive callers (single writes wrapped in batch() for API
+	// symmetry) should not pay envelope cost or the round-trip of a batch
+	// response. The collected entry's pending entry was created with
+	// timer: null inside the call's __rpc path; attach a per-call timer
+	// here so the single call still times out cleanly.
+	if (collected.length === 1) {
+		const call = collected[0];
+		const _startTime = Date.now();
+		const sleepThreshold = Math.max(effectiveTimeout * 3, 90000);
+		const timer = setTimeout(() => {
+			const entry = pending.get(call.id);
+			if (!entry) return;
+			pending.delete(call.id);
+			if (Date.now() - _startTime > sleepThreshold) {
+				entry.reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
+			} else {
+				entry.reject(new RpcError('TIMEOUT', `RPC '${call.rpc}' timed out after ${Math.round(effectiveTimeout / 1000)}s`));
+			}
+		}, effectiveTimeout);
+		const existing = pending.get(call.id);
+		if (existing) existing.timer = timer;
+		conn.sendQueued(call);
+		return Promise.all(promises);
+	}
+
 	// Set a batch-level timeout (sleep-aware)
 	const _batchStartTime = Date.now();
 	const batchTimer = setTimeout(() => {
@@ -3383,10 +3498,9 @@ export function batch(fn, options) {
 				entry.reject(new RpcError('TIMEOUT', `Batch timed out after 30s`));
 			}
 		}
-	}, _getTimeout());
+	}, effectiveTimeout);
 
 	// Send all calls as one frame
-	const conn = _connect();
 	const payload = { batch: collected };
 	if (options?.sequential) payload.sequential = true;
 	conn.sendQueued(payload);
@@ -3416,7 +3530,7 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number }} OfflineEntry
  */
 
-/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, upload?: { frameSize?: number, chunkSize?: number, highWaterMark?: number, lowWaterMark?: number }, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
+/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, upload?: { frameSize?: number, chunkSize?: number, highWaterMark?: number, lowWaterMark?: number }, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
 let _clientConfig = {};
 
 /** @type {boolean} */
@@ -3440,7 +3554,14 @@ let _replayingQueue = false;
  * window resumes from the retained seq/version/cursor so the server can
  * gap-fill instead of cold-rehydrating. Set to 0 to disable.
  *
- * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * `volatileBackpressureBytes` (default 4 MB) is the `WS.bufferedAmount`
+ * threshold at which `.fireAndForget()` sends are dropped silently and
+ * `__devtools.volatileDropped` increments. Sized for 120Hz cursor + drag
+ * traffic; raise it if your app legitimately bursts above 4 MB of in-flight
+ * volatile traffic, lower it on mobile-constrained targets where the OS
+ * send buffer is tighter.
+ *
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
 	_clientConfig = config;
@@ -3743,11 +3864,15 @@ const _DEFAULT_REDACT_KEYS = new Set([
 
 const _MAX_STREAM_EVENTS = 20;
 
+const _DEVTOOLS_VOLATILE_MAX = 100;
+
 /**
  * @type {{
  *   history: any[],
  *   streams: Map<string, any>,
  *   pending: Map<string, any>,
+ *   volatile: any[],
+ *   volatileDropped: number,
  *   redactKeys: Set<string>,
  *   paused: boolean
  * } | null}
@@ -3757,10 +3882,36 @@ export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.en
 		history: new Array(50).fill(null),
 		streams: new Map(),
 		pending: new Map(),
+		volatile: new Array(_DEVTOOLS_VOLATILE_MAX).fill(null),
+		volatileDropped: 0,
 		redactKeys: new Set(_DEFAULT_REDACT_KEYS),
 		paused: false
 	}
 	: null;
+
+/** Ring buffer index for the devtools volatile send track. */
+let _devtoolsVolatileIdx = 0;
+let _devtoolsVolatileSeq = 0;
+
+/**
+ * Record a fire-and-forget RPC send for devtools. Send-only - there is no
+ * matching completion event because the wire shape carries no `id` and the
+ * server never replies. Ring buffer is bounded (`_DEVTOOLS_VOLATILE_MAX`,
+ * drop-oldest) so a high-frequency 60-120Hz mover can't anchor unbounded
+ * dev-mode memory.
+ * @param {string} path
+ * @param {any[]} args
+ */
+function _devtoolsVolatileSent(path, args) {
+	if (!__devtools) return;
+	__devtools.volatile[_devtoolsVolatileIdx] = {
+		path,
+		args,
+		time: Date.now(),
+		seq: ++_devtoolsVolatileSeq
+	};
+	_devtoolsVolatileIdx = (_devtoolsVolatileIdx + 1) % _DEVTOOLS_VOLATILE_MAX;
+}
 
 /**
  * Walk a value, replacing matched keys with `'[REDACTED]'`. Caps recursion

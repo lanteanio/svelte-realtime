@@ -227,6 +227,7 @@ Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `re
 
 **Client features**
 - [Batching](#batching)
+- [Volatile RPC (fire-and-forget)](#volatile-rpc-fire-and-forget)
 - [Optimistic updates](#optimistic-updates)
 - [Stream pagination](#stream-pagination)
 - [Undo and redo](#undo-and-redo)
@@ -957,6 +958,8 @@ const [board, column] = await batch(() => [
 
 Each call resolves or rejects independently - one failure does not cancel the others. Batches are limited to 50 calls - enforced both client-side (rejects before sending) and server-side.
 
+A `batch()` containing only one call sends a bare RPC frame (no batch envelope) and the server replies through the normal RPC path - so the defensive "always wrap writes in batch() for symmetry" pattern pays no envelope overhead. Batches of 2+ keep the envelope.
+
 ### Server-side batching
 
 Use `ctx.batch()` inside RPC handlers to publish multiple messages in a single call:
@@ -970,6 +973,59 @@ export const resetBoard = live(async (ctx, boardId) => {
   ]);
 });
 ```
+
+---
+
+## Volatile RPC (fire-and-forget)
+
+For high-frequency one-way calls where the caller has no reply to await - cursor moves, drag updates, typing indicators, telemetry beacons, heartbeats - use `live.volatile(fn)` server-side + `.fireAndForget(...args)` client-side. The wire frame carries no `id`; the server runs the full handler chain (middleware, guards, rate limits, validation) but does not write a response.
+
+```js
+// src/lib/realtime/cursors.js
+import { live } from 'svelte-realtime';
+
+export const moveCursor = live.volatile(async (ctx, boardId, pos) => {
+  // ctx.publish / ctx.shed / guards all work normally
+  ctx.publish(`board:${boardId}`, 'cursor', pos);
+});
+```
+
+```svelte
+<script>
+  import { moveCursor } from '$live/cursors';
+
+  function onPointerMove(e) {
+    moveCursor.fireAndForget(boardId, { x: e.clientX, y: e.clientY });
+    // returns void synchronously - no Promise, no await
+  }
+</script>
+```
+
+What `.fireAndForget()` skips that a normal RPC does:
+- ID allocation (`_nextId()`)
+- Promise allocation
+- Dedup-Map entry + `queueMicrotask(delete)`
+- Pending-Map entry
+- Timer allocation (per-call 30s timeout)
+- DevTools-pending entry
+
+At 60-120Hz on a single hot path that is 100K+ short-lived heap allocations per second avoided on the client.
+
+**Safety:**
+- **Errors disappear silently from the caller.** A volatile call that fails auth, validation, or throws still runs through metrics (`_recordRpcMetrics`) and server logs - operators see the failure - but the wire carries no reply, so the caller does not. Use `live.volatile()` only when this is the intended contract.
+- **Backpressure drop.** Before send, the client reads `WS.bufferedAmount`; if it exceeds `volatileBackpressureBytes` (default 4 MB, configurable via `configure(...)`), the frame is dropped silently and `__devtools.volatileDropped` ticks. Dev-mode emits a one-shot `console.warn` on first drop per session.
+- **Offline drop.** Volatile calls made while disconnected are silently dropped. They do not enter the offline queue (which is for awaited mutations).
+- **Inside `batch()`.** Throws in dev, no-op in prod. Volatile bypasses batching by design.
+
+**Server-side marker is recommended, not required.** The wire shape (`id` absent) is the actual contract. A `.fireAndForget()` against a plain `live()` handler also works - server processes it, just skips the reply - but dev-mode emits a one-shot warning per such path naming the handler so accidental fire-and-forget surfaces. Mark intentional one-way handlers with `live.volatile()` to silence the warning and document intent. The marker can sit at any depth inside `live.rateLimit` / `live.idempotent` / `live.breaker` / `live.validated` / `live.lock` wrappers (the framework walks `__wrappedFn` to find it).
+
+**When NOT to use `.fireAndForget()`:**
+- The caller needs to know whether the call succeeded -> use the normal awaited RPC.
+- The call needs to be retried on failure -> use `.with({ idempotencyKey })` + normal RPC.
+- The call should survive a disconnect -> use the offline queue via the normal RPC.
+- The call is sometimes one-way, sometimes interesting -> keep the handler `live()` (not `live.volatile()`) and choose at each call site.
+
+**`live.notify` vs `.fireAndForget()`.** Both are fire-and-forget, but they go in opposite directions: `live.notify(target, event, data)` is server -> client (server-initiated push, no client reply expected), while `.fireAndForget(...args)` is client -> server (client-initiated RPC, no server reply emitted). Different surfaces, different use cases.
 
 ---
 
@@ -3663,8 +3719,8 @@ Import from `svelte-realtime/client`.
 |---|---|
 | `RpcError` | Typed error with `code` field |
 | `UploadHandle<T>` | Type for `live.upload` client handles (thenable + events + cancel) |
-| `batch(fn, options?)` | Group RPC calls into one WebSocket frame |
-| `configure(config)` | Connection hooks, offline queue, upload frame size |
+| `batch(fn, options?)` | Group RPC calls into one WebSocket frame (or send bare frame when only one call was collected) |
+| `configure(config)` | Connection hooks, offline queue, upload frame size, `volatileBackpressureBytes` |
 | `combine(...stores, fn)` | Multi-store composition |
 | `onSignal(userId, callback)` | Listen for point-to-point signals |
 | `onDerived` | Re-exported from adapter: reactive derived topic subscription |
