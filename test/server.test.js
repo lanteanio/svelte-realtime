@@ -13701,7 +13701,18 @@ describe('live.push() / pushHooks', () => {
 		});
 	});
 
-	it('prefers the local registry over the remote registry when both have an entry', async () => {
+	it('prefers the remote registry over the local registry when both have an entry', async () => {
+		// The cluster-wide remoteRegistry is the canonical-owner source of
+		// truth (most-recently-opened wins across the cluster). When the
+		// canonical owner is THIS instance, the registry's own self-
+		// targeting short-circuit calls the local platform.request without
+		// a Redis hop -- so single-tab perf is unchanged. When the
+		// canonical owner is a DIFFERENT instance (multi-tab same-user
+		// where the more recent open landed elsewhere), the cluster route
+		// is the correct deterministic recipient; pre-fix the local short-
+		// circuit beat the cluster lookup whenever this instance had any
+		// local entry, routing to the older tab regardless of caller
+		// location.
 		const platform = mockPlatform();
 		const ws = { getUserData: () => ({ user_id: 'u-local' }) };
 		pushHooks.open(ws, { platform });
@@ -13717,8 +13728,29 @@ describe('live.push() / pushHooks', () => {
 			}
 		});
 
-		await expect(live.push({ userId: 'u-local' }, 'event')).resolves.toBe('from-local');
-		expect(remoteCalls).toHaveLength(0);
+		await expect(live.push({ userId: 'u-local' }, 'event')).resolves.toBe('from-remote');
+		expect(remoteCalls).toHaveLength(1);
+		expect(platform.requested).toHaveLength(0);
+	});
+
+	it('falls back to local registry when remoteRegistry rejects with "offline" and a local entry exists', async () => {
+		// Brief propagation race after pushHooks.open: local registry has
+		// the entry, cluster pub/sub event hasn't applied to this
+		// instance's userToInstance index yet, cluster says "offline".
+		// We treat the local entry as authoritative for this window so a
+		// just-opened user doesn't NOT_FOUND their own push.
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-racing' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'from-local-after-cluster-miss');
+
+		live.configurePush({
+			remoteRegistry: {
+				request: async () => { throw new Error('registry.request: target user "u-racing" is offline'); }
+			}
+		});
+
+		await expect(live.push({ userId: 'u-racing' }, 'event')).resolves.toBe('from-local-after-cluster-miss');
 		expect(platform.requested).toHaveLength(1);
 	});
 
@@ -13793,11 +13825,19 @@ describe('live.push() / pushHooks', () => {
 		// Local identify shape now reads account.id
 		pushHooks.open(ws, { platform });
 		platform._setRequestResolver(async () => 'local-reply');
-		await expect(live.push({ userId: 'acct-1' }, 'evt')).resolves.toBe('local-reply');
+		// With remoteRegistry configured, the cluster is the canonical-
+		// owner source of truth and is consulted first. In a real cluster
+		// the registry's self-target short-circuit would route this back
+		// to the local platform; the mock here returns 'remote-reply'
+		// directly, which is what we assert against.
+		await expect(live.push({ userId: 'acct-1' }, 'evt')).resolves.toBe('remote-reply');
 
-		// And userIds not present locally fall through to remote
+		// Same path for a userId not present locally.
 		await expect(live.push({ userId: 'acct-elsewhere' }, 'evt')).resolves.toBe('remote-reply');
-		expect(remoteCalls).toEqual([{ target: 'acct-elsewhere', event: 'evt' }]);
+		expect(remoteCalls).toEqual([
+			{ target: 'acct-1', event: 'evt' },
+			{ target: 'acct-elsewhere', event: 'evt' }
+		]);
 	});
 
 	it('configurePush(null) clears both identify and remoteRegistry', async () => {
@@ -14036,7 +14076,10 @@ describe('live.notify()', () => {
 		live.configurePush(null);
 	});
 
-	it('prefers the local registry over the remote registry (same as push)', async () => {
+	it('prefers the remote registry over the local registry (same as push)', async () => {
+		// Symmetric with live.push: when remoteRegistry is configured, it
+		// is the cluster-wide source of truth and the local entry is only
+		// a fallback for the brief propagation race after a fresh open.
 		const platform = mockPlatform();
 		const ws = { getUserData: () => ({ user_id: 'u-both' }) };
 		pushHooks.open(ws, { platform });
@@ -14052,10 +14095,41 @@ describe('live.notify()', () => {
 		live.configurePush({ remoteRegistry });
 
 		await live.notify({ userId: 'u-both' }, 'evt');
+		// Notify is fire-and-forget; let the internal promise tick.
+		await new Promise(r => setTimeout(r, 10));
 
-		// Local match short-circuits - remote registry never consulted.
+		// Cluster wins: remote registry receives the request; local
+		// platform is not touched (the registry's self-target short-
+		// circuit doesn't fire because the test's mock registry doesn't
+		// implement it -- this asserts the routing decision, not the
+		// downstream optimization).
+		expect(remoteCalls).toHaveLength(1);
+		expect(platform.requested).toHaveLength(0);
+
+		live.configurePush(null);
+	});
+
+	it('falls back to local registry when remoteRegistry rejects with "offline" and a local entry exists', async () => {
+		// Symmetric with live.push: brief propagation race after
+		// pushHooks.open. Notify is fire-and-forget, but the user-
+		// experience win is real: a just-opened user gets their own
+		// notify delivered instead of silently dropped.
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-racing-notify' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => undefined);
+
+		live.configurePush({
+			remoteRegistry: {
+				request: async () => { throw new Error('registry.request: target user "u-racing-notify" is offline'); }
+			}
+		});
+
+		await live.notify({ userId: 'u-racing-notify' }, 'evt');
+		// Let the cluster rejection settle and the local fallback fire.
+		await new Promise(r => setTimeout(r, 10));
+
 		expect(platform.requested).toHaveLength(1);
-		expect(remoteCalls).toHaveLength(0);
 
 		live.configurePush(null);
 	});

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-05-25
+
+### Fixed
+
+- **`live.push` and `live.notify`: cluster-first lookup when `configurePush({ remoteRegistry })` is configured.** Pre-fix, both delegates short-circuited on the local `_pushRegistry` whenever this instance had any entry for the target userId, even if a later registration on a different instance had become the cluster-canonical owner. Result on a multi-replica deploy with the same user open in multiple tabs across workers: the push routed to whichever tab happened to be on the caller's instance, not to the cluster-canonical (most-recently-opened) tab the documentation already promised. Routing was non-deterministic: the same `live.push({ userId })` call returned different recipients depending on which instance the caller was running on. Post-fix, `live.push` / `live.notify` consult the `remoteRegistry` first when one is configured. The registry's own self-targeting short-circuit (`registry.request`'s `ownerInstanceId === instanceId` fast path in `svelte-adapter-uws-extensions/redis/registry.js`) preserves single-tab performance -- no extra Redis hop when the canonical owner IS this instance. Multi-tab same-user across instances now routes deterministically to the cluster-canonical recipient. The local entry is consulted only as a fallback when `remoteRegistry` rejects with an "offline" error AND the local registry has an entry for the userId (covers the brief propagation race where `pushHooks.open` has populated local + Redis but the cluster pub/sub event hasn't yet applied to this instance's userToInstance index). Updates the three tests that previously codified the local-first behavior (`prefers the local registry over the remote registry...`, the symmetric notify test, `configurePush({ identify, remoteRegistry })`) and adds two new tests covering the propagation-race fallback for both push and notify. Single-instance deployments (no `remoteRegistry` configured) are unaffected -- the local-only path is preserved as-is.
+
 ## [0.5.9] - 2026-05-22
 
 ### Added

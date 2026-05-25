@@ -3093,15 +3093,23 @@ export const pushHooks = {
  * Send a server-initiated request to a connected user and await the reply.
  *
  * Lookup order:
- * 1. **Local registry** - the per-userId Map populated by `pushHooks.open` /
- *    `pushHooks.close`. Resolves directly via `platform.request(ws, ...)` --
- *    no I/O.
- * 2. **Remote registry** - the optional `remoteRegistry` configured via
- *    `live.configurePush({ remoteRegistry })`. When the userId is not
- *    registered on this instance and a registry is configured,
- *    `live.push` falls through to `remoteRegistry.request(userId, ...)`
- *    so a request from any instance reaches the user's owning instance
- *    over the registry's transport.
+ * 1. **Remote registry (when configured)** - the optional `remoteRegistry`
+ *    set via `live.configurePush({ remoteRegistry })` is the cluster-wide
+ *    source of truth for "which instance currently owns this userId" (most-
+ *    recently-opened wins via the registry's last-write-wins userToInstance
+ *    map). `live.push` delegates to `remoteRegistry.request(userId, ...)`
+ *    so the recipient is deterministic regardless of which instance the
+ *    caller runs on. The registry's own self-targeting short-circuit
+ *    (`registry.js: ownerInstanceId === instanceId`) means no extra Redis
+ *    hop when the canonical owner IS this instance -- single-tab
+ *    performance is unchanged.
+ * 2. **Local registry (fallback)** - the per-userId Map populated by
+ *    `pushHooks.open` / `pushHooks.close`. When no `remoteRegistry` is
+ *    configured (single-instance dev), this is the only path. When a
+ *    `remoteRegistry` IS configured, the local entry is used only as a
+ *    best-effort fallback on the brief race window where `pushHooks.open`
+ *    has populated the local map but the cluster pub/sub event has not
+ *    yet propagated to this instance's index.
  *
  * Returns whatever the client's `onPush(event, handler)` returns.
  *
@@ -3189,20 +3197,38 @@ live.push = async function push(target, event, data, options) {
 		throw new LiveError('VALIDATION', '[svelte-realtime] live.push: target.userId must be a non-empty string');
 	}
 
-	const entry = _pushRegistry.get(userId);
-	if (entry) {
-		if (typeof entry.platform.request !== 'function') {
-			throw new Error('[svelte-realtime] live.push: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4');
-		}
-		try {
-			return await entry.platform.request(entry.ws, event, data, options || undefined);
-		} catch (err) {
-			throw _translatePushError(err);
-		}
-	}
+	// Cluster-first when a remoteRegistry is configured: the registry's
+	// userToInstance map is the cluster-wide canonical-owner truth (most-
+	// recent open wins per its last-write-wins applyOpenEvent). The
+	// registry's own self-targeting short-circuit means no extra Redis
+	// hop when the canonical owner is THIS instance -- single-tab perf
+	// is unchanged. Multi-tab same-user across instances now routes
+	// deterministically to the cluster-canonical recipient regardless of
+	// which instance the caller runs on, matching the documented
+	// "cluster-wide most-recent-wins" contract above.
+	//
+	// On a brief registry-offline race (fresh local open whose cluster
+	// pub/sub event has not yet propagated to this instance's index),
+	// fall back to the local entry so the just-opened user does not see
+	// a NOT_FOUND for their own push.
+	const localEntry = _pushRegistry.get(userId);
 	if (_remoteRegistry) {
 		try {
 			return await _remoteRegistry.request(userId, event, data, options || undefined);
+		} catch (err) {
+			if (localEntry && _isRegistryOfflineError(err)) {
+				// fall through to local fast path below
+			} else {
+				throw _translatePushError(err);
+			}
+		}
+	}
+	if (localEntry) {
+		if (typeof localEntry.platform.request !== 'function') {
+			throw new Error('[svelte-realtime] live.push: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4');
+		}
+		try {
+			return await localEntry.platform.request(localEntry.ws, event, data, options || undefined);
 		} catch (err) {
 			throw _translatePushError(err);
 		}
@@ -3241,6 +3267,31 @@ function _translatePushError(err) {
 		return wrapped;
 	}
 	return err;
+}
+
+/**
+ * Detect the "cluster has no entry for this userId" rejection from a
+ * configured remoteRegistry. Used by live.push / live.notify to decide
+ * whether to fall back to a (potentially fresher) local registry entry
+ * during the brief propagation race after `pushHooks.open` writes to
+ * Redis + publishes the event but the subscriber index hasn't yet
+ * applied it on the current instance.
+ *
+ * Conservatively substring-matches "offline" -- the extensions
+ * registry's exact wording is `registry.request: target user "..." is
+ * offline`, and the project's existing test fixtures throw bare
+ * `Error('offline')`. Other cluster errors (recipient handler throw,
+ * timeout) are real signals and NOT eligible for local fallback so
+ * caller-defined error shapes propagate intact.
+ *
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+function _isRegistryOfflineError(err) {
+	const msg = err && typeof (/** @type {any} */ (err).message) === 'string'
+		? /** @type {any} */ (err).message
+		: '';
+	return /offline/i.test(msg);
 }
 
 /**
@@ -3324,8 +3375,46 @@ live.notify = function notify(target, event, data) {
 		throw new LiveError('VALIDATION', '[svelte-realtime] live.notify: target.userId must be a non-empty string');
 	}
 
-	const entry = _pushRegistry.get(userId);
-	if (entry) {
+	// Cluster-first when a remoteRegistry is configured -- same rationale
+	// as live.push above: the cluster registry's canonical-owner truth
+	// routes deterministically to the most-recently-opened ws regardless
+	// of caller instance. Self-target short-circuit keeps single-tab perf
+	// unchanged. Multi-tab same-user across instances correctly reaches
+	// the cluster-canonical recipient instead of the caller-local one.
+	//
+	// Fire-and-forget contract is preserved: any delivery failure
+	// (offline, timeout, client handler throw, remote registry error)
+	// is silent. The local fallback on registry-offline is a UX-only
+	// optimization for the brief propagation race after a fresh open.
+	const localEntry = _pushRegistry.get(userId);
+	if (_remoteRegistry) {
+		try {
+			const p = _remoteRegistry.request(userId, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS });
+			if (localEntry) {
+				// Brief registry-offline race after a fresh local open:
+				// the cluster pub/sub event has not yet propagated, the
+				// cluster rejects with "is offline", but the local
+				// registry already has a valid entry. Fall back so the
+				// user does not silently drop their own first notify.
+				p.catch((err) => {
+					if (_isRegistryOfflineError(err)) _deliverLocalNotify(localEntry);
+				});
+			} else {
+				p.catch(() => { /* silent: fire-and-forget contract */ });
+			}
+		} catch {
+			// Sync throw from registry shape; try local as best-effort.
+			if (localEntry) _deliverLocalNotify(localEntry);
+		}
+		return Promise.resolve();
+	}
+	if (localEntry) _deliverLocalNotify(localEntry);
+	// Offline + no cluster routing: silent no-op. The caller chose
+	// notify; "we couldn't reach the user" isn't an error in this
+	// contract - they'll see the result next time they load.
+	return Promise.resolve();
+
+	function _deliverLocalNotify(entry) {
 		if (typeof entry.platform.request !== 'function') {
 			// Same versioning constraint as live.push - platform.request
 			// requires svelte-adapter-uws >= 0.5.0-next.4. Stay silent in
@@ -3334,7 +3423,7 @@ live.notify = function notify(target, event, data) {
 			if (_IS_DEV) {
 				console.warn('[svelte-realtime] live.notify: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4. Notify dispatch silently no-op.\n  See: https://svti.me/migration');
 			}
-			return Promise.resolve();
+			return;
 		}
 		try {
 			entry.platform.request(entry.ws, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS })
@@ -3347,24 +3436,7 @@ live.notify = function notify(target, event, data) {
 			// platform.request can throw synchronously on a torn-down ws.
 			// Same fire-and-forget contract: silent.
 		}
-		return Promise.resolve();
 	}
-	if (_remoteRegistry) {
-		try {
-			_remoteRegistry.request(userId, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS })
-				.catch(() => {
-					// Cluster-route error (offline cluster-wide, transport
-					// failure, remote handler throw) - silent.
-				});
-		} catch {
-			// Sync throw from registry shape - silent.
-		}
-		return Promise.resolve();
-	}
-	// Offline + no cluster routing: silent no-op. The caller chose
-	// notify; "we couldn't reach the user" isn't an error in this
-	// contract - they'll see the result next time they load.
-	return Promise.resolve();
 };
 
 /**
