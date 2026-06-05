@@ -21,6 +21,10 @@ const DYNAMIC_CHANNEL_RE = /export\s+const\s+(\w+)\s*=\s*live\.channel\s*\(\s*(?
 const RATE_LIMIT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.rateLimit\s*\(/g;
 const EFFECT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.effect\s*\(/g;
 const AGGREGATE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.aggregate\s*\(/g;
+// `live.flag(topic, initialValue)` declares a `merge: 'set'` stream carrying
+// the flag value, so the client treats it exactly like a static stream: emit
+// a `__stream(..., { merge: 'set' })` stub and register it as a plain stream.
+const FLAG_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.flag\s*\(/g;
 // `live.lock(...)` and `live.idempotent(...)` wrap an inner handler. From the
 // client's perspective they're plain RPCs (the lock / idempotency runs
 // server-side inside the wrapper), so the codegen treats them identically
@@ -1272,6 +1276,18 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		}
 	}
 
+	// Detect live.flag() exports (readable set-merge stream on the client)
+	FLAG_EXPORT_RE.lastIndex = 0;
+	while ((match = FLAG_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		if (!exportedNames.has(name)) {
+			exportedNames.add(name);
+			imports.add('__stream');
+			lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify({ merge: 'set' })});`);
+		}
+	}
+
 	// Dev warnings for non-live exports
 	const allExportRe = /export\s+(?:const|function|let|var|class)\s+(\w+)/g;
 	allExportRe.lastIndex = 0;
@@ -1685,6 +1701,65 @@ function _extractStreamOptions(source, name) {
 }
 
 /**
+ * Extract the static declaration of a `live.flag(topic, initialValue)` export:
+ * the required topic string literal, and the second argument's source text when
+ * it is present. The topic is needed so the registry can install the flag's
+ * refresh watcher eagerly (keyed by topic, before the flag module is imported).
+ * The `initialArg` is the raw source of the second argument and is emitted only
+ * when it is a statically safe literal (a string, number, boolean, or null) so
+ * the value cell can be seeded at registry load; anything else is left for the
+ * flag body to seed on first import. Returns null when the topic is not a plain
+ * string literal (dynamic-topic flags are not supported by the codegen).
+ * @param {string} source
+ * @param {string} name
+ * @returns {{ topic: string, initialArg: string | null } | null}
+ */
+function _extractFlagDecl(source, name) {
+	const openPattern = new RegExp(
+		`export\\s+const\\s+${name}\\s*=\\s*live\\.flag\\s*\\(`
+	);
+	const openMatch = openPattern.exec(source);
+	if (!openMatch) return null;
+	let i = openMatch.index + openMatch[0].length;
+	while (i < source.length && /\s/.test(source[i])) i++;
+	if (source[i] !== '\'' && source[i] !== '"' && source[i] !== '`') return null;
+	const topicLit = _readStringLiteral(source, i);
+	if (!topicLit) return null;
+	const topic = topicLit.value;
+	i = topicLit.end + 1;
+	while (i < source.length && /\s/.test(source[i])) i++;
+	if (source[i] !== ',') return { topic, initialArg: null };
+	i++;
+	while (i < source.length && /\s/.test(source[i])) i++;
+	// Read the second argument up to the next top-level `,` or the closing `)`.
+	let depth = 0;
+	const argStart = i;
+	while (i < source.length) {
+		const skipped = _skipNonCode(source, i);
+		if (skipped >= 0) { i = skipped + 1; continue; }
+		const c = source[i];
+		if (c === '(' || c === '[' || c === '{') depth++;
+		else if (c === ')' || c === ']' || c === '}') { if (depth === 0) break; depth--; }
+		else if (c === ',' && depth === 0) break;
+		i++;
+	}
+	const rawArg = source.slice(argStart, i).trim();
+	if (rawArg === '') return { topic, initialArg: null };
+	// Only forward statically safe literals so the generated registry never
+	// evaluates user expressions. String literals are re-quoted via the parsed
+	// value; primitives pass through verbatim.
+	if (rawArg[0] === '\'' || rawArg[0] === '"' || rawArg[0] === '`') {
+		const lit = _readStringLiteral(rawArg, 0);
+		if (lit && lit.end === rawArg.length - 1) return { topic, initialArg: JSON.stringify(lit.value) };
+		return { topic, initialArg: null };
+	}
+	if (rawArg === 'true' || rawArg === 'false' || rawArg === 'null' || /^-?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i.test(rawArg)) {
+		return { topic, initialArg: rawArg };
+	}
+	return { topic, initialArg: null };
+}
+
+/**
  * Parse option properties from an object body string into an opts object.
  * Shared by stream, channel, and room option extraction.
  * Uses _extractTopLevelStringProp for robust quoted-key and non-word value support.
@@ -1851,7 +1926,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 	const files = _findLiveFiles(liveDir);
 	const lines = [
-		`import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions } from 'svelte-realtime/server';`,
+		`import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag } from 'svelte-realtime/server';`,
 		`const __L = fn => (fn.__lazy = true, fn);\n`
 	];
 
@@ -2057,6 +2132,27 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 				} else {
 					lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 					lines.push(`__registerAggregate(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
+				}
+			}
+		}
+
+		// Register live.flag() exports. The stream registration stays lazy (the
+		// flag module is imported on first subscribe), but the refresh watcher
+		// is installed eagerly via __registerFlag at registry-module load - the
+		// same lifecycle that activates live.effect watchers - so a server-side
+		// .get() reflects cluster-latest sets from boot without waiting for the
+		// flag module's first local import.
+		FLAG_EXPORT_RE.lastIndex = 0;
+		while ((match = FLAG_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			if (!/^\w+$/.test(name)) continue;
+			if (!registered.has(name)) {
+				registered.add(name);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
+				const decl = _extractFlagDecl(source, name);
+				if (decl) {
+					const initArg = decl.initialArg === null ? '' : `, ${decl.initialArg}`;
+					lines.push(`__registerFlag(${JSON.stringify(decl.topic)}${initArg});`);
 				}
 			}
 		}
@@ -2315,6 +2411,17 @@ function _generateTypeDeclarations(liveDir, dir) {
 				} else {
 					exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };`);
 				}
+			}
+		}
+
+		// Detect live.flag() exports (readable set-merge stream)
+		FLAG_EXPORT_RE.lastIndex = 0;
+		while ((match = FLAG_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				needsStreamStore = true;
+				exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };`);
 			}
 		}
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fc from 'fast-check';
 
-let __rpc, __stream, __binaryRpc, __upload, _resetUploadAutoDiscovery, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters, _resetDedupCoalesceWarned;
+let __rpc, __stream, __binaryRpc, __upload, _resetUploadAutoDiscovery, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters, _resetDedupCoalesceWarned, _resetClientPublishRateWarning;
 let topicCallbacks;
 let statusCallbacks;
 let statusInitialValue;
@@ -223,6 +223,8 @@ beforeEach(async () => {
 	_resetAssertCounters();
 	_resetDedupCoalesceWarned = mod._resetDedupCoalesceWarned;
 	if (_resetDedupCoalesceWarned) _resetDedupCoalesceWarned();
+	_resetClientPublishRateWarning = mod._resetClientPublishRateWarning;
+	if (_resetClientPublishRateWarning) _resetClientPublishRateWarning();
 });
 
 // - __rpc (Finding 1 regression) ---------------------------------------------
@@ -2263,7 +2265,7 @@ describe('__stream() cursor merge', () => {
 	});
 });
 
-// - __stream() hydrate (Phase 11) --------------------------------------------
+// - __stream() hydrate --------------------------------------------
 
 describe('__stream() hydrate', () => {
 	it('sets initial data from SSR before subscribing to live updates', () => {
@@ -2730,7 +2732,7 @@ describe('__stream() initial-connect status handling', () => {
 	});
 });
 
-// - __stream() seq tracking (Phase 15) ---------------------------------------
+// - __stream() seq tracking ---------------------------------------
 
 describe('__stream() seq tracking', () => {
 	it('sends seq on reconnect request', async () => {
@@ -2791,7 +2793,7 @@ describe('__rpc() issues', () => {
 	});
 });
 
-// - Phase 16 Bug #4: Dynamic stream subscribe wrapper stability ---------------
+// - Bug #4: Dynamic stream subscribe wrapper stability ---------------
 
 describe('__stream() dynamic subscribe wrapper (Bug #4 fix)', () => {
 	it('does not nest wrappers on repeated cache hits', () => {
@@ -2813,7 +2815,7 @@ describe('__stream() dynamic subscribe wrapper (Bug #4 fix)', () => {
 	});
 });
 
-// - Phase 16 Bug #5: batch() cleanup on throw --------------------------------
+// - Bug #5: batch() cleanup on throw --------------------------------
 
 describe('batch() cleanup on throw (Bug #5 fix)', () => {
 	it('cleans up if fn() throws synchronously', () => {
@@ -2828,7 +2830,7 @@ describe('batch() cleanup on throw (Bug #5 fix)', () => {
 	});
 });
 
-// - Phase 19: Stream pagination (client) -------------------------------------
+// - Stream pagination (client) -------------------------------------
 
 describe('__stream() pagination', () => {
 	it('tracks hasMore and cursor from server response', async () => {
@@ -2918,7 +2920,7 @@ describe('__stream() pagination', () => {
 	});
 });
 
-// - Phase 22: Binary RPC (client) --------------------------------------------
+// - Binary RPC (client) --------------------------------------------
 
 describe('__binaryRpc()', () => {
 	it('sends binary frame with header and payload', () => {
@@ -3655,7 +3657,7 @@ describe('__upload() frameSize hard cap + chunkSize alias', () => {
 	});
 });
 
-// - Phase 23: configure() ---------------------------------------------------
+// - configure() ---------------------------------------------------
 
 describe('configure()', () => {
 	it('is a callable function', () => {
@@ -3953,7 +3955,7 @@ describe('combine()', () => {
 	});
 });
 
-// - Undo/Redo (Phase 36) ----------------------------------------------------
+// - Undo/Redo ----------------------------------------------------
 
 describe('stream undo/redo', () => {
 	it('canUndo is false before enableHistory', () => {
@@ -4098,7 +4100,7 @@ describe('stream undo/redo', () => {
 	});
 });
 
-// - pauseHistory / resumeHistory (Phase 36) ----------------------------------
+// - pauseHistory / resumeHistory ----------------------------------
 
 describe('stream pauseHistory / resumeHistory', () => {
 	it('pauseHistory suppresses undo snapshots while events still apply', async () => {
@@ -4218,7 +4220,7 @@ describe('stream pauseHistory / resumeHistory', () => {
 	});
 });
 
-// - onSignal() (Phase 43) ----------------------------------------------------
+// - onSignal() ----------------------------------------------------
 
 describe('onSignal()', () => {
 	it('fires callback when a signal is received', () => {
@@ -4287,7 +4289,7 @@ describe('onSignal()', () => {
 	});
 });
 
-// - .when() (Phase 40: gate) -------------------------------------------------
+// - .when() (gate) -------------------------------------------------
 
 describe('.when(condition)', () => {
 	it('.when(false) keeps store as undefined and makes no RPC call', () => {
@@ -4850,6 +4852,145 @@ describe('__rpc() dedup-coalesce dev-warn', () => {
 
 		simulateRpcResponse(sendQueuedFn.mock.calls[0][0].id, { ok: true, data: 'ok' });
 		simulateRpcResponse(sendQueuedFn.mock.calls[1][0].id, { ok: true, data: 'ok' });
+	});
+});
+
+// - client publish-rate dev hint ---------------------------------------------
+
+describe('client publish-rate dev hint', () => {
+	/** @type {ReturnType<typeof vi.spyOn>} */
+	let warnSpy;
+
+	beforeEach(() => {
+		warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		vi.useFakeTimers();
+		vi.setSystemTime(0);
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+		warnSpy.mockRestore();
+		if (_resetClientPublishRateWarning) _resetClientPublishRateWarning();
+	});
+
+	// Subscribe a stream and resolve its initial load so its topic is wired
+	// to applyEvent. Returns the wire topic so the test can feed frames.
+	async function subscribeStream(path, options, topic) {
+		const store = __stream(path, options);
+		const unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic, merge: options.merge, key: options.key });
+		return { topic, unsub };
+	}
+
+	// Drive `n` live frames onto a topic at the current fake-clock time.
+	function feed(topic, n) {
+		for (let i = 0; i < n; i++) {
+			simulateTopicMessage(topic, { event: 'update', data: { id: i % 50, x: i } });
+		}
+	}
+
+	it('warns once when an inbound stream crosses the high-frequency threshold', async () => {
+		const { topic } = await subscribeStream('hot/cursors', { merge: 'cursor' }, 'hot');
+		feed(topic, 250);          // open + fill the window at t=0
+		vi.setSystemTime(1000);    // window is now a full second old
+		feed(topic, 1);            // this frame closes the window -> rate ~251/s
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+		const msg = warnSpy.mock.calls[0][0];
+		expect(msg).toContain("Topic 'hot/cursors'");
+		expect(msg).toContain('events/sec');
+		expect(msg).toContain('coalesceBy');
+		expect(msg).toContain('volatile: true');
+		expect(msg).toContain('https://svti.me/highfreq');
+	});
+
+	it('does NOT warn when the inbound rate stays below threshold', async () => {
+		const { topic } = await subscribeStream('cool/chat', { merge: 'crud', key: 'id' }, 'cool');
+		feed(topic, 30);
+		vi.setSystemTime(1000);
+		feed(topic, 1);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('warns at most once per topic even when later windows stay over threshold', async () => {
+		const { topic } = await subscribeStream('hot/again', { merge: 'cursor' }, 'hot2');
+		feed(topic, 250);
+		vi.setSystemTime(1000);
+		feed(topic, 1);            // first window closes -> warn
+		feed(topic, 250);
+		vi.setSystemTime(2000);
+		feed(topic, 1);            // second window closes -> still over, but deduped
+
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it('suppresses the hint when the stream was declared with coalesceBy', async () => {
+		const { topic } = await subscribeStream(
+			'hot/coalesced',
+			{ merge: 'cursor', coalesceBy: (d) => d.id },
+			'hot3'
+		);
+		feed(topic, 250);
+		vi.setSystemTime(1000);
+		feed(topic, 1);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	it('opt-out via configure({ publishRateHint: false }) silences the hint', async () => {
+		configure({ publishRateHint: false });
+		const { topic } = await subscribeStream('hot/optout', { merge: 'cursor' }, 'hot4');
+		feed(topic, 250);
+		vi.setSystemTime(1000);
+		feed(topic, 1);
+
+		expect(warnSpy).not.toHaveBeenCalled();
+		configure({});
+	});
+
+	it('warns separately per topic for two distinct over-threshold streams', async () => {
+		const a = await subscribeStream('hot/a', { merge: 'cursor' }, 'topic-a');
+		const b = await subscribeStream('hot/b', { merge: 'cursor' }, 'topic-b');
+		feed(a.topic, 250);
+		feed(b.topic, 250);
+		vi.setSystemTime(1000);
+		feed(a.topic, 1);
+		feed(b.topic, 1);
+
+		expect(warnSpy).toHaveBeenCalledTimes(2);
+		const all = warnSpy.mock.calls.map((c) => c[0]).join('\n');
+		expect(all).toContain("'hot/a'");
+		expect(all).toContain("'hot/b'");
+	});
+
+	it('reset clears the warned set so a previously seen topic warns again', async () => {
+		const { topic } = await subscribeStream('hot/reset', { merge: 'cursor' }, 'reset-topic');
+		feed(topic, 250);
+		vi.setSystemTime(1000);
+		feed(topic, 1);
+		expect(warnSpy).toHaveBeenCalledTimes(1);
+
+		_resetClientPublishRateWarning();
+		feed(topic, 250);
+		vi.setSystemTime(2000);
+		feed(topic, 1);
+		expect(warnSpy).toHaveBeenCalledTimes(2);
+	});
+
+	it('does not warn before a window has closed even on a heavy burst', async () => {
+		const { topic } = await subscribeStream('hot/inflight', { merge: 'cursor' }, 'inflight-topic');
+		// A burst of 1000 frames all within the same sub-window tick. No frame
+		// has yet crossed the window boundary, so no rate is computed and no
+		// warning fires until a later frame closes the window.
+		feed(topic, 1000);
+		expect(warnSpy).not.toHaveBeenCalled();
+
+		vi.setSystemTime(1000);
+		feed(topic, 1); // closes the window -> 1001/sec -> warns now
+		expect(warnSpy).toHaveBeenCalledTimes(1);
 	});
 });
 

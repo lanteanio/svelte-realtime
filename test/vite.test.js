@@ -317,7 +317,7 @@ export const messages = live.stream('messages', async (ctx) => []);
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:__registry', {});
 
-		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions } from 'svelte-realtime/server'");
+		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag } from 'svelte-realtime/server'");
 		expect(code).toContain('__register("chat/sendMessage"');
 		expect(code).toContain('__register("chat/messages"');
 		expect(code).toContain('__registerGuard("chat"');
@@ -1500,7 +1500,7 @@ export const notifications = live.channel('notifications');
 	});
 });
 
-// - live.validated() client stubs (Phase 12) ---------------------------------
+// - live.validated() client stubs ---------------------------------
 
 describe('live.validated() stubs', () => {
 	afterEach(teardown);
@@ -1556,7 +1556,7 @@ export const send = live.validated(schema, async (ctx, input) => {});
 	});
 });
 
-// - live.cron() registration (Phase 14) --------------------------------------
+// - live.cron() registration --------------------------------------
 
 describe('live.cron() registration', () => {
 	afterEach(teardown);
@@ -1573,7 +1573,7 @@ export const refreshStats = live.cron('*/5 * * * *', 'stats', async () => {});
 		const code = plugin.load('\0live:__registry', {});
 
 		expect(code).toContain('__registerCron("jobs/refreshStats"');
-		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions }");
+		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag }");
 	});
 
 	it('does not generate client stub for cron exports', () => {
@@ -1601,7 +1601,7 @@ export const tick = live.cron('* * * * *', 'tick', async () => {});
 	});
 });
 
-// - SSR stubs with .load() (Phase 11) ----------------------------------------
+// - SSR stubs with .load() ----------------------------------------
 
 describe('SSR stubs with .load()', () => {
 	afterEach(teardown);
@@ -1745,7 +1745,7 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 	});
 });
 
-// - Replay option extraction (Phase 15) --------------------------------------
+// - Replay option extraction --------------------------------------
 
 describe('replay option extraction', () => {
 	afterEach(teardown);
@@ -1779,7 +1779,7 @@ export const feed = live.stream('feed', async (ctx) => [], { merge: 'latest', re
 	});
 });
 
-// - DevTools injection (Phase 13) --------------------------------------------
+// - DevTools injection --------------------------------------------
 
 describe('devtools injection', () => {
 	it('injects devtools middleware in dev mode via configureServer', () => {
@@ -1824,7 +1824,7 @@ describe('devtools injection', () => {
 	});
 });
 
-// - live.validated() type declarations (Phase 12) ----------------------------
+// - live.validated() type declarations ----------------------------
 
 describe('live.validated() type declarations', () => {
 	afterEach(teardown);
@@ -1922,6 +1922,101 @@ export const summary = live.derived(['orders', 'inventory'], async () => {
 		const code = plugin.load('\0live:dashboard', { ssr: true });
 
 		expect(code).toContain('(...args)');
+	});
+});
+
+// - live.flag() client stubs and registry ------------------------------------
+
+describe('live.flag() vite integration', () => {
+	afterEach(teardown);
+
+	it('generates a set-merge __stream client stub for flag exports', () => {
+		setup({
+			'flags.js': `
+import { live } from 'svelte-realtime/server';
+export const maintenance = live.flag('flag:maintenance', false);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:flags', { ssr: false });
+
+		expect(code).toContain("import { __stream } from 'svelte-realtime/client'");
+		expect(code).toContain('export const maintenance = __stream("flags/maintenance"');
+		expect(code).toContain('"merge":"set"');
+	});
+
+	it('registers a flag as a plain stream (no __registerDerived)', () => {
+		setup({
+			'flags.js': `
+import { live } from 'svelte-realtime/server';
+export const maintenance = live.flag('flag:maintenance', false);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		expect(code).toContain('__register("flags/maintenance"');
+		expect(code).not.toContain('__registerDerived("flags/maintenance"');
+	});
+
+	it('emits an eager __registerFlag with the topic and a static initial value', () => {
+		setup({
+			'flags.js': `
+import { live } from 'svelte-realtime/server';
+export const maintenance = live.flag('flag:maintenance', false);
+export const rollout = live.flag('flag:rollout', 'green');
+export const bare = live.flag('flag:bare');
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		// Watcher install is hoisted to registry load (eager), keyed by topic,
+		// alongside the lazy stream __register.
+		expect(code).toContain('__registerFlag("flag:maintenance", false)');
+		expect(code).toContain('__registerFlag("flag:rollout", "green")');
+		// A flag with no static initial value still installs the watcher.
+		expect(code).toContain('__registerFlag("flag:bare")');
+		// __registerFlag must be imported.
+		expect(code).toContain('__registerFlag');
+	});
+
+	it('omits a non-literal initial value from __registerFlag (watcher still installs)', () => {
+		setup({
+			'flags.js': `
+import { live } from 'svelte-realtime/server';
+const computed = Math.random() > 0.5;
+export const dynamic = live.flag('flag:dynamic', computed);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		// Non-literal second arg is not forwarded - the registry never evaluates
+		// user expressions - but the watcher install is still emitted.
+		expect(code).toContain('__registerFlag("flag:dynamic")');
+		expect(code).not.toContain('computed');
+	});
+
+	it('emits a StreamStore type for flag exports', () => {
+		setup({
+			'flags.js': `
+import { live } from 'svelte-realtime/server';
+export const maintenance = live.flag('flag:maintenance', false);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain("declare module '$live/flags'");
+		expect(content).toContain('maintenance');
+		expect(content).toContain('StreamStore<any>');
 	});
 });
 
@@ -2079,7 +2174,7 @@ export const board = live.room({
 	});
 });
 
-// - live.channel() client stubs (Phase 35) -----------------------------------
+// - live.channel() client stubs -----------------------------------
 
 describe('live.channel() vite integration', () => {
 	afterEach(teardown);
@@ -2157,7 +2252,7 @@ export const stripe = live.webhook('payments', {
 	});
 });
 
-// - Schema evolution (Phase 42) ----------------------------------------------
+// - Schema evolution ----------------------------------------------
 
 describe('schema evolution', () => {
 	afterEach(teardown);

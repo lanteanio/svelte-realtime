@@ -3720,6 +3720,139 @@ live.cron = function cron(schedule, topic, fn) {
 	return fn;
 };
 
+/**
+ * Declare a server-side feature flag exposed as a readable stream.
+ *
+ * A flag is a thin wrapper over `live.stream`: it declares a `merge: 'set'`
+ * topic carrying the flag value, and any `.set(value)` pushes the new value
+ * to every subscriber. On the client, `$live/<module>` exposes the export as
+ * a readable store carrying the current value.
+ *
+ * Flags are cluster-consistent by default: a single-entry shared replay
+ * buffer is enabled, so `.set()` writes the cluster-shared buffer and a
+ * subscriber that connects fresh - to any replica, including one that never
+ * set the flag locally - is served the cluster-latest value. Already-
+ * subscribed clients stay in sync across the cluster as `.set()` relays the
+ * update. Pass a custom `replay` object to size the buffer, or
+ * `replay: false` to opt out (single-process apps lose nothing, since the
+ * locally cached value is authoritative in one process).
+ *
+ * On every running replica an internal watcher keeps the cached value fresh
+ * from boot. The watcher is installed when the registry module loads (the
+ * same moment `live.effect` watchers become active), so it does not wait for
+ * the flag module's first local import or subscribe: an inbound `set` relayed
+ * from any replica updates the cached value within a tick, and the synchronous
+ * `.get()` reflects the cluster-latest value on any running instance. For a
+ * strict read on a replica that booted AFTER the last `set` and has not yet
+ * received any inbound `set` (the watcher only catches post-boot sets), use the
+ * asynchronous `getLatest()`, which reads the shared buffer directly.
+ *
+ * The `.set(value)` method publishes through the framework-owned platform
+ * (the same path as the top-level `publish()` helper), so the new value
+ * reaches every local subscriber and relays across the cluster when a bus
+ * is wired. Call it from any server context after the platform has been
+ * captured (RPC handler, cron tick, effect, an admin `+server.js` route).
+ *
+ * @param {string} topic - Topic carrying the flag value
+ * @param {any} [initialValue] - Value served to subscribers before the first `.set`
+ * @param {{ replay?: boolean | { size?: number } }} [options]
+ * @returns {Function & { set(value: any): any, get(): any, getLatest(): Promise<any> }}
+ *
+ * @example
+ * ```js
+ * // src/live/flags.js
+ * import { live } from 'svelte-realtime/server';
+ * export const maintenance = live.flag('flag:maintenance', false);
+ *
+ * // Flip it from any handler:
+ * export const toggleMaintenance = live(async (ctx, on) => {
+ *   maintenance.set(on);
+ * });
+ * ```
+ *
+ * ```svelte
+ * <script>
+ *   import { maintenance } from '$live/flags';
+ * </script>
+ * {#if $maintenance}<Banner />{/if}
+ * ```
+ */
+live.flag = function flag(topic, initialValue, options) {
+	if (typeof topic !== 'string' || topic.length === 0) {
+		throw new Error('[svelte-realtime] live.flag topic must be a non-empty string');
+	}
+	// The flag's value lives in a per-topic cell shared with the eager
+	// registry-load watcher (installed by `__registerFlag`). Binding to the
+	// cell instead of a private closure variable decouples the value from this
+	// module's import: a `set` that arrives before the module is first imported
+	// is captured into the cell by the eager watcher, so the first `.get()`
+	// after import reads the cluster-latest value rather than a stale init.
+	const cell = _flagCell(topic, initialValue);
+	const initFn = async function flagInit() { return cell.value; };
+	// Replay is ON by default with a single-entry buffer so the flag's
+	// topic is replay-eligible at declaration: `.set() -> publish() ->
+	// _maybeReplayPublish` writes the cluster-shared buffer, and a fresh
+	// subscriber (or a just-booted replica) is served the cluster-latest
+	// value through the seeding branch in `_executeStreamRpc`. Pass a
+	// custom `replay` object to override the buffer size, or `replay: false`
+	// to opt out (single-process apps lose nothing - the cached value is
+	// authoritative in one process).
+	const streamOpts = { merge: 'set' };
+	if (options && options.replay === false) {
+		// opt out: leave replay unset
+	} else if (options && options.replay) {
+		/** @type {any} */ (streamOpts).replay = options.replay;
+	} else {
+		/** @type {any} */ (streamOpts).replay = { size: 1 };
+	}
+	const stream = live.stream(topic, initFn, streamOpts);
+	/** @type {any} */ (stream).__isFlag = true;
+	/**
+	 * Read the flag's current value on the server (synchronous). On a running
+	 * replica this stays fresh from boot within a tick of any inbound `set` via
+	 * the per-topic watcher installed eagerly at registry load (see
+	 * `__registerFlag`). For a strict read on a replica that booted after the
+	 * last `set` and has not yet received any inbound `set`, use `getLatest()`.
+	 */
+	/** @type {any} */ (stream).get = function get() { return cell.value; };
+	/**
+	 * Read the cluster-latest flag value (asynchronous). Reads the shared
+	 * replay buffer when one is wired and non-empty; otherwise falls back to
+	 * the locally cached value. Serves the strict read-after-cold-boot
+	 * case where a replica may not yet have observed the cluster-latest set.
+	 */
+	/** @type {any} */ (stream).getLatest = async function getLatest() {
+		// Resolve the captured platform the same way `.set()` does (via the
+		// top-level `publish()` helper), so `getLatest()` reads the shared
+		// buffer whether the platform was captured by `_activateDerived` or
+		// `setCronPlatform`.
+		const platform = getPlatform();
+		const replay = platform && /** @type {any} */ (platform).replay;
+		if (replay && typeof replay.since === 'function') {
+			try {
+				const buffered = await replay.since(topic, 0);
+				if (Array.isArray(buffered) && buffered.length > 0) {
+					const last = buffered[buffered.length - 1];
+					if (last && 'data' in last) return last.data;
+				}
+			} catch {}
+		}
+		return cell.value;
+	};
+	/** Publish a new flag value to every subscriber. */
+	/** @type {any} */ (stream).set = function set(value) {
+		cell.value = value;
+		return publish(topic, 'set', value);
+	};
+	// Ensure the per-topic refresh watcher is installed. This is idempotent
+	// with the eager `__registerFlag` install the registry module emits, and
+	// covers the cases where a flag module is imported without a generated
+	// registry (the dev-mode direct-load fallback, or a flag declared inline
+	// in tests).
+	_installFlagWatcher(topic);
+	return /** @type {any} */ (stream);
+};
+
 /** @type {Map<string, { sources: string[], fn: Function, topic: string, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
 const derivedRegistry = new Map();
 
@@ -3858,6 +3991,95 @@ export function __registerEffect(path, fn) {
 		_watchedTopics.add(src);
 	}
 	_maybeLateActivate();
+}
+
+/**
+ * Per-topic value cells for `live.flag`. The cell holds the flag's current
+ * value and is shared between the flag export's accessors (`get`/`set`/the
+ * loader) and the eager refresh watcher installed at registry load. Keying on
+ * the topic (rather than the export path) lets the watcher install before the
+ * flag module is imported - the value the watcher captures from inbound sets is
+ * exactly the value the flag's `.get()` reads once the module is imported.
+ * @type {Map<string, { value: any }>}
+ */
+const _flagCells = new Map();
+
+/**
+ * Per-topic refresh watcher entries, so the install is idempotent across the
+ * eager registry call and the flag module's own import.
+ * @type {Map<string, { sources: string[], fn: Function, debounce: number, timer: ReturnType<typeof setTimeout> | null }>}
+ */
+const _flagWatchers = new Map();
+
+/**
+ * Get (or create) the value cell for a flag topic. A cell created by the eager
+ * watcher path may not have a meaningful seed yet; the first caller that knows
+ * the declared `initialValue` (the watcher install or the flag body, whichever
+ * runs first) seeds it. Inbound sets always overwrite the seed.
+ * @param {string} topic
+ * @param {any} [initialValue]
+ * @returns {{ value: any }}
+ */
+function _flagCell(topic, initialValue) {
+	let cell = _flagCells.get(topic);
+	if (!cell) {
+		cell = { value: initialValue };
+		_flagCells.set(topic, cell);
+	} else if (cell.value === undefined && initialValue !== undefined) {
+		// Adopt the declared initial value when the cell was created without
+		// one (e.g. the eager watcher had no static initialValue to pass).
+		cell.value = initialValue;
+	}
+	return cell;
+}
+
+/**
+ * Install the per-topic flag refresh watcher into the effect index. Idempotent:
+ * one watcher per topic, regardless of how many times this is called. The
+ * watcher updates the topic's value cell on every inbound `set`, so a sync
+ * `.get()` reflects the cluster-latest value from boot on every running replica.
+ *
+ * The bus inbound relay reaches `derivedPublishLocal -> fireWatchers(topic,
+ * event, data)`, so a `set` originating on any replica updates the cell here
+ * (the self-set echo on the origin is idempotent). `_maybeLateActivate()`
+ * installs the publish wrap even when the flag is declared before
+ * `_activateDerived`.
+ * @param {string} topic
+ */
+function _installFlagWatcher(topic) {
+	if (_flagWatchers.has(topic)) return;
+	const cell = _flagCell(topic);
+	const watcher = {
+		sources: [topic],
+		fn: function flagWatcher(event, data) { if (event === 'set') cell.value = data; },
+		debounce: 0,
+		timer: null
+	};
+	_flagWatchers.set(topic, watcher);
+	let watcherSet = _effectBySource.get(topic);
+	if (!watcherSet) { watcherSet = new Set(); _effectBySource.set(topic, watcherSet); }
+	watcherSet.add(watcher);
+	_watchedTopics.add(topic);
+	_maybeLateActivate();
+}
+
+/**
+ * Register a flag's refresh watcher eagerly. Called by the Vite-generated
+ * registry module at registry-module load (the same lifecycle that activates
+ * `live.effect` watchers), so the watcher is live from server boot on every
+ * replica WITHOUT waiting for the flag module's first local import or subscribe.
+ *
+ * Carries the static topic and (when statically analyzable) the declared
+ * `initialValue` so the cell is seeded before any inbound `set`. The flag's
+ * `__register` stream entry is emitted alongside this and remains lazy; only the
+ * watcher install is hoisted to boot.
+ * @param {string} topic
+ * @param {any} [initialValue]
+ */
+export function __registerFlag(topic, initialValue) {
+	if (typeof topic !== 'string' || topic.length === 0) return;
+	_flagCell(topic, initialValue);
+	_installFlagWatcher(topic);
 }
 
 /** @type {Map<string, { source: string, reducers: any, topic: string, state: any, snapshot: Function | null, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
@@ -6140,6 +6362,11 @@ export function _prepareHmr() {
 	_aggregateBySource.clear();
 	_aggregateByTopic.clear();
 	_watchedTopics.clear();
+	// Drop the flag watcher index so `__registerFlag` reinstalls watchers on
+	// the regenerated registry load. The value cells persist across HMR - the
+	// flag's cluster-latest value should not reset when an unrelated module is
+	// edited - and the reinstalled watcher rebinds to the surviving cell.
+	_flagWatchers.clear();
 	_streamsWithUnsubscribe.clear();
 	_hasDynamicDerived = false;
 	_hasLazyReactive = false;
@@ -6996,6 +7223,27 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		try {
 			const missed = await platform.replay.since(topic, clientSeq);
 			if (missed) {
+				const currentSeq = await platform.replay.seq(topic);
+				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
+			}
+		} catch {}
+	}
+
+	// Flag fresh-subscribe seeding (cluster-latest on cold connect). A
+	// fresh subscribe omits `seq`, so the seq-gated block above is skipped
+	// and the loader would otherwise return this replica's locally-cached
+	// value. For a flag backed by shared replay, read the whole buffer
+	// (size:1 => one `set` envelope) and serve it through the same
+	// `replay: true` array response the seq-gated block uses, so a fresh
+	// connect to a replica that never set the flag locally still gets the
+	// cluster-latest value. Gated strictly on `__isFlag` so non-flag replay
+	// streams (crud/latest, whose loaders intentionally hit the DB on a
+	// fresh subscribe) keep loader-only fresh-subscribe behavior. Empty
+	// buffer (no `.set()` anywhere yet) falls through to the loader.
+	if (replayOpts && platform.replay && typeof clientSeq === 'undefined' && /** @type {any} */ (fn).__isFlag) {
+		try {
+			const missed = await platform.replay.since(topic, 0);
+			if (Array.isArray(missed) && missed.length > 0) {
 				const currentSeq = await platform.replay.seq(topic);
 				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
 			}

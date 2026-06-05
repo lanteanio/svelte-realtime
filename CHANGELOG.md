@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.1] - 2026-06-05
+
+### Added
+
+- **Client-side dev-mode publish-rate hint.** The server already warns when a topic publishes faster than the high-frequency threshold (`live.publishRateWarning`, reading `platform.pressure.topPublishers`). The client now mirrors that hint from the receiving side: in development it measures each stream's inbound frame rate at the dispatch hook and logs one warning per topic when it crosses the same threshold (200 events/sec), with the same `coalesceBy` / `volatile` suggestions and the same `https://svti.me/highfreq` link. The hint is suppressed for any stream declared with `coalesceBy` (the user already chose latest-value-wins), and warns at most once per topic per session with a FIFO-evicted dedup set. Silence it everywhere with `configure({ publishRateHint: false })`. The whole feature is gated by the `import.meta.env`-folded dev flag, so a production build dead-code-eliminates it - zero residue on the inbound dispatch path (verified by a production-mode bundle check and the unchanged `bench/onjsonmessage.js` dispatch numbers).
+
+- **`live.flag(topic, initialValue?, options?)` - server-controlled feature flag exposed as a readable client store, cluster-consistent by default.** A flag is a thin wrapper over `live.stream`: it declares a `merge: 'set'` topic carrying the value, and the returned export carries a `.set(value)` method that publishes a new value to every subscriber. On the client, `$live/<module>` is a readable store carrying the current value - import it and read `$flag` like any other stream. `.set(value)` publishes through the framework-owned platform (the same path as the top-level `publish()` helper), so the new value reaches every local subscriber and relays across the cluster when a bus is wired; it requires the platform to have been captured (`realtime().init` / `setCronPlatform` / `_activateDerived`), matching cron and `publish()`. A single-entry shared replay buffer is enabled by default, so `.set()` writes the cluster-shared buffer and a client connecting fresh to any replica - including one that never set the flag locally - is served the cluster-latest value on connect; the fresh-subscribe seeding is gated strictly to flags so non-flag replay streams keep their loader-only fresh-subscribe behavior. An internal watcher on every running replica keeps the cached value fresh from boot within a tick of any inbound `set`, so synchronous `.get()` reflects the cluster-latest value on any running instance. The watcher is installed eagerly when the registry module loads - the same lifecycle that activates `live.effect` watchers - via a generated `__registerFlag(topic, initialValue?)` call keyed by topic, so it catches inbound sets from boot without waiting for the flag module's first local import or subscribe (the flag's stream registration stays lazy; only the watcher install is hoisted to boot). `getLatest()` reads the shared buffer asynchronously for the strict read on a replica that booted after the last `set` and has not yet received any inbound `set` (a flag read the moment a replica boots, before it has seen any traffic; the watcher catches only post-boot sets, `getLatest()` reads the shared buffer). Pass a custom `replay` object to size the buffer, or `{ replay: false }` to opt out - a single-process app loses nothing, since the locally cached value is authoritative in one process. The Vite plugin generates the client stub (a `merge: 'set'` `__stream`), the registry registration (stream + eager `__registerFlag` watcher install), and the `StreamStore` type declaration, mirroring the existing `live.derived` / `live.aggregate` codegen. Types added to the `live` namespace in `server.d.ts`.
+
+  ```js
+  // src/live/flags.js
+  export const maintenance = live.flag('flag:maintenance', false);
+  export const toggleMaintenance = live(async (ctx, on) => { maintenance.set(on); });
+  ```
+
+  ```svelte
+  <script>
+    import { maintenance } from '$live/flags';
+  </script>
+  {#if $maintenance}<Banner />{/if}
+  ```
+
 ## [0.5.10] - 2026-05-25
 
 ### Fixed

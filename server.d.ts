@@ -1660,6 +1660,57 @@ export namespace live {
 	): T;
 
 	/**
+	 * Declare a server-side feature flag exposed as a readable stream.
+	 *
+	 * A flag is a thin wrapper over `live.stream`: it declares a
+	 * `merge: 'set'` topic carrying the flag value, and any `.set(value)`
+	 * pushes the new value to every subscriber. On the client,
+	 * `$live/<module>` exposes the export as a readable store carrying the
+	 * current value.
+	 *
+	 * Flags are cluster-consistent by default: a single-entry shared replay
+	 * buffer is enabled, so `.set()` writes the cluster-shared buffer and a
+	 * subscriber that connects fresh - to any replica, including one that
+	 * never set the flag locally - is served the cluster-latest value.
+	 * Already-subscribed clients stay in sync across the cluster as `.set()`
+	 * relays the update. Pass a custom `replay` object to size the buffer, or
+	 * `replay: false` to opt out (single-process apps lose nothing, since the
+	 * locally cached value is authoritative in one process).
+	 *
+	 * `.set(value)` publishes through the framework-owned platform (the same
+	 * path as the top-level `publish()` helper), so the new value reaches
+	 * every local subscriber and relays across the cluster when a bus is
+	 * wired. Call it from any server context after the platform has been
+	 * captured. `.get()` reads the current value on the server synchronously;
+	 * an internal watcher - installed when the registry module loads, the same
+	 * lifecycle that activates `live.effect` watchers - keeps it fresh from boot
+	 * within a tick of any inbound `set` on a running replica, without waiting
+	 * for the flag module's first local import. `getLatest()` reads the
+	 * cluster-latest value asynchronously from the shared buffer for the strict
+	 * read on a replica that booted after the last `set` and has not yet
+	 * received any inbound `set`.
+	 *
+	 * @param topic - Topic carrying the flag value
+	 * @param initialValue - Value served to subscribers before the first `.set`
+	 * @param options - Optional `replay` to size the shared buffer, or `replay: false` to opt out
+	 *
+	 * @example
+	 * ```js
+	 * // src/live/flags.js
+	 * export const maintenance = live.flag('flag:maintenance', false);
+	 *
+	 * export const toggleMaintenance = live(async (ctx, on) => {
+	 *   maintenance.set(on);
+	 * });
+	 * ```
+	 */
+	function flag<V = any>(
+		topic: string,
+		initialValue?: V,
+		options?: { replay?: boolean | { size?: number } }
+	): Function & { set(value: V): any; get(): V; getLatest(): Promise<V> };
+
+	/**
 	 * Create a real-time incremental aggregation over a source topic.
 	 *
 	 * @param source - Topic to watch
@@ -2494,6 +2545,15 @@ export function __registerEffect(path: string, fn: Function): void;
  * @internal
  */
 export function __registerAggregate(path: string, fn: Function): void;
+
+/**
+ * Install a flag's refresh watcher eagerly at registry-module load, keyed by
+ * topic, so a server-side `.get()` reflects cluster-latest sets from boot
+ * without waiting for the flag module's first local import. Called by the
+ * Vite-generated registry module.
+ * @internal
+ */
+export function __registerFlag(topic: string, initialValue?: any): void;
 
 /**
  * Register room actions lazily. Called by the Vite-generated registry module.

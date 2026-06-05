@@ -23,6 +23,7 @@ import {
 	__registerGuard,
 	__registerEffect,
 	__registerAggregate,
+	__registerFlag,
 	__directCall,
 	_activateDerived,
 	_clearCron,
@@ -2113,7 +2114,7 @@ describe('platform.send() return value', () => {
 	});
 });
 
-// - live.validated() (Phase 12) ----------------------------------------------
+// - live.validated() ----------------------------------------------
 
 describe('live.validated()', () => {
 	it('passes through when schema validates successfully (Zod-like)', async () => {
@@ -2299,7 +2300,7 @@ describe('live.validated()', () => {
 	});
 });
 
-// - __directCall() (Phase 11) ------------------------------------------------
+// - __directCall() ------------------------------------------------
 
 describe('__directCall()', () => {
 	it('calls a registered live function directly without WebSocket', async () => {
@@ -2395,7 +2396,7 @@ describe('__directCall()', () => {
 	});
 });
 
-// - live.cron() (Phase 14) ---------------------------------------------------
+// - live.cron() ---------------------------------------------------
 
 describe('live.cron()', () => {
 	it('marks function with cron metadata', () => {
@@ -3933,7 +3934,7 @@ describe('0.5.7 single-wrap invariant (every publish relays exactly once)', () =
 	});
 });
 
-// - Replay / seq handling (Phase 15) -----------------------------------------
+// - Replay / seq handling -----------------------------------------
 
 describe('replay stream response', () => {
 	it('includes seq in response when replay is enabled and platform supports it', async () => {
@@ -4008,7 +4009,7 @@ describe('issues propagation', () => {
 	});
 });
 
-// - Phase 16: _clearCron() ---------------------------------------------------
+// - _clearCron() ---------------------------------------------------
 
 describe('_clearCron()', () => {
 	it('is a callable function', () => {
@@ -4017,7 +4018,7 @@ describe('_clearCron()', () => {
 	});
 });
 
-// - Phase 16: onCronError() --------------------------------------------------
+// - onCronError() --------------------------------------------------
 
 describe('onCronError()', () => {
 	it('is a callable function', () => {
@@ -4026,7 +4027,7 @@ describe('onCronError()', () => {
 	});
 });
 
-// - Phase 18: onError hook ---------------------------------------------------
+// - onError hook ---------------------------------------------------
 
 describe('handleRpc() onError', () => {
 	it('calls onError when a non-LiveError is thrown', async () => {
@@ -4078,7 +4079,7 @@ describe('handleRpc() onError', () => {
 	});
 });
 
-// - Phase 18: createMessage with onError -------------------------------------
+// - createMessage with onError -------------------------------------
 
 describe('createMessage() with onError', () => {
 	it('passes onError through to handleRpc', async () => {
@@ -4108,7 +4109,7 @@ describe('createMessage() with onError', () => {
 	});
 });
 
-// - Phase 19: Stream pagination ----------------------------------------------
+// - Stream pagination ----------------------------------------------
 
 describe('handleRpc() stream pagination', () => {
 	it('passes through hasMore and cursor from paginated initFn response', async () => {
@@ -4172,7 +4173,7 @@ describe('handleRpc() stream pagination', () => {
 	});
 });
 
-// - Phase 20: Stream lifecycle hooks -----------------------------------------
+// - Stream lifecycle hooks -----------------------------------------
 
 describe('live.stream() lifecycle hooks', () => {
 	it('fires onSubscribe after ws.subscribe', async () => {
@@ -4197,7 +4198,7 @@ describe('live.stream() lifecycle hooks', () => {
 	});
 });
 
-// - Phase 20: close() -------------------------------------------------------
+// - close() -------------------------------------------------------
 
 describe('close()', () => {
 	it('does not fire onUnsubscribe when socket was not subscribed to the topic', () => {
@@ -4294,7 +4295,7 @@ describe('close()', () => {
 	});
 });
 
-// - Phase 21: Global middleware ----------------------------------------------
+// - Global middleware ----------------------------------------------
 
 describe('live.middleware()', () => {
 	it('runs before guard and handler', async () => {
@@ -4570,7 +4571,7 @@ describe('live.upload({ reauthEvery })', () => {
 	});
 });
 
-// - Phase 22: Binary RPC ----------------------------------------------------
+// - Binary RPC ----------------------------------------------------
 
 describe('handleRpc() binary', () => {
 	it('handles binary RPC frames', async () => {
@@ -4663,7 +4664,7 @@ describe('handleRpc() binary', () => {
 	});
 });
 
-// - Phase 27: Throttle / Debounce -------------------------------------------
+// - Throttle / Debounce -------------------------------------------
 
 describe('ctx.throttle and ctx.debounce', () => {
 	let ws, platform;
@@ -4973,7 +4974,7 @@ describe('ctx.throttle / ctx.debounce deprecation warnings', () => {
 	});
 });
 
-// - Phase 26/32: live.access helpers ----------------------------------------
+// - live.access helpers ----------------------------------------
 
 describe('live.access', () => {
 	it('owner() checks ctx.user[field] is present', () => {
@@ -5078,7 +5079,7 @@ describe('live.access', () => {
 	});
 });
 
-// - Phase 26/32: live.stream with filter/access option ----------------------
+// - live.stream with filter/access option ----------------------
 
 describe('live.stream() with filter/access', () => {
 	it('stores filter function from filter option', () => {
@@ -5101,7 +5102,7 @@ describe('live.stream() with filter/access', () => {
 	});
 });
 
-// - Phase 30: live.derived() ------------------------------------------------
+// - live.derived() ------------------------------------------------
 
 describe('live.derived()', () => {
 	it('marks function with __isDerived and __isStream', () => {
@@ -5128,7 +5129,7 @@ describe('live.derived()', () => {
 	});
 });
 
-// - Phase 30: _activateDerived + __registerDerived --------------------------
+// - _activateDerived + __registerDerived --------------------------
 
 import { __registerDerived, _activateDerived, _prepareHmr } from '../server.js';
 
@@ -5543,7 +5544,7 @@ describe('missing _activateDerived warning', () => {
 	});
 });
 
-// - Phase 24: live.room() ---------------------------------------------------
+// - live.room() ---------------------------------------------------
 
 describe('live.room()', () => {
 	it('creates a room export with __isRoom and sub-streams', () => {
@@ -5856,7 +5857,7 @@ describe('live.room()', () => {
 	});
 });
 
-// - Phase 31: live.webhook() ------------------------------------------------
+// - live.webhook() ------------------------------------------------
 
 describe('live.webhook()', () => {
 	it('creates a webhook handler with metadata', () => {
@@ -5924,7 +5925,7 @@ describe('live.webhook()', () => {
 	});
 });
 
-// - Phase 33: Delta sync (server side) --------------------------------------
+// - Delta sync (server side) --------------------------------------
 
 describe('delta sync in streams', () => {
 	let ws, platform;
@@ -6034,7 +6035,7 @@ describe('delta sync in streams', () => {
 	});
 });
 
-// - Phase 28: Test utilities ------------------------------------------------
+// - Test utilities ------------------------------------------------
 
 import { createTestEnv, expectGuardRejects, createTestContext } from '../test.js';
 
@@ -6394,7 +6395,7 @@ describe('TestStream.simulatePublish()', () => {
 	});
 });
 
-// - Phase 35: live.channel() -------------------------------------------------
+// - live.channel() -------------------------------------------------
 
 describe('live.channel()', () => {
 	it('sets __isChannel, __isStream and __isLive flags', () => {
@@ -6455,6 +6456,253 @@ describe('live.channel()', () => {
 		expect(platform.sent[0].data.data).toBe(null);
 		expect(platform.sent[0].data.merge).toBe('set');
 		expect(platform.sent[0].data.channel).toBe(true);
+	});
+});
+
+// - live.flag() --------------------------------------------------------------
+
+describe('live.flag()', () => {
+	it('declares a set-merge stream carrying the flag value', () => {
+		const f = live.flag('flag:maintenance', false);
+		expect(f.__isFlag).toBe(true);
+		expect(f.__isStream).toBe(true);
+		expect(f.__isLive).toBe(true);
+		expect(f.__streamTopic).toBe('flag:maintenance');
+		expect(f.__streamOptions).toEqual({ merge: 'set' });
+	});
+
+	it('initFn returns the initial value, then the latest set value', async () => {
+		const f = live.flag('flag:rollout', false);
+		expect(await f()).toBe(false);
+		_activateDerived(mockPlatform());
+		f.set(true);
+		expect(await f()).toBe(true);
+		expect(f.get()).toBe(true);
+	});
+
+	it('.set publishes a set event through the captured platform', () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		const f = live.flag('flag:beta', false);
+		f.set(true);
+		expect(platform.published).toEqual([
+			{ topic: 'flag:beta', event: 'set', data: true, options: undefined }
+		]);
+	});
+
+	it('omits the initialValue argument and defaults the value to undefined', async () => {
+		const f = live.flag('flag:bare');
+		expect(await f()).toBe(undefined);
+	});
+
+	it('forwards replay option to the underlying stream', () => {
+		const f = live.flag('flag:audited', false, { replay: { size: 1 } });
+		// __replay lands on the initFn via live.stream when replay is set.
+		expect(f.__replay).toEqual({ size: 1 });
+	});
+
+	it('serves the current value to a fresh subscriber via handleRpc', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		const f = live.flag('flag:served', 'green');
+		f.set('red');
+		__register('flags/served', f);
+
+		const ws = mockWs({ id: 'u1' });
+		const buf = toArrayBuffer({ rpc: 'flags/served', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.data).toBe('red');
+		expect(platform.sent[0].data.merge).toBe('set');
+		expect(ws._topics.has('flag:served')).toBe(true);
+	});
+
+	it('throws when topic is not a non-empty string', () => {
+		expect(() => live.flag('', false)).toThrow('non-empty string');
+		expect(() => live.flag(/** @type {any} */ (null), false)).toThrow('non-empty string');
+	});
+
+	it('rejects reserved __ topic prefixes (via the underlying live.stream guard)', () => {
+		expect(() => live.flag('__internal', false)).toThrow('reserved prefix');
+	});
+
+	it('enables a single-entry shared buffer by default, overridable, opt-out via replay:false', () => {
+		const def = live.flag('flag:default-buf', false);
+		expect(def.__replay).toEqual({ size: 1 });
+
+		const sized = live.flag('flag:sized-buf', false, { replay: { size: 5 } });
+		expect(sized.__replay).toEqual({ size: 5 });
+
+		const off = live.flag('flag:no-buf', false, { replay: false });
+		expect(off.__replay).toBeUndefined();
+	});
+
+	it('watcher refreshes the cached value on an inbound set the replica never set locally', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		// Declare the flag but never call .set() on this replica - the value
+		// only arrives via the bus inbound relay (modeled by publishing the
+		// 'set' through the wrapped platform, the same path
+		// derivedPublishLocal takes for cluster-relayed events).
+		const f = live.flag('flag:watched', 'idle');
+		expect(f.get()).toBe('idle');
+
+		platform.publish('flag:watched', 'set', 'active');
+		// The effect-index watcher fires fire-and-forget on a microtask.
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(f.get()).toBe('active');
+	});
+
+	it('eager __registerFlag installs the watcher at registry load, so an inbound set before the flag module is imported is reflected by a later .get()', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		// Simulate the registry module loading: the eager watcher install runs
+		// WITHOUT importing the flag module (live.flag is never called yet).
+		__registerFlag('flag:eager', 'idle');
+
+		// An inbound cluster-relayed set arrives before any local import or
+		// subscribe of the flag module. The eager watcher captures it.
+		platform.publish('flag:eager', 'set', 'active');
+		await Promise.resolve();
+		await Promise.resolve();
+
+		// Now the flag module is imported for the first time (e.g. an admin
+		// route reads the flag). .get() must reflect the set the watcher caught
+		// before import - not the stale declared initialValue.
+		const f = live.flag('flag:eager', 'idle');
+		expect(f.get()).toBe('active');
+		expect(await f()).toBe('active');
+	});
+
+	it('eager __registerFlag is idempotent with the flag body watcher install', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		__registerFlag('flag:idem', false);
+		// Importing the flag module installs the same watcher; it must not
+		// double-register (one inbound set must produce exactly one update).
+		const f = live.flag('flag:idem', false);
+		expect(f.get()).toBe(false);
+
+		platform.publish('flag:idem', 'set', true);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(f.get()).toBe(true);
+	});
+
+	it('seeds a fresh subscriber with the cluster-latest value from the shared buffer', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		const buffered = [{ seq: 7, topic: 'flag:seeded', event: 'set', data: 'cluster-latest' }];
+		platform.replay = {
+			seq: async () => 7,
+			since: async (topic, sinceSeq) => sinceSeq === 0 ? buffered : null
+		};
+		// This replica's cached value is the stale init - the fresh subscribe
+		// must serve the buffered cluster-latest value, not the loader's.
+		const f = live.flag('flag:seeded', 'stale-init');
+		__register('flags/seeded', f);
+
+		const ws = mockWs({ id: 'u1' });
+		const buf = toArrayBuffer({ rpc: 'flags/seeded', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.replay).toBe(true);
+		expect(platform.sent[0].data.data).toBe(buffered);
+		expect(platform.sent[0].data.seq).toBe(7);
+		expect(platform.sent[0].data.merge).toBe('set');
+	});
+
+	it('falls through to the loader when the shared buffer is empty', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		platform.replay = {
+			seq: async () => 0,
+			since: async () => []
+		};
+		const f = live.flag('flag:empty-buf', 'initial');
+		__register('flags/empty-buf', f);
+
+		const ws = mockWs({ id: 'u1' });
+		const buf = toArrayBuffer({ rpc: 'flags/empty-buf', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.replay).not.toBe(true);
+		expect(platform.sent[0].data.data).toBe('initial');
+	});
+
+	it('fresh-subscribe seeding is gated to flags - non-flag replay streams keep loader-only behavior', async () => {
+		const platform = mockPlatform();
+		const buffered = [{ seq: 3, topic: 'plain-replay', event: 'created', data: { id: 9 } }];
+		platform.replay = {
+			seq: async () => 3,
+			since: async (topic, sinceSeq) => sinceSeq === 0 ? buffered : null
+		};
+		const streamFn = live.stream('plain-replay', async () => [{ id: 1 }], { merge: 'crud', key: 'id', replay: true });
+		__register('plain/replay', streamFn);
+
+		const ws = mockWs({ id: 'u1' });
+		// Fresh subscribe (no seq) for a non-flag replay stream must run the
+		// loader, not seed from the buffer.
+		const buf = toArrayBuffer({ rpc: 'plain/replay', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.replay).not.toBe(true);
+		expect(platform.sent[0].data.data).toEqual([{ id: 1 }]);
+	});
+
+	it('getLatest reads the cluster-latest value from the shared buffer', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		platform.replay = {
+			seq: async () => 4,
+			since: async (topic, sinceSeq) => sinceSeq === 0
+				? [{ seq: 4, topic: 'flag:latest', event: 'set', data: 'fresh' }]
+				: []
+		};
+		// Cached value is the stale init; getLatest must read the buffer.
+		const f = live.flag('flag:latest', 'stale');
+		expect(f.get()).toBe('stale');
+		expect(await f.getLatest()).toBe('fresh');
+	});
+
+	it('getLatest falls back to the cached value without a shared buffer', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		const f = live.flag('flag:no-replay', 'init');
+		f.set('local');
+		expect(await f.getLatest()).toBe('local');
+	});
+
+	it('single-process: set/get and a fresh subscribe are unchanged with no platform.replay', async () => {
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		const f = live.flag('flag:single-proc', 'green');
+		expect(f.get()).toBe('green');
+		f.set('red');
+		expect(f.get()).toBe('red');
+		expect(await f()).toBe('red');
+		__register('flags/single-proc', f);
+
+		const ws = mockWs({ id: 'u1' });
+		const buf = toArrayBuffer({ rpc: 'flags/single-proc', id: '1', args: [], stream: true });
+		handleRpc(ws, buf, platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// No platform.replay -> seeding branch no-ops -> loader returns current.
+		expect(platform.sent[0].data.ok).toBe(true);
+		expect(platform.sent[0].data.replay).not.toBe(true);
+		expect(platform.sent[0].data.data).toBe('red');
 	});
 });
 
@@ -6554,7 +6802,7 @@ describe('derived stream handleRpc response', () => {
 	});
 });
 
-// - Phase 37: live.rateLimit() -----------------------------------------------
+// - live.rateLimit() -----------------------------------------------
 
 describe('live.rateLimit()', () => {
 	it('sets __isLive and __isRateLimited flags', () => {
@@ -6798,7 +7046,7 @@ describe('live.rateLimits() registry config', () => {
 	});
 });
 
-// - Phase 38: live.effect() --------------------------------------------------
+// - live.effect() --------------------------------------------------
 
 describe('live.effect()', () => {
 	it('sets __isEffect flag and metadata', () => {
@@ -6873,7 +7121,7 @@ describe('live.effect()', () => {
 	});
 });
 
-// - Phase 43: live.signal() --------------------------------------------------
+// - live.signal() --------------------------------------------------
 
 describe('live.signal()', () => {
 	it('ctx.signal publishes to __signal:{userId} topic', async () => {
@@ -6916,7 +7164,7 @@ describe('live.signal()', () => {
 	});
 });
 
-// - Phase 39: live.aggregate() -----------------------------------------------
+// - live.aggregate() -----------------------------------------------
 
 describe('live.aggregate()', () => {
 	it('sets aggregate metadata', () => {
@@ -7640,7 +7888,7 @@ describe('_activateDerived late-activation', () => {
 	});
 });
 
-// - Phase 40: live.gate() ----------------------------------------------------
+// - live.gate() ----------------------------------------------------
 
 describe('live.gate()', () => {
 	it('sets gate metadata on the wrapped function', () => {
@@ -7800,7 +8048,7 @@ describe('stream filter/access', () => {
 	});
 });
 
-// - Phase 41: pipe() ---------------------------------------------------------
+// - pipe() ---------------------------------------------------------
 
 describe('pipe()', () => {
 	it('preserves stream metadata on piped function', () => {
@@ -7899,7 +8147,7 @@ describe('pipe()', () => {
 	});
 });
 
-// - Phase 42: Schema Evolution -----------------------------------------------
+// - Schema Evolution -----------------------------------------------
 
 describe('schema evolution', () => {
 	it('stores version and migrate metadata on stream function', () => {

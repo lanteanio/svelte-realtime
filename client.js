@@ -121,6 +121,32 @@ const _dedupMap = new Map();
  */
 const _dedupCoalesceWarned = new Set();
 
+// - Dev-mode publish-rate hint (client half) -------------------------------
+// Mirrors the server-side sampler in `svelte-realtime/server.js`, but the
+// signal source differs. The server reads `platform.pressure.topPublishers`
+// (rates the adapter already computes); the client has no such snapshot, so
+// it measures inbound frame rate directly at the dispatch hook. A per-topic
+// fixed window counts frames; when a window closes over threshold, one warn
+// fires per topic per session with the SAME wording, threshold (200), and
+// `svti.me/highfreq` link as the server. The whole feature is gated by the
+// `import.meta.env`-folded `_IS_DEV` const so a production build strips it to
+// dead code, leaving zero residue on the inbound dispatch hot path.
+
+/** Inbound events/sec at which a topic is considered high-frequency. Matches the server sampler default. */
+const _PUBLISH_RATE_HINT_THRESHOLD = 200;
+
+/** Measurement window for the client frame-rate counter, in ms. Rate = frames-in-window / window-seconds. */
+const _PUBLISH_RATE_HINT_WINDOW_MS = 1000;
+
+/** Max distinct topics tracked in the warned dedup set. FIFO-evict on cap: dropping the oldest entry just lets that topic re-warn on its next over-threshold window. Mirrors the server `PUBLISH_RATE_WARN_DEDUP_MAX` eviction shape. */
+const _PUBLISH_RATE_HINT_DEDUP_MAX = 1_000_000;
+
+/** @type {Map<string, { start: number, count: number }>} Per-topic fixed-window frame counter. */
+const _publishRateWindows = new Map();
+
+/** @type {Set<string>} One-shot warned topics. FIFO-evicted at the dedup cap. */
+const _publishRateHintWarned = new Set();
+
 /**
  * Dev-mode check, mirrored from the `process.env.NODE_ENV` pattern
  * used elsewhere in this file. Cached once at first call so the hot
@@ -492,6 +518,85 @@ function _warnCoalesceOnce(path) {
 		"If you wanted N parallel requests (stress test, fan-out), call `.fresh(...args)` " +
 		"on the rpc to bypass dedup. Warned once per path per session.\n  See: https://svti.me/dedup"
 	);
+}
+
+/**
+ * Count one inbound frame for a topic and, if its measured rate crosses the
+ * high-frequency threshold, emit a one-shot dev hint. Counterpart to the
+ * server-side sampler: same threshold (200), same `coalesceBy` / `volatile`
+ * suggestions, same `svti.me/highfreq` link. The server reads rates the
+ * adapter pre-computes; the client has none, so it counts frames over a fixed
+ * window and derives the rate locally.
+ *
+ * Suppressed when the stream was declared with `coalesceBy` - that is the user
+ * already choosing the latest-value-wins mitigation, so the hint would be
+ * noise. (There is no client-side `volatile` declaration to read; `volatile`
+ * is a per-call RPC concern, not a stream option, so only `coalesceBy`
+ * suppresses here.) Opt out entirely with `configure({ publishRateHint: false })`.
+ *
+ * The whole function is dead code in production: the only caller is gated by
+ * the `import.meta.env`-folded `_IS_DEV` const, and this body re-checks it so a
+ * direct call from a test still no-ops under a production build.
+ *
+ * @param {string} topic - the stream path (the identity available at dispatch)
+ * @param {any} options - the per-stream options object (read for `coalesceBy`)
+ */
+function _maybeHintPublishRate(topic, options) {
+	if (!_IS_DEV) return;
+	if (_clientConfig.publishRateHint === false) return;
+	if (_publishRateHintWarned.has(topic)) return;
+	// A declared-coalesced stream already picked latest-value-wins, so the hint
+	// would be noise: skip the counting work entirely, mirroring the server which
+	// marks such topics handled up front.
+	if (options && options.coalesceBy) return;
+
+	const now = Date.now();
+	let win = _publishRateWindows.get(topic);
+	if (win === undefined) {
+		_publishRateWindows.set(topic, { start: now, count: 1 });
+		return;
+	}
+	win.count++;
+	const elapsed = now - win.start;
+	if (elapsed < _PUBLISH_RATE_HINT_WINDOW_MS) return;
+
+	// Window closed: derive events/sec and reset for the next window. A short
+	// final window (e.g. the stream unsubscribed mid-window) still scales to a
+	// per-second rate, so a genuine burst is not under-counted.
+	const rate = (win.count * 1000) / elapsed;
+	win.start = now;
+	win.count = 0;
+
+	if (rate < _PUBLISH_RATE_HINT_THRESHOLD) return;
+
+	if (_publishRateHintWarned.size >= _PUBLISH_RATE_HINT_DEDUP_MAX) {
+		const oldest = _publishRateHintWarned.values().next().value;
+		if (oldest !== undefined) _publishRateHintWarned.delete(oldest);
+	}
+	_publishRateHintWarned.add(topic);
+	// The window counter is never re-read once a topic has warned (the warned
+	// set short-circuits at the top), so drop it to keep the window map bounded
+	// by live unwarned topics, mirroring the server sampler's symmetry.
+	_publishRateWindows.delete(topic);
+	console.warn(
+		`[svelte-realtime] Topic '${topic}' is receiving ` +
+		`${Math.round(rate)} events/sec.\n` +
+		`  For high-frequency streams, consider one of:\n` +
+		`    live.stream(topic, loader, { coalesceBy: (data) => data.userId })  // latest-value-wins, queued per subscriber\n` +
+		`    live.stream(topic, loader, { volatile: true })                     // drop on backpressure, best-effort\n` +
+		`  See: https://svti.me/highfreq`
+	);
+}
+
+/**
+ * Reset the dev-mode client publish-rate hint state. Tests only. Clears the
+ * one-shot warned set and the per-topic window counters so a previously seen
+ * topic can warn again.
+ * @internal
+ */
+export function _resetClientPublishRateWarning() {
+	_publishRateHintWarned.clear();
+	_publishRateWindows.clear();
 }
 
 /**
@@ -2424,6 +2529,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		}
 
 		_devtoolsStreamEvent(path, envelope.event, envelope.data);
+		if (_IS_DEV) _maybeHintPublishRate(path, options);
 
 		if (_useRAF) {
 			_activeBuf.push(envelope);
@@ -3530,7 +3636,7 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number }} OfflineEntry
  */
 
-/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, upload?: { frameSize?: number, chunkSize?: number, highWaterMark?: number, lowWaterMark?: number }, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
+/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, upload?: { frameSize?: number, chunkSize?: number, highWaterMark?: number, lowWaterMark?: number }, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
 let _clientConfig = {};
 
 /** @type {boolean} */
@@ -3561,7 +3667,12 @@ let _replayingQueue = false;
  * volatile traffic, lower it on mobile-constrained targets where the OS
  * send buffer is tighter.
  *
- * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * `publishRateHint` (default enabled in dev) controls the one-shot console
+ * hint logged when an inbound stream's frame rate crosses the high-frequency
+ * threshold. Set `false` to silence it. Production builds strip the hint
+ * regardless, so this only matters in development.
+ *
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
 	_clientConfig = config;

@@ -583,6 +583,15 @@ export function configure(config: {
 	 * @default 4_194_304 (4 MB)
 	 */
 	volatileBackpressureBytes?: number;
+	/**
+	 * Enable the dev-mode publish-rate hint: a one-shot console warning logged
+	 * when an inbound stream's frame rate crosses the high-frequency threshold,
+	 * suggesting `coalesceBy` / `volatile`. Set `false` to silence it.
+	 * Production builds strip the hint entirely, so this flag only has an effect
+	 * in development.
+	 * @default true
+	 */
+	publishRateHint?: boolean;
 	/** Offline mutation queue configuration. */
 	offline?: {
 		/** Enable queuing RPCs when disconnected. */

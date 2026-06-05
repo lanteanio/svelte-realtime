@@ -2339,6 +2339,49 @@ Without a leader configured (the default), every worker fires every job. svelte-
 
 ---
 
+## Feature flags
+
+Use `live.flag()` to declare a server-controlled value that every client reads as a readable store. A flag is a thin wrapper over `live.stream`: it declares a `merge: 'set'` topic carrying the value, and `.set(value)` pushes a new value to every subscriber.
+
+```js
+// src/live/flags.js
+import { live } from 'svelte-realtime/server';
+
+export const maintenance = live.flag('flag:maintenance', false);
+```
+
+Flip it from any handler - the `.set(value)` call publishes through the framework-owned platform, so the new value reaches every local subscriber and relays across the cluster when a bus is wired:
+
+```js
+export const toggleMaintenance = live(async (ctx, on) => {
+  maintenance.set(on);
+});
+```
+
+On the client, the flag is a readable store carrying the current value:
+
+```svelte
+<script>
+  import { maintenance } from '$live/flags';
+</script>
+
+{#if $maintenance}
+  <Banner>Down for maintenance</Banner>
+{/if}
+```
+
+`.set(value)` requires that the platform has been captured (`realtime().init`, `setCronPlatform`, or `_activateDerived` from your `hooks.ws.js` `init({ platform })` hook) - the same wiring cron and the top-level `publish()` helper need. Read the current value on the server with `.get()`.
+
+Flags are cluster-consistent by default. A single-entry shared replay buffer is enabled automatically, so a `.set()` on any replica writes the cluster-shared buffer, and a client that connects fresh - to any replica, including one that never set the flag locally - is served the cluster-latest value on connect. Already-subscribed clients stay in sync wherever they connected, because `.set()` relays the update across the cluster. Pass a custom `replay` object (for example `{ replay: { size: 5 } }`) to size the buffer, or `{ replay: false }` to opt out - a single-process app loses nothing by opting out, since the locally cached value is authoritative in one process.
+
+On every running replica an internal watcher keeps the cached value behind `.get()` fresh from boot. The watcher is installed when the registry module loads - the same moment `live.effect` watchers become active - so it does not wait for the flag module's first local import or subscribe: an inbound `set` relayed from any replica updates the cached value within a tick, and synchronous `.get()` reflects the cluster-latest value on any running instance. For a strict read on a replica that booted after the last `set` and has not yet received any inbound `set` - reading a flag the moment a replica comes up, before it has observed any traffic - use the asynchronous `getLatest()`, which reads the shared buffer directly:
+
+```js
+const on = await maintenance.getLatest();
+```
+
+---
+
 ## Derived streams
 
 Server-side computed streams that recompute when any source topic publishes.
@@ -3048,7 +3091,7 @@ With adapter 0.4.0+, the replay end marker sends `{ reqId }` (replay complete) o
 
 Once `platform.replay` is exposed (the standard install pattern is `platform.replay = createReplay(redisClient)` in your hooks), the framework auto-routes every publish to a replay-eligible topic through `platform.replay.publish` regardless of which seam the publisher sits on. `live.stream(topic, loader, { replay: true })` registers the topic at declaration time; static topics are registered up-front and dynamic topics are registered at first-subscribe time when they resolve.
 
-This applies to every framework publish surface — `ctx.publish` from RPC handlers, cron auto-publish (`live.cron('* * * * * *', topic, async (ctx) => result)` where `result !== undefined`), and `ctx.publish` from inside cron handlers — without the user wiring anything beyond `replay: true`. Pre-fix, the user was responsible for wrapping the platform with a `wrapWithReplay` proxy at every seam (the docs showed it on `createMessage` only; cron was a separate `setCronPlatform(platform)` capture, and cron-published events silently bypassed the buffer because the wrap was missing there). The auto-routing makes that asymmetry impossible by construction.
+This applies to every framework publish surface - `ctx.publish` from RPC handlers, cron auto-publish (`live.cron('* * * * * *', topic, async (ctx) => result)` where `result !== undefined`), and `ctx.publish` from inside cron handlers - without the user wiring anything beyond `replay: true`. Pre-fix, the user was responsible for wrapping the platform with a `wrapWithReplay` proxy at every seam (the docs showed it on `createMessage` only; cron was a separate `setCronPlatform(platform)` capture, and cron-published events silently bypassed the buffer because the wrap was missing there). The auto-routing makes that asymmetry impossible by construction.
 
 If you need to keep your own platform-wrapping proxy (custom topic patterns, additional intercepts), set `[WRAPPED_FOR_REPLAY] = true` on the proxy:
 
@@ -3062,7 +3105,7 @@ function wrapWithReplay(p) {
 }
 ```
 
-The framework defers entirely when this marker is present (no double-write to Redis). Without the marker, the framework's auto-routing runs alongside the user proxy's routing and will issue duplicate Redis writes — explicit opt-out is required.
+The framework defers entirely when this marker is present (no double-write to Redis). Without the marker, the framework's auto-routing runs alongside the user proxy's routing and will issue duplicate Redis writes - explicit opt-out is required.
 
 If `replay: true` is declared but `platform.replay` is never set, dev-mode logs a one-time `console.warn` per topic on the first publish, with the install pointer for the replay extension. Production runs silently (no per-publish overhead) and the local broadcast still happens.
 
@@ -3401,6 +3444,8 @@ live.publishRateWarning(false);
 
 Production builds constant-fold the activation branch to dead code - zero overhead. The sampler runs once per platform on the first ctx-helpers cache miss; per-publish cost is unchanged. Topics already in `_topicCoalesce` or `_topicVolatile` are skipped (the user has already addressed them).
 
+The client emits the same hint from the receiving side: in development it measures each stream's inbound frame rate and logs one warning per topic when it crosses the threshold, suggesting `coalesceBy` / `volatile` and linking the same guide. Streams declared with `coalesceBy` are suppressed; silence it everywhere with `configure({ publishRateHint: false })`. Production builds strip the client hint entirely (`import.meta.env`-gated), leaving zero residue on the inbound dispatch path.
+
 ### Dev-mode silent-topic warning
 
 In development, the framework arms a one-shot timer when a stream first subscribes to a topic. If no events arrive within `thresholdMs` (default `30000`), it logs a warning naming the topic and the common causes:
@@ -3677,6 +3722,7 @@ Import from `svelte-realtime/server`.
 | `live.upload(fn, options?)` | Streaming upload handler (chunked, abortable async-iterable; `maxSize` 100MB, `maxConcurrentPerSession` 4, `maxBufferedChunks` 64) |
 | `live.validated(schema, fn)` | RPC with [Standard Schema](https://standardschema.dev/) input validation (Zod, ArkType, Valibot, etc.) |
 | `live.cron(schedule, topic, fn)` | Server-side scheduled function |
+| `live.flag(topic, initialValue?, options?)` | Feature flag exposed as a readable stream with a server-side `.set(value)` |
 | `live.derived(sources, fn, options?)` | Server-side computed stream (static or dynamic sources) |
 | `live.effect(sources, fn, options?)` | Server-side reactive side effect |
 | `live.aggregate(source, reducers, options)` | Real-time incremental aggregation |
