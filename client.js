@@ -253,13 +253,37 @@ const _healthStore = writable(/** @type {'healthy' | 'degraded'} */ ('healthy'))
 /** @type {(() => void) | null} */
 let _healthUnsub = null;
 
+// Two independent inputs OR into the single health state: a server-pushed
+// degraded/recovered event on the system topic, and the connection's local
+// internal flow-control pressure (a queued/refused flow-controlled send).
+// Tracked separately so neither input clobbers the other - health is degraded
+// while EITHER is degraded, healthy only when BOTH are clear.
+let _healthServerDegraded = false;
+let _healthFlowDegraded = false;
+
+function _recomputeHealth() {
+	_healthStore.set(_healthServerDegraded || _healthFlowDegraded ? 'degraded' : 'healthy');
+}
+
 function _ensureHealthSubscription() {
 	if (_healthUnsub) return;
-	_healthUnsub = on(_HEALTH_TOPIC).subscribe((envelope) => {
+	const offTopic = on(_HEALTH_TOPIC).subscribe((envelope) => {
 		if (!envelope) return;
-		if (envelope.event === 'degraded') _healthStore.set('degraded');
-		else if (envelope.event === 'recovered') _healthStore.set('healthy');
+		if (envelope.event === 'degraded') { _healthServerDegraded = true; _recomputeHealth(); }
+		else if (envelope.event === 'recovered') { _healthServerDegraded = false; _recomputeHealth(); }
 	});
+	// Fold the connection's internal flow-control health in as a second,
+	// OR-ed input. A boolean is the only thing that crosses this accessor;
+	// no internal accounting value surfaces. Older adapter connections that
+	// predate the accessor simply do not contribute this input.
+	let offFlow = () => {};
+	try {
+		const conn = _connect();
+		if (conn && typeof conn._onLeaseDegraded === 'function') {
+			offFlow = conn._onLeaseDegraded((d) => { _healthFlowDegraded = !!d; _recomputeHealth(); });
+		}
+	} catch { /* connection not configured yet; flow health stays clear */ }
+	_healthUnsub = () => { offTopic(); offFlow(); };
 }
 
 /**
@@ -297,8 +321,17 @@ export function _resetHealth() {
 		_healthUnsub();
 		_healthUnsub = null;
 	}
+	_healthServerDegraded = false;
+	_healthFlowDegraded = false;
 	_healthStore.set('healthy');
 }
+
+// Flow control is owned end to end by the adapter connection's send gate: it
+// advertises the capability, paces its own flow-controlled sends against the
+// server's window, and reports a single degraded boolean. The realtime layer
+// consumes that boolean through conn._onLeaseDegraded in
+// _ensureHealthSubscription above and ORs it into realtime.health. There is no
+// realtime-owned mirror of the gate - a second copy would only drift.
 
 function _registerTopicErrorSetter(topic, setError) {
 	let set = _streamErrorByTopic.get(topic);

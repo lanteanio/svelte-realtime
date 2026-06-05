@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.2] - 2026-06-05
+
+### Changed
+
+- **`realtime.health` now also reflects the connection's own flow-control pressure, not just server-pushed status.** When the underlying adapter connection signals sustained outbound back-pressure, `realtime.health` reports `degraded` (and recovers when it drains), OR-ed with the existing server `degraded` / `recovered` signal so neither input clobbers the other. No new API and no new surface; a connection or adapter without the flow-control signal behaves exactly as before.
+
 ## [0.6.0-next.1] - 2026-06-05
 
 ### Added
