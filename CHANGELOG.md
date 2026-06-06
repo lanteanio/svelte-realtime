@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.3] - 2026-06-06
+
+### Added
+
+- **`live.multiplayer(config)` - bundle live cursors and presence into one collaborative declaration with an aggregated roster.** A dedicated bundler that reuses the same data stream, presence auto-join, cursor stream, and scoped actions as `live.room()` (the data/presence/cursors sub-streams, the presence-ref grace handling, and the room actions are byte-identical), then exposes a connection-aware surface on the client. The generated client export carries the room sub-streams (`data` / `presence` / `cursors`) plus `status` (the connection-status store), the `move` / `reportViewport` cursor methods, `identify(key)`, and a `room(...args)` factory. `move(...args, payload)` and `reportViewport(...args, payload)` are volatile (fire-and-forget) calls that publish a keyed update to the room's cursor sub-topic, so every connected client sees the position on the `cursors` stream.
+
+  `board.room(boardId)` returns a reactive roster view that aggregates the presence and cursor streams into the surface an app renders:
+  - `others` - the presence roster deduped by user key (latest wins), each entry stamped with a deterministic color, with the local user excluded once it is known.
+  - `cursors` - deduped by user key and colored (the local user is kept so it can render its own cursor).
+  - `me` - the local user's key, or `null` until `identify(key)` is called.
+  - `status` - the connection-status passthrough.
+
+  The app names the current user once with `board.identify(key)` (the same identity it already supplies for presence, available from the SvelteKit page load). Calling `identify(key)` after `room(...)` lights up `me` and self-exclusion live. If it is never called the surface degrades gracefully: `others` is the full deduped roster and `me` reads `null`, never a crash. The Vite plugin detects the export, registers its sub-streams, cursor handlers, and actions lazily (and eagerly in dev) exactly like a room, generates the client namespace, and renders an empty collaborative state during SSR so a page that reads `board.status`, calls `board.move(...)`, or reads `board.room(...).others` before hydration does not crash. A project with no `live.multiplayer` export generates identical output to before. `MultiplayerConfig` and `MultiplayerExport` types are added to the `live` namespace in `server.d.ts`; the aggregated `MultiplayerRoom` view ships from the `svelte-realtime/multiplayer` subpath.
+
+  ```js
+  // src/live/collab.js
+  export const board = live.multiplayer({
+    topic: (ctx, boardId) => 'board:' + boardId,
+    topicArgs: 1,
+    init: async (ctx, boardId) => db.cards.forBoard(boardId),
+    presence: (ctx) => ({ name: ctx.user.name }),
+    cursors: true
+  });
+  ```
+
+  ```svelte
+  <script>
+    import { board } from '$live/collab';
+    let { data } = $props();        // data.userId from the SvelteKit load
+    board.identify(data.userId);    // names self; me + self-exclusion light up
+    const room = board.room(boardId);
+  </script>
+
+  {#each room.others as person (person.key)}
+    <Avatar name={person.name} color={person.color} />
+  {/each}
+  ```
+
+  The `typing` / `locks` / `selections` / `reactions` views and their methods (`setTyping` / `acquireLock` / `releaseLock` / `setSelection` / `react`) are present so the API shape is stable, but they are inert: the views read empty and the methods are safe no-ops that emit a single dev-mode note. They activate once the client-to-server field send path lands.
+
+- **`colorForKey(key)` / `hueForKey(key)` - deterministic user colors.** Derive a stable color (or raw hue) from a user key with a 32-bit FNV-1a hash kept entirely in unsigned 32-bit space (`Math.imul` + `>>> 0`), so a server render and the first client paint compute the identical color for a key with no hydration mismatch. Exported from `svelte-realtime/client` and re-exported through `svelte-realtime/shared/color.js`. `colorForKey` draws saturation and lightness from a legible band using high bits of the same hash (windows disjoint from the bits the hue consumes), widening the palette from 360 hue-only buckets to 4320 distinct swatches (360 hues x 3 saturation bands x 4 lightness bands) so distinct collaborators are far less likely to share a color, while every swatch keeps a legible foreground contrast. The first band of each set is the original value, so the palette is a strict superset of the previous single band; `hueForKey` is unchanged and still returns the raw hue.
+
 ## [0.6.0-next.2] - 2026-06-05
 
 ### Changed

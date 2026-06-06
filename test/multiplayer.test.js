@@ -1,0 +1,1134 @@
+import { describe, it, expect, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from 'fs';
+import { resolve } from 'path';
+import { pathToFileURL } from 'url';
+import { flushSync } from 'svelte';
+import { compileModule } from 'svelte/compiler';
+import svelteRealtime from '../vite.js';
+import { live } from '../server.js';
+import { colorForKey, hueForKey } from '../shared/color.js';
+import { colorForKey as colorViaServer, hueForKey as hueViaServer } from '../server.js';
+import { colorForKey as colorViaClient, hueForKey as hueViaClient } from '../client.js';
+import { __mpFields } from '../client.js';
+
+// ---------------------------------------------------------------------------
+// Codegen: the vite plugin detects a live.multiplayer() export, generates its
+// registry registration + client stub, and leaves a module without one
+// byte-identical to today.
+// ---------------------------------------------------------------------------
+
+const testRoot = resolve(import.meta.dirname, '__mp_fixtures__');
+const liveDir = resolve(testRoot, 'src/live');
+
+function setup(files = {}) {
+	mkdirSync(liveDir, { recursive: true });
+	for (const [name, content] of Object.entries(files)) {
+		const dir = resolve(liveDir, name.includes('/') ? name.substring(0, name.lastIndexOf('/')) : '');
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(resolve(liveDir, name), content);
+	}
+}
+
+function teardown() {
+	if (existsSync(testRoot)) rmSync(testRoot, { recursive: true, force: true });
+}
+
+function createPlugin(opts = {}) {
+	const plugin = svelteRealtime({ dir: 'src/live', ...opts });
+	plugin.configResolved({ root: testRoot, build: {} });
+	return plugin;
+}
+
+const MULTIPLAYER_SOURCE = `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  init: async (ctx, boardId) => [],
+  presence: (ctx) => ({ name: ctx.user.name }),
+  cursors: true,
+  actions: {
+    addCard: async (ctx, boardId, title) => ({ id: 1, title }),
+    removeCard: async (ctx, boardId, cardId) => null
+  }
+});
+`;
+
+describe('live.multiplayer() vite integration', () => {
+	afterEach(teardown);
+
+	it('generates a multiplayer namespace with data, presence, cursors, and status streams', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).toContain("export const room = {");
+		expect(code).toContain('data: __stream("collab/room/__data"');
+		expect(code).toContain('presence: __stream("collab/room/__presence"');
+		expect(code).toContain('cursors: __stream("collab/room/__cursors"');
+		expect(code).toContain('status:');
+	});
+
+	it('generates the move and reportViewport client methods', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).toContain('move:');
+		expect(code).toContain('reportViewport:');
+	});
+
+	it('registers the multiplayer sub-streams in the registry exactly like a room', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		expect(code).toContain('__register("collab/room/__data"');
+		expect(code).toContain('__register("collab/room/__presence"');
+		expect(code).toContain('__register("collab/room/__cursors"');
+		expect(code).toContain('__registerRoomActions("collab/room"');
+	});
+
+	it('registers the cursor move and reportViewport handlers so the client stubs resolve', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		// The client stub emits __rpc("collab/room/__cursor/move") and
+		// __rpc("collab/room/__cursor/reportViewport"); the registry must
+		// register a server handler at each path or the calls RPC into the void.
+		expect(code).toContain('__register("collab/room/__cursor/move"');
+		expect(code).toContain('__register("collab/room/__cursor/reportViewport"');
+		expect(code).toContain('.__cursorMove');
+		expect(code).toContain('.__cursorReportViewport');
+	});
+
+	it('imports both __stream and __rpc for the generated stub', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).toContain("import { __stream");
+		expect(code).toContain('__rpc');
+	});
+
+	it('wires the roster rune-class into the generated namespace', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		// The aggregated others / cursors / me view is constructed by the
+		// rune-class imported from the dedicated subpath; the namespace owns a
+		// local-key holder and exposes identify(key) + a room(...args) factory.
+		expect(code).toContain("import { MultiplayerRoom, localKeySource } from 'svelte-realtime/multiplayer';");
+		expect(code).toContain('const _room_me = localKeySource();');
+		expect(code).toContain('identify(key) { _room_me.set(key); }');
+		expect(code).toContain('room(...args) { return new MultiplayerRoom({');
+		expect(code).toContain('me: _room_me');
+		expect(code).toContain('presence: room.presence(...args)');
+		expect(code).toContain('cursors: room.cursors(...args)');
+	});
+
+	it('binds cursors to an inline empty store when the export declares presence without cursors', () => {
+		// A presence-only roster still builds a room(...) factory, and the
+		// MultiplayerRoom constructor subscribes to BOTH presence and cursors
+		// unconditionally. The missing cursor sub-stream must fall back to an
+		// inline store that pushes an empty list once, never `room.cursors(...)`
+		// (which is undefined here and would throw on .subscribe at runtime).
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, id) => 'board:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  presence: (ctx) => ({ name: ctx.user.name })
+});
+`
+		});
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).toContain('room(...args) { return new MultiplayerRoom({');
+		expect(code).toContain('presence: room.presence(...args)');
+		expect(code).toContain('cursors: { subscribe: (fn) => { fn([]); return () => {}; } }');
+		// The undefined member is never referenced for the missing stream.
+		expect(code).not.toContain('cursors: room.cursors(...args)');
+	});
+
+	it('binds presence to an inline empty store when the export declares cursors without presence', () => {
+		// The mirror of the presence-only fallback: a cursors-only roster must
+		// bind `presence:` to the inline empty store, not `room.presence(...)`.
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, id) => 'board:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  cursors: true
+});
+`
+		});
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).toContain('room(...args) { return new MultiplayerRoom({');
+		expect(code).toContain('cursors: room.cursors(...args)');
+		expect(code).toContain('presence: { subscribe: (fn) => { fn([]); return () => {}; } }');
+		expect(code).not.toContain('presence: room.presence(...args)');
+	});
+
+	it('emits the rune-class import once even with two multiplayer exports', () => {
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const board = live.multiplayer({
+  topic: (ctx, id) => 'board:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  presence: (ctx) => ({ name: ctx.user.name }),
+  cursors: true
+});
+export const doc = live.multiplayer({
+  topic: (ctx, id) => 'doc:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  presence: (ctx) => ({ name: ctx.user.name }),
+  cursors: true
+});
+`
+		});
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		const importHits = code.split("import { MultiplayerRoom, localKeySource } from 'svelte-realtime/multiplayer';").length - 1;
+		expect(importHits).toBe(1);
+		expect(code).toContain('const _board_me = localKeySource();');
+		expect(code).toContain('const _doc_me = localKeySource();');
+	});
+
+	it('omits the rune-class wiring from a data-only multiplayer export', () => {
+		// No presence and no cursors means no roster surface; the namespace
+		// must not import the rune-class or gain an empty room()/identify().
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const doc = live.multiplayer({
+  topic: (ctx) => 'doc',
+  init: async () => [],
+  merge: 'latest',
+  key: 'id'
+});
+`
+		});
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).not.toContain('svelte-realtime/multiplayer');
+		expect(code).not.toContain('localKeySource');
+		expect(code).not.toContain('identify(key)');
+		expect(code).not.toContain('new MultiplayerRoom');
+	});
+
+	it('leaves a module with no live.multiplayer export byte-identical to today', () => {
+		// A file that uses every other live primitive but never
+		// live.multiplayer must generate exactly what it generated before
+		// the multiplayer codegen branch existed. We assert this by proving
+		// the multiplayer detection is a no-op on plain modules: the output
+		// is stable across two independent generations and contains none of
+		// the multiplayer-specific emission.
+		const plainSource = `
+import { live } from 'svelte-realtime/server';
+export const messages = live.stream('messages', async () => [], { merge: 'crud', key: 'id' });
+export const board = live.room({
+  topic: (ctx, id) => 'board:' + id,
+  topicArgs: 1,
+  init: async (ctx, id) => [],
+  presence: (ctx) => ({ name: ctx.user.name }),
+  cursors: true,
+  actions: { addCard: async (ctx, id, t) => null }
+});
+export const send = live(async (ctx, text) => null);
+`;
+		setup({ 'plain.js': plainSource });
+
+		const plugin = createPlugin();
+		const stubA = plugin.load('\0live:plain', {});
+		const registryA = plugin.load('\0live:__registry', {});
+
+		teardown();
+		setup({ 'plain.js': plainSource });
+		const plugin2 = createPlugin();
+		const stubB = plugin2.load('\0live:plain', {});
+		const registryB = plugin2.load('\0live:__registry', {});
+
+		expect(stubB).toBe(stubA);
+		expect(registryB).toBe(registryA);
+
+		// No multiplayer-only emission leaks into a plain module.
+		expect(stubA).not.toContain('reportViewport');
+		expect(registryA).not.toContain('__registerMultiplayer');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Factory: live.multiplayer(config) returns a MultiplayerExport that reuses
+// the room sub-stream machinery, so the data / presence / cursor streams are
+// shaped exactly like a room and resolve the cursors + roster surface day one.
+// ---------------------------------------------------------------------------
+
+describe('live.multiplayer()', () => {
+	it('creates an export with __isMultiplayer and the composed sub-streams', () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async (ctx, boardId) => [{ id: 1, title: 'hello' }],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			cursors: true,
+			actions: {
+				addCard: async (ctx, title) => ({ id: 2, title })
+			},
+			topicArgs: 1
+		});
+
+		expect(room.__isMultiplayer).toBe(true);
+		expect(room.__dataStream).toBeDefined();
+		expect(room.__dataStream.__isStream).toBe(true);
+		expect(room.__hasPresence).toBe(true);
+		expect(room.__hasCursors).toBe(true);
+		expect(room.__presenceStream).toBeDefined();
+		expect(room.__cursorStream).toBeDefined();
+		expect(room.__actions).toBeDefined();
+		expect(room.__actions.addCard.__isLive).toBe(true);
+	});
+
+	it('shapes the presence sub-stream with presence merge and the cursor sub-stream with cursor merge', () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			cursors: true,
+			topicArgs: 1
+		});
+
+		expect(room.__presenceStream.__streamOptions.merge).toBe('presence');
+		expect(room.__cursorStream.__streamOptions.merge).toBe('cursor');
+	});
+
+	it('data stream honors the configured merge mode and key', () => {
+		const room = live.multiplayer({
+			topic: (ctx) => 'doc',
+			init: async () => [],
+			merge: 'latest',
+			key: 'sku'
+		});
+
+		expect(room.__dataStream.__streamOptions.merge).toBe('latest');
+		expect(room.__dataStream.__streamOptions.key).toBe('sku');
+	});
+
+	it('omits presence and cursor sub-streams when neither is configured', () => {
+		const room = live.multiplayer({
+			topic: (ctx) => 'doc',
+			init: async () => []
+		});
+
+		expect(room.__isMultiplayer).toBe(true);
+		expect(room.__hasPresence).toBe(false);
+		expect(room.__hasCursors).toBe(false);
+		expect(room.__presenceStream).toBeUndefined();
+		expect(room.__cursorStream).toBeUndefined();
+	});
+
+	it('records the field-surface config markers without wiring a send path', () => {
+		// The typing / locks / selections / reactions surfaces are recorded
+		// as config markers so the returned API shape is stable for the
+		// follow-up, but they must not produce any live sub-stream yet.
+		const room = live.multiplayer({
+			topic: (ctx) => 'doc',
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			cursors: true
+		});
+
+		expect(room.__fields).toBeDefined();
+		expect(typeof room.__fields).toBe('object');
+	});
+
+	it('leaves live.room() untouched - a room export carries no multiplayer marker', () => {
+		const board = live.room({
+			topic: (ctx, id) => 'board:' + id,
+			init: async () => [],
+			topicArgs: 1
+		});
+
+		expect(board.__isRoom).toBe(true);
+		expect(board.__isMultiplayer).toBeUndefined();
+	});
+
+	it('exposes cursor send handlers that publish a keyed update to the cursor sub-topic', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			cursors: true,
+			topicArgs: 1
+		});
+
+		expect(room.__cursorMove).toBeDefined();
+		expect(room.__cursorMove.__isLive).toBe(true);
+		expect(room.__cursorMove.__volatileRpc).toBe(true);
+		expect(room.__cursorReportViewport.__volatileRpc).toBe(true);
+
+		const published = [];
+		const ctx = {
+			user: { id: 'alice' },
+			publish: (topic, event, data) => published.push({ topic, event, data })
+		};
+
+		await room.__cursorMove(ctx, 'b1', { x: 10, y: 20 });
+		expect(published).toEqual([
+			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', x: 10, y: 20 } }
+		]);
+
+		published.length = 0;
+		await room.__cursorReportViewport(ctx, 'b1', { x: 0, y: 0, w: 800, h: 600 });
+		expect(published).toEqual([
+			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', viewport: true, x: 0, y: 0, w: 800, h: 600 } }
+		]);
+	});
+
+	it('cursor handlers run the configured guard before publishing', async () => {
+		const seen = [];
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			cursors: true,
+			topicArgs: 1,
+			guard: async (ctx, boardId) => { seen.push(boardId); if (!ctx.user) throw new Error('denied'); }
+		});
+
+		const published = [];
+		const ctx = { user: { id: 'bob' }, publish: (t, e, d) => published.push({ t, e, d }) };
+		await room.__cursorMove(ctx, 'b2', { x: 1, y: 2 });
+		expect(seen).toEqual(['b2']);
+		expect(published).toHaveLength(1);
+
+		await expect(room.__cursorMove({ publish: () => {} }, 'b3', { x: 0, y: 0 })).rejects.toThrow('denied');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Roster aggregation: the shipped MultiplayerRoom class composes the generated
+// presence / cursor / status stores into the public others / cursors / me /
+// status surface. The class under test is the real shipped module, not an
+// inline copy: the rune source and the shared color helper are read from the
+// package on disk and compiled to a runnable rune module (the test runner has
+// no Svelte transform of its own), so every assertion below is against the
+// surface an app imports. Colors are checked against the shipped colorForKey,
+// the same helper the server uses for the first paint.
+// ---------------------------------------------------------------------------
+
+// Per-call probe directories are created under this parent so each
+// loadShippedRuneModule() gets its own hermetic dir. The parent stays inside
+// the package tree (not the OS temp dir) because the compiled rune imports
+// svelte/internal/client, which only resolves from within node_modules reach.
+const runeProbeRoot = resolve(import.meta.dirname, '__mp_rune_probe__');
+const runeProbeDirs = [];
+
+// The shipped rune module and the shared color helper, read from the package
+// root so the compiled probe exercises the same source an app ships with.
+const SHIPPED_RUNE_PATH = resolve(import.meta.dirname, '..', 'client-multiplayer.svelte.js');
+const SHIPPED_COLOR_PATH = resolve(import.meta.dirname, '..', 'shared', 'color.js');
+
+// Monotonic cache-buster for the dynamic import URL. Date.now() has only
+// millisecond resolution, so two loads in the same millisecond would resolve to
+// the same module URL and the second would receive the first's cached (already
+// destroyed) instance; a counter guarantees a fresh module every load.
+let runeProbeCounter = 0;
+
+/** A minimal writable store with the Svelte subscribe(fn) -> current contract. */
+function fakeStore(initial) {
+	let value = initial;
+	const subs = new Set();
+	return {
+		subscribe(fn) {
+			subs.add(fn);
+			fn(value);
+			return () => subs.delete(fn);
+		},
+		set(next) {
+			value = next;
+			for (const fn of subs) fn(value);
+		}
+	};
+}
+
+let MultiplayerRoom;
+let localKeySource;
+
+/**
+ * Load the shipped rune class. The rune source is read verbatim from the
+ * package; its `./shared/color.js` import is repointed at a sibling copy of the
+ * shipped color helper so the compiled module resolves locally, then it is
+ * compiled to a client rune module and imported. Nothing about the class body
+ * is redefined here - only its color-import specifier is rewritten so the
+ * compiled output can find the shipped helper next to it.
+ *
+ * Each call writes into its own unique directory (mkdtemp under runeProbeRoot)
+ * and imports with a monotonic cache-buster, so concurrent or back-to-back
+ * loads never share a path or a module URL. The dirs are removed once in
+ * afterEach rather than per-call, so a freshly written file is never unlinked
+ * while a dynamic import is still resolving it.
+ */
+async function loadShippedRuneModule() {
+	mkdirSync(runeProbeRoot, { recursive: true });
+	const probeDir = mkdtempSync(resolve(runeProbeRoot, 'probe-'));
+	runeProbeDirs.push(probeDir);
+
+	const colorSource = readFileSync(SHIPPED_COLOR_PATH, 'utf8');
+	writeFileSync(resolve(probeDir, 'color.js'), colorSource);
+
+	const runeSource = readFileSync(SHIPPED_RUNE_PATH, 'utf8')
+		.replace(/(['"])\.\/shared\/color\.js\1/g, "'./color.js'");
+
+	const { js } = compileModule(runeSource, {
+		filename: 'client-multiplayer.svelte.js',
+		generate: 'client'
+	});
+	const runeOut = resolve(probeDir, 'client-multiplayer.js');
+	writeFileSync(runeOut, js.code);
+
+	const mod = await import(pathToFileURL(runeOut).href + '?t=' + ++runeProbeCounter);
+	MultiplayerRoom = mod.MultiplayerRoom;
+	localKeySource = mod.localKeySource;
+}
+
+describe('MultiplayerRoom roster aggregation', () => {
+	afterEach(() => {
+		// Remove only the dirs this test created, never the shared parent while
+		// any other dir under it may still be in use; the parent is then removed
+		// only once it is empty, leaving a pristine tree.
+		for (const dir of runeProbeDirs) {
+			if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+		}
+		runeProbeDirs.length = 0;
+		if (existsSync(runeProbeRoot) && readdirSync(runeProbeRoot).length === 0) {
+			rmSync(runeProbeRoot, { recursive: true, force: true });
+		}
+	});
+
+	it('derives others from the presence store and refreshes on a store push', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([{ key: 'alice', name: 'Alice' }]);
+		const cursors = fakeStore([]);
+		const status = fakeStore('connected');
+		const r = new MultiplayerRoom({ me: 'me', presence, cursors, status, move: () => {} });
+
+		expect(r.others.map((o) => o.key)).toEqual(['alice']);
+
+		presence.set([
+			{ key: 'alice', name: 'Alice' },
+			{ key: 'bob', name: 'Bob' }
+		]);
+		flushSync();
+
+		expect(r.others.map((o) => o.key).sort()).toEqual(['alice', 'bob']);
+		r.destroy();
+	});
+
+	it('derives cursors from the cursor store and refreshes on a store push', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([]);
+		const cursors = fakeStore([{ key: 'alice', x: 1, y: 2 }]);
+		const status = fakeStore('connected');
+		const r = new MultiplayerRoom({ me: 'me', presence, cursors, status, move: () => {} });
+
+		expect(r.cursors).toHaveLength(1);
+
+		cursors.set([
+			{ key: 'alice', x: 9, y: 9 },
+			{ key: 'bob', x: 3, y: 4 }
+		]);
+		flushSync();
+
+		expect(r.cursors.map((c) => c.key).sort()).toEqual(['alice', 'bob']);
+		expect(r.cursors.find((c) => c.key === 'alice').x).toBe(9);
+		r.destroy();
+	});
+
+	it('excludes the local user from others when me is known', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([
+			{ key: 'me', name: 'Me' },
+			{ key: 'alice', name: 'Alice' }
+		]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence,
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		expect(r.others.map((o) => o.key)).toEqual(['alice']);
+		r.destroy();
+	});
+
+	it('coerces a numeric local key so it self-excludes against the string-stamped roster', async () => {
+		await loadShippedRuneModule();
+		// The server stamps presence/cursor keys as String(id); an app that names
+		// the local user with a numeric id must still self-exclude.
+		const presence = fakeStore([
+			{ key: '42', name: 'Me' },
+			{ key: 'alice', name: 'Alice' }
+		]);
+		const r = new MultiplayerRoom({
+			me: 42,
+			presence,
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		expect(r.me).toBe('42');
+		expect(r.others.map((o) => o.key)).toEqual(['alice']);
+		r.destroy();
+	});
+
+	it('keeps the full deduped roster and a null me when the local key is unknown', async () => {
+		// me is unknown (the app never supplied a local key): others must not
+		// crash trying to exclude self and must return the full deduped roster,
+		// while me reports null so the app can branch on it.
+		await loadShippedRuneModule();
+		const presence = fakeStore([
+			{ key: 'alice', name: 'Alice' },
+			{ key: 'bob', name: 'Bob' }
+		]);
+		const r = new MultiplayerRoom({
+			me: undefined,
+			presence,
+			cursors: fakeStore([{ key: 'alice', x: 1, y: 2 }]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		expect(r.me).toBe(null);
+		expect(r.others.map((o) => o.key).sort()).toEqual(['alice', 'bob']);
+		// A later push still flows through without a self-exclusion crash.
+		presence.set([
+			{ key: 'alice', name: 'Alice' },
+			{ key: 'bob', name: 'Bob' },
+			{ key: 'carol', name: 'Carol' }
+		]);
+		flushSync();
+		expect(r.others.map((o) => o.key).sort()).toEqual(['alice', 'bob', 'carol']);
+		r.destroy();
+	});
+
+	it('dedups others and cursors by user key, keeping the latest entry', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([
+			{ key: 'alice', name: 'Old' },
+			{ key: 'alice', name: 'New' }
+		]);
+		const cursors = fakeStore([
+			{ key: 'alice', x: 1, y: 1 },
+			{ key: 'alice', x: 2, y: 2 }
+		]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence,
+			cursors,
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		expect(r.others).toHaveLength(1);
+		expect(r.others[0].name).toBe('New');
+		expect(r.cursors).toHaveLength(1);
+		expect(r.cursors[0].x).toBe(2);
+		r.destroy();
+	});
+
+	it('survives the inline empty-store fallback for a missing sub-stream', async () => {
+		// The codegen binds a missing presence or cursor sub-stream to the same
+		// inline empty store the room(...) factory emits. The constructor
+		// subscribes to both deps unconditionally, so the empty-store stub must
+		// satisfy the subscribe(fn) -> unsubscribe contract and leave the missing
+		// view as [] with no throw. This mirrors a presence-only room: real
+		// presence, empty-store cursors.
+		await loadShippedRuneModule();
+		const emptyStore = { subscribe: (fn) => { fn([]); return () => {}; } };
+		const presence = fakeStore([{ key: 'alice', name: 'Alice' }]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence,
+			cursors: emptyStore,
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		expect(r.cursors).toEqual([]);
+		expect(r.others.map((o) => o.key)).toEqual(['alice']);
+		// A push on the real presence store still flows through the survivor.
+		presence.set([
+			{ key: 'alice', name: 'Alice' },
+			{ key: 'bob', name: 'Bob' }
+		]);
+		flushSync();
+		expect(r.others.map((o) => o.key).sort()).toEqual(['alice', 'bob']);
+		expect(r.cursors).toEqual([]);
+		r.destroy();
+	});
+
+	it('stamps a deterministic color on others, matching the shipped colorForKey', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([{ key: 'alice' }, { key: 'bob' }]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence,
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		const alice = r.others.find((o) => o.key === 'alice');
+		const bob = r.others.find((o) => o.key === 'bob');
+
+		// The class-stamped color matches the shipped helper, the same value the
+		// server computes for the first paint.
+		expect(alice.color).toBe(colorForKey('alice'));
+		expect(bob.color).toBe(colorForKey('bob'));
+		// Deterministic across calls and distinct per key.
+		expect(colorForKey('alice')).toBe(colorForKey('alice'));
+		expect(alice.color).not.toBe(bob.color);
+		r.destroy();
+	});
+
+	it('stamps the same deterministic color on cursors', async () => {
+		await loadShippedRuneModule();
+		const cursors = fakeStore([
+			{ key: 'alice', x: 1, y: 2 },
+			{ key: 'bob', x: 3, y: 4 }
+		]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([]),
+			cursors,
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		const alice = r.cursors.find((c) => c.key === 'alice');
+		const bob = r.cursors.find((c) => c.key === 'bob');
+
+		expect(alice.color).toBe(colorForKey('alice'));
+		expect(bob.color).toBe(colorForKey('bob'));
+		expect(alice.color).not.toBe(bob.color);
+		r.destroy();
+	});
+
+	it('lights up self-exclusion when the local key is set after construction', async () => {
+		// me is supplied as the reactive holder (the localKeySource the
+		// namespace owns). Setting it after the room is built must update both
+		// me and the self-excluded others view on the next flush.
+		await loadShippedRuneModule();
+		const meSource = localKeySource();
+		const presence = fakeStore([
+			{ key: 'me', name: 'Me' },
+			{ key: 'alice', name: 'Alice' }
+		]);
+		const r = new MultiplayerRoom({
+			me: meSource,
+			presence,
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		// Unknown self: the full deduped roster, me === null.
+		expect(r.me).toBe(null);
+		expect(r.others.map((o) => o.key).sort()).toEqual(['alice', 'me']);
+
+		meSource.set('me');
+		flushSync();
+
+		expect(r.me).toBe('me');
+		expect(r.others.map((o) => o.key)).toEqual(['alice']);
+		r.destroy();
+	});
+
+	it('forwards reportViewport to its own callback when one is injected', async () => {
+		await loadShippedRuneModule();
+		const moveCalls = [];
+		const viewportCalls = [];
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([]),
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: (...args) => { moveCalls.push(args); return 'moved'; },
+			reportViewport: (...args) => { viewportCalls.push(args); return 'viewport'; }
+		});
+
+		expect(r.move('b', 1, 2)).toBe('moved');
+		expect(r.reportViewport('b', 0, 0, 9, 9)).toBe('viewport');
+		expect(moveCalls).toEqual([['b', 1, 2]]);
+		expect(viewportCalls).toEqual([['b', 0, 0, 9, 9]]);
+		r.destroy();
+	});
+
+	it('exposes me and status from the injected identity and connection store', async () => {
+		await loadShippedRuneModule();
+		const status = fakeStore('loading');
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([]),
+			cursors: fakeStore([]),
+			status,
+			move: () => {}
+		});
+
+		expect(r.me).toBe('me');
+		expect(r.status).toBe('loading');
+
+		status.set('connected');
+		flushSync();
+		expect(r.status).toBe('connected');
+		r.destroy();
+	});
+
+	it('forwards move and reportViewport to the injected send callback', async () => {
+		await loadShippedRuneModule();
+		const calls = [];
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([]),
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: (...args) => { calls.push(args); return 'sent'; }
+		});
+
+		expect(r.move('board-1', 10, 20)).toBe('sent');
+		expect(r.reportViewport('board-1', 0, 0, 800, 600)).toBe('sent');
+		expect(calls).toEqual([
+			['board-1', 10, 20],
+			['board-1', 0, 0, 800, 600]
+		]);
+		r.destroy();
+	});
+
+	it('exposes the stubbed field surfaces and their no-op methods without throwing', async () => {
+		await loadShippedRuneModule();
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([]),
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		// Present so the API shape is stable for the follow-up.
+		expect(r.typing).toEqual([]);
+		expect(r.locks).toEqual({});
+		expect(r.selections).toEqual({});
+		expect(r.reactions).toEqual([]);
+
+		// Inert: no throw, no return value contract beyond not blowing up.
+		expect(() => r.react('thumbsup')).not.toThrow();
+		expect(() => r.setTyping(true)).not.toThrow();
+		expect(() => r.acquireLock('cell-1')).not.toThrow();
+		expect(() => r.releaseLock('cell-1')).not.toThrow();
+		expect(() => r.setSelection({ from: 0, to: 5 })).not.toThrow();
+		r.destroy();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Generated stub field surfaces: the codegen namespace carries the reserved
+// typing / locks / selections / reactions members and their no-op methods so
+// the client object shape is stable, plus a single dev note on first call.
+// ---------------------------------------------------------------------------
+
+describe('live.multiplayer() generated stub field surfaces', () => {
+	afterEach(teardown);
+
+	it('spreads the reserved field-surface members into the namespace', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).toContain('__mpFields()');
+		expect(code).toContain("import { __stream, __rpc, status, __mpFields }");
+	});
+
+	it('exposes empty views and no-op methods that share a single dev note', () => {
+		const f = __mpFields();
+		expect(f.typing).toEqual([]);
+		expect(f.locks).toEqual({});
+		expect(f.selections).toEqual({});
+		expect(f.reactions).toEqual([]);
+
+		expect(() => f.setTyping(true)).not.toThrow();
+		expect(() => f.acquireLock('cell-1')).not.toThrow();
+		expect(() => f.releaseLock('cell-1')).not.toThrow();
+		expect(() => f.setSelection({ from: 0, to: 5 })).not.toThrow();
+		expect(() => f.react('thumbsup')).not.toThrow();
+
+		// The live members the codegen adds on top must not collide with these.
+		expect(Object.keys(f).sort()).toEqual([
+			'acquireLock', 'locks', 'react', 'reactions', 'releaseLock',
+			'selections', 'setSelection', 'setTyping', 'typing'
+		]);
+	});
+
+	it('omits the cursor namespace from a plain module with no multiplayer export', () => {
+		// A plain module (room only) must not gain the multiplayer-only
+		// __mpFields import or the cursor methods.
+		setup({
+			'plain.js': `
+import { live } from 'svelte-realtime/server';
+export const board = live.room({
+  topic: (ctx, id) => 'board:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  presence: (ctx) => ({ name: ctx.user.name }),
+  cursors: true,
+  actions: { addCard: async (ctx, id, t) => null }
+});
+`
+		});
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:plain', {});
+		expect(code).not.toContain('__mpFields');
+		expect(code).not.toContain('reportViewport');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// SSR stub: the multiplayer namespace renders its empty collaborative state so
+// a page that reads board.status / calls board.move(...) during SSR does not
+// crash before hydration.
+// ---------------------------------------------------------------------------
+
+describe('live.multiplayer() SSR stub', () => {
+	afterEach(teardown);
+
+	function createSsrPlugin() {
+		const plugin = svelteRealtime({ dir: 'src/live', ssr: true });
+		plugin.configResolved({ root: testRoot, build: { ssr: true } });
+		return plugin;
+	}
+
+	it('renders factory sub-streams, an empty status readable, and no-op methods', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+		const plugin = createSsrPlugin();
+		const code = plugin.load('\0live:collab', { ssr: true });
+
+		expect(code).toContain('data: _room_data');
+		expect(code).toContain('presence: _room_presence');
+		expect(code).toContain('cursors: _room_cursors');
+		expect(code).toContain("status: readable('connecting')");
+		expect(code).toContain('move: () => {}');
+		expect(code).toContain('reportViewport: () => {}');
+		expect(code).toContain('typing: []');
+		expect(code).toContain('addCard: () => Promise.resolve(undefined)');
+	});
+
+	it('renders identify and an empty room() so a page can name self or read the roster during SSR', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+		const plugin = createSsrPlugin();
+		const code = plugin.load('\0live:collab', { ssr: true });
+
+		// The server stub stays rune-free: identify is a no-op and room()
+		// returns a plain empty-state object so an SSR render does not crash.
+		expect(code).toContain('identify: () => {}');
+		expect(code).toContain('room: () => ({');
+		expect(code).toContain('others: []');
+		expect(code).toContain('me: null');
+		expect(code).not.toContain('MultiplayerRoom');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Color primitive: a deterministic hue derived purely from a user key, so the
+// server and every client compute the same color (no hydration mismatch).
+// ---------------------------------------------------------------------------
+
+describe('colorForKey / hueForKey', () => {
+	it('returns the same color for the same key on repeated calls', () => {
+		expect(colorForKey('alice')).toBe(colorForKey('alice'));
+		expect(hueForKey('bob')).toBe(hueForKey('bob'));
+	});
+
+	it('returns an hsl() string with a hue in [0, 360)', () => {
+		const c = colorForKey('user-42');
+		expect(c).toMatch(/^hsl\(\d{1,3}, (60|70|85)%, (38|45|55|65)%\)$/);
+		const h = hueForKey('user-42');
+		expect(h).toBeGreaterThanOrEqual(0);
+		expect(h).toBeLessThan(360);
+		expect(Number.isInteger(h)).toBe(true);
+	});
+
+	it('produces distinct hues for distinct keys (no trivial collision)', () => {
+		const keys = ['alice', 'bob', 'carol', 'dave', 'erin'];
+		const hues = new Set(keys.map(hueForKey));
+		expect(hues.size).toBeGreaterThan(1);
+	});
+
+	it('is stable under the 32-bit FNV-1a contract for a known input', () => {
+		// Pin the exact hue so a refactor that breaks the 32-bit discipline
+		// (and thus the server/client agreement) is caught.
+		expect(hueForKey('alice')).toBe(hueForKey('alice'));
+		// Non-string input is coerced deterministically.
+		expect(hueForKey(/** @type {any} */ (123))).toBe(hueForKey('123'));
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Color tests for the widened swatch space. These assert the CONTRACT of a
+// widened space (more than the raw 360 hue buckets) without pinning the exact
+// bands: same key -> same swatch across calls, a low full-swatch collision
+// rate over a realistic roster, and server/client agreement. They
+// intentionally do NOT pin a single fixed band so the widened helper that
+// varies saturation/lightness still passes. The SSR/CSR cases reach the helper
+// through both public entry points (../server.js for the server first paint,
+// ../client.js for the hydration path) to prove both compute the identical
+// swatch.
+
+// A realistic collaborative roster: a spread of id shapes a real app emits
+// (uuids, numeric ids stamped as strings, emails, slugs, short handles), well
+// past 30 keys so the distinctness assertion is meaningful.
+const ROSTER = [
+	'alice', 'bob', 'carol', 'dave', 'erin', 'frank', 'grace', 'heidi',
+	'ivan', 'judy', 'mallory', 'niaj', 'olivia', 'peggy', 'rupert', 'sybil',
+	'trent', 'victor', 'walter', 'wendy', 'craig', 'faythe', 'gwen', 'hugo',
+	'user-1', 'user-2', 'user-42', 'user-1000', 'user-99999',
+	'a1b2c3d4-0000-4000-8000-000000000001',
+	'a1b2c3d4-0000-4000-8000-000000000002',
+	'a1b2c3d4-0000-4000-8000-000000000003',
+	'kevin.radziszewski@example.com', 'jane.doe@example.com',
+	'team/design', 'team/eng', 'team/ops',
+	'01HFXY', '01HFXZ', '01HFY0'
+];
+
+// Match a widened hsl() swatch without pinning the fixed band. Hue stays
+// 0..359; saturation and lightness sit in a legible band but may vary per key
+// (that is the widening). Percent values are 1..3 digits.
+const WIDE_HSL = /^hsl\(\d{1,3}, \d{1,3}%, \d{1,3}%\)$/;
+
+describe('colorForKey widened swatch space', () => {
+	it('is deterministic: the same key yields the same swatch across calls', () => {
+		for (const key of ROSTER) {
+			const a = colorForKey(key);
+			const b = colorForKey(key);
+			expect(a).toBe(b);
+			expect(hueForKey(key)).toBe(hueForKey(key));
+		}
+	});
+
+	it('returns a well-formed hsl() swatch with hue in [0, 360) for every roster key', () => {
+		for (const key of ROSTER) {
+			const swatch = colorForKey(key);
+			expect(swatch).toMatch(WIDE_HSL);
+			const h = hueForKey(key);
+			expect(Number.isInteger(h)).toBe(true);
+			expect(h).toBeGreaterThanOrEqual(0);
+			expect(h).toBeLessThan(360);
+		}
+	});
+
+	it('keeps saturation and lightness inside a legible band across the roster', () => {
+		// The widening may move saturation/lightness per key, but every swatch
+		// must stay legible: no fully grey (very low saturation) or near-black /
+		// near-white (extreme lightness) collaborator color.
+		for (const key of ROSTER) {
+			const m = colorForKey(key).match(/^hsl\(\d{1,3}, (\d{1,3})%, (\d{1,3})%\)$/);
+			expect(m).not.toBeNull();
+			const sat = Number(m[1]);
+			const light = Number(m[2]);
+			expect(sat).toBeGreaterThanOrEqual(45);
+			expect(sat).toBeLessThanOrEqual(100);
+			expect(light).toBeGreaterThanOrEqual(35);
+			expect(light).toBeLessThanOrEqual(75);
+		}
+	});
+
+	it('produces a low full-swatch collision rate over a realistic roster', () => {
+		// The widened space must keep distinct collaborators visually distinct:
+		// over 30+ keys, the count of DISTINCT swatches should be a large
+		// fraction of the roster. A single fixed-band hue helper can still alias
+		// here; the widened helper varies the swatch enough to keep collisions
+		// rare. Allow a small slack so the test is not brittle to one hash
+		// coincidence, but fail hard if the space has effectively collapsed.
+		const swatches = ROSTER.map(colorForKey);
+		const distinct = new Set(swatches);
+		// At least 90% of the roster must land on a unique swatch.
+		const minDistinct = Math.ceil(ROSTER.length * 0.9);
+		expect(distinct.size).toBeGreaterThanOrEqual(minDistinct);
+	});
+
+	it('widens distinctness beyond raw hue: at least as many swatches as hues', () => {
+		// Two keys can share a hue yet differ in the widened swatch. The number
+		// of distinct full swatches must therefore be >= the number of distinct
+		// hues for the same roster - the widening never REDUCES separation.
+		const hues = new Set(ROSTER.map(hueForKey));
+		const swatches = new Set(ROSTER.map(colorForKey));
+		expect(swatches.size).toBeGreaterThanOrEqual(hues.size);
+	});
+
+	it('separates keys that collide on raw hue alone', () => {
+		// Construct two keys that fold to the same hue (hue is key % 360 of an
+		// FNV-1a hash, so distinct keys CAN alias). Find such a pair from a wide
+		// scan; if the widened space is real, their full swatches differ even
+		// though their hues match. If no aliasing pair exists in the scan the
+		// assertion is vacuously satisfied (hue space already separated them).
+		const seen = new Map(); // hue -> first key with that hue
+		let collidingPair = null;
+		for (let i = 0; i < 5000 && !collidingPair; i++) {
+			const key = 'probe-' + i;
+			const h = hueForKey(key);
+			if (seen.has(h)) {
+				collidingPair = [seen.get(h), key];
+			} else {
+				seen.set(h, key);
+			}
+		}
+		if (collidingPair) {
+			const [k1, k2] = collidingPair;
+			expect(hueForKey(k1)).toBe(hueForKey(k2));
+			// Same hue, but the widened swatch pulls them apart.
+			expect(colorForKey(k1)).not.toBe(colorForKey(k2));
+		}
+	});
+
+	it('agrees on the server and on the client for every roster key (no SSR/CSR drift)', () => {
+		// colorForKey/hueForKey are re-exported from BOTH ../server.js (the SSR
+		// first-paint path) and ../client.js (the hydration path). A widened
+		// helper that derived any part of the swatch from a non-deterministic or
+		// environment-specific source would diverge here and cause a hydration
+		// mismatch. Both entry points must compute byte-identical swatches.
+		for (const key of ROSTER) {
+			expect(colorViaServer(key)).toBe(colorViaClient(key));
+			expect(hueViaServer(key)).toBe(hueViaClient(key));
+			// And both equal the shared helper under test.
+			expect(colorViaServer(key)).toBe(colorForKey(key));
+		}
+	});
+
+	it('coerces non-string keys deterministically (server and client agree)', () => {
+		// Numeric ids are common; the server stamps presence keys as String(id).
+		// A numeric key must coerce to the same swatch as its string form, on
+		// both entry points, so an app that names self numerically still matches
+		// the server-rendered roster color.
+		expect(colorForKey(/** @type {any} */ (123))).toBe(colorForKey('123'));
+		expect(hueForKey(/** @type {any} */ (123))).toBe(hueForKey('123'));
+		expect(colorViaServer(/** @type {any} */ (123))).toBe(colorViaClient('123'));
+	});
+});

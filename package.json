@@ -1,6 +1,6 @@
 {
   "name": "svelte-realtime",
-  "version": "0.6.0-next.2",
+  "version": "0.6.0-next.3",
   "publishConfig": {
     "tag": "next"
   },
@@ -30,6 +30,10 @@
       "types": "./client.d.ts",
       "default": "./client.js"
     },
+    "./multiplayer": {
+      "types": "./client-multiplayer.d.ts",
+      "default": "./client-multiplayer.svelte.js"
+    },
     "./vite": {
       "types": "./vite.d.ts",
       "default": "./vite.js"
@@ -56,6 +60,8 @@
     "server.d.ts",
     "client.js",
     "client.d.ts",
+    "client-multiplayer.svelte.js",
+    "client-multiplayer.d.ts",
     "vite.js",
     "vite.d.ts",
     "test.js",

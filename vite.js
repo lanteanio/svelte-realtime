@@ -15,6 +15,12 @@ const UPLOAD_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.upload\s*\(/g;
 const DERIVED_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.derived\s*\(/g;
 const DYNAMIC_DERIVED_RE = /export\s+const\s+(\w+)\s*=\s*live\.derived\s*\(\s*(?:\([^)]*\)|[a-zA-Z_$][\w$]*)\s*=>/g;
 const ROOM_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.room\s*\(/g;
+// `live.multiplayer(...)` is a room export with a collaborative client surface.
+// At runtime it carries `__isRoom` plus the same __data/__presence/__cursors
+// sub-streams, so its registry registration is identical to a room; the client
+// stub adds the aggregated `status` view and the `move`/`reportViewport`
+// cursor methods on top of the room namespace.
+const MULTIPLAYER_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.multiplayer\s*\(/g;
 const WEBHOOK_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.webhook\s*\(/g;
 const CHANNEL_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.channel\s*\(/g;
 const DYNAMIC_CHANNEL_RE = /export\s+const\s+(\w+)\s*=\s*live\.channel\s*\(\s*(?:\([^)]*\)|[a-zA-Z_$][\w$]*)\s*=>/g;
@@ -989,12 +995,25 @@ function _generateSsrStubs(filePath, modulePath) {
 		rooms.push({ name, info: _extractRoomInfo(source, name) });
 	}
 
+	// Collect live.multiplayer() exports - the SSR stub mirrors the room
+	// namespace (factory-shaped sub-streams, no-op actions) plus the empty
+	// collaborative views and no-op cursor methods, so a page that renders
+	// `board.status` / `board.move(...)` during SSR does not crash.
+	/** @type {Array<{ name: string, info: ReturnType<typeof _extractMultiplayerInfo> }>} */
+	const multiplayers = [];
+	MULTIPLAYER_EXPORT_RE.lastIndex = 0;
+	while ((match = MULTIPLAYER_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		multiplayers.push({ name, info: _extractMultiplayerInfo(source, name) });
+	}
+
 	// Escape paths for safe embedding in generated code
 	const safePath = JSON.stringify(normalized);
 	const safeModulePath = (name) => JSON.stringify(modulePath + '/' + name);
 
-	// If no store-like / room / windowed-aggregate exports, simple re-export
-	if (storeNames.length === 0 && rooms.length === 0 && windowedAggregates.length === 0) {
+	// If no store-like / room / multiplayer / windowed-aggregate exports, simple re-export
+	if (storeNames.length === 0 && rooms.length === 0 && multiplayers.length === 0 && windowedAggregates.length === 0) {
 		return `export * from ${safePath};\n`;
 	}
 
@@ -1059,6 +1078,49 @@ function _generateSsrStubs(filePath, modulePath) {
 			subFactories.push(`${action}: () => Promise.resolve(undefined)`);
 		}
 		lines.push(`const _${name} = { ${subFactories.join(', ')} };`);
+		lines.push(`export { _${name} as ${name} };`);
+	}
+
+	for (const { name, info } of multiplayers) {
+		// Multiplayer namespace: the same factory-shaped sub-streams a room
+		// uses, plus an empty connection-status readable and no-op cursor
+		// methods. The client factory replaces all of this on hydration.
+		lines.push(`const _${name}_data = (...args) => { const s = readable(undefined); s.hydrate = (d) => readable(d); return s; };`);
+		lines.push(`_${name}_data.load = (platform, options) => __directCall(${JSON.stringify(modulePath + '/' + name + '/__data')}, options?.args || [], platform, options);`);
+		const mpFactories = [`data: _${name}_data`];
+		if (info.hasPresence) {
+			lines.push(`const _${name}_presence = (...args) => readable(undefined);`);
+			mpFactories.push(`presence: _${name}_presence`);
+		}
+		if (info.hasCursors) {
+			lines.push(`const _${name}_cursors = (...args) => readable(undefined);`);
+			mpFactories.push(`cursors: _${name}_cursors`);
+		}
+		mpFactories.push(`status: readable('connecting')`);
+		mpFactories.push(`move: () => {}`);
+		mpFactories.push(`reportViewport: () => {}`);
+		// Reserved field-surface members rendered as their empty SSR state.
+		mpFactories.push(`typing: []`);
+		mpFactories.push(`locks: {}`);
+		mpFactories.push(`selections: {}`);
+		mpFactories.push(`reactions: []`);
+		mpFactories.push(`setTyping: () => {}`);
+		mpFactories.push(`acquireLock: () => {}`);
+		mpFactories.push(`releaseLock: () => {}`);
+		mpFactories.push(`setSelection: () => {}`);
+		mpFactories.push(`react: () => {}`);
+		// identify(...) and room(...) render their empty collaborative state on
+		// the server so a page that names self or reads the aggregated roster
+		// during SSR does not crash before hydration. No rune import on the
+		// server: room() returns a plain object, not a MultiplayerRoom.
+		if (info.hasPresence || info.hasCursors) {
+			mpFactories.push(`identify: () => {}`);
+			mpFactories.push(`room: () => ({ others: [], cursors: [], me: null, status: 'connecting', typing: [], locks: {}, selections: {}, reactions: [], move: () => {}, reportViewport: () => {}, setTyping: () => {}, acquireLock: () => {}, releaseLock: () => {}, setSelection: () => {}, react: () => {}, destroy: () => {} })`);
+		}
+		for (const action of info.actions) {
+			mpFactories.push(`${action}: () => Promise.resolve(undefined)`);
+		}
+		lines.push(`const _${name} = { ${mpFactories.join(', ')} };`);
 		lines.push(`export { _${name} as ${name} };`);
 	}
 
@@ -1197,6 +1259,79 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			} else {
 				lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify({ merge: 'set' })});`);
 			}
+		}
+	}
+
+	// Detect live.multiplayer() exports - the room namespace plus the
+	// aggregated connection status and the cursor move / reportViewport
+	// methods. Runs before the room loop and marks the name so the room loop
+	// (which guards on exportedNames) skips it - a single export is never
+	// emitted twice.
+	// Emit the rune-class import at most once per stub even when a module
+	// declares several multiplayer exports, so the generated module never has a
+	// duplicate import declaration.
+	let mpRuntimeImported = false;
+	MULTIPLAYER_EXPORT_RE.lastIndex = 0;
+	while ((match = MULTIPLAYER_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		if (!exportedNames.has(name)) {
+			exportedNames.add(name);
+			imports.add('__stream');
+			imports.add('__rpc');
+			imports.add('status');
+			imports.add('__mpFields');
+			const mpInfo = _extractMultiplayerInfo(source, name);
+			// `others` / `cursors` / `me` aggregation needs the rune-class. It
+			// composes the generated presence / cursor / status sub-streams, so
+			// it is only constructed when a roster surface exists (presence or
+			// cursors). The class lives in a separate rune-aware subpath, not in
+			// svelte-realtime/client, so its import is a standalone line.
+			const hasRoster = mpInfo.hasPresence || mpInfo.hasCursors;
+			if (hasRoster) {
+				if (!mpRuntimeImported) {
+					lines.push(`import { MultiplayerRoom, localKeySource } from 'svelte-realtime/multiplayer';`);
+					mpRuntimeImported = true;
+				}
+				lines.push(`const _${name}_me = localKeySource();`);
+			}
+			const mpLines = [];
+			mpLines.push(`export const ${name} = {`);
+			// Reserved field-surface members (typing / locks / selections /
+			// reactions + their no-op methods). The live members below override
+			// nothing here.
+			mpLines.push(`  ...__mpFields(),`);
+			mpLines.push(`  data: __stream(${JSON.stringify(modulePath + '/' + name + '/__data')}, ${JSON.stringify(mpInfo.dataOpts)}, true),`);
+			if (mpInfo.hasPresence) {
+				mpLines.push(`  presence: __stream(${JSON.stringify(modulePath + '/' + name + '/__presence')}, ${JSON.stringify({ merge: 'presence' })}, true),`);
+			}
+			if (mpInfo.hasCursors) {
+				mpLines.push(`  cursors: __stream(${JSON.stringify(modulePath + '/' + name + '/__cursors')}, ${JSON.stringify({ merge: 'cursor' })}, true),`);
+			}
+			mpLines.push(`  status: status,`);
+			mpLines.push(`  move: __rpc(${JSON.stringify(modulePath + '/' + name + '/__cursor/move')}),`);
+			mpLines.push(`  reportViewport: __rpc(${JSON.stringify(modulePath + '/' + name + '/__cursor/reportViewport')}),`);
+			for (const action of mpInfo.actions) {
+				mpLines.push(`  ${action}: __rpc(${JSON.stringify(modulePath + '/' + name + '/__action/' + action)}),`);
+			}
+			if (hasRoster) {
+				// identify(key) names the local user once; me + self-exclusion
+				// light up. room(...args) builds the aggregated reactive view
+				// over the per-room presence / cursor sub-streams and forwards
+				// the room args to each. The object is fully assigned before
+				// room() can be called, so self-referencing ${name} is safe.
+				// A roster surface may declare presence without cursors (or the
+				// reverse); the missing sub-stream falls back to a store that
+				// pushes an empty list once, so the room always has both stores
+				// to compose without a dangling member reference.
+				const emptyStore = `{ subscribe: (fn) => { fn([]); return () => {}; } }`;
+				const presenceArg = mpInfo.hasPresence ? `${name}.presence(...args)` : emptyStore;
+				const cursorsArg = mpInfo.hasCursors ? `${name}.cursors(...args)` : emptyStore;
+				mpLines.push(`  identify(key) { _${name}_me.set(key); },`);
+				mpLines.push(`  room(...args) { return new MultiplayerRoom({ me: _${name}_me, presence: ${presenceArg}, cursors: ${cursorsArg}, status: status, move: (...a) => ${name}.move(...args, ...a), reportViewport: (...a) => ${name}.reportViewport(...args, ...a) }); },`);
+			}
+			mpLines.push(`};`);
+			lines.push(mpLines.join('\n'));
 		}
 	}
 
@@ -1891,6 +2026,58 @@ function _extractRoomInfo(source, name) {
 }
 
 /**
+ * Extract multiplayer config for client-stub generation. The config is
+ * room-shaped (topic / init / presence / cursors / actions / merge / key), so
+ * the room extractor supplies the data options and the presence / cursor /
+ * action discriminators; the field-surface keys are read separately so a
+ * future client surface can be told which surfaces were declared.
+ * @param {string} source
+ * @param {string} name
+ * @returns {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[], typing: boolean, hasLocks: boolean, reactions: boolean, selections: string | null }}
+ */
+function _extractMultiplayerInfo(source, name) {
+	const startPattern = new RegExp(
+		`export\\s+const\\s+${name}\\s*=\\s*live\\.multiplayer\\s*\\(`
+	);
+	const startMatch = startPattern.exec(source);
+
+	const info = {
+		dataOpts: { merge: 'crud', key: 'id' },
+		hasPresence: false,
+		hasCursors: false,
+		actions: [],
+		typing: false,
+		hasLocks: false,
+		reactions: false,
+		selections: /** @type {string | null} */ (null)
+	};
+	if (!startMatch) return info;
+
+	const afterOpen = source.slice(startMatch.index + startMatch[0].length);
+	const body = _extractBraceContent(afterOpen);
+	if (!body) return info;
+
+	const configKeys = new Set(_extractTopLevelKeys(body));
+	info.hasPresence = configKeys.has('presence');
+	info.hasCursors = configKeys.has('cursors');
+	info.typing = configKeys.has('typing');
+	info.hasLocks = configKeys.has('locks');
+	info.reactions = configKeys.has('reactions');
+	info.selections = _extractTopLevelStringProp(body, 'selections') || null;
+
+	const mergeVal = _extractTopLevelStringProp(body, 'merge');
+	if (mergeVal) info.dataOpts.merge = mergeVal;
+	const keyVal = _extractTopLevelStringProp(body, 'key');
+	if (keyVal) info.dataOpts.key = keyVal;
+	if (info.dataOpts.merge !== 'crud' && keyVal === undefined) delete info.dataOpts.key;
+
+	const actionsBody = _extractTopLevelBraceProp(body, 'actions');
+	if (actionsBody) info.actions = _extractTopLevelKeys(actionsBody);
+
+	return info;
+}
+
+/**
  * Extract content between matching braces { ... } respecting nesting.
  * Input should start at or before the opening brace.
  * @param {string} str
@@ -2052,6 +2239,27 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 				registered.add(name);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 				lines.push(`__registerDerived(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
+			}
+		}
+
+		// Register live.multiplayer() exports - a multiplayer export reuses the
+		// room sub-streams at runtime, so it registers the same
+		// __data/__presence/__cursors paths plus its scoped actions lazily.
+		// Running before the room loop and marking the name means the room loop
+		// (which guards on registered) skips it - never double-registered.
+		MULTIPLAYER_EXPORT_RE.lastIndex = 0;
+		while ((match = MULTIPLAYER_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			if (!/^\w+$/.test(name)) continue;
+			if (!registered.has(name)) {
+				registered.add(name);
+				const importPath = JSON.stringify(normalizedPath);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__data')}, __L(() => import(${importPath}).then(m => m.${name}.__dataStream)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__presence')}, __L(() => import(${importPath}).then(m => m.${name}.__presenceStream)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursors')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorStream)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursor/move')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorMove)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursor/reportViewport')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorReportViewport)), ${JSON.stringify(rel)});`);
+				lines.push(`__registerRoomActions(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}
 		}
 
@@ -2508,6 +2716,23 @@ function _generateTypeDeclarations(liveDir, dir) {
 				} else {
 					exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);
 				}
+			}
+		}
+
+		// Detect live.multiplayer() exports - the room namespace plus the
+		// connection-status view and the cursor methods. Runs before the room
+		// branch and claims the name so the room branch skips it.
+		MULTIPLAYER_EXPORT_RE.lastIndex = 0;
+		while ((match = MULTIPLAYER_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				needsStreamStore = true;
+				const mpInfo = _extractMultiplayerInfo(source, name);
+				const rosterMembers = (mpInfo.hasPresence || mpInfo.hasCursors)
+					? `, identify: (key: string) => void, room: (...args: any[]) => import('svelte-realtime/multiplayer').MultiplayerRoom`
+					: '';
+				exports.push(`  export const ${name}: { data: (...args: any[]) => StreamStore<any>, presence?: (...args: any[]) => StreamStore<any>, cursors?: (...args: any[]) => StreamStore<any>, status: import('svelte/store').Readable<string>, move: (...args: any[]) => void, reportViewport: (...args: any[]) => void${rosterMembers}, [action: string]: any };`);
 			}
 		}
 
@@ -3181,6 +3406,20 @@ async function _loadRegistryDirect(server, liveDir, dir) {
 			for (const [name, fn] of Object.entries(mod)) {
 				if (name === '_guard' && /** @type {any} */ (fn)?.__isGuard) {
 					__registerGuard(rel, fn);
+				} else if (/** @type {any} */ (fn)?.__isMultiplayer) {
+					// A multiplayer export reuses the room sub-streams; register
+					// them, the cursor send handlers, and its scoped actions the
+					// same way a room does.
+					if (fn.__dataStream) __register(rel + '/' + name + '/__data', fn.__dataStream, rel);
+					if (fn.__presenceStream) __register(rel + '/' + name + '/__presence', fn.__presenceStream, rel);
+					if (fn.__cursorStream) __register(rel + '/' + name + '/__cursors', fn.__cursorStream, rel);
+					if (fn.__cursorMove) __register(rel + '/' + name + '/__cursor/move', fn.__cursorMove, rel);
+					if (fn.__cursorReportViewport) __register(rel + '/' + name + '/__cursor/reportViewport', fn.__cursorReportViewport, rel);
+					if (fn.__actions) {
+						for (const [k, v] of Object.entries(fn.__actions)) {
+							__register(rel + '/' + name + '/__action/' + k, v, rel);
+						}
+					}
 				} else if (/** @type {any} */ (fn)?.__isRoom) {
 					if (fn.__dataStream) __register(rel + '/' + name + '/__data', fn.__dataStream, rel);
 					if (fn.__presenceStream) __register(rel + '/' + name + '/__presence', fn.__presenceStream, rel);

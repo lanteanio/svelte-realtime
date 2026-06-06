@@ -723,6 +723,15 @@ export const combineCounts: (...buckets: Array<Record<string, number> | undefine
 export const combineMerge: <T extends object>(...buckets: Array<T | undefined>) => T;
 
 /**
+ * Deterministic `hsl(...)` color for a stable user key. The same key yields
+ * the same color on the server and on every client, so server-rendered markup
+ * and the first client paint agree without a hydration mismatch.
+ */
+export function colorForKey(key: string): string;
+/** Raw deterministic hue (0..359) for a stable user key. */
+export function hueForKey(key: string): number;
+
+/**
  * Maximum number of hop buckets a single sliding window may allocate.
  * Sliding state is `O(bucketCount * per-bucket state)`. Default 1000;
  * override via test setup.
@@ -1886,6 +1895,26 @@ export namespace live {
 	function room(config: RoomConfig): RoomExport;
 
 	/**
+	 * Bundle the collaborative surfaces (live cursors and presence) into one
+	 * declaration whose codegen produces a connection-aware client object.
+	 * Reuses the room sub-stream machinery for the `data` / `presence` /
+	 * `cursors` streams, then adds the `status` connection store and the
+	 * `move` / `reportViewport` cursor methods on the client. The cursor
+	 * methods publish a keyed update to the room's cursor sub-topic, so the
+	 * `cursors` stream reflects every connected client's position.
+	 *
+	 * @example
+	 * ```js
+	 * export const board = live.multiplayer({
+	 *   topic: (ctx, id) => 'board:' + id,
+	 *   presence: (ctx) => ({ id: ctx.user.id, name: ctx.user.name }),
+	 *   cursors: true
+	 * });
+	 * ```
+	 */
+	function multiplayer(config: MultiplayerConfig): MultiplayerExport;
+
+	/**
 	 * Create a webhook-to-stream bridge.
 	 * The returned handler can be used in a SvelteKit +server.js POST endpoint.
 	 *
@@ -2130,6 +2159,56 @@ export interface RoomExport {
 	__presenceStream?: any;
 	__cursorStream?: any;
 	__actions?: Record<string, any>;
+}
+
+/**
+ * Configuration for `live.multiplayer()`. Mirrors `RoomConfig` and adds the
+ * reserved field-surface declarations.
+ */
+export interface MultiplayerConfig {
+	/** Function that computes the room topic from context and args. */
+	topic: (ctx: LiveContext<any>, ...args: any[]) => string;
+	/** Initial data for the room's data stream. Defaults to an empty list. */
+	init?: (ctx: LiveContext<any>, ...args: any[]) => Promise<any>;
+	/** Presence payload for the connecting user. Drives the roster. */
+	presence?: (ctx: LiveContext<any>) => any;
+	/** Enable cursor tracking. Pass `true` or `{ throttle: ms }`. */
+	cursors?: boolean | { throttle?: number };
+	/** Room-scoped RPC actions on the data stream. */
+	actions?: Record<string, (ctx: LiveContext<any>, ...args: any[]) => any>;
+	/** Guard run before data access and actions. */
+	guard?: (ctx: LiveContext<any>, ...args: any[]) => void | Promise<void>;
+	/** Called when a user joins. */
+	onJoin?: (ctx: LiveContext<any>, ...args: any[]) => void | Promise<void>;
+	/** Called when a user leaves. */
+	onLeave?: (ctx: LiveContext<any>, topic: string) => void | Promise<void>;
+	/** Merge strategy for the data stream. @default 'crud' */
+	merge?: string;
+	/** Key field for the data stream. @default 'id' */
+	key?: string;
+	/** Number of room-identifying args the topic function expects (excluding ctx). */
+	topicArgs?: number;
+	/** Reserve a typing indicator surface. Not yet active. */
+	typing?: boolean;
+	/** Reserve advisory single-holder lock surfaces by key. Not yet active. */
+	locks?: string[];
+	/** Reserve an ephemeral reactions surface. Not yet active. */
+	reactions?: boolean;
+	/** Reserve a remote-selection surface. Not yet active. */
+	selections?: 'offset' | 'crdt';
+}
+
+/**
+ * Return type of `live.multiplayer()`. A superset of `RoomExport`.
+ */
+export interface MultiplayerExport extends RoomExport {
+	__isMultiplayer: true;
+	__fields: {
+		typing: boolean;
+		locks: string[] | null;
+		reactions: boolean;
+		selections: 'offset' | 'crdt' | null;
+	};
 }
 
 /**

@@ -3,6 +3,7 @@ import { connect as _connect, on, status, denials, onRequest as _adapterOnReques
 import { writable, readable } from 'svelte/store';
 import { assert } from './shared/assert.js';
 export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
+export { colorForKey, hueForKey } from './shared/color.js';
 import { mergeKeyField, rebuildIndex } from './shared/merge.js';
 import { sanitizeRowData } from './shared/safe-assign.js';
 // Namespace import lets .rune() access fromStore (Svelte 5 only) without
@@ -839,6 +840,45 @@ export function __rpc(path) {
 	};
 
 	return rpcCall;
+}
+
+let _mpStubNoteFired = false;
+
+/**
+ * Build the reserved field-surface members of a generated `live.multiplayer()`
+ * namespace: the `typing` / `locks` / `selections` / `reactions` views (empty)
+ * and the `setTyping` / `acquireLock` / `releaseLock` / `setSelection` / `react`
+ * methods (no-op). These keep the namespace shape stable for the follow-up that
+ * wires the client->server send path; calling a method is a safe no-op and
+ * emits one dev-only note so a render loop does not spam the console.
+ *
+ * Spread into the generated namespace object: the live `data` / `presence` /
+ * `cursors` / `status` / `move` / `reportViewport` members and the room actions
+ * are added by the codegen and override nothing here.
+ *
+ * @returns {Record<string, any>}
+ */
+export function __mpFields() {
+	const note = (method) => {
+		if (_mpStubNoteFired) return;
+		_mpStubNoteFired = true;
+		if (typeof console !== 'undefined' && console.warn) {
+			console.warn(
+				`[svelte-realtime] multiplayer.${method}() is reserved and currently a no-op; the field surface is not yet active.\n  See: https://svti.me/multiplayer`
+			);
+		}
+	};
+	return {
+		typing: [],
+		locks: {},
+		selections: {},
+		reactions: [],
+		setTyping() { note('setTyping'); },
+		acquireLock() { note('acquireLock'); },
+		releaseLock() { note('releaseLock'); },
+		setSelection() { note('setSelection'); },
+		react() { note('react'); }
+	};
 }
 
 /**
@@ -4209,3 +4249,12 @@ export { onDerived } from 'svelte-adapter-uws/client';
  * successful `'open'`. Not set on intentional `close()`.
  */
 export { failure } from 'svelte-adapter-uws/client';
+
+/**
+ * Re-export `status` from the adapter client.
+ * Reactive store holding the connection status: 'loading', 'connected',
+ * 'reconnecting', or 'error'. The generated multiplayer namespace exposes this
+ * as its `status` view so a collaborative surface can react to connectivity
+ * without a separate adapter import.
+ */
+export { status } from 'svelte-adapter-uws/client';

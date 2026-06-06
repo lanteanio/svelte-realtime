@@ -2887,6 +2887,118 @@ export const { message, close, unsubscribe } = board.hooks;
 
 ---
 
+## Multiplayer
+
+`live.multiplayer()` bundles the collaborative surfaces - live cursors and presence - into a single declaration. It reuses the same data, presence, and cursor machinery a room uses, so the data stream, presence auto-join, and scoped actions behave exactly like `live.room()`. The difference is on the client: the generated export carries a connection-aware surface alongside the sub-streams - a `status` connection store, the `move` / `reportViewport` cursor methods, `identify(key)`, and a `room(...)` factory that returns the aggregated roster view.
+
+```js
+// src/live/collab.js
+import { live } from 'svelte-realtime/server';
+
+export const board = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  init: async (ctx, boardId) => db.cards.forBoard(boardId),
+  presence: (ctx) => ({ name: ctx.user.name, avatar: ctx.user.avatar }),
+  cursors: true,
+  actions: {
+    addCard: async (ctx, boardId, title) => {
+      const card = await db.cards.insert({ boardId, title });
+      ctx.publish('created', card);
+      return card;
+    }
+  }
+});
+```
+
+### The roster view
+
+`board.room(...)` aggregates the raw presence and cursor streams into the reactive surface an app renders. It is the recommended way to consume a multiplayer export:
+
+- `others` - the presence roster, deduped by user key (latest wins), each entry stamped with a deterministic color, and with the local user excluded once it is known.
+- `cursors` - deduped by user key and colored. The local user is kept so you can render your own cursor.
+- `me` - the local user's key, or `null` until you name it.
+- `status` - the connection-status passthrough.
+- `move(...)` / `reportViewport(...)` - forward to the cursor send path.
+
+Name the current user once with `board.identify(key)` - the same identity you already supply for presence, available from the SvelteKit page load. Calling `identify(key)` after `board.room(...)` still lights up `me` and self-exclusion. If you never call it the surface degrades gracefully: `others` is the full deduped roster and `me` reads `null`, never a crash.
+
+```svelte
+<script>
+  import { board } from '$live/collab';
+
+  let { data, boardId } = $props();   // data.userId from the SvelteKit load
+  board.identify(data.userId);        // names self; me + self-exclusion light up
+
+  const room = board.room(boardId);
+
+  function onPointerMove(e) {
+    // move() is volatile (fire-and-forget) - lossy under disconnect is the contract.
+    room.move(boardId, { x: e.clientX, y: e.clientY });
+  }
+</script>
+
+<div onpointermove={onPointerMove}>
+  <ul class="roster">
+    {#each room.others as person (person.key)}
+      <li style:color={person.color}>{person.name}</li>
+    {/each}
+  </ul>
+
+  {#each room.cursors as c (c.key)}
+    <Cursor x={c.x} y={c.y} color={c.color} />
+  {/each}
+
+  {#if room.me == null}
+    <p>Pass a user key to <code>board.identify(...)</code> to highlight yourself.</p>
+  {/if}
+</div>
+
+<button onclick={() => board.addCard(boardId, 'New card')}>Add</button>
+```
+
+The aggregated view ships from the `svelte-realtime/multiplayer` subpath and is reactive: `others` and `cursors` refresh whenever the underlying presence or cursor stream pushes. Reactivity uses Svelte 5 runes, so `board.room(...)` requires Svelte 5.
+
+### Raw sub-streams
+
+The raw `data` / `presence` / `cursors` factory stores stay on the export for back-compat and lower-level use; `board.room(...)` composes them for you.
+
+```svelte
+<script>
+  import { board } from '$live/collab';
+  let { boardId } = $props();
+
+  const data = board.data(boardId);       // main data stream
+  const cursors = board.cursors(boardId); // raw cursor stream (uncolored, undeduped)
+  const status = board.status;            // connection status store
+</script>
+
+{#each $data as card (card.id)}
+  <Card {card} />
+{/each}
+```
+
+### Reserved surfaces
+
+The `typing`, `locks`, `selections`, and `reactions` views and their methods (`setTyping`, `acquireLock`, `releaseLock`, `setSelection`, `react`) are present on the export so the API shape is stable, but they are inert for now: the views read empty and the methods are no-ops that emit a single dev-mode note. They activate once the client-to-server field send path lands; declaring `typing: true`, `locks: ['cell']`, `reactions: true`, or `selections: 'offset'` reserves the surface without changing today's behavior.
+
+### Deterministic user colors
+
+`colorForKey(key)` and `hueForKey(key)` derive a stable color from a user key with a 32-bit FNV-1a hash, so a server render and the first client paint compute the identical color with no hydration mismatch.
+
+The hue is the folded hash; saturation and lightness are each drawn from a legible band using high bits of the same hash, so the palette spans 4320 distinct swatches (360 hues x 3 saturation bands x 4 lightness bands) instead of hue alone. Two keys are far less likely to share a swatch, and every swatch keeps a legible contrast for foreground text. `hueForKey(key)` is unchanged and still returns the raw hue, so a caller building its own color expression from the hue is unaffected.
+
+```js
+import { colorForKey } from 'svelte-realtime/client';
+
+const fill = colorForKey(user.id);
+// saturation and lightness vary per key, e.g.
+// colorForKey('alice') -> 'hsl(239, 70%, 45%)'
+// colorForKey('carol') -> 'hsl(2, 85%, 55%)'
+```
+
+---
+
 ## Webhooks
 
 Bridge external HTTP webhooks into your pub/sub topics.
@@ -3727,6 +3839,7 @@ Import from `svelte-realtime/server`.
 | `live.effect(sources, fn, options?)` | Server-side reactive side effect |
 | `live.aggregate(source, reducers, options)` | Real-time incremental aggregation |
 | `live.room(config)` | Collaborative room (data + presence + cursors + actions) |
+| `live.multiplayer(config)` | Collaborative surface: room sub-streams plus an aggregated roster view (`room(...)` -> `others` / `cursors` / `me`, colored and deduped), live cursors (move / reportViewport), connection status, and `identify(key)` |
 | `live.webhook(topic, config)` | HTTP webhook-to-stream bridge |
 | `live.gate(predicate, fn)` | Conditional stream activation |
 | `live.rateLimit(config, fn)` | Per-function sliding window rate limiter |

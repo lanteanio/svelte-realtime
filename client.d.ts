@@ -391,6 +391,18 @@ export function __stream(
 ): (...args: any[]) => StreamStore;
 
 /**
+ * Build the reserved field-surface members of a generated `live.multiplayer()`
+ * namespace: the empty `typing` / `locks` / `selections` / `reactions` views
+ * and the no-op `setTyping` / `acquireLock` / `releaseLock` / `setSelection` /
+ * `react` methods. The codegen spreads the result into the namespace object and
+ * adds the live `data` / `presence` / `cursors` / `status` / `move` /
+ * `reportViewport` members on top.
+ *
+ * @internal
+ */
+export function __mpFields(): Record<string, any>;
+
+/**
  * Group multiple RPC calls into a single WebSocket frame.
  * All calls are sent together and responses come back in one frame.
  *
@@ -782,6 +794,23 @@ export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AU
  * ```
  */
 export const failure: Readable<Failure | null>;
+
+/**
+ * Reactive store holding the connection status. Re-exported from
+ * `svelte-adapter-uws/client`. The generated `live.multiplayer()` namespace
+ * exposes this as its `status` view.
+ */
+export const status: Readable<string>;
+
+/**
+ * Deterministic `hsl(...)` color for a stable user key. The same key yields
+ * the same color on the server and on every client, so server-rendered markup
+ * and the first client paint agree without a hydration mismatch. Use it to
+ * stamp a per-user color on a roster or cursor entry.
+ */
+export function colorForKey(key: string): string;
+/** Raw deterministic hue (0..359) for a stable user key. */
+export function hueForKey(key: string): number;
 
 /**
  * Reactive store that emits `true` when every active stream has

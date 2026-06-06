@@ -2,6 +2,7 @@
 import { assert, wireAssertionMetrics } from './shared/assert.js';
 import { safeAssign as _safeAssignSnapshot } from './shared/safe-assign.js';
 export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
+export { colorForKey, hueForKey } from './shared/color.js';
 
 const textDecoder = new TextDecoder();
 const _validPathRe = /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)+$/;
@@ -5342,6 +5343,92 @@ live.room = function room(config) {
 			close(ws, ctx);
 		},
 		unsubscribe: unsubscribe
+	};
+
+	return roomExport;
+};
+
+live.multiplayer = function multiplayer(config) {
+	const topicFn = config && config.topic;
+	if (typeof topicFn !== 'function') {
+		throw new Error(
+			`[svelte-realtime] live.multiplayer() requires a topic function (ctx, ...args) => string\n  See: https://svti.me/multiplayer`
+		);
+	}
+
+	// A multiplayer export is a room export with a marker stamped on top. It
+	// reuses live.room's sub-stream construction verbatim so the data /
+	// presence / cursor streams, the presence-ref auto-join, and the scoped
+	// actions are byte-identical to a room. The codegen and the dev-direct
+	// loader dispatch on __isRoom for the sub-streams; the __isMultiplayer
+	// marker only adds the collaborative client surface.
+	const roomExport = live.room({
+		topic: topicFn,
+		init: config.init ? config.init : async () => [],
+		presence: config.presence,
+		cursors: config.cursors,
+		guard: config.guard,
+		onJoin: config.onJoin,
+		onLeave: config.onLeave,
+		merge: config.merge,
+		key: config.key,
+		actions: config.actions,
+		topicArgs: config.topicArgs
+	});
+
+	/** @type {any} */ (roomExport).__isMultiplayer = true;
+
+	// Cursor send path. The client `move` / `reportViewport` methods are
+	// volatile RPCs (fire-and-forget, lossy under disconnect is the contract)
+	// that publish an `update` frame keyed by the caller's identity onto the
+	// room's `:cursors` sub-topic - the same topic the cursor stream loads and
+	// merges with `merge: 'cursor'`. The leading args identify the room (the
+	// same count the topic function and room actions use); the trailing args
+	// are the cursor payload, normalized to a flat object the cursor merge can
+	// key by `.key`.
+	const _cursorArgCount = config.topicArgs !== undefined
+		? config.topicArgs
+		: Math.max(0, topicFn.length - 1);
+
+	/**
+	 * @param {any} ctx
+	 * @param {any[]} args
+	 * @param {Record<string, any>} extra
+	 */
+	const _publishCursor = (ctx, args, extra) => {
+		const roomArgs = args.slice(0, _cursorArgCount);
+		const payload = args.slice(_cursorArgCount);
+		const cursorTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':cursors';
+		const key = _getIdentityKey(ctx);
+		const frame = { key, ...extra };
+		const cur = payload[0];
+		if (cur && typeof cur === 'object' && !Array.isArray(cur)) {
+			Object.assign(frame, cur);
+		} else if (payload.length > 0) {
+			frame.value = payload.length === 1 ? cur : payload;
+		}
+		ctx.publish(cursorTopic, 'update', frame);
+	};
+
+	const _cursorGuard = config.guard;
+	/** @type {any} */ (roomExport).__cursorMove = live.volatile(async (ctx, ...args) => {
+		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
+		_publishCursor(ctx, args, {});
+	});
+	/** @type {any} */ (roomExport).__cursorReportViewport = live.volatile(async (ctx, ...args) => {
+		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
+		_publishCursor(ctx, args, { viewport: true });
+	});
+
+	// Record the declared field surfaces. The typing / locks / selections /
+	// reactions surfaces are reserved here so the returned shape is stable for
+	// the follow-up that wires the client->server send path; they produce no
+	// live sub-stream yet.
+	/** @type {any} */ (roomExport).__fields = {
+		typing: !!config.typing,
+		locks: Array.isArray(config.locks) ? config.locks.slice() : (config.locks ? [] : null),
+		reactions: !!config.reactions,
+		selections: config.selections === 'crdt' ? 'crdt' : (config.selections ? 'offset' : null)
 	};
 
 	return roomExport;
