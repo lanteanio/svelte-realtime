@@ -1099,7 +1099,8 @@ function _generateSsrStubs(filePath, modulePath) {
 		mpFactories.push(`status: readable('connecting')`);
 		mpFactories.push(`move: () => {}`);
 		mpFactories.push(`reportViewport: () => {}`);
-		// Reserved field-surface members rendered as their empty SSR state.
+		// Field-surface members rendered as their empty server-side state before
+		// hydration (live values arrive on the client once the room subscribes).
 		mpFactories.push(`typing: []`);
 		mpFactories.push(`locks: {}`);
 		mpFactories.push(`selections: {}`);
@@ -1112,8 +1113,12 @@ function _generateSsrStubs(filePath, modulePath) {
 		// identify(...) and room(...) render their empty collaborative state on
 		// the server so a page that names self or reads the aggregated roster
 		// during SSR does not crash before hydration. No rune import on the
-		// server: room() returns a plain object, not a MultiplayerRoom.
-		if (info.hasPresence || info.hasCursors) {
+		// server: room() returns a plain object, not a MultiplayerRoom. The gate
+		// mirrors the client room-view gate exactly (presence, cursors, OR any
+		// field surface) so a field-only export renders room() on both sides and
+		// never throws board.room-is-not-a-function during SSR.
+		const ssrHasField = info.typing || info.hasLocks || info.selections || info.reactions;
+		if (info.hasPresence || info.hasCursors || ssrHasField) {
 			mpFactories.push(`identify: () => {}`);
 			mpFactories.push(`room: () => ({ others: [], cursors: [], me: null, status: 'connecting', typing: [], locks: {}, selections: {}, reactions: [], move: () => {}, reportViewport: () => {}, setTyping: () => {}, acquireLock: () => {}, releaseLock: () => {}, setSelection: () => {}, react: () => {}, destroy: () => {} })`);
 		}
@@ -1285,9 +1290,12 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			// `others` / `cursors` / `me` aggregation needs the rune-class. It
 			// composes the generated presence / cursor / status sub-streams, so
 			// it is only constructed when a roster surface exists (presence or
-			// cursors). The class lives in a separate rune-aware subpath, not in
+			// cursors), a field surface (typing / selections / locks) is declared,
+			// or reactions are enabled - all of which the room view hosts. The
+			// class lives in a separate rune-aware subpath, not in
 			// svelte-realtime/client, so its import is a standalone line.
-			const hasRoster = mpInfo.hasPresence || mpInfo.hasCursors;
+			const hasField = mpInfo.typing || mpInfo.hasLocks || mpInfo.selections || mpInfo.reactions;
+			const hasRoster = mpInfo.hasPresence || mpInfo.hasCursors || hasField;
 			if (hasRoster) {
 				if (!mpRuntimeImported) {
 					lines.push(`import { MultiplayerRoom, localKeySource } from 'svelte-realtime/multiplayer';`);
@@ -1297,9 +1305,10 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			}
 			const mpLines = [];
 			mpLines.push(`export const ${name} = {`);
-			// Reserved field-surface members (typing / locks / selections /
-			// reactions + their no-op methods). The live members below override
-			// nothing here.
+			// Namespace-level field-surface fallback (empty views + safe no-op
+			// methods) for code that reads board.typing without entering a room.
+			// board.room(...) hosts the live surfaces; the members below add the
+			// data / presence / cursor streams and the send-path RPCs.
 			mpLines.push(`  ...__mpFields(),`);
 			mpLines.push(`  data: __stream(${JSON.stringify(modulePath + '/' + name + '/__data')}, ${JSON.stringify(mpInfo.dataOpts)}, true),`);
 			if (mpInfo.hasPresence) {
@@ -1307,6 +1316,17 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			}
 			if (mpInfo.hasCursors) {
 				mpLines.push(`  cursors: __stream(${JSON.stringify(modulePath + '/' + name + '/__cursors')}, ${JSON.stringify({ merge: 'cursor' })}, true),`);
+			}
+			// The presence-field send path (typing / selections / locks) and the
+			// reactions stream are emitted only when the export declares a field
+			// surface, so a multiplayer export with no fields is unchanged.
+			const hasPresenceField = mpInfo.typing || mpInfo.hasLocks || mpInfo.selections;
+			if (hasPresenceField) {
+				mpLines.push(`  _setField: __rpc(${JSON.stringify(modulePath + '/' + name + '/__presence/update')}),`);
+			}
+			if (mpInfo.reactions) {
+				mpLines.push(`  reactions: __stream(${JSON.stringify(modulePath + '/' + name + '/__reactions')}, ${JSON.stringify({ merge: 'latest' })}, true),`);
+				mpLines.push(`  _emitReaction: __rpc(${JSON.stringify(modulePath + '/' + name + '/__reaction/emit')}),`);
 			}
 			mpLines.push(`  status: status,`);
 			mpLines.push(`  move: __rpc(${JSON.stringify(modulePath + '/' + name + '/__cursor/move')}),`);
@@ -1327,8 +1347,38 @@ function _generateClientStubs(filePath, modulePath, dir) {
 				const emptyStore = `{ subscribe: (fn) => { fn([]); return () => {}; } }`;
 				const presenceArg = mpInfo.hasPresence ? `${name}.presence(...args)` : emptyStore;
 				const cursorsArg = mpInfo.hasCursors ? `${name}.cursors(...args)` : emptyStore;
+				// The room composes the live field surfaces over the same presence
+				// roster. Each send dep binds the room args, then the room layers in
+				// the field-specific shape. typing / lock acquire / release are
+				// awaitable (the ack surfaces an error); the selection drag is
+				// fire-and-forget so a high-frequency drag drops under backpressure
+				// rather than queueing. Reactions ride their own stream and emit.
+				const roomDeps = [
+					`me: _${name}_me`,
+					`presence: ${presenceArg}`,
+					`cursors: ${cursorsArg}`,
+					`status: status`,
+					`move: (...a) => ${name}.move(...args, ...a)`,
+					`reportViewport: (...a) => ${name}.reportViewport(...args, ...a)`
+				];
+				if (hasPresenceField) {
+					if (mpInfo.typing) {
+						roomDeps.push(`setTyping: (...a) => ${name}._setField(...args, ...a)`);
+					}
+					if (mpInfo.selections) {
+						roomDeps.push(`setSelection: (...a) => ${name}._setField.fireAndForget(...args, ...a)`);
+					}
+					if (mpInfo.hasLocks) {
+						roomDeps.push(`acquireLock: (...a) => ${name}._setField(...args, ...a)`);
+						roomDeps.push(`releaseLock: (...a) => ${name}._setField(...args, ...a)`);
+					}
+				}
+				if (mpInfo.reactions) {
+					roomDeps.push(`reactions: ${name}.reactions(...args)`);
+					roomDeps.push(`react: (...a) => ${name}._emitReaction.fireAndForget(...args, ...a)`);
+				}
 				mpLines.push(`  identify(key) { _${name}_me.set(key); },`);
-				mpLines.push(`  room(...args) { return new MultiplayerRoom({ me: _${name}_me, presence: ${presenceArg}, cursors: ${cursorsArg}, status: status, move: (...a) => ${name}.move(...args, ...a), reportViewport: (...a) => ${name}.reportViewport(...args, ...a) }); },`);
+				mpLines.push(`  room(...args) { return new MultiplayerRoom({ ${roomDeps.join(', ')} }); },`);
 			}
 			mpLines.push(`};`);
 			lines.push(mpLines.join('\n'));
@@ -2074,6 +2124,17 @@ function _extractMultiplayerInfo(source, name) {
 	const actionsBody = _extractTopLevelBraceProp(body, 'actions');
 	if (actionsBody) info.actions = _extractTopLevelKeys(actionsBody);
 
+	// A presence field (typing / locks / selections) is stamped on a roster entry,
+	// which only exists when presence is set. Catch the missing presence at build
+	// time so the dev never ships a field that publishes but never persists for a
+	// late joiner. Reactions are exempt: they ride their own ephemeral stream.
+	const declaresPresenceField = info.typing || info.hasLocks || !!info.selections;
+	if (declaresPresenceField && !info.hasPresence) {
+		throw new Error(
+			`[svelte-realtime] ${name}: live.multiplayer() declares a presence field (typing / locks / selections) but has no presence function. Presence fields are stamped on a roster entry that only exists when presence is set, so add a presence function. Reactions do not require presence.\n  See: https://svti.me/multiplayer`
+		);
+	}
+
 	return info;
 }
 
@@ -2259,6 +2320,9 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursors')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorStream)), ${JSON.stringify(rel)});`);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursor/move')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorMove)), ${JSON.stringify(rel)});`);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursor/reportViewport')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorReportViewport)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__presence/update')}, __L(() => import(${importPath}).then(m => m.${name}.__presenceUpdate)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__reactions')}, __L(() => import(${importPath}).then(m => m.${name}.__reactionStream)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__reaction/emit')}, __L(() => import(${importPath}).then(m => m.${name}.__reactionEmit)), ${JSON.stringify(rel)});`);
 				lines.push(`__registerRoomActions(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}
 		}
@@ -3408,13 +3472,17 @@ async function _loadRegistryDirect(server, liveDir, dir) {
 					__registerGuard(rel, fn);
 				} else if (/** @type {any} */ (fn)?.__isMultiplayer) {
 					// A multiplayer export reuses the room sub-streams; register
-					// them, the cursor send handlers, and its scoped actions the
-					// same way a room does.
+					// them, the cursor and presence-field send handlers, the
+					// reactions stream, and its scoped actions the same way a room
+					// does.
 					if (fn.__dataStream) __register(rel + '/' + name + '/__data', fn.__dataStream, rel);
 					if (fn.__presenceStream) __register(rel + '/' + name + '/__presence', fn.__presenceStream, rel);
 					if (fn.__cursorStream) __register(rel + '/' + name + '/__cursors', fn.__cursorStream, rel);
 					if (fn.__cursorMove) __register(rel + '/' + name + '/__cursor/move', fn.__cursorMove, rel);
 					if (fn.__cursorReportViewport) __register(rel + '/' + name + '/__cursor/reportViewport', fn.__cursorReportViewport, rel);
+					if (fn.__presenceUpdate) __register(rel + '/' + name + '/__presence/update', fn.__presenceUpdate, rel);
+					if (fn.__reactionStream) __register(rel + '/' + name + '/__reactions', fn.__reactionStream, rel);
+					if (fn.__reactionEmit) __register(rel + '/' + name + '/__reaction/emit', fn.__reactionEmit, rel);
 					if (fn.__actions) {
 						for (const [k, v] of Object.entries(fn.__actions)) {
 							__register(rel + '/' + name + '/__action/' + k, v, rel);

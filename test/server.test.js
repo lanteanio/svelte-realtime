@@ -76,6 +76,8 @@ import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { toArrayBuffer } from './helpers/encode.js';
+import { installFakeRuntimeClock, releaseRuntimeClock } from './helpers/runtime-clock.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../shared/runtime.js';
 
 const noopRegistry = () => ({
 	counter: () => ({ inc() {} }),
@@ -2484,7 +2486,10 @@ describe('live.cron()', () => {
 			__registerCron('cron-five-field', live.cron('* * * * *', 'five-min', async () => { runs++; }));
 
 			// Drive the tick at second != 0 manually - the dedup should skip.
+			// The cron tick reads the wall clock through the runtime module, so
+			// bind it to the global Date this case swaps below.
 			const realDate = global.Date;
+			installFakeRuntimeClock();
 			try {
 				const fakeNow = new realDate('2026-05-06T12:34:17Z');
 				global.Date = /** @type {any} */ (function FakeDate(...args) {
@@ -2510,6 +2515,7 @@ describe('live.cron()', () => {
 				expect(runs).toBe(1);
 			} finally {
 				global.Date = realDate;
+				releaseRuntimeClock();
 			}
 		});
 
@@ -2646,6 +2652,116 @@ describe('live.cron()', () => {
 			expect(pub).toBeDefined();
 			expect(pub.event).toBe('set');
 			expect(pub.data).toBe('hello');
+		});
+	});
+
+	describe('timezone-pinned cron', () => {
+		afterEach(() => {
+			_clearCron();
+			resetRuntimeEnv();
+		});
+
+		it('reads UTC date parts when the effective timezone is pinned to UTC', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			// sec 0, min 30, hour 23. The reference instant below is 23:30:00 UTC.
+			__registerCron('tz/utc', live.cron('0 30 23 * * *', 'utc-marker', async () => { runs++; }));
+
+			// Fixed epoch-ms: 2026-01-15T23:30:00Z. Clock pinned, tz pinned to UTC.
+			const ref = Date.UTC(2026, 0, 15, 23, 30, 0);
+			setRuntimeEnv({ clock: { now: () => ref, monotonic: () => ref }, tz: 'UTC' });
+
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 10));
+			expect(runs).toBe(1);
+		});
+
+		it('does not fire when the pinned timezone shifts the hour out of the match', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+			// Same schedule, hour 23.
+			__registerCron('tz/tokyo', live.cron('0 30 23 * * *', 'tokyo-marker', async () => { runs++; }));
+
+			// 2026-01-15T23:30:00Z is 2026-01-16T08:30 in Asia/Tokyo (UTC+9, no
+			// DST), so the local hour is 8, not 23 - the schedule must not match.
+			const ref = Date.UTC(2026, 0, 15, 23, 30, 0);
+			setRuntimeEnv({ clock: { now: () => ref, monotonic: () => ref }, tz: 'Asia/Tokyo' });
+
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 10));
+			expect(runs).toBe(0);
+
+			// And the SAME instant fires under a zone where the local hour is 23.
+			let utcRuns = 0;
+			_clearCron();
+			__registerCron('tz/utc-same-instant', live.cron('0 30 23 * * *', 'utc-marker-2', async () => { utcRuns++; }));
+			setRuntimeEnv({ clock: { now: () => ref, monotonic: () => ref }, tz: 'UTC' });
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 10));
+			expect(utcRuns).toBe(1);
+		});
+
+		it('matches the weekday in the pinned timezone', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			// 2026-01-15 is a Thursday (weekday 4) in UTC. Same instant late in
+			// the UTC day rolls to Friday (weekday 5) in a far-east zone.
+			const ref = Date.UTC(2026, 0, 15, 23, 30, 0);
+
+			let thuRuns = 0;
+			__registerCron('tz/thursday', live.cron('0 30 23 * * 4', 'thu-marker', async () => { thuRuns++; }));
+			setRuntimeEnv({ clock: { now: () => ref, monotonic: () => ref }, tz: 'UTC' });
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 10));
+			expect(thuRuns).toBe(1);
+
+			// In Asia/Tokyo the same instant is Friday 08:30; a Thursday-only
+			// schedule must not fire (and the hour no longer matches either).
+			let tokyoRuns = 0;
+			_clearCron();
+			__registerCron('tz/thursday-tokyo', live.cron('0 30 8 * * 4', 'thu-tokyo', async () => { tokyoRuns++; }));
+			setRuntimeEnv({ clock: { now: () => ref, monotonic: () => ref }, tz: 'Asia/Tokyo' });
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 10));
+			expect(tokyoRuns).toBe(0); // Friday in Tokyo, schedule asks for Thursday
+
+			// Friday in Tokyo fires a Friday-targeted schedule at the local hour.
+			let friRuns = 0;
+			_clearCron();
+			__registerCron('tz/friday-tokyo', live.cron('0 30 8 * * 5', 'fri-tokyo', async () => { friRuns++; }));
+			setRuntimeEnv({ clock: { now: () => ref, monotonic: () => ref }, tz: 'Asia/Tokyo' });
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 10));
+			expect(friRuns).toBe(1);
+		});
+
+		it('default (no pinned timezone) matches the host system zone', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			let runs = 0;
+
+			// With no tz override the cron reads the host system zone, the same
+			// behavior production has always had. Derive the local parts of a
+			// fixed instant via Intl in the system zone and build a 6-field
+			// schedule that targets exactly those parts.
+			const ref = Date.UTC(2026, 5, 15, 12, 34, 56);
+			const sysFmt = new Intl.DateTimeFormat('en-US', {
+				hour: 'numeric', minute: 'numeric', second: 'numeric',
+				day: 'numeric', month: 'numeric', hour12: false
+			});
+			const parts = sysFmt.formatToParts(ref);
+			const part = (k) => Number(parts.find((p) => p.type === k)?.value);
+			let h = part('hour'); if (h === 24) h = 0;
+			const schedule = `${part('second')} ${part('minute')} ${h} ${part('day')} ${part('month')} *`;
+			__registerCron('tz/system-default', live.cron(schedule, 'sys-marker', async () => { runs++; }));
+
+			// Pin only the clock; leave tz unset so effectiveTimeZone() is undefined.
+			setRuntimeEnv({ clock: { now: () => ref, monotonic: () => ref } });
+			await _tickCron();
+			await new Promise((r) => setTimeout(r, 10));
+			expect(runs).toBe(1);
 		});
 	});
 
@@ -3080,6 +3196,68 @@ describe('live.cron()', () => {
 			expect(bus.wrappedPublishes.length).toBe(1);
 			expect(bus.wrappedPublishes[0]).toMatchObject({ topic: 't:bus-only', event: 'set' });
 		});
+	});
+});
+
+describe('ctx.hlc (hybrid logical clock forwarding)', () => {
+	afterEach(() => {
+		_clearCron();
+		resetRuntimeEnv();
+	});
+
+	it('forwards platform.hlc when the adapter platform projects one', async () => {
+		const platform = mockPlatform();
+		// A platform that projects its own hlc - the ctx must use it verbatim.
+		const stamp = { wall: 1717, logical: 4, nodeId: 'worker-7' };
+		platform.hlc = () => stamp;
+		setCronPlatform(platform);
+
+		let captured = null;
+		__registerCron('hlc/forward', live.cron('* * * * *', 'hlc-fwd', async (ctx) => { captured = ctx; }));
+		await _tickCron();
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(captured).not.toBeNull();
+		expect(typeof captured.hlc).toBe('function');
+		expect(captured.hlc).toBe(platform.hlc);
+		expect(captured.hlc()).toEqual(stamp);
+	});
+
+	it('falls back to a runtime-backed local hlc when the platform has none', async () => {
+		// mockPlatform projects no hlc, so the ctx must supply the fallback.
+		const platform = mockPlatform();
+		expect(platform.hlc).toBeUndefined();
+		setCronPlatform(platform);
+
+		// Pin the runtime clock so the fallback wall component is deterministic.
+		let clock = 9000;
+		setRuntimeEnv({ clock: { now: () => clock, monotonic: () => clock } });
+
+		let captured = null;
+		__registerCron('hlc/fallback', live.cron('* * * * *', 'hlc-fb', async (ctx) => { captured = ctx; }));
+		await _tickCron();
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(captured).not.toBeNull();
+		expect(typeof captured.hlc).toBe('function');
+		const a = captured.hlc();
+		expect(a.wall).toBe(9000);
+		expect(a.logical).toBe(0);
+		expect(typeof a.nodeId).toBe('string');
+		expect(a.nodeId.length).toBeGreaterThan(0);
+
+		// Same-millisecond read bumps logical, wall held; nodeId stable.
+		const b = captured.hlc();
+		expect(b.wall).toBe(9000);
+		expect(b.logical).toBe(1);
+		expect(b.nodeId).toBe(a.nodeId);
+
+		// Clock advances -> wall advances, logical resets.
+		clock = 9001;
+		const c = captured.hlc();
+		expect(c.wall).toBe(9001);
+		expect(c.logical).toBe(0);
+		expect(c.nodeId).toBe(a.nodeId);
 	});
 });
 

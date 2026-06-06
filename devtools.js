@@ -2,6 +2,8 @@
 // DevTools overlay for svelte-realtime (dev-mode only)
 // Injected by the Vite plugin via transformIndexHtml
 
+import { now, setIntervalTimer, clearIntervalTimer } from './client-runtime.js';
+
 /** @type {HTMLElement | null} */
 let panel = null;
 let visible = false;
@@ -41,12 +43,12 @@ function toggle() {
 	if (visible && !refreshInterval) {
 		const content = panel?.querySelector('div:last-child');
 		if (content) render(/** @type {HTMLElement} */ (content));
-		refreshInterval = setInterval(() => {
+		refreshInterval = setIntervalTimer(() => {
 			const content = panel?.querySelector('div:last-child');
 			if (content) render(/** @type {HTMLElement} */ (content));
 		}, 1000);
 	} else if (!visible && refreshInterval) {
-		clearInterval(refreshInterval);
+		clearIntervalTimer(refreshInterval);
 		refreshInterval = null;
 	}
 }
@@ -218,7 +220,7 @@ function renderRpcs(el, dt) {
 	if (pending.length > 0) {
 		html += '<div style="color:#ffc107;margin-bottom:6px">Pending (' + esc(String(pending.length)) + ')</div>';
 		for (const p of pending) {
-			const elapsed = Date.now() - p.startTime;
+			const elapsed = now() - p.startTime;
 			html += `<div style="padding:2px 0;color:#aaa">${esc(p.path)} <span style="color:#666">${esc(String(elapsed))}ms</span></div>`;
 		}
 		html += '<hr style="border-color:#333;margin:6px 0">';
@@ -248,7 +250,7 @@ function renderRpcs(el, dt) {
  */
 function _ageString(t) {
 	if (!t) return 'never';
-	const ms = Date.now() - t;
+	const ms = now() - t;
 	if (ms < 1000) return 'just now';
 	if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
 	if (ms < 3_600_000) return Math.floor(ms / 60_000) + 'm ago';
@@ -321,7 +323,7 @@ function renderStreams(el, dt) {
 				html += `<div style="padding:2px 0 4px 24px">`;
 				for (let i = recent.length - 1; i >= 0; i--) {
 					const ev = recent[i];
-					const time = new Date(ev.ts).toLocaleTimeString('en', {
+					const time = new Date(ev.ts).toLocaleTimeString('en', { // determinism-allow: formats a captured event timestamp for display, not a clock read
 						hour12: false,
 						hour: '2-digit',
 						minute: '2-digit',

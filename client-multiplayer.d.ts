@@ -40,10 +40,22 @@ export interface MultiplayerRoomDeps {
 	cursors: Readable<any[]>;
 	/** Connection-status store. */
 	status: Readable<string>;
+	/** Reactions sub-stream (the bounded ring of recent emotes), when enabled. */
+	reactions?: Readable<any[]>;
 	/** Outbound cursor-move send callback. */
 	move?: (...args: any[]) => any;
 	/** Outbound viewport-report send callback. Falls back to `move`. */
 	reportViewport?: (...args: any[]) => any;
+	/** Outbound presence-field send callback for typing toggles. */
+	setTyping?: (...args: any[]) => any;
+	/** Outbound presence-field send callback for selection ranges. */
+	setSelection?: (...args: any[]) => any;
+	/** Outbound presence-field send callback for advisory lock acquisition. */
+	acquireLock?: (...args: any[]) => any;
+	/** Outbound presence-field send callback for advisory lock release. */
+	releaseLock?: (...args: any[]) => any;
+	/** Outbound reaction send callback. */
+	react?: (...args: any[]) => any;
 }
 
 /**
@@ -60,8 +72,9 @@ export interface MultiplayerRoomDeps {
  * - `me`: the local user's key, or `null` when the app never supplied one.
  * - `status`: the connection-status passthrough.
  *
- * The `typing` / `locks` / `selections` / `reactions` field surfaces and their
- * methods are reserved and inert.
+ * The `typing` / `locks` / `selections` views are reactive projections of the
+ * presence roster, driven by the field-send methods; `reactions` is the bounded
+ * ring of recent ephemeral emotes.
  */
 export class MultiplayerRoom {
 	constructor(deps: MultiplayerRoomDeps);
@@ -73,28 +86,28 @@ export class MultiplayerRoom {
 	get me(): string | null;
 	/** The connection status. */
 	get status(): string;
-	/** Reserved field surface. Inert. */
-	get typing(): any[];
-	/** Reserved field surface. Inert. */
+	/** The user keys of remote collaborators currently flagged as typing. */
+	get typing(): string[];
+	/** Advisory lock holders keyed by lock key: `{ lockKey: holderUserKey }`. */
 	get locks(): Record<string, any>;
-	/** Reserved field surface. Inert. */
+	/** Remote selection ranges keyed by user (self excluded). */
 	get selections(): Record<string, any>;
-	/** Reserved field surface. Inert. */
+	/** The bounded ring of recent reactions. */
 	get reactions(): any[];
 	/** Forward a cursor move to the injected send callback. */
 	move(...args: any[]): any;
 	/** Forward a viewport report to the injected send callback. */
 	reportViewport(...args: any[]): any;
-	/** Reserved no-op. */
-	react(...args: any[]): void;
-	/** Reserved no-op. */
-	setTyping(...args: any[]): void;
-	/** Reserved no-op. */
-	acquireLock(...args: any[]): void;
-	/** Reserved no-op. */
-	releaseLock(...args: any[]): void;
-	/** Reserved no-op. */
-	setSelection(...args: any[]): void;
+	/** Emit an ephemeral reaction (a token at an optional point). */
+	react(token: any, at?: any): any;
+	/** Toggle the local typing flag, published onto the presence roster. */
+	setTyping(on: boolean): any;
+	/** Claim an advisory lock on a key (collaborative awareness, not exclusion). */
+	acquireLock(lockKey: string): any;
+	/** Release an advisory lock on a key. */
+	releaseLock(lockKey: string): any;
+	/** Publish the local selection range; pass `null` to clear it. */
+	setSelection(selection: any): any;
 	/** Unsubscribe from the injected stores. Call when the room unmounts. */
 	destroy(): void;
 }

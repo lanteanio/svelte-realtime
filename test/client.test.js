@@ -2196,6 +2196,93 @@ describe('__stream() presence merge', () => {
 
 		unsub();
 	});
+
+	it('update shallow-merges fields into the roster entry, preserving key and identity', async () => {
+		const store = __stream('room/field', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ key: 'u1', name: 'Alice' }, { key: 'u2', name: 'Bob' }],
+			topic: 'pres-field',
+			merge: 'presence'
+		});
+
+		simulateTopicMessage('pres-field', { event: 'update', data: { key: 'u1', typing: true } });
+		expect(values[values.length - 1]).toEqual([
+			{ key: 'u1', name: 'Alice', typing: true },
+			{ key: 'u2', name: 'Bob' }
+		]);
+
+		// A second field on the same entry layers on without dropping the first.
+		simulateTopicMessage('pres-field', { event: 'update', data: { key: 'u1', selection: { start: 0, end: 5 } } });
+		expect(values[values.length - 1]).toEqual([
+			{ key: 'u1', name: 'Alice', typing: true, selection: { start: 0, end: 5 } },
+			{ key: 'u2', name: 'Bob' }
+		]);
+
+		// Clearing a field sets it without touching siblings.
+		simulateTopicMessage('pres-field', { event: 'update', data: { key: 'u1', typing: false } });
+		expect(values[values.length - 1]).toEqual([
+			{ key: 'u1', name: 'Alice', typing: false, selection: { start: 0, end: 5 } },
+			{ key: 'u2', name: 'Bob' }
+		]);
+
+		unsub();
+	});
+
+	it('update before its join seeds the entry so the field is not lost', async () => {
+		const store = __stream('room/race', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [],
+			topic: 'pres-race',
+			merge: 'presence'
+		});
+
+		// A field delta arrives before the join (no entry yet): it seeds the entry.
+		simulateTopicMessage('pres-race', { event: 'update', data: { key: 'u9', typing: true } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u9', typing: true }]);
+
+		// The later join updates the same entry in place (no duplicate).
+		simulateTopicMessage('pres-race', { event: 'join', data: { key: 'u9', name: 'Late' } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u9', name: 'Late' }]);
+
+		unsub();
+	});
+
+	it('update leaves an unrelated entry untouched and join/leave/set stay intact', async () => {
+		const store = __stream('room/mixed', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ key: 'a' }, { key: 'b' }],
+			topic: 'pres-mixed',
+			merge: 'presence'
+		});
+
+		simulateTopicMessage('pres-mixed', { event: 'update', data: { key: 'a', typing: true } });
+		simulateTopicMessage('pres-mixed', { event: 'join', data: { key: 'c', name: 'C' } });
+		simulateTopicMessage('pres-mixed', { event: 'leave', data: { key: 'b' } });
+		expect(values[values.length - 1]).toEqual([
+			{ key: 'a', typing: true },
+			{ key: 'c', name: 'C' }
+		]);
+
+		unsub();
+	});
 });
 
 // - __stream() cursor merge ---------------------------------------------------

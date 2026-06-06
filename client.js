@@ -10,6 +10,10 @@ import { sanitizeRowData } from './shared/safe-assign.js';
 // breaking the module under Svelte 4 - missing exports become undefined,
 // not module-load errors.
 import * as _svelteStore from 'svelte/store';
+// Browser-backed injectable runtime: the clock, RNG, and timers route through
+// these helpers so a seeded simulation harness can drive the client clock,
+// randomness, and timers deterministically.
+import { now, randomFloat, setTimer, clearTimer, microtask } from './client-runtime.js';
 
 /** @type {import('svelte/store').Readable<undefined>} */
 export const empty = readable(undefined);
@@ -91,10 +95,11 @@ export class RpcError extends Error {
 }
 
 // Incrementing counter for short correlation IDs, prefixed to avoid cross-tab
-// collision. Math.random is the right primitive: this prefix is response-routing
-// bookkeeping, not a session token or any value that crosses a trust boundary.
-// Not security-relevant; collision-avoidance only.
-const _idPrefix = Math.random().toString(36).slice(2, 6);
+// collision. The seeded RNG is the right primitive: this prefix is
+// response-routing bookkeeping, not a session token or any value that crosses a
+// trust boundary. Not security-relevant; routing it through the runtime RNG also
+// lets a seeded harness reproduce request ids exactly.
+const _idPrefix = randomFloat().toString(36).slice(2, 6);
 let idCounter = 0;
 
 /** Generate a unique correlation ID, wrapping the counter before exceeding safe integer range */
@@ -420,7 +425,7 @@ function ensureListener() {
 				const entry = pending.get(result.id);
 				if (!entry) continue;
 				pending.delete(result.id);
-				if (entry.timer) clearTimeout(entry.timer);
+				if (entry.timer) clearTimer(entry.timer);
 				if (result.ok) {
 					entry.resolve(entry.stream ? result : result.data);
 				} else {
@@ -434,7 +439,7 @@ function ensureListener() {
 		const entry = pending.get(correlationId);
 		if (!entry) return;
 		pending.delete(correlationId);
-		if (entry.timer) clearTimeout(entry.timer);
+		if (entry.timer) clearTimer(entry.timer);
 
 		if (data && data.ok) {
 			entry.resolve(entry.stream ? data : data.data);
@@ -464,13 +469,13 @@ function ensureDisconnectListener() {
 		if (s === 'disconnected' || s === 'failed') {
 			for (const [id, entry] of pending) {
 				pending.delete(id);
-				if (entry.timer) clearTimeout(entry.timer);
+				if (entry.timer) clearTimer(entry.timer);
 				entry.reject(new RpcError('DISCONNECTED', 'WebSocket connection lost'));
 			}
 			_drainPendingUploadsOnDisconnect();
 
 			if (lastOpenAt > 0) {
-				const openDuration = Date.now() - lastOpenAt;
+				const openDuration = now() - lastOpenAt;
 				lastOpenAt = 0;
 				if (openDuration < 1000) {
 					fastCloseCount++;
@@ -493,7 +498,7 @@ function ensureDisconnectListener() {
 		}
 		if (s === 'open') {
 			_terminated = false;
-			lastOpenAt = Date.now();
+			lastOpenAt = now();
 		}
 	});
 
@@ -509,7 +514,7 @@ function ensureDisconnectListener() {
 					// Reject all pending RPCs
 					for (const [id, entry] of pending) {
 						pending.delete(id);
-						if (entry.timer) clearTimeout(entry.timer);
+						if (entry.timer) clearTimer(entry.timer);
 						entry.reject(new RpcError(errCode, errMsg));
 					}
 					// Reject in-flight uploads (terminal close mirrors disconnect)
@@ -584,21 +589,21 @@ function _maybeHintPublishRate(topic, options) {
 	// marks such topics handled up front.
 	if (options && options.coalesceBy) return;
 
-	const now = Date.now();
+	const nowMs = now();
 	let win = _publishRateWindows.get(topic);
 	if (win === undefined) {
-		_publishRateWindows.set(topic, { start: now, count: 1 });
+		_publishRateWindows.set(topic, { start: nowMs, count: 1 });
 		return;
 	}
 	win.count++;
-	const elapsed = now - win.start;
+	const elapsed = nowMs - win.start;
 	if (elapsed < _PUBLISH_RATE_HINT_WINDOW_MS) return;
 
 	// Window closed: derive events/sec and reset for the next window. A short
 	// final window (e.g. the stream unsubscribed mid-window) still scales to a
 	// per-second rate, so a genuine burst is not under-counted.
 	const rate = (win.count * 1000) / elapsed;
-	win.start = now;
+	win.start = nowMs;
 	win.count = 0;
 
 	if (rate < _PUBLISH_RATE_HINT_THRESHOLD) return;
@@ -673,7 +678,7 @@ export function __rpc(path) {
 
 			const promise = _sendRpc(path, args);
 			_dedupMap.set(dedupKey, promise);
-			queueMicrotask(() => _dedupMap.delete(dedupKey));
+			microtask(() => _dedupMap.delete(dedupKey));
 			return promise;
 		}
 		return _sendRpc(path, args);
@@ -779,7 +784,7 @@ export function __rpc(path) {
 				}
 				const promise = _sendRpc(path, args, idempotencyKey, timeout);
 				_dedupMap.set(dedupKey, promise);
-				queueMicrotask(() => _dedupMap.delete(dedupKey));
+				microtask(() => _dedupMap.delete(dedupKey));
 				return promise;
 			}
 			return _sendRpc(path, args, idempotencyKey, timeout);
@@ -845,12 +850,16 @@ export function __rpc(path) {
 let _mpStubNoteFired = false;
 
 /**
- * Build the reserved field-surface members of a generated `live.multiplayer()`
- * namespace: the `typing` / `locks` / `selections` / `reactions` views (empty)
- * and the `setTyping` / `acquireLock` / `releaseLock` / `setSelection` / `react`
- * methods (no-op). These keep the namespace shape stable for the follow-up that
- * wires the client->server send path; calling a method is a safe no-op and
- * emits one dev-only note so a render loop does not spam the console.
+ * Build the namespace-level field-surface fallbacks of a generated
+ * `live.multiplayer()` namespace: the `typing` / `locks` / `selections` /
+ * `reactions` views (empty) and the `setTyping` / `acquireLock` / `releaseLock`
+ * / `setSelection` / `react` methods. The live collaborative field surface lives
+ * on the room instance returned by `namespace.room(...args)`, where the views
+ * are reactive projections of the presence roster and the methods publish onto
+ * it. These namespace-level members are the no-room fallback: reading a view
+ * yields empty state and calling a method off the room is a safe no-op that
+ * emits one dev-only note (so a render loop does not spam the console) pointing
+ * the caller at `room(...)`.
  *
  * Spread into the generated namespace object: the live `data` / `presence` /
  * `cursors` / `status` / `move` / `reportViewport` members and the room actions
@@ -864,7 +873,7 @@ export function __mpFields() {
 		_mpStubNoteFired = true;
 		if (typeof console !== 'undefined' && console.warn) {
 			console.warn(
-				`[svelte-realtime] multiplayer.${method}() is reserved and currently a no-op; the field surface is not yet active.\n  See: https://svti.me/multiplayer`
+				`[svelte-realtime] multiplayer.${method}() off the room is a no-op; call it on the room instance from namespace.room(...args) to publish.\n  See: https://svti.me/multiplayer`
 			);
 		}
 	};
@@ -913,7 +922,7 @@ function _sendRpc(path, args, idempotencyKey, timeout) {
 				const dropped = _offlineQueue.shift();
 				if (dropped) dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped'));
 			}
-			_offlineQueue.push({ path, args, queuedAt: Date.now(), resolve, reject, idempotencyKey, timeout });
+			_offlineQueue.push({ path, args, queuedAt: now(), resolve, reject, idempotencyKey, timeout });
 		});
 	}
 
@@ -938,9 +947,9 @@ function _sendRpc(path, args, idempotencyKey, timeout) {
 	const sleepThreshold = Math.max(effectiveTimeout * 3, 90000);
 
 	return new Promise((resolve, reject) => {
-		const _startTime = Date.now();
-		const timer = setTimeout(() => {
-			if (Date.now() - _startTime > sleepThreshold) {
+		const _startTime = now();
+		const timer = setTimer(() => {
+			if (now() - _startTime > sleepThreshold) {
 				// Device was sleeping. Clean up the pending entry so it doesn't hang
 				// forever - the disconnect listener or reconnect will handle the actual error.
 				pending.delete(id);
@@ -983,9 +992,9 @@ export function __binaryRpc(path) {
 		const conn = _connect();
 
 		return new Promise((resolve, reject) => {
-			const _startTime = Date.now();
-			const timer = setTimeout(() => {
-				if (Date.now() - _startTime > 90000) {
+			const _startTime = now();
+			const timer = setTimer(() => {
+				if (now() - _startTime > 90000) {
 					pending.delete(id);
 					_devtoolsEnd(id, false, 'SLEEP_TIMEOUT');
 					reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
@@ -1007,7 +1016,7 @@ export function __binaryRpc(path) {
 			const headerBytes = _textEncoder.encode(header);
 			if (headerBytes.length > 0xFFFF) {
 				pending.delete(id);
-				clearTimeout(timer);
+				clearTimer(timer);
 				reject(new RpcError('PAYLOAD_TOO_LARGE', 'Binary RPC header exceeds 65535 bytes'));
 				return;
 			}
@@ -1483,7 +1492,7 @@ async function _maybePaceUpload(handle, conn) {
 		typeof conn.bufferedAmount === 'number' &&
 		conn.bufferedAmount > lo
 	) {
-		await new Promise((r) => setTimeout(r, _UPLOAD_DRAIN_POLL_MS));
+		await new Promise((r) => setTimer(r, _UPLOAD_DRAIN_POLL_MS));
 	}
 }
 
@@ -1559,7 +1568,7 @@ class UploadHandle {
 
 		// Microtask-deferred start so users can attach listeners + set up
 		// cancellation between `const h = avatar(file)` and the first chunk.
-		queueMicrotask(() => this._start());
+		microtask(() => this._start());
 	}
 
 	/** Bytes uploaded so far. */
@@ -1577,10 +1586,10 @@ class UploadHandle {
 	/** Smoothed throughput over the last ~1s, in bytes/sec. */
 	get bytesPerSec() {
 		if (this._rateSamples.length === 0) return 0;
-		const now = Date.now();
+		const nowMs = now();
 		let total = 0;
 		for (const s of this._rateSamples) total += s.bytes;
-		const span = Math.max(1, now - this._rateSamples[0].t);
+		const span = Math.max(1, nowMs - this._rateSamples[0].t);
 		return Math.round(total * 1000 / span);
 	}
 	/** Numeric streamId (uint32). Hex via `streamIdHex`. */
@@ -1682,9 +1691,9 @@ class UploadHandle {
 	_trackProgress(bytes) {
 		this._sent += bytes;
 		this._chunks++;
-		const now = Date.now();
-		this._rateSamples.push({ t: now, bytes });
-		while (this._rateSamples.length > 0 && now - this._rateSamples[0].t > 1000) {
+		const nowMs = now();
+		this._rateSamples.push({ t: nowMs, bytes });
+		while (this._rateSamples.length > 0 && nowMs - this._rateSamples[0].t > 1000) {
 			this._rateSamples.shift();
 		}
 		this._emit('progress', {
@@ -1788,7 +1797,7 @@ let _subscribeBatch = null;
 function _batchedSubscribe(request) {
 	if (!_subscribeBatch) {
 		_subscribeBatch = [];
-		queueMicrotask(() => {
+		microtask(() => {
 			const batch = _subscribeBatch;
 			_subscribeBatch = null;
 			if (!batch || batch.length === 0) return;
@@ -2321,6 +2330,21 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					}
 					value.length = last;
 				}
+			} else if (event === 'update') {
+				// Field-level delta: shallow-merge the changed fields into the
+				// roster entry, preserving the key and the rest of the payload.
+				// A delta that races ahead of its join (no entry yet) seeds a
+				// transient entry; the authoritative join that follows replaces it
+				// with its snapshot, so a raced-ahead field shows briefly and then
+				// clears until the next update (acceptable for the rare
+				// update-before-join order; normal order is join first).
+				const idx = index.get(data.key);
+				if (idx !== undefined) {
+					value[idx] = { ...value[idx], ...data };
+				} else {
+					index.set(data.key, value.length);
+					value.push(data);
+				}
 			} else if (event === 'set') {
 				value = data;
 				_rebuildIndexFn(value, index);
@@ -2639,7 +2663,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			const prev = pending.get(pendingId);
 			if (prev) {
 				pending.delete(pendingId);
-				if (prev.timer) clearTimeout(prev.timer);
+				if (prev.timer) clearTimer(prev.timer);
 			}
 			pendingId = null;
 		}
@@ -2651,9 +2675,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		pendingId = id;
 		const conn = _connect();
 
-		const _startTime = Date.now();
-		const timer = setTimeout(() => {
-			if (Date.now() - _startTime > 90000) {
+		const _startTime = now();
+		const timer = setTimer(() => {
+			if (now() - _startTime > 90000) {
 				pending.delete(id);
 				pendingId = null;
 				fetching = false;
@@ -2807,7 +2831,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			const entry = pending.get(pendingId);
 			if (entry) {
 				pending.delete(pendingId);
-				if (entry.timer) clearTimeout(entry.timer);
+				if (entry.timer) clearTimer(entry.timer);
 			}
 			pendingId = null;
 		}
@@ -2828,7 +2852,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			_removeInFlight();
 		}
 		if (_reconnectTimer) {
-			clearTimeout(_reconnectTimer);
+			clearTimer(_reconnectTimer);
 			_reconnectTimer = null;
 		}
 		if (_rafId !== null) {
@@ -2921,20 +2945,22 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			if (subCount > 0) {
 				_status = 'reconnecting';
 				_statusStore.set('reconnecting');
-				if (_reconnectTimer) clearTimeout(_reconnectTimer);
+				if (_reconnectTimer) clearTimer(_reconnectTimer);
 				let delay;
 				// Reconnect jitter: spread a fleet's reconnect attempts across the
 				// window so a server restart does not get a thundering-herd retry
-				// spike. Math.random is the right primitive here - jitter does not
-				// need crypto-quality entropy. Not security-relevant.
+				// spike. The seeded RNG is the right primitive here - jitter does
+				// not need crypto-quality entropy and is not security-relevant -
+				// and routing it through the runtime lets a seeded harness replay
+				// the backoff schedule exactly.
 				if (_reconnectAttempts < 2) {
-					delay = 20 + Math.floor(Math.random() * 80);
+					delay = 20 + Math.floor(randomFloat() * 80);
 				} else {
 					const base = Math.min(1000 * Math.pow(2.2, _reconnectAttempts - 2), 300000);
-					delay = Math.floor(base * (0.75 + Math.random() * 0.5));
+					delay = Math.floor(base * (0.75 + randomFloat() * 0.5));
 				}
 				_reconnectAttempts++;
-				_reconnectTimer = setTimeout(() => {
+				_reconnectTimer = setTimer(() => {
 					_reconnectTimer = null;
 					if (topicUnsub) {
 						topicUnsub();
@@ -2985,7 +3011,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// subscribe envelope so the server can fill the gap from its
 					// replay buffer (or fromSeq, or truncated -> full rehydrate).
 					if (_resumeGraceTimer) {
-						clearTimeout(_resumeGraceTimer);
+						clearTimer(_resumeGraceTimer);
 						_resumeGraceTimer = null;
 					}
 					_inGracePeriod = false;
@@ -3011,7 +3037,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				unsub();
 				if (--subCount === 0) {
 					_pendingCleanup = true;
-					queueMicrotask(() => {
+					microtask(() => {
 						if (_pendingCleanup && subCount === 0) {
 							_pendingCleanup = false;
 							const graceMs = _getResumeGraceMs();
@@ -3024,7 +3050,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 								// from the retained seq via fetchAndSubscribe.
 								_releaseSubscription();
 								_inGracePeriod = true;
-								_resumeGraceTimer = setTimeout(() => {
+								_resumeGraceTimer = setTimer(() => {
 									_resumeGraceTimer = null;
 									_inGracePeriod = false;
 									_resetSession();
@@ -3233,9 +3259,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			const conn = _connect();
 
 			return new Promise((resolve, reject) => {
-				const _startTime = Date.now();
-				const timer = setTimeout(() => {
-					if (Date.now() - _startTime > 90000) {
+				const _startTime = now();
+				const timer = setTimer(() => {
+					if (now() - _startTime > 90000) {
 						pending.delete(id);
 						_loadingMore = false;
 						reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
@@ -3605,7 +3631,7 @@ export function batch(fn, options) {
 				const entry = pending.get(call.id);
 				if (entry) {
 					pending.delete(call.id);
-					if (entry.timer) clearTimeout(entry.timer);
+					if (entry.timer) clearTimer(entry.timer);
 				}
 			}
 		}
@@ -3621,7 +3647,7 @@ export function batch(fn, options) {
 			const entry = pending.get(call.id);
 			if (entry) {
 				pending.delete(call.id);
-				if (entry.timer) clearTimeout(entry.timer);
+				if (entry.timer) clearTimer(entry.timer);
 				entry.reject(new RpcError('INVALID_REQUEST', 'Batch exceeds maximum of 50 calls'));
 			}
 		}
@@ -3639,13 +3665,13 @@ export function batch(fn, options) {
 	// here so the single call still times out cleanly.
 	if (collected.length === 1) {
 		const call = collected[0];
-		const _startTime = Date.now();
+		const _startTime = now();
 		const sleepThreshold = Math.max(effectiveTimeout * 3, 90000);
-		const timer = setTimeout(() => {
+		const timer = setTimer(() => {
 			const entry = pending.get(call.id);
 			if (!entry) return;
 			pending.delete(call.id);
-			if (Date.now() - _startTime > sleepThreshold) {
+			if (now() - _startTime > sleepThreshold) {
 				entry.reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
 			} else {
 				entry.reject(new RpcError('TIMEOUT', `RPC '${call.rpc}' timed out after ${Math.round(effectiveTimeout / 1000)}s`));
@@ -3658,9 +3684,9 @@ export function batch(fn, options) {
 	}
 
 	// Set a batch-level timeout (sleep-aware)
-	const _batchStartTime = Date.now();
-	const batchTimer = setTimeout(() => {
-		if (Date.now() - _batchStartTime > 90000) {
+	const _batchStartTime = now();
+	const batchTimer = setTimer(() => {
+		if (now() - _batchStartTime > 90000) {
 			for (const call of collected) {
 				const entry = pending.get(call.id);
 				if (entry) {
@@ -3685,7 +3711,7 @@ export function batch(fn, options) {
 	conn.sendQueued(payload);
 
 	// Return promise that resolves when all individual promises resolve
-	return Promise.all(promises).finally(() => clearTimeout(batchTimer));
+	return Promise.all(promises).finally(() => clearTimer(batchTimer));
 }
 
 /**
@@ -3787,13 +3813,13 @@ async function _drainOfflineQueue() {
 	const beforeReplay = offlineOpts?.beforeReplay;
 	const onReplayError = offlineOpts?.onReplayError;
 	const maxAge = offlineOpts?.maxAge || 0;
-	const now = Date.now();
+	const nowMs = now();
 
 	// Filter the queue
 	/** @type {OfflineEntry[]} */
 	let queue = [];
 	for (const entry of _offlineQueue) {
-		if (maxAge > 0 && now - entry.queuedAt > maxAge) {
+		if (maxAge > 0 && nowMs - entry.queuedAt > maxAge) {
 			entry.reject(new RpcError('STALE', 'Offline mutation expired'));
 			continue;
 		}
@@ -4091,7 +4117,7 @@ function _devtoolsVolatileSent(path, args) {
 	__devtools.volatile[_devtoolsVolatileIdx] = {
 		path,
 		args,
-		time: Date.now(),
+		time: now(),
 		seq: ++_devtoolsVolatileSeq
 	};
 	_devtoolsVolatileIdx = (_devtoolsVolatileIdx + 1) % _DEVTOOLS_VOLATILE_MAX;
@@ -4141,7 +4167,7 @@ const _DEVTOOLS_HISTORY_MAX = 50;
  */
 function _devtoolsStart(path, id, args) {
 	if (!__devtools) return;
-	__devtools.pending.set(id, { path, args, startTime: Date.now() });
+	__devtools.pending.set(id, { path, args, startTime: now() });
 }
 
 /**
@@ -4160,8 +4186,8 @@ function _devtoolsEnd(id, ok, result) {
 		args: entry.args,
 		ok,
 		result,
-		duration: Date.now() - entry.startTime,
-		time: Date.now(),
+		duration: now() - entry.startTime,
+		time: now(),
 		seq: ++_devtoolsSeq
 	};
 	__devtools.history[_devtoolsHistoryIdx] = record;
@@ -4207,7 +4233,7 @@ function _devtoolsStreamEvent(path, eventType, data) {
 	if (!__devtools) return;
 	const e = __devtools.streams.get(path);
 	if (!e) return;
-	e.lastEventTime = Date.now();
+	e.lastEventTime = now();
 	e.lastEvent = eventType;
 	if (__devtools.paused) return;
 	const redacted = data === undefined

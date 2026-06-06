@@ -6,6 +6,12 @@ import { flushSync } from 'svelte';
 import { compileModule } from 'svelte/compiler';
 import svelteRealtime from '../vite.js';
 import { live } from '../server.js';
+import {
+	_clusterPresenceAcquire,
+	_clusterPresenceList,
+	_clusterPresenceMerge,
+	_presenceRefForTest
+} from '../server.js';
 import { colorForKey, hueForKey } from '../shared/color.js';
 import { colorForKey as colorViaServer, hueForKey as hueViaServer } from '../server.js';
 import { colorForKey as colorViaClient, hueForKey as hueViaClient } from '../client.js';
@@ -346,10 +352,10 @@ describe('live.multiplayer()', () => {
 		expect(room.__cursorStream).toBeUndefined();
 	});
 
-	it('records the field-surface config markers without wiring a send path', () => {
-		// The typing / locks / selections / reactions surfaces are recorded
-		// as config markers so the returned API shape is stable for the
-		// follow-up, but they must not produce any live sub-stream yet.
+	it('records the field-surface config markers even when no field surface is declared', () => {
+		// The typing / locks / selections / reactions markers are always
+		// recorded so the generated namespace knows which surfaces to wire; an
+		// export that declares none still exposes the (all-falsy) marker object.
 		const room = live.multiplayer({
 			topic: (ctx) => 'doc',
 			init: async () => [],
@@ -359,6 +365,7 @@ describe('live.multiplayer()', () => {
 
 		expect(room.__fields).toBeDefined();
 		expect(typeof room.__fields).toBe('object');
+		expect(room.__fields).toEqual({ typing: false, locks: null, reactions: false, selections: null });
 	});
 
 	it('leaves live.room() untouched - a room export carries no multiplayer marker', () => {
@@ -420,6 +427,526 @@ describe('live.multiplayer()', () => {
 		expect(published).toHaveLength(1);
 
 		await expect(room.__cursorMove({ publish: () => {} }, 'b3', { x: 0, y: 0 })).rejects.toThrow('denied');
+	});
+
+	it('exposes a presence-field send handler that publishes a keyed update to the presence sub-topic', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			typing: true,
+			topicArgs: 1
+		});
+
+		expect(room.__presenceUpdate).toBeDefined();
+		expect(room.__presenceUpdate.__isLive).toBe(true);
+		expect(room.__presenceUpdate.__volatileRpc).toBe(true);
+
+		const published = [];
+		const ctx = {
+			user: { id: 'alice' },
+			publish: (topic, event, data) => published.push({ topic, event, data })
+		};
+
+		await room.__presenceUpdate(ctx, 'b1', { typing: true });
+		expect(published).toEqual([
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true } }
+		]);
+
+		published.length = 0;
+		await room.__presenceUpdate(ctx, 'b1', { selection: { start: 0, end: 5, nodePath: [0] } });
+		expect(published).toEqual([
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', selection: { start: 0, end: 5, nodePath: [0] } } }
+		]);
+	});
+
+	it('presence-field handler stamps a lock key on the caller entry and clears it on release', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: ['title'],
+			topicArgs: 1
+		});
+
+		const published = [];
+		const ctx = {
+			user: { id: 'alice' },
+			publish: (topic, event, data) => published.push({ topic, event, data })
+		};
+
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': true });
+		expect(published).toEqual([
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': true } }
+		]);
+
+		published.length = 0;
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': null });
+		expect(published).toEqual([
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': null } }
+		]);
+	});
+
+	it('exposes a reaction send handler that publishes an ephemeral event to the reactions sub-topic', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			reactions: true,
+			topicArgs: 1
+		});
+
+		expect(room.__reactionEmit).toBeDefined();
+		expect(room.__reactionEmit.__isLive).toBe(true);
+		expect(room.__reactionEmit.__volatileRpc).toBe(true);
+		expect(room.__reactionStream).toBeDefined();
+		expect(room.__reactionStream.__streamOptions.merge).toBe('latest');
+
+		const published = [];
+		const ctx = {
+			user: { id: 'alice' },
+			publish: (topic, event, data) => published.push({ topic, event, data })
+		};
+
+		await room.__reactionEmit(ctx, 'b1', 'heart', { x: 3, y: 4 });
+		expect(published).toEqual([
+			{ topic: 'board:b1:reactions', event: 'reaction', data: { key: 'alice', token: 'heart', x: 3, y: 4 } }
+		]);
+	});
+
+	it('reaction handler never coalesces: a burst of taps all publish', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			reactions: true,
+			topicArgs: 1
+		});
+
+		const published = [];
+		const ctx = {
+			user: { id: 'alice' },
+			publish: (topic, event, data) => published.push({ topic, event, data })
+		};
+
+		// Twelve identical reactions across twelve task boundaries: every one
+		// must reach the wire (no server-side coalescing).
+		for (let i = 0; i < 12; i++) {
+			await room.__reactionEmit(ctx, 'b1', 'heart', { x: 1, y: 1 });
+		}
+		expect(published).toHaveLength(12);
+		expect(published.every((p) => p.event === 'reaction' && p.topic === 'board:b1:reactions')).toBe(true);
+	});
+
+	it('omits the reactions sub-stream when reactions are not enabled', () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			topicArgs: 1
+		});
+
+		expect(room.__reactionStream).toBeUndefined();
+		// The send handlers are always present (a no-field multiplayer export
+		// simply never wires the client methods that call them).
+		expect(room.__presenceUpdate).toBeDefined();
+		expect(room.__reactionEmit).toBeDefined();
+	});
+
+	it('presence-field and reaction handlers run the configured guard before publishing', async () => {
+		const seen = [];
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			typing: true,
+			reactions: true,
+			topicArgs: 1,
+			guard: async (ctx, boardId) => { seen.push(boardId); if (!ctx.user) throw new Error('denied'); }
+		});
+
+		const published = [];
+		const ctx = { user: { id: 'bob' }, publish: (t, e, d) => published.push({ t, e, d }) };
+		await room.__presenceUpdate(ctx, 'b2', { typing: true });
+		await room.__reactionEmit(ctx, 'b2', 'wave', { x: 0, y: 0 });
+		expect(seen).toEqual(['b2', 'b2']);
+		expect(published).toHaveLength(2);
+
+		await expect(room.__presenceUpdate({ publish: () => {} }, 'b3', { typing: true })).rejects.toThrow('denied');
+		await expect(room.__reactionEmit({ publish: () => {} }, 'b3', 'wave')).rejects.toThrow('denied');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Sticky presence fields: a selection or a lock must persist on the caller's
+// roster entry after the forward update publish, so a late joiner who loads the
+// roster still sees it. typing (and any other field) stays ephemeral. Null
+// clears the field (release). These run on a Map-backed fake-redis stub shared
+// across two platform objects to model two cluster instances, plus an in-memory
+// (no platform.redis) variant. No Docker, no real Redis.
+// ---------------------------------------------------------------------------
+
+// Minimal Map-backed stand-in for the raw ioredis hash commands the cluster
+// presence helpers call. A single shared instance models one cluster-shared
+// Redis that two platform objects (two instances) both point at.
+function makeFakeRedis() {
+	/** @type {Map<string, Map<string, string>>} */
+	const hashes = new Map();
+	const get = (h) => {
+		let m = hashes.get(h);
+		if (!m) { m = new Map(); hashes.set(h, m); }
+		return m;
+	};
+	return {
+		async hget(h, field) {
+			const m = hashes.get(h);
+			const v = m && m.get(field);
+			return v === undefined ? null : v;
+		},
+		async hset(h, field, value) {
+			const m = get(h);
+			const isNew = m.has(field) ? 0 : 1;
+			m.set(field, String(value));
+			return isNew;
+		},
+		async hgetall(h) {
+			const m = hashes.get(h);
+			if (!m) return {};
+			const out = {};
+			for (const [k, v] of m) out[k] = v;
+			return out;
+		},
+		async hincrby(h, field, by) {
+			const m = get(h);
+			const cur = m.has(field) ? parseInt(m.get(field), 10) : 0;
+			const next = cur + by;
+			m.set(field, String(next));
+			return next;
+		},
+		async hdel(h, ...fields) {
+			const m = hashes.get(h);
+			if (!m) return 0;
+			let n = 0;
+			for (const f of fields) { if (m.delete(f)) n++; }
+			return n;
+		},
+		async hexists(h, field) {
+			const m = hashes.get(h);
+			return m && m.has(field) ? 1 : 0;
+		},
+		async eval(_script, _numKeys, hKey, countField, dataField, deltaJson) {
+			// Emulates the atomic sticky-merge script: gated on the count field
+			// still existing, merge the JSON delta into the data field (a null
+			// value deletes the key); the TTL refresh is a no-op here.
+			const m = hashes.get(hKey);
+			if (!m || !m.has(countField)) return 0;
+			let cur = {};
+			const raw = m.get(dataField);
+			if (raw != null) { try { const p = JSON.parse(raw); if (p && typeof p === 'object') cur = p; } catch { /* corrupt: start fresh */ } }
+			const delta = JSON.parse(deltaJson);
+			for (const k of Object.keys(delta)) { if (delta[k] == null) delete cur[k]; else cur[k] = delta[k]; }
+			m.set(dataField, JSON.stringify(cur));
+			return 1;
+		},
+		async expire() { return 1; }
+	};
+}
+
+describe('live.multiplayer() sticky presence fields', () => {
+	it('carries a lock and a selection across instances for a late joiner, and clears on release', async () => {
+		const redis = makeFakeRedis();
+		const platformA = { redis };
+		const platformB = { redis };
+
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: ['title'],
+			selections: 'offset',
+			topicArgs: 1
+		});
+
+		// Alice joins on instance A: the data-stream auto-join writes her roster
+		// entry to the shared hash (the same write the real onSubscribe does).
+		await _clusterPresenceAcquire(platformA, 'board:b1', 'alice', { name: 'Alice' });
+
+		const publishedA = [];
+		const ctxA = {
+			user: { id: 'alice', name: 'Alice' },
+			platform: platformA,
+			publish: (topic, event, data) => publishedA.push({ topic, event, data })
+		};
+
+		await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': true });
+		await room.__presenceUpdate(ctxA, 'b1', { selection: { start: 0, end: 5 } });
+
+		// The late joiner on instance B loads the cluster roster and sees both
+		// sticky fields stamped on Alice's entry.
+		const rosterB = await _clusterPresenceList(platformB, 'board:b1');
+		const aliceB = rosterB.find((e) => e.key === 'alice');
+		expect(aliceB).toBeDefined();
+		expect(aliceB.data.name).toBe('Alice');
+		expect(aliceB.data['lock:title']).toBe(true);
+		expect(aliceB.data.selection).toEqual({ start: 0, end: 5 });
+
+		// Releasing the lock removes the field from the persisted entry.
+		await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': null });
+		const rosterB2 = await _clusterPresenceList(platformB, 'board:b1');
+		const aliceB2 = rosterB2.find((e) => e.key === 'alice');
+		expect('lock:title' in aliceB2.data).toBe(false);
+		// The selection is untouched by the lock release.
+		expect(aliceB2.data.selection).toEqual({ start: 0, end: 5 });
+
+		// Clearing the selection removes it too.
+		await room.__presenceUpdate(ctxA, 'b1', { selection: null });
+		const rosterB3 = await _clusterPresenceList(platformB, 'board:b1');
+		const aliceB3 = rosterB3.find((e) => e.key === 'alice');
+		expect('selection' in aliceB3.data).toBe(false);
+	});
+
+	it('keeps typing ephemeral: it never persists to the roster but the forward update still publishes', async () => {
+		const redis = makeFakeRedis();
+		const platformA = { redis };
+		const platformB = { redis };
+
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			typing: true,
+			selections: 'offset',
+			topicArgs: 1
+		});
+
+		await _clusterPresenceAcquire(platformA, 'board:b1', 'alice', { name: 'Alice' });
+
+		const publishedA = [];
+		const ctxA = {
+			user: { id: 'alice', name: 'Alice' },
+			platform: platformA,
+			publish: (topic, event, data) => publishedA.push({ topic, event, data })
+		};
+
+		await room.__presenceUpdate(ctxA, 'b1', { typing: true });
+
+		// The forward publish still emits the live update frame.
+		expect(publishedA).toEqual([
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true } }
+		]);
+
+		// But the late snapshot carries no typing field.
+		const rosterB = await _clusterPresenceList(platformB, 'board:b1');
+		const aliceB = rosterB.find((e) => e.key === 'alice');
+		expect(aliceB).toBeDefined();
+		expect('typing' in aliceB.data).toBe(false);
+	});
+
+	it('mutates the in-memory roster entry by reference when no platform.redis is wired', async () => {
+		const refMap = _presenceRefForTest();
+		const refKey = 'board:b9\0alice';
+		// Seed the entry the way the data-stream auto-join would: count, no timer,
+		// and the presence payload object the no-redis snapshot reads by reference.
+		const data = { name: 'Alice' };
+		refMap.set(refKey, { count: 1, timer: null, data });
+
+		try {
+			const room = live.multiplayer({
+				topic: (ctx, boardId) => 'board:' + boardId,
+				init: async () => [],
+				presence: (ctx) => ({ name: ctx.user?.name }),
+				locks: ['title'],
+				selections: 'offset',
+				topicArgs: 1
+			});
+
+			const ctxA = {
+				user: { id: 'alice', name: 'Alice' },
+				platform: {}, // no redis
+				publish: () => {}
+			};
+
+			await room.__presenceUpdate(ctxA, 'b9', { 'lock:title': true });
+			await room.__presenceUpdate(ctxA, 'b9', { selection: { start: 2, end: 8 } });
+
+			// The same-instance late snapshot iterates _presenceRef and reads
+			// ref.data by reference, so the merged fields are visible.
+			const roster = await _clusterPresenceList({}, 'board:b9');
+			const alice = roster.find((e) => e.key === 'alice');
+			expect(alice).toBeDefined();
+			expect(alice.data['lock:title']).toBe(true);
+			expect(alice.data.selection).toEqual({ start: 2, end: 8 });
+
+			// Release clears it.
+			await room.__presenceUpdate(ctxA, 'b9', { 'lock:title': null });
+			const roster2 = await _clusterPresenceList({}, 'board:b9');
+			const alice2 = roster2.find((e) => e.key === 'alice');
+			expect('lock:title' in alice2.data).toBe(false);
+		} finally {
+			refMap.delete(refKey);
+		}
+	});
+
+	it('does not persist when the field is gated off by config (lock without locks, selection without selections)', async () => {
+		const redis = makeFakeRedis();
+		const platform = { redis };
+
+		// typing enabled (so the runtime guard is satisfied via presence), but
+		// locks and selections are NOT declared: a lock or selection delta must
+		// publish forward yet never persist to the roster.
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			typing: true,
+			topicArgs: 1
+		});
+
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+
+		const ctxA = {
+			user: { id: 'alice', name: 'Alice' },
+			platform,
+			publish: () => {}
+		};
+
+		await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': true });
+		await room.__presenceUpdate(ctxA, 'b1', { selection: { start: 0, end: 1 } });
+
+		const roster = await _clusterPresenceList(platform, 'board:b1');
+		const alice = roster.find((e) => e.key === 'alice');
+		expect(alice).toBeDefined();
+		expect('lock:title' in alice.data).toBe(false);
+		expect('selection' in alice.data).toBe(false);
+	});
+
+	it('merge is a no-op when no roster entry exists yet (no live presence)', async () => {
+		const redis = makeFakeRedis();
+		const platform = { redis };
+		// No acquire: the hash has no 'd:alice' field.
+		await _clusterPresenceMerge(platform, 'board:b1', 'alice', { 'lock:title': true });
+		const roster = await _clusterPresenceList(platform, 'board:b1');
+		expect(roster.find((e) => e.key === 'alice')).toBeUndefined();
+	});
+
+	it('does not resurrect a phantom roster row when the entry was released mid-flight', async () => {
+		const redis = makeFakeRedis();
+		const platform = { redis };
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+		// Simulate a release landing first: the count and data fields are gone.
+		await redis.hdel('__live-presence:board:b1', 'c:alice', 'd:alice');
+		// A merge that races in afterward must be gated on the count field and so
+		// must NOT write a data row back (which would be a ghost with no count).
+		await _clusterPresenceMerge(platform, 'board:b1', 'alice', { 'lock:title': true });
+		const roster = await _clusterPresenceList(platform, 'board:b1');
+		expect(roster.find((e) => e.key === 'alice')).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Presence-field validation: a presence field (typing / locks / selections)
+// requires a presence function, because the field is stamped on a roster entry
+// that only exists once presence is set. Reactions are exempt. This is enforced
+// at runtime (live.multiplayer factory) and at build time (the vite codegen).
+// ---------------------------------------------------------------------------
+
+describe('live.multiplayer() presence-field requires presence', () => {
+	it('throws at runtime when typing is declared without a presence function', () => {
+		expect(() => live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			typing: true,
+			topicArgs: 1
+		})).toThrow(/presence field/);
+	});
+
+	it('throws at runtime when locks are declared without a presence function', () => {
+		expect(() => live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			locks: ['title'],
+			topicArgs: 1
+		})).toThrow(/presence field/);
+	});
+
+	it('throws at runtime when selections are declared without a presence function', () => {
+		expect(() => live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			selections: 'offset',
+			topicArgs: 1
+		})).toThrow(/presence field/);
+	});
+
+	it('does not throw at runtime for reactions without a presence function', () => {
+		expect(() => live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			reactions: true,
+			topicArgs: 1
+		})).not.toThrow();
+	});
+
+	it('throws at build time when a codegen source declares typing without presence', () => {
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  init: async () => [],
+  typing: true
+});
+`
+		});
+		const plugin = createPlugin();
+		expect(() => plugin.load('\0live:collab', {})).toThrow(/presence field/);
+		teardown();
+	});
+
+	it('throws at build time when a codegen source declares locks without presence', () => {
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  init: async () => [],
+  locks: ['title']
+});
+`
+		});
+		const plugin = createPlugin();
+		expect(() => plugin.load('\0live:collab', {})).toThrow(/presence field/);
+		teardown();
+	});
+
+	it('throws at build time when a codegen source declares selections without presence', () => {
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  init: async () => [],
+  selections: 'offset'
+});
+`
+		});
+		const plugin = createPlugin();
+		expect(() => plugin.load('\0live:collab', {})).toThrow(/presence field/);
+		teardown();
+	});
+
+	it('does not throw at build time for a reactions-only codegen source', () => {
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  init: async () => [],
+  reactions: true
+});
+`
+		});
+		const plugin = createPlugin();
+		expect(() => plugin.load('\0live:collab', {})).not.toThrow();
+		teardown();
 	});
 });
 
@@ -824,7 +1351,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		r.destroy();
 	});
 
-	it('exposes the stubbed field surfaces and their no-op methods without throwing', async () => {
+	it('degrades to empty field surfaces and no-op methods when no field deps are injected', async () => {
 		await loadShippedRuneModule();
 		const r = new MultiplayerRoom({
 			me: 'me',
@@ -834,18 +1361,166 @@ describe('MultiplayerRoom roster aggregation', () => {
 			move: () => {}
 		});
 
-		// Present so the API shape is stable for the follow-up.
+		// No roster, no field deps: every view is empty.
 		expect(r.typing).toEqual([]);
 		expect(r.locks).toEqual({});
 		expect(r.selections).toEqual({});
 		expect(r.reactions).toEqual([]);
 
-		// Inert: no throw, no return value contract beyond not blowing up.
+		// A method called without its send dep is a safe no-op, never a throw.
 		expect(() => r.react('thumbsup')).not.toThrow();
 		expect(() => r.setTyping(true)).not.toThrow();
 		expect(() => r.acquireLock('cell-1')).not.toThrow();
 		expect(() => r.releaseLock('cell-1')).not.toThrow();
 		expect(() => r.setSelection({ from: 0, to: 5 })).not.toThrow();
+		r.destroy();
+	});
+
+	it('projects typing from the presence roster, excluding self and clearing on toggle off', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([
+			{ key: 'me', name: 'Me', typing: true },
+			{ key: 'alice', name: 'Alice', typing: true },
+			{ key: 'bob', name: 'Bob' }
+		]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence,
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		// Self is excluded; only remote typers appear.
+		expect(r.typing).toEqual(['alice']);
+
+		presence.set([
+			{ key: 'me', name: 'Me', typing: true },
+			{ key: 'alice', name: 'Alice', typing: false },
+			{ key: 'bob', name: 'Bob', typing: true }
+		]);
+		flushSync();
+		expect(r.typing).toEqual(['bob']);
+		r.destroy();
+	});
+
+	it('projects remote selections keyed by user, excluding self', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([
+			{ key: 'me', selection: { start: 0, end: 1 } },
+			{ key: 'alice', selection: { start: 2, end: 5, nodePath: [0] } }
+		]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence,
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		expect(r.selections).toEqual({ alice: { start: 2, end: 5, nodePath: [0] } });
+
+		presence.set([
+			{ key: 'me', selection: { start: 0, end: 1 } },
+			{ key: 'alice', selection: null }
+		]);
+		flushSync();
+		// A cleared selection drops out of the map.
+		expect(r.selections).toEqual({});
+		r.destroy();
+	});
+
+	it('derives advisory lock holders from the roster and clears them when a holder leaves', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([
+			{ key: 'alice', 'lock:title': true },
+			{ key: 'bob', 'lock:body': true }
+		]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence,
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+
+		// The holder is the entry owner, keyed by lock key.
+		expect(r.locks).toEqual({ title: 'alice', body: 'bob' });
+
+		// Alice releases (field cleared): her lock drops.
+		presence.set([
+			{ key: 'alice', 'lock:title': null },
+			{ key: 'bob', 'lock:body': true }
+		]);
+		flushSync();
+		expect(r.locks).toEqual({ body: 'bob' });
+
+		// Bob leaves entirely (entry gone): his lock recomputes to absent.
+		presence.set([{ key: 'alice', 'lock:title': null }]);
+		flushSync();
+		expect(r.locks).toEqual({});
+		r.destroy();
+	});
+
+	it('forwards field methods to the injected send callbacks with the field-shaped delta', async () => {
+		await loadShippedRuneModule();
+		const sent = [];
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([]),
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			reactions: fakeStore([]),
+			move: () => {},
+			setTyping: (delta) => { sent.push(['setTyping', delta]); },
+			setSelection: (delta) => { sent.push(['setSelection', delta]); },
+			acquireLock: (delta) => { sent.push(['acquireLock', delta]); },
+			releaseLock: (delta) => { sent.push(['releaseLock', delta]); },
+			react: (...args) => { sent.push(['react', ...args]); }
+		});
+
+		r.setTyping(true);
+		r.setTyping(0);
+		r.setSelection({ start: 1, end: 2 });
+		r.setSelection(null);
+		r.acquireLock('title');
+		r.releaseLock('title');
+		r.react('heart', { x: 1, y: 2 });
+		r.react('wave');
+
+		expect(sent).toEqual([
+			['setTyping', { typing: true }],
+			['setTyping', { typing: false }],
+			['setSelection', { selection: { start: 1, end: 2 } }],
+			['setSelection', { selection: null }],
+			['acquireLock', { 'lock:title': true }],
+			['releaseLock', { 'lock:title': null }],
+			['react', 'heart', { x: 1, y: 2 }],
+			['react', 'wave']
+		]);
+		r.destroy();
+	});
+
+	it('reflects the reactions ring from the injected reactions store', async () => {
+		await loadShippedRuneModule();
+		const reactions = fakeStore([{ key: 'alice', token: 'heart', x: 1, y: 2 }]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([]),
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			reactions,
+			move: () => {}
+		});
+
+		expect(r.reactions).toEqual([{ key: 'alice', token: 'heart', x: 1, y: 2 }]);
+
+		reactions.set([
+			{ key: 'alice', token: 'heart', x: 1, y: 2 },
+			{ key: 'bob', token: 'wave', x: 3, y: 4 }
+		]);
+		flushSync();
+		expect(r.reactions.map((x) => x.token)).toEqual(['heart', 'wave']);
 		r.destroy();
 	});
 });
@@ -912,6 +1587,127 @@ export const board = live.room({
 });
 
 // ---------------------------------------------------------------------------
+// Field codegen: a multiplayer export that declares a field surface (typing /
+// selections / locks / reactions) emits the presence-field send path and the
+// reactions stream + emit handler, wired into the room() deps. An export with
+// no field surface emits none of this, so it stays unchanged.
+// ---------------------------------------------------------------------------
+
+const FIELD_SOURCE = `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  init: async (ctx, boardId) => [],
+  presence: (ctx) => ({ name: ctx.user.name }),
+  cursors: true,
+  typing: true,
+  selections: 'offset',
+  locks: ['title'],
+  reactions: true
+});
+`;
+
+// A field surface with no presence and no cursors. reactions ride their own
+// stream, so a reactions-only room is a legitimate lightweight config (floating
+// reactions, no roster). It still needs room() to host the reactions consumable,
+// so the room() factory must render on BOTH the client and the SSR stub.
+const REACTIONS_ONLY_SOURCE = `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  init: async (ctx, boardId) => [],
+  reactions: true
+});
+`;
+
+describe('live.multiplayer() field codegen', () => {
+	afterEach(teardown);
+
+	it('emits the presence-field send rpc and the reactions stream + emit when fields are declared', () => {
+		setup({ 'collab.js': FIELD_SOURCE });
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).toContain('_setField: __rpc("collab/room/__presence/update")');
+		expect(code).toContain('reactions: __stream("collab/room/__reactions"');
+		expect(code).toContain('_emitReaction: __rpc("collab/room/__reaction/emit")');
+	});
+
+	it('wires the field send callbacks into the room() deps with the configured volatility', () => {
+		setup({ 'collab.js': FIELD_SOURCE });
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		// typing and lock acquire/release are awaitable (id-bearing) RPCs.
+		expect(code).toContain('setTyping: (...a) => room._setField(...args, ...a)');
+		expect(code).toContain('acquireLock: (...a) => room._setField(...args, ...a)');
+		expect(code).toContain('releaseLock: (...a) => room._setField(...args, ...a)');
+		// the selection drag drops under backpressure (fire-and-forget).
+		expect(code).toContain('setSelection: (...a) => room._setField.fireAndForget(...args, ...a)');
+		// reactions emit fire-and-forget and the room consumes the stream.
+		expect(code).toContain('reactions: room.reactions(...args)');
+		expect(code).toContain('react: (...a) => room._emitReaction.fireAndForget(...args, ...a)');
+	});
+
+	it('registers the presence-field, reactions stream, and reaction handlers in the registry', () => {
+		setup({ 'collab.js': FIELD_SOURCE });
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		expect(code).toContain('__register("collab/room/__presence/update"');
+		expect(code).toContain('.__presenceUpdate');
+		expect(code).toContain('__register("collab/room/__reactions"');
+		expect(code).toContain('.__reactionStream');
+		expect(code).toContain('__register("collab/room/__reaction/emit"');
+		expect(code).toContain('.__reactionEmit');
+	});
+
+	it('omits the field send path from a multiplayer export with no field surface', () => {
+		// MULTIPLAYER_SOURCE declares presence + cursors + actions but no field
+		// surface; the field emission must not appear.
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).not.toContain('_setField');
+		expect(code).not.toContain('_emitReaction');
+		expect(code).not.toContain('__presence/update');
+		expect(code).not.toContain('__reaction/emit');
+		// The room() factory still builds (presence/cursors roster) but carries
+		// no field deps.
+		expect(code).toContain('room(...args) { return new MultiplayerRoom({');
+		expect(code).not.toContain('setTyping:');
+	});
+
+	it('a non-multiplayer module is unaffected by the field codegen', () => {
+		const plainSource = `
+import { live } from 'svelte-realtime/server';
+export const messages = live.stream('messages', async () => [], { merge: 'crud', key: 'id' });
+export const send = live(async (ctx, text) => null);
+`;
+		setup({ 'plain.js': plainSource });
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:plain', {});
+
+		expect(code).not.toContain('_setField');
+		expect(code).not.toContain('_emitReaction');
+		expect(code).not.toContain('__reactions');
+	});
+
+	it('builds the client room() for a field-only (reactions-only) export with no presence or cursors', () => {
+		setup({ 'collab.js': REACTIONS_ONLY_SOURCE });
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		// A field surface alone must still build the reactive room view.
+		expect(code).toContain('room(...args) { return new MultiplayerRoom({');
+		expect(code).toContain('reactions: __stream("collab/room/__reactions"');
+	});
+});
+
+// ---------------------------------------------------------------------------
 // SSR stub: the multiplayer namespace renders its empty collaborative state so
 // a page that reads board.status / calls board.move(...) during SSR does not
 // crash before hydration.
@@ -952,6 +1748,19 @@ describe('live.multiplayer() SSR stub', () => {
 		expect(code).toContain('room: () => ({');
 		expect(code).toContain('others: []');
 		expect(code).toContain('me: null');
+		expect(code).not.toContain('MultiplayerRoom');
+	});
+
+	it('renders the SSR room() for a field-only (reactions-only) export so SSR matches the client', () => {
+		// Regression: the client room-view gate includes any field surface, so the
+		// SSR gate must too. Without symmetry a field-only export exposes
+		// board.room(...) on the client but not on the server, crashing SSR with
+		// "board.room is not a function".
+		setup({ 'collab.js': REACTIONS_ONLY_SOURCE });
+		const plugin = createSsrPlugin();
+		const code = plugin.load('\0live:collab', { ssr: true });
+
+		expect(code).toContain('room: () => ({');
 		expect(code).not.toContain('MultiplayerRoom');
 	});
 });

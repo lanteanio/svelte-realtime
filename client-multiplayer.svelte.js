@@ -50,6 +50,12 @@ function dedupeByUser(list) {
  * means `identify(key)` called after the room is constructed updates self-
  * exclusion live.
  *
+ * The collaborative field surfaces - `typing`, `selections`, `locks` - are
+ * projections of the same presence roster: a caller stamps fields onto its own
+ * entry through the injected send callbacks, the presence merge layers them in,
+ * and these views read them back. `reactions` is the bounded ring of recent
+ * ephemeral emotes from the dedicated reactions stream.
+ *
  * The views are `$derived` over `$state` snapshots of the injected stores, so a
  * store push followed by a reactive flush refreshes every view.
  */
@@ -57,18 +63,32 @@ export class MultiplayerRoom {
 	#meSource;
 	#presence = $state([]);
 	#cursors = $state([]);
+	#reactions = $state([]);
 	#status = $state('idle');
 	#move;
 	#reportViewport;
+	#setTyping;
+	#setSelection;
+	#acquireLock;
+	#releaseLock;
+	#react;
 	#unsubs = [];
 
 	constructor(deps) {
 		this.#meSource = deps.me;
 		this.#move = deps.move;
 		this.#reportViewport = deps.reportViewport || deps.move;
+		this.#setTyping = deps.setTyping;
+		this.#setSelection = deps.setSelection;
+		this.#acquireLock = deps.acquireLock;
+		this.#releaseLock = deps.releaseLock;
+		this.#react = deps.react;
 		this.#unsubs.push(deps.presence.subscribe((v) => { this.#presence = v || []; }));
 		this.#unsubs.push(deps.cursors.subscribe((v) => { this.#cursors = v || []; }));
 		this.#unsubs.push(deps.status.subscribe((v) => { this.#status = v; }));
+		if (deps.reactions) {
+			this.#unsubs.push(deps.reactions.subscribe((v) => { this.#reactions = v || []; }));
+		}
 	}
 
 	// Reads the reactive holder when one was injected (so identify(key) after
@@ -95,21 +115,91 @@ export class MultiplayerRoom {
 	);
 	get cursors() { return this.#cursorsDerived; }
 
-	// Stubbed field surfaces: present so the API shape is stable, inert until
-	// the client-to-server presence-field send path lands.
-	get typing() { return []; }
-	get locks() { return {}; }
-	get selections() { return {}; }
-	get reactions() { return []; }
+	// Field surfaces are projections of the same presence roster `others` reads:
+	// a caller stamps fields onto its own roster entry through the send path, the
+	// presence merge layers them onto the entry, and these views read them back.
+	// They add no new store subscription - one derive pass over the roster the
+	// room already aggregates.
+
+	// The keys of remote collaborators currently flagged as typing.
+	#typingDerived = $derived(
+		dedupeByUser(this.#presence)
+			.filter((p) => p.typing === true && (this.me == null || p.key !== this.me))
+			.map((p) => p.key)
+	);
+	get typing() { return this.#typingDerived; }
+
+	// Advisory lock holders, keyed by lock key. A roster entry carries a held key
+	// as `lock:<key>` (truthy while held, cleared on release); the holder is the
+	// entry's own user key. This collapses the roster into a { lockKey: holder }
+	// map. A holder leaving drops its entry, so its locks recompute to absent on
+	// the next push - no stale grant survives.
+	#locksDerived = $derived(this.#deriveLocks(this.#presence));
+	get locks() { return this.#locksDerived; }
+
+	// Remote selections, keyed by user. Self is excluded so an app renders only
+	// collaborators' ranges. Each value is the selection payload the holder sent.
+	#selectionsDerived = $derived(
+		Object.fromEntries(
+			dedupeByUser(this.#presence)
+				.filter((p) => p.selection != null && (this.me == null || p.key !== this.me))
+				.map((p) => [p.key, p.selection])
+		)
+	);
+	get selections() { return this.#selectionsDerived; }
+
+	// The bounded ring of recent reactions. The send stream caps and GCs old
+	// taps, so an app renders the current window and lets entries fall off.
+	get reactions() { return this.#reactions; }
+
+	/** @param {Array<Record<string, any>>} roster */
+	#deriveLocks(roster) {
+		const out = /** @type {Record<string, any>} */ ({});
+		for (const entry of dedupeByUser(roster)) {
+			for (const field in entry) {
+				if (field.startsWith('lock:') && entry[field] != null && entry[field] !== false) {
+					out[field.slice(5)] = entry.key;
+				}
+			}
+		}
+		return out;
+	}
 
 	move(...args) { return this.#move ? this.#move(...args) : undefined; }
 	reportViewport(...args) { return this.#reportViewport ? this.#reportViewport(...args) : undefined; }
 
-	react() {}
-	setTyping() {}
-	acquireLock() {}
-	releaseLock() {}
-	setSelection() {}
+	// Toggle the local typing flag. Publishes a `{ typing }` delta onto the
+	// caller's presence entry so every collaborator's `typing` view updates.
+	setTyping(on) {
+		return this.#setTyping ? this.#setTyping({ typing: !!on }) : undefined;
+	}
+
+	// Publish the local selection range. `null` clears it. Offset selections are
+	// a plain `{ start, end, nodePath }` object; the value is sent verbatim.
+	setSelection(selection) {
+		return this.#setSelection ? this.#setSelection({ selection: selection ?? null }) : undefined;
+	}
+
+	// Claim an advisory lock on a key: stamps `lock:<key>` on the caller's
+	// presence entry, which the server keys by the caller's identity. Advisory
+	// only - it announces intent, it does not block another claimant.
+	acquireLock(lockKey) {
+		if (!this.#acquireLock || lockKey == null) return undefined;
+		return this.#acquireLock({ ['lock:' + lockKey]: true });
+	}
+
+	// Release an advisory lock: clears `lock:<key>` on the caller's entry.
+	releaseLock(lockKey) {
+		if (!this.#releaseLock || lockKey == null) return undefined;
+		return this.#releaseLock({ ['lock:' + lockKey]: null });
+	}
+
+	// Emit an ephemeral reaction (an emote token at an optional point). Rides the
+	// dedicated reactions stream, never the roster, so it is a one-off event.
+	react(token, at) {
+		if (!this.#react) return undefined;
+		return at !== undefined ? this.#react(token, at) : this.#react(token);
+	}
 
 	destroy() {
 		for (const off of this.#unsubs) off();

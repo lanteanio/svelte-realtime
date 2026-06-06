@@ -2920,6 +2920,7 @@ export const board = live.multiplayer({
 - `me` - the local user's key, or `null` until you name it.
 - `status` - the connection-status passthrough.
 - `move(...)` / `reportViewport(...)` - forward to the cursor send path.
+- `typing` / `selections` / `locks` / `reactions` and their send methods, when the matching field surfaces are declared (see [Field surfaces](#field-surfaces-typing-selections-locks-reactions)).
 
 Name the current user once with `board.identify(key)` - the same identity you already supply for presence, available from the SvelteKit page load. Calling `identify(key)` after `board.room(...)` still lights up `me` and self-exclusion. If you never call it the surface degrades gracefully: `others` is the full deduped roster and `me` reads `null`, never a crash.
 
@@ -2978,9 +2979,50 @@ The raw `data` / `presence` / `cursors` factory stores stay on the export for ba
 {/each}
 ```
 
-### Reserved surfaces
+### Field surfaces: typing, selections, locks, reactions
 
-The `typing`, `locks`, `selections`, and `reactions` views and their methods (`setTyping`, `acquireLock`, `releaseLock`, `setSelection`, `react`) are present on the export so the API shape is stable, but they are inert for now: the views read empty and the methods are no-ops that emit a single dev-mode note. They activate once the client-to-server field send path lands; declaring `typing: true`, `locks: ['cell']`, `reactions: true`, or `selections: 'offset'` reserves the surface without changing today's behavior.
+Declare a collaborative field surface on the export and the room view lights up a reactive projection plus a send method for it. Typing, selections, and locks are published onto the same presence roster `room.others` reads, so they cost no extra subscription; reactions ride a dedicated stream.
+
+```js
+export const board = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  init: async (ctx, boardId) => db.cards.forBoard(boardId),
+  presence: (ctx) => ({ name: ctx.user.name }),
+  cursors: true,
+  typing: true,
+  selections: 'offset',
+  locks: ['title', 'body'],
+  reactions: true
+});
+```
+
+- **Typing** - `room.typing` is the list of remote collaborators' user keys currently flagged as typing (self excluded). Toggle the local flag with `room.setTyping(true)` / `room.setTyping(false)`. Typing is a transient flag and is never persisted on the roster.
+- **Selections** - `room.selections` is a `{ userKey: range }` map of remote selection ranges (self excluded). Publish the local offset-mode range with `room.setSelection({ start, end, nodePath })`; pass `null` to clear it. A selection is stamped on the caller's roster entry, so a late joiner loads the current selections from the roster snapshot instead of waiting for the next change.
+- **Locks** - `room.locks` is a `{ lockKey: holderUserKey }` map. `room.acquireLock('title')` announces an advisory claim on a key and `room.releaseLock('title')` clears it. A holder disconnecting drops its claims on the next roster push. These are soft, collaborative-awareness locks (they tell collaborators who is editing what), not distributed mutual exclusion - a second caller is not blocked. A held lock is stamped on the caller's roster entry, so a late joiner sees who holds what from the roster snapshot.
+- **Reactions** - `room.reactions` is a bounded ring of recent ephemeral emotes; `room.react('heart', { x, y })` emits one. Reactions are never coalesced, so a burst of taps all arrive, and old entries fall off the ring.
+
+Selections and locks persist on the roster both single-instance and across a cluster (wire `platform.redis`); typing stays ephemeral. Because a field is stamped on a roster entry that only exists once presence is set, declaring `typing`, `selections`, or `locks` requires a `presence` function - the Vite plugin and `live.multiplayer()` both reject a presence field with no presence. `reactions` are exempt: they ride their own ephemeral stream and need no presence.
+
+```svelte
+<script>
+  import { board } from '$live/collab';
+  let { boardId } = $props();
+  const room = board.room(boardId);
+</script>
+
+<input
+  oninput={() => room.setTyping(true)}
+  onblur={() => room.setTyping(false)} />
+
+{#if room.typing.length}
+  <p>{room.typing.length} editing...</p>
+{/if}
+
+<button onclick={() => room.react('heart', { x: 100, y: 40 })}>React</button>
+```
+
+A multiplayer export that declares no field surface is unchanged, and calling a field method on the namespace (rather than a `room(...)` instance) is a safe no-op that points you at `room(...)`.
 
 ### Deterministic user colors
 
@@ -3839,7 +3881,7 @@ Import from `svelte-realtime/server`.
 | `live.effect(sources, fn, options?)` | Server-side reactive side effect |
 | `live.aggregate(source, reducers, options)` | Real-time incremental aggregation |
 | `live.room(config)` | Collaborative room (data + presence + cursors + actions) |
-| `live.multiplayer(config)` | Collaborative surface: room sub-streams plus an aggregated roster view (`room(...)` -> `others` / `cursors` / `me`, colored and deduped), live cursors (move / reportViewport), connection status, and `identify(key)` |
+| `live.multiplayer(config)` | Collaborative surface: room sub-streams plus an aggregated roster view (`room(...)` -> `others` / `cursors` / `me`, colored and deduped), live cursors (move / reportViewport), field surfaces (typing / selections / advisory locks / reactions), connection status, and `identify(key)` |
 | `live.webhook(topic, config)` | HTTP webhook-to-stream bridge |
 | `live.gate(predicate, fn)` | Conditional stream activation |
 | `live.rateLimit(config, fn)` | Per-function sliding window rate limiter |

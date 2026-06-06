@@ -1,6 +1,6 @@
 {
   "name": "svelte-realtime",
-  "version": "0.6.0-next.3",
+  "version": "0.6.0-next.4",
   "publishConfig": {
     "tag": "next"
   },
@@ -60,6 +60,7 @@
     "server.d.ts",
     "client.js",
     "client.d.ts",
+    "client-runtime.js",
     "client-multiplayer.svelte.js",
     "client-multiplayer.d.ts",
     "vite.js",
@@ -80,6 +81,8 @@
     "MIGRATION.md"
   ],
   "scripts": {
+    "check": "node scripts/check-determinism.js",
+    "pretest": "npm run check",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test --config test/e2e/playwright.config.js",

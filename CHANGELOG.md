@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.4] - 2026-06-07
+
+### Added
+
+- **Collaborative field surfaces on `live.multiplayer()` rooms are now live: typing, selections, advisory locks, and reactions.** The room view returned by `board.room(...args)` exposes them as reactive projections and send methods:
+  - `room.typing` - the user keys of remote collaborators currently flagged as typing. `room.setTyping(on)` publishes the local flag.
+  - `room.selections` - remote selection ranges keyed by user (self excluded). `room.setSelection(range)` publishes the local offset-mode range (`{ start, end, nodePath }`); pass `null` to clear it.
+  - `room.locks` - advisory lock holders as a `{ lockKey: holderUserKey }` map. `room.acquireLock(key)` announces a soft, collaborative-awareness claim and `room.releaseLock(key)` clears it; a holder disconnecting drops its claims automatically. These are awareness locks, not distributed mutual exclusion.
+  - `room.reactions` - a bounded ring of recent ephemeral emotes. `room.react(token, point?)` emits one. Reactions ride a dedicated stream and are never coalesced, so a burst of taps all arrive.
+
+  Typing, selections, and locks are published onto the room presence roster (the same roster `room.others` reads), so the field views add no extra subscription. Enable a surface by declaring it on the export: `typing: true`, `selections: 'offset'`, `locks: ['title', 'body']`, `reactions: true`. A multiplayer export that declares no field surface generates identical output to before, and a project with no `live.multiplayer` export is unchanged. Calling a field method off the room (on the namespace rather than a `room(...)` instance) remains a safe no-op.
+
+- **Selections and advisory locks now persist on the presence roster, so a late joiner sees them immediately.** A `setSelection(range)` or `acquireLock(key)` is stamped onto the caller's roster entry after the live update is published, so a collaborator who subscribes afterwards loads the current selection and held locks from the roster snapshot instead of waiting for the next change. Clearing a selection (`setSelection(null)`) or releasing a lock (`releaseLock(key)`) removes the field from the entry. This works both single-instance and across a cluster (via `platform.redis`). `typing` stays ephemeral by design: it is a transient flag that never persists.
+
+- **An injectable clock/RNG/timer runtime, surfaced on `ctx` as `ctx.now()` / `ctx.hlc()` / `ctx.random`.** Every wall-clock read, duration measurement, PRNG, UUID, and timer in the server and the browser client now routes through one swappable runtime module (its default binds the native primitives, no measurable cost). Loaders and RPC handlers can read the injectable clock and seeded RNG through `ctx.now()`, `ctx.random` (`{ float, u32, uuid, bytes }`), and `ctx.hlc()` (a hybrid logical clock), which forward the adapter platform's surface with a native fallback when running standalone. The cron tick now reads its date parts through `Intl` in a configurable time zone (default the system zone, so production behavior is unchanged). The browser client uses a browser-backed runtime (Web Crypto + global timers, no Node built-ins). A dependency-free `scripts/check-determinism.js` check, new to this package and wired into `pretest`, keeps raw native time/RNG/timer calls out of the routed source. Strictly additive and zero-config.
+
+### Changed
+
+- **A `live.multiplayer()` export that declares a presence field (`typing`, `locks`, or `selections`) now requires a `presence` function.** A presence field is stamped on a roster entry that only exists once presence is set, so declaring a field without presence is a configuration error - the field would publish live but never persist for a late joiner. This is caught at build time by the Vite plugin and at runtime by `live.multiplayer()`. `reactions` are exempt: they ride their own ephemeral stream and never touch the roster, so a reactions-only export needs no presence.
+
 ## [0.6.0-next.3] - 2026-06-06
 
 ### Added

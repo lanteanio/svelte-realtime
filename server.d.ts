@@ -153,6 +153,68 @@ export interface LiveContext<UserData = unknown> {
 	 * against `svelte-adapter-uws@^0.5.0-next.4` it's always a string.
 	 */
 	requestId: string | undefined;
+
+	/**
+	 * Current wall-clock time in epoch milliseconds, read through the
+	 * injectable runtime clock the adapter platform exposes (falling back to
+	 * the framework's own runtime clock on older adapters / mock platforms).
+	 * Prefer this over `Date.now()` inside a handler/loader so a seeded
+	 * simulation harness can replay time-dependent behavior exactly.
+	 *
+	 * @example
+	 * ```js
+	 * export default live((ctx) => ({ at: ctx.now() }));
+	 * ```
+	 */
+	now: () => number;
+
+	/**
+	 * Randomness read through the injectable runtime RNG the adapter platform
+	 * exposes (falling back to the framework's own runtime RNG on older
+	 * adapters / mock platforms). Prefer this over `Math.random()` /
+	 * `crypto.randomUUID()` inside a handler/loader so a seeded simulation
+	 * harness can reproduce random-dependent output.
+	 *
+	 * @example
+	 * ```js
+	 * export default live((ctx) => ({ id: ctx.random.uuid() }));
+	 * ```
+	 */
+	random: {
+		/** Uniform float in [0, 1), like `Math.random()`. */
+		float(): number;
+		/** Unsigned 32-bit integer. */
+		u32(): number;
+		/** RFC 4122 v4 UUID string. */
+		uuid(): string;
+		/** `n` cryptographically-strong random bytes. */
+		bytes(n: number): Uint8Array;
+	};
+
+	/**
+	 * A hybrid logical clock stamp for events that must order consistently
+	 * across workers (or across a coarse / briefly-backward wall clock).
+	 *
+	 * - `wall` is a non-decreasing wall-clock value in epoch milliseconds; it
+	 *   never moves backward, so a same-millisecond or backward clock read
+	 *   holds the previous value.
+	 * - `logical` is a tiebreaker that resets to `0` whenever `wall` advances
+	 *   and increments when two stamps share a millisecond, making the
+	 *   `(wall, logical)` pair a strict per-process ordering.
+	 * - `nodeId` is a short, stable per-process identity; in clustered mode it
+	 *   is effectively the worker identity.
+	 *
+	 * Comes from the adapter platform's injectable runtime when present, so a
+	 * seeded simulation harness can replay causally-ordered behavior exactly;
+	 * older adapters and mock platforms fall back to the framework's own
+	 * runtime-backed stamp of the same shape.
+	 *
+	 * @example
+	 * ```js
+	 * export default live((ctx) => ({ stamp: ctx.hlc() }));
+	 * ```
+	 */
+	hlc: () => { wall: number; logical: number; nodeId: string };
 }
 
 /**
@@ -2188,13 +2250,17 @@ export interface MultiplayerConfig {
 	key?: string;
 	/** Number of room-identifying args the topic function expects (excluding ctx). */
 	topicArgs?: number;
-	/** Reserve a typing indicator surface. Not yet active. */
+	/** Enable a typing-indicator surface published onto the room presence roster. */
 	typing?: boolean;
-	/** Reserve advisory single-holder lock surfaces by key. Not yet active. */
+	/**
+	 * Enable advisory lock surfaces by key. These are collaborative awareness
+	 * locks (a holder announces intent), published onto the presence roster, not
+	 * distributed mutual exclusion.
+	 */
 	locks?: string[];
-	/** Reserve an ephemeral reactions surface. Not yet active. */
+	/** Enable an ephemeral reactions surface on a dedicated reactions stream. */
 	reactions?: boolean;
-	/** Reserve a remote-selection surface. Not yet active. */
+	/** Enable a remote-selection surface. Offset-mode ranges are published onto the presence roster. */
 	selections?: 'offset' | 'crdt';
 }
 
@@ -2203,6 +2269,12 @@ export interface MultiplayerConfig {
  */
 export interface MultiplayerExport extends RoomExport {
 	__isMultiplayer: true;
+	/** Presence-field send handler: publishes a keyed field delta onto the room presence topic. */
+	__presenceUpdate?: any;
+	/** Reactions sub-stream: a bounded append ring on the room reactions topic. */
+	__reactionStream?: any;
+	/** Reaction send handler: publishes an ephemeral reaction onto the room reactions topic. */
+	__reactionEmit?: any;
 	__fields: {
 		typing: boolean;
 		locks: string[] | null;

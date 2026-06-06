@@ -1,10 +1,57 @@
 // @ts-check
 import { assert, wireAssertionMetrics } from './shared/assert.js';
 import { safeAssign as _safeAssignSnapshot } from './shared/safe-assign.js';
+import {
+	now as runtimeNow,
+	monotonicNow,
+	randomFloat,
+	randomU32,
+	randomUuid,
+	randomBytes,
+	setTimer,
+	setIntervalTimer,
+	clearTimer,
+	clearIntervalTimer,
+	microtask,
+	effectiveTimeZone
+} from './shared/runtime.js';
 export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
 
 const textDecoder = new TextDecoder();
+
+// Runtime-backed RNG fallback for ctx.random when the adapter platform does
+// not expose its own injectable RNG (older adapters, mock platforms). Shape
+// matches the adapter's platform.random so a loader/handler reads one stable
+// interface regardless of which side supplies it. Frozen singleton so the
+// fallback object identity never changes.
+const _runtimeRandom = Object.freeze({
+	float: randomFloat,
+	u32: randomU32,
+	uuid: randomUuid,
+	bytes: randomBytes
+});
+
+// Runtime-backed hybrid logical clock fallback for ctx.hlc when the adapter
+// platform does not project its own (older adapters, mock platforms). Same
+// {wall, logical, nodeId} shape and non-decreasing wall + logical-tiebreaker
+// rule the adapter uses, but sourced from this framework's own runtime clock
+// and RNG so a seeded simulation harness reproduces the stamps. nodeId is
+// assigned once per process from the runtime RNG.
+const _localHlcNodeId = randomUuid().slice(0, 8);
+let _localHlcLastWall = 0;
+let _localHlcLogical = 0;
+function _localHlc() {
+	const w = runtimeNow();
+	if (w > _localHlcLastWall) {
+		_localHlcLastWall = w;
+		_localHlcLogical = 0;
+	} else {
+		_localHlcLogical += 1;
+	}
+	return { wall: _localHlcLastWall, logical: _localHlcLogical, nodeId: _localHlcNodeId };
+}
+
 const _validPathRe = /^[a-zA-Z0-9_-]+(?:\/[a-zA-Z0-9_-]+)+$/;
 const _validSegmentRe = /^[a-zA-Z0-9_]+$/;
 
@@ -650,7 +697,7 @@ function _registerStaleWatch(topic, fn, ctx, args, platform) {
 		platform,
 		onError: fn.__streamOnError || null,
 		reloading: false,
-		timerId: setTimeout(() => _staleReload(topic), staleMs)
+		timerId: setTimer(() => _staleReload(topic), staleMs)
 	};
 	_topicStaleWatch.set(topic, entry);
 }
@@ -663,7 +710,7 @@ function _registerStaleWatch(topic, fn, ctx, args, platform) {
 function _unregisterStaleWatch(topic) {
 	const entry = _topicStaleWatch.get(topic);
 	if (!entry) return;
-	clearTimeout(entry.timerId);
+	clearTimer(entry.timerId);
 	_topicStaleWatch.delete(topic);
 }
 
@@ -676,8 +723,8 @@ function _unregisterStaleWatch(topic) {
 function _resetStaleTimer(topic) {
 	const entry = _topicStaleWatch.get(topic);
 	if (!entry) return;
-	clearTimeout(entry.timerId);
-	entry.timerId = setTimeout(() => _staleReload(topic), entry.staleAfterMs);
+	clearTimer(entry.timerId);
+	entry.timerId = setTimer(() => _staleReload(topic), entry.staleAfterMs);
 }
 
 /**
@@ -711,14 +758,14 @@ async function _staleReload(topic) {
 		// timer slot.
 		const stillThere = _topicStaleWatch.get(topic);
 		if (stillThere === entry) {
-			stillThere.timerId = setTimeout(() => _staleReload(topic), entry.staleAfterMs);
+			stillThere.timerId = setTimer(() => _staleReload(topic), entry.staleAfterMs);
 		}
 	}
 }
 
 /** Reset the per-topic stale-watch registry. Tests only. @internal */
 export function _resetStaleWatch() {
-	for (const entry of _topicStaleWatch.values()) clearTimeout(entry.timerId);
+	for (const entry of _topicStaleWatch.values()) clearTimer(entry.timerId);
 	_topicStaleWatch.clear();
 }
 
@@ -740,7 +787,7 @@ export function _armSilentTopicWatch(topic) {
 	if (topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) return;
 	const entry = {
 		sawEvent: false,
-		timerId: setTimeout(() => {
+		timerId: setTimer(() => {
 			const e = _silentTopicWatch.get(topic);
 			if (!e || e.sawEvent) return;
 			if (_silentTopicWarned.size >= _silentTopicWarnDedupMax && !_silentTopicWarned.has(topic)) {
@@ -780,7 +827,7 @@ function _observeSilentTopicPublish(topic) {
 	const entry = _silentTopicWatch.get(topic);
 	if (!entry) return;
 	entry.sawEvent = true;
-	clearTimeout(entry.timerId);
+	clearTimer(entry.timerId);
 	_silentTopicWatch.delete(topic);
 }
 
@@ -793,13 +840,13 @@ function _observeSilentTopicPublish(topic) {
 function _disarmSilentTopicWatch(topic) {
 	const entry = _silentTopicWatch.get(topic);
 	if (!entry) return;
-	clearTimeout(entry.timerId);
+	clearTimer(entry.timerId);
 	_silentTopicWatch.delete(topic);
 }
 
 /** Reset the silent-topic watchdog state. Tests only. @internal */
 export function _resetSilentTopicWarning() {
-	for (const entry of _silentTopicWatch.values()) clearTimeout(entry.timerId);
+	for (const entry of _silentTopicWatch.values()) clearTimer(entry.timerId);
 	_silentTopicWatch.clear();
 	_silentTopicWarned.clear();
 	_silentTopicConfig.enabled = true;
@@ -1030,17 +1077,17 @@ export function _activatePublishRateWarning(platform) {
 	if (typeof platform?.pressure !== 'object' || platform.pressure === null) return;
 	const platformRef = new WeakRef(platform);
 	const epoch = _publishRateEpoch;
-	const sampler = setInterval(() => {
+	const sampler = setIntervalTimer(() => {
 		// Self-clear on disable / reset / platform-GC. Any of the three
 		// makes the sampler stale; clearInterval here lets Node drop the
 		// Timer from the queue on the next event-loop turn.
 		if (!_publishRateConfig.enabled || epoch !== _publishRateEpoch) {
-			clearInterval(sampler);
+			clearIntervalTimer(sampler);
 			return;
 		}
 		const p = platformRef.deref();
 		if (!p) {
-			clearInterval(sampler);
+			clearIntervalTimer(sampler);
 			return;
 		}
 		const top = p.pressure?.topPublishers;
@@ -1192,7 +1239,7 @@ function _getCtxHelpers(platform) {
 				if (!_hasBatched) return platform.publish(topic, event, data, finalOptions);
 				if (!pendingBatch) {
 					pendingBatch = [];
-					queueMicrotask(_flushBatch);
+					microtask(_flushBatch);
 				}
 				pendingBatch.push({ topic, event, data, options: finalOptions });
 				return true;
@@ -1247,7 +1294,7 @@ function _getCtxHelpers(platform) {
 				if (!_hasBatched) return platform.publish(topic, event, wireData, finalOptions);
 				if (!pendingBatch) {
 					pendingBatch = [];
-					queueMicrotask(_flushBatch);
+					microtask(_flushBatch);
 				}
 				pendingBatch.push({ topic, event, data: wireData, options: finalOptions });
 				return true;
@@ -1373,14 +1420,14 @@ function _trackStreamSub(ws, topic, fn) {
  * Record RPC metrics for any exit path. Call exactly once per RPC.
  * @param {string} path
  * @param {string} code - error code, or empty string for success
- * @param {number} startTime - from Date.now(), or 0 to skip duration
+ * @param {number} startTime - from monotonicNow(), or 0 to skip duration
  */
 function _recordRpcMetrics(path, code, startTime) {
 	if (!_metricsInstruments) return;
 	const status = code ? 'error' : 'ok';
 	_metricsInstruments.rpcCount.inc({ path, status });
 	if (code) _metricsInstruments.rpcErrors.inc({ path, code });
-	if (startTime) _metricsInstruments.rpcDuration.observe({ path }, (Date.now() - startTime) / 1000);
+	if (startTime) _metricsInstruments.rpcDuration.observe({ path }, (monotonicNow() - startTime) / 1000);
 }
 
 /** @type {WeakSet<object>} Sockets currently in rollback (skips grace period in presence) */
@@ -1467,6 +1514,20 @@ function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 		shed: helpers.shed,
 		skip: helpers.skip,
 		requestId: platform.requestId,
+		// Clock and RNG come from the adapter platform's injectable runtime when
+		// present, so a loader/handler reads the same swappable source a seeded
+		// harness controls (ctx.now(), ctx.random.uuid(), etc.). Older adapters
+		// and mock platforms without them fall back to the framework's own
+		// runtime helpers, so the surface is always populated.
+		now: (platform && platform.now) || runtimeNow,
+		random: (platform && platform.random) || _runtimeRandom,
+		// Hybrid logical clock for events that must order consistently across
+		// workers (or across a coarse / briefly-backward wall clock). Comes
+		// from the adapter platform when it projects one, so a loader/handler
+		// reads the same swappable source a seeded harness controls; older
+		// adapters and mock platforms fall back to the framework's own
+		// runtime-backed stamp of the same {wall, logical, nodeId} shape.
+		hlc: (platform && platform.hlc) || _localHlc,
 		_idempotencyKey: idempotencyKey || null
 	};
 }
@@ -2014,7 +2075,7 @@ live.access = {
 const _rateLimits = new Map();
 
 /** @type {number} */
-let _rateLimitLastSweep = Date.now();
+let _rateLimitLastSweep = runtimeNow();
 
 /** Hard cap on rate limit buckets to prevent memory exhaustion */
 const _RATE_LIMIT_MAX = 5000;
@@ -2032,7 +2093,7 @@ const _RATE_LIMIT_MAX = 5000;
  * @returns {{ ok: boolean, retryAfter?: number }}
  */
 function _consumeRateLimitBucket(bucketKey, points, windowMs) {
-	const now = Date.now();
+	const now = runtimeNow();
 
 	// Lazy sweep: prune stale entries every 30s, sweep all entries
 	if (now - _rateLimitLastSweep > 30000) {
@@ -2387,7 +2448,7 @@ live.silentTopicWarning = function silentTopicWarning(config) {
 	if (config === false) {
 		_silentTopicConfig.enabled = false;
 		// Disable takes effect immediately: clear any armed timers.
-		for (const entry of _silentTopicWatch.values()) clearTimeout(entry.timerId);
+		for (const entry of _silentTopicWatch.values()) clearTimer(entry.timerId);
 		_silentTopicWatch.clear();
 		return;
 	}
@@ -2432,11 +2493,11 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	const results = new Map();
 	/** @type {Map<string, Promise<any>>} */
 	const inflight = new Map();
-	let lastSweep = Date.now();
+	let lastSweep = runtimeNow();
 
 	return {
 		async acquire(key, ttlSec) {
-			const now = Date.now();
+			const now = runtimeNow();
 			if (now - lastSweep >= 30000) {
 				lastSweep = now;
 				for (const [k, e] of results) {
@@ -2451,7 +2512,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 			while (inflight.has(key)) {
 				try { await inflight.get(key); } catch {}
 				const re = results.get(key);
-				if (re && re.expiresAt > Date.now()) return { result: re.value };
+				if (re && re.expiresAt > runtimeNow()) return { result: re.value };
 			}
 			let resolveInflight;
 			let rejectInflight;
@@ -2473,7 +2534,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 			return {
 				acquired: true,
 				async commit(value) {
-					if (ttlMs > 0) results.set(key, { value, expiresAt: Date.now() + ttlMs });
+					if (ttlMs > 0) results.set(key, { value, expiresAt: runtimeNow() + ttlMs });
 					inflight.delete(key);
 					if (resolveInflight) resolveInflight(value);
 				},
@@ -2552,7 +2613,7 @@ function _createInMemoryLock() {
 			assert(typeof waiter.resolve === 'function' && typeof waiter.reject === 'function', 'realtime/lock.waiter.shape', { hasResolve: typeof waiter.resolve === 'function', hasReject: typeof waiter.reject === 'function' });
 			if (waiter.cancelled) continue;
 			if (waiter.timer != null) {
-				clearTimeout(waiter.timer);
+				clearTimer(waiter.timer);
 				waiter.timer = null;
 			}
 			runHead(key, state, waiter.fn).then(waiter.resolve, waiter.reject);
@@ -2600,7 +2661,7 @@ function _createInMemoryLock() {
 				/** @type {_Waiter} */
 				const waiter = { fn, resolve, reject, timer: null, cancelled: false };
 				if (maxWaitMs != null) {
-					waiter.timer = setTimeout(() => {
+					waiter.timer = setTimer(() => {
 						if (waiter.cancelled) return;
 						waiter.cancelled = true;
 						waiter.timer = null;
@@ -2624,7 +2685,7 @@ function _createInMemoryLock() {
 					if (waiter.cancelled) continue;
 					waiter.cancelled = true;
 					if (waiter.timer != null) {
-						clearTimeout(waiter.timer);
+						clearTimer(waiter.timer);
 						waiter.timer = null;
 					}
 					const err = /** @type {Error & { code: string }} */ (new Error('lock: cleared'));
@@ -4187,7 +4248,10 @@ function _nextBoundaryForPeriod(now, period, tz = 'UTC') {
 		hour: 'numeric', minute: 'numeric', second: 'numeric',
 		hour12: false
 	});
-	const parts = fmt.formatToParts(new Date(now));
+	// Intl.DateTimeFormat.formatToParts accepts a numeric epoch-ms directly, so
+	// the already-numeric reference is formatted in the target time zone without
+	// constructing an intermediate Date.
+	const parts = fmt.formatToParts(now);
 	const get = (k) => Number(parts.find(p => p.type === k)?.value);
 	let y = get('year'), mo = get('month'), d = get('day');
 	let h = get('hour'), mi = get('minute');
@@ -4230,7 +4294,8 @@ function _wallClockUtcInTz(ms, tz) {
 		hour: 'numeric', minute: 'numeric', second: 'numeric',
 		hour12: false
 	});
-	const parts = fmt.formatToParts(new Date(ms));
+	// formatToParts takes the numeric epoch-ms directly; no intermediate Date.
+	const parts = fmt.formatToParts(ms);
 	const get = (k) => Number(parts.find(p => p.type === k)?.value);
 	let h = get('hour'); if (h === 24) h = 0;
 	return Date.UTC(get('year'), get('month') - 1, get('day'), h, get('minute'), get('second'), 0);
@@ -4549,7 +4614,7 @@ function _registerWindowedAggregate(path, fn) {
 		windowed: true
 	};
 
-	const now = Date.now();
+	const now = runtimeNow();
 	for (const [wn, spec] of Object.entries(windowsSpec)) {
 		const outputTopic = `${baseTopic}:${wn}`;
 		const winDebounce = (typeof spec.debounce === 'number' && spec.debounce >= 0) ? spec.debounce : debounce;
@@ -4637,15 +4702,15 @@ function _registerWindowedAggregate(path, fn) {
  * @param {any} win
  */
 function _scheduleNextBoundary(entry, win) {
-	const delay = Math.max(0, win.nextBoundary - Date.now());
-	win.boundaryTimer = setTimeout(() => {
+	const delay = Math.max(0, win.nextBoundary - runtimeNow());
+	win.boundaryTimer = setTimer(() => {
 		win.boundaryTimer = null;
 		// Final publish of the closing window so subscribers see the
 		// pre-reset state before the new window starts. If a debounce is
 		// pending, flush it inline rather than letting the new state
 		// race the published value.
 		if (win.timer) {
-			clearTimeout(win.timer);
+			clearTimer(win.timer);
 			win.timer = null;
 		}
 		_publishWindow(entry, win);
@@ -4655,9 +4720,9 @@ function _scheduleNextBoundary(entry, win) {
 			if (r.init) fresh[field] = r.init();
 		}
 		win.state = fresh;
-		// Compute the next boundary off the fired-at time, not Date.now(),
-		// so a slow/blocked event loop does not drift the schedule.
-		const now = Date.now();
+		// Compute the next boundary off the fired-at time, not the current
+		// clock, so a slow/blocked event loop does not drift the schedule.
+		const now = runtimeNow();
 		win.nextBoundary = win.spec.period
 			? _nextBoundaryForPeriod(now, win.spec.period, win.spec.tz || 'UTC')
 			: _nextBoundaryForDuration(now, win.spec.durationMs, win.spec.anchor || 0);
@@ -4680,7 +4745,7 @@ function _scheduleNextBoundary(entry, win) {
  * @param {any} win
  */
 function _scheduleNextSlide(entry, win) {
-	win.slideTimer = setTimeout(() => {
+	win.slideTimer = setTimer(() => {
 		win.slideTimer = null;
 		// Advance the ring head and clear the new current bucket.
 		win.bucketIndex = (win.bucketIndex + 1) % win.bucketCount;
@@ -4693,7 +4758,7 @@ function _scheduleNextSlide(entry, win) {
 		// values dropping out of the window even when no fresh events
 		// are arriving.
 		if (win.timer) {
-			clearTimeout(win.timer);
+			clearTimer(win.timer);
 			win.timer = null;
 		}
 		_publishWindow(entry, win);
@@ -4731,9 +4796,9 @@ function _publishWindow(entry, win) {
 function _clearAggregateTimers(entry) {
 	if (!entry || !entry.windowStates) return;
 	for (const win of entry.windowStates.values()) {
-		if (win.timer) { clearTimeout(win.timer); win.timer = null; }
-		if (win.boundaryTimer) { clearTimeout(win.boundaryTimer); win.boundaryTimer = null; }
-		if (win.slideTimer) { clearTimeout(win.slideTimer); win.slideTimer = null; }
+		if (win.timer) { clearTimer(win.timer); win.timer = null; }
+		if (win.boundaryTimer) { clearTimer(win.boundaryTimer); win.boundaryTimer = null; }
+		if (win.slideTimer) { clearTimer(win.slideTimer); win.slideTimer = null; }
 	}
 }
 
@@ -4745,7 +4810,7 @@ function _clearAggregateTimers(entry) {
  */
 export function _resetAggregates() {
 	for (const e of aggregateRegistry.values()) {
-		if (e.timer) clearTimeout(e.timer);
+		if (e.timer) clearTimer(e.timer);
 		_clearAggregateTimers(e);
 	}
 	aggregateRegistry.clear();
@@ -4967,6 +5032,17 @@ pipe.join = function pipeJoin(field, resolver, as) {
  */
 const _presenceRef = new Map();
 
+/**
+ * Direct handle to the in-memory presence-ref map for tests that need to seed
+ * or inspect a roster entry without driving a full socket subscribe. Not part
+ * of the public surface.
+ * @internal
+ * @returns {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any }>}
+ */
+export function _presenceRefForTest() {
+	return _presenceRef;
+}
+
 /** @type {WeakMap<object, string>} Stable guest ID per connection for anonymous users */
 const _guestIds = new WeakMap();
 let _guestIdCounter = 0;
@@ -5022,13 +5098,31 @@ export function _getIdentityKey(ctx) {
 const _PRESENCE_KEY_PREFIX = '__live-presence:';
 const _PRESENCE_TTL_SEC = 3600;
 
+// Atomic sticky-field merge into a roster entry's data field, gated on the
+// entry still being present. KEYS[1] = the roster hash; ARGV = count field,
+// data field, the JSON delta (null value = delete the field), the TTL. Returns
+// 0 (and writes nothing) when the count field is gone, so a release that lands
+// between a read and a write cannot resurrect a phantom data row with no count.
+// One round-trip; the JS fallback below covers a redis without scripting.
+const _PRESENCE_MERGE_SCRIPT =
+	"if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then return 0 end\n" +
+	"local raw = redis.call('HGET', KEYS[1], ARGV[2])\n" +
+	"local cur = {}\n" +
+	"if raw then local ok, parsed = pcall(cjson.decode, raw); if ok and type(parsed) == 'table' then cur = parsed end end\n" +
+	"local delta = cjson.decode(ARGV[3])\n" +
+	"for k, v in pairs(delta) do if v == cjson.null then cur[k] = nil else cur[k] = v end end\n" +
+	"local encoded; if next(cur) == nil then encoded = '{}' else encoded = cjson.encode(cur) end\n" +
+	"redis.call('HSET', KEYS[1], ARGV[2], encoded)\n" +
+	"redis.call('EXPIRE', KEYS[1], ARGV[4])\n" +
+	"return 1";
+
 /**
  * Bump the cluster-wide count for (topic, key). Returns isFirst=true when
  * this acquire took the count from 0 to 1 cluster-wide, signaling that the
  * caller should publish a 'join' event. Falls through to a no-op stub when
  * platform.redis is missing (single-replica dev path).
  */
-async function _clusterPresenceAcquire(platform, topic, key, data) {
+export async function _clusterPresenceAcquire(platform, topic, key, data) {
 	const redis = platform && platform.redis;
 	if (!redis || typeof redis.hincrby !== 'function') return { isFirst: true };
 	const hKey = _PRESENCE_KEY_PREFIX + topic;
@@ -5093,7 +5187,7 @@ async function _clusterPresenceRelease(platform, topic, key) {
  * Falls through to the local _presenceRef iteration when platform.redis is
  * missing.
  */
-async function _clusterPresenceList(platform, topic) {
+export async function _clusterPresenceList(platform, topic) {
 	const redis = platform && platform.redis;
 	if (!redis || typeof redis.hgetall !== 'function') {
 		const prefix = topic + '\0';
@@ -5119,6 +5213,66 @@ async function _clusterPresenceList(platform, topic) {
 	} catch {
 		return [];
 	}
+}
+
+/**
+ * Merge a sticky presence delta into both roster stores so either snapshot
+ * path (the in-memory _presenceRef iteration or the Redis 'd:'+key JSON field)
+ * reflects it for a late joiner. A null delta value deletes the field, which is
+ * the release path: releaseLock sends `{ 'lock:<k>': null }` and clearing a
+ * selection sends `{ selection: null }`.
+ *
+ * The forward `update` publish has already been sent by the caller; this merge
+ * only carries the sticky subset onto the roster entry so a subscriber who
+ * loads the roster after the update still sees the field. An entry only exists
+ * once presence has been set, so a missing entry (no live roster row) is a
+ * no-op: there is nothing to stamp the field onto.
+ *
+ * @param {any} platform
+ * @param {string} topic
+ * @param {string} key
+ * @param {Record<string, any>} delta
+ */
+export async function _clusterPresenceMerge(platform, topic, key, delta) {
+	// In-memory roster (the no-redis snapshot path reads ref.data by reference).
+	const ref = _presenceRef.get(topic + '\0' + key);
+	if (ref && ref.data && typeof ref.data === 'object') {
+		for (const k of Object.keys(delta)) {
+			if (delta[k] == null) delete ref.data[k]; else ref.data[k] = delta[k];
+		}
+	}
+	// Cluster roster (the redis snapshot path reads the 'd:'+key JSON field).
+	const redis = platform && platform.redis;
+	if (!redis) return;
+	const hKey = _PRESENCE_KEY_PREFIX + topic;
+	const dataField = 'd:' + key;
+	const countField = 'c:' + key;
+	// Preferred path: one atomic server-side merge gated on the count field, so a
+	// concurrent release cannot leave a phantom data row behind.
+	if (typeof redis.eval === 'function') {
+		try {
+			await redis.eval(
+				_PRESENCE_MERGE_SCRIPT, 1, hKey, countField, dataField,
+				JSON.stringify(delta), String(_PRESENCE_TTL_SEC)
+			);
+		} catch { /* redis blip: in-memory already merged; forward update already sent */ }
+		return;
+	}
+	// Fallback for a redis without scripting: read, merge, then re-check the
+	// count still exists right before the write to narrow the same race.
+	if (typeof redis.hget !== 'function') return;
+	try {
+		const raw = await redis.hget(hKey, dataField);
+		if (raw == null) return; // no live entry yet: nothing to carry the field
+		let cur; try { cur = JSON.parse(raw); } catch { return; }
+		if (cur == null || typeof cur !== 'object') cur = {};
+		for (const k of Object.keys(delta)) {
+			if (delta[k] == null) delete cur[k]; else cur[k] = delta[k];
+		}
+		if (typeof redis.hexists === 'function' && !(await redis.hexists(hKey, countField))) return;
+		await redis.hset(hKey, dataField, JSON.stringify(cur));
+		try { await redis.expire(hKey, _PRESENCE_TTL_SEC); } catch { /* best-effort */ }
+	} catch { /* redis blip: in-memory already merged; forward update already sent */ }
 }
 
 live.room = function room(config) {
@@ -5172,7 +5326,7 @@ live.room = function room(config) {
 			let ref = _presenceRef.get(refKey);
 			if (ref) {
 				// Cancel pending grace leave if reconnecting
-				if (ref.timer) { clearTimeout(ref.timer); ref.timer = null; }
+				if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
 				ref.count++;
 				// Refresh LRU position so active entries survive eviction
 				_presenceRef.delete(refKey);
@@ -5183,7 +5337,7 @@ live.room = function room(config) {
 			if (_presenceRef.size >= _maxPresenceRef) {
 				for (const [k, r] of _presenceRef) {
 					if (r.timer) {
-						clearTimeout(r.timer);
+						clearTimer(r.timer);
 						const [t, u] = k.split('\0');
 						// Cluster release runs eagerly here too: an evicted entry
 						// would otherwise leak a phantom counter on Redis.
@@ -5242,7 +5396,7 @@ live.room = function room(config) {
 			// immediately. Cluster release decides whether this was the LAST
 			// subscriber across the cluster - only then do we publish 'leave'.
 			if (ctx.ws && _rollingBack.has(ctx.ws)) {
-				if (ref.timer) clearTimeout(ref.timer);
+				if (ref.timer) clearTimer(ref.timer);
 				_presenceRef.delete(refKey);
 				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
 					if (res.isLast) {
@@ -5255,7 +5409,7 @@ live.room = function room(config) {
 				return;
 			}
 
-			ref.timer = setTimeout(() => {
+			ref.timer = setTimer(() => {
 				_presenceRef.delete(refKey);
 				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
 					if (res.isLast) {
@@ -5356,6 +5510,18 @@ live.multiplayer = function multiplayer(config) {
 		);
 	}
 
+	// A presence field (typing / locks / selections) is stamped on a roster
+	// entry, and a roster entry only exists once presence has been set. Without
+	// a presence function there is no entry to carry the field, so the field
+	// would publish but never persist for a late joiner. Reactions are exempt:
+	// they ride their own ephemeral sub-topic and never touch the roster.
+	if ((config.typing || config.locks || config.selections) && typeof config.presence !== 'function') {
+		const declared = config.typing ? 'typing' : (config.locks ? 'locks' : 'selections');
+		throw new Error(
+			`[svelte-realtime] live.multiplayer() declares the '${declared}' presence field but has no presence function. Presence fields are stamped on a roster entry that only exists when presence is set, so add a presence function. Reactions do not require presence.\n  See: https://svti.me/multiplayer`
+		);
+	}
+
 	// A multiplayer export is a room export with a marker stamped on top. It
 	// reuses live.room's sub-stream construction verbatim so the data /
 	// presence / cursor streams, the presence-ref auto-join, and the scoped
@@ -5420,10 +5586,102 @@ live.multiplayer = function multiplayer(config) {
 		_publishCursor(ctx, args, { viewport: true });
 	});
 
-	// Record the declared field surfaces. The typing / locks / selections /
-	// reactions surfaces are reserved here so the returned shape is stable for
-	// the follow-up that wires the client->server send path; they produce no
-	// live sub-stream yet.
+	// Presence-field send path. The typing / selection / lock surfaces are
+	// presence fields: a caller publishes a delta keyed by its own identity onto
+	// the room's `:presence` sub-topic, the same topic the presence stream loads
+	// and merges with `merge: 'presence'`. The `update` event shallow-merges the
+	// changed fields into the caller's roster entry, so every subscriber's roster
+	// gains the new field value. The leading args identify the room (the same
+	// count the topic function and cursor send path use); the trailing arg is a
+	// flat `{ field: value }` delta object.
+	//
+	// Locks here are advisory presence locks: each caller stamps `lock:<key>` on
+	// its own entry (the server keys the entry by the caller's identity, so the
+	// holder is the entry owner), so a plain keyed publish is correct with no
+	// arbitration - releasing clears the field, and a leave drops the entry so
+	// derived holders recompute. This is awareness, not mutual exclusion.
+	/**
+	 * @param {any} ctx
+	 * @param {any[]} args
+	 */
+	const _publishPresenceField = (ctx, args) => {
+		const roomArgs = args.slice(0, _cursorArgCount);
+		const delta = args[_cursorArgCount];
+		const presenceTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':presence';
+		const key = _getIdentityKey(ctx);
+		const frame = { key };
+		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
+			Object.assign(frame, delta);
+		}
+		ctx.publish(presenceTopic, 'update', frame);
+	};
+
+	/** @type {any} */ (roomExport).__presenceUpdate = live.volatile(async (ctx, ...args) => {
+		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
+		_publishPresenceField(ctx, args);
+		// Persist the sticky subset onto the roster after the forward publish so a
+		// late joiner who loads the roster still sees it. selection (when
+		// selections are enabled) and lock:<k> (when locks are enabled) are sticky;
+		// typing and everything else stay ephemeral. Reactions ride a separate path.
+		const delta = args[_cursorArgCount];
+		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
+			const sticky = {};
+			for (const k of Object.keys(delta)) {
+				if (k === 'selection') { if (config.selections) sticky[k] = delta[k]; }
+				else if (k.slice(0, 5) === 'lock:') { if (config.locks) sticky[k] = delta[k]; }
+			}
+			if (Object.keys(sticky).length > 0) {
+				const dataTopic = _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount));
+				await _clusterPresenceMerge(ctx.platform, dataTopic, _getIdentityKey(ctx), sticky);
+			}
+		}
+	});
+
+	// Reactions are ephemeral events, not roster fields: a reaction is a one-off
+	// emote (an emoji at a point), never a sticky value on a presence entry. It
+	// rides a dedicated `:reactions` sub-topic as a bare `reaction` event so it
+	// is consumed as a bounded, GC-after-render list rather than merged into the
+	// roster. ctx.publish never coalesces, so a burst of taps all arrive.
+	/**
+	 * @param {any} ctx
+	 * @param {any[]} args
+	 */
+	const _publishReaction = (ctx, args) => {
+		const roomArgs = args.slice(0, _cursorArgCount);
+		const payload = args.slice(_cursorArgCount);
+		const reactionTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':reactions';
+		const key = _getIdentityKey(ctx);
+		const frame = { key, token: payload[0] };
+		const at = payload[1];
+		if (at && typeof at === 'object' && !Array.isArray(at)) {
+			Object.assign(frame, at);
+		}
+		ctx.publish(reactionTopic, 'reaction', frame);
+	};
+
+	/** @type {any} */ (roomExport).__reactionEmit = live.volatile(async (ctx, ...args) => {
+		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
+		_publishReaction(ctx, args);
+	});
+
+	// Reactions sub-stream: a bounded append-only ring (merge 'latest') on the
+	// `:reactions` sub-topic. New subscribers start empty (a reaction is a live
+	// event, never replayed from a roster), and the client GCs rendered taps so
+	// a burst never grows unbounded.
+	if (config.reactions) {
+		/** @type {any} */ (roomExport).__reactionStream = live.stream(
+			(ctx, ...args) => topicFn(ctx, ...args) + ':reactions',
+			async (ctx, ...args) => {
+				if (_cursorGuard) await _cursorGuard(ctx, ...args);
+				return [];
+			},
+			{ merge: 'latest' }
+		);
+	}
+
+	// Record the declared field surfaces so the generated namespace knows which
+	// methods and reactive views to wire. typing / selections / locks publish
+	// onto the room's `:presence` topic; reactions ride the `:reactions` topic.
 	/** @type {any} */ (roomExport).__fields = {
 		typing: !!config.typing,
 		locks: Array.isArray(config.locks) ? config.locks.slice() : (config.locks ? [] : null),
@@ -5805,8 +6063,8 @@ function _wrapPlatformPublish(platform) {
 		if (derivedEntries) {
 			for (const entry of derivedEntries) {
 				if (entry.debounce > 0) {
-					if (entry.timer) clearTimeout(entry.timer);
-					entry.timer = setTimeout(() => {
+					if (entry.timer) clearTimer(entry.timer);
+					entry.timer = setTimer(() => {
 						entry.timer = null;
 						_recomputeDerived(entry, platform);
 					}, entry.debounce);
@@ -5821,8 +6079,8 @@ function _wrapPlatformPublish(platform) {
 		if (effectEntries) {
 			for (const entry of effectEntries) {
 				if (entry.debounce > 0) {
-					if (entry.timer) clearTimeout(entry.timer);
-					entry.timer = setTimeout(() => {
+					if (entry.timer) clearTimer(entry.timer);
+					entry.timer = setTimer(() => {
 						entry.timer = null;
 						_fireEffect(entry, event, data, platform);
 					}, entry.debounce);
@@ -5860,8 +6118,8 @@ function _wrapPlatformPublish(platform) {
 						const computed = _computeWindowState(win, entry.reducers);
 						const winRef = win;
 						if (winRef.debounce > 0) {
-							if (winRef.timer) clearTimeout(winRef.timer);
-							winRef.timer = setTimeout(() => {
+							if (winRef.timer) clearTimer(winRef.timer);
+							winRef.timer = setTimer(() => {
 								winRef.timer = null;
 								platform.publish(winRef.outputTopic, 'set', computed);
 							}, winRef.debounce);
@@ -5882,8 +6140,8 @@ function _wrapPlatformPublish(platform) {
 				const computed = _computeAggregateState(entry.state, entry.reducers);
 
 				if (entry.debounce > 0) {
-					if (entry.timer) clearTimeout(entry.timer);
-					entry.timer = setTimeout(() => {
+					if (entry.timer) clearTimer(entry.timer);
+					entry.timer = setTimer(() => {
 						entry.timer = null;
 						platform.publish(entry.topic, 'set', computed);
 					}, entry.debounce);
@@ -6042,7 +6300,7 @@ function _deactivateDynamicDerived(fn, resolvedTopic) {
 	instance.refCount--;
 	if (instance.refCount > 0) return;
 
-	if (instance.timer) clearTimeout(instance.timer);
+	if (instance.timer) clearTimer(instance.timer);
 
 	for (const src of instance.resolvedSources) {
 		const set = _derivedBySource.get(src);
@@ -6271,9 +6529,9 @@ function _ensureCronInterval() {
 	if (_cronInterval) return;
 	// Set sentinel immediately to prevent duplicate timers from concurrent calls
 	_cronInterval = /** @type {any} */ (-1);
-	_cronInterval = setInterval(_tickCron, _cronAt1Hz ? 1000 : 60000);
+	_cronInterval = setIntervalTimer(_tickCron, _cronAt1Hz ? 1000 : 60000);
 	// Run an initial tick after a short delay to catch jobs on startup
-	_cronStartupTimer = setTimeout(_tickCron, 1000);
+	_cronStartupTimer = setTimer(_tickCron, 1000);
 }
 
 /**
@@ -6286,8 +6544,8 @@ function _upgradeCronTo1Hz() {
 	if (_cronAt1Hz) return;
 	_cronAt1Hz = true;
 	if (_cronInterval && _cronInterval !== /** @type {any} */ (-1)) {
-		clearInterval(_cronInterval);
-		_cronInterval = setInterval(_tickCron, 1000);
+		clearIntervalTimer(_cronInterval);
+		_cronInterval = setIntervalTimer(_tickCron, 1000);
 	}
 }
 
@@ -6380,11 +6638,11 @@ export function __registerRoomActions(basePath, loader) {
  */
 export function _clearCron() {
 	if (_cronInterval) {
-		clearInterval(_cronInterval);
+		clearIntervalTimer(_cronInterval);
 		_cronInterval = null;
 	}
 	if (_cronStartupTimer) {
-		clearTimeout(_cronStartupTimer);
+		clearTimer(_cronStartupTimer);
 		_cronStartupTimer = null;
 	}
 	cronRegistry.clear();
@@ -6413,21 +6671,21 @@ export function _prepareHmr() {
 
 	// Clear debounce timers
 	for (const e of derivedRegistry.values()) {
-		if (e.timer) clearTimeout(e.timer);
+		if (e.timer) clearTimer(e.timer);
 		if (e.instances) {
-			for (const inst of e.instances.values()) { if (inst.timer) clearTimeout(inst.timer); }
+			for (const inst of e.instances.values()) { if (inst.timer) clearTimer(inst.timer); }
 		}
 	}
-	for (const e of effectRegistry.values()) { if (e.timer) clearTimeout(e.timer); }
+	for (const e of effectRegistry.values()) { if (e.timer) clearTimer(e.timer); }
 	for (const e of aggregateRegistry.values()) {
-		if (e.timer) clearTimeout(e.timer);
+		if (e.timer) clearTimer(e.timer);
 		_clearAggregateTimers(e);
 	}
 
 	// Clear orphaned throttle/debounce timers to prevent stale platform.publish refs
-	for (const [, entry] of _throttles) clearTimeout(entry.timer);
+	for (const [, entry] of _throttles) clearTimer(entry.timer);
 	_throttles.clear();
-	for (const [, timer] of _debounces) clearTimeout(timer);
+	for (const [, timer] of _debounces) clearTimer(timer);
 	_debounces.clear();
 
 	// Clear cron timers (but keep _cronPlatform - it stays valid across HMR)
@@ -6534,6 +6792,47 @@ export function _restoreHmr(snap) {
 	}
 }
 
+// English short weekday names mapped to the 0-6 (Sunday=0) convention the
+// cron weekday field matches against, identical to the historical getDay()
+// numbering. Pinning the formatter locale to 'en-US' keeps these names stable
+// regardless of the host locale.
+const _CRON_WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+/**
+ * Extract the cron date parts (second, minute, hour, day, month 1-12,
+ * weekday 0-6 Sunday=0) for an epoch-ms reference, formatted in the given
+ * IANA time zone. Passing `undefined` for the zone uses the host system zone,
+ * which preserves the historical local-time cron behavior. The numeric
+ * epoch-ms is handed straight to Intl - no intermediate Date is constructed,
+ * so a seeded clock plus a pinned zone makes the parts fully reproducible.
+ *
+ * @param {number} ms - epoch milliseconds
+ * @param {string | undefined} tz - IANA zone, or undefined for the system zone
+ * @returns {{ second: number, minute: number, hour: number, day: number, month: number, weekday: number }}
+ */
+function _cronDateParts(ms, tz) {
+	const fmt = new Intl.DateTimeFormat('en-US', {
+		timeZone: tz,
+		year: 'numeric', month: 'numeric', day: 'numeric',
+		hour: 'numeric', minute: 'numeric', second: 'numeric',
+		weekday: 'short',
+		hour12: false
+	});
+	const parts = fmt.formatToParts(ms);
+	const get = (k) => Number(parts.find(p => p.type === k)?.value);
+	let hour = get('hour');
+	if (hour === 24) hour = 0; // some Intl impls render midnight as 24
+	const wd = parts.find(p => p.type === 'weekday')?.value;
+	return {
+		second: get('second'),
+		minute: get('minute'),
+		hour,
+		day: get('day'),
+		month: get('month'),
+		weekday: _CRON_WEEKDAY_INDEX[wd] ?? 0
+	};
+}
+
 export async function _tickCron() {
 	if (!_lazyResolved) await _resolveAllLazy();
 
@@ -6566,13 +6865,17 @@ export async function _tickCron() {
 		}
 	}
 
-	const now = new Date();
-	const second = now.getSeconds();
-	const minute = now.getMinutes();
-	const hour = now.getHours();
-	const day = now.getDate();
-	const month = now.getMonth() + 1;
-	const weekday = now.getDay();
+	// Extract the wall-clock date parts the schedule matches against by
+	// formatting the runtime epoch-ms through Intl in the effective time zone,
+	// without constructing a Date. The effective zone is the system zone by
+	// default (preserving the historical local-time cron behavior); a seeded
+	// simulation harness pins it (e.g. 'UTC') so the same epoch-ms always
+	// yields the same parts. The schedule math below is unchanged - only the
+	// parts extraction is now Intl + time-zone based.
+	const { second, minute, hour, day, month, weekday } = _cronDateParts(
+		runtimeNow(),
+		effectiveTimeZone() || undefined
+	);
 
 	for (const [path, entry] of cronRegistry) {
 		const schedule = entry.schedule;
@@ -7120,7 +7423,7 @@ function _hasVolatileMarker(fn) {
  */
 async function _executeBatch(ws, msg, platform, options) {
 	const { batch, sequential } = msg;
-	const _batchMetricsStart = _metricsInstruments ? Date.now() : 0;
+	const _batchMetricsStart = _metricsInstruments ? monotonicNow() : 0;
 
 	if (batch.length > 50) {
 		_recordRpcMetrics('__batch__', 'INVALID_REQUEST', _batchMetricsStart);
@@ -7441,7 +7744,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
  */
 async function _executeSingleRpc(ws, msg, platform, options) {
 	const { rpc: path, id, args: rawArgs, stream: isStream, cursor: clientCursor } = msg;
-	const _metricsStart = _metricsInstruments ? Date.now() : 0;
+	const _metricsStart = _metricsInstruments ? monotonicNow() : 0;
 
 	if (!_validPathRe.test(path)) {
 		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
@@ -7540,7 +7843,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
  */
 async function _executeBinaryRpc(ws, header, payload, platform, options) {
 	const { rpc: path, id, args: extraArgs } = header;
-	const _metricsStart = _metricsInstruments ? Date.now() : 0;
+	const _metricsStart = _metricsInstruments ? monotonicNow() : 0;
 
 	if (!_validPathRe.test(path)) {
 		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
@@ -8114,7 +8417,7 @@ function _handleUploadControlFrame(ws, data, platform) {
  * @param {{ beforeExecute?: Function, onError?: Function }} [options]
  */
 async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, options) {
-	const _metricsStart = _metricsInstruments ? Date.now() : 0;
+	const _metricsStart = _metricsInstruments ? monotonicNow() : 0;
 	let path = '';
 	/** @type {any} */ let ctx = null;
 
@@ -8340,7 +8643,7 @@ function _throttlePublish(platform, topic, event, data, ms) {
 	const entityKey = data && typeof data === 'object' && data.key !== undefined ? '\0' + data.key : '';
 	const key = topic + '\0' + event + entityKey;
 	const existing = _throttles.get(key);
-	const now = Date.now();
+	const now = runtimeNow();
 
 	if (!existing) {
 		if (_throttles.size >= _THROTTLE_DEBOUNCE_MAX) {
@@ -8351,7 +8654,7 @@ function _throttlePublish(platform, topic, event, data, ms) {
 		}
 		platform.publish(topic, event, data);
 		_throttles.set(key, {
-			timer: setTimeout(() => {
+			timer: setTimer(() => {
 				const entry = _throttles.get(key);
 				if (entry && entry.lastData !== undefined) {
 					platform.publish(topic, event, entry.lastData);
@@ -8383,7 +8686,7 @@ function _debouncePublish(platform, topic, event, data, ms) {
 	const entityKey = data && typeof data === 'object' && data.key !== undefined ? '\0' + data.key : '';
 	const key = topic + '\0' + event + entityKey;
 	const existing = _debounces.get(key);
-	if (existing) clearTimeout(existing);
+	if (existing) clearTimer(existing);
 
 	if (!existing && _debounces.size >= _THROTTLE_DEBOUNCE_MAX) {
 		// At capacity - publish immediately instead of evicting an active timer
@@ -8391,7 +8694,7 @@ function _debouncePublish(platform, topic, event, data, ms) {
 		return;
 	}
 
-	_debounces.set(key, setTimeout(() => {
+	_debounces.set(key, setTimer(() => {
 		_debounces.delete(key);
 		platform.publish(topic, event, data);
 	}, ms));
@@ -8457,7 +8760,7 @@ function _skipGate(key, ms) {
 		}
 		return false;
 	}
-	_skipGates.set(key, setTimeout(() => { _skipGates.delete(key); }, ms));
+	_skipGates.set(key, setTimer(() => { _skipGates.delete(key); }, ms));
 	return false;
 }
 
