@@ -74,6 +74,8 @@ import {
 	WRAPPED_FOR_REPLAY
 } from '../server.js';
 import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
+import http from 'node:http';
+import { createHash, createHmac } from 'node:crypto';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { toArrayBuffer } from './helpers/encode.js';
@@ -6107,30 +6109,51 @@ describe('live.webhook()', () => {
 // - live.webhooks.outbound() --------------------------------------
 
 describe('live.webhooks namespace + outbound', () => {
-	let fetchMock;
+	let server;
+	let baseUrl;
+	let received; // every request the receiver saw: { method, path, headers, body }
+	let respond; // per-test response programmer: (req, res, entry) => void; null -> 200
 	let idCounter = 0;
 
-	beforeEach(() => {
-		fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => 'ok' }));
-		vi.stubGlobal('fetch', fetchMock);
+	// A real loopback HTTP receiver: delivery is exercised over the wire (node:http
+	// is the transport now, not fetch), which also covers the redirect / retry /
+	// HMAC / idempotency paths end to end. The receiver is on 127.0.0.1, so the
+	// strict SSRF guard would block it - delivery tests therefore use urlMode:'off'
+	// (loopback is the test server), while the SSRF-blocking tests use strict mode
+	// and assert NOTHING reaches the receiver.
+	beforeEach(async () => {
+		received = [];
+		respond = null;
+		server = http.createServer((req, res) => {
+			let body = '';
+			req.on('data', (c) => { body += c; });
+			req.on('end', () => {
+				const entry = { method: req.method, path: req.url, headers: req.headers, body };
+				received.push(entry);
+				if (respond) respond(req, res, entry);
+				else { res.writeHead(200); res.end('ok'); }
+			});
+		});
+		await new Promise((r) => server.listen(0, '127.0.0.1', r));
+		baseUrl = 'http://127.0.0.1:' + server.address().port;
 		configureCron(null); // no leader configured: every worker fires
 	});
-	afterEach(() => {
-		vi.unstubAllGlobals();
+	afterEach(async () => {
+		await new Promise((r) => server.close(r));
 		configureCron(null);
 	});
 
 	// Register an outbound webhook, activate the publish wrap, publish once on a
 	// UNIQUE topic (so tests never cross-fire), and wait for the async fire chain
 	// (retry backoffs use 1ms delays).
-	async function fireOnce(sources, config, { topic, event = 'created', data = { id: 1 }, leader } = {}) {
+	async function fireOnce(sources, config, { topic, event = 'created', data = { id: 1 }, leader, wait = 120 } = {}) {
 		const src = topic || sources[0];
 		__registerWebhookOut('wh/out' + (++idCounter), live.webhooks.outbound(sources, config));
 		if (leader !== undefined) configureCron({ leader });
 		const platform = mockPlatform();
 		_activateDerived(platform);
 		platform.publish(src, event, data);
-		await new Promise((r) => setTimeout(r, 60));
+		await new Promise((r) => setTimeout(r, wait));
 		return platform;
 	}
 
@@ -6156,81 +6179,241 @@ describe('live.webhooks namespace + outbound', () => {
 		expect(() => live.webhooks.outbound(['orders'], { url: 42 })).toThrow(/url/);
 	});
 
+	it('rejects an invalid resolve / urlMode at definition time', () => {
+		expect(() => live.webhooks.outbound(['orders'], { url: 'https://x.com', resolve: 42 })).toThrow(/resolve/);
+		expect(() => live.webhooks.outbound(['orders'], { url: 'https://x.com', urlMode: 'lax' })).toThrow(/urlMode/);
+	});
+
 	it('rejects a static url that fails the SSRF guard at definition time', () => {
 		expect(() => live.webhooks.outbound(['orders'], { url: 'http://169.254.169.254/' })).toThrow(/blocked/);
 		expect(() => live.webhooks.outbound(['orders'], { url: 'http://localhost/hook' })).toThrow(/blocked/);
 		expect(() => live.webhooks.outbound(['orders'], { url: 'file:///etc/passwd' })).toThrow(/blocked/);
 	});
 
-	it('allows a static url via allowlist mode or a custom validateUrl override', () => {
+	it('a static url to a private host is blocked even with validateUrl (validateUrl can only narrow)', () => {
+		// validateUrl is no longer an escape hatch: the range floor still blocks a
+		// private literal at definition time. urlMode:'off' is the way to reach one.
+		expect(() => live.webhooks.outbound(['orders'], { url: 'http://10.0.0.5/h', validateUrl: () => true })).toThrow(/blocked/);
+		expect(() => live.webhooks.outbound(['orders'], { url: 'http://10.0.0.5/h', urlMode: 'off' })).not.toThrow();
 		expect(() => live.webhooks.outbound(['orders'], { url: 'https://ok.com/h', urlMode: 'allowlist', allow: ['ok.com'] })).not.toThrow();
-		expect(() => live.webhooks.outbound(['orders'], { url: 'http://10.0.0.5/h', validateUrl: () => true })).not.toThrow();
 	});
 
 	it('fires an HTTP POST on a matching publish, with json body + idempotency-key header', async () => {
-		await fireOnce(['wh-orders'], { url: 'https://hooks.example.com/x' }, { topic: 'wh-orders', event: 'created', data: { id: 7 } });
-		expect(fetchMock).toHaveBeenCalledTimes(1);
-		const [url, opts] = fetchMock.mock.calls[0];
-		expect(url).toBe('https://hooks.example.com/x');
-		expect(opts.method).toBe('POST');
-		expect(opts.headers['content-type']).toBe('application/json');
-		expect(typeof opts.headers['idempotency-key']).toBe('string');
-		expect(JSON.parse(opts.body)).toEqual({ event: 'created', data: { id: 7 } });
+		await fireOnce(['wh-orders'], { url: baseUrl + '/x', urlMode: 'off' }, { topic: 'wh-orders', event: 'created', data: { id: 7 } });
+		expect(received).toHaveLength(1);
+		const entry = received[0];
+		expect(entry.method).toBe('POST');
+		expect(entry.path).toBe('/x');
+		expect(entry.headers['content-type']).toBe('application/json');
+		expect(typeof entry.headers['idempotency-key']).toBe('string');
+		expect(JSON.parse(entry.body)).toEqual({ event: 'created', data: { id: 7 } });
 	});
 
 	it('applies transform, and skips the POST when transform returns null', async () => {
-		await fireOnce(['wh-t1'], { url: 'https://h.example.com/', transform: (e, d) => ({ kind: e, n: d.id }) }, { topic: 'wh-t1', data: { id: 3 } });
-		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ kind: 'created', n: 3 });
+		await fireOnce(['wh-t1'], { url: baseUrl + '/', urlMode: 'off', transform: (e, d) => ({ kind: e, n: d.id }) }, { topic: 'wh-t1', data: { id: 3 } });
+		expect(JSON.parse(received[0].body)).toEqual({ kind: 'created', n: 3 });
 
-		fetchMock.mockClear();
-		await fireOnce(['wh-t2'], { url: 'https://h.example.com/', transform: () => null }, { topic: 'wh-t2' });
-		expect(fetchMock).not.toHaveBeenCalled();
+		received.length = 0;
+		await fireOnce(['wh-t2'], { url: baseUrl + '/', urlMode: 'off', transform: () => null }, { topic: 'wh-t2' });
+		expect(received).toHaveLength(0);
 	});
 
 	it('signs the body with HMAC when secret is set', async () => {
-		await fireOnce(['wh-sig'], { url: 'https://h.example.com/', secret: 's3cret' }, { topic: 'wh-sig' });
-		const sig = fetchMock.mock.calls[0][1].headers['x-webhook-signature'];
-		expect(sig).toMatch(/^sha256=[0-9a-f]{64}$/);
+		await fireOnce(['wh-sig'], { url: baseUrl + '/', urlMode: 'off', secret: 's3cret' }, { topic: 'wh-sig' });
+		expect(received[0].headers['x-webhook-signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
 	});
 
-	it('blocks a dynamic url resolving to a private address at fire time (onFailure, no fetch)', async () => {
+	it('the default idempotency-key is keyed (unforgeable) when a secret is set', async () => {
+		await fireOnce(['wh-idem-keyed'], { url: baseUrl + '/', urlMode: 'off', secret: 's3cret' }, { topic: 'wh-idem-keyed', event: 'created', data: { id: 9 } });
+		const keyed = received[0].headers['idempotency-key'];
+		const body = JSON.stringify({ event: 'created', data: { id: 9 } });
+		const material = 'wh-idem-keyed\0created\0' + body;
+		// The plain content hash an outsider could precompute from public data...
+		const plain = createHash('sha256').update(material).digest('hex');
+		// ...is NOT what ships when a secret is set: the default is keyed (HMAC).
+		expect(keyed).not.toBe(plain);
+		expect(keyed).toBe(createHmac('sha256', 's3cret').update('idem\0' + material).digest('hex'));
+	});
+
+	it('rejects an idempotency-key containing CR/LF (no delivery)', async () => {
+		const failures = [];
+		await fireOnce(['wh-crlf'], { url: baseUrl + '/', urlMode: 'off', idempotencyKey: () => 'a\r\nb', onFailure: (e) => failures.push(e) }, { topic: 'wh-crlf' });
+		expect(received).toHaveLength(0);
+		expect(String(failures[0].message)).toMatch(/idempotency-key/);
+	});
+
+	it('blocks a dynamic url resolving to a private literal at fire time (onFailure, no delivery)', async () => {
 		const failures = [];
 		await fireOnce(['wh-dyn'], { url: () => 'http://169.254.169.254/', onFailure: (e) => failures.push(e) }, { topic: 'wh-dyn' });
-		expect(fetchMock).not.toHaveBeenCalled();
+		expect(received).toHaveLength(0);
 		expect(failures).toHaveLength(1);
 		expect(String(failures[0].message)).toMatch(/blocked/);
 	});
 
+	it('blocks a DNS name that resolves to a private address (rebinding defense, no delivery)', async () => {
+		const failures = [];
+		// strict mode + a custom resolver that maps a public-looking name to a
+		// private address: resolve+validate catches it before any connection.
+		await fireOnce(['wh-rebind'], {
+			url: 'http://hook.example.test/path',
+			resolve: () => '169.254.169.254',
+			onFailure: (e) => failures.push(e)
+		}, { topic: 'wh-rebind' });
+		expect(received).toHaveLength(0);
+		expect(String(failures[0].message)).toMatch(/blocked/);
+	});
+
+	it('does NOT leak the secret or URL credentials in a reported error', async () => {
+		const failures = [];
+		// A dynamic url (function) is checked + redacted at fire time, exercising
+		// the runtime reporting path. (A static credential url is caught and
+		// redacted at definition time; see the definition-time block tests.)
+		await fireOnce(['wh-redact'], {
+			url: () => 'http://user:hunter2@169.254.169.254/admin?token=topsecret',
+			secret: 'super-secret-hmac',
+			onFailure: (e) => failures.push(e)
+		}, { topic: 'wh-redact' });
+		const msg = String(failures[0] && failures[0].message);
+		expect(msg).toMatch(/blocked/);
+		expect(msg).not.toContain('hunter2');
+		expect(msg).not.toContain('topsecret');
+		expect(msg).not.toContain('super-secret-hmac');
+	});
+
+	it('redacts URL credentials in the definition-time block error', () => {
+		try {
+			live.webhooks.outbound(['orders'], { url: 'http://user:hunter2@169.254.169.254/admin?token=topsecret' });
+			throw new Error('expected outbound() to throw');
+		} catch (e) {
+			expect(String(e.message)).toMatch(/blocked/);
+			expect(String(e.message)).not.toContain('hunter2');
+			expect(String(e.message)).not.toContain('topsecret');
+		}
+	});
+
+	it('aborts a hung callback via the per-callback timeout (no delivery)', async () => {
+		const failures = [];
+		await fireOnce(['wh-hang'], {
+			url: baseUrl + '/',
+			urlMode: 'off',
+			callbackTimeoutMs: 20,
+			transform: () => new Promise(() => {}), // never resolves
+			onFailure: (e) => failures.push(e)
+		}, { topic: 'wh-hang', wait: 120 });
+		expect(received).toHaveLength(0);
+		expect(String(failures[0].message)).toMatch(/timed out/);
+	});
+
 	it('does NOT fire when the cron leader gate returns false (cluster dedup)', async () => {
-		await fireOnce(['wh-lead-no'], { url: 'https://h.example.com/' }, { topic: 'wh-lead-no', leader: () => false });
-		expect(fetchMock).not.toHaveBeenCalled();
+		await fireOnce(['wh-lead-no'], { url: baseUrl + '/', urlMode: 'off' }, { topic: 'wh-lead-no', leader: () => false });
+		expect(received).toHaveLength(0);
 	});
 
 	it('fires when the leader gate returns true', async () => {
-		await fireOnce(['wh-lead-yes'], { url: 'https://h.example.com/' }, { topic: 'wh-lead-yes', leader: () => true });
-		expect(fetchMock).toHaveBeenCalledTimes(1);
+		await fireOnce(['wh-lead-yes'], { url: baseUrl + '/', urlMode: 'off' }, { topic: 'wh-lead-yes', leader: () => true });
+		expect(received).toHaveLength(1);
 	});
 
 	it('retries on a 5xx and stops once delivered; the idempotency-key is stable across retries', async () => {
 		let n = 0;
-		fetchMock.mockImplementation(async () => {
+		respond = (req, res) => {
 			n++;
-			return n < 2
-				? { ok: false, status: 503, text: async () => 'down' }
-				: { ok: true, status: 200, text: async () => 'ok' };
-		});
-		await fireOnce(['wh-retry'], { url: 'https://h.example.com/', retry: { attempts: 3, initialDelayMs: 1 } }, { topic: 'wh-retry' });
-		expect(fetchMock).toHaveBeenCalledTimes(2);
-		expect(fetchMock.mock.calls[0][1].headers['idempotency-key'])
-			.toBe(fetchMock.mock.calls[1][1].headers['idempotency-key']);
+			if (n < 2) { res.writeHead(503); res.end('down'); }
+			else { res.writeHead(200); res.end('ok'); }
+		};
+		await fireOnce(['wh-retry'], { url: baseUrl + '/', urlMode: 'off', retry: { attempts: 3, initialDelayMs: 1 } }, { topic: 'wh-retry' });
+		expect(received).toHaveLength(2);
+		expect(received[0].headers['idempotency-key']).toBe(received[1].headers['idempotency-key']);
 	});
 
 	it('does NOT retry a 4xx client error', async () => {
 		const failures = [];
-		fetchMock.mockImplementation(async () => ({ ok: false, status: 400, text: async () => 'bad' }));
-		await fireOnce(['wh-4xx'], { url: 'https://h.example.com/', retry: { attempts: 3, initialDelayMs: 1 }, onFailure: (e, ev, d, attempts) => failures.push(attempts) }, { topic: 'wh-4xx' });
-		expect(fetchMock).toHaveBeenCalledTimes(1);
+		respond = (req, res) => { res.writeHead(400); res.end('bad'); };
+		await fireOnce(['wh-4xx'], { url: baseUrl + '/', urlMode: 'off', retry: { attempts: 3, initialDelayMs: 1 }, onFailure: (e, ev, d, attempts) => failures.push(attempts) }, { topic: 'wh-4xx' });
+		expect(received).toHaveLength(1);
 		expect(failures[0]).toBe(1);
+	});
+
+	it('times out a hung receiver via the per-attempt deadline', async () => {
+		const failures = [];
+		respond = () => { /* receive the request but never respond */ };
+		await fireOnce(['wh-timeout'], {
+			url: baseUrl + '/',
+			urlMode: 'off',
+			timeoutMs: 40,
+			retry: { attempts: 1 },
+			onFailure: (e) => failures.push(e)
+		}, { topic: 'wh-timeout', wait: 200 });
+		expect(received).toHaveLength(1); // the POST was sent...
+		expect(String(failures[0].message)).toMatch(/timeout/); // ...then aborted by the deadline
+	});
+
+	it('follows a redirect to a new target, re-gating each hop', async () => {
+		respond = (req, res) => {
+			if (req.url === '/start') { res.writeHead(302, { location: baseUrl + '/final' }); res.end(); }
+			else { res.writeHead(200); res.end('ok'); }
+		};
+		await fireOnce(['wh-redir'], { url: baseUrl + '/start', urlMode: 'off', maxRedirects: 3 }, { topic: 'wh-redir' });
+		expect(received.map((r) => r.path)).toEqual(['/start', '/final']);
+	});
+
+	it('refuses a redirect to a non-http(s) scheme (per-hop scheme gate)', async () => {
+		const failures = [];
+		respond = (req, res) => { res.writeHead(302, { location: 'file:///etc/passwd' }); res.end(); };
+		await fireOnce(['wh-redir-scheme'], { url: baseUrl + '/start', urlMode: 'off', onFailure: (e) => failures.push(e) }, { topic: 'wh-redir-scheme' });
+		expect(received).toHaveLength(1); // only the first hop; the file: redirect is not followed
+		expect(String(failures[0].message)).toMatch(/redirect-bad-scheme/);
+	});
+
+	it('stops following after maxRedirects hops', async () => {
+		const failures = [];
+		let i = 0;
+		respond = (req, res) => { res.writeHead(302, { location: baseUrl + '/r' + (++i) }); res.end(); };
+		await fireOnce(['wh-redir-cap'], { url: baseUrl + '/start', urlMode: 'off', maxRedirects: 2, onFailure: (e) => failures.push(e) }, { topic: 'wh-redir-cap' });
+		// hop 0 (/start) + 2 followed hops = 3 requests, then the cap stops it.
+		expect(received).toHaveLength(3);
+		expect(String(failures[0].message)).toMatch(/too many redirects/);
+	});
+
+	it('refuses all redirects when maxRedirects is 0', async () => {
+		const failures = [];
+		respond = (req, res) => { res.writeHead(302, { location: baseUrl + '/final' }); res.end(); };
+		await fireOnce(['wh-redir-zero'], { url: baseUrl + '/start', urlMode: 'off', maxRedirects: 0, onFailure: (e) => failures.push(e) }, { topic: 'wh-redir-zero' });
+		expect(received).toHaveLength(1);
+		expect(String(failures[0].message)).toMatch(/too many redirects/);
+	});
+
+	it('off mode resolves + pins a DNS name to its address (Host preserved; rebinding closed)', async () => {
+		// A DNS-name target under off mode: the custom resolver maps it to the
+		// loopback test server, the connection is pinned to that address, and the
+		// Host header keeps the original name. This is also the positive proof that
+		// the pin routes the socket to the resolved address (no second resolution).
+		const port = server.address().port;
+		await fireOnce(['wh-off-pin'], {
+			url: 'http://pinned.example.test:' + port + '/hook',
+			urlMode: 'off',
+			resolve: () => '127.0.0.1'
+		}, { topic: 'wh-off-pin' });
+		expect(received).toHaveLength(1);
+		expect(received[0].path).toBe('/hook');
+		expect(received[0].headers.host).toBe('pinned.example.test:' + port);
+	});
+
+	it('detects a redirect loop regardless of initial-URL case (normalized seen-set)', async () => {
+		const failures = [];
+		const port = server.address().port;
+		// The server redirects to the lowercase form of the (mixed-case) initial
+		// URL. With the seen-set normalized, the loop is caught on the first hop
+		// (one delivery), not one hop later.
+		respond = (req, res) => { res.writeHead(302, { location: 'http://pinned.example.test:' + port + '/loop' }); res.end(); };
+		await fireOnce(['wh-loop-case'], {
+			url: 'http://Pinned.Example.Test:' + port + '/loop',
+			urlMode: 'off',
+			resolve: () => '127.0.0.1',
+			onFailure: (e) => failures.push(e)
+		}, { topic: 'wh-loop-case' });
+		expect(received).toHaveLength(1);
+		expect(String(failures[0].message)).toMatch(/redirect loop/);
 	});
 });
 

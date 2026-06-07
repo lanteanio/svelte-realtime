@@ -3104,30 +3104,40 @@ import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
 configureCron({ leader: createLeader(redis).isLeader });
 ```
 
-With a leader configured, only the leader replica POSTs; without one, every worker fires (correct for single-process, the same footgun cron has). Delivery is **at-least-once**, not exactly-once - strict exactly-once over HTTP is unachievable (a dropped *response* is indistinguishable from a dropped *request*, so the only safe action, retry, is also what can duplicate). Every POST therefore carries an `idempotency-key` header (a content hash by default, stable across retries **and** across a leadership-transition double-fire), so **make your receiver idempotent** and it is effectively-once. Override the key with `idempotencyKey: (event, data) => yourId`.
+With a leader configured, only the leader replica POSTs; without one, every worker fires (correct for single-process, the same footgun cron has). Delivery is **at-least-once**, not exactly-once - strict exactly-once over HTTP is unachievable (a dropped *response* is indistinguishable from a dropped *request*, so the only safe action, retry, is also what can duplicate). Every POST therefore carries an `idempotency-key` header (stable across retries **and** across a leadership-transition double-fire), so **make your receiver idempotent** and it is effectively-once. When you set a `secret` the default key is **keyed** with it (an outsider who can trigger the same publish still cannot precompute the key to replay or suppress a delivery); without a secret it is a plain content hash (predictable - set a secret or supply your own `idempotencyKey: (event, data) => yourId`).
 
 #### SSRF protection
 
-The target URL is validated against private/loopback/metadata ranges (strict by default) - at definition time for a static `url`, and again at fire time for a dynamic `url: (event, data) => ...` (the dynamic case is attacker-influenceable). A blocked URL throws at definition or calls `onFailure` at fire time; it never reaches `fetch`. Loosen or replace the guard with `urlMode: 'allowlist'` + `allow: [...]`, or a custom `validateUrl: (url) => boolean` (e.g. the full `checkUrl` from `svelte-adapter-uws/safe-url`).
+Outbound delivery is a classic server-side request forgery (SSRF) surface, so the guard is **on by default and covers the whole request**, not just the configured URL:
+
+- **Private/loopback/metadata ranges are blocked** (strict by default) at definition time for a static `url` and at fire time for a dynamic `url: (event, data) => ...`.
+- **DNS rebinding is closed.** A DNS-name target is resolved, **every** resolved address is range-checked, and the connection is **pinned** to the validated address - a public-looking name that resolves to `169.254.169.254` or a private host is rejected, and it cannot rebind between the check and the connection. The `Host` header and TLS certificate validation still use the original hostname.
+- **Redirects are re-checked on every hop** (up to `maxRedirects`, default 5): a `3xx` to a private host, a non-http(s) scheme, or an https->http downgrade is refused, and redirect loops are detected. (A plain `fetch` would silently follow such a redirect - this does not.)
+- A blocked URL throws at definition or calls `onFailure` at fire time; it never reaches the network.
+
+To reach an internal endpoint on purpose, set `urlMode: 'allowlist'` + `allow: [...]` for a **public** host, or - for a **private** host - `urlMode: 'off'` (the explicit range opt-out; the http(s) scheme gate still applies) paired with a `validateUrl` that allows exactly that host. `validateUrl` is an **additional** restriction (logical AND): it can only narrow the allowed set, never re-open a blocked host, and it may be `async`. Supply a custom `resolve(hostname)` to use a hardened resolver.
 
 #### Delivery
 
-Each POST is retried with exponential backoff (default 3 attempts, 100ms - 5s) on a 5xx / 429 / network error / timeout; a 4xx (other than 429) is a permanent client error and is not retried. When `secret` is set the body is signed as `x-webhook-signature: sha256=<hex>`. Exhausted retries (and blocked URLs / bad payloads) call `onFailure(err, event, data, attempts)`.
+Delivery runs over `node:http`/`node:https` (no extra dependency). Each POST is retried with **jittered** exponential backoff (default 3 attempts, 100ms - 5s) on a 5xx / 429 / network error / timeout; a 4xx (other than 429) is a permanent client error and is not retried. When `secret` is set the body is signed as `x-webhook-signature: sha256=<hex>`. The per-attempt `timeoutMs` covers DNS, connect, TTFB and body; user callbacks are bounded by `callbackTimeoutMs`. Exhausted retries (and blocked URLs / bad payloads / blocked redirects) call `onFailure(err, event, data, attempts)` - the error never contains the `secret`, the signature, or URL credentials.
 
 #### Options
 
 | Option | Default | Description |
 |---|---|---|
-| `url` | (required) | Destination URL, or `(event, data) => string` for a per-event URL. SSRF-checked. |
+| `url` | (required) | Destination URL, or `(event, data) => string \| Promise<string>` for a per-event URL. SSRF-checked. |
 | `transform` | `{ event, data }` | Build the POST body. Return `null` to skip the event. |
-| `secret` | - | HMAC-SHA256 signing secret; adds the `x-webhook-signature` header. |
-| `idempotencyKey` | content hash | Override the `idempotency-key` header value. |
-| `retry` | `{ attempts: 3, initialDelayMs: 100, maxDelayMs: 5000, backoffMultiplier: 2 }` | Retry policy. |
-| `timeoutMs` | `10000` | Per-request timeout. |
-| `urlMode` | `'strict'` | SSRF posture: `strict` / `allowlist` / `off`. |
+| `secret` | - | HMAC-SHA256 signing secret; adds `x-webhook-signature` and keys the default idempotency key. |
+| `idempotencyKey` | keyed/content hash | Override the `idempotency-key` header value. |
+| `retry` | `{ attempts: 3, initialDelayMs: 100, maxDelayMs: 5000, backoffMultiplier: 2 }` | Retry policy (jittered). |
+| `timeoutMs` | `10000` | Per-attempt timeout (DNS + connect + TTFB + body). |
+| `callbackTimeoutMs` | `10000` | Timeout for each user callback (`transform` / `url` / `validateUrl` / `resolve` / `idempotencyKey`). |
+| `maxRedirects` | `5` | Redirect hops to follow; every hop is re-gated. `0` refuses all redirects. |
+| `urlMode` | `'strict'` | SSRF posture: `strict` (range-check + DNS pin), `allowlist` (+ host in `allow`), or `off` (no range check / no pin; scheme gate stays on). |
 | `allow` | - | Allowlisted hostnames for `urlMode: 'allowlist'`. |
-| `validateUrl` | built-in guard | Custom URL validator `(url) => boolean`, replacing the built-in SSRF check. |
-| `onFailure` | - | Called on delivery failure after retries (or on a blocked URL / bad payload). |
+| `validateUrl` | - | Additional restriction `(url) => boolean \| Promise<boolean>`, ANDed with the built-in guard on every hop. Narrows only. |
+| `resolve` | `node:dns` | Custom DNS resolver `(hostname) => address \| address[] \| Promise<...>` for the pin. |
+| `onFailure` | - | Called on delivery failure after retries (or on a blocked URL / payload / redirect). |
 
 ---
 

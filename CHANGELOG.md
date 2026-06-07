@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.6] - 2026-06-07
+
+### Security
+
+- **`live.webhooks.outbound` ships a complete SSRF defense.** Outbound delivery moves from `fetch` to `node:http`/`node:https` (no new dependency) so the guard controls the whole request, not just the first URL:
+  - **DNS rebinding is closed.** In `strict`/`allowlist` mode a DNS-name target is resolved (via `node:dns`, or a custom `resolve` hook), **every** resolved address is range-checked, and the connection is **pinned** to the validated address - so a name that passes the check cannot rebind to a private address before the socket connects. The `Host` header and TLS server name stay the original hostname.
+  - **Redirects are followed manually and re-checked on every hop** (up to `maxRedirects`, default 5), with loop detection and refusal of a private/metadata host, a non-http(s) scheme, or an https->http downgrade. (A plain `fetch` would silently follow such a redirect.)
+  - **`validateUrl` is now an additional restriction (logical AND), not a replacement** - it can only narrow the allowed set, never re-open a blocked host, runs on every hop, and may be `async`. To reach a specific private endpoint, pair `urlMode: 'off'` (the explicit range opt-out; the http(s) scheme gate still applies) with a `validateUrl` that allows exactly that host.
+  - The default `idempotency-key` is **keyed** with your `secret` (HMAC) when set, so it cannot be precomputed from public content; user callbacks are bounded by `callbackTimeoutMs`; the per-attempt `timeoutMs` covers DNS/connect/TTFB/body; retries are jittered; the response body is drained; and failure reports redact URL credentials and never include the secret. New config: `resolve`, `maxRedirects`, `callbackTimeoutMs`.
+
 ## [0.6.0-next.5] - 2026-06-07
 
 ### Added

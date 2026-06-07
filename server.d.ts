@@ -2349,23 +2349,63 @@ export interface OutboundWebhookConfig {
 		maxDelayMs?: number;
 		backoffMultiplier?: number;
 	};
-	/** Per-request timeout in milliseconds. @default 10000 */
+	/**
+	 * Absolute per-attempt timeout in milliseconds, covering DNS, connect, TTFB
+	 * and body. @default 10000
+	 */
 	timeoutMs?: number;
-	/** SSRF posture for the built-in guard. @default 'strict' */
+	/**
+	 * Maximum number of redirect hops to follow. Every hop is re-run through the
+	 * full SSRF gate (scheme + range + DNS-pin), so a redirect to a private host,
+	 * a non-http(s) scheme, an https->http downgrade, a loop, or hop-cap overflow
+	 * ends delivery with a reported failure. Set `0` to refuse all redirects.
+	 * @default 5
+	 */
+	maxRedirects?: number;
+	/**
+	 * Per-callback timeout in milliseconds for `transform` / the dynamic `url` /
+	 * `validateUrl` / `resolve` / `idempotencyKey`, so a hung callback cannot
+	 * pile up pending deliveries. @default 10000
+	 */
+	callbackTimeoutMs?: number;
+	/**
+	 * SSRF posture for the built-in guard.
+	 * - `'strict'` (default): block private/loopback/metadata literals, resolve
+	 *   every DNS name and block if any address is private, and pin the
+	 *   connection to the validated address (closing DNS rebinding).
+	 * - `'allowlist'`: as strict, plus the hostname must be in `allow`.
+	 * - `'off'`: skip the range checks and the DNS pin (the http(s) scheme gate
+	 *   still applies) - the explicit, reviewable opt-out for a trusted endpoint.
+	 * @default 'strict'
+	 */
 	urlMode?: 'strict' | 'allowlist' | 'off';
 	/** Allowlisted hostnames when `urlMode: 'allowlist'`. */
 	allow?: string[];
 	/**
-	 * Custom URL validator, replacing the built-in SSRF guard. Return `true`
-	 * to allow the fetch. Use to plug in the full
-	 * `svelte-adapter-uws-extensions/safe-url` `checkUrl` or a custom policy.
+	 * Additional URL restriction, applied as a logical AND on top of the
+	 * built-in guard on the initial URL and on every redirect hop. It can only
+	 * NARROW the allowed set, never widen it: returning `true` does not re-open a
+	 * host the range check blocked. May be async (it is awaited). To reach a
+	 * specific private endpoint, pair `urlMode: 'off'` (which relaxes the ranges)
+	 * with a `validateUrl` that allows exactly that host.
 	 */
-	validateUrl?: (url: string) => boolean;
+	validateUrl?: (url: string) => boolean | Promise<boolean>;
+	/**
+	 * Custom DNS resolver for the SSRF pin (strict/allowlist mode), receiving the
+	 * hostname and returning one address or an array of addresses. Defaults to
+	 * `node:dns` lookup of all addresses. Every resolved address is range-checked
+	 * and the connection is pinned to it, so supplying a hardened resolver (or
+	 * one that returns a private address) is how DNS rebinding is defended and
+	 * tested.
+	 */
+	resolve?: (hostname: string) => string | string[] | Promise<string | string[]>;
 	/**
 	 * Called when delivery fails (after retries are exhausted, or on a blocked
-	 * URL / bad payload). `attempts` is how many HTTP attempts were made.
+	 * URL / bad payload / blocked redirect). `attempts` is how many HTTP attempts
+	 * were made. The error never contains the secret, the signature, or URL
+	 * credentials. May return a promise (it is detached, not awaited).
 	 */
-	onFailure?: (err: Error, event: string, data: any, attempts: number) => void;
+	onFailure?: (err: Error, event: string, data: any, attempts: number) => void | Promise<void>;
 }
 
 /**
