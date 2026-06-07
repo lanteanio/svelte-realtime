@@ -22,6 +22,13 @@ const ROOM_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.room\s*\(/g;
 // cursor methods on top of the room namespace.
 const MULTIPLAYER_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.multiplayer\s*\(/g;
 const WEBHOOK_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.webhook\s*\(/g;
+// Namespaced webhook forms. live.webhooks.inbound() is the same server-only
+// manual handler as the flat live.webhook(); live.webhooks.outbound() is a
+// leader-gated outbound POST that IS registered server-side as a topic watcher
+// (like an effect). The flat regex does not match these (after `webhook` comes
+// `s`, not `(`), so they need their own patterns.
+const WEBHOOK_INBOUND_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.webhooks\.inbound\s*\(/g;
+const WEBHOOK_OUTBOUND_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.webhooks\.outbound\s*\(/g;
 const CHANNEL_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.channel\s*\(/g;
 const DYNAMIC_CHANNEL_RE = /export\s+const\s+(\w+)\s*=\s*live\.channel\s*\(\s*(?:\([^)]*\)|[a-zA-Z_$][\w$]*)\s*=>/g;
 const RATE_LIMIT_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.rateLimit\s*\(/g;
@@ -1415,10 +1422,13 @@ function _generateClientStubs(filePath, modulePath, dir) {
 		}
 	}
 
-	// Mark webhook exports as known (server-only, no client stub)
-	WEBHOOK_EXPORT_RE.lastIndex = 0;
-	while ((match = WEBHOOK_EXPORT_RE.exec(source)) !== null) {
-		exportedNames.add(match[1]);
+	// Mark webhook exports as known (server-only, no client stub). Covers the
+	// flat live.webhook(), live.webhooks.inbound(), and live.webhooks.outbound().
+	for (const re of [WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE, WEBHOOK_OUTBOUND_EXPORT_RE]) {
+		re.lastIndex = 0;
+		while ((match = re.exec(source)) !== null) {
+			exportedNames.add(match[1]);
+		}
 	}
 
 	// Mark cron exports as known (they are server-only, no client stub needed)
@@ -2174,7 +2184,7 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 
 	const files = _findLiveFiles(liveDir);
 	const lines = [
-		`import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag } from 'svelte-realtime/server';`,
+		`import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag, __registerWebhookOut } from 'svelte-realtime/server';`,
 		`const __L = fn => (fn.__lazy = true, fn);\n`
 	];
 
@@ -2346,10 +2356,26 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			}
 		}
 
-		// Webhook exports are server-only (no registration needed in client registry)
-		WEBHOOK_EXPORT_RE.lastIndex = 0;
-		while ((match = WEBHOOK_EXPORT_RE.exec(source)) !== null) {
-			registered.add(match[1]);
+		// Inbound webhooks (flat live.webhook + live.webhooks.inbound) are
+		// server-only manual handlers: no client stub AND no server-side
+		// registration (the app calls handler.handle(req) itself).
+		for (const re of [WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE]) {
+			re.lastIndex = 0;
+			while ((match = re.exec(source)) !== null) {
+				registered.add(match[1]);
+			}
+		}
+
+		// Outbound webhooks ARE registered server-side (they watch source topics
+		// and fire on publish, like effects); still no client stub.
+		WEBHOOK_OUTBOUND_EXPORT_RE.lastIndex = 0;
+		while ((match = WEBHOOK_OUTBOUND_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			if (!/^\w+$/.test(name)) continue;
+			if (!registered.has(name)) {
+				registered.add(name);
+				lines.push(`__registerWebhookOut(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
+			}
 		}
 
 		// Register live.channel() exports (treated like streams)
@@ -3459,7 +3485,7 @@ async function _loadRegistryDirect(server, liveDir, dir) {
 		return;
 	}
 
-	const { __register, __registerGuard, __registerDerived, __registerCron, __registerEffect, __registerAggregate } = serverMod;
+	const { __register, __registerGuard, __registerDerived, __registerCron, __registerEffect, __registerAggregate, __registerWebhookOut } = serverMod;
 	const files = _findLiveFiles(liveDir);
 
 	for (const filePath of files) {
@@ -3499,6 +3525,8 @@ async function _loadRegistryDirect(server, liveDir, dir) {
 					}
 				} else if (/** @type {any} */ (fn)?.__isEffect) {
 					__registerEffect(rel + '/' + name, fn);
+				} else if (/** @type {any} */ (fn)?.__isWebhookOut) {
+					__registerWebhookOut(rel + '/' + name, fn);
 				} else if (/** @type {any} */ (fn)?.__isAggregate) {
 					if (/** @type {any} */ (fn).__windowStreams) {
 						// Windowed: register the watcher under the export

@@ -22,6 +22,7 @@ import {
 	__register,
 	__registerGuard,
 	__registerEffect,
+	__registerWebhookOut,
 	__registerAggregate,
 	__registerFlag,
 	__directCall,
@@ -6100,6 +6101,136 @@ describe('live.webhook()', () => {
 		expect(result.status).toBe(200);
 		expect(result.body).toBe('Ignored');
 		expect(platform.published).toHaveLength(0);
+	});
+});
+
+// - live.webhooks.outbound() --------------------------------------
+
+describe('live.webhooks namespace + outbound', () => {
+	let fetchMock;
+	let idCounter = 0;
+
+	beforeEach(() => {
+		fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => 'ok' }));
+		vi.stubGlobal('fetch', fetchMock);
+		configureCron(null); // no leader configured: every worker fires
+	});
+	afterEach(() => {
+		vi.unstubAllGlobals();
+		configureCron(null);
+	});
+
+	// Register an outbound webhook, activate the publish wrap, publish once on a
+	// UNIQUE topic (so tests never cross-fire), and wait for the async fire chain
+	// (retry backoffs use 1ms delays).
+	async function fireOnce(sources, config, { topic, event = 'created', data = { id: 1 }, leader } = {}) {
+		const src = topic || sources[0];
+		__registerWebhookOut('wh/out' + (++idCounter), live.webhooks.outbound(sources, config));
+		if (leader !== undefined) configureCron({ leader });
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		platform.publish(src, event, data);
+		await new Promise((r) => setTimeout(r, 60));
+		return platform;
+	}
+
+	it('live.webhooks.inbound is the same function as live.webhook', () => {
+		expect(live.webhooks.inbound).toBe(live.webhook);
+	});
+
+	it('outbound returns a server-only marker with sources + config', () => {
+		const cfg = { url: 'https://hooks.example.com/x' };
+		const m = live.webhooks.outbound(['orders'], cfg);
+		expect(m.__isWebhookOut).toBe(true);
+		expect(m.__webhookOutSources).toEqual(['orders']);
+		expect(m.__webhookOutConfig).toBe(cfg);
+	});
+
+	it('rejects a non-array / empty sources', () => {
+		expect(() => live.webhooks.outbound('orders', { url: 'https://x.com' })).toThrow(/sources/);
+		expect(() => live.webhooks.outbound([], { url: 'https://x.com' })).toThrow(/sources/);
+	});
+
+	it('rejects a missing / invalid url', () => {
+		expect(() => live.webhooks.outbound(['orders'], {})).toThrow(/url/);
+		expect(() => live.webhooks.outbound(['orders'], { url: 42 })).toThrow(/url/);
+	});
+
+	it('rejects a static url that fails the SSRF guard at definition time', () => {
+		expect(() => live.webhooks.outbound(['orders'], { url: 'http://169.254.169.254/' })).toThrow(/blocked/);
+		expect(() => live.webhooks.outbound(['orders'], { url: 'http://localhost/hook' })).toThrow(/blocked/);
+		expect(() => live.webhooks.outbound(['orders'], { url: 'file:///etc/passwd' })).toThrow(/blocked/);
+	});
+
+	it('allows a static url via allowlist mode or a custom validateUrl override', () => {
+		expect(() => live.webhooks.outbound(['orders'], { url: 'https://ok.com/h', urlMode: 'allowlist', allow: ['ok.com'] })).not.toThrow();
+		expect(() => live.webhooks.outbound(['orders'], { url: 'http://10.0.0.5/h', validateUrl: () => true })).not.toThrow();
+	});
+
+	it('fires an HTTP POST on a matching publish, with json body + idempotency-key header', async () => {
+		await fireOnce(['wh-orders'], { url: 'https://hooks.example.com/x' }, { topic: 'wh-orders', event: 'created', data: { id: 7 } });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const [url, opts] = fetchMock.mock.calls[0];
+		expect(url).toBe('https://hooks.example.com/x');
+		expect(opts.method).toBe('POST');
+		expect(opts.headers['content-type']).toBe('application/json');
+		expect(typeof opts.headers['idempotency-key']).toBe('string');
+		expect(JSON.parse(opts.body)).toEqual({ event: 'created', data: { id: 7 } });
+	});
+
+	it('applies transform, and skips the POST when transform returns null', async () => {
+		await fireOnce(['wh-t1'], { url: 'https://h.example.com/', transform: (e, d) => ({ kind: e, n: d.id }) }, { topic: 'wh-t1', data: { id: 3 } });
+		expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ kind: 'created', n: 3 });
+
+		fetchMock.mockClear();
+		await fireOnce(['wh-t2'], { url: 'https://h.example.com/', transform: () => null }, { topic: 'wh-t2' });
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('signs the body with HMAC when secret is set', async () => {
+		await fireOnce(['wh-sig'], { url: 'https://h.example.com/', secret: 's3cret' }, { topic: 'wh-sig' });
+		const sig = fetchMock.mock.calls[0][1].headers['x-webhook-signature'];
+		expect(sig).toMatch(/^sha256=[0-9a-f]{64}$/);
+	});
+
+	it('blocks a dynamic url resolving to a private address at fire time (onFailure, no fetch)', async () => {
+		const failures = [];
+		await fireOnce(['wh-dyn'], { url: () => 'http://169.254.169.254/', onFailure: (e) => failures.push(e) }, { topic: 'wh-dyn' });
+		expect(fetchMock).not.toHaveBeenCalled();
+		expect(failures).toHaveLength(1);
+		expect(String(failures[0].message)).toMatch(/blocked/);
+	});
+
+	it('does NOT fire when the cron leader gate returns false (cluster dedup)', async () => {
+		await fireOnce(['wh-lead-no'], { url: 'https://h.example.com/' }, { topic: 'wh-lead-no', leader: () => false });
+		expect(fetchMock).not.toHaveBeenCalled();
+	});
+
+	it('fires when the leader gate returns true', async () => {
+		await fireOnce(['wh-lead-yes'], { url: 'https://h.example.com/' }, { topic: 'wh-lead-yes', leader: () => true });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it('retries on a 5xx and stops once delivered; the idempotency-key is stable across retries', async () => {
+		let n = 0;
+		fetchMock.mockImplementation(async () => {
+			n++;
+			return n < 2
+				? { ok: false, status: 503, text: async () => 'down' }
+				: { ok: true, status: 200, text: async () => 'ok' };
+		});
+		await fireOnce(['wh-retry'], { url: 'https://h.example.com/', retry: { attempts: 3, initialDelayMs: 1 } }, { topic: 'wh-retry' });
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(fetchMock.mock.calls[0][1].headers['idempotency-key'])
+			.toBe(fetchMock.mock.calls[1][1].headers['idempotency-key']);
+	});
+
+	it('does NOT retry a 4xx client error', async () => {
+		const failures = [];
+		fetchMock.mockImplementation(async () => ({ ok: false, status: 400, text: async () => 'bad' }));
+		await fireOnce(['wh-4xx'], { url: 'https://h.example.com/', retry: { attempts: 3, initialDelayMs: 1 }, onFailure: (e, ev, d, attempts) => failures.push(attempts) }, { topic: 'wh-4xx' });
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(failures[0]).toBe(1);
 	});
 });
 

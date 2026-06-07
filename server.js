@@ -15,6 +15,8 @@ import {
 	microtask,
 	effectiveTimeZone
 } from './shared/runtime.js';
+import { createHmac, createHash } from 'node:crypto';
+import { checkUrl } from 'svelte-adapter-uws/safe-url';
 export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
 
@@ -4056,6 +4058,32 @@ export function __registerEffect(path, fn) {
 }
 
 /**
+ * Register an outbound webhook. Called by the Vite-generated registry module.
+ * Outbound webhooks are effect-like: they watch source topics and fire on
+ * publish (leader-gated), so they register into the same watched-topic index.
+ * @param {string} path
+ * @param {any} fn - The outbound-webhook marker object from `live.webhooks.outbound`.
+ */
+export function __registerWebhookOut(path, fn) {
+	if (/** @type {any} */ (fn).__lazy) {
+		_lazyQueue.push({ type: 'webhookOut', path, loader: fn });
+		_hasLazyReactive = true;
+		return;
+	}
+	const sources = /** @type {any} */ (fn).__webhookOutSources;
+	const config = /** @type {any} */ (fn).__webhookOutConfig;
+	if (!sources || !config) return;
+	webhookOutRegistry.set(path, { sources, config });
+	for (const src of sources) {
+		let set = _webhookOutBySource.get(src);
+		if (!set) { set = new Set(); _webhookOutBySource.set(src, set); }
+		set.add(webhookOutRegistry.get(path));
+		_watchedTopics.add(src);
+	}
+	_maybeLateActivate();
+}
+
+/**
  * Per-topic value cells for `live.flag`. The cell holds the flag's current
  * value and is shared between the flag export's accessors (`get`/`set`/the
  * loader) and the eager refresh watcher installed at registry load. Keying on
@@ -4154,6 +4182,12 @@ const _derivedBySource = new Map();
 
 /** @type {Map<string, Set<any>>} Source topic -> effect entries that watch it */
 const _effectBySource = new Map();
+
+/** @type {Map<string, { sources: string[], config: any }>} path -> outbound webhook entry */
+const webhookOutRegistry = new Map();
+
+/** @type {Map<string, Set<any>>} Source topic -> outbound-webhook entries that watch it */
+const _webhookOutBySource = new Map();
 
 /** @type {Map<string, Set<any>>} Source topic -> aggregate entries that watch it */
 const _aggregateBySource = new Map();
@@ -6091,6 +6125,28 @@ function _wrapPlatformPublish(platform) {
 			}
 		}
 
+		// Fire matching outbound webhooks. Leader-gated SYNCHRONOUSLY here, before
+		// scheduling, so non-leader replicas do ~zero work (one cached-boolean
+		// read) - the fetch / signing / retries all run off the publish path.
+		// Default (no leader) is "every worker fires", same as cron; wire
+		// `configureCron({ leader })` for cluster dedup. At-least-once by design
+		// (strict exactly-once over HTTP is unachievable); each POST carries an
+		// idempotency-key header so receivers can dedup to effectively-once.
+		const webhookOutEntries = _webhookOutBySource.get(topic);
+		if (webhookOutEntries) {
+			let _isLeader = true;
+			if (_cronLeader !== null) {
+				// Fail closed on a throwing leader fn, exactly like the cron tick:
+				// better to skip a delivery than double-fire because election broke.
+				try { _isLeader = !!_cronLeader(); } catch { _isLeader = false; }
+			}
+			if (_isLeader) {
+				for (const entry of webhookOutEntries) {
+					Promise.resolve().then(() => _fireWebhookOut(entry, topic, event, data, platform));
+				}
+			}
+		}
+
 		// Run matching aggregates
 		const aggregateEntries = _aggregateBySource.get(topic);
 		if (aggregateEntries) {
@@ -6336,6 +6392,123 @@ async function _fireEffect(entry, event, data, platform) {
 		} else if (_IS_DEV) {
 			console.error('[svelte-realtime] Effect error:', err);
 		}
+	}
+}
+
+/**
+ * Report an outbound-webhook failure. Mirrors the effect error path: a
+ * per-webhook `onFailure` wins, else the server error handler, else a dev
+ * console line. Never throws.
+ */
+function _reportWebhookOutFailure(config, err, event, data, attempts) {
+	if (config.onFailure) {
+		try { config.onFailure(err, event, data, attempts); } catch { /* swallow listener errors */ }
+	} else if (_serverErrorHandler) {
+		try { _serverErrorHandler('webhook', err); } catch {}
+	} else if (_IS_DEV) {
+		console.error('[svelte-realtime] Outbound webhook failed:', err);
+	}
+}
+
+/** Backoff sleep through the runtime timer seam; unref'd so it never holds the loop. */
+function _webhookSleep(ms) {
+	return new Promise((resolve) => {
+		const h = setTimer(resolve, ms);
+		if (h && h.unref) h.unref();
+	});
+}
+
+/**
+ * Deliver one outbound-webhook POST with retry + exponential backoff. A 2xx is
+ * success; a 4xx other than 429 is a permanent client error (not retried); a
+ * 5xx / 429 / network error / timeout is retried up to `attempts`. Exhausting
+ * retries reports via `_reportWebhookOutFailure`.
+ */
+async function _deliverWebhookOut(url, headers, body, config, event, data) {
+	const retry = config.retry || {};
+	const attempts = Number.isInteger(retry.attempts) && retry.attempts > 0 ? retry.attempts : 3;
+	const initialDelayMs = retry.initialDelayMs ?? 100;
+	const maxDelayMs = retry.maxDelayMs ?? 5000;
+	const backoff = retry.backoffMultiplier ?? 2;
+	const timeoutMs = config.timeoutMs ?? 10000;
+
+	let lastErr;
+	for (let attempt = 0; attempt < attempts; attempt++) {
+		try {
+			const ac = new AbortController();
+			const timer = setTimer(() => ac.abort(), timeoutMs);
+			if (timer && timer.unref) timer.unref();
+			let res;
+			try {
+				res = await fetch(url, { method: 'POST', headers, body, signal: ac.signal });
+			} finally {
+				clearTimer(timer);
+			}
+			if (res.ok) return; // 2xx -> delivered
+			if (res.status >= 400 && res.status < 500 && res.status !== 429) {
+				// Permanent client error: retrying cannot help.
+				_reportWebhookOutFailure(config, new Error(`outbound webhook: HTTP ${res.status}`), event, data, attempt + 1);
+				return;
+			}
+			lastErr = new Error(`outbound webhook: HTTP ${res.status}`);
+		} catch (err) {
+			lastErr = err; // network error / timeout / abort -> retryable
+		}
+		if (attempt < attempts - 1) {
+			await _webhookSleep(Math.min(initialDelayMs * Math.pow(backoff, attempt), maxDelayMs));
+		}
+	}
+	_reportWebhookOutFailure(config, lastErr, event, data, attempts);
+}
+
+/**
+ * Fire one outbound webhook for a matching publish. Resolves the payload (a
+ * `transform` returning null skips), resolves + SSRF-checks the URL (a dynamic
+ * url is attacker-influenceable, so it is re-checked here), attaches a stable
+ * idempotency-key header (content-derived, so retries AND a leader-transition
+ * double-fire carry the same key) and an optional HMAC signature, then delivers
+ * with retry. Runs off the publish path; never throws.
+ */
+async function _fireWebhookOut(entry, topic, event, data, platform) {
+	const { config } = entry;
+	try {
+		const payload = config.transform ? await config.transform(event, data) : { event, data };
+		if (payload == null) return; // transform opted out
+
+		const url = typeof config.url === 'function' ? await config.url(event, data) : config.url;
+		if (typeof url !== 'string' || url.length === 0) {
+			_reportWebhookOutFailure(config, new Error('outbound webhook: url resolved to a non-string'), event, data, 0);
+			return;
+		}
+
+		// SSRF gate at fire time. A custom validateUrl wins; otherwise the
+		// vendored strict guard (loopback / private / link-local / metadata).
+		const safe = config.validateUrl
+			? !!config.validateUrl(url)
+			: checkUrl(url, { mode: config.urlMode || 'strict', allow: config.allow }).safe;
+		if (!safe) {
+			_reportWebhookOutFailure(config, new Error(`outbound webhook: url "${url}" blocked by SSRF guard`), event, data, 0);
+			return;
+		}
+
+		const body = JSON.stringify(payload);
+		const headers = { 'content-type': 'application/json' };
+
+		// Stable idempotency key so receivers can dedup retries and any
+		// leader-transition double-fire down to effectively-once.
+		const idem = config.idempotencyKey
+			? config.idempotencyKey(event, data)
+			: createHash('sha256').update(topic + '\0' + event + '\0' + body).digest('hex');
+		if (idem != null) headers['idempotency-key'] = String(idem);
+
+		// HMAC signature so the receiver can authenticate the payload.
+		if (config.secret) {
+			headers['x-webhook-signature'] = 'sha256=' + createHmac('sha256', config.secret).update(body).digest('hex');
+		}
+
+		await _deliverWebhookOut(url, headers, body, config, event, data);
+	} catch (err) {
+		_reportWebhookOutFailure(config, err, event, data, 0);
 	}
 }
 
@@ -6588,6 +6761,9 @@ async function _resolveAllLazy() {
 						break;
 					case 'effect':
 						__registerEffect(path, fn);
+						break;
+					case 'webhookOut':
+						__registerWebhookOut(path, fn);
 						break;
 					case 'aggregate':
 						__register(path, fn);
@@ -7103,6 +7279,52 @@ live.webhook = function webhook(topic, config) {
 	};
 
 	return handler;
+};
+
+/**
+ * Webhook namespace. `live.webhooks.inbound(topic, config)` is `live.webhook`
+ * (bridge an external HTTP webhook into a topic). `live.webhooks.outbound(
+ * sources, config)` fires an outbound HTTP webhook when any source topic
+ * publishes: leader-gated (wire `configureCron({ leader })` for cluster dedup;
+ * without a leader every worker fires, same as cron), retried with backoff,
+ * optionally HMAC-signed, with an `idempotency-key` header so receivers can
+ * dedup to effectively-once. The target URL is SSRF-checked (strict by default)
+ * at definition time for a static url and again at fire time for a dynamic url.
+ * Both directions are server-only; the flat `live.webhook` stays as a permanent
+ * back-compat alias.
+ */
+live.webhooks = {
+	inbound: live.webhook,
+	outbound(sources, config) {
+		if (!Array.isArray(sources) || sources.length === 0) {
+			throw new Error('[svelte-realtime] live.webhooks.outbound: sources must be a non-empty array of topic names');
+		}
+		if (!config || (typeof config.url !== 'string' && typeof config.url !== 'function')) {
+			throw new Error('[svelte-realtime] live.webhooks.outbound: config.url must be a string or a (event, data) => string function');
+		}
+		if (config.validateUrl !== undefined && typeof config.validateUrl !== 'function') {
+			throw new Error('[svelte-realtime] live.webhooks.outbound: validateUrl must be a function');
+		}
+		// Fail fast: a static url is SSRF-checked at definition time so a
+		// misconfigured endpoint is caught at boot, not on the first event. A
+		// dynamic url is only known at fire time and is checked there.
+		if (typeof config.url === 'string') {
+			const ok = config.validateUrl
+				? !!config.validateUrl(config.url)
+				: checkUrl(config.url, { mode: config.urlMode || 'strict', allow: config.allow }).safe;
+			if (!ok) {
+				throw new Error(
+					`[svelte-realtime] live.webhooks.outbound: url "${config.url}" is blocked - it points inside the trust boundary. ` +
+					"Pass urlMode: 'allowlist' with allow: [...], or a custom validateUrl, to override."
+				);
+			}
+		}
+		return {
+			__isWebhookOut: true,
+			__webhookOutSources: sources,
+			__webhookOutConfig: config
+		};
+	}
 };
 
 /**

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.5] - 2026-06-07
+
+### Added
+
+- **`live.webhooks.outbound(sources, config)`: fire an outbound HTTP webhook when a topic publishes.** The mirror of the inbound `live.webhook` (now also `live.webhooks.inbound`, with `live.webhook` kept as a permanent alias). An outbound webhook watches `sources` topics and POSTs to an external endpoint on each matching publish - no `+server.js`, no client code. The body defaults to `{ event, data }` (override or skip via `transform`); the target URL is SSRF-checked against private/loopback/metadata ranges (strict by default) at definition time for a static url and again at fire time for a dynamic `(event, data) => url`, loosened via `urlMode: 'allowlist'` / `allow` or a custom `validateUrl`. Delivery is **at-least-once**, leader-gated for clusters: wire `configureCron({ leader })` (the same leader cron uses) so only the leader replica fires; without a leader every worker fires (single-process-correct). Strict exactly-once over HTTP is unachievable, so every POST carries a stable `idempotency-key` header (content-derived; identical across retries and a leadership-transition double-fire) - make receivers idempotent for effectively-once. Each POST is retried with exponential backoff on 5xx / 429 / network errors (a 4xx is permanent, not retried), optionally HMAC-signed (`x-webhook-signature: sha256=...`) when a `secret` is set, with an `onFailure` hook on exhaustion. Server-only; nothing is generated for the client. Requires `svelte-adapter-uws >= 0.6.0-next.15` (the outbound URL guard uses its `safe-url` export).
+
+### Changed
+
+- **The SSRF URL guard is now imported from `svelte-adapter-uws/safe-url`** instead of being a concern of any one extension. (Internal; no public surface change beyond the adapter peer-dependency floor moving to `^0.6.0-next.15`.)
+
 ## [0.6.0-next.4] - 2026-06-07
 
 ### Added

@@ -317,7 +317,7 @@ export const messages = live.stream('messages', async (ctx) => []);
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:__registry', {});
 
-		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag } from 'svelte-realtime/server'");
+		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag, __registerWebhookOut } from 'svelte-realtime/server'");
 		expect(code).toContain('__register("chat/sendMessage"');
 		expect(code).toContain('__register("chat/messages"');
 		expect(code).toContain('__registerGuard("chat"');
@@ -1573,7 +1573,7 @@ export const refreshStats = live.cron('*/5 * * * *', 'stats', async () => {});
 		const code = plugin.load('\0live:__registry', {});
 
 		expect(code).toContain('__registerCron("jobs/refreshStats"');
-		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag }");
+		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag, __registerWebhookOut }");
 	});
 
 	it('does not generate client stub for cron exports', () => {
@@ -2249,6 +2249,38 @@ export const stripe = live.webhook('payments', {
 		// Webhook should NOT produce client stubs
 		expect(code).not.toContain('__rpc("hooks/stripe"');
 		expect(code).not.toContain('__stream("hooks/stripe"');
+	});
+});
+
+describe('live.webhooks.outbound() vite integration', () => {
+	afterEach(teardown);
+
+	it('registers outbound webhooks server-side via __registerWebhookOut', () => {
+		setup({
+			'hooks.js': `
+import { live } from 'svelte-realtime/server';
+export const notifySlack = live.webhooks.outbound(['alerts'], { url: 'https://hooks.example.com/x' });
+`
+		});
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+		expect(code).toContain('__registerWebhookOut("hooks/notifySlack"');
+	});
+
+	it('does not generate a client stub for inbound or outbound webhooks', () => {
+		setup({
+			'hooks.js': `
+import { live } from 'svelte-realtime/server';
+export const inHook = live.webhooks.inbound('payments', { verify: ({ body }) => JSON.parse(body), transform: (e) => ({ event: 'created', data: e }) });
+export const outHook = live.webhooks.outbound(['alerts'], { url: 'https://hooks.example.com/x' });
+`
+		});
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:hooks', {});
+		expect(code).not.toContain('__rpc("hooks/inHook"');
+		expect(code).not.toContain('__stream("hooks/inHook"');
+		expect(code).not.toContain('__rpc("hooks/outHook"');
+		expect(code).not.toContain('__stream("hooks/outHook"');
 	});
 });
 

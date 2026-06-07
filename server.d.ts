@@ -1994,6 +1994,19 @@ export namespace live {
 	function webhook(topic: string, config: WebhookConfig): WebhookHandler;
 
 	/**
+	 * Webhook namespace. `live.webhooks.inbound` is `live.webhook` (bridge an
+	 * external HTTP webhook into a topic). `live.webhooks.outbound` fires an
+	 * outbound HTTP webhook when any source topic publishes - leader-gated,
+	 * retried, optionally HMAC-signed, with an `idempotency-key` header and a
+	 * built-in SSRF guard on the target URL. The flat `live.webhook` stays as a
+	 * back-compat alias for the inbound form.
+	 */
+	const webhooks: {
+		inbound(topic: string, config: WebhookConfig): WebhookHandler;
+		outbound(sources: string[], config: OutboundWebhookConfig): OutboundWebhookHandler;
+	};
+
+	/**
 	 * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
 	 * subscriptions, and cron executions. Zero overhead if never called.
 	 *
@@ -2300,6 +2313,67 @@ export interface WebhookHandler {
 	__isWebhook: true;
 	/** Handle an incoming webhook request. */
 	handle(req: { body: string; headers: Record<string, string>; platform: Platform }): Promise<{ status: number; body?: string }>;
+}
+
+/**
+ * Configuration for `live.webhooks.outbound()`.
+ */
+export interface OutboundWebhookConfig {
+	/**
+	 * Destination URL, or a function computing it per event. SSRF-checked
+	 * (strict by default): a static url is validated at definition time, a
+	 * dynamic url at fire time.
+	 */
+	url: string | ((event: string, data: any) => string | Promise<string>);
+	/**
+	 * Build the POST body from the event. Return `null`/`undefined` to skip
+	 * sending. Default: `{ event, data }`.
+	 */
+	transform?: (event: string, data: any) => any;
+	/**
+	 * HMAC-SHA256 secret. When set, each request carries
+	 * `x-webhook-signature: sha256=<hex>` over the body so the receiver can
+	 * authenticate it.
+	 */
+	secret?: string;
+	/**
+	 * Override the `idempotency-key` header. Default: a content hash of
+	 * `(topic, event, body)`, stable across retries and a leader-transition
+	 * double-fire so receivers can dedup to effectively-once.
+	 */
+	idempotencyKey?: (event: string, data: any) => string;
+	/** Retry policy. Default: 3 attempts, 100ms initial backoff, x2, 5s cap. */
+	retry?: {
+		attempts?: number;
+		initialDelayMs?: number;
+		maxDelayMs?: number;
+		backoffMultiplier?: number;
+	};
+	/** Per-request timeout in milliseconds. @default 10000 */
+	timeoutMs?: number;
+	/** SSRF posture for the built-in guard. @default 'strict' */
+	urlMode?: 'strict' | 'allowlist' | 'off';
+	/** Allowlisted hostnames when `urlMode: 'allowlist'`. */
+	allow?: string[];
+	/**
+	 * Custom URL validator, replacing the built-in SSRF guard. Return `true`
+	 * to allow the fetch. Use to plug in the full
+	 * `svelte-adapter-uws-extensions/safe-url` `checkUrl` or a custom policy.
+	 */
+	validateUrl?: (url: string) => boolean;
+	/**
+	 * Called when delivery fails (after retries are exhausted, or on a blocked
+	 * URL / bad payload). `attempts` is how many HTTP attempts were made.
+	 */
+	onFailure?: (err: Error, event: string, data: any, attempts: number) => void;
+}
+
+/**
+ * Return type of `live.webhooks.outbound()` (an opaque server-only marker;
+ * nothing is generated for the client).
+ */
+export interface OutboundWebhookHandler {
+	__isWebhookOut: true;
 }
 
 /**

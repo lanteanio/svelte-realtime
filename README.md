@@ -3076,6 +3076,59 @@ export async function POST({ request, platform }) {
 }
 ```
 
+The flat `live.webhook(...)` above is an alias for `live.webhooks.inbound(...)`; both keep working.
+
+---
+
+## Outbound webhooks
+
+The mirror of inbound: `live.webhooks.outbound(sources, config)` fires an HTTP POST to an external endpoint whenever one of the `sources` topics publishes. Use it to forward your events to other systems - Slack, a partner's API, an internal pipeline.
+
+```js
+// src/live/integrations.js
+export const slackAlerts = live.webhooks.outbound(['alerts'], {
+  url: 'https://hooks.slack.example/services/T000/B000/xxxx',
+  secret: process.env.WEBHOOK_SECRET,         // optional HMAC-SHA256 signing
+  transform: (event, data) => ({ text: `[${event}] ${data.message}` })
+});
+```
+
+That's the whole wiring - no `+server.js`, no client code. It fires on every `platform.publish('alerts', ...)` (local or cluster-relayed). The body defaults to `{ event, data }`; return `null` from `transform` to skip an event.
+
+#### Cluster delivery: at-least-once, leader-gated
+
+In a single process every publish fires the webhook once. In a cluster every replica receives the published event, so to fire it **once** wire a leader (the same one cron uses):
+
+```js
+import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
+configureCron({ leader: createLeader(redis).isLeader });
+```
+
+With a leader configured, only the leader replica POSTs; without one, every worker fires (correct for single-process, the same footgun cron has). Delivery is **at-least-once**, not exactly-once - strict exactly-once over HTTP is unachievable (a dropped *response* is indistinguishable from a dropped *request*, so the only safe action, retry, is also what can duplicate). Every POST therefore carries an `idempotency-key` header (a content hash by default, stable across retries **and** across a leadership-transition double-fire), so **make your receiver idempotent** and it is effectively-once. Override the key with `idempotencyKey: (event, data) => yourId`.
+
+#### SSRF protection
+
+The target URL is validated against private/loopback/metadata ranges (strict by default) - at definition time for a static `url`, and again at fire time for a dynamic `url: (event, data) => ...` (the dynamic case is attacker-influenceable). A blocked URL throws at definition or calls `onFailure` at fire time; it never reaches `fetch`. Loosen or replace the guard with `urlMode: 'allowlist'` + `allow: [...]`, or a custom `validateUrl: (url) => boolean` (e.g. the full `checkUrl` from `svelte-adapter-uws/safe-url`).
+
+#### Delivery
+
+Each POST is retried with exponential backoff (default 3 attempts, 100ms - 5s) on a 5xx / 429 / network error / timeout; a 4xx (other than 429) is a permanent client error and is not retried. When `secret` is set the body is signed as `x-webhook-signature: sha256=<hex>`. Exhausted retries (and blocked URLs / bad payloads) call `onFailure(err, event, data, attempts)`.
+
+#### Options
+
+| Option | Default | Description |
+|---|---|---|
+| `url` | (required) | Destination URL, or `(event, data) => string` for a per-event URL. SSRF-checked. |
+| `transform` | `{ event, data }` | Build the POST body. Return `null` to skip the event. |
+| `secret` | - | HMAC-SHA256 signing secret; adds the `x-webhook-signature` header. |
+| `idempotencyKey` | content hash | Override the `idempotency-key` header value. |
+| `retry` | `{ attempts: 3, initialDelayMs: 100, maxDelayMs: 5000, backoffMultiplier: 2 }` | Retry policy. |
+| `timeoutMs` | `10000` | Per-request timeout. |
+| `urlMode` | `'strict'` | SSRF posture: `strict` / `allowlist` / `off`. |
+| `allow` | - | Allowlisted hostnames for `urlMode: 'allowlist'`. |
+| `validateUrl` | built-in guard | Custom URL validator `(url) => boolean`, replacing the built-in SSRF check. |
+| `onFailure` | - | Called on delivery failure after retries (or on a blocked URL / bad payload). |
+
 ---
 
 ## Signals
