@@ -2885,11 +2885,55 @@ import { board } from './live/collab.js';
 export const { message, close, unsubscribe } = board.hooks;
 ```
 
+### Lag compensation
+
+For real-time games, the moment a player acts and the moment the server evaluates that action are separated by network latency - by the time a shot arrives, the target has moved on the server. A room can opt into a bounded history of state snapshots and evaluate actions against the state *as it was when the player acted*: declare `history` with a `capture` function (your snapshot of your own authoritative state - the framework never guesses at state shape), and call `ctx.compensate()` inside an action with the client-stamped command time, passed as an ordinary action argument:
+
+```js
+export const game = live.room({
+  topic: (ctx, gameId) => 'game:' + gameId,
+  init: async (ctx, gameId) => loadWorld(gameId),
+  topicArgs: 1,
+  history: {
+    capture: (gameId) => snapshotPlayers(gameId)  // plain data, recorded after every action
+  },
+  actions: {
+    move: async (ctx, gameId, dir) => applyMove(gameId, ctx.user.id, dir),
+    shoot: async (ctx, gameId, targetId, firedAt) => {
+      const result = await ctx.compensate(firedAt, (state, meta) => {
+        const target = state.players[targetId];
+        const hit = target && hitscan(state.players[ctx.user.id].pos, target.pos);
+        return { hit, rewoundMs: meta.age };
+      });
+      if (result.hit) ctx.publish('hit', { by: ctx.user.id, target: targetId });
+      return result;
+    }
+  }
+});
+```
+
+```js
+// Client: stamp the moment the player fired with the local clock.
+game.shoot(gameId, targetId, Date.now());
+```
+
+How it behaves:
+
+- **Recording.** After every successful action, `capture` runs and the snapshot joins a per-room-topic ring (`maxEntries`, default 300; `maxAgeMs` rewind window, default 2000ms; topics LRU-capped via `maxTopics`, default 100). A failed action records nothing. Snapshots are frozen - return plain data from `capture`, not live references. Worst-case retention is `maxTopics * maxEntries` snapshots per room export (a quiet topic keeps its ring until it is touched again or LRU-evicted), so size your `capture` output with that envelope in mind.
+- **Capture is room-global by design.** It receives only the room-identifying arguments, never the acting user's `ctx`: a snapshot recorded during one player's action is served to *every* room member's later evaluations, so an API that cannot see the acting user cannot accidentally record one user's private view into state another user will read.
+- **Trust model.** The client stamps when it acted; the server only honors stamps inside the window it recorded itself. A stamp older than the history window, an empty ring, or a nested `compensate` call all fail safe to *current* state - never the oldest marker - and report `meta.fallback: true`. Production game servers run windows of 500-2000ms; longer windows widen the peek advantage a high-latency client gets, so tune `maxAgeMs` to your tolerance. The ring's topic cap is per room export: if your action guard lets a user act on arbitrarily many room ids, that user can cycle honest rooms' history out of the cap - the guard is the mitigation.
+- **Clock skew matters.** The stamp is compared against the *server's* wall clock. A client clock running ahead makes every stamp look fresh (no rewind, reported as `fallback: false`); one running behind by more than the window gets permanent `fallback: true`. Both degrade safely but silently - if your players' device clocks cannot be trusted to be NTP-accurate, derive the stamp from a server-synced clock (an offset estimated from server frames) instead of raw `Date.now()`.
+- **Publishes during evaluation** are ordinary room publishes, delivered immediately - the same semantics as a publish anywhere else in an action (a publish followed by a throw is delivered there too). The recommended pattern is evaluate first, publish from the result, as in the example above.
+- **Cost.** Without `history`, actions are unchanged. With it, recording adds roughly the cost of your `capture` (a 32-player snapshot measures ~2-4us per action with `NODE_ENV=production node bench/compensate.js`; plain dev mode reads several times that because dev deep-freezes each snapshot to catch mutations), and a ring-hit rewind is a clock read plus a binary search - the cheapest compensate path, since it reuses an already-frozen snapshot.
+- **With client prediction.** If clients predict and reconcile, capture every field the reconciliation compares (position-only snapshots suffice for hitscan, not for replaying movement), and stamp commands with the same clock the prediction loop uses.
+
+`tolerance` (per call: `ctx.compensate(t, fn, { tolerance: 20 })`) skips the rewind when the stamp is within that many milliseconds of now - the low-latency common case.
+
 ---
 
 ## Multiplayer
 
-`live.multiplayer()` bundles the collaborative surfaces - live cursors and presence - into a single declaration. It reuses the same data, presence, and cursor machinery a room uses, so the data stream, presence auto-join, and scoped actions behave exactly like `live.room()`. The difference is on the client: the generated export carries a connection-aware surface alongside the sub-streams - a `status` connection store, the `move` / `reportViewport` cursor methods, `identify(key)`, and a `room(...)` factory that returns the aggregated roster view.
+`live.multiplayer()` bundles the collaborative surfaces - live cursors and presence - into a single declaration. It reuses the same data, presence, and cursor machinery a room uses, so the data stream, presence auto-join, scoped actions, and the `history` / `ctx.compensate()` lag-compensation surface behave exactly like `live.room()`. The difference is on the client: the generated export carries a connection-aware surface alongside the sub-streams - a `status` connection store, the `move` / `reportViewport` cursor methods, `identify(key)`, and a `room(...)` factory that returns the aggregated roster view.
 
 ```js
 // src/live/collab.js

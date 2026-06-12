@@ -4,6 +4,7 @@ import { safeAssign as _safeAssignSnapshot } from './shared/safe-assign.js';
 import {
 	now as runtimeNow,
 	monotonicNow,
+	wallEpoch,
 	randomFloat,
 	randomU32,
 	randomUuid,
@@ -1533,6 +1534,13 @@ function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 		// adapters and mock platforms fall back to the framework's own
 		// runtime-backed stamp of the same {wall, logical, nodeId} shape.
 		hlc: (platform && platform.hlc) || _localHlc,
+		// Lag-compensated evaluation. The default throws with guidance; room
+		// actions on a room with a `history` config shadow it with the live
+		// implementation (the same shadow-and-restore pattern as ctx.publish).
+		// Declared here so every ctx shares one hidden class - the shadow
+		// swaps the value, never the shape.
+		compensate: _compensateUnavailable,
+		_compensateDepth: 0,
 		_idempotencyKey: idempotencyKey || null
 	};
 }
@@ -5312,6 +5320,198 @@ export async function _clusterPresenceMerge(platform, topic, key, delta) {
 	} catch { /* redis blip: in-memory already merged; forward update already sent */ }
 }
 
+// - Room action history (lag compensation) ----------------------------------
+
+const _HISTORY_MAX_ENTRIES = 300;
+const _HISTORY_MAX_AGE_MS = 2000;
+const _HISTORY_MAX_TOPICS = 100;
+
+/**
+ * Validate and normalize a room's `history` config. The capture function is
+ * the app's snapshot of its own authoritative state - the framework never
+ * guesses at state shape; it only owns the ring mechanics around what the
+ * app hands it.
+ *
+ * @param {any} history
+ * @returns {{ capture: Function, maxEntries: number, maxAgeMs: number, maxTopics: number }}
+ */
+function _resolveHistoryConfig(history) {
+	if (!history || typeof history !== 'object' || typeof history.capture !== 'function') {
+		throw new Error(
+			`[svelte-realtime] live.room() history requires a capture function: history: { capture: (...roomArgs) => state }\n  See: https://svti.me/rooms`
+		);
+	}
+	const maxEntries = history.maxEntries ?? _HISTORY_MAX_ENTRIES;
+	if (!Number.isInteger(maxEntries) || maxEntries < 1) {
+		throw new Error(`[svelte-realtime] live.room() history.maxEntries must be a positive integer, got ${history.maxEntries}\n  See: https://svti.me/rooms`);
+	}
+	const maxAgeMs = history.maxAgeMs ?? _HISTORY_MAX_AGE_MS;
+	if (typeof maxAgeMs !== 'number' || !(maxAgeMs > 0)) {
+		throw new Error(`[svelte-realtime] live.room() history.maxAgeMs must be a positive number, got ${history.maxAgeMs}\n  See: https://svti.me/rooms`);
+	}
+	const maxTopics = history.maxTopics ?? _HISTORY_MAX_TOPICS;
+	if (!Number.isInteger(maxTopics) || maxTopics < 1) {
+		throw new Error(`[svelte-realtime] live.room() history.maxTopics must be a positive integer, got ${history.maxTopics}\n  See: https://svti.me/rooms`);
+	}
+	return { capture: history.capture, maxEntries, maxAgeMs, maxTopics };
+}
+
+/**
+ * Cycle-safe recursive freeze for dev-mode snapshots, so a handler that
+ * mutates historical state throws at the mutation site instead of silently
+ * corrupting the ring. Plain objects and arrays only - Map/Set contents
+ * cannot be frozen by Object.freeze and are the capture contract's
+ * responsibility (documented: capture returns plain data). Depth-capped so
+ * client-shaped payloads an app stored into its state cannot recurse the
+ * dev process into a stack overflow.
+ *
+ * @param {any} value
+ * @param {Set<any>} seen
+ * @param {number} depth
+ */
+function _deepFreeze(value, seen, depth) {
+	if (value === null || typeof value !== 'object' || seen.has(value)) return value;
+	seen.add(value);
+	Object.freeze(value);
+	if (depth >= 64) return value;
+	for (const key of Object.keys(value)) _deepFreeze(value[key], seen, depth + 1);
+	return value;
+}
+
+/** @param {any} state */
+function _freezeSnapshot(state) {
+	if (state === null || typeof state !== 'object') return state;
+	// A thenable here means an async capture: the ring would record a frozen
+	// pending Promise and every evaluation would silently read garbage.
+	// Checked at the state boundary (catches any promise-returning function,
+	// not just async syntax) and loud by design.
+	if (typeof state.then === 'function') {
+		throw new Error(
+			`[svelte-realtime] history capture must return state synchronously; it returned a thenable. Snapshot your in-memory authoritative state directly.\n  See: https://svti.me/rooms`
+		);
+	}
+	if (_IS_DEV) return _deepFreeze(state, new Set(), 0);
+	return Object.freeze(state);
+}
+
+/**
+ * Per-room store of bounded per-topic history rings. Same shape as the replay
+ * plugin's in-memory ring: fixed-size buffer with modular indices, topics
+ * LRU-capped so a burst of parameterized room ids cannot grow memory without
+ * bound. Entry times come from the exact wall clock (`wallEpoch`), never the
+ * 1s-cached `now()` - rewind windows are sub-second.
+ *
+ * @param {{ maxEntries: number, maxAgeMs: number, maxTopics: number }} cfg
+ */
+function _createHistoryStore(cfg) {
+	/** @type {Map<string, { buf: Array<{ time: number, state: any } | undefined>, start: number, len: number }>} */
+	const topics = new Map();
+	/** @type {Map<string, null>} insertion-ordered LRU; first key is coldest */
+	const topicOrder = new Map();
+
+	/** @param {string} topic */
+	function getRing(topic) {
+		let ring = topics.get(topic);
+		if (!ring) {
+			if (topics.size >= cfg.maxTopics) {
+				const lru = topicOrder.keys().next().value;
+				if (lru !== undefined) {
+					topics.delete(lru);
+					topicOrder.delete(lru);
+				}
+			}
+			ring = { buf: new Array(cfg.maxEntries), start: 0, len: 0 };
+			topics.set(topic, ring);
+		} else {
+			topicOrder.delete(topic);
+		}
+		topicOrder.set(topic, null);
+		return ring;
+	}
+
+	return {
+		/**
+		 * Append a snapshot, lazily evicting entries past the age window. One
+		 * write per successful room action; never timer-driven.
+		 *
+		 * @param {string} topic
+		 * @param {any} state
+		 * @param {number} time
+		 */
+		record(topic, state, time) {
+			const ring = getRing(topic);
+			// The binary search below requires non-decreasing entry times, and
+			// the wall clock can step backwards (NTP correction). Clamping a
+			// new entry to at least the newest recorded time keeps the ring
+			// sorted at the cost of one compare against the tail.
+			if (ring.len > 0) {
+				const newest = ring.buf[(ring.start + ring.len - 1) % cfg.maxEntries];
+				if (newest !== undefined && newest.time > time) time = newest.time;
+			}
+			while (ring.len > 0) {
+				const oldest = ring.buf[ring.start];
+				if (oldest !== undefined && oldest.time >= time - cfg.maxAgeMs) break;
+				ring.buf[ring.start] = undefined;
+				ring.start = (ring.start + 1) % cfg.maxEntries;
+				ring.len--;
+			}
+			const idx = (ring.start + ring.len) % cfg.maxEntries;
+			ring.buf[idx] = { time, state };
+			if (ring.len < cfg.maxEntries) ring.len++;
+			else ring.start = (ring.start + 1) % cfg.maxEntries;
+		},
+
+		/**
+		 * Newest entry recorded at or before `commandTime`, still inside the
+		 * age window as of `t`. Null when the ring cannot serve the rewind -
+		 * the caller fails safe to current state (a rewind past the window
+		 * must never resolve to the oldest marker, or stale commands would
+		 * evaluate against ancient state).
+		 *
+		 * @param {string} topic
+		 * @param {number} commandTime
+		 * @param {number} t
+		 * @returns {{ time: number, state: any } | null}
+		 */
+		lookup(topic, commandTime, t) {
+			const ring = topics.get(topic);
+			if (!ring || ring.len === 0) return null;
+			topicOrder.delete(topic);
+			topicOrder.set(topic, null);
+			let lo = 0;
+			let hi = ring.len - 1;
+			let found = -1;
+			while (lo <= hi) {
+				const mid = (lo + hi) >> 1;
+				const e = /** @type {{ time: number, state: any }} */ (ring.buf[(ring.start + mid) % cfg.maxEntries]);
+				if (e.time <= commandTime) {
+					found = mid;
+					lo = mid + 1;
+				} else {
+					hi = mid - 1;
+				}
+			}
+			if (found < 0) return null;
+			const entry = /** @type {{ time: number, state: any }} */ (ring.buf[(ring.start + found) % cfg.maxEntries]);
+			if (entry.time < t - cfg.maxAgeMs) return null;
+			return entry;
+		}
+	};
+}
+
+/**
+ * Default `ctx.compensate` outside a history-enabled room action: a clear
+ * error beats a silent no-rewind evaluation. Room actions on a room with a
+ * `history` config shadow this with the live implementation, the same way
+ * they shadow `ctx.publish`.
+ */
+async function _compensateUnavailable() {
+	throw new LiveError(
+		'VALIDATION',
+		'ctx.compensate requires a live.room with a history config: live.room({ history: { capture } })'
+	);
+}
+
 live.room = function room(config) {
 	const {
 		topic: topicFn,
@@ -5341,6 +5541,80 @@ live.room = function room(config) {
 			`[svelte-realtime] live.room() with actions requires 'topicArgs'. ` +
 			`Set topicArgs to the number of room-identifying args (excluding ctx).\n  See: https://svti.me/rooms`
 		);
+	}
+
+	// Action history for lag compensation. Opt-in: without a `history` config
+	// the action wrapper below is unchanged and ctx.compensate stays the
+	// loud-error default. Recording only ever happens on action execution, so
+	// history on a room with no actions is dead config and rejected here.
+	const historyCfg = config.history !== undefined ? _resolveHistoryConfig(config.history) : null;
+	if (historyCfg && !actions) {
+		throw new Error(
+			`[svelte-realtime] live.room() history requires actions - snapshots are recorded after each action, so a room with no actions would never record.\n  See: https://svti.me/rooms`
+		);
+	}
+	const historyStore = historyCfg ? _createHistoryStore(historyCfg) : null;
+	let _captureWarned = false;
+
+	/**
+	 * The live ctx.compensate for this room's actions: clamp the
+	 * client-stamped command time against the ring and hand the eval function
+	 * the matching snapshot. Client-stamped time is trusted only inside the
+	 * window the server itself recorded; everything else fails safe to
+	 * current state. The eval function is ordinary action code - publishes
+	 * inside it are immediate, exactly like publishes anywhere else in an
+	 * action (interposing a queue on the shared ctx.publish slot would
+	 * corrupt delivery under concurrent compensate calls on one ctx).
+	 *
+	 * @param {string} roomTopic
+	 * @param {any} ctx
+	 * @param {any[]} roomArgs
+	 * @param {number | null | undefined} commandTime
+	 * @param {(state: any, meta: { time: number, age: number, fallback: boolean }) => any} evalFn
+	 * @param {{ tolerance?: number } | undefined} options
+	 */
+	async function _runCompensate(roomTopic, ctx, roomArgs, commandTime, evalFn, options) {
+		if (typeof evalFn !== 'function') {
+			throw new LiveError('VALIDATION', 'ctx.compensate requires an eval function: ctx.compensate(commandTime, (state, meta) => ...)');
+		}
+		const tolerance = options && typeof options.tolerance === 'number' && options.tolerance > 0 ? options.tolerance : 0;
+		const t = wallEpoch();
+		let entry = null;
+		let fallback = false;
+		if (ctx._compensateDepth > 0) {
+			// A compensate already in flight on this ctx - nested inside an
+			// eval function, or concurrent within one action: no nested
+			// rewind, evaluate against current state.
+			fallback = true;
+		} else if (typeof commandTime === 'number' && Number.isFinite(commandTime) && t - commandTime > tolerance) {
+			entry = /** @type {NonNullable<typeof historyStore>} */ (historyStore).lookup(roomTopic, commandTime, t);
+			// A rewind the ring cannot serve (empty, or older than the age
+			// window) evaluates against current state - never the oldest
+			// marker, or stale commands would hit ancient positions.
+			if (entry === null) fallback = true;
+		}
+		let state;
+		let meta;
+		if (entry !== null) {
+			state = entry.state;
+			meta = { time: entry.time, age: t - entry.time, fallback: false };
+		} else {
+			// Fresh capture: no/invalid command time, within tolerance, or a
+			// rewind that fell back. A throw here propagates - the app's own
+			// capture is the state source and must be loud when broken.
+			state = _freezeSnapshot(/** @type {NonNullable<typeof historyCfg>} */ (historyCfg).capture(...roomArgs));
+			meta = { time: t, age: 0, fallback };
+		}
+		// A depth counter, not a boolean: increment/decrement commutes, so
+		// the guard survives any interleaving - sibling nested calls, and
+		// concurrent compensates whose evals resolve out of order (a saved
+		// boolean restored out of order would leak the in-flight flag).
+		ctx._compensateDepth++;
+		try {
+			return await evalFn(state, meta);
+		} finally {
+			ctx._compensateDepth--;
+		}
 	}
 
 	const roomExport = {};
@@ -5513,10 +5787,38 @@ live.room = function room(config) {
 				const roomTopic = _callTopicFn(topicFn, ctx, roomArgs);
 				const originalPublish = ctx.publish;
 				ctx.publish = (event, data) => originalPublish(roomTopic, event, data);
+				if (historyStore === null) {
+					try {
+						return await fn(ctx, ...args);
+					} finally {
+						ctx.publish = originalPublish;
+					}
+				}
+				const originalCompensate = ctx.compensate;
+				ctx.compensate = (commandTime, evalFn, options) =>
+					_runCompensate(roomTopic, ctx, roomArgs, commandTime, evalFn, options);
 				try {
-					return await fn(ctx, ...args);
+					const result = await fn(ctx, ...args);
+					// Record AFTER the action succeeds: the post-action state is
+					// what subscribers are about to see, and a failed action
+					// must leave no marker. Capture failures are contained (the
+					// action's own result already exists) and warn once.
+					try {
+						historyStore.record(
+							roomTopic,
+							_freezeSnapshot(/** @type {NonNullable<typeof historyCfg>} */ (historyCfg).capture(...roomArgs)),
+							wallEpoch()
+						);
+					} catch (err) {
+						if (!_captureWarned) {
+							_captureWarned = true;
+							console.error('[svelte-realtime] history capture threw; suppressing further capture errors for this room:', err);
+						}
+					}
+					return result;
 				} finally {
 					ctx.publish = originalPublish;
+					ctx.compensate = originalCompensate;
 				}
 			});
 			/** @type {any} */ (wrappedAction).__wrappedFn = fn;
@@ -5576,7 +5878,8 @@ live.multiplayer = function multiplayer(config) {
 		merge: config.merge,
 		key: config.key,
 		actions: config.actions,
-		topicArgs: config.topicArgs
+		topicArgs: config.topicArgs,
+		history: config.history
 	});
 
 	/** @type {any} */ (roomExport).__isMultiplayer = true;

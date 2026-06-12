@@ -215,6 +215,117 @@ export interface LiveContext<UserData = unknown> {
 	 * ```
 	 */
 	hlc: () => { wall: number; logical: number; nodeId: string };
+
+	/**
+	 * Lag-compensated evaluation against the room's recorded state history.
+	 * Available inside the actions of a `live.room()` (or `live.multiplayer()`)
+	 * that declares a `history` config; anywhere else it throws a
+	 * `VALIDATION` `LiveError` with guidance.
+	 *
+	 * The eval function receives the snapshot recorded closest at-or-before
+	 * `commandTime` (the client-stamped moment the player acted, passed as an
+	 * ordinary action argument) plus a `meta` record: `time` (the snapshot's
+	 * wall time), `age` (how far back the rewind reached, ms), and `fallback`
+	 * (`true` when the requested rewind could not be served and current state
+	 * was used instead - an empty ring, a command older than the history
+	 * window, or a nested compensate call). A missing or non-finite
+	 * `commandTime` evaluates against current state with `fallback: false`.
+	 *
+	 * Client-supplied times are trusted only inside the window the server
+	 * itself recorded: a rewind can never reach past `history.maxAgeMs`, and
+	 * anything unservable falls back to current state - never the oldest
+	 * marker. The stamp is compared against the server's wall clock, so it
+	 * must share the server's epoch within the window budget: derive it from
+	 * a server-synced clock rather than a raw device clock when client
+	 * clocks cannot be trusted to be NTP-accurate.
+	 *
+	 * The eval function is ordinary action code: publishes inside it are
+	 * delivered immediately, exactly like publishes anywhere else in an
+	 * action. The recommended pattern is evaluate first, publish from the
+	 * result.
+	 *
+	 * @example
+	 * ```js
+	 * actions: {
+	 *   async shoot(ctx, gameId, targetId, firedAt) {
+	 *     const result = await ctx.compensate(firedAt, (state, meta) => {
+	 *       const target = state.players[targetId];
+	 *       return { hit: hitscan(state.players[ctx.user.id], target), rewoundMs: meta.age };
+	 *     });
+	 *     if (result.hit) ctx.publish('hit', { by: ctx.user.id, target: targetId });
+	 *     return result;
+	 *   }
+	 * }
+	 * ```
+	 */
+	compensate: <R>(
+		commandTime: number | null | undefined,
+		evalFn: (state: any, meta: CompensateMeta) => R | Promise<R>,
+		options?: CompensateOptions
+	) => Promise<R>;
+}
+
+/**
+ * Snapshot metadata handed to a `ctx.compensate()` eval function.
+ */
+export interface CompensateMeta {
+	/** Wall time (epoch ms) of the snapshot the eval function received. */
+	time: number;
+	/** How far back the rewind reached, in milliseconds (`0` for current state). */
+	age: number;
+	/**
+	 * `true` when a requested rewind could not be served and current state was
+	 * evaluated instead (empty ring, command older than the history window, or
+	 * a nested compensate call).
+	 */
+	fallback: boolean;
+}
+
+/**
+ * Options for `ctx.compensate()`.
+ */
+export interface CompensateOptions {
+	/**
+	 * Skip the ring lookup when the command time is within this many
+	 * milliseconds of now and evaluate a fresh capture of current state
+	 * instead - fresh commands see fresh state. Semantic, not a perf knob:
+	 * the fresh path still pays one capture.
+	 * @default 0
+	 */
+	tolerance?: number;
+}
+
+/**
+ * History config for `live.room()` / `live.multiplayer()`: a bounded,
+ * per-topic ring of app-captured state snapshots backing `ctx.compensate()`.
+ * The app owns what a snapshot contains; the framework owns the ring.
+ */
+export interface RoomHistoryConfig {
+	/**
+	 * Snapshot of the room's authoritative state, recorded after every
+	 * successful action on the room. Receives only the room-identifying
+	 * arguments - deliberately no ctx: a snapshot is served to EVERY room
+	 * member's later evaluations, so it must be room-global, and an API that
+	 * cannot see the acting user cannot accidentally record one user's
+	 * private view into state another user will read. Return plain data
+	 * (objects/arrays) synchronously - the framework freezes each snapshot
+	 * (deeply in dev, so accidental mutation throws at the mutation site).
+	 * Capture every field your evaluation (and any client prediction
+	 * reconciliation) reads: position-only snapshots are sufficient for
+	 * hitscan but not for replaying movement.
+	 */
+	capture: (...roomArgs: any[]) => any;
+	/** Ring capacity in snapshots per room topic. @default 300 */
+	maxEntries?: number;
+	/**
+	 * Rewind window in milliseconds: entries older than this are evicted and
+	 * unreachable. Production game servers run 500-2000ms; longer windows
+	 * widen the advantage a high-latency client gets against moving targets.
+	 * @default 2000
+	 */
+	maxAgeMs?: number;
+	/** Concurrently-tracked room topics; least-recently-used is evicted. @default 100 */
+	maxTopics?: number;
 }
 
 /**
@@ -2220,6 +2331,12 @@ export interface RoomConfig {
 	key?: string;
 	/** Number of room-identifying args the topic function expects (excluding ctx). Required when topic uses rest params and actions are defined. @default topicFn.length - 1 */
 	topicArgs?: number;
+	/**
+	 * Record a bounded history of app-captured state snapshots (one per
+	 * successful action) and enable `ctx.compensate()` inside this room's
+	 * actions. Requires `actions`.
+	 */
+	history?: RoomHistoryConfig;
 }
 
 /**
@@ -2263,6 +2380,12 @@ export interface MultiplayerConfig {
 	key?: string;
 	/** Number of room-identifying args the topic function expects (excluding ctx). */
 	topicArgs?: number;
+	/**
+	 * Record a bounded history of app-captured state snapshots (one per
+	 * successful action) and enable `ctx.compensate()` inside this room's
+	 * actions. Requires `actions`.
+	 */
+	history?: RoomHistoryConfig;
 	/** Enable a typing-indicator surface published onto the room presence roster. */
 	typing?: boolean;
 	/**

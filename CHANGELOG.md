@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.7] - 2026-06-12
+
+### Added
+
+- **Server-side lag compensation for room actions: `history` config + `ctx.compensate()`.** A `live.room()` / `live.multiplayer()` can declare `history: { capture }` - the app's own snapshot function over its authoritative state - and the framework records a bounded per-room-topic ring of snapshots, one after every successful action (`maxEntries` default 300, `maxAgeMs` rewind window default 2000ms, room topics LRU-capped via `maxTopics` default 100; entries are frozen, deeply in dev so accidental mutation throws at the site; entry times are clamped monotonic so a backwards wall-clock step cannot unsort the ring). `capture` receives only the room-identifying arguments - deliberately no ctx, since a snapshot recorded during one user's action is served to every room member's later evaluations - and must return plain data synchronously (a thenable is rejected loudly). Inside those actions, `ctx.compensate(commandTime, (state, meta) => ...)` evaluates against the snapshot recorded at-or-before the client-stamped command time - passed as an ordinary action argument, so there is no wire change and no cost to apps that never use it. Client stamps are honored only inside the window the server itself recorded: an unservable rewind (empty ring, stamp older than the window, nested compensate - including sibling nested calls) fails safe to current state - never the oldest marker - and reports `meta.fallback: true`; `meta.age` reports how far back the rewind reached; a per-call `tolerance` skips the ring lookup for fresh stamps. The eval function is ordinary action code: publishes inside it are delivered immediately, the same semantics as anywhere else in an action, and concurrent `ctx.compensate` calls in one action are safe. Without a `history` config the action path is unchanged and `ctx.compensate` throws a `VALIDATION` error with guidance. Recording a 32-player snapshot measures ~2-4us per action and a ring-hit rewind ~4us on top of dispatch (`NODE_ENV=production node bench/compensate.js`; dev mode reads several times that from the dev-only deep freeze).
+
 ## [0.6.0-next.6] - 2026-06-07
 
 ### Security
