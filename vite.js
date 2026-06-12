@@ -21,6 +21,12 @@ const ROOM_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.room\s*\(/g;
 // stub adds the aggregated `status` view and the `move`/`reportViewport`
 // cursor methods on top of the room namespace.
 const MULTIPLAYER_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.multiplayer\s*\(/g;
+// `live.smooth(...)` is a smoothed-entity export: the client namespace gets
+// the command/sync send paths plus a `smooth(...)` factory that builds the
+// predicted view. The app's shared apply() function is passed at the factory
+// call site at runtime - generated code carries only paths and JSON
+// literals, never serialized functions.
+const SMOOTH_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.smooth\s*\(/g;
 const WEBHOOK_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.webhook\s*\(/g;
 // Namespaced webhook forms. live.webhooks.inbound() is the same server-only
 // manual handler as the flat live.webhook(); live.webhooks.outbound() is a
@@ -1015,12 +1021,25 @@ function _generateSsrStubs(filePath, modulePath) {
 		multiplayers.push({ name, info: _extractMultiplayerInfo(source, name) });
 	}
 
+	// Collect live.smooth() exports - the SSR stub renders an inert predicted
+	// view (the runtime options arrive at the factory call, so `local` echoes
+	// the caller's own initial state) and no-op send methods, so a page that
+	// constructs the view during SSR does not crash before hydration.
+	/** @type {string[]} */
+	const smooths = [];
+	SMOOTH_EXPORT_RE.lastIndex = 0;
+	while ((match = SMOOTH_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		smooths.push(name);
+	}
+
 	// Escape paths for safe embedding in generated code
 	const safePath = JSON.stringify(normalized);
 	const safeModulePath = (name) => JSON.stringify(modulePath + '/' + name);
 
-	// If no store-like / room / multiplayer / windowed-aggregate exports, simple re-export
-	if (storeNames.length === 0 && rooms.length === 0 && multiplayers.length === 0 && windowedAggregates.length === 0) {
+	// If no store-like / room / multiplayer / smooth / windowed-aggregate exports, simple re-export
+	if (storeNames.length === 0 && rooms.length === 0 && multiplayers.length === 0 && smooths.length === 0 && windowedAggregates.length === 0) {
 		return `export * from ${safePath};\n`;
 	}
 
@@ -1133,6 +1152,16 @@ function _generateSsrStubs(filePath, modulePath) {
 			mpFactories.push(`${action}: () => Promise.resolve(undefined)`);
 		}
 		lines.push(`const _${name} = { ${mpFactories.join(', ')} };`);
+		lines.push(`export { _${name} as ${name} };`);
+	}
+
+	for (const name of smooths) {
+		// Smooth namespace: no-op send paths and a factory returning the
+		// view's empty server-side shape. `local` echoes the caller's own
+		// initial (the trailing factory argument carries it at runtime), so
+		// SSR markup renders the entity at its starting state and the client
+		// factory replaces everything on hydration.
+		lines.push(`const _${name} = { _command: () => Promise.resolve(undefined), _sync: () => Promise.resolve(undefined), status: readable('connecting'), smooth: (...args) => { const o = args.length > 0 ? args[args.length - 1] : undefined; return { local: o && typeof o === 'object' ? o.initial : undefined, remote: new Map(), status: 'connecting', overflowed: false, self: null, command: () => 0, now: () => 0, resync: () => {}, destroy: () => {} }; } };`);
 		lines.push(`export { _${name} as ${name} };`);
 	}
 
@@ -1271,6 +1300,46 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			} else {
 				lines.push(`export const ${name} = __stream(${safeModulePath(name)}, ${JSON.stringify({ merge: 'set' })});`);
 			}
+		}
+	}
+
+	// Smoothed-entity exports: the namespace carries the command/sync send
+	// paths and a smooth(...) factory. The factory's trailing argument is the
+	// app's runtime options object (apply, initial, knobs) - it is forwarded
+	// verbatim into the channel, never serialized into the stub. The channel
+	// itself comes from the adapter (the same package the client connection
+	// already rides), and the rune view class from the svelte-realtime/smooth
+	// subpath. Runs before the room/multiplayer loops and claims the name.
+	let smoothRuntimeImported = false;
+	SMOOTH_EXPORT_RE.lastIndex = 0;
+	while ((match = SMOOTH_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		if (!exportedNames.has(name)) {
+			exportedNames.add(name);
+			imports.add('__rpc');
+			imports.add('status');
+			if (!smoothRuntimeImported) {
+				lines.push(`import { SmoothEntity } from 'svelte-realtime/smooth';`);
+				lines.push(`import { createSmoothChannel } from 'svelte-adapter-uws/plugins/smooth/client';`);
+				smoothRuntimeImported = true;
+			}
+			const smLines = [];
+			smLines.push(`export const ${name} = {`);
+			smLines.push(`  _command: __rpc(${JSON.stringify(modulePath + '/' + name + '/__smooth/command')}),`);
+			smLines.push(`  _sync: __rpc(${JSON.stringify(modulePath + '/' + name + '/__smooth/sync')}),`);
+			smLines.push(`  status: status,`);
+			smLines.push(`  smooth(...args) {`);
+			smLines.push(`    const opts = args.length > 0 ? args[args.length - 1] : undefined;`);
+			smLines.push(`    const roomArgs = args.slice(0, -1);`);
+			smLines.push(`    const channel = createSmoothChannel({ ...opts, transport: {`);
+			smLines.push(`      sendCommand: (batch) => ${name}._command.fireAndForget(...roomArgs, batch),`);
+			smLines.push(`      sync: () => ${name}._sync(...roomArgs)`);
+			smLines.push(`    } });`);
+			smLines.push(`    return new SmoothEntity(channel, status);`);
+			smLines.push(`  },`);
+			smLines.push(`};`);
+			lines.push(smLines.join('\n'));
 		}
 	}
 
@@ -2313,6 +2382,20 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			}
 		}
 
+		// Register live.smooth() exports - the command and sync send paths
+		// resolve lazily to the export's attached handlers.
+		SMOOTH_EXPORT_RE.lastIndex = 0;
+		while ((match = SMOOTH_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			if (!/^\w+$/.test(name)) continue;
+			if (!registered.has(name)) {
+				registered.add(name);
+				const importPath = JSON.stringify(normalizedPath);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__smooth/command')}, __L(() => import(${importPath}).then(m => m.${name}.__smoothCommand)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__smooth/sync')}, __L(() => import(${importPath}).then(m => m.${name}.__smoothSync)), ${JSON.stringify(rel)});`);
+			}
+		}
+
 		// Register live.multiplayer() exports - a multiplayer export reuses the
 		// room sub-streams at runtime, so it registers the same
 		// __data/__presence/__cursors paths plus its scoped actions lazily.
@@ -2806,6 +2889,17 @@ function _generateTypeDeclarations(liveDir, dir) {
 				} else {
 					exports.push(`  export const ${name}: (...args: any[]) => Promise<any>;`);
 				}
+			}
+		}
+
+		// Detect live.smooth() exports - the namespace carries the send paths
+		// and the smooth(...) factory returning the predicted view.
+		SMOOTH_EXPORT_RE.lastIndex = 0;
+		while ((match = SMOOTH_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				exports.push(`  export const ${name}: { status: import('svelte/store').Readable<string>, smooth: (...args: any[]) => import('svelte-realtime/smooth').SmoothEntity, [member: string]: any };`);
 			}
 		}
 
@@ -3514,6 +3608,12 @@ async function _loadRegistryDirect(server, liveDir, dir) {
 							__register(rel + '/' + name + '/__action/' + k, v, rel);
 						}
 					}
+				} else if (/** @type {any} */ (fn)?.__isSmooth) {
+					// A smooth export carries only its two send handlers; the
+					// authoritative tick machinery hangs off the handlers'
+					// first use, never off registration.
+					if (fn.__smoothCommand) __register(rel + '/' + name + '/__smooth/command', fn.__smoothCommand, rel);
+					if (fn.__smoothSync) __register(rel + '/' + name + '/__smooth/sync', fn.__smoothSync, rel);
 				} else if (/** @type {any} */ (fn)?.__isRoom) {
 					if (fn.__dataStream) __register(rel + '/' + name + '/__data', fn.__dataStream, rel);
 					if (fn.__presenceStream) __register(rel + '/' + name + '/__presence', fn.__presenceStream, rel);

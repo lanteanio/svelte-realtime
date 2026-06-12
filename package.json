@@ -1,6 +1,6 @@
 {
   "name": "svelte-realtime",
-  "version": "0.6.0-next.7",
+  "version": "0.6.0-next.8",
   "publishConfig": {
     "tag": "next"
   },
@@ -34,6 +34,10 @@
       "types": "./client-multiplayer.d.ts",
       "default": "./client-multiplayer.svelte.js"
     },
+    "./smooth": {
+      "types": "./client-smooth.d.ts",
+      "default": "./client-smooth.svelte.js"
+    },
     "./vite": {
       "types": "./vite.d.ts",
       "default": "./vite.js"
@@ -63,6 +67,8 @@
     "client-runtime.js",
     "client-multiplayer.svelte.js",
     "client-multiplayer.d.ts",
+    "client-smooth.svelte.js",
+    "client-smooth.d.ts",
     "vite.js",
     "vite.d.ts",
     "test.js",
@@ -98,7 +104,7 @@
   "peerDependencies": {
     "@sveltejs/kit": "^2.0.0",
     "svelte": "^4.0.0 || ^5.0.0",
-    "svelte-adapter-uws": "^0.6.0-next.15"
+    "svelte-adapter-uws": "^0.6.0-next.24"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",

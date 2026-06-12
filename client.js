@@ -259,16 +259,36 @@ const _healthStore = writable(/** @type {'healthy' | 'degraded'} */ ('healthy'))
 /** @type {(() => void) | null} */
 let _healthUnsub = null;
 
-// Two independent inputs OR into the single health state: a server-pushed
-// degraded/recovered event on the system topic, and the connection's local
-// internal flow-control pressure (a queued/refused flow-controlled send).
-// Tracked separately so neither input clobbers the other - health is degraded
-// while EITHER is degraded, healthy only when BOTH are clear.
+// Three independent inputs OR into the single health state: a server-pushed
+// degraded/recovered event on the system topic, the connection's local
+// internal flow-control pressure (a queued/refused flow-controlled send), and
+// smoothed-entity prediction loss (a smooth view whose un-acked command
+// window overflowed because the server stopped acknowledging). Tracked
+// separately so no input clobbers another - health is degraded while ANY is
+// degraded, healthy only when ALL are clear.
 let _healthServerDegraded = false;
 let _healthFlowDegraded = false;
+/** Smooth views currently in prediction-killed recovery. Counted (not a
+ * boolean) because several entities can overflow and recover independently. */
+let _healthSmoothDegraded = 0;
 
 function _recomputeHealth() {
-	_healthStore.set(_healthServerDegraded || _healthFlowDegraded ? 'degraded' : 'healthy');
+	_healthStore.set(
+		_healthServerDegraded || _healthFlowDegraded || _healthSmoothDegraded > 0 ? 'degraded' : 'healthy'
+	);
+}
+
+/**
+ * Fold one smooth view's prediction-loss transition into the health state.
+ * A boolean is the only thing that crosses this accessor, mirroring the
+ * flow-control input above.
+ * @param {boolean} degraded
+ * @internal
+ */
+export function _setSmoothDegraded(degraded) {
+	_healthSmoothDegraded += degraded ? 1 : -1;
+	if (_healthSmoothDegraded < 0) _healthSmoothDegraded = 0;
+	_recomputeHealth();
 }
 
 function _ensureHealthSubscription() {
@@ -329,6 +349,7 @@ export function _resetHealth() {
 	}
 	_healthServerDegraded = false;
 	_healthFlowDegraded = false;
+	_healthSmoothDegraded = 0;
 	_healthStore.set('healthy');
 }
 

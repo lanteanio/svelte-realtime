@@ -2088,6 +2088,27 @@ export namespace live {
 	function multiplayer(config: MultiplayerConfig): MultiplayerExport;
 
 	/**
+	 * Declare a topic of smoothed (predicted / reconciled) entities. The app
+	 * writes ONE pure `apply(state, command, ctx)` in a plain shared module;
+	 * the server runs it on an authoritative tick and the component constructs
+	 * the view with the same import, so prediction and authority can never
+	 * drift. Each connected identity owns exactly one entity per topic; a
+	 * client can only ever send commands, never state.
+	 *
+	 * @example
+	 * ```js
+	 * import { apply } from './board.shared.js';
+	 *
+	 * export const shape = live.smooth({
+	 *   topic: (ctx, boardId) => 'shape:' + boardId,
+	 *   apply,
+	 *   initial: { x: 0, y: 0 }
+	 * });
+	 * ```
+	 */
+	function smooth(config: SmoothConfig): SmoothExport;
+
+	/**
 	 * Create a webhook-to-stream bridge.
 	 * The returned handler can be used in a SvelteKit +server.js POST endpoint.
 	 *
@@ -2417,6 +2438,54 @@ export interface MultiplayerExport extends RoomExport {
 		reactions: boolean;
 		selections: 'offset' | 'crdt' | null;
 	};
+}
+
+/**
+ * Configuration for `live.smooth()`.
+ */
+export interface SmoothConfig {
+	/** Topic name, or a function computing it from context and room args. */
+	topic: string | ((ctx: any, ...args: any[]) => string);
+	/**
+	 * The shared simulation step: pure `(state, command, ctx) -> state`.
+	 * Reconciliation replays commands, so one-shot side effects must guard on
+	 * `ctx.firstTime`, and randomness must come from `ctx.rng` (reseeded per
+	 * command id - identical on prediction, replay, and the server).
+	 */
+	apply: (state: any, command: any, ctx: { firstTime: boolean; rng: { reseed(seed: number): void; float(): number; u32(): number } }) => any;
+	/** Starting state for a new entity: a value, or `(key) => state`. */
+	initial: any | ((key: string) => any);
+	/** Guard run before sync and commands. Throw to deny, same shape as room guards. */
+	guard?: (ctx: any, ...args: any[]) => any;
+	/**
+	 * Per-tick continuation for entities with no queued commands - the hook
+	 * for genuinely simulated entities that keep moving between inputs.
+	 * Omitted, an idle entity holds position and costs nothing.
+	 */
+	onMissing?: (state: any, lastCommand: any) => any;
+	/** Authoritative tick interval in milliseconds. @default 50 */
+	tickMs?: number;
+	/**
+	 * Suppress echoing an owner's own commanded updates in broadcasts - the
+	 * acknowledgement carries the owner's copy. `onMissing` motion has no
+	 * acknowledgement and always broadcasts to the owner too. @default true
+	 */
+	noEcho?: boolean;
+	/** Per-entity command queue bound (an integer of at least 1). @default 1024 */
+	queueCap?: number;
+	/** Number of room-identifying args the topic function expects (excluding ctx). @default topicFn.length - 1 */
+	topicArgs?: number;
+}
+
+/**
+ * Return type of `live.smooth()`.
+ */
+export interface SmoothExport {
+	__isSmooth: true;
+	/** Sync handler: subscribes the socket, ensures the entity, returns the catalog basis. */
+	__smoothSync: any;
+	/** Command handler: enqueues an owner's command batch for the authoritative tick. */
+	__smoothCommand: any;
 }
 
 /**

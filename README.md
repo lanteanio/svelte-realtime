@@ -256,6 +256,8 @@ Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `re
 - [Pipes](#pipes)
 - [Binary RPC](#binary-rpc)
 - [Rooms](#rooms)
+- [Multiplayer](#multiplayer)
+- [Smoothed entities](#smoothed-entities)
 - [Webhooks](#webhooks)
 - [Signals](#signals)
 - [Schema evolution](#schema-evolution)
@@ -2922,10 +2924,10 @@ How it behaves:
 - **Recording.** After every successful action, `capture` runs and the snapshot joins a per-room-topic ring (`maxEntries`, default 300; `maxAgeMs` rewind window, default 2000ms; topics LRU-capped via `maxTopics`, default 100). A failed action records nothing. Snapshots are frozen - return plain data from `capture`, not live references. Worst-case retention is `maxTopics * maxEntries` snapshots per room export (a quiet topic keeps its ring until it is touched again or LRU-evicted), so size your `capture` output with that envelope in mind.
 - **Capture is room-global by design.** It receives only the room-identifying arguments, never the acting user's `ctx`: a snapshot recorded during one player's action is served to *every* room member's later evaluations, so an API that cannot see the acting user cannot accidentally record one user's private view into state another user will read.
 - **Trust model.** The client stamps when it acted; the server only honors stamps inside the window it recorded itself. A stamp older than the history window, an empty ring, or a nested `compensate` call all fail safe to *current* state - never the oldest marker - and report `meta.fallback: true`. Production game servers run windows of 500-2000ms; longer windows widen the peek advantage a high-latency client gets, so tune `maxAgeMs` to your tolerance. The ring's topic cap is per room export: if your action guard lets a user act on arbitrarily many room ids, that user can cycle honest rooms' history out of the cap - the guard is the mitigation.
-- **Clock skew matters.** The stamp is compared against the *server's* wall clock. A client clock running ahead makes every stamp look fresh (no rewind, reported as `fallback: false`); one running behind by more than the window gets permanent `fallback: true`. Both degrade safely but silently - if your players' device clocks cannot be trusted to be NTP-accurate, derive the stamp from a server-synced clock (an offset estimated from server frames) instead of raw `Date.now()`.
+- **Clock skew matters.** The stamp is compared against the *server's* wall clock. A client clock running ahead makes every stamp look fresh (no rewind, reported as `fallback: false`); one running behind by more than the window gets permanent `fallback: true`. Both degrade safely but silently - so derive the stamp from a server-synced clock instead of raw `Date.now()`. A [smoothed-entity view](#smoothed-entities) maintains exactly that clock: stamp with `view.now()` and the compensation window and the prediction loop share one time axis.
 - **Publishes during evaluation** are ordinary room publishes, delivered immediately - the same semantics as a publish anywhere else in an action (a publish followed by a throw is delivered there too). The recommended pattern is evaluate first, publish from the result, as in the example above.
 - **Cost.** Without `history`, actions are unchanged. With it, recording adds roughly the cost of your `capture` (a 32-player snapshot measures ~2-4us per action with `NODE_ENV=production node bench/compensate.js`; plain dev mode reads several times that because dev deep-freezes each snapshot to catch mutations), and a ring-hit rewind is a clock read plus a binary search - the cheapest compensate path, since it reuses an already-frozen snapshot.
-- **With client prediction.** If clients predict and reconcile, capture every field the reconciliation compares (position-only snapshots suffice for hitscan, not for replaying movement), and stamp commands with the same clock the prediction loop uses.
+- **With client prediction.** If clients predict and reconcile, capture every field the reconciliation compares (position-only snapshots suffice for hitscan, not for replaying movement), and stamp commands with the same clock the prediction loop uses - `view.now()` on a [smoothed-entity view](#smoothed-entities).
 
 `tolerance` (per call: `ctx.compensate(t, fn, { tolerance: 20 })`) skips the rewind when the stamp is within that many milliseconds of now - the low-latency common case.
 
@@ -3082,6 +3084,73 @@ const fill = colorForKey(user.id);
 // colorForKey('alice') -> 'hsl(239, 70%, 45%)'
 // colorForKey('carol') -> 'hsl(2, 85%, 55%)'
 ```
+
+---
+
+## Smoothed entities
+
+`live.smooth()` is the responsiveness primitive for entities a user drives continuously - a dragged shape, an avatar, a game character. The local entity responds to input on the same frame it happens; remote entities animate smoothly between server updates; and the server remains the only authority on truth - a client can only ever send commands, never state.
+
+The whole contract is one pure function the app writes once, in a plain module both sides import:
+
+```js
+// src/live/board.shared.js - no framework imports, pure (state, command) -> state.
+export function apply(state, command) {
+  return { x: state.x + command.dx, y: state.y + command.dy };
+}
+```
+
+The server declares the topic with it:
+
+```js
+// src/live/board.js
+import { live } from 'svelte-realtime';
+import { apply } from './board.shared.js';
+
+export const shape = live.smooth({
+  topic: (ctx, boardId) => 'shape:' + boardId,
+  apply,
+  initial: { x: 0, y: 0 }
+});
+```
+
+And the component constructs the view with the same `apply` - the generated module can only carry paths and literals, so the shared function travels through the app's own import, which is exactly what makes client and server provably identical:
+
+```svelte
+<script>
+  import { shape } from '$live/board';
+  import { apply } from '$live/board.shared.js';
+
+  let { boardId } = $props();
+  const view = shape.smooth(boardId, { apply, initial: { x: 0, y: 0 } });
+  $effect(() => () => view.destroy());
+
+  function onpointermove(e) {
+    view.command({ dx: e.movementX, dy: e.movementY });
+  }
+</script>
+
+<Box x={view.local.x} y={view.local.y} />
+{#each [...view.remote] as [key, s] (key)}
+  <Box x={s.x} y={s.y} ghost />
+{/each}
+```
+
+How it behaves:
+
+- **The local entity is predicted.** `view.command(cmd)` applies your function immediately, so `view.local` moves this frame, and transmits the command (frame-batched, fire-and-forget - loss is recovered by reconciliation, never retransmission). The server applies the same commands through the same function on its authoritative tick and acknowledges each owner with the resulting state. When the acknowledged state disagrees with the prediction, the simulation adopts the server's answer immediately and the *rendered* position eases over a short window (`smoothTimeMs`, default 100) - unless the divergence is below `errorThreshold` (default 1), where easing would smear precision for nothing and the correction snaps silently.
+- **Remote entities render slightly in the past.** Their positions interpolate between server updates on a server-synced clock, so a dropped or late frame is invisible. `interpolationMs: 'auto'` (the default) tracks twice the measured update interval and collapses toward its floor when updates arrive at display rate. State fields beyond `x`/`y` are latest-value.
+- **Echo suppression is on by default** (`noEcho`): broadcasts of an owner's own commanded updates skip that owner - the acknowledgement already carries the authoritative copy, so the echo would be wasted bytes that fight the prediction. `onMissing` motion produces no acknowledgement and broadcasts to the owner too.
+- **One entity per identity per topic**, keyed like presence rosters (`identify`-style user keys, or per-connection guest keys). A second tab takes ownership by constructing a view (its sync re-binds the entity); it never races commands against the first. Ownership is last-sync-wins: a dispossessed view's commands are silently ignored until its un-acked window overflows, and the overflow recovery resync re-takes ownership - so exactly one view per identity should be commanding at a time.
+- **Side effects in `apply` must guard on `ctx.firstTime`** - reconciliation replays commands, and the flag is true only on a command's first application. Randomness inside `apply` must come from `ctx.rng` (reseeded per command id, identical on prediction, replay, and the server); `Math.random()` there is the documented mistake that turns every random command into a misprediction.
+- **`onMissing(state, lastCommand)`** runs on the server for entities with no commands that tick - the hook for genuinely simulated entities that keep moving between inputs. Omitted, an idle entity simply holds position and costs nothing.
+- **Recovery is explicit.** If the server stops acknowledging long enough that the un-acked command window overflows (`windowCap` 256 commands or `windowMaxAgeMs` 3000ms), prediction is killed rather than allowed to run away: the entity renders the last authoritative state, `view.overflowed` reads true, the shared `health` store reads `'degraded'`, and the view resyncs; the next acknowledgement re-engages prediction.
+- **`view.now()`** is the estimated server wall-clock time, maintained from the server's frame stamps and the acknowledgement round trips. It is the right stamp for lag-compensated action arguments (see below).
+- **The wire is negotiated.** Binary frames engage per connection (`smooth.protocol:1`); everything degrades to JSON additively - old clients ignore the new events, and a server without the smooth plugin fails the first sync or command with an actionable version message, never a resolution crash.
+
+Knobs (all optional, on the server declaration: `tickMs` 50, `noEcho` true, `queueCap` 1024, `guard`, `onMissing`; on the client factory: `interpolationMs` 'auto', `extrapolateMs` 250, `snapGapMs` 500, `smoothTimeMs` 100, `errorThreshold` 1, `computeError`, `cmdRate` 60, `windowCap` 256, `windowMaxAgeMs` 3000). The tradeoff to know: larger `interpolationMs` survives more dropped frames but renders remote entities further in the past.
+
+Requires Svelte 5 (the view is a rune class) and svelte-adapter-uws 0.6.0-next.24 or newer.
 
 ---
 

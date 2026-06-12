@@ -45,6 +45,7 @@ const ENFORCED = new Set([
 	'server.js',
 	'client.js',
 	'client-multiplayer.svelte.js',
+	'client-smooth.svelte.js',
 	'devtools.js'
 ]);
 
