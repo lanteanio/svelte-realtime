@@ -24,12 +24,45 @@ import { checkUrl } from 'svelte-adapter-uws/safe-url';
 import { LiveError } from './server/live-error.js';
 import { _runtimeRandom, _localHlc } from './server/runtime-fallbacks.js';
 import { _validPathRe, _validSegmentRe, _validUserIdReason, _MAX_USER_ID_LENGTH, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './server/validate.js';
-import { state } from './server/state.js';
+import {
+	state,
+	registry,
+	guards,
+	_topicWsCounts,
+	_topicStaleWatch,
+	_silentTopicWatch,
+	_topicCoalesce,
+	_topicTransform,
+	_topicVolatile,
+	_topicInvalidationWatch,
+	_ctxHelpersCache,
+	_rateLimits,
+	cronRegistry,
+	derivedRegistry,
+	effectRegistry,
+	aggregateRegistry,
+	_lazyQueue,
+	_presenceRef
+} from './server/state.js';
 import { _IS_DEV } from './server/env.js';
 import { _fireWebhookOut, _redactUrl } from './server/webhook-out.js';
+import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge } from './server/presence.js';
+import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
+import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs } from './server/publish-helpers.js';
+import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
+import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
+import { _recordRpcMetrics, installMetrics } from './server/metrics.js';
+import { _shouldShed, _resetAdmission, installAdmission } from './server/admission.js';
+import { _getIdentityKey } from './server/identity.js';
+import { _resetIdempotencyStore, _resetLock, installIdempotency } from './server/idempotency.js';
+export { _resetIdempotencyStore, _resetLock };
+export { _getIdentityKey };
+export { _resetAdmission };
+export { WRAPPED_FOR_REPLAY, _resetReplayRouting };
 export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
 export { LiveError };
+export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge };
 
 const textDecoder = new TextDecoder();
 
@@ -67,14 +100,14 @@ export const PUBLISH_RATE_WARN_DEDUP_MAX = 1_000_000;
 /** Max distinct (user, room) pairs the in-memory presence-ref map holds. FIFO-evict graces first, then WARN-then-skip on cap: new joiners don't get registered, so they're invisible in any subscriber's roster until existing entries clear. Matches the per-process safety-net convention used by the other caps in this section. For multi-instance deploys, wire `platform.presence` (e.g. `svelte-adapter-uws-extensions/presence`) to bypass this map entirely. */
 export const MAX_PRESENCE_REF = 1_000_000;
 
-// Mutable internal copies: the public `export const` values above are the
-// canonical defaults; tests use `_setCapsForTest` to lower them for fast
-// saturation scenarios. Production never touches these.
-let _maxPushRegistry = MAX_PUSH_REGISTRY;
-let _topicWsCountsWarnThreshold = TOPIC_WS_COUNTS_WARN_THRESHOLD;
-let _silentTopicWarnDedupMax = SILENT_TOPIC_WARN_DEDUP_MAX;
-let _publishRateWarnDedupMax = PUBLISH_RATE_WARN_DEDUP_MAX;
-let _maxPresenceRef = MAX_PRESENCE_REF;
+// Seed the mutable cap shadows on the shared state holder from the public
+// `export const` caps above (the canonical defaults). Tests lower them via
+// `_setCapsForTest` for fast saturation; production never touches them.
+state.maxPushRegistry = MAX_PUSH_REGISTRY;
+state.topicWsCountsWarnThreshold = TOPIC_WS_COUNTS_WARN_THRESHOLD;
+state.silentTopicWarnDedupMax = SILENT_TOPIC_WARN_DEDUP_MAX;
+state.publishRateWarnDedupMax = PUBLISH_RATE_WARN_DEDUP_MAX;
+state.maxPresenceRef = MAX_PRESENCE_REF;
 
 /**
  * Override capacity caps for testing. Pass any subset of the cap names
@@ -85,12 +118,12 @@ let _maxPresenceRef = MAX_PRESENCE_REF;
  * @param {{ pushRegistry?: number, topicWsCountsWarn?: number, silentTopicWarnDedup?: number, publishRateWarnDedup?: number, presenceRef?: number }} overrides
  */
 export function _setCapsForTest(overrides) {
-	if (overrides.pushRegistry !== undefined) _maxPushRegistry = overrides.pushRegistry;
-	if (overrides.topicWsCountsWarn !== undefined) _topicWsCountsWarnThreshold = overrides.topicWsCountsWarn;
-	if (overrides.silentTopicWarnDedup !== undefined) _silentTopicWarnDedupMax = overrides.silentTopicWarnDedup;
-	if (overrides.publishRateWarnDedup !== undefined) _publishRateWarnDedupMax = overrides.publishRateWarnDedup;
-	if (overrides.presenceRef !== undefined) _maxPresenceRef = overrides.presenceRef;
-	if (overrides.uploadPendingMaxAggregate !== undefined) _UPLOAD_PENDING_MAX_AGGREGATE = overrides.uploadPendingMaxAggregate;
+	if (overrides.pushRegistry !== undefined) state.maxPushRegistry = overrides.pushRegistry;
+	if (overrides.topicWsCountsWarn !== undefined) state.topicWsCountsWarnThreshold = overrides.topicWsCountsWarn;
+	if (overrides.silentTopicWarnDedup !== undefined) state.silentTopicWarnDedupMax = overrides.silentTopicWarnDedup;
+	if (overrides.publishRateWarnDedup !== undefined) state.publishRateWarnDedupMax = overrides.publishRateWarnDedup;
+	if (overrides.presenceRef !== undefined) state.maxPresenceRef = overrides.presenceRef;
+	if (overrides.uploadPendingMaxAggregate !== undefined) state.UPLOAD_PENDING_MAX_AGGREGATE = overrides.uploadPendingMaxAggregate;
 }
 
 /**
@@ -98,21 +131,15 @@ export function _setCapsForTest(overrides) {
  * @internal
  */
 export function _resetCapsForTest() {
-	_maxPushRegistry = MAX_PUSH_REGISTRY;
-	_topicWsCountsWarnThreshold = TOPIC_WS_COUNTS_WARN_THRESHOLD;
-	_silentTopicWarnDedupMax = SILENT_TOPIC_WARN_DEDUP_MAX;
-	_publishRateWarnDedupMax = PUBLISH_RATE_WARN_DEDUP_MAX;
-	_maxPresenceRef = MAX_PRESENCE_REF;
-	_presenceRefWarnFired = false;
-	_UPLOAD_PENDING_MAX_AGGREGATE = 64 * 1024 * 1024;
-	_pendingUploadBytes = 0;
+	state.maxPushRegistry = MAX_PUSH_REGISTRY;
+	state.topicWsCountsWarnThreshold = TOPIC_WS_COUNTS_WARN_THRESHOLD;
+	state.silentTopicWarnDedupMax = SILENT_TOPIC_WARN_DEDUP_MAX;
+	state.publishRateWarnDedupMax = PUBLISH_RATE_WARN_DEDUP_MAX;
+	state.maxPresenceRef = MAX_PRESENCE_REF;
+	state.presenceRefWarnFired = false;
+	state.UPLOAD_PENDING_MAX_AGGREGATE = 64 * 1024 * 1024;
+	state.pendingUploadBytes = 0;
 }
-
-/** @type {Map<string, Function>} */
-const registry = new Map();
-
-/** @type {Map<string, Function>} */
-const guards = new Map();
 
 /** @type {Set<Function>} Streams with onUnsubscribe hooks (for iterating static matches in close) */
 const _streamsWithUnsubscribe = new Set();
@@ -217,12 +244,6 @@ let _pushRegistryWarnFired = false;
 /** One-shot flag for the TOPIC_WS_COUNTS_WARN_THRESHOLD warning. Reset by `_resetTopicWsCounts`. */
 let _topicWsCountsWarnFired = false;
 
-/** One-shot flag for the MAX_PRESENCE_REF saturation warning. Reset by `_resetCapsForTest`. */
-let _presenceRefWarnFired = false;
-
-/** @type {((ws: any) => string | null | undefined) | null} */
-let _pushIdentify = null;
-
 /**
  * Default identify: read user_id then userId from ws.getUserData().
  * Returns undefined for anonymous connections (skipped by pushHooks.open).
@@ -237,50 +258,8 @@ function _defaultPushIdentify(ws) {
 }
 
 function _getPushIdentify() {
-	return _pushIdentify || _defaultPushIdentify;
+	return state.pushIdentify || _defaultPushIdentify;
 }
-
-/**
- * Per-topic set of WebSockets currently holding at least one realtime
- * stream subscription. Maintained as the source of truth for the
- * `remainingSubscribers` argument the realtime layer passes to
- * `__onUnsubscribe(ctx, topic, remainingSubscribers)` - apps use this
- * to decide "should I tear down the upstream feed?" once the count
- * hits zero. Distinct from the adapter's own ws.isSubscribed bookkeeping
- * because it tracks realtime-stream subscriptions specifically (not
- * arbitrary `on(topic)` topic listeners).
- * @type {Map<string, Set<object>>}
- */
-const _topicWsCounts = new Map();
-
-/**
- * Per-topic staleness watchdog. When a stream is configured with
- * `staleAfterMs`, the realtime layer arms a timer on first subscribe
- * for the topic. Every publish to the topic resets the timer (a
- * publish proves the topic is live). When the timer fires, the
- * realtime layer re-runs the stream's loader and broadcasts the new
- * data as a `refreshed` event; the client merges it as a full-state
- * replacement across every merge strategy.
- *
- * Captured ctx, args, fn, and platform reference are taken from the
- * FIRST subscriber for the topic. Subsequent subscribers do not
- * replace these (any subscriber's ctx works for a shared loader call
- * since the topic identifies the data scope). When the topic's
- * subscriber count drops to zero the watchdog clears; a new subscriber
- * after that captures a fresh ctx.
- *
- * @type {Map<string, {
- *   timerId: ReturnType<typeof setTimeout>,
- *   staleAfterMs: number,
- *   fn: Function,
- *   ctx: any,
- *   args: any[],
- *   platform: any,
- *   onError: Function | null,
- *   reloading: boolean
- * }>}
- */
-const _topicStaleWatch = new Map();
 
 /**
  * Per-process state for the dev-mode silent-topic warning. Arms a one-shot
@@ -302,9 +281,6 @@ const _silentTopicConfig = {
 	/** @type {Set<string>} */
 	suppress: new Set()
 };
-
-/** @type {Map<string, { timerId: ReturnType<typeof setTimeout>, sawEvent: boolean }>} */
-const _silentTopicWatch = new Map();
 
 /** @type {Set<string>} Topics already warned about; prevents re-warning across re-subscribe cycles. */
 const _silentTopicWarned = new Set();
@@ -350,20 +326,6 @@ function _copyStreamMeta(target, source) {
 	}
 }
 
-/**
- * Per-topic coalesce registry. When a stream registered with `coalesceBy`
- * is subscribed, its topic is recorded here along with the live set of
- * subscriber sockets. The publish helper uses this to decide between
- * `platform.publish` (default broadcast) and per-socket
- * `platform.sendCoalesced` fan-out.
- *
- * Hot-path cost on the default (no-coalesce) branch: one Map.get on an
- * almost-always-empty map. See bench/publish.js for numbers.
- *
- * @type {Map<string, { coalesceBy: Function, onError: Function | null, ws: Set<any> }>}
- */
-const _topicCoalesce = new Map();
-
 /** @internal Exported only so tests can drive the coalesce registry without a full subscribe round-trip. */
 export function _registerCoalesce(ws, topic, coalesceBy, onError) {
 	let entry = _topicCoalesce.get(topic);
@@ -380,25 +342,6 @@ function _unregisterCoalesce(ws, topic) {
 	entry.ws.delete(ws);
 	if (entry.ws.size === 0) _topicCoalesce.delete(topic);
 }
-
-/**
- * Per-topic transform registry. When a stream registered with `transform`
- * is subscribed, its topic is recorded here. The publish helper applies
- * the transform once per publish, BEFORE platform.publish (or the
- * sendCoalesced fan-out), so subscribers see the projected wire shape.
- *
- * Refcounted by ws-topic contributions - evicted when the last
- * subscriber leaves so HMR-changed stream definitions can re-register.
- *
- * Each entry also carries the registering stream's `onError` reference
- * (if configured). The publish helper wraps the transform call in
- * try/catch and routes throws to that observer; without an observer,
- * the throw propagates as before. First subscriber-for-topic wins on
- * `onError` selection (same rule as for `transform` itself).
- *
- * @type {Map<string, { transform: Function, onError: Function | null, refcount: number }>}
- */
-const _topicTransform = new Map();
 
 /** Per-ws set of topics where this ws has contributed a transform refcount.
  *  Lets the unregister side be idempotent and ws-aware. */
@@ -434,24 +377,6 @@ export function _resetTransformRegistry() {
 	_topicTransform.clear();
 }
 
-/**
- * Per-topic volatile registry. When a stream registered with `volatile: true`
- * is subscribed, its topic is recorded here. The publish helper translates
- * `volatile` topics + per-call `options.volatile === true` into the adapter's
- * `seq: false` per-event option, so seq stamping is skipped for these
- * messages - a reconnect carrying `lastSeenSeq` won't try to backfill them.
- *
- * Wire-level "drop on backpressure" behavior is the adapter's job:
- * platform.publish / platform.publishBatched / platform.send all skip a
- * subscriber whose outbound buffer is over the configured maxBackpressure
- * threshold (default 64 KB). This registry only governs seq stamping and
- * intent declaration on the realtime side.
- *
- * Refcounted by ws-topic contributions, mirroring the transform registry.
- * @type {Map<string, { refcount: number }>}
- */
-const _topicVolatile = new Map();
-
 /** Per-ws set of topics where this ws has contributed a volatile refcount. */
 const _wsVolatileContrib = new WeakMap();
 
@@ -482,31 +407,6 @@ function _unregisterVolatile(ws, topic) {
 export function _resetVolatileRegistry() {
 	_topicVolatile.clear();
 }
-
-/**
- * Per-topic invalidation registry. When a stream is registered with
- * `invalidateOn: '<pattern>'`, an entry is created here keyed by the
- * pattern's compiled regex. The publish helper checks every publish
- * against these patterns and triggers a loader re-run for any stream
- * whose pattern matches the publish topic. Distinct from the stale
- * watchdog (timer-driven) - this one is event-driven.
- *
- * Each watcher stores everything `_staleReload` needs to re-execute the
- * loader: stream topic, init fn (with stashed __streamTransform /
- * __streamOnError), captured ctx + args, and the platform reference
- * for the publish path.
- *
- * @type {Map<string, { regex: RegExp, watchers: Array<{
- *   topic: string,
- *   fn: any,
- *   ctx: any,
- *   args: any[],
- *   platform: any,
- *   onError: Function | null,
- *   reloading: boolean
- * }> }>}
- */
-const _topicInvalidationWatch = new Map();
 
 /**
  * Convert an `invalidateOn` pattern into a fast matcher. `*` matches any
@@ -726,7 +626,7 @@ export function _armSilentTopicWatch(topic) {
 		timerId: setTimer(() => {
 			const e = _silentTopicWatch.get(topic);
 			if (!e || e.sawEvent) return;
-			if (_silentTopicWarned.size >= _silentTopicWarnDedupMax && !_silentTopicWarned.has(topic)) {
+			if (_silentTopicWarned.size >= state.silentTopicWarnDedupMax && !_silentTopicWarned.has(topic)) {
 				const oldest = _silentTopicWarned.values().next().value;
 				if (oldest !== undefined) _silentTopicWarned.delete(oldest);
 			}
@@ -807,154 +707,10 @@ function _applyInitTransform(transform, data) {
 	return transform(data);
 }
 
-/** @type {WeakMap<any, { publish: Function, publishThrottled: Function, publishDebounced: Function, throttle: Function, debounce: Function, signal: Function, batch: Function, shed: Function, skip: Function }>} */
-const _ctxHelpersCache = new WeakMap();
-
 /** Dev-warn dedup: one-time "ctx.throttle is deprecated" warning. */
 let _throttleDeprecatedWarned = false;
 /** Dev-warn dedup: one-time "ctx.debounce is deprecated" warning. */
 let _debounceDeprecatedWarned = false;
-/** Dev-warn dedup: per-helper bad-args warning. Keys: 'publishThrottled', 'publishDebounced', 'throttle', 'debounce'. */
-/** @type {Record<string, boolean>} */
-const _publishHelperBadArgsWarned = Object.create(null);
-/** Dev-warn dedup: one-time "ctx.skip gate map at capacity" warning. */
-let _skipGateCapWarned = false;
-
-/**
- * Topics declared with `live.stream(..., { replay: true })`. Populated at
- * declaration time for static topics and at first-subscribe time for
- * dynamic-topic factories (when the topic resolves). When a publish to one
- * of these topics happens (from `ctx.publish`, cron auto-publish, derived /
- * aggregate, anywhere), the framework auto-routes through
- * `platform.replay.publish(...)` so the buffer captures it for gap-fill on
- * resume -- regardless of which seam (RPC / cron / etc.) the publisher
- * sits on. Pre-fix, only publishes that flowed through a user-managed
- * `wrapWithReplay` proxy reached the buffer; cron-published events bypassed
- * it silently because the cron platform was captured separately.
- *
- * @type {Set<string>}
- */
-const _replayEligibleTopics = new Set();
-
-/**
- * Dev-warn dedup for "stream declared replay: true but the adapter does
- * not expose `platform.replay`" misconfigurations. Per-topic so each
- * misconfigured topic surfaces once; the warning includes the install
- * pointer for the replay extension. Cleared by `_resetReplayRouting()`
- * for tests.
- *
- * @type {Set<string>}
- */
-const _replayMissingWarned = new Set();
-
-/**
- * Public well-known marker: a user-managed platform proxy that already
- * routes replay-eligible publishes through `platform.replay.publish(...)`
- * itself can opt out of the framework's auto-routing by setting this
- * symbol-keyed property to `true`. Without the marker, the framework's
- * `_publish` would call `platform.replay.publish(platform, ...)`, which
- * internally calls `platform.publish(topic, event, data)` -- the user
- * proxy's intercept would then call `replay.publish(target, ...)` again,
- * doubling the Redis write. The marker lets the framework defer to the
- * user proxy in that case.
- *
- * Most users should drop their bespoke `wrapWithReplay` proxy and let the
- * framework own routing; the marker is a back-compat escape hatch.
- */
-export const WRAPPED_FOR_REPLAY = Symbol.for('svelte-realtime.wrapped-for-replay');
-
-/**
- * Register a topic as replay-eligible. Called from `live.stream` declaration
- * for static topics, and from `_executeStreamRpc` for dynamic topics on first
- * subscribe. Idempotent; a topic registered twice stays in the set once.
- *
- * @param {string} topic
- */
-function _registerReplayTopic(topic) {
-	if (typeof topic === 'string' && topic.length > 0) {
-		_replayEligibleTopics.add(topic);
-	}
-}
-
-/**
- * Replay-route a publish through `platform.replay.publish(...)` when the
- * topic is in the replay-eligible registry AND the platform exposes a
- * `replay` surface. Returns `true` when the publish was routed (caller
- * should NOT fall back to `platform.publish` -- replay.publish handles the
- * local broadcast internally) and `false` when it was not (caller should
- * call its own publish path: bare `platform.publish`, batched, or
- * coalesced).
- *
- * Skips routing when:
- * - The topic is not registered as replay-eligible.
- * - The adapter exposes no `platform.replay` (replay extension not
- *   installed). A one-time dev warn fires per topic so the misconfig is
- *   visible during development.
- * - The platform is marked `[WRAPPED_FOR_REPLAY] = true` (a user-managed
- *   proxy is already routing replay; framework defers).
- *
- * Failures inside `replay.publish` are logged in dev and otherwise
- * swallowed -- the local broadcast still happens via the extension's own
- * fallback, and we don't want a Redis hiccup to crash the publisher.
- *
- * @param {any} platform
- * @param {string} topic
- * @param {string} event
- * @param {any} data
- * @returns {boolean} true if routed through replay, false if caller should fall back
- */
-function _maybeReplayPublish(platform, topic, event, data) {
-	if (!_replayEligibleTopics.has(topic)) return false;
-	const replay = platform && /** @type {any} */ (platform).replay;
-	if (!replay || typeof replay.publish !== 'function') {
-		if (_IS_DEV && !_replayMissingWarned.has(topic)) {
-			_replayMissingWarned.add(topic);
-			console.warn(
-				"[svelte-realtime] live.stream('" + topic + "', ..., { replay: true }) is declared but " +
-				"the adapter exposes no `platform.replay` -- the bounded replay buffer is not engaged " +
-				"and clients will not receive missed events on resume. Install the replay extension " +
-				"(svelte-adapter-uws-extensions/redis/replay or postgres/replay) and wire it via " +
-				"`platform.replay = createReplay(redisClient)` so `platform.replay` is exposed. " +
-				"Warned once per topic per session."
-			);
-		}
-		return false;
-	}
-	if (/** @type {any} */ (platform)[WRAPPED_FOR_REPLAY]) return false;
-	try {
-		const ret = replay.publish(platform, topic, event, data);
-		if (ret && typeof ret.then === 'function') {
-			ret.catch((err) => {
-				if (_IS_DEV) {
-					console.warn(
-						"[svelte-realtime] replay.publish('" + topic + "') failed:",
-						err
-					);
-				}
-			});
-		}
-	} catch (err) {
-		if (_IS_DEV) {
-			console.warn(
-				"[svelte-realtime] replay.publish('" + topic + "') threw synchronously:",
-				err
-			);
-		}
-		// On sync throw the local broadcast didn't happen; fall back to
-		// platform.publish so subscribers still receive the event live.
-		return false;
-	}
-	return true;
-}
-
-/**
- * Reset replay-routing state. Tests only.
- * @internal
- */
-export function _resetReplayRouting() {
-	_replayEligibleTopics.clear();
-	_replayMissingWarned.clear();
-}
 
 /**
  * Per-process state for the dev-mode publish-rate warning. Sampler is lazy:
@@ -1029,7 +785,7 @@ export function _activatePublishRateWarning(platform) {
 			if (!entry || typeof entry.topic !== 'string') continue;
 			if (entry.messagesPerSec < _publishRateConfig.threshold) continue;
 			if (_publishRateWarned.has(entry.topic)) continue;
-			if (_publishRateWarned.size >= _publishRateWarnDedupMax) {
+			if (_publishRateWarned.size >= state.publishRateWarnDedupMax) {
 				const oldest = _publishRateWarned.values().next().value;
 				if (oldest !== undefined) _publishRateWarned.delete(oldest);
 			}
@@ -1312,10 +1068,10 @@ function _trackStreamSub(ws, topic, fn) {
 	if (isFirstSubForTopic) {
 		let wsSet = _topicWsCounts.get(topic);
 		if (!wsSet) {
-			if (_topicWsCounts.size >= _topicWsCountsWarnThreshold && !_topicWsCountsWarnFired) {
+			if (_topicWsCounts.size >= state.topicWsCountsWarnThreshold && !_topicWsCountsWarnFired) {
 				_topicWsCountsWarnFired = true;
 				console.warn(
-					"[svelte-realtime] topic-subscribers index reached TOPIC_WS_COUNTS_WARN_THRESHOLD=" + _topicWsCountsWarnThreshold + " distinct topics.\n" +
+					"[svelte-realtime] topic-subscribers index reached TOPIC_WS_COUNTS_WARN_THRESHOLD=" + state.topicWsCountsWarnThreshold + " distinct topics.\n" +
 					"  Eviction would corrupt subscribe/unsubscribe routing, so the index keeps growing.\n" +
 					"  Check for runaway dynamic-topic generation (e.g. per-request topic strings) and prefer aggregating into stable topics.\n" +
 					"  See: https://svti.me/topic-cardinality"
@@ -1346,21 +1102,7 @@ function _trackStreamSub(ws, topic, fn) {
 		_registerVolatile(ws, topic);
 	}
 	if (isFirstSubForTopic) _armSilentTopicWatch(topic);
-	if (_metricsInstruments) _metricsInstruments.streamGauge.inc();
-}
-
-/**
- * Record RPC metrics for any exit path. Call exactly once per RPC.
- * @param {string} path
- * @param {string} code - error code, or empty string for success
- * @param {number} startTime - from monotonicNow(), or 0 to skip duration
- */
-function _recordRpcMetrics(path, code, startTime) {
-	if (!_metricsInstruments) return;
-	const status = code ? 'error' : 'ok';
-	_metricsInstruments.rpcCount.inc({ path, status });
-	if (code) _metricsInstruments.rpcErrors.inc({ path, code });
-	if (startTime) _metricsInstruments.rpcDuration.observe({ path }, (monotonicNow() - startTime) / 1000);
+	if (state.metricsInstruments) state.metricsInstruments.streamGauge.inc();
 }
 
 /** @type {WeakSet<object>} Sockets currently in rollback (skips grace period in presence) */
@@ -1368,7 +1110,7 @@ const _rollingBack = new WeakSet();
 
 function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 	try { ws.unsubscribe(topic); } catch {}
-	if (_metricsInstruments) _metricsInstruments.streamGauge.dec();
+	if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
 	const topicMap = _wsStreamOwners.get(ws);
 	let removedFromTopic = false;
 	if (topicMap) {
@@ -2011,9 +1753,6 @@ live.access = {
 	}
 };
 
-/** @type {Map<string, { prev: number, curr: number, windowStart: number, windowMs: number }>} */
-const _rateLimits = new Map();
-
 /** @type {number} */
 let _rateLimitLastSweep = runtimeNow();
 
@@ -2419,88 +2158,6 @@ live.silentTopicWarning = function silentTopicWarning(config) {
 	_silentTopicConfig.enabled = true;
 };
 
-/** @type {{ acquire: (key: string, ttlSec: number) => Promise<any> } | null} */
-let _defaultIdempotencyStore = null;
-
-/**
- * Lazy in-process idempotency store. Three-state acquire matching the contract
- * of `createIdempotencyStore` from svelte-adapter-uws-extensions, so swapping
- * the default for a multi-instance backend is a one-line change.
- * Bounded by maxEntries; lazy-sweeps expired records every 30s.
- */
-function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
-	/** @type {Map<string, { value: any, expiresAt: number }>} */
-	const results = new Map();
-	/** @type {Map<string, Promise<any>>} */
-	const inflight = new Map();
-	let lastSweep = runtimeNow();
-
-	return {
-		async acquire(key, ttlSec) {
-			const now = runtimeNow();
-			if (now - lastSweep >= 30000) {
-				lastSweep = now;
-				for (const [k, e] of results) {
-					if (e.expiresAt <= now) results.delete(k);
-				}
-			}
-			const cached = results.get(key);
-			if (cached) {
-				if (cached.expiresAt > now) return { result: cached.value };
-				results.delete(key);
-			}
-			while (inflight.has(key)) {
-				try { await inflight.get(key); } catch {}
-				const re = results.get(key);
-				if (re && re.expiresAt > runtimeNow()) return { result: re.value };
-			}
-			let resolveInflight;
-			let rejectInflight;
-			const promise = new Promise((res, rej) => { resolveInflight = res; rejectInflight = rej; });
-			// Suppress unhandled-rejection logs when there are no waiters at the
-			// moment a handler aborts. Real awaiters attach their own handlers
-			// via `await inflight.get(key)`.
-			promise.catch(() => {});
-			inflight.set(key, promise);
-			if (results.size >= maxEntries) {
-				const drop = Math.max(1, Math.floor(maxEntries * 0.1));
-				let i = 0;
-				for (const k of results.keys()) {
-					results.delete(k);
-					if (++i >= drop) break;
-				}
-			}
-			const ttlMs = ttlSec * 1000;
-			return {
-				acquired: true,
-				async commit(value) {
-					if (ttlMs > 0) results.set(key, { value, expiresAt: runtimeNow() + ttlMs });
-					inflight.delete(key);
-					if (resolveInflight) resolveInflight(value);
-				},
-				async abort() {
-					inflight.delete(key);
-					if (rejectInflight) rejectInflight(new Error('ABORTED'));
-				}
-			};
-		}
-	};
-}
-
-function _getDefaultIdempotencyStore() {
-	if (_defaultIdempotencyStore) return _defaultIdempotencyStore;
-	_defaultIdempotencyStore = _createInMemoryIdempotencyStore();
-	return _defaultIdempotencyStore;
-}
-
-/**
- * Reset the default in-process idempotency store. Tests only.
- * @internal
- */
-export function _resetIdempotencyStore() {
-	_defaultIdempotencyStore = null;
-}
-
 /**
  * Reset the per-topic coalesce registry. Tests only.
  * @internal
@@ -2518,396 +2175,7 @@ export function _resetTopicWsCounts() {
 	_topicWsCountsWarnFired = false;
 }
 
-/**
- * Per-key serialization primitive. Mirrors the algorithm in the adapter's
- * Lock plugin (per-key FIFO waiter queue) inline to preserve server.js's
- * no-imports profile. Custom Lock instances passed via `live.lock({ lock })`
- * just need to expose `withLock(key, fn, opts?)` matching the adapter's
- * contract.
- *
- * The `opts.maxWaitMs` field, when set, rejects a queued waiter with a typed
- * `LOCK_TIMEOUT` error if it does not acquire the lock within that many
- * milliseconds. The current holder is not interrupted; only the waiting
- * caller gives up. Subsequent waiters on the same key are unaffected and
- * continue in their original order (`advance` skips cancelled entries).
- *
- * @returns {{ withLock: <T>(key: string, fn: () => T | Promise<T>, opts?: { maxWaitMs?: number }) => Promise<T>, held: (key: string) => boolean, size: () => number, clear: () => void }}
- */
-function _createInMemoryLock() {
-	/**
-	 * @typedef {Object} _Waiter
-	 * @property {() => any | Promise<any>} fn
-	 * @property {(value: any) => void} resolve
-	 * @property {(err: Error) => void} reject
-	 * @property {ReturnType<typeof setTimeout> | null} timer
-	 * @property {boolean} cancelled
-	 */
-	/** @type {Map<string, { running: boolean, queue: Array<_Waiter> }>} */
-	const states = new Map();
-
-	function advance(key, state) {
-		while (state.queue.length > 0) {
-			const waiter = /** @type {_Waiter} */ (state.queue.shift());
-			// lock.waiter invariant: every queued waiter has resolve+reject
-			// captured at push time. Mismatch indicates corrupted queue state.
-			assert(typeof waiter.resolve === 'function' && typeof waiter.reject === 'function', 'realtime/lock.waiter.shape', { hasResolve: typeof waiter.resolve === 'function', hasReject: typeof waiter.reject === 'function' });
-			if (waiter.cancelled) continue;
-			if (waiter.timer != null) {
-				clearTimer(waiter.timer);
-				waiter.timer = null;
-			}
-			runHead(key, state, waiter.fn).then(waiter.resolve, waiter.reject);
-			return;
-		}
-		state.running = false;
-		states.delete(key);
-	}
-
-	async function runHead(key, state, fn) {
-		try {
-			return await fn();
-		} finally {
-			advance(key, state);
-		}
-	}
-
-	return {
-		withLock(key, fn, opts) {
-			if (typeof key !== 'string' || key.length === 0) {
-				return Promise.reject(new Error('lock: key must be a non-empty string'));
-			}
-			if (typeof fn !== 'function') {
-				return Promise.reject(new Error('lock: fn must be a function'));
-			}
-			const maxWaitMs = opts && opts.maxWaitMs;
-			if (maxWaitMs != null) {
-				if (typeof maxWaitMs !== 'number' || !Number.isFinite(maxWaitMs) || maxWaitMs < 0) {
-					return Promise.reject(new Error('lock: maxWaitMs must be a non-negative finite number'));
-				}
-			}
-
-			let state = states.get(key);
-			if (!state) {
-				state = { running: false, queue: [] };
-				states.set(key, state);
-			}
-
-			if (!state.running) {
-				state.running = true;
-				return runHead(key, state, fn);
-			}
-
-			return new Promise((resolve, reject) => {
-				/** @type {_Waiter} */
-				const waiter = { fn, resolve, reject, timer: null, cancelled: false };
-				if (maxWaitMs != null) {
-					waiter.timer = setTimer(() => {
-						if (waiter.cancelled) return;
-						waiter.cancelled = true;
-						waiter.timer = null;
-						const err = /** @type {Error & { code: string, key: string, maxWaitMs: number }} */ (
-							new Error("lock: timed out after " + maxWaitMs + "ms waiting for key '" + key + "'")
-						);
-						err.code = 'LOCK_TIMEOUT';
-						err.key = key;
-						err.maxWaitMs = maxWaitMs;
-						reject(err);
-					}, maxWaitMs);
-				}
-				state.queue.push(waiter);
-			});
-		},
-		held(key) { return states.has(key); },
-		size() { return states.size; },
-		clear() {
-			for (const state of states.values()) {
-				for (const waiter of state.queue) {
-					if (waiter.cancelled) continue;
-					waiter.cancelled = true;
-					if (waiter.timer != null) {
-						clearTimer(waiter.timer);
-						waiter.timer = null;
-					}
-					const err = /** @type {Error & { code: string }} */ (new Error('lock: cleared'));
-					err.code = 'LOCK_CLEARED';
-					waiter.reject(err);
-				}
-			}
-			states.clear();
-		}
-	};
-}
-
-/** @type {ReturnType<typeof _createInMemoryLock> | null} */
-let _defaultLock = null;
-
-function _getDefaultLock() {
-	if (_defaultLock) return _defaultLock;
-	_defaultLock = _createInMemoryLock();
-	return _defaultLock;
-}
-
-/**
- * Reset the default in-process lock. Tests only.
- * @internal
- */
-export function _resetLock() {
-	if (_defaultLock) _defaultLock.clear();
-	_defaultLock = null;
-}
-
-/**
- * Allowed config-object fields per wrapper. Kept in sync with the JSDoc of
- * each wrapper's config parameter; any unknown field at the call site
- * throws with a "did you mean..." hint mapped from `_*_CONFIG_HINTS`.
- *
- * Why this matters: `live.idempotent` uses `keyFrom` while `live.lock` uses
- * `key`; without unknown-field validation, a caller mirroring the other
- * helper's shape would silently fall through to the default code path
- * (idempotent: no key -> bypass cache; lock: no key -> different error).
- * Either way the caller's intended one-per-key guarantee silently breaks.
- * The hint table converts a 20-min debug into a 2-second eye-scan.
- */
-const _IDEMPOTENT_CONFIG_FIELDS = ['keyFrom', 'store', 'ttl'];
-const _IDEMPOTENT_CONFIG_HINTS = {
-	key: "live.lock uses 'key' but live.idempotent uses 'keyFrom' (the names diverged historically)"
-};
-const _LOCK_CONFIG_FIELDS = ['key', 'lock', 'maxWaitMs'];
-const _LOCK_CONFIG_HINTS = {
-	keyFrom: "live.idempotent uses 'keyFrom' but live.lock uses 'key' (which accepts a string OR a function)"
-};
-
-/**
- * Throw on any field in `cfg` not in `allowed`. Suggestions from `hints`
- * (when present) include a one-line cross-helper note for the common
- * "I mirrored the wrong helper's shape" case.
- *
- * @param {string} helperName e.g. 'live.idempotent'
- * @param {Record<string, any>} cfg The user's config object.
- * @param {string[]} allowed
- * @param {Record<string, string>} hints
- */
-function _assertConfigShape(helperName, cfg, allowed, hints) {
-	for (const k of Object.keys(cfg)) {
-		if (allowed.includes(k)) continue;
-		const hint = hints[k];
-		const suffix = hint ? ' Hint: ' + hint + '.' : '';
-		throw new Error(
-			'[svelte-realtime] ' + helperName + ": unknown config field '" + k +
-			"'. Allowed: " + allowed.join(', ') + '.' + suffix
-		);
-	}
-}
-
-/**
- * Wrap an RPC handler with idempotency: identical calls (by key) return the
- * cached result without re-running the handler. Composes with live(),
- * live.validated(), live.rateLimit(), etc.
- *
- * The key is derived from `config.keyFrom(ctx, ...args)` if provided, otherwise
- * from the client envelope's `idempotencyKey` (set via the client's
- * `rpc.with({ idempotencyKey })` helper). When neither is present, the call
- * runs as if the wrapper were absent.
- *
- * Only successful results are cached. A throwing handler aborts the slot so
- * the next caller re-runs.
- *
- * Default store is in-process (bounded). For multi-instance deployments,
- * pass `store: createIdempotencyStore(redis)` from svelte-adapter-uws-extensions.
- *
- * @param {{ keyFrom?: (ctx: any, ...args: any[]) => string | null | undefined, store?: { acquire: (key: string, ttlSec: number) => Promise<any> }, ttl?: number }} config
- * @param {Function} fn Handler function (ctx, ...args)
- * @returns {Function}
- */
-live.idempotent = function idempotent(config, fn) {
-	if (typeof fn !== 'function') {
-		throw new Error('[svelte-realtime] live.idempotent(config, fn) requires a handler function');
-	}
-	const cfg = config || {};
-	_assertConfigShape('live.idempotent', cfg, _IDEMPOTENT_CONFIG_FIELDS, _IDEMPOTENT_CONFIG_HINTS);
-	if (cfg.keyFrom !== undefined && typeof cfg.keyFrom !== 'function') {
-		throw new Error('[svelte-realtime] live.idempotent: keyFrom must be a function');
-	}
-	if (cfg.store !== undefined && (cfg.store === null || typeof cfg.store.acquire !== 'function')) {
-		throw new Error('[svelte-realtime] live.idempotent: store must implement acquire(key, ttlSec)');
-	}
-	if (cfg.ttl !== undefined && (typeof cfg.ttl !== 'number' || cfg.ttl < 0)) {
-		throw new Error('[svelte-realtime] live.idempotent: ttl must be a non-negative number of seconds');
-	}
-	const ttlSec = typeof cfg.ttl === 'number' ? cfg.ttl : 172800;
-	const keyFrom = cfg.keyFrom || null;
-	const customStore = cfg.store || null;
-
-	const wrapper = async function idempotentWrapper(ctx, ...args) {
-		const userKey = keyFrom ? keyFrom(ctx, ...args) : ctx._idempotencyKey;
-		if (!userKey) return fn(ctx, ...args);
-		// Cap key length at 256 bytes - matches isValidWireTopic and
-		// keeps the cache key from growing into a per-attacker memory
-		// pressure or a Redis/Postgres B-tree depth amplifier.
-		if (typeof userKey !== 'string' || userKey.length > 256) {
-			throw new LiveError(
-				'INVALID_REQUEST',
-				'idempotencyKey must be a string no longer than 256 characters'
-			);
-		}
-		// Namespace the cache key by registered RPC path so the same
-		// userKey across different RPCs lands in different slots.
-		// Custom keyFrom callbacks must still encode tenant scope
-		// explicitly - the framework cannot guess the app's tenant
-		// shape - but path-scoping closes the cross-RPC class.
-		const path = /** @type {any} */ (wrapper).__idempotencyPath;
-		const key = path ? 'rpc:' + path + ':' + userKey : userKey;
-		const store = customStore || _getDefaultIdempotencyStore();
-		const slot = await store.acquire(key, ttlSec);
-		if (slot && slot.acquired) {
-			try {
-				const data = await fn(ctx, ...args);
-				await slot.commit(data);
-				return data;
-			} catch (err) {
-				try { await slot.abort(); } catch {}
-				throw err;
-			}
-		}
-		if (slot && slot.pending) {
-			throw new LiveError('CONFLICT', 'A request with this idempotency key is already in progress');
-		}
-		return slot.result;
-	};
-
-	/** @type {any} */ (wrapper).__isLive = true;
-	/** @type {any} */ (wrapper).__isIdempotent = true;
-	/** @type {any} */ (wrapper).__idempotency = { keyFrom, store: customStore, ttl: ttlSec };
-	/** @type {any} */ (wrapper).__wrappedFn = fn;
-	return wrapper;
-};
-
-/**
- * Wrap an RPC handler with per-key serialization. Concurrent calls that
- * resolve to the same lock key run one at a time in FIFO order; calls on
- * different keys run in parallel. Composes with `live()`,
- * `live.validated()`, `live.idempotent()`, etc.
- *
- * The key is derived per-call: pass a string for a static lock, or a
- * function `(ctx, ...args) => string | null | undefined` to derive it
- * from the caller's context. A null / undefined key bypasses the lock
- * (the handler runs unguarded for that call).
- *
- * Default lock is in-process and bounded only by your active key set.
- * For multi-instance deployments, pass `lock: createDistributedLock(...)`
- * from `svelte-adapter-uws-extensions/redis/lock`. Any object that
- * exposes `withLock(key, fn, opts?)` matching the adapter's Lock contract
- * works.
- *
- * Pass `maxWaitMs` (in the config-object form) to bound how long a queued
- * caller will wait before giving up. On timeout, the wrapper rejects with
- * `LiveError('LOCK_TIMEOUT', ...)` so the client receives a typed error
- * with `.code === 'LOCK_TIMEOUT'`. The current holder's handler is not
- * interrupted; only the waiting caller gives up. Subsequent waiters on
- * the same key are unaffected and continue in their original order.
- *
- * Use for cron-ish triggers, expensive recompute, single-flight cache
- * fills, and atomic read-modify-write on shared records.
- *
- * @example
- * ```js
- * export const recomputeLeaderboard = live.lock(
- *   (ctx) => `leaderboard:${ctx.user.organization_id}`,
- *   async (ctx) => {
- *     const rows = await db.expensive.recompute(ctx.user.organization_id);
- *     ctx.publish(`org:${ctx.user.organization_id}:leaderboard`, 'set', rows);
- *     return rows;
- *   }
- * );
- * ```
- *
- * @example
- * ```js
- * // Bounded wait: clients calling while the lock is busy give up after 5s
- * // with LiveError('LOCK_TIMEOUT') instead of waiting indefinitely.
- * export const settleInvoice = live.lock(
- *   { key: (ctx, id) => `invoice:${id}`, maxWaitMs: 5000 },
- *   async (ctx, id) => settle(id)
- * );
- * ```
- *
- * @param {string | ((ctx: any, ...args: any[]) => string | null | undefined) | { key: string | ((ctx: any, ...args: any[]) => string | null | undefined), lock?: { withLock: (key: string, fn: () => any, opts?: { maxWaitMs?: number }) => Promise<any> }, maxWaitMs?: number }} keyOrConfig
- * @param {Function} fn Handler function (ctx, ...args)
- * @returns {Function}
- */
-live.lock = function lock(keyOrConfig, fn) {
-	if (typeof fn !== 'function') {
-		throw new Error('[svelte-realtime] live.lock(keyOrConfig, fn) requires a handler function');
-	}
-	let keyFrom;
-	let customLock = null;
-	let maxWaitMs;
-	if (typeof keyOrConfig === 'string') {
-		const staticKey = keyOrConfig;
-		if (staticKey.length === 0) {
-			throw new Error('[svelte-realtime] live.lock: key string must be non-empty');
-		}
-		keyFrom = () => staticKey;
-	} else if (typeof keyOrConfig === 'function') {
-		keyFrom = keyOrConfig;
-	} else if (keyOrConfig && typeof keyOrConfig === 'object') {
-		const cfg = keyOrConfig;
-		_assertConfigShape('live.lock', cfg, _LOCK_CONFIG_FIELDS, _LOCK_CONFIG_HINTS);
-		if (typeof cfg.key === 'string') {
-			const staticKey = cfg.key;
-			if (staticKey.length === 0) {
-				throw new Error('[svelte-realtime] live.lock: key string must be non-empty');
-			}
-			keyFrom = () => staticKey;
-		} else if (typeof cfg.key === 'function') {
-			keyFrom = cfg.key;
-		} else {
-			throw new Error('[svelte-realtime] live.lock: config.key must be a string or function');
-		}
-		if (cfg.lock !== undefined) {
-			if (!cfg.lock || typeof cfg.lock.withLock !== 'function') {
-				throw new Error('[svelte-realtime] live.lock: lock must implement withLock(key, fn)');
-			}
-			customLock = cfg.lock;
-		}
-		if (cfg.maxWaitMs !== undefined) {
-			if (typeof cfg.maxWaitMs !== 'number' || !Number.isFinite(cfg.maxWaitMs) || cfg.maxWaitMs < 0) {
-				throw new Error('[svelte-realtime] live.lock: maxWaitMs must be a non-negative finite number');
-			}
-			maxWaitMs = cfg.maxWaitMs;
-		}
-	} else {
-		throw new Error('[svelte-realtime] live.lock: first argument must be a key string, key function, or config object');
-	}
-
-	const lockOpts = maxWaitMs != null ? { maxWaitMs } : undefined;
-
-	const wrapper = async function lockedWrapper(ctx, ...args) {
-		const key = keyFrom(ctx, ...args);
-		if (key == null || key === '') return fn(ctx, ...args);
-		if (typeof key !== 'string') {
-			throw new Error('[svelte-realtime] live.lock: key resolver must return a string (or null/undefined to bypass)');
-		}
-		const lockInst = customLock || _getDefaultLock();
-		try {
-			return await lockInst.withLock(key, () => fn(ctx, ...args), lockOpts);
-		} catch (err) {
-			if (err && /** @type {any} */ (err).code === 'LOCK_TIMEOUT' && !(err instanceof LiveError)) {
-				const wrapped = new LiveError('LOCK_TIMEOUT', /** @type {Error} */ (err).message);
-				/** @type {any} */ (wrapped).key = /** @type {any} */ (err).key;
-				/** @type {any} */ (wrapped).maxWaitMs = /** @type {any} */ (err).maxWaitMs;
-				throw wrapped;
-			}
-			throw err;
-		}
-	};
-
-	/** @type {any} */ (wrapper).__isLive = true;
-	/** @type {any} */ (wrapper).__isLocked = true;
-	/** @type {any} */ (wrapper).__lockConfig = { keyFrom, lock: customLock, maxWaitMs };
-	/** @type {any} */ (wrapper).__wrappedFn = fn;
-	return wrapper;
-};
+installIdempotency(live);
 
 /**
  * Optional remote-registry surface used by `live.push` when the userId
@@ -2968,7 +2236,7 @@ let _remoteRegistry = null;
  */
 live.configurePush = function configurePush(config) {
 	if (config === null) {
-		_pushIdentify = null;
+		state.pushIdentify = null;
 		_remoteRegistry = null;
 		return;
 	}
@@ -2980,11 +2248,11 @@ live.configurePush = function configurePush(config) {
 	}
 	if (config.identify !== undefined) {
 		if (config.identify === null) {
-			_pushIdentify = null;
+			state.pushIdentify = null;
 		} else if (typeof config.identify !== 'function') {
 			throw new Error('[svelte-realtime] live.configurePush: identify must be a function or null');
 		} else {
-			_pushIdentify = config.identify;
+			state.pushIdentify = config.identify;
 		}
 	}
 	if (config.remoteRegistry !== undefined) {
@@ -3035,11 +2303,11 @@ export const pushHooks = {
 		if (reason !== null) {
 			throw new Error('[svelte-realtime] pushHooks.open: ' + reason + '. identify(ws) must return a non-empty userId string that is safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for anonymous connections.');
 		}
-		if (!_pushRegistry.has(userId) && _pushRegistry.size >= _maxPushRegistry) {
+		if (!_pushRegistry.has(userId) && _pushRegistry.size >= state.maxPushRegistry) {
 			if (!_pushRegistryWarnFired) {
 				_pushRegistryWarnFired = true;
 				console.warn(
-					"[svelte-realtime] push registry reached MAX_PUSH_REGISTRY=" + _maxPushRegistry +
+					"[svelte-realtime] push registry reached MAX_PUSH_REGISTRY=" + state.maxPushRegistry +
 					"; new userIds will not be registered for `live.push({ userId })` until existing entries clear.\n" +
 					"  This usually indicates push registrations are not being released on disconnect.\n" +
 					"  Check that hooks.ws.js wires `pushHooks.close` and that the upstream identify(ws) is stable per-user.\n" +
@@ -3448,7 +2716,7 @@ live.notify = function notify(target, event, data) {
  */
 export function _resetPushRegistry() {
 	_pushRegistry.clear();
-	_pushIdentify = null;
+	state.pushIdentify = null;
 	_remoteRegistry = null;
 	_pushRegistryWarnFired = false;
 }
@@ -3560,9 +2828,6 @@ function _validate(schema, input) {
 	};
 }
 
-/** @type {Map<string, { schedule: number[], fn: Function, topic: string }>} */
-const cronRegistry = new Map();
-
 /** @type {ReturnType<typeof setInterval> | null} */
 let _cronInterval = null;
 
@@ -3583,9 +2848,6 @@ let _cronAt1Hz = false;
  */
 const _cronRunning = new Set();
 
-/** @type {import('svelte-adapter-uws').Platform | null} */
-let _cronPlatform = null;
-
 /**
  * Process-wide leader gate for cron. When set, every tick consults
  * `_cronLeader()` before invoking any registered job; if it returns
@@ -3604,46 +2866,10 @@ let _cronPlatform = null;
 let _cronLeader = null;
 
 /**
- * Process-wide cluster bus. Single source of truth consulted by every
- * publish surface in the framework (RPC `ctx.publish`, cron tick,
- * reactive watchers' publish wrap, top-level `publish()` helper). When
- * set, outbound publishes relay to other cluster instances via
- * `bus.wrap(platform).publish`; inbound relays from other instances
- * arrive through the bus's own subscriber and are broadcast on this
- * instance via the wrapped surrogate's `publish`.
- *
- * Written by `setBus(bus)`, `configureCron({ bus })`, and the
- * `realtime({ bus })` factory. Read via `getBus()` and consulted at
- * publish-time by every framework seam so a single declaration of
- * deployment intent covers all of them. Without a bus, every seam
- * publishes locally (the single-replica default).
- *
- * Composition discipline: `bus.wrap(...)` is applied at publish time
- * over a snapshot of the raw adapter publish (the "surrogate"). The
- * reactive seam mutates `platform.publish` to a `derivedPublish` that
- * routes through the wrapped surrogate when a bus is configured, so
- * the same publish call fires reactive watchers AND relays to the
- * cluster in one step. Inbound relays from other instances arrive via
- * the wrapped surrogate's publish (which runs the local broadcast + the
- * watcher fan-out without re-relaying), so derived / effect /
- * aggregate handlers on receiving instances see the cross-cluster
- * stream the same way they see local publishes.
- *
- * @type {{ wrap: (platform: any) => any } | null}
- */
-let _bus = null;
-/**
- * Legacy alias retained so the existing `_cronBus` references in the
- * cron tick read the canonical bus without surgery. Always equal to
- * `_bus` (the setter writes both in lockstep). Treat as read-only.
- */
-let _cronBus = null;
-
-/**
  * Write the process-wide bus. Validated like `configureCron({ bus })`
  * - must expose `.wrap(platform)` or be `null`. Mirrored into the
- * legacy `_cronBus` alias so the existing cron tick keeps reading the
- * canonical value without surgery. Bumps `_busEpoch` so memoized
+ * legacy `state.cronBus` alias so the existing cron tick keeps reading the
+ * canonical value without surgery. Bumps `state.busEpoch` so memoized
  * `bus.wrap(...)` caches (per-platform, computed lazily by the
  * reactive wrap and the RPC message hooks) invalidate on swap.
  * @param {{ wrap: (platform: any) => any } | null} bus
@@ -3652,22 +2878,15 @@ function _setBus(bus) {
 	if (bus !== null && (typeof bus !== 'object' || typeof bus.wrap !== 'function')) {
 		throw new Error('[svelte-realtime] setBus: bus must expose a .wrap(platform) method or be null');
 	}
-	_bus = bus;
-	_cronBus = bus;
-	_busEpoch++;
+	state.bus = bus;
+	state.cronBus = bus;
+	state.busEpoch++;
 }
 
 /** Read the process-wide bus (or null when no cluster intent is wired). */
 function _getBus() {
-	return _bus;
+	return state.bus;
 }
-
-/**
- * Monotonic counter bumped on every bus swap. Used by per-platform
- * `bus.wrap(...)` caches to detect "the bus changed under me, re-wrap"
- * without holding a strong reference to the old bus.
- */
-let _busEpoch = 0;
 
 /**
  * One-shot flag for the "configureCron leader without bus" warning.
@@ -3852,9 +3071,6 @@ live.flag = function flag(topic, initialValue, options) {
 	return /** @type {any} */ (stream);
 };
 
-/** @type {Map<string, { sources: string[], fn: Function, topic: string, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
-const derivedRegistry = new Map();
-
 /**
  * Create a server-side computed stream that recomputes when any source topic publishes.
  *
@@ -3939,17 +3155,11 @@ let _hasLazyReactive = false;
 /** @type {Map<Function, object>} O(1) lookup from fn reference to dynamic derived registry entry */
 const _dynamicDerivedByFn = new Map();
 
-/** @type {import('svelte-adapter-uws').Platform | null} Captured platform for dynamic derived recomputation */
-let _derivedPlatform = null;
-
 /** @type {boolean} Whether _activateDerived has been called at least once */
 let _activateDerivedCalled = false;
 
 /** @type {boolean} Whether the missing _activateDerived warning has already fired */
 let _warnedActivateDerived = false;
-
-/** @type {Map<string, { sources: string[], fn: Function, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
-const effectRegistry = new Map();
 
 /**
  * Create a server-side reactive side effect.
@@ -4106,9 +3316,6 @@ export function __registerFlag(topic, initialValue) {
 	_flagCell(topic, initialValue);
 	_installFlagWatcher(topic);
 }
-
-/** @type {Map<string, { source: string, reducers: any, topic: string, state: any, snapshot: Function | null, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
-const aggregateRegistry = new Map();
 /** @type {Map<string, any>} Topic-keyed lookup for aggregates */
 const _aggregateByTopic = new Map();
 
@@ -4738,7 +3945,7 @@ function _scheduleNextSlide(entry, win) {
 
 /**
  * Compute and publish a window's current state to its output topic.
- * Honors `_cronPlatform` first (the captured publish path used by cron
+ * Honors `state.cronPlatform` first (the captured publish path used by cron
  * and by anything that runs outside an active connection), so boundary
  * and slide timers can publish without an active publish wrapping them.
  *
@@ -4750,7 +3957,7 @@ function _scheduleNextSlide(entry, win) {
  * @param {any} win
  */
 function _publishWindow(entry, win) {
-	const platform = _cronPlatform;
+	const platform = state.cronPlatform;
 	if (!platform) return;
 	const computed = _computeWindowState(win, entry.reducers);
 	platform.publish(win.outputTopic, 'set', computed);
@@ -4987,454 +4194,6 @@ pipe.join = function pipeJoin(field, resolver, as) {
  * @param {{ topic: (ctx: any, ...args: any[]) => string, init: (ctx: any, ...args: any[]) => Promise<any>, presence?: (ctx: any) => any, cursors?: boolean | { throttle?: number }, actions?: Record<string, Function>, guard?: Function, onJoin?: Function, onLeave?: Function, merge?: string, key?: string }} config
  * @returns {any}
  */
-/**
- * Per topic+userId presence tracking.
- *  - `count`: number of active subscriptions for this user in this room.
- *  - `timer`: pending grace-period leave (or null).
- *  - `data`: the user-supplied presence payload (`presenceFn(ctx)` result),
- *    held so the presence stream's init can reconstruct the roster from
- *    in-memory state when `platform.presence.list` isn't wired (zero-config
- *    dev path). Production wires a cluster-aware `platform.presence` and
- *    bypasses this fallback. Memory: bounded by `_PRESENCE_REF_MAX`; entries
- *    are dropped on the grace-timer expiry or under cap eviction.
- * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any }>}
- */
-const _presenceRef = new Map();
-
-/**
- * Direct handle to the in-memory presence-ref map for tests that need to seed
- * or inspect a roster entry without driving a full socket subscribe. Not part
- * of the public surface.
- * @internal
- * @returns {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any }>}
- */
-export function _presenceRefForTest() {
-	return _presenceRef;
-}
-
-/** @type {WeakMap<object, string>} Stable guest ID per connection for anonymous users */
-const _guestIds = new WeakMap();
-let _guestIdCounter = 0;
-
-/**
- * Get a stable identity key for a connection. Uses ctx.user.id (or the
- * Postgres-convention `user_id` / camelCase `userId` aliases) if present,
- * otherwise assigns a unique guest ID that persists for the connection
- * lifetime. The id-key probe order mirrors `_defaultPushIdentify` so apps
- * that expose `user_id` in their session shape rate-limit per-user instead
- * of falling back to the per-connection bucket.
- * @param {any} ctx
- * @returns {string}
- */
-export function _getIdentityKey(ctx) {
-	const u = ctx.user;
-	if (u) {
-		const id = u.id ?? u.user_id ?? u.userId;
-		if (id !== undefined && id !== null) return String(id);
-	}
-	if (!ctx.ws) return 'anon';
-	let guestId = _guestIds.get(ctx.ws);
-	if (!guestId) {
-		guestId = '__guest_' + (++_guestIdCounter).toString(36);
-		_guestIds.set(ctx.ws, guestId);
-	}
-	return guestId;
-}
-
-/**
- * Cluster-shared presence-ref store. Used by `live.room({ presence })` when
- * `platform.redis` is wired by the host app (raw ioredis-shaped client with
- * hincrby / hset / hdel / hgetall / expire). Falls back to the in-process
- * `_presenceRef` Map when absent, preserving zero-config dev behavior.
- *
- * Storage layout (one Redis HASH per topic):
- *   key:    `__live-presence:{topic}`
- *   fields: 'c:{userKey}' -> integer (cluster-wide subscriber count)
- *           'd:{userKey}' -> JSON-stringified presence data
- *
- * Cluster semantics:
- * - First replica to take a user's count from 0->1 publishes 'join' (cluster-
- *   wide isFirst). Subsequent replicas just increment.
- * - Last replica to take a user's count from 1->0 publishes 'leave'.
- * - Loader returns the full HGETALL view so any replica's new subscriber sees
- *   all users from all replicas, not just the locally-attached ones.
- *
- * Per-replica refcount (multiple tabs of the same user on the same replica)
- * and grace-timer behavior stay in the existing _presenceRef Map. The cluster
- * helpers only fire at the local 0<->1 transitions, so a quick reconnect
- * burst on a single replica doesn't churn the cluster counter.
- */
-const _PRESENCE_KEY_PREFIX = '__live-presence:';
-const _PRESENCE_TTL_SEC = 3600;
-
-// Atomic sticky-field merge into a roster entry's data field, gated on the
-// entry still being present. KEYS[1] = the roster hash; ARGV = count field,
-// data field, the JSON delta (null value = delete the field), the TTL. Returns
-// 0 (and writes nothing) when the count field is gone, so a release that lands
-// between a read and a write cannot resurrect a phantom data row with no count.
-// One round-trip; the JS fallback below covers a redis without scripting.
-const _PRESENCE_MERGE_SCRIPT =
-	"if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then return 0 end\n" +
-	"local raw = redis.call('HGET', KEYS[1], ARGV[2])\n" +
-	"local cur = {}\n" +
-	"if raw then local ok, parsed = pcall(cjson.decode, raw); if ok and type(parsed) == 'table' then cur = parsed end end\n" +
-	"local delta = cjson.decode(ARGV[3])\n" +
-	"for k, v in pairs(delta) do if v == cjson.null then cur[k] = nil else cur[k] = v end end\n" +
-	"local encoded; if next(cur) == nil then encoded = '{}' else encoded = cjson.encode(cur) end\n" +
-	"redis.call('HSET', KEYS[1], ARGV[2], encoded)\n" +
-	"redis.call('EXPIRE', KEYS[1], ARGV[4])\n" +
-	"return 1";
-
-/**
- * Bump the cluster-wide count for (topic, key). Returns isFirst=true when
- * this acquire took the count from 0 to 1 cluster-wide, signaling that the
- * caller should publish a 'join' event. Falls through to a no-op stub when
- * platform.redis is missing (single-replica dev path).
- */
-export async function _clusterPresenceAcquire(platform, topic, key, data) {
-	const redis = platform && platform.redis;
-	if (!redis || typeof redis.hincrby !== 'function') return { isFirst: true };
-	const hKey = _PRESENCE_KEY_PREFIX + topic;
-	const countField = 'c:' + key;
-	const dataField = 'd:' + key;
-	let serialized;
-	try { serialized = JSON.stringify(data); } catch { serialized = 'null'; }
-	try {
-		// Write the data field BEFORE bumping the count. A concurrent
-		// `_clusterPresenceList` (e.g. the same user's own :presence stream
-		// loader racing the data stream's acquire) reads data fields only;
-		// if HINCRBY ran first the loader could observe a count without a
-		// data field and return an empty roster, missing the user's own
-		// entry. Writing data first guarantees the loader sees the entry
-		// as soon as the count is visible.
-		await redis.hset(hKey, dataField, serialized);
-		const count = await redis.hincrby(hKey, countField, 1);
-		if (count === 1) {
-			await redis.expire(hKey, _PRESENCE_TTL_SEC);
-			return { isFirst: true };
-		}
-		// Refresh TTL on activity so the hash doesn't expire under a busy room.
-		try { await redis.expire(hKey, _PRESENCE_TTL_SEC); } catch { /* best-effort */ }
-		return { isFirst: false };
-	} catch {
-		// Redis blip: treat as first so we publish a join. Worst case a duplicate
-		// 'join' merges idempotently by key on the client.
-		return { isFirst: true };
-	}
-}
-
-/**
- * Decrement the cluster-wide count for (topic, key). Returns isLast=true when
- * this release took the count from 1 to 0 cluster-wide, signaling that the
- * caller should publish a 'leave' event. Falls through to isLast=true when
- * platform.redis is missing (single-replica dev path treats every grace-timer
- * expiry as the final leave).
- */
-async function _clusterPresenceRelease(platform, topic, key) {
-	const redis = platform && platform.redis;
-	if (!redis || typeof redis.hincrby !== 'function') return { isLast: true };
-	const hKey = _PRESENCE_KEY_PREFIX + topic;
-	const countField = 'c:' + key;
-	const dataField = 'd:' + key;
-	try {
-		const count = await redis.hincrby(hKey, countField, -1);
-		if (count <= 0) {
-			await redis.hdel(hKey, countField, dataField);
-			return { isLast: true };
-		}
-		return { isLast: false };
-	} catch {
-		// Redis blip: assume last so we publish a leave. A late observer reading
-		// HGETALL might still see the stale field until the next acquire repairs
-		// the count (or the hash TTL expires).
-		return { isLast: true };
-	}
-}
-
-/**
- * Return the cluster-wide presence roster for a topic as `[{key, data}, ...]`.
- * Falls through to the local _presenceRef iteration when platform.redis is
- * missing.
- */
-export async function _clusterPresenceList(platform, topic) {
-	const redis = platform && platform.redis;
-	if (!redis || typeof redis.hgetall !== 'function') {
-		const prefix = topic + '\0';
-		const out = [];
-		for (const [refKey, ref] of _presenceRef) {
-			if (!refKey.startsWith(prefix)) continue;
-			if (ref.data == null) continue;
-			out.push({ key: refKey.slice(prefix.length), data: ref.data });
-		}
-		return out;
-	}
-	const hKey = _PRESENCE_KEY_PREFIX + topic;
-	try {
-		const all = await redis.hgetall(hKey);
-		const out = [];
-		for (const field of Object.keys(all)) {
-			if (field.length < 3 || field[0] !== 'd' || field[1] !== ':') continue;
-			const key = field.slice(2);
-			try { out.push({ key, data: JSON.parse(all[field]) }); }
-			catch { /* skip corrupt entry */ }
-		}
-		return out;
-	} catch {
-		return [];
-	}
-}
-
-/**
- * Merge a sticky presence delta into both roster stores so either snapshot
- * path (the in-memory _presenceRef iteration or the Redis 'd:'+key JSON field)
- * reflects it for a late joiner. A null delta value deletes the field, which is
- * the release path: releaseLock sends `{ 'lock:<k>': null }` and clearing a
- * selection sends `{ selection: null }`.
- *
- * The forward `update` publish has already been sent by the caller; this merge
- * only carries the sticky subset onto the roster entry so a subscriber who
- * loads the roster after the update still sees the field. An entry only exists
- * once presence has been set, so a missing entry (no live roster row) is a
- * no-op: there is nothing to stamp the field onto.
- *
- * @param {any} platform
- * @param {string} topic
- * @param {string} key
- * @param {Record<string, any>} delta
- */
-export async function _clusterPresenceMerge(platform, topic, key, delta) {
-	// In-memory roster (the no-redis snapshot path reads ref.data by reference).
-	const ref = _presenceRef.get(topic + '\0' + key);
-	if (ref && ref.data && typeof ref.data === 'object') {
-		for (const k of Object.keys(delta)) {
-			if (delta[k] == null) delete ref.data[k]; else ref.data[k] = delta[k];
-		}
-	}
-	// Cluster roster (the redis snapshot path reads the 'd:'+key JSON field).
-	const redis = platform && platform.redis;
-	if (!redis) return;
-	const hKey = _PRESENCE_KEY_PREFIX + topic;
-	const dataField = 'd:' + key;
-	const countField = 'c:' + key;
-	// Preferred path: one atomic server-side merge gated on the count field, so a
-	// concurrent release cannot leave a phantom data row behind.
-	if (typeof redis.eval === 'function') {
-		try {
-			await redis.eval(
-				_PRESENCE_MERGE_SCRIPT, 1, hKey, countField, dataField,
-				JSON.stringify(delta), String(_PRESENCE_TTL_SEC)
-			);
-		} catch { /* redis blip: in-memory already merged; forward update already sent */ }
-		return;
-	}
-	// Fallback for a redis without scripting: read, merge, then re-check the
-	// count still exists right before the write to narrow the same race.
-	if (typeof redis.hget !== 'function') return;
-	try {
-		const raw = await redis.hget(hKey, dataField);
-		if (raw == null) return; // no live entry yet: nothing to carry the field
-		let cur; try { cur = JSON.parse(raw); } catch { return; }
-		if (cur == null || typeof cur !== 'object') cur = {};
-		for (const k of Object.keys(delta)) {
-			if (delta[k] == null) delete cur[k]; else cur[k] = delta[k];
-		}
-		if (typeof redis.hexists === 'function' && !(await redis.hexists(hKey, countField))) return;
-		await redis.hset(hKey, dataField, JSON.stringify(cur));
-		try { await redis.expire(hKey, _PRESENCE_TTL_SEC); } catch { /* best-effort */ }
-	} catch { /* redis blip: in-memory already merged; forward update already sent */ }
-}
-
-// - Room action history (lag compensation) ----------------------------------
-
-const _HISTORY_MAX_ENTRIES = 300;
-const _HISTORY_MAX_AGE_MS = 2000;
-const _HISTORY_MAX_TOPICS = 100;
-
-/**
- * Validate and normalize a room's `history` config. The capture function is
- * the app's snapshot of its own authoritative state - the framework never
- * guesses at state shape; it only owns the ring mechanics around what the
- * app hands it.
- *
- * @param {any} history
- * @returns {{ capture: Function, maxEntries: number, maxAgeMs: number, maxTopics: number }}
- */
-function _resolveHistoryConfig(history) {
-	if (!history || typeof history !== 'object' || typeof history.capture !== 'function') {
-		throw new Error(
-			`[svelte-realtime] live.room() history requires a capture function: history: { capture: (...roomArgs) => state }\n  See: https://svti.me/rooms`
-		);
-	}
-	const maxEntries = history.maxEntries ?? _HISTORY_MAX_ENTRIES;
-	if (!Number.isInteger(maxEntries) || maxEntries < 1) {
-		throw new Error(`[svelte-realtime] live.room() history.maxEntries must be a positive integer, got ${history.maxEntries}\n  See: https://svti.me/rooms`);
-	}
-	const maxAgeMs = history.maxAgeMs ?? _HISTORY_MAX_AGE_MS;
-	if (typeof maxAgeMs !== 'number' || !(maxAgeMs > 0)) {
-		throw new Error(`[svelte-realtime] live.room() history.maxAgeMs must be a positive number, got ${history.maxAgeMs}\n  See: https://svti.me/rooms`);
-	}
-	const maxTopics = history.maxTopics ?? _HISTORY_MAX_TOPICS;
-	if (!Number.isInteger(maxTopics) || maxTopics < 1) {
-		throw new Error(`[svelte-realtime] live.room() history.maxTopics must be a positive integer, got ${history.maxTopics}\n  See: https://svti.me/rooms`);
-	}
-	return { capture: history.capture, maxEntries, maxAgeMs, maxTopics };
-}
-
-/**
- * Cycle-safe recursive freeze for dev-mode snapshots, so a handler that
- * mutates historical state throws at the mutation site instead of silently
- * corrupting the ring. Plain objects and arrays only - Map/Set contents
- * cannot be frozen by Object.freeze and are the capture contract's
- * responsibility (documented: capture returns plain data). Depth-capped so
- * client-shaped payloads an app stored into its state cannot recurse the
- * dev process into a stack overflow.
- *
- * @param {any} value
- * @param {Set<any>} seen
- * @param {number} depth
- */
-function _deepFreeze(value, seen, depth) {
-	if (value === null || typeof value !== 'object' || seen.has(value)) return value;
-	seen.add(value);
-	Object.freeze(value);
-	if (depth >= 64) return value;
-	for (const key of Object.keys(value)) _deepFreeze(value[key], seen, depth + 1);
-	return value;
-}
-
-/** @param {any} state */
-function _freezeSnapshot(state) {
-	if (state === null || typeof state !== 'object') return state;
-	// A thenable here means an async capture: the ring would record a frozen
-	// pending Promise and every evaluation would silently read garbage.
-	// Checked at the state boundary (catches any promise-returning function,
-	// not just async syntax) and loud by design.
-	if (typeof state.then === 'function') {
-		throw new Error(
-			`[svelte-realtime] history capture must return state synchronously; it returned a thenable. Snapshot your in-memory authoritative state directly.\n  See: https://svti.me/rooms`
-		);
-	}
-	if (_IS_DEV) return _deepFreeze(state, new Set(), 0);
-	return Object.freeze(state);
-}
-
-/**
- * Per-room store of bounded per-topic history rings. Same shape as the replay
- * plugin's in-memory ring: fixed-size buffer with modular indices, topics
- * LRU-capped so a burst of parameterized room ids cannot grow memory without
- * bound. Entry times come from the exact wall clock (`wallEpoch`), never the
- * 1s-cached `now()` - rewind windows are sub-second.
- *
- * @param {{ maxEntries: number, maxAgeMs: number, maxTopics: number }} cfg
- */
-function _createHistoryStore(cfg) {
-	/** @type {Map<string, { buf: Array<{ time: number, state: any } | undefined>, start: number, len: number }>} */
-	const topics = new Map();
-	/** @type {Map<string, null>} insertion-ordered LRU; first key is coldest */
-	const topicOrder = new Map();
-
-	/** @param {string} topic */
-	function getRing(topic) {
-		let ring = topics.get(topic);
-		if (!ring) {
-			if (topics.size >= cfg.maxTopics) {
-				const lru = topicOrder.keys().next().value;
-				if (lru !== undefined) {
-					topics.delete(lru);
-					topicOrder.delete(lru);
-				}
-			}
-			ring = { buf: new Array(cfg.maxEntries), start: 0, len: 0 };
-			topics.set(topic, ring);
-		} else {
-			topicOrder.delete(topic);
-		}
-		topicOrder.set(topic, null);
-		return ring;
-	}
-
-	return {
-		/**
-		 * Append a snapshot, lazily evicting entries past the age window. One
-		 * write per successful room action; never timer-driven.
-		 *
-		 * @param {string} topic
-		 * @param {any} state
-		 * @param {number} time
-		 */
-		record(topic, state, time) {
-			const ring = getRing(topic);
-			// The binary search below requires non-decreasing entry times, and
-			// the wall clock can step backwards (NTP correction). Clamping a
-			// new entry to at least the newest recorded time keeps the ring
-			// sorted at the cost of one compare against the tail.
-			if (ring.len > 0) {
-				const newest = ring.buf[(ring.start + ring.len - 1) % cfg.maxEntries];
-				if (newest !== undefined && newest.time > time) time = newest.time;
-			}
-			while (ring.len > 0) {
-				const oldest = ring.buf[ring.start];
-				if (oldest !== undefined && oldest.time >= time - cfg.maxAgeMs) break;
-				ring.buf[ring.start] = undefined;
-				ring.start = (ring.start + 1) % cfg.maxEntries;
-				ring.len--;
-			}
-			const idx = (ring.start + ring.len) % cfg.maxEntries;
-			ring.buf[idx] = { time, state };
-			if (ring.len < cfg.maxEntries) ring.len++;
-			else ring.start = (ring.start + 1) % cfg.maxEntries;
-		},
-
-		/**
-		 * Newest entry recorded at or before `commandTime`, still inside the
-		 * age window as of `t`. Null when the ring cannot serve the rewind -
-		 * the caller fails safe to current state (a rewind past the window
-		 * must never resolve to the oldest marker, or stale commands would
-		 * evaluate against ancient state).
-		 *
-		 * @param {string} topic
-		 * @param {number} commandTime
-		 * @param {number} t
-		 * @returns {{ time: number, state: any } | null}
-		 */
-		lookup(topic, commandTime, t) {
-			const ring = topics.get(topic);
-			if (!ring || ring.len === 0) return null;
-			topicOrder.delete(topic);
-			topicOrder.set(topic, null);
-			let lo = 0;
-			let hi = ring.len - 1;
-			let found = -1;
-			while (lo <= hi) {
-				const mid = (lo + hi) >> 1;
-				const e = /** @type {{ time: number, state: any }} */ (ring.buf[(ring.start + mid) % cfg.maxEntries]);
-				if (e.time <= commandTime) {
-					found = mid;
-					lo = mid + 1;
-				} else {
-					hi = mid - 1;
-				}
-			}
-			if (found < 0) return null;
-			const entry = /** @type {{ time: number, state: any }} */ (ring.buf[(ring.start + found) % cfg.maxEntries]);
-			if (entry.time < t - cfg.maxAgeMs) return null;
-			return entry;
-		}
-	};
-}
-
-/**
- * Default `ctx.compensate` outside a history-enabled room action: a clear
- * error beats a silent no-rewind evaluation. Room actions on a room with a
- * `history` config shadow this with the live implementation, the same way
- * they shadow `ctx.publish`.
- */
-async function _compensateUnavailable() {
-	throw new LiveError(
-		'VALIDATION',
-		'ctx.compensate requires a live.room with a history config: live.room({ history: { capture } })'
-	);
-}
 
 live.room = function room(config) {
 	const {
@@ -5569,7 +4328,7 @@ live.room = function room(config) {
 				return;
 			}
 
-			if (_presenceRef.size >= _maxPresenceRef) {
+			if (_presenceRef.size >= state.maxPresenceRef) {
 				for (const [k, r] of _presenceRef) {
 					if (r.timer) {
 						clearTimer(r.timer);
@@ -5587,11 +4346,11 @@ live.room = function room(config) {
 						_presenceRef.delete(k);
 					}
 				}
-				if (_presenceRef.size >= _maxPresenceRef) {
-					if (!_presenceRefWarnFired) {
-						_presenceRefWarnFired = true;
+				if (_presenceRef.size >= state.maxPresenceRef) {
+					if (!state.presenceRefWarnFired) {
+						state.presenceRefWarnFired = true;
 						console.warn(
-							"[svelte-realtime] presence-ref map reached MAX_PRESENCE_REF=" + _maxPresenceRef +
+							"[svelte-realtime] presence-ref map reached MAX_PRESENCE_REF=" + state.maxPresenceRef +
 							"; new joiners will not appear in any subscriber's roster until existing entries clear.\n" +
 							"  For multi-instance deploys, wire `platform.redis` (raw ioredis client) so the cluster-shared Redis presence is bypasses the in-memory cap.\n" +
 							"  See: https://svti.me/presence"
@@ -6961,123 +5720,9 @@ live.array = function array(config) {
 	return _crdtRegister('array', config);
 };
 
-/** @type {{ rpcCount?: any, rpcDuration?: any, rpcErrors?: any, streamGauge?: any, cronCount?: any, cronErrors?: any, assertions?: any } | null} */
-let _metricsInstruments = null;
+installAdmission(live);
 
-/** Valid pressure reasons accepted in admission rules. Mirrors the adapter's PressureReason enum. */
-const _PRESSURE_REASONS = new Set(['NONE', 'PUBLISH_RATE', 'SUBSCRIBERS', 'MEMORY']);
-
-/** @type {{ classes: Record<string, string[] | ((snapshot: any) => boolean)> } | null} */
-let _admissionConfig = null;
-
-/**
- * Configure pressure-aware admission control. Each named class maps to
- * either an array of pressure reasons (shed when `platform.pressure.reason`
- * is in the array) or a `(snapshot) => boolean` predicate (shed when truthy).
- *
- * Once configured, `ctx.shed(className)` evaluates the rule against the
- * current `platform.pressure` snapshot, and any `live.stream({ classOfService })`
- * auto-rejects new subscribes under matching pressure with `OVERLOADED`.
- *
- * Pass `null` to clear (tests).
- *
- * Zero overhead when never called: `ctx.shed` returns `false` and
- * `classOfService` is a no-op.
- *
- * @param {{ classes: Record<string, string[] | ((snapshot: any) => boolean)> } | null} config
- */
-live.admission = function admission(config) {
-	if (config === null || config === undefined) { _admissionConfig = null; return; }
-	if (typeof config !== 'object') {
-		throw new Error('[svelte-realtime] live.admission: config must be an object or null');
-	}
-	if (!config.classes || typeof config.classes !== 'object') {
-		throw new Error('[svelte-realtime] live.admission: config.classes must be an object');
-	}
-	const classes = {};
-	for (const [name, rule] of Object.entries(config.classes)) {
-		if (Array.isArray(rule)) {
-			for (const r of rule) {
-				if (!_PRESSURE_REASONS.has(r)) {
-					throw new Error(
-						`[svelte-realtime] live.admission: class '${name}' has unknown pressure reason '${r}'. ` +
-						`Valid: ${[..._PRESSURE_REASONS].join(', ')}`
-					);
-				}
-			}
-			classes[name] = rule;
-		} else if (typeof rule === 'function') {
-			classes[name] = rule;
-		} else {
-			throw new Error(
-				`[svelte-realtime] live.admission: class '${name}' must be an array of pressure reasons or a (snapshot) => boolean predicate`
-			);
-		}
-	}
-	_admissionConfig = { classes };
-};
-
-/**
- * Reset the admission configuration. Tests only.
- * @internal
- */
-export function _resetAdmission() {
-	_admissionConfig = null;
-}
-
-/**
- * Evaluate whether a request of the given class should be shed under
- * current pressure. Returns `true` to shed, `false` to admit.
- *
- * - No admission configured -> always admit.
- * - No `platform.pressure` snapshot -> always admit (no signal to act on).
- * - Class not configured -> throws (typo defense).
- *
- * @param {any} platform
- * @param {string} className
- * @returns {boolean}
- */
-function _shouldShed(platform, className) {
-	if (!_admissionConfig) return false;
-	const rule = _admissionConfig.classes[className];
-	if (rule === undefined) {
-		const known = Object.keys(_admissionConfig.classes).join(', ') || '<none>';
-		throw new Error(`[svelte-realtime] ctx.shed: unknown class '${className}'. Configured: ${known}`);
-	}
-	const snapshot = platform && platform.pressure;
-	if (!snapshot) return false;
-	if (typeof rule === 'function') return !!rule(snapshot);
-	return rule.includes(snapshot.reason);
-}
-
-/**
- * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
- * subscriptions, and cron executions. Zero overhead if never called.
- *
- * Call once at server start (e.g. the top of `src/hooks.ws.{js,ts}`).
- *
- * The registry is any object exposing:
- *   counter({ name, help, labelNames }) -> { inc(labels?) }
- *   histogram({ name, help, labelNames }) -> { observe(labels, valueSeconds) }
- *   gauge({ name, help }) -> { inc(), dec() }
- *
- * See the README "Prometheus metrics" section for a working example that
- * pairs this with `createMetrics()` from `svelte-adapter-uws-extensions/prometheus`.
- *
- * @param {any} registry - Object with counter, histogram, and gauge factories
- */
-live.metrics = function metrics(registry) {
-	_metricsInstruments = {
-		rpcCount: registry.counter({ name: 'svelte_realtime_rpc_total', help: 'Total RPC calls', labelNames: ['path', 'status'] }),
-		rpcDuration: registry.histogram({ name: 'svelte_realtime_rpc_duration_seconds', help: 'RPC call duration', labelNames: ['path'] }),
-		rpcErrors: registry.counter({ name: 'svelte_realtime_rpc_errors_total', help: 'Total RPC errors', labelNames: ['path', 'code'] }),
-		streamGauge: registry.gauge({ name: 'svelte_realtime_stream_subscriptions', help: 'Active stream subscriptions' }),
-		cronCount: registry.counter({ name: 'svelte_realtime_cron_total', help: 'Total cron executions', labelNames: ['path', 'status'] }),
-		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] }),
-		assertions: registry.counter({ name: 'svelte_realtime_assertion_violations_total', help: 'Production-assertion violations by category', labelNames: ['category'] })
-	};
-	wireAssertionMetrics((category) => _metricsInstruments.assertions.inc({ category }));
-};
+installMetrics(live);
 
 /**
  * Wrap a stream initFn call with a circuit breaker.
@@ -7221,7 +5866,7 @@ function _ensureWrap(platform) {
 }
 
 export function _activateDerived(platform) {
-	_derivedPlatform = platform;
+	state.derivedPlatform = platform;
 	_activateDerivedCalled = true;
 	// Install the framework's publish wrap unconditionally. Pre-0.5.7 this
 	// was gated on "any reactive primitives registered?" to avoid wrap
@@ -7253,8 +5898,8 @@ export function _activateDerived(platform) {
  * as empty leaderboards and `silentTopicWarning` after 30s.
  */
 function _maybeLateActivate() {
-	if (!_derivedPlatform) return;
-	_ensureWrap(_derivedPlatform);
+	if (!state.derivedPlatform) return;
+	_ensureWrap(state.derivedPlatform);
 }
 
 /**
@@ -7280,7 +5925,7 @@ function _wrapPlatformPublish(platform) {
 		: null;
 
 	// Memoized bus-wrapped surrogate. Recomputed when the process-wide
-	// bus changes (detected via `_busEpoch`). The surrogate's `publish`
+	// bus changes (detected via `state.busEpoch`). The surrogate's `publish`
 	// is `derivedPublishLocal` (local broadcast + watcher fan-out, no
 	// re-relay), so inbound bus deliveries fire watchers on the
 	// receiving instance without bouncing the message back out onto the
@@ -7294,8 +5939,8 @@ function _wrapPlatformPublish(platform) {
 	/** @type {((batch: any) => any) | null} */
 	let _busPublishBatched = null;
 	function _refreshBusCache() {
-		if (_cachedBusEpoch === _busEpoch) return;
-		_cachedBusEpoch = _busEpoch;
+		if (_cachedBusEpoch === state.busEpoch) return;
+		_cachedBusEpoch = state.busEpoch;
 		const bus = _getBus();
 		if (!bus) {
 			_busPublish = null;
@@ -7692,7 +6337,7 @@ export function __registerCron(path, fn) {
  * ```
  */
 export function setCronPlatform(platform) {
-	_cronPlatform = platform;
+	state.cronPlatform = platform;
 	// Re-arm the dedup so a subsequent platform-loss (defensive only --
 	// platform never goes null in practice) gets one fresh warning.
 	_cronPlatformWarnFired = false;
@@ -7784,10 +6429,10 @@ export function configureCron(config) {
 		}
 	}
 	if (config.bus !== undefined) {
-		// Routes through `_setBus` so the canonical `_bus` (consulted by
+		// Routes through `_setBus` so the canonical `state.bus` (consulted by
 		// the reactive wrap, the RPC auto-wrap, and the top-level
 		// `publish()` helper) stays in lockstep with the legacy
-		// `_cronBus` alias - one declaration of cluster intent covers
+		// `state.cronBus` alias - one declaration of cluster intent covers
 		// every framework seam, not just cron.
 		if (config.bus !== null && (typeof config.bus !== 'object' || typeof config.bus.wrap !== 'function')) {
 			throw new Error('[svelte-realtime] configureCron: bus must expose a .wrap(platform) method or be null');
@@ -7799,7 +6444,7 @@ export function configureCron(config) {
 	// leader worker only - subscribers on non-leader instances see
 	// nothing. The user typically wants both wired together. Warn once
 	// per process so the same hot-reload cycle doesn't spam.
-	if (_IS_DEV && _cronLeader !== null && _cronBus === null && !_cronClusterWarnFired) {
+	if (_IS_DEV && _cronLeader !== null && state.cronBus === null && !_cronClusterWarnFired) {
 		console.warn(
 			"[svelte-realtime] configureCron({ leader }) was set without a `bus`. " +
 			"Leader-only cron ticks publish on the elected worker only - " +
@@ -7839,14 +6484,6 @@ function _upgradeCronTo1Hz() {
 		_cronInterval = setIntervalTimer(_tickCron, 1000);
 	}
 }
-
-/**
- * Queue of deferred registrations for cron/derived/effect/aggregate/room-actions.
- * Populated when lazy loaders are passed to __registerCron, __registerDerived, etc.
- * Resolved on first RPC call or cron tick via _resolveAllLazy().
- * @type {Array<{ type: string, path: string, loader: Function }>}
- */
-const _lazyQueue = [];
 
 /** @type {Promise<void> | null} */
 let _lazyInitPromise = null;
@@ -7924,7 +6561,7 @@ export function __registerRoomActions(basePath, loader) {
  * single-flight set, and the platform-missing warn-once flag so the
  * next registration round starts fresh.
  *
- * `_cronPlatform` and `_cronLeader` are intentionally NOT cleared: both
+ * `state.cronPlatform` and `_cronLeader` are intentionally NOT cleared: both
  * are user-provided refs captured once per process lifetime (typically
  * from the adapter's `init` hook), and clearing them would force every
  * HMR cycle to re-acquire them. Tests that need to swap a leader can
@@ -7991,7 +6628,7 @@ export function _prepareHmr() {
 	for (const [, timer] of _debounces) clearTimer(timer);
 	_debounces.clear();
 
-	// Clear cron timers (but keep _cronPlatform - it stays valid across HMR)
+	// Clear cron timers (but keep state.cronPlatform - it stays valid across HMR)
 	_clearCron();
 
 	// Clear lazy queue and reset lazy init state
@@ -8110,47 +6747,6 @@ export function _restoreHmr(snap) {
 	}
 }
 
-// English short weekday names mapped to the 0-6 (Sunday=0) convention the
-// cron weekday field matches against, identical to the historical getDay()
-// numbering. Pinning the formatter locale to 'en-US' keeps these names stable
-// regardless of the host locale.
-const _CRON_WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-
-/**
- * Extract the cron date parts (second, minute, hour, day, month 1-12,
- * weekday 0-6 Sunday=0) for an epoch-ms reference, formatted in the given
- * IANA time zone. Passing `undefined` for the zone uses the host system zone,
- * which preserves the historical local-time cron behavior. The numeric
- * epoch-ms is handed straight to Intl - no intermediate Date is constructed,
- * so a seeded clock plus a pinned zone makes the parts fully reproducible.
- *
- * @param {number} ms - epoch milliseconds
- * @param {string | undefined} tz - IANA zone, or undefined for the system zone
- * @returns {{ second: number, minute: number, hour: number, day: number, month: number, weekday: number }}
- */
-function _cronDateParts(ms, tz) {
-	const fmt = new Intl.DateTimeFormat('en-US', {
-		timeZone: tz,
-		year: 'numeric', month: 'numeric', day: 'numeric',
-		hour: 'numeric', minute: 'numeric', second: 'numeric',
-		weekday: 'short',
-		hour12: false
-	});
-	const parts = fmt.formatToParts(ms);
-	const get = (k) => Number(parts.find(p => p.type === k)?.value);
-	let hour = get('hour');
-	if (hour === 24) hour = 0; // some Intl impls render midnight as 24
-	const wd = parts.find(p => p.type === 'weekday')?.value;
-	return {
-		second: get('second'),
-		minute: get('minute'),
-		hour,
-		day: get('day'),
-		month: get('month'),
-		weekday: _CRON_WEEKDAY_INDEX[wd] ?? 0
-	};
-}
-
 export async function _tickCron() {
 	if (!_lazyResolved) await _resolveAllLazy();
 
@@ -8174,11 +6770,11 @@ export async function _tickCron() {
 			if (_IS_DEV) {
 				console.error('[svelte-realtime] configureCron leader function threw; skipping tick:', err, '\n  See: https://svti.me/cron');
 			}
-			if (_metricsInstruments) _metricsInstruments.cronCount.inc({ path: '*', status: 'leader-error' });
+			if (state.metricsInstruments) state.metricsInstruments.cronCount.inc({ path: '*', status: 'leader-error' });
 			return;
 		}
 		if (!isLeader) {
-			if (_metricsInstruments) _metricsInstruments.cronCount.inc({ path: '*', status: 'not-leader' });
+			if (state.metricsInstruments) state.metricsInstruments.cronCount.inc({ path: '*', status: 'not-leader' });
 			return;
 		}
 	}
@@ -8223,7 +6819,7 @@ export async function _tickCron() {
 		// invoking it again. Surfaces overlap to ops without breaking the
 		// invariant that one cron path runs at most once concurrently.
 		if (_cronRunning.has(path)) {
-			if (_metricsInstruments) _metricsInstruments.cronCount.inc({ path, status: 'skipped' });
+			if (state.metricsInstruments) state.metricsInstruments.cronCount.inc({ path, status: 'skipped' });
 			continue;
 		}
 		_cronRunning.add(path);
@@ -8231,7 +6827,7 @@ export async function _tickCron() {
 		// Match - run the job
 		(async () => {
 			try {
-				if (!_cronPlatform) {
+				if (!state.cronPlatform) {
 					// Warn at most once per process lifetime. Without dedup,
 					// a 6-field schedule + idle server emits this line every
 					// second across the boot-to-first-connect window,
@@ -8249,12 +6845,12 @@ export async function _tickCron() {
 				// Cluster fan-out is the framework's publish wrap's job
 				// now (one wrap site for the whole framework, installed
 				// by `_ensureWrap` from `setCronPlatform`). The cron tick
-				// uses the captured `_cronPlatform` directly - its
+				// uses the captured `state.cronPlatform` directly - its
 				// `publish` is `derivedPublish`, which consults the
 				// process-wide bus at publish time. No outer `bus.wrap(...)`
 				// here, which eliminates the 0.5.6 double-relay class of
 				// bugs by construction.
-				const cronPub = _cronPlatform;
+				const cronPub = state.cronPlatform;
 				const _h = _getCtxHelpers(cronPub);
 				const ctx = _buildCtx(null, null, cronPub, _h, null);
 				const result = await entry.fn(ctx);
@@ -8267,11 +6863,11 @@ export async function _tickCron() {
 						cronPub.publish(entry.topic, 'set', result);
 					}
 				}
-				if (_metricsInstruments) _metricsInstruments.cronCount.inc({ path, status: 'ok' });
+				if (state.metricsInstruments) state.metricsInstruments.cronCount.inc({ path, status: 'ok' });
 			} catch (err) {
-				if (_metricsInstruments) {
-					_metricsInstruments.cronCount.inc({ path, status: 'error' });
-					_metricsInstruments.cronErrors.inc({ path });
+				if (state.metricsInstruments) {
+					state.metricsInstruments.cronCount.inc({ path, status: 'error' });
+					state.metricsInstruments.cronErrors.inc({ path });
 				}
 				if (state.serverErrorHandler) {
 					state.serverErrorHandler(path, err);
@@ -8283,96 +6879,6 @@ export async function _tickCron() {
 			}
 		})();
 	}
-}
-
-/**
- * Parse a 5- or 6-field cron expression into an array of field matchers.
- * 5-field form is `minute hour day month weekday` (fires at second `:00`
- * of each matching minute). 6-field form prepends `seconds` (Quartz /
- * node-cron convention) and unlocks sub-minute schedules; once any
- * 6-field schedule is registered the cron tick adapts to 1 Hz so the
- * seconds field is honored.
- *
- * Supports: *, N, N-M, N,M, and *\/N in every field.
- * @param {string} expr
- * @returns {any[]}
- */
-function _parseCron(expr) {
-	const parts = expr.trim().split(/\s+/);
-	if (parts.length !== 5 && parts.length !== 6) {
-		throw new Error(`[svelte-realtime] Invalid cron expression '${expr}' - expected 5 fields (minute hour day month weekday) or 6 fields (seconds minute hour day month weekday)\n  See: https://svti.me/cron`);
-	}
-	// Map each part to its semantic field index. 5-field input shifts
-	// by one (no seconds) so fields land at indices 1..5; 6-field input
-	// uses indices 0..5 directly.
-	const offset = parts.length === 5 ? 1 : 0;
-	return parts.map((field, idx) => _parseCronField(field, idx + offset));
-}
-
-/** Max values per cron field index: seconds, minute, hour, day, month, weekday */
-const _CRON_RANGES = [[0, 59], [0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
-
-/**
- * Parse a single cron field with validation.
- * Returns null for '*' (match all), or a Set of allowed values,
- * or { step: N } for step expressions.
- * @param {string} field
- * @param {number} idx - Semantic field index (0=seconds, 1=minute, 2=hour, 3=day, 4=month, 5=weekday)
- * @returns {any}
- */
-function _parseCronField(field, idx) {
-	const [min, max] = _CRON_RANGES[idx] || [0, 59];
-
-	if (field === '*') return null;
-
-	if (field.startsWith('*/')) {
-		const step = parseInt(field.slice(2), 10);
-		if (!Number.isFinite(step) || step < 1) {
-			throw new Error(`[svelte-realtime] Invalid cron step '${field}' - step must be a positive integer\n  See: https://svti.me/cron`);
-		}
-		return { step };
-	}
-
-	if (field.includes('-') && !field.includes(',')) {
-		const parts = field.split('-');
-		const a = parseInt(parts[0], 10);
-		const b = parseInt(parts[1], 10);
-		if (!Number.isFinite(a) || !Number.isFinite(b) || a < min || b > max || a > b) {
-			throw new Error(`[svelte-realtime] Invalid cron range '${field}' - values must be ${min}-${max}\n  See: https://svti.me/cron`);
-		}
-		const vals = new Set();
-		for (let i = a; i <= b; i++) vals.add(i);
-		return vals;
-	}
-
-	if (field.includes(',')) {
-		const nums = field.split(',').map(s => {
-			const n = parseInt(s, 10);
-			if (!Number.isFinite(n) || n < min || n > max) {
-				throw new Error(`[svelte-realtime] Invalid cron value '${s}' in '${field}' - must be ${min}-${max}\n  See: https://svti.me/cron`);
-			}
-			return n;
-		});
-		return new Set(nums);
-	}
-
-	const n = parseInt(field, 10);
-	if (!Number.isFinite(n) || n < min || n > max) {
-		throw new Error(`[svelte-realtime] Invalid cron value '${field}' - must be ${min}-${max}\n  See: https://svti.me/cron`);
-	}
-	return new Set([n]);
-}
-
-/**
- * Check if a value matches a cron field matcher.
- * @param {any} matcher
- * @param {number} value
- * @returns {boolean}
- */
-function _cronFieldMatch(matcher, value) {
-	if (matcher === null) return true; // * matches all
-	if (matcher.step) return value % matcher.step === 0;
-	return matcher.has(value);
 }
 
 /**
@@ -8573,7 +7079,7 @@ async function _runGuard(guardFn, ctx) {
  */
 export function handleRpc(ws, data, platform, options) {
 	// Auto-capture platform for cron jobs
-	if (!_cronPlatform && cronRegistry.size > 0) _cronPlatform = platform;
+	if (!state.cronPlatform && cronRegistry.size > 0) state.cronPlatform = platform;
 
 	// Fast path: only process ArrayBuffer
 	if (!(data instanceof ArrayBuffer) || data.byteLength < 4) return false;
@@ -8739,7 +7245,7 @@ function _hasVolatileMarker(fn) {
  */
 async function _executeBatch(ws, msg, platform, options) {
 	const { batch, sequential } = msg;
-	const _batchMetricsStart = _metricsInstruments ? monotonicNow() : 0;
+	const _batchMetricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
 	if (batch.length > 50) {
 		_recordRpcMetrics('__batch__', 'INVALID_REQUEST', _batchMetricsStart);
@@ -8849,7 +7355,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	}
 
 	const classOfService = /** @type {any} */ (fn).__classOfService;
-	if (classOfService && _admissionConfig) {
+	if (classOfService && state.admissionConfig) {
 		try {
 			if (_shouldShed(platform, classOfService)) {
 				return { id, ok: false, code: 'OVERLOADED', error: `Stream class '${classOfService}' shed under pressure` };
@@ -9060,7 +7566,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
  */
 async function _executeSingleRpc(ws, msg, platform, options) {
 	const { rpc: path, id, args: rawArgs, stream: isStream, cursor: clientCursor } = msg;
-	const _metricsStart = _metricsInstruments ? monotonicNow() : 0;
+	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
 	if (!_validPathRe.test(path)) {
 		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
@@ -9159,7 +7665,7 @@ async function _executeSingleRpc(ws, msg, platform, options) {
  */
 async function _executeBinaryRpc(ws, header, payload, platform, options) {
 	const { rpc: path, id, args: extraArgs } = header;
-	const _metricsStart = _metricsInstruments ? monotonicNow() : 0;
+	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
 	if (!_validPathRe.test(path)) {
 		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
@@ -9271,7 +7777,7 @@ const _UPLOAD_FLAG_RESERVED_MASK = 0xFC;
 // and the handler being resolved. Three boundaries on memory:
 //   - _UPLOAD_PENDING_MAX_CHUNKS bounds queue depth for tiny chunks.
 //   - _UPLOAD_PENDING_MAX_SIZE bounds total bytes per stream.
-//   - _UPLOAD_PENDING_MAX_AGGREGATE bounds total bytes across ALL streams
+//   - state.UPLOAD_PENDING_MAX_AGGREGATE bounds total bytes across ALL streams
 //     in the pending phase, so an attacker cannot multiply per-stream
 //     caps by opening many concurrent connections / streamIds. Apps
 //     with large legitimate concurrent uploads can raise it via
@@ -9279,8 +7785,6 @@ const _UPLOAD_FLAG_RESERVED_MASK = 0xFC;
 // Once the handler is resolved, per-handler caps in __uploadOptions take over.
 const _UPLOAD_PENDING_MAX_CHUNKS = 64;
 const _UPLOAD_PENDING_MAX_SIZE = 16 * 1024 * 1024;
-let _UPLOAD_PENDING_MAX_AGGREGATE = 64 * 1024 * 1024;
-let _pendingUploadBytes = 0;
 
 /**
  * Per-WS upload registry. WeakMap so connections that GC before close()
@@ -9494,7 +7998,7 @@ function _createUploadStream(ctrl) {
  */
 function _releasePendingUploadBytes(upload) {
 	if (!upload || !upload._pendingAggBytes) return;
-	_pendingUploadBytes = Math.max(0, _pendingUploadBytes - upload._pendingAggBytes);
+	state.pendingUploadBytes = Math.max(0, state.pendingUploadBytes - upload._pendingAggBytes);
 	upload._pendingAggBytes = 0;
 }
 
@@ -9585,9 +8089,9 @@ function _handleUploadChunkFrame(ws, data, platform, options) {
 		// pre-fix: N concurrent WS opening streamId 0 with a 16 MB
 		// payload each = 16 * N MB held until a handler resolves, with
 		// no handler-side cap able to fire. Post-fix: aggregate is
-		// bounded by _UPLOAD_PENDING_MAX_AGGREGATE regardless of N.
+		// bounded by state.UPLOAD_PENDING_MAX_AGGREGATE regardless of N.
 		const initialBytes = payload ? payload.byteLength : 0;
-		if (_pendingUploadBytes + initialBytes > _UPLOAD_PENDING_MAX_AGGREGATE) {
+		if (state.pendingUploadBytes + initialBytes > state.UPLOAD_PENDING_MAX_AGGREGATE) {
 			_respondUpload(ws, platform, streamId, {
 				ok: false, code: 'OVERLOADED',
 				error: 'pending-upload aggregate buffer cap exceeded; retry shortly'
@@ -9601,7 +8105,7 @@ function _handleUploadChunkFrame(ws, data, platform, options) {
 		upload.expectedSeq = 1;
 		upload.pendingChunks.push({ payload, isLast });
 		upload._pendingAggBytes = initialBytes;
-		_pendingUploadBytes += initialBytes;
+		state.pendingUploadBytes += initialBytes;
 		perWs.set(streamId, upload);
 		_totalActiveUploads++;
 
@@ -9637,13 +8141,13 @@ function _handleUploadChunkFrame(ws, data, platform, options) {
 		}
 		// Aggregate cap also applies to follow-on chunks while pending.
 		// upload.fail() releases the bytes via _releasePendingUploadBytes.
-		if (_pendingUploadBytes + payloadLen > _UPLOAD_PENDING_MAX_AGGREGATE) {
+		if (state.pendingUploadBytes + payloadLen > state.UPLOAD_PENDING_MAX_AGGREGATE) {
 			upload.fail('OVERLOADED', 'pending-upload aggregate buffer cap exceeded');
 			return;
 		}
 		upload.pendingChunks.push({ payload, isLast });
 		upload._pendingAggBytes += payloadLen;
-		_pendingUploadBytes += payloadLen;
+		state.pendingUploadBytes += payloadLen;
 		return;
 	}
 
@@ -9733,7 +8237,7 @@ function _handleUploadControlFrame(ws, data, platform) {
  * @param {{ beforeExecute?: Function, onError?: Function }} [options]
  */
 async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, options) {
-	const _metricsStart = _metricsInstruments ? monotonicNow() : 0;
+	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 	let path = '';
 	/** @type {any} */ let ctx = null;
 
@@ -9932,193 +8436,6 @@ function _runWithMiddleware(ctx, handler) {
 		return fn(ctx, next);
 	}
 	return dispatch();
-}
-
-// - Throttle / Debounce infrastructure ----------------------------------------
-
-/** Hard cap on throttle/debounce entries to prevent memory exhaustion */
-const _THROTTLE_DEBOUNCE_MAX = 5000;
-
-/** @type {Map<string, { timer: ReturnType<typeof setTimeout>, lastData: any, lastEvent: string, platform: any, lastRun: number }>} */
-const _throttles = new Map();
-
-/** @type {Map<string, ReturnType<typeof setTimeout>>} */
-const _debounces = new Map();
-
-/**
- * Throttle a publish to a topic. Sends at most once per `ms` milliseconds.
- * The last value always arrives (trailing edge).
- *
- * @param {import('svelte-adapter-uws').Platform} platform
- * @param {string} topic
- * @param {string} event
- * @param {any} data
- * @param {number} ms - Throttle interval in milliseconds
- */
-function _throttlePublish(platform, topic, event, data, ms) {
-	const entityKey = data && typeof data === 'object' && data.key !== undefined ? '\0' + data.key : '';
-	const key = topic + '\0' + event + entityKey;
-	const existing = _throttles.get(key);
-	const now = runtimeNow();
-
-	if (!existing) {
-		if (_throttles.size >= _THROTTLE_DEBOUNCE_MAX) {
-			// At capacity - publish immediately without a trailing-edge timer
-			// so data is never silently dropped
-			platform.publish(topic, event, data);
-			return;
-		}
-		platform.publish(topic, event, data);
-		_throttles.set(key, {
-			timer: setTimer(() => {
-				const entry = _throttles.get(key);
-				if (entry && entry.lastData !== undefined) {
-					platform.publish(topic, event, entry.lastData);
-				}
-				_throttles.delete(key);
-			}, ms),
-			lastData: undefined,
-			lastEvent: event,
-			lastRun: now
-		});
-		return;
-	}
-
-	// Subsequent calls within the window - store for trailing edge
-	existing.lastData = data;
-	existing.lastEvent = event;
-}
-
-/**
- * Debounce a publish to a topic. Only sends after `ms` milliseconds of silence.
- *
- * @param {import('svelte-adapter-uws').Platform} platform
- * @param {string} topic
- * @param {string} event
- * @param {any} data
- * @param {number} ms - Debounce interval in milliseconds
- */
-function _debouncePublish(platform, topic, event, data, ms) {
-	const entityKey = data && typeof data === 'object' && data.key !== undefined ? '\0' + data.key : '';
-	const key = topic + '\0' + event + entityKey;
-	const existing = _debounces.get(key);
-	if (existing) clearTimer(existing);
-
-	if (!existing && _debounces.size >= _THROTTLE_DEBOUNCE_MAX) {
-		// At capacity - publish immediately instead of evicting an active timer
-		platform.publish(topic, event, data);
-		return;
-	}
-
-	_debounces.set(key, setTimer(() => {
-		_debounces.delete(key);
-		platform.publish(topic, event, data);
-	}, ms));
-}
-
-/**
- * Per-key gate state. Each entry is a setTimeout handle that self-deletes
- * the key when its cooldown window elapses. Shape mirrors `_throttles` /
- * `_debounces` so memory accounting and cap semantics are uniform.
- *
- * @type {Map<string, ReturnType<typeof setTimeout>>}
- */
-const _skipGates = new Map();
-
-/**
- * Per-key rate gate. Returns `true` to skip the call (key is within its
- * cooldown window), `false` to run it (no entry, or window elapsed). The
- * caller pairs this with an early `return` inside an RPC handler:
- *
- *     export const moveNote = live(async (ctx, noteId, x, y) => {
- *       if (ctx.skip(`move:${noteId}`, 16)) return;  // drop calls within 16ms
- *       await dbUpdateNote(noteId, x, y);
- *       ctx.publish(TOPICS.notes, 'updated', { noteId, x, y });
- *     });
- *
- * Pairs with `ctx.shed` semantically (both return `true` to early-return),
- * so call sites read uniformly. Different from `ctx.publishThrottled` /
- * `ctx.publishDebounced` which schedule outbound publishes - `ctx.skip`
- * gates the inbound handler body.
- *
- * **Memory:** capped at `_THROTTLE_DEBOUNCE_MAX` (5000) entries. When the
- * cap is hit, the gate fails open (returns `false`, does NOT stamp a new
- * entry) so a runaway dynamic-key generator (e.g. spraying unique keys to
- * exhaust the map) cannot silently start blocking legitimate calls. The
- * first cap-hit fires a one-shot dev warning so operators see the issue.
- *
- * **Cluster:** state is per-replica. Each replica that received an RPC
- * call evaluates `ctx.skip` against its local map; the gate is a CPU/DB
- * shed, not a cluster-wide ratelimit. For cross-replica gating use
- * `live.rateLimit({ store: 'redis' })` or `redis/ratelimit`.
- *
- * @param {string} key
- * @param {number} ms
- * @returns {boolean} `true` to skip the call; `false` to run it
- */
-function _skipGate(key, ms) {
-	if (typeof key !== 'string') {
-		throw new LiveError('INVALID_ARG', 'ctx.skip: key must be a string (got ' + (typeof key) + ')');
-	}
-	if (typeof ms !== 'number' || !(ms > 0) || !Number.isFinite(ms)) {
-		throw new LiveError('INVALID_ARG', 'ctx.skip: ms must be a positive finite number (got ' + String(ms) + ')');
-	}
-	if (_skipGates.has(key)) return true;
-	if (_skipGates.size >= _THROTTLE_DEBOUNCE_MAX) {
-		if (_IS_DEV && !_skipGateCapWarned) {
-			_skipGateCapWarned = true;
-			console.warn(
-				'[svelte-realtime] ctx.skip: gate map at capacity (' + _THROTTLE_DEBOUNCE_MAX + ' entries). ' +
-				'Falling open - calls are no longer being gated. Check for runaway dynamic-key generation ' +
-				'(e.g. unique-per-request keys).\n' +
-				'  See: https://svti.me/skip-gate'
-			);
-		}
-		return false;
-	}
-	_skipGates.set(key, setTimer(() => { _skipGates.delete(key); }, ms));
-	return false;
-}
-
-/**
- * Dev-only sanity check for `ctx.publishThrottled` / `ctx.publishDebounced`
- * (and the deprecated `ctx.throttle` / `ctx.debounce` aliases). Logs a
- * one-time warning per helper name when args don't match the publish-
- * helper shape `(topic: string, event: string, data: any, ms: number > 0)`.
- *
- * The misuse pattern is calling `ctx.throttle('move:id', 50)` thinking it
- * gates a handler - it doesn't, it's a 4-arg publish helper. The warning
- * points at `ctx.skip(key, ms)` as the actual gate primitive.
- *
- * Production silently continues (no throw) so existing buggy deployments
- * don't crash on adapter upgrade; the dev warning surfaces the issue at
- * code-change time, not at runtime.
- *
- * @param {string} name - bare helper name (e.g. `'publishThrottled'`)
- * @param {ReadonlyArray<unknown>} args - the call's argument list
- */
-function _checkPublishHelperArgs(name, args) {
-	if (!_IS_DEV) return;
-	if (_publishHelperBadArgsWarned[name]) return;
-	const ok = args.length >= 4
-		&& typeof args[0] === 'string'
-		&& typeof args[1] === 'string'
-		&& typeof args[3] === 'number'
-		&& /** @type {number} */ (args[3]) > 0
-		&& Number.isFinite(/** @type {number} */ (args[3]));
-	if (ok) return;
-	_publishHelperBadArgsWarned[name] = true;
-	console.warn(
-		'[svelte-realtime] ctx.' + name + ' called with bad args -- expected ' +
-		'(topic: string, event: string, data: any, ms: number > 0). Got ' +
-		'argc=' + args.length + ', topic=' + (typeof args[0]) +
-		', event=' + (typeof args[1]) +
-		', ms=' + (typeof args[3] === 'number' ? String(args[3]) : typeof args[3]) + '. ' +
-		'ctx.' + name + ' is a publish helper, not a handler gate. ' +
-		'For per-key handler gating use ctx.skip(key, ms); for handler-wide rate ' +
-		'limiting use live.rateLimit().\n' +
-		'  See: https://svti.me/publish-helper-args'
-	);
 }
 
 /**
@@ -10386,7 +8703,7 @@ export function unsubscribe(ws, topic, { platform }) {
 	// Drain every logical subscriber for this topic
 	for (const entry of owners) {
 		for (let i = 0; i < entry.count; i++) {
-			if (_metricsInstruments) _metricsInstruments.streamGauge.dec();
+			if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
 			if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
 				Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(unsubCtx, topic, remainingSubscribers)).catch(() => {});
 			}
@@ -10455,7 +8772,7 @@ export function close(ws, { platform, subscriptions }) {
 			if (alreadyFired && alreadyFired.has(topic)) continue;
 			for (const entry of owners) {
 				for (let i = 0; i < entry.count; i++) {
-					if (_metricsInstruments) _metricsInstruments.streamGauge.dec();
+					if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
 					if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
 						Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(closeCtx, topic, remainingSubscribers)).catch(() => {});
 					}
@@ -10743,7 +9060,7 @@ export function getBus() {
  * @returns {import('svelte-adapter-uws').Platform | null}
  */
 export function getPlatform() {
-	return _derivedPlatform || _cronPlatform || null;
+	return state.derivedPlatform || state.cronPlatform || null;
 }
 
 /**
