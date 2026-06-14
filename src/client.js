@@ -14,6 +14,9 @@ import * as _svelteStore from 'svelte/store';
 // these helpers so a seeded simulation harness can drive the client clock,
 // randomness, and timers deterministically.
 import { now, randomFloat, setTimer, clearTimer, microtask } from './client-runtime.js';
+import { __devtools, _devtoolsStart, _devtoolsEnd, _devtoolsStream, _devtoolsStreamEvent, _devtoolsStreamError, _devtoolsVolatileSent } from './client/devtools-instrument.js';
+import { clientState } from './client/internal-state.js';
+export { __devtools };
 
 /** @type {import('svelte/store').Readable<undefined>} */
 export const empty = readable(undefined);
@@ -35,15 +38,13 @@ const _IS_DEV = typeof import.meta === 'undefined' || !import.meta.env || !impor
 /** Max in-flight optimistic mutations per stream. REJECT on cap: `mutate()` throws synchronously. Bounds the worst-case display-recompute cost during slow-server scenarios. Matches svelte-adapter-uws `MAX_QUEUE_SIZE` (the per-connection client send queue) since both serve as UI-layer in-flight burglar alarms. */
 export const MAX_OPTIMISTIC_QUEUE_DEPTH = 1_000;
 
-let _maxOptimisticQueueDepth = MAX_OPTIMISTIC_QUEUE_DEPTH;
-
 /**
  * Override capacity caps for testing.
  * @internal
  * @param {{ optimisticQueueDepth?: number }} overrides
  */
 export function _setCapsForTest(overrides) {
-	if (overrides.optimisticQueueDepth !== undefined) _maxOptimisticQueueDepth = overrides.optimisticQueueDepth;
+	if (overrides.optimisticQueueDepth !== undefined) clientState.maxOptimisticQueueDepth = overrides.optimisticQueueDepth;
 }
 
 /**
@@ -51,7 +52,7 @@ export function _setCapsForTest(overrides) {
  * @internal
  */
 export function _resetCapsForTest() {
-	_maxOptimisticQueueDepth = MAX_OPTIMISTIC_QUEUE_DEPTH;
+	clientState.maxOptimisticQueueDepth = MAX_OPTIMISTIC_QUEUE_DEPTH;
 }
 
 /** Pre-allocated binary frame buffer for reuse across sequential binary RPC calls */
@@ -107,9 +108,6 @@ function _nextId() {
 	if (idCounter >= 0x1FFFFFFFFFFFFF) idCounter = 0;
 	return _idPrefix + (idCounter++).toString(36);
 }
-
-/** @type {Array<{ rpc: string, id: string, args: any[] }> | null} */
-let _batchCollector = null;
 
 /** @type {Map<string, Promise<any>>} */
 const _dedupMap = new Map();
@@ -418,7 +416,7 @@ const _DEFAULT_TIMEOUT = 30000;
 
 /** @returns {number} Configured or default RPC timeout in ms */
 function _getTimeout() {
-	return _clientConfig.timeout || _DEFAULT_TIMEOUT;
+	return clientState.config.timeout || _DEFAULT_TIMEOUT;
 }
 
 const _DEFAULT_RESUME_GRACE_MS = 60000;
@@ -435,13 +433,10 @@ const _DEFAULT_RESUME_GRACE_MS = 60000;
  * @returns {number}
  */
 function _getResumeGraceMs() {
-	const v = _clientConfig.resumeGraceMs;
+	const v = clientState.config.resumeGraceMs;
 	if (typeof v === 'number' && v >= 0) return v;
 	return _DEFAULT_RESUME_GRACE_MS;
 }
-
-/** @type {boolean} Whether the connection is permanently dead (terminal close code, exhausted retries, or explicit close) */
-let _terminated = false;
 
 /**
  * Attach the __rpc topic listener once.
@@ -516,7 +511,7 @@ function ensureDisconnectListener() {
 				lastOpenAt = 0;
 				if (openDuration < 1000) {
 					fastCloseCount++;
-					if (fastCloseCount >= 2 && !cfTunnelWarned && !_clientConfig.auth) {
+					if (fastCloseCount >= 2 && !cfTunnelWarned && !clientState.config.auth) {
 						cfTunnelWarned = true;
 						console.warn(
 							'[svelte-realtime] WebSocket opened then closed in ' + openDuration + 'ms ' +
@@ -534,7 +529,7 @@ function ensureDisconnectListener() {
 			}
 		}
 		if (s === 'open') {
-			_terminated = false;
+			clientState.terminated = false;
 			lastOpenAt = now();
 		}
 	});
@@ -545,7 +540,7 @@ function ensureDisconnectListener() {
 			const conn = _connect();
 			if (conn && typeof conn.ready === 'function') {
 				conn.ready().catch((/** @type {any} */ err) => {
-					_terminated = true;
+					clientState.terminated = true;
 					const errCode = err?.code || 'CONNECTION_CLOSED';
 					const errMsg = err?.message || 'Connection permanently closed';
 					// Reject all pending RPCs
@@ -619,7 +614,7 @@ function _warnCoalesceOnce(path) {
  */
 function _maybeHintPublishRate(topic, options) {
 	if (!_IS_DEV) return;
-	if (_clientConfig.publishRateHint === false) return;
+	if (clientState.config.publishRateHint === false) return;
 	if (_publishRateHintWarned.has(topic)) return;
 	// A declared-coalesced stream already picked latest-value-wins, so the hint
 	// would be noise: skip the counting work entirely, mirroring the server which
@@ -705,7 +700,7 @@ function _buildDedupKey(path, args) {
 export function __rpc(path) {
 	function rpcCall(...args) {
 		// Dedup: coalesce identical calls within the same microtask
-		if (!_batchCollector) {
+		if (!clientState.batchCollector) {
 			const dedupKey = _buildDedupKey(path, args);
 			const existing = _dedupMap.get(dedupKey);
 			if (existing) {
@@ -759,9 +754,9 @@ export function __rpc(path) {
 	 * ```
 	 */
 	rpcCall.fireAndForget = function fireAndForget(...args) {
-		if (_terminated) return;
-		if (_isOffline) { _volatileDropped++; return; }
-		if (_batchCollector) {
+		if (clientState.terminated) return;
+		if (clientState.isOffline) { _volatileDropped++; return; }
+		if (clientState.batchCollector) {
 			if (_IS_DEV) {
 				throw new Error(
 					`[svelte-realtime] '${path}'.fireAndForget() cannot be used inside batch() - volatile RPCs bypass batching.\n  See: https://svti.me/volatile`
@@ -772,7 +767,7 @@ export function __rpc(path) {
 		ensureListener();
 		ensureDisconnectListener();
 		const conn = _connect();
-		const cap = _clientConfig.volatileBackpressureBytes || _DEFAULT_VOLATILE_BACKPRESSURE_BYTES;
+		const cap = clientState.config.volatileBackpressureBytes || _DEFAULT_VOLATILE_BACKPRESSURE_BYTES;
 		if (typeof conn.bufferedAmount === 'number' && conn.bufferedAmount > cap) {
 			_volatileDropped++;
 			if (__devtools) __devtools.volatileDropped = _volatileDropped;
@@ -808,8 +803,8 @@ export function __rpc(path) {
 	 * @returns {void}
 	 */
 	rpcCall.send = function sendReliable(...args) {
-		if (_terminated) return;
-		if (_batchCollector) {
+		if (clientState.terminated) return;
+		if (clientState.batchCollector) {
 			if (_IS_DEV) {
 				throw new Error(
 					`[svelte-realtime] '${path}'.send() cannot be used inside batch() - one-way RPCs bypass batching.\n  See: https://svti.me/volatile`
@@ -845,7 +840,7 @@ export function __rpc(path) {
 			// Dedup only when an idempotency key is bound. Timeout-only calls
 			// bypass dedup - the longer-waiting caller would otherwise be
 			// rejected at the shorter call's timeout.
-			if (!_batchCollector && idempotencyKey) {
+			if (!clientState.batchCollector && idempotencyKey) {
 				const dedupKey = path + '\0K' + idempotencyKey;
 				const existing = _dedupMap.get(dedupKey);
 				if (existing) {
@@ -975,7 +970,7 @@ function _sendRpc(path, args, idempotencyKey, timeout) {
 	ensureDisconnectListener();
 
 	// Fast-fail if connection is permanently dead
-	if (_terminated) {
+	if (clientState.terminated) {
 		return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 	}
 
@@ -984,8 +979,8 @@ function _sendRpc(path, args, idempotencyKey, timeout) {
 	}
 
 	// Offline queue: if disconnected and queue is enabled, defer the call
-	if (_isOffline && _clientConfig.offline?.queue && !_batchCollector) {
-		const maxQueue = _clientConfig.offline.maxQueue || 100;
+	if (clientState.isOffline && clientState.config.offline?.queue && !clientState.batchCollector) {
+		const maxQueue = clientState.config.offline.maxQueue || 100;
 		return new Promise((resolve, reject) => {
 			if (_offlineQueue.length >= maxQueue) {
 				// Drop oldest
@@ -1001,8 +996,8 @@ function _sendRpc(path, args, idempotencyKey, timeout) {
 	// If inside a batch() call, collect instead of sending. The batch-level
 	// timer governs all collected calls; per-call `timeout` is intentionally
 	// dropped here (documented limitation).
-	if (_batchCollector) {
-		_batchCollector.push(idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args });
+	if (clientState.batchCollector) {
+		clientState.batchCollector.push(idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args });
 		return new Promise((resolve, reject) => {
 			pending.set(id, { resolve, reject, timer: null });
 		});
@@ -1050,7 +1045,7 @@ function _sendRpc(path, args, idempotencyKey, timeout) {
  */
 export function __binaryRpc(path) {
 	return function binaryRpcCall(buffer, ...args) {
-		if (_terminated) {
+		if (clientState.terminated) {
 			return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 		}
 		ensureListener();
@@ -1209,7 +1204,7 @@ let _uploadChunkSizeDeprecatedWarned = false;
  * @returns {number}
  */
 function _computeUploadFrameSize() {
-	const cfg = _clientConfig.upload;
+	const cfg = clientState.config.upload;
 
 	// Resolve the user-supplied value, preferring `frameSize` over the
 	// deprecated `chunkSize` alias. Warn once per session if the deprecated
@@ -1550,7 +1545,7 @@ async function _pumpUpload(handle) {
  */
 async function _maybePaceUpload(handle, conn) {
 	if (typeof conn.bufferedAmount !== 'number') return;
-	const cfg = _clientConfig.upload;
+	const cfg = clientState.config.upload;
 	const hi = cfg?.highWaterMark ?? _DEFAULT_UPLOAD_HIGH_WATER_MARK;
 	if (conn.bufferedAmount <= hi) return;
 
@@ -1558,7 +1553,7 @@ async function _maybePaceUpload(handle, conn) {
 	while (
 		!handle._cancelled &&
 		!handle._settled &&
-		!_terminated &&
+		!clientState.terminated &&
 		typeof conn.bufferedAmount === 'number' &&
 		conn.bufferedAmount > lo
 	) {
@@ -1777,7 +1772,7 @@ class UploadHandle {
 
 	async _start() {
 		if (this._settled) return;
-		if (_terminated) {
+		if (clientState.terminated) {
 			this._settle(false, new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 			return;
 		}
@@ -2720,7 +2715,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 */
 	function fetchAndSubscribe() {
 		if (fetching) return;
-		if (_terminated) {
+		if (clientState.terminated) {
 			_setError(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 			return;
 		}
@@ -3221,11 +3216,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				throw new Error('[svelte-realtime] mutate: optimisticChange must be { event, data } or a function (current) => newValue');
 			}
 
-			if (_optimisticQueue.length >= _maxOptimisticQueueDepth) {
+			if (_optimisticQueue.length >= clientState.maxOptimisticQueueDepth) {
 				throw new Error(
 					'[svelte-realtime] mutate(): in-flight optimistic queue depth ' +
 					_optimisticQueue.length + ' exceeds MAX_OPTIMISTIC_QUEUE_DEPTH=' +
-					_maxOptimisticQueueDepth + '. ' +
+					clientState.maxOptimisticQueueDepth + '. ' +
 					'Either the server is unresponsive (mutates are not settling) or ' +
 					'the call site is firing mutates faster than the server can confirm. ' +
 					'Throttle the call site, or check WS health.'
@@ -3319,7 +3314,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		 */
 		async loadMore(...extraArgs) {
 			if (_loadingMore || !_hasMore || !_cursor) return false;
-			if (_terminated) {
+			if (clientState.terminated) {
 				throw new RpcError('CONNECTION_CLOSED', 'Connection permanently closed');
 			}
 			_loadingMore = true;
@@ -3680,22 +3675,22 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
  * @returns {Promise<any[]>}
  */
 export function batch(fn, options) {
-	if (_terminated) {
+	if (clientState.terminated) {
 		return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 	}
 	ensureListener();
 	ensureDisconnectListener();
 
 	// Collect RPC calls during fn() execution
-	_batchCollector = [];
+	clientState.batchCollector = [];
 	/** @type {any} */
 	let promises;
 	try {
 		promises = fn();
 	} catch (err) {
 		// Clean up collector and any pending entries on synchronous throw
-		const collected = _batchCollector;
-		_batchCollector = null;
+		const collected = clientState.batchCollector;
+		clientState.batchCollector = null;
 		if (collected) {
 			for (const call of collected) {
 				const entry = pending.get(call.id);
@@ -3707,8 +3702,8 @@ export function batch(fn, options) {
 		}
 		throw err;
 	}
-	const collected = _batchCollector;
-	_batchCollector = null;
+	const collected = clientState.batchCollector;
+	clientState.batchCollector = null;
 
 	if (collected.length === 0) return Promise.resolve([]);
 
@@ -3805,17 +3800,11 @@ function _checkArgs(path, args) {
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number }} OfflineEntry
  */
 
-/** @type {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, upload?: { frameSize?: number, chunkSize?: number, highWaterMark?: number, lowWaterMark?: number }, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} */
-let _clientConfig = {};
-
 /** @type {boolean} */
 let _configListenerAttached = false;
 
 /** @type {OfflineEntry[]} */
 const _offlineQueue = [];
-
-/** @type {boolean} */
-let _isOffline = false;
 
 /** @type {boolean} */
 let _replayingQueue = false;
@@ -3844,7 +3833,7 @@ let _replayingQueue = false;
  * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
-	_clientConfig = config;
+	clientState.config = config;
 
 	if (config.url !== undefined || config.auth !== undefined) {
 		/** @type {{ url?: string, auth?: boolean | string }} */
@@ -3860,13 +3849,13 @@ export function configure(config) {
 		status.subscribe((s) => {
 			if (isFirst) { isFirst = false; return; }
 			if (s === 'open') {
-				_isOffline = false;
-				if (_clientConfig.onConnect) _clientConfig.onConnect();
+				clientState.isOffline = false;
+				if (clientState.config.onConnect) clientState.config.onConnect();
 				_drainOfflineQueue();
 			}
 			if (s === 'disconnected' || s === 'failed') {
-				_isOffline = true;
-				if (_clientConfig.onDisconnect) _clientConfig.onDisconnect();
+				clientState.isOffline = true;
+				if (clientState.config.onDisconnect) clientState.config.onDisconnect();
 			}
 		});
 	}
@@ -3879,7 +3868,7 @@ async function _drainOfflineQueue() {
 	if (_offlineQueue.length === 0 || _replayingQueue) return;
 	_replayingQueue = true;
 
-	const offlineOpts = _clientConfig.offline;
+	const offlineOpts = clientState.config.offline;
 	const beforeReplay = offlineOpts?.beforeReplay;
 	const onReplayError = offlineOpts?.onReplayError;
 	const maxAge = offlineOpts?.maxAge || 0;
@@ -4126,205 +4115,6 @@ export function _resetPushHandlers() {
 		_pushDispatcherUnsub();
 		_pushDispatcherUnsub = null;
 	}
-}
-
-// - DevTools instrumentation (non-production only) ---------------------------
-
-/**
- * Default key names whose values are replaced with `'[REDACTED]'` when
- * captured into the per-stream payload preview. Case-insensitive match
- * against the ENTIRE key (substring match would over-redact). Apps can
- * override or extend via `__devtools.redactKeys = new Set([...])`
- * (normalized to lowercase by `_devtoolsStreamEvent`).
- */
-const _DEFAULT_REDACT_KEYS = new Set([
-	'password', 'token', 'apikey', 'api_key', 'secret', 'authorization',
-	'cookie', 'sessionid', 'session_id', 'csrf', 'csrftoken', 'csrf_token'
-]);
-
-const _MAX_STREAM_EVENTS = 20;
-
-const _DEVTOOLS_VOLATILE_MAX = 100;
-
-/**
- * @type {{
- *   history: any[],
- *   streams: Map<string, any>,
- *   pending: Map<string, any>,
- *   volatile: any[],
- *   volatileDropped: number,
- *   redactKeys: Set<string>,
- *   paused: boolean
- * } | null}
- */
-export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.env?.PROD)
-	? {
-		history: new Array(50).fill(null),
-		streams: new Map(),
-		pending: new Map(),
-		volatile: new Array(_DEVTOOLS_VOLATILE_MAX).fill(null),
-		volatileDropped: 0,
-		redactKeys: new Set(_DEFAULT_REDACT_KEYS),
-		paused: false
-	}
-	: null;
-
-/** Ring buffer index for the devtools volatile send track. */
-let _devtoolsVolatileIdx = 0;
-let _devtoolsVolatileSeq = 0;
-
-/**
- * Record a fire-and-forget RPC send for devtools. Send-only - there is no
- * matching completion event because the wire shape carries no `id` and the
- * server never replies. Ring buffer is bounded (`_DEVTOOLS_VOLATILE_MAX`,
- * drop-oldest) so a high-frequency 60-120Hz mover can't anchor unbounded
- * dev-mode memory.
- * @param {string} path
- * @param {any[]} args
- */
-function _devtoolsVolatileSent(path, args) {
-	if (!__devtools) return;
-	__devtools.volatile[_devtoolsVolatileIdx] = {
-		path,
-		args,
-		time: now(),
-		seq: ++_devtoolsVolatileSeq
-	};
-	_devtoolsVolatileIdx = (_devtoolsVolatileIdx + 1) % _DEVTOOLS_VOLATILE_MAX;
-}
-
-/**
- * Walk a value, replacing matched keys with `'[REDACTED]'`. Caps recursion
- * depth at 5 and array length at 50 so dev-only capture doesn't pin large
- * payload graphs in memory. Tracks visited objects to handle cycles.
- * @param {any} value
- * @param {Set<string>} redactKeys
- * @param {number} depth
- * @param {WeakSet<object>} seen
- * @returns {any}
- */
-function _devtoolsRedact(value, redactKeys, depth, seen) {
-	if (depth > 5) return '[depth-cap]';
-	if (value === null || typeof value !== 'object') return value;
-	if (seen.has(value)) return '[cycle]';
-	seen.add(value);
-	if (Array.isArray(value)) {
-		const out = value.slice(0, 50).map((v) => _devtoolsRedact(v, redactKeys, depth + 1, seen));
-		if (value.length > 50) out.push('[+' + (value.length - 50) + ' more]');
-		return out;
-	}
-	const out = /** @type {Record<string, any>} */ ({});
-	for (const k of Object.keys(value)) {
-		if (redactKeys.has(k.toLowerCase())) {
-			out[k] = '[REDACTED]';
-		} else {
-			out[k] = _devtoolsRedact(value[k], redactKeys, depth + 1, seen);
-		}
-	}
-	return out;
-}
-
-/** Ring buffer index for devtools history (O(1) insertion, no array.shift) */
-let _devtoolsHistoryIdx = 0;
-let _devtoolsSeq = 0;
-const _DEVTOOLS_HISTORY_MAX = 50;
-
-/**
- * Record an RPC call start for devtools.
- * @param {string} path
- * @param {string} id
- * @param {any[]} args
- */
-function _devtoolsStart(path, id, args) {
-	if (!__devtools) return;
-	__devtools.pending.set(id, { path, args, startTime: now() });
-}
-
-/**
- * Record an RPC call completion for devtools.
- * @param {string} id
- * @param {boolean} ok
- * @param {any} result
- */
-function _devtoolsEnd(id, ok, result) {
-	if (!__devtools) return;
-	const entry = __devtools.pending.get(id);
-	if (!entry) return;
-	__devtools.pending.delete(id);
-	const record = {
-		path: entry.path,
-		args: entry.args,
-		ok,
-		result,
-		duration: now() - entry.startTime,
-		time: now(),
-		seq: ++_devtoolsSeq
-	};
-	__devtools.history[_devtoolsHistoryIdx] = record;
-	_devtoolsHistoryIdx = (_devtoolsHistoryIdx + 1) % _DEVTOOLS_HISTORY_MAX;
-}
-
-/**
- * Track an active stream for devtools.
- * @param {string} path
- * @param {string | null} topic
- * @param {number} subCount
- * @param {string} [merge] - merge strategy ('crud' | 'latest' | 'set' | 'presence' | 'cursor')
- */
-function _devtoolsStream(path, topic, subCount, merge) {
-	if (!__devtools) return;
-	if (subCount <= 0) {
-		__devtools.streams.delete(path);
-	} else {
-		const existing = __devtools.streams.get(path);
-		__devtools.streams.set(path, {
-			path,
-			topic,
-			subCount,
-			merge: merge || existing?.merge || null,
-			lastEventTime: existing?.lastEventTime || null,
-			lastEvent: existing?.lastEvent || null,
-			error: existing?.error || null,
-			recentEvents: existing?.recentEvents || []
-		});
-	}
-}
-
-/**
- * Record a pub/sub event arrival for devtools, including a redacted +
- * depth/array-capped snapshot of the payload pushed to a per-stream
- * ring buffer (capped at `_MAX_STREAM_EVENTS`). Skips capture entirely
- * when `__devtools.paused` is true.
- * @param {string} path
- * @param {string} eventType
- * @param {any} [data]
- */
-function _devtoolsStreamEvent(path, eventType, data) {
-	if (!__devtools) return;
-	const e = __devtools.streams.get(path);
-	if (!e) return;
-	e.lastEventTime = now();
-	e.lastEvent = eventType;
-	if (__devtools.paused) return;
-	const redacted = data === undefined
-		? undefined
-		: _devtoolsRedact(data, __devtools.redactKeys, 0, new WeakSet());
-	e.recentEvents.push({ event: eventType, data: redacted, ts: e.lastEventTime });
-	if (e.recentEvents.length > _MAX_STREAM_EVENTS) {
-		e.recentEvents.splice(0, e.recentEvents.length - _MAX_STREAM_EVENTS);
-	}
-}
-
-/**
- * Record (or clear) an error state on a stream for devtools.
- * @param {string} path
- * @param {{ code?: string, message?: string } | null} err
- */
-function _devtoolsStreamError(path, err) {
-	if (!__devtools) return;
-	const e = __devtools.streams.get(path);
-	if (!e) return;
-	e.error = err ? { code: err.code || 'UNKNOWN', message: err.message || String(err) } : null;
 }
 
 /**
