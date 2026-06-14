@@ -20,7 +20,6 @@ import { createHmac, createHash } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { lookup as nodeDnsLookup } from 'node:dns';
-import { checkUrl } from 'svelte-adapter-uws/safe-url';
 import { LiveError } from './server/live-error.js';
 import { _runtimeRandom, _localHlc } from './server/runtime-fallbacks.js';
 import { _validPathRe, _validSegmentRe, _validUserIdReason, _MAX_USER_ID_LENGTH, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './server/validate.js';
@@ -47,11 +46,11 @@ import {
 	_effectBySource,
 	_webhookOutBySource,
 	_aggregateBySource,
+	_aggregateByTopic,
 	_watchedTopics,
 	_dynamicDerivedByFn
 } from './server/state.js';
 import { _IS_DEV } from './server/env.js';
-import { _fireWebhookOut, _redactUrl } from './server/webhook-out.js';
 import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge } from './server/presence.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
 import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs } from './server/publish-helpers.js';
@@ -75,6 +74,11 @@ export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, 
 export { _smoothLoadError, _setSmoothRuntime, _resetSmooth };
 import { _armSilentTopicWatch, _disarmSilentTopicWatch, _resetSilentTopicWarning, _activatePublishRateWarning, _resetPublishRateWarning, installDevWarnings } from './server/dev-warnings.js';
 import { _drainUploadsOnClose, _resetUploadAutoDiscovery, installUpload } from './server/upload.js';
+import { _breakerRegister, installBreaker } from './server/breaker.js';
+import { _webhookRegister, _webhooksOutboundRegister } from './server/webhooks.js';
+import { _multiplayerRegister, installMultiplayer } from './server/multiplayer.js';
+import { _roomRegister, installRoom } from './server/room.js';
+import { _flagRegister, _derivedRegister, _effectRegister, _aggregateRegister, installReactiveFamilies } from './server/reactive-families.js';
 import { handleRpc, _runGuard, guard, __directCall, message, createMessage, installDispatch } from './server/dispatch.js';
 export { handleRpc, guard, __directCall, message, createMessage };
 installDispatch({ isLazyResolved: _isLazyResolved, trackStreamSub: _trackStreamSub, rollbackStreamSubscribe: _rollbackStreamSubscribe, registerStaleWatch: _registerStaleWatch, registerInvalidationWatch: _registerInvalidationWatch, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, resolveAllLazy: _resolveAllLazy, runWithMiddleware: _runWithMiddleware, validate: _validate, callTopicFn: _callTopicFn, applyInitTransform: _applyInitTransform });
@@ -1470,195 +1474,14 @@ live.cron = function cron(schedule, topic, fn) {
 	return fn;
 };
 
-/**
- * Declare a server-side feature flag exposed as a readable stream.
- *
- * A flag is a thin wrapper over `live.stream`: it declares a `merge: 'set'`
- * topic carrying the flag value, and any `.set(value)` pushes the new value
- * to every subscriber. On the client, `$live/<module>` exposes the export as
- * a readable store carrying the current value.
- *
- * Flags are cluster-consistent by default: a single-entry shared replay
- * buffer is enabled, so `.set()` writes the cluster-shared buffer and a
- * subscriber that connects fresh - to any replica, including one that never
- * set the flag locally - is served the cluster-latest value. Already-
- * subscribed clients stay in sync across the cluster as `.set()` relays the
- * update. Pass a custom `replay` object to size the buffer, or
- * `replay: false` to opt out (single-process apps lose nothing, since the
- * locally cached value is authoritative in one process).
- *
- * On every running replica an internal watcher keeps the cached value fresh
- * from boot. The watcher is installed when the registry module loads (the
- * same moment `live.effect` watchers become active), so it does not wait for
- * the flag module's first local import or subscribe: an inbound `set` relayed
- * from any replica updates the cached value within a tick, and the synchronous
- * `.get()` reflects the cluster-latest value on any running instance. For a
- * strict read on a replica that booted AFTER the last `set` and has not yet
- * received any inbound `set` (the watcher only catches post-boot sets), use the
- * asynchronous `getLatest()`, which reads the shared buffer directly.
- *
- * The `.set(value)` method publishes through the framework-owned platform
- * (the same path as the top-level `publish()` helper), so the new value
- * reaches every local subscriber and relays across the cluster when a bus
- * is wired. Call it from any server context after the platform has been
- * captured (RPC handler, cron tick, effect, an admin `+server.js` route).
- *
- * @param {string} topic - Topic carrying the flag value
- * @param {any} [initialValue] - Value served to subscribers before the first `.set`
- * @param {{ replay?: boolean | { size?: number } }} [options]
- * @returns {Function & { set(value: any): any, get(): any, getLatest(): Promise<any> }}
- *
- * @example
- * ```js
- * // src/live/flags.js
- * import { live } from 'svelte-realtime/server';
- * export const maintenance = live.flag('flag:maintenance', false);
- *
- * // Flip it from any handler:
- * export const toggleMaintenance = live(async (ctx, on) => {
- *   maintenance.set(on);
- * });
- * ```
- *
- * ```svelte
- * <script>
- *   import { maintenance } from '$live/flags';
- * </script>
- * {#if $maintenance}<Banner />{/if}
- * ```
- */
-live.flag = function flag(topic, initialValue, options) {
-	if (typeof topic !== 'string' || topic.length === 0) {
-		throw new Error('[svelte-realtime] live.flag topic must be a non-empty string');
-	}
-	// The flag's value lives in a per-topic cell shared with the eager
-	// registry-load watcher (installed by `__registerFlag`). Binding to the
-	// cell instead of a private closure variable decouples the value from this
-	// module's import: a `set` that arrives before the module is first imported
-	// is captured into the cell by the eager watcher, so the first `.get()`
-	// after import reads the cluster-latest value rather than a stale init.
-	const cell = _flagCell(topic, initialValue);
-	const initFn = async function flagInit() { return cell.value; };
-	// Replay is ON by default with a single-entry buffer so the flag's
-	// topic is replay-eligible at declaration: `.set() -> publish() ->
-	// _maybeReplayPublish` writes the cluster-shared buffer, and a fresh
-	// subscriber (or a just-booted replica) is served the cluster-latest
-	// value through the seeding branch in `_executeStreamRpc`. Pass a
-	// custom `replay` object to override the buffer size, or `replay: false`
-	// to opt out (single-process apps lose nothing - the cached value is
-	// authoritative in one process).
-	const streamOpts = { merge: 'set' };
-	if (options && options.replay === false) {
-		// opt out: leave replay unset
-	} else if (options && options.replay) {
-		/** @type {any} */ (streamOpts).replay = options.replay;
-	} else {
-		/** @type {any} */ (streamOpts).replay = { size: 1 };
-	}
-	const stream = live.stream(topic, initFn, streamOpts);
-	/** @type {any} */ (stream).__isFlag = true;
-	/**
-	 * Read the flag's current value on the server (synchronous). On a running
-	 * replica this stays fresh from boot within a tick of any inbound `set` via
-	 * the per-topic watcher installed eagerly at registry load (see
-	 * `__registerFlag`). For a strict read on a replica that booted after the
-	 * last `set` and has not yet received any inbound `set`, use `getLatest()`.
-	 */
-	/** @type {any} */ (stream).get = function get() { return cell.value; };
-	/**
-	 * Read the cluster-latest flag value (asynchronous). Reads the shared
-	 * replay buffer when one is wired and non-empty; otherwise falls back to
-	 * the locally cached value. Serves the strict read-after-cold-boot
-	 * case where a replica may not yet have observed the cluster-latest set.
-	 */
-	/** @type {any} */ (stream).getLatest = async function getLatest() {
-		// Resolve the captured platform the same way `.set()` does (via the
-		// top-level `publish()` helper), so `getLatest()` reads the shared
-		// buffer whether the platform was captured by `_activateDerived` or
-		// `setCronPlatform`.
-		const platform = getPlatform();
-		const replay = platform && /** @type {any} */ (platform).replay;
-		if (replay && typeof replay.since === 'function') {
-			try {
-				const buffered = await replay.since(topic, 0);
-				if (Array.isArray(buffered) && buffered.length > 0) {
-					const last = buffered[buffered.length - 1];
-					if (last && 'data' in last) return last.data;
-				}
-			} catch {}
-		}
-		return cell.value;
-	};
-	/** Publish a new flag value to every subscriber. */
-	/** @type {any} */ (stream).set = function set(value) {
-		cell.value = value;
-		return publish(topic, 'set', value);
-	};
-	// Ensure the per-topic refresh watcher is installed. This is idempotent
-	// with the eager `__registerFlag` install the registry module emits, and
-	// covers the cases where a flag module is imported without a generated
-	// registry (the dev-mode direct-load fallback, or a flag declared inline
-	// in tests).
-	_installFlagWatcher(topic);
-	return /** @type {any} */ (stream);
-};
+installReactiveFamilies({ flagCell: _flagCell, installFlagWatcher: _installFlagWatcher, validateWindowSpec: _validateWindowSpec });
 
-/**
- * Create a server-side computed stream that recomputes when any source topic publishes.
- *
- * Static form: sources is a string[] of topic names.
- * Dynamic form: sources is a function (...args) => string[] that resolves topics at subscribe time.
- *
- * @param {string[] | Function} sources - Topic names to watch, or a factory that receives runtime args
- * @param {Function} fn - Async function that computes the derived value
- * @param {{ merge?: string, debounce?: number }} [options]
- * @returns {Function}
- */
-live.derived = function derived(sources, fn, options) {
-	const baseTopic = /** @type {any} */ (fn).__derivedTopic || ('__derived:' + (_derivedIdCounter++));
-	const merge = options?.merge || 'set';
-	const debounce = options?.debounce || 0;
-	const dynamic = typeof sources === 'function';
+// live.flag/derived/effect/aggregate registration bodies live in
+// src/server/reactive-families.js; these thin wrappers keep them on the factory.
+live.flag = function flag(...args) { return _flagRegister(...args); };
 
-	/** @type {any} */ (fn).__isDerived = true;
-	/** @type {any} */ (fn).__isStream = true;
-	/** @type {any} */ (fn).__isLive = true;
-	/** @type {any} */ (fn).__streamOptions = merge === 'crud' ? { merge, key: 'id' } : { merge };
-	/** @type {any} */ (fn).__derivedDebounce = debounce;
-
-	if (dynamic) {
-		/** @type {any} */ (fn).__derivedDynamic = true;
-		/** @type {any} */ (fn).__derivedSourceFactory = sources;
-		/** @type {Map<string, any[]>} */
-		const topicArgs = new Map();
-		const topicFn = (...args) => {
-			const t = baseTopic + '~' + args.map(a => String(a).replace(/~/g, '')).join('~');
-			topicArgs.set(t, args);
-			if (topicArgs.size > 10000) {
-				const iter = topicArgs.keys();
-				topicArgs.delete(iter.next().value);
-			}
-			return t;
-		};
-		/** @type {any} */ (topicFn).__topicUsesCtx = false;
-		/** @type {any} */ (fn).__streamTopic = topicFn;
-		/** @type {any} */ (fn).__derivedTopicArgs = topicArgs;
-
-		/** @type {any} */ (fn).__onSubscribe = function (_ctx, resolvedTopic) {
-			_activateDynamicDerived(fn, resolvedTopic, _ctx && _ctx.user);
-		};
-		/** @type {any} */ (fn).__onUnsubscribe = function (_ctx, resolvedTopic) {
-			_deactivateDynamicDerived(fn, resolvedTopic);
-		};
-	} else {
-		/** @type {any} */ (fn).__streamTopic = baseTopic;
-		/** @type {any} */ (fn).__derivedSources = sources;
-	}
-
-	return fn;
-};
-
-let _derivedIdCounter = 0;
+// live.derived: registration body in src/server/reactive-families.js.
+live.derived = function derived(...args) { return _derivedRegister(...args); };
 
 /** @type {boolean} Whether any dynamic derived streams have been registered */
 let _hasDynamicDerived = false;
@@ -1684,22 +1507,8 @@ let _hasDynamicDerived = false;
  */
 let _hasLazyReactive = false;
 
-/**
- * Create a server-side reactive side effect.
- * Effects fire when source topics publish. They are fire-and-forget - no data, no topic.
- *
- * @param {string[]} sources - Topic names to watch
- * @param {Function} fn - Async function (event, data, platform) called on each matching publish
- * @param {{ debounce?: number }} [options]
- * @returns {Function}
- */
-live.effect = function effect(sources, fn, options) {
-	const debounce = options?.debounce || 0;
-	/** @type {any} */ (fn).__isEffect = true;
-	/** @type {any} */ (fn).__effectSources = sources;
-	/** @type {any} */ (fn).__effectDebounce = debounce;
-	return fn;
-};
+// live.effect: registration body in src/server/reactive-families.js.
+live.effect = function effect(...args) { return _effectRegister(...args); };
 
 /**
  * Register an effect. Called by the Vite-generated registry module.
@@ -1839,8 +1648,6 @@ export function __registerFlag(topic, initialValue) {
 	_flagCell(topic, initialValue);
 	_installFlagWatcher(topic);
 }
-/** @type {Map<string, any>} Topic-keyed lookup for aggregates */
-const _aggregateByTopic = new Map();
 
 /** @type {Map<string, { sources: string[], config: any }>} path -> outbound webhook entry */
 const webhookOutRegistry = new Map();
@@ -2041,140 +1848,8 @@ export const combineMerge = (...buckets) => {
 };
 
 
-/**
- * Create a real-time incremental aggregation over a source topic.
- * Each event runs O(1) reducers instead of requerying the database.
- *
- * **Single-state form** (no `windows`): the original behavior. One
- * state slice per reducer field, one output topic, one snapshot.
- *
- * **Windowed form** (`windows: { ... }`): declarative time-windowed
- * aggregation. One state slice per (reducer field x window), per-window
- * output topic at `${topic}:${windowName}`, per-window debounce + snapshot.
- * Supports three window types:
- *
- * - `lifetime` - never resets; equivalent to a single-state aggregate
- *   exposed as a named output for symmetry.
- * - `tumbling` - boundary-anchored. `period: 'minute' | 'hour' | 'daily'
- *   | 'monthly'` resets at the configured tz's natural boundary;
- *   `durationMs + anchor` resets at fixed intervals from a custom epoch.
- *   On boundary cross, the closing window publishes one final pre-reset
- *   state, then state is `init()`-cleared for the new window.
- * - `sliding` - hop-window with `durationMs / slideMs` buckets. Each
- *   event reduces into the current hop; on each slide, drop the oldest
- *   bucket and start a new current bucket. Reducers MUST provide a
- *   `combine(...buckets)` field so cross-bucket state can be recomputed
- *   on each publish; built-in helpers `combineSum`, `combineCounts`,
- *   `combineMax`, `combineMin`, `combineMerge` cover the common shapes.
- *
- * **Cluster mode (important).** Today's aggregate runs on every worker
- * fed by the source topic via the adapter's cluster bus. State converges
- * across workers as long as the source topic fans out to every worker
- * (the default). Sharded source topics (where each worker sees a
- * partition rather than the full firehose) will produce divergent
- * per-worker state and inconsistent per-window publishes. For sharded
- * sources, layer a leader gate later (symmetric to `configureCron({
- * leader })`) - not shipped in this slice.
- *
- * @param {string} source - Topic to watch for events
- * @param {Record<string, { init?: () => any, reduce?: (acc: any, event: string, data: any) => any, compute?: (state: any) => any, combine?: (...buckets: any[]) => any }>} reducers
- * @param {{ topic: string, snapshot?: () => Promise<any>, snapshots?: Record<string, () => Promise<any>>, debounce?: number, windows?: Record<string, any> }} options
- * @returns {Function}
- */
-live.aggregate = function aggregate(source, reducers, options) {
-	const topic = options.topic;
-	const debounce = options?.debounce || 0;
-	const windowsSpec = options?.windows || null;
-
-	// Build initial state from init() functions
-	const initState = {};
-	for (const [field, r] of Object.entries(reducers)) {
-		if (r.init) initState[field] = r.init();
-	}
-
-	// ---- Windowed form ----
-	if (windowsSpec) {
-		const windowKeys = Object.keys(windowsSpec);
-		if (windowKeys.length === 0) {
-			throw new Error('[svelte-realtime] live.aggregate: windows must declare at least one window');
-		}
-		for (const [name, spec] of Object.entries(windowsSpec)) {
-			_validateWindowSpec(name, spec, reducers);
-		}
-
-		// The "root" function. It is NOT a stream itself; the per-window
-		// streams attached as `__windowStreams` are what the Vite plugin
-		// generates client stubs for. Calling the root directly throws --
-		// the user's per-window subscribe path is the intended entry.
-		const root = function aggregateRoot() {
-			throw new Error('[svelte-realtime] Windowed aggregate is not a single stream; subscribe via its per-window children (e.g. `myAggregate.last10min`).');
-		};
-
-		/** @type {any} */ (root).__isAggregate = true;
-		/** @type {any} */ (root).__isLive = true;
-		/** @type {any} */ (root).__aggregateSource = source;
-		/** @type {any} */ (root).__aggregateReducers = reducers;
-		/** @type {any} */ (root).__aggregateInitState = initState;
-		/** @type {any} */ (root).__aggregateBaseTopic = topic;
-		/** @type {any} */ (root).__aggregateSnapshot = options?.snapshot || null;
-		/** @type {any} */ (root).__aggregateSnapshots = options?.snapshots || null;
-		/** @type {any} */ (root).__aggregateDebounce = debounce;
-		/** @type {any} */ (root).__aggregateWindows = windowsSpec;
-		/** @type {any} */ (root).__aggregateWindowKeys = windowKeys;
-
-		// Build per-window stream functions. Each is registered separately
-		// via the Vite plugin's per-window registry lines and exposed on
-		// the client as `myAggregate.windowName`.
-		const windowStreams = {};
-		for (const wn of windowKeys) {
-			const outputTopic = `${topic}:${wn}`;
-			const perWindowInit = async function aggregatePerWindowInit() {
-				const entry = _aggregateByTopic.get(topic);
-				if (!entry || !entry.windowStates) {
-					return _computeAggregateState(initState, reducers);
-				}
-				if (entry._hydrationPromise) await entry._hydrationPromise;
-				const winState = entry.windowStates.get(wn);
-				if (!winState) return _computeAggregateState(initState, reducers);
-				return _computeWindowState(winState, reducers);
-			};
-			/** @type {any} */ (perWindowInit).__isStream = true;
-			/** @type {any} */ (perWindowInit).__isLive = true;
-			/** @type {any} */ (perWindowInit).__isAggregateWindow = true;
-			/** @type {any} */ (perWindowInit).__streamTopic = outputTopic;
-			/** @type {any} */ (perWindowInit).__streamOptions = { merge: 'set' };
-			/** @type {any} */ (perWindowInit).__aggregateRoot = root;
-			/** @type {any} */ (perWindowInit).__aggregateWindowName = wn;
-			windowStreams[wn] = perWindowInit;
-		}
-		/** @type {any} */ (root).__windowStreams = windowStreams;
-
-		return root;
-	}
-
-	// ---- Single-state form (existing behavior, untouched) ----
-	const initFn = async function aggregateInit() {
-		const entry = _aggregateByTopic.get(topic);
-		if (entry) {
-			// Wait for snapshot hydration to finish before returning state
-			if (entry._hydrationPromise) await entry._hydrationPromise;
-			return _computeAggregateState(entry.state, reducers);
-		}
-		return _computeAggregateState(initState, reducers);
-	};
-
-	/** @type {any} */ (initFn).__isAggregate = true;
-	/** @type {any} */ (initFn).__isStream = true;
-	/** @type {any} */ (initFn).__isLive = true;
-	/** @type {any} */ (initFn).__streamTopic = topic;
-	/** @type {any} */ (initFn).__streamOptions = { merge: 'set' };
-	/** @type {any} */ (initFn).__aggregateSource = source;
-	/** @type {any} */ (initFn).__aggregateReducers = reducers;
-	/** @type {any} */ (initFn).__aggregateInitState = initState;
-	/** @type {any} */ (initFn).__aggregateSnapshot = options?.snapshot || null;
-	/** @type {any} */ (initFn).__aggregateDebounce = debounce;
-	return initFn;
-};
+// live.aggregate: registration body in src/server/reactive-families.js.
+live.aggregate = function aggregate(...args) { return _aggregateRegister(...args); };
 
 /**
  * Register an aggregate. Called by the Vite-generated registry module.
@@ -2654,532 +2329,19 @@ pipe.join = function pipeJoin(field, resolver, as) {
 	};
 };
 
-/**
- * Create a collaborative room that bundles data stream, presence, cursors, and room-scoped RPC.
- *
- * @param {{ topic: (ctx: any, ...args: any[]) => string, init: (ctx: any, ...args: any[]) => Promise<any>, presence?: (ctx: any) => any, cursors?: boolean | { throttle?: number }, actions?: Record<string, Function>, guard?: Function, onJoin?: Function, onLeave?: Function, merge?: string, key?: string }} config
- * @returns {any}
- */
+installRoom({ callTopicFn: _callTopicFn, rollingBack: _rollingBack });
 
-live.room = function room(config) {
-	const {
-		topic: topicFn,
-		init: initFn,
-		presence: presenceFn,
-		cursors: cursorConfig,
-		actions,
-		guard: guardFn,
-		onJoin,
-		onLeave,
-		merge: mergeMode = 'crud',
-		key: keyField = 'id'
-	} = config;
+// live.room builds a collaborative room (data stream, presence, cursors, scoped
+// actions); its registration body lives in src/server/room.js. This thin wrapper
+// keeps live.room on the factory while the body moved out.
+live.room = function room(...args) { return _roomRegister(...args); };
 
-	/** @type {any} */ (topicFn).__topicUsesCtx = true;
+installMultiplayer({ callTopicFn: _callTopicFn });
 
-	// Number of room-identifying args the topic function expects (excluding ctx).
-	// Used by room actions to separate room args from action-specific payload.
-	let _roomArgCount = Math.max(0, topicFn.length - 1);
-	if (config.topicArgs !== undefined) {
-		if (!Number.isInteger(config.topicArgs) || config.topicArgs < 0) {
-			throw new Error(`[svelte-realtime] live.room() topicArgs must be a non-negative integer, got ${config.topicArgs}\n  See: https://svti.me/rooms`);
-		}
-		_roomArgCount = config.topicArgs;
-	} else if (actions) {
-		throw new Error(
-			`[svelte-realtime] live.room() with actions requires 'topicArgs'. ` +
-			`Set topicArgs to the number of room-identifying args (excluding ctx).\n  See: https://svti.me/rooms`
-		);
-	}
-
-	// Action history for lag compensation. Opt-in: without a `history` config
-	// the action wrapper below is unchanged and ctx.compensate stays the
-	// loud-error default. Recording only ever happens on action execution, so
-	// history on a room with no actions is dead config and rejected here.
-	const historyCfg = config.history !== undefined ? _resolveHistoryConfig(config.history) : null;
-	if (historyCfg && !actions) {
-		throw new Error(
-			`[svelte-realtime] live.room() history requires actions - snapshots are recorded after each action, so a room with no actions would never record.\n  See: https://svti.me/rooms`
-		);
-	}
-	const historyStore = historyCfg ? _createHistoryStore(historyCfg) : null;
-	let _captureWarned = false;
-
-	/**
-	 * The live ctx.compensate for this room's actions: clamp the
-	 * client-stamped command time against the ring and hand the eval function
-	 * the matching snapshot. Client-stamped time is trusted only inside the
-	 * window the server itself recorded; everything else fails safe to
-	 * current state. The eval function is ordinary action code - publishes
-	 * inside it are immediate, exactly like publishes anywhere else in an
-	 * action (interposing a queue on the shared ctx.publish slot would
-	 * corrupt delivery under concurrent compensate calls on one ctx).
-	 *
-	 * @param {string} roomTopic
-	 * @param {any} ctx
-	 * @param {any[]} roomArgs
-	 * @param {number | null | undefined} commandTime
-	 * @param {(state: any, meta: { time: number, age: number, fallback: boolean }) => any} evalFn
-	 * @param {{ tolerance?: number } | undefined} options
-	 */
-	async function _runCompensate(roomTopic, ctx, roomArgs, commandTime, evalFn, options) {
-		if (typeof evalFn !== 'function') {
-			throw new LiveError('VALIDATION', 'ctx.compensate requires an eval function: ctx.compensate(commandTime, (state, meta) => ...)');
-		}
-		const tolerance = options && typeof options.tolerance === 'number' && options.tolerance > 0 ? options.tolerance : 0;
-		const t = wallEpoch();
-		let entry = null;
-		let fallback = false;
-		if (ctx._compensateDepth > 0) {
-			// A compensate already in flight on this ctx - nested inside an
-			// eval function, or concurrent within one action: no nested
-			// rewind, evaluate against current state.
-			fallback = true;
-		} else if (typeof commandTime === 'number' && Number.isFinite(commandTime) && t - commandTime > tolerance) {
-			entry = /** @type {NonNullable<typeof historyStore>} */ (historyStore).lookup(roomTopic, commandTime, t);
-			// A rewind the ring cannot serve (empty, or older than the age
-			// window) evaluates against current state - never the oldest
-			// marker, or stale commands would hit ancient positions.
-			if (entry === null) fallback = true;
-		}
-		let state;
-		let meta;
-		if (entry !== null) {
-			state = entry.state;
-			meta = { time: entry.time, age: t - entry.time, fallback: false };
-		} else {
-			// Fresh capture: no/invalid command time, within tolerance, or a
-			// rewind that fell back. A throw here propagates - the app's own
-			// capture is the state source and must be loud when broken.
-			state = _freezeSnapshot(/** @type {NonNullable<typeof historyCfg>} */ (historyCfg).capture(...roomArgs));
-			meta = { time: t, age: 0, fallback };
-		}
-		// A depth counter, not a boolean: increment/decrement commutes, so
-		// the guard survives any interleaving - sibling nested calls, and
-		// concurrent compensates whose evals resolve out of order (a saved
-		// boolean restored out of order would leak the in-flight flag).
-		ctx._compensateDepth++;
-		try {
-			return await evalFn(state, meta);
-		} finally {
-			ctx._compensateDepth--;
-		}
-	}
-
-	const roomExport = {};
-
-	const dataStream = live.stream(topicFn, async function roomInit(ctx, ...args) {
-		if (guardFn) await guardFn(ctx, ...args);
-		const result = await initFn(ctx, ...args);
-		// onJoin runs after successful init so a failed init doesn't leave orphaned side effects
-		if (onJoin) {
-			try { await onJoin(ctx, ...args); } catch {}
-		}
-		return result;
-	}, {
-		merge: mergeMode,
-		key: keyField,
-		onSubscribe: presenceFn ? async (ctx, topic) => {
-			const userId = _getIdentityKey(ctx);
-			const refKey = topic + '\0' + userId;
-
-			let ref = _presenceRef.get(refKey);
-			if (ref) {
-				// Cancel pending grace leave if reconnecting
-				if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
-				ref.count++;
-				// Refresh LRU position so active entries survive eviction
-				_presenceRef.delete(refKey);
-				_presenceRef.set(refKey, ref);
-				return;
-			}
-
-			if (_presenceRef.size >= state.maxPresenceRef) {
-				for (const [k, r] of _presenceRef) {
-					if (r.timer) {
-						clearTimer(r.timer);
-						const [t, u] = k.split('\0');
-						// Cluster release runs eagerly here too: an evicted entry
-						// would otherwise leak a phantom counter on Redis.
-						_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
-							if (res.isLast) {
-								ctx.publish(t + ':presence', 'leave', { key: u });
-							}
-						}).catch(() => {});
-						if (onLeave) {
-							Promise.resolve().then(() => onLeave(ctx, t)).catch(() => {});
-						}
-						_presenceRef.delete(k);
-					}
-				}
-				if (_presenceRef.size >= state.maxPresenceRef) {
-					if (!state.presenceRefWarnFired) {
-						state.presenceRefWarnFired = true;
-						console.warn(
-							"[svelte-realtime] presence-ref map reached MAX_PRESENCE_REF=" + state.maxPresenceRef +
-							"; new joiners will not appear in any subscriber's roster until existing entries clear.\n" +
-							"  For multi-instance deploys, wire `platform.redis` (raw ioredis client) so the cluster-shared Redis presence is bypasses the in-memory cap.\n" +
-							"  See: https://svti.me/presence"
-						);
-					}
-					return;
-				}
-			}
-
-			// Compute presence payload BEFORE storing the ref so the in-memory
-			// fallback in the presence stream's init can reconstruct the roster
-			// even when this user's join was published before they subscribed
-			// to the :presence topic.
-			const presenceData = presenceFn(ctx);
-			_presenceRef.set(refKey, { count: 1, timer: null, data: presenceData });
-			// Cluster transition: bump shared count; only the first replica to
-			// reach 1 publishes 'join'. With no platform.redis the helper
-			// returns isFirst=true unconditionally, matching the in-memory path.
-			if (presenceData) {
-				const { isFirst } = await _clusterPresenceAcquire(ctx.platform, topic, userId, presenceData);
-				if (isFirst) {
-					ctx.publish(topic + ':presence', 'join', { key: userId, data: presenceData });
-				}
-			}
-		} : undefined,
-		onUnsubscribe: presenceFn ? (ctx, topic) => {
-			const userId = _getIdentityKey(ctx);
-			const refKey = topic + '\0' + userId;
-
-			const ref = _presenceRef.get(refKey);
-			if (!ref) return;
-
-			ref.count--;
-			if (ref.count > 0) return;
-
-			// On rollback (failed stream init), skip grace and release
-			// immediately. Cluster release decides whether this was the LAST
-			// subscriber across the cluster - only then do we publish 'leave'.
-			if (ctx.ws && _rollingBack.has(ctx.ws)) {
-				if (ref.timer) clearTimer(ref.timer);
-				_presenceRef.delete(refKey);
-				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
-					if (res.isLast) {
-						ctx.publish(topic + ':presence', 'leave', { key: userId });
-					}
-				}).catch(() => {});
-				if (onLeave) {
-					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
-				}
-				return;
-			}
-
-			ref.timer = setTimer(() => {
-				_presenceRef.delete(refKey);
-				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
-					if (res.isLast) {
-						ctx.publish(topic + ':presence', 'leave', { key: userId });
-					}
-				}).catch(() => {});
-				if (onLeave) {
-					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
-				}
-			}, 5000);
-		} : undefined
-	});
-
-	/** @type {any} */ (roomExport).__isRoom = true;
-	/** @type {any} */ (roomExport).__dataStream = dataStream;
-	/** @type {any} */ (roomExport).__topicFn = topicFn;
-	/** @type {any} */ (roomExport).__hasPresence = !!presenceFn;
-	/** @type {any} */ (roomExport).__hasCursors = !!cursorConfig;
-	/** @type {any} */ (roomExport).__cursorThrottle = typeof cursorConfig === 'object' ? cursorConfig.throttle || 50 : 50;
-
-	// Presence stream (if enabled)
-	if (presenceFn) {
-		/** @type {any} */ (roomExport).__presenceStream = live.stream(
-			(ctx, ...args) => topicFn(ctx, ...args) + ':presence',
-			async (ctx, ...args) => {
-				if (guardFn) await guardFn(ctx, ...args);
-				const dataTopic = topicFn(ctx, ...args);
-				// Cluster-shared roster when `platform.redis` is wired; falls
-				// back to the local _presenceRef iteration otherwise. The
-				// loader reconstructs the roster even when this user's join
-				// was published before they subscribed to :presence (the live
-				// merge takes over from here).
-				return _clusterPresenceList(ctx.platform, dataTopic);
-			},
-			{ merge: 'presence' }
-		);
-	}
-
-	// Cursor stream (if enabled)
-	if (cursorConfig) {
-		/** @type {any} */ (roomExport).__cursorStream = live.stream(
-			(ctx, ...args) => topicFn(ctx, ...args) + ':cursors',
-			async (ctx, ...args) => {
-				if (guardFn) await guardFn(ctx, ...args);
-				return [];
-			},
-			{ merge: 'cursor' }
-		);
-	}
-
-	// Room-scoped actions
-	if (actions) {
-		/** @type {any} */ (roomExport).__actions = {};
-		for (const [name, fn] of Object.entries(actions)) {
-			if (!_validSegmentRe.test(name)) {
-				if (_IS_DEV) {
-					console.warn(`[svelte-realtime] Room action '${name}' contains invalid characters (only a-z, A-Z, 0-9, _ allowed) - skipped\n  See: https://svti.me/rooms`);
-				}
-				continue;
-			}
-			const wrappedAction = live(async function roomAction(ctx, ...args) {
-				if (guardFn) await guardFn(ctx, ...args);
-				const roomArgs = args.slice(0, _roomArgCount);
-				const roomTopic = _callTopicFn(topicFn, ctx, roomArgs);
-				const originalPublish = ctx.publish;
-				ctx.publish = (event, data) => originalPublish(roomTopic, event, data);
-				if (historyStore === null) {
-					try {
-						return await fn(ctx, ...args);
-					} finally {
-						ctx.publish = originalPublish;
-					}
-				}
-				const originalCompensate = ctx.compensate;
-				ctx.compensate = (commandTime, evalFn, options) =>
-					_runCompensate(roomTopic, ctx, roomArgs, commandTime, evalFn, options);
-				try {
-					const result = await fn(ctx, ...args);
-					// Record AFTER the action succeeds: the post-action state is
-					// what subscribers are about to see, and a failed action
-					// must leave no marker. Capture failures are contained (the
-					// action's own result already exists) and warn once.
-					try {
-						historyStore.record(
-							roomTopic,
-							_freezeSnapshot(/** @type {NonNullable<typeof historyCfg>} */ (historyCfg).capture(...roomArgs)),
-							wallEpoch()
-						);
-					} catch (err) {
-						if (!_captureWarned) {
-							_captureWarned = true;
-							console.error('[svelte-realtime] history capture threw; suppressing further capture errors for this room:', err);
-						}
-					}
-					return result;
-				} finally {
-					ctx.publish = originalPublish;
-					ctx.compensate = originalCompensate;
-				}
-			});
-			/** @type {any} */ (wrappedAction).__wrappedFn = fn;
-			/** @type {any} */ (roomExport).__actions[name] = wrappedAction;
-		}
-	}
-
-	// Convenience .hooks property for one-liner wiring in hooks.ws.js:
-	// export const { subscribe, unsubscribe, message, close } = myRoom.hooks;
-	/** @type {any} */ (roomExport).hooks = {
-		message(ws, ctx) {
-			handleRpc(ws, ctx.data, ctx.platform);
-		},
-		close(ws, ctx) {
-			close(ws, ctx);
-		},
-		unsubscribe: unsubscribe
-	};
-
-	return roomExport;
-};
-
-live.multiplayer = function multiplayer(config) {
-	const topicFn = config && config.topic;
-	if (typeof topicFn !== 'function') {
-		throw new Error(
-			`[svelte-realtime] live.multiplayer() requires a topic function (ctx, ...args) => string\n  See: https://svti.me/multiplayer`
-		);
-	}
-
-	// A presence field (typing / locks / selections) is stamped on a roster
-	// entry, and a roster entry only exists once presence has been set. Without
-	// a presence function there is no entry to carry the field, so the field
-	// would publish but never persist for a late joiner. Reactions are exempt:
-	// they ride their own ephemeral sub-topic and never touch the roster.
-	if ((config.typing || config.locks || config.selections) && typeof config.presence !== 'function') {
-		const declared = config.typing ? 'typing' : (config.locks ? 'locks' : 'selections');
-		throw new Error(
-			`[svelte-realtime] live.multiplayer() declares the '${declared}' presence field but has no presence function. Presence fields are stamped on a roster entry that only exists when presence is set, so add a presence function. Reactions do not require presence.\n  See: https://svti.me/multiplayer`
-		);
-	}
-
-	// A multiplayer export is a room export with a marker stamped on top. It
-	// reuses live.room's sub-stream construction verbatim so the data /
-	// presence / cursor streams, the presence-ref auto-join, and the scoped
-	// actions are byte-identical to a room. The codegen and the dev-direct
-	// loader dispatch on __isRoom for the sub-streams; the __isMultiplayer
-	// marker only adds the collaborative client surface.
-	const roomExport = live.room({
-		topic: topicFn,
-		init: config.init ? config.init : async () => [],
-		presence: config.presence,
-		cursors: config.cursors,
-		guard: config.guard,
-		onJoin: config.onJoin,
-		onLeave: config.onLeave,
-		merge: config.merge,
-		key: config.key,
-		actions: config.actions,
-		topicArgs: config.topicArgs,
-		history: config.history
-	});
-
-	/** @type {any} */ (roomExport).__isMultiplayer = true;
-
-	// Cursor send path. The client `move` / `reportViewport` methods are
-	// volatile RPCs (fire-and-forget, lossy under disconnect is the contract)
-	// that publish an `update` frame keyed by the caller's identity onto the
-	// room's `:cursors` sub-topic - the same topic the cursor stream loads and
-	// merges with `merge: 'cursor'`. The leading args identify the room (the
-	// same count the topic function and room actions use); the trailing args
-	// are the cursor payload, normalized to a flat object the cursor merge can
-	// key by `.key`.
-	const _cursorArgCount = config.topicArgs !== undefined
-		? config.topicArgs
-		: Math.max(0, topicFn.length - 1);
-
-	/**
-	 * @param {any} ctx
-	 * @param {any[]} args
-	 * @param {Record<string, any>} extra
-	 */
-	const _publishCursor = (ctx, args, extra) => {
-		const roomArgs = args.slice(0, _cursorArgCount);
-		const payload = args.slice(_cursorArgCount);
-		const cursorTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':cursors';
-		const key = _getIdentityKey(ctx);
-		const frame = { key, ...extra };
-		const cur = payload[0];
-		if (cur && typeof cur === 'object' && !Array.isArray(cur)) {
-			Object.assign(frame, cur);
-		} else if (payload.length > 0) {
-			frame.value = payload.length === 1 ? cur : payload;
-		}
-		ctx.publish(cursorTopic, 'update', frame);
-	};
-
-	const _cursorGuard = config.guard;
-	/** @type {any} */ (roomExport).__cursorMove = live.volatile(async (ctx, ...args) => {
-		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
-		_publishCursor(ctx, args, {});
-	});
-	/** @type {any} */ (roomExport).__cursorReportViewport = live.volatile(async (ctx, ...args) => {
-		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
-		_publishCursor(ctx, args, { viewport: true });
-	});
-
-	// Presence-field send path. The typing / selection / lock surfaces are
-	// presence fields: a caller publishes a delta keyed by its own identity onto
-	// the room's `:presence` sub-topic, the same topic the presence stream loads
-	// and merges with `merge: 'presence'`. The `update` event shallow-merges the
-	// changed fields into the caller's roster entry, so every subscriber's roster
-	// gains the new field value. The leading args identify the room (the same
-	// count the topic function and cursor send path use); the trailing arg is a
-	// flat `{ field: value }` delta object.
-	//
-	// Locks here are advisory presence locks: each caller stamps `lock:<key>` on
-	// its own entry (the server keys the entry by the caller's identity, so the
-	// holder is the entry owner), so a plain keyed publish is correct with no
-	// arbitration - releasing clears the field, and a leave drops the entry so
-	// derived holders recompute. This is awareness, not mutual exclusion.
-	/**
-	 * @param {any} ctx
-	 * @param {any[]} args
-	 */
-	const _publishPresenceField = (ctx, args) => {
-		const roomArgs = args.slice(0, _cursorArgCount);
-		const delta = args[_cursorArgCount];
-		const presenceTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':presence';
-		const key = _getIdentityKey(ctx);
-		const frame = { key };
-		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
-			Object.assign(frame, delta);
-		}
-		ctx.publish(presenceTopic, 'update', frame);
-	};
-
-	/** @type {any} */ (roomExport).__presenceUpdate = live.volatile(async (ctx, ...args) => {
-		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
-		_publishPresenceField(ctx, args);
-		// Persist the sticky subset onto the roster after the forward publish so a
-		// late joiner who loads the roster still sees it. selection (when
-		// selections are enabled) and lock:<k> (when locks are enabled) are sticky;
-		// typing and everything else stay ephemeral. Reactions ride a separate path.
-		const delta = args[_cursorArgCount];
-		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
-			const sticky = {};
-			for (const k of Object.keys(delta)) {
-				if (k === 'selection') { if (config.selections) sticky[k] = delta[k]; }
-				else if (k.slice(0, 5) === 'lock:') { if (config.locks) sticky[k] = delta[k]; }
-			}
-			if (Object.keys(sticky).length > 0) {
-				const dataTopic = _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount));
-				await _clusterPresenceMerge(ctx.platform, dataTopic, _getIdentityKey(ctx), sticky);
-			}
-		}
-	});
-
-	// Reactions are ephemeral events, not roster fields: a reaction is a one-off
-	// emote (an emoji at a point), never a sticky value on a presence entry. It
-	// rides a dedicated `:reactions` sub-topic as a bare `reaction` event so it
-	// is consumed as a bounded, GC-after-render list rather than merged into the
-	// roster. ctx.publish never coalesces, so a burst of taps all arrive.
-	/**
-	 * @param {any} ctx
-	 * @param {any[]} args
-	 */
-	const _publishReaction = (ctx, args) => {
-		const roomArgs = args.slice(0, _cursorArgCount);
-		const payload = args.slice(_cursorArgCount);
-		const reactionTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':reactions';
-		const key = _getIdentityKey(ctx);
-		const frame = { key, token: payload[0] };
-		const at = payload[1];
-		if (at && typeof at === 'object' && !Array.isArray(at)) {
-			Object.assign(frame, at);
-		}
-		ctx.publish(reactionTopic, 'reaction', frame);
-	};
-
-	/** @type {any} */ (roomExport).__reactionEmit = live.volatile(async (ctx, ...args) => {
-		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
-		_publishReaction(ctx, args);
-	});
-
-	// Reactions sub-stream: a bounded append-only ring (merge 'latest') on the
-	// `:reactions` sub-topic. New subscribers start empty (a reaction is a live
-	// event, never replayed from a roster), and the client GCs rendered taps so
-	// a burst never grows unbounded.
-	if (config.reactions) {
-		/** @type {any} */ (roomExport).__reactionStream = live.stream(
-			(ctx, ...args) => topicFn(ctx, ...args) + ':reactions',
-			async (ctx, ...args) => {
-				if (_cursorGuard) await _cursorGuard(ctx, ...args);
-				return [];
-			},
-			{ merge: 'latest' }
-		);
-	}
-
-	// Record the declared field surfaces so the generated namespace knows which
-	// methods and reactive views to wire. typing / selections / locks publish
-	// onto the room's `:presence` topic; reactions ride the `:reactions` topic.
-	/** @type {any} */ (roomExport).__fields = {
-		typing: !!config.typing,
-		locks: Array.isArray(config.locks) ? config.locks.slice() : (config.locks ? [] : null),
-		reactions: !!config.reactions,
-		selections: config.selections === 'crdt' ? 'crdt' : (config.selections ? 'offset' : null)
-	};
-
-	return roomExport;
-};
+// live.multiplayer builds a collaborative room namespace; its registration body
+// lives in src/server/multiplayer.js. This thin wrapper keeps live.multiplayer
+// on the factory while the body moved out.
+live.multiplayer = function multiplayer(...args) { return _multiplayerRegister(...args); };
 
 installSmooth({ callTopicFn: _callTopicFn });
 
@@ -3276,33 +2438,12 @@ installAdmission(live);
 
 installMetrics(live);
 
-/**
- * Wrap a stream initFn call with a circuit breaker.
- * When the breaker is open, returns the fallback value or throws SERVICE_UNAVAILABLE.
- *
- * @param {{ breaker: any, fallback?: any }} options
- * @param {Function} fn - The stream initFn
- * @returns {Function}
- */
-live.breaker = function breaker(options, fn) {
-	const { breaker: cb, fallback } = options;
-	const wrapper = async function breakerWrapper(ctx, ...args) {
-		if (cb.isOpen && cb.isOpen()) {
-			if (fallback !== undefined) return typeof fallback === 'function' ? fallback() : fallback;
-			throw new LiveError('SERVICE_UNAVAILABLE', 'Service temporarily unavailable (circuit open)');
-		}
-		try {
-			const result = await fn(ctx, ...args);
-			if (cb.success) cb.success();
-			return result;
-		} catch (err) {
-			if (cb.failure) cb.failure();
-			throw err;
-		}
-	};
-	_copyStreamMeta(wrapper, fn);
-	return wrapper;
-};
+installBreaker({ copyStreamMeta: _copyStreamMeta });
+
+// live.breaker wraps a stream initFn with a circuit breaker; the body lives in
+// src/server/breaker.js. This thin wrapper keeps live.breaker on the factory
+// while the registration body moved out.
+live.breaker = function breaker(options, fn) { return _breakerRegister(options, fn); };
 
 /**
  * Register a derived stream. Called by the Vite-generated registry module.
@@ -3559,105 +2700,15 @@ export function _restoreHmr(snap) {
 	}
 }
 
-/**
- * Create a webhook-to-stream bridge.
- *
- * Webhooks are server-only utilities; the Vite plugin marks them as known
- * exports (so they are not flagged as "not wrapped in live()") but does NOT
- * generate a SvelteKit `+server.js` endpoint. Wire one yourself by importing
- * the exported handler and calling its `.handle({ body, headers, platform })`
- * inside a POST handler. See README "Webhooks" for the canonical example.
- *
- * @param {string} topic - Topic to publish events to
- * @param {{ verify: (req: { body: string, headers: Record<string, string> }) => any, transform: (event: any) => { event: string, data: any } | null }} config
- * @returns {any}
- */
-live.webhook = function webhook(topic, config) {
-	const handler = {
-		__isWebhook: true,
-		__webhookTopic: topic,
-		__verify: config.verify,
-		__transform: config.transform,
+// live.webhook bridges an external HTTP webhook into a topic; the body lives in
+// src/server/webhooks.js. This thin wrapper keeps live.webhook on the factory.
+live.webhook = function webhook(...args) { return _webhookRegister(...args); };
 
-		/**
-		 * Handle an incoming webhook request.
-		 * Call this from a SvelteKit +server.js POST handler.
-		 *
-		 * @param {{ body: string, headers: Record<string, string>, platform: any }} req
-		 * @returns {{ status: number, body?: string }}
-		 */
-		async handle(req) {
-			let event;
-			try {
-				event = await config.verify({ body: req.body, headers: req.headers });
-			} catch {
-				return { status: 400, body: 'Verification failed' };
-			}
-
-			const mapped = await config.transform(event);
-			if (!mapped) return { status: 200, body: 'Ignored' };
-
-			if (req.platform) {
-				req.platform.publish(topic, mapped.event, mapped.data);
-			}
-			return { status: 200, body: 'OK' };
-		}
-	};
-
-	return handler;
-};
-
-/**
- * Webhook namespace. `live.webhooks.inbound(topic, config)` is `live.webhook`
- * (bridge an external HTTP webhook into a topic). `live.webhooks.outbound(
- * sources, config)` fires an outbound HTTP webhook when any source topic
- * publishes: leader-gated (wire `configureCron({ leader })` for cluster dedup;
- * without a leader every worker fires, same as cron), retried with backoff,
- * optionally HMAC-signed, with an `idempotency-key` header so receivers can
- * dedup to effectively-once. The target URL is SSRF-checked (strict by default)
- * at definition time for a static url and again at fire time for a dynamic url.
- * Both directions are server-only; the flat `live.webhook` stays as a permanent
- * back-compat alias.
- */
+// live.webhooks is the webhook namespace: inbound aliases live.webhook; outbound
+// fires leader-gated HTTP webhooks. Both bodies live in src/server/webhooks.js.
 live.webhooks = {
 	inbound: live.webhook,
-	outbound(sources, config) {
-		if (!Array.isArray(sources) || sources.length === 0) {
-			throw new Error('[svelte-realtime] live.webhooks.outbound: sources must be a non-empty array of topic names');
-		}
-		if (!config || (typeof config.url !== 'string' && typeof config.url !== 'function')) {
-			throw new Error('[svelte-realtime] live.webhooks.outbound: config.url must be a string or a (event, data) => string function');
-		}
-		if (config.validateUrl !== undefined && typeof config.validateUrl !== 'function') {
-			throw new Error('[svelte-realtime] live.webhooks.outbound: validateUrl must be a function');
-		}
-		if (config.resolve !== undefined && typeof config.resolve !== 'function') {
-			throw new Error('[svelte-realtime] live.webhooks.outbound: resolve must be a function');
-		}
-		if (config.urlMode !== undefined && config.urlMode !== 'strict' && config.urlMode !== 'allowlist' && config.urlMode !== 'off') {
-			throw new Error("[svelte-realtime] live.webhooks.outbound: urlMode must be 'strict', 'allowlist', or 'off'");
-		}
-		// Fail fast on a static url: the always-on scheme gate plus, in
-		// strict/allowlist mode, the literal range floor are checked at definition
-		// time so a misconfigured endpoint is caught at boot, not on the first
-		// event. A custom validateUrl can only narrow the allowed set, so it is
-		// not run here (it is awaited at fire time alongside the DNS-resolved
-		// re-check); a static url that fails the floor is blocked regardless.
-		if (typeof config.url === 'string') {
-			const base = checkUrl(config.url, { mode: config.urlMode || 'strict', allow: config.allow });
-			if (!base.safe) {
-				throw new Error(
-					`[svelte-realtime] live.webhooks.outbound: url "${_redactUrl(config.url)}" is blocked (${base.reason}) - it points inside the trust boundary or uses a non-http(s) scheme. ` +
-					"Use urlMode: 'allowlist' with allow: [...] for a public host, or urlMode: 'off' with a validateUrl that allows exactly your endpoint to reach a private one."
-				);
-			}
-		}
-		return {
-			__isWebhookOut: true,
-			__webhookOutSources: sources,
-			__webhookOutConfig: config
-		};
-	}
+	outbound(...args) { return _webhooksOutboundRegister(...args); }
 };
 
 installUpload({ resolveAllLazy: _resolveAllLazy, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, runGuard: _runGuard, runWithMiddleware: _runWithMiddleware });

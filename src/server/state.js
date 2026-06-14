@@ -162,6 +162,9 @@ export const effectRegistry = new Map();
 /** @type {Map<string, { source: string, reducers: any, topic: string, state: any, snapshot: Function | null, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
 export const aggregateRegistry = new Map();
 
+/** @type {Map<string, any>} Topic-keyed lookup for aggregates */
+export const _aggregateByTopic = new Map();
+
 /**
  * Queue of deferred registrations for cron/derived/effect/aggregate/room-actions.
  * Populated when lazy loaders are passed to __registerCron, __registerDerived, etc.
