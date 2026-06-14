@@ -271,10 +271,13 @@ let _healthFlowDegraded = false;
 /** Smooth views currently in prediction-killed recovery. Counted (not a
  * boolean) because several entities can overflow and recover independently. */
 let _healthSmoothDegraded = 0;
+/** Document replicas whose last sync exchange failed and is retrying.
+ * Counted because several documents can degrade and recover independently. */
+let _healthCrdtDegraded = 0;
 
 function _recomputeHealth() {
 	_healthStore.set(
-		_healthServerDegraded || _healthFlowDegraded || _healthSmoothDegraded > 0 ? 'degraded' : 'healthy'
+		_healthServerDegraded || _healthFlowDegraded || _healthSmoothDegraded > 0 || _healthCrdtDegraded > 0 ? 'degraded' : 'healthy'
 	);
 }
 
@@ -288,6 +291,18 @@ function _recomputeHealth() {
 export function _setSmoothDegraded(degraded) {
 	_healthSmoothDegraded += degraded ? 1 : -1;
 	if (_healthSmoothDegraded < 0) _healthSmoothDegraded = 0;
+	_recomputeHealth();
+}
+
+/**
+ * Fold one document replica's sync-failure transition into the health state.
+ * Same boolean-transition contract as the smooth input.
+ * @param {boolean} degraded
+ * @internal
+ */
+export function _setCrdtDegraded(degraded) {
+	_healthCrdtDegraded += degraded ? 1 : -1;
+	if (_healthCrdtDegraded < 0) _healthCrdtDegraded = 0;
 	_recomputeHealth();
 }
 
@@ -350,6 +365,7 @@ export function _resetHealth() {
 	_healthServerDegraded = false;
 	_healthFlowDegraded = false;
 	_healthSmoothDegraded = 0;
+	_healthCrdtDegraded = 0;
 	_healthStore.set('healthy');
 }
 
@@ -772,6 +788,39 @@ export function __rpc(path) {
 		}
 		_devtoolsVolatileSent(path, args);
 		conn.sendQueued({ rpc: path, args });
+	};
+
+	/**
+	 * Send a RELIABLE no-reply RPC. Returns `void` synchronously like
+	 * `fireAndForget`, with the same `{rpc, args}` no-`id` wire frame - but
+	 * with NO drop tiers: not dropped while offline (the frame queues and
+	 * flushes FIFO on reconnect) and not dropped under WS backpressure (the
+	 * socket buffer absorbs the burst). For one-way sends whose payloads are
+	 * precious rather than lossy-by-contract - a CRDT document update is the
+	 * canonical case: a silently dropped edit would desync the document until
+	 * the next reconnect, where a buffered burst merely arrives late.
+	 *
+	 * Pair with `live.volatile(fn)` server-side (no response is written).
+	 * Inside `batch()` the dev-mode throw matches `fireAndForget` - one-way
+	 * sends bypass batching by design.
+	 *
+	 * @param {...any} args - Arguments forwarded to the handler
+	 * @returns {void}
+	 */
+	rpcCall.send = function sendReliable(...args) {
+		if (_terminated) return;
+		if (_batchCollector) {
+			if (_IS_DEV) {
+				throw new Error(
+					`[svelte-realtime] '${path}'.send() cannot be used inside batch() - one-way RPCs bypass batching.\n  See: https://svti.me/volatile`
+				);
+			}
+			return;
+		}
+		ensureListener();
+		ensureDisconnectListener();
+		_devtoolsVolatileSent(path, args);
+		_connect().sendQueued({ rpc: path, args });
 	};
 
 	/**

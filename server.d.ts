@@ -2109,6 +2109,43 @@ export namespace live {
 	function smooth(config: SmoothConfig): SmoothExport;
 
 	/**
+	 * Declare a conflict-free shared document with named containers. Every
+	 * client holds a local replica: reads never await the network, writes
+	 * apply immediately (no pending state), and concurrent edits from any
+	 * number of peers merge to the same value on every replica. Reconnects
+	 * and offline sessions reconcile through one idempotent state-vector
+	 * exchange. The guard resolves to a per-document `{read, write, comment}`
+	 * access record (a boolean return widens to all three rights).
+	 *
+	 * @example
+	 * ```js
+	 * export const board = live.doc({
+	 *   topic: (ctx, boardId) => 'board:' + boardId,
+	 *   guard: ({ user }) => ({ read: user != null, write: isEditor(user) }),
+	 *   persist: {
+	 *     load: (topic) => db.loadSnapshot(topic),
+	 *     store: (topic, bytes) => db.saveSnapshot(topic, bytes)
+	 *   }
+	 * });
+	 * ```
+	 */
+	function doc(config: DocConfig): DocExport;
+
+	/**
+	 * Declare a conflict-free shared map: `live.doc` sugar whose
+	 * component-side store IS the keyed container. Same options as
+	 * {@link doc}.
+	 */
+	function map(config: DocConfig): DocExport;
+
+	/**
+	 * Declare a conflict-free shared list: `live.doc` sugar whose
+	 * component-side store IS the ordered container. Same options as
+	 * {@link doc}.
+	 */
+	function array(config: DocConfig): DocExport;
+
+	/**
 	 * Create a webhook-to-stream bridge.
 	 * The returned handler can be used in a SvelteKit +server.js POST endpoint.
 	 *
@@ -2486,6 +2523,63 @@ export interface SmoothExport {
 	__smoothSync: any;
 	/** Command handler: enqueues an owner's command batch for the authoritative tick. */
 	__smoothCommand: any;
+}
+
+/**
+ * Configuration for `live.doc()` / `live.map()` / `live.array()`.
+ */
+export interface DocConfig {
+	/** Topic name, or a function computing it from context and room args. */
+	topic: string | ((ctx: any, ...args: any[]) => string);
+	/**
+	 * Per-connection per-document access. Return a boolean (widened to all
+	 * three rights) or a `{read, write, comment}` record; a missing right is
+	 * `false`, so `{read: true}` means read-only. Throwing denies like any
+	 * guard. The record is cached for the life of the subscription and
+	 * re-resolved on every sync, so a downgrade applies at the next sync.
+	 * `comment` is carried for the rich-text marks layer and grants nothing
+	 * extra yet.
+	 */
+	guard?: (ctx: any, ...args: any[]) => any;
+	/**
+	 * Durable persistence hooks - the app owns the I/O, the framework owns
+	 * the schedule. `load` returns the stored full-state bytes for a cold
+	 * topic (or null for a brand-new document); `store` persists the
+	 * compacted full-state bytes. Omit for a purely in-memory document.
+	 */
+	persist?: {
+		load?: (topic: string) => Promise<Uint8Array | number[] | null | undefined> | Uint8Array | number[] | null | undefined;
+		store?: (topic: string, bytes: Uint8Array) => Promise<void> | void;
+	};
+	/** Persist this long after the last edit (ms). @default 2000 */
+	debounceWait?: number;
+	/** Force a persist at least this often during sustained editing (ms). @default 10000 */
+	debounceMaxWait?: number;
+	/** Compact (full-state store) every N updates. @default 200 */
+	snapshotEvery?: number;
+	/** Run a final store when the last subscriber leaves. @default true */
+	persistOnEmpty?: boolean;
+	/** CRDT garbage collection on the server replica. @default true */
+	gc?: boolean;
+	/** Observe persist I/O failures (the schedule retries; this is the operator signal). */
+	onError?: (err: unknown, info: { topic: string; op: 'load' | 'store' }) => void;
+	/** Number of room-identifying args the topic function expects (excluding ctx). @default topicFn.length - 1 */
+	topicArgs?: number;
+}
+
+/**
+ * Return type of `live.doc()` / `live.map()` / `live.array()`.
+ */
+export interface DocExport {
+	__isDoc: true;
+	/** Which factory the component-side namespace exposes. */
+	__docKind: 'doc' | 'map' | 'array';
+	/** Sync handler: runs the guard, loads + subscribes, returns the state-vector exchange. */
+	__docSync: any;
+	/** Update handler: merges an authorized update and fans it out. */
+	__docUpdate: any;
+	/** Close handler: releases one mount's replica reference before socket close. */
+	__docClose: any;
 }
 
 /**

@@ -27,6 +27,13 @@ const MULTIPLAYER_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.multiplayer\s*
 // call site at runtime - generated code carries only paths and JSON
 // literals, never serialized functions.
 const SMOOTH_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.smooth\s*\(/g;
+// `live.doc(...)` / `live.map(...)` / `live.array(...)` are CRDT document
+// exports: the client namespace gets the sync/update/close send paths plus a
+// factory (named after the kind) that builds the reactive replica view. The
+// channel comes from the adapter, the rune view classes from the
+// svelte-realtime/doc subpath; generated code carries only paths and JSON
+// literals.
+const DOC_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.(doc|map|array)\s*\(/g;
 const WEBHOOK_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.webhook\s*\(/g;
 // Namespaced webhook forms. live.webhooks.inbound() is the same server-only
 // manual handler as the flat live.webhook(); live.webhooks.outbound() is a
@@ -1034,12 +1041,24 @@ function _generateSsrStubs(filePath, modulePath) {
 		smooths.push(name);
 	}
 
+	// Collect CRDT document exports - the SSR stub renders an inert empty
+	// replica view (empty containers, no-op writes), so a page that
+	// constructs the store during SSR does not crash before hydration.
+	/** @type {Array<{ name: string, kind: string }>} */
+	const docs = [];
+	DOC_EXPORT_RE.lastIndex = 0;
+	while ((match = DOC_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		docs.push({ name, kind: match[2] });
+	}
+
 	// Escape paths for safe embedding in generated code
 	const safePath = JSON.stringify(normalized);
 	const safeModulePath = (name) => JSON.stringify(modulePath + '/' + name);
 
-	// If no store-like / room / multiplayer / smooth / windowed-aggregate exports, simple re-export
-	if (storeNames.length === 0 && rooms.length === 0 && multiplayers.length === 0 && smooths.length === 0 && windowedAggregates.length === 0) {
+	// If no store-like / room / multiplayer / smooth / doc / windowed-aggregate exports, simple re-export
+	if (storeNames.length === 0 && rooms.length === 0 && multiplayers.length === 0 && smooths.length === 0 && docs.length === 0 && windowedAggregates.length === 0) {
 		return `export * from ${safePath};\n`;
 	}
 
@@ -1162,6 +1181,22 @@ function _generateSsrStubs(filePath, modulePath) {
 		// SSR markup renders the entity at its starting state and the client
 		// factory replaces everything on hydration.
 		lines.push(`const _${name} = { _command: () => Promise.resolve(undefined), _sync: () => Promise.resolve(undefined), status: readable('connecting'), smooth: (...args) => { const o = args.length > 0 ? args[args.length - 1] : undefined; return { local: o && typeof o === 'object' ? o.initial : undefined, remote: new Map(), status: 'connecting', overflowed: false, self: null, command: () => 0, now: () => 0, resync: () => {}, destroy: () => {} }; } };`);
+		lines.push(`export { _${name} as ${name} };`);
+	}
+
+	if (docs.length > 0) {
+		// Inert empty replica views for SSR: empty containers, no-op writes,
+		// shared lifecycle fields. The client factory replaces everything on
+		// hydration; markup renders the document at its empty starting state.
+		lines.push(`const __ssrDocBase = () => ({ readOnly: false, synced: false, degraded: false, access: null, status: 'connecting', resync: () => {}, destroy: () => {} });`);
+		lines.push(`const __ssrDocMap = () => ({ ...__ssrDocBase(), get: () => undefined, has: () => false, size: 0, keys: () => [][Symbol.iterator](), values: () => [][Symbol.iterator](), entries: () => [][Symbol.iterator](), toJSON: () => ({}), set: () => {}, delete: () => {}, clear: () => {} });`);
+		lines.push(`const __ssrDocArray = () => ({ ...__ssrDocBase(), at: () => undefined, length: 0, toArray: () => [], toJSON: () => [], push: () => {}, insert: () => {}, delete: () => {} });`);
+		lines.push(`const __ssrDocText = () => ({ ...__ssrDocBase(), toString: () => '', value: '', length: 0, insert: () => {}, delete: () => {} });`);
+		lines.push(`const __ssrDocHandle = () => ({ ...__ssrDocBase(), map: () => __ssrDocMap(), array: () => __ssrDocArray(), text: () => __ssrDocText(), transact: () => {} });`);
+	}
+	for (const { name, kind } of docs) {
+		const factory = kind === 'doc' ? '__ssrDocHandle' : kind === 'map' ? '__ssrDocMap' : '__ssrDocArray';
+		lines.push(`const _${name} = { _sync: () => Promise.resolve(undefined), _update: () => {}, _close: () => {}, status: readable('connecting'), ${kind}: () => ${factory}() };`);
 		lines.push(`export { _${name} as ${name} };`);
 	}
 
@@ -1340,6 +1375,46 @@ function _generateClientStubs(filePath, modulePath, dir) {
 			smLines.push(`  },`);
 			smLines.push(`};`);
 			lines.push(smLines.join('\n'));
+		}
+	}
+
+	// CRDT document exports: the namespace carries the sync/update/close send
+	// paths and a factory named after the kind (doc/map/array) that builds
+	// the reactive replica view. Updates ride the reliable no-reply `.send()`
+	// (a dropped edit would desync the document; a buffered one merely
+	// arrives late); mounts of the same document share one channel through
+	// the rune layer's reference-counted cache. Runs before the
+	// room/multiplayer loops and claims the name.
+	let docRuntimeImported = false;
+	DOC_EXPORT_RE.lastIndex = 0;
+	while ((match = DOC_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		const kind = match[2];
+		if (!/^\w+$/.test(name)) continue;
+		if (!exportedNames.has(name)) {
+			exportedNames.add(name);
+			imports.add('__rpc');
+			imports.add('status');
+			if (!docRuntimeImported) {
+				lines.push(`import { _acquireDoc } from 'svelte-realtime/doc';`);
+				lines.push(`import { createCrdtChannel } from 'svelte-adapter-uws/plugins/crdt/channel';`);
+				docRuntimeImported = true;
+			}
+			const dLines = [];
+			dLines.push(`export const ${name} = {`);
+			dLines.push(`  _sync: __rpc(${JSON.stringify(modulePath + '/' + name + '/__doc/sync')}),`);
+			dLines.push(`  _update: __rpc(${JSON.stringify(modulePath + '/' + name + '/__doc/update')}),`);
+			dLines.push(`  _close: __rpc(${JSON.stringify(modulePath + '/' + name + '/__doc/close')}),`);
+			dLines.push(`  status: status,`);
+			dLines.push(`  ${kind}(...args) {`);
+			dLines.push(`    return _acquireDoc(${JSON.stringify(modulePath + '/' + name)} + '\\u0000' + JSON.stringify(args), ${JSON.stringify(kind)}, () => createCrdtChannel({ transport: {`);
+			dLines.push(`      sendUpdate: (bytes) => ${name}._update.send(...args, bytes),`);
+			dLines.push(`      sync: (sv, mountId) => ${name}._sync(...args, sv, mountId),`);
+			dLines.push(`      close: (mountId) => ${name}._close.send(...args, mountId)`);
+			dLines.push(`    } }), status);`);
+			dLines.push(`  },`);
+			dLines.push(`};`);
+			lines.push(dLines.join('\n'));
 		}
 	}
 
@@ -2396,6 +2471,21 @@ function _generateRegistry(liveDir, dir, topicsRegistry) {
 			}
 		}
 
+		// Register CRDT document exports - the sync, update, and close send
+		// paths resolve lazily to the export's attached handlers.
+		DOC_EXPORT_RE.lastIndex = 0;
+		while ((match = DOC_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			if (!/^\w+$/.test(name)) continue;
+			if (!registered.has(name)) {
+				registered.add(name);
+				const importPath = JSON.stringify(normalizedPath);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__doc/sync')}, __L(() => import(${importPath}).then(m => m.${name}.__docSync)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__doc/update')}, __L(() => import(${importPath}).then(m => m.${name}.__docUpdate)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__doc/close')}, __L(() => import(${importPath}).then(m => m.${name}.__docClose)), ${JSON.stringify(rel)});`);
+			}
+		}
+
 		// Register live.multiplayer() exports - a multiplayer export reuses the
 		// room sub-streams at runtime, so it registers the same
 		// __data/__presence/__cursors paths plus its scoped actions lazily.
@@ -2903,6 +2993,19 @@ function _generateTypeDeclarations(liveDir, dir) {
 			}
 		}
 
+		// Detect CRDT document exports - the namespace carries the send paths
+		// and a factory (named after the kind) returning the replica view.
+		DOC_EXPORT_RE.lastIndex = 0;
+		while ((match = DOC_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			const kind = match[2];
+			handledNames.add(name);
+			if (!exports.some(e => e.includes(`export const ${name}:`))) {
+				const viewType = kind === 'doc' ? 'DocHandle' : kind === 'map' ? 'DocMap' : 'DocList';
+				exports.push(`  export const ${name}: { status: import('svelte/store').Readable<string>, ${kind}: (...args: any[]) => import('svelte-realtime/doc').${viewType}, [member: string]: any };`);
+			}
+		}
+
 		// Detect live.multiplayer() exports - the room namespace plus the
 		// connection-status view and the cursor methods. Runs before the room
 		// branch and claims the name so the room branch skips it.
@@ -3146,8 +3249,8 @@ function _isDynamicExport(source, name, apiName) {
  */
 /**
  * Strip default initializers from parameter strings for .d.ts output.
- * `count: number = 1` → `count?: number`
- * `label = 'x'` → `label?: any`
+ * `count: number = 1` -> `count?: number`
+ * `label = 'x'` -> `label?: any`
  * Params without defaults are returned unchanged.
  * @param {string[]} params
  * @returns {string[]}
@@ -3172,12 +3275,12 @@ function _stripParamDefaults(params) {
 		// Check if there's a type annotation
 		const colonIdx = beforeEq.indexOf(':');
 		if (colonIdx >= 0) {
-			// Has type: `name: Type = val` → `name?: Type`
+			// Has type: `name: Type = val` -> `name?: Type`
 			const name = beforeEq.slice(0, colonIdx).trim();
 			const type = beforeEq.slice(colonIdx + 1).trim();
 			return `${name}?: ${type}`;
 		}
-		// No type: `name = val` → `name?: any`
+		// No type: `name = val` -> `name?: any`
 		return `${beforeEq}?: any`;
 	});
 }
@@ -3614,6 +3717,14 @@ async function _loadRegistryDirect(server, liveDir, dir) {
 					// first use, never off registration.
 					if (fn.__smoothCommand) __register(rel + '/' + name + '/__smooth/command', fn.__smoothCommand, rel);
 					if (fn.__smoothSync) __register(rel + '/' + name + '/__smooth/sync', fn.__smoothSync, rel);
+				} else if (/** @type {any} */ (fn)?.__isDoc) {
+					// A document export carries its three send handlers; the
+					// replica authority hangs off the handlers' first use, and
+					// the module-level records survive the hot reload so live
+					// replicas keep their un-persisted edits.
+					if (fn.__docSync) __register(rel + '/' + name + '/__doc/sync', fn.__docSync, rel);
+					if (fn.__docUpdate) __register(rel + '/' + name + '/__doc/update', fn.__docUpdate, rel);
+					if (fn.__docClose) __register(rel + '/' + name + '/__doc/close', fn.__docClose, rel);
 				} else if (/** @type {any} */ (fn)?.__isRoom) {
 					if (fn.__dataStream) __register(rel + '/' + name + '/__data', fn.__dataStream, rel);
 					if (fn.__presenceStream) __register(rel + '/' + name + '/__presence', fn.__presenceStream, rel);

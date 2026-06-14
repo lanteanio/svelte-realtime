@@ -140,6 +140,17 @@ export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
 	 * ```
 	 */
 	fireAndForget: (...args: any[]) => void;
+	/**
+	 * Send a RELIABLE no-reply RPC. Same `{rpc, args}` no-`id` wire frame as
+	 * `fireAndForget`, but with NO drop tiers: not dropped while offline (the
+	 * frame queues and flushes FIFO on reconnect) and not dropped under WS
+	 * backpressure. For one-way sends whose payloads are precious rather than
+	 * lossy-by-contract (a CRDT document update is the canonical case).
+	 *
+	 * Pair with `live.volatile(fn)` server-side. Inside `batch()`: throws in
+	 * dev, no-op in prod (one-way sends bypass batching by design).
+	 */
+	send: (...args: any[]) => void;
 };
 
 /**

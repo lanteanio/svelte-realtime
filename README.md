@@ -3154,6 +3154,92 @@ Requires Svelte 5 (the view is a rune class) and svelte-adapter-uws 0.6.0-next.2
 
 ---
 
+## Shared documents
+
+`live.doc()` / `live.map()` / `live.array()` are the merge primitives for state several people edit at once - a kanban board, a shared form, a todo list, collaborative text. A `live.stream` publish replaces; a document write **merges**: every client holds a local replica, every local edit applies immediately (no pending state, no rollback), and concurrent edits from any number of peers converge to the same value on every replica without a server round trip deciding a winner.
+
+The server declares a document like any other live export:
+
+```js
+// src/live/board.js
+import { live } from 'svelte-realtime';
+
+export const board = live.map({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  guard({ user }) {
+    const role = roleFor(user);
+    return { read: role !== null, write: role === 'editor' || role === 'owner' };
+  },
+  persist: {
+    load: (topic) => db.loadSnapshot(topic),          // bytes or null for a new doc
+    store: (topic, bytes) => db.saveSnapshot(topic, bytes)
+  }
+});
+```
+
+And the component mutates the store directly - no transaction objects, no flush, no await:
+
+```svelte
+<script>
+  import { board } from '$live/board';
+
+  let { boardId, selected } = $props();
+  const cards = board.map(boardId);
+  $effect(() => () => cards.destroy());
+
+  function rename(id, title) {
+    cards.set(id, { ...cards.get(id), title });   // applies locally now, merges everywhere
+  }
+</script>
+
+<input value={cards.get(selected)?.title ?? ''} disabled={cards.readOnly}
+       oninput={(e) => rename(selected, e.target.value)} />
+
+{#each [...cards.entries()] as [id, card] (id)}
+  <Card {...card} />
+{/each}
+```
+
+The three declarations differ only in what the component-side factory returns. `live.map` gives the keyed container directly (`get` / `set` / `delete` / `entries` / `keys` / `size`); `live.array` gives the ordered container (`at` / `push` / `insert` / `delete` / `length` - positions are stable under concurrent insert/delete because every element carries its own identity); `live.doc` gives the root handle for documents that mix shapes:
+
+```js
+const doc = board.doc(boardId);
+const layers = doc.array('layers');   // ordered
+const meta   = doc.map('meta');       // keyed
+const title  = doc.text('title');     // collaborative text (concurrent character edits)
+doc.transact(() => { meta.set('a', 1); meta.set('b', 2); });  // one atomic wire update
+```
+
+All named containers share the topic's single update stream. Reads are rune-backed and granular - a write to one map key re-renders only readers of that key - and multiple components mounting the same document share one replica through a reference-counted cache, so `destroy()` is safe to call per component.
+
+How it behaves:
+
+- **Local-first by construction.** Reads never await the network (the page renders offline); a write returns synchronously and the template re-renders against the just-written value in the same tick. The update travels as opaque merge data, never as a request that could fail and need unwinding.
+- **Reconnect and offline are one mechanism.** On every connection open the store runs one idempotent exchange: it tells the server what it has (a compact state vector), receives exactly the missing changes, and uploads exactly what the server lacks. The local replica IS the offline queue - two minutes or two hours offline reconciles in one bounded round trip, and replaying overlapping data is free because the merge is idempotent. Any lost frame in between (backpressure, anything) is detected as a dependency gap and self-heals through the same exchange.
+- **The guard returns an access record.** `{read, write, comment}` per connection per document: a boolean widens to all three rights (`guard: () => user != null` never learns the record shape), a partial record defaults missing rights to false (`{read: true}` is a viewer). The record is cached at sync time and every inbound update is checked against it server-side; a role change applies at the next sync. Read-only mounts surface `readOnly` so the UI disables inputs up front - their mutators throw rather than silently fork the local view with edits the server will reject. The `comment` right is carried in full for the coming rich-text marks surface; granting it changes nothing yet. No guard means everyone connected can read and write (a one-time production warning says so).
+- **Persistence is two hooks on a framework schedule.** `load` runs once per cold document (simultaneous joiners coalesce onto one call); `store` receives the compacted full state - debounced 2s after the last edit, forced at least every 10s under sustained editing, compacted every 200 updates, and flushed once when the last subscriber leaves, so an edit-then-disconnect is never lost. Knobs: `debounceWait`, `debounceMaxWait`, `snapshotEvery`, `persistOnEmpty`, `onError`. Omit `persist` entirely for an in-memory document.
+- **Status is on the store**: `synced` (this connection completed its exchange), `degraded` (the exchange is failing and retrying - also folded into the shared `health` store), `access`, `readOnly`. Documents survive dev-server hot reloads with their unsaved edits intact.
+- **The wire is negotiated.** Document frames ride the binary wire per connection (`crdt.protocol:1`) and degrade transparently to JSON envelopes; updates ride a reliable no-reply send (never the volatile drop tier - a dropped edit would desync the document, a buffered one merely arrives late).
+
+Values are plain JSON values with replace-on-write semantics (`m.set(k, { ...m.get(k), title })`); nested collaborative structures are sibling named containers on the same document, not nested values. Presence (who is here, where their cursor is) stays a sibling concern - pair a document with `live.multiplayer()` / the cursor plugin; ephemeral state never belongs in the document.
+
+### Running across a cluster
+
+On a single process, documents are correct out of the box. Behind a load balancer, two people editing one document land on different instances - so clustered deployments must wire the CRDT coordinator from the extensions package, or the instances will not converge and each will overwrite the others' persisted snapshot:
+
+```js
+// hooks.server.js (or wherever you wire the Redis bus)
+import { createCrdtCluster } from 'svelte-adapter-uws-extensions/redis/crdt';
+
+platform.crdt = createCrdtCluster(redisClient);   // alongside platform.redis / platform.presence
+```
+
+That is the whole wiring. The document layer detects `platform.crdt` and routes through it automatically: every instance keeps its own replica and serves its own subscribers (no extra hop), every edit relays so all replicas converge, snapshots persist single-writer per topic (no clobber), and a cold-joining instance pulls the latest from a live peer. Without it the document family still works - it just runs single-instance, which is correct on one process and divergent across a cluster.
+
+Requires Svelte 5 (the stores are rune classes) and svelte-adapter-uws 0.6.0-next.25 or newer.
+
+---
+
 ## Webhooks
 
 Bridge external HTTP webhooks into your pub/sub topics.
