@@ -184,6 +184,24 @@ export const _lazyQueue = [];
  */
 export const _presenceRef = new Map();
 
+/** @type {Map<Function, object>} O(1) lookup from fn reference to dynamic derived registry entry */
+export const _dynamicDerivedByFn = new Map();
+
+/** @type {Map<string, Set<any>>} Source topic -> derived entries that watch it */
+export const _derivedBySource = new Map();
+
+/** @type {Map<string, Set<any>>} Source topic -> effect entries that watch it */
+export const _effectBySource = new Map();
+
+/** @type {Map<string, Set<any>>} Source topic -> outbound-webhook entries that watch it */
+export const _webhookOutBySource = new Map();
+
+/** @type {Map<string, Set<any>>} Source topic -> aggregate entries that watch it */
+export const _aggregateBySource = new Map();
+
+/** @type {Set<string>} All source topics watched by derived/effect/aggregate for fast bail-out */
+export const _watchedTopics = new Set();
+
 /* -------------------------------------------------------------------------- *
  * Reassignable cross-section scalars (holder properties)                      *
  * -------------------------------------------------------------------------- */
@@ -247,6 +265,15 @@ export const state = {
 
 	/** @type {import('svelte-adapter-uws').Platform | null} Captured platform for dynamic derived recomputation */
 	derivedPlatform: null,
+
+	/** @type {boolean} Whether _activateDerived has been called at least once. */
+	activateDerivedCalled: false,
+
+	/** @type {boolean} Whether the missing-_activateDerived warning has already fired (one-shot). */
+	warnedActivateDerived: false,
+
+	/** @type {boolean} One-shot dedup for the "createMessage({ platform: callback }) is redundant" dev-warn. */
+	manualPlatformCallbackWarnFired: false,
 
 	/** @type {{ rpcCount?: any, rpcDuration?: any, rpcErrors?: any, streamGauge?: any, cronCount?: any, cronErrors?: any, assertions?: any } | null} */
 	metricsInstruments: null,
