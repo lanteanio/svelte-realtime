@@ -17,7 +17,7 @@
  * and pair with {@link releaseRuntimeClock} in an `afterEach` / `finally`.
  * Test-only: never imported by production code.
  */
-import { setRuntimeEnv, resetRuntimeEnv } from '../../shared/runtime.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../../src/shared/runtime.js';
 
 export function installFakeRuntimeClock() {
 	setRuntimeEnv({ clock: { now: () => Date.now(), monotonic: () => Date.now() } });

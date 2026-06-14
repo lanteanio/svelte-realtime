@@ -19,7 +19,7 @@
 // 2. Heap allocation diff: same iteration count on both paths, snapshot the
 //    heap post-loop after a forced gc.
 
-import { live, handleRpc, __register } from '../server.js';
+import { live, handleRpc, __register } from '../src/server.js';
 
 const textEncoder = new TextEncoder();
 

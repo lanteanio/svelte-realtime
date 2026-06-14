@@ -15,79 +15,56 @@
   "bugs": "https://github.com/lanteanio/svelte-realtime/issues",
   "type": "module",
   "bin": {
-    "svelte-realtime": "./cli.js"
+    "svelte-realtime": "./src/cli.js"
   },
   "exports": {
     ".": {
-      "types": "./server.d.ts",
-      "default": "./server.js"
+      "types": "./src/server.d.ts",
+      "default": "./src/server.js"
     },
     "./server": {
-      "types": "./server.d.ts",
-      "default": "./server.js"
+      "types": "./src/server.d.ts",
+      "default": "./src/server.js"
     },
     "./client": {
-      "types": "./client.d.ts",
-      "default": "./client.js"
+      "types": "./src/client.d.ts",
+      "default": "./src/client.js"
     },
     "./multiplayer": {
-      "types": "./client-multiplayer.d.ts",
-      "default": "./client-multiplayer.svelte.js"
+      "types": "./src/client-multiplayer.d.ts",
+      "default": "./src/client-multiplayer.svelte.js"
     },
     "./smooth": {
-      "types": "./client-smooth.d.ts",
-      "default": "./client-smooth.svelte.js"
+      "types": "./src/client-smooth.d.ts",
+      "default": "./src/client-smooth.svelte.js"
     },
     "./doc": {
-      "types": "./client-doc.d.ts",
-      "default": "./client-doc.svelte.js"
+      "types": "./src/client-doc.d.ts",
+      "default": "./src/client-doc.svelte.js"
     },
     "./vite": {
-      "types": "./vite.d.ts",
-      "default": "./vite.js"
+      "types": "./src/vite.d.ts",
+      "default": "./src/vite.js"
     },
     "./devtools": {
-      "types": "./devtools.d.ts",
-      "default": "./devtools.js"
+      "types": "./src/devtools.d.ts",
+      "default": "./src/devtools.js"
     },
     "./test": {
-      "types": "./test.d.ts",
-      "default": "./test.js"
+      "types": "./src/test.d.ts",
+      "default": "./src/test.js"
     },
     "./test-client": {
-      "types": "./test-client.d.ts",
-      "default": "./test-client.js"
+      "types": "./src/test-client.d.ts",
+      "default": "./src/test-client.js"
     },
     "./hooks": {
-      "types": "./hooks.d.ts",
-      "default": "./hooks.js"
+      "types": "./src/hooks.d.ts",
+      "default": "./src/hooks.js"
     }
   },
   "files": [
-    "server.js",
-    "server.d.ts",
-    "client.js",
-    "client.d.ts",
-    "client-runtime.js",
-    "client-multiplayer.svelte.js",
-    "client-multiplayer.d.ts",
-    "client-smooth.svelte.js",
-    "client-smooth.d.ts",
-    "client-doc.svelte.js",
-    "client-doc.d.ts",
-    "vite.js",
-    "vite.d.ts",
-    "test.js",
-    "test.d.ts",
-    "test-client.js",
-    "test-client.d.ts",
-    "devtools.js",
-    "devtools.d.ts",
-    "hooks.js",
-    "hooks.d.ts",
-    "cli.js",
-    "cli-utils.js",
-    "shared",
+    "src",
     "LICENSE",
     "README.md",
     "MIGRATION.md"

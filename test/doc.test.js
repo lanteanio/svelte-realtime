@@ -20,10 +20,10 @@ import {
 	_restoreHmr,
 	_crdtLoadError,
 	LiveError
-} from '../server.js';
+} from '../src/server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
-import svelteRealtime from '../vite.js';
+import svelteRealtime from '../src/vite.js';
 
 const textEncoder = new TextEncoder();
 const toArrayBuffer = (obj) => textEncoder.encode(JSON.stringify(obj)).buffer;

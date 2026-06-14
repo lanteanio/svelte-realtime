@@ -64,7 +64,7 @@ beforeEach(async () => {
 		})
 	}));
 
-	const mod = await import('../client.js');
+	const mod = await import('../src/client.js');
 	health = mod.health;
 	_resetHealth = mod._resetHealth;
 	_resetHealth();
@@ -142,7 +142,7 @@ describe('realtime health folds the connection flow-control signal', () => {
 				}
 			})
 		}));
-		const mod = await import('../client.js');
+		const mod = await import('../src/client.js');
 		mod._resetHealth();
 		const values = [];
 		const unsub = mod.health.subscribe((v) => values.push(v));

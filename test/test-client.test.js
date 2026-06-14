@@ -87,10 +87,10 @@ beforeEach(async () => {
 		}
 	}));
 
-	const clientMod = await import('../client.js');
+	const clientMod = await import('../src/client.js');
 	__stream = clientMod.__stream;
 
-	const testClientMod = await import('../test-client.js');
+	const testClientMod = await import('../src/test-client.js');
 	subscribeAt = testClientMod.subscribeAt;
 });
 

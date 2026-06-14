@@ -18,7 +18,7 @@ import {
 	setRuntimeEnv,
 	resetRuntimeEnv,
 	getRuntimeEnv
-} from '../shared/runtime.js';
+} from '../src/shared/runtime.js';
 
 describe('shared/runtime', () => {
 	afterEach(() => {

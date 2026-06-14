@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { realtimeTransport } from '../hooks.js';
-import { LiveError } from '../server.js';
-import { RpcError } from '../client.js';
+import { realtimeTransport } from '../src/hooks.js';
+import { LiveError } from '../src/server.js';
+import { RpcError } from '../src/client.js';
 
 describe('realtimeTransport()', () => {
 	it('returns an object with RpcError and LiveError entries', () => {

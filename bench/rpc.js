@@ -9,7 +9,7 @@
 // 2. Stream merge throughput (ops/sec for each merge strategy at various array sizes)
 //
 
-import { live, LiveError, handleRpc, __register } from '../server.js';
+import { live, LiveError, handleRpc, __register } from '../src/server.js';
 
 const textEncoder = new TextEncoder();
 

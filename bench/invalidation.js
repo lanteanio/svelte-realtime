@@ -13,7 +13,7 @@
 // Run with: node bench/invalidation.js
 //
 
-import { live, __register, handleRpc, _resetInvalidationWatch } from '../server.js';
+import { live, __register, handleRpc, _resetInvalidationWatch } from '../src/server.js';
 
 const textEncoder = new TextEncoder();
 

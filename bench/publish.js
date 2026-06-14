@@ -7,7 +7,7 @@
 // Run with: node bench/publish.js
 //
 
-import { live, __register, handleRpc } from '../server.js';
+import { live, __register, handleRpc } from '../src/server.js';
 
 const textEncoder = new TextEncoder();
 

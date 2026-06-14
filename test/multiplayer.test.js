@@ -4,18 +4,18 @@ import { resolve } from 'path';
 import { pathToFileURL } from 'url';
 import { flushSync } from 'svelte';
 import { compileModule } from 'svelte/compiler';
-import svelteRealtime from '../vite.js';
-import { live } from '../server.js';
+import svelteRealtime from '../src/vite.js';
+import { live } from '../src/server.js';
 import {
 	_clusterPresenceAcquire,
 	_clusterPresenceList,
 	_clusterPresenceMerge,
 	_presenceRefForTest
-} from '../server.js';
-import { colorForKey, hueForKey } from '../shared/color.js';
-import { colorForKey as colorViaServer, hueForKey as hueViaServer } from '../server.js';
-import { colorForKey as colorViaClient, hueForKey as hueViaClient } from '../client.js';
-import { __mpFields } from '../client.js';
+} from '../src/server.js';
+import { colorForKey, hueForKey } from '../src/shared/color.js';
+import { colorForKey as colorViaServer, hueForKey as hueViaServer } from '../src/server.js';
+import { colorForKey as colorViaClient, hueForKey as hueViaClient } from '../src/client.js';
+import { __mpFields } from '../src/client.js';
 
 // ---------------------------------------------------------------------------
 // Codegen: the vite plugin detects a live.multiplayer() export, generates its
@@ -970,8 +970,8 @@ const runeProbeDirs = [];
 
 // The shipped rune module and the shared color helper, read from the package
 // root so the compiled probe exercises the same source an app ships with.
-const SHIPPED_RUNE_PATH = resolve(import.meta.dirname, '..', 'client-multiplayer.svelte.js');
-const SHIPPED_COLOR_PATH = resolve(import.meta.dirname, '..', 'shared', 'color.js');
+const SHIPPED_RUNE_PATH = resolve(import.meta.dirname, '..', 'src', 'client-multiplayer.svelte.js');
+const SHIPPED_COLOR_PATH = resolve(import.meta.dirname, '..', 'src', 'shared', 'color.js');
 
 // Monotonic cache-buster for the dynamic import URL. Date.now() has only
 // millisecond resolution, so two loads in the same millisecond would resolve to

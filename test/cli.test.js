@@ -2,10 +2,10 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
-import { parseArgs, detectAgent } from '../cli-utils.js';
+import { parseArgs, detectAgent } from '../src/cli-utils.js';
 
 const _here = dirname(fileURLToPath(import.meta.url));
-const _cliSrc = readFileSync(resolve(_here, '..', 'cli.js'), 'utf8');
+const _cliSrc = readFileSync(resolve(_here, '..', 'src', 'cli.js'), 'utf8');
 
 // - parseArgs (in-process) ---------------------------------------------------
 

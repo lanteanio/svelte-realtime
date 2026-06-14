@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
 import { resolve } from 'path';
-import svelteRealtime from '../vite.js';
+import svelteRealtime from '../src/vite.js';
 
 const testRoot = resolve(import.meta.dirname, '__fixtures__');
 const liveDir = resolve(testRoot, 'src/live');

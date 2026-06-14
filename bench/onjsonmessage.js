@@ -19,7 +19,7 @@
 // is the opposite -- a measurable improvement on the same hot primitive.
 
 import { performance } from 'node:perf_hooks';
-import { createMessage } from '../server.js';
+import { createMessage } from '../src/server.js';
 
 const textEncoder = new TextEncoder();
 

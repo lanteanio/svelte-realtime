@@ -4,7 +4,7 @@ import {
 	safeAssign,
 	sanitizeRowData,
 	assertSafeMergeKey
-} from '../shared/safe-assign.js';
+} from '../src/shared/safe-assign.js';
 
 describe('shared/safe-assign', () => {
 	describe('PROTO_POLLUTION_KEYS', () => {

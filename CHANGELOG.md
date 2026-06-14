@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Internal: all package source moved under `src/`.** Every entry module (`server`, `client`, `vite`, `devtools`, `hooks`, the `client-*` runes, `cli`, the test helpers) and the `shared/` helpers now live under `src/`; the repository root holds only package metadata, docs, and config. The package `exports` map repoints transparently, so every import specifier (`svelte-realtime`, `svelte-realtime/server`, `/client`, `/vite`, `/doc`, `/smooth`, `/multiplayer`, `/devtools`, `/hooks`, `/test`, `/test-client`) is unchanged - a physical relocation only, with no public API change. The determinism guard now ratchets the entire `src/` tree, so any source extracted into new modules is checked automatically.
+
 ## [0.6.0-next.9] - 2026-06-13
 
 ### Added

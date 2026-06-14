@@ -5,7 +5,7 @@
 // the mocked Date - so every rewind window in here is deterministic.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { live, handleRpc, __register, LiveError } from '../server.js';
+import { live, handleRpc, __register, LiveError } from '../src/server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 

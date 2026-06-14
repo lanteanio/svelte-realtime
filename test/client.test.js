@@ -180,7 +180,7 @@ beforeEach(async () => {
 		}
 	}));
 
-	const mod = await import('../client.js');
+	const mod = await import('../src/client.js');
 	__rpc = mod.__rpc;
 	__stream = mod.__stream;
 	__binaryRpc = mod.__binaryRpc;
@@ -4914,7 +4914,7 @@ describe('__rpc() dedup-coalesce dev-warn', () => {
 		process.env.NODE_ENV = 'production';
 		try {
 			vi.resetModules();
-			const mod = await import('../client.js');
+			const mod = await import('../src/client.js');
 			const buyProd = mod.__rpc('shop/buy');
 			const localWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 			try {
@@ -6180,7 +6180,7 @@ describe('stream .error and .status', () => {
 
 describe('empty store', () => {
 	it('is a readable that holds undefined', async () => {
-		const { empty } = await import('../client.js');
+		const { empty } = await import('../src/client.js');
 		const values = [];
 		const unsub = empty.subscribe((v) => values.push(v));
 		expect(values).toEqual([undefined]);
@@ -6620,7 +6620,7 @@ describe('__stream() rune()', () => {
 			// vitest's strict mock factory requires us to declare it.
 			fromStore: undefined
 		}));
-		const mod = await import('../client.js');
+		const mod = await import('../src/client.js');
 		const s = mod.__stream('rune-v4/items', { merge: 'crud', key: 'id' });
 		const u = s.subscribe(() => {});
 		expect(() => s.rune()).toThrow(/requires Svelte 5/);

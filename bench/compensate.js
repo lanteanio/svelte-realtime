@@ -11,7 +11,7 @@
 //    vs the tolerance-gated path (clock read + fresh capture, no search)
 //
 
-import { live, handleRpc, __register } from '../server.js';
+import { live, handleRpc, __register } from '../src/server.js';
 
 const textEncoder = new TextEncoder();
 

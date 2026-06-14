@@ -72,7 +72,7 @@ import {
 	_getIdentityKey,
 	_resetReplayRouting,
 	WRAPPED_FOR_REPLAY
-} from '../server.js';
+} from '../src/server.js';
 import { createMetrics } from 'svelte-adapter-uws-extensions/prometheus';
 import http from 'node:http';
 import { createHash, createHmac } from 'node:crypto';
@@ -80,7 +80,7 @@ import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { toArrayBuffer } from './helpers/encode.js';
 import { installFakeRuntimeClock, releaseRuntimeClock } from './helpers/runtime-clock.js';
-import { setRuntimeEnv, resetRuntimeEnv } from '../shared/runtime.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 
 const noopRegistry = () => ({
 	counter: () => ({ inc() {} }),
@@ -5312,7 +5312,7 @@ describe('live.derived()', () => {
 
 // - _activateDerived + __registerDerived --------------------------
 
-import { __registerDerived, _activateDerived, _prepareHmr } from '../server.js';
+import { __registerDerived, _activateDerived, _prepareHmr } from '../src/server.js';
 
 describe('derived stream activation', () => {
 	it('recomputes and publishes when source topic publishes', async () => {
@@ -6529,7 +6529,7 @@ describe('delta sync in streams', () => {
 
 // - Test utilities ------------------------------------------------
 
-import { createTestEnv, expectGuardRejects, createTestContext } from '../test.js';
+import { createTestEnv, expectGuardRejects, createTestContext } from '../src/test.js';
 
 describe('createTestEnv()', () => {
 	let env;

@@ -37,17 +37,22 @@ const verbose = process.argv.includes('--verbose');
 // vs shared/) does not matter.
 const ALLOW_FILES = new Set(['runtime.js', 'client-runtime.js']);
 
-// Files already routed through the runtime module that MUST stay clean. A raw
-// primitive reappearing in one of these fails the build. Populated per area as
-// call sites are migrated.
-const ENFORCED = new Set([
-	// e.g. 'shared/runtime.js' is covered by ALLOW_FILES; migrated areas listed here.
-	'server.js',
-	'client.js',
-	'client-multiplayer.svelte.js',
-	'client-smooth.svelte.js',
-	'devtools.js'
-]);
+// All shipped framework runtime source lives under src/. Every file there MUST
+// stay clean (a raw primitive reappearing fails the build), so modules extracted
+// during a decomposition are enforced automatically and cannot silently regress.
+// WARN_EXEMPT lists the published entries that are NOT part of the replayable
+// runtime: the scaffolder CLI (its only flagged primitive sits inside a generated
+// scaffold template, not runtime code) and the public test-authoring helper
+// (test-harness timing). These warn rather than fail. A single runtime line may
+// still opt out with a trailing `// determinism-allow: <reason>` comment.
+const SRC_ROOT = 'src';
+const WARN_EXEMPT = new Set(['cli.js', 'test.js']);
+function isEnforced(rel) {
+	const norm = rel.split(/[\\/]/).join('/');
+	if (norm !== SRC_ROOT && !norm.startsWith(SRC_ROOT + '/')) return false;
+	if (WARN_EXEMPT.has(basename(rel))) return false;
+	return true;
+}
 
 // Path segments that are never framework runtime source.
 const SKIP_SEGMENTS = new Set([
@@ -132,7 +137,7 @@ const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 console.log(`check-determinism: ${pkg.name}@${pkg.version}`);
 console.log(`  ${files.length} framework source file(s) scanned, ${all.length} raw native-primitive call site(s) found.`);
 
-const errors = all.filter((f) => strict || ENFORCED.has(f.rel));
+const errors = all.filter((f) => strict || isEnforced(f.rel));
 const warnings = all.filter((f) => !errors.includes(f));
 
 // Per-file summary so pretest output stays bounded; --verbose lists each site.
