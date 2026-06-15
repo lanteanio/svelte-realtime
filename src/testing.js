@@ -31,7 +31,7 @@ import { sanitizeRowData } from './shared/safe-assign.js';
  *
  * @example
  * ```js
- * import { createTestContext } from 'svelte-realtime/test';
+ * import { createTestContext } from 'svelte-realtime/testing';
  *
  * const myGuard = (ctx) => ctx.user?.role === 'admin';
  * expect(myGuard(createTestContext({ user: { role: 'admin' } }))).toBe(true);

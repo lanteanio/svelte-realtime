@@ -3398,12 +3398,12 @@ The Vite plugin includes the stream version in the client stub. On reconnect, th
 
 The migration codepath only fires across a real deploy boundary - a v1 server is replaced with a v2 server, a previously-connected v1 client reconnects, the cached `_schemaVersion` rides up. There's no path in a fresh tab to observe the migrate chain end-to-end, which makes demos and e2e tests awkward.
 
-`subscribeAt(stream, { schemaVersion })` from `svelte-realtime/test-client` creates a parallel store that subscribes pretending to be a stale client at the chosen version. The wire envelope carries `schemaVersion: N`, the server runs the registered migrate chain forward, and the parallel store renders the migrated payload. Use it for side-by-side demo panels and for e2e assertions on the migrate chain output.
+`subscribeAt(stream, { schemaVersion })` from `svelte-realtime/testing/client` creates a parallel store that subscribes pretending to be a stale client at the chosen version. The wire envelope carries `schemaVersion: N`, the server runs the registered migrate chain forward, and the parallel store renders the migrated payload. Use it for side-by-side demo panels and for e2e assertions on the migrate chain output.
 
 ```svelte
 <script>
   import { todos } from '$live/todos';
-  import { subscribeAt } from 'svelte-realtime/test-client';
+  import { subscribeAt } from 'svelte-realtime/testing/client';
 
   // Production store at the current server version (no migration on its responses).
   // Parallel stores pretending to be stale clients - each triggers the migrate
@@ -3423,7 +3423,7 @@ For dynamic streams, call the factory first and pass the cached store:
 
 ```js
 import { messages } from '$live/chat';
-import { subscribeAt } from 'svelte-realtime/test-client';
+import { subscribeAt } from 'svelte-realtime/testing/client';
 
 const v1Messages = subscribeAt(messages('room-1'), { schemaVersion: 1 });
 ```
@@ -3986,11 +3986,11 @@ realtime({ devtools: false })
 
 ## Testing
 
-Use `createTestEnv()` from `svelte-realtime/test` to test your live functions without a real WebSocket server.
+Use `createTestEnv()` from `svelte-realtime/testing` to test your live functions without a real WebSocket server.
 
 ```js
 import { describe, it, expect, afterEach } from 'vitest';
-import { createTestEnv } from 'svelte-realtime/test';
+import { createTestEnv } from 'svelte-realtime/testing';
 import * as chat from '../src/live/chat.js';
 
 describe('chat module', () => {
@@ -4053,7 +4053,7 @@ describe('chat module', () => {
 `createTestEnv({ chaos: { dropRate, seed } })` enables fault injection on `platform.publish` so tests can verify resilience to message drops without spinning a real cluster.
 
 ```js
-import { createTestEnv } from 'svelte-realtime/test';
+import { createTestEnv } from 'svelte-realtime/testing';
 
 // 50% drop rate, deterministic via seed
 const env = createTestEnv({
@@ -4088,7 +4088,7 @@ Currently models the `drop-outbound` scenario only - `platform.publish` events t
 `createTestContext({ user })` builds a `ctx`-shaped object suitable for direct unit tests of guards and predicates - helper methods are no-ops, the user / cursor / requestId can be overridden. Use this when the function under test takes `ctx` and synchronously returns a value; reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
 
 ```js
-import { createTestContext } from 'svelte-realtime/test';
+import { createTestContext } from 'svelte-realtime/testing';
 
 const adminOnly = (ctx) => ctx.user?.role === 'admin';
 
@@ -4104,7 +4104,7 @@ The returned shape mirrors the production `_buildCtx`: `user`, `ws`, `platform`,
 `expectGuardRejects(promise, expectedCode?)` is a small ergonomic wrapper for the common "this call should be denied" pattern. It awaits the promise, asserts it rejected with a `LiveError` of the expected code (default `'FORBIDDEN'`), and returns the error so further assertions can run on it.
 
 ```js
-import { createTestEnv, expectGuardRejects } from 'svelte-realtime/test';
+import { createTestEnv, expectGuardRejects } from 'svelte-realtime/testing';
 
 const env = createTestEnv();
 env.register('admin', adminModule);

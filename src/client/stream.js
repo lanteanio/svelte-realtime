@@ -137,7 +137,7 @@ export function __stream(path, options, isDynamic) {
 			return store;
 		};
 		// Stamp metadata so test-affordances like `subscribeAt` (from
-		// `svelte-realtime/test-client`) can construct a parallel store
+		// `svelte-realtime/testing/client`) can construct a parallel store
 		// at a chosen `schemaVersion` without needing the user to pass
 		// the path string by hand.
 		/** @type {any} */ (dynamicStream).__streamPath = path;
@@ -154,7 +154,7 @@ export function __stream(path, options, isDynamic) {
  * subscribe - the server sees a normal `subscribe { schemaVersion }`
  * envelope, runs its registered migrate chain forward to the current
  * server version, and returns the migrated payload, which this store
- * renders. Used by `svelte-realtime/test-client`'s `subscribeAt`; not
+ * renders. Used by `svelte-realtime/testing/client`'s `subscribeAt`; not
  * a production primitive.
  *
  * @internal
@@ -255,7 +255,7 @@ function _createMappedStore(source, fn) {
  * @param {number} [initialSchemaVersion] Test/demo affordance: pre-seed
  *   the closure-local `_schemaVersion` so the very first subscribe
  *   envelope carries it. Production code never sets this; only the
- *   `subscribeAt` helper from `svelte-realtime/test-client`.
+ *   `subscribeAt` helper from `svelte-realtime/testing/client`.
  */
 function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	let merge = options?.merge || 'crud';
@@ -1222,7 +1222,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 	return {
 		// Stamped metadata so test-affordances like `subscribeAt`
-		// (`svelte-realtime/test-client`) can construct a parallel store
+		// (`svelte-realtime/testing/client`) can construct a parallel store
 		// at a chosen schemaVersion without needing the user to pass the
 		// path string by hand. Not part of the public store contract.
 		__streamPath: path,

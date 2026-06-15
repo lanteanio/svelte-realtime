@@ -13,7 +13,7 @@ import { LiveError } from './server.js';
  *
  * @example
  * ```js
- * import { createTestEnv } from 'svelte-realtime/test';
+ * import { createTestEnv } from 'svelte-realtime/testing';
  * import * as chat from './src/live/chat.js';
  *
  * const env = createTestEnv();
@@ -39,7 +39,7 @@ export function createTestEnv(options?: {
  *
  * @example
  * ```js
- * import { createTestContext } from 'svelte-realtime/test';
+ * import { createTestContext } from 'svelte-realtime/testing';
  *
  * const adminOnly = (ctx) => ctx.user?.role === 'admin';
  * expect(adminOnly(createTestContext({ user: { role: 'admin' } }))).toBe(true);

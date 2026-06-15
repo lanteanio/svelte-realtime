@@ -46,7 +46,7 @@ const ALLOW_FILES = new Set(['runtime.js', 'client-runtime.js']);
 // (test-harness timing). These warn rather than fail. A single runtime line may
 // still opt out with a trailing `// determinism-allow: <reason>` comment.
 const SRC_ROOT = 'src';
-const WARN_EXEMPT = new Set(['cli.js', 'test.js']);
+const WARN_EXEMPT = new Set(['cli.js', 'testing.js']);
 function isEnforced(rel) {
 	const norm = rel.split(/[\\/]/).join('/');
 	if (norm !== SRC_ROOT && !norm.startsWith(SRC_ROOT + '/')) return false;

@@ -37,7 +37,7 @@ import type { Readable } from 'svelte/store';
  * ```svelte
  * <script>
  *   import { counter } from '$live/streams';
- *   import { subscribeAt } from 'svelte-realtime/test-client';
+ *   import { subscribeAt } from 'svelte-realtime/testing/client';
  *   const counterAsV1 = subscribeAt(counter, { schemaVersion: 1 });
  * </script>
  *

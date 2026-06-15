@@ -74,6 +74,19 @@ The fix awaits the predicate before the truthiness check. The matching adapter-s
 
 These won't run cleanly until you make the change.
 
+### `svelte-realtime/test` renamed to `svelte-realtime/testing` (and `/test-client` to `/testing/client`)
+
+**What changed.** The test-authoring entry points moved: import `createTestEnv`, `createTestContext`, and `expectGuardRejects` from `svelte-realtime/testing` (was `svelte-realtime/test`), and `subscribeAt` from `svelte-realtime/testing/client` (was `svelte-realtime/test-client`). The exported names are identical; only the subpath changed, so the framework test helpers no longer collide by name with a test runner global `test`.
+
+**How to migrate.** Update the import specifiers:
+
+```diff
+- import { createTestEnv, expectGuardRejects } from 'svelte-realtime/test';
++ import { createTestEnv, expectGuardRejects } from 'svelte-realtime/testing';
+- import { subscribeAt } from 'svelte-realtime/test-client';
++ import { subscribeAt } from 'svelte-realtime/testing/client';
+```
+
 ### Runtime: Node.js 22+ required (was Node 20+)
 
 **What changed.** `package.json#engines.node` moved from `>=20.0.0` to `>=22.0.0`. Tracks the adapter's bump, which in turn tracks `uWebSockets.js` v20.67.0 dropping Node 20 support upstream.

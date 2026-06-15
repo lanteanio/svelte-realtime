@@ -42,7 +42,7 @@ import { _createStreamAtSchemaVersion } from './client.js';
  * ```svelte
  * <script>
  *   import { counter } from '$live/streams';                  // production v2 store
- *   import { subscribeAt } from 'svelte-realtime/test-client';
+ *   import { subscribeAt } from 'svelte-realtime/testing/client';
  *   const counterAsV1 = subscribeAt(counter, { schemaVersion: 1 });
  * </script>
  *
@@ -54,7 +54,7 @@ import { _createStreamAtSchemaVersion } from './client.js';
  * ```js
  * // Dynamic stream: pass the cached store from the factory call.
  * import { messages } from '$live/streams';
- * import { subscribeAt } from 'svelte-realtime/test-client';
+ * import { subscribeAt } from 'svelte-realtime/testing/client';
  *
  * const v1Messages = subscribeAt(messages('room-1'), { schemaVersion: 1 });
  * ```

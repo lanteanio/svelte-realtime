@@ -50,13 +50,13 @@
       "types": "./src/devtools.d.ts",
       "default": "./src/devtools.js"
     },
-    "./test": {
-      "types": "./src/test.d.ts",
-      "default": "./src/test.js"
+    "./testing": {
+      "types": "./src/testing.d.ts",
+      "default": "./src/testing.js"
     },
-    "./test-client": {
-      "types": "./src/test-client.d.ts",
-      "default": "./src/test-client.js"
+    "./testing/client": {
+      "types": "./src/testing-client.d.ts",
+      "default": "./src/testing-client.js"
     },
     "./hooks": {
       "types": "./src/hooks.d.ts",

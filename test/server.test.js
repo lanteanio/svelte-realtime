@@ -6529,7 +6529,7 @@ describe('delta sync in streams', () => {
 
 // - Test utilities ------------------------------------------------
 
-import { createTestEnv, expectGuardRejects, createTestContext } from '../src/test.js';
+import { createTestEnv, expectGuardRejects, createTestContext } from '../src/testing.js';
 
 describe('createTestEnv()', () => {
 	let env;
