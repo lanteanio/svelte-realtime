@@ -183,4 +183,20 @@ export function _resetDedupCoalesceWarned() {
 /** @type {Map<string, { resolve: Function, reject: Function, timer: ReturnType<typeof setTimeout> | null }>} */
 const pending = new Map();
 
+/**
+ * In-flight uploads keyed by numeric streamId. Cross-module: upload.js owns it
+ * (creates/deletes handles); connection.js reads it to drain in-flight uploads
+ * when the socket disconnects or terminally closes.
+ * @type {Map<number, any>}
+ */
+export const pendingUploads = new Map();
+
+/**
+ * Offline send queue. Cross-module: misc.js owns it (configure / _drainOfflineQueue
+ * on reconnect); rpc.js enqueues a call when offline; connection.js drains it with
+ * errors on terminal close.
+ * @type {Array<{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number }>}
+ */
+export const _offlineQueue = [];
+
 export { _textEncoder, _IS_DEV, _getBinaryFrame, _useRAF, _nextId, _dedupMap, _dedupCoalesceWarned, _PUBLISH_RATE_HINT_THRESHOLD, _PUBLISH_RATE_HINT_WINDOW_MS, _PUBLISH_RATE_HINT_DEDUP_MAX, _publishRateWindows, _publishRateHintWarned, _isDev, pending };
