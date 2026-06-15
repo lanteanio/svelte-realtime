@@ -76,7 +76,7 @@ export const _silentTopicWatch = new Map();
  * `platform.sendCoalesced` fan-out.
  *
  * Hot-path cost on the default (no-coalesce) branch: one Map.get on an
- * almost-always-empty map. See bench/publish.js for numbers.
+ * almost-always-empty map. See bench/publish.mjs for numbers.
  *
  * @type {Map<string, { coalesceBy: Function, onError: Function | null, ws: Set<any> }>}
  */

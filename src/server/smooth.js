@@ -44,6 +44,11 @@ let _smoothRuntimePromise = null;
 // module runs server-side where node resolves the subpath natively).
 const _SMOOTH_PLUGIN_SPECIFIER = 'svelte-adapter-uws' + '/plugins/smooth';
 
+// The specifier actually imported. Equals the canonical constant in production;
+// a test repoints it (see _setSmoothSpecifierForTest) to exercise the load-failure
+// path against a real, rejecting resolution.
+let _smoothSpecifier = _SMOOTH_PLUGIN_SPECIFIER;
+
 function _loadSmoothRuntime() {
 	if (_smoothRuntime) return Promise.resolve(_smoothRuntime);
 	if (!_smoothRuntimePromise) {
@@ -51,7 +56,7 @@ function _loadSmoothRuntime() {
 		// while this import is in flight, the late settlement must not clobber
 		// the injected module - both handlers check that this promise is still
 		// the live one before touching shared state.
-		const p = import(/* @vite-ignore */ _SMOOTH_PLUGIN_SPECIFIER).then(
+		const p = import(/* @vite-ignore */ _smoothSpecifier).then(
 			(mod) => {
 				if (_smoothRuntimePromise !== p) {
 					return _smoothRuntime !== null ? _smoothRuntime : mod;
@@ -103,6 +108,19 @@ export function _smoothLoadError(err) {
  */
 export function _setSmoothRuntime(mod) {
 	_smoothRuntime = mod;
+	_smoothRuntimePromise = null;
+}
+
+/**
+ * Test seam: repoint the lazily-imported plugin specifier (or pass null to
+ * restore the default). Lets the load-failure path be exercised against a real
+ * rejecting resolution without depending on the installed adapter version.
+ * @param {string | null} spec
+ * @internal
+ */
+export function _setSmoothSpecifierForTest(spec) {
+	_smoothSpecifier = spec == null ? _SMOOTH_PLUGIN_SPECIFIER : spec;
+	_smoothRuntime = null;
 	_smoothRuntimePromise = null;
 }
 

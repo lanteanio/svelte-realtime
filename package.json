@@ -9,10 +9,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lanteanio/svelte-realtime.git"
+    "url": "git+https://github.com/lanteanio/svelte-realtime.git"
   },
-  "homepage": "https://github.com/lanteanio/svelte-realtime",
-  "bugs": "https://github.com/lanteanio/svelte-realtime/issues",
+  "homepage": "https://github.com/lanteanio/svelte-realtime#readme",
+  "bugs": {
+    "url": "https://github.com/lanteanio/svelte-realtime/issues"
+  },
   "type": "module",
   "bin": {
     "svelte-realtime": "./src/cli.js"
@@ -70,7 +72,7 @@
     "MIGRATION.md"
   ],
   "scripts": {
-    "check": "node scripts/check-determinism.js",
+    "check": "node scripts/check-types.js && node scripts/check-determinism.js",
     "pretest": "npm run check",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -92,7 +94,7 @@
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "fast-check": "^4.7.0",
-    "svelte-adapter-uws-extensions": "^0.5.3",
+    "svelte-adapter-uws-extensions": "^0.6.0-next.18",
     "vitest": "^4.0.18"
   },
   "keywords": [

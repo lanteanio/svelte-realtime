@@ -14,6 +14,7 @@ import {
 	__register,
 	close,
 	_setSmoothRuntime,
+	_setSmoothSpecifierForTest,
 	_resetSmooth,
 	_prepareHmr,
 	_restoreHmr,
@@ -233,13 +234,15 @@ describe('live.smooth without the adapter smooth plugin', () => {
 	afterEach(() => {
 		_resetSmooth();
 		_setSmoothRuntime(null);
+		_setSmoothSpecifierForTest(null);
 	});
 
 	it('reports an actionable error instead of a resolution crash', async () => {
-		// Real timers: the lazy module resolution rejects on the real event
-		// loop (this repo's installed adapter predates the smooth plugin),
-		// which is exactly the deployment shape the error message serves.
+		// Force the lazy plugin import to reject (bogus specifier) so this
+		// exercises the load-failure path regardless of whether the installed
+		// adapter ships the smooth plugin.
 		_setSmoothRuntime(null);
+		_setSmoothSpecifierForTest('svelte-adapter-uws/plugins/__smooth_absent__');
 		const { name } = declareShape();
 		const platform = wirePlatform();
 		handleRpc(mockWs({ id: 'u1' }), toArrayBuffer({ rpc: name + '/shape/__smooth/sync', id: 'c' + ++_id, args: ['r1'] }), platform);

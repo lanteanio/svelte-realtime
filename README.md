@@ -2926,7 +2926,7 @@ How it behaves:
 - **Trust model.** The client stamps when it acted; the server only honors stamps inside the window it recorded itself. A stamp older than the history window, an empty ring, or a nested `compensate` call all fail safe to *current* state - never the oldest marker - and report `meta.fallback: true`. Production game servers run windows of 500-2000ms; longer windows widen the peek advantage a high-latency client gets, so tune `maxAgeMs` to your tolerance. The ring's topic cap is per room export: if your action guard lets a user act on arbitrarily many room ids, that user can cycle honest rooms' history out of the cap - the guard is the mitigation.
 - **Clock skew matters.** The stamp is compared against the *server's* wall clock. A client clock running ahead makes every stamp look fresh (no rewind, reported as `fallback: false`); one running behind by more than the window gets permanent `fallback: true`. Both degrade safely but silently - so derive the stamp from a server-synced clock instead of raw `Date.now()`. A [smoothed-entity view](#smoothed-entities) maintains exactly that clock: stamp with `view.now()` and the compensation window and the prediction loop share one time axis.
 - **Publishes during evaluation** are ordinary room publishes, delivered immediately - the same semantics as a publish anywhere else in an action (a publish followed by a throw is delivered there too). The recommended pattern is evaluate first, publish from the result, as in the example above.
-- **Cost.** Without `history`, actions are unchanged. With it, recording adds roughly the cost of your `capture` (a 32-player snapshot measures ~2-4us per action with `NODE_ENV=production node bench/compensate.js`; plain dev mode reads several times that because dev deep-freezes each snapshot to catch mutations), and a ring-hit rewind is a clock read plus a binary search - the cheapest compensate path, since it reuses an already-frozen snapshot.
+- **Cost.** Without `history`, actions are unchanged. With it, recording adds roughly the cost of your `capture` (a 32-player snapshot measures ~2-4us per action with `NODE_ENV=production node bench/compensate.mjs`; plain dev mode reads several times that because dev deep-freezes each snapshot to catch mutations), and a ring-hit rewind is a clock read plus a binary search - the cheapest compensate path, since it reuses an already-frozen snapshot.
 - **With client prediction.** If clients predict and reconcile, capture every field the reconciliation compares (position-only snapshots suffice for hitscan, not for replaying movement), and stamp commands with the same clock the prediction loop uses - `view.now()` on a [smoothed-entity view](#smoothed-entities).
 
 `tolerance` (per call: `ctx.compensate(t, fn, { tolerance: 20 })`) skips the rewind when the stamp is within that many milliseconds of now - the low-latency common case.
@@ -4234,7 +4234,7 @@ The benchmark suite measures the full-stack overhead added by svelte-realtime on
 Run with:
 
 ```bash
-node bench/rpc.js
+node bench/rpc.mjs
 ```
 
 What gets measured:
@@ -4252,7 +4252,7 @@ With high-frequency streams (e.g. 1000 cursors at 20 updates/sec), this reduces 
 
 In Node/SSR (tests, `__directCall`, etc.), events apply synchronously - no batching overhead.
 
-See [bench/rpc.js](bench/rpc.js) for the full source.
+See [bench/rpc.mjs](bench/rpc.mjs) for the full source.
 
 ---
 
