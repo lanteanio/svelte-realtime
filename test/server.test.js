@@ -66,6 +66,9 @@ import {
 	PUBLISH_RATE_WARN_DEDUP_MAX,
 	MAX_PRESENCE_REF,
 	assert,
+	fatal,
+	setFatalSink,
+	resetFatalSink,
 	getAssertionCounters,
 	_resetAssertCounters,
 	_resetMiddleware,
@@ -15783,5 +15786,84 @@ describe('capacity caps', () => {
 			expect(warnSpy.mock.calls[0][0]).toContain('MAX_PRESENCE_REF=2');
 			expect(warnSpy.mock.calls[0][0]).toContain('platform.redis');
 		});
+	});
+});
+
+// - Production assertions: hard tier (server) --------------------------------
+
+describe('fatal() hard tier (server)', () => {
+	let errSpy;
+	let savedVitest;
+	let savedNodeEnv;
+	// Computed env access so vite:define cannot statically rewrite (and mangle)
+	// these reads/writes during transform.
+	const setEnv = (k, v) => { if (v === undefined) delete process.env[k]; else process.env[k] = v; };
+
+	beforeEach(() => {
+		_resetAssertCounters();
+		errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		savedVitest = process.env['VITEST'];
+		savedNodeEnv = process.env['NODE_ENV'];
+	});
+
+	afterEach(() => {
+		// Restore the env first so a failed assertion can never strand the
+		// process in the production branch (a real exit would kill vitest).
+		setEnv('VITEST', savedVitest);
+		setEnv('NODE_ENV', savedNodeEnv);
+		errSpy.mockRestore();
+		_resetAssertCounters();
+	});
+
+	it('returns silently when the condition holds', () => {
+		fatal(true, 'realtime/test.fatal-ok');
+		expect(getAssertionCounters().get('realtime/test.fatal-ok')).toBeUndefined();
+		expect(errSpy).not.toHaveBeenCalled();
+	});
+
+	it('throws in test mode, counts the violation, and logs the fatal severity', () => {
+		expect(() => fatal(false, 'realtime/test.fatal-y', { v: 7 })).toThrow(/realtime\/test\.fatal-y/);
+		expect(getAssertionCounters().get('realtime/test.fatal-y')).toBe(1);
+		const logged = errSpy.mock.calls[0][0];
+		expect(logged).toContain('[realtime/fatal]');
+		expect(logged).toContain('"severity":"fatal"');
+		expect(logged).toContain('"v":7');
+	});
+
+	it('in production defers an exit(78) through the sink without throwing', async () => {
+		const exits = [];
+		setFatalSink({ exit: (code) => exits.push(code) });
+		setEnv('VITEST', undefined);
+		setEnv('NODE_ENV', 'production');
+		expect(() => fatal(false, 'realtime/test.fatal-prod')).not.toThrow();
+		// Deferred to a microtask so the current callback frame unwinds first.
+		expect(exits).toEqual([]);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(exits).toEqual([78]);
+		expect(getAssertionCounters().get('realtime/test.fatal-prod')).toBe(1);
+	});
+
+	it('setFatalSink rejects a sink without an exit function', () => {
+		expect(() => setFatalSink({})).toThrow(/exit\(code\)/);
+		expect(() => setFatalSink(null)).toThrow(/exit\(code\)/);
+	});
+
+	it('resetFatalSink restores the default exit sink', async () => {
+		const custom = [];
+		setFatalSink({ exit: (code) => custom.push(code) });
+		resetFatalSink();
+		const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {});
+		try {
+			setEnv('VITEST', undefined);
+			setEnv('NODE_ENV', 'production');
+			fatal(false, 'realtime/test.fatal-reset');
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(custom).toEqual([]);
+			expect(exitSpy).toHaveBeenCalledWith(78);
+		} finally {
+			exitSpy.mockRestore();
+		}
 	});
 });

@@ -2127,12 +2127,14 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 - **In production**, a violation increments an in-memory per-category counter, fires the Prometheus counter `svelte_realtime_assertion_violations_total{category}` (when `live.metrics(...)` is wired), and logs a single `[realtime/assert] {...}` line at `console.error`. The assert does NOT throw - a thrown exception inside a publish hot-path microtask or a subscribe callback could leave a half-applied bookkeeping update or a corrupted index. Counter + log give observability without the corruption risk.
 - **In test mode** (`process.env.VITEST` or `NODE_ENV === 'test'`) the assert THROWS so vitest surfaces the failure as a normal test error.
 
+There is also a **hard tier**, `fatal(cond, category, context)`, for genuinely unrecoverable server state where continuing risks silent misdelivery. It records the same per-category counter and Prometheus series as `assert` (the severity rides the log as `[realtime/fatal] {..., "severity":"fatal"}`), but in production it schedules a deferred worker termination with exit code 78 once the current callback frame unwinds, so the supervisor restarts the worker from clean state rather than letting it mis-route publishes; in test mode it throws. On the client it degrades to the log + counter only (there is no worker to terminate).
+
 Categories are stable strings prefixed `realtime/<module>.<invariant>` (so the Prometheus label cardinality is bounded and won't collide with the adapter's `extensions_assertion_violations_total`). Today's categories:
 
 | Category                                              | Where                                       |
 | ----------------------------------------------------- | ------------------------------------------- |
 | `realtime/handleRpc.envelope.non-empty`               | RPC frame has non-empty `rpc` and `id`      |
-| `realtime/subscription.bookkeeping.ws-was-tracked`    | Unsubscribe path: ws was in the topic set   |
+| `realtime/subscription.bookkeeping.ws-was-tracked`    | Subscribe rollback: forward/reverse subscription indexes agree (**hard tier**: terminates the worker) |
 | `realtime/push-registry.entry-tracked`                | Close hook: registry entry exists for userId |
 | `realtime/lock.waiter.shape`                          | Dequeued lock waiter has resolve+reject     |
 | `realtime/optimistic.queue.serverValue-iff-nonempty`  | Server-merge path: `_serverValue` set when queue non-empty |

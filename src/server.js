@@ -1,5 +1,5 @@
 // @ts-check
-import { assert, wireAssertionMetrics } from './shared/assert.js';
+import { assert, fatal, wireAssertionMetrics } from './shared/assert.js';
 import { safeAssign as _safeAssignSnapshot } from './shared/safe-assign.js';
 import {
 	now as runtimeNow,
@@ -90,7 +90,7 @@ export { _resetIdempotencyStore, _resetLock };
 export { _getIdentityKey };
 export { _resetAdmission };
 export { WRAPPED_FOR_REPLAY, _resetReplayRouting };
-export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
+export { assert, fatal, setFatalSink, resetFatalSink, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
 export { LiveError };
 export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge };
@@ -674,9 +674,15 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 		const wsSet = _topicWsCounts.get(topic);
 		if (wsSet) {
 			// subscription.bookkeeping invariant: if owners.length hit 0 for
-			// this ws+topic, the wsSet must have tracked this ws. Mismatch
-			// means a stale tracking entry or a double-remove.
-			assert(wsSet.has(ws), 'realtime/subscription.bookkeeping.ws-was-tracked', { topic, wsSetSize: wsSet.size });
+			// this ws+topic, the wsSet must have tracked this ws. Every path that
+			// mutates this index pair (subscribe, rollback, unsubscribe, close)
+			// updates the forward owner map and the reverse ws-set together and
+			// synchronously, so a mismatch here is not a transient race but a
+			// genuine divergence (a missed update or memory corruption) after which
+			// delivery on this worker can no longer be trusted. Fail closed:
+			// terminate so the supervisor restarts from a clean index instead of
+			// silently mis-routing publishes.
+			fatal(wsSet.has(ws), 'realtime/subscription.bookkeeping.ws-was-tracked', { topic, wsSetSize: wsSet.size });
 			wsSet.delete(ws);
 			remainingSubscribers = wsSet.size;
 			if (wsSet.size === 0) {
