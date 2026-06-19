@@ -24,6 +24,9 @@ import {
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import svelteRealtime from '../src/vite.js';
+// Internal record map, for asserting a topic record is reclaimed (same module
+// instance server.js uses - ESM dedupes the import).
+import { _smoothTopics } from '../src/server/smooth.js';
 
 const textEncoder = new TextEncoder();
 const toArrayBuffer = (obj) => textEncoder.encode(JSON.stringify(obj)).buffer;
@@ -779,5 +782,373 @@ describe('live.smooth() vite integration', () => {
 		// calling view.onEvent during SSR gets a no-op that returns a disposer.
 		expect(code).toContain('onEvent: () => () => {}');
 		expect(code).not.toContain('createSmoothChannel');
+	});
+});
+
+/**
+ * A scripted smooth cluster coordinator (the `platform.smooth` surface): records
+ * every relay call and exposes `emit.*` to drive the inbound handlers, so the
+ * tests pin exactly what the realtime layer forwards and how it reacts to a
+ * peer's frame - the cluster analog of fakeRuntime() scripting the authority.
+ */
+function scriptedSmoothCluster(opts = {}) {
+	const calls = {
+		relayCommand: [], requestSync: [], sendSyncReply: [],
+		relayBroadcast: [], relayAck: [], relayLeave: [],
+		acquireOwner: [], renewOwner: [], releaseOwner: []
+	};
+	let handlers = null;
+	let owner = opts.owner !== undefined ? opts.owner : true;
+	const cluster = {
+		instanceId: opts.instanceId || 'A',
+		onMessage(h) { handlers = h; },
+		relayCommand(...a) { calls.relayCommand.push(a); },
+		requestSync(...a) { calls.requestSync.push(a); },
+		sendSyncReply(...a) { calls.sendSyncReply.push(a); },
+		relayBroadcast(...a) { calls.relayBroadcast.push(a); },
+		relayAck(...a) { calls.relayAck.push(a); },
+		relayLeave(...a) { calls.relayLeave.push(a); },
+		async acquireOwner(t) { calls.acquireOwner.push(t); return owner; },
+		async renewOwner(t) { calls.renewOwner.push(t); return opts.renew !== undefined ? opts.renew : true; },
+		async releaseOwner(t) { calls.releaseOwner.push(t); return true; }
+	};
+	return {
+		cluster,
+		calls,
+		setOwner(v) { owner = v; },
+		emit: {
+			command: (...a) => handlers.onCommand(...a),
+			sync: (...a) => handlers.onSync(...a),
+			syncReply: (...a) => handlers.onSyncReply(...a),
+			broadcast: (...a) => handlers.onBroadcast(...a),
+			ack: (...a) => handlers.onAck(...a),
+			leave: (...a) => handlers.onLeave(...a)
+		}
+	};
+}
+
+describe('live.smooth cluster (platform.smooth)', () => {
+	const WT = '__smooth:shape:r1';
+	let rt;
+	beforeEach(() => {
+		vi.useFakeTimers();
+		rt = fakeRuntime();
+		_setSmoothRuntime(rt.mod);
+	});
+	afterEach(() => {
+		_resetSmooth();
+		_setSmoothRuntime(null);
+		vi.useRealTimers();
+	});
+
+	/** Fire an RPC without awaiting the reply (for handlers that suspend on a relay). */
+	function fire(ws, platform, path, args) {
+		handleRpc(ws, toArrayBuffer({ rpc: path, id: 'k' + ++_id, args }), platform);
+	}
+
+	function clusterPlatform(sc) {
+		const platform = wirePlatform();
+		platform.smooth = sc.cluster;
+		return platform;
+	}
+
+	it('owner sync acquires the lease, ensures locally, and returns the catalog basis', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		const res = await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(sc.calls.acquireOwner).toEqual([WT]);
+		expect(rt.calls.ensure).toHaveLength(1);
+		expect(res.data.you).toBe('u1');
+		expect(res.data.states).toEqual([{ key: 'u1', state: { x: 0, y: 0 } }]);
+		expect(sc.calls.requestSync).toHaveLength(0); // the owner answers itself
+	});
+
+	it('non-owner sync forwards a request and resolves with the owner reply', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const before = platform.sent.length;
+		fire(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(sc.calls.requestSync).toHaveLength(1);
+		const [wireTopic, identity, originInstance, corr] = sc.calls.requestSync[0];
+		expect([wireTopic, identity, originInstance]).toEqual([WT, 'u2', 'B']);
+		sc.emit.syncReply(WT, corr, { ack: 9, states: [{ key: 'u1', state: { x: 1, y: 2 } }] });
+		await vi.advanceTimersByTimeAsync(1);
+		const reply = platform.sent[before]?.data;
+		expect(reply.data.ack).toBe(9);
+		expect(reply.data.states).toEqual([{ key: 'u1', state: { x: 1, y: 2 } }]);
+		expect(rt.calls.ensure).toHaveLength(0); // a non-owner never ensures locally
+	});
+
+	it('non-owner sync degrades to an empty basis when the owner does not reply', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: false });
+		const platform = clusterPlatform(sc);
+		const before = platform.sent.length;
+		fire(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(sc.calls.requestSync).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(2000); // past the sync timeout
+		const reply = platform.sent[before]?.data;
+		expect(reply.data.ack).toBe(0);
+		expect(reply.data.states).toEqual([]);
+	});
+
+	it('forwards a command to the owner when this instance is not the owner', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		fire(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], { ack: 0, states: [] });
+		await vi.advanceTimersByTimeAsync(1);
+		await call(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 1 } }]]);
+		expect(sc.calls.relayCommand).toEqual([[WT, 'u2', 'B', [{ id: 1, cmd: { dx: 1 } }]]]);
+		expect(rt.calls.enqueue).toHaveLength(0); // a non-owner does not tick locally
+	});
+
+	it('owner tick relays each broadcast with a monotonic per-topic seq; the local-author ack stays local', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		rt.queueDrain({
+			updates: [{ key: 'u1', state: { x: 5, y: 0 }, ws, commanded: true }],
+			acks: [{ key: 'u1', ws, id: 3, state: { x: 5, y: 0 } }],
+			events: [{ type: 'shot', key: '3:0', data: {}, id: 3, opts: null, ws, commanded: true }],
+			idle: true
+		});
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 3, cmd: { dx: 5 } }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		// Local emit: the owner's own client is excluded from its own update/event.
+		const localUpdate = platform.wirePublished.find((p) => p.event === 'update');
+		expect(localUpdate.options).toEqual({ excludeWs: ws });
+		// Relay: update then event, each with the next seq; a native author needs
+		// no cross-instance exclude (it is on no other instance).
+		expect(sc.calls.relayBroadcast.map((r) => [r[1], r[3], r[4]])).toEqual([
+			['update', undefined, 0],
+			['event', undefined, 1]
+		]);
+		// The owner's own client ack is delivered locally, never relayed.
+		expect(sc.calls.relayAck).toHaveLength(0);
+		expect(platform.wireSent.filter((s) => s.event === 'ack')).toHaveLength(1);
+	});
+
+	it('owner enqueues a forwarded command (dropping already-acked ids) and relays its ack + update back', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true, instanceId: 'A' });
+		const platform = clusterPlatform(sc);
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']); // A owns + wires handlers
+		sc.emit.command(WT, 'u2', 'B', [{ id: 5, cmd: { dx: 9 } }]);
+		expect(rt.calls.ensure.some((e) => e.key === 'u2')).toBe(true); // surrogate ensured
+		expect(rt.calls.enqueue).toContainEqual({ key: 'u2', batch: [{ id: 5, cmd: { dx: 9 } }] });
+		// A redelivery of an already-acked id is dropped, not re-applied.
+		rt.entities.get('u2').lastAckedId = 5;
+		sc.emit.command(WT, 'u2', 'B', [{ id: 5, cmd: {} }, { id: 4, cmd: {} }]);
+		expect(rt.calls.enqueue.filter((e) => e.key === 'u2')).toHaveLength(1);
+		// On the tick, the remote client's ack relays back to its instance and the
+		// update relays excluding the remote author identity.
+		const surrogate = rt.entities.get('u2').ws;
+		rt.queueDrain({
+			updates: [{ key: 'u2', state: { x: 9, y: 0 }, ws: surrogate, commanded: true }],
+			acks: [{ key: 'u2', ws: surrogate, id: 5, state: { x: 9, y: 0 } }],
+			idle: true
+		});
+		await vi.advanceTimersByTimeAsync(20);
+		expect(sc.calls.relayAck).toHaveLength(1);
+		expect(sc.calls.relayAck[0].slice(0, 3)).toEqual([WT, 'u2', 'B']);
+		expect(sc.calls.relayAck[0][3].id).toBe(5);
+		const upRelay = sc.calls.relayBroadcast.find((r) => r[1] === 'update');
+		expect(upRelay[3]).toBe('u2'); // relay excludes the remote author identity
+	});
+
+	it('re-emits a relayed broadcast to local subscribers, excluding only a local author', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: false });
+		const platform = clusterPlatform(sc);
+		const sub = mockWs({ id: 'viewer' });
+		fire(sub, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], { ack: 0, states: [] });
+		await vi.advanceTimersByTimeAsync(1);
+		// Author is the local subscriber -> excluded.
+		sc.emit.broadcast(WT, 'update', { key: 'a', data: { x: 1 } }, 'viewer', 0, 'A');
+		// Author is on another instance -> nobody local excluded.
+		sc.emit.broadcast(WT, 'update', { key: 'b', data: { x: 2 } }, 'elsewhere', 1, 'A');
+		const ups = platform.wirePublished.filter((p) => p.event === 'update');
+		expect(ups).toHaveLength(2);
+		expect(ups[0].options).toEqual({ excludeWs: sub });
+		expect(ups[1].options).toBeUndefined();
+	});
+
+	it('delivers a relayed ack to the registered local socket', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: false });
+		const platform = clusterPlatform(sc);
+		const sub = mockWs({ id: 'u2' });
+		fire(sub, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], { ack: 0, states: [] });
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.ack(WT, 'u2', { id: 7, state: { x: 1 }, t: 123 });
+		const ack = platform.wireSent.find((s) => s.event === 'ack');
+		expect(ack.ws).toBe(sub);
+		expect(ack.data.id).toBe(7);
+	});
+
+	it('drops a redelivered or regressing broadcast seq, and resets the watermark on an owner change', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: false });
+		const platform = clusterPlatform(sc);
+		fire(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], { ack: 0, states: [] });
+		await vi.advanceTimersByTimeAsync(1);
+		const ev = (key, seq, owner) => sc.emit.broadcast(WT, 'event', { type: 'x', key, data: {}, id: 1 }, undefined, seq, owner);
+		ev('1:0', 5, 'A');
+		ev('1:1', 5, 'A'); // duplicate seq -> dropped
+		ev('1:2', 3, 'A'); // regressing seq -> dropped
+		expect(platform.wirePublished.filter((p) => p.event === 'event')).toHaveLength(1);
+		// A new owner restarts the seq counter; the watermark resets so its lower
+		// seqs are NOT dropped.
+		ev('2:0', 0, 'B');
+		expect(platform.wirePublished.filter((p) => p.event === 'event')).toHaveLength(2);
+	});
+
+	it('relays a leave to the owner when a local subscriber closes (non-owner)', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u2' });
+		fire(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], { ack: 0, states: [] });
+		await vi.advanceTimersByTimeAsync(1);
+		close(ws, { platform });
+		expect(sc.calls.relayLeave).toEqual([[WT, 'u2', 'B']]);
+	});
+
+	it('owner drops a remote client surrogate and broadcasts the removal on leave', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		sc.emit.command(WT, 'u2', 'B', [{ id: 1, cmd: {} }]); // ensures the surrogate
+		expect(rt.entities.has('u2')).toBe(true);
+		sc.emit.leave(WT, 'u2', 'B');
+		expect(rt.entities.has('u2')).toBe(false);
+		const remove = sc.calls.relayBroadcast.find((r) => r[1] === 'remove');
+		expect(remove[2]).toEqual({ key: 'u2' });
+	});
+
+	it('renews the ownership lease from the tick while owning', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		rt.queueDrain({ updates: [], acks: [], idle: false });
+		rt.queueDrain({ updates: [], acks: [], idle: true });
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(40);
+		expect(sc.calls.renewOwner).toContain(WT);
+	});
+
+	it('keeps renewing the lease while holding an IDLE entity (does not stop when the drain goes idle)', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		// No queued drains: every drain reports idle while the entity is still held.
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		const after1 = sc.calls.renewOwner.length;
+		expect(after1).toBeGreaterThanOrEqual(1);
+		// The tick must keep firing across renew intervals despite being idle, or
+		// the lease would silently expire under a live owner.
+		await vi.advanceTimersByTimeAsync(6500);
+		expect(sc.calls.renewOwner.length).toBeGreaterThan(after1);
+	});
+
+	it('a non-owner sync that closes mid-flight resolves (no hang) and relays a leave', async () => {
+		const { name } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u2' });
+		const before = platform.sent.length;
+		fire(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(sc.calls.requestSync).toHaveLength(1); // suspended awaiting the owner reply
+		close(ws, { platform }); // forgets the record while the sync is in flight
+		await vi.advanceTimersByTimeAsync(1);
+		// The suspended handler resumed (its pending sync was resolved, not orphaned),
+		// hit its liveness re-check, and errored - it did NOT hang.
+		const res = platform.sent[before]?.data;
+		expect(res).toBeDefined();
+		expect(res.ok).toBe(false);
+		expect(res.code).toBe('CONNECTION_CLOSED');
+		expect(sc.calls.relayLeave).toEqual([[WT, 'u2', 'B']]);
+	});
+
+	it('a demoted owner (failed renew) stops ticking and relaying', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true, renew: false }); // the renew fails -> demotion
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		rt.queueDrain({ updates: [{ key: 'u1', state: { x: 1, y: 0 }, ws, commanded: true }], acks: [], idle: false });
+		rt.queueDrain({ updates: [{ key: 'u1', state: { x: 2, y: 0 }, ws, commanded: true }], acks: [], idle: false });
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20); // tick 1: relays (still owned), renew fires -> false -> demote
+		const afterTick1 = sc.calls.relayBroadcast.length;
+		expect(afterTick1).toBeGreaterThanOrEqual(1);
+		expect(sc.calls.renewOwner.length).toBeGreaterThanOrEqual(1);
+		await vi.advanceTimersByTimeAsync(80); // subsequent ticks must bail: no new relays
+		expect(sc.calls.relayBroadcast.length).toBe(afterTick1);
+	});
+
+	it('reclaims a demoted owner that holds only remote surrogates (no local subscriber)', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true, renew: false }); // renew fails -> demotion
+		const platform = clusterPlatform(sc);
+		const local = mockWs({ id: 'u1' });
+		await call(local, platform, name + '/shape/__smooth/sync', ['r1']); // owner, local u1
+		// A remote client commands -> the owner mints a surrogate entity for it.
+		sc.emit.command(WT, 'remoteUser', 'B', [{ id: 1, cmd: {} }]);
+		expect(rt.entities.has('remoteUser')).toBe(true);
+		// The only LOCAL subscriber leaves: the record is retained (a remote
+		// surrogate still lives) and keeps ticking/renewing - registry now empty.
+		close(local, { platform });
+		expect(_smoothTopics.has('shape:r1')).toBe(true);
+		// A failed renew demotes it. With no local subscriber there is no future
+		// close to reclaim it, so the demotion path must forget it now (else leak).
+		await vi.advanceTimersByTimeAsync(20);
+		expect(_smoothTopics.has('shape:r1')).toBe(false);
+	});
+
+	it('a relayed frame resolves to a record RE-CREATED after HMR (no stale wire index)', async () => {
+		const { name, shape } = declareShape();
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		// A local subscriber 'u1' on the pre-reload record.
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		// HMR success path: the topics map is cleared and the snapshot discarded; the
+		// module re-registers its exports and a fresh sync builds a NEW record object
+		// for the same topic (this is the case a stale separate index would break -
+		// the FAILED-reimport restore path reuses the same object and masks the bug).
+		_prepareHmr();
+		registerSmooth(name, shape); // the re-import re-registers the same export
+		await call(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		// A relayed ack for 'u2' must route to the NEW record (which registered u2).
+		// A stale index pointing at the discarded pre-reload record - where only u1
+		// was registered - would drop the ack, so this discriminates the fix.
+		sc.emit.ack(WT, 'u2', { id: 5, state: { x: 0, y: 0 }, t: 1 });
+		const ack = platform.wireSent.find((s) => s.event === 'ack');
+		expect(ack).toBeDefined();
+		expect(ack.data.id).toBe(5);
 	});
 });

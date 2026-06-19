@@ -5,7 +5,11 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0-next.11] - 2026-06-20
+
+### Added
+
+- **`live.smooth()` entities now work across a Redis-backed cluster.** Until now smoothed entities were single-instance: behind a load balancer the clients of one topic land on different instances, each runs its own authority, and the same command double-applies while one-shot events double-fire (the [0.6.0-next.10] event-channel note flagged this as the required follow-up). Wire `platform.smooth = createSmoothCluster(redisClient)` from `svelte-adapter-uws-extensions/redis/smooth` and the smoothed-entity layer detects it and routes through it automatically - no application change beyond the one wiring line, and the public surface (`live.smooth()`, the client store, `view.onEvent`) is identical. The model is single-owner-per-topic, because the authority's `apply` step is order-dependent and not idempotent (a converge-everywhere replica like documents would double-apply): exactly one instance holds a per-topic Redis lease and ticks that topic's authority; the other instances forward their clients' command batches to it (one envelope, already-acknowledged ids dropped on arrival) and re-broadcast its updates, acknowledgements, and events to their own local subscribers. Acknowledgements route back to the one instance the commanding client is on; one-shot events carry a per-topic sequence so a redelivered or ownership-overlap-duplicated event is dropped, so cross-instance events now fire exactly once (closing the next.10 cluster gap). On owner death the lease expires, another instance acquires a fresh authority, and clients re-sync - the same recovery a single-instance restart already triggers. Without `platform.smooth` the layer runs single-instance exactly as before (byte-identical wire and lifecycle). Wire it for any multi-instance deployment of smoothed entities. Requires `svelte-adapter-uws-extensions >= 0.6.0-next.19` for the `createSmoothCluster` coordinator.
 
 ## [0.6.0-next.10] - 2026-06-19
 

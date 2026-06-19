@@ -3155,6 +3155,8 @@ Knobs (all optional, on the server declaration: `tickMs` 50, `noEcho` true, `que
 
 Requires Svelte 5 (the view is a rune class) and svelte-adapter-uws 0.6.0-next.26 or newer (`view.onEvent` needs the adapter's client-side event delivery; the prediction/reconciliation surface alone needs only next.24).
 
+**Cluster-aware:** wire `platform.smooth = createSmoothCluster(redisClient)` from `svelte-adapter-uws-extensions/redis/smooth` and the smoothed-entity layer detects it and routes through it automatically. Because the authority's `apply` is order-dependent (unlike a document merge, it cannot run on every instance), the model is single-owner-per-topic: one instance holds a per-topic Redis lease and ticks that topic; the others forward their clients' commands to it and re-broadcast its updates, acknowledgements, and events to their own subscribers, so a load balancer can spread one topic's players across instances and cross-instance events still fire exactly once. On owner death the lease expires, another instance takes over with a fresh authority, and clients re-sync. Without it, `live.smooth()` runs single-instance (correct on one process, divergent across a load-balanced cluster - so wire the coordinator for any multi-instance deployment).
+
 ---
 
 ## Shared documents

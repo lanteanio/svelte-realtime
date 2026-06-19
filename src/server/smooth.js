@@ -143,10 +143,58 @@ export const _smoothTopics = new Map();
  */
 export const _smoothClosedWs = new WeakSet();
 
-/** Test seam: clear every smooth record and cancel pending ticks. */
+/**
+ * The reserved wire-topic prefix (`__smooth:`), captured from the loaded
+ * runtime so the cluster relay handlers - which receive the wire topic, not the
+ * bare name - can resolve a record back through `_smoothTopics` by stripping it.
+ * Resolving through the single topics map (rather than a second index) keeps the
+ * relay path correct across HMR, which clears and rebuilds `_smoothTopics`.
+ * @type {string | null}
+ */
+let _smoothPrefix = null;
+
+/** Resolve the live record for a reserved wire topic, or undefined. */
+function _smoothRecByWire(wireTopic) {
+	if (_smoothPrefix !== null && wireTopic.startsWith(_smoothPrefix)) {
+		return _smoothTopics.get(wireTopic.slice(_smoothPrefix.length));
+	}
+	return undefined;
+}
+
+/**
+ * Cluster coordinators (`platform.smooth`) whose inbound relay handlers have
+ * been wired. One registration per coordinator for the process lifetime: the
+ * handlers dispatch by wireTopic to the live record. WeakSet so a replaced
+ * coordinator is collectable.
+ */
+const _smoothClustersWired = new WeakSet();
+
+/** Monotonic correlation-id source for cluster sync requests (unique per instance). */
+let _smoothCorrSeq = 0;
+
+/** How long a non-owner waits for the owner's sync reply before degrading to a local-empty basis. */
+const _SMOOTH_SYNC_TIMEOUT_MS = 2000;
+
+/**
+ * How often the owner refreshes its ownership lease from the tick. Comfortably
+ * inside the coordinator's default 10s lease TTL so a renew survives a GC pause
+ * plus a Redis blip; an app on a shorter lease should keep its tick active.
+ */
+const _SMOOTH_RENEW_MS = 3000;
+
+/** Test seam: clear every smooth record, pending sync, and armed tick. */
 export function _resetSmooth() {
 	for (const rec of _smoothTopics.values()) {
 		if (rec.timer !== null) clearTimer(rec.timer);
+		if (rec.pendingSync) {
+			// Settle any suspended sync so its handler resumes (and does not orphan
+			// the async frame) instead of merely dropping the timer.
+			for (const p of rec.pendingSync.values()) {
+				if (p.timer !== null) clearTimer(p.timer);
+				p.resolve(null);
+			}
+			rec.pendingSync.clear();
+		}
 	}
 	_smoothTopics.clear();
 }
@@ -166,10 +214,33 @@ function _smoothRecord(name, cfg, platform, rt) {
 			platform,
 			tickMs: cfg.tickMs,
 			noEcho: cfg.noEcho,
-			timer: null
+			timer: null,
+			// Cluster bookkeeping (unused on the single-instance path). `cfg` is
+			// stashed so the module-level relay handlers can resolve a topic's
+			// initial-state factory; `registry` maps a local subscriber's identity
+			// to its socket (ack routing + author exclusion); `surrogates` caches
+			// the owner-side stand-in socket per remote (instance, identity) so the
+			// authority's by-reference ownership check holds across ticks;
+			// `pendingSync` correlates a non-owner's in-flight sync request;
+			// `eventSeq` is the owner's outbound broadcast counter; `lastSeenSeq` /
+			// `lastSeenOwner` are the receiver's dedup watermark for the current
+			// owner; `owned` is whether this instance currently holds the tick lease.
+			cfg,
+			registry: new Map(),
+			surrogates: new Map(),
+			pendingSync: new Map(),
+			eventSeq: 0,
+			lastSeenSeq: -1,
+			lastSeenOwner: null,
+			lastRenew: 0,
+			owned: false
 		};
 		_smoothTopics.set(name, rec);
 	}
+	// Capture the reserved prefix once so the cluster relay handlers can resolve
+	// a wire topic back to its record through `_smoothTopics` (no second index to
+	// drift across HMR).
+	_smoothPrefix = rt.SMOOTH_TOPIC_PREFIX;
 	// The record follows the caller's live platform: dev-server restarts and
 	// multi-platform test processes otherwise publish into a dead instance.
 	rec.platform = platform;
@@ -209,6 +280,15 @@ function _armSmoothTick(rec) {
 }
 
 function _smoothTick(rec) {
+	// Cluster owner: this instance ticks the topic's authority for clients across
+	// the cluster. Local subscribers get the broadcast directly; remote ones get
+	// it relayed (and their acks routed back). When falsy, the single-instance
+	// path below runs unchanged.
+	const cluster = rec.platform && rec.platform.smooth;
+	// A demoted owner (lost the lease on a failed renew) stops ticking entirely:
+	// it is no longer the authority, so it must not drain or relay stale state.
+	// Its local subscribers reconcile by re-syncing to the new owner.
+	if (cluster && !rec.owned) return;
 	// Drain first, publish after: `apply` is pure state -> state, so nothing
 	// can publish mid-drain, and subscribers observe each tick atomically -
 	// every update and acknowledgement below reflects the same drained state.
@@ -220,17 +300,41 @@ function _smoothTick(rec) {
 		// their copy through the acknowledgement. onMissing-driven motion
 		// produces no ack, so its owner must receive the broadcast or it
 		// renders a frozen entity everyone else sees gliding.
-		_smoothPublish(rec, 'update', { key: u.key, data: u.state }, rec.noEcho && u.commanded ? u.ws : undefined);
+		if (cluster) {
+			// The author's local socket (if it is on THIS instance) is the
+			// registry entry for the entity key; a remote author resolves to
+			// undefined here, so the owner's own subscribers all see the move.
+			const localAuthor = rec.noEcho && u.commanded ? rec.registry.get(u.key) : undefined;
+			_smoothPublish(rec, 'update', { key: u.key, data: u.state }, localAuthor);
+			// Relay to other instances. Only a remote (surrogate) author needs a
+			// cross-instance exclude - a local author is already excluded above
+			// and is on no other instance. The entity key IS the author identity.
+			const relayExclude = rec.noEcho && u.commanded && _isSmoothSurrogate(u.ws) ? u.key : undefined;
+			if (typeof cluster.relayBroadcast === 'function') {
+				cluster.relayBroadcast(rec.wireTopic, 'update', { key: u.key, data: u.state }, relayExclude, rec.eventSeq++);
+			}
+		} else {
+			_smoothPublish(rec, 'update', { key: u.key, data: u.state }, rec.noEcho && u.commanded ? u.ws : undefined);
+		}
 	}
 	for (let i = 0; i < acks.length; i++) {
 		const a = acks[i];
+		// Remote client: its ack rides the relay back to the instance it is
+		// connected to, which delivers it to the real socket. (A surrogate is
+		// never a closed-ws ghost - a remote departure arrives as onLeave.)
+		if (cluster && _isSmoothSurrogate(a.ws)) {
+			if (typeof cluster.relayAck === 'function') {
+				cluster.relayAck(rec.wireTopic, a.key, a.ws.originInstance, { id: a.id, state: a.state, t });
+			}
+			continue;
+		}
 		// Self-heal: an entity whose socket closed between enqueue and drain
 		// is a ghost - remove it and broadcast its departure instead of
 		// acknowledging into a freed handle.
 		if (a.ws && _smoothClosedWs.has(a.ws)) {
 			const removed = rec.authority.removeWs(a.ws);
 			for (let j = 0; j < removed.length; j++) {
-				_smoothPublish(rec, 'remove', { key: removed[j] }, undefined);
+				_smoothRelayRemove(rec, removed[j]);
 			}
 			continue;
 		}
@@ -247,14 +351,53 @@ function _smoothTick(rec) {
 	for (let i = 0; i < events.length; i++) {
 		const e = events[i];
 		const authorIncluded = !!(e.opts && (e.opts.toAuthor || e.opts.global));
-		const excludeWs = !authorIncluded && rec.noEcho && e.commanded ? e.ws : undefined;
-		_smoothPublish(rec, 'event', { type: e.type, key: e.key, data: e.data, id: e.id }, excludeWs);
+		const wire = { type: e.type, key: e.key, data: e.data, id: e.id };
+		if (cluster) {
+			// Local author excluded only when its socket is on THIS instance.
+			const localExclude = !authorIncluded && rec.noEcho && e.commanded && !_isSmoothSurrogate(e.ws) ? e.ws : undefined;
+			_smoothPublish(rec, 'event', wire, localExclude);
+			// A remote author is excluded on its own instance via the relay
+			// (the surrogate carries the author's identity).
+			const relayExclude = !authorIncluded && rec.noEcho && e.commanded && _isSmoothSurrogate(e.ws) ? e.ws.identity : undefined;
+			if (typeof cluster.relayBroadcast === 'function') {
+				cluster.relayBroadcast(rec.wireTopic, 'event', wire, relayExclude, rec.eventSeq++);
+			}
+		} else {
+			const excludeWs = !authorIncluded && rec.noEcho && e.commanded ? e.ws : undefined;
+			_smoothPublish(rec, 'event', wire, excludeWs);
+		}
+	}
+	// Owner: refresh the ownership lease while ticking so the lease only rotates
+	// when this instance goes quiet or dies. Fire-and-forget on a coarse cadence;
+	// losing the lease (Redis blip or a takeover) drops ownership and the next
+	// sync re-establishes it.
+	if (cluster && rec.owned && t - rec.lastRenew >= _SMOOTH_RENEW_MS && typeof cluster.renewOwner === 'function') {
+		rec.lastRenew = t;
+		cluster.renewOwner(rec.wireTopic).then((ok) => {
+			if (ok) return;
+			rec.owned = false;
+			// A demoted owner stops ticking (the top-of-tick bail) and ignores
+			// inbound leaves (onLeave is owner-gated). If it has no local
+			// subscriber, no future close will ever reclaim it, so its record and
+			// surrogate entities would leak - forget it now. A demoted owner that
+			// still has local subscribers is reclaimed when they re-sync or close.
+			if (rec.registry.size === 0) _smoothForget(rec);
+		}).catch(() => {});
 	}
 	if (rec.authority.size === 0) {
-		_smoothTopics.delete(rec.name);
+		_smoothForget(rec);
 		return;
 	}
-	if (!idle) _armSmoothTick(rec);
+	// A cluster owner keeps ticking while it holds ANY entity, even when the
+	// drain is idle: the tick is what renews the ownership lease, so an idle
+	// holding owner must not stop or its lease would expire under it (an entity
+	// with no commands and the default hold-position onMissing goes idle but must
+	// stay owned). Single-instance keeps the original demand-armed behavior.
+	if (cluster) {
+		_armSmoothTick(rec);
+	} else if (!idle) {
+		_armSmoothTick(rec);
+	}
 }
 
 /**
@@ -265,6 +408,34 @@ function _smoothTick(rec) {
 export function _drainSmoothOnClose(ws) {
 	if (_smoothTopics.size === 0) return;
 	for (const [name, rec] of _smoothTopics) {
+		const cluster = rec.platform && rec.platform.smooth;
+		if (cluster) {
+			// Unregister this socket as a local subscriber and, when this instance
+			// does not own the topic, tell the owner the client left so it drops
+			// the surrogate entity (the entity lives on the owner; the close fires
+			// here on the forwarder).
+			let identity;
+			for (const [id, sub] of rec.registry) {
+				if (sub === ws) { identity = id; break; }
+			}
+			if (identity !== undefined) {
+				rec.registry.delete(identity);
+				if (!rec.owned && typeof cluster.relayLeave === 'function') {
+					cluster.relayLeave(rec.wireTopic, identity, cluster.instanceId);
+				}
+			}
+			// Owner: remove this socket's own (native) entities and broadcast.
+			const removed = rec.authority.removeWs(ws);
+			for (let i = 0; i < removed.length; i++) {
+				_smoothRelayRemove(rec, removed[i]);
+			}
+			// Drop the record when nothing local remains: an owner with no entity
+			// anywhere, a non-owner with no local subscriber left.
+			if (rec.owned ? rec.authority.size === 0 : rec.registry.size === 0) {
+				_smoothForget(rec);
+			}
+			continue;
+		}
 		const removed = rec.authority.removeWs(ws);
 		for (let i = 0; i < removed.length; i++) {
 			_smoothPublish(rec, 'remove', { key: removed[i] }, undefined);
@@ -274,6 +445,179 @@ export function _drainSmoothOnClose(ws) {
 			_smoothTopics.delete(name);
 		}
 	}
+}
+
+/** Is this `ws` slot an owner-side stand-in for a remote client (not a real socket)? */
+function _isSmoothSurrogate(ws) {
+	return !!(ws && ws.__smoothSurrogate);
+}
+
+/**
+ * The OWNER's stable stand-in socket for a remote client. The authority only
+ * compares its `ws` slot by reference, so caching one surrogate per (instance,
+ * identity) lets a forwarded command keep ownership of its entity across ticks.
+ * @param {any} rec @param {string} originInstance @param {string} identity
+ */
+function _smoothSurrogate(rec, originInstance, identity) {
+	const k = originInstance + '\u0000' + identity;
+	let s = rec.surrogates.get(k);
+	if (s === undefined) {
+		s = { __smoothSurrogate: true, identity, originInstance };
+		rec.surrogates.set(k, s);
+	}
+	return s;
+}
+
+/**
+ * Forget a record: cancel its tick, settle any pending sync, drop it from the
+ * topics map, and release the ownership lease so a sibling can take over within
+ * a renew cycle. Single-instance behavior is identical to a bare topic delete
+ * (no pending sync, not an owner).
+ * @param {any} rec
+ */
+function _smoothForget(rec) {
+	if (rec.timer !== null) { clearTimer(rec.timer); rec.timer = null; }
+	// Settle every suspended sync so its awaiting handler resumes (and hits its
+	// CONNECTION_CLOSED liveness re-check) rather than hanging forever.
+	for (const p of rec.pendingSync.values()) {
+		if (p.timer !== null) clearTimer(p.timer);
+		p.resolve(null);
+	}
+	rec.pendingSync.clear();
+	_smoothTopics.delete(rec.name);
+	const cluster = rec.platform && rec.platform.smooth;
+	if (rec.owned && cluster && typeof cluster.releaseOwner === 'function') {
+		rec.owned = false;
+		try { cluster.releaseOwner(rec.wireTopic); } catch { /* best-effort; the lease TTL is the safety net */ }
+	}
+}
+
+/**
+ * Broadcast an entity removal to local subscribers and, when this instance owns
+ * the topic in a cluster, relay it so every other instance drops it too.
+ * @param {any} rec @param {string} key
+ */
+function _smoothRelayRemove(rec, key) {
+	_smoothPublish(rec, 'remove', { key }, undefined);
+	const cluster = rec.platform && rec.platform.smooth;
+	if (cluster && rec.owned && typeof cluster.relayBroadcast === 'function') {
+		cluster.relayBroadcast(rec.wireTopic, 'remove', { key }, undefined, rec.eventSeq++);
+	}
+}
+
+/**
+ * Ask the topic's owner for the catalog and resolve with its reply, or with
+ * null if the owner does not answer within the timeout (the caller then returns
+ * a local-empty basis and reconciles from incoming broadcasts).
+ * @param {any} rec @param {any} cluster @param {string} identity @param {string} corr
+ * @returns {Promise<any>}
+ */
+function _smoothRequestSync(rec, cluster, identity, corr) {
+	return new Promise((resolve) => {
+		const timer = setTimer(() => {
+			rec.pendingSync.delete(corr);
+			resolve(null);
+		}, _SMOOTH_SYNC_TIMEOUT_MS);
+		rec.pendingSync.set(corr, { resolve, timer });
+		cluster.requestSync(rec.wireTopic, identity, cluster.instanceId, corr);
+	});
+}
+
+/**
+ * Wire the inbound relay handlers on a cluster coordinator, once per coordinator.
+ * The handlers dispatch by wire topic to the live record and act only when this
+ * instance has a stake in the topic (owns it, or has a local subscriber). A
+ * frame for a topic this instance does not track is correctly ignored.
+ * @param {any} smooth
+ */
+function _ensureSmoothCluster(smooth) {
+	if (!smooth || typeof smooth.onMessage !== 'function' || _smoothClustersWired.has(smooth)) return;
+	_smoothClustersWired.add(smooth);
+	smooth.onMessage({
+		// Owner: a non-owner forwarded a client's command batch. Ensure the
+		// client's surrogate entity (idle until commands flow), drop ids the
+		// authority has already acked (relay reorder/redelivery is then an
+		// idempotent discard, not a re-apply), enqueue, and arm the tick.
+		onCommand: (wireTopic, identity, originInstance, batch) => {
+			const rec = _smoothRecByWire(wireTopic);
+			if (!rec || !rec.owned || !Array.isArray(batch) || batch.length === 0) return;
+			const surrogate = _smoothSurrogate(rec, originInstance, identity);
+			let existing = rec.authority.get(identity);
+			if (existing === undefined) {
+				rec.authority.ensure(identity, surrogate, _smoothResolveInitial(rec.cfg, identity));
+				existing = rec.authority.get(identity);
+			} else if (existing.ws !== surrogate) {
+				// A newer sync re-owns this identity from another connection; a
+				// command bound to the stale surrogate is ignored (one owning
+				// socket per entity, the same rule the local command path holds).
+				return;
+			}
+			const lastAcked = existing ? existing.lastAckedId : 0;
+			const fresh = batch.filter((c) => c && typeof c.id === 'number' && c.id > lastAcked);
+			if (fresh.length === 0) return;
+			if (rec.authority.enqueue(identity, fresh)) _armSmoothTick(rec);
+		},
+		// Owner: a non-owner asked for the catalog on behalf of a cold-joining
+		// client. Ensure its surrogate, answer with the client's basis + catalog.
+		onSync: (wireTopic, identity, originInstance, corr) => {
+			const rec = _smoothRecByWire(wireTopic);
+			if (!rec || !rec.owned) return;
+			const surrogate = _smoothSurrogate(rec, originInstance, identity);
+			const ensured = rec.authority.ensure(identity, surrogate, _smoothResolveInitial(rec.cfg, identity));
+			if (typeof smooth.sendSyncReply === 'function') {
+				smooth.sendSyncReply(wireTopic, corr, originInstance, { ack: ensured.lastAckedId, states: rec.authority.catalog() });
+			}
+		},
+		// Requester: the owner answered our cold-join sync. Resolve the pending.
+		onSyncReply: (wireTopic, corr, payload) => {
+			const rec = _smoothRecByWire(wireTopic);
+			if (!rec) return;
+			const pending = rec.pendingSync.get(corr);
+			if (!pending) return;
+			rec.pendingSync.delete(corr);
+			if (pending.timer !== null) clearTimer(pending.timer);
+			pending.resolve(payload);
+		},
+		// Every instance: the owner relayed a broadcast. Drop a seen/regressing
+		// seq (reset on an ownership handoff, since a fresh owner restarts the
+		// counter), then re-emit to local subscribers, excluding the author's
+		// local socket when the relay names one.
+		onBroadcast: (wireTopic, event, data, excludeIdentity, seq, ownerInstance) => {
+			const rec = _smoothRecByWire(wireTopic);
+			if (!rec) return;
+			if (ownerInstance !== rec.lastSeenOwner) {
+				rec.lastSeenOwner = ownerInstance;
+				rec.lastSeenSeq = -1;
+			}
+			if (typeof seq === 'number') {
+				if (seq <= rec.lastSeenSeq) return;
+				rec.lastSeenSeq = seq;
+			}
+			const excludeWs = excludeIdentity !== undefined ? rec.registry.get(excludeIdentity) : undefined;
+			_smoothPublish(rec, event, data, excludeWs);
+		},
+		// The commanding client's instance: deliver the owner's ack to its socket.
+		onAck: (wireTopic, identity, payload) => {
+			const rec = _smoothRecByWire(wireTopic);
+			if (!rec) return;
+			const ws = rec.registry.get(identity);
+			if (ws !== undefined) _smoothSendTo(rec, ws, 'ack', payload);
+		},
+		// Owner: a remote client left. Drop its surrogate entity and broadcast
+		// the removal so every instance forgets it.
+		onLeave: (wireTopic, identity, originInstance) => {
+			const rec = _smoothRecByWire(wireTopic);
+			if (!rec || !rec.owned) return;
+			const surrogate = rec.surrogates.get(originInstance + '\u0000' + identity);
+			if (surrogate === undefined) return;
+			rec.surrogates.delete(originInstance + '\u0000' + identity);
+			const removed = rec.authority.removeWs(surrogate);
+			for (let i = 0; i < removed.length; i++) {
+				_smoothRelayRemove(rec, removed[i]);
+			}
+			if (rec.authority.size === 0) _smoothForget(rec);
+		}
+	});
 }
 
 /**
@@ -382,10 +726,63 @@ export const _smoothRegister = function smooth(config) {
 		// already run, and ensuring now would create a ghost entity bound to a
 		// freed handle (or steal ownership from a live tab).
 		if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
-			if (rec.authority.size === 0 && rec.timer === null) _smoothTopics.delete(name);
+			if (rec.authority.size === 0 && rec.timer === null) _smoothForget(rec);
 			throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
 		}
 		const key = _getIdentityKey(ctx);
+		const cluster = ctx.platform && ctx.platform.smooth;
+		if (cluster) {
+			// Register this socket as the topic's local subscriber for `key` (the
+			// ack-routing and author-exclusion paths read this), wire the relay
+			// handlers once, then race the ownership lease against the subscribe
+			// above.
+			if (ctx.ws) rec.registry.set(key, ctx.ws);
+			_ensureSmoothCluster(cluster);
+			// On a Redis failure, degrade to a local authority (owned=true) so the
+			// client keeps a working entity rather than a frozen one. Deliberate
+			// availability tradeoff: during a sustained outage the coordinator's
+			// breaker opens and outbound relays no-op, so each instance runs
+			// isolated (no cross-instance traffic, no cross-owner event double-fire);
+			// only the brief pre-breaker window can relay from two pseudo-owners,
+			// which the per-owner seq dedup does not cover - an outage-only artifact.
+			let owned = true;
+			try {
+				owned = await cluster.acquireOwner(rec.wireTopic);
+			} catch {
+				owned = true;
+			}
+			// Record ownership BEFORE the liveness re-check so that, if the socket
+			// closed during the acquire, _smoothForget releases the lease we just
+			// took rather than leaking it until the TTL.
+			rec.owned = owned;
+			if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
+				rec.registry.delete(key);
+				if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
+				throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
+			}
+			if (owned) {
+				// This instance ticks the topic: ensure the entity against the real
+				// socket. The basis reply is byte-identical to single-instance.
+				const ensured = rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
+				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: rec.authority.catalog() };
+			}
+			// Non-owner: ask the owner for the catalog. On a timeout, return a
+			// local-empty basis - incoming broadcasts reconcile the client.
+			const corr = cluster.instanceId + ':' + (++_smoothCorrSeq);
+			const reply = await _smoothRequestSync(rec, cluster, key, corr);
+			if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
+				rec.registry.delete(key);
+				if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
+				throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
+			}
+			return {
+				topic: name,
+				t: wallEpoch(),
+				you: key,
+				ack: reply ? reply.ack : 0,
+				states: reply ? reply.states : []
+			};
+		}
 		const ensured = rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
 		return {
 			topic: name,
@@ -409,9 +806,20 @@ export const _smoothRegister = function smooth(config) {
 		if (ctx.ws && _smoothClosedWs.has(ctx.ws)) return;
 		const rec = _smoothRecord(name, cfg, ctx.platform, rt);
 		const key = _getIdentityKey(ctx);
+		const cluster = ctx.platform && ctx.platform.smooth;
+		if (cluster && !rec.owned) {
+			// Non-owner: forward the batch to the topic's owner as one envelope
+			// (fire-and-forget; the owner drops already-acked ids and ticks).
+			if (typeof cluster.relayCommand === 'function') {
+				cluster.relayCommand(rec.wireTopic, key, cluster.instanceId, batch);
+			}
+			return;
+		}
 		const existing = rec.authority.get(key);
 		if (existing === undefined) {
 			rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
+			// Owner: register this socket so its ack and author exclusion resolve.
+			if (cluster && ctx.ws) rec.registry.set(key, ctx.ws);
 		} else if (ctx.ws && existing.ws !== ctx.ws) {
 			// One entity, one owning socket: the socket that last synced owns
 			// the command stream. A second tab takes over by syncing, never
