@@ -212,7 +212,7 @@ function _smoothTick(rec) {
 	// Drain first, publish after: `apply` is pure state -> state, so nothing
 	// can publish mid-drain, and subscribers observe each tick atomically -
 	// every update and acknowledgement below reflects the same drained state.
-	const { updates, acks, idle } = rec.authority.drain();
+	const { updates, acks, events = [], idle } = rec.authority.drain();
 	const t = wallEpoch();
 	for (let i = 0; i < updates.length; i++) {
 		const u = updates[i];
@@ -235,6 +235,20 @@ function _smoothTick(rec) {
 			continue;
 		}
 		_smoothSendTo(rec, a.ws, 'ack', { id: a.id, state: a.state, t });
+	}
+	// Discrete one-shot events last (after the positions they happened at and
+	// the owner's authoritative copy). Author-exclude the owner's echo of an
+	// event it already drew optimistically, EXCEPT when it must receive the
+	// authoritative copy: `toAuthor` (a hit the victim has to see) and `global`
+	// (the author needs the broadcast - and once interest culling lands a global
+	// event routes to the base topic). Same discipline as the commanded-update
+	// exclusion above. The wire frame carries only {type,key,data,id}; the
+	// server-side ws/commanded/opts never cross the wire.
+	for (let i = 0; i < events.length; i++) {
+		const e = events[i];
+		const authorIncluded = !!(e.opts && (e.opts.toAuthor || e.opts.global));
+		const excludeWs = !authorIncluded && rec.noEcho && e.commanded ? e.ws : undefined;
+		_smoothPublish(rec, 'event', { type: e.type, key: e.key, data: e.data, id: e.id }, excludeWs);
 	}
 	if (rec.authority.size === 0) {
 		_smoothTopics.delete(rec.name);

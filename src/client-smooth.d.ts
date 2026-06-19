@@ -1,5 +1,22 @@
 import type { Readable } from 'svelte/store';
 
+/** One discrete event delivered to a {@link SmoothEntity.onEvent} handler. */
+export interface SmoothEvent<Data = any> {
+	/** The event type passed to `ctx.emitEvent(type, ...)`. */
+	type: string;
+	/** The correlation key: `<commandId>:<ordinal>` by default, or an explicit
+	 * `opts.key`. The optimistic and authoritative copies of one event share it,
+	 * so a handler that receives both can match them. */
+	key: string;
+	/** The payload passed to `ctx.emitEvent(type, data)`. */
+	data: Data;
+	/** The id of the command whose `apply` emitted the event. */
+	id: number;
+	/** `'local'` for the optimistic copy delivered when the command was issued;
+	 * `'server'` for the authoritative broadcast. */
+	origin: 'local' | 'server';
+}
+
 /**
  * Reactive view over one smoothed entity channel: instant local input
  * (predicted, server-reconciled) plus interpolated remote entities, read
@@ -45,6 +62,11 @@ export class SmoothEntity<State = any, Command = any> {
 	now(): number;
 	/** Re-request the authoritative catalog. */
 	resync(): void;
+	/** Subscribe to the entity's discrete one-shot events (`ctx.emitEvent`):
+	 * `origin:'local'` the frame the owner's command was issued, `origin:'server'`
+	 * for the authoritative broadcast. Returns an unsubscribe. Events are not
+	 * buffered - subscribe before the first command to catch its fires. */
+	onEvent(handler: (event: SmoothEvent) => void): () => void;
 	/** Stop the frame loop and release the channel. */
 	destroy(): void;
 }

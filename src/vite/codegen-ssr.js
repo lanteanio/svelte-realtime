@@ -238,7 +238,7 @@ export function _generateSsrStubs(filePath, modulePath) {
 		// initial (the trailing factory argument carries it at runtime), so
 		// SSR markup renders the entity at its starting state and the client
 		// factory replaces everything on hydration.
-		lines.push(`const _${name} = { _command: () => Promise.resolve(undefined), _sync: () => Promise.resolve(undefined), status: readable('connecting'), smooth: (...args) => { const o = args.length > 0 ? args[args.length - 1] : undefined; return { local: o && typeof o === 'object' ? o.initial : undefined, remote: new Map(), status: 'connecting', overflowed: false, self: null, command: () => 0, now: () => 0, resync: () => {}, destroy: () => {} }; } };`);
+		lines.push(`const _${name} = { _command: () => Promise.resolve(undefined), _sync: () => Promise.resolve(undefined), status: readable('connecting'), smooth: (...args) => { const o = args.length > 0 ? args[args.length - 1] : undefined; return { local: o && typeof o === 'object' ? o.initial : undefined, remote: new Map(), status: 'connecting', overflowed: false, self: null, command: () => 0, now: () => 0, resync: () => {}, onEvent: () => () => {}, destroy: () => {} }; } };`);
 		lines.push(`export { _${name} as ${name} };`);
 	}
 

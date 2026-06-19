@@ -33,6 +33,7 @@ export class SmoothEntity {
 	#overflowed = $state(false);
 	#unsubs = [];
 	#healthFlagged = false;
+	#eventHandlers = new Set();
 
 	/**
 	 * @param {any} channel - a smooth channel (the adapter's
@@ -53,6 +54,13 @@ export class SmoothEntity {
 				this.#healthFlagged = overflowed;
 				_setSmoothDegraded(overflowed);
 			}
+		});
+		// The channel delivers events to a single consumer; this view owns that
+		// consumer and fans out to its subscribers. Snapshot per fire so a
+		// handler that (un)subscribes mid-dispatch does not perturb it.
+		channel.onEvent((e) => {
+			const handlers = [...this.#eventHandlers];
+			for (let i = 0; i < handlers.length; i++) handlers[i](e);
 		});
 		if (status) {
 			this.#unsubs.push(status.subscribe((s) => {
@@ -106,6 +114,22 @@ export class SmoothEntity {
 		this.#channel.resync();
 	}
 
+	/**
+	 * Subscribe to the entity's discrete one-shot events (`ctx.emitEvent` in the
+	 * shared `apply`). A handler fires with `origin:'local'` the frame the
+	 * owner's command was issued (the optimistic copy) and `origin:'server'` for
+	 * the authoritative broadcast - other authors' events, and this owner's own
+	 * `toAuthor`/`global` confirmations, which share the correlation key with the
+	 * local copy. Returns an unsubscribe. Events are not buffered: subscribe
+	 * before the first command to catch its fires.
+	 * @param {(event: { type: string, key: string, data: any, id: number, origin: 'local' | 'server' }) => void} handler
+	 * @returns {() => void}
+	 */
+	onEvent(handler) {
+		this.#eventHandlers.add(handler);
+		return () => this.#eventHandlers.delete(handler);
+	}
+
 	destroy() {
 		for (const off of this.#unsubs) off();
 		this.#unsubs = [];
@@ -113,6 +137,7 @@ export class SmoothEntity {
 			this.#healthFlagged = false;
 			_setSmoothDegraded(false);
 		}
+		this.#eventHandlers.clear();
 		this.#channel.destroy();
 	}
 }

@@ -69,7 +69,7 @@ function fakeRuntime() {
 		},
 		drain() {
 			calls.drains++;
-			return drainQueue.length > 0 ? drainQueue.shift() : { updates: [], acks: [], idle: true };
+			return drainQueue.length > 0 ? drainQueue.shift() : { updates: [], acks: [], events: [], idle: true };
 		},
 		remove(key) {
 			return entities.delete(key);
@@ -387,6 +387,52 @@ describe('live.smooth commands and the authoritative tick', () => {
 		// onMissing motion produced no acknowledgement, so the owner must hear the broadcast.
 		expect(platform.wirePublished[1].data).toEqual({ key: 'u2', data: { x: 7, y: 0 } });
 		expect(platform.wirePublished[1].options).toBeUndefined();
+	});
+
+	it('publishes drain events author-excluded, except toAuthor and global which reach the author', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const owner = mockWs({ id: 'u1' });
+		const platform = wirePlatform();
+		rt.queueDrain({
+			updates: [],
+			acks: [],
+			events: [
+				// A normal owner-authored event: the owner drew it optimistically, so exclude its echo.
+				{ type: 'shot', key: '3:0', data: { dir: 'N' }, id: 3, opts: null, ws: owner, commanded: true },
+				// toAuthor: the owner must receive the authoritative copy.
+				{ type: 'hit', key: '3:1', data: { dmg: 10 }, id: 3, opts: { toAuthor: true }, ws: owner, commanded: true },
+				// global: the author needs the broadcast too (forward-compat for interest culling).
+				{ type: 'kill', key: '3:2', data: { who: 'u2' }, id: 3, opts: { global: true }, ws: owner, commanded: true }
+			],
+			idle: true
+		});
+		await call(owner, platform, name + '/shape/__smooth/command', ['r1', [{ id: 3, cmd: { fire: true } }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		const evs = platform.wirePublished.filter((p) => p.event === 'event');
+		expect(evs).toHaveLength(3);
+		// The wire data carries only {type,key,data,id} - never ws/commanded/opts.
+		expect(evs[0].data).toEqual({ type: 'shot', key: '3:0', data: { dir: 'N' }, id: 3 });
+		expect(evs[0].options).toEqual({ excludeWs: owner }); // normal: author-excluded
+		expect(evs[1].data).toEqual({ type: 'hit', key: '3:1', data: { dmg: 10 }, id: 3 });
+		expect(evs[1].options).toBeUndefined(); // toAuthor: reaches the author
+		expect(evs[2].data).toEqual({ type: 'kill', key: '3:2', data: { who: 'u2' }, id: 3 });
+		expect(evs[2].options).toBeUndefined(); // global: reaches the author
+	});
+
+	it('does not author-exclude events when noEcho is off', async () => {
+		const { name } = declareShape({ tickMs: 20, noEcho: false });
+		const owner = mockWs({ id: 'u1' });
+		const platform = wirePlatform();
+		rt.queueDrain({
+			updates: [],
+			acks: [],
+			events: [{ type: 'shot', key: '1:0', data: {}, id: 1, opts: null, ws: owner, commanded: true }],
+			idle: true
+		});
+		await call(owner, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { fire: true } }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		const ev = platform.wirePublished.find((p) => p.event === 'event');
+		expect(ev.options).toBeUndefined();
 	});
 
 	it('falls back to plain publish/send on a platform without the wire methods', async () => {
@@ -729,6 +775,9 @@ describe('live.smooth() vite integration', () => {
 		expect(code).toContain('smooth:');
 		expect(code).toContain("status: readable('connecting')");
 		expect(code).toContain('o.initial');
+		// The inert view mirrors the live surface so an isomorphic component
+		// calling view.onEvent during SSR gets a no-op that returns a disposer.
+		expect(code).toContain('onEvent: () => () => {}');
 		expect(code).not.toContain('createSmoothChannel');
 	});
 });
