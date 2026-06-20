@@ -42,7 +42,7 @@ export interface SmoothEvent<Data = any> {
  * Requires Svelte 5 (the view is a rune class).
  */
 export class SmoothEntity<State = any, Command = any> {
-	constructor(channel: any, status?: Readable<string>);
+	constructor(channel: any, status?: Readable<string>, reportCenter?: (center: { x: number; y: number } | null) => void);
 	/** The rendered local state: predicted, with corrections eased in. */
 	readonly local: State;
 	/** Remote entities, keyed by entity key, positions interpolated. */
@@ -62,6 +62,13 @@ export class SmoothEntity<State = any, Command = any> {
 	now(): number;
 	/** Re-request the authoritative catalog. */
 	resync(): void;
+	/** Report this view's area-of-interest center to the server (a spectator /
+	 * free-cam whose view is not its own entity). Overrides the own-entity default
+	 * until `clearCenter()`; an unchanged center is dropped. Inert on a topic
+	 * declared without `interest`. */
+	reportCenter(x: number, y: number): void;
+	/** Drop a reported center, reverting culling to the own-entity default. */
+	clearCenter(): void;
 	/** Subscribe to the entity's discrete one-shot events (`ctx.emitEvent`):
 	 * `origin:'local'` the frame the owner's command was issued, `origin:'server'`
 	 * for the authoritative broadcast. Returns an unsubscribe. Events are not

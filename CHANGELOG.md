@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.14] - 2026-06-20
+
+### Added
+
+- **`view.reportCenter(x, y)` / `view.clearCenter()`: a free-cam override for area-of-interest culling.** A `live.smooth({ interest })` topic culls each subscriber around its own entity by default. That is right for a player driving an avatar, wrong for a spectator or a free-cam whose view is somewhere else entirely - centred on its idle entity, such a viewer would be delivered only its own quiet corner instead of the action it is watching. Call `view.reportCenter(x, y)` to point culling at where the camera actually looks (in the topic's position units); the server measures relevance from there until `view.clearCenter()` reverts to the own-entity default. Report it when the camera moves, not every frame - an unchanged center is dropped client-side, and the report rides a volatile send (a lost one is corrected by the next). A reported center takes effect even on a still board (the relevancy pass re-runs on the report, not only on entity motion), so panning across a paused scene reveals what is there. Inert on a topic declared without `interest`. Single-instance and on a cluster topic's owning instance today; a center reported to a non-owning instance is stored but dormant until the cross-instance cull lands (the subscriber keeps its safe whole-relay delivery meanwhile). Realtime-only - no adapter or extensions change.
+
 ## [0.6.0-next.13] - 2026-06-20
 
 ### Added

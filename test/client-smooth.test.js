@@ -43,8 +43,11 @@ function mockChannel() {
 		predicted: { x: 0, y: 0 },
 		self: 'me',
 		fire: null,
+		frame: null,
 		destroyed: false,
-		onFrame() {},
+		onFrame(cb) {
+			ch.frame = cb;
+		},
 		onOverflow() {},
 		onEvent(cb) {
 			ch.fire = cb;
@@ -121,5 +124,63 @@ describe('SmoothEntity onEvent fan-out', () => {
 		expect(ch.destroyed).toBe(true);
 		ch.fire({ type: 'z', key: '1:0', data: {}, id: 1, origin: 'server' });
 		expect(seen).toEqual([]);
+	});
+});
+
+describe('SmoothEntity reportCenter / clearCenter', () => {
+	afterEach(() => {
+		for (const dir of runeProbeDirs) {
+			if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+		}
+		runeProbeDirs.length = 0;
+		if (existsSync(runeProbeRoot) && readdirSync(runeProbeRoot).length === 0) {
+			rmSync(runeProbeRoot, { recursive: true, force: true });
+		}
+	});
+
+	it('forwards a center, de-dupes an unchanged one, and forwards a clear (null)', async () => {
+		const SmoothEntity = await loadSmoothEntity();
+		const reports = [];
+		const view = new SmoothEntity(mockChannel(), statusStore, (c) => reports.push(c));
+
+		view.reportCenter(10, 20);
+		view.reportCenter(10, 20); // unchanged -> dropped
+		view.reportCenter(11, 20); // moved -> sent
+		view.reportCenter(NaN, 5); // non-finite -> dropped
+		view.clearCenter();
+		view.clearCenter(); // already cleared -> dropped
+		view.reportCenter(11, 20); // after a clear, the prior center sends again
+
+		expect(reports).toEqual([{ x: 10, y: 20 }, { x: 11, y: 20 }, null, { x: 11, y: 20 }]);
+	});
+
+	it('is inert when the topic has no interest (no report fn wired)', async () => {
+		const SmoothEntity = await loadSmoothEntity();
+		const view = new SmoothEntity(mockChannel(), statusStore); // no reportCenter fn
+		expect(() => { view.reportCenter(1, 2); view.clearCenter(); }).not.toThrow();
+	});
+
+	it('re-reports a set center on the first frame after a (re)connect so a free-cam survives a reconnect', async () => {
+		const SmoothEntity = await loadSmoothEntity();
+		const ch = mockChannel();
+		let emit;
+		const status = { subscribe: (fn) => { emit = fn; fn('connecting'); return () => {}; } };
+		const reports = [];
+		const view = new SmoothEntity(ch, status, (c) => reports.push(c));
+
+		emit('connected'); // initial connect, no center yet -> no pending re-send
+		view.reportCenter(7, 8); // sent immediately
+		ch.frame({ x: 0, y: 0 }, new Map()); // a frame with nothing pending -> no extra send
+		expect(reports).toEqual([{ x: 7, y: 8 }]);
+
+		// Reconnect: the server has dropped the center; the next frame re-establishes it.
+		emit('reconnecting');
+		emit('connected');
+		ch.frame({ x: 0, y: 0 }, new Map());
+		expect(reports).toEqual([{ x: 7, y: 8 }, { x: 7, y: 8 }]);
+
+		// A second frame does not re-send again (the flag was cleared).
+		ch.frame({ x: 0, y: 0 }, new Map());
+		expect(reports).toHaveLength(2);
 	});
 });

@@ -142,6 +142,7 @@ function wirePlatform() {
 function registerSmooth(moduleName, smoothExport) {
 	__register(moduleName + '/shape/__smooth/sync', smoothExport.__smoothSync, moduleName);
 	__register(moduleName + '/shape/__smooth/command', smoothExport.__smoothCommand, moduleName);
+	__register(moduleName + '/shape/__smooth/center', smoothExport.__smoothCenter, moduleName);
 }
 
 let moduleSeq = 0;
@@ -1553,6 +1554,30 @@ describe('live.smooth interest (area-of-interest culling)', () => {
 		await vi.advanceTimersByTimeAsync(20);
 		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(1);
 		expect(platform.wireSent.filter((s) => s.event === 'update')).toHaveLength(0);
+	});
+
+	it('a reported smooth-center overrides the own-entity center and recomputes on a still board', async () => {
+		const { name } = declareInterest();
+		const wsA = mockWs({ id: 'A' });
+		const wsB = mockWs({ id: 'B' });
+		const platform = wirePlatform();
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']); // A at 0
+		await call(wsB, platform, name + '/shape/__smooth/sync', ['r1']); // B at 500 (out of A's own-entity AoI)
+		// A reports a center at B's position. NOTHING moves this tick - the dirty
+		// flag must still force a relevancy pass, and A is caught up to B from the
+		// catalog (first-sight) despite no update.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		const toAKeys = () => updatesSent(platform).filter((s) => s.ws === wsA).map((s) => s.data.key);
+		expect(toAKeys()).toContain('B'); // A now sees B via the reported center
+		const bToA = updatesSent(platform).filter((s) => s.ws === wsA && s.data.key === 'B')[0];
+		expect(bToA.data.data).toEqual({ x: 500, y: 0 });
+
+		// Clearing the center reverts A to its own-entity center; B leaves A's AoI.
+		platform.wireSent.length = 0;
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', null]);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(toAKeys()).not.toContain('B');
 	});
 
 	it('drops a departed subscriber from the registry and interest state on close', async () => {

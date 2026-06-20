@@ -357,6 +357,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 				const importPath = JSON.stringify(normalizedPath);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__smooth/command')}, __L(() => import(${importPath}).then(m => m.${name}.__smoothCommand)), ${JSON.stringify(rel)});`);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__smooth/sync')}, __L(() => import(${importPath}).then(m => m.${name}.__smoothSync)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__smooth/center')}, __L(() => import(${importPath}).then(m => m.${name}.__smoothCenter)), ${JSON.stringify(rel)});`);
 			}
 		}
 

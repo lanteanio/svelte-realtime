@@ -110,6 +110,27 @@ export const messages = live.stream('messages', async (ctx) => {}, { merge: 'cru
 		expect(code).toContain("export { empty } from 'svelte-realtime/client'");
 	});
 
+	it('generates a SmoothEntity factory wiring command/sync/center for live.smooth() exports', () => {
+		setup({
+			'board.js': `
+import { live } from 'svelte-realtime/server';
+import { apply } from './board.shared.js';
+export const shape = live.smooth({ topic: (ctx, id) => 'shape:' + id, apply, initial: { x: 0, y: 0 }, topicArgs: 1 });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:board', { ssr: false });
+
+		expect(code).toContain("import { SmoothEntity } from 'svelte-realtime/smooth'");
+		expect(code).toContain('_command: __rpc("board/shape/__smooth/command")');
+		expect(code).toContain('_sync: __rpc("board/shape/__smooth/sync")');
+		expect(code).toContain('_center: __rpc("board/shape/__smooth/center")');
+		// The area-of-interest center wires the per-topic RPC into SmoothEntity's
+		// third argument (the report fn), bound to the room args.
+		expect(code).toContain('new SmoothEntity(channel, status, (center) => shape._center.fireAndForget(...roomArgs, center))');
+	});
+
 	it('generates mixed __rpc and __stream stubs', () => {
 		setup({
 			'items.js': `
@@ -334,6 +355,24 @@ export const messages = live.stream('messages', async (ctx) => []);
 
 		expect(code).toContain('__register("admin/deleteUser"');
 		expect(code).toContain('__register("chat/send"');
+	});
+
+	it('registers the command, sync, and center handlers for a live.smooth() export', () => {
+		setup({
+			'board.js': `
+import { live } from 'svelte-realtime/server';
+import { apply } from './board.shared.js';
+export const shape = live.smooth({ topic: (ctx, id) => 'shape:' + id, apply, initial: { x: 0, y: 0 }, topicArgs: 1 });
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:__registry', {});
+
+		expect(code).toContain('__register("board/shape/__smooth/command"');
+		expect(code).toContain('__register("board/shape/__smooth/sync"');
+		expect(code).toContain('__register("board/shape/__smooth/center"');
+		expect(code).toContain('m.shape.__smoothCenter');
 	});
 
 	it('returns empty comment when no live dir exists', () => {

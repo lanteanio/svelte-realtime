@@ -266,9 +266,13 @@ function _smoothRecord(name, cfg, platform, rt) {
 			// set, the tick runs a per-subscriber relevancy pass before publishing
 			// and delivers each subscriber only the entities in its area of interest.
 			// `interestTick` is the monotonic counter that drives the LOD send
-			// cadence (a tick count, not a clock - determinism seam).
+			// cadence (a tick count, not a clock - determinism seam). `interestDirty`
+			// forces the next tick to run the relevancy pass even with no entity
+			// motion, so a reported area-of-interest center (the `smooth-center`
+			// frame) takes effect on a still board (a spectator panning the camera).
 			interest: cfg.interest ? createInterestState(cfg.interest) : null,
-			interestTick: 0
+			interestTick: 0,
+			interestDirty: false
 		};
 		_smoothTopics.set(name, rec);
 	}
@@ -418,10 +422,14 @@ function _smoothTick(rec) {
 	// also the source for a delivery the relevancy pass forced but `updates` does
 	// not carry (an entity a subscriber just moved into range of that did not move
 	// itself this tick - the first-sight catch-up).
-	const catalog = (rec.interest && updates.length > 0) ? rec.authority.catalog() : null;
+	// Run the relevancy pass when an entity moved (updates) OR a subscriber just
+	// reported a new area-of-interest center (interestDirty) - the latter so a
+	// spectator panning the camera over a still board still gets caught up.
+	const catalog = (rec.interest && (updates.length > 0 || rec.interestDirty)) ? rec.authority.catalog() : null;
 	const relevancy = catalog
 		? rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++)
 		: null;
+	rec.interestDirty = false;
 	for (let i = 0; i < updates.length; i++) {
 		const u = updates[i];
 		// Echo suppression applies only to commanded updates: those owners get
@@ -1135,6 +1143,41 @@ export const _smoothRegister = function smooth(config) {
 			return;
 		}
 		if (rec.authority.enqueue(key, batch)) _armSmoothTick(rec);
+	});
+
+	// Report (or clear) a subscriber's area-of-interest center - the optional
+	// `smooth-center` override for a spectator / free-cam whose view is not its own
+	// entity's position. Volatile (a lost report is corrected by the next one), and
+	// inert unless the topic opted into `interest`. The center is consumed only by
+	// the instance that culls this subscriber (the owner, or single-instance); on a
+	// non-owner it is stored but dormant until the cross-instance cull lands. A null
+	// payload clears the override (reverting to the own-entity center).
+	smoothExport.__smoothCenter = live.volatile(async (ctx, ...args) => {
+		const roomArgs = args.slice(0, argCount);
+		if (guard) await guard(ctx, ...roomArgs);
+		if (ctx.ws && _smoothClosedWs.has(ctx.ws)) return;
+		const name = resolveName(ctx, roomArgs);
+		const rec = _smoothTopics.get(name);
+		// Only a live, interest-on topic has a center map to update. No runtime load
+		// and no record creation: a center for a topic with no entities yet is moot
+		// (the relevancy pass has nothing to cull), so it is dropped, not buffered.
+		if (rec === undefined || !rec.interest) return;
+		const key = _getIdentityKey(ctx);
+		const center = args[argCount];
+		if (center === null || center === undefined) {
+			rec.interest.clearCenter(key);
+		} else if (typeof center === 'object') {
+			rec.interest.reportCenter(key, center.x, center.y); // reportCenter ignores a non-finite pair
+		} else {
+			return;
+		}
+		// Force the next tick to recompute relevancy for the new center, and arm one
+		// when this instance is the ticking authority (the owner, or single-instance).
+		// A non-owner does not tick, so its stored center stays dormant (the non-owner
+		// over-delivers in this version regardless - safe).
+		rec.interestDirty = true;
+		const cluster = ctx.platform && ctx.platform.smooth;
+		if (!cluster || rec.owned) _armSmoothTick(rec);
 	});
 
 	return smoothExport;

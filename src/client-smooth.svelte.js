@@ -34,19 +34,38 @@ export class SmoothEntity {
 	#unsubs = [];
 	#healthFlagged = false;
 	#eventHandlers = new Set();
+	#reportCenter;
+	#lastCenterX;
+	#lastCenterY;
+	#pendingCenterResend = false;
 
 	/**
 	 * @param {any} channel - a smooth channel (the adapter's
 	 *   `createSmoothChannel` result); the generated factory constructs it.
 	 * @param {{ subscribe: (fn: (v: string) => void) => () => void }} [status]
 	 *   the connection-status store the view mirrors.
+	 * @param {(center: { x: number, y: number } | null) => void} [reportCenter]
+	 *   sends an area-of-interest center to the server (the generated factory
+	 *   wires it to the topic's `smooth-center` RPC); absent on a topic without
+	 *   `interest`, where `reportCenter`/`clearCenter` are inert.
 	 */
-	constructor(channel, status) {
+	constructor(channel, status, reportCenter) {
 		this.#channel = channel;
+		this.#reportCenter = typeof reportCenter === 'function' ? reportCenter : null;
 		this.#local = channel.predicted;
 		channel.onFrame((local, remote) => {
 			this.#local = local;
 			this.#remote = remote;
+			// Re-establish a reported area-of-interest center after a (re)connect: the
+			// server resets per-topic interest state when the prior connection closed,
+			// so a free-cam center set once would otherwise be lost (and the client
+			// de-dupe would mask an identical re-report). Done on the first frame after
+			// the (re)connect - frame delivery means the resync has landed, so the
+			// re-report reaches a live record rather than racing it.
+			if (this.#pendingCenterResend && this.#reportCenter !== null && this.#lastCenterX !== undefined) {
+				this.#pendingCenterResend = false;
+				this.#reportCenter({ x: this.#lastCenterX, y: this.#lastCenterY });
+			}
 		});
 		channel.onOverflow((overflowed) => {
 			this.#overflowed = overflowed;
@@ -64,6 +83,12 @@ export class SmoothEntity {
 		});
 		if (status) {
 			this.#unsubs.push(status.subscribe((s) => {
+				// A transition INTO 'connected' (initial connect or a reconnect) means
+				// the server has fresh per-topic state with no reported center; flag a
+				// re-send (consumed on the next frame) so a center set once survives.
+				if (s === 'connected' && this.#status !== 'connected' && this.#lastCenterX !== undefined) {
+					this.#pendingCenterResend = true;
+				}
 				this.#status = s;
 			}));
 		}
@@ -112,6 +137,33 @@ export class SmoothEntity {
 	/** Re-request the authoritative catalog. */
 	resync() {
 		this.#channel.resync();
+	}
+
+	/**
+	 * Report this view's area-of-interest center to the server - the point its
+	 * culling should be measured from when the camera is not the player's own
+	 * entity (a spectator, a free-cam, a zoomed-out overview). Overrides the
+	 * server's own-entity default until `clearCenter()`. Call it when the camera
+	 * moves, not every frame; an unchanged center is dropped. Inert on a topic
+	 * declared without `interest`.
+	 * @param {number} x @param {number} y
+	 */
+	reportCenter(x, y) {
+		if (this.#reportCenter === null) return;
+		if (typeof x !== 'number' || typeof y !== 'number' || !Number.isFinite(x) || !Number.isFinite(y)) return;
+		if (x === this.#lastCenterX && y === this.#lastCenterY) return;
+		this.#lastCenterX = x;
+		this.#lastCenterY = y;
+		this.#reportCenter({ x, y });
+	}
+
+	/** Drop a reported center, reverting culling to the server's own-entity default. */
+	clearCenter() {
+		if (this.#reportCenter === null) return;
+		if (this.#lastCenterX === undefined && this.#lastCenterY === undefined) return; // already cleared
+		this.#lastCenterX = undefined;
+		this.#lastCenterY = undefined;
+		this.#reportCenter(null);
 	}
 
 	/**

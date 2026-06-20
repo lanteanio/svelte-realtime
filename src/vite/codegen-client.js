@@ -165,6 +165,7 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			smLines.push(`export const ${name} = {`);
 			smLines.push(`  _command: __rpc(${JSON.stringify(modulePath + '/' + name + '/__smooth/command')}),`);
 			smLines.push(`  _sync: __rpc(${JSON.stringify(modulePath + '/' + name + '/__smooth/sync')}),`);
+			smLines.push(`  _center: __rpc(${JSON.stringify(modulePath + '/' + name + '/__smooth/center')}),`);
 			smLines.push(`  status: status,`);
 			smLines.push(`  smooth(...args) {`);
 			smLines.push(`    const opts = args.length > 0 ? args[args.length - 1] : undefined;`);
@@ -173,7 +174,10 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			smLines.push(`      sendCommand: (batch) => ${name}._command.fireAndForget(...roomArgs, batch),`);
 			smLines.push(`      sync: () => ${name}._sync(...roomArgs)`);
 			smLines.push(`    } });`);
-			smLines.push(`    return new SmoothEntity(channel, status);`);
+			// The area-of-interest center report rides its own volatile RPC, not the
+			// channel transport: it is a server-side culling hint, orthogonal to the
+			// prediction/reconciliation loop the channel runs.
+			smLines.push(`    return new SmoothEntity(channel, status, (center) => ${name}._center.fireAndForget(...roomArgs, center));`);
 			smLines.push(`  },`);
 			smLines.push(`};`);
 			lines.push(smLines.join('\n'));
