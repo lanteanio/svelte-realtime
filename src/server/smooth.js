@@ -182,6 +182,22 @@ const _SMOOTH_SYNC_TIMEOUT_MS = 2000;
  */
 const _SMOOTH_RENEW_MS = 3000;
 
+/**
+ * Default debounce for the owner's warm-handoff snapshot write (ms). At most
+ * this much entity state is lost on an owner crash; one Redis write per topic
+ * per interval while the topic is owned and non-empty. Overridable per topic
+ * via `snapshotDebounceMs`.
+ */
+const _SMOOTH_SNAPSHOT_MS = 1000;
+
+/**
+ * How long a recovered-but-not-yet-rebound entity state is held (and re-persisted)
+ * after a warm-handoff acquire. Past this window a still-absent client is treated
+ * as departed: its pending state is dropped so the cache stays bounded and the
+ * snapshot tracks the live roster.
+ */
+const _SMOOTH_PENDING_GRACE_MS = 30000;
+
 /** Test seam: clear every smooth record, pending sync, and armed tick. */
 export function _resetSmooth() {
 	for (const rec of _smoothTopics.values()) {
@@ -233,7 +249,18 @@ function _smoothRecord(name, cfg, platform, rt) {
 			lastSeenSeq: -1,
 			lastSeenOwner: null,
 			lastRenew: 0,
-			owned: false
+			owned: false,
+			// Warm-handoff snapshot state (opt-in; null/0 on the default path).
+			// `lastSnap` throttles the owner's debounced write; `pendingSnapshot`
+			// holds states recovered on acquire until each entity's real client
+			// re-binds (consumed by `_smoothSeed`) - bounded per tenure and
+			// grace-dropped via `pendingSnapshotAt`; `snapshotReady` is the
+			// per-tenure once-and-barrier read promise (a concurrent sync awaits it
+			// rather than seeding from initial mid-read).
+			lastSnap: 0,
+			pendingSnapshot: null,
+			pendingSnapshotAt: 0,
+			snapshotReady: null
 		};
 		_smoothTopics.set(name, rec);
 	}
@@ -249,6 +276,80 @@ function _smoothRecord(name, cfg, platform, rt) {
 
 function _smoothResolveInitial(cfg, key) {
 	return typeof cfg.initial === 'function' ? cfg.initial(key) : cfg.initial;
+}
+
+/**
+ * The seed state for a first-`ensure` of `key`: a state recovered from the
+ * warm-handoff snapshot when one is pending for this key (consumed so each
+ * recovered entity seeds exactly once, the moment its real client re-binds),
+ * otherwise the declared `initial`. With no pending snapshot - the default
+ * path - this is exactly `_smoothResolveInitial(rec.cfg, key)`.
+ * @param {any} rec @param {string} key
+ */
+function _smoothSeed(rec, key) {
+	if (rec.pendingSnapshot !== null && rec.pendingSnapshot.has(key)) {
+		const state = rec.pendingSnapshot.get(key);
+		rec.pendingSnapshot.delete(key);
+		return state;
+	}
+	return _smoothResolveInitial(rec.cfg, key);
+}
+
+/** Clear a record's warm-handoff state so a re-acquire reads the snapshot fresh. */
+function _smoothClearSnapshotState(rec) {
+	rec.snapshotReady = null;
+	rec.pendingSnapshot = null;
+	rec.pendingSnapshotAt = 0;
+	rec.lastSnap = 0;
+}
+
+/**
+ * Load this tenure's snapshot into `rec.pendingSnapshot` exactly once, returning
+ * a promise that resolves when it is ready. The first caller performs the read;
+ * a concurrent caller (a second sync, or a relay handler once ownership is
+ * published) gets the SAME in-flight promise, so none seeds an entity from
+ * `initial` while the read is still in flight. Caller gates on `rec.cfg.snapshot`;
+ * a coordinator without `readSnapshot` resolves immediately (inert).
+ * @param {any} rec @param {any} cluster @returns {Promise<void>}
+ */
+function _smoothLoadSnapshot(rec, cluster) {
+	if (rec.snapshotReady !== null) return rec.snapshotReady;
+	if (typeof cluster.readSnapshot !== 'function') {
+		rec.snapshotReady = Promise.resolve();
+		return rec.snapshotReady;
+	}
+	rec.snapshotReady = (async () => {
+		let snap = null;
+		try { snap = await cluster.readSnapshot(rec.wireTopic); } catch { snap = null; }
+		if (Array.isArray(snap) && snap.length > 0) {
+			const pending = new Map();
+			for (let i = 0; i < snap.length; i++) {
+				const entry = snap[i];
+				if (entry && typeof entry.key === 'string') pending.set(entry.key, entry.state);
+			}
+			if (pending.size > 0) {
+				rec.pendingSnapshot = pending;
+				rec.pendingSnapshotAt = wallEpoch();
+			}
+		}
+	})();
+	return rec.snapshotReady;
+}
+
+/**
+ * The owner's snapshot payload: the live catalog plus any recovered states whose
+ * client has not re-bound yet, so a second failover before they reconnect still
+ * recovers them (the catalog holds only entities ensured into the authority; a
+ * pending entry is consumed - removed - the instant its client re-binds, so the
+ * two sets are disjoint).
+ * @param {any} rec @returns {Array<{ key: string, state: any }>}
+ */
+function _smoothSnapshotPayload(rec) {
+	const catalog = rec.authority.catalog();
+	if (rec.pendingSnapshot === null || rec.pendingSnapshot.size === 0) return catalog;
+	const out = catalog.slice();
+	for (const [key, state] of rec.pendingSnapshot) out.push({ key, state });
+	return out;
 }
 
 function _smoothPublish(rec, event, data, excludeWs) {
@@ -376,6 +477,9 @@ function _smoothTick(rec) {
 		cluster.renewOwner(rec.wireTopic).then((ok) => {
 			if (ok) return;
 			rec.owned = false;
+			// Drop this tenure's warm-handoff state so a re-acquire reads the
+			// snapshot fresh.
+			_smoothClearSnapshotState(rec);
 			// A demoted owner stops ticking (the top-of-tick bail) and ignores
 			// inbound leaves (onLeave is owner-gated). If it has no local
 			// subscriber, no future close will ever reclaim it, so its record and
@@ -383,6 +487,25 @@ function _smoothTick(rec) {
 			// still has local subscribers is reclaimed when they re-sync or close.
 			if (rec.registry.size === 0) _smoothForget(rec);
 		}).catch(() => {});
+	}
+	// Owner with the snapshot opt-in: debounce-persist the topic state so a sibling
+	// that takes over after this owner dies can resume entities from their last
+	// state. Fire-and-forget on its own throttle (the same `t` the renew gate uses).
+	if (cluster && rec.owned && rec.cfg.snapshot && typeof cluster.writeSnapshot === 'function') {
+		// Past the grace window a still-absent recovered client has departed: drop
+		// its pending state so the cache stays bounded and the snapshot tracks the
+		// live roster.
+		if (rec.pendingSnapshot !== null && t - rec.pendingSnapshotAt >= _SMOOTH_PENDING_GRACE_MS) {
+			rec.pendingSnapshot = null;
+		}
+		// Only while the topic holds live entities (an emptied topic stops refreshing
+		// and its snapshot self-expires via the coordinator TTL). The payload unions
+		// the catalog with any not-yet-rebound recovered states so a second failover
+		// before they reconnect still recovers them.
+		if (rec.authority.size > 0 && t - rec.lastSnap >= rec.cfg.snapshotDebounceMs) {
+			rec.lastSnap = t;
+			cluster.writeSnapshot(rec.wireTopic, _smoothSnapshotPayload(rec)).catch(() => {});
+		}
 	}
 	if (rec.authority.size === 0) {
 		_smoothForget(rec);
@@ -544,7 +667,7 @@ function _ensureSmoothCluster(smooth) {
 			const surrogate = _smoothSurrogate(rec, originInstance, identity);
 			let existing = rec.authority.get(identity);
 			if (existing === undefined) {
-				rec.authority.ensure(identity, surrogate, _smoothResolveInitial(rec.cfg, identity));
+				rec.authority.ensure(identity, surrogate, _smoothSeed(rec, identity));
 				existing = rec.authority.get(identity);
 			} else if (existing.ws !== surrogate) {
 				// A newer sync re-owns this identity from another connection; a
@@ -563,7 +686,7 @@ function _ensureSmoothCluster(smooth) {
 			const rec = _smoothRecByWire(wireTopic);
 			if (!rec || !rec.owned) return;
 			const surrogate = _smoothSurrogate(rec, originInstance, identity);
-			const ensured = rec.authority.ensure(identity, surrogate, _smoothResolveInitial(rec.cfg, identity));
+			const ensured = rec.authority.ensure(identity, surrogate, _smoothSeed(rec, identity));
 			if (typeof smooth.sendSyncReply === 'function') {
 				smooth.sendSyncReply(wireTopic, corr, originInstance, { ack: ensured.lastAckedId, states: rec.authority.catalog() });
 			}
@@ -650,10 +773,16 @@ function _ensureSmoothCluster(smooth) {
  * echoing an owner's own commanded updates in broadcasts, default true - the
  * acknowledgement carries the owner's copy; onMissing motion has no
  * acknowledgement and always broadcasts to the owner too), `queueCap?`
- * (per-entity command queue bound), `topicArgs?` (explicit room-arg count
+ * (per-entity command queue bound), `snapshot?` (opt-in warm handoff: when
+ * true, the topic owner persists a debounced state snapshot so a cluster
+ * failover resumes entities from their last state (which must be JSON-
+ * serializable, the same constraint the sync reply already relays) instead of `initial`;
+ * cluster-only - it needs `platform.smooth` - and default false, so the
+ * single-instance path is unchanged), `snapshotDebounceMs?` (snapshot write
+ * throttle, default 1000), `topicArgs?` (explicit room-arg count
  * when the topic function's arity cannot express it).
  *
- * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, noEcho?: boolean, queueCap?: number, topicArgs?: number }} config
+ * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number }} config
  */
 export const _smoothRegister = function smooth(config) {
 	if (!config || typeof config !== 'object') {
@@ -679,13 +808,22 @@ export const _smoothRegister = function smooth(config) {
 	if (config.queueCap !== undefined && !(typeof config.queueCap === 'number' && Number.isInteger(config.queueCap) && config.queueCap >= 1)) {
 		throw new Error('[svelte-realtime] live.smooth() queueCap must be an integer of at least 1');
 	}
+	if (config.snapshot !== undefined && typeof config.snapshot !== 'boolean') {
+		throw new Error('[svelte-realtime] live.smooth() snapshot must be a boolean');
+	}
+	const snapshotDebounceMs = config.snapshotDebounceMs === undefined ? _SMOOTH_SNAPSHOT_MS : config.snapshotDebounceMs;
+	if (!(typeof snapshotDebounceMs === 'number' && Number.isFinite(snapshotDebounceMs) && snapshotDebounceMs > 0)) {
+		throw new Error('[svelte-realtime] live.smooth() snapshotDebounceMs must be a positive number');
+	}
 	const cfg = {
 		apply: config.apply,
 		initial: config.initial,
 		onMissing: config.onMissing,
 		queueCap: config.queueCap,
 		tickMs,
-		noEcho: config.noEcho !== false
+		noEcho: config.noEcho !== false,
+		snapshot: config.snapshot === true,
+		snapshotDebounceMs
 	};
 	const guard = config.guard;
 	const argCount = config.topicArgs !== undefined
@@ -745,15 +883,38 @@ export const _smoothRegister = function smooth(config) {
 			// isolated (no cross-instance traffic, no cross-owner event double-fire);
 			// only the brief pre-breaker window can relay from two pseudo-owners,
 			// which the per-owner seq dedup does not cover - an outage-only artifact.
+			const wasOwned = rec.owned;
 			let owned = true;
 			try {
 				owned = await cluster.acquireOwner(rec.wireTopic);
 			} catch {
 				owned = true;
 			}
-			// Record ownership BEFORE the liveness re-check so that, if the socket
-			// closed during the acquire, _smoothForget releases the lease we just
-			// took rather than leaking it until the TTL.
+			// A demotion observed on this path (we held the tick, the lease is gone)
+			// drops this tenure's warm-handoff state so a later re-acquire reads the
+			// snapshot fresh rather than reusing a stale pending set. (A rare Redis
+			// lease flap landing between two concurrent same-instance syncs could let
+			// this clear wipe the other sync's just-loaded pending; the only effect is
+			// that topic's entities fall back to `initial` - the snapshot-off default -
+			// for that one handoff, never an incorrect state, a leak, or a hang.)
+			if (wasOwned && !owned) _smoothClearSnapshotState(rec);
+			if (owned && rec.cfg.snapshot) {
+				// Warm handoff (opt-in): a fresh owner LOADS the snapshot the previous
+				// owner persisted BEFORE it publishes ownership, so neither a concurrent
+				// sync nor a relay handler (both gated on `rec.owned`) can seed an entity
+				// from `initial` while the read is still in flight. Loaded once per
+				// tenure into `pendingSnapshot` behind a shared barrier promise; each
+				// entity is then seeded the moment its real client re-binds
+				// (`_smoothSeed`), so a client that never returns never enters the
+				// authority. Its recovered state waits in `pendingSnapshot`, re-persisted
+				// on write (a second failover still recovers it) and grace-dropped on
+				// the tick (the cache stays bounded).
+				await _smoothLoadSnapshot(rec, cluster);
+			}
+			// Publish ownership AFTER the snapshot is ready (so the relay seed sites
+			// see a populated `pendingSnapshot`) but BEFORE the liveness re-check, so a
+			// socket that closed during either await releases the lease via
+			// _smoothForget rather than leaking it until the TTL.
 			rec.owned = owned;
 			if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
 				rec.registry.delete(key);
@@ -762,8 +923,9 @@ export const _smoothRegister = function smooth(config) {
 			}
 			if (owned) {
 				// This instance ticks the topic: ensure the entity against the real
-				// socket. The basis reply is byte-identical to single-instance.
-				const ensured = rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
+				// socket (seeded from the snapshot when one was recovered, else the
+				// declared initial - identical to single-instance when snapshot is off).
+				const ensured = rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
 				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: rec.authority.catalog() };
 			}
 			// Non-owner: ask the owner for the catalog. On a timeout, return a
@@ -817,7 +979,7 @@ export const _smoothRegister = function smooth(config) {
 		}
 		const existing = rec.authority.get(key);
 		if (existing === undefined) {
-			rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
+			rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
 			// Owner: register this socket so its ack and author exclusion resolve.
 			if (cluster && ctx.ws) rec.registry.set(key, ctx.ws);
 		} else if (ctx.ws && existing.ws !== ctx.ws) {

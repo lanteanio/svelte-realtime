@@ -795,10 +795,12 @@ function scriptedSmoothCluster(opts = {}) {
 	const calls = {
 		relayCommand: [], requestSync: [], sendSyncReply: [],
 		relayBroadcast: [], relayAck: [], relayLeave: [],
-		acquireOwner: [], renewOwner: [], releaseOwner: []
+		acquireOwner: [], renewOwner: [], releaseOwner: [],
+		writeSnapshot: [], readSnapshot: []
 	};
 	let handlers = null;
 	let owner = opts.owner !== undefined ? opts.owner : true;
+	let resolveReadFn = null;
 	const cluster = {
 		instanceId: opts.instanceId || 'A',
 		onMessage(h) { handlers = h; },
@@ -810,12 +812,20 @@ function scriptedSmoothCluster(opts = {}) {
 		relayLeave(...a) { calls.relayLeave.push(a); },
 		async acquireOwner(t) { calls.acquireOwner.push(t); return owner; },
 		async renewOwner(t) { calls.renewOwner.push(t); return opts.renew !== undefined ? opts.renew : true; },
-		async releaseOwner(t) { calls.releaseOwner.push(t); return true; }
+		async releaseOwner(t) { calls.releaseOwner.push(t); return true; },
+		async writeSnapshot(t, payload) { calls.writeSnapshot.push([t, payload]); },
+		async readSnapshot(t) {
+			calls.readSnapshot.push(t);
+			const val = opts.snapshot !== undefined ? opts.snapshot : null;
+			if (opts.deferRead) return new Promise((res) => { resolveReadFn = () => res(val); });
+			return val;
+		}
 	};
 	return {
 		cluster,
 		calls,
 		setOwner(v) { owner = v; },
+		resolveRead() { if (resolveReadFn) resolveReadFn(); },
 		emit: {
 			command: (...a) => handlers.onCommand(...a),
 			sync: (...a) => handlers.onSync(...a),
@@ -1150,5 +1160,175 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		const ack = platform.wireSent.find((s) => s.event === 'ack');
 		expect(ack).toBeDefined();
 		expect(ack.data.id).toBe(5);
+	});
+
+	// --- Warm-handoff snapshot opt-in (live.smooth({ snapshot: true })) ---
+
+	it('owner sync with snapshot on seeds the entity from the recovered state', async () => {
+		const { name } = declareShape({ snapshot: true });
+		const sc = scriptedSmoothCluster({ owner: true, snapshot: [{ key: 'u1', state: { x: 7, y: 9 } }] });
+		const platform = clusterPlatform(sc);
+		const res = await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(sc.calls.readSnapshot).toEqual([WT]); // read once, on acquire
+		// The recovered state seeds the entity instead of the declared initial {x:0,y:0}.
+		expect(rt.calls.ensure).toEqual([{ key: 'u1', initial: { x: 7, y: 9 } }]);
+		expect(res.data.states).toEqual([{ key: 'u1', state: { x: 7, y: 9 } }]);
+	});
+
+	it('seeds a roster member when its client re-binds; reads the snapshot once per tenure', async () => {
+		const { name } = declareShape({ snapshot: true });
+		const sc = scriptedSmoothCluster({
+			owner: true,
+			snapshot: [{ key: 'u1', state: { x: 7, y: 9 } }, { key: 'u2', state: { x: 1, y: 2 } }]
+		});
+		const platform = clusterPlatform(sc);
+		// u1 syncs first: owner acquires, reads the snapshot, seeds u1.
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		// u2 syncs next on the SAME owner: no second read, but u2 still seeds from
+		// the pending snapshot the moment it binds.
+		await call(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(sc.calls.readSnapshot).toEqual([WT]); // once per tenure, not per sync
+		expect(rt.calls.ensure).toEqual([
+			{ key: 'u1', initial: { x: 7, y: 9 } },
+			{ key: 'u2', initial: { x: 1, y: 2 } }
+		]);
+	});
+
+	it('a key absent from the snapshot falls back to the declared initial', async () => {
+		const { name } = declareShape({ snapshot: true });
+		const sc = scriptedSmoothCluster({ owner: true, snapshot: [{ key: 'u1', state: { x: 7, y: 9 } }] });
+		const platform = clusterPlatform(sc);
+		// u2 is not in the snapshot -> it starts from the declared initial.
+		await call(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(rt.calls.ensure).toEqual([{ key: 'u2', initial: { x: 0, y: 0 } }]);
+	});
+
+	it('snapshot off (the default) never reads a snapshot and seeds the declared initial', async () => {
+		const { name } = declareShape(); // no snapshot opt-in
+		const sc = scriptedSmoothCluster({ owner: true, snapshot: [{ key: 'u1', state: { x: 7, y: 9 } }] });
+		const platform = clusterPlatform(sc);
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(sc.calls.readSnapshot).toEqual([]); // never read
+		expect(rt.calls.ensure).toEqual([{ key: 'u1', initial: { x: 0, y: 0 } }]); // declared initial
+	});
+
+	it('the owner tick debounce-writes the catalog snapshot when snapshot is on', async () => {
+		const { name } = declareShape({ snapshot: true, tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']); // ensures u1 -> authority non-empty
+		// A command arms the tick (a cluster owner then re-arms every tick).
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 1 } }]]);
+		await vi.advanceTimersByTimeAsync(20); // one owned tick
+		expect(sc.calls.writeSnapshot).toHaveLength(1);
+		const [topic, payload] = sc.calls.writeSnapshot[0];
+		expect(topic).toBe(WT);
+		expect(payload).toEqual([{ key: 'u1', state: { x: 0, y: 0 } }]); // the catalog
+	});
+
+	it('snapshot off: the owner tick never writes a snapshot', async () => {
+		const { name } = declareShape({ tickMs: 20 }); // no snapshot
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(40);
+		expect(sc.calls.writeSnapshot).toEqual([]);
+	});
+
+	it('a re-acquire after demotion re-reads the snapshot fresh', async () => {
+		const { name } = declareShape({ snapshot: true, tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true, renew: false, snapshot: [{ key: 'u1', state: { x: 7, y: 9 } }] });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']); // tenure 1: reads the snapshot
+		expect(sc.calls.readSnapshot).toHaveLength(1);
+		// A command arms the tick; on it the renew fails -> the owner is demoted and
+		// drops its snapshot state. A local subscriber remains, so the record is kept.
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		// The same client re-syncs and re-acquires: snapshotLoaded was reset, so the
+		// new tenure reads the snapshot again rather than reusing the stale pending.
+		sc.setOwner(true);
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(sc.calls.readSnapshot).toHaveLength(2);
+	});
+
+	it('a concurrent sync during a pending snapshot read still seeds from the snapshot (barrier, not a race)', async () => {
+		const { name } = declareShape({ snapshot: true });
+		const sc = scriptedSmoothCluster({
+			owner: true,
+			deferRead: true,
+			snapshot: [{ key: 'u1', state: { x: 7, y: 9 } }, { key: 'u2', state: { x: 1, y: 2 } }]
+		});
+		const platform = clusterPlatform(sc);
+		// u1's sync acquires and suspends on the in-flight readSnapshot.
+		fire(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		// u2 syncs WHILE the read is in flight: it must await the same read, not seed
+		// from `initial` (the pre-fix bug seeded u2 to spawn here).
+		fire(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(sc.calls.readSnapshot).toHaveLength(1); // ONE shared read for both
+		sc.resolveRead();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(rt.calls.ensure).toEqual([
+			{ key: 'u1', initial: { x: 7, y: 9 } },
+			{ key: 'u2', initial: { x: 1, y: 2 } }
+		]);
+	});
+
+	it('a relay sync during a pending snapshot read is not answered from initial (ownership is unpublished until ready)', async () => {
+		const { name } = declareShape({ snapshot: true });
+		const sc = scriptedSmoothCluster({ owner: true, deferRead: true, snapshot: [{ key: 'remote', state: { x: 5, y: 5 } }] });
+		const platform = clusterPlatform(sc);
+		fire(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']); // acquires, suspends on the read
+		await vi.advanceTimersByTimeAsync(1);
+		// A relay sync for a remote client arrives mid-read: rec.owned is still false,
+		// so it is ignored rather than answered with an initial-seeded basis.
+		sc.emit.sync(WT, 'remote', 'B', 'corr-1');
+		expect(rt.calls.ensure.filter((e) => e.key === 'remote')).toHaveLength(0);
+		expect(sc.calls.sendSyncReply).toHaveLength(0);
+		sc.resolveRead();
+		await vi.advanceTimersByTimeAsync(1);
+		// Once ownership is published a fresh relay sync seeds the remote from the snapshot.
+		sc.emit.sync(WT, 'remote', 'B', 'corr-2');
+		expect(rt.calls.ensure).toContainEqual({ key: 'remote', initial: { x: 5, y: 5 } });
+	});
+
+	it('the owner re-persists not-yet-rebound recovered entities (the snapshot write unions catalog + pending)', async () => {
+		const { name } = declareShape({ snapshot: true, tickMs: 20 });
+		const sc = scriptedSmoothCluster({
+			owner: true,
+			snapshot: [{ key: 'u1', state: { x: 7, y: 9 } }, { key: 'gone', state: { x: 4, y: 4 } }]
+		});
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']); // u1 re-binds; 'gone' stays pending
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]); // arms the tick
+		await vi.advanceTimersByTimeAsync(20);
+		expect(sc.calls.writeSnapshot).toHaveLength(1);
+		const payload = sc.calls.writeSnapshot[0][1];
+		// The live entity AND the still-pending recovered one are both persisted, so a
+		// second failover before 'gone' reconnects still recovers it.
+		expect(payload).toContainEqual({ key: 'u1', state: { x: 7, y: 9 } }); // catalog (re-bound, live)
+		expect(payload).toContainEqual({ key: 'gone', state: { x: 4, y: 4 } }); // pending (not yet rebound)
+	});
+
+	it('a sync-observed demotion (acquireOwner returns false) resets the snapshot so a re-acquire re-reads', async () => {
+		const { name } = declareShape({ snapshot: true });
+		const sc = scriptedSmoothCluster({ owner: true, snapshot: [{ key: 'u1', state: { x: 7, y: 9 } }] });
+		const platform = clusterPlatform(sc);
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']); // tenure 1: reads (1)
+		expect(sc.calls.readSnapshot).toHaveLength(1);
+		// The lease is lost; a new client's sync observes acquireOwner === false.
+		sc.setOwner(false);
+		fire(mockWs({ id: 'u2' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		// The lease frees again and a sync re-acquires: it must read a FRESH snapshot
+		// rather than reuse the prior tenure's pending set.
+		sc.setOwner(true);
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']); // tenure 2: reads (2)
+		expect(sc.calls.readSnapshot).toHaveLength(2);
 	});
 });

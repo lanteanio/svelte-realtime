@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.12] - 2026-06-20
+
+### Added
+
+- **`live.smooth({ snapshot: true })`: warm-handoff recovery across a cluster failover.** By default a clustered `live.smooth` topic recovers from an owner crash the way a single-instance restart does - the new owner starts a fresh authority and every entity resets to its declared `initial`, which for a game entity means snapping back to spawn. Opt into `snapshot: true` and the topic owner debounce-persists its state (the entity catalog) to Redis while it ticks; when a sibling takes over after the owner dies, it seeds each entity from that snapshot the moment the entity's own client re-syncs, so players resume where they were instead of teleporting. Seeding is lazy by design: a recovered state is applied only when its real client re-binds, so a client that never returns never enters the new authority and nothing leaks. Tune the persistence cadence with `snapshotDebounceMs` (default 1000 - at most that much state is lost on an abrupt crash) and the snapshot's lifetime with the coordinator's `snapshotTtlMs`. Cluster-only (it needs `platform.smooth`) and **off by default**, so the single-instance and default cluster paths stay byte-identical. A rapid second failover before clients finish reconnecting still recovers every entity - the new owner re-persists not-yet-rebound states alongside the live ones - while a client absent past a reconnect grace (~30s) is treated as departed and its entity resets to `initial`. Requires `svelte-adapter-uws-extensions >= 0.6.0-next.20` for the coordinator's `writeSnapshot` / `readSnapshot`.
+
 ## [0.6.0-next.11] - 2026-06-20
 
 ### Added
