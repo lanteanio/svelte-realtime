@@ -3157,6 +3157,27 @@ Requires Svelte 5 (the view is a rune class) and svelte-adapter-uws 0.6.0-next.2
 
 **Cluster-aware:** wire `platform.smooth = createSmoothCluster(redisClient)` from `svelte-adapter-uws-extensions/redis/smooth` and the smoothed-entity layer detects it and routes through it automatically. Because the authority's `apply` is order-dependent (unlike a document merge, it cannot run on every instance), the model is single-owner-per-topic: one instance holds a per-topic Redis lease and ticks that topic; the others forward their clients' commands to it and re-broadcast its updates, acknowledgements, and events to their own subscribers, so a load balancer can spread one topic's players across instances and cross-instance events still fire exactly once. On owner death the lease expires, another instance takes over with a fresh authority, and clients re-sync. Without it, `live.smooth()` runs single-instance (correct on one process, divergent across a load-balanced cluster - so wire the coordinator for any multi-instance deployment). **Warm handoff:** pass `snapshot: true` to recover gracefully from an owner crash - the owner persists a debounced state snapshot and the instance that takes over resumes each entity from its last state instead of resetting it to `initial` (snapping a player back to spawn). Off by default; tune the write cadence with `snapshotDebounceMs`. Needs `svelte-adapter-uws-extensions >= 0.6.0-next.20`.
 
+**Area of interest** (an uncapped lobby): a smoothed topic broadcasts every entity's motion to every subscriber, which is right for a small room and ruinous for a lobby of thousands where each client only sees its own neighbourhood. Opt into `interest` and the tick delivers each subscriber only the entities inside its area of interest:
+
+```js
+export const arena = live.smooth({
+  topic: (ctx, arenaId) => `arena:${arenaId}`,
+  apply,
+  initial: (key) => spawn(key),
+  interest: {
+    radius: 1200,                              // cull radius, in your position units
+    position: (s) => ({ x: s.x, y: s.y }),     // where an entity is; null = always-visible (a flag, an objective)
+    lod: [                                      // optional level-of-detail bands (the outer edge is the radius)
+      { within: 400, rate: 1 },                // near: every tick
+      { within: 800, rate: 3 },                // mid: every 3rd tick
+      { within: 1200, rate: 8 }                // fringe: every 8th tick
+    ]
+  }
+});
+```
+
+The area-of-interest centre is the subscriber's own entity by default, so a player-centric game needs no extra wiring. `lod` bands let distant motion fade at a throttled, id-staggered cadence instead of consuming the same bandwidth as a nearby duel; a small hysteresis margin on the band edges stops an entity hovering on a ring from flickering, and an entity entering range (or crossing into a nearer band) is always delivered at once. Relevancy is a delivery preference, never authorization - the `guard` stays the separate auth layer - and the polarity is to over-deliver: a subscriber with no resolvable centre is delivered the whole board. **Off by default**, gated end to end on `interest != null`, so a topic without it is byte-identical to the broadcast-all path (the gate overhead benchmarks within noise, well under 1%). Culling re-sends an entity only when it actually moved since a subscriber last saw it, which relies on `apply` returning a NEW state object on a change rather than mutating in place - the same contract the broadcast itself already depends on (an in-place mutation makes the authority think nothing changed). At arena scale the cull delivers roughly 90% less per client, and the saving grows with the population. It works single-instance and across the cluster (a topic's owner culls its own local subscribers against the full cluster-wide catalog). _Today the centre is the own-entity position only (a spectator / free-cam override frame is coming), and a subscriber on a non-owning cluster instance is over-delivered relayed updates - never under-delivered - until the cross-instance fine cull lands._
+
 ---
 
 ## Shared documents

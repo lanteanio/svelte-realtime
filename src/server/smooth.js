@@ -3,6 +3,7 @@ import { live } from '../server.js';
 import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
+import { createInterestState } from './interest.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); smooth registration reaches it through this, set at
@@ -260,7 +261,14 @@ function _smoothRecord(name, cfg, platform, rt) {
 			lastSnap: 0,
 			pendingSnapshot: null,
 			pendingSnapshotAt: 0,
-			snapshotReady: null
+			snapshotReady: null,
+			// Area-of-interest relevancy (opt-in; null on the default path). When
+			// set, the tick runs a per-subscriber relevancy pass before publishing
+			// and delivers each subscriber only the entities in its area of interest.
+			// `interestTick` is the monotonic counter that drives the LOD send
+			// cadence (a tick count, not a clock - determinism seam).
+			interest: cfg.interest ? createInterestState(cfg.interest) : null,
+			interestTick: 0
 		};
 		_smoothTopics.set(name, rec);
 	}
@@ -395,6 +403,25 @@ function _smoothTick(rec) {
 	// every update and acknowledgement below reflects the same drained state.
 	const { updates, acks, events = [], idle } = rec.authority.drain();
 	const t = wallEpoch();
+	// K4 area-of-interest: when this topic opted into interest, build the relevancy
+	// for THIS instance's local subscribers once per tick from the drained catalog
+	// (which on a cluster owner spans every entity cluster-wide, local and remote
+	// surrogate, so a local player still sees nearby remote players). The publish
+	// loop then delivers each local subscriber only the updates inside its area of
+	// interest. Null (skipped) when interest is off or there is nothing to publish,
+	// so the broadcast-all path is byte-identical. Cross-instance subscribers are
+	// still relayed every update (the non-owner over-delivers to its locals in this
+	// version - safe, never under-delivers; the cross-instance fine cull is a
+	// follow-up). The relevancy is keyed by local identity via `rec.registry`,
+	// which the single-instance sync/command paths now populate for interest too.
+	// The catalog is the post-drain authoritative state of every entity, so it is
+	// also the source for a delivery the relevancy pass forced but `updates` does
+	// not carry (an entity a subscriber just moved into range of that did not move
+	// itself this tick - the first-sight catch-up).
+	const catalog = (rec.interest && updates.length > 0) ? rec.authority.catalog() : null;
+	const relevancy = catalog
+		? rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++)
+		: null;
 	for (let i = 0; i < updates.length; i++) {
 		const u = updates[i];
 		// Echo suppression applies only to commanded updates: those owners get
@@ -402,20 +429,56 @@ function _smoothTick(rec) {
 		// produces no ack, so its owner must receive the broadcast or it
 		// renders a frozen entity everyone else sees gliding.
 		if (cluster) {
-			// The author's local socket (if it is on THIS instance) is the
-			// registry entry for the entity key; a remote author resolves to
-			// undefined here, so the owner's own subscribers all see the move.
-			const localAuthor = rec.noEcho && u.commanded ? rec.registry.get(u.key) : undefined;
-			_smoothPublish(rec, 'update', { key: u.key, data: u.state }, localAuthor);
+			// Local delivery: with interest on, the per-subscriber relevancy walk
+			// below delivers to local subscribers (culled). Without it, the shared
+			// fan-out broadcasts to all local subscribers, excluding the author's
+			// local socket (a remote author resolves to undefined, so the owner's
+			// own subscribers all see the move).
+			if (!relevancy) {
+				const localAuthor = rec.noEcho && u.commanded ? rec.registry.get(u.key) : undefined;
+				_smoothPublish(rec, 'update', { key: u.key, data: u.state }, localAuthor);
+			}
 			// Relay to other instances. Only a remote (surrogate) author needs a
-			// cross-instance exclude - a local author is already excluded above
-			// and is on no other instance. The entity key IS the author identity.
+			// cross-instance exclude - a local author is already excluded (above, or
+			// by the relevancy walk's own-update suppression) and is on no other
+			// instance. The entity key IS the author identity.
 			const relayExclude = rec.noEcho && u.commanded && _isSmoothSurrogate(u.ws) ? u.key : undefined;
 			if (typeof cluster.relayBroadcast === 'function') {
 				cluster.relayBroadcast(rec.wireTopic, 'update', { key: u.key, data: u.state }, relayExclude, rec.eventSeq++);
 			}
+		} else if (relevancy) {
+			// Interest-on: updates fan out per subscriber after this loop (the
+			// relevancy walk below), so nothing broadcasts here.
 		} else {
 			_smoothPublish(rec, 'update', { key: u.key, data: u.state }, rec.noEcho && u.commanded ? u.ws : undefined);
+		}
+	}
+	// Interest-on: deliver each LOCAL subscriber (single-instance, or the owner
+	// side of a cluster) the CURRENT state of every entity the relevancy pass marked
+	// for it this tick - the entities inside its area of interest that changed since
+	// it last saw them, plus any it just moved into range of (first-sight catch-up).
+	// The state comes from this tick's update when the entity moved, else from the
+	// post-drain catalog (the catch-up case, where the entity has no update of its
+	// own). A subscriber's own entity is suppressed when noEcho is on EXCEPT for
+	// onMissing motion: a commanded change is already in hand via the acknowledgement,
+	// but server-side (onMissing) motion of the owner's entity produces no ack, so the
+	// owner must receive it. Per-subscriber sends ride the binary codec, exactly as
+	// the cursor viewport cull does. Events and removals stay on the shared broadcast
+	// path (over-deliver rather than risk a ghost or a dropped one-shot).
+	if (relevancy) {
+		const catalogByKey = new Map();
+		for (let i = 0; i < catalog.length; i++) catalogByKey.set(catalog[i].key, catalog[i].state);
+		const updatesByKey = new Map();
+		for (let i = 0; i < updates.length; i++) updatesByKey.set(updates[i].key, updates[i]);
+		for (const [identity, ws] of rec.registry) {
+			const relSet = relevancy.get(identity);
+			if (relSet === undefined) continue;
+			for (const key of relSet) {
+				const u = updatesByKey.get(key);
+				if (key === identity && rec.noEcho && (u === undefined || u.commanded)) continue;
+				const state = u !== undefined ? u.state : catalogByKey.get(key);
+				if (state !== undefined) _smoothSendTo(rec, ws, 'update', { key, data: state });
+			}
 		}
 	}
 	for (let i = 0; i < acks.length; i++) {
@@ -435,6 +498,13 @@ function _smoothTick(rec) {
 		if (a.ws && _smoothClosedWs.has(a.ws)) {
 			const removed = rec.authority.removeWs(a.ws);
 			for (let j = 0; j < removed.length; j++) {
+				// Mirror the close-drain cleanup so every entity-removal site holds the
+				// same invariant: an entity removed => its registry + interest state
+				// released (the entity key IS its owner identity).
+				if (rec.interest) {
+					rec.registry.delete(removed[j]);
+					rec.interest.releaseSubscriber(removed[j]);
+				}
 				_smoothRelayRemove(rec, removed[j]);
 			}
 			continue;
@@ -543,6 +613,7 @@ export function _drainSmoothOnClose(ws) {
 			}
 			if (identity !== undefined) {
 				rec.registry.delete(identity);
+				if (rec.interest) rec.interest.releaseSubscriber(identity);
 				if (!rec.owned && typeof cluster.relayLeave === 'function') {
 					cluster.relayLeave(rec.wireTopic, identity, cluster.instanceId);
 				}
@@ -561,6 +632,12 @@ export function _drainSmoothOnClose(ws) {
 		}
 		const removed = rec.authority.removeWs(ws);
 		for (let i = 0; i < removed.length; i++) {
+			// Interest topics carry an identity -> socket map and per-subscriber band
+			// state keyed by identity (the entity key IS the identity); drop both.
+			if (rec.interest) {
+				rec.registry.delete(removed[i]);
+				rec.interest.releaseSubscriber(removed[i]);
+			}
 			_smoothPublish(rec, 'remove', { key: removed[i] }, undefined);
 		}
 		if (rec.authority.size === 0) {
@@ -607,6 +684,7 @@ function _smoothForget(rec) {
 		p.resolve(null);
 	}
 	rec.pendingSync.clear();
+	if (rec.interest) rec.interest.reset();
 	_smoothTopics.delete(rec.name);
 	const cluster = rec.platform && rec.platform.smooth;
 	if (rec.owned && cluster && typeof cluster.releaseOwner === 'function') {
@@ -744,6 +822,55 @@ function _ensureSmoothCluster(smooth) {
 }
 
 /**
+ * Validate and normalize a `live.smooth({ interest })` config. Throws a
+ * descriptive error on a malformed shape; returns the normalized interest the
+ * relevancy pass consumes. `radius` and `position` are required when interest is
+ * on (without a resolvable position there is nothing to cull on); `lod` bands,
+ * when given, must be strictly ascending by `within` with an integer send-`rate`
+ * of at least 1; `cell` tunes the spatial grid. `budget` is accepted but inert in
+ * this version (a reserved per-client bandwidth ceiling).
+ * @param {any} it
+ */
+function _validateInterest(it) {
+	if (it === null || typeof it !== 'object') {
+		throw new Error('[svelte-realtime] live.smooth() interest must be an object\n  See: https://svti.me/smooth');
+	}
+	if (!(typeof it.radius === 'number' && Number.isFinite(it.radius) && it.radius > 0)) {
+		throw new Error('[svelte-realtime] live.smooth() interest.radius must be a positive number');
+	}
+	if (typeof it.position !== 'function') {
+		throw new Error('[svelte-realtime] live.smooth() interest.position must be a function (state) => ({ x, y }) | null');
+	}
+	if (it.cell !== undefined && !(typeof it.cell === 'number' && Number.isFinite(it.cell) && it.cell > 0)) {
+		throw new Error('[svelte-realtime] live.smooth() interest.cell must be a positive number');
+	}
+	let lod;
+	if (it.lod !== undefined) {
+		if (!Array.isArray(it.lod) || it.lod.length === 0) {
+			throw new Error('[svelte-realtime] live.smooth() interest.lod must be a non-empty array of { within, rate } bands');
+		}
+		let prev = 0;
+		lod = it.lod.map((band) => {
+			if (!band || typeof band !== 'object') {
+				throw new Error('[svelte-realtime] live.smooth() interest.lod bands must be { within, rate } objects');
+			}
+			if (!(typeof band.within === 'number' && Number.isFinite(band.within) && band.within > 0)) {
+				throw new Error('[svelte-realtime] live.smooth() interest.lod within must be a positive number');
+			}
+			if (!(typeof band.rate === 'number' && Number.isInteger(band.rate) && band.rate >= 1)) {
+				throw new Error('[svelte-realtime] live.smooth() interest.lod rate must be an integer of at least 1');
+			}
+			if (band.within <= prev) {
+				throw new Error('[svelte-realtime] live.smooth() interest.lod bands must be strictly ascending by within');
+			}
+			prev = band.within;
+			return { within: band.within, rate: band.rate };
+		});
+	}
+	return { radius: it.radius, position: it.position, lod, cell: it.cell, budget: it.budget };
+}
+
+/**
  * Declare a topic of smoothed (predicted / reconciled) entities.
  *
  * The app writes ONE pure `apply(state, command, ctx)` in a plain shared
@@ -780,9 +907,20 @@ function _ensureSmoothCluster(smooth) {
  * cluster-only - it needs `platform.smooth` - and default false, so the
  * single-instance path is unchanged), `snapshotDebounceMs?` (snapshot write
  * throttle, default 1000), `topicArgs?` (explicit room-arg count
- * when the topic function's arity cannot express it).
+ * when the topic function's arity cannot express it), `interest?` (opt-in
+ * area-of-interest culling for an uncapped lobby: each subscriber is delivered
+ * only the entity updates inside its area of interest, near entities every tick
+ * and fringe entities at a throttled cadence. `interest.radius` (required, the
+ * cull radius in the app's position units) and `interest.position(state) =>
+ * ({x,y}) | null` (required; null means always-visible) drive the cull; the
+ * area-of-interest center is the subscriber's own entity by default. Optional
+ * `interest.lod` is an ascending list of `{ within, rate }` level-of-detail
+ * bands (send every `rate` ticks within that distance; the outer band's edge is
+ * the cull radius), `interest.cell` tunes the spatial grid, and
+ * `interest.budget` is reserved (inert). Default off, so the broadcast-all path
+ * is byte-identical).
  *
- * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number }} config
+ * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number, interest?: { radius: number, position: (state: any) => ({ x: number, y: number } | null), lod?: Array<{ within: number, rate: number }>, cell?: number, budget?: number } }} config
  */
 export const _smoothRegister = function smooth(config) {
 	if (!config || typeof config !== 'object') {
@@ -815,6 +953,7 @@ export const _smoothRegister = function smooth(config) {
 	if (!(typeof snapshotDebounceMs === 'number' && Number.isFinite(snapshotDebounceMs) && snapshotDebounceMs > 0)) {
 		throw new Error('[svelte-realtime] live.smooth() snapshotDebounceMs must be a positive number');
 	}
+	const interest = config.interest === undefined ? undefined : _validateInterest(config.interest);
 	const cfg = {
 		apply: config.apply,
 		initial: config.initial,
@@ -823,7 +962,8 @@ export const _smoothRegister = function smooth(config) {
 		tickMs,
 		noEcho: config.noEcho !== false,
 		snapshot: config.snapshot === true,
-		snapshotDebounceMs
+		snapshotDebounceMs,
+		interest
 	};
 	const guard = config.guard;
 	const argCount = config.topicArgs !== undefined
@@ -946,6 +1086,11 @@ export const _smoothRegister = function smooth(config) {
 			};
 		}
 		const ensured = rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
+		// Interest topics need the identity -> socket map even single-instance (the
+		// cluster path keeps it for ack routing; interest reuses it as the
+		// per-subscriber relevancy and delivery set). No awaits follow, so the
+		// liveness re-check above still holds.
+		if (rec.interest && ctx.ws) rec.registry.set(key, ctx.ws);
 		return {
 			topic: name,
 			t: wallEpoch(),
@@ -980,8 +1125,9 @@ export const _smoothRegister = function smooth(config) {
 		const existing = rec.authority.get(key);
 		if (existing === undefined) {
 			rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
-			// Owner: register this socket so its ack and author exclusion resolve.
-			if (cluster && ctx.ws) rec.registry.set(key, ctx.ws);
+			// Owner (or any interest topic): register this socket so its ack, author
+			// exclusion, and the interest relevancy cull can resolve it by identity.
+			if ((cluster || rec.interest) && ctx.ws) rec.registry.set(key, ctx.ws);
 		} else if (ctx.ws && existing.ws !== ctx.ws) {
 			// One entity, one owning socket: the socket that last synced owns
 			// the command stream. A second tab takes over by syncing, never

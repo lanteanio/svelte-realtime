@@ -72,7 +72,16 @@ function fakeRuntime() {
 		},
 		drain() {
 			calls.drains++;
-			return drainQueue.length > 0 ? drainQueue.shift() : { updates: [], acks: [], events: [], idle: true };
+			const result = drainQueue.length > 0 ? drainQueue.shift() : { updates: [], acks: [], events: [], idle: true };
+			// The real authority advances each entity's state during the drain, so a
+			// post-drain catalog() reflects this tick's updates. Mirror that here so the
+			// interest relevancy pass (which reads catalog() after drain) sees the moved
+			// states, not the stale initial.
+			for (const u of (result.updates || [])) {
+				const e = entities.get(u.key);
+				if (e) e.state = u.state;
+			}
+			return result;
 		},
 		remove(key) {
 			return entities.delete(key);
@@ -874,6 +883,39 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		expect(sc.calls.requestSync).toHaveLength(0); // the owner answers itself
 	});
 
+	it('an interest owner culls its own local subscribers and still relays every update', async () => {
+		const { name } = declareShape({
+			tickMs: 20,
+			initial: (key) => ({ A: { x: 0, y: 0 }, B: { x: 500, y: 0 } }[key] || { x: 0, y: 0 }),
+			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }) }
+		});
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		const wsA = mockWs({ id: 'A' });
+		const wsB = mockWs({ id: 'B' });
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsB, platform, name + '/shape/__smooth/sync', ['r1']);
+		rt.queueDrain({
+			updates: [
+				{ key: 'A', state: { x: 1, y: 0 }, ws: wsA, commanded: false },
+				{ key: 'B', state: { x: 501, y: 0 }, ws: wsB, commanded: false }
+			],
+			acks: [],
+			idle: true
+		});
+		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		// Local delivery is culled per subscriber (no shared publishWire updates).
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(0);
+		const sent = platform.wireSent.filter((s) => s.event === 'update');
+		expect(sent.filter((s) => s.ws === wsA).map((s) => s.data.key)).toEqual(['A']);
+		expect(sent.filter((s) => s.ws === wsB).map((s) => s.data.key)).toEqual(['B']);
+		// Every update is still relayed cross-instance (the non-owner over-delivers
+		// to its own locals in this version - safe, never under-delivers).
+		const relayed = sc.calls.relayBroadcast.filter((a) => a[1] === 'update').map((a) => a[2].key);
+		expect(relayed.sort()).toEqual(['A', 'B']);
+	});
+
 	it('non-owner sync forwards a request and resolves with the owner reply', async () => {
 		const { name } = declareShape();
 		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
@@ -1330,5 +1372,202 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		sc.setOwner(true);
 		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']); // tenure 2: reads (2)
 		expect(sc.calls.readSnapshot).toHaveLength(2);
+	});
+});
+
+describe('live.smooth interest validation', () => {
+	const base = { topic: 't', apply: () => ({}), initial: {} };
+	it('rejects a non-object interest', () => {
+		expect(() => live.smooth({ ...base, interest: 5 })).toThrow('interest must be an object');
+	});
+	it('requires a positive radius', () => {
+		expect(() => live.smooth({ ...base, interest: {} })).toThrow('interest.radius');
+		expect(() => live.smooth({ ...base, interest: { radius: 0, position: () => null } })).toThrow('interest.radius');
+	});
+	it('requires a position function', () => {
+		expect(() => live.smooth({ ...base, interest: { radius: 100 } })).toThrow('interest.position');
+	});
+	it('rejects a non-positive cell', () => {
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: () => null, cell: 0 } })).toThrow('interest.cell');
+	});
+	it('rejects malformed lod bands', () => {
+		const p = () => null;
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, lod: [] } })).toThrow('interest.lod');
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, lod: [{ within: 100, rate: 0 }] } })).toThrow('rate');
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, lod: [{ within: 100, rate: 1.5 }] } })).toThrow('rate');
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, lod: [{ within: -5, rate: 1 }] } })).toThrow('within');
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, lod: [{ within: 200, rate: 1 }, { within: 100, rate: 2 }] } })).toThrow('ascending');
+	});
+	it('accepts a well-formed interest config', () => {
+		expect(() => live.smooth({
+			...base,
+			interest: { radius: 500, position: (s) => ({ x: s.x, y: s.y }), lod: [{ within: 100, rate: 1 }, { within: 500, rate: 4 }], budget: 1000 }
+		})).not.toThrow();
+	});
+});
+
+describe('live.smooth interest (area-of-interest culling)', () => {
+	let rt;
+	beforeEach(() => {
+		vi.useFakeTimers();
+		rt = fakeRuntime();
+		_setSmoothRuntime(rt.mod);
+	});
+	afterEach(() => {
+		_resetSmooth();
+		_setSmoothRuntime(null);
+		vi.useRealTimers();
+	});
+
+	// A and B own entities 500 apart; with radius 100 neither is in the other's
+	// area of interest, so each must see only its own entity's updates.
+	const posOf = { A: { x: 0, y: 0 }, B: { x: 500, y: 0 } };
+	function declareInterest(extra = {}) {
+		return declareShape({
+			tickMs: 20,
+			initial: (key) => ({ ...(posOf[key] || { x: 0, y: 0 }) }),
+			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }) },
+			...extra
+		});
+	}
+	const updatesSent = (platform) => platform.wireSent.filter((s) => s.event === 'update');
+	const updatesPublished = (platform) => platform.wirePublished.filter((p) => p.event === 'update');
+
+	it('delivers each subscriber only the updates inside its area of interest, via the per-subscriber wire', async () => {
+		const { name } = declareInterest();
+		const wsA = mockWs({ id: 'A' });
+		const wsB = mockWs({ id: 'B' });
+		const platform = wirePlatform();
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsB, platform, name + '/shape/__smooth/sync', ['r1']);
+		// onMissing-style motion (commanded: false) so each owner receives its own.
+		rt.queueDrain({
+			updates: [
+				{ key: 'A', state: { x: 1, y: 0 }, ws: wsA, commanded: false },
+				{ key: 'B', state: { x: 501, y: 0 }, ws: wsB, commanded: false }
+			],
+			acks: [],
+			idle: true
+		});
+		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+
+		// Interest-on routes updates through the per-subscriber wire, never the
+		// shared publishWire fan-out.
+		expect(updatesPublished(platform)).toHaveLength(0);
+		const sent = updatesSent(platform);
+		const toA = sent.filter((s) => s.ws === wsA);
+		const toB = sent.filter((s) => s.ws === wsB);
+		expect(toA).toHaveLength(1);
+		expect(toA[0].data).toEqual({ key: 'A', data: { x: 1, y: 0 } });
+		expect(toB).toHaveLength(1);
+		expect(toB[0].data).toEqual({ key: 'B', data: { x: 501, y: 0 } });
+	});
+
+	it('suppresses an owner own commanded update (the ack is its copy) but delivers onMissing motion', async () => {
+		const { name } = declareInterest();
+		const wsA = mockWs({ id: 'A' });
+		const platform = wirePlatform();
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		rt.queueDrain({
+			updates: [{ key: 'A', state: { x: 2, y: 0 }, ws: wsA, commanded: true }],
+			acks: [],
+			idle: true
+		});
+		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		// Own commanded update is echo-suppressed and no one else is in range.
+		expect(updatesSent(platform)).toHaveLength(0);
+
+		// An onMissing (non-commanded) update for the same owner IS delivered to it.
+		rt.queueDrain({
+			updates: [{ key: 'A', state: { x: 3, y: 0 }, ws: wsA, commanded: false }],
+			acks: [],
+			idle: true
+		});
+		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 2, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		const sent = updatesSent(platform);
+		expect(sent).toHaveLength(1);
+		expect(sent[0].ws).toBe(wsA);
+		expect(sent[0].data).toEqual({ key: 'A', data: { x: 3, y: 0 } });
+	});
+
+	it('delivers an idle in-range entity to a subscriber that moved toward it, from the catalog (not this tick updates)', async () => {
+		const { name } = declareShape({
+			tickMs: 20,
+			initial: (key) => ({ A: { x: 0, y: 0 }, X: { x: 1000, y: 0 } }[key] || { x: 0, y: 0 }),
+			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }) }
+		});
+		const wsA = mockWs({ id: 'A' });
+		const wsX = mockWs({ id: 'X' });
+		const platform = wirePlatform();
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']); // A at 0
+		await call(wsX, platform, name + '/shape/__smooth/sync', ['r1']); // X at 1000 (out of A's range)
+		// This tick ONLY A moves (to 950, now 50 from X). X is idle - no update of its own.
+		rt.queueDrain({
+			updates: [{ key: 'A', state: { x: 950, y: 0 }, ws: wsA, commanded: false }],
+			acks: [],
+			idle: true
+		});
+		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		// A must receive X's CURRENT state (from the catalog) - first-sight catch-up -
+		// even though X produced no update this tick. The old (updates-only) cull dropped it.
+		const toA = updatesSent(platform).filter((s) => s.ws === wsA);
+		const xToA = toA.find((s) => s.data.key === 'X');
+		expect(xToA).toBeDefined();
+		expect(xToA.data.data).toEqual({ x: 1000, y: 0 });
+	});
+
+	it('leaves discrete events on the shared broadcast (unculled) even for an out-of-range entity', async () => {
+		const { name } = declareInterest();
+		const wsA = mockWs({ id: 'A' });
+		const wsB = mockWs({ id: 'B' });
+		const platform = wirePlatform();
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsB, platform, name + '/shape/__smooth/sync', ['r1']);
+		rt.queueDrain({
+			updates: [],
+			acks: [],
+			events: [{ type: 'boom', key: 'B', data: { n: 1 }, id: 1, opts: null, ws: wsB, commanded: false }],
+			idle: true
+		});
+		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		const events = platform.wirePublished.filter((p) => p.event === 'event');
+		expect(events).toHaveLength(1);
+		expect(events[0].data).toEqual({ type: 'boom', key: 'B', data: { n: 1 }, id: 1 });
+	});
+
+	it('a topic without interest keeps the shared publishWire fan-out (byte-identical)', async () => {
+		const { name } = declareShape({ tickMs: 20 }); // no interest
+		const ws = mockWs({ id: 'A' });
+		const platform = wirePlatform();
+		rt.queueDrain({
+			updates: [{ key: 'A', state: { x: 1, y: 0 }, ws, commanded: false }],
+			acks: [],
+			idle: true
+		});
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(1);
+		expect(platform.wireSent.filter((s) => s.event === 'update')).toHaveLength(0);
+	});
+
+	it('drops a departed subscriber from the registry and interest state on close', async () => {
+		const { name } = declareInterest();
+		const wsA = mockWs({ id: 'A' });
+		const platform = wirePlatform();
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		const rec = _smoothTopics.get('shape:r1');
+		expect(rec.registry.has('A')).toBe(true);
+		close(wsA, { platform });
+		await vi.advanceTimersByTimeAsync(1);
+		// The record is reclaimed once its last entity leaves; if it survives (other
+		// entities), the departed identity must at least be gone from the registry.
+		const after = _smoothTopics.get('shape:r1');
+		if (after) expect(after.registry.has('A')).toBe(false);
+		else expect(after).toBeUndefined();
 	});
 });
