@@ -4,6 +4,7 @@ import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
 import { createInterestState } from './interest.js';
+import { createK2 } from './k2.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); smooth registration reaches it through this, set at
@@ -272,7 +273,19 @@ function _smoothRecord(name, cfg, platform, rt) {
 			// frame) takes effect on a still board (a spectator panning the camera).
 			interest: cfg.interest ? createInterestState(cfg.interest) : null,
 			interestTick: 0,
-			interestDirty: false
+			interestDirty: false,
+			// Lag-compensation history ring (opt-in; null on the default path). When
+			// set, the tick records the post-drain catalog here and the __smoothShoot
+			// RPC rewinds against it. Gated entirely on cfg.hitTest so the OFF path is
+			// byte-identical and zero-cost (credo 4). Lives only on the owner.
+			k2: cfg.hitTest
+				? createK2({
+						position: cfg.hitTest.position,
+						tickMs: cfg.tickMs,
+						maxRewindMs: cfg.hitTest.maxRewindMs,
+						teleportThreshold: cfg.hitTest.teleportThreshold
+					})
+				: null
 		};
 		_smoothTopics.set(name, rec);
 	}
@@ -879,6 +892,103 @@ function _validateInterest(it) {
 }
 
 /**
+ * Validate and normalize a `hitTest` config (server-rewind lag compensation).
+ * `hitTest` REQUIRES `interest`: the relevancy set is the authoritative security
+ * gate (you cannot rewind/hit an entity that was never replicated to the
+ * shooter), so a hitTest without an interest set has no candidate gate and is
+ * rejected at registration. The shot ray (`shot`) is always required - it
+ * defines the geometry the framework rewinds around and hands to the narrowphase.
+ * The narrowphase is either the declarative `hitbox` (circle/aabb, framework-
+ * owned) or the `resolve` escape hatch (app-owned custom geometry); at least one
+ * is required. `onHit` (the consequence - usually ctx.applyTo + ctx.emitEvent)
+ * is always required. `position` defaults to interest.position.
+ *
+ * @param {any} ht
+ * @param {{ position: Function } | undefined} interest the already-validated interest config
+ */
+function _validateHitTest(ht, interest) {
+	if (ht === null || typeof ht !== 'object') {
+		throw new Error('[svelte-realtime] live.smooth() hitTest must be an object\n  See: https://svti.me/smooth');
+	}
+	if (interest === undefined) {
+		throw new Error(
+			'[svelte-realtime] live.smooth() hitTest requires interest - the relevancy set is the lag-compensation security gate (you cannot hit what was never replicated to the shooter)\n  See: https://svti.me/smooth'
+		);
+	}
+	if (typeof ht.onHit !== 'function') {
+		throw new Error('[svelte-realtime] live.smooth() hitTest.onHit must be a function (ctx, target, info) => ...');
+	}
+	const shot = ht.shot;
+	if (!shot || typeof shot !== 'object' || shot.type !== 'ray') {
+		throw new Error("[svelte-realtime] live.smooth() hitTest.shot must be a { type: 'ray', origin, dir, maxDist } object");
+	}
+	if (typeof shot.origin !== 'function' || typeof shot.dir !== 'function') {
+		throw new Error('[svelte-realtime] live.smooth() hitTest.shot.origin and shot.dir must be functions');
+	}
+	if (!(typeof shot.maxDist === 'number' && Number.isFinite(shot.maxDist) && shot.maxDist > 0)) {
+		throw new Error('[svelte-realtime] live.smooth() hitTest.shot.maxDist must be a positive number');
+	}
+	const hasResolve = typeof ht.resolve === 'function';
+	let hitbox;
+	if (ht.hitbox !== undefined) {
+		if (!ht.hitbox || typeof ht.hitbox !== 'object') {
+			throw new Error('[svelte-realtime] live.smooth() hitTest.hitbox must be an object');
+		}
+		if (ht.hitbox.shape === 'circle') {
+			if (!(typeof ht.hitbox.radius === 'number' && Number.isFinite(ht.hitbox.radius) && ht.hitbox.radius > 0)) {
+				throw new Error('[svelte-realtime] live.smooth() hitTest.hitbox circle requires a positive radius');
+			}
+			hitbox = { shape: 'circle', radius: ht.hitbox.radius };
+		} else if (ht.hitbox.shape === 'aabb') {
+			if (!(typeof ht.hitbox.w === 'number' && ht.hitbox.w > 0 && typeof ht.hitbox.h === 'number' && ht.hitbox.h > 0)) {
+				throw new Error('[svelte-realtime] live.smooth() hitTest.hitbox aabb requires positive w and h');
+			}
+			hitbox = { shape: 'aabb', w: ht.hitbox.w, h: ht.hitbox.h };
+		} else {
+			throw new Error("[svelte-realtime] live.smooth() hitTest.hitbox.shape must be 'circle' or 'aabb'");
+		}
+	}
+	if (!hitbox && !hasResolve) {
+		throw new Error('[svelte-realtime] live.smooth() hitTest needs a hitbox (declarative) or a resolve function (custom narrowphase)');
+	}
+	let broadphase;
+	if (ht.broadphase !== undefined) {
+		if (!ht.broadphase || typeof ht.broadphase !== 'object') {
+			throw new Error('[svelte-realtime] live.smooth() hitTest.broadphase must be an object');
+		}
+		const bpMax = ht.broadphase.maxDist;
+		if (bpMax !== undefined && !(typeof bpMax === 'number' && bpMax > 0)) {
+			throw new Error('[svelte-realtime] live.smooth() hitTest.broadphase.maxDist must be a positive number');
+		}
+		const cone = ht.broadphase.cone;
+		if (cone !== undefined && !(typeof cone === 'number' && cone >= -1 && cone <= 1)) {
+			throw new Error('[svelte-realtime] live.smooth() hitTest.broadphase.cone must be a cosine in [-1, 1]');
+		}
+		broadphase = { maxDist: bpMax, cone };
+	}
+	if (ht.position !== undefined && typeof ht.position !== 'function') {
+		throw new Error('[svelte-realtime] live.smooth() hitTest.position must be a function (state) => ({ x, y }) | null');
+	}
+	const maxRewindMs = ht.maxRewindMs === undefined ? 1000 : ht.maxRewindMs;
+	if (!(typeof maxRewindMs === 'number' && Number.isFinite(maxRewindMs) && maxRewindMs > 0)) {
+		throw new Error('[svelte-realtime] live.smooth() hitTest.maxRewindMs must be a positive number');
+	}
+	if (ht.teleportThreshold !== undefined && !(typeof ht.teleportThreshold === 'number' && ht.teleportThreshold > 0)) {
+		throw new Error('[svelte-realtime] live.smooth() hitTest.teleportThreshold must be a positive number');
+	}
+	return {
+		hitbox,
+		shot: { type: 'ray', origin: shot.origin, dir: shot.dir, maxDist: shot.maxDist },
+		onHit: ht.onHit,
+		resolve: hasResolve ? ht.resolve : undefined,
+		broadphase,
+		position: typeof ht.position === 'function' ? ht.position : interest.position,
+		maxRewindMs,
+		teleportThreshold: ht.teleportThreshold
+	};
+}
+
+/**
  * Declare a topic of smoothed (predicted / reconciled) entities.
  *
  * The app writes ONE pure `apply(state, command, ctx)` in a plain shared
@@ -962,6 +1072,7 @@ export const _smoothRegister = function smooth(config) {
 		throw new Error('[svelte-realtime] live.smooth() snapshotDebounceMs must be a positive number');
 	}
 	const interest = config.interest === undefined ? undefined : _validateInterest(config.interest);
+	const hitTest = config.hitTest === undefined ? undefined : _validateHitTest(config.hitTest, interest);
 	const cfg = {
 		apply: config.apply,
 		initial: config.initial,
@@ -971,7 +1082,8 @@ export const _smoothRegister = function smooth(config) {
 		noEcho: config.noEcho !== false,
 		snapshot: config.snapshot === true,
 		snapshotDebounceMs,
-		interest
+		interest,
+		hitTest
 	};
 	const guard = config.guard;
 	const argCount = config.topicArgs !== undefined

@@ -1407,6 +1407,52 @@ describe('live.smooth interest validation', () => {
 	});
 });
 
+describe('live.smooth hitTest validation (K2 lag compensation)', () => {
+	const position = (s) => ({ x: s.x, y: s.y });
+	const base = { topic: 't', apply: () => ({}), initial: {}, interest: { radius: 500, position } };
+	const shot = { type: 'ray', origin: () => ({ x: 0, y: 0 }), dir: () => 0, maxDist: 1000 };
+	const onHit = () => {};
+
+	it('rejects a non-object hitTest', () => {
+		expect(() => live.smooth({ ...base, hitTest: 5 })).toThrow('hitTest must be an object');
+	});
+	it('requires interest (the candidate set is the security gate)', () => {
+		expect(() => live.smooth({
+			topic: 't', apply: () => ({}), initial: {},
+			hitTest: { shot, onHit, hitbox: { shape: 'circle', radius: 10 } }
+		})).toThrow('hitTest requires interest');
+	});
+	it('requires an onHit function', () => {
+		expect(() => live.smooth({ ...base, hitTest: { shot, hitbox: { shape: 'circle', radius: 10 } } })).toThrow('onHit');
+	});
+	it('requires a ray shot', () => {
+		expect(() => live.smooth({ ...base, hitTest: { onHit, hitbox: { shape: 'circle', radius: 10 } } })).toThrow('hitTest.shot');
+		expect(() => live.smooth({ ...base, hitTest: { onHit, shot: { type: 'cone' }, hitbox: { shape: 'circle', radius: 10 } } })).toThrow('hitTest.shot');
+		expect(() => live.smooth({ ...base, hitTest: { onHit, shot: { type: 'ray', origin: 1, dir: () => 0, maxDist: 1 }, hitbox: { shape: 'circle', radius: 10 } } })).toThrow('origin and shot.dir');
+		expect(() => live.smooth({ ...base, hitTest: { onHit, shot: { type: 'ray', origin: () => ({}), dir: () => 0, maxDist: 0 }, hitbox: { shape: 'circle', radius: 10 } } })).toThrow('maxDist');
+	});
+	it('requires a hitbox OR a resolve function', () => {
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit } })).toThrow('hitbox (declarative) or a resolve function');
+	});
+	it('rejects a malformed hitbox', () => {
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit, hitbox: { shape: 'blob' } } })).toThrow("'circle' or 'aabb'");
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit, hitbox: { shape: 'circle' } } })).toThrow('positive radius');
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit, hitbox: { shape: 'aabb', w: 0, h: 10 } } })).toThrow('positive w and h');
+	});
+	it('rejects a malformed maxRewindMs / teleportThreshold / broadphase', () => {
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit, hitbox: { shape: 'circle', radius: 10 }, maxRewindMs: 0 } })).toThrow('maxRewindMs');
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit, hitbox: { shape: 'circle', radius: 10 }, teleportThreshold: -1 } })).toThrow('teleportThreshold');
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit, hitbox: { shape: 'circle', radius: 10 }, broadphase: { cone: 2 } } })).toThrow('cone');
+	});
+	it('accepts a well-formed declarative hitTest', () => {
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit, hitbox: { shape: 'circle', radius: 24 }, teleportThreshold: 300 } })).not.toThrow();
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit, hitbox: { shape: 'aabb', w: 20, h: 40 } } })).not.toThrow();
+	});
+	it('accepts the resolve escape hatch without a hitbox', () => {
+		expect(() => live.smooth({ ...base, hitTest: { shot, onHit, resolve: () => null, broadphase: { maxDist: 1500, cone: 0.707 } } })).not.toThrow();
+	});
+});
+
 describe('live.smooth interest (area-of-interest culling)', () => {
 	let rt;
 	beforeEach(() => {

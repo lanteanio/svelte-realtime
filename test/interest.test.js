@@ -236,3 +236,50 @@ describe('interest relevancy (K4)', () => {
 		expect(keysOf(rel)).toEqual(expected.sort());
 	});
 });
+
+describe('getCandidates (K2 candidate set)', () => {
+	it('returns the FULL in-range membership, including a stationary entity the deltas drop', () => {
+		const state = createInterestState({ radius: 100, position });
+		// Same state references on both ticks: tick 1 is first-sight (delivered),
+		// tick 2 sees state === prevSent so the delta is empty - but the entity is
+		// still in range, so it must remain a candidate.
+		const a = at('A', 0, 0);
+		const b = at('b', 50, 0);
+		const catalog = [a, b];
+		const rel1 = state.compute(catalog, ['A'], 0);
+		expect(keysOf(rel1.get('A'))).toEqual(['A', 'b']); // first sight delivers both
+		const rel2 = state.compute(catalog, ['A'], 1);
+		expect(keysOf(rel2.get('A'))).toEqual([]); // nothing moved -> empty delta
+		// The candidate set is unchanged: a stationary in-range target is still hittable.
+		expect([...state.getCandidates('A')].sort()).toEqual(['A', 'b']);
+	});
+
+	it('drops an entity from the candidate set once it leaves range', () => {
+		const state = createInterestState({ radius: 100, position });
+		state.compute([at('A', 0, 0), at('b', 50, 0)], ['A'], 0);
+		expect([...state.getCandidates('A')].sort()).toEqual(['A', 'b']);
+		// b moves out of radius -> pruned from the in-range membership.
+		state.compute([at('A', 0, 0), at('b', 500, 0)], ['A'], 1);
+		expect([...state.getCandidates('A')].sort()).toEqual(['A']);
+	});
+
+	it('includes always-visible (null-position) entities as candidates', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('A', 0, 0), { key: 'g', state: { global: true } }];
+		state.compute(catalog, ['A'], 0);
+		expect([...state.getCandidates('A')].sort()).toEqual(['A', 'g']);
+	});
+
+	it('returns undefined for an unknown subscriber', () => {
+		const state = createInterestState({ radius: 100, position });
+		state.compute([at('A', 0, 0)], ['A'], 0);
+		expect(state.getCandidates('nobody')).toBeUndefined();
+	});
+
+	it('a whole-board subscriber (no center) has the whole board as candidates', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('a', 0, 0), at('b', 50, 0), at('c', 999, 0)];
+		state.compute(catalog, ['spectator'], 0);
+		expect([...state.getCandidates('spectator')].sort()).toEqual(['a', 'b', 'c']);
+	});
+});

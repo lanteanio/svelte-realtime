@@ -142,7 +142,7 @@ export function createInterestState(interest) {
 	// Persistent across ticks.
 	/** @type {Map<string, { x: number, y: number }>} reported center override by identity */
 	const centers = new Map();
-	/** @type {Map<string, Map<string, number>>} per subscriber: entity key -> last LOD band */
+	/** @type {Map<string, Map<string, { band: number, sent: any }>>} per subscriber: entity key -> last LOD band + last-sent state */
 	const lod = new Map();
 	/** @type {Map<string, Set<string>>} the last computed relevancy (the lag-comp candidate set) */
 	let last = new Map();
@@ -345,12 +345,28 @@ export function createInterestState(interest) {
 		/**
 		 * The most recent per-subscriber relevancy: identity -> the entity keys
 		 * DELIVERED this tick. Each Set is owned per subscriber (not shared), so a
-		 * reader may hold it; the lag-compensation candidate set ("what the shooter
-		 * currently has replicated", i.e. the full in-range set rather than just
-		 * this tick's deltas) is a separate query K4's successor will add.
+		 * reader may hold it. This is the delivery delta, NOT the candidate set -
+		 * a stationary in-range entity is absent here on the ticks it does not move.
+		 * For the lag-compensation candidate set ("what the shooter currently has
+		 * replicated", the full in-range membership) use `getCandidates`.
 		 */
 		get relevancy() {
 			return last;
+		},
+		/**
+		 * The shooter's hit-candidate set for lag compensation: the entity keys this
+		 * subscriber currently has replicated - the full in-range membership (pruned
+		 * to the live in-range set each tick), NOT just this tick's delivered deltas.
+		 * The transmit-bit analog: you cannot rewind/hit an entity that was never
+		 * sent to you. Returns the live keyset (consume it synchronously within the
+		 * tick - the next compute() mutates it) or undefined when the subscriber is
+		 * unknown (never reported a center and owns no in-range entity yet).
+		 * @param {string} identity
+		 * @returns {IterableIterator<string> | undefined}
+		 */
+		getCandidates(identity) {
+			const m = lod.get(identity);
+			return m ? m.keys() : undefined;
 		},
 		/** Drop every center, band record, and the spatial scratch (topic teardown). */
 		reset() {
