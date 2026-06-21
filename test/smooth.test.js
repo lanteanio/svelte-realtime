@@ -811,7 +811,7 @@ describe('live.smooth() vite integration', () => {
  */
 function scriptedSmoothCluster(opts = {}) {
 	const calls = {
-		relayCommand: [], requestSync: [], sendSyncReply: [],
+		relayCommand: [], relayShoot: [], requestSync: [], sendSyncReply: [],
 		relayBroadcast: [], relayAck: [], relayLeave: [],
 		acquireOwner: [], renewOwner: [], releaseOwner: [],
 		writeSnapshot: [], readSnapshot: []
@@ -823,6 +823,7 @@ function scriptedSmoothCluster(opts = {}) {
 		instanceId: opts.instanceId || 'A',
 		onMessage(h) { handlers = h; },
 		relayCommand(...a) { calls.relayCommand.push(a); },
+		relayShoot(...a) { calls.relayShoot.push(a); },
 		requestSync(...a) { calls.requestSync.push(a); },
 		sendSyncReply(...a) { calls.sendSyncReply.push(a); },
 		relayBroadcast(...a) { calls.relayBroadcast.push(a); },
@@ -850,7 +851,8 @@ function scriptedSmoothCluster(opts = {}) {
 			syncReply: (...a) => handlers.onSyncReply(...a),
 			broadcast: (...a) => handlers.onBroadcast(...a),
 			ack: (...a) => handlers.onAck(...a),
-			leave: (...a) => handlers.onLeave(...a)
+			leave: (...a) => handlers.onLeave(...a),
+			shoot: (...a) => handlers.onShoot(...a)
 		}
 	};
 }
@@ -2253,5 +2255,182 @@ describe('live.smooth lag-compensated shoot', () => {
 		expect(second).toEqual(first);
 		// The stream must actually resolve hits (not a vacuous empty == empty assertion).
 		expect(first.filter((e) => e.key !== undefined).length).toBeGreaterThan(3);
+	});
+});
+
+describe('live.smooth forwarded shot (cluster relayShoot / onShoot)', () => {
+	const WT = '__smooth:shape:r1';
+	let rt;
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(10000);
+		rt = fakeRuntime();
+		_setSmoothRuntime(rt.mod);
+	});
+	afterEach(() => {
+		_resetSmooth();
+		_setSmoothRuntime(null);
+		vi.useRealTimers();
+	});
+
+	const baseOnHit = (ctx, target) => {
+		ctx.applyTo(target.key, { damage: 25 });
+		ctx.emitEvent('hit', { victim: target.key, by: ctx.identity }, { key: target.key });
+		return { stop: true };
+	};
+
+	function hitShape(htExtra = {}) {
+		return declareShape({
+			tickMs: 20,
+			interest: { radius: 1000, position: (s) => ({ x: s.x, y: s.y }) },
+			hitTest: {
+				hitbox: { shape: 'circle', radius: 30 },
+				shot: { type: 'ray', origin: (cmd, sh) => ({ x: sh.x, y: sh.y }), dir: (cmd) => cmd.aim, maxDist: 2000 },
+				onHit: baseOnHit,
+				...htExtra
+			}
+		});
+	}
+
+	function paths(name) {
+		return { sync: name + '/shape/__smooth/sync', cmd: name + '/shape/__smooth/command', shoot: name + '/shape/__smooth/shoot' };
+	}
+
+	function fire(ws, platform, path, args) {
+		handleRpc(ws, toArrayBuffer({ rpc: path, id: 'k' + ++_id, args }), platform);
+	}
+
+	function clusterPlatform(sc) {
+		const platform = wirePlatform();
+		platform.smooth = sc.cluster;
+		return platform;
+	}
+
+	// Bring the shooter onto a NON-owning edge: sync (forwarded to the owner),
+	// the owner answers an empty basis, so the local rec exists, is not owned,
+	// and has the shooter's socket registered.
+	async function edgeSync(sc, platform, ws, p) {
+		fire(ws, platform, p.sync, ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], { ack: 0, states: [] });
+		await vi.advanceTimersByTimeAsync(1);
+	}
+
+	it('an edge with no owner-clock basis forwards at the present (rewindAge null) and never touches the authority', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await edgeSync(sc, platform, ws, p);
+		await call(ws, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(sc.calls.relayShoot).toHaveLength(1);
+		const [wireTopic, identity, originInstance, fwd] = sc.calls.relayShoot[0];
+		expect([wireTopic, identity, originInstance]).toEqual([WT, 'u1', 'B']);
+		expect(fwd.rewindAge).toBeNull(); // cold start -> resolve at present (favor defender)
+		expect(fwd.reach).toBe(100); // the default maxRewindMs window width
+		expect(fwd.cmd).toEqual({ aim: 0 });
+		expect(rt.calls.inject).toEqual([]); // the edge never resolves locally
+	});
+
+	it('an edge with an owner-clock basis forwards bounded DURATIONS only - no absolute timestamp crosses the hop', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await edgeSync(sc, platform, ws, p);
+		// Seed the owner-clock basis from an inbound ack carrying the owner's `t`.
+		const ownerT = Date.now();
+		sc.emit.ack(WT, 'u1', { id: 1, state: { x: 0, y: 0 }, t: ownerT });
+		await vi.advanceTimersByTimeAsync(40); // real wall advances; the reconstructed owner-now tracks it
+		const rtStamp = Date.now() - 30;
+		await call(ws, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: rtStamp, ackT: ownerT }]);
+		expect(sc.calls.relayShoot).toHaveLength(1);
+		const fwd = sc.calls.relayShoot[0][3];
+		// Only durations + the opaque cmd; the wire never carries rt / ackT / t.
+		expect(Object.keys(fwd).sort()).toEqual(['cmd', 'reach', 'rewindAge']);
+		// rewindAge is a duration on the reconstructed owner axis: edgeOwnerNow - rt.
+		// edgeOwnerNow = ownerT + 40 (the wall elapsed since the ack); rt = now - 30 = ownerT + 10.
+		expect(fwd.rewindAge).toBe(30);
+		expect(typeof fwd.reach).toBe('number');
+		expect(fwd.reach).toBeGreaterThan(0);
+	});
+
+	it('an edge drops a replayed (older) render-time before it forwards', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await edgeSync(sc, platform, ws, p);
+		sc.emit.ack(WT, 'u1', { id: 1, state: { x: 0, y: 0 }, t: Date.now() });
+		await vi.advanceTimersByTimeAsync(40);
+		const fresh = Date.now() - 10;
+		await call(ws, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: fresh, ackT: Date.now() - 50 }]);
+		// A captured shot resent with an OLDER render-time: dropped at the edge, never forwarded.
+		await call(ws, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: fresh - 25, ackT: Date.now() - 50 }]);
+		expect(sc.calls.relayShoot).toHaveLength(1);
+	});
+
+	it('the owner resolves a forwarded shot against its own ring and relays the hit back', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const sc = scriptedSmoothCluster({ owner: true, instanceId: 'A' });
+		const platform = clusterPlatform(sc);
+		// A local owner sync wires the relay handlers and records a target into the ring.
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws2, platform, p.sync, ['r1']);
+		// A remote shooter `rs` (connected to instance B) gets a surrogate entity here.
+		sc.emit.sync(WT, 'rs', 'B', 'c1');
+		await call(ws2, platform, p.cmd, ['r1', [{ id: 1, cmd: { step: 1 } }]]);
+		rt.queueDrain({ updates: [{ key: 'u2', state: { x: 100, y: 0 }, ws: ws2, commanded: true }], acks: [], idle: false });
+		await vi.advanceTimersByTimeAsync(20);
+		const eventsBefore = sc.calls.relayBroadcast.filter((a) => a[1] === 'event').length;
+		// rs at (0,0) aims +x along the ray; rewindAge 0 resolves at the present.
+		sc.emit.shoot(WT, 'rs', 'B', { cmd: { aim: 0 }, reach: 100, rewindAge: 0 });
+		await vi.advanceTimersByTimeAsync(1);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+		const relayedEvents = sc.calls.relayBroadcast.filter((a) => a[1] === 'event');
+		expect(relayedEvents.length).toBe(eventsBefore + 1);
+		expect(relayedEvents[relayedEvents.length - 1][2].type).toBe('hit');
+	});
+
+	it('a forwarded shot cannot spoof the shooter identity in the detection hook', async () => {
+		const seen = [];
+		const { name } = hitShape({ detectionHook: (info) => seen.push(info.identity) });
+		const p = paths(name);
+		const sc = scriptedSmoothCluster({ owner: true, instanceId: 'A' });
+		const platform = clusterPlatform(sc);
+		await call(mockWs({ id: 'u2' }), platform, p.sync, ['r1']); // wires the relay handlers
+		sc.emit.sync(WT, 'rs', 'B', 'c1'); // the surrogate entity for the remote shooter
+		// A forged payload claims a DIFFERENT identity inside the detect block.
+		sc.emit.shoot(WT, 'rs', 'B', { cmd: { aim: 0 }, reach: 100, rewindAge: 0, detect: { identity: 'attacker', minUplink: 5, maxUplink: 5, divergence: 0 } });
+		await vi.advanceTimersByTimeAsync(1);
+		expect(seen).toEqual(['rs']); // the authoritative identity wins, never the forged one
+	});
+
+	it('the owner drops a forwarded shot from a shooter with no entity here (favor defender)', async () => {
+		const { name } = hitShape();
+		const sc = scriptedSmoothCluster({ owner: true, instanceId: 'A' });
+		const platform = clusterPlatform(sc);
+		// Wire the relay handlers (a local owner sync registers them).
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		sc.emit.shoot(WT, 'ghost', 'B', { cmd: { aim: 0 }, reach: 100, rewindAge: 0 });
+		await vi.advanceTimersByTimeAsync(1);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
+	it('a non-owner whose coordinator predates relayShoot leaves the shot inert (no throw)', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		delete sc.cluster.relayShoot; // an older extensions build
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await edgeSync(sc, platform, ws, p);
+		await call(ws, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(sc.calls.relayShoot).toHaveLength(0);
+		expect(rt.calls.inject).toEqual([]);
 	});
 });

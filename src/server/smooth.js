@@ -269,6 +269,12 @@ function _smoothRecord(name, cfg, platform, rt) {
 			lastSeenOwner: null,
 			lastRenew: 0,
 			owned: false,
+			// Owner wall-clock basis captured at a non-owner from inbound acks (which
+			// carry the owner's `t`): a forwarding edge reconstructs the owner's clock
+			// from this to measure a shot's latency on the owner's axis. Null until the
+			// first ack with a `t` lands; read only on the forwarded-shoot path.
+			lastOwnerT: null,
+			lastOwnerWall: 0,
 			// Warm-handoff snapshot state (opt-in; null/0 on the default path).
 			// `lastSnap` throttles the owner's debounced write; `pendingSnapshot`
 			// holds states recovered on acquire until each entity's real client
@@ -886,6 +892,13 @@ function _ensureSmoothCluster(smooth) {
 		onAck: (wireTopic, identity, payload) => {
 			const rec = _smoothRecByWire(wireTopic);
 			if (!rec) return;
+			// Capture the owner's wall stamp (carried on every ack) so a non-owner can
+			// reconstruct the owner's clock for an edge-measured forwarded shot. Gated
+			// on hitTest so a non-lag-comp topic pays nothing.
+			if (rec.cfg.hitTest !== undefined && payload && typeof payload.t === 'number' && Number.isFinite(payload.t)) {
+				rec.lastOwnerT = payload.t;
+				rec.lastOwnerWall = wallEpoch();
+			}
 			const ws = rec.registry.get(identity);
 			if (ws !== undefined) _smoothSendTo(rec, ws, 'ack', payload);
 		},
@@ -902,6 +915,41 @@ function _ensureSmoothCluster(smooth) {
 				_smoothRelayRemove(rec, removed[i]);
 			}
 			if (rec.authority.size === 0) _smoothForget(rec);
+		},
+		// Owner: a non-owner forwarded a client's shot. Resolve it against the ring
+		// using the EDGE-measured durations (reach width + rewind age) applied to the
+		// owner's OWN present - never re-measuring across the inter-instance hop, which
+		// would fold that hop into the window. The authoritative hit rides the owner's
+		// existing event broadcast back to the shooter's instance, so a forwarded shot
+		// needs no correlated reply.
+		onShoot: (wireTopic, identity, originInstance, payload) => {
+			const rec = _smoothRecByWire(wireTopic);
+			if (!rec || !rec.owned || rec.lagComp === null) return;
+			if (!payload || typeof payload !== 'object') return;
+			const shooterEntity = rec.authority.get(identity);
+			if (shooterEntity === undefined) return; // no entity here: this shooter cannot aim
+			const ht = rec.cfg.hitTest;
+			const reach = typeof payload.reach === 'number' && Number.isFinite(payload.reach)
+				? Math.min(payload.reach, ht.maxRewindMs)
+				: ht.maxRewindMs;
+			const rewindAge =
+				typeof payload.rewindAge === 'number' && Number.isFinite(payload.rewindAge) && payload.rewindAge >= 0
+					? payload.rewindAge
+					: null;
+			// The detection signal fires from the edge-measured picture the owner cannot
+			// recompute; a throwing hook never affects the shot.
+			if (ht.detectionHook !== undefined && payload.detect && typeof payload.detect === 'object') {
+				try {
+					// Spread the forwarded picture first, then the trusted identity, so a
+					// forged payload.detect.identity can never override the authoritative shooter.
+					ht.detectionHook({ ...payload.detect, identity });
+				} catch {
+					/* observability only */
+				}
+			}
+			const nowMono = rec.monoClock.mono(wallEpoch());
+			const rewindAt = _smoothRewindAt(nowMono, reach, rewindAge);
+			_smoothResolveShot(rec, rec.name, identity, shooterEntity, rec.platform, payload.cmd, rewindAt).catch(() => {});
 		}
 	});
 }
@@ -1080,6 +1128,240 @@ function _shotUnitDir(d) {
 		return { x: d.x / len, y: d.y / len };
 	}
 	return null;
+}
+
+/**
+ * Reconstruct the topic owner's wall clock at a non-owner (the forwarding edge).
+ * The owner stamps an absolute `t` on every ack; the edge captures it with its
+ * own wall time (`onAck`), so the owner's clock "now" is that stamp plus the
+ * wall time elapsed since. Returns null until an ack with a `t` has been seen
+ * (cold start) - the edge then forwards no rewind age and the owner resolves the
+ * shot at the present (favor the defender). Wall-elapsed (not the monotonic
+ * seam) keeps it deterministic under a seeded/faked clock.
+ * @param {any} rec
+ * @returns {number | null}
+ */
+function _edgeOwnerNow(rec) {
+	if (rec.lastOwnerT === null) return null;
+	return rec.lastOwnerT + (wallEpoch() - rec.lastOwnerWall);
+}
+
+/**
+ * Convert a reach window width + a rewind age (both DURATIONS, milliseconds)
+ * into a rewindAt on a ring's own monotonic axis. A null age resolves at the
+ * present (favor the defender); otherwise the aimed instant `now - age` is
+ * floored by the reach window and capped at the present. This is the age-form of
+ * the single-instance clamp `max(now - reach, min(rtMono, now))` and is
+ * bit-identical to it for a local shot (where `age = now - rt`).
+ * @param {number} nowMono @param {number} reach @param {number | null} rewindAge
+ * @returns {number}
+ */
+function _smoothRewindAt(nowMono, reach, rewindAge) {
+	if (rewindAge === null || rewindAge === undefined) return nowMono;
+	return Math.min(nowMono, Math.max(nowMono - reach, nowMono - rewindAge));
+}
+
+/**
+ * Edge measurement for a shot: from the shot payload compute the favor-shooter
+ * reach WIDTH and the rewind AGE (both durations, axis-free), run the per-
+ * connection replay defense + latch, and - when a `detectionHook` is configured
+ * - the latency detection picture. `now` is the wall time on the OWNER's axis:
+ * `wallEpoch()` on the owner / single instance, the reconstructed owner clock on
+ * a forwarding edge (null on edge cold start -> resolve at present). Both the
+ * uplink sample and the replay latch live on this connection's `ws` (the edge
+ * always holds the real shooter socket, so the WeakMap already keys on the
+ * origin client, never the inter-instance hop). Returns the forwarded payload
+ * shape `{ cmd, reach, rewindAge, detect, nowMono }`, or null when the shot is a
+ * replayed / older render-time the latch rejects.
+ * @param {any} rec @param {any} ctx @param {any} payload @param {string} shooterKey @param {number | null} now
+ * @returns {{ cmd: any, reach: number, rewindAge: number | null, detect: any, nowMono: number | null } | null}
+ */
+function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
+	const ht = rec.cfg.hitTest;
+	const cmd = payload.cmd;
+	// No owner-clock basis yet (edge cold start): forward at the present.
+	if (now === null) return { cmd, reach: ht.maxRewindMs, rewindAge: null, detect: null, nowMono: null };
+	const nowMono = rec.monoClock.mono(now);
+	const monoCorr = nowMono - now;
+	const rtStamp = payload.rt;
+	let reach = ht.maxRewindMs;
+	let rewindAge = null;
+	let detect = null;
+	if (typeof rtStamp === 'number' && Number.isFinite(rtStamp)) {
+		let st = ctx.ws ? _lcRtt.get(ctx.ws) : undefined;
+		if (ctx.ws && st === undefined) {
+			st = { tracker: createRttTracker(), lastRt: -Infinity };
+			_lcRtt.set(ctx.ws, st);
+		}
+		// Map the wall-axis render-time onto the monotonic axis so the replay
+		// defense, the latch, and the age all live on one axis (a wall backstep
+		// then stays continuous). monoCorr is zero in normal operation.
+		const rtMono = rtStamp + monoCorr;
+		// Replay defense: a real rendered instant only advances, so a render-time
+		// strictly OLDER than the last accepted one (a captured shot resent to
+		// re-resolve an old lineup) is dropped before it can resolve or forward.
+		if (st && rtMono < st.lastRt) return null;
+		const ackT = payload.ackT;
+		if (st && typeof ackT === 'number' && Number.isFinite(ackT) && ackT <= now && now - ackT <= ht.maxRewindMs) {
+			st.tracker.sample((now - ackT) / 2, nowMono);
+		}
+		// Favor-the-shooter reach width = measured uplink (max-of-recent) + the
+		// client's interpolation delay; both server-measured, clamped to the cap.
+		const maxUp = st ? st.tracker.maxUplink() : null;
+		const serverInterp = rec.interest.interpDelayMs(shooterKey, rec.tickMs, now);
+		reach = maxUp === null ? ht.maxRewindMs : Math.min(ht.maxRewindMs, maxUp + serverInterp);
+		// The rewind age is a pure duration the owner applies to its own present.
+		rewindAge = Math.max(0, now - rtStamp);
+		if (st) st.lastRt = Math.max(st.lastRt, Math.min(rtMono, nowMono));
+		if (ht.detectionHook !== undefined && st) {
+			const minUp = st.tracker.minUplink();
+			detect = {
+				minUplink: minUp,
+				maxUplink: maxUp,
+				reach,
+				interpDelay: serverInterp,
+				divergence: minUp !== null && maxUp !== null ? maxUp - minUp : 0
+			};
+		}
+	}
+	return { cmd, reach, rewindAge, detect, nowMono };
+}
+
+/**
+ * Resolve a shot against the rewound world: gate candidates at `rewindAt`, run
+ * the shot geometry from the shooter's CURRENT state, the broadphase + per-
+ * candidate narrowphase, the nearest-first `onHit` consequence, and the hit-
+ * event broadcast (plus cluster relay). Shared by the local / owner-direct shot
+ * path and the forwarded-shot owner handler; the caller computes `rewindAt`
+ * (directly from a local measurement, or from forwarded durations on the owner)
+ * and supplies the platform whose `smooth` coordinator relays the hit events.
+ * @param {any} rec @param {string} name @param {string} shooterKey
+ * @param {any} shooterEntity @param {any} ctxPlatform @param {any} cmd @param {number} rewindAt
+ */
+async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctxPlatform, cmd, rewindAt) {
+	const ht = rec.cfg.hitTest;
+	const cluster = ctxPlatform && ctxPlatform.smooth;
+	// Candidate set, gated at the REWIND instant rather than at receipt: a target
+	// the shooter had on screen when it fired is a valid hit even if it drifted
+	// out of range in flight, and one that drifted in only after firing is not.
+	const candKeys = new Set();
+	const liveCand = rec.interest.getCandidates(shooterKey);
+	if (liveCand !== undefined) for (const k of liveCand) if (k !== shooterKey) candKeys.add(k);
+	// The geometric gate compares ring positions against the interest radius, so
+	// it is only sound when the ring records the SAME position the interest set
+	// uses (the default, where hitTest.position falls back to interest.position).
+	// A custom hitTest.position in another space, or a null rewound center, skips
+	// the gate and falls back to the receipt-time membership.
+	const gateInRingSpace = rec.cfg.hitTest.position === rec.cfg.interest.position;
+	const shooterAt = gateInRingSpace ? rec.lagComp.sample(shooterKey, rewindAt) : null;
+	let world;
+	if (shooterAt === null) {
+		if (candKeys.size === 0) return;
+		world = rec.lagComp.rewind(candKeys, rewindAt);
+	} else {
+		const radius = rec.interest.radius;
+		// Also broadphase the departed shell - entities near the shooter's rewound
+		// position the receipt-time set no longer lists (they left in flight). The
+		// exact gate below trims it back, so over-pulling is safe.
+		const near = rec.interest.candidatesAt(shooterAt.x, shooterAt.y, radius * 2);
+		for (let i = 0; i < near.length; i++) if (near[i] !== shooterKey) candKeys.add(near[i]);
+		if (candKeys.size === 0) return;
+		world = rec.lagComp.rewindWithin(candKeys, rewindAt, shooterAt.x, shooterAt.y, radius * radius);
+	}
+	if (world.size === 0) return;
+	// Shot geometry from the shooter's CURRENT state: only the targets rewind. A
+	// throw on malformed state drops the shot (favor-defender miss).
+	let origin, dir;
+	try {
+		origin = ht.shot.origin(cmd, shooterEntity.state);
+		dir = _shotUnitDir(ht.shot.dir(cmd, shooterEntity.state));
+	} catch {
+		return;
+	}
+	if (origin === null || typeof origin !== 'object' || !Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return;
+	if (dir === null) return;
+	const maxDist = ht.shot.maxDist;
+	const useResolve = typeof ht.resolve === 'function';
+	// Broadphase distance cull, defaulting to maxDist plus the hitbox's own reach
+	// so a target centred just past maxDist can still be struck on its near edge.
+	const hitboxReach = useResolve
+		? Infinity
+		: ht.hitbox.shape === 'circle'
+			? ht.hitbox.radius
+			: 0.5 * Math.sqrt(ht.hitbox.w * ht.hitbox.w + ht.hitbox.h * ht.hitbox.h);
+	const bpMaxDist = ht.broadphase && ht.broadphase.maxDist ? ht.broadphase.maxDist : maxDist + hitboxReach;
+	const bpMaxSq = bpMaxDist * bpMaxDist;
+	const cone = ht.broadphase ? ht.broadphase.cone : undefined;
+	const shot = { origin, dir, maxDist };
+	// The shoot ctx is per-shot (not per-target): applyTo (authoritative cross-
+	// entity mutation) and emitEvent (the hit signal) are plain locals.
+	let armed = false;
+	const pendingEvents = [];
+	const shootCtx = {
+		identity: shooterKey,
+		platform: ctxPlatform,
+		applyTo(victimKey, victimCmd) {
+			if (typeof victimKey !== 'string') return false;
+			if (rec.authority.inject(victimKey, victimCmd)) {
+				armed = true;
+				return true;
+			}
+			return false;
+		},
+		emitEvent(type, data, opts) {
+			if (typeof type !== 'string') return;
+			pendingEvents.push({ type, data, opts });
+		}
+	};
+	// Broadphase cull + narrowphase per candidate, nearest-first. Penetration is
+	// ON by default: every aligned candidate is hit unless onHit returns { stop: true }.
+	const hits = [];
+	for (const [key, s] of world) {
+		const vx = s.x - origin.x;
+		const vy = s.y - origin.y;
+		const distSq = vx * vx + vy * vy;
+		if (distSq > bpMaxSq) continue;
+		if (cone !== undefined && cone !== null && distSq > 0) {
+			if ((vx * dir.x + vy * dir.y) / Math.sqrt(distSq) < cone) continue;
+		}
+		let hit;
+		if (useResolve) {
+			hit = ht.resolve(shot, { key, pos: { x: s.x, y: s.y }, state: s.state }, shootCtx);
+		} else if (ht.hitbox.shape === 'circle') {
+			hit = rayCircleHit(origin.x, origin.y, dir.x, dir.y, maxDist, s.x, s.y, ht.hitbox.radius);
+		} else {
+			hit = rayAabbHit(origin.x, origin.y, dir.x, dir.y, maxDist, s.x, s.y, ht.hitbox.w, ht.hitbox.h);
+		}
+		if (hit !== null && hit !== undefined && Number.isFinite(hit.dist)) {
+			hits.push({ key, pos: { x: s.x, y: s.y }, state: s.state, dist: hit.dist, point: hit.point, fallback: s.fallback });
+		}
+	}
+	if (hits.length === 0) return;
+	hits.sort((a, b) => a.dist - b.dist);
+	for (let i = 0; i < hits.length; i++) {
+		const h = hits[i];
+		const target = { key: h.key, pos: h.pos, state: h.state };
+		const info = { dist: h.dist, point: h.point, fraction: maxDist > 0 ? h.dist / maxDist : 0, rewindAt, fallback: h.fallback };
+		const verdict = await ht.onHit(shootCtx, target, info);
+		if (verdict && verdict.stop) break;
+	}
+	// onHit may have awaited; if the topic was forgotten or this instance lost
+	// ownership meanwhile, do not publish the events or arm a dead/demoted record.
+	if (_smoothTopics.get(name) !== rec || (cluster && !rec.owned)) return;
+	for (let i = 0; i < pendingEvents.length; i++) {
+		const pe = pendingEvents[i];
+		const wire = {
+			type: pe.type,
+			key: pe.opts && typeof pe.opts.key === 'string' ? pe.opts.key : shooterKey,
+			data: pe.data,
+			id: ++rec.shootEventSeq
+		};
+		_smoothPublish(rec, 'event', wire, undefined);
+		if (cluster && typeof cluster.relayBroadcast === 'function') {
+			cluster.relayBroadcast(rec.wireTopic, 'event', wire, undefined, rec.eventSeq++);
+		}
+	}
+	if (armed) _armSmoothTick(rec);
 }
 
 /**
@@ -1404,263 +1686,46 @@ export const _smoothRegister = function smooth(config) {
 		// No live record, or hit testing off: nothing to resolve. (Defense in depth -
 		// the RPC is only registered when hitTest is configured.)
 		if (rec === undefined || rec.lagComp === null) return;
-		// The ring and the authoritative catalog live only on the ticking owner. A
-		// non-owner shooter's shot is forwarded to the owner in a later step; until
-		// then it is inert on a non-owning instance (never resolved against an empty
-		// local ring, which would be a silent miss).
-		const cluster = ctx.platform && ctx.platform.smooth;
-		if (cluster && !rec.owned) return;
 		const shooterKey = _getIdentityKey(ctx);
+		const cluster = ctx.platform && ctx.platform.smooth;
+		if (cluster && !rec.owned) {
+			// EDGE: this instance does not own the ring (the authoritative catalog and
+			// the history ring live on the owner). Measure latency against the
+			// reconstructed owner clock, run the replay defense, and forward the
+			// bounded DURATIONS (reach width + rewind age) to the owner, which resolves
+			// the shot on its own ring axis - never re-measuring across the hop, which
+			// would fold the inter-instance latency into the reach. Inert when the
+			// coordinator predates relayShoot (an older extensions build): the shot
+			// stays a no-op, exactly as it did before forwarded shots existed.
+			if (typeof cluster.relayShoot !== 'function') return;
+			const fwd = _smoothEdgeMeasure(rec, ctx, payload, shooterKey, _edgeOwnerNow(rec));
+			if (fwd === null) return; // a replayed / older render-time, dropped at the edge
+			cluster.relayShoot(rec.wireTopic, shooterKey, cluster.instanceId, {
+				cmd: fwd.cmd,
+				reach: fwd.reach,
+				rewindAge: fwd.rewindAge,
+				...(fwd.detect && { detect: fwd.detect })
+			});
+			return;
+		}
+		// OWNER / single instance: this instance holds the ring. Measure against the
+		// local wall clock and resolve the shot here.
 		const shooterEntity = rec.authority.get(shooterKey);
 		if (shooterEntity === undefined) return; // a shooter with no entity cannot aim
 		const ht = rec.cfg.hitTest;
-		const cmd = payload.cmd;
-		const now = wallEpoch();
-		// The ring is keyed on a monotonic axis, so the rewind works on that axis too:
-		// `nowMono` is the present on it and `monoCorr` (the wall->monotonic offset, zero
-		// in normal operation) maps the client's wall-axis render-time onto it.
-		const nowMono = rec.monoClock.mono(now);
-		const monoCorr = nowMono - now;
-		// Rewind DIRECTLY to the client's absolute synced-clock renderTime (idTech3-
-		// faithful) - reconstructing `now - rtt` at receipt would re-add the uplink leg
-		// and under-compensate. The client proposes WHERE in time; the server bounds HOW
-		// WIDE the window may be from latency it measures itself. A missing / non-finite
-		// stamp resolves at the present (favor defender).
-		const rtStamp = payload.rt;
-		let rewindAt = nowMono;
-		if (typeof rtStamp === 'number' && Number.isFinite(rtStamp)) {
-			// Per-connection server-anchored latency: the client echoed the latest
-			// server stamp it saw (ackT); roundTrip = now - ackT, BOTH ends server wall
-			// times, so the client cannot fake a lower latency (only inflate it, which
-			// costs real responsiveness and is bounded below by the policy cap). Feed
-			// this shot's own sample first so even a first shot self-seeds its reach.
-			let st = ctx.ws ? _lcRtt.get(ctx.ws) : undefined;
-			if (ctx.ws && st === undefined) {
-				st = { tracker: createRttTracker(), lastRt: -Infinity };
-				_lcRtt.set(ctx.ws, st);
-			}
-			// Map the wall-axis render-time onto the ring's monotonic axis up front, so the
-			// replay defense, the latch, AND the rewind all live on that one axis. A server
-			// wall backstep steps the client's synced render-time DOWN by the same offset, so
-			// the raw stamp would look like it moved backward; on the monotonic axis it stays
-			// continuous (rtMono = the stepped-down stamp + the absorbed offset). monoCorr is
-			// zero in normal operation, so rtMono == rtStamp and nothing below changes.
-			const rtMono = rtStamp + monoCorr;
-			// Replay defense: a real rendered instant only advances, so a renderTime OLDER
-			// than the last accepted one (a captured shot resent to re-resolve an old enemy
-			// lineup) is dropped. Strict `<` admits an EQUAL stamp: a shotgun's pellets / a
-			// burst fired in one frame share the same render-time and must all resolve. A
-			// replay of a stale lineup is strictly older once the shooter has fired since, so
-			// it is still rejected. One number per connection, on the monotonic axis - so a
-			// wall backstep (which steps the raw stamp down) is not mistaken for a replay.
-			if (st && rtMono < st.lastRt) return;
-			const ackT = payload.ackT;
-			if (st && typeof ackT === 'number' && Number.isFinite(ackT) && ackT <= now && now - ackT <= ht.maxRewindMs) {
-				// Uplink is a wall-axis duration (ackT is a server wall stamp); rotate the
-				// bucket window on the monotonic axis so a wall backstep cannot disturb it.
-				st.tracker.sample((now - ackT) / 2, nowMono);
-			}
-			// Favor-the-shooter reach width = measured uplink (max-of-recent, so a latency
-			// spike never clamps an honest shot) + the client's interpolation delay. BOTH
-			// legs are now server-measured: the uplink from the ackT round trips, and the
-			// interp delay from how often the server sends THIS shooter frames (the same
-			// cadence the client measures to set its render delay). So a sparsely-served
-			// shooter, which legitimately renders further in the past, gets the wider reach
-			// it needs instead of clamping short - while a densely-served low-latency shooter
-			// stays tight (cadence == tick rate) and cannot borrow a laggy player's budget.
-			// All clamped to the policy cap.
-			const maxUp = st ? st.tracker.maxUplink() : null;
-			const serverInterp = rec.interest.interpDelayMs(shooterKey, rec.tickMs, now);
-			const reach = maxUp === null ? ht.maxRewindMs : Math.min(ht.maxRewindMs, maxUp + serverInterp);
-			// Clamp the mapped render-time into the rewind window. `min(rtMono, nowMono)`
-			// caps an over-mapped stamp (the brief post-backstep window before the client
-			// re-syncs to the stepped clock) to the present - favor defender, never a read
-			// outside the ring.
-			rewindAt = Math.max(nowMono - reach, Math.min(rtMono, nowMono));
-			// Latch the clamped monotonic value: a one-off future/overshooting renderTime is
-			// bounded by `min(rtMono, nowMono)` so it cannot strand subsequent honest shots
-			// behind an inflated floor, and because the floor lives on the monotonic axis a
-			// wall backstep (which steps the raw stamp down) does not read as a replay.
-			if (st) st.lastRt = Math.max(st.lastRt, Math.min(rtMono, nowMono));
-			// Detection signal (opt-in, off by default): surface the per-shot latency picture
-			// to an app/anti-cheat callback. The discriminating lag-switch tell is the
-			// divergence between the un-inflatable floor (minUplink) and the reach-driving max
-			// (maxUplink), plus an abrupt floor jump the app derives from the minUplink series -
-			// NOT the raw clamp rate (honest jittery/mobile players clamp routinely). This
-			// subsystem only emits; detection action lives in the app's module. A throwing hook
-			// never affects the shot (observability only).
-			if (ht.detectionHook !== undefined && st) {
-				const minUp = st.tracker.minUplink();
-				try {
-					ht.detectionHook({
-						identity: shooterKey,
-						minUplink: minUp,
-						maxUplink: maxUp,
-						reach,
-						interpDelay: serverInterp,
-						divergence: minUp !== null && maxUp !== null ? maxUp - minUp : 0
-					});
-				} catch {
-					/* observability only */
-				}
+		const m = _smoothEdgeMeasure(rec, ctx, payload, shooterKey, wallEpoch());
+		if (m === null) return;
+		// Detection signal (opt-in): fire from this shot's locally-measured picture.
+		// A throwing hook never affects the shot.
+		if (ht.detectionHook !== undefined && m.detect) {
+			try {
+				ht.detectionHook({ ...m.detect, identity: shooterKey });
+			} catch {
+				/* observability only */
 			}
 		}
-		// Candidate set, gated at the REWIND instant rather than at receipt. The shooter
-		// aimed at the world it saw when it fired (rewindAt), so membership belongs there:
-		// a target that drifted out of the shooter's area of interest while the shot was in
-		// flight is still a valid hit (it was replicated when fired - the honest miss the
-		// receipt-time gate dropped), and one that drifted IN only after the shot was fired
-		// is not (it was never replicated at that instant). Both reduce to one geometric
-		// test on historical positions: in-gate iff dist(shooter, target) <= interest
-		// radius, both sampled at rewindAt. The transmit-bit guarantee is unchanged - you
-		// still cannot hit what the shooter never had - it is just evaluated at the right
-		// time. The set is server-computed; the client supplies no candidate list.
-		const candKeys = new Set();
-		const liveCand = rec.interest.getCandidates(shooterKey);
-		if (liveCand !== undefined) for (const k of liveCand) if (k !== shooterKey) candKeys.add(k);
-		// The geometric gate compares ring positions against the interest radius, so it is
-		// only sound when the ring records the SAME position the interest membership uses.
-		// That holds on the default path (hitTest.position falls back to interest.position,
-		// same reference); a custom hitTest.position in a different coordinate space would
-		// make the gate mix spaces, so there we skip it and fall back to the receipt-time
-		// membership (interest-space correct, just not rewindAt-precise). A null sample
-		// (shooter just spawned, pre-history, or a ring discontinuity at rewindAt) also
-		// has no usable rewound center, so it takes the same fallback.
-		const gateInRingSpace = rec.cfg.hitTest.position === rec.cfg.interest.position;
-		const shooterAt = gateInRingSpace ? rec.lagComp.sample(shooterKey, rewindAt) : null;
-		let world;
-		if (shooterAt === null) {
-			// No usable rewound gate: fall back to the receipt-time membership ungated -
-			// never worse than the pre-gate behavior.
-			if (candKeys.size === 0) return;
-			world = rec.lagComp.rewind(candKeys, rewindAt);
-		} else {
-			const radius = rec.interest.radius;
-			// Also broadphase the departed shell: entities near the shooter's rewound
-			// position that the receipt-time set no longer lists (they left during the
-			// flight window). A target must cross a full interest radius within the rewind
-			// window (<= maxRewindMs) to escape the doubled query - implausible for a radius
-			// sized to the arena - and the exact gate below trims the broadphase back to the
-			// true membership, so over-pulling is safe; under-pulling is the only real risk.
-			const near = rec.interest.candidatesAt(shooterAt.x, shooterAt.y, radius * 2);
-			for (let i = 0; i < near.length; i++) if (near[i] !== shooterKey) candKeys.add(near[i]);
-			if (candKeys.size === 0) return;
-			world = rec.lagComp.rewindWithin(candKeys, rewindAt, shooterAt.x, shooterAt.y, radius * radius);
-		}
-		if (world.size === 0) return;
-		// Shot geometry from the shooter's CURRENT state: only the targets rewind, the
-		// shooter fires from where the server says it is. The app's origin/dir are
-		// guarded like the ring's position() (lagcomp.record): a throw on malformed
-		// state drops the shot (favor-defender miss) rather than rejecting the handler.
-		let origin, dir;
-		try {
-			origin = ht.shot.origin(cmd, shooterEntity.state);
-			dir = _shotUnitDir(ht.shot.dir(cmd, shooterEntity.state));
-		} catch {
-			return;
-		}
-		if (origin === null || typeof origin !== 'object' || !Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return;
-		if (dir === null) return;
-		const maxDist = ht.shot.maxDist;
-		const useResolve = typeof ht.resolve === 'function';
-		// Broadphase distance cull. The narrowphase accepts a hit whose ray ENTRY is
-		// within maxDist, but a hitbox reaches one radius (or half-diagonal) past its
-		// centre - so a target centred just beyond maxDist can still be struck on its
-		// near edge. Default the cull to maxDist + that reach so it never drops a valid
-		// hit; for a custom resolve (unknown reach) skip the distance cull entirely
-		// unless the app set an explicit broadphase.maxDist.
-		const hitboxReach = useResolve
-			? Infinity
-			: ht.hitbox.shape === 'circle'
-				? ht.hitbox.radius
-				: 0.5 * Math.sqrt(ht.hitbox.w * ht.hitbox.w + ht.hitbox.h * ht.hitbox.h);
-		const bpMaxDist = ht.broadphase && ht.broadphase.maxDist ? ht.broadphase.maxDist : maxDist + hitboxReach;
-		const bpMaxSq = bpMaxDist * bpMaxDist;
-		const cone = ht.broadphase ? ht.broadphase.cone : undefined;
-		const shot = { origin, dir, maxDist };
-		// Build the shoot ctx once (it is per-shot, not per-target): the seam where
-		// `applyTo` (authoritative cross-entity mutation) and `emitEvent` (the hit
-		// signal) are plain locals, never threaded through the authority's time-pure
-		// synchronous apply ctx.
-		let armed = false;
-		const pendingEvents = [];
-		const shootCtx = {
-			identity: shooterKey,
-			platform: ctx.platform,
-			// Apply a server-initiated command to any entity: a non-commanded update
-			// (broadcast to all incl. the victim, no ack), via the adapter authority's
-			// inject primitive. The victim's predictor is undisturbed (its ack
-			// watermark never moves); it sees the change through the normal broadcast.
-			applyTo(victimKey, victimCmd) {
-				if (typeof victimKey !== 'string') return false;
-				if (rec.authority.inject(victimKey, victimCmd)) {
-					armed = true;
-					return true;
-				}
-				return false;
-			},
-			// Queue a discrete one-shot event (a hit) for broadcast after resolution.
-			emitEvent(type, data, opts) {
-				if (typeof type !== 'string') return;
-				pendingEvents.push({ type, data, opts });
-			}
-		};
-		// Broadphase cull + narrowphase per candidate, collecting hits to order
-		// nearest-first. Penetration is ON by default: every aligned candidate is hit
-		// unless the app stops after the nearest by returning `{ stop: true }`.
-		const hits = [];
-		for (const [key, s] of world) {
-			const vx = s.x - origin.x;
-			const vy = s.y - origin.y;
-			const distSq = vx * vx + vy * vy;
-			if (distSq > bpMaxSq) continue;
-			if (cone !== undefined && cone !== null && distSq > 0) {
-				if ((vx * dir.x + vy * dir.y) / Math.sqrt(distSq) < cone) continue;
-			}
-			let hit;
-			if (useResolve) {
-				hit = ht.resolve(shot, { key, pos: { x: s.x, y: s.y }, state: s.state }, shootCtx);
-			} else if (ht.hitbox.shape === 'circle') {
-				hit = rayCircleHit(origin.x, origin.y, dir.x, dir.y, maxDist, s.x, s.y, ht.hitbox.radius);
-			} else {
-				hit = rayAabbHit(origin.x, origin.y, dir.x, dir.y, maxDist, s.x, s.y, ht.hitbox.w, ht.hitbox.h);
-			}
-			if (hit !== null && hit !== undefined && Number.isFinite(hit.dist)) {
-				hits.push({ key, pos: { x: s.x, y: s.y }, state: s.state, dist: hit.dist, point: hit.point, fallback: s.fallback });
-			}
-		}
-		if (hits.length === 0) return;
-		hits.sort((a, b) => a.dist - b.dist);
-		for (let i = 0; i < hits.length; i++) {
-			const h = hits[i];
-			const target = { key: h.key, pos: h.pos, state: h.state };
-			const info = { dist: h.dist, point: h.point, fraction: maxDist > 0 ? h.dist / maxDist : 0, rewindAt, fallback: h.fallback };
-			const verdict = await ht.onHit(shootCtx, target, info);
-			if (verdict && verdict.stop) break;
-		}
-		// The app's onHit may have awaited. If the topic was forgotten (its last
-		// entity left) or this instance lost ownership in that window, do not publish
-		// the events or arm a tick on a dead or demoted record.
-		if (_smoothTopics.get(name) !== rec || (cluster && !rec.owned)) return;
-		// Broadcast the hit events. A shot bypasses the prediction ring, so there is
-		// no optimistic client copy to suppress: the event reaches everyone, the
-		// shooter (its hit marker) and the victim alike. The wire frame carries only
-		// {type,key,data,id}, exactly as the tick's event broadcast does.
-		for (let i = 0; i < pendingEvents.length; i++) {
-			const pe = pendingEvents[i];
-			const wire = {
-				type: pe.type,
-				key: pe.opts && typeof pe.opts.key === 'string' ? pe.opts.key : shooterKey,
-				data: pe.data,
-				id: ++rec.shootEventSeq
-			};
-			_smoothPublish(rec, 'event', wire, undefined);
-			if (cluster && typeof cluster.relayBroadcast === 'function') {
-				cluster.relayBroadcast(rec.wireTopic, 'event', wire, undefined, rec.eventSeq++);
-			}
-		}
-		// Arm the tick so the injected damage drains and broadcasts this frame.
-		if (armed) _armSmoothTick(rec);
+		const rewindAt = _smoothRewindAt(m.nowMono, m.reach, m.rewindAge);
+		await _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctx.platform, m.cmd, rewindAt);
 	});
 
 	return smoothExport;
