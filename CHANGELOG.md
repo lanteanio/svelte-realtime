@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.15] - 2026-06-21
+
+### Changed
+
+- **Internal: the server-side lag-compensation foundation for `live.smooth()` (off by default, no public surface yet).** Groundwork for resolving a shot against where a target actually was on the shooter's screen, rather than where it has since moved to. A per-entity position-history ring records each entity's authoritative position every tick (extracted scalar coordinates plus a snap-to-previous state reference, so a rewind reads the time-correct stance while the framework only ever interpolates position); a rewind read bracket-interpolates between the two surrounding records, never extrapolates, fails safe to the current position outside its window, and aborts for an entity whose path straddles a teleport (a respawn must never resolve a shot against the post-warp position). The candidate set for a rewind is gated by the existing area-of-interest relevancy - you cannot rewind or hit an entity that was never replicated to you - so the security boundary is the same set that already governs delivery. The ring is fed each authoritative tick and dropped at every entity-removal site, and is entirely inert unless a topic opts in: the broadcast hot path and the wire are byte-identical when it is off. The public hit-resolution surface builds on this in a later release.
+
 ## [0.6.0-next.14] - 2026-06-20
 
 ### Added
