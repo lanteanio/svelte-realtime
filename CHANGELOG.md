@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.17] - 2026-06-21
+
+### Changed
+
+- **`live.smooth({ hitTest })` now bounds each shot's rewind to the shooter's server-measured latency, and defaults to a competitive rewind window.** Previously a shot rewound to the client's proposed render-time clamped only to a flat `maxRewindMs`. The server now derives a per-connection rewind window from latency it measures itself: the client echoes a server-authored stamp on the shot (`ackT`, requires `svelte-adapter-uws >= 0.6.0-next.29`), the server computes the round trip as `now - ackT` (both ends server wall times), and tracks the recent maximum (the favor-the-shooter reach, so a latency spike never clamps an honest hit) and minimum (an un-inflatable floor). The shot's render-time is the proposal of WHERE in time to rewind; the server bounds HOW WIDE the window may be - a client can inflate its measured latency only by genuinely lagging (which costs responsiveness), never fake a lower one, so a low-latency shooter can no longer borrow a laggy player's rewind budget. A replayed render-time (a captured shot resent to re-resolve an old enemy lineup) is rejected: render-time only advances per connection. **The `maxRewindMs` default changes from 1000ms to 100ms** - competitive and defender-friendly, suited to a ~60Hz topic: it fully compensates good connections (uplink plus the interpolation delay) while bounding the "shot around the corner" the defender eats to about one body-width at fast-game speeds. Raise it to favor the shooter or to support a high-ping community; keep it at or above one interpolation delay (~`2 x tickMs`). Off by default and byte-identical when `hitTest` is off; without the adapter `ackT` echo it degrades to the flat `maxRewindMs` clamp.
+
 ## [0.6.0-next.16] - 2026-06-21
 
 ### Added

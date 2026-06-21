@@ -1878,6 +1878,68 @@ describe('live.smooth lag-compensated shoot', () => {
 		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
 	});
 
+	it('rejects a strictly-older renderTime (stale-lineup replay defense)', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+
+		const fireRt = Date.now();
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: fireRt }]);
+		expect(rt.calls.inject).toHaveLength(1);
+		// A captured shot resent with an OLDER render-time (re-resolving a stale enemy
+		// lineup) is dropped - a real rendered instant only advances.
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: fireRt - 50 }]);
+		expect(rt.calls.inject).toHaveLength(1);
+	});
+
+	it('admits a same-instant burst: pellets sharing one render-time all resolve', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+
+		// A shotgun fires N pellets in one frame; every pellet carries the same
+		// render-time. The replay guard must admit the equal stamp (only an OLDER one
+		// is a replay), so all pellets resolve.
+		const burstRt = Date.now();
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: burstRt }]);
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: burstRt }]);
+		expect(rt.calls.inject).toHaveLength(2);
+	});
+
+	it('holds a low-latency shooter (fresh ackT) to its measured reach, not the full window', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// On the ray only in the oldest records; off it since.
+		const tOnRay = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 300 });
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 300 });
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 300 });
+
+		// A fresh ackT (echoing the latest server stamp) measures ~zero uplink, so the
+		// reach is just the server-derived interp (~40ms at tickMs 20) - far short of
+		// the ~84ms back where the target was on the ray. The renderTime is clamped to
+		// the tight window edge (off-ray) -> MISS. The same renderTime with no ackT
+		// (the prior test's full-window behaviour) would reach back and hit.
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tOnRay, ackT: Date.now() }]);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
 	it('clamps a hostile far-past renderTime to the window (fails safe to current state)', async () => {
 		const { name } = hitShape();
 		const p = paths(name);

@@ -5,6 +5,7 @@ import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
 import { createInterestState } from './interest.js';
 import { createLagComp, rayCircleHit, rayAabbHit } from './lagcomp.js';
+import { createRttTracker } from './rtt.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); smooth registration reaches it through this, set at
@@ -144,6 +145,17 @@ export const _smoothTopics = new Map();
  * WeakSet: closed sockets stay collectable.
  */
 export const _smoothClosedWs = new WeakSet();
+
+/**
+ * Per-connection lag-compensation latency state, keyed by socket. Holds the
+ * server-anchored round-trip tracker (how far back this connection may rewind)
+ * and `lastRt` (the last accepted render-time, for replay rejection). Latency is
+ * a property of the connection, not the topic, so it lives here rather than on a
+ * topic record. WeakMap: state is dropped when the socket is collected, no manual
+ * teardown. `{ tracker, lastRt }`.
+ * @type {WeakMap<object, { tracker: ReturnType<typeof createRttTracker>, lastRt: number }>}
+ */
+const _lcRtt = new WeakMap();
 
 /**
  * The reserved wire-topic prefix (`__smooth:`), captured from the loaded
@@ -998,7 +1010,16 @@ function _validateHitTest(ht, interest) {
 	if (ht.position !== undefined && typeof ht.position !== 'function') {
 		throw new Error('[svelte-realtime] live.smooth() hitTest.position must be a function (state) => ({ x, y }) | null');
 	}
-	const maxRewindMs = ht.maxRewindMs === undefined ? 1000 : ht.maxRewindMs;
+	// The defender-protection cap: the furthest back any shot may rewind, i.e. the
+	// worst-case "shot around the corner" a defender can eat. This is the
+	// security-critical knob (a latency-faker can at most look like a real player at
+	// this latency). Default 100ms is competitive/defender-friendly and suits a ~60Hz
+	// topic - it fully compensates good connections (uplink + ~32ms interp) while
+	// bounding peeker's advantage to ~one body-width at fast-game speeds. Raise it to
+	// favor the shooter / support a high-ping community (the casual default was 1000);
+	// it should stay >= one interpolation delay (~2x tickMs) or honest players whose
+	// interp buffer alone exceeds the window clamp every shot.
+	const maxRewindMs = ht.maxRewindMs === undefined ? 100 : ht.maxRewindMs;
 	if (!(typeof maxRewindMs === 'number' && Number.isFinite(maxRewindMs) && maxRewindMs > 0)) {
 		throw new Error('[svelte-realtime] live.smooth() hitTest.maxRewindMs must be a positive number');
 	}
@@ -1368,17 +1389,50 @@ export const _smoothRegister = function smooth(config) {
 		const ht = rec.cfg.hitTest;
 		const cmd = payload.cmd;
 		const now = wallEpoch();
-		// Decision A (idTech3-faithful): trust the client's absolute synced-clock
-		// renderTime, clamped to the policy window. Rewinding directly to it is
-		// correct; reconstructing `now - rt` at receipt would re-add the uplink leg
-		// and under-compensate. A missing / non-finite stamp falls back to the
-		// current instant (the server RTT cross-check that hardens a hostile stamp
-		// is a later step).
+		// Decision A (idTech3-faithful): rewind DIRECTLY to the client's absolute
+		// synced-clock renderTime - reconstructing `now - rtt` at receipt would re-add
+		// the uplink leg and under-compensate. The client proposes WHERE in time; the
+		// server bounds HOW WIDE the window may be from latency it measures itself. A
+		// missing / non-finite stamp resolves at the present (favor defender).
 		const rtStamp = payload.rt;
-		const rewindAt =
-			typeof rtStamp === 'number' && Number.isFinite(rtStamp)
-				? Math.max(now - ht.maxRewindMs, Math.min(rtStamp, now))
-				: now;
+		let rewindAt = now;
+		if (typeof rtStamp === 'number' && Number.isFinite(rtStamp)) {
+			// Per-connection server-anchored latency: the client echoed the latest
+			// server stamp it saw (ackT); roundTrip = now - ackT, BOTH ends server wall
+			// times, so the client cannot fake a lower latency (only inflate it, which
+			// costs real responsiveness and is bounded below by the policy cap). Feed
+			// this shot's own sample first so even a first shot self-seeds its reach.
+			let st = ctx.ws ? _lcRtt.get(ctx.ws) : undefined;
+			if (ctx.ws && st === undefined) {
+				st = { tracker: createRttTracker(), lastRt: -Infinity };
+				_lcRtt.set(ctx.ws, st);
+			}
+			// Replay defense: a real rendered instant only advances, so a renderTime
+			// OLDER than the last accepted one (a captured shot resent to re-resolve an
+			// old enemy lineup) is dropped. Strict `<` admits an EQUAL stamp: a shotgun's
+			// pellets / a burst fired in one frame share the same render-time and must all
+			// resolve. A replay of a stale lineup is strictly older once the shooter has
+			// fired since, so it is still rejected. One number per connection.
+			if (st && rtStamp < st.lastRt) return;
+			const ackT = payload.ackT;
+			if (st && typeof ackT === 'number' && Number.isFinite(ackT) && ackT <= now && now - ackT <= ht.maxRewindMs) {
+				st.tracker.sample((now - ackT) / 2, now);
+			}
+			// Favor-the-shooter reach width = measured uplink (max-of-recent, so a
+			// latency spike never clamps an honest shot) + the server's estimate of the
+			// client interpolation delay (2x the tick cadence, the interpolator's own
+			// formula), clamped to the policy cap. With a tight maxRewindMs a generous
+			// claim saturates to the cap; with a generous one this tightens a
+			// low-latency shooter so it cannot borrow a laggy player's rewind budget.
+			const maxUp = st ? st.tracker.maxUplink() : null;
+			const serverInterp = Math.min(250, Math.max(32, 2 * rec.tickMs));
+			const reach = maxUp === null ? ht.maxRewindMs : Math.min(ht.maxRewindMs, maxUp + serverInterp);
+			rewindAt = Math.max(now - reach, Math.min(rtStamp, now));
+			// Latch the clamped, monotonic value (not the raw stamp): a one-off
+			// future/overshooting renderTime is bounded by `min(rtStamp, now)` here so it
+			// cannot strand subsequent honest shots behind an inflated floor.
+			if (st) st.lastRt = Math.max(st.lastRt, Math.min(rtStamp, now));
+		}
 		// Candidate set = what the shooter currently has replicated (the relevancy /
 		// transmit-bit gate), minus self. You cannot rewind or hit an entity that was
 		// never sent to you (credo-5 default-deny). The set is server-computed; the
@@ -1391,10 +1445,17 @@ export const _smoothRegister = function smooth(config) {
 		const world = rec.lagComp.rewind(candidates, rewindAt);
 		if (world.size === 0) return;
 		// Shot geometry from the shooter's CURRENT state: only the targets rewind, the
-		// shooter fires from where the server says it is.
-		const origin = ht.shot.origin(cmd, shooterEntity.state);
+		// shooter fires from where the server says it is. The app's origin/dir are
+		// guarded like the ring's position() (lagcomp.record): a throw on malformed
+		// state drops the shot (favor-defender miss) rather than rejecting the handler.
+		let origin, dir;
+		try {
+			origin = ht.shot.origin(cmd, shooterEntity.state);
+			dir = _shotUnitDir(ht.shot.dir(cmd, shooterEntity.state));
+		} catch {
+			return;
+		}
 		if (origin === null || typeof origin !== 'object' || !Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return;
-		const dir = _shotUnitDir(ht.shot.dir(cmd, shooterEntity.state));
 		if (dir === null) return;
 		const maxDist = ht.shot.maxDist;
 		const useResolve = typeof ht.resolve === 'function';
