@@ -342,3 +342,87 @@ describe('candidatesAt (lag-comp candidate broadphase)', () => {
 		expect(got).toEqual(expected.sort());
 	});
 });
+
+describe('send cadence (lag-comp interpolation-delay estimate)', () => {
+	it('seeds the delay at twice the tick rate for an unknown subscriber', () => {
+		const state = createInterestState({ radius: 100, position });
+		expect(state.interpDelayMs('nobody', 20)).toBe(40); // clamp(2*20, 32, 250)
+	});
+
+	it('a tick-rate cadence holds the delay at twice the tick (the dense path stays put)', () => {
+		const state = createInterestState({ radius: 100, position });
+		for (let t = 1000; t <= 1200; t += 20) state.noteSend('A', t, 20);
+		expect(state.interpDelayMs('A', 20)).toBe(40); // every-tick sends -> no widening
+	});
+
+	it('a sparse cadence widens the delay toward twice the send interval', () => {
+		const sparse = createInterestState({ radius: 100, position });
+		const dense = createInterestState({ radius: 100, position });
+		for (let t = 1000, i = 0; i < 20; i++, t += 80) sparse.noteSend('A', t, 20); // every 4 ticks
+		for (let t = 1000, i = 0; i < 20; i++, t += 20) dense.noteSend('A', t, 20); // every tick
+		expect(dense.interpDelayMs('A', 20)).toBe(40);
+		expect(sparse.interpDelayMs('A', 20)).toBeGreaterThan(120); // toward clamp(2*80,..)=160
+		expect(sparse.interpDelayMs('A', 20)).toBeLessThan(160);
+	});
+
+	it('clamps to the 32ms floor for a very fast tick', () => {
+		const state = createInterestState({ radius: 100, position });
+		expect(state.interpDelayMs('nobody', 10)).toBe(32); // 2*10 = 20 < 32
+	});
+
+	it('clamps to the 250ms ceiling for a very sparse cadence', () => {
+		const state = createInterestState({ radius: 100, position });
+		for (let t = 1000, i = 0; i < 60; i++, t += 500) state.noteSend('A', t, 20);
+		expect(state.interpDelayMs('A', 20)).toBe(250); // 2*~500 -> ceiling
+	});
+
+	it('a repeated send stamp does not perturb the cadence', () => {
+		const state = createInterestState({ radius: 100, position });
+		state.noteSend('A', 1000, 20);
+		state.noteSend('A', 1020, 20);
+		state.noteSend('A', 1020, 20); // d = 0 -> skipped
+		state.noteSend('A', 1020, 20);
+		expect(state.interpDelayMs('A', 20)).toBe(40);
+	});
+
+	it('ignores an out-of-range gap (a long pause is not a cadence signal)', () => {
+		const state = createInterestState({ radius: 100, position });
+		state.noteSend('A', 1000, 20);
+		state.noteSend('A', 1020, 20);
+		state.noteSend('A', 5000, 20); // d = 3980 >= 2000 -> skipped
+		expect(state.interpDelayMs('A', 20)).toBe(40);
+	});
+
+	it('releases a widened delay slowly on a densify (rise at once, fall no faster than the client)', () => {
+		const state = createInterestState({ radius: 100, position });
+		let t = 1000;
+		// Sparse (100ms interval) drives the delay wide; the rise is instant (attack).
+		for (let i = 0; i < 30; i++, t += 100) state.noteSend('A', t, 20);
+		expect(state.interpDelayMs('A', 20)).toBeGreaterThan(150); // toward clamp(2*100,..) = 200
+		// Densify to the tick rate. After a short dense run the delay must NOT snap to the
+		// dense target (40): it releases at most ~3% of the elapsed wall, mirroring the
+		// client's appliedDelay slew-down, so a re-densifying target's reach cannot retract
+		// ahead of the client and drop honest shots.
+		for (let i = 0; i < 5; i++, t += 20) state.noteSend('A', t, 20);
+		expect(state.interpDelayMs('A', 20)).toBeGreaterThan(150); // still wide, not snapped
+		// Partway through it is releasing - below the wide value, still above the dense target.
+		for (let i = 0; i < 100; i++, t += 20) state.noteSend('A', t, 20);
+		const mid = state.interpDelayMs('A', 20);
+		expect(mid).toBeGreaterThan(40);
+		expect(mid).toBeLessThan(150);
+		// After a long dense run it settles at the dense target.
+		for (let i = 0; i < 2000; i++, t += 20) state.noteSend('A', t, 20);
+		expect(state.interpDelayMs('A', 20)).toBeCloseTo(40, 5);
+	});
+
+	it('forgets a subscriber cadence on release and on reset', () => {
+		const state = createInterestState({ radius: 100, position });
+		for (let t = 1000, i = 0; i < 10; i++, t += 80) state.noteSend('A', t, 20);
+		expect(state.interpDelayMs('A', 20)).toBeGreaterThan(40);
+		state.releaseSubscriber('A');
+		expect(state.interpDelayMs('A', 20)).toBe(40); // back to the seed fallback
+		for (let t = 1000, i = 0; i < 10; i++, t += 80) state.noteSend('B', t, 20);
+		state.reset();
+		expect(state.interpDelayMs('B', 20)).toBe(40);
+	});
+});

@@ -57,6 +57,12 @@ export class SmoothEntity<State = any, Command = any> {
 	/** Submit one command: instant locally, authoritative on the server.
 	 * Returns the command id. */
 	command(cmd: Command): number;
+	/** Fire a shot: a fire-and-forget, non-predicted command the server resolves
+	 * against the rewound world (lag compensation on a `hitTest` topic). Unlike
+	 * `command` it never enters the prediction ring - a shot owns no entity state -
+	 * and its outcome arrives as a discrete `onEvent` (a hit), not a reconciliation.
+	 * Inert on a topic declared without `hitTest`. */
+	shoot(cmd: Command): void;
 	/** The estimated server wall-clock time - the stamp for compensated
 	 * action arguments. */
 	now(): number;

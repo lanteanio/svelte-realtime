@@ -534,12 +534,26 @@ function _smoothTick(rec) {
 		for (const [identity, ws] of rec.registry) {
 			const relSet = relevancy.get(identity);
 			if (relSet === undefined) continue;
+			let delivered = false;
 			for (const key of relSet) {
 				const u = updatesByKey.get(key);
 				if (key === identity && rec.noEcho && (u === undefined || u.commanded)) continue;
 				const state = u !== undefined ? u.state : catalogByKey.get(key);
-				if (state !== undefined) _smoothSendTo(rec, ws, 'update', { key, data: state });
+				if (state !== undefined) {
+					_smoothSendTo(rec, ws, 'update', { key, data: state });
+					// Only a REMOTE frame advances the cadence: the client discards its own
+					// entity frame before its interpolation-delay estimator (it predicts its
+					// own entity), so counting an own onMissing frame here would read a dense
+					// cadence for a sparsely-served shooter and re-introduce the honest miss.
+					if (key !== identity) delivered = true;
+				}
 			}
+			// Track this subscriber's REMOTE-frame cadence for the lag-comp reach: this is the
+			// interval the client measures to set its interpolation delay, so the server
+			// estimates that delay from its OWN send timing. Only a hitTest topic reads it
+			// (the shoot handler), so the plain-interest path pays nothing. `t` (wall) is
+			// the frame-stamp axis the client measures on.
+			if (delivered && rec.lagComp !== null) rec.interest.noteSend(identity, t, rec.tickMs);
 		}
 	}
 	for (let i = 0; i < acks.length; i++) {
@@ -1035,6 +1049,9 @@ function _validateHitTest(ht, interest) {
 	if (ht.teleportThreshold !== undefined && !(typeof ht.teleportThreshold === 'number' && ht.teleportThreshold > 0)) {
 		throw new Error('[svelte-realtime] live.smooth() hitTest.teleportThreshold must be a positive number');
 	}
+	if (ht.detectionHook !== undefined && typeof ht.detectionHook !== 'function') {
+		throw new Error('[svelte-realtime] live.smooth() hitTest.detectionHook must be a function (info) => ...');
+	}
 	return {
 		hitbox,
 		shot: { type: 'ray', origin: shot.origin, dir: shot.dir, maxDist: shot.maxDist },
@@ -1043,7 +1060,8 @@ function _validateHitTest(ht, interest) {
 		broadphase,
 		position: typeof ht.position === 'function' ? ht.position : interest.position,
 		maxRewindMs,
-		teleportThreshold: ht.teleportThreshold
+		teleportThreshold: ht.teleportThreshold,
+		detectionHook: typeof ht.detectionHook === 'function' ? ht.detectionHook : undefined
 	};
 }
 
@@ -1442,14 +1460,17 @@ export const _smoothRegister = function smooth(config) {
 				// bucket window on the monotonic axis so a wall backstep cannot disturb it.
 				st.tracker.sample((now - ackT) / 2, nowMono);
 			}
-			// Favor-the-shooter reach width = measured uplink (max-of-recent, so a
-			// latency spike never clamps an honest shot) + the server's estimate of the
-			// client interpolation delay (2x the tick cadence, the interpolator's own
-			// formula), clamped to the policy cap. With a tight maxRewindMs a generous
-			// claim saturates to the cap; with a generous one this tightens a
-			// low-latency shooter so it cannot borrow a laggy player's rewind budget.
+			// Favor-the-shooter reach width = measured uplink (max-of-recent, so a latency
+			// spike never clamps an honest shot) + the client's interpolation delay. BOTH
+			// legs are now server-measured: the uplink from the ackT round trips, and the
+			// interp delay from how often the server sends THIS shooter frames (the same
+			// cadence the client measures to set its render delay). So a sparsely-served
+			// shooter, which legitimately renders further in the past, gets the wider reach
+			// it needs instead of clamping short - while a densely-served low-latency shooter
+			// stays tight (cadence == tick rate) and cannot borrow a laggy player's budget.
+			// All clamped to the policy cap.
 			const maxUp = st ? st.tracker.maxUplink() : null;
-			const serverInterp = Math.min(250, Math.max(32, 2 * rec.tickMs));
+			const serverInterp = rec.interest.interpDelayMs(shooterKey, rec.tickMs, now);
 			const reach = maxUp === null ? ht.maxRewindMs : Math.min(ht.maxRewindMs, maxUp + serverInterp);
 			// Clamp the mapped render-time into the rewind window. `min(rtMono, nowMono)`
 			// caps an over-mapped stamp (the brief post-backstep window before the client
@@ -1461,6 +1482,28 @@ export const _smoothRegister = function smooth(config) {
 			// behind an inflated floor, and because the floor lives on the monotonic axis a
 			// wall backstep (which steps the raw stamp down) does not read as a replay.
 			if (st) st.lastRt = Math.max(st.lastRt, Math.min(rtMono, nowMono));
+			// Detection signal (opt-in, off by default): surface the per-shot latency picture
+			// to an app/anti-cheat callback. The discriminating lag-switch tell is the
+			// divergence between the un-inflatable floor (minUplink) and the reach-driving max
+			// (maxUplink), plus an abrupt floor jump the app derives from the minUplink series -
+			// NOT the raw clamp rate (honest jittery/mobile players clamp routinely). This
+			// subsystem only emits; detection action lives in the app's module. A throwing hook
+			// never affects the shot (observability only).
+			if (ht.detectionHook !== undefined && st) {
+				const minUp = st.tracker.minUplink();
+				try {
+					ht.detectionHook({
+						identity: shooterKey,
+						minUplink: minUp,
+						maxUplink: maxUp,
+						reach,
+						interpDelay: serverInterp,
+						divergence: minUp !== null && maxUp !== null ? maxUp - minUp : 0
+					});
+				} catch {
+					/* observability only */
+				}
+			}
 		}
 		// Candidate set, gated at the REWIND instant rather than at receipt. The shooter
 		// aimed at the world it saw when it fired (rewindAt), so membership belongs there:

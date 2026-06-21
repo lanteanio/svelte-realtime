@@ -2055,6 +2055,124 @@ describe('live.smooth lag-compensated shoot', () => {
 		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
 	});
 
+	it('detectionHook (opt-in) emits the per-shot latency signal and a throwing hook never breaks the shot', async () => {
+		const calls = [];
+		const { name } = hitShape(baseOnHit, {
+			detectionHook: (info) => {
+				calls.push(info);
+				throw new Error('boom'); // a throwing hook must not affect the shot (observability only)
+			}
+		});
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now(), ackT: Date.now() }]);
+		expect(calls).toHaveLength(1);
+		expect(calls[0].identity).toBe('u1');
+		expect(typeof calls[0].reach).toBe('number');
+		expect(typeof calls[0].divergence).toBe('number');
+		expect(calls[0]).toHaveProperty('minUplink');
+		expect(calls[0]).toHaveProperty('maxUplink');
+		expect(calls[0]).toHaveProperty('interpDelay');
+		// The shot still resolved despite the hook throwing.
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
+	it('a sparsely-served shooter gets the wider reach its render delay needs (LOD-aware interp)', async () => {
+		// u1's only neighbour u2 sits in a throttled LOD band, so the server sends u1 a
+		// frame only every ~5 ticks. u1's client therefore renders further in the past, and
+		// the server - measuring its OWN send cadence - widens the reach to match. A far-back
+		// shot that the flat 2*tickMs reach would clamp short (rewinding only into the recent
+		// off-ray interval) now reaches the on-ray instant and lands.
+		const { name } = declareShape({
+			tickMs: 20,
+			interest: {
+				radius: 2000,
+				position: (s) => ({ x: s.x, y: s.y }),
+				lod: [{ within: 100, rate: 1 }, { within: 2000, rate: 5 }]
+			},
+			hitTest: {
+				hitbox: { shape: 'circle', radius: 30 },
+				shot: { type: 'ray', origin: (cmd, sh) => ({ x: sh.x, y: sh.y }), dir: (cmd) => cmd.aim, maxDist: 3000 },
+				onHit: baseOnHit
+			}
+		});
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// u2 slides along the ray (y=0) in the throttled band for many ticks, so u1's measured
+		// send cadence (every ~5 ticks) widens its estimated render delay well past 2*tick. It
+		// stays on the ray through the whole rewind window older than ~60ms back.
+		for (let i = 0; i < 36; i++) await moveTick(platform, ws2, p.cmd, 'u2', { x: 500 + i * 10, y: 0 });
+		// Then u2 leaves the ray hard for the last ~60ms (3 ticks). A flat 2*tick reach (~40ms)
+		// would rewind only into this off-ray interval and miss; the widened reach (~100ms,
+		// capped by maxRewindMs) reaches back to where u2 was still on the ray and lands.
+		for (let i = 0; i < 3; i++) await moveTick(platform, ws2, p.cmd, 'u2', { x: 860, y: 400 });
+		// A far-back render-time clamps to now - reach, so the rewind lands at the reach edge:
+		// ~100ms back (on the ray) for the wide cadence, not ~40ms back (off the ray) for a flat
+		// estimate. The fresh ackT zeroes the uplink, so the reach is the interpolation leg alone.
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() - 1000, ackT: Date.now() }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
+	it('a sparse shooter that self-moves via onMissing is not mis-measured as dense (own frames excluded from cadence)', async () => {
+		// Same throttled-LOD sparse shooter as above, but now u1's OWN entity also moves
+		// every tick via onMissing (gravity/momentum - a non-commanded own update). The
+		// client discards its own frame before its interpolation-delay estimator (it
+		// predicts its own entity), so the server must too: if the own frame counted, u1's
+		// cadence would read dense (every tick) and the reach would clamp the far-back shot
+		// short. With own frames excluded, the cadence stays sparse and the shot lands.
+		const { name } = declareShape({
+			tickMs: 20,
+			interest: {
+				radius: 2000,
+				position: (s) => ({ x: s.x, y: s.y }),
+				lod: [{ within: 100, rate: 1 }, { within: 2000, rate: 5 }]
+			},
+			hitTest: {
+				hitbox: { shape: 'circle', radius: 30 },
+				shot: { type: 'ray', origin: (cmd, sh) => ({ x: sh.x, y: sh.y }), dir: (cmd) => cmd.aim, maxDist: 3000 },
+				onHit: baseOnHit
+			}
+		});
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// Arm the tick and seed the rings (u2 on the ray, in the throttled far band).
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 500, y: 0 });
+		// Each tick: u1 self-moves (own onMissing, commanded false) AND u2 slides on the ray.
+		// u2 is delivered to u1 only every ~5 ticks (far band); u1's own frame every tick.
+		for (let i = 1; i < 36; i++) {
+			rt.queueDrain({ updates: [
+				{ key: 'u1', state: { x: i, y: 0 }, ws: ws1, commanded: false },
+				{ key: 'u2', state: { x: 500 + i * 10, y: 0 }, ws: ws2, commanded: true }
+			], acks: [], idle: false });
+			await vi.advanceTimersByTimeAsync(20);
+		}
+		// u2 leaves the ray for the last ~60ms (3 ticks); u1 keeps self-moving.
+		for (let i = 0; i < 3; i++) {
+			rt.queueDrain({ updates: [
+				{ key: 'u1', state: { x: 36 + i, y: 0 }, ws: ws1, commanded: false },
+				{ key: 'u2', state: { x: 860, y: 400 }, ws: ws2, commanded: true }
+			], acks: [], idle: false });
+			await vi.advanceTimersByTimeAsync(20);
+		}
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() - 1000, ackT: Date.now() }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
 	it('resolves an identical hit stream when a recorded shot sequence is replayed (determinism)', async () => {
 		// Replaying a fixed, latency-varying shot stream over a moving board under the same
 		// seeded clock must reproduce every hit's target, distance, and rewind instant bit
@@ -2083,7 +2201,23 @@ describe('live.smooth lag-compensated shoot', () => {
 				});
 				ctx.applyTo(target.key, { damage: 10 });
 			};
-			const { name } = hitShape(onHit);
+			// LOD bands so the shooter is served at a throttled (sub-tick) cadence: the
+			// send-cadence EWMA carries a non-seed value, so the reach/rewindAt it drives is
+			// exercised and pinned by the two-pass equality rather than frozen at the seed.
+			// (The slow-release branch is covered deterministically by the cadence unit tests.)
+			const { name } = declareShape({
+				tickMs: 20,
+				interest: {
+					radius: 1000,
+					position: (s) => ({ x: s.x, y: s.y }),
+					lod: [{ within: 50, rate: 1 }, { within: 1000, rate: 3 }]
+				},
+				hitTest: {
+					hitbox: { shape: 'circle', radius: 30 },
+					shot: { type: 'ray', origin: (cmd, sh) => ({ x: sh.x, y: sh.y }), dir: (cmd) => cmd.aim, maxDist: 2000 },
+					onHit
+				}
+			});
 			const p = paths(name);
 			const platform = wirePlatform();
 			const ws1 = mockWs({ id: 'u1' });

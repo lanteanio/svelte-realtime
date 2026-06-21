@@ -5,6 +5,16 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.21] - 2026-06-21
+
+### Fixed
+
+- **A lag-compensated shot now accounts for how far in the past each shooter actually renders, so a sparsely-served shooter's honest shots are not dropped.** `live.smooth({ hitTest })` bounds a shot's rewind by `reach = measured uplink + interpolation delay`. The interpolation-delay term was a flat guess (twice the tick interval), but a client renders remote entities behind the present by an amount that tracks how often it RECEIVES frames - and a shooter whose neighbours are throttled by area-of-interest level-of-detail, or who sits in a quiet region, receives frames less often and so renders further in the past. The flat guess under-estimated that and clamped such a shooter's shots short of where it actually saw the target (an honest miss). The server now measures each shooter's own send cadence - the same interval the client measures to set its render delay - and derives the interpolation-delay term from it, so the reach matches the shooter's real render delay. Both legs of the rewind bound are now server-measured (uplink from acknowledgement round trips, interpolation from the send cadence), so neither can be forged: a densely-served low-latency shooter stays tight and cannot borrow a laggy player's budget, while a sparsely-served one gets the wider reach it genuinely needs. The estimate rises at once and falls only as fast as the client lowers its own render delay, so a target re-densifying into view does not drop honest shots during the transition. Off by default and byte-identical when `hitTest` is off.
+
+### Added
+
+- **`live.smooth({ hitTest: { detectionHook } })`: an opt-in per-shot anti-cheat signal.** When set, the framework calls `detectionHook({ identity, minUplink, maxUplink, reach, interpDelay, divergence })` once per resolved shot. The discriminating lag-switch tell is the `divergence` between the un-inflatable measured latency floor (`minUplink`) and the reach-driving recent maximum (`maxUplink`), plus an abrupt floor jump the consumer derives from the `minUplink` series - not the raw window-clamp rate, since honest jittery, mobile, or reconnecting players clamp routinely and must not be punished. This subsystem only emits the signal; the detection action (flag, kick, shadow) belongs to your own module. Off by default; a hook that throws never affects the shot.
+
 ## [0.6.0-next.20] - 2026-06-21
 
 ### Fixed

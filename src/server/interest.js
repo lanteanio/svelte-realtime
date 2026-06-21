@@ -121,6 +121,32 @@ function bandFor(bands, d2, prev) {
 }
 
 /**
+ * The adapter smoother's `targetDelay()`: twice the measured send interval, clamped
+ * to [32, 250] ms. Kept byte-identical with that formula so the server's reach
+ * estimate tracks the client's actual render delay.
+ * @param {number} intervalMs the (EWMA) interval between frames the client receives
+ */
+function targetDelayMs(intervalMs) {
+	const d = 2 * intervalMs;
+	return d < 32 ? 32 : d > 250 ? 250 : d;
+}
+
+/**
+ * Slew an applied estimate toward `target` the way the adapter smoother slews its
+ * `appliedDelay`: rise to a wider delay AT ONCE (a newly-sparse cadence must never
+ * clamp an honest shot short), but fall no faster than the client lowers its render
+ * delay - about 3% of the elapsed wall time. The asymmetry is the point: it stops a
+ * re-densifying target's reach from retracting AHEAD of the client and dropping
+ * honest shots during the multi-second window the client takes to slew down.
+ * @param {number} applied @param {number} target @param {number} elapsedMs
+ */
+function slewApplied(applied, target, elapsedMs) {
+	if (target >= applied) return target;
+	const floor = applied - elapsedMs * 0.03;
+	return target > floor ? target : floor;
+}
+
+/**
  * Create the per-topic interest state for a smooth topic that opted into
  * `interest`. Owns the spatial index, the reported-center overrides, and the
  * per-(subscriber, entity) last-band tracking that drives the LOD cadence and
@@ -144,6 +170,18 @@ export function createInterestState(interest) {
 	const centers = new Map();
 	/** @type {Map<string, Map<string, { band: number, sent: any }>>} per subscriber: entity key -> last LOD band + last-sent state */
 	const lod = new Map();
+	/**
+	 * Per subscriber: the EWMA of the interval (ms) between REMOTE frames the server
+	 * sends it (`ewma`), the last send stamp (`lastT`), and the slewed applied delay
+	 * (`applied`) that tracks the adapter smoother's `appliedDelay`. Mirrors that
+	 * estimator (same alpha, same out-of-range guard, same target + slew), so the
+	 * server estimates each shooter's client-side interpolation delay - the buffering
+	 * leg of the lag-comp reach - from a quantity it measures itself, the way it already
+	 * measures the uplink leg. Populated only for a lag-compensated topic (the shoot
+	 * handler is the sole reader).
+	 * @type {Map<string, { lastT: number, ewma: number, applied: number }>}
+	 */
+	const sendCadence = new Map();
 	/** @type {Map<string, Set<string>>} the last computed relevancy (the lag-comp candidate set) */
 	let last = new Map();
 	// The last tick's snapshot, retained so the lag-comp candidate broadphase
@@ -196,6 +234,7 @@ export function createInterestState(interest) {
 	function releaseSubscriber(identity) {
 		centers.delete(identity);
 		lod.delete(identity);
+		sendCadence.delete(identity);
 	}
 
 	/**
@@ -340,6 +379,7 @@ export function createInterestState(interest) {
 		// releaseSubscriber on close, so a missed release can never leak.
 		for (const id of centers.keys()) if (!subSet.has(id)) centers.delete(id);
 		for (const id of lod.keys()) if (!subSet.has(id)) lod.delete(id);
+		for (const id of sendCadence.keys()) if (!subSet.has(id)) sendCadence.delete(id);
 
 		// Keep the index + positions queryable between ticks for the lag-comp candidate
 		// broadphase (candidatesAt) - a shot resolves against this last-tick snapshot. The
@@ -409,10 +449,66 @@ export function createInterestState(interest) {
 			for (let i = 0; i < idxs.length; i++) result.push(keys[idxs[i]]);
 			return result;
 		},
-		/** Drop every center, band record, and the spatial scratch (topic teardown). */
+		/**
+		 * Record that the server delivered a frame to `identity` at server stamp `t`,
+		 * updating its send-interval EWMA. Call once per tick per delivered subscriber
+		 * (a repeated `t` is a no-op via the d>0 guard). The EWMA seeds at `seedMs` (the
+		 * tick interval - the densest possible cadence, since the server cannot send
+		 * faster than it ticks), so a dense subscriber's estimate stays at the tick rate
+		 * and only a sparsely-served subscriber's widens. Mirrors the adapter smoother's
+		 * `ewmaIntervalMs` update (alpha 0.08, only an in-(0,2000)ms gap counts).
+		 * @param {string} identity @param {number} t server stamp of the delivered frame
+		 * @param {number} seedMs the tick interval (ms), the cold-start cadence
+		 */
+		noteSend(identity, t, seedMs) {
+			let r = sendCadence.get(identity);
+			if (r === undefined) {
+				r = { lastT: -1, ewma: seedMs, applied: -1 };
+				sendCadence.set(identity, r);
+			}
+			if (r.lastT < 0) {
+				// First sight: snap the applied delay to the seed target (the adapter
+				// smoother sets appliedDelay to the target on its first frame too).
+				r.applied = targetDelayMs(r.ewma);
+			} else {
+				const elapsed = t - r.lastT;
+				if (elapsed > 0) {
+					// Slew toward the target the cadence implied OVER this interval (the EWMA
+					// before this sample feeds it), then fold in the new interval - the same
+					// order the smoother uses (render-slew toward the prevailing target, then
+					// the arriving frame updates the interval estimate).
+					r.applied = slewApplied(r.applied, targetDelayMs(r.ewma), elapsed);
+					if (elapsed < 2000) r.ewma += 0.08 * (elapsed - r.ewma);
+				}
+			}
+			if (t > r.lastT) r.lastT = t;
+		},
+		/**
+		 * The estimated client-side interpolation delay (ms) for `identity`: the slewed
+		 * applied delay tracking the adapter smoother's `appliedDelay` (rise at once,
+		 * fall no faster than the client). The shoot handler adds this to the measured
+		 * uplink to bound the rewind reach, so a sparsely-served shooter (which
+		 * legitimately renders further in the past) is not clamped short, and a
+		 * re-densifying one is not clamped short during the client's slew-down. `now`
+		 * (the shot stamp) continues the slew since the last send; omit it to read the
+		 * value as of the last send. An unknown subscriber falls back to `seedMs` (the
+		 * tick rate), the dense-path estimate.
+		 * @param {string} identity @param {number} seedMs the tick interval (ms)
+		 * @param {number} [now] the shot wall stamp, to continue the slew to the present
+		 * @returns {number}
+		 */
+		interpDelayMs(identity, seedMs, now) {
+			const r = sendCadence.get(identity);
+			if (r === undefined || r.applied < 0) return targetDelayMs(seedMs);
+			const elapsed = now - r.lastT;
+			if (elapsed > 0) return slewApplied(r.applied, targetDelayMs(r.ewma), elapsed);
+			return r.applied;
+		},
+		/** Drop every center, band record, cadence, and the spatial scratch (topic teardown). */
 		reset() {
 			centers.clear();
 			lod.clear();
+			sendCadence.clear();
 			last = new Map();
 			lastN = 0;
 			lastUseIndex = false;

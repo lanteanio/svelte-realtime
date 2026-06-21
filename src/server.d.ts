@@ -2512,6 +2512,157 @@ export interface SmoothConfig {
 	queueCap?: number;
 	/** Number of room-identifying args the topic function expects (excluding ctx). @default topicFn.length - 1 */
 	topicArgs?: number;
+	/**
+	 * Opt-in area-of-interest culling for an uncapped lobby: each subscriber is
+	 * delivered only the entities inside its area of interest (near entities every
+	 * tick, fringe entities at a throttled cadence) instead of the whole board.
+	 * Off by default - the broadcast-all path is byte-identical without it.
+	 */
+	interest?: SmoothInterestConfig;
+	/**
+	 * Opt-in server-rewind lag compensation: the server resolves `view.shoot(cmd)`
+	 * against the world as the shooter saw it, rewinding each candidate to the
+	 * instant the shooter rendered it. Requires `interest` (its relevancy set is
+	 * the candidate-security gate - you cannot hit what was never replicated to the
+	 * shooter). Off by default.
+	 */
+	hitTest?: SmoothHitTestConfig;
+}
+
+/** A 2D point in the topic's own position units. */
+export interface SmoothPoint {
+	x: number;
+	y: number;
+}
+
+/**
+ * Area-of-interest culling config for `live.smooth({ interest })`.
+ */
+export interface SmoothInterestConfig {
+	/** Cull radius, in the topic's position units (required, positive). */
+	radius: number;
+	/**
+	 * Where an entity is, for culling. Return `null` to make it always-visible
+	 * (a flag, an objective). Required.
+	 */
+	position: (state: any) => SmoothPoint | null;
+	/**
+	 * Ascending level-of-detail bands: within `within` units, send every `rate`
+	 * ticks (the outer band's edge is the cull radius). `rate` is an integer >= 1.
+	 */
+	lod?: Array<{ within: number; rate: number }>;
+	/** Spatial-grid cell size (tuning; positive). */
+	cell?: number;
+	/** Reserved per-client bandwidth ceiling - accepted but inert in this version. */
+	budget?: number;
+}
+
+/**
+ * The per-shot context passed to `hitTest.onHit` and `hitTest.resolve`. Built
+ * once per shot (not per target); its primitives are authoritative.
+ */
+export interface SmoothShotCtx {
+	/** The shooter's identity key. */
+	identity: string;
+	/** The composed platform. */
+	platform: any;
+	/**
+	 * Apply a server-initiated command to any entity authoritatively (a hit
+	 * dropping a victim's health). The victim still receives the change through the
+	 * normal broadcast, so its own prediction is undisturbed. Returns whether the
+	 * entity existed.
+	 */
+	applyTo(victimKey: string, command: any): boolean;
+	/**
+	 * Signal a discrete one-shot event on the `view.onEvent` channel, broadcast
+	 * after the shot resolves. `opts.key` overrides the event key (default: the
+	 * shooter's key).
+	 */
+	emitEvent(type: string, data?: any, opts?: { key?: string }): void;
+}
+
+/** A target as handed to `hitTest.onHit` / `hitTest.resolve`, rewound to the shot instant. */
+export interface SmoothHitTarget {
+	/** The target entity's key. */
+	key: string;
+	/** The target's rewound position. */
+	pos: SmoothPoint;
+	/** The target's rewound state (the time-correct stance). */
+	state: any;
+}
+
+/**
+ * Server-rewind lag-compensation config for `live.smooth({ hitTest })`. Requires
+ * `interest`. Provide exactly one narrowphase (`hitbox` or `resolve`).
+ */
+export interface SmoothHitTestConfig {
+	/** The shot ray, resolved from the shooter's command and current state. */
+	shot: {
+		type: 'ray';
+		/** Ray origin in position units. */
+		origin: (command: any, state: any) => SmoothPoint;
+		/** Ray direction: an angle in radians, or a (non-unit) `{ x, y }` vector. */
+		dir: (command: any, state: any) => number | SmoothPoint;
+		/** Maximum ray distance (positive). */
+		maxDist: number;
+	};
+	/**
+	 * Declarative narrowphase: a circle or an axis-aligned box per target.
+	 * Provide this or `resolve`.
+	 */
+	hitbox?: { shape: 'circle'; radius: number } | { shape: 'aabb'; w: number; h: number };
+	/**
+	 * Custom narrowphase escape hatch (provide this or `hitbox`). The `shot.dir`
+	 * here is a unit vector. Return a hit `{ dist, point }` (finite `dist`) or
+	 * `null`/`undefined` for a miss; `target.state` is the time-correct rewound stance.
+	 */
+	resolve?: (
+		shot: { origin: SmoothPoint; dir: SmoothPoint; maxDist: number },
+		target: SmoothHitTarget,
+		ctx: SmoothShotCtx
+	) => { dist: number; point: SmoothPoint } | null | undefined;
+	/**
+	 * The consequence, run nearest-first for each entity the ray passes through.
+	 * Return `{ stop: true }` to stop at the nearest (no penetration). May be async.
+	 */
+	onHit: (
+		ctx: SmoothShotCtx,
+		target: SmoothHitTarget,
+		info: { dist: number; point: SmoothPoint; fraction: number; rewindAt: number; fallback: boolean }
+	) => { stop?: boolean } | void | Promise<{ stop?: boolean } | void>;
+	/** Broadphase cull tuning. `cone` is a cosine in `[-1, 1]`. */
+	broadphase?: { maxDist?: number; cone?: number };
+	/**
+	 * Position the rewind and candidate gate read; defaults to `interest.position`.
+	 * A custom function in a different coordinate space disables the rewind-instant
+	 * candidate gate (it falls back to receipt-time membership).
+	 */
+	position?: (state: any) => SmoothPoint | null;
+	/**
+	 * The furthest back any shot may rewind, in milliseconds - the security-critical
+	 * defender-protection cap (a latency-faker can at most look like a real player at
+	 * this latency). Keep it at or above one interpolation delay (~`2 x tickMs`).
+	 * @default 100
+	 */
+	maxRewindMs?: number;
+	/**
+	 * Distance guard (position units): abort the rewind for a candidate whose path
+	 * jumps more than this across the rewind bracket. Off by default - the always-on
+	 * gap guard already covers death/respawn.
+	 */
+	teleportThreshold?: number;
+	/**
+	 * Opt-in per-shot observability signal (anti-cheat). Called once per resolved
+	 * shot; a throwing hook never affects the shot. Off by default.
+	 */
+	detectionHook?: (info: {
+		identity: string;
+		minUplink: number | null;
+		maxUplink: number | null;
+		reach: number;
+		interpDelay: number;
+		divergence: number;
+	}) => void;
 }
 
 /**
