@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.22] - 2026-06-22
+
+### Added
+
+- **`live.smooth({ hitTest })` now resolves a shot fired from any cluster instance, not just the topic owner.** Previously a `view.shoot(cmd)` from a client connected to a non-owning instance was inert (the authoritative rewind ring lives only on the instance that ticks the topic). Now the instance the shooter is connected to (the edge) measures the shot's latency and forwards it to the owner, which resolves it against its ring and broadcasts the hit back - so lag-compensated shooting works behind a load balancer. Latency is measured AT THE EDGE and only bounded durations are forwarded (a reach window width and a rewind age), never an absolute timestamp: the edge reconstructs the owner's clock from the server stamps it already relays, so the owner rebuilds the rewind on its own ring axis without folding the inter-instance hop into the window (which would hand the shooter free reach-back). A slow hop only ever shrinks the effective window (favor the defender); a replayed shot is dropped at the edge before it forwards. Needs `svelte-adapter-uws-extensions >= 0.6.0-next.21` for the coordinator's `relayShoot` / `onShoot`; without it, or single-instance, the behavior is unchanged - a non-owner's shot stays inert as before and the owner / single-instance path is byte-identical. Off by default and gated end to end on `hitTest`.
+
 ## [0.6.0-next.21] - 2026-06-21
 
 ### Fixed
