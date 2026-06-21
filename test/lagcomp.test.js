@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { createLagComp, rayCircleHit, rayAabbHit } from '../src/server/lagcomp.js';
+import { createMonotonicClock } from '../src/server/monoclock.js';
 
 /** A catalog entry whose state carries an {x,y}; position() reads it back. */
 const at = (key, x, y, extra = {}) => ({ key, state: { x, y, ...extra } });
@@ -208,6 +209,45 @@ describe('lag-comp ring: rewindWithin (rewound candidate gate)', () => {
 		// No gate -> both kept regardless of distance from any center.
 		const world = ring.rewind(['a', 'b'], 1025);
 		expect([...world.keys()].sort()).toEqual(['a', 'b']);
+	});
+});
+
+describe('lag-comp ring keyed through the monotonic clock (wall backstep safety)', () => {
+	// The smooth tick keys the ring through createMonotonicClock (record at mono(t)),
+	// so a server wall-clock step cannot feed the ring a timestamp older than its
+	// newest. This drives the same record sequence a tick would, including a backstep.
+	it('a wall backstep does not corrupt a pre-backstep rewind', () => {
+		const clock = createMonotonicClock();
+		const ring = mk({ tickMs: 20, maxRewindMs: 200 });
+		// Forward ticks: the target slides along the ray.
+		ring.record([at('t', 0, 0)], clock.mono(1000));
+		ring.record([at('t', 100, 0)], clock.mono(1020));
+		ring.record([at('t', 200, 0)], clock.mono(1040));
+		// The server wall clock steps BACK to 940 (NTP / live-migration). The tick keys
+		// the record through the clock, so it lands at the clamped monotonic time (the
+		// held cursor 1040), NOT 940 - the ring axis stays monotonic.
+		const mBack = clock.mono(940);
+		expect(mBack).toBe(1040);
+		ring.record([at('t', 300, 0)], mBack);
+		// A rewind to a pre-backstep instant still interpolates the correct historical
+		// position - no garbage bracket from a non-monotonic timestamp.
+		const s = ring.sample('t', 1010); // mono 1010, between the 1000 and 1020 records
+		expect(s.x).toBeCloseTo(50);
+		expect(s.fallback).toBe(false);
+	});
+
+	it('once wall catches back up, records advance again past the held cursor', () => {
+		const clock = createMonotonicClock();
+		const ring = mk({ tickMs: 20, maxRewindMs: 500 });
+		ring.record([at('t', 0, 0)], clock.mono(1000));
+		ring.record([at('t', 100, 0)], clock.mono(1040));
+		ring.record([at('t', 200, 0)], clock.mono(960)); // backstep -> held at 1040
+		// Wall climbs back: 960 -> 1000 is +40 from the clamped point -> mono 1080.
+		const m = clock.mono(1000);
+		expect(m).toBe(1080);
+		ring.record([at('t', 300, 0)], m);
+		// The newest record (mono 1080) clamps a present-time rewind to the live state.
+		expect(ring.sample('t', 1080).x).toBe(300);
 	});
 });
 

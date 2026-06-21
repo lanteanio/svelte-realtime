@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.20] - 2026-06-21
+
+### Fixed
+
+- **A server wall-clock step backward no longer corrupts lag-compensated shots.** `live.smooth({ hitTest })` records a position-history ring every tick and rewinds shots against it. The ring was keyed on the wall clock, so an NTP correction or a VM live-migration that resumes with an earlier clock could feed it a timestamp older than its newest record - which the forward-only discontinuity guard does not catch, since it watches for a forward gap rather than a backstep - and a rewind spanning the step then resolved against a garbage interpolation. The ring is now keyed on a monotonic axis derived from the wall clock: forward time passes through unchanged, so normal operation is byte-identical, and a backstep is absorbed so the axis never moves backward. The shot handler rewinds and runs its replay defense on that same axis, mapping the client's render-time across the step by the absorbed offset, so honest shots are not mistaken for replays and dropped while the client re-syncs to the stepped clock. Off by default and byte-identical when `hitTest` is off.
+
 ## [0.6.0-next.19] - 2026-06-21
 
 ### Fixed

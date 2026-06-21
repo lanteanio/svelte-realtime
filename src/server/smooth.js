@@ -6,6 +6,7 @@ import { _getIdentityKey } from './identity.js';
 import { createInterestState } from './interest.js';
 import { createLagComp, rayCircleHit, rayAabbHit } from './lagcomp.js';
 import { createRttTracker } from './rtt.js';
+import { createMonotonicClock } from './monoclock.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); smooth registration reaches it through this, set at
@@ -302,6 +303,12 @@ function _smoothRecord(name, cfg, platform, rt) {
 						teleportThreshold: cfg.hitTest.teleportThreshold
 					})
 				: null,
+			// Monotonic clock for the ring axis: the tick records and the shot handler
+			// rewinds through this, so a server wall-clock backstep (NTP / live-migration)
+			// can never feed the ring a timestamp older than its newest. Zero offset in
+			// normal operation (the ring axis is the wall clock), so the OFF and the
+			// common path stay byte-identical. Paired with lagComp (same hitTest gate).
+			monoClock: cfg.hitTest ? createMonotonicClock() : null,
 			// The last tick this topic had live motion. A hitTest topic keeps ticking
 			// (recording the still board) for one rewind window past this, so the
 			// demand-armed idle never leaves a gap in the ring a rewind could span.
@@ -470,7 +477,9 @@ function _smoothTick(rec) {
 		? rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++)
 		: null;
 	if (rec.lagComp !== null && catalog !== null) {
-		rec.lagComp.record(catalog, t);
+		// Key the ring on the monotonic axis (immune to a wall backstep); `t` (wall)
+		// still drives the frame/ack stamps and the wall-axis idle grace below.
+		rec.lagComp.record(catalog, rec.monoClock.mono(t));
 		if (!idle) rec.lagCompLastActive = t;
 	}
 	rec.interestDirty = false;
@@ -1389,13 +1398,18 @@ export const _smoothRegister = function smooth(config) {
 		const ht = rec.cfg.hitTest;
 		const cmd = payload.cmd;
 		const now = wallEpoch();
-		// Decision A (idTech3-faithful): rewind DIRECTLY to the client's absolute
-		// synced-clock renderTime - reconstructing `now - rtt` at receipt would re-add
-		// the uplink leg and under-compensate. The client proposes WHERE in time; the
-		// server bounds HOW WIDE the window may be from latency it measures itself. A
-		// missing / non-finite stamp resolves at the present (favor defender).
+		// The ring is keyed on a monotonic axis, so the rewind works on that axis too:
+		// `nowMono` is the present on it and `monoCorr` (the wall->monotonic offset, zero
+		// in normal operation) maps the client's wall-axis render-time onto it.
+		const nowMono = rec.monoClock.mono(now);
+		const monoCorr = nowMono - now;
+		// Rewind DIRECTLY to the client's absolute synced-clock renderTime (idTech3-
+		// faithful) - reconstructing `now - rtt` at receipt would re-add the uplink leg
+		// and under-compensate. The client proposes WHERE in time; the server bounds HOW
+		// WIDE the window may be from latency it measures itself. A missing / non-finite
+		// stamp resolves at the present (favor defender).
 		const rtStamp = payload.rt;
-		let rewindAt = now;
+		let rewindAt = nowMono;
 		if (typeof rtStamp === 'number' && Number.isFinite(rtStamp)) {
 			// Per-connection server-anchored latency: the client echoed the latest
 			// server stamp it saw (ackT); roundTrip = now - ackT, BOTH ends server wall
@@ -1407,16 +1421,26 @@ export const _smoothRegister = function smooth(config) {
 				st = { tracker: createRttTracker(), lastRt: -Infinity };
 				_lcRtt.set(ctx.ws, st);
 			}
-			// Replay defense: a real rendered instant only advances, so a renderTime
-			// OLDER than the last accepted one (a captured shot resent to re-resolve an
-			// old enemy lineup) is dropped. Strict `<` admits an EQUAL stamp: a shotgun's
-			// pellets / a burst fired in one frame share the same render-time and must all
-			// resolve. A replay of a stale lineup is strictly older once the shooter has
-			// fired since, so it is still rejected. One number per connection.
-			if (st && rtStamp < st.lastRt) return;
+			// Map the wall-axis render-time onto the ring's monotonic axis up front, so the
+			// replay defense, the latch, AND the rewind all live on that one axis. A server
+			// wall backstep steps the client's synced render-time DOWN by the same offset, so
+			// the raw stamp would look like it moved backward; on the monotonic axis it stays
+			// continuous (rtMono = the stepped-down stamp + the absorbed offset). monoCorr is
+			// zero in normal operation, so rtMono == rtStamp and nothing below changes.
+			const rtMono = rtStamp + monoCorr;
+			// Replay defense: a real rendered instant only advances, so a renderTime OLDER
+			// than the last accepted one (a captured shot resent to re-resolve an old enemy
+			// lineup) is dropped. Strict `<` admits an EQUAL stamp: a shotgun's pellets / a
+			// burst fired in one frame share the same render-time and must all resolve. A
+			// replay of a stale lineup is strictly older once the shooter has fired since, so
+			// it is still rejected. One number per connection, on the monotonic axis - so a
+			// wall backstep (which steps the raw stamp down) is not mistaken for a replay.
+			if (st && rtMono < st.lastRt) return;
 			const ackT = payload.ackT;
 			if (st && typeof ackT === 'number' && Number.isFinite(ackT) && ackT <= now && now - ackT <= ht.maxRewindMs) {
-				st.tracker.sample((now - ackT) / 2, now);
+				// Uplink is a wall-axis duration (ackT is a server wall stamp); rotate the
+				// bucket window on the monotonic axis so a wall backstep cannot disturb it.
+				st.tracker.sample((now - ackT) / 2, nowMono);
 			}
 			// Favor-the-shooter reach width = measured uplink (max-of-recent, so a
 			// latency spike never clamps an honest shot) + the server's estimate of the
@@ -1427,11 +1451,16 @@ export const _smoothRegister = function smooth(config) {
 			const maxUp = st ? st.tracker.maxUplink() : null;
 			const serverInterp = Math.min(250, Math.max(32, 2 * rec.tickMs));
 			const reach = maxUp === null ? ht.maxRewindMs : Math.min(ht.maxRewindMs, maxUp + serverInterp);
-			rewindAt = Math.max(now - reach, Math.min(rtStamp, now));
-			// Latch the clamped, monotonic value (not the raw stamp): a one-off
-			// future/overshooting renderTime is bounded by `min(rtStamp, now)` here so it
-			// cannot strand subsequent honest shots behind an inflated floor.
-			if (st) st.lastRt = Math.max(st.lastRt, Math.min(rtStamp, now));
+			// Clamp the mapped render-time into the rewind window. `min(rtMono, nowMono)`
+			// caps an over-mapped stamp (the brief post-backstep window before the client
+			// re-syncs to the stepped clock) to the present - favor defender, never a read
+			// outside the ring.
+			rewindAt = Math.max(nowMono - reach, Math.min(rtMono, nowMono));
+			// Latch the clamped monotonic value: a one-off future/overshooting renderTime is
+			// bounded by `min(rtMono, nowMono)` so it cannot strand subsequent honest shots
+			// behind an inflated floor, and because the floor lives on the monotonic axis a
+			// wall backstep (which steps the raw stamp down) does not read as a replay.
+			if (st) st.lastRt = Math.max(st.lastRt, Math.min(rtMono, nowMono));
 		}
 		// Candidate set, gated at the REWIND instant rather than at receipt. The shooter
 		// aimed at the world it saw when it fired (rewindAt), so membership belongs there:

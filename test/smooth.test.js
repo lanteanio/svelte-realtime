@@ -1959,6 +1959,30 @@ describe('live.smooth lag-compensated shoot', () => {
 		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
 	});
 
+	it('does not drop honest shots as replays after a server wall backstep', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		const tHit = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 }); // on the ray
+		// A first honest shot latches the replay floor at the pre-step render-time.
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tHit }]);
+		expect(rt.calls.inject).toHaveLength(1);
+
+		// The server wall clock steps BACK (NTP / live-migration) by less than the rewind
+		// window. The monotonic ring axis is held, so the rewind survives; the replay floor
+		// lives on that same axis, so the client's HONEST render-time - which re-syncs DOWN
+		// to the stepped wall - is not mistaken for a stale-lineup replay. (On the raw axis
+		// the stepped-down stamp would read as older than the latch and be dropped.)
+		vi.setSystemTime(tHit - 50);
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tHit - 50 }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
 	it('rewound gate: hits a target that left the shooter area of interest mid-flight (honest miss fixed)', async () => {
 		const { name } = hitShape();
 		const p = paths(name);
