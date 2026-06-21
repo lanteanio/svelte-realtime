@@ -2054,4 +2054,70 @@ describe('live.smooth lag-compensated shoot', () => {
 		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
 		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
 	});
+
+	it('resolves an identical hit stream when a recorded shot sequence is replayed (determinism)', async () => {
+		// Replaying a fixed, latency-varying shot stream over a moving board under the same
+		// seeded clock must reproduce every hit's target, distance, and rewind instant bit
+		// for bit. The whole path - monotonic clock -> per-connection latency tracker ->
+		// reach -> rewindAt -> rewound candidate gate -> narrowphase - reads time only
+		// through the runtime seam (faked here), and orders candidates through ordered Maps,
+		// so it is deterministic. A real-monotonic read or a Map-iteration-order dependence
+		// would make the two passes diverge; the static determinism check cannot see either.
+		async function pass() {
+			_resetSmooth();
+			rt = fakeRuntime();
+			_setSmoothRuntime(rt.mod);
+			vi.setSystemTime(50000);
+			const log = [];
+			const onHit = (ctx, target, info) => {
+				// No stop -> penetration, so every target on the ray is captured in order:
+				// the world Map and the nearest-first sort both feed this sequence.
+				log.push({
+					key: target.key,
+					dist: info.dist,
+					rewindAt: info.rewindAt,
+					fraction: info.fraction,
+					fallback: info.fallback,
+					px: info.point.x,
+					py: info.point.y
+				});
+				ctx.applyTo(target.key, { damage: 10 });
+			};
+			const { name } = hitShape(onHit);
+			const p = paths(name);
+			const platform = wirePlatform();
+			const ws1 = mockWs({ id: 'u1' });
+			const ws2 = mockWs({ id: 'u2' });
+			const ws3 = mockWs({ id: 'u3' });
+			await call(ws1, platform, p.sync, ['r1']);
+			await call(ws2, platform, p.sync, ['r1']);
+			await call(ws3, platform, p.sync, ['r1']);
+			// Two targets slide along the ray (y stays 0) over several ticks.
+			const ts = [];
+			ts.push(await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 }));
+			ts.push(await moveTick(platform, ws3, p.cmd, 'u3', { x: 200, y: 0 }));
+			ts.push(await moveTick(platform, ws2, p.cmd, 'u2', { x: 110, y: 0 }));
+			ts.push(await moveTick(platform, ws3, p.cmd, 'u3', { x: 210, y: 0 }));
+			ts.push(await moveTick(platform, ws2, p.cmd, 'u2', { x: 120, y: 0 }));
+			// rt is non-decreasing (so the replay defense never drops a shot); ackT varies,
+			// so the measured uplink and the resulting reach evolve shot to shot.
+			const stream = [
+				{ rt: ts[1], ackT: ts[1] },
+				{ rt: ts[2], ackT: ts[0] },
+				{ rt: ts[3], ackT: ts[1] },
+				{ rt: ts[4], ackT: ts[4] }
+			];
+			for (let i = 0; i < stream.length; i++) {
+				log.push({ shot: i });
+				await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: stream[i].rt, ackT: stream[i].ackT }]);
+			}
+			return log;
+		}
+
+		const first = await pass();
+		const second = await pass();
+		expect(second).toEqual(first);
+		// The stream must actually resolve hits (not a vacuous empty == empty assertion).
+		expect(first.filter((e) => e.key !== undefined).length).toBeGreaterThan(3);
+	});
 });
