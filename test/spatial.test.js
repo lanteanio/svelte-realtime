@@ -1,4 +1,4 @@
-// The transient spatial index behind K4 area-of-interest relevancy: distance-
+// The transient spatial index behind area-of-interest relevancy: distance-
 // squared radius cull, the deliver-all clamp, always-visible passthrough, and
 // the load-bearing invariant that the indexed cull returns exactly the same set
 // as the flat cull (so the INDEX_CROSSOVER switch never changes WHO is relevant,
@@ -12,7 +12,7 @@ function keysOf(indices, keys) {
 	return indices.map((i) => keys[i]).sort();
 }
 
-describe('spatial index (K4 relevancy grid)', () => {
+describe('spatial index (relevancy grid)', () => {
 	it('packCell is collision-free across the +-32k cell range it claims', () => {
 		expect(packCell(0, 0)).not.toBe(packCell(1, 0));
 		expect(packCell(0, 0)).not.toBe(packCell(0, 1));

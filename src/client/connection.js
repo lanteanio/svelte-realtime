@@ -41,7 +41,7 @@ export function _unregisterTopicErrorSetter(topic, setError) {
  * Attach the subscribe-denial listener once. Routes each adapter denial
  * (`{topic, reason, ref}`) to the per-topic error setters registered by
  * stream stores, so apps see a typed `error.code` (the denial reason)
- * instead of the generic `INTERNAL_ERROR` the framework's pre-A6 error
+ * instead of the generic `INTERNAL_ERROR` the framework's earlier error
  * mapping produced.
  */
 export function ensureDenialsListener() {

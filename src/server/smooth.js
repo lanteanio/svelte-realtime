@@ -4,7 +4,7 @@ import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
 import { createInterestState } from './interest.js';
-import { createK2 } from './k2.js';
+import { createLagComp } from './lagcomp.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); smooth registration reaches it through this, set at
@@ -278,14 +278,18 @@ function _smoothRecord(name, cfg, platform, rt) {
 			// set, the tick records the post-drain catalog here and the __smoothShoot
 			// RPC rewinds against it. Gated entirely on cfg.hitTest so the OFF path is
 			// byte-identical and zero-cost (credo 4). Lives only on the owner.
-			k2: cfg.hitTest
-				? createK2({
+			lagComp: cfg.hitTest
+				? createLagComp({
 						position: cfg.hitTest.position,
 						tickMs: cfg.tickMs,
 						maxRewindMs: cfg.hitTest.maxRewindMs,
 						teleportThreshold: cfg.hitTest.teleportThreshold
 					})
-				: null
+				: null,
+			// The last tick this topic had live motion. A hitTest topic keeps ticking
+			// (recording the still board) for one rewind window past this, so the
+			// demand-armed idle never leaves a gap in the ring a rewind could span.
+			lagCompLastActive: 0
 		};
 		_smoothTopics.set(name, rec);
 	}
@@ -420,7 +424,7 @@ function _smoothTick(rec) {
 	// every update and acknowledgement below reflects the same drained state.
 	const { updates, acks, events = [], idle } = rec.authority.drain();
 	const t = wallEpoch();
-	// K4 area-of-interest: when this topic opted into interest, build the relevancy
+	// Area-of-interest: when this topic opted into interest, build the relevancy
 	// for THIS instance's local subscribers once per tick from the drained catalog
 	// (which on a cluster owner spans every entity cluster-wide, local and remote
 	// surrogate, so a local player still sees nearby remote players). The publish
@@ -438,10 +442,21 @@ function _smoothTick(rec) {
 	// Run the relevancy pass when an entity moved (updates) OR a subscriber just
 	// reported a new area-of-interest center (interestDirty) - the latter so a
 	// spectator panning the camera over a still board still gets caught up.
-	const catalog = (rec.interest && (updates.length > 0 || rec.interestDirty)) ? rec.authority.catalog() : null;
-	const relevancy = catalog
+	// The interest relevancy pass runs only on a moving / dirty tick (its existing
+	// cadence). The lag-compensation ring, in contrast, must capture EVERY tick so a
+	// stationary-but-targetable entity stays rewindable. Take the catalog once when
+	// either wants it (one allocation when both are on), but compute relevancy only
+	// on the interest cadence (so the interest LOD counter is unchanged when the
+	// catalog was taken solely for lag compensation).
+	const wantInterest = rec.interest !== null && (updates.length > 0 || rec.interestDirty);
+	const catalog = (rec.lagComp !== null || wantInterest) ? rec.authority.catalog() : null;
+	const relevancy = wantInterest
 		? rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++)
 		: null;
+	if (rec.lagComp !== null && catalog !== null) {
+		rec.lagComp.record(catalog, t);
+		if (!idle) rec.lagCompLastActive = t;
+	}
 	rec.interestDirty = false;
 	for (let i = 0; i < updates.length; i++) {
 		const u = updates[i];
@@ -611,6 +626,13 @@ function _smoothTick(rec) {
 		_armSmoothTick(rec);
 	} else if (!idle) {
 		_armSmoothTick(rec);
+	} else if (rec.lagComp !== null && t - rec.lagCompLastActive < rec.cfg.hitTest.maxRewindMs) {
+		// hitTest grace: keep recording the still board for one rewind window after
+		// the last motion so a shot that rewinds into the just-gone-idle interval
+		// brackets dense records (no mis-lerp across a tick gap). After the window
+		// the ring's newest record is the still position and a later shot clamps to
+		// it (a still world's current state IS what the shooter saw).
+		_armSmoothTick(rec);
 	}
 }
 
@@ -659,6 +681,7 @@ export function _drainSmoothOnClose(ws) {
 				rec.registry.delete(removed[i]);
 				rec.interest.releaseSubscriber(removed[i]);
 			}
+			if (rec.lagComp !== null) rec.lagComp.remove(removed[i]);
 			_smoothPublish(rec, 'remove', { key: removed[i] }, undefined);
 		}
 		if (rec.authority.size === 0) {
@@ -706,6 +729,7 @@ function _smoothForget(rec) {
 	}
 	rec.pendingSync.clear();
 	if (rec.interest) rec.interest.reset();
+	if (rec.lagComp !== null) rec.lagComp.reset();
 	_smoothTopics.delete(rec.name);
 	const cluster = rec.platform && rec.platform.smooth;
 	if (rec.owned && cluster && typeof cluster.releaseOwner === 'function') {
@@ -720,6 +744,7 @@ function _smoothForget(rec) {
  * @param {any} rec @param {string} key
  */
 function _smoothRelayRemove(rec, key) {
+	if (rec.lagComp !== null) rec.lagComp.remove(key);
 	_smoothPublish(rec, 'remove', { key }, undefined);
 	const cluster = rec.platform && rec.platform.smooth;
 	if (cluster && rec.owned && typeof cluster.relayBroadcast === 'function') {

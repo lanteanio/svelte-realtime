@@ -1407,7 +1407,7 @@ describe('live.smooth interest validation', () => {
 	});
 });
 
-describe('live.smooth hitTest validation (K2 lag compensation)', () => {
+describe('live.smooth hitTest validation (lag compensation)', () => {
 	const position = (s) => ({ x: s.x, y: s.y });
 	const base = { topic: 't', apply: () => ({}), initial: {}, interest: { radius: 500, position } };
 	const shot = { type: 'ray', origin: () => ({ x: 0, y: 0 }), dir: () => 0, maxDist: 1000 };

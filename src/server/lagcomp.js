@@ -45,7 +45,7 @@ function _newRing(cap) {
  *   entity whose bracketing pair straddles a jump larger than it (a respawn /
  *   warp must never resolve a shot against the post-warp position).
  */
-export function createK2(opts) {
+export function createLagComp(opts) {
 	const position = opts.position;
 	const tickMs = opts.tickMs > 0 ? opts.tickMs : 50;
 	const maxRewindMs = opts.maxRewindMs !== undefined ? opts.maxRewindMs : _DEFAULT_MAX_REWIND_MS;

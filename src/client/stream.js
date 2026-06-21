@@ -170,8 +170,8 @@ export function _createStreamAtSchemaVersion(path, options, dynamicArgs, schemaV
 
 /**
  * Wrap a subscribable in a `{ subscribe, rune, map }` object whose `.map()`
- * projects per-item over the source's array (matching the
- * `($source ?? []).map(fn)` semantic from the plan body).
+ * projects per-item over the source's array (the
+ * `($source ?? []).map(fn)` semantic).
  *
  * Lifecycle: lazy. Source is subscribed on first downstream consumer and
  * unsubscribed on the last; the projection is recomputed per emission.

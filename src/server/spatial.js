@@ -14,7 +14,8 @@
 // predicate - distance-squared against a radius (the open-arena area of
 // interest) rather than the cursor's rect-bounds. The cross-repo unification of
 // all three grids onto one shared primitive is a deferred follow-up; this stays
-// realtime-local so K4 ships without touching the working cursor hot path.
+// realtime-local so area-of-interest relevancy ships without touching the
+// working cursor hot path.
 //
 // Zero per-call allocation once warm: the cell index, its bucket pool, and the
 // query-output buffer are reused across ticks.

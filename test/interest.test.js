@@ -1,4 +1,4 @@
-// The K4 relevancy layer on top of the spatial grid: per-subscriber radius cull,
+// The relevancy layer on top of the spatial grid: per-subscriber radius cull,
 // the whole-board safety default for an uncentered subscriber, always-visible
 // passthrough, the reported-center override, and the level-of-detail cadence
 // (near every tick / fringe throttled, with first-sight + band-crossing always
@@ -29,7 +29,7 @@ function at(key, x, y) {
 const position = (s) => (s && s.global ? null : { x: s.x, y: s.y });
 const keysOf = (set) => [...set].sort();
 
-describe('interest relevancy (K4)', () => {
+describe('interest relevancy', () => {
 	it('culls to entities within radius, including the subscriber own entity at the center', () => {
 		const state = createInterestState({ radius: 100, position });
 		// 'A' is both a subscriber and an entity at the origin -> its own position is the center.
@@ -237,7 +237,7 @@ describe('interest relevancy (K4)', () => {
 	});
 });
 
-describe('getCandidates (K2 candidate set)', () => {
+describe('getCandidates (lag-comp candidate set)', () => {
 	it('returns the FULL in-range membership, including a stationary entity the deltas drop', () => {
 		const state = createInterestState({ radius: 100, position });
 		// Same state references on both ticks: tick 1 is first-sight (delivered),
