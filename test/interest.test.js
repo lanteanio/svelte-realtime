@@ -283,3 +283,62 @@ describe('getCandidates (lag-comp candidate set)', () => {
 		expect([...state.getCandidates('spectator')].sort()).toEqual(['a', 'b', 'c']);
 	});
 });
+
+describe('candidatesAt (lag-comp candidate broadphase)', () => {
+	it('exposes the cull radius the shoot handler gates against', () => {
+		expect(createInterestState({ radius: 250, position }).radius).toBe(250);
+	});
+
+	it('returns the entity keys whose last-tick position is within the query radius', () => {
+		const state = createInterestState({ radius: 100, position });
+		state.compute([at('A', 0, 0), at('b', 50, 0), at('c', 300, 0)], ['A'], 0);
+		// The query radius is independent of the cull radius (it is the shot broadphase).
+		expect(state.candidatesAt(0, 0, 120).sort()).toEqual(['A', 'b']); // c at 300 is out
+		expect(state.candidatesAt(0, 0, 400).sort()).toEqual(['A', 'b', 'c']); // wider pulls c
+	});
+
+	it('recovers an entity that has left a subscriber in-range membership (the departed shell)', () => {
+		const state = createInterestState({ radius: 100, position });
+		state.compute([at('A', 0, 0), at('b', 50, 0)], ['A'], 0);
+		expect([...state.getCandidates('A')].sort()).toEqual(['A', 'b']);
+		// b drifts out of A's interest radius -> pruned from the membership set...
+		state.compute([at('A', 0, 0), at('b', 200, 0)], ['A'], 1);
+		expect([...state.getCandidates('A')].sort()).toEqual(['A']);
+		// ...but candidatesAt still finds it near its last-tick position. This is the
+		// broadphase the rewound gate relies on to recover a target that drifted out
+		// mid-flight (the receipt-time set no longer lists it, the geometry still does).
+		expect(state.candidatesAt(0, 0, 300).sort()).toEqual(['A', 'b']);
+	});
+
+	it('excludes always-visible (ring-less) entities from the broadphase', () => {
+		const state = createInterestState({ radius: 100, position });
+		state.compute([at('A', 0, 0), { key: 'flag', state: { global: true } }], ['A'], 0);
+		// 'flag' has a null position -> never a position-based hit candidate.
+		expect(state.candidatesAt(0, 0, 100000)).toEqual(['A']);
+	});
+
+	it('returns empty before the first compute and after reset', () => {
+		const state = createInterestState({ radius: 100, position });
+		expect(state.candidatesAt(0, 0, 1000)).toEqual([]);
+		state.compute([at('A', 0, 0), at('b', 50, 0)], ['A'], 0);
+		expect(state.candidatesAt(0, 0, 100).sort()).toEqual(['A', 'b']);
+		state.reset();
+		expect(state.candidatesAt(0, 0, 100)).toEqual([]);
+	});
+
+	it('matches the flat broadphase above the index threshold', () => {
+		// Above INDEX_CROSSOVER (512) compute builds the spatial index; candidatesAt must
+		// query it to the same set the flat scan would produce.
+		const state = createInterestState({ radius: 300, position });
+		const catalog = [at('A', 0, 0)];
+		for (let i = 0; i < 600; i++) catalog.push(at('e' + i, (i * 17) % 4000, (i * 53) % 4000));
+		state.compute(catalog, ['A'], 0); // 601 entities -> indexed path
+		const got = state.candidatesAt(0, 0, 500).sort();
+		const expected = [];
+		for (const e of catalog) {
+			const p = position(e.state);
+			if (p && p.x * p.x + p.y * p.y <= 500 * 500) expected.push(e.key);
+		}
+		expect(got).toEqual(expected.sort());
+	});
+});

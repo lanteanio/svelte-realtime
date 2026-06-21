@@ -1752,9 +1752,11 @@ describe('live.smooth lag-compensated shoot', () => {
 		const ws2 = mockWs({ id: 'u2' });
 		await call(ws1, platform, p.sync, ['r1']);
 		await call(ws2, platform, p.sync, ['r1']);
-		// u2 sits ON the ray and within maxDist (2000), but BEYOND the interest
-		// radius (1000), so it is in the ring yet never in u1's candidate set. The
-		// only reason the shot misses is the transmit-bit gate, not geometry.
+		// u2 sits ON the ray and within maxDist (2000), but BEYOND the interest radius
+		// (1000). The candidate gate is evaluated at the rewind instant: dist(shooter, u2)
+		// = 1500 > radius, so the membership gate (now geometric at rewindAt) drops it. The
+		// shot misses for the transmit-bit reason - u2 was never replicated to u1 - just
+		// enforced by the rewindAt distance test rather than ray geometry (the ray would hit).
 		await moveTick(platform, ws2, p.cmd, 'u2', { x: 1500, y: 0 });
 
 		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
@@ -1954,6 +1956,78 @@ describe('live.smooth lag-compensated shoot', () => {
 		// resolves against the newest record (current position), still on the ray,
 		// so the hit lands - never a crash, never a stale resolution.
 		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: 1 }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
+	it('rewound gate: hits a target that left the shooter area of interest mid-flight (honest miss fixed)', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// u2 is on the ray and inside the shooter's interest (radius 1000) at the render
+		// instant the shot is stamped with...
+		const tOnRay = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+		// ...then drifts far outside the interest before the shot arrives, so the
+		// receipt-time membership no longer lists it. The pre-gate code (getCandidates at
+		// receipt) would find an empty candidate set and silently miss; the rewound gate
+		// recovers u2 via the broadphase and gates it in (in-range + on the ray at rewindAt).
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 1500, y: 0 });
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tOnRay }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
+	it('rewound gate: denies a target that entered the area of interest only after the shot (over-permissive hit fixed)', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// At the render instant the shot is stamped with, u2 sits on the ray-line but
+		// OUTSIDE the shooter's interest (radius 1000) - it was never replicated then...
+		const tOutside = await moveTick(platform, ws2, p.cmd, 'u2', { x: 1500, y: 0 });
+		// ...and only entered the interest afterward. A receipt-time gate would rewind the
+		// now-in-range u2 to (1500,0), on the ray within maxDist, and wrongly hit. The
+		// rewound gate denies it: it was outside the interest at the instant fired.
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tOutside }]);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
+	it('falls back to receipt-time membership when hitTest.position uses a different coordinate space than interest', async () => {
+		// interest.position is in "feet"; a custom hitTest.position scales by 100 (a
+		// different coordinate space). The geometric rewindAt gate compares ring positions
+		// against the interest radius, so it is sound only when the ring records the
+		// interest position. With a divergent hitTest.position it must NOT gate in the
+		// mismatched space - doing so would test dist 50000 against radius 1000 and wrongly
+		// drop a legitimately in-range target. It falls back to the receipt-time membership.
+		const { name } = declareShape({
+			tickMs: 20,
+			interest: { radius: 1000, position: (s) => ({ x: s.x, y: s.y }) },
+			hitTest: {
+				hitbox: { shape: 'circle', radius: 30 },
+				shot: { type: 'ray', origin: (cmd, sh) => ({ x: sh.x * 100, y: sh.y * 100 }), dir: (cmd) => cmd.aim, maxDist: 1e9 },
+				position: (s) => ({ x: s.x * 100, y: s.y * 100 }),
+				onHit: baseOnHit
+			}
+		});
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// u2 is well within the interest radius by feet (500 < 1000) and on the ray. Its
+		// scaled hitTest position is (50000,0); a space-mixed gate against the feet radius
+		// (1000) would drop it. The fallback keeps it - it is in the receipt-time membership.
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 500, y: 0 });
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
 		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
 	});
 });

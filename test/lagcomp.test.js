@@ -164,6 +164,53 @@ describe('lag-comp ring: eviction + rewind(candidateKeys)', () => {
 	});
 });
 
+describe('lag-comp ring: rewindWithin (rewound candidate gate)', () => {
+	it('keeps only candidates within the gate radius of the center at the rewind instant', () => {
+		const ring = mk();
+		ring.record([at('near', 0, 0), at('far', 0, 0)], 1000);
+		ring.record([at('near', 50, 0), at('far', 800, 0)], 1050);
+		// At t=1025: near -> (25,0), far -> (400,0). Center (0,0), radius 100 -> only 'near'.
+		const world = ring.rewindWithin(['near', 'far'], 1025, 0, 0, 100 * 100);
+		expect([...world.keys()]).toEqual(['near']);
+		expect(world.get('near').x).toBeCloseTo(25);
+	});
+
+	it('gates against the position at the rewind instant, not the current position', () => {
+		const ring = mk();
+		// 'mover' was inside the gate early and drifted out by the latest record.
+		ring.record([at('mover', 20, 0)], 1000);
+		ring.record([at('mover', 400, 0)], 1050);
+		// Rewound to t=1000 it is at (20,0): inside radius 100 of the origin -> kept,
+		// even though its CURRENT position (400,0) is well outside.
+		const inGate = ring.rewindWithin(['mover'], 1000, 0, 0, 100 * 100);
+		expect([...inGate.keys()]).toEqual(['mover']);
+		// Rewound to t=1050 it is at (400,0): outside the gate -> dropped.
+		const outGate = ring.rewindWithin(['mover'], 1050, 0, 0, 100 * 100);
+		expect([...outGate.keys()]).toEqual([]);
+	});
+
+	it('still drops no-history and discontinuity candidates inside the radius', () => {
+		const ring = mk({ tickMs: 50 }); // gapMs = 100
+		ring.record([at('a', 10, 0)], 1000);
+		ring.record([at('a', 10, 0, { hidden: true })], 1100);
+		ring.record([at('a', 10, 0, { hidden: true })], 1300);
+		ring.record([at('a', 10, 0)], 1350); // resume after a death gap
+		// 'a' sits inside the radius the whole time, but a rewind into the dead interval
+		// still returns null from sample() -> excluded; 'ghost' has no history -> excluded.
+		const world = ring.rewindWithin(['a', 'ghost'], 1200, 0, 0, 1000 * 1000);
+		expect([...world.keys()]).toEqual([]);
+	});
+
+	it('rewind() is rewindWithin with an unbounded radius (every servable candidate)', () => {
+		const ring = mk();
+		ring.record([at('a', 0, 0), at('b', 9999, 0)], 1000);
+		ring.record([at('a', 20, 0), at('b', 9999, 0)], 1050);
+		// No gate -> both kept regardless of distance from any center.
+		const world = ring.rewind(['a', 'b'], 1025);
+		expect([...world.keys()].sort()).toEqual(['a', 'b']);
+	});
+});
+
 describe('lag-comp narrowphase: rayCircleHit', () => {
 	it('hits a circle ahead on the ray at the near intersection', () => {
 		const h = rayCircleHit(0, 0, 1, 0, 100, 50, 0, 10);

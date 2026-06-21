@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.19] - 2026-06-21
+
+### Fixed
+
+- **A lag-compensated shot now decides which targets were hittable at the instant the shooter fired, not at the instant the shot arrived.** `live.smooth({ hitTest })` rewinds each candidate to the shooter's render-time, but it previously drew the candidate SET from the shooter's area-of-interest membership at receipt - a moment later. Two errors followed when a target crossed the area-of-interest boundary during the shot's brief flight: a target that drifted OUT was dropped though the shooter had it on screen when firing (a hit the player earned, silently missed), and a target that drifted IN only after the shot was fired could be struck though it was never on the shooter's screen then. Membership is now evaluated geometrically at the rewind instant - a target is a candidate only if it was within the shooter's interest radius when fired, measured from the same rewound history the hit test already uses - so both the missed hit and the over-permissive hit are corrected, with no extra per-entity memory. You still cannot hit what was never replicated to you; the gate is just evaluated at the right time. Off by default and byte-identical when `hitTest` is off.
+
 ## [0.6.0-next.18] - 2026-06-21
 
 ### Fixed

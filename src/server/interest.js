@@ -146,6 +146,12 @@ export function createInterestState(interest) {
 	const lod = new Map();
 	/** @type {Map<string, Set<string>>} the last computed relevancy (the lag-comp candidate set) */
 	let last = new Map();
+	// The last tick's snapshot, retained so the lag-comp candidate broadphase
+	// (candidatesAt) can query it between ticks: `lastN` positioned entries live in
+	// `positions`/`keys`, and `lastUseIndex` says whether the spatial index holds
+	// this snapshot's bins (built) or the flat path applies.
+	let lastN = 0;
+	let lastUseIndex = false;
 
 	// Per-tick scratch (reused; no steady-state allocation in the catalog scan).
 	/** @type {Array<{ x: number, y: number } | null>} resolved position per catalog index */
@@ -164,6 +170,8 @@ export function createInterestState(interest) {
 	const seen = new Set();
 	/** @type {Set<string>} scratch: current subscriber identities (for the departed-subscriber prune) */
 	const subSet = new Set();
+	/** @type {number[]} empty always-visible list for candidatesAt (ring-less entities are never hit candidates) */
+	const noAlwaysVisible = [];
 
 	/**
 	 * Record a subscriber's reported area-of-interest center (the optional
@@ -252,6 +260,7 @@ export function createInterestState(interest) {
 		// 2. Build the index only past the crossover; below it a flat scan is cheaper.
 		const useIndex = n > INDEX_CROSSOVER;
 		if (useIndex) index.build(positions, n);
+		else index.release(); // drop any stale bins from a prior indexed tick; the flat path reads positions directly
 
 		const relevancy = new Map();
 		subSet.clear();
@@ -332,8 +341,13 @@ export function createInterestState(interest) {
 		for (const id of centers.keys()) if (!subSet.has(id)) centers.delete(id);
 		for (const id of lod.keys()) if (!subSet.has(id)) lod.delete(id);
 
-		if (useIndex) index.release();
+		// Keep the index + positions queryable between ticks for the lag-comp candidate
+		// broadphase (candidatesAt) - a shot resolves against this last-tick snapshot. The
+		// next compute's build() (or the else-branch release above) frees the retained
+		// bins, so nothing leaks.
 		last = relevancy;
+		lastN = n;
+		lastUseIndex = useIndex;
 		return relevancy;
 	}
 
@@ -368,11 +382,40 @@ export function createInterestState(interest) {
 			const m = lod.get(identity);
 			return m ? m.keys() : undefined;
 		},
+		/** The area-of-interest cull radius - the candidate-gate radius the shoot handler tests against. */
+		get radius() {
+			return radius;
+		},
+		/**
+		 * The lag-compensation candidate broadphase: the entity keys whose LAST-TICK
+		 * position lies within `queryRadius` of (cx, cy). The shoot handler queries a
+		 * radius generously larger than the interest radius around the shooter's REWOUND
+		 * position, recovering targets that have since left the receipt-time membership
+		 * (the departed shell), then trims the result to the exact in-radius set at the
+		 * rewind instant from the lag-comp ring. Reads the retained last-tick snapshot, so
+		 * consume it synchronously within a tick window (the next compute overwrites it).
+		 * Always-visible (ring-less) entities are excluded - a position-based shot cannot
+		 * hit them. Returns a fresh array (empty before the first compute).
+		 *
+		 * @param {number} cx @param {number} cy @param {number} queryRadius
+		 * @returns {string[]}
+		 */
+		candidatesAt(cx, cy, queryRadius) {
+			const result = [];
+			if (lastN === 0) return result;
+			const idxs = lastUseIndex
+				? index.cullIndexed(cx, cy, queryRadius, positions, lastN, noAlwaysVisible)
+				: index.cullDirect(cx, cy, queryRadius, positions, lastN, noAlwaysVisible);
+			for (let i = 0; i < idxs.length; i++) result.push(keys[idxs[i]]);
+			return result;
+		},
 		/** Drop every center, band record, and the spatial scratch (topic teardown). */
 		reset() {
 			centers.clear();
 			lod.clear();
 			last = new Map();
+			lastN = 0;
+			lastUseIndex = false;
 			index.reset();
 		}
 	};

@@ -1433,16 +1433,48 @@ export const _smoothRegister = function smooth(config) {
 			// cannot strand subsequent honest shots behind an inflated floor.
 			if (st) st.lastRt = Math.max(st.lastRt, Math.min(rtStamp, now));
 		}
-		// Candidate set = what the shooter currently has replicated (the relevancy /
-		// transmit-bit gate), minus self. You cannot rewind or hit an entity that was
-		// never sent to you (credo-5 default-deny). The set is server-computed; the
-		// client supplies no candidate list.
-		const candIter = rec.interest.getCandidates(shooterKey);
-		if (candIter === undefined) return;
-		const candidates = [];
-		for (const k of candIter) if (k !== shooterKey) candidates.push(k);
-		if (candidates.length === 0) return;
-		const world = rec.lagComp.rewind(candidates, rewindAt);
+		// Candidate set, gated at the REWIND instant rather than at receipt. The shooter
+		// aimed at the world it saw when it fired (rewindAt), so membership belongs there:
+		// a target that drifted out of the shooter's area of interest while the shot was in
+		// flight is still a valid hit (it was replicated when fired - the honest miss the
+		// receipt-time gate dropped), and one that drifted IN only after the shot was fired
+		// is not (it was never replicated at that instant). Both reduce to one geometric
+		// test on historical positions: in-gate iff dist(shooter, target) <= interest
+		// radius, both sampled at rewindAt. The transmit-bit guarantee is unchanged - you
+		// still cannot hit what the shooter never had - it is just evaluated at the right
+		// time. The set is server-computed; the client supplies no candidate list.
+		const candKeys = new Set();
+		const liveCand = rec.interest.getCandidates(shooterKey);
+		if (liveCand !== undefined) for (const k of liveCand) if (k !== shooterKey) candKeys.add(k);
+		// The geometric gate compares ring positions against the interest radius, so it is
+		// only sound when the ring records the SAME position the interest membership uses.
+		// That holds on the default path (hitTest.position falls back to interest.position,
+		// same reference); a custom hitTest.position in a different coordinate space would
+		// make the gate mix spaces, so there we skip it and fall back to the receipt-time
+		// membership (interest-space correct, just not rewindAt-precise). A null sample
+		// (shooter just spawned, pre-history, or a ring discontinuity at rewindAt) also
+		// has no usable rewound center, so it takes the same fallback.
+		const gateInRingSpace = rec.cfg.hitTest.position === rec.cfg.interest.position;
+		const shooterAt = gateInRingSpace ? rec.lagComp.sample(shooterKey, rewindAt) : null;
+		let world;
+		if (shooterAt === null) {
+			// No usable rewound gate: fall back to the receipt-time membership ungated -
+			// never worse than the pre-gate behavior.
+			if (candKeys.size === 0) return;
+			world = rec.lagComp.rewind(candKeys, rewindAt);
+		} else {
+			const radius = rec.interest.radius;
+			// Also broadphase the departed shell: entities near the shooter's rewound
+			// position that the receipt-time set no longer lists (they left during the
+			// flight window). A target must cross a full interest radius within the rewind
+			// window (<= maxRewindMs) to escape the doubled query - implausible for a radius
+			// sized to the arena - and the exact gate below trims the broadphase back to the
+			// true membership, so over-pulling is safe; under-pulling is the only real risk.
+			const near = rec.interest.candidatesAt(shooterAt.x, shooterAt.y, radius * 2);
+			for (let i = 0; i < near.length; i++) if (near[i] !== shooterKey) candKeys.add(near[i]);
+			if (candKeys.size === 0) return;
+			world = rec.lagComp.rewindWithin(candKeys, rewindAt, shooterAt.x, shooterAt.y, radius * radius);
+		}
 		if (world.size === 0) return;
 		// Shot geometry from the shooter's CURRENT state: only the targets rewind, the
 		// shooter fires from where the server says it is. The app's origin/dir are

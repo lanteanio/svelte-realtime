@@ -172,10 +172,35 @@ export function createLagComp(opts) {
 		 * @returns {Map<string, { x: number, y: number, state: any, fallback: boolean }>}
 		 */
 		rewind(candidateKeys, at) {
+			return this.rewindWithin(candidateKeys, at, 0, 0, Infinity);
+		},
+
+		/**
+		 * `rewind`, additionally gating each candidate to a circle: an entity is kept
+		 * only when its rewound position is within `radiusSq` (distance-squared) of the
+		 * center (cx, cy) AT THE SAME rewind instant `at`. The shoot handler passes the
+		 * shooter's own rewound position as the center and the area-of-interest radius,
+		 * so membership is decided at the moment the shooter fired (when it had the
+		 * target replicated) rather than at receipt. This corrects both an honest miss (a
+		 * target that drifted out of the area of interest while the shot was in flight)
+		 * and an over-permissive hit (a target that drifted in only after the shot was
+		 * fired). `radiusSq = Infinity` reduces this to an ungated `rewind`.
+		 *
+		 * @param {Iterable<string>} candidateKeys
+		 * @param {number} at
+		 * @param {number} cx @param {number} cy center of the gate, at `at`
+		 * @param {number} radiusSq squared gate radius
+		 * @returns {Map<string, { x: number, y: number, state: any, fallback: boolean }>}
+		 */
+		rewindWithin(candidateKeys, at, cx, cy, radiusSq) {
 			const out = new Map();
 			for (const key of candidateKeys) {
 				const s = this.sample(key, at);
-				if (s !== null) out.set(key, s);
+				if (s === null) continue;
+				const dx = s.x - cx;
+				const dy = s.y - cy;
+				if (dx * dx + dy * dy > radiusSq) continue;
+				out.set(key, s);
 			}
 			return out;
 		},
