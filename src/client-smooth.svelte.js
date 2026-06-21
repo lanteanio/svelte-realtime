@@ -140,6 +140,18 @@ export class SmoothEntity {
 	}
 
 	/**
+	 * Fire a shot: a fire-and-forget, non-predicted command the server resolves
+	 * against the rewound world (lag compensation). Unlike `command`, it does not
+	 * enter the prediction ring - a shot owns no entity state to predict - and its
+	 * outcome arrives as a discrete `onEvent` (a hit), not a reconciliation. Inert
+	 * on a topic declared without `hitTest`.
+	 * @param {any} cmd
+	 */
+	shoot(cmd) {
+		this.#channel.shoot(cmd);
+	}
+
+	/**
 	 * Report this view's area-of-interest center to the server - the point its
 	 * culling should be measured from when the camera is not the player's own
 	 * entity (a spectator, a free-cam, a zoomed-out overview). Overrides the

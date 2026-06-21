@@ -4,7 +4,7 @@ import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
 import { createInterestState } from './interest.js';
-import { createLagComp } from './lagcomp.js';
+import { createLagComp, rayCircleHit, rayAabbHit } from './lagcomp.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); smooth registration reaches it through this, set at
@@ -248,6 +248,10 @@ function _smoothRecord(name, cfg, platform, rt) {
 			surrogates: new Map(),
 			pendingSync: new Map(),
 			eventSeq: 0,
+			// Outbound correlation id for events emitted by the shoot RPC's onHit (a
+			// hit has no commanded apply, so it cannot borrow a command id). Distinct
+			// from `eventSeq` (the cluster relay dedup counter); client-facing.
+			shootEventSeq: 0,
 			lastSeenSeq: -1,
 			lastSeenOwner: null,
 			lastRenew: 0,
@@ -1013,6 +1017,23 @@ function _validateHitTest(ht, interest) {
 	};
 }
 
+// Resolve `shot.dir`'s app value into a unit direction. An app may return an
+// angle in radians (the common 2D-aim case) or a vector; both normalise here so
+// the ray test always gets a unit (dx,dy). A zero or malformed vector yields
+// null (the shot is dropped rather than resolved along a degenerate ray).
+function _shotUnitDir(d) {
+	if (typeof d === 'number') {
+		if (!Number.isFinite(d)) return null;
+		return { x: Math.cos(d), y: Math.sin(d) };
+	}
+	if (d !== null && typeof d === 'object' && Number.isFinite(d.x) && Number.isFinite(d.y)) {
+		const len = Math.sqrt(d.x * d.x + d.y * d.y);
+		if (len === 0) return null;
+		return { x: d.x / len, y: d.y / len };
+	}
+	return null;
+}
+
 /**
  * Declare a topic of smoothed (predicted / reconciled) entities.
  *
@@ -1211,7 +1232,7 @@ export const _smoothRegister = function smooth(config) {
 				// socket (seeded from the snapshot when one was recovered, else the
 				// declared initial - identical to single-instance when snapshot is off).
 				const ensured = rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
-				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: rec.authority.catalog() };
+				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: rec.authority.catalog(), ...(rec.lagComp !== null && { lc: 1 }) };
 			}
 			// Non-owner: ask the owner for the catalog. On a timeout, return a
 			// local-empty basis - incoming broadcasts reconcile the client.
@@ -1227,7 +1248,8 @@ export const _smoothRegister = function smooth(config) {
 				t: wallEpoch(),
 				you: key,
 				ack: reply ? reply.ack : 0,
-				states: reply ? reply.states : []
+				states: reply ? reply.states : [],
+				...(rec.lagComp !== null && { lc: 1 })
 			};
 		}
 		const ensured = rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
@@ -1241,7 +1263,8 @@ export const _smoothRegister = function smooth(config) {
 			t: wallEpoch(),
 			you: key,
 			ack: ensured.lastAckedId,
-			states: rec.authority.catalog()
+			states: rec.authority.catalog(),
+			...(rec.lagComp !== null && { lc: 1 })
 		};
 	});
 
@@ -1315,6 +1338,164 @@ export const _smoothRegister = function smooth(config) {
 		rec.interestDirty = true;
 		const cluster = ctx.platform && ctx.platform.smooth;
 		if (!cluster || rec.owned) _armSmoothTick(rec);
+	});
+
+	// Fire-and-forget shot resolution: rewind every candidate to the instant the
+	// shooter saw the world, test the shot against those historical positions, and
+	// apply the result authoritatively. Registered only when `hitTest` is set, so
+	// the default smooth surface never gains this RPC (credo-4). Volatile - a lost
+	// shot is the app's to retransmit, never the framework's; there is no reply.
+	smoothExport.__smoothShoot = live.volatile(async (ctx, ...args) => {
+		const roomArgs = args.slice(0, argCount);
+		if (guard) await guard(ctx, ...roomArgs);
+		const payload = args[argCount];
+		if (payload === null || typeof payload !== 'object') return;
+		if (ctx.ws && _smoothClosedWs.has(ctx.ws)) return;
+		const name = resolveName(ctx, roomArgs);
+		const rec = _smoothTopics.get(name);
+		// No live record, or hit testing off: nothing to resolve. (Defense in depth -
+		// the RPC is only registered when hitTest is configured.)
+		if (rec === undefined || rec.lagComp === null) return;
+		// The ring and the authoritative catalog live only on the ticking owner. A
+		// non-owner shooter's shot is forwarded to the owner in a later step; until
+		// then it is inert on a non-owning instance (never resolved against an empty
+		// local ring, which would be a silent miss).
+		const cluster = ctx.platform && ctx.platform.smooth;
+		if (cluster && !rec.owned) return;
+		const shooterKey = _getIdentityKey(ctx);
+		const shooterEntity = rec.authority.get(shooterKey);
+		if (shooterEntity === undefined) return; // a shooter with no entity cannot aim
+		const ht = rec.cfg.hitTest;
+		const cmd = payload.cmd;
+		const now = wallEpoch();
+		// Decision A (idTech3-faithful): trust the client's absolute synced-clock
+		// renderTime, clamped to the policy window. Rewinding directly to it is
+		// correct; reconstructing `now - rt` at receipt would re-add the uplink leg
+		// and under-compensate. A missing / non-finite stamp falls back to the
+		// current instant (the server RTT cross-check that hardens a hostile stamp
+		// is a later step).
+		const rtStamp = payload.rt;
+		const rewindAt =
+			typeof rtStamp === 'number' && Number.isFinite(rtStamp)
+				? Math.max(now - ht.maxRewindMs, Math.min(rtStamp, now))
+				: now;
+		// Candidate set = what the shooter currently has replicated (the relevancy /
+		// transmit-bit gate), minus self. You cannot rewind or hit an entity that was
+		// never sent to you (credo-5 default-deny). The set is server-computed; the
+		// client supplies no candidate list.
+		const candIter = rec.interest.getCandidates(shooterKey);
+		if (candIter === undefined) return;
+		const candidates = [];
+		for (const k of candIter) if (k !== shooterKey) candidates.push(k);
+		if (candidates.length === 0) return;
+		const world = rec.lagComp.rewind(candidates, rewindAt);
+		if (world.size === 0) return;
+		// Shot geometry from the shooter's CURRENT state: only the targets rewind, the
+		// shooter fires from where the server says it is.
+		const origin = ht.shot.origin(cmd, shooterEntity.state);
+		if (origin === null || typeof origin !== 'object' || !Number.isFinite(origin.x) || !Number.isFinite(origin.y)) return;
+		const dir = _shotUnitDir(ht.shot.dir(cmd, shooterEntity.state));
+		if (dir === null) return;
+		const maxDist = ht.shot.maxDist;
+		const useResolve = typeof ht.resolve === 'function';
+		// Broadphase distance cull. The narrowphase accepts a hit whose ray ENTRY is
+		// within maxDist, but a hitbox reaches one radius (or half-diagonal) past its
+		// centre - so a target centred just beyond maxDist can still be struck on its
+		// near edge. Default the cull to maxDist + that reach so it never drops a valid
+		// hit; for a custom resolve (unknown reach) skip the distance cull entirely
+		// unless the app set an explicit broadphase.maxDist.
+		const hitboxReach = useResolve
+			? Infinity
+			: ht.hitbox.shape === 'circle'
+				? ht.hitbox.radius
+				: 0.5 * Math.sqrt(ht.hitbox.w * ht.hitbox.w + ht.hitbox.h * ht.hitbox.h);
+		const bpMaxDist = ht.broadphase && ht.broadphase.maxDist ? ht.broadphase.maxDist : maxDist + hitboxReach;
+		const bpMaxSq = bpMaxDist * bpMaxDist;
+		const cone = ht.broadphase ? ht.broadphase.cone : undefined;
+		const shot = { origin, dir, maxDist };
+		// Build the shoot ctx once (it is per-shot, not per-target): the seam where
+		// `applyTo` (authoritative cross-entity mutation) and `emitEvent` (the hit
+		// signal) are plain locals, never threaded through the authority's time-pure
+		// synchronous apply ctx.
+		let armed = false;
+		const pendingEvents = [];
+		const shootCtx = {
+			identity: shooterKey,
+			platform: ctx.platform,
+			// Apply a server-initiated command to any entity: a non-commanded update
+			// (broadcast to all incl. the victim, no ack), via the adapter authority's
+			// inject primitive. The victim's predictor is undisturbed (its ack
+			// watermark never moves); it sees the change through the normal broadcast.
+			applyTo(victimKey, victimCmd) {
+				if (typeof victimKey !== 'string') return false;
+				if (rec.authority.inject(victimKey, victimCmd)) {
+					armed = true;
+					return true;
+				}
+				return false;
+			},
+			// Queue a discrete one-shot event (a hit) for broadcast after resolution.
+			emitEvent(type, data, opts) {
+				if (typeof type !== 'string') return;
+				pendingEvents.push({ type, data, opts });
+			}
+		};
+		// Broadphase cull + narrowphase per candidate, collecting hits to order
+		// nearest-first. Penetration is ON by default: every aligned candidate is hit
+		// unless the app stops after the nearest by returning `{ stop: true }`.
+		const hits = [];
+		for (const [key, s] of world) {
+			const vx = s.x - origin.x;
+			const vy = s.y - origin.y;
+			const distSq = vx * vx + vy * vy;
+			if (distSq > bpMaxSq) continue;
+			if (cone !== undefined && cone !== null && distSq > 0) {
+				if ((vx * dir.x + vy * dir.y) / Math.sqrt(distSq) < cone) continue;
+			}
+			let hit;
+			if (useResolve) {
+				hit = ht.resolve(shot, { key, pos: { x: s.x, y: s.y }, state: s.state }, shootCtx);
+			} else if (ht.hitbox.shape === 'circle') {
+				hit = rayCircleHit(origin.x, origin.y, dir.x, dir.y, maxDist, s.x, s.y, ht.hitbox.radius);
+			} else {
+				hit = rayAabbHit(origin.x, origin.y, dir.x, dir.y, maxDist, s.x, s.y, ht.hitbox.w, ht.hitbox.h);
+			}
+			if (hit !== null && hit !== undefined && Number.isFinite(hit.dist)) {
+				hits.push({ key, pos: { x: s.x, y: s.y }, state: s.state, dist: hit.dist, point: hit.point, fallback: s.fallback });
+			}
+		}
+		if (hits.length === 0) return;
+		hits.sort((a, b) => a.dist - b.dist);
+		for (let i = 0; i < hits.length; i++) {
+			const h = hits[i];
+			const target = { key: h.key, pos: h.pos, state: h.state };
+			const info = { dist: h.dist, point: h.point, fraction: maxDist > 0 ? h.dist / maxDist : 0, rewindAt, fallback: h.fallback };
+			const verdict = await ht.onHit(shootCtx, target, info);
+			if (verdict && verdict.stop) break;
+		}
+		// The app's onHit may have awaited. If the topic was forgotten (its last
+		// entity left) or this instance lost ownership in that window, do not publish
+		// the events or arm a tick on a dead or demoted record.
+		if (_smoothTopics.get(name) !== rec || (cluster && !rec.owned)) return;
+		// Broadcast the hit events. A shot bypasses the prediction ring, so there is
+		// no optimistic client copy to suppress: the event reaches everyone, the
+		// shooter (its hit marker) and the victim alike. The wire frame carries only
+		// {type,key,data,id}, exactly as the tick's event broadcast does.
+		for (let i = 0; i < pendingEvents.length; i++) {
+			const pe = pendingEvents[i];
+			const wire = {
+				type: pe.type,
+				key: pe.opts && typeof pe.opts.key === 'string' ? pe.opts.key : shooterKey,
+				data: pe.data,
+				id: ++rec.shootEventSeq
+			};
+			_smoothPublish(rec, 'event', wire, undefined);
+			if (cluster && typeof cluster.relayBroadcast === 'function') {
+				cluster.relayBroadcast(rec.wireTopic, 'event', wire, undefined, rec.eventSeq++);
+			}
+		}
+		// Arm the tick so the injected damage drains and broadcasts this frame.
+		if (armed) _armSmoothTick(rec);
 	});
 
 	return smoothExport;

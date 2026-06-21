@@ -166,12 +166,14 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			smLines.push(`  _command: __rpc(${JSON.stringify(modulePath + '/' + name + '/__smooth/command')}),`);
 			smLines.push(`  _sync: __rpc(${JSON.stringify(modulePath + '/' + name + '/__smooth/sync')}),`);
 			smLines.push(`  _center: __rpc(${JSON.stringify(modulePath + '/' + name + '/__smooth/center')}),`);
+			smLines.push(`  _shoot: __rpc(${JSON.stringify(modulePath + '/' + name + '/__smooth/shoot')}),`);
 			smLines.push(`  status: status,`);
 			smLines.push(`  smooth(...args) {`);
 			smLines.push(`    const opts = args.length > 0 ? args[args.length - 1] : undefined;`);
 			smLines.push(`    const roomArgs = args.slice(0, -1);`);
 			smLines.push(`    const channel = createSmoothChannel({ ...opts, transport: {`);
 			smLines.push(`      sendCommand: (batch) => ${name}._command.fireAndForget(...roomArgs, batch),`);
+			smLines.push(`      sendShoot: (payload) => ${name}._shoot.fireAndForget(...roomArgs, payload),`);
 			smLines.push(`      sync: () => ${name}._sync(...roomArgs)`);
 			smLines.push(`    } });`);
 			// The area-of-interest center report rides its own volatile RPC, not the

@@ -48,7 +48,7 @@ async function call(ws, platform, path, args) {
  */
 function fakeRuntime() {
 	const entities = new Map();
-	const calls = { ensure: [], enqueue: [], drains: 0, removeWs: 0 };
+	const calls = { ensure: [], enqueue: [], drains: 0, removeWs: 0, inject: [] };
 	let drainQueue = [];
 	const authority = {
 		ensure(key, ws, initial) {
@@ -69,6 +69,13 @@ function fakeRuntime() {
 		enqueue(key, batch) {
 			calls.enqueue.push({ key, batch });
 			return true;
+		},
+		inject(key, cmd) {
+			// Mirror the real authority: a server-initiated command is accepted only
+			// for a live entity (unknown key -> false, the cue the caller uses to skip
+			// arming). The drained effect is scripted via queueDrain in the test.
+			calls.inject.push({ key, cmd });
+			return entities.has(key);
 		},
 		drain() {
 			calls.drains++;
@@ -143,6 +150,7 @@ function registerSmooth(moduleName, smoothExport) {
 	__register(moduleName + '/shape/__smooth/sync', smoothExport.__smoothSync, moduleName);
 	__register(moduleName + '/shape/__smooth/command', smoothExport.__smoothCommand, moduleName);
 	__register(moduleName + '/shape/__smooth/center', smoothExport.__smoothCenter, moduleName);
+	__register(moduleName + '/shape/__smooth/shoot', smoothExport.__smoothShoot, moduleName);
 }
 
 let moduleSeq = 0;
@@ -1640,5 +1648,250 @@ describe('live.smooth interest (area-of-interest culling)', () => {
 		const after = _smoothTopics.get('shape:r1');
 		if (after) expect(after.registry.has('A')).toBe(false);
 		else expect(after).toBeUndefined();
+	});
+});
+
+describe('live.smooth lag-compensated shoot', () => {
+	let rt;
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(10000);
+		rt = fakeRuntime();
+		_setSmoothRuntime(rt.mod);
+	});
+	afterEach(() => {
+		_resetSmooth();
+		_setSmoothRuntime(null);
+		vi.useRealTimers();
+	});
+
+	// The default consequence: drop the victim's health authoritatively and signal
+	// the hit, stopping after the first target (penetration off).
+	const baseOnHit = (ctx, target) => {
+		ctx.applyTo(target.key, { damage: 25 });
+		ctx.emitEvent('hit', { victim: target.key, by: ctx.identity }, { key: target.key, toAuthor: true });
+		return { stop: true };
+	};
+
+	function hitShape(onHit = baseOnHit, htExtra = {}) {
+		return declareShape({
+			tickMs: 20,
+			interest: { radius: 1000, position: (s) => ({ x: s.x, y: s.y }) },
+			hitTest: {
+				hitbox: { shape: 'circle', radius: 30 },
+				shot: { type: 'ray', origin: (cmd, sh) => ({ x: sh.x, y: sh.y }), dir: (cmd) => cmd.aim, maxDist: 2000 },
+				onHit,
+				...htExtra
+			}
+		});
+	}
+
+	// Arm a tick whose scripted drain positions `key` at `state`, so the tick
+	// records that position into the lag-comp ring and recomputes interest
+	// relevancy. Returns the wall time the tick fired at (the ring timestamp).
+	async function moveTick(platform, ws, cmdPath, key, state) {
+		await call(ws, platform, cmdPath, ['r1', [{ id: 1, cmd: { step: 1 } }]]);
+		rt.queueDrain({ updates: [{ key, state, ws, commanded: true }], acks: [], idle: false });
+		await vi.advanceTimersByTimeAsync(20);
+		return Date.now();
+	}
+
+	function paths(name) {
+		return {
+			sync: name + '/shape/__smooth/sync',
+			cmd: name + '/shape/__smooth/command',
+			shoot: name + '/shape/__smooth/shoot'
+		};
+	}
+
+	it('resolves a hit in the ray path: applies damage via the authority and broadcasts the hit', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+
+		const drainsBefore = rt.calls.drains;
+		const eventsBefore = platform.wirePublished.filter((w) => w.event === 'event').length;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+		const hitEvents = platform.wirePublished.filter((w) => w.event === 'event');
+		expect(hitEvents).toHaveLength(eventsBefore + 1);
+		expect(hitEvents[hitEvents.length - 1].data.type).toBe('hit');
+		expect(hitEvents[hitEvents.length - 1].data.key).toBe('u2');
+		expect(hitEvents[hitEvents.length - 1].data.data).toEqual({ victim: 'u2', by: 'u1' });
+		// The hit armed a tick so the injected damage drains and broadcasts.
+		await vi.advanceTimersByTimeAsync(20);
+		expect(rt.calls.drains).toBeGreaterThan(drainsBefore);
+	});
+
+	it('misses an entity off the ray path (no damage, no hit event)', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 500 }); // well off the y=0 ray
+
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(rt.calls.inject).toEqual([]);
+		expect(platform.wirePublished.filter((w) => w.event === 'event')).toHaveLength(0);
+	});
+
+	it('cannot hit an entity outside the shooter candidate set (credo-5 default-deny)', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// u2 sits ON the ray and within maxDist (2000), but BEYOND the interest
+		// radius (1000), so it is in the ring yet never in u1's candidate set. The
+		// only reason the shot misses is the transmit-bit gate, not geometry.
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 1500, y: 0 });
+
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
+	it('rewinds to where the target was: a hit at render-time that would miss against the current position', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		const tHit = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 }); // on the ray
+		const tMiss = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 300 }); // moved off it
+
+		// Rewound to when the target was on the ray -> hit.
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tHit }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+
+		// Same shot against the current (moved) position -> miss.
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tMiss }]);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
+	it('advertises lc:1 on a hitTest topic and omits it without one (byte-identical off)', async () => {
+		const hit = hitShape();
+		const plain = declareShape();
+		const platform = wirePlatform();
+		const onSync = await call(mockWs({ id: 'u1' }), platform, hit.name + '/shape/__smooth/sync', ['r1']);
+		const offSync = await call(mockWs({ id: 'u9' }), platform, plain.name + '/shape/__smooth/sync', ['r2']);
+		expect(onSync.data.lc).toBe(1);
+		expect('lc' in offSync.data).toBe(false);
+	});
+
+	it('a shot on a topic without hitTest is inert', async () => {
+		const { name } = declareShape();
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		// The RPC exists for every smooth topic, but a topic with no ring no-ops it.
+		await call(ws1, platform, name + '/shape/__smooth/shoot', ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
+	it('orders hits nearest-first and stops after the first when onHit returns stop', async () => {
+		const order = [];
+		const { name } = hitShape((ctx, target) => {
+			order.push(target.key);
+			ctx.applyTo(target.key, { damage: 25 });
+			return { stop: true };
+		});
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		const ws3 = mockWs({ id: 'u3' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await call(ws3, platform, p.sync, ['r1']);
+		await moveTick(platform, ws3, p.cmd, 'u3', { x: 200, y: 0 }); // farther
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 }); // nearer
+
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		// Nearest first, and stop halts before the farther one.
+		expect(order).toEqual(['u2']);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
+	it('penetrates every candidate on the ray when onHit does not stop', async () => {
+		const order = [];
+		const { name } = hitShape((ctx, target) => {
+			order.push(target.key);
+			ctx.applyTo(target.key, { damage: 10 });
+			// no stop -> penetration
+		});
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		const ws3 = mockWs({ id: 'u3' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await call(ws3, platform, p.sync, ['r1']);
+		await moveTick(platform, ws3, p.cmd, 'u3', { x: 200, y: 0 });
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(order).toEqual(['u2', 'u3']); // nearest-first, both hit
+		expect(rt.calls.inject).toEqual([
+			{ key: 'u2', cmd: { damage: 10 } },
+			{ key: 'u3', cmd: { damage: 10 } }
+		]);
+	});
+
+	it('does not false-miss a target centred just past maxDist but struck on its near edge', async () => {
+		// Center at 120 is beyond maxDist (100), but the circle's near edge at 90 is in
+		// range, so the ray hits. A broadphase that culls by center distance alone would
+		// wrongly drop it; the cull must allow one hitbox-reach past maxDist.
+		const { name } = declareShape({
+			tickMs: 20,
+			interest: { radius: 5000, position: (s) => ({ x: s.x, y: s.y }) },
+			hitTest: {
+				hitbox: { shape: 'circle', radius: 30 },
+				shot: { type: 'ray', origin: (cmd, sh) => ({ x: sh.x, y: sh.y }), dir: (cmd) => cmd.aim, maxDist: 100 },
+				onHit: baseOnHit
+			}
+		});
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 120, y: 0 });
+
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
+	it('clamps a hostile far-past renderTime to the window (fails safe to current state)', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+
+		// A renderTime a year in the past is clamped into the window; the rewind
+		// resolves against the newest record (current position), still on the ray,
+		// so the hit lands - never a crash, never a stale resolution.
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: 1 }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
 	});
 });
