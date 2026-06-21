@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.18] - 2026-06-21
+
+### Fixed
+
+- **A lag-compensated shot can no longer register a "phantom" hit between a dead and a respawned entity.** The rewind history records a position every tick; when an entity dies (or is removed and respawns, often reusing its key) its history has a gap across the dead interval. A rewind landing in that gap previously interpolated a position along the straight line from the corpse to the respawn point - somewhere the entity never was - and could resolve a hit there. The ring now marks any record that resumes after a gap (more than ~2 ticks) as a discontinuity, and a rewind whose bracketing pair spans it misses. Always on and distance-independent, so it covers the respawn case the optional `hitTest.teleportThreshold` distance guard (off by default) does not. Off-path unchanged.
+
 ## [0.6.0-next.17] - 2026-06-21
 
 ### Changed

@@ -24,10 +24,13 @@ const _DEFAULT_MAX_REWIND_MS = 1000; // Source sv_maxunlag (a ceiling, not a tar
 
 /**
  * @param {number} cap
- * @returns {{ t: Float64Array, x: Float64Array, y: Float64Array, st: any[], head: number, len: number }}
+ * @returns {{ t: Float64Array, x: Float64Array, y: Float64Array, st: any[], brk: Uint8Array, head: number, len: number }}
  */
 function _newRing(cap) {
-	return { t: new Float64Array(cap), x: new Float64Array(cap), y: new Float64Array(cap), st: new Array(cap), head: -1, len: 0 };
+	// `brk[i] = 1` marks a record that RESUMED after an absence (the entity was
+	// dead / removed-but-key-kept / null-position for a span before it): a rewind
+	// must never LERP across such a boundary (corpse -> respawn phantom).
+	return { t: new Float64Array(cap), x: new Float64Array(cap), y: new Float64Array(cap), st: new Array(cap), brk: new Uint8Array(cap), head: -1, len: 0 };
 }
 
 /**
@@ -56,6 +59,13 @@ export function createLagComp(opts) {
 		typeof opts.teleportThreshold === 'number' && opts.teleportThreshold > 0
 			? opts.teleportThreshold * opts.teleportThreshold
 			: Infinity;
+	// A record gap larger than this (the entity was absent for ~2+ ticks: death,
+	// removal, or a null-position interval) is a discontinuity - the rewind must not
+	// LERP across it. Two ticks of slack absorbs timer jitter (a live entity records
+	// every tick) while catching any real death/respawn gap. Always on, distance-
+	// independent, so it covers the respawn case the teleport-distance guard (default
+	// off) does not.
+	const gapMs = tickMs * 2;
 
 	/** @type {Map<string, ReturnType<typeof _newRing>>} per entity key */
 	const rings = new Map();
@@ -85,11 +95,16 @@ export function createLagComp(opts) {
 					r = _newRing(cap);
 					rings.set(entry.key, r);
 				}
+				// Mark a resume after an absence: this record follows the last one by
+				// more than a gap, so the entity was gone in between (it skips the loop
+				// above when its position is null, and re-add starts a fresh ring).
+				const resumed = r.len > 0 && t - r.t[r.head] > gapMs ? 1 : 0;
 				r.head = (r.head + 1) % cap;
 				r.t[r.head] = t;
 				r.x[r.head] = p.x;
 				r.y[r.head] = p.y;
 				r.st[r.head] = entry.state;
+				r.brk[r.head] = resumed;
 				if (r.len < cap) r.len++;
 			}
 		},
@@ -131,6 +146,11 @@ export function createLagComp(opts) {
 				}
 			}
 			const hi = (lo + 1) % cap;
+			// The upper bracket resumed after an absence: the entity was dead / removed
+			// for the span between lo and hi, so it never occupied any point on the line
+			// from lo to hi - a shot rewinding into that gap must miss, not hit a phantom
+			// interpolated between a corpse and a respawn point.
+			if (r.brk[hi]) return null;
 			const ddx = r.x[hi] - r.x[lo];
 			const ddy = r.y[hi] - r.y[lo];
 			if (teleportSq !== Infinity && ddx * ddx + ddy * ddy > teleportSq) return null;

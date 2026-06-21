@@ -93,6 +93,38 @@ describe('lag-comp ring: teleport-abort', () => {
 	});
 });
 
+describe('lag-comp ring: discontinuity (death / respawn) guard', () => {
+	it('refuses to LERP across a death gap, even with no teleportThreshold set', () => {
+		const ring = mk({ tickMs: 50 }); // gapMs = 100, teleport guard OFF (default)
+		ring.record([at('a', 0, 0)], 1000);
+		ring.record([at('a', 10, 0)], 1050);
+		// Dead for 300ms: a null-position record is skipped, leaving a gap in the ring.
+		ring.record([at('a', 0, 0, { hidden: true })], 1100);
+		ring.record([at('a', 0, 0, { hidden: true })], 1300);
+		ring.record([at('a', 500, 0)], 1350); // respawn far away -> resume after the gap
+		// A rewind INTO the dead interval must MISS, not interpolate a phantom from the
+		// corpse (10,0) toward the spawn (500,0). The teleport-distance guard is off,
+		// so only the time-gap discontinuity catches this.
+		expect(ring.sample('a', 1200)).toBe(null);
+		// A rewind BEFORE the death still interpolates normally.
+		const before = ring.sample('a', 1025);
+		expect(before).not.toBe(null);
+		expect(before.x).toBeCloseTo(5);
+		// A rewind at the respawn clamps to it.
+		expect(ring.sample('a', 1350).x).toBe(500);
+	});
+
+	it('does not flag normal tick-spaced records as a discontinuity', () => {
+		const ring = mk({ tickMs: 50 });
+		ring.record([at('a', 0, 0)], 1000);
+		ring.record([at('a', 30, 0)], 1050);
+		ring.record([at('a', 60, 0)], 1100);
+		const s = ring.sample('a', 1075); // mid second interval, no gap
+		expect(s).not.toBe(null);
+		expect(s.x).toBeCloseTo(45);
+	});
+});
+
 describe('lag-comp ring: eviction + rewind(candidateKeys)', () => {
 	it('keeps recent history correct after the ring wraps past capacity', () => {
 		const ring = mk(); // cap ~ 23 at tickMs 50 / window 1000
