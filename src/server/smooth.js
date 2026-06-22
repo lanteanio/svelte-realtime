@@ -3,6 +3,7 @@ import { live } from '../server.js';
 import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
+import { _tenantTopic } from './tenant.js';
 import { createInterestState } from './interest.js';
 import { createLagComp, rayCircleHit, rayAabbHit } from './lagcomp.js';
 import { createRttTracker } from './rtt.js';
@@ -1466,8 +1467,13 @@ export const _smoothRegister = function smooth(config) {
 		? config.topicArgs
 		: (typeof topicFn === 'function' ? Math.max(0, topicFn.length - 1) : 0);
 
+	// Prefix the resolved name ONCE with the connection's tenant: the wire topic
+	// (SMOOTH_TOPIC_PREFIX + name), the `_smoothTopics` map key, the cluster relay
+	// channel, and the reverse `_smoothRecByWire` lookup all derive from `name`, so
+	// scoping it here isolates an entire smooth entity per tenant. Null tenant ->
+	// unchanged (byte-identical single-tenant path).
 	const resolveName = (ctx, roomArgs) =>
-		typeof topicFn === 'function' ? _callTopicFn(topicFn, ctx, roomArgs) : topicFn;
+		_tenantTopic(ctx.tenantId, typeof topicFn === 'function' ? _callTopicFn(topicFn, ctx, roomArgs) : topicFn);
 
 	const smoothExport = /** @type {any} */ ({});
 	smoothExport.__isSmooth = true;

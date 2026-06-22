@@ -23,6 +23,7 @@ import {
 } from '../src/server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
+import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.js';
 import svelteRealtime from '../src/vite.js';
 // Internal record map, for asserting a topic record is reclaimed (same module
 // instance server.js uses - ESM dedupes the import).
@@ -206,7 +207,25 @@ describe('live.smooth sync', () => {
 	afterEach(() => {
 		_resetSmooth();
 		_setSmoothRuntime(null);
+		_resetTenantResolver();
 		vi.useRealTimers();
+	});
+
+	it('isolates the smooth record and wire topic per tenant', async () => {
+		_setTenantResolver((u) => u.org);
+		const { name } = declareShape();
+		const wsA = mockWs({ id: 'u1', org: 'a' });
+		const wsB = mockWs({ id: 'u2', org: 'b' });
+		await call(wsA, wirePlatform(), name + '/shape/__smooth/sync', ['r1']);
+		await call(wsB, wirePlatform(), name + '/shape/__smooth/sync', ['r1']);
+		// Same logical room id, two tenants -> two distinct records + wire topics; the
+		// un-prefixed (shared) record never exists, so no cross-tenant entity/relay.
+		expect(_smoothTopics.has('@t/a/shape:r1')).toBe(true);
+		expect(_smoothTopics.has('@t/b/shape:r1')).toBe(true);
+		expect(_smoothTopics.has('shape:r1')).toBe(false);
+		expect(wsA.isSubscribed('__smooth:@t/a/shape:r1')).toBe(true);
+		expect(wsB.isSubscribed('__smooth:@t/b/shape:r1')).toBe(true);
+		expect(wsA.isSubscribed('__smooth:@t/b/shape:r1')).toBe(false);
 	});
 
 	it('subscribes the socket, ensures the entity, and returns the catalog basis', async () => {

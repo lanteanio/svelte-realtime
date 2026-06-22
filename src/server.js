@@ -52,6 +52,7 @@ import {
 } from './server/state.js';
 import { _IS_DEV } from './server/env.js';
 import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge } from './server/presence.js';
+import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
 import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs } from './server/publish-helpers.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
@@ -2452,6 +2453,50 @@ installBreaker({ copyStreamMeta: _copyStreamMeta });
 live.breaker = function breaker(options, fn) { return _breakerRegister(options, fn); };
 
 /**
+ * Declare a tenant and (optionally) its config, returning a server-side handle.
+ *
+ * Tenant isolation is automatic and OPT-IN via `realtime({ tenant })`: once a
+ * resolver is configured, every topic and key is scoped by the connection's
+ * server-trusted `ctx.tenantId`, and inside a handler `ctx.tenant(id).publish(...)`
+ * is the cross-tenant escape. This factory is a thin complement for code OUTSIDE a
+ * request handler:
+ * - it validates `id` (the same delimiter-safe, length-bounded charset as the resolver),
+ * - it records `config` (quota / metrics / breaker settings) in a global registry
+ *   that the deferred quota / metrics slices consume - the realtime core does not
+ *   enforce it here, and
+ * - it returns a handle whose `.publish(topic, event, data)` targets the tenant's
+ *   scope using the active server platform.
+ *
+ * @param {string} id - tenant id ([a-zA-Z0-9_-], <= 64 chars)
+ * @param {object} [config] - opt-in per-tenant config carrier (not enforced by the core)
+ * @returns {{ id: string, config: any, publish: (topic: string, event: string, data: any, options?: any) => any }}
+ */
+live.tenant = function tenant(id, config) {
+	const tenantId = _validTenantId(id);
+	if (config !== undefined && config !== null) {
+		if (typeof config !== 'object' || Array.isArray(config)) {
+			throw new LiveError('VALIDATION', 'live.tenant(id, config): config must be a plain object (quota / metrics / breaker settings).');
+		}
+		_tenantConfigRegistry.set(tenantId, config);
+	}
+	return {
+		id: tenantId,
+		// Read live so a later re-declare with new config is reflected.
+		get config() { const c = _tenantConfigRegistry.get(tenantId); return c === undefined ? null : c; },
+		publish(topic, event, data, options) {
+			// Outside a request handler there is no ctx; use the platform the server
+			// activated (the same one cron publishes through). Inside a handler prefer
+			// ctx.tenant(id).publish, which carries the connection's own platform.
+			const platform = state.derivedPlatform || state.cronPlatform;
+			if (!platform) {
+				throw new LiveError('INTERNAL', 'live.tenant(...).publish requires an active server platform; call it after the realtime server is wired (inside a handler use ctx.tenant(id).publish instead).');
+			}
+			return _makeTenantScope(_getCtxHelpers(platform).publish, tenantId).publish(topic, event, data, options);
+		}
+	};
+};
+
+/**
  * Register a derived stream. Called by the Vite-generated registry module.
  * @param {string} path
  * @param {Function} fn
@@ -2778,6 +2823,12 @@ export function enableSignals(ws, options) {
 	if (reason !== null) {
 		throw new Error('[svelte-realtime] enableSignals: ' + reason + '. The userData field "' + idField + '" must be a non-empty string safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for anonymous connections.');
 	}
+	// Point-to-point signals key by the user id you supply, NOT by the tenant: the
+	// channel is delivered to the client under `__signal:<userId>` (the client keys
+	// its onSignal store on that logical topic and has no way to learn a server-only
+	// tenant prefix), so a tenant-scoped channel would silently never reach the
+	// client. Under multi-tenancy, use globally-unique user ids (the norm) so signals
+	// stay isolated; see the README "Multi-tenancy" note.
 	ws.subscribe('__signal:' + userId);
 }
 
@@ -2802,7 +2853,14 @@ export function unsubscribe(ws, topic, { platform }) {
 	if (!owners || owners.length === 0) return;
 
 	const user = ws.getUserData();
-	const unsubCtx = { user, ws, platform, publish: _getCtxHelpers(platform).publish, cursor: null };
+	// The drain ctx carries the connection's server-trusted tenant so tenant-scoped
+	// unsubscribe drains (the room-enumeration roster release + its delta channel)
+	// target the right tenant; `_publishWire` is the raw, non-prefixing publish that
+	// framework code uses when it already holds a wire topic. `publish` stays the raw
+	// helper (the hook topics here are already wire topics). Both reduce to the
+	// originals with no tenant resolver configured (tenantId null, _publishWire === publish).
+	const _helpers = _getCtxHelpers(platform);
+	const unsubCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId: _resolveTenant(user), _publishWire: _helpers.publish };
 
 	// Compute remaining subscribers AFTER this ws fully drops the topic. The
 	// hook fires N times (one per logical sub on this ws) and every firing
@@ -2868,7 +2926,10 @@ export function close(ws, { platform, subscriptions }) {
 	const alreadyFired = _firedUnsubscribes.get(ws);
 
 	const user = ws.getUserData();
-	const closeCtx = { user, ws, platform, publish: _getCtxHelpers(platform).publish, cursor: null };
+	// Carries the connection's tenant + raw wire-publish for tenant-scoped close
+	// drains (room-enumeration roster release + delta), exactly like unsubscribe().
+	const _helpers = _getCtxHelpers(platform);
+	const closeCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId: _resolveTenant(user), _publishWire: _helpers.publish };
 
 	// Drain tracked stream subscriptions (from the RPC subscribe path)
 	if (topicMap) {
@@ -3124,10 +3185,14 @@ export function publish(topic, event, data, options) {
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant } = cfg;
 
 	if (bus !== undefined) _setBus(bus);
 	if (leader !== undefined) configureCron({ leader });
+	// Multi-tenancy opt-in: a resolver mapping the server-trusted authenticated
+	// user (ws.getUserData()) to a tenant id auto-scopes every topic and key.
+	// Passing nothing (or null) leaves the framework single-tenant and zero-cost.
+	if (tenant !== undefined) _setTenantResolver(tenant);
 	if (typeof onError === 'function') {
 		// Routes through the existing module-level setter so the
 		// behaviour matches a direct `onError(handler)` call - one

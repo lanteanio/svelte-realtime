@@ -1993,7 +1993,8 @@ describe('live.room enumeration (game.rooms())', () => {
 		});
 		const ds = game.__dataStream;
 		const pub = [];
-		const ctx = { publish: (topic, event, data) => pub.push({ topic, event, data }) };
+		const cap = (topic, event, data) => pub.push({ topic, event, data });
+		const ctx = { publish: cap, _publishWire: cap };
 		await ds.__onSubscribe(ctx, 'game:7', [7]); // first subscriber: the room opens
 		await ds.__onSubscribe(ctx, 'game:7', [7]); // second: the live count rises
 		ds.__onUnsubscribe(ctx, 'game:7', 1); // one leaves: count drops to the remaining
@@ -2019,7 +2020,8 @@ describe('live.room enumeration (game.rooms())', () => {
 		});
 		const ds = game.__dataStream;
 		const pub = [];
-		const ctx = { publish: (t, e, d) => pub.push({ event: e, data: d }) };
+		const cap = (t, e, d) => pub.push({ event: e, data: d });
+		const ctx = { publish: cap, _publishWire: cap };
 		await ds.__onSubscribe(ctx, 'game:a', ['a']);
 		await ds.__onSubscribe(ctx, 'game:a', ['a']); // meta is NOT recomputed for a later subscriber
 		expect(calls).toBe(1);
@@ -2048,8 +2050,10 @@ describe('live.room enumeration (game.rooms())', () => {
 		const ds = game.__dataStream;
 		const pubA = [];
 		const pubB = [];
-		const ctxA = { platform: platformA, publish: (topic, event, data) => pubA.push({ topic, event, data }) };
-		const ctxB = { platform: platformB, publish: (topic, event, data) => pubB.push({ topic, event, data }) };
+		const capA = (topic, event, data) => pubA.push({ topic, event, data });
+		const capB = (topic, event, data) => pubB.push({ topic, event, data });
+		const ctxA = { platform: platformA, publish: capA, _publishWire: capA };
+		const ctxB = { platform: platformB, publish: capB, _publishWire: capB };
 
 		// First subscriber lands on instance A: the cluster-wide opener publishes
 		// 'created' with count 1 and resolves the card once.
@@ -2134,7 +2138,7 @@ describe('live.room enumeration (game.rooms())', () => {
 		games.__setEnumId('lobby/games');
 		rooms.__setEnumId('lobby/rooms');
 
-		const sink = (arr) => ({ platform, publish: (topic, event, data) => arr.push({ topic, event, data }) });
+		const sink = (arr) => { const cap = (topic, event, data) => arr.push({ topic, event, data }); return { platform, publish: cap, _publishWire: cap }; };
 		const gPub = [];
 		const rPub = [];
 		await games.__dataStream.__onSubscribe(sink(gPub), 'game:1', [1]);
@@ -2168,7 +2172,8 @@ describe('live.room enumeration (game.rooms())', () => {
 		const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], meta: () => ({}) });
 		game.__setEnumId('lobby/game');
 		const pub = [];
-		await game.__dataStream.__onSubscribe({ platform, publish: (t, e, d) => pub.push({ t, e, d }) }, 'game:1', [1]);
+		const cap = (t, e, d) => pub.push({ t, e, d });
+		await game.__dataStream.__onSubscribe({ platform, publish: cap, _publishWire: cap }, 'game:1', [1]);
 		expect(pub).toEqual([]);
 	});
 
@@ -2189,7 +2194,8 @@ describe('live.room enumeration (game.rooms())', () => {
 		const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], meta: (id) => ({ name: 'g' + id }) });
 		const partial = { hincrby: async () => 1 };
 		const pub = [];
-		const ctx = { platform: { redis: partial }, publish: (t, e, d) => pub.push({ topic: t, event: e, data: d }) };
+		const cap = (t, e, d) => pub.push({ topic: t, event: e, data: d });
+		const ctx = { platform: { redis: partial }, publish: cap, _publishWire: cap };
 		await game.__dataStream.__onSubscribe(ctx, 'game:7', [7]);
 		// The in-memory path ran (a created with the local entry), not the cluster path.
 		expect(pub).toHaveLength(1);
@@ -2216,7 +2222,8 @@ describe('live.room enumeration (game.rooms())', () => {
 		expect(game.__roomsStream.__streamTopic.startsWith('rooms-enum:')).toBe(true);
 		const redis = makeFakeRedis();
 		const pub = [];
-		await game.__dataStream.__onSubscribe({ platform: { redis }, publish: (t, e, d) => pub.push({ t, e, d }) }, 'game:1', [1]);
+		const cap = (t, e, d) => pub.push({ t, e, d });
+		await game.__dataStream.__onSubscribe({ platform: { redis }, publish: cap, _publishWire: cap }, 'game:1', [1]);
 		expect(pub).toHaveLength(1);
 		expect(pub[0].t).toBe(game.__roomsStream.__streamTopic);
 		expect(pub[0].e).toBe('created');

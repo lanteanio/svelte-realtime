@@ -49,6 +49,31 @@ export interface CronContext {
 /**
  * Context passed to every `live()` and `live.stream()` function.
  */
+/**
+ * A publisher scoped to a specific tenant - returned by `ctx.tenant(id)` (the
+ * explicit cross-tenant escape) and exposed on the `live.tenant(id)` handle. The
+ * topic is prefixed to the tenant's wire namespace exactly once.
+ */
+export interface TenantScope {
+	/** The target tenant id. */
+	tenantId: string;
+	/** Publish into the target tenant's scope. Refuses `__`-prefixed topics. */
+	publish(topic: string, event: string, data: any, options?: any): any;
+}
+
+/**
+ * Server-side handle returned by `live.tenant(id, config)`. For use OUTSIDE a
+ * request handler; inside one prefer `ctx.tenant(id)`.
+ */
+export interface TenantHandle {
+	/** The validated tenant id. */
+	id: string;
+	/** The registered config object (quota / metrics / breaker), or `null`. */
+	config: any;
+	/** Publish into this tenant's scope using the active server platform. */
+	publish(topic: string, event: string, data: any, options?: any): any;
+}
+
 export interface LiveContext<UserData = unknown> {
 	/** User data attached during the WebSocket upgrade handshake. */
 	user: UserData;
@@ -87,8 +112,26 @@ export interface LiveContext<UserData = unknown> {
 	 * a one-time dev warning fires on first call.
 	 */
 	debounce(topic: string, event: string, data: any, ms: number): void;
-	/** Send a point-to-point signal to a specific user. */
+	/**
+	 * Send a point-to-point signal to a specific user. Keyed by `userId` and NOT
+	 * tenant-scoped (the client keys its `onSignal` store on the logical
+	 * `__signal:<userId>` topic): under multi-tenancy use globally-unique user ids
+	 * so signals stay isolated.
+	 */
 	signal(userId: string, event: string, data: any): void;
+	/**
+	 * The connection's server-trusted tenant id, or `null` when no tenant resolver
+	 * is configured (`realtime({ tenant })`). When set, the framework auto-scopes
+	 * every topic and key by it. Never read off the wire - resolved from the
+	 * authenticated `user`.
+	 */
+	tenantId: string | null;
+	/**
+	 * A publisher scoped to ANOTHER tenant - the explicit cross-tenant escape for
+	 * an admin / system handler that must publish into a different tenant. Validates
+	 * the target id; refuses `__`-prefixed (framework-internal) topics.
+	 */
+	tenant(id: string): TenantScope;
 	/**
 	 * Per-key handler gate. Returns `true` to skip the call (key is within
 	 * its cooldown window), `false` to run it (no entry, or window elapsed).
@@ -2269,6 +2312,27 @@ export namespace live {
 	): T;
 
 	/**
+	 * Declare a tenant and (optionally) its config, returning a server-side handle
+	 * for use OUTSIDE a request handler (a background job, a scheduled task).
+	 *
+	 * Tenant isolation is automatic and opt-in via `realtime({ tenant })`; inside a
+	 * handler `ctx.tenant(id).publish(...)` is the cross-tenant escape. This factory
+	 * validates `id`, records `config` (quota / metrics / breaker settings consumed
+	 * by the cluster extensions - the realtime core does not enforce it), and exposes
+	 * a `publish` that targets the tenant's scope using the active server platform.
+	 *
+	 * @param id - tenant id ([a-zA-Z0-9_-], at most 64 chars)
+	 * @param config - opt-in per-tenant config carrier (not enforced by the core)
+	 *
+	 * @example
+	 * ```js
+	 * const acme = live.tenant('acme', { quota: { messagesPerSec: 100 } });
+	 * acme.publish('maintenance', 'scheduled', { at: '02:00' });
+	 * ```
+	 */
+	function tenant(id: string, config?: Record<string, any>): TenantHandle;
+
+	/**
 	 * Declarative access control helpers for subscribe-time gating.
 	 * For per-event filtering, use `pipe.filter()`.
 	 */
@@ -3449,6 +3513,16 @@ export interface RealtimeConfig {
 	 * Equivalent to calling `onError(handler)`.
 	 */
 	onError?: (path: string, error: unknown) => void;
+	/**
+	 * Opt-in multi-tenancy resolver. Maps the authenticated user
+	 * (`ws.getUserData()`) to a server-trusted tenant id, or `null`/`undefined`
+	 * for an unscoped connection. When set, the framework derives `ctx.tenantId`
+	 * and auto-scopes every topic and key so two tenants can never share a stream,
+	 * roster, room, document, idempotency slot, lock, rate-limit bucket, or signal.
+	 * The id is validated to `[a-zA-Z0-9_-]` (<= 64 chars) and is NEVER read off the
+	 * wire. Omit for the single-tenant, zero-cost default.
+	 */
+	tenant?: ((user: any) => string | null | undefined) | null;
 }
 
 /**

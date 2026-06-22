@@ -5,6 +5,7 @@ import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggrega
 import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _fireWebhookOut } from './webhook-out.js';
+import { _resolveTenant, _tenantTopic, _stripTenantTopic } from './tenant.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -401,6 +402,16 @@ export function _activateDynamicDerived(fn, resolvedTopic, user) {
 	const entry = _dynamicDerivedByFn.get(fn);
 	if (!entry) return;
 
+	// The subscribe hook hands us the WIRE output topic (the dispatch chokepoint
+	// prefixed it under a tenant). Instances are keyed by that wire topic, so two
+	// tenants subscribing with the same args get independent derived instances and
+	// independent outputs. The topicArgs map is keyed by the un-prefixed topic the
+	// topicFn produced, so strip the tenant to look the args back up; and the
+	// watched sources are prefixed to the subscriber's tenant so the recompute
+	// fires on that tenant's writes only (its scoped ctx.publish lands on the same
+	// wire source). Null tenant -> all three are no-ops, byte-identical.
+	const tenantId = _resolveTenant(user);
+
 	const existing = entry.instances.get(resolvedTopic);
 	if (existing) {
 		existing.refCount++;
@@ -414,16 +425,17 @@ export function _activateDynamicDerived(fn, resolvedTopic, user) {
 	_maybeLateActivate();
 
 	const topicArgs = /** @type {any} */ (fn).__derivedTopicArgs;
-	const args = topicArgs && topicArgs.get(resolvedTopic);
+	const args = topicArgs && topicArgs.get(_stripTenantTopic(tenantId, resolvedTopic));
 	if (!args) return;
 
-	const resolvedSources = entry.sourceFactory(...args);
-	if (!Array.isArray(resolvedSources) || resolvedSources.length === 0) {
+	const rawSources = entry.sourceFactory(...args);
+	if (!Array.isArray(rawSources) || rawSources.length === 0) {
 		if (_IS_DEV) {
 			console.warn(`[svelte-realtime] Dynamic derived sourceFactory returned empty sources for topic '${resolvedTopic}'\n  See: https://svti.me/derived`);
 		}
 		return;
 	}
+	const resolvedSources = tenantId ? rawSources.map((s) => _tenantTopic(tenantId, s)) : rawSources;
 
 	const instance = {
 		fn: entry.fn,
@@ -452,7 +464,7 @@ export function _activateDynamicDerived(fn, resolvedTopic, user) {
  * @param {Function} fn - The derived compute function
  * @param {string} resolvedTopic - The resolved output topic
  */
-export function _deactivateDynamicDerived(fn, resolvedTopic) {
+export function _deactivateDynamicDerived(fn, resolvedTopic, user) {
 	const entry = _dynamicDerivedByFn.get(fn);
 	if (!entry) return;
 
@@ -479,7 +491,10 @@ export function _deactivateDynamicDerived(fn, resolvedTopic) {
 
 	entry.instances.delete(resolvedTopic);
 	const topicArgs = /** @type {any} */ (fn).__derivedTopicArgs;
-	if (topicArgs) topicArgs.delete(resolvedTopic);
+	// topicArgs is keyed by the un-prefixed topic the topicFn produced; strip the
+	// tenant from the wire resolvedTopic so the matching entry is removed (parity
+	// with the single-tenant cleanup). Null tenant -> no-op strip.
+	if (topicArgs) topicArgs.delete(_stripTenantTopic(_resolveTenant(user), resolvedTopic));
 }
 
 /**

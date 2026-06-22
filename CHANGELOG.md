@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.25] - 2026-06-22
+
+### Added
+
+- **Multi-tenancy: `realtime({ tenant })` auto-scopes every topic and key by a server-trusted tenant id.** Configure one resolver - `realtime({ tenant: (user) => user.orgId ?? null })` - and the framework derives `ctx.tenantId` for each connection from the authenticated user (never read off the wire) and isolates every realtime surface, so two tenants can never share a stream, presence roster, cursor channel, room enumeration, smoothed entity, CRDT document, lag-compensation history, idempotency slot, lock, or rate-limit bucket. You write your handlers exactly as before: `ctx.publish('orders', ...)` from a tenant-A connection lands on tenant A's wire namespace and a tenant-B subscriber never sees it. `ctx.tenant(otherId).publish(...)` is the explicit cross-tenant escape for an admin / system handler, and `live.tenant(id, config)` is a server-side handle for code outside a request handler (it validates the id, records an opt-in per-tenant config carrier for the cluster quota / metrics slices, and publishes into the tenant's scope). Strictly opt-in and zero-cost: with no resolver every scoping helper is a single null-check and the single-tenant path is byte-identical to before. Tenant ids are validated to `[a-zA-Z0-9_-]` (at most 64 chars) at the trust boundary. A few surfaces have no per-connection tenant and are NOT auto-scoped - encode the tenant yourself: `live.cron` (no connection), static `live.derived` / `live.effect` / `live.aggregate` (use a dynamic `live.derived((tenantId) => ['orders:' + tenantId], ...)` for per-tenant reactivity), and `ctx.signal` (point-to-point by user id - use globally-unique user ids). See the README "Multi-tenancy" section.
+
 ## [0.6.0-next.24] - 2026-06-22
 
 ### Added

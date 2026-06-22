@@ -2,6 +2,7 @@
 import { now as runtimeNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { assert } from '../shared/assert.js';
 import { LiveError } from './live-error.js';
+import { _tenantKey } from './tenant.js';
 
 /** @type {{ acquire: (key: string, ttlSec: number) => Promise<any> } | null} */
 let _defaultIdempotencyStore = null;
@@ -318,12 +319,14 @@ const _liveIdempotent = function idempotent(config, fn) {
 			);
 		}
 		// Namespace the cache key by registered RPC path so the same
-		// userKey across different RPCs lands in different slots.
-		// Custom keyFrom callbacks must still encode tenant scope
-		// explicitly - the framework cannot guess the app's tenant
-		// shape - but path-scoping closes the cross-RPC class.
+		// userKey across different RPCs lands in different slots, then by the
+		// connection's tenant (when one is resolved) so the same key under two
+		// tenants can NEVER share a slot - the framework auto-scopes the security
+		// boundary; the app's keyFrom no longer has to encode the tenant. The
+		// tenant segment is first and `\0`-delimited (a validated tenant id has no
+		// `\0`), so it stays unambiguous. Null tenant -> unchanged.
 		const path = /** @type {any} */ (wrapper).__idempotencyPath;
-		const key = path ? 'rpc:' + path + ':' + userKey : userKey;
+		const key = _tenantKey(ctx.tenantId, path ? 'rpc:' + path + ':' + userKey : userKey);
 		const store = customStore || _getDefaultIdempotencyStore();
 		const slot = await store.acquire(key, ttlSec);
 		if (slot && slot.acquired) {
@@ -450,11 +453,15 @@ const _liveLock = function lock(keyOrConfig, fn) {
 	const lockOpts = maxWaitMs != null ? { maxWaitMs } : undefined;
 
 	const wrapper = async function lockedWrapper(ctx, ...args) {
-		const key = keyFrom(ctx, ...args);
-		if (key == null || key === '') return fn(ctx, ...args);
-		if (typeof key !== 'string') {
+		const rawKey = keyFrom(ctx, ...args);
+		if (rawKey == null || rawKey === '') return fn(ctx, ...args);
+		if (typeof rawKey !== 'string') {
 			throw new Error('[svelte-realtime] live.lock: key resolver must return a string (or null/undefined to bypass)');
 		}
+		// Tenant-scope the lock key so two tenants whose resolvers return the same
+		// string (e.g. 'leaderboard') hold INDEPENDENT locks - the framework owns
+		// the isolation, not app discipline. Null tenant -> unchanged.
+		const key = _tenantKey(ctx.tenantId, rawKey);
 		const lockInst = customLock || _getDefaultLock();
 		try {
 			return await lockInst.withLock(key, () => fn(ctx, ...args), lockOpts);

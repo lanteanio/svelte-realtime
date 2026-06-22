@@ -18,6 +18,7 @@ import { _recordRpcMetrics } from './metrics.js';
 import { _shouldShed } from './admission.js';
 import { _getIdentityKey } from './identity.js';
 import { _registerReplayTopic } from './replay-routing.js';
+import { _tenantTopic, _tenantKey } from './tenant.js';
 import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame } from './upload.js';
 
 const textDecoder = new TextDecoder();
@@ -401,17 +402,26 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	}
 
 	const rawTopic = /** @type {any} */ (fn).__streamTopic;
-	const topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, streamArgs) : rawTopic;
+	let topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, streamArgs) : rawTopic;
+	// The reserved-prefix guard runs on the LOGICAL topic (an app cannot subscribe
+	// to a `__` system channel) before the tenant prefix is applied.
 	if (typeof topic === 'string' && topic.startsWith('__')) {
 		return { id, ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' };
 	}
+	// Tenant prefix once, here, at the boundary: from this point `topic` is the
+	// WIRE topic, so subscribe bookkeeping, replay registration, the
+	// subscribe/unsubscribe hooks, and the topic-keyed registries
+	// (coalesce/transform/volatile/stale/invalidation, all registered below by
+	// `topic`) are all keyed by the tenant-scoped string - and a publish, which
+	// prefixes the same way, matches. Null tenant -> unchanged (zero cost).
+	if (ctx.tenantId && typeof topic === 'string') topic = _tenantTopic(ctx.tenantId, topic);
 	const streamOpts = /** @type {any} */ (fn).__streamOptions;
 	const replayOpts = /** @type {any} */ (fn).__replay;
-	// Dynamic-topic stream registration: when the topic is resolved per
-	// subscribe (factory form), register the resolved topic so subsequent
-	// publishers (cron, derived, RPC) auto-route through replay. Static
-	// topics already registered at declaration time in `live.stream`.
-	if (replayOpts && typeof rawTopic === 'function' && typeof topic === 'string') {
+	// Register the replay topic at subscribe for a dynamic (factory) topic so
+	// publishers auto-route through replay. A static topic is already registered at
+	// declaration with its raw string; under a tenant it must ALSO register the
+	// per-tenant WIRE topic here, or the wire-keyed publish would miss the buffer.
+	if (replayOpts && typeof topic === 'string' && (typeof rawTopic === 'function' || ctx.tenantId)) {
 		_registerReplayTopic(topic);
 	}
 
@@ -685,7 +695,8 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 				const rule = _resolveRegistryRateLimit(path);
 				if (rule) {
 					const userKey = _getIdentityKey(ctx);
-					const r = _consumeRateLimitBucket(path + '\0' + userKey, rule.points, rule.window);
+					// Tenant-scope the registry-level bucket too (null tenant -> unchanged).
+					const r = _consumeRateLimitBucket(_tenantKey(ctx.tenantId, path + '\0' + userKey), rule.points, rule.window);
 					if (!r.ok) {
 						/** @type {any} */
 						const out = { id, ok: false, code: 'RATE_LIMITED', error: 'Too many requests' };

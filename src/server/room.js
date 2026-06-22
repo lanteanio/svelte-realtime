@@ -9,6 +9,7 @@ import { _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList 
 import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId, _ENUM_TOPIC_PREFIX } from './rooms-cluster.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot } from './history-compensation.js';
 import { _getIdentityKey } from './identity.js';
+import { _tenantTopic, _tenantKey, _stripTenantTopic } from './tenant.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) and the rollback marker
 // set (_rollingBack) stay in server.js - the staying stream-subscribe rollback
@@ -156,12 +157,22 @@ export const _roomRegister = function room(config) {
 
 	// Enumeration registry: which of this room's topics currently have
 	// subscribers, with a subscriber count and the `meta` captured at the moment
-	// the topic gained its first subscriber. Keyed by the data topic. This is the
-	// single-replica path (no `platform.redis`): the snapshot is
-	// `Array.from(roomsIndex.values())`. When `platform.redis` is wired the hooks
-	// route through the shared Redis roster instead (see rooms-cluster.js) so the
-	// count and snapshot span the whole cluster; this Map is then unused.
-	const roomsIndex = new Map();
+	// the topic gained its first subscriber. Keyed by the logical data topic and
+	// PARTITIONED BY TENANT, so one tenant's lobby snapshot can never enumerate
+	// another tenant's rooms (the in-memory mirror of the per-tenant Redis roster
+	// key). The null-tenant partition is the original single Map - byte-identical
+	// behavior with no tenant resolver configured. This is the single-replica path
+	// (no `platform.redis`): the snapshot is `Array.from(<partition>.values())`.
+	// When `platform.redis` is wired the hooks route through the shared Redis
+	// roster instead (see rooms-cluster.js) so the count and snapshot span the
+	// whole cluster; these Maps are then unused.
+	const roomsIndexByTenant = new Map();
+	const _roomsIndexFor = (tenantId) => {
+		const key = tenantId || '';
+		let idx = roomsIndexByTenant.get(key);
+		if (!idx) { idx = new Map(); roomsIndexByTenant.set(key, idx); }
+		return idx;
+	};
 	// `enumId` is the stable per-export identity (the Redis roster key); `enumTopic`
 	// is the pub/sub channel the deltas ride and clients subscribe to. Both default
 	// to a process-local id and are re-bound by `__setEnumId` at registration so
@@ -195,27 +206,40 @@ export const _roomRegister = function room(config) {
 	// (updated). `args` is the room-identifying args of the topic, forwarded by
 	// the stream subscribe path as the hook's 3rd argument. With `platform.redis`
 	// the count and the open/close decision are cluster-wide (the shared roster);
-	// without it the closure-local `roomsIndex` keeps the original single-replica
-	// behavior, byte-identical. `meta(args)` is resolved lazily - only by the
-	// opener - so it still runs exactly once per open on either path.
+	// without it the closure-local per-tenant registry keeps the original single-
+	// replica behavior, byte-identical. `meta(args)` is resolved lazily - only by
+	// the opener - so it still runs exactly once per open on either path.
 	const _enumOnSub = async (ctx, topic, args) => {
 		const safeArgs = Array.isArray(args) ? args.slice() : [];
+		// The hook receives the WIRE data topic (the dispatch chokepoint prefixed it
+		// under a tenant). The roster field, the in-memory key, and the delta payload
+		// all use the LOGICAL data topic so the snapshot the app sees matches the
+		// single-tenant shape; isolation comes from a tenant-scoped roster identity
+		// (the Redis hash key / the in-memory partition) and a tenant-scoped delta
+		// channel, so two tenants on the same export can never share a count or see
+		// each other's rooms. All three reduce to the originals when there is no
+		// tenant. `_publishWire` is the raw, non-prefixing publish: the channel is
+		// already the wire topic here, so it must not be prefixed a second time.
+		const dataTopic = _stripTenantTopic(ctx.tenantId, topic);
+		const rosterId = _tenantKey(ctx.tenantId, enumId);
+		const channel = _tenantTopic(ctx.tenantId, enumTopic);
 		if (_clusterRedis(ctx)) {
-			const res = await _clusterRoomsAcquire(ctx.platform, enumId, topic, safeArgs, () => _roomMeta(safeArgs));
+			const res = await _clusterRoomsAcquire(ctx.platform, rosterId, dataTopic, safeArgs, () => _roomMeta(safeArgs));
 			if (!res) return;
-			ctx.publish(enumTopic, res.isFirst ? 'created' : 'updated', { topic, args: res.args, count: res.count, meta: res.meta });
+			ctx._publishWire(channel, res.isFirst ? 'created' : 'updated', { topic: dataTopic, args: res.args, count: res.count, meta: res.meta });
 			return;
 		}
-		let entry = roomsIndex.get(topic);
+		const idx = _roomsIndexFor(ctx.tenantId);
+		let entry = idx.get(dataTopic);
 		if (entry === undefined) {
-			entry = { topic, args: safeArgs, count: 1, meta: _roomMeta(safeArgs) };
-			roomsIndex.set(topic, entry);
+			entry = { topic: dataTopic, args: safeArgs, count: 1, meta: _roomMeta(safeArgs) };
+			idx.set(dataTopic, entry);
 			// Publish a snapshot copy, not the live entry - the registry mutates
 			// `count` in place, so a delta must capture its value at this moment.
-			ctx.publish(enumTopic, 'created', { ...entry });
+			ctx._publishWire(channel, 'created', { ...entry });
 		} else {
 			entry.count++;
-			ctx.publish(enumTopic, 'updated', { ...entry });
+			ctx._publishWire(channel, 'updated', { ...entry });
 		}
 	};
 	// The last subscriber to leave closes the room (deleted); otherwise the count
@@ -223,21 +247,30 @@ export const _roomRegister = function room(config) {
 	// is the cluster-wide 1->0; on the single-replica path it drops to the
 	// authoritative remaining count the unsubscribe hook supplies.
 	const _enumOnUnsub = async (ctx, topic, remainingSubscribers) => {
+		// Same tenant scoping as the subscribe path: the disconnect/unsubscribe ctx
+		// carries the connection's tenant so the release decrements the SAME roster
+		// the acquire bumped and the delta rides the SAME prefixed channel the
+		// lobby subscribed to. (server.js builds the unsub/close ctx with tenantId
+		// and _publishWire for exactly this.)
+		const dataTopic = _stripTenantTopic(ctx.tenantId, topic);
+		const rosterId = _tenantKey(ctx.tenantId, enumId);
+		const channel = _tenantTopic(ctx.tenantId, enumTopic);
 		if (_clusterRedis(ctx)) {
-			const res = await _clusterRoomsRelease(ctx.platform, enumId, topic);
+			const res = await _clusterRoomsRelease(ctx.platform, rosterId, dataTopic);
 			if (!res) return;
-			if (res.isLast) ctx.publish(enumTopic, 'deleted', { topic });
-			else ctx.publish(enumTopic, 'updated', { topic, args: res.args, count: res.count, meta: res.meta });
+			if (res.isLast) ctx._publishWire(channel, 'deleted', { topic: dataTopic });
+			else ctx._publishWire(channel, 'updated', { topic: dataTopic, args: res.args, count: res.count, meta: res.meta });
 			return;
 		}
-		const entry = roomsIndex.get(topic);
+		const idx = _roomsIndexFor(ctx.tenantId);
+		const entry = idx.get(dataTopic);
 		if (entry === undefined) return;
 		if (remainingSubscribers <= 0) {
-			roomsIndex.delete(topic);
-			ctx.publish(enumTopic, 'deleted', { topic });
+			idx.delete(dataTopic);
+			ctx._publishWire(channel, 'deleted', { topic: dataTopic });
 		} else {
 			entry.count = remainingSubscribers;
-			ctx.publish(enumTopic, 'updated', { ...entry });
+			ctx._publishWire(channel, 'updated', { ...entry });
 		}
 	};
 
@@ -280,7 +313,9 @@ export const _roomRegister = function room(config) {
 						// would otherwise leak a phantom counter on Redis.
 						_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
 							if (res.isLast) {
-								ctx.publish(t + ':presence', 'leave', { key: u });
+								// `t` is the wire data topic (the ref-map key is wire); publish raw
+								// so the `:presence` sub-topic is not prefixed a second time.
+								ctx._publishWire(t + ':presence', 'leave', { key: u });
 							}
 						}).catch(() => {});
 						if (onLeave) {
@@ -315,7 +350,8 @@ export const _roomRegister = function room(config) {
 			if (presenceData) {
 				const { isFirst } = await _clusterPresenceAcquire(ctx.platform, topic, userId, presenceData);
 				if (isFirst) {
-					ctx.publish(topic + ':presence', 'join', { key: userId, data: presenceData });
+					// `topic` is the wire data topic; publish raw (no second prefix).
+					ctx._publishWire(topic + ':presence', 'join', { key: userId, data: presenceData });
 				}
 			}
 		} : undefined,
@@ -339,7 +375,7 @@ export const _roomRegister = function room(config) {
 				_presenceRef.delete(refKey);
 				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
 					if (res.isLast) {
-						ctx.publish(topic + ':presence', 'leave', { key: userId });
+						ctx._publishWire(topic + ':presence', 'leave', { key: userId });
 					}
 				}).catch(() => {});
 				if (onLeave) {
@@ -352,7 +388,7 @@ export const _roomRegister = function room(config) {
 				_presenceRef.delete(refKey);
 				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
 					if (res.isLast) {
-						ctx.publish(topic + ':presence', 'leave', { key: userId });
+						ctx._publishWire(topic + ':presence', 'leave', { key: userId });
 					}
 				}).catch(() => {});
 				if (onLeave) {
@@ -379,11 +415,13 @@ export const _roomRegister = function room(config) {
 	// the publish bus cluster-wide for free, take over from there.
 	if (isEnumerable) {
 		const _roomsSnapshot = async (ctx) => {
+			// Read only the requesting connection's tenant partition / roster key, so
+			// a lobby viewer enumerates its own tenant's rooms and never another's.
 			if (_clusterRedis(ctx)) {
-				const list = await _clusterRoomsList(ctx.platform, enumId);
+				const list = await _clusterRoomsList(ctx.platform, _tenantKey(ctx.tenantId, enumId));
 				if (list) return list;
 			}
-			return Array.from(roomsIndex.values(), (e) => ({ ...e }));
+			return Array.from(_roomsIndexFor(ctx.tenantId).values(), (e) => ({ ...e }));
 		};
 		/** @type {any} */ (roomExport).__roomsStream = live.stream(
 			enumTopic,
@@ -416,7 +454,11 @@ export const _roomRegister = function room(config) {
 			(ctx, ...args) => topicFn(ctx, ...args) + ':presence',
 			async (ctx, ...args) => {
 				if (guardFn) await guardFn(ctx, ...args);
-				const dataTopic = topicFn(ctx, ...args);
+				// The roster is keyed by the WIRE data topic (the data-stream's
+				// onSubscribe acquired it with the tenant-prefixed topic), so the
+				// loader must prefix the same way or a tenant would read an empty /
+				// wrong roster. Null tenant -> unchanged.
+				const dataTopic = _tenantTopic(ctx.tenantId, topicFn(ctx, ...args));
 				// Cluster-shared roster when `platform.redis` is wired; falls
 				// back to the local _presenceRef iteration otherwise. The
 				// loader reconstructs the roster even when this user's join
@@ -454,6 +496,12 @@ export const _roomRegister = function room(config) {
 				if (guardFn) await guardFn(ctx, ...args);
 				const roomArgs = args.slice(0, _roomArgCount);
 				const roomTopic = _callTopicFn(topicFn, ctx, roomArgs);
+				// The publish shadow feeds the LOGICAL roomTopic to the (scoped) wrapper
+				// so it is prefixed exactly once. The lag-compensation history ring is a
+				// per-topic store, so its key must be the WIRE topic or two tenants on the
+				// same room id would share one ring (cross-tenant state read). Null tenant
+				// -> wireRoomTopic === roomTopic, byte-identical.
+				const wireRoomTopic = _tenantTopic(ctx.tenantId, roomTopic);
 				const originalPublish = ctx.publish;
 				ctx.publish = (event, data) => originalPublish(roomTopic, event, data);
 				if (historyStore === null) {
@@ -465,7 +513,7 @@ export const _roomRegister = function room(config) {
 				}
 				const originalCompensate = ctx.compensate;
 				ctx.compensate = (commandTime, evalFn, options) =>
-					_runCompensate(roomTopic, ctx, roomArgs, commandTime, evalFn, options);
+					_runCompensate(wireRoomTopic, ctx, roomArgs, commandTime, evalFn, options);
 				try {
 					const result = await fn(ctx, ...args);
 					// Record AFTER the action succeeds: the post-action state is
@@ -474,7 +522,7 @@ export const _roomRegister = function room(config) {
 					// action's own result already exists) and warn once.
 					try {
 						historyStore.record(
-							roomTopic,
+							wireRoomTopic,
 							_freezeSnapshot(/** @type {NonNullable<typeof historyCfg>} */ (historyCfg).capture(...roomArgs)),
 							wallEpoch()
 						);

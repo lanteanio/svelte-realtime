@@ -195,7 +195,7 @@ export const _derivedRegister = function derived(sources, fn, options) {
 			_activateDynamicDerived(fn, resolvedTopic, _ctx && _ctx.user);
 		};
 		/** @type {any} */ (fn).__onUnsubscribe = function (_ctx, resolvedTopic) {
-			_deactivateDynamicDerived(fn, resolvedTopic);
+			_deactivateDynamicDerived(fn, resolvedTopic, _ctx && _ctx.user);
 		};
 	} else {
 		/** @type {any} */ (fn).__streamTopic = baseTopic;

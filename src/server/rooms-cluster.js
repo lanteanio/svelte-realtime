@@ -52,6 +52,15 @@ const _ROOMS_TTL_SEC = 3600;
 // 256 chars (svelte-adapter-uws isValidWireTopic / extensions bus-validate
 // isValidBusTopic), so an over-long id would make the bus SILENTLY drop the
 // cross-instance deltas. `_stableEnumId` keeps the id under that budget.
+//
+// Under multi-tenancy the delta channel is additionally prefixed to
+// `@t/<tenantId>/rooms-enum:<enumId>`. A near-budget enum id plus the tenant
+// prefix can exceed the 256-char cap and lose that ONE tenant's own cross-instance
+// deltas (its `.list()` still works - the Redis roster key has no cap). That is the
+// same length budget every tenant-scoped wire topic shares (app data topics are not
+// length-capped either); the tenant id cap is the framework's headroom contribution.
+// This budget stays unconditional (no tenant reservation) so the single-tenant enum
+// id - and its wire topic and Redis roster key - is byte-identical to pre-tenancy.
 export const _ENUM_TOPIC_PREFIX = 'rooms-enum:';
 const _ENUM_ID_MAX = 256 - _ENUM_TOPIC_PREFIX.length;
 

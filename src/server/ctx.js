@@ -10,6 +10,49 @@ import { _shouldShed } from './admission.js';
 import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
 import { _compensateUnavailable } from './history-compensation.js';
 import { _observeSilentTopicPublish, _activatePublishRateWarning } from './dev-warnings.js';
+import { _resolveTenant, _tenantTopic, _makeTenantScope } from './tenant.js';
+
+/**
+ * Reject a publish to a `__`-prefixed (framework-internal) topic. Shared by the
+ * raw publish helper and the tenant-scoped wrapper so the reserved-channel guard
+ * holds on the LOGICAL topic on both paths (the wrapper checks before prefixing,
+ * so a tenant cannot reach a `__signal:*` / `__replay:*` channel either).
+ * @param {any} topic
+ */
+function _assertNotReservedTopic(topic) {
+	if (typeof topic === 'string' && topic.length >= 2 && topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) {
+		throw new LiveError(
+			'INVALID_TOPIC',
+			"ctx.publish() refuses '__'-prefixed topics; those are reserved for " +
+			'framework-internal channels. Use platform.publish(...) directly if ' +
+			'you genuinely need to broadcast on a system channel.'
+		);
+	}
+}
+
+/**
+ * Tenant-scoped publish wrappers, memoized per (raw-publish, tenantId) so a
+ * multi-tenant deploy allocates one wrapper per tenant, not one per RPC. The
+ * wrapper guards the LOGICAL topic then prefixes once to the tenant's wire
+ * namespace before delegating to the raw `helpers.publish` (which keys every
+ * topic-registry by the wire topic - matching the wire topic registered at
+ * subscribe). Single-tenant ctx never touches this (ctx.publish stays the raw helper).
+ * @type {WeakMap<Function, Map<string, Function>>}
+ */
+const _scopedPublishCache = new WeakMap();
+function _getScopedPublish(rawPublish, tenantId) {
+	let byTenant = _scopedPublishCache.get(rawPublish);
+	if (!byTenant) { byTenant = new Map(); _scopedPublishCache.set(rawPublish, byTenant); }
+	let scoped = byTenant.get(tenantId);
+	if (!scoped) {
+		scoped = function publish(topic, event, data, options) {
+			_assertNotReservedTopic(topic);
+			return rawPublish(_tenantTopic(tenantId, topic), event, data, options);
+		};
+		byTenant.set(tenantId, scoped);
+	}
+	return scoped;
+}
 
 // Seam callbacks injected by server.js at init. The stale-watch + invalidation
 // subsystems live in server.js (wired to the subscribe / unsubscribe / close
@@ -63,14 +106,7 @@ export function _getCtxHelpers(platform) {
 			// genuinely need to broadcast on a `__`-prefixed topic should
 			// reach for the unwrapped `platform.publish` directly so the
 			// intent is explicit at the call site.
-			if (typeof topic === 'string' && topic.length >= 2 && topic.charCodeAt(0) === 95 && topic.charCodeAt(1) === 95) {
-				throw new LiveError(
-					'INVALID_TOPIC',
-					"ctx.publish() refuses '__'-prefixed topics; those are reserved for " +
-					'framework-internal channels. Use platform.publish(...) directly if ' +
-					'you genuinely need to broadcast on a system channel.'
-				);
-			}
+			_assertNotReservedTopic(topic);
 			// Volatile option translation. Per-call `options.volatile` or a
 			// topic registered as volatile turns into `seq: false` on the wire
 			// so reconnect with `lastSeenSeq` won't try to backfill the gap.
@@ -264,11 +300,16 @@ export function _getCtxHelpers(platform) {
  * @returns {any}
  */
 export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
+	// Server-trusted tenant id for this connection (null when no resolver is
+	// configured -> single-tenant, zero-cost path). When set, ctx.publish prefixes
+	// every topic to the tenant's wire namespace; ctx._publishWire stays the raw
+	// helper for framework code that already holds a wire topic (no double-prefix).
+	const tenantId = _resolveTenant(user);
 	return {
 		user,
 		ws,
 		platform,
-		publish: helpers.publish,
+		publish: tenantId ? _getScopedPublish(helpers.publish, tenantId) : helpers.publish,
 		cursor,
 		publishThrottled: helpers.publishThrottled,
 		publishDebounced: helpers.publishDebounced,
@@ -300,6 +341,15 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 		// swaps the value, never the shape.
 		compensate: _compensateUnavailable,
 		_compensateDepth: 0,
-		_idempotencyKey: idempotencyKey || null
+		_idempotencyKey: idempotencyKey || null,
+		// Multi-tenancy. `tenantId` is the connection's server-trusted tenant (or
+		// null). `_publishWire` is the raw, non-prefixing publish for framework
+		// code that already holds a wire topic (presence/cursor/room-action), so it
+		// never double-prefixes. `tenant(id)` returns a publisher scoped to ANOTHER
+		// tenant - the explicit cross-tenant escape hatch. All three are present on
+		// every ctx (value swap, not shape change) to keep one hidden class.
+		tenantId,
+		_publishWire: helpers.publish,
+		tenant: (id) => _makeTenantScope(helpers.publish, id)
 	};
 }

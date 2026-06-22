@@ -2,6 +2,7 @@
 import { live } from '../server.js';
 import { wallEpoch } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _tenantTopic } from './tenant.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); crdt registration reaches it through this, set at init.
@@ -290,8 +291,11 @@ export function _crdtRegister(kind, config) {
 		onError: config.onError
 	};
 
+	// Prefix the resolved name ONCE with the connection's tenant so the document's
+	// wire topic (rec.prefix + name), its record key, and every sub-stream / relay
+	// derivation agree per-tenant. Null tenant -> unchanged (byte-identical).
 	const resolveName = (ctx, roomArgs) =>
-		typeof topicFn === 'function' ? _callTopicFn(topicFn, ctx, roomArgs) : topicFn;
+		_tenantTopic(ctx.tenantId, typeof topicFn === 'function' ? _callTopicFn(topicFn, ctx, roomArgs) : topicFn);
 
 	let warnedNoGuard = false;
 

@@ -1746,6 +1746,58 @@ Custom denial reasons returned from a server-side `subscribe` hook (e.g. `'KYC_P
 
 ---
 
+## Multi-tenancy (`live.tenant`)
+
+Tenant isolation is a platform concern, not something every handler has to remember. Configure one resolver and the framework derives a server-trusted tenant id for each connection and auto-scopes every topic and key, so two tenants can never share a stream, presence roster, cursor channel, room enumeration, smoothed entity, CRDT document, lag-compensation history, idempotency slot, lock, or rate-limit bucket.
+
+It is strictly opt-in. With no resolver configured every scoping helper is a single null-check that returns its input unchanged, so the single-tenant path is byte-identical and zero-cost.
+
+```js
+// hooks.ws.js (or wherever you call realtime())
+import { realtime } from 'svelte-realtime/server';
+
+realtime({
+  // Map the authenticated user (ws.getUserData()) to a tenant id, or null for
+  // an unscoped connection. Server-trusted: the id is NEVER read off the wire.
+  tenant: (user) => user?.orgId ?? null
+});
+```
+
+The tenant id must be a delimiter-safe slug (`[a-zA-Z0-9_-]`, at most 64 chars - a UUID fits). A resolver that returns a malformed id throws loudly rather than silently disabling scoping (a silently-dropped id would be a leak).
+
+### What you get
+
+- **`ctx.tenantId`** - the connection's server-trusted tenant (or `null`). Available on every handler ctx; use it to scope your own database reads.
+- **Automatic scoping** - inside a handler, `ctx.publish`, every `live.stream` / `live.room` subscribe, presence, cursors, `<export>.rooms()` enumeration, `live.multiplayer`, `live.smooth`, `live.doc` / `live.map` / `live.array`, `live.idempotent`, `live.lock`, `live.rateLimit`, and dynamic `live.derived` are all keyed by the tenant. You write your handlers exactly as before.
+- **`ctx.tenant(otherId).publish(topic, event, data)`** - the explicit cross-tenant escape, for an admin or system handler that must publish into another tenant.
+- **`live.tenant(id, config)`** - a server-side handle for code OUTSIDE a request handler. It validates the id, records an optional per-tenant `config` (quota / metrics / breaker settings, consumed by the cluster extensions), and its `.publish(topic, event, data)` targets that tenant's scope using the active server platform.
+
+```js
+// Inside a handler - automatic, plus the explicit cross-tenant escape:
+export const orders = live.stream('orders', async (ctx) => loadOrders(ctx.tenantId));
+export const broadcastToOrg = live(async (ctx, orgId, msg) => {
+  if (!ctx.user.isAdmin) throw new Error('forbidden');
+  ctx.tenant(orgId).publish('announcements', 'posted', msg); // cross-tenant, explicit
+});
+
+// Outside a handler (a background job):
+import { live } from 'svelte-realtime/server';
+const acme = live.tenant('acme', { quota: { messagesPerSec: 100 } });
+acme.publish('maintenance', 'scheduled', { at: '02:00' });
+```
+
+### What is NOT auto-scoped (by design)
+
+A few surfaces have no per-connection tenant, so the framework cannot scope them for you - encode the tenant explicitly:
+
+- **`live.cron`** fires on a schedule with no connection, so a cron handler has no `ctx.tenantId`. A cron that should target one tenant must publish to a tenant-scoped literal topic itself (e.g. `ctx.tenant(orgId).publish(...)` with the org you are iterating).
+- **Static `live.derived` / `live.effect` / `live.aggregate`** (declared with a fixed source list, no args) are global watchers: they watch the source topics you name verbatim. Under tenancy a tenant's writes land on its own scoped wire topic, so a global static watcher does not fire on them. For per-tenant reactivity use a **dynamic** `live.derived((tenantId) => ['orders:' + tenantId], ...)` - the dynamic form resolves its sources per subscriber and is auto-scoped to the subscriber's tenant.
+- **`ctx.signal(userId, ...)`** is point-to-point and keys by the user id you supply, delivered to the client under the logical `__signal:<userId>` topic (the client keys its `onSignal` store on that and has no way to learn a server-only tenant prefix). It is therefore NOT tenant-scoped. Under tenancy, use **globally-unique user ids** (the norm - a user is a global identity, tenancy scopes resources) so signals stay isolated. If your user-id space is per-tenant, encode the tenant into the id you pass to `ctx.signal` / `enableSignals`.
+
+> Length note: a tenant-scoped wire topic is `@t/<tenantId>/<your topic>`. The tenant id is capped at 64 chars to leave headroom, but app topics are not length-capped - a topic already near the adapter/bus 256-char limit plus the tenant prefix can exceed it and have that one tenant's cross-instance deltas dropped (no cross-tenant exposure; the single-tenant path is unaffected). Keep topic names well under ~180 chars if you use long tenant ids.
+
+---
+
 ## Rate limiting
 
 ### Per-function rate limiting

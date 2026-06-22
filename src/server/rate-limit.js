@@ -2,6 +2,7 @@
 import { now as runtimeNow } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
+import { _tenantKey } from './tenant.js';
 import { _rateLimits } from './state.js';
 
 /** @type {number} */
@@ -89,7 +90,11 @@ const _liveRateLimit = function rateLimit(config, fn) {
 
 	const wrapper = async function rateLimitedWrapper(ctx, ...args) {
 		const userKey = keyFn(ctx);
-		const bucketKey = /** @type {any} */ (wrapper).__rateLimitPath + '\0' + userKey;
+		// Tenant-scope the bucket so a custom `key` resolver that returns a
+		// tenant-ambiguous value cannot let one tenant spend (or evade) another's
+		// limit. Null tenant -> unchanged. The default identity key is already
+		// per-user, so this is a fairness/consistency guard more than a leak fix.
+		const bucketKey = _tenantKey(ctx.tenantId, /** @type {any} */ (wrapper).__rateLimitPath + '\0' + userKey);
 		const result = _consumeRateLimitBucket(bucketKey, points, windowMs);
 		if (!result.ok) {
 			const err = new LiveError('RATE_LIMITED', 'Too many requests');

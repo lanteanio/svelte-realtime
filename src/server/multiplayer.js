@@ -2,6 +2,7 @@
 import { live } from '../server.js';
 import { _getIdentityKey } from './identity.js';
 import { _clusterPresenceMerge } from './presence.js';
+import { _tenantTopic } from './tenant.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); multiplayer registration reaches it through this,
@@ -141,7 +142,12 @@ export const _multiplayerRegister = function multiplayer(config) {
 				else if (k.slice(0, 5) === 'lock:') { if (config.locks) sticky[k] = delta[k]; }
 			}
 			if (Object.keys(sticky).length > 0) {
-				const dataTopic = _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount));
+				// The roster store is keyed by the WIRE data topic (the data-stream's
+				// onSubscribe acquired it tenant-prefixed); prefix here too so the sticky
+				// field lands on the same entry. The forward `:presence` publish above
+				// uses ctx.publish (logical -> the scoped wrapper prefixes it once), so
+				// only the roster key needs the explicit prefix. Null tenant -> unchanged.
+				const dataTopic = _tenantTopic(ctx.tenantId, _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount)));
 				await _clusterPresenceMerge(ctx.platform, dataTopic, _getIdentityKey(ctx), sticky);
 			}
 		}
