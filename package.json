@@ -1,6 +1,6 @@
 {
   "name": "svelte-realtime",
-  "version": "0.6.0-next.22",
+  "version": "0.6.0-next.23",
   "publishConfig": {
     "tag": "next"
   },
@@ -43,6 +43,10 @@
     "./doc": {
       "types": "./src/client-doc.d.ts",
       "default": "./src/client-doc.svelte.js"
+    },
+    "./rooms": {
+      "types": "./src/client-rooms.d.ts",
+      "default": "./src/client-rooms.svelte.js"
     },
     "./vite": {
       "types": "./src/vite.d.ts",

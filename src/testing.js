@@ -323,6 +323,8 @@ export function createTestEnv(options) {
 				if (fn.__dataStream) __register(path + '/__data', fn.__dataStream);
 				if (fn.__presenceStream) __register(path + '/__presence', fn.__presenceStream);
 				if (fn.__cursorStream) __register(path + '/__cursors', fn.__cursorStream);
+				if (fn.__roomsStream) __register(path + '/__rooms', fn.__roomsStream);
+				if (fn.__roomsSync) __register(path + '/__roomsSync', fn.__roomsSync);
 				if (fn.__actions) {
 					for (const [k, v] of Object.entries(fn.__actions)) {
 						__register(path + '/__action/' + k, v);

@@ -459,7 +459,7 @@ export function _extractChannelOptions(source, name) {
  * Extract room configuration info from source code for client stub generation.
  * @param {string} source
  * @param {string} name
- * @returns {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[] }}
+ * @returns {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[], isEnumerable: boolean }}
  */
 /**
  * Detect a windowed `live.aggregate(...)` export and return the window
@@ -495,8 +495,8 @@ export function _extractAggregateWindows(source, name) {
 }
 
 export function _extractRoomInfo(source, name) {
-	/** @type {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[] }} */
-	const info = { dataOpts: { merge: 'crud' }, hasPresence: false, hasCursors: false, actions: [] };
+	/** @type {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[], isEnumerable: boolean }} */
+	const info = { dataOpts: { merge: 'crud' }, hasPresence: false, hasCursors: false, actions: [], isEnumerable: false };
 
 	// Find the start of live.room({ ... }) call
 	const startPattern = new RegExp(
@@ -512,6 +512,8 @@ export function _extractRoomInfo(source, name) {
 	const configKeys = new Set(_extractTopLevelKeys(body));
 	info.hasPresence = configKeys.has('presence');
 	info.hasCursors = configKeys.has('cursors');
+	// Room enumeration is opt-in via `enumerable: true` or a `meta` function.
+	info.isEnumerable = configKeys.has('enumerable') || configKeys.has('meta');
 
 	const mergeVal = _extractTopLevelStringProp(body, 'merge');
 	if (mergeVal) info.dataOpts.merge = mergeVal;

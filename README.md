@@ -2933,6 +2933,39 @@ How it behaves:
 
 `tolerance` (per call: `ctx.compensate(t, fn, { tolerance: 20 })`) skips the rewind when the stamp is within that many milliseconds of now - the low-latency common case.
 
+### Room enumeration (lobby browser)
+
+A lobby browser needs to list the *active* rooms of a type - the open games, and how many players are in each. Opt in with a `meta` function (or `enumerable: true` for a count-only list) and the export gains a `rooms()` view:
+
+```js
+export const game = live.room({
+  topic: (ctx, id) => 'game:' + id,
+  topicArgs: 1,
+  init: async (ctx, id) => loadGame(id),
+  meta: (id) => ({ name: nameFor(id), map: mapFor(id), cap: 32 })   // opt-in; resolved once when a room opens
+});
+```
+```svelte
+<script>
+  import { game } from '$live/game';
+  const lobby = game.rooms();   // a snapshot, then live
+  $effect(() => () => lobby.destroy());
+</script>
+
+{#each [...lobby.rooms] as [id, r] (id)}
+  <a href={'/game/' + id}>{r.meta.name} - {r.count}/{r.meta.cap}</a>
+{/each}
+```
+
+How it behaves:
+
+- **A room is "active" while it has a subscriber.** The first client to subscribe to a topic (`game:7`) opens that room in the enumeration; the last to leave closes it. `count` is the live subscriber count and moves as players join and leave. The view is a snapshot on subscribe, then live deltas - no polling.
+- **`lobby.rooms` is a reactive `Map` keyed by the room args** - the single arg (a `gameId`) when the room takes one, else the joined args. Each value is `{ args, count, meta }`. `lobby.list()` returns a one-shot snapshot array without opening a live subscription (for a `+page.server` load or a one-off fetch).
+- **`meta(args)` is resolved once, when the room opens** (its first subscriber), and frozen - it is the room's display card (name, map, cap). A throwing `meta` never blocks the room; the room appears with an empty meta. Mutable per-room state belongs in the room's own data stream, not in `meta`.
+- **Off by default.** A room without `meta` or `enumerable` installs no registry and no enumeration stream, so it is byte-identical to a plain room - you pay only when you browse.
+
+Single-instance today: `rooms()` lists the rooms active on the instance the client is connected to. Cluster-wide aggregation (a Redis roster unioning every instance's active rooms) is a separate, additive step; until it lands, host a lobby browser on a single instance or one all its viewers share.
+
 ---
 
 ## Multiplayer

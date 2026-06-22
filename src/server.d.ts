@@ -2395,6 +2395,19 @@ export interface RoomConfig {
 	 * actions. Requires `actions`.
 	 */
 	history?: RoomHistoryConfig;
+	/**
+	 * Per-room metadata for a lobby browser, resolved once when a room opens
+	 * (its first subscriber arrives). Providing it opts the room into
+	 * enumeration, so the generated `<export>.rooms()` lists the active rooms,
+	 * each `{ args, count, meta }`. Receives the room-identifying args. A throwing
+	 * `meta` never blocks the room (the room still appears, with empty meta).
+	 */
+	meta?: (...args: any[]) => any;
+	/**
+	 * Opt into room enumeration without per-room metadata (a count-only lobby).
+	 * Implied by `meta`. @default false
+	 */
+	enumerable?: boolean;
 }
 
 /**
@@ -2406,8 +2419,13 @@ export interface RoomExport {
 	__topicFn: Function;
 	__hasPresence: boolean;
 	__hasCursors: boolean;
+	__hasRooms: boolean;
 	__presenceStream?: any;
 	__cursorStream?: any;
+	/** The enumeration stream (active rooms) when the room opts into enumeration. */
+	__roomsStream?: any;
+	/** The one-shot enumeration snapshot RPC backing `rooms().list()`. */
+	__roomsSync?: any;
 	__actions?: Record<string, any>;
 }
 

@@ -465,7 +465,10 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	subscribedRef.topic = topic;
 
 	if (/** @type {any} */ (fn).__onSubscribe) {
-		try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic); } catch {}
+		// `streamArgs` (3rd arg) lets a room enumeration registry capture the
+		// room-identifying args of the topic that just gained a subscriber; the
+		// presence hook ignores it.
+		try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic, streamArgs); } catch {}
 	}
 
 	if (/** @type {any} */ (fn).__isDerived && !state.activateDerivedCalled && !state.warnedActivateDerived) {

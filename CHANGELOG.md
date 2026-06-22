@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.23] - 2026-06-22
+
+### Added
+
+- **`live.room({ meta })` + `<export>.rooms()`: a lobby browser for a room type.** Opt a room into enumeration with a `meta(args)` function (or `enumerable: true` for a count-only list) and the generated export gains a `rooms()` view - a snapshot-then-stream reactive `Map` of the room type's ACTIVE rooms, each `{ args, count, meta }`. A room is "active" while it has a subscriber: the first client to subscribe to a topic opens it in the enumeration, the last to leave closes it, and `count` tracks the live subscriber count between. `meta(args)` is resolved once when a room opens (frozen; a throw never blocks the room - it appears with an empty meta) and is the room's display card (name, map, player cap). `lobby.rooms` is keyed by the room args (the single arg when the room takes one, else the joined args); `lobby.list()` is a one-shot snapshot array without a live subscription, for a server load. Off by default and byte-identical to a plain room when neither `meta` nor `enumerable` is set - the registry and the enumeration stream exist only when you opt in. Single-instance in this release (it lists the rooms active on the connected instance); cluster-wide aggregation over the Redis roster is an additive follow-up.
+
 ## [0.6.0-next.22] - 2026-06-22
 
 ### Added

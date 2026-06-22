@@ -177,6 +177,11 @@ export function _generateSsrStubs(filePath, modulePath) {
 			lines.push(`const _${name}_cursors = (...args) => readable(undefined);`);
 			subFactories.push(`cursors: _${name}_cursors`);
 		}
+		// The lobby-browser view renders empty during SSR (no live subscription);
+		// the client RoomsList takes over on hydration.
+		if (info.isEnumerable) {
+			subFactories.push(`rooms: () => ({ rooms: new Map(), status: 'idle', list: () => Promise.resolve([]), destroy: () => {} })`);
+		}
 		for (const action of info.actions) {
 			subFactories.push(`${action}: () => Promise.resolve(undefined)`);
 		}

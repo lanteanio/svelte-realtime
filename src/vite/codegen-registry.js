@@ -414,6 +414,10 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__presence')}, __L(() => import(${importPath}).then(m => m.${name}.__presenceStream)), ${JSON.stringify(rel)});`);
 				// Register cursor stream if present
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursors')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorStream)), ${JSON.stringify(rel)});`);
+				// Register the enumeration stream + one-shot snapshot if the room opted
+				// in (resolves to undefined and is never subscribed for a plain room).
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__rooms')}, __L(() => import(${importPath}).then(m => m.${name}.__roomsStream)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__roomsSync')}, __L(() => import(${importPath}).then(m => m.${name}.__roomsSync)), ${JSON.stringify(rel)});`);
 				// Register actions (deferred - resolved on first RPC or cron tick)
 				lines.push(`__registerRoomActions(${JSON.stringify(rel + '/' + name)}, ${_lazy(name)});`);
 			}

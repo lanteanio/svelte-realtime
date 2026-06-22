@@ -345,6 +345,8 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 	}
 
 	// Detect live.room() exports - generates data stream + presence stream + cursor stream + actions
+	// (and the lobby-browser `rooms()` view when the room opts into enumeration).
+	let roomsRuntimeImported = false;
 	ROOM_EXPORT_RE.lastIndex = 0;
 	while ((match = ROOM_EXPORT_RE.exec(source)) !== null) {
 		const name = match[1];
@@ -356,6 +358,10 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			// Room generates a namespace object with data, presence, cursors, and actions
 			// Extract room config to determine which sub-streams exist
 			const roomInfo = _extractRoomInfo(source, name);
+			if (roomInfo.isEnumerable && !roomsRuntimeImported) {
+				lines.push(`import { RoomsList } from 'svelte-realtime/rooms';`);
+				roomsRuntimeImported = true;
+			}
 			const roomLines = [];
 			roomLines.push(`export const ${name} = {`);
 			roomLines.push(`  data: __stream(${JSON.stringify(modulePath + '/' + name + '/__data')}, ${JSON.stringify(roomInfo.dataOpts)}, true),`);
@@ -364,6 +370,12 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			}
 			if (roomInfo.hasCursors) {
 				roomLines.push(`  cursors: __stream(${JSON.stringify(modulePath + '/' + name + '/__cursors')}, ${JSON.stringify({ merge: 'cursor' })}, true),`);
+			}
+			// Lobby-browser view (opt-in): a per-export enumeration stream of the
+			// active rooms, wrapped in the RoomsList rune. `game.rooms()` takes no
+			// args (it lists the whole export); `.list()` is the one-shot snapshot.
+			if (roomInfo.isEnumerable) {
+				roomLines.push(`  rooms: () => new RoomsList({ stream: __stream(${JSON.stringify(modulePath + '/' + name + '/__rooms')}, ${JSON.stringify({ merge: 'crud', key: 'topic' })}, true)(), list: __rpc(${JSON.stringify(modulePath + '/' + name + '/__roomsSync')}) }),`);
 			}
 			// Actions are RPCs
 			for (const action of roomInfo.actions) {

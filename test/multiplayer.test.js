@@ -1941,3 +1941,90 @@ describe('colorForKey widened swatch space', () => {
 		expect(colorViaServer(/** @type {any} */ (123))).toBe(colorViaClient('123'));
 	});
 });
+
+describe('live.room enumeration (game.rooms())', () => {
+	it('opt-in via meta: exposes __hasRooms, a crud __roomsStream keyed by topic, and a __roomsSync one-shot', () => {
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			meta: (id) => ({ name: 'g' + id, cap: 32 })
+		});
+		expect(game.__hasRooms).toBe(true);
+		expect(game.__roomsStream).toBeDefined();
+		expect(game.__roomsStream.__isStream).toBe(true);
+		expect(game.__roomsStream.__streamOptions.merge).toBe('crud');
+		expect(game.__roomsStream.__streamOptions.key).toBe('topic');
+		expect(game.__roomsSync.__isLive).toBe(true);
+	});
+
+	it('opt-in via enumerable:true with no meta (count-only enumeration)', () => {
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			enumerable: true
+		});
+		expect(game.__hasRooms).toBe(true);
+		expect(game.__roomsStream).toBeDefined();
+		expect(game.__roomsStream.__streamOptions.key).toBe('topic');
+	});
+
+	it('is off by default: a plain room carries no enumeration surface (byte-identical)', () => {
+		const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [] });
+		expect(game.__hasRooms).toBe(false);
+		expect(game.__roomsStream).toBeUndefined();
+		expect(game.__roomsSync).toBeUndefined();
+	});
+
+	it('rejects a non-function meta', () => {
+		expect(() =>
+			live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], meta: 5 })
+		).toThrow('meta must be a function');
+	});
+
+	it('feeds created/updated/deleted to one enumeration topic as subscribers come and go', async () => {
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			meta: (id) => ({ name: 'g' + id })
+		});
+		const ds = game.__dataStream;
+		const pub = [];
+		const ctx = { publish: (topic, event, data) => pub.push({ topic, event, data }) };
+		await ds.__onSubscribe(ctx, 'game:7', [7]); // first subscriber: the room opens
+		await ds.__onSubscribe(ctx, 'game:7', [7]); // second: the live count rises
+		ds.__onUnsubscribe(ctx, 'game:7', 1); // one leaves: count drops to the remaining
+		ds.__onUnsubscribe(ctx, 'game:7', 0); // the last leaves: the room closes
+		expect(pub.map((p) => p.event)).toEqual(['created', 'updated', 'updated', 'deleted']);
+		// Every delta rides the SAME per-export enumeration topic.
+		const enumTopic = pub[0].topic;
+		expect(pub.every((p) => p.topic === enumTopic)).toBe(true);
+		// `created` carries args + count + meta; the count tracks the subscribers.
+		expect(pub[0].data).toMatchObject({ topic: 'game:7', args: [7], count: 1, meta: { name: 'g7' } });
+		expect(pub[1].data.count).toBe(2);
+		expect(pub[2].data.count).toBe(1);
+		expect(pub[3].data).toEqual({ topic: 'game:7' });
+	});
+
+	it('captures meta once at open and contains a throwing meta (empty meta, room still opens)', async () => {
+		let calls = 0;
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			meta: (id) => { calls++; if (id === 'boom') throw new Error('x'); return { n: id }; }
+		});
+		const ds = game.__dataStream;
+		const pub = [];
+		const ctx = { publish: (t, e, d) => pub.push({ event: e, data: d }) };
+		await ds.__onSubscribe(ctx, 'game:a', ['a']);
+		await ds.__onSubscribe(ctx, 'game:a', ['a']); // meta is NOT recomputed for a later subscriber
+		expect(calls).toBe(1);
+		// A throwing meta still opens the room, with an empty meta object.
+		await ds.__onSubscribe(ctx, 'game:boom', ['boom']);
+		const openBoom = pub.find((p) => p.event === 'created' && p.data.topic === 'game:boom');
+		expect(openBoom.data.meta).toEqual({});
+	});
+});

@@ -26,6 +26,12 @@ export function installRoom(seams) {
  * @returns {any}
  */
 
+// Per-export enumeration topic counter. A process-local id is enough for the
+// single-instance enumeration stream (the client reaches it through the
+// generated path, never the raw string); a future cluster-wide variant will
+// derive a stable topic from the module path so two instances of one export agree.
+let _roomsEnumSeq = 0;
+
 export const _roomRegister = function room(config) {
 	const {
 		topic: topicFn,
@@ -37,10 +43,22 @@ export const _roomRegister = function room(config) {
 		onJoin,
 		onLeave,
 		merge: mergeMode = 'crud',
-		key: keyField = 'id'
+		key: keyField = 'id',
+		meta: metaFn,
+		enumerable: enumerableFlag
 	} = config;
 
 	/** @type {any} */ (topicFn).__topicUsesCtx = true;
+
+	// Room enumeration (opt-in: a `meta` function or `enumerable: true`). When on,
+	// a per-export registry tracks which of this room's topics currently have
+	// subscribers (and how many), so `game.rooms()` can render a live lobby
+	// browser. Off by default - a room without it installs no registry hooks and
+	// no enumeration stream, so it is byte-identical to before.
+	if (metaFn !== undefined && typeof metaFn !== 'function') {
+		throw new Error('[svelte-realtime] live.room() meta must be a function (args) => ({ ... })\n  See: https://svti.me/rooms');
+	}
+	const isEnumerable = enumerableFlag === true || typeof metaFn === 'function';
 
 	// Number of room-identifying args the topic function expects (excluding ctx).
 	// Used by room actions to separate room args from action-specific payload.
@@ -133,6 +151,55 @@ export const _roomRegister = function room(config) {
 
 	const roomExport = {};
 
+	// Enumeration registry (single-instance): which of this room's topics
+	// currently have subscribers, with a per-connection count and the `meta`
+	// captured at the moment the topic gained its first subscriber. Keyed by the
+	// data topic; the lobby-browser snapshot is `Array.from(roomsIndex.values())`.
+	const roomsIndex = new Map();
+	const enumTopic = 'rooms:' + ++_roomsEnumSeq;
+
+	// Resolve meta once, when a room opens. A throwing meta never blocks the room
+	// (the entry still appears, with empty meta); a frozen copy keeps a later
+	// reader from mutating the registry through the snapshot.
+	const _roomMeta = (args) => {
+		if (typeof metaFn !== 'function') return undefined;
+		try {
+			const m = metaFn(...args);
+			return m && typeof m === 'object' ? Object.freeze({ ...m }) : m;
+		} catch {
+			return {};
+		}
+	};
+	// First subscriber opens the room (created); later subscribers bump the count
+	// (updated). `args` is the room-identifying args of the topic, forwarded by
+	// the stream subscribe path as the hook's 3rd argument.
+	const _enumOnSub = (ctx, topic, args) => {
+		let entry = roomsIndex.get(topic);
+		if (entry === undefined) {
+			entry = { topic, args: Array.isArray(args) ? args.slice() : [], count: 1, meta: _roomMeta(args || []) };
+			roomsIndex.set(topic, entry);
+			// Publish a snapshot copy, not the live entry - the registry mutates
+			// `count` in place, so a delta must capture its value at this moment.
+			ctx.publish(enumTopic, 'created', { ...entry });
+		} else {
+			entry.count++;
+			ctx.publish(enumTopic, 'updated', { ...entry });
+		}
+	};
+	// The last subscriber to leave closes the room (deleted); otherwise the count
+	// drops to the authoritative remaining count the unsubscribe path supplies.
+	const _enumOnUnsub = (ctx, topic, remainingSubscribers) => {
+		const entry = roomsIndex.get(topic);
+		if (entry === undefined) return;
+		if (remainingSubscribers <= 0) {
+			roomsIndex.delete(topic);
+			ctx.publish(enumTopic, 'deleted', { topic });
+		} else {
+			entry.count = remainingSubscribers;
+			ctx.publish(enumTopic, 'updated', { ...entry });
+		}
+	};
+
 	const dataStream = live.stream(topicFn, async function roomInit(ctx, ...args) {
 		if (guardFn) await guardFn(ctx, ...args);
 		const result = await initFn(ctx, ...args);
@@ -144,7 +211,9 @@ export const _roomRegister = function room(config) {
 	}, {
 		merge: mergeMode,
 		key: keyField,
-		onSubscribe: presenceFn ? async (ctx, topic) => {
+		onSubscribe: (presenceFn || isEnumerable) ? async (ctx, topic, args) => {
+			if (isEnumerable) _enumOnSub(ctx, topic, args);
+			if (!presenceFn) return;
 			const userId = _getIdentityKey(ctx);
 			const refKey = topic + '\0' + userId;
 
@@ -207,7 +276,9 @@ export const _roomRegister = function room(config) {
 				}
 			}
 		} : undefined,
-		onUnsubscribe: presenceFn ? (ctx, topic) => {
+		onUnsubscribe: (presenceFn || isEnumerable) ? (ctx, topic, remainingSubscribers) => {
+			if (isEnumerable) _enumOnUnsub(ctx, topic, remainingSubscribers);
+			if (!presenceFn) return;
 			const userId = _getIdentityKey(ctx);
 			const refKey = topic + '\0' + userId;
 
@@ -254,6 +325,21 @@ export const _roomRegister = function room(config) {
 	/** @type {any} */ (roomExport).__hasPresence = !!presenceFn;
 	/** @type {any} */ (roomExport).__hasCursors = !!cursorConfig;
 	/** @type {any} */ (roomExport).__cursorThrottle = typeof cursorConfig === 'object' ? cursorConfig.throttle || 50 : 50;
+	/** @type {any} */ (roomExport).__hasRooms = isEnumerable;
+
+	// Enumeration stream (opt-in): one per-export stream whose snapshot is the
+	// active-rooms registry and whose live deltas (created/updated/deleted, fed by
+	// the data-stream subscribe hooks above) merge into the client's lobby view,
+	// keyed by topic. `__roomsSync` backs the one-shot `.list()` (snapshot, no
+	// subscription).
+	if (isEnumerable) {
+		/** @type {any} */ (roomExport).__roomsStream = live.stream(
+			enumTopic,
+			async () => Array.from(roomsIndex.values(), (e) => ({ ...e })),
+			{ merge: 'crud', key: 'topic' }
+		);
+		/** @type {any} */ (roomExport).__roomsSync = live(async () => Array.from(roomsIndex.values(), (e) => ({ ...e })));
+	}
 
 	// Presence stream (if enabled)
 	if (presenceFn) {
