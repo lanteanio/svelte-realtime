@@ -55,6 +55,12 @@ export async function _resolveAllLazy() {
 						break;
 					case 'room-actions': {
 						const modulePath = path.substring(0, path.lastIndexOf('/'));
+						// Bind the room's enumeration identity to its stable module
+						// path so cluster replicas of one export agree on the
+						// roster key and pub/sub topic. `path` is `rel/name`.
+						if (typeof (/** @type {any} */ (fn).__setEnumId) === 'function') {
+							/** @type {any} */ (fn).__setEnumId(path);
+						}
 						if (/** @type {any} */ (fn).__actions) {
 							for (const [k, v] of Object.entries(/** @type {any} */ (fn).__actions)) {
 								if (_validSegmentRe.test(k)) {

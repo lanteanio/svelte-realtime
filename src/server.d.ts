@@ -2426,6 +2426,12 @@ export interface RoomExport {
 	__roomsStream?: any;
 	/** The one-shot enumeration snapshot RPC backing `rooms().list()`. */
 	__roomsSync?: any;
+	/**
+	 * Bind the enumeration identity to the export's stable module path so cluster
+	 * replicas of one export share a Redis roster and pub/sub topic. Called by the
+	 * registration path; present only on an enumerable room.
+	 */
+	__setEnumId?: (id: string) => void;
 	__actions?: Record<string, any>;
 }
 

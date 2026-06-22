@@ -106,6 +106,7 @@ export async function _loadRegistryDirect(server, liveDir, dir) {
 					if (fn.__cursorStream) __register(rel + '/' + name + '/__cursors', fn.__cursorStream, rel);
 					if (fn.__roomsStream) __register(rel + '/' + name + '/__rooms', fn.__roomsStream, rel);
 					if (fn.__roomsSync) __register(rel + '/' + name + '/__roomsSync', fn.__roomsSync, rel);
+					if (typeof fn.__setEnumId === 'function') fn.__setEnumId(rel + '/' + name);
 					if (fn.__actions) {
 						for (const [k, v] of Object.entries(fn.__actions)) {
 							__register(rel + '/' + name + '/__action/' + k, v, rel);

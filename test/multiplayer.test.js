@@ -12,6 +12,7 @@ import {
 	_clusterPresenceMerge,
 	_presenceRefForTest
 } from '../src/server.js';
+import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId } from '../src/server/rooms-cluster.js';
 import { colorForKey, hueForKey } from '../src/shared/color.js';
 import { colorForKey as colorViaServer, hueForKey as hueViaServer } from '../src/server.js';
 import { colorForKey as colorViaClient, hueForKey as hueViaClient } from '../src/client.js';
@@ -2026,5 +2027,199 @@ describe('live.room enumeration (game.rooms())', () => {
 		await ds.__onSubscribe(ctx, 'game:boom', ['boom']);
 		const openBoom = pub.find((p) => p.event === 'created' && p.data.topic === 'game:boom');
 		expect(openBoom.data.meta).toEqual({});
+	});
+
+	it('aggregates the count cluster-wide and opens/closes on the cluster-first/last subscriber (platform.redis)', async () => {
+		let metaCalls = 0;
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			meta: (id) => { metaCalls++; return { name: 'g' + id, cap: 32 }; }
+		});
+		// Registration binds the stable enum identity; two replicas of one export
+		// derive the SAME pub/sub topic and Redis roster key from it.
+		game.__setEnumId('lobby/game');
+		expect(game.__roomsStream.__streamTopic).toBe('rooms-enum:lobby/game');
+
+		const redis = makeFakeRedis();
+		const platformA = { redis };
+		const platformB = { redis };
+		const ds = game.__dataStream;
+		const pubA = [];
+		const pubB = [];
+		const ctxA = { platform: platformA, publish: (topic, event, data) => pubA.push({ topic, event, data }) };
+		const ctxB = { platform: platformB, publish: (topic, event, data) => pubB.push({ topic, event, data }) };
+
+		// First subscriber lands on instance A: the cluster-wide opener publishes
+		// 'created' with count 1 and resolves the card once.
+		await ds.__onSubscribe(ctxA, 'game:7', [7]);
+		expect(pubA).toHaveLength(1);
+		expect(pubA[0].event).toBe('created');
+		expect(pubA[0].topic).toBe('rooms-enum:lobby/game');
+		expect(pubA[0].data).toMatchObject({ topic: 'game:7', args: [7], count: 1, meta: { name: 'g7', cap: 32 } });
+
+		// A second subscriber lands on instance B: the count rises CLUSTER-WIDE to
+		// 2 and B reads the opener's card back rather than recomputing it.
+		await ds.__onSubscribe(ctxB, 'game:7', [7]);
+		expect(pubB).toHaveLength(1);
+		expect(pubB[0].event).toBe('updated');
+		expect(pubB[0].topic).toBe('rooms-enum:lobby/game');
+		expect(pubB[0].data).toMatchObject({ topic: 'game:7', args: [7], count: 2, meta: { name: 'g7', cap: 32 } });
+		// meta(args) ran exactly once across the cluster (the opener), not per replica.
+		expect(metaCalls).toBe(1);
+
+		// A late lobby viewer on instance B loads the cluster snapshot: it sees the
+		// room with the cluster-wide count, not just B's local subscribers.
+		const snapB = await _clusterRoomsList(platformB, 'lobby/game');
+		expect(snapB).toEqual([{ topic: 'game:7', args: [7], count: 2, meta: { name: 'g7', cap: 32 } }]);
+
+		// Instance A's only subscriber leaves. Although A has no local subscribers
+		// left, the room stays open (B still has one) and the count drops to the
+		// cluster-wide remaining - NOT 'deleted'. The local-remaining arg (0) is
+		// irrelevant on the cluster path.
+		await ds.__onUnsubscribe(ctxA, 'game:7', 0);
+		expect(pubA).toHaveLength(2);
+		expect(pubA[1].event).toBe('updated');
+		expect(pubA[1].data).toMatchObject({ topic: 'game:7', count: 1 });
+
+		// The cluster-last subscriber leaves on instance B: the room closes once,
+		// cluster-wide, with a single 'deleted'.
+		await ds.__onUnsubscribe(ctxB, 'game:7', 0);
+		expect(pubB).toHaveLength(2);
+		expect(pubB[1].event).toBe('deleted');
+		expect(pubB[1].data).toEqual({ topic: 'game:7' });
+
+		// The roster is empty again - both fields were removed on the cluster-last release.
+		expect(await _clusterRoomsList(platformA, 'lobby/game')).toEqual([]);
+	});
+
+	it('cluster acquire/release: running count, isFirst/isLast, and a card captured once', async () => {
+		const redis = makeFakeRedis();
+		const platformA = { redis };
+		const platformB = { redis };
+		const getMetaA = () => ({ name: 'A-card' });
+		const getMetaB = () => ({ name: 'B-card' });
+
+		// The opener (0->1) sets isFirst and captures its card.
+		const a1 = await _clusterRoomsAcquire(platformA, 'lobby/game', 'game:9', [9], getMetaA);
+		expect(a1).toMatchObject({ isFirst: true, count: 1, args: [9], meta: { name: 'A-card' } });
+
+		// A later acquire from another replica reads the opener's card back; its own
+		// getMeta is never consulted.
+		const b1 = await _clusterRoomsAcquire(platformB, 'lobby/game', 'game:9', [9], getMetaB);
+		expect(b1).toMatchObject({ isFirst: false, count: 2, args: [9], meta: { name: 'A-card' } });
+
+		// Release decrements the shared count; not last yet.
+		const r1 = await _clusterRoomsRelease(platformA, 'lobby/game', 'game:9');
+		expect(r1).toMatchObject({ isLast: false, count: 1, meta: { name: 'A-card' } });
+
+		// The cluster-last release reports isLast and clears the fields.
+		const r2 = await _clusterRoomsRelease(platformB, 'lobby/game', 'game:9');
+		expect(r2.isLast).toBe(true);
+		expect(await _clusterRoomsList(platformA, 'lobby/game')).toEqual([]);
+	});
+
+	it('cluster helpers no-op without platform.redis so the in-memory path stays in control', async () => {
+		expect(await _clusterRoomsAcquire({}, 'lobby/game', 'game:1', [1], () => ({}))).toBeNull();
+		expect(await _clusterRoomsRelease({}, 'lobby/game', 'game:1')).toBeNull();
+		expect(await _clusterRoomsList({}, 'lobby/game')).toBeNull();
+	});
+
+	it('keeps two enumerable exports on distinct cluster rosters keyed by their module path', async () => {
+		const redis = makeFakeRedis();
+		const platform = { redis };
+		const games = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], meta: (id) => ({ kind: 'game' }) });
+		const rooms = live.room({ topic: (ctx, id) => 'room:' + id, topicArgs: 1, init: async () => [], meta: (id) => ({ kind: 'room' }) });
+		games.__setEnumId('lobby/games');
+		rooms.__setEnumId('lobby/rooms');
+
+		const sink = (arr) => ({ platform, publish: (topic, event, data) => arr.push({ topic, event, data }) });
+		const gPub = [];
+		const rPub = [];
+		await games.__dataStream.__onSubscribe(sink(gPub), 'game:1', [1]);
+		await rooms.__dataStream.__onSubscribe(sink(rPub), 'room:1', [1]);
+
+		// Distinct stable topics; each export's roster lists only its own rooms.
+		expect(gPub[0].topic).toBe('rooms-enum:lobby/games');
+		expect(rPub[0].topic).toBe('rooms-enum:lobby/rooms');
+		expect(await _clusterRoomsList(platform, 'lobby/games')).toEqual([{ topic: 'game:1', args: [1], count: 1, meta: { kind: 'game' } }]);
+		expect(await _clusterRoomsList(platform, 'lobby/rooms')).toEqual([{ topic: 'room:1', args: [1], count: 1, meta: { kind: 'room' } }]);
+	});
+
+	it('cluster helpers fail CLOSED on a redis error (no phantom delta with a wrong count)', async () => {
+		// A redis whose ops reject mid-call (a transient blip). The helpers must
+		// return null so the caller publishes nothing, rather than a count the
+		// shared hash never recorded.
+		const blip = {
+			hincrby: async () => { throw new Error('blip'); },
+			hgetall: async () => { throw new Error('blip'); },
+			hdel: async () => 0,
+			hget: async () => null,
+			hset: async () => 1,
+			expire: async () => 1
+		};
+		const platform = { redis: blip };
+		expect(await _clusterRoomsAcquire(platform, 'lobby/game', 'game:1', [1], () => ({ n: 1 }))).toBeNull();
+		expect(await _clusterRoomsRelease(platform, 'lobby/game', 'game:1')).toBeNull();
+		expect(await _clusterRoomsList(platform, 'lobby/game')).toEqual([]);
+
+		// And the enum hook publishes nothing when the acquire fails closed.
+		const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], meta: () => ({}) });
+		game.__setEnumId('lobby/game');
+		const pub = [];
+		await game.__dataStream.__onSubscribe({ platform, publish: (t, e, d) => pub.push({ t, e, d }) }, 'game:1', [1]);
+		expect(pub).toEqual([]);
+	});
+
+	it('cluster snapshot skips a count whose card has not landed yet (the acquire window)', async () => {
+		const redis = makeFakeRedis();
+		// Simulate the brief window between the opener HINCRBY and its card HSET:
+		// a c: field exists with no matching m: field.
+		await redis.hincrby('__live-rooms:lobby/game', 'c:game:1', 1);
+		expect(await _clusterRoomsList({ redis }, 'lobby/game')).toEqual([]);
+		// Once the card lands, the room appears.
+		await redis.hset('__live-rooms:lobby/game', 'm:game:1', JSON.stringify({ args: [1], meta: { name: 'g1' } }));
+		expect(await _clusterRoomsList({ redis }, 'lobby/game')).toEqual([{ topic: 'game:1', args: [1], count: 1, meta: { name: 'g1' } }]);
+	});
+
+	it('a partial redis client (missing roster ops) falls back to the in-memory path, not a split read', async () => {
+		// hincrby present but hgetall/hdel/hget absent: writes must NOT go to redis
+		// while reads come from an empty Map. The uniform gate keeps it in-memory.
+		const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], meta: (id) => ({ name: 'g' + id }) });
+		const partial = { hincrby: async () => 1 };
+		const pub = [];
+		const ctx = { platform: { redis: partial }, publish: (t, e, d) => pub.push({ topic: t, event: e, data: d }) };
+		await game.__dataStream.__onSubscribe(ctx, 'game:7', [7]);
+		// The in-memory path ran (a created with the local entry), not the cluster path.
+		expect(pub).toHaveLength(1);
+		expect(pub[0].event).toBe('created');
+		expect(pub[0].data).toMatchObject({ topic: 'game:7', args: [7], count: 1, meta: { name: 'g7' } });
+	});
+
+	it('keeps the enum id (and so the pub/sub topic) under the 256-char wire/bus cap, verbatim for real paths', async () => {
+		// A normal module path is used verbatim - readable in logs and redis-cli.
+		expect(_stableEnumId('rooms/lobby/game')).toBe('rooms/lobby/game');
+		// A pathological path is bounded deterministically and collision-distinctly.
+		const long = 'deeply/' + 'nested/'.repeat(60) + 'game';
+		expect(long.length).toBeGreaterThan(245);
+		const id = _stableEnumId(long);
+		expect(id.length).toBeLessThanOrEqual(256 - 'rooms-enum:'.length);
+		expect(_stableEnumId(long)).toBe(id); // deterministic: every replica agrees
+		expect(_stableEnumId(long + 'x')).not.toBe(id); // a different long path -> a different id
+
+		// End to end: an export with a huge path still produces a wire-legal topic
+		// and still aggregates over the cluster (the bus would have dropped a >256 topic).
+		const game = live.room({ topic: (ctx, gid) => 'game:' + gid, topicArgs: 1, init: async () => [], meta: () => ({ ok: true }) });
+		game.__setEnumId(long);
+		expect(game.__roomsStream.__streamTopic.length).toBeLessThanOrEqual(256);
+		expect(game.__roomsStream.__streamTopic.startsWith('rooms-enum:')).toBe(true);
+		const redis = makeFakeRedis();
+		const pub = [];
+		await game.__dataStream.__onSubscribe({ platform: { redis }, publish: (t, e, d) => pub.push({ t, e, d }) }, 'game:1', [1]);
+		expect(pub).toHaveLength(1);
+		expect(pub[0].t).toBe(game.__roomsStream.__streamTopic);
+		expect(pub[0].e).toBe('created');
+		expect(await _clusterRoomsList({ redis }, id)).toEqual([{ topic: 'game:1', args: [1], count: 1, meta: { ok: true } }]);
 	});
 });

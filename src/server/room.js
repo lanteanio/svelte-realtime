@@ -6,6 +6,7 @@ import { _validSegmentRe } from './validate.js';
 import { _IS_DEV } from './env.js';
 import { state, _presenceRef } from './state.js';
 import { _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList } from './presence.js';
+import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId, _ENUM_TOPIC_PREFIX } from './rooms-cluster.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot } from './history-compensation.js';
 import { _getIdentityKey } from './identity.js';
 
@@ -26,10 +27,12 @@ export function installRoom(seams) {
  * @returns {any}
  */
 
-// Per-export enumeration topic counter. A process-local id is enough for the
-// single-instance enumeration stream (the client reaches it through the
-// generated path, never the raw string); a future cluster-wide variant will
-// derive a stable topic from the module path so two instances of one export agree.
+// Per-export enumeration topic counter. It seeds a unique default id before the
+// registry binds the stable one: `__setEnumId` (called from the registration
+// path with the export's module path) swaps in a cluster-stable id so two
+// replicas of one export agree on both the pub/sub topic and the Redis roster
+// key. The client always reaches the stream through the generated path, never
+// the raw string, so the default counter is invisible to apps.
 let _roomsEnumSeq = 0;
 
 export const _roomRegister = function room(config) {
@@ -151,12 +154,21 @@ export const _roomRegister = function room(config) {
 
 	const roomExport = {};
 
-	// Enumeration registry (single-instance): which of this room's topics
-	// currently have subscribers, with a per-connection count and the `meta`
-	// captured at the moment the topic gained its first subscriber. Keyed by the
-	// data topic; the lobby-browser snapshot is `Array.from(roomsIndex.values())`.
+	// Enumeration registry: which of this room's topics currently have
+	// subscribers, with a subscriber count and the `meta` captured at the moment
+	// the topic gained its first subscriber. Keyed by the data topic. This is the
+	// single-replica path (no `platform.redis`): the snapshot is
+	// `Array.from(roomsIndex.values())`. When `platform.redis` is wired the hooks
+	// route through the shared Redis roster instead (see rooms-cluster.js) so the
+	// count and snapshot span the whole cluster; this Map is then unused.
 	const roomsIndex = new Map();
-	const enumTopic = 'rooms:' + ++_roomsEnumSeq;
+	// `enumId` is the stable per-export identity (the Redis roster key); `enumTopic`
+	// is the pub/sub channel the deltas ride and clients subscribe to. Both default
+	// to a process-local id and are re-bound by `__setEnumId` at registration so
+	// every replica of one export agrees. `let`, because the publish closures and
+	// the stream's topic must both follow the re-bind.
+	let enumId = 'rooms:' + ++_roomsEnumSeq;
+	let enumTopic = _ENUM_TOPIC_PREFIX + enumId;
 
 	// Resolve meta once, when a room opens. A throwing meta never blocks the room
 	// (the entry still appears, with empty meta); a frozen copy keeps a later
@@ -170,13 +182,33 @@ export const _roomRegister = function room(config) {
 			return {};
 		}
 	};
+	// A platform whose redis client can host the shared roster: it must expose
+	// every hash op the cluster helpers use. Decided uniformly so the sub/unsub
+	// writes and the snapshot read never split between Redis and the in-memory Map
+	// (a client with some ops but not others falls back to in-memory consistently).
+	const _clusterRedis = (ctx) => {
+		const r = ctx && ctx.platform && ctx.platform.redis;
+		return r && typeof r.hincrby === 'function' && typeof r.hgetall === 'function'
+			&& typeof r.hdel === 'function' && typeof r.hget === 'function' ? r : null;
+	};
 	// First subscriber opens the room (created); later subscribers bump the count
 	// (updated). `args` is the room-identifying args of the topic, forwarded by
-	// the stream subscribe path as the hook's 3rd argument.
-	const _enumOnSub = (ctx, topic, args) => {
+	// the stream subscribe path as the hook's 3rd argument. With `platform.redis`
+	// the count and the open/close decision are cluster-wide (the shared roster);
+	// without it the closure-local `roomsIndex` keeps the original single-replica
+	// behavior, byte-identical. `meta(args)` is resolved lazily - only by the
+	// opener - so it still runs exactly once per open on either path.
+	const _enumOnSub = async (ctx, topic, args) => {
+		const safeArgs = Array.isArray(args) ? args.slice() : [];
+		if (_clusterRedis(ctx)) {
+			const res = await _clusterRoomsAcquire(ctx.platform, enumId, topic, safeArgs, () => _roomMeta(safeArgs));
+			if (!res) return;
+			ctx.publish(enumTopic, res.isFirst ? 'created' : 'updated', { topic, args: res.args, count: res.count, meta: res.meta });
+			return;
+		}
 		let entry = roomsIndex.get(topic);
 		if (entry === undefined) {
-			entry = { topic, args: Array.isArray(args) ? args.slice() : [], count: 1, meta: _roomMeta(args || []) };
+			entry = { topic, args: safeArgs, count: 1, meta: _roomMeta(safeArgs) };
 			roomsIndex.set(topic, entry);
 			// Publish a snapshot copy, not the live entry - the registry mutates
 			// `count` in place, so a delta must capture its value at this moment.
@@ -187,8 +219,17 @@ export const _roomRegister = function room(config) {
 		}
 	};
 	// The last subscriber to leave closes the room (deleted); otherwise the count
-	// drops to the authoritative remaining count the unsubscribe path supplies.
-	const _enumOnUnsub = (ctx, topic, remainingSubscribers) => {
+	// drops. On the cluster path the count is the shared running total and isLast
+	// is the cluster-wide 1->0; on the single-replica path it drops to the
+	// authoritative remaining count the unsubscribe hook supplies.
+	const _enumOnUnsub = async (ctx, topic, remainingSubscribers) => {
+		if (_clusterRedis(ctx)) {
+			const res = await _clusterRoomsRelease(ctx.platform, enumId, topic);
+			if (!res) return;
+			if (res.isLast) ctx.publish(enumTopic, 'deleted', { topic });
+			else ctx.publish(enumTopic, 'updated', { topic, args: res.args, count: res.count, meta: res.meta });
+			return;
+		}
 		const entry = roomsIndex.get(topic);
 		if (entry === undefined) return;
 		if (remainingSubscribers <= 0) {
@@ -212,7 +253,9 @@ export const _roomRegister = function room(config) {
 		merge: mergeMode,
 		key: keyField,
 		onSubscribe: (presenceFn || isEnumerable) ? async (ctx, topic, args) => {
-			if (isEnumerable) _enumOnSub(ctx, topic, args);
+			// Enumeration is best-effort and must never suppress the presence join
+			// below - the two are independent concerns sharing one hook.
+			if (isEnumerable) { try { await _enumOnSub(ctx, topic, args); } catch { /* enum is best-effort */ } }
 			if (!presenceFn) return;
 			const userId = _getIdentityKey(ctx);
 			const refKey = topic + '\0' + userId;
@@ -276,8 +319,8 @@ export const _roomRegister = function room(config) {
 				}
 			}
 		} : undefined,
-		onUnsubscribe: (presenceFn || isEnumerable) ? (ctx, topic, remainingSubscribers) => {
-			if (isEnumerable) _enumOnUnsub(ctx, topic, remainingSubscribers);
+		onUnsubscribe: (presenceFn || isEnumerable) ? async (ctx, topic, remainingSubscribers) => {
+			if (isEnumerable) { try { await _enumOnUnsub(ctx, topic, remainingSubscribers); } catch { /* enum is best-effort */ } }
 			if (!presenceFn) return;
 			const userId = _getIdentityKey(ctx);
 			const refKey = topic + '\0' + userId;
@@ -331,14 +374,40 @@ export const _roomRegister = function room(config) {
 	// active-rooms registry and whose live deltas (created/updated/deleted, fed by
 	// the data-stream subscribe hooks above) merge into the client's lobby view,
 	// keyed by topic. `__roomsSync` backs the one-shot `.list()` (snapshot, no
-	// subscription).
+	// subscription). The snapshot is cluster-wide when `platform.redis` is wired
+	// (the shared roster), else the local registry - the live deltas, which ride
+	// the publish bus cluster-wide for free, take over from there.
 	if (isEnumerable) {
+		const _roomsSnapshot = async (ctx) => {
+			if (_clusterRedis(ctx)) {
+				const list = await _clusterRoomsList(ctx.platform, enumId);
+				if (list) return list;
+			}
+			return Array.from(roomsIndex.values(), (e) => ({ ...e }));
+		};
 		/** @type {any} */ (roomExport).__roomsStream = live.stream(
 			enumTopic,
-			async () => Array.from(roomsIndex.values(), (e) => ({ ...e })),
+			_roomsSnapshot,
 			{ merge: 'crud', key: 'topic' }
 		);
-		/** @type {any} */ (roomExport).__roomsSync = live(async () => Array.from(roomsIndex.values(), (e) => ({ ...e })));
+		/** @type {any} */ (roomExport).__roomsSync = live(_roomsSnapshot);
+		// Re-bind the enumeration identity to the export's stable module path so
+		// every replica agrees on the pub/sub topic and the Redis roster key.
+		// Called from the registration path (production codegen, the test harness,
+		// and HMR) after this stream exists; it must follow BOTH the stream's
+		// subscribe topic and the publish closures' `enumTopic`, or deltas and
+		// subscribers would diverge. The registration always runs before the first
+		// subscribe (dispatch resolves the lazy registry before reading the
+		// stream's topic), so a subscriber never attaches to the default id.
+		/** @type {any} */ (roomExport).__setEnumId = (id) => {
+			if (typeof id !== 'string' || id.length === 0) return;
+			// Bound the id so `enumTopic` stays under the wire/bus 256-char cap - an
+			// over-long module path would otherwise make the cluster bus silently
+			// drop this export's deltas. Verbatim for every realistic path.
+			enumId = _stableEnumId(id);
+			enumTopic = _ENUM_TOPIC_PREFIX + enumId;
+			/** @type {any} */ (roomExport).__roomsStream.__streamTopic = enumTopic;
+		};
 	}
 
 	// Presence stream (if enabled)

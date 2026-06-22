@@ -325,6 +325,7 @@ export function createTestEnv(options) {
 				if (fn.__cursorStream) __register(path + '/__cursors', fn.__cursorStream);
 				if (fn.__roomsStream) __register(path + '/__rooms', fn.__roomsStream);
 				if (fn.__roomsSync) __register(path + '/__roomsSync', fn.__roomsSync);
+				if (typeof fn.__setEnumId === 'function') fn.__setEnumId(path);
 				if (fn.__actions) {
 					for (const [k, v] of Object.entries(fn.__actions)) {
 						__register(path + '/__action/' + k, v);

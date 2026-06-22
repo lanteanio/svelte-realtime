@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-next.24] - 2026-06-22
+
+### Added
+
+- **`<export>.rooms()` now aggregates active rooms across the whole cluster.** When `platform.redis` is wired (the same client presence uses), a room type's enumeration spans every instance: the first client to subscribe to a topic on any instance opens the room in the lobby, `count` is the live subscriber total summed across the cluster, and the room closes only when its last subscriber leaves anywhere. A lobby viewer connected to one instance sees the rooms open on all of them - the snapshot is a cluster-wide roster (a Redis hash, one per room export) and the live `created`/`updated`/`deleted` deltas ride the publish bus to every instance, so a lobby browser works behind a load balancer. `meta(args)` is resolved once per open by the instance that opens the room (cluster-wide, not per instance) and crosses the wire as JSON, so it must be a pure, JSON-serializable function of the room args. The roster is best-effort and eventually consistent (the right model for a discovery view, matching cluster presence): a Redis blip fails closed and is reconciled on the next subscribe/unsubscribe, and the TTL is refreshed on that activity so a dead instance cannot leak a phantom count while a room with no membership change for the whole window expires and reappears on its next change. Single-instance and zero-config (no `platform.redis`) behavior is byte-identical to before - the in-memory registry path is unchanged. Needs no `svelte-adapter-uws-extensions` change: the existing publish bus already fans the deltas cluster-wide.
+
 ## [0.6.0-next.23] - 2026-06-22
 
 ### Added
