@@ -67,6 +67,10 @@
     "./hooks": {
       "types": "./src/hooks.d.ts",
       "default": "./src/hooks.js"
+    },
+    "./sim": {
+      "types": "./src/sim.d.ts",
+      "default": "./src/sim.js"
     }
   },
   "files": [
