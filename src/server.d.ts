@@ -1,5 +1,23 @@
 import type { Platform, WebSocket } from 'svelte-adapter-uws';
 
+/** A reseedable deterministic generator: the same seed yields the same draws. */
+export interface SharedRandom {
+	/** Restart the stream from a new seed. */
+	reseed(seed: number): void;
+	/** A draw in [0, 1). */
+	float(): number;
+	/** A draw over the full unsigned 32-bit range. */
+	u32(): number;
+}
+
+/**
+ * Create a reseedable deterministic generator (re-exported from the adapter's
+ * smooth plugin). Reseed from a stable id - a command id, an entity id, a world
+ * seed - to get the identical draw sequence on the server, the client, and every
+ * replay. The same generator `live.smooth`'s `apply` receives as `ctx.rng`.
+ */
+export function createSharedRandom(seed?: number): SharedRandom;
+
 /**
  * Context passed to `live.cron()` functions.
  * No `user` or `ws` since cron jobs run outside a connection.

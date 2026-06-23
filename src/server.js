@@ -96,6 +96,11 @@ export { colorForKey, hueForKey } from './shared/color.js';
 export { LiveError };
 export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge };
 
+// The deterministic shared RNG the smooth simulation seeds per command, re-exported
+// so app/game code can draw the same reproducible randomness outside `apply` (world
+// generation, spawns, deterministic tests) without importing the adapter subpath.
+export { createSharedRandom } from 'svelte-adapter-uws/plugins/smooth/random';
+
 const textDecoder = new TextDecoder();
 
 // - Bounded-by-default capacity caps (server side) -------------------------

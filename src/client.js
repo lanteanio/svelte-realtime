@@ -36,3 +36,11 @@ export { failure } from 'svelte-adapter-uws/client';
  * without a separate adapter import.
  */
 export { status } from 'svelte-adapter-uws/client';
+
+/**
+ * Re-export `createSharedRandom` from the adapter's smooth plugin. The deterministic
+ * generator `live.smooth`'s `apply` receives as `ctx.rng`, exposed so client code can
+ * draw the same reproducible randomness outside `apply` (world generation, spawns,
+ * deterministic tests) by reseeding from a stable id.
+ */
+export { createSharedRandom } from 'svelte-adapter-uws/plugins/smooth/random';
