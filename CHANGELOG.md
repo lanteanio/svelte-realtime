@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.26] - 2026-06-23
+
+### Fixed
+
+- **`live.stream({ coalesceBy })` now delivers cross-instance in a cluster.** A coalesced publish previously fanned out only to subscribers on the publishing instance (the per-key latest-value-wins path never entered the cluster relay), so behind a load balancer a subscriber on another instance silently missed coalesced updates - the exact multi-instance case coalesceBy is meant for (prices, cursors, presence). The coalesce path now also relays a coalesced frame (when the pubsub extension is wrapped in) that every other instance re-coalesces onto its own subscribers, latest-value-wins preserved. Single-instance / no-extension behavior is byte-identical (no relay path). The cluster leg needs `svelte-adapter-uws-extensions >= 0.6.0-next.24`.
+
 ## [0.6.0-next.25] - 2026-06-23
 
 ### Added

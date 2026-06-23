@@ -10959,6 +10959,42 @@ describe('live.stream({ coalesceBy })', () => {
 		expect(platform.coalesced[0].key).toBe('coal/topic\0a');
 	});
 
+	it('coalescing stream also relays cross-instance via platform.relayCoalesced when present', async () => {
+		const stream = live.stream('coal/relay', async () => null, {
+			merge: 'set',
+			coalesceBy: (data) => data.k
+		});
+		__register('coal/relay', stream);
+
+		const handler = live(async (ctx) => {
+			ctx.publish('coal/relay', 'updated', { k: 'a', v: 1 });
+			return 'ok';
+		});
+		__register('coal/relay-pub', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// Subscribe so the publish takes the coalesce branch.
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/relay', id: 's1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		platform.reset();
+
+		// A cluster platform (the pubsub extension wrap) provides relayCoalesced;
+		// the coalesce branch must call it so other instances re-coalesce. The
+		// in-memory platform has none, so single-instance stays byte-identical.
+		const relayed = [];
+		platform.relayCoalesced = (topic, event, data, key) => relayed.push({ topic, event, data, key });
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'coal/relay-pub', id: 'p1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Local sendCoalesced still fires, and the cross-instance relay is invoked
+		// with the raw coalesce key.
+		expect(platform.coalesced).toHaveLength(1);
+		expect(relayed).toEqual([{ topic: 'coal/relay', event: 'updated', data: { k: 'a', v: 1 }, key: 'a' }]);
+	});
+
 	it('fans out one sendCoalesced per subscribed ws', async () => {
 		const stream = live.stream('coal/multi', async () => null, {
 			merge: 'set',

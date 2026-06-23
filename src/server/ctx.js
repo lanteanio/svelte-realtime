@@ -233,6 +233,13 @@ export function _getCtxHelpers(platform) {
 			for (const ws of c.ws) {
 				last = platform.sendCoalesced(ws, { key: fullKey, topic, event, data: wireData });
 			}
+			// Cross-instance: the loop above only reaches THIS instance's sockets.
+			// When the pubsub extension is wrapped in, relay a coalesced envelope so
+			// every other instance re-coalesces this latest value onto its own
+			// subscribers; without it a clustered coalesceBy topic silently delivers
+			// to the publishing instance only. In-memory / single-instance has no
+			// relayCoalesced, so it stays byte-identical.
+			if (platform.relayCoalesced) platform.relayCoalesced(topic, event, wireData, coalesceKey);
 			return last;
 		};
 		helpers = {
