@@ -2751,6 +2751,20 @@ export interface SmoothHitTestConfig {
 		interpDelay: number;
 		divergence: number;
 	}) => void;
+	/**
+	 * Opt-in, off by default. A graded benefit-of-the-doubt for a defender that broke
+	 * line of sight to the shooter in flight: a candidate visible to the shooter at the
+	 * rewind instant but occluded by `min(now, rewindAt + allowanceMs)` (it reached cover
+	 * within the window) is dropped from the shot - it cannot be hit. The app owns
+	 * occlusion via `exposure(shooterState, targetState)` (the framework has positions, not
+	 * visibility). Strictly subtractive: it can only ever turn a hit into a miss, never the
+	 * reverse, so it never helps a shooter. A throwing hook fails safe to no grace. Bounded
+	 * by `allowanceMs`, so it only relaxes `maxRewindMs` toward the present, never past it.
+	 */
+	defenderAllowance?: {
+		exposure: (shooterState: any, targetState: any) => boolean;
+		allowanceMs: number;
+	};
 }
 
 /**

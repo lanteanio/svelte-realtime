@@ -2103,6 +2103,107 @@ describe('live.smooth lag-compensated shoot', () => {
 		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
 	});
 
+	// defenderAllowance (opt-in, off by default): a graded benefit-of-the-doubt for a
+	// defender that broke line of sight to the shooter in flight. The app owns occlusion;
+	// here exposure() reports "in the open" as |y| < 100. A target visible at the rewind
+	// instant but occluded (behind cover) by the present is DROPPED, so the shot misses -
+	// favoring the defender that reached cover.
+	const exposeByY = (sh, t) => Math.abs(t.y) < 100;
+
+	it('defenderAllowance: a target visible when shot but behind cover now is graced into a miss', async () => {
+		const { name } = hitShape(baseOnHit, { defenderAllowance: { exposure: exposeByY, allowanceMs: 5000 } });
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// On the ray and in the open at the instant the shot is stamped with...
+		const tThen = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+		// ...then reaches cover (|y| >= 100) before the shot resolves.
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 600 });
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tThen }]);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
+	it('defenderAllowance off: the same geometry hits (proving the allowance is the cause)', async () => {
+		const { name } = hitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		const tThen = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 600 });
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tThen }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
+	it('defenderAllowance: a target still in the open at the present is NOT graced - it is hit', async () => {
+		const { name } = hitShape(baseOnHit, { defenderAllowance: { exposure: exposeByY, allowanceMs: 5000 } });
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		const tThen = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+		// Still on the ray and in the open at the present - no cover reached, no grace.
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 200, y: 0 });
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tThen }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
+	it('defenderAllowance: a throwing exposure hook fails safe to no grace (the shot still resolves)', async () => {
+		const { name } = hitShape(baseOnHit, { defenderAllowance: { exposure: () => { throw new Error('boom'); }, allowanceMs: 5000 } });
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		const tThen = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 });
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 600 });
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tThen }]);
+		// Hook threw -> no grace granted -> resolves at the rewind instant (on-ray) -> hit.
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+	});
+
+	it('defenderAllowance never turns a miss into a hit (off-ray when shot, on-ray behind cover at present)', async () => {
+		// The defender is OFF the ray when the shot is stamped (a clean miss) but strafes
+		// ONTO the ray while ducking behind near cover. exposure here is "visible iff y >= 30"
+		// (cover is the near band y < 30, which straddles the aim line at y=0). A position-
+		// relocating grace would re-sample u2 onto the ray and fabricate a kill; the strictly
+		// -subtractive grace can only drop a candidate, so the clean miss stays a miss.
+		const exposeFar = (sh, t) => t.y >= 30;
+		const { name } = hitShape(baseOnHit, { defenderAllowance: { exposure: exposeFar, allowanceMs: 5000 } });
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		const tThen = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 50 }); // off-ray, visible
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 10 });               // on-ray, occluded
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tThen }]);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
+	it('defenderAllowance validation: rejects a bad shape, a non-function exposure, a non-positive allowanceMs', () => {
+		const base = { topic: 't', apply: () => ({}), initial: { x: 0, y: 0 }, interest: { radius: 1000, position: (s) => ({ x: s.x, y: s.y }) } };
+		const ht = { hitbox: { shape: 'circle', radius: 30 }, shot: { type: 'ray', origin: (c, s) => ({ x: s.x, y: s.y }), dir: (c) => c.aim, maxDist: 100 }, onHit: () => {} };
+		expect(() => live.smooth({ ...base, hitTest: { ...ht, defenderAllowance: 'x' } })).toThrow('defenderAllowance');
+		expect(() => live.smooth({ ...base, hitTest: { ...ht, defenderAllowance: { allowanceMs: 50 } } })).toThrow('exposure');
+		expect(() => live.smooth({ ...base, hitTest: { ...ht, defenderAllowance: { exposure: () => true, allowanceMs: 0 } } })).toThrow('allowanceMs');
+		expect(() => live.smooth({ ...base, hitTest: { ...ht, defenderAllowance: { exposure: () => true, allowanceMs: 50 } } })).not.toThrow();
+	});
+
 	it('a sparsely-served shooter gets the wider reach its render delay needs (LOD-aware interp)', async () => {
 		// u1's only neighbour u2 sits in a throttled LOD band, so the server sends u1 a
 		// frame only every ~5 ticks. u1's client therefore renders further in the past, and

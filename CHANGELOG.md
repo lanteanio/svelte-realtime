@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`live.smooth({ hitTest: { defenderAllowance } })`: an opt-in, off-by-default grace for a defender who broke line of sight in flight.** Server-rewind lag compensation favors the shooter within the `maxRewindMs` cap; `defenderAllowance` leans further toward the holder for the case that stings most - getting shot after reaching cover. You supply `{ exposure(shooterState, targetState), allowanceMs }`: `exposure` is your occlusion test (the framework has positions, not line of sight), and a candidate the shooter could see at the rewind instant but that is occluded by `min(now, rewindAt + allowanceMs)` - it reached cover within the window - is dropped from that shot and cannot be hit. It is **strictly subtractive**: it can only ever turn a hit into a miss, never the reverse, so it can never help a shooter no matter how your occlusion relates to the shot ray; a throwing `exposure` fails safe to no grace; and it only ever relaxes the cap toward the present, never past it. Default off and byte-identical when unset. No new peer-dep - it rides the existing `hitTest` shoot path (which needs `svelte-adapter-uws >= 0.6.0-next.29`).
+
 ## [0.6.0-next.25] - 2026-06-22
 
 ### Added

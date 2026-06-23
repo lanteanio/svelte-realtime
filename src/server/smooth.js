@@ -950,7 +950,7 @@ function _ensureSmoothCluster(smooth) {
 			}
 			const nowMono = rec.monoClock.mono(wallEpoch());
 			const rewindAt = _smoothRewindAt(nowMono, reach, rewindAge);
-			_smoothResolveShot(rec, rec.name, identity, shooterEntity, rec.platform, payload.cmd, rewindAt).catch(() => {});
+			_smoothResolveShot(rec, rec.name, identity, shooterEntity, rec.platform, payload.cmd, rewindAt, nowMono).catch(() => {});
 		}
 	});
 }
@@ -1101,6 +1101,27 @@ function _validateHitTest(ht, interest) {
 	if (ht.detectionHook !== undefined && typeof ht.detectionHook !== 'function') {
 		throw new Error('[svelte-realtime] live.smooth() hitTest.detectionHook must be a function (info) => ...');
 	}
+	// Opt-in, off by default. A graded benefit-of-the-doubt for a defender who broke
+	// line of sight to the shooter in flight (the "I reached cover but still died"
+	// complaint). The framework has positions, not visibility, so the app supplies
+	// exposure(shooterState, targetState) => boolean; allowanceMs bounds how far the
+	// rewind may be pulled back toward the present for a target that reached cover. It
+	// only ever moves resolution toward now (favors the defender), so it can never help
+	// a cheating shooter. Sits on top of the maxRewindMs cap, never bypasses it.
+	let defenderAllowance;
+	if (ht.defenderAllowance !== undefined) {
+		const da = ht.defenderAllowance;
+		if (da === null || typeof da !== 'object') {
+			throw new Error('[svelte-realtime] live.smooth() hitTest.defenderAllowance must be an object { exposure, allowanceMs }');
+		}
+		if (typeof da.exposure !== 'function') {
+			throw new Error('[svelte-realtime] live.smooth() hitTest.defenderAllowance.exposure must be a function (shooterState, targetState) => boolean');
+		}
+		if (!(typeof da.allowanceMs === 'number' && Number.isFinite(da.allowanceMs) && da.allowanceMs > 0)) {
+			throw new Error('[svelte-realtime] live.smooth() hitTest.defenderAllowance.allowanceMs must be a positive number');
+		}
+		defenderAllowance = { exposure: da.exposure, allowanceMs: da.allowanceMs };
+	}
 	return {
 		hitbox,
 		shot: { type: 'ray', origin: shot.origin, dir: shot.dir, maxDist: shot.maxDist },
@@ -1110,7 +1131,8 @@ function _validateHitTest(ht, interest) {
 		position: typeof ht.position === 'function' ? ht.position : interest.position,
 		maxRewindMs,
 		teleportThreshold: ht.teleportThreshold,
-		detectionHook: typeof ht.detectionHook === 'function' ? ht.detectionHook : undefined
+		detectionHook: typeof ht.detectionHook === 'function' ? ht.detectionHook : undefined,
+		defenderAllowance
 	};
 }
 
@@ -1237,9 +1259,9 @@ function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
  * (directly from a local measurement, or from forwarded durations on the owner)
  * and supplies the platform whose `smooth` coordinator relays the hit events.
  * @param {any} rec @param {string} name @param {string} shooterKey
- * @param {any} shooterEntity @param {any} ctxPlatform @param {any} cmd @param {number} rewindAt
+ * @param {any} shooterEntity @param {any} ctxPlatform @param {any} cmd @param {number} rewindAt @param {number} nowMono
  */
-async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctxPlatform, cmd, rewindAt) {
+async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctxPlatform, cmd, rewindAt, nowMono) {
 	const ht = rec.cfg.hitTest;
 	const cluster = ctxPlatform && ctxPlatform.smooth;
 	// Candidate set, gated at the REWIND instant rather than at receipt: a target
@@ -1270,6 +1292,40 @@ async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctxPlatf
 		world = rec.lagComp.rewindWithin(candKeys, rewindAt, shooterAt.x, shooterAt.y, radius * radius);
 	}
 	if (world.size === 0) return;
+	// defenderAllowance (opt-in, off by default): a graded benefit-of-the-doubt for a
+	// defender that broke line of sight to the shooter in flight. The app owns occlusion
+	// via exposure(shooterState, targetState) (the framework has positions, not visibility).
+	// A candidate visible to the shooter at the rewind instant but occluded by biasedAt =
+	// min(now, rewindAt + allowanceMs) reached cover within the allowance window and is
+	// DROPPED from the candidate set - it cannot be hit by this shot. Dropping (rather than
+	// relocating the candidate to its later position) keeps the grace STRICTLY SUBTRACTIVE:
+	// it can only ever turn a hit into a miss, never a miss into a hit, so it can never help
+	// the shooter regardless of how the app's occlusion relates to the shot ray geometry. A
+	// throwing/slow exposure hook fails safe to no grace (never the shot). Bounded by
+	// allowanceMs, so it only relaxes the maxRewindMs cap toward the present, never past it.
+	const da = ht.defenderAllowance;
+	if (da !== undefined && nowMono !== null) {
+		const biasedAt = Math.min(nowMono, rewindAt + da.allowanceMs);
+		if (biasedAt > rewindAt) {
+			const maybeGrace = new Set();
+			for (const [key, s] of world) {
+				let visThen;
+				try { visThen = da.exposure(shooterEntity.state, s.state); } catch { continue; }
+				if (visThen) maybeGrace.add(key);
+			}
+			if (maybeGrace.size > 0) {
+				const later = rec.lagComp.rewind(maybeGrace, biasedAt);
+				for (const key of maybeGrace) {
+					const ls = later.get(key);
+					if (ls === undefined) continue;
+					let visLater;
+					try { visLater = da.exposure(shooterEntity.state, ls.state); } catch { continue; }
+					if (visLater) continue;
+					world.delete(key);
+				}
+			}
+		}
+	}
 	// Shot geometry from the shooter's CURRENT state: only the targets rewind. A
 	// throw on malformed state drops the shot (favor-defender miss).
 	let origin, dir;
@@ -1731,7 +1787,7 @@ export const _smoothRegister = function smooth(config) {
 			}
 		}
 		const rewindAt = _smoothRewindAt(m.nowMono, m.reach, m.rewindAge);
-		await _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctx.platform, m.cmd, rewindAt);
+		await _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctx.platform, m.cmd, rewindAt, m.nowMono);
 	});
 
 	return smoothExport;
