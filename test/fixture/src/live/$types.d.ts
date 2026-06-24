@@ -10,7 +10,7 @@ declare module '$live/auth' {
   export const adminAction: (...args: any[]) => Promise<any>;
   export const resetAuth: (...args: any[]) => Promise<any>;
   export type ErrorCode = 'FORBIDDEN';
-  export const inbox: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const inbox: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
   export const empty: Readable<undefined>;
 }
 
@@ -22,9 +22,9 @@ declare module '$live/channels' {
   export const joinRoster: (...args: any[]) => Promise<any>;
   export const sendToRoom: (...args: any[]) => Promise<any>;
   export const resetChannels: (...args: any[]) => Promise<any>;
-  export const lobby: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
-  export const roster: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
-  export const room: ((...args: any[]) => StreamStore<any>) & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const lobby: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
+  export const roster: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
+  export const room: ((...args: any[]) => StreamStore<any>) & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
   export const empty: Readable<undefined>;
 }
 
@@ -35,8 +35,8 @@ declare module '$live/cronjobs' {
   export const tickNow: (...args: any[]) => Promise<any>;
   export const getCounts: (...args: any[]) => Promise<any>;
   export const resetCron: (...args: any[]) => Promise<any>;
-  export const stats: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
-  export const feed: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const stats: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
+  export const feed: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
   export const empty: Readable<undefined>;
 }
 
@@ -47,7 +47,7 @@ declare module '$live/cursor' {
   export const moveCursor: (...args: any[]) => Promise<any>;
   export const removeCursor: (...args: any[]) => Promise<any>;
   export const resetCursor: (...args: any[]) => Promise<any>;
-  export const cursors: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const cursors: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
   export const empty: Readable<undefined>;
 }
 
@@ -61,9 +61,9 @@ declare module '$live/derived' {
   export const publishOrgSource: (...args: any[]) => Promise<any>;
   export const getRecomputeCounts: (...args: any[]) => Promise<any>;
   export const resetDerived: (...args: any[]) => Promise<any>;
-  export const dashboardStats: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
-  export const debouncedStats: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
-  export const orgStats: ((...args: any[]) => StreamStore<any>) & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const dashboardStats: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
+  export const debouncedStats: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
+  export const orgStats: ((...args: any[]) => StreamStore<any>) & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
   export const empty: Readable<undefined>;
 }
 
@@ -89,7 +89,7 @@ declare module '$live/presence' {
   export const joinPresence: (...args: any[]) => Promise<any>;
   export const leavePresence: (...args: any[]) => Promise<any>;
   export const resetPresence: (...args: any[]) => Promise<any>;
-  export const presence: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const presence: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
   export const empty: Readable<undefined>;
 }
 
@@ -122,7 +122,7 @@ declare module '$live/todos' {
   export const killSelf: (...args: any[]) => Promise<any>;
   export const reset: (...args: any[]) => Promise<any>;
   export type ErrorCode = 'TEST_FAIL';
-  export const todos: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };
+  export const todos: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> };
   export const empty: Readable<undefined>;
 }
 

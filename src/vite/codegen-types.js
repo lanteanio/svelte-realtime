@@ -8,6 +8,11 @@ import { _extractFunctionSignature, _extractFunctionSignatureFor, _extractErrorC
 import { _extractAggregateWindows, _extractMultiplayerInfo } from './extract-options.js';
 import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE, DYNAMIC_STREAM_RE, CRON_EXPORT_RE, BINARY_EXPORT_RE, UPLOAD_EXPORT_RE, DERIVED_EXPORT_RE, DYNAMIC_DERIVED_RE, ROOM_EXPORT_RE, MULTIPLAYER_EXPORT_RE, SMOOTH_EXPORT_RE, DOC_EXPORT_RE, WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE, WEBHOOK_OUTBOUND_EXPORT_RE, CHANNEL_EXPORT_RE, DYNAMIC_CHANNEL_RE, RATE_LIMIT_EXPORT_RE, EFFECT_EXPORT_RE, AGGREGATE_EXPORT_RE, FLAG_EXPORT_RE, LOCK_EXPORT_RE, PUBLIC_EXPORT_RE, PUBLIC_COMMENT_RE, IDEMPOTENT_EXPORT_RE, VOLATILE_EXPORT_RE } from './patterns.js';
 
+// The `.load()` SSR-degradation options, shared across every generated stream
+// kind so the documented `fallback` / `onError` stay typed in one place
+// (mirrors the internal `__directCall` options type in server.d.ts).
+const LOAD_OPTS = '{ args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }';
+
 /**
  * Generate and write type declarations for all $live/ modules.
  * Creates `$types.d.ts` in the live directory with ambient module declarations.
@@ -107,7 +112,7 @@ export function _generateTypeDeclarations(liveDir, dir) {
 			if (isTS) {
 				const returnType = _extractStreamReturnType(source, name);
 				const storeType = `StreamStore<${returnType} | undefined | { error: RpcError }>`;
-				const loadSig = `{ load(platform: any, options?: { args?: any[]; user?: any }): Promise<${returnType}> }`;
+				const loadSig = `{ load(platform: any, options?: ${LOAD_OPTS}): Promise<${returnType}> }`;
 				if (isDynamic) {
 					const factoryParams = _extractDynamicFactoryParams(source, name, 'live\\.stream');
 					exports.push(`  export const ${name}: (${factoryParams} => ${storeType}) & ${loadSig};`);
@@ -115,7 +120,7 @@ export function _generateTypeDeclarations(liveDir, dir) {
 					exports.push(`  export const ${name}: ${storeType} & ${loadSig};`);
 				}
 			} else {
-				const loadSig = `{ load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> }`;
+				const loadSig = `{ load(platform: any, options?: ${LOAD_OPTS}): Promise<any> }`;
 				if (isDynamic) {
 					exports.push(`  export const ${name}: ((...args: any[]) => StreamStore<any>) & ${loadSig};`);
 				} else {
@@ -132,7 +137,7 @@ export function _generateTypeDeclarations(liveDir, dir) {
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
 				needsStreamStore = true;
 				const isDynamic = _isDynamicExport(source, name, 'live\\.channel');
-				const loadSig = `{ load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> }`;
+				const loadSig = `{ load(platform: any, options?: ${LOAD_OPTS}): Promise<any> }`;
 				if (isDynamic) {
 					if (isTS) {
 						const factoryParams = _extractDynamicFactoryParams(source, name, 'live\\.channel');
@@ -154,7 +159,7 @@ export function _generateTypeDeclarations(liveDir, dir) {
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
 				needsStreamStore = true;
 				const isDynamic = _isDynamicExport(source, name, 'live\\.derived');
-				const loadSig = `{ load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> }`;
+				const loadSig = `{ load(platform: any, options?: ${LOAD_OPTS}): Promise<any> }`;
 				if (isDynamic) {
 					if (isTS) {
 						const factoryParams = _extractDynamicFactoryParams(source, name, 'live\\.derived');
@@ -180,11 +185,11 @@ export function _generateTypeDeclarations(liveDir, dir) {
 					// Windowed: emit a namespace shape with one StreamStore
 					// per window. Each window has its own .load(platform).
 					const memberLines = windowKeys.map(wn =>
-						`    ${JSON.stringify(wn)}: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };`
+						`    ${JSON.stringify(wn)}: StreamStore<any> & { load(platform: any, options?: ${LOAD_OPTS}): Promise<any> };`
 					).join('\n');
 					exports.push(`  export const ${name}: {\n${memberLines}\n  };`);
 				} else {
-					exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };`);
+					exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: ${LOAD_OPTS}): Promise<any> };`);
 				}
 			}
 		}
@@ -196,7 +201,7 @@ export function _generateTypeDeclarations(liveDir, dir) {
 			handledNames.add(name);
 			if (!exports.some(e => e.includes(`export const ${name}:`))) {
 				needsStreamStore = true;
-				exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> };`);
+				exports.push(`  export const ${name}: StreamStore<any> & { load(platform: any, options?: ${LOAD_OPTS}): Promise<any> };`);
 			}
 		}
 

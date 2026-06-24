@@ -714,6 +714,14 @@ export interface StreamOptions {
 	staleAfterMs?: number;
 
 	/**
+	 * Topic pattern(s) that invalidate this stream's cached load. When a
+	 * `ctx.publish` (or any broadcast) hits a matching topic, the loader is
+	 * re-run and a `refreshed` event is broadcast to subscribers. A single
+	 * glob-style pattern, or an array of them.
+	 */
+	invalidateOn?: string | string[];
+
+	/**
 	 * Per-stream error observer. Called when the loader throws, on
 	 * either the initial subscribe path, the staleness-driven reload
 	 * (if `staleAfterMs` is configured), or the `.load()` SSR path.

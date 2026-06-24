@@ -1485,7 +1485,7 @@ export const items = live.stream('items', async (ctx): Promise<Item[]> => [], { 
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
 		expect(content).toContain('StreamStore<Item[] | undefined | { error: RpcError }>');
-		expect(content).toContain('load(platform: any, options?: { args?: any[]; user?: any }): Promise<Item[]>');
+		expect(content).toContain('load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<Item[]>');
 	});
 
 	it('generates .load() type on dynamic stream declarations', () => {
@@ -1505,7 +1505,7 @@ export const notes = live.stream(
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
 		expect(content).toContain('(boardId: string) => StreamStore<Note[] | undefined | { error: RpcError }>');
-		expect(content).toContain('load(platform: any, options?: { args?: any[]; user?: any }): Promise<Note[]>');
+		expect(content).toContain('load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<Note[]>');
 	});
 
 	it('generates .load() type on JS stream declarations', () => {
@@ -1520,7 +1520,7 @@ export const feed = live.stream('feed', async (ctx) => [], { merge: 'latest' });
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain('StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any }): Promise<any> }');
+		expect(content).toContain('StreamStore<any> & { load(platform: any, options?: { args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }): Promise<any> }');
 	});
 
 	it('generates .load() type on channel declarations', () => {
@@ -1536,6 +1536,21 @@ export const notifications = live.channel('notifications');
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
 		expect(content).toContain('StreamStore<any> & { load(platform: any');
+	});
+
+	it('types the .load() fallback and onError SSR-degradation options', () => {
+		setup({
+			'feed.js': `
+import { live } from 'svelte-realtime/server';
+export const feed = live.stream('feed', async () => []);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain('fallback?: any; onError?: (err: any) => void');
 	});
 });
 

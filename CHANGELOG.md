@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.27] - 2026-06-24
+
+### Fixed
+
+- **`live.stream({ invalidateOn })` is now typed.** The `invalidateOn` option (topic pattern(s) whose publishes re-run the loader and broadcast a `refreshed` event) has worked and been documented since it shipped, but was missing from the `StreamOptions` type - so a TypeScript app got a type error on a valid config. Added `invalidateOn?: string | string[]` to the interface. No runtime change.
+- **The generated `.load()` stub now types its `fallback` and `onError` options.** A `$live` export's `.load(platform, { fallback, onError })` (partial-SSR degradation) worked at runtime and was documented, but the generated `.load()` type declared only `{ args, user }` - so TypeScript rejected `fallback` / `onError`. The codegen now emits them on every generated `.load()` signature (stream / channel / derived / aggregate / flag). No runtime change.
+
 ## [0.6.0-next.26] - 2026-06-23
 
 ### Fixed
