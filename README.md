@@ -129,7 +129,7 @@ import { db } from '$lib/server/db';
 
 // A plain RPC function - clients can call this like a regular async function
 export const sendMessage = live(async (ctx, text) => {
-  if (!ctx.user) throw new LiveError('UNAUTHORIZED', 'Login required');
+  if (!ctx.user) throw new LiveError('UNAUTHENTICATED', 'Login required');
 
   const msg = await db.messages.insert({ userId: ctx.user.id, text });
   ctx.publish('messages', 'created', msg);
@@ -570,7 +570,7 @@ try {
 } catch (err) {
   if (err.code === 'VALIDATION') {
     // handle validation error - err.issues has details
-  } else if (err.code === 'UNAUTHORIZED') {
+  } else if (err.code === 'UNAUTHENTICATED') {
     // redirect to login
   }
 }
@@ -685,7 +685,7 @@ Both `deleteUser` and `banUser` require admin access. No need to check in each f
 
 ```js
 export const _guard = guard(
-  (ctx) => { if (!ctx.user) throw new LiveError('UNAUTHORIZED'); },
+  (ctx) => { if (!ctx.user) throw new LiveError('UNAUTHENTICATED'); },
   (ctx) => { ctx.permissions = lookupPermissions(ctx.user.id); },
   (ctx) => { if (!ctx.permissions.includes('write')) throw new LiveError('FORBIDDEN'); }
 );
@@ -1516,7 +1516,7 @@ live.middleware(async (ctx, next) => {
 
 // Auth middleware - rejects unauthenticated requests globally
 live.middleware(async (ctx, next) => {
-  if (!ctx.user) throw new LiveError('UNAUTHORIZED', 'Login required');
+  if (!ctx.user) throw new LiveError('UNAUTHENTICATED', 'Login required');
   return next();
 });
 ```
@@ -2758,7 +2758,7 @@ import { live, LiveError } from 'svelte-realtime/server';
 import { open } from 'node:fs/promises';
 
 export const avatar = live.upload(async (ctx, name, mime) => {
-  if (!ctx.user) throw new LiveError('UNAUTHORIZED');
+  if (!ctx.user) throw new LiveError('UNAUTHENTICATED');
 
   const sink = await open(`/var/uploads/${ctx.user.id}/${name}`, 'w');
   let bytes = 0;
@@ -2900,7 +2900,7 @@ export const board = live.room({
   presence: (ctx) => ({ name: ctx.user.name, avatar: ctx.user.avatar }),
   cursors: true,
   guard: async (ctx) => {
-    if (!ctx.user) throw new LiveError('UNAUTHORIZED');
+    if (!ctx.user) throw new LiveError('UNAUTHENTICATED');
   },
   actions: {
     addCard: async (ctx, boardId, title) => {

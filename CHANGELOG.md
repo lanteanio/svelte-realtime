@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.28] - 2026-06-24
+
+### Fixed
+
+- **Docs: corrected 6 README examples that threw or matched a non-canonical `UNAUTHORIZED` error code.** The framework emits `UNAUTHENTICATED` for a missing user (it never emits `UNAUTHORIZED`), so those examples - including a client `err.code === 'UNAUTHORIZED'` branch that could never match - taught a code that does not exist. Now `UNAUTHENTICATED` throughout. No API or runtime change.
+
 ## [0.6.0-next.27] - 2026-06-24
 
 ### Fixed
