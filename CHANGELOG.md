@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.35] - 2026-06-26
+
+### Added
+
+- **`introspect(options?)`: a structured, PII-free snapshot of the server's live dispatch state** for admin / observability. Counts and code structure only - handler totals + a per-kind breakdown (`rpc` / `stream` / `channel` / `upload` / `binary` / `lazy`) with overlay modifier counts (`deprecated` / `rateLimited` / `idempotent` / `volatile`), active topics + total subscribers, push registry sizes (users / sessions), cron jobs + scheduler state, reactive watcher counts, capacity-map sizes, tenant count, and the metrics/admission/shutdown flags - never user identifiers or presence rosters. It is counts-only by default; opt into the detail with `introspect({ handlers: true })` (registered paths) and `introspect({ topics: true })` (the top 20 topics by subscriber count, off by default because topic names can embed ids). Pure read (no mutation), cheap (in-memory registry sizes), safe to call on a scrape interval. This is the introspection substrate the (forthcoming) auth-gated `/__realtime` admin route serves; usable standalone behind your own authorization.
+
 ## [0.6.0-next.34] - 2026-06-26
 
 ### Added

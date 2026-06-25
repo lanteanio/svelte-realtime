@@ -2202,6 +2202,31 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 
 ---
 
+## Server introspection
+
+`introspect(options?)` returns a structured, PII-free snapshot of the server's live dispatch state - counts and code structure (handler kinds, topic load, cron schedule, lifecycle), never user identifiers or presence rosters. Use it for an admin dashboard, a readiness probe, or ad-hoc debugging.
+
+```js
+import { introspect } from 'svelte-realtime/server';
+
+const snap = introspect();
+// {
+//   shuttingDown: false, inFlight: 0,
+//   handlers: { total: 42, byKind: { rpc: 30, stream: 8, channel: 2, upload: 1, binary: 1, lazy: 0 },
+//               modifiers: { deprecated: 1, rateLimited: 4, idempotent: 2, volatile: 3 } },
+//   topics: { active: 17, subscribers: 134 },
+//   push: { users: 12, sessions: 12 },
+//   cron: { jobs: 3, running: 0, schedulerActive: true, secondResolution: false },
+//   reactive: { derived: 2, effect: 1, aggregate: 1, watchedTopics: 4 },
+//   capacity: { rateLimitBuckets: 9, throttles: 0, debounces: 0, presenceRefs: 0, lazyQueue: 0 },
+//   tenants: 0, metrics: true, admission: false
+// }
+```
+
+It is **counts-only by default** - PII-conscious. Opt into the structural detail explicitly: `introspect({ handlers: true })` adds the registered handler `paths` (code structure), and `introspect({ topics: true })` adds the top 20 topics by subscriber count (topic names can embed ids, so they are off by default). The read is pure (no mutation) and cheap (in-memory registry sizes), so it is safe to call on a scrape interval.
+
+---
+
 ## Production assertions
 
 `svelte-realtime` instruments each internal invariant with `assert(cond, category, context)`. Behavior:

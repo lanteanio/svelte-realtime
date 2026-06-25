@@ -3685,3 +3685,55 @@ export function onShutdown(
 	handler: (ctx: { platform: Platform }) => void | Promise<void>,
 	options?: { drainMs?: number }
 ): () => void;
+
+/**
+ * A structured, PII-free snapshot of the server's live dispatch state - counts
+ * and code structure only (no user identifiers, no presence rosters). Returned
+ * by {@link introspect}. The admin route (`/__realtime`) serves this behind a
+ * mandatory auth gate; the primitive itself is usable standalone.
+ */
+export interface RealtimeIntrospection {
+	/** True once a graceful shutdown drain has started. */
+	shuttingDown: boolean;
+	/** Server handlers currently settling (RPC / cron in flight). */
+	inFlight: number;
+	handlers: {
+		/** Total registered live.X handlers. */
+		total: number;
+		/** Base-kind counts (mutually exclusive; `lazy` = not yet resolved). */
+		byKind: { rpc: number; stream: number; channel: number; upload: number; binary: number; lazy: number } | null;
+		/** Overlay-flag counts (a handler can carry several). */
+		modifiers: { deprecated: number; rateLimited: number; idempotent: number; volatile: number } | null;
+		/** Registered handler paths - only present when called with `{ handlers: true }`. */
+		paths?: string[];
+	};
+	topics: {
+		/** Topics with at least one subscriber. */
+		active: number;
+		/** Total subscriber count across all topics. */
+		subscribers: number;
+		/** Top 20 topics by subscriber count - only present when called with `{ topics: true }`. */
+		top?: Array<{ topic: string; subscribers: number }>;
+	};
+	/** Push registry sizes (unique users / sessions with a live connection). */
+	push: { users: number; sessions: number };
+	cron: { jobs: number; running?: number; schedulerActive?: boolean; secondResolution?: boolean };
+	reactive: { derived: number; effect: number; aggregate: number; watchedTopics: number };
+	capacity: { rateLimitBuckets: number; throttles: number; debounces: number; presenceRefs: number; lazyQueue: number };
+	/** Configured tenants. */
+	tenants: number;
+	/** Whether Prometheus metrics are wired (`live.metrics(...)`). */
+	metrics: boolean;
+	/** Whether admission control is configured (`live.admission(...)`). */
+	admission: boolean;
+}
+
+/**
+ * Snapshot the server's live dispatch state for admin / observability - a pure,
+ * PII-free read over the in-memory registries (counts + code structure, never
+ * user identifiers). By default paths and topic names are omitted (counts only);
+ * opt into them with `{ handlers: true }` (registered paths) and `{ topics: true }`
+ * (the top 20 topics by subscriber count). Useful standalone; the `/__realtime`
+ * admin route serves it behind a mandatory auth gate.
+ */
+export function introspect(options?: { handlers?: boolean; topics?: boolean }): RealtimeIntrospection;

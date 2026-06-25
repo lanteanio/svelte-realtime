@@ -74,6 +74,8 @@ import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, 
 export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
 export { onShutdown, _resetLifecycle };
+import { introspect } from './server/introspect.js';
+export { introspect };
 // Bind framework-internal background teardown (cron scheduler + stale-reload
 // watchdogs) into the graceful-shutdown drain. One-way: lifecycle never imports
 // cron-engine / server.js, so this avoids an import cycle.

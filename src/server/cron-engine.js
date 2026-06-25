@@ -294,6 +294,17 @@ function _upgradeCronTo1Hz() {
  * HMR cycle to re-acquire them. Tests that need to swap a leader can
  * call `configureCron({ leader: null })` between cases.
  */
+/**
+ * Read-only cron state for the introspection snapshot (mirrors lifecycle's
+ * `inFlightCount()`): whether the scheduler tick is armed, how many jobs are
+ * mid-invocation (the single-flight set), and whether the 1Hz second-resolution
+ * tick has engaged. Pure read, no mutation.
+ * @returns {{ schedulerActive: boolean, running: number, secondResolution: boolean }}
+ */
+export function _cronIntrospect() {
+	return { schedulerActive: _cronInterval !== null, running: _cronRunning.size, secondResolution: _cronAt1Hz };
+}
+
 export function _clearCron() {
 	if (_cronInterval) {
 		clearIntervalTimer(_cronInterval);
