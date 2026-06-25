@@ -1,7 +1,7 @@
 // @ts-check
 import { LiveError } from './live-error.js';
 import { assert } from '../shared/assert.js';
-import { _validUserIdReason, _MAX_USER_ID_LENGTH } from './validate.js';
+import { _validIdReason, _MAX_USER_ID_LENGTH } from './validate.js';
 import { _IS_DEV } from './env.js';
 import { state } from './state.js';
 import { close } from '../server.js';
@@ -30,8 +30,29 @@ export const _pushRegistry = new Map();
  */
 export const _wsToPushUserId = new WeakMap();
 
-/** One-shot flag for the MAX_PUSH_REGISTRY warning. Reset by `_resetPushRegistry`. */
+/**
+ * Per-sessionId connection registry. Source of truth for
+ * `live.push({ sessionId })` routing. Independent of the userId registry: a
+ * connection may carry a userId, a sessionId, both, or neither. Resume-aware
+ * by the same last-write-wins lifecycle as the userId registry - a session that
+ * reconnects with the same id re-runs `pushHooks.open` and the entry flips to the
+ * live socket. Cluster-wide sessionId routing is a separate extensions primitive.
+ * @type {Map<string, { ws: any, platform: any }>}
+ */
+export const _pushSessionRegistry = new Map();
+
+/**
+ * Reverse index from ws back to its registered sessionId (mirror of
+ * `_wsToPushUserId`). WeakMap so sockets stay GC-eligible if close is missed.
+ * @type {WeakMap<object, string>}
+ */
+export const _wsToPushSessionId = new WeakMap();
+
+/** One-shot flag for the MAX_PUSH_REGISTRY warning (userId). Reset by `_resetPushRegistry`. */
 let _pushRegistryWarnFired = false;
+
+/** One-shot flag for the MAX_PUSH_REGISTRY warning (sessionId). Reset by `_resetPushRegistry`. */
+let _pushSessionRegistryWarnFired = false;
 
 /**
  * Default identify: read user_id then userId from ws.getUserData().
@@ -46,8 +67,25 @@ function _defaultPushIdentify(ws) {
 	return data.user_id != null ? data.user_id : data.userId;
 }
 
+/**
+ * Default session identify: read session_id then sessionId from ws.getUserData().
+ * Returns undefined for connections that carry no session (skipped by pushHooks.open).
+ * @param {any} ws
+ * @returns {string | null | undefined}
+ */
+function _defaultPushSessionIdentify(ws) {
+	let data;
+	try { data = ws.getUserData?.(); } catch { return undefined; }
+	if (!data) return undefined;
+	return data.session_id != null ? data.session_id : data.sessionId;
+}
+
 function _getPushIdentify() {
 	return state.pushIdentify || _defaultPushIdentify;
+}
+
+function _getPushSessionIdentify() {
+	return state.pushSessionIdentify || _defaultPushSessionIdentify;
 }
 
 /**
@@ -68,6 +106,11 @@ let _remoteRegistry = null;
  *   from a connecting WebSocket. Defaults to reading
  *   `ws.getUserData()?.user_id ?? ws.getUserData()?.userId`. Pass a
  *   function to override; pass `null` (in `config.identify`) to clear.
+ * - `sessionIdentify` - override how `pushHooks.open` extracts the
+ *   sessionId for `live.push({ sessionId })` routing. Defaults to reading
+ *   `ws.getUserData()?.session_id ?? ws.getUserData()?.sessionId`. Pass a
+ *   function to override; pass `null` to clear. Independent of `identify`:
+ *   a connection may register under a userId, a sessionId, both, or neither.
  * - `remoteRegistry` - an object with a
  *   `request(userId, event, data, options)` method. When supplied,
  *   `live.push({ userId })` falls back to `remoteRegistry.request(...)`
@@ -85,7 +128,7 @@ let _remoteRegistry = null;
  * but is brittle if your Redis client is created inside an async setup
  * function or behind a module that imports lazily.
  *
- * @param {{ identify?: ((ws: any) => string | null | undefined) | null, remoteRegistry?: { request: Function } | null } | null} config
+ * @param {{ identify?: ((ws: any) => string | null | undefined) | null, sessionIdentify?: ((ws: any) => string | null | undefined) | null, remoteRegistry?: { request: Function } | null } | null} config
  *
  * @example
  * ```js
@@ -110,14 +153,15 @@ let _remoteRegistry = null;
 const _liveConfigurePush = function configurePush(config) {
 	if (config === null) {
 		state.pushIdentify = null;
+		state.pushSessionIdentify = null;
 		_remoteRegistry = null;
 		return;
 	}
 	if (typeof config !== 'object') {
 		throw new Error('[svelte-realtime] live.configurePush: config must be an object or null');
 	}
-	if (config.identify === undefined && config.remoteRegistry === undefined) {
-		throw new Error('[svelte-realtime] live.configurePush: config must include at least one of identify or remoteRegistry');
+	if (config.identify === undefined && config.sessionIdentify === undefined && config.remoteRegistry === undefined) {
+		throw new Error('[svelte-realtime] live.configurePush: config must include at least one of identify, sessionIdentify, or remoteRegistry');
 	}
 	if (config.identify !== undefined) {
 		if (config.identify === null) {
@@ -126,6 +170,15 @@ const _liveConfigurePush = function configurePush(config) {
 			throw new Error('[svelte-realtime] live.configurePush: identify must be a function or null');
 		} else {
 			state.pushIdentify = config.identify;
+		}
+	}
+	if (config.sessionIdentify !== undefined) {
+		if (config.sessionIdentify === null) {
+			state.pushSessionIdentify = null;
+		} else if (typeof config.sessionIdentify !== 'function') {
+			throw new Error('[svelte-realtime] live.configurePush: sessionIdentify must be a function or null');
+		} else {
+			state.pushSessionIdentify = config.sessionIdentify;
 		}
 	}
 	if (config.remoteRegistry !== undefined) {
@@ -170,27 +223,58 @@ export const pushHooks = {
 		if (!ctx || !ctx.platform) {
 			throw new Error('[svelte-realtime] pushHooks.open: missing platform on hook context');
 		}
+		const platform = ctx.platform;
+
+		// userId registration. A connection with no userId (anonymous) is skipped
+		// here but may still register a sessionId below - the two are independent.
 		const userId = _getPushIdentify()(ws);
-		if (userId == null || userId === '') return;
-		const reason = _validUserIdReason(userId);
-		if (reason !== null) {
-			throw new Error('[svelte-realtime] pushHooks.open: ' + reason + '. identify(ws) must return a non-empty userId string that is safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for anonymous connections.');
-		}
-		if (!_pushRegistry.has(userId) && _pushRegistry.size >= state.maxPushRegistry) {
-			if (!_pushRegistryWarnFired) {
-				_pushRegistryWarnFired = true;
-				console.warn(
-					"[svelte-realtime] push registry reached MAX_PUSH_REGISTRY=" + state.maxPushRegistry +
-					"; new userIds will not be registered for `live.push({ userId })` until existing entries clear.\n" +
-					"  This usually indicates push registrations are not being released on disconnect.\n" +
-					"  Check that hooks.ws.js wires `pushHooks.close` and that the upstream identify(ws) is stable per-user.\n" +
-					"  See: https://svti.me/push-registry"
-				);
+		if (userId != null && userId !== '') {
+			const reason = _validIdReason(userId, 'userId');
+			if (reason !== null) {
+				throw new Error('[svelte-realtime] pushHooks.open: ' + reason + '. identify(ws) must return a non-empty userId string that is safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for anonymous connections.');
 			}
-			return;
+			if (!_pushRegistry.has(userId) && _pushRegistry.size >= state.maxPushRegistry) {
+				if (!_pushRegistryWarnFired) {
+					_pushRegistryWarnFired = true;
+					console.warn(
+						"[svelte-realtime] push registry reached MAX_PUSH_REGISTRY=" + state.maxPushRegistry +
+						"; new userIds will not be registered for `live.push({ userId })` until existing entries clear.\n" +
+						"  This usually indicates push registrations are not being released on disconnect.\n" +
+						"  Check that hooks.ws.js wires `pushHooks.close` and that the upstream identify(ws) is stable per-user.\n" +
+						"  See: https://svti.me/push-registry"
+					);
+				}
+			} else {
+				_pushRegistry.set(userId, { ws, platform });
+				_wsToPushUserId.set(ws, userId);
+			}
 		}
-		_pushRegistry.set(userId, { ws, platform: ctx.platform });
-		_wsToPushUserId.set(ws, userId);
+
+		// sessionId registration (independent of userId). Resume-aware by the same
+		// last-write-wins lifecycle: a session reconnecting with the same id re-runs
+		// open and the entry flips to the live socket.
+		const sessionId = _getPushSessionIdentify()(ws);
+		if (sessionId != null && sessionId !== '') {
+			const reason = _validIdReason(sessionId, 'sessionId');
+			if (reason !== null) {
+				throw new Error('[svelte-realtime] pushHooks.open: ' + reason + '. sessionIdentify(ws) must return a non-empty sessionId string that is safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for connections without a session.');
+			}
+			if (!_pushSessionRegistry.has(sessionId) && _pushSessionRegistry.size >= state.maxPushRegistry) {
+				if (!_pushSessionRegistryWarnFired) {
+					_pushSessionRegistryWarnFired = true;
+					console.warn(
+						"[svelte-realtime] push session registry reached MAX_PUSH_REGISTRY=" + state.maxPushRegistry +
+						"; new sessionIds will not be registered for `live.push({ sessionId })` until existing entries clear.\n" +
+						"  This usually indicates push registrations are not being released on disconnect.\n" +
+						"  Check that hooks.ws.js wires `pushHooks.close` and that the upstream sessionIdentify(ws) is stable per-session.\n" +
+						"  See: https://svti.me/push-registry"
+					);
+				}
+			} else {
+				_pushSessionRegistry.set(sessionId, { ws, platform });
+				_wsToPushSessionId.set(ws, sessionId);
+			}
+		}
 	},
 	/**
 	 * Adapter close hook. Drains both the per-userId push registry AND
@@ -216,21 +300,41 @@ export const pushHooks = {
 			return;
 		}
 		// Direct one-arg call (legacy, tests, custom flows): drain the
-		// push registry only. The stream-subscription bookkeeping path
+		// push registries only. The stream-subscription bookkeeping path
 		// requires `ctx.platform` for `__onUnsubscribe` callbacks; without
 		// it, the safe behavior is "do what the original signature did."
 		const userId = _wsToPushUserId.get(ws);
-		if (userId == null) return;
-		_wsToPushUserId.delete(ws);
-		const entry = _pushRegistry.get(userId);
-		// push-registry invariant: if userId was tracked in _wsToPushUserId,
-		// the registry should still have an entry for that userId (possibly
-		// pointing at a different ws if the user reconnected on another
-		// device). Missing entry means an external mutation cleared it.
-		assert(entry !== undefined, 'realtime/push-registry.entry-tracked', { userIdLen: userId.length });
-		if (entry && entry.ws === ws) _pushRegistry.delete(userId);
+		if (userId != null) {
+			_wsToPushUserId.delete(ws);
+			const entry = _pushRegistry.get(userId);
+			// push-registry invariant: if userId was tracked in _wsToPushUserId,
+			// the registry should still have an entry for that userId (possibly
+			// pointing at a different ws if the user reconnected on another
+			// device). Missing entry means an external mutation cleared it.
+			assert(entry !== undefined, 'realtime/push-registry.entry-tracked', { userIdLen: userId.length });
+			if (entry && entry.ws === ws) _pushRegistry.delete(userId);
+		}
+		_deregisterPushSession(ws);
 	}
 };
+
+/**
+ * Deregister a socket's sessionId push entry. Shared by `pushHooks.close`
+ * (the direct one-arg path) and the realtime `close` drain in server.js, so a
+ * single `export const close = pushHooks.close` covers the session registry too.
+ * Idempotent: a second pass finds nothing tracked.
+ * @param {any} ws
+ */
+export function _deregisterPushSession(ws) {
+	const sessionId = _wsToPushSessionId.get(ws);
+	if (sessionId == null) return;
+	_wsToPushSessionId.delete(ws);
+	const entry = _pushSessionRegistry.get(sessionId);
+	// Same invariant as the userId registry: a tracked sessionId should still
+	// have an entry (possibly pointing at a newer socket after a resume).
+	assert(entry !== undefined, 'realtime/push-session-registry.entry-tracked', { sessionIdLen: sessionId.length });
+	if (entry && entry.ws === ws) _pushSessionRegistry.delete(sessionId);
+}
 
 /**
  * Send a server-initiated request to a connected user and await the reply.
@@ -330,15 +434,17 @@ const _livePush = async function push(target, event, data, options) {
 		}
 	}
 
-	const targetKeys = Object.keys(target);
-	const extraKeys = targetKeys.filter((k) => k !== 'userId');
-	if (extraKeys.length > 0) {
-		throw new LiveError('VALIDATION', '[svelte-realtime] live.push: unsupported target keys: ' + extraKeys.join(', '));
+	const targetKey = _resolvePushTarget(target, 'live.push');
+
+	// sessionId target: route through the local session registry. Cluster-wide
+	// sessionId routing is a separate extensions primitive (the remoteRegistry is
+	// userId-keyed), so this path is single-instance today.
+	if (targetKey === 'sessionId') {
+		const sessionId = /** @type {any} */ (target).sessionId;
+		return _localPushRequest(_pushSessionRegistry.get(sessionId), event, data, options, 'sessionId', sessionId);
 	}
+
 	const userId = /** @type {any} */ (target).userId;
-	if (typeof userId !== 'string' || userId.length === 0) {
-		throw new LiveError('VALIDATION', '[svelte-realtime] live.push: target.userId must be a non-empty string');
-	}
 
 	// Cluster-first when a remoteRegistry is configured: the registry's
 	// userToInstance map is the cluster-wide canonical-owner truth (most-
@@ -366,18 +472,57 @@ const _livePush = async function push(target, event, data, options) {
 			}
 		}
 	}
-	if (localEntry) {
-		if (typeof localEntry.platform.request !== 'function') {
+	return _localPushRequest(localEntry, event, data, options, 'userId', userId);
+};
+
+/**
+ * Validate a push/notify target: exactly one known target key
+ * (`userId` | `sessionId`), no unknown keys, and the chosen id is a non-empty
+ * string. Returns the resolved key. `caller` flavors the error messages
+ * (`'live.push'` / `'live.notify'`).
+ * @param {any} target @param {string} caller
+ * @returns {'userId' | 'sessionId'}
+ */
+function _resolvePushTarget(target, caller) {
+	const keys = Object.keys(target);
+	const unknown = keys.filter((k) => k !== 'userId' && k !== 'sessionId');
+	if (unknown.length > 0) {
+		throw new LiveError('VALIDATION', '[svelte-realtime] ' + caller + ': unsupported target keys: ' + unknown.join(', '));
+	}
+	const known = keys.filter((k) => k === 'userId' || k === 'sessionId');
+	if (known.length !== 1) {
+		throw new LiveError('VALIDATION', '[svelte-realtime] ' + caller + ': target must name exactly one of userId / sessionId');
+	}
+	const key = /** @type {'userId' | 'sessionId'} */ (known[0]);
+	const id = target[key];
+	if (typeof id !== 'string' || id.length === 0) {
+		throw new LiveError('VALIDATION', '[svelte-realtime] ' + caller + ': target.' + key + ' must be a non-empty string');
+	}
+	return key;
+}
+
+/**
+ * Send a request to a locally-registered connection and map its delivery
+ * errors, or throw `NOT_FOUND` when no entry is registered. Shared by the
+ * local userId fast path and the (cluster-free) sessionId path.
+ * @param {{ ws: any, platform: any } | undefined} entry
+ * @param {string} event @param {any} data @param {any} options
+ * @param {string} label @param {string} id
+ * @returns {Promise<any>}
+ */
+async function _localPushRequest(entry, event, data, options, label, id) {
+	if (entry) {
+		if (typeof entry.platform.request !== 'function') {
 			throw new Error('[svelte-realtime] live.push: platform.request is not available; requires svelte-adapter-uws >= 0.5.0-next.4');
 		}
 		try {
-			return await localEntry.platform.request(localEntry.ws, event, data, options || undefined);
+			return await entry.platform.request(entry.ws, event, data, options || undefined);
 		} catch (err) {
 			throw _translatePushError(err);
 		}
 	}
-	throw new LiveError('NOT_FOUND', "no active connection for userId '" + userId + "'");
-};
+	throw new LiveError('NOT_FOUND', "no active connection for " + label + " '" + id + "'");
+}
 
 /**
  * Translate a low-level push delivery error into the typed LiveError
@@ -508,15 +653,18 @@ const _liveNotify = function notify(target, event, data) {
 	if (typeof event !== 'string' || event.length === 0) {
 		throw new LiveError('VALIDATION', '[svelte-realtime] live.notify: event must be a non-empty string');
 	}
-	const targetKeys = Object.keys(target);
-	const extraKeys = targetKeys.filter((k) => k !== 'userId');
-	if (extraKeys.length > 0) {
-		throw new LiveError('VALIDATION', '[svelte-realtime] live.notify: unsupported target keys: ' + extraKeys.join(', '));
+	const targetKey = _resolvePushTarget(target, 'live.notify');
+
+	// sessionId target: fire-and-forget delivery to the local session entry.
+	// Cluster sessionId routing is a separate extensions primitive.
+	if (targetKey === 'sessionId') {
+		const sessionEntry = _pushSessionRegistry.get(/** @type {any} */ (target).sessionId);
+		if (sessionEntry) _deliverLocalNotify(sessionEntry);
+		// Offline + no session entry: silent no-op (fire-and-forget contract).
+		return Promise.resolve();
 	}
+
 	const userId = /** @type {any} */ (target).userId;
-	if (typeof userId !== 'string' || userId.length === 0) {
-		throw new LiveError('VALIDATION', '[svelte-realtime] live.notify: target.userId must be a non-empty string');
-	}
 
 	// Cluster-first when a remoteRegistry is configured -- same rationale
 	// as live.push above: the cluster registry's canonical-owner truth
@@ -589,9 +737,12 @@ const _liveNotify = function notify(target, event, data) {
  */
 export function _resetPushRegistry() {
 	_pushRegistry.clear();
+	_pushSessionRegistry.clear();
 	state.pushIdentify = null;
+	state.pushSessionIdentify = null;
 	_remoteRegistry = null;
 	_pushRegistryWarnFired = false;
+	_pushSessionRegistryWarnFired = false;
 }
 
 export function installPush(live) {

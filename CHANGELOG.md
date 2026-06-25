@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.33] - 2026-06-25
+
+### Added
+
+- **`live.push` / `live.notify` can now target a session: `live.push({ sessionId }, ...)`.** Alongside the existing `{ userId }` target, a push or notify may name a `sessionId` to reach a specific session's connection rather than "whichever device this user last opened". The session id is read off the socket by a new `sessionIdentify` hook (configure via `live.configurePush({ sessionIdentify })`, default `ws.getUserData()?.session_id ?? ws.getUserData()?.sessionId`); the userId and sessionId registries are independent, so one connection can register under both, either, or neither, and the same `pushHooks.open` / `pushHooks.close` maintain both. Session routing is resume-aware by the same last-write-wins lifecycle as userId - a reconnecting session flips the target to its live socket. A target must name exactly one of `userId` / `sessionId` (naming neither, or both, throws `VALIDATION`); `NOT_FOUND` is thrown when no connection is registered for the sessionId. Session routing is single-instance (the cluster `remoteRegistry` is userId-keyed); a session-keyed cluster registry is a separate extensions primitive.
+
 ## [0.6.0-next.32] - 2026-06-25
 
 ### Added

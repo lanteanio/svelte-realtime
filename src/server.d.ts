@@ -1071,21 +1071,22 @@ export function defineTopics<M extends TopicMap>(map: M): DefinedTopics<M>;
  */
 export const pushHooks: {
 	/**
-	 * Register the connection in the push registry. Anonymous connections
-	 * (identify(ws) returning null/undefined) are silently skipped.
+	 * Register the connection in the push registries. A connection with no
+	 * userId (identify(ws) -> null/undefined) is skipped for userId routing but
+	 * may still register a sessionId (sessionIdentify(ws)), and vice versa - the
+	 * two registries are independent.
 	 */
 	open(ws: any, ctx: { platform: any }): void;
 	/**
-	 * Adapter close hook. Drains the per-userId push registry AND the
-	 * realtime stream-subscription bookkeeping (ws-counts, silent-topic
-	 * watchdogs, `__onUnsubscribe` callbacks) when the adapter passes a
-	 * `ctx` - a single `export const close = pushHooks.close` covers both
-	 * concerns with no separate wiring needed. Falls back to push-only
-	 * behavior when called directly without `ctx` (test setups, custom
-	 * flows). Looks up the userId via the reverse index so it works even
-	 * when `getUserData` has been cleared. Only removes the push-registry
-	 * entry if this exact ws is still the registered one (handles fast
-	 * device-swap sequences correctly).
+	 * Adapter close hook. Drains the per-userId AND per-sessionId push registries
+	 * AND the realtime stream-subscription bookkeeping (ws-counts, silent-topic
+	 * watchdogs, `__onUnsubscribe` callbacks) when the adapter passes a `ctx` - a
+	 * single `export const close = pushHooks.close` covers all of them with no
+	 * separate wiring needed. Falls back to push-only behavior when called
+	 * directly without `ctx` (test setups, custom flows). Looks up each id via its
+	 * reverse index so it works even when `getUserData` has been cleared. Only
+	 * removes a registry entry if this exact ws is still the registered one
+	 * (handles fast device-swap / resume sequences correctly).
 	 */
 	close(ws: any, ctx?: { platform: any; subscriptions?: Set<string> | string[] }): void;
 };
@@ -1735,15 +1736,23 @@ export namespace live {
 	 *   `pushHooks.open` skips registration. Pass `null` to clear an
 	 *   override and restore the default.
 	 *
+	 * - `sessionIdentify` - override how `pushHooks.open` extracts the
+	 *   sessionId for `live.push({ sessionId })` / `live.notify({ sessionId })`
+	 *   routing. Defaults to reading
+	 *   `ws.getUserData()?.session_id ?? ws.getUserData()?.sessionId`.
+	 *   Independent of `identify`: a connection may register under a userId,
+	 *   a sessionId, both, or neither. Pass `null` to clear.
+	 *
 	 * - `remoteRegistry` - wire a cluster-routing registry so `live.push`
 	 *   can reach users connected to other instances. When the userId is
 	 *   not registered locally, `live.push` falls through to
 	 *   `remoteRegistry.request(userId, ...)`. Pass `null` to clear.
+	 *   (Cluster routing is userId-keyed; sessionId routing is single-instance.)
 	 *
-	 * At least one of `identify` / `remoteRegistry` must be provided per
-	 * call; passing `{}` is a runtime error and rejected here at compile
-	 * time. Pass `null` (in place of the whole config object) to clear
-	 * both slots at once.
+	 * At least one of `identify` / `sessionIdentify` / `remoteRegistry` must be
+	 * provided per call; passing `{}` is a runtime error and rejected here at
+	 * compile time. Pass `null` (in place of the whole config object) to clear
+	 * all slots at once.
 	 *
 	 * @example
 	 * ```js
@@ -1751,6 +1760,9 @@ export namespace live {
 	 *
 	 * // Custom userData shape:
 	 * live.configurePush({ identify: (ws) => ws.getUserData()?.account?.id });
+	 *
+	 * // Route by session for resume-aware push:
+	 * live.configurePush({ sessionIdentify: (ws) => ws.getUserData()?.sid });
 	 *
 	 * // Wire cluster routing:
 	 * import { createConnectionRegistry } from 'svelte-adapter-uws-extensions/redis/registry';
@@ -1760,8 +1772,9 @@ export namespace live {
 	 */
 	function configurePush(
 		config:
-			| { identify: ((ws: any) => string | null | undefined) | null; remoteRegistry?: PushRemoteRegistry | null }
-			| { identify?: ((ws: any) => string | null | undefined) | null; remoteRegistry: PushRemoteRegistry | null }
+			| { identify: ((ws: any) => string | null | undefined) | null; sessionIdentify?: ((ws: any) => string | null | undefined) | null; remoteRegistry?: PushRemoteRegistry | null }
+			| { identify?: ((ws: any) => string | null | undefined) | null; sessionIdentify: ((ws: any) => string | null | undefined) | null; remoteRegistry?: PushRemoteRegistry | null }
+			| { identify?: ((ws: any) => string | null | undefined) | null; sessionIdentify?: ((ws: any) => string | null | undefined) | null; remoteRegistry: PushRemoteRegistry | null }
 			| null
 	): void;
 
@@ -1792,6 +1805,12 @@ export namespace live {
 	 * push (any instance routing to any user's ws) requires the connection
 	 * registry primitive in the extensions package.
 	 *
+	 * Target by `{ sessionId }` instead of `{ userId }` to route to a specific
+	 * session's connection (resume-aware: a reconnecting session keeps its id and
+	 * the push follows it to the live socket). Exactly one target key is required.
+	 * sessionId routing is single-instance today (the cluster registry is
+	 * userId-keyed).
+	 *
 	 * For fire-and-forget delivery (no reply expected), use `live.notify`
 	 * instead. `live.push({ timeoutMs: 0 })` rejects with
 	 * `LiveError('VALIDATION')` - `timeoutMs` must be a positive finite
@@ -1820,7 +1839,7 @@ export namespace live {
 	 * ```
 	 */
 	function push<TReply = unknown>(
-		target: { userId: string },
+		target: { userId: string } | { sessionId: string },
 		event: string,
 		data?: unknown,
 		options?: { timeoutMs?: number }
@@ -1867,7 +1886,7 @@ export namespace live {
 	 * ```
 	 */
 	function notify(
-		target: { userId: string },
+		target: { userId: string } | { sessionId: string },
 		event: string,
 		data?: unknown
 	): Promise<void>;

@@ -2033,6 +2033,22 @@ Message text on the wrapped `TIMEOUT` is preserved verbatim from the underlying 
 
 Multi-device users see most-recent-connection-wins routing within each instance, and cluster-wide most-recent-wins via the registry's Redis hash when cluster routing is configured (see [Cluster routing](#cluster-routing) below). Older connections still receive topic publishes via their own subscriptions; only push routing flips. Anonymous connections (identify returning null/undefined) are silently skipped at registration so they cannot be push targets.
 
+### Routing by session
+
+Target a specific session instead of a user with `{ sessionId }`. The session id is read off the socket by `sessionIdentify`, defaulting to `ws.getUserData()?.session_id ?? ws.getUserData()?.sessionId`:
+
+```js
+live.configurePush({ sessionIdentify: (ws) => ws.getUserData()?.sid });
+
+// Reach the exact session, not "whichever device this user last opened":
+await live.push({ sessionId: 'sess-abc' }, 'reauth-required', { reason: 'token-rotated' });
+live.notify({ sessionId: 'sess-abc' }, 'tab:focus', {});
+```
+
+A push/notify target names exactly one of `{ userId }` or `{ sessionId }`. The two registries are independent: one connection can register under both, either, or neither, and the same `pushHooks.open` / `pushHooks.close` maintain both. Session routing is **resume-aware** by the same last-write-wins lifecycle as userId - a session that reconnects with the same id flips the target to its live socket, so a push always reaches the session's current connection. `NOT_FOUND` is thrown when no connection is registered for the sessionId.
+
+Session routing is single-instance today (the cluster `remoteRegistry` is userId-keyed); a session-keyed cluster registry is a separate extensions primitive.
+
 `onPush(event, handler)` multiplexes multiple events over the adapter's single `onRequest` channel. Returning a value sends it as the reply; throwing rejects the server-side promise. Returns an unsubscribe function.
 
 ### Trust model: target.userId is whatever the caller passes

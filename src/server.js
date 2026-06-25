@@ -61,7 +61,7 @@ import { _recordRpcMetrics, installMetrics } from './server/metrics.js';
 import { _shouldShed, _resetAdmission, installAdmission } from './server/admission.js';
 import { _getIdentityKey } from './server/identity.js';
 import { _resetIdempotencyStore, _resetLock, installIdempotency } from './server/idempotency.js';
-import { installPush, pushHooks, _resetPushRegistry, _pushRegistry, _wsToPushUserId } from './server/push.js';
+import { installPush, pushHooks, _resetPushRegistry, _pushRegistry, _wsToPushUserId, _deregisterPushSession } from './server/push.js';
 import { installRateLimit, _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } from './server/rate-limit.js';
 export { _resetRateLimits } from './server/rate-limit.js';
 import { _setBus, _getBus } from './server/bus.js';
@@ -3097,6 +3097,8 @@ export function close(ws, { platform, subscriptions }) {
 		assert(pushEntry !== undefined, 'realtime/push-registry.entry-tracked', { userIdLen: pushUserId.length });
 		if (pushEntry && pushEntry.ws === ws) _pushRegistry.delete(pushUserId);
 	}
+	// Same drain for the sessionId push registry (independent of the userId one).
+	_deregisterPushSession(ws);
 }
 
 /**

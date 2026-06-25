@@ -17,36 +17,47 @@ export const _validSegmentRe = /^[a-zA-Z0-9_]+$/;
 export const _MAX_USER_ID_LENGTH = 256;
 
 /**
- * Validate that a userId is safe to interpolate into a system topic
- * name. Returns `null` if valid, otherwise a short error reason string
- * suitable for embedding in a thrown LiveError / Error message.
+ * Validate that a caller-supplied identifier is safe to interpolate into a
+ * system topic name. Returns `null` if valid, otherwise a short error reason
+ * string (prefixed with `label`) suitable for embedding in a thrown
+ * LiveError / Error message.
  *
- * Server-side helpers that build `__signal:${userId}` / `__push:${userId}`
- * topic names from caller-supplied identifiers go through this gate so
- * malformed identifiers (control bytes, CR/LF, NUL, quotes, backslash,
- * empty, non-string, oversized) cannot poison the topic namespace,
- * corrupt log lines, or escape the system-topic prefix into the
- * user-topic space. Non-ASCII bytes are allowed for parity with the
- * adapter's `allowNonAsciiTopics` opt-in; the server-side builder
- * trusts identifier shapes set by upgrade hooks.
+ * Server-side helpers that build `__signal:${id}` / `__push:${id}` topic names
+ * from caller-supplied identifiers (userId, sessionId, ...) go through this gate
+ * so malformed identifiers (control bytes, CR/LF, NUL, quotes, backslash, empty,
+ * non-string, oversized) cannot poison the topic namespace, corrupt log lines, or
+ * escape the system-topic prefix into the user-topic space. Non-ASCII bytes are
+ * allowed for parity with the adapter's `allowNonAsciiTopics` opt-in; the server-
+ * side builder trusts identifier shapes set by upgrade hooks.
  *
- * @param {unknown} userId
+ * @param {unknown} value
+ * @param {string} label the identifier kind, used in the error reason (e.g. 'userId')
  * @returns {string | null}
  */
-export function _validUserIdReason(userId) {
-	if (typeof userId !== 'string') return 'userId must be a string (got ' + (typeof userId) + ')';
-	if (userId.length === 0) return 'userId must be non-empty';
-	if (userId.length > _MAX_USER_ID_LENGTH) return 'userId exceeds maximum length ' + _MAX_USER_ID_LENGTH + ' (got ' + userId.length + ')';
-	for (let i = 0; i < userId.length; i++) {
-		const c = userId.charCodeAt(i);
+export function _validIdReason(value, label) {
+	if (typeof value !== 'string') return label + ' must be a string (got ' + (typeof value) + ')';
+	if (value.length === 0) return label + ' must be non-empty';
+	if (value.length > _MAX_USER_ID_LENGTH) return label + ' exceeds maximum length ' + _MAX_USER_ID_LENGTH + ' (got ' + value.length + ')';
+	for (let i = 0; i < value.length; i++) {
+		const c = value.charCodeAt(i);
 		// Reject ASCII C0 controls (0x00-0x1F), DEL (0x7F), and the two
 		// characters the adapter's wire-topic validator forbids:
 		// 0x22 (double-quote), 0x5C (backslash).
 		if (c < 0x20 || c === 0x7F || c === 0x22 || c === 0x5C) {
-			return 'userId contains invalid character at index ' + i + ' (charCode ' + c + ')';
+			return label + ' contains invalid character at index ' + i + ' (charCode ' + c + ')';
 		}
 	}
 	return null;
+}
+
+/**
+ * userId-labelled wrapper over {@link _validIdReason}, kept for the existing
+ * call sites whose error wording is asserted.
+ * @param {unknown} userId
+ * @returns {string | null}
+ */
+export function _validUserIdReason(userId) {
+	return _validIdReason(userId, 'userId');
 }
 
 /**

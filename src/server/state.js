@@ -287,6 +287,9 @@ export const state = {
 	/** @type {((ws: any) => string | null | undefined) | null} */
 	pushIdentify: null,
 
+	/** @type {((ws: any) => string | null | undefined) | null} */
+	pushSessionIdentify: null,
+
 	/**
 	 * One-shot flag for the MAX_PRESENCE_REF saturation warning. Reset by
 	 * `_resetCapsForTest`.

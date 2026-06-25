@@ -15017,9 +15017,11 @@ describe('live.notify()', () => {
 		try { live.notify({ userId: 'u-1', orgId: 'o-1' }, 'evt'); } catch (e) { expect(/** @type {any} */ (e).code).toBe('VALIDATION'); }
 	});
 
-	it('throws synchronously on missing userId', () => {
-		expect(() => live.notify({}, 'evt')).toThrow('target.userId must be a non-empty string');
+	it('throws synchronously on a target with no recognized key or a malformed userId', () => {
+		// An empty target names neither userId nor sessionId.
+		expect(() => live.notify({}, 'evt')).toThrow('target must name exactly one of userId / sessionId');
 		try { live.notify({}, 'evt'); } catch (e) { expect(/** @type {any} */ (e).code).toBe('VALIDATION'); }
+		// A present-but-malformed userId still reports the userId-specific reason.
 		expect(() => live.notify({ userId: '' }, 'evt')).toThrow('target.userId must be a non-empty string');
 		expect(() => live.notify({ userId: 42 }, 'evt')).toThrow('target.userId must be a non-empty string');
 	});
@@ -15033,6 +15035,140 @@ describe('live.notify()', () => {
 	it('live.push timeoutMs:0 error message points at live.notify', async () => {
 		await expect(live.push({ userId: 'u-1' }, 'evt', null, { timeoutMs: 0 }))
 			.rejects.toThrow(/use `live\.notify\(target, event, data\)` instead/);
+	});
+});
+
+// - sessionId push target -----------------------------------------------------
+
+describe('live.push() / live.notify() sessionId target', () => {
+	beforeEach(() => {
+		_resetPushRegistry();
+	});
+
+	it('routes to the connection registered by sessionId', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ session_id: 's-1' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => ({ ok: true }));
+
+		const reply = await live.push({ sessionId: 's-1' }, 'evt', { n: 1 });
+		expect(reply).toEqual({ ok: true });
+		expect(platform.requested[0]).toMatchObject({ ws, event: 'evt', data: { n: 1 } });
+	});
+
+	it('throws NOT_FOUND naming the sessionId when no session is registered', async () => {
+		await expect(live.push({ sessionId: 's-missing' }, 'evt')).rejects.toMatchObject({
+			code: 'NOT_FOUND',
+			message: expect.stringContaining('s-missing')
+		});
+	});
+
+	it('resume-aware: a reconnecting session flips the target to the live socket', async () => {
+		const platform = mockPlatform();
+		const wsOld = { getUserData: () => ({ session_id: 's-1' }) };
+		const wsNew = { getUserData: () => ({ session_id: 's-1' }) };
+		pushHooks.open(wsOld, { platform });
+		pushHooks.open(wsNew, { platform });
+		platform._setRequestResolver(async () => 'ok');
+
+		await live.push({ sessionId: 's-1' }, 'evt');
+		expect(platform.requested[0].ws).toBe(wsNew);
+	});
+
+	it('registers userId and sessionId independently from one connection', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ user_id: 'u-1', session_id: 's-1' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'ok');
+
+		await live.push({ userId: 'u-1' }, 'a');
+		await live.push({ sessionId: 's-1' }, 'b');
+		expect(platform.requested.map((r) => r.event)).toEqual(['a', 'b']);
+		expect(platform.requested.every((r) => r.ws === ws)).toBe(true);
+	});
+
+	it('a session-only connection registers for sessionId but not userId', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ session_id: 's-1' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'ok');
+
+		await expect(live.push({ sessionId: 's-1' }, 'evt')).resolves.toBe('ok');
+		await expect(live.push({ userId: 's-1' }, 'evt')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	});
+
+	it('close deregisters the session; a stale-ws close keeps the active one', async () => {
+		const platform = mockPlatform();
+		const wsOld = { getUserData: () => ({ session_id: 's-1' }) };
+		const wsNew = { getUserData: () => ({ session_id: 's-1' }) };
+		pushHooks.open(wsOld, { platform });
+		pushHooks.open(wsNew, { platform });
+		pushHooks.close(wsOld); // stale: must not deregister the active session
+		platform._setRequestResolver(async () => 'ok');
+		await expect(live.push({ sessionId: 's-1' }, 'evt')).resolves.toBe('ok');
+		expect(platform.requested[0].ws).toBe(wsNew);
+
+		pushHooks.close(wsNew); // active: fully deregisters
+		await expect(live.push({ sessionId: 's-1' }, 'evt')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	});
+
+	it('rejects a target that names zero or both known keys', async () => {
+		await expect(live.push({}, 'evt')).rejects.toMatchObject({
+			code: 'VALIDATION',
+			message: expect.stringContaining('exactly one of userId / sessionId')
+		});
+		await expect(live.push({ userId: 'u-1', sessionId: 's-1' }, 'evt')).rejects.toMatchObject({
+			code: 'VALIDATION',
+			message: expect.stringContaining('exactly one of userId / sessionId')
+		});
+	});
+
+	it('rejects an unknown target key', async () => {
+		await expect(live.push({ groupId: 'g-1' }, 'evt')).rejects.toMatchObject({
+			code: 'VALIDATION',
+			message: expect.stringContaining('unsupported target keys: groupId')
+		});
+	});
+
+	it('rejects a non-string / empty sessionId', async () => {
+		await expect(live.push({ sessionId: '' }, 'evt')).rejects.toMatchObject({
+			code: 'VALIDATION',
+			message: expect.stringContaining('target.sessionId must be a non-empty string')
+		});
+		await expect(live.push({ sessionId: 42 }, 'evt')).rejects.toMatchObject({ code: 'VALIDATION' });
+	});
+
+	it('live.notify delivers to a session and is silent when the session is offline', async () => {
+		const platform = mockPlatform();
+		const ws = { getUserData: () => ({ session_id: 's-1' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'ignored');
+
+		await live.notify({ sessionId: 's-1' }, 'ping', { x: 1 });
+		expect(platform.requested[0]).toMatchObject({ ws, event: 'ping', data: { x: 1 } });
+
+		await expect(live.notify({ sessionId: 's-gone' }, 'ping')).resolves.toBeUndefined();
+	});
+
+	it('configurePush({ sessionIdentify }) overrides the session source', async () => {
+		const platform = mockPlatform();
+		live.configurePush({ sessionIdentify: (ws) => ws.getUserData()?.sid });
+		const ws = { getUserData: () => ({ sid: 's-9' }) };
+		pushHooks.open(ws, { platform });
+		platform._setRequestResolver(async () => 'ok');
+
+		await expect(live.push({ sessionId: 's-9' }, 'evt')).resolves.toBe('ok');
+	});
+
+	it('configurePush rejects a non-function sessionIdentify and still requires one slot', () => {
+		expect(() => live.configurePush({ sessionIdentify: 42 })).toThrow(/sessionIdentify must be a function or null/);
+		expect(() => live.configurePush({})).toThrow(/at least one of identify, sessionIdentify, or remoteRegistry/);
+	});
+
+	it('pushHooks.open validates the sessionId (control chars / oversized)', () => {
+		const platform = mockPlatform();
+		expect(() => pushHooks.open({ getUserData: () => ({ session_id: 'a\nb' }) }, { platform })).toThrow(/pushHooks\.open/);
+		expect(() => pushHooks.open({ getUserData: () => ({ session_id: 'x'.repeat(300) }) }, { platform })).toThrow(/sessionId exceeds maximum length/);
 	});
 });
 
