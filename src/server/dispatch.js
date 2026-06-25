@@ -52,6 +52,45 @@ const _volatileWarnSet = new Set();
 const _VOLATILE_WARN_CAP = 256;
 
 /**
+ * Per-connection record of deprecated paths already signaled, so the wire
+ * `deprecation` field is sent at most once per (ws, path) rather than on every
+ * call. WeakMap keyed by ws - GC'd with the socket, no explicit cleanup.
+ * @type {WeakMap<object, Set<string>>}
+ */
+const _deprecationInformed = new WeakMap();
+
+/**
+ * Return the one-shot `deprecation` signal for a `live.deprecate`-marked handler
+ * the first time it responds on a connection (per ws+path), else undefined. Lets
+ * the text and binary RPC response paths attach it uniformly with no per-call
+ * wire cost on a hot deprecated endpoint. Non-deprecated handlers return
+ * undefined immediately (one property read; the common case stays free).
+ * @param {object} ws
+ * @param {string} path
+ * @param {Function} fn
+ * @returns {({ path: string } & Record<string, string>) | undefined}
+ */
+function _deprecationSignal(ws, path, fn) {
+	// Walk the __wrappedFn chain (bounded depth 8, like _hasVolatileMarker) so a
+	// live.deprecate core wrapped by rateLimit / validated / idempotency / lock /
+	// breaker still signals regardless of wrap order. Stream re-wrappers (gate,
+	// derived, ...) copy __deprecated forward via _copyStreamMeta, so for those
+	// the first iteration finds it directly.
+	let info;
+	let cur = /** @type {any} */ (fn);
+	for (let i = 0; cur && i < 8; i++) {
+		if (cur.__deprecated) { info = cur.__deprecated; break; }
+		cur = cur.__wrappedFn;
+	}
+	if (!info) return undefined;
+	let informed = _deprecationInformed.get(ws);
+	if (!informed) { informed = new Set(); _deprecationInformed.set(ws, informed); }
+	if (informed.has(path)) return undefined;
+	informed.add(path);
+	return { path, ...info };
+}
+
+/**
  * Create a per-module guard. Accepts middleware functions (variadic) and/or
  * a single declarative options object as the first argument:
  *
@@ -730,6 +769,16 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 			return { id, ok: true, data: result };
 		}
 		}); // end _runWithMiddleware
+		// Deprecation signal (live.deprecate): one-shot per (ws, path), attached to
+		// the first ok response so the client warns once. Covers text/batch/
+		// stream-subscribe (all flow through here); binary RPC attaches its own.
+		// Skip fire-and-forget calls (id '__volatile', set in _executeVolatileRpc):
+		// no response is sent, so consuming the one-shot would silently swallow it
+		// and starve a later real call to the same deprecated path.
+		if (_result && _result.ok !== false && id !== '__volatile') {
+			const dep = _deprecationSignal(ws, path, fn);
+			if (dep) /** @type {any} */ (_result).deprecation = dep;
+		}
 		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart);
 		return _result;
 	} catch (err) {
@@ -829,7 +878,11 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
 			}
 
 			const result = await fn(ctx, payload, ...(extraArgs || []));
-			_respond(ws, platform, id, { ok: true, data: result });
+			/** @type {any} */
+				const _resp = { ok: true, data: result };
+				const _dep = _deprecationSignal(ws, path, fn);
+				if (_dep) _resp.deprecation = _dep;
+				_respond(ws, platform, id, _resp);
 		});
 		_recordRpcMetrics(path, '', _metricsStart);
 	} catch (err) {

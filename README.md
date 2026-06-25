@@ -1029,6 +1029,20 @@ At 60-120Hz on a single hot path that is 100K+ short-lived heap allocations per 
 
 **`live.notify` vs `.fireAndForget()`.** Both are fire-and-forget, but they go in opposite directions: `live.notify(target, event, data)` is server -> client (server-initiated push, no client reply expected), while `.fireAndForget(...args)` is client -> server (client-initiated RPC, no server reply emitted). Different surfaces, different use cases.
 
+### Deprecating an endpoint
+
+Mark any live function deprecated with `live.deprecate(fn, options)`. It is additive - wrap a stream, channel, or RPC handler and the marker composes with the function's other markers:
+
+```js
+// src/live/feed.js
+export const legacyFeed = live.deprecate(
+  live.stream('legacy-feed', async (ctx) => loadFeed(ctx)),
+  { since: '0.6', use: 'feed', removeBy: '0.7', message: 'paginated feed replaces it' }
+);
+```
+
+The marker composes with the handler's other markers in any wrap order (rateLimit / validated / idempotency / lock / breaker, and the stream re-wrappers). The server attaches a one-shot `deprecation` signal to the first response each connection receives for the deprecated path; the client surfaces it as a single dev-mode `console.warn` naming the path, the replacement (`use`), and the removal target (`removeBy`). Cost is negligible - one small field, sent once per connection per path, with the warning itself dev-only on the client - and fire-and-forget calls never consume the one-shot. Every `options` field is optional. (Not wired for `live.upload` handlers.)
+
 ---
 
 ## Optimistic updates
@@ -4322,6 +4336,7 @@ Import from `svelte-realtime/server`.
 | `live.binary(fn, options?)` | Mark a function as a binary RPC handler (`maxSize` limits payload, default 10MB) |
 | `live.upload(fn, options?)` | Streaming upload handler (chunked, abortable async-iterable; `maxSize` 100MB, `maxConcurrentPerSession` 4, `maxBufferedChunks` 64) |
 | `live.validated(schema, fn)` | RPC with [Standard Schema](https://standardschema.dev/) input validation (Zod, ArkType, Valibot, etc.) |
+| `live.deprecate(fn, options?)` | Mark a live function deprecated; the client dev-warns once per path with the optional `message` / `since` / `use` / `removeBy` |
 | `live.cron(schedule, topic, fn)` | Server-side scheduled function |
 | `live.flag(topic, initialValue?, options?)` | Feature flag exposed as a readable stream with a server-side `.set(value)` |
 | `live.derived(sources, fn, options?)` | Server-side computed stream (static or dynamic sources) |

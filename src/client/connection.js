@@ -1,10 +1,35 @@
 // @ts-check
 import { connect as _connect, on, status, denials } from 'svelte-adapter-uws/client';
 import { now, clearTimer } from '../client-runtime.js';
-import { clientState, RpcError, pending, pendingUploads, _offlineQueue } from './internal-state.js';
+import { clientState, RpcError, pending, pendingUploads, _offlineQueue, _IS_DEV } from './internal-state.js';
 
 /** @type {boolean} */
 let listenerAttached = false;
+
+/**
+ * Dev-warn dedup for server-signaled deprecations: at most one warning per
+ * deprecated path per session. The server sends the `deprecation` signal once
+ * per connection; this set also suppresses a re-warn after a reconnect.
+ * @type {Set<string>}
+ */
+const _deprecationWarned = new Set();
+
+/**
+ * Surface a server `deprecation` signal (from a `live.deprecate`-marked handler)
+ * as a single dev-mode console warning. Dead code in production (gated on the
+ * `import.meta.env`-folded `_IS_DEV`).
+ * @param {{ path: string, message?: string, since?: string, use?: string, removeBy?: string } | undefined} dep
+ */
+function _warnDeprecation(dep) {
+	if (!_IS_DEV || !dep || !dep.path || _deprecationWarned.has(dep.path)) return;
+	_deprecationWarned.add(dep.path);
+	let msg = `[svelte-realtime] '${dep.path}' is deprecated`;
+	if (dep.since) msg += ` (since ${dep.since})`;
+	if (dep.message) msg += `: ${dep.message}`;
+	if (dep.use) msg += `\n  Use '${dep.use}' instead.`;
+	if (dep.removeBy) msg += `\n  Scheduled for removal in ${dep.removeBy}.`;
+	console.warn(msg);
+}
 
 /** @type {boolean} */
 let disconnectListenerAttached = false;
@@ -110,6 +135,7 @@ export function ensureListener() {
 				if (entry.timer) clearTimer(entry.timer);
 				if (result.ok) {
 					entry.resolve(entry.stream ? result : result.data);
+					_warnDeprecation(result.deprecation);
 				} else {
 					entry.reject(new RpcError(result.code || 'UNKNOWN', result.error || 'Unknown error'));
 				}
@@ -125,6 +151,7 @@ export function ensureListener() {
 
 		if (data && data.ok) {
 			entry.resolve(entry.stream ? data : data.data);
+			_warnDeprecation(data.deprecation);
 		} else if (data) {
 			const err = new RpcError(data.code || 'UNKNOWN', data.error || 'Unknown error');
 			if (data.issues) /** @type {any} */ (err).issues = data.issues;

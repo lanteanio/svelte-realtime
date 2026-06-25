@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.30] - 2026-06-25
+
+### Added
+
+- **`live.deprecate(fn, options)`: mark a live function (RPC, stream, or channel) as deprecated.** Additive - wrap any registered handler (`live.deprecate(live.stream(init), { use: 'newFeed' })`) and the marker composes with the handler's other markers. The server attaches a one-shot `deprecation` signal to the first response each connection receives for the deprecated path, and the client surfaces it as a single dev-mode `console.warn` naming the path plus the optional `message` (what changed), `since` (version it was deprecated in), `use` (the replacement path), and `removeBy` (removal target). Negligible cost - one small field, sent once per connection per path, with the warning itself dev-only on the client; fire-and-forget calls never consume the one-shot. The marker composes with the handler's other markers in any wrap order. All option fields are optional. (Not wired for `live.upload` handlers.)
+
 ## [0.6.0-next.29] - 2026-06-25
 
 ### Added

@@ -272,6 +272,7 @@ const _globalMiddleware = [];
 function _copyStreamMeta(target, source) {
 	target.__isStream = source.__isStream;
 	target.__isLive = source.__isLive;
+	if (source.__deprecated) target.__deprecated = source.__deprecated;
 	target.__streamTopic = source.__streamTopic;
 	target.__streamOptions = source.__streamOptions;
 	if (source.__replay) target.__replay = source.__replay;
@@ -1351,6 +1352,61 @@ live.volatile = function volatileMarker(fn) {
 	}
 	/** @type {any} */ (fn).__isLive = true;
 	/** @type {any} */ (fn).__volatileRpc = true;
+	return fn;
+};
+
+/**
+ * Mark a live function (RPC, stream, or channel) as deprecated. Additive: wrap
+ * any RPC / stream / channel handler - `live.deprecate(live.stream('feed', init), { use: 'feedV2' })`
+ * or `live.deprecate(async (ctx) => {...}, { since: '0.6' })` - and the marker
+ * composes with the handler's other markers in any wrap order (it is found
+ * through the rateLimit / validated / idempotency / lock / breaker chain and the
+ * stream re-wrappers alike). The server sends a one-shot `deprecation` signal on
+ * the first response to each connection for the deprecated path; the client
+ * surfaces it as a single dev-mode console warning. Negligible cost: one small
+ * field, sent once per connection per path, and the warning itself is dev-only
+ * on the client. NOT wired for `live.upload` handlers (they have no client warn
+ * surface; deprecate the upload's caller-facing wrapper or rely on docs/types).
+ *
+ * @param {Function} fn - the handler to mark (any live function)
+ * @param {{ message?: string, since?: string, use?: string, removeBy?: string }} [options]
+ *   `message` (why / what changed), `since` (version it was deprecated in),
+ *   `use` (the replacement path to point callers at), `removeBy` (when it will
+ *   be removed). All optional and free-form strings.
+ * @returns {Function} the same `fn`, marked.
+ *
+ * @example
+ * ```js
+ * // src/lib/realtime/feed.js
+ * import { live } from 'svelte-realtime';
+ * export const legacyFeed = live.deprecate(
+ *   live.stream('legacy-feed', async (ctx) => loadFeed(ctx)),
+ *   { since: '0.6', use: 'feed', removeBy: '0.7', message: 'paginated feed replaces it' }
+ * );
+ * ```
+ */
+live.deprecate = function deprecateMarker(fn, options) {
+	if (typeof fn !== 'function') {
+		throw new Error('[svelte-realtime] live.deprecate(fn, options?) requires a handler function');
+	}
+	/** @type {Record<string, string>} */
+	const info = {};
+	if (options !== undefined) {
+		if (typeof options !== 'object' || options === null) {
+			throw new Error('[svelte-realtime] live.deprecate: options must be an object');
+		}
+		for (const key of ['message', 'since', 'use', 'removeBy']) {
+			const v = /** @type {any} */ (options)[key];
+			if (v !== undefined) {
+				if (typeof v !== 'string') {
+					throw new Error(`[svelte-realtime] live.deprecate: ${key} must be a string`);
+				}
+				info[key] = v;
+			}
+		}
+	}
+	/** @type {any} */ (fn).__isLive = true;
+	/** @type {any} */ (fn).__deprecated = info;
 	return fn;
 };
 

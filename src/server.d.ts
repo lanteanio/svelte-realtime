@@ -1349,6 +1349,31 @@ export namespace live {
 	function volatile<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(fn: T): T;
 
 	/**
+	 * Mark a live function (RPC, stream, or channel) as deprecated. Additive -
+	 * wrap any registered handler and the marker composes with its other markers.
+	 * The server sends a one-shot `deprecation` signal on the first response to
+	 * each connection for the deprecated path; the client surfaces it as a single
+	 * dev-mode console warning (no per-call overhead, no production cost).
+	 *
+	 * @param fn - the handler to mark (any live function)
+	 * @param options - `message` (why/what changed), `since` (version deprecated
+	 *   in), `use` (replacement path to point callers at), `removeBy` (when it
+	 *   will be removed); all optional free-form strings.
+	 *
+	 * @example
+	 * ```js
+	 * export const legacyFeed = live.deprecate(
+	 *   live.stream('legacy-feed', async (ctx) => loadFeed(ctx)),
+	 *   { since: '0.6', use: 'feed', removeBy: '0.7' }
+	 * );
+	 * ```
+	 */
+	function deprecate<T extends Function>(
+		fn: T,
+		options?: { message?: string; since?: string; use?: string; removeBy?: string }
+	): T;
+
+	/**
 	 * Wrap a stream with a server-side gate predicate.
 	 * If the predicate returns false (or a `Promise` resolving to false),
 	 * the client receives a graceful no-op (`{ data: null, gated: true }`)
