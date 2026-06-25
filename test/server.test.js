@@ -10763,6 +10763,88 @@ describe('live.idempotent()', () => {
 		expect(platform.sent[1].data.data.secret).toBeUndefined();
 	});
 
+	// Pre-fix footgun: reusing one idempotency key with a DIFFERENT request
+	// body silently returned the FIRST call's cached result (a wrong answer).
+	// The framework now fingerprints the request args and rejects the mismatch.
+	it('rejects a key reused with a DIFFERENT request payload (IDEMPOTENCY_KEY_REUSED)', async () => {
+		let calls = 0;
+		const handler = live.idempotent(
+			{ keyFrom: () => 'fixed' },
+			async (ctx, x) => { calls++; return x * 10; }
+		);
+		__register('idem/reuse', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/reuse', id: '1', args: [4] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		// Same key, DIFFERENT args -> must not return the first call's result.
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/reuse', id: '2', args: [9] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1);
+		expect(platform.sent[0].data).toMatchObject({ ok: true, data: 40 });
+		expect(platform.sent[1].data.ok).toBe(false);
+		expect(platform.sent[1].data.code).toBe('IDEMPOTENCY_KEY_REUSED');
+		// The wrong cached value (40) must NOT leak into the rejected response.
+		expect(platform.sent[1].data.data).toBeUndefined();
+	});
+
+	it('treats object args as equal regardless of key order (no false collision)', async () => {
+		let calls = 0;
+		const handler = live.idempotent(
+			{ keyFrom: () => 'obj' },
+			async (ctx, input) => { calls++; return input.a + input.b; }
+		);
+		__register('idem/obj', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/obj', id: '1', args: [{ a: 1, b: 2 }] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		// Same payload, different key order -> same fingerprint -> cached result.
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/obj', id: '2', args: [{ b: 2, a: 1 }] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1);
+		expect(platform.sent[0].data.data).toBe(3);
+		expect(platform.sent[1].data.data).toBe(3);
+	});
+
+	it('detects payload mismatch through a round-trip custom store', async () => {
+		const cachePerKey = new Map();
+		const customStore = {
+			async acquire(key) {
+				if (cachePerKey.has(key)) return { result: cachePerKey.get(key) };
+				return {
+					acquired: true,
+					commit: async (val) => { cachePerKey.set(key, val); },
+					abort: async () => {}
+				};
+			}
+		};
+		let calls = 0;
+		const handler = live.idempotent(
+			{ keyFrom: () => 'k', store: customStore },
+			async (ctx, x) => { calls++; return x; }
+		);
+		__register('idem/store-reuse', handler);
+
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/store-reuse', id: '1', args: ['a'] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/store-reuse', id: '2', args: ['b'] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1);
+		expect(platform.sent[0].data.data).toBe('a');
+		expect(platform.sent[1].data.code).toBe('IDEMPOTENCY_KEY_REUSED');
+	});
+
 	it('rejects idempotencyKey longer than 256 chars with INVALID_REQUEST', async () => {
 		const handler = live.idempotent({}, async () => 'ok');
 		__register('idem/long', handler);

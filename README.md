@@ -1258,7 +1258,7 @@ const intentId = crypto.randomUUID();
 const order = await createOrder.with({ idempotencyKey: intentId })(payload);
 ```
 
-Resolution: `keyFrom(ctx, ...args)` if defined, otherwise the client envelope's `idempotencyKey`, otherwise the wrapper is a no-op. Only successful results cache; throwing handlers abort the slot so the next caller re-runs. Default store is in-process and bounded; for multi-instance deployments pass `store: createIdempotencyStore(redis)` from `svelte-adapter-uws-extensions`.
+Resolution: `keyFrom(ctx, ...args)` if defined, otherwise the client envelope's `idempotencyKey`, otherwise the wrapper is a no-op. Only successful results cache; throwing handlers abort the slot so the next caller re-runs. Reusing a key with a **different request payload** throws `LiveError('IDEMPOTENCY_KEY_REUSED')` instead of returning the first call's result - a genuine idempotent retry must carry the same body, so the framework fingerprints the request args (canonical, key-order-insensitive) and rejects a mismatch rather than silently answering with the wrong cached value. Default store is in-process and bounded; for multi-instance deployments pass `store: createIdempotencyStore(redis)` from `svelte-adapter-uws-extensions`.
 
 > **Field name divergence with `live.lock`.** `live.idempotent` uses `keyFrom`; `live.lock` uses `key` (which accepts a string OR a function). Mistakenly mirroring the wrong helper's shape used to silently fall through to the no-key bypass, breaking the one-per-key guarantee with no warning. Unknown config fields now throw at registration time with a cross-helper hint:
 >

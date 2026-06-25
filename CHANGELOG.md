@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`live.idempotent` now rejects a key reused with a different request payload instead of silently returning the first call's cached result.** A genuine idempotent retry must carry the same body, so the framework fingerprints the request args (a canonical, key-order-insensitive hash) and, on a mismatch for the same key, throws `LiveError('IDEMPOTENCY_KEY_REUSED')` rather than answering the second request with the first one's value. Same-key/same-payload calls are unchanged, and a payload whose args cannot be serialized simply skips the check. The fingerprint rides an opaque value envelope that is unwrapped before it reaches the caller, so it works through any store (the default in-process map or the extensions Redis/Postgres store); cached entries written before this release lack the envelope and are treated as legacy (the check is skipped for them and they age out within their TTL). Note: the envelope adds a few dozen bytes, so a result that sat exactly at a store's `maxResultBytes` limit may need a slightly higher cap.
+
 ## [0.6.0-next.30] - 2026-06-25
 
 ### Added

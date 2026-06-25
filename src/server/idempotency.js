@@ -3,6 +3,58 @@ import { now as runtimeNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { assert } from '../shared/assert.js';
 import { LiveError } from './live-error.js';
 import { _tenantKey } from './tenant.js';
+import { createHash } from 'node:crypto';
+
+// Reserved keys for the cached-value envelope that carries the request
+// fingerprint. The read path detects the envelope by `_FP` being a string, so
+// the key is deliberately namespaced and uncommon; a user result that uses this
+// exact key would be treated as the envelope.
+const _FP = '__srk_idem_fp';
+const _VAL = '__srk_idem_v';
+
+/**
+ * Deterministic stable serialization: object keys sorted recursively so two
+ * payloads differing only in key order fingerprint identically. Wire args are
+ * JSON values, so only JSON types appear.
+ * @param {any} v
+ * @returns {string}
+ */
+function _stableStringify(v) {
+	if (v === null || typeof v !== 'object') {
+		const s = JSON.stringify(v);
+		return s === undefined ? 'null' : s;
+	}
+	if (Array.isArray(v)) {
+		let out = '[';
+		for (let i = 0; i < v.length; i++) out += (i ? ',' : '') + _stableStringify(v[i]);
+		return out + ']';
+	}
+	const keys = Object.keys(v).sort();
+	let out = '{';
+	for (let i = 0; i < keys.length; i++) {
+		if (i) out += ',';
+		out += JSON.stringify(keys[i]) + ':' + _stableStringify(v[keys[i]]);
+	}
+	return out + '}';
+}
+
+/**
+ * Fingerprint the request args so a replayed idempotency key carrying a
+ * DIFFERENT payload is caught (a typed error) instead of silently returning the
+ * first request's cached result. A correctness guard, not a security boundary:
+ * the slot key is already namespaced by RPC path + tenant + the app's keyFrom
+ * (which should encode identity). Best-effort - an args shape that cannot be
+ * canonically serialized returns null and the check is skipped.
+ * @param {any[]} args
+ * @returns {string | null}
+ */
+function _fingerprintArgs(args) {
+	try {
+		return createHash('sha256').update(_stableStringify(args)).digest('hex').slice(0, 32);
+	} catch {
+		return null;
+	}
+}
 
 /** @type {{ acquire: (key: string, ttlSec: number) => Promise<any> } | null} */
 let _defaultIdempotencyStore = null;
@@ -278,7 +330,10 @@ function _assertConfigShape(helperName, cfg, allowed, hints) {
  * runs as if the wrapper were absent.
  *
  * Only successful results are cached. A throwing handler aborts the slot so
- * the next caller re-runs.
+ * the next caller re-runs. Reusing the same key with a DIFFERENT request
+ * payload throws `LiveError('IDEMPOTENCY_KEY_REUSED')` rather than silently
+ * returning the first call's result (a true idempotent retry must carry the
+ * same body); the framework fingerprints the request args to detect this.
  *
  * Default store is in-process (bounded). For multi-instance deployments,
  * pass `store: createIdempotencyStore(redis)` from svelte-adapter-uws-extensions.
@@ -327,12 +382,18 @@ const _liveIdempotent = function idempotent(config, fn) {
 		// `\0`), so it stays unambiguous. Null tenant -> unchanged.
 		const path = /** @type {any} */ (wrapper).__idempotencyPath;
 		const key = _tenantKey(ctx.tenantId, path ? 'rpc:' + path + ':' + userKey : userKey);
+		// Fingerprint the request payload so a replayed key carrying a DIFFERENT
+		// body is rejected, not silently answered with the first call's result.
+		const fp = _fingerprintArgs(args);
 		const store = customStore || _getDefaultIdempotencyStore();
 		const slot = await store.acquire(key, ttlSec);
 		if (slot && slot.acquired) {
 			try {
 				const data = await fn(ctx, ...args);
-				await slot.commit(data);
+				// Wrap the result with its request fingerprint (skipped only when the
+				// args could not be serialized). The envelope is opaque to the store
+				// and is unwrapped before it ever reaches the caller.
+				await slot.commit(fp != null ? { [_FP]: fp, [_VAL]: data } : data);
 				return data;
 			} catch (err) {
 				try { await slot.abort(); } catch {}
@@ -342,7 +403,19 @@ const _liveIdempotent = function idempotent(config, fn) {
 		if (slot && slot.pending) {
 			throw new LiveError('CONFLICT', 'A request with this idempotency key is already in progress');
 		}
-		return slot.result;
+		const cached = slot.result;
+		if (cached !== null && typeof cached === 'object' && typeof (/** @type {any} */ (cached)[_FP]) === 'string') {
+			if (fp != null && /** @type {any} */ (cached)[_FP] !== fp) {
+				throw new LiveError(
+					'IDEMPOTENCY_KEY_REUSED',
+					'idempotency key reused with a different request payload; the same key must always carry the same request'
+				);
+			}
+			return (/** @type {any} */ (cached))[_VAL];
+		}
+		// Legacy/raw cached value (a pre-upgrade entry, a store that does not
+		// round-trip the envelope, or unserializable args): return as-is.
+		return cached;
 	};
 
 	/** @type {any} */ (wrapper).__isLive = true;

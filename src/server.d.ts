@@ -1554,7 +1554,10 @@ export namespace live {
 	 * as if the wrapper were absent.
 	 *
 	 * Only successful results are cached. A throwing handler aborts the slot
-	 * so the next caller re-runs.
+	 * so the next caller re-runs. Reusing the same key with a DIFFERENT request
+	 * payload throws `LiveError('IDEMPOTENCY_KEY_REUSED')` instead of returning
+	 * the first call's result (a genuine idempotent retry must carry the same
+	 * body); the framework fingerprints the request args to detect the mismatch.
 	 *
 	 * Default store is in-process and bounded. For multi-instance deployments,
 	 * pass `store: createIdempotencyStore(redis)` from
