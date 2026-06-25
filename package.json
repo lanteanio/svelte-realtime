@@ -80,7 +80,7 @@
     "MIGRATION.md"
   ],
   "scripts": {
-    "check": "node scripts/check-types.js && node scripts/check-determinism.js",
+    "check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js",
     "pretest": "npm run check",
     "test": "vitest run",
     "test:watch": "vitest",

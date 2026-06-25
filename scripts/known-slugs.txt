@@ -1,0 +1,48 @@
+# Registered svti.me short-link slugs.
+#
+# Every `svti.me/<slug>` referenced in the published surface (src/, README.md,
+# MIGRATION.md) must appear here, one slug per line. `scripts/check-slugs.js`
+# (wired into pretest) fails the build on a referenced slug that is NOT listed,
+# so a new short link cannot ship as a dead redirect: adding the link forces you
+# to add the slug here, which is the prompt to actually create the redirect at
+# svti.me before release.
+#
+# Blank lines and `#` comments are ignored. Keep the list alphabetical.
+
+adapter-config
+binary
+cf-cookies
+client
+cluster-cron
+cluster-relay
+cron
+dedup
+derived
+doc
+errors
+guard
+highfreq
+hooks
+merge
+migration
+multiplayer
+presence
+publish-debounced
+publish-helper-args
+publish-throttled
+push-registry
+rooms
+rpc
+schema
+silent-topic
+skip-gate
+smooth
+ssr
+start
+streams
+tenant
+topic-cardinality
+topics
+uploads
+vite
+volatile
