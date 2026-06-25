@@ -1,8 +1,10 @@
 // Runtime tests for the SmoothEntity rune's onEvent fan-out. SmoothEntity is a
 // Svelte 5 rune class, so it is compiled with compileModule and imported - the
-// same probe harness multiplayer.test.js uses. Its `./client.js` import (the
-// shared health flag) is repointed to a local stub so the probe does not drag
-// in the whole browser client. The adapter channel is mocked: it exposes the
+// same probe harness multiplayer.test.js uses. Its imports (the shared health
+// flag from `./client.js` and the smooth devtools registrar from
+// `./client/devtools-instrument.js`) are repointed to local stubs so the probe
+// does not drag in the whole browser client. The adapter channel is mocked: it
+// exposes the
 // single-consumer onFrame/onOverflow/onEvent the rune wires in its constructor,
 // and the test fires the captured onEvent callback to simulate delivery.
 
@@ -24,9 +26,13 @@ async function loadSmoothEntity() {
 	const probeDir = mkdtempSync(resolve(runeProbeRoot, 'probe-'));
 	runeProbeDirs.push(probeDir);
 
-	// Stub the only import (the shared degraded-health flag) so the probe does
-	// not pull in the browser connection module.
+	// Stub the imports so the probe does not pull in the browser connection module
+	// or the devtools instrument: the shared degraded-health flag (`./client.js`)
+	// and the smooth devtools registrar (`./client/devtools-instrument.js`), the
+	// latter a no-op that returns a no-op unregister.
 	writeFileSync(resolve(probeDir, 'client.js'), 'export function _setSmoothDegraded() {}\n');
+	mkdirSync(resolve(probeDir, 'client'), { recursive: true });
+	writeFileSync(resolve(probeDir, 'client', 'devtools-instrument.js'), 'export function _devtoolsSmoothRegister() { return () => {}; }\n');
 
 	const source = readFileSync(SHIPPED_RUNE_PATH, 'utf8');
 	const { js } = compileModule(source, { filename: 'client-smooth.svelte.js', generate: 'client' });

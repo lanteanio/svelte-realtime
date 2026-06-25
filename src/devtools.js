@@ -107,7 +107,7 @@ function init() {
 	const content = document.createElement('div');
 	content.style.cssText = 'padding:8px;overflow-y:auto;max-height:320px;';
 
-	const tabNames = ['rpcs', 'streams', 'connection'];
+	const tabNames = ['rpcs', 'streams', 'smooth', 'connection'];
 	for (const name of tabNames) {
 		const btn = document.createElement('button');
 		btn.textContent = name;
@@ -194,6 +194,8 @@ function render(el) {
 		renderRpcs(el, devtools);
 	} else if (activeTab === 'streams') {
 		renderStreams(el, devtools);
+	} else if (activeTab === 'smooth') {
+		renderSmooth(el, devtools);
 	} else if (activeTab === 'connection') {
 		renderConnection(el, devtools);
 	}
@@ -343,6 +345,55 @@ function renderStreams(el, dt) {
 		html += `</div>`;
 	}
 	if (streams.length === 0) html += '<div style="color:#666">No active streams</div>';
+
+	if (html !== _lastRenderedHtml) {
+		_lastRenderedHtml = html;
+		el.innerHTML = html;
+	}
+}
+
+/**
+ * The "smooth" tab: a per-channel inspector for live `live.smooth` views. Pulls
+ * each registered channel's `stats()` snapshot on the panel's refresh tick (the
+ * accessors live in `dt.smooth`), so it costs nothing until the panel is open.
+ * @param {HTMLElement} el @param {any} dt
+ */
+function renderSmooth(el, dt) {
+	const accessors = dt.smooth ? [...dt.smooth] : [];
+	let html = `<div style="color:#888;margin-bottom:6px;font-size:10px">Smoothed channels (${esc(String(accessors.length))})</div>`;
+	let shown = 0;
+	for (const statsFn of accessors) {
+		let s;
+		try { s = statsFn(); } catch { s = null; }
+		if (s === undefined) {
+			html += `<div style="padding:4px 0;color:#c97">telemetry unavailable (needs svelte-adapter-uws &gt;= 0.6.0-next.35)</div>`;
+			shown++;
+			continue;
+		}
+		if (!s) continue;
+		shown++;
+		const topic = esc(s.topic || '(connecting)');
+		const self = s.self ? esc(s.self) : '-';
+		const status = s.overflowed
+			? `<span style="color:#f44336">prediction KILLED (overflow)</span>`
+			: `<span style="color:#4caf50">predicting</span>`;
+		const unacked = Number(s.unacked) || 0;
+		const cap = Number(s.windowCap) || 0;
+		const unackedColor = cap > 0 && unacked / cap > 0.5 ? '#ffc107' : '#aaa';
+		const divergence = Number(s.lastDivergence) || 0;
+		const divColor = divergence > 0 ? '#ffc107' : '#666';
+		const clockColor = s.clockSynced ? '#4caf50' : '#f44336';
+		html += `<div style="padding:4px 0;border-bottom:1px solid #2a2a3e">` +
+			`<div style="display:flex;align-items:center;gap:6px"><span>${topic}</span> ${status}</div>` +
+			`<div style="padding:1px 0 1px 12px;color:#888">self:${self} remote:${esc(String(Number(s.remoteCount) || 0))} clock:<span style="color:${clockColor}">${s.clockSynced ? 'synced' : 'unsynced'}</span></div>` +
+			`<div style="padding:1px 0 1px 12px;color:#888">unacked:<span style="color:${unackedColor}">${esc(String(unacked))}</span>/${esc(String(cap))} ` +
+				`divergence:<span style="color:${divColor}">${esc(divergence.toFixed(2))}</span>` +
+				(s.correcting ? ` <span style="color:#ffc107">easing</span>` : '') +
+				`</div>` +
+			`<div style="padding:1px 0 1px 12px;color:#666">interp delay:${esc((Number(s.interpDelayMs) || 0).toFixed(0))}ms</div>` +
+			`</div>`;
+	}
+	if (shown === 0) html += '<div style="color:#666">No smoothed channels active</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;

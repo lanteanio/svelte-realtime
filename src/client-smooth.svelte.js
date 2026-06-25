@@ -1,5 +1,6 @@
 // @ts-check
 import { _setSmoothDegraded } from './client.js';
+import { _devtoolsSmoothRegister } from './client/devtools-instrument.js';
 
 /**
  * Reactive view over one smoothed entity channel.
@@ -92,6 +93,12 @@ export class SmoothEntity {
 				this.#status = s;
 			}));
 		}
+		// Expose this channel's telemetry to the devtools "smooth" tab (dev only -
+		// the register is a no-op in production). The accessor optional-chains
+		// `stats()` so an older adapter degrades to "telemetry unavailable" rather
+		// than throwing. The unregister rides #unsubs, so destroy() drops it before
+		// tearing the channel down.
+		this.#unsubs.push(_devtoolsSmoothRegister(() => this.#channel.stats?.()));
 	}
 
 	/** The rendered local state: predicted, with corrections eased in. */

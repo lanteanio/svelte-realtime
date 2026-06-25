@@ -27,7 +27,8 @@ const _DEVTOOLS_VOLATILE_MAX = 100;
  *   volatile: any[],
  *   volatileDropped: number,
  *   redactKeys: Set<string>,
- *   paused: boolean
+ *   paused: boolean,
+ *   smooth: Set<() => any>
  * } | null}
  */
 export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.env?.PROD)
@@ -38,7 +39,12 @@ export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.en
 		volatile: new Array(_DEVTOOLS_VOLATILE_MAX).fill(null),
 		volatileDropped: 0,
 		redactKeys: new Set(_DEFAULT_REDACT_KEYS),
-		paused: false
+		paused: false,
+		// Live smoothed-channel telemetry accessors (the "smooth" tab). Pull-based:
+		// each entry is a `() => channel.stats()` the panel calls on its refresh
+		// tick, so a smooth view costs nothing until the panel is open. The smooth
+		// view registers on construct and drops its accessor on destroy.
+		smooth: new Set()
 	}
 	: null;
 
@@ -198,4 +204,20 @@ export function _devtoolsStreamError(path, err) {
 	const e = __devtools.streams.get(path);
 	if (!e) return;
 	e.error = err ? { code: err.code || 'UNKNOWN', message: err.message || String(err) } : null;
+}
+
+/**
+ * Register a smoothed channel's telemetry accessor for the devtools "smooth"
+ * tab. `statsFn` returns the channel's `stats()` snapshot (or `undefined` on an
+ * adapter too old to expose it). Pull-based: the panel calls the accessor on its
+ * refresh tick, so a registered channel costs nothing until the panel is open.
+ * Returns an unregister function (a no-op in production); the smooth view pushes
+ * it onto its teardown list, so the accessor is dropped on destroy.
+ * @param {() => any} statsFn
+ * @returns {() => void}
+ */
+export function _devtoolsSmoothRegister(statsFn) {
+	if (!__devtools) return () => {};
+	__devtools.smooth.add(statsFn);
+	return () => { if (__devtools) __devtools.smooth.delete(statsFn); };
 }

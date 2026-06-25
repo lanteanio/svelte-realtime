@@ -4191,6 +4191,8 @@ Match is case-insensitive and exact-key (no substring fuzz). Redacted values ren
 
 The RPC tab shows pending calls (with elapsed time) and a 50-entry ring buffer of recent results (ok/err, duration). The Connection tab summarizes the same counters.
 
+The Smooth tab is a per-stream inspector for `live.smooth` views (multiplayer prediction + lag compensation). For each live smoothed channel it pulls the prediction/interpolation telemetry from the adapter on each refresh tick: `predicting` vs `prediction KILLED` (window overflow), the un-acked reconciliation window (`unacked`/`windowCap`), the most recent reconciliation `divergence` and whether a correction is still `easing`, the remote-entity count, the `interp delay`, and whether the server clock is `synced`. Pull-based, so a smoothed view costs nothing until the tab is open. It needs `svelte-adapter-uws >= 0.6.0-next.35` (the channel's `stats()` surface); on an older adapter the row reads "telemetry unavailable".
+
 The overlay is stripped from production builds. Disable it in dev with:
 
 ```js

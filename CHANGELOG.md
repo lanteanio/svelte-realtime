@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.34] - 2026-06-26
+
+### Added
+
+- **DevTools: a "Smooth" tab - a per-stream inspector for `live.smooth` views (multiplayer prediction + lag compensation).** For each live smoothed channel it pulls the prediction/interpolation telemetry from the adapter on each refresh tick: `predicting` vs `prediction KILLED` (window overflow), the un-acked reconciliation window (`unacked`/`windowCap`), the most recent reconciliation `divergence` and whether a correction is still `easing`, the remote-entity count, the `interp delay`, and whether the server clock is `synced`. Pull-based (the view registers a `() => channel.stats()` accessor the panel calls only while open), so a smoothed view costs nothing until the tab is opened, and nothing in production (the overlay is stripped). Needs `svelte-adapter-uws >= 0.6.0-next.35` for the channel `stats()` surface; on an older adapter the row reads "telemetry unavailable" (the view optional-chains `stats()`, so it never throws). No dep floor bump - the feature degrades gracefully.
+
 ## [0.6.0-next.33] - 2026-06-25
 
 ### Added
