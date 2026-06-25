@@ -6,6 +6,7 @@ import { _validPathRe } from './validate.js';
 import { state } from './state.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _recordRpcMetrics } from './metrics.js';
+import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 
 const textDecoder = new TextDecoder();
 
@@ -365,6 +366,15 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 	let perWs = _wsUploads.get(ws);
 
 	if (seq === 0) {
+		// Graceful shutdown: reject a NEW upload, symmetric with the RPC paths.
+		// Continuation frames (seq !== 0) for an already-running upload are
+		// in-flight work and fall through to the normal path below.
+		if (_isShuttingDown()) {
+			_respondUpload(ws, platform, streamId, {
+				ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down'
+			});
+			return;
+		}
 		if (perWs && perWs.has(streamId)) {
 			_respondUpload(ws, platform, streamId, {
 				ok: false, code: 'INVALID_REQUEST', error: 'streamId already active'
@@ -529,6 +539,12 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 	let path = '';
 	/** @type {any} */ let ctx = null;
 
+	// Count the upload handler as in-flight so onShutdown's drain waits for it.
+	// Uploads are the longest-running handler (they span every chunk via the
+	// for-await), so the drain must not resolve and let the adapter close the
+	// socket mid-write. Paired with the _exitInFlight in the finally below; the
+	// finally runs on every exit path (early return, throw, stream abort).
+	_enterInFlight();
 	try {
 		if (!argsHeader || typeof argsHeader.rpc !== 'string') {
 			_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);

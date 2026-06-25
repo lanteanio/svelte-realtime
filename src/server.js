@@ -70,8 +70,14 @@ import { _ensureWrap, _maybeLateActivate, _activateDynamicDerived, _deactivateDy
 import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, installCrdt } from './server/crdt.js';
 import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
 import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy } from './server/lazy.js';
-import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError, _ensureCronInterval, _getCronLeader, _cronTimerActive } from './server/cron-engine.js';
+import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError, _ensureCronInterval, _getCronLeader, _cronTimerActive, _stopCronScheduler } from './server/cron-engine.js';
 export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError };
+import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
+export { onShutdown, _resetLifecycle };
+// Bind framework-internal background teardown (cron scheduler + stale-reload
+// watchdogs) into the graceful-shutdown drain. One-way: lifecycle never imports
+// cron-engine / server.js, so this avoids an import cycle.
+_installLifecycle(_stopBackgroundWork);
 export { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest };
 import { _armSilentTopicWatch, _disarmSilentTopicWatch, _resetSilentTopicWarning, _activatePublishRateWarning, _resetPublishRateWarning, installDevWarnings } from './server/dev-warnings.js';
 import { _drainUploadsOnClose, _resetUploadAutoDiscovery, installUpload } from './server/upload.js';
@@ -463,6 +469,9 @@ export function _resetInvalidationWatch() {
  * @param {{ topic: string, fn: any, ctx: any, args: any[], platform: any, onError: Function | null, reloading: boolean }} watcher
  */
 async function _invalidationReload(watcher) {
+	// Graceful shutdown: skip the publish-triggered reload during a drain
+	// (an uncounted background loader run; the socket is about to close).
+	if (_isShuttingDown()) return;
 	if (watcher.reloading) return;
 	watcher.reloading = true;
 	try {
@@ -542,6 +551,10 @@ function _resetStaleTimer(topic) {
  * @param {string} topic
  */
 async function _staleReload(topic) {
+	// Graceful shutdown: do not run the loader or re-arm the timer during a
+	// drain. The reload is an uncounted background refresh to about-to-close
+	// subscribers, and re-arming would schedule work past the gate.
+	if (_isShuttingDown()) return;
 	const entry = _topicStaleWatch.get(topic);
 	if (!entry) return;
 	if (entry.reloading) return;
@@ -572,6 +585,18 @@ async function _staleReload(topic) {
 export function _resetStaleWatch() {
 	for (const entry of _topicStaleWatch.values()) clearTimer(entry.timerId);
 	_topicStaleWatch.clear();
+}
+
+/**
+ * Stop framework-internal background timers for graceful shutdown: the cron
+ * scheduler and the per-topic stale-reload watchdogs. New cron ticks, stale
+ * reloads, and invalidation reloads also short-circuit via `_isShuttingDown()`;
+ * clearing the stale timers here stops a pending one-shot from firing during
+ * the drain window. Wired into the shutdown drain via `_installLifecycle`.
+ */
+function _stopBackgroundWork() {
+	_stopCronScheduler();
+	for (const entry of _topicStaleWatch.values()) clearTimer(entry.timerId);
 }
 
 /**
@@ -3215,6 +3240,14 @@ export function realtime(config) {
 			}
 			setCronPlatform(ctx.platform);
 			_activateDerived(ctx.platform);
+		},
+		// Graceful shutdown: the adapter calls this once on SIGTERM, before it
+		// closes the listen socket and flushes the WebSockets. Drains in-flight
+		// work (rejecting new RPC/SSR/cron with UNAVAILABLE) and runs registered
+		// onShutdown() handlers. Idempotent and zero-config (drains even with no
+		// handler registered). Composes with an app's own teardown via onShutdown.
+		shutdown(ctx) {
+			return _runShutdown(ctx);
 		},
 	};
 	if (typeof upgradeFn === 'function') /** @type {any} */ (hooks).upgrade = upgradeFn;

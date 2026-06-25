@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.29] - 2026-06-25
+
+### Added
+
+- **Graceful shutdown: `realtime()` now returns a `shutdown` hook, and `onShutdown(handler, { drainMs })` is exported.** On `SIGTERM` the adapter calls the hook before it closes the listen socket and flushes the open WebSockets, so a rolling deploy drains cleanly. The server stops accepting new RPC, SSR `load()`, upload, and cron work (each rejected with an `UNAVAILABLE` code), waits up to `drainMs` (default 5000) for in-flight work to settle, then runs your registered `onShutdown` handlers in order - a throwing handler is logged and never aborts the rest, and `onShutdown` returns an unregister function. Use it for teardown the framework should time, such as releasing a leader lease or deactivating a cluster bus: `onShutdown(async () => { await leader.stop(); }, { drainMs: 3000 })`. Zero-config: even with no handler registered you get the in-flight drain for free. Re-export the hook for it to run - `export const { open, close, message, init, shutdown } = realtime()` - and keep `drainMs` under the adapter's `SHUTDOWN_TIMEOUT` (default 30s).
+
 ## [0.6.0-next.28] - 2026-06-24
 
 ### Fixed

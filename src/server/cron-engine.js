@@ -2,6 +2,7 @@
 import { state, cronRegistry, _lazyQueue } from './state.js';
 import { _IS_DEV } from './env.js';
 import { now as runtimeNow, effectiveTimeZone, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from '../shared/runtime.js';
+import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _cronDateParts, _cronFieldMatch } from './cron.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _ensureWrap } from './reactive.js';
@@ -309,8 +310,33 @@ export function _clearCron() {
 	_cronClusterWarnFired = false;
 }
 
+/**
+ * Stop the cron scheduler WITHOUT clearing the registry or the sticky-1Hz
+ * flag. Called from the graceful-shutdown drain (wired via `_installLifecycle`
+ * in server.js): no new ticks fire, but the registered jobs survive for
+ * introspection. In-flight cron handlers are NOT cut - they participate in the
+ * lifecycle in-flight counter, so the drain waits for them.
+ */
+export function _stopCronScheduler() {
+	if (_cronInterval) {
+		clearIntervalTimer(_cronInterval);
+		_cronInterval = null;
+	}
+	if (_cronStartupTimer) {
+		clearTimer(_cronStartupTimer);
+		_cronStartupTimer = null;
+	}
+}
+
 export async function _tickCron() {
+	// Graceful shutdown: stop firing new cron jobs so the in-flight drain can
+	// finish. The scheduler interval is also cleared in `_stopCronScheduler`;
+	// this guards any tick already queued when the drain began.
+	if (_isShuttingDown()) return;
 	if (!_isLazyResolved()) await _resolveAllLazy();
+	// Re-check after the (possibly awaited) lazy-resolve: a drain may have begun
+	// during that await on the very first uninitialized tick.
+	if (_isShuttingDown()) return;
 
 	// Cluster-mode leader gate. Default (no leader configured) is "every
 	// worker fires" - correct for single-process and dev. With a leader
@@ -385,6 +411,9 @@ export async function _tickCron() {
 			continue;
 		}
 		_cronRunning.add(path);
+		// Count the in-flight cron handler so onShutdown's drain waits for it
+		// to settle (paired with the _exitInFlight in the finally below).
+		_enterInFlight();
 
 		// Match - run the job
 		(async () => {
@@ -438,6 +467,7 @@ export async function _tickCron() {
 				}
 			} finally {
 				_cronRunning.delete(path);
+				_exitInFlight();
 			}
 		})();
 	}

@@ -3574,6 +3574,14 @@ export interface RealtimeHooks {
 	close(ws: any, ctx: { platform: Platform; subscriptions?: Set<string> | string[] }): void;
 	message(ws: any, ctx: { data: ArrayBuffer; platform: Platform }): void;
 	init(ctx: { platform: Platform }): void;
+	/**
+	 * Graceful shutdown. The adapter calls this once on SIGTERM, before it
+	 * closes the listen socket and flushes the open WebSockets. Drains
+	 * in-flight RPC / SSR / cron work (rejecting new calls with `UNAVAILABLE`)
+	 * up to the `onShutdown` drain budget, then runs registered `onShutdown`
+	 * handlers in order. Idempotent; zero-config (drains even with no handler).
+	 */
+	shutdown(ctx: { platform: Platform }): Promise<void>;
 	upgrade?: (...args: any[]) => any;
 }
 
@@ -3585,7 +3593,7 @@ export interface RealtimeHooks {
  * Single-replica:
  * ```js
  * import { realtime } from 'svelte-realtime/server';
- * export const { open, close, message, init } = realtime();
+ * export const { open, close, message, init, shutdown } = realtime();
  * export function upgrade({ cookies }) { ... }
  * ```
  *
@@ -3593,7 +3601,7 @@ export interface RealtimeHooks {
  * ```js
  * import { realtime } from 'svelte-realtime/server';
  * import { redisBus, redisLeader } from 'svelte-adapter-uws-extensions/redis';
- * export const { open, close, message, init } = realtime({
+ * export const { open, close, message, init, shutdown } = realtime({
  *   bus: redisBus(),
  *   leader: redisLeader().isLeader,
  * });
@@ -3604,3 +3612,29 @@ export interface RealtimeHooks {
  * difference is whether `bus` and `leader` are passed at the top.
  */
 export function realtime(config?: RealtimeConfig): RealtimeHooks;
+
+/**
+ * Register a teardown handler run during graceful shutdown, after in-flight
+ * work has drained. Handlers run in registration order and receive the same
+ * `{ platform }` the adapter passes the `shutdown` hook. A throwing handler is
+ * logged and ignored so one failure cannot abort the rest. Use this for
+ * app-level teardown that the framework owns the timing of - releasing a
+ * leader lease, deactivating a cluster bus, flushing a buffer:
+ *
+ * ```js
+ * // src/hooks.ws.js
+ * import { realtime, onShutdown } from 'svelte-realtime/server';
+ * export const { open, close, message, init, shutdown } = realtime({ bus, leader: leader.isLeader });
+ * onShutdown(async () => { await leader.stop(); await bus.deactivate(); }, { drainMs: 3000 });
+ * ```
+ *
+ * `drainMs` is the in-flight drain budget before handlers run (the largest
+ * across all registrations wins; default 5000ms). Keep it well under the
+ * adapter's `SHUTDOWN_TIMEOUT` (default 30s), which is the hard cap.
+ *
+ * @returns an unregister function.
+ */
+export function onShutdown(
+	handler: (ctx: { platform: Platform }) => void | Promise<void>,
+	options?: { drainMs?: number }
+): () => void;

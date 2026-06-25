@@ -3708,7 +3708,7 @@ const redis = createRedis();
 const bus = createPubSubBus(redis);
 const leader = createLeader(redis);
 
-export const { open, close, message, init } = realtime({
+export const { open, close, message, init, shutdown } = realtime({
   bus,
   leader: leader.isLeader,
 });
@@ -3723,11 +3723,28 @@ Single-replica is the same file with no config:
 ```js
 // src/hooks.ws.js (single-replica)
 import { realtime } from 'svelte-realtime/server';
-export const { open, close, message, init } = realtime();
+export const { open, close, message, init, shutdown } = realtime();
 export function upgrade({ cookies }) {
   return validateSession(cookies.session_id) || false;
 }
 ```
+
+### Graceful shutdown
+
+`realtime()` includes a `shutdown` hook - **re-export it** for the graceful drain to run. On `SIGTERM` the adapter calls it before it closes the listen socket and flushes the open WebSockets: new RPC / SSR / upload / cron work is rejected with `UNAVAILABLE`, in-flight work is given a budget to settle, then your `onShutdown` handlers run in order. With no handler registered you still get the in-flight drain for free.
+
+```js
+// src/hooks.ws.js
+import { realtime, onShutdown } from 'svelte-realtime/server';
+export const { open, close, message, init, shutdown } = realtime({ bus, leader: leader.isLeader });
+
+onShutdown(async () => {
+  await leader.stop();        // release the lease so a sibling takes over fast
+  await bus.deactivate?.();
+}, { drainMs: 3000 });         // wait up to 3s for in-flight work before teardown
+```
+
+`onShutdown(handler, { drainMs })` returns an unregister function; a throwing handler is logged and never aborts the rest. `drainMs` (default 5000) is the in-flight drain budget - keep it well under the adapter's `SHUTDOWN_TIMEOUT` (default 30s), the hard cap. If you destructure only `{ open, close, message, init }`, the `shutdown` hook is never wired and the drain does not run - add `shutdown`.
 
 ### Layer 1: manual wiring (experts)
 
@@ -3789,7 +3806,7 @@ const limiter = createRateLimit(redis, { points: 30, interval: 10000 });
 
 setBus(bus);
 
-export const { open, close, init } = realtime({ leader: leader.isLeader });
+export const { open, close, init, shutdown } = realtime({ leader: leader.isLeader });
 export function upgrade({ cookies }) { return validateSession(cookies.session_id) || false; }
 
 export const message = createMessage({
@@ -4323,7 +4340,8 @@ Import from `svelte-realtime/server`.
 | `handleRpc(ws, data, platform, options?)` | Low-level RPC handler |
 | `message` | Ready-made message hook (auto bus-wraps when `setBus` is wired) |
 | `createMessage(options?)` | Custom message hook factory (auto bus-wraps unless `options.platform` is provided) |
-| `realtime(config?)` | One-call setup returning `{ open, close, message, init, upgrade? }` - wires bus + leader + platform from a single declaration of cluster intent |
+| `realtime(config?)` | One-call setup returning `{ open, close, message, init, shutdown, upgrade? }` - wires bus + leader + platform from a single declaration of cluster intent |
+| `onShutdown(handler, { drainMs }?)` | Register a teardown handler run on graceful shutdown after in-flight work drains; returns an unregister fn (re-export `shutdown` from `realtime()` for it to fire) |
 | `setBus(bus)` | Configure the process-wide bus consulted by every framework publish surface (alias for `configureCron({ bus })`) |
 | `getBus()` | Read the process-wide bus, or `null` |
 | `getPlatform()` | Read the framework-owned composed platform after `init` has captured it |

@@ -20,6 +20,7 @@ import { _getIdentityKey } from './identity.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { _tenantTopic, _tenantKey } from './tenant.js';
 import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame } from './upload.js';
+import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 
 const textDecoder = new TextDecoder();
 
@@ -644,7 +645,27 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
  * @param {{ beforeExecute?: (ws: any, rpcPath: string, args: any[]) => Promise<void> | void, onError?: (path: string, error: unknown, ctx: any) => void }} [options]
  * @returns {Promise<{ id: string, ok: boolean, data?: any, code?: string, error?: string }>}
  */
+/**
+ * Graceful-shutdown wrapper around the RPC funnel (text + volatile + batch +
+ * the stream-subscribe branch all flow through here). Once a drain has begun,
+ * new calls are rejected with `UNAVAILABLE` and are NOT counted in-flight (they
+ * return immediately); every accepted call is counted so `onShutdown`'s drain
+ * waits for it to settle. Counting happens before the first `await` so there is
+ * no gap between the gate check and the in-flight increment.
+ */
 async function _executeSingleRpc(ws, msg, platform, options) {
+	if (_isShuttingDown()) {
+		return { id: msg.id, ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down' };
+	}
+	_enterInFlight();
+	try {
+		return await _executeSingleRpcInner(ws, msg, platform, options);
+	} finally {
+		_exitInFlight();
+	}
+}
+
+async function _executeSingleRpcInner(ws, msg, platform, options) {
 	const { rpc: path, id, args: rawArgs, stream: isStream, cursor: clientCursor } = msg;
 	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
@@ -745,6 +766,19 @@ async function _executeSingleRpc(ws, msg, platform, options) {
  * @param {{ beforeExecute?: Function, onError?: Function }} [options]
  */
 async function _executeBinaryRpc(ws, header, payload, platform, options) {
+	if (_isShuttingDown()) {
+		_respond(ws, platform, header.id, { ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down' });
+		return;
+	}
+	_enterInFlight();
+	try {
+		await _executeBinaryRpcInner(ws, header, payload, platform, options);
+	} finally {
+		_exitInFlight();
+	}
+}
+
+async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
 	const { rpc: path, id, args: extraArgs } = header;
 	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
@@ -913,6 +947,7 @@ export async function __directCall(path, args, platform, options) {
 	const fallback = hasFallback ? options.fallback : undefined;
 	const onError = options && typeof options.onError === 'function' ? options.onError : null;
 
+	_enterInFlight();
 	try {
 		return await _runDirectCall(path, args, platform, options);
 	} catch (err) {
@@ -921,10 +956,18 @@ export async function __directCall(path, args, platform, options) {
 			try { onError(err); } catch {}
 		}
 		return fallback;
+	} finally {
+		_exitInFlight();
 	}
 }
 
 async function _runDirectCall(path, args, platform, options) {
+	if (_isShuttingDown()) {
+		// Reject new SSR loads during a drain. A caller that passed `fallback`
+		// gets it (the page renders degraded); otherwise the load throws
+		// UNAVAILABLE. __directCall counts this in-flight either way.
+		throw new LiveError('UNAVAILABLE', 'Server is shutting down');
+	}
 	if (!_isLazyResolved()) await _resolveAllLazy();
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
