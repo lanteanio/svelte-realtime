@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.32] - 2026-06-25
+
+### Added
+
+- **Deterministic-netcode simulation: `svelte-realtime/sim` now exports `runSmoothSim`, `replaySmoothSim`, and `runSmoothSimSwarm` for the server-rewind lag compensation.** A seeded, latency-varying shot stream resolved against a moving board reproduces every hit - target, distance, rewind instant, impact point - bit for bit under the same seed; a divergence between two passes is a real determinism bug. The swarm runs thousands of randomized worlds and reports `{ summary, runs }` in the same shape as the other sims (`runLiveSimSwarm` / `runSimSwarm`), so a CI sweep or a status board can assert "N seeds, 0 violations". It drives the real resolution path - the reach measurement, the favor-shooter clamp, the candidate gate, the rewound narrowphase, the nearest-first `onHit` - over the real history ring, monotonic clock, interest relevancy, and round-trip tracker, so nothing is re-implemented. `buggify` widens the shot lag past the reach and teleports a target into the rewindable window, exercising the reach clamp, the over-window fallback, and the ring's teleport guard. Per-shot domain invariants (bounded reach, no future or out-of-window rewind, a real `[0,1]` ray fraction) are checked inline; `checkRatio` re-runs a fraction of seeds for the two-pass determinism gate.
+
 ## [0.6.0-next.31] - 2026-06-25
 
 ### Fixed

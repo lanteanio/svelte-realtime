@@ -231,7 +231,7 @@ export function _resetSmooth() {
 	_smoothTopics.clear();
 }
 
-function _smoothRecord(name, cfg, platform, rt) {
+export function _smoothRecord(name, cfg, platform, rt) {
 	let rec = _smoothTopics.get(name);
 	if (rec === undefined) {
 		rec = {
@@ -1179,7 +1179,7 @@ function _edgeOwnerNow(rec) {
  * @param {number} nowMono @param {number} reach @param {number | null} rewindAge
  * @returns {number}
  */
-function _smoothRewindAt(nowMono, reach, rewindAge) {
+export function _smoothRewindAt(nowMono, reach, rewindAge) {
 	if (rewindAge === null || rewindAge === undefined) return nowMono;
 	return Math.min(nowMono, Math.max(nowMono - reach, nowMono - rewindAge));
 }
@@ -1199,7 +1199,7 @@ function _smoothRewindAt(nowMono, reach, rewindAge) {
  * @param {any} rec @param {any} ctx @param {any} payload @param {string} shooterKey @param {number | null} now
  * @returns {{ cmd: any, reach: number, rewindAge: number | null, detect: any, nowMono: number | null } | null}
  */
-function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
+export function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
 	const ht = rec.cfg.hitTest;
 	const cmd = payload.cmd;
 	// No owner-clock basis yet (edge cold start): forward at the present.
@@ -1261,7 +1261,7 @@ function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
  * @param {any} rec @param {string} name @param {string} shooterKey
  * @param {any} shooterEntity @param {any} ctxPlatform @param {any} cmd @param {number} rewindAt @param {number} nowMono
  */
-async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctxPlatform, cmd, rewindAt, nowMono) {
+export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, ctxPlatform, cmd, rewindAt, nowMono) {
 	const ht = rec.cfg.hitTest;
 	const cluster = ctxPlatform && ctxPlatform.smooth;
 	// Candidate set, gated at the REWIND instant rather than at receipt: a target
@@ -1533,6 +1533,11 @@ export const _smoothRegister = function smooth(config) {
 
 	const smoothExport = /** @type {any} */ ({});
 	smoothExport.__isSmooth = true;
+	// The normalized, validated config. The deterministic-netcode sim reads it to
+	// build a faithful record through the same `_smoothRecord` the handlers use,
+	// without re-validating. Set once at declaration time (not per tick or
+	// connection), so the hot path is unaffected.
+	smoothExport.__smoothCfg = cfg;
 
 	smoothExport.__smoothSync = live(async (ctx, ...args) => {
 		const roomArgs = args.slice(0, argCount);

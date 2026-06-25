@@ -21,6 +21,11 @@ import { setRuntimeEnv, resetRuntimeEnv } from './shared/runtime.js';
 import { createTestEnv } from './testing.js';
 import { live } from './server.js';
 
+// The lag-compensation ("deterministic netcode") sim drives the smooth shot-resolution
+// path rather than the RPC / stream path, so it lives in its own module; re-exported
+// here so the whole realtime DST surface is one import (svelte-realtime/sim).
+export { runSmoothSim, replaySmoothSim, runSmoothSimSwarm, DEFAULT_SMOOTH_SEED } from './server/sim-smooth.js';
+
 /** A fixed default seed so the zero-config run is itself reproducible. */
 export const DEFAULT_LIVE_SEED = 'svti-live-sim-0';
 

@@ -106,3 +106,129 @@ export function runLiveSimSwarm(config?: LiveSimSwarmConfig): Promise<LiveSimSwa
 
 export const DEFAULT_LIVE_SEED: string;
 export const FIXED_EPOCH: number;
+
+// --- Lag-compensation ("deterministic netcode") sim --------------------------
+// Drives the server-rewind shot-resolution path: a seeded latency-varying shot
+// stream over a moving board must reproduce every hit bit-for-bit under one seed.
+
+export interface SmoothSimConfig {
+	/** Seed string; the same seed reproduces the run bit-for-bit. */
+	seed?: string;
+	/** Entity count (1 shooter + the rest targets); minimum 2. */
+	entities?: number;
+	/** Ticks of board motion recorded into the lag-comp ring. */
+	ticks?: number;
+	/** Shots fired in the seeded stream. */
+	shots?: number;
+	/** Tick interval (ms); sizes the ring and the cadence estimate. */
+	tickMs?: number;
+	/** The favor-shooter rewind cap (ms). */
+	maxRewindMs?: number;
+	/** Area-of-interest cull radius (position units). */
+	radius?: number;
+	/** Widen the shot lag past the reach and teleport a target mid-run, exercising
+	 *  the reach clamp / window fallback / discontinuity guard. */
+	buggify?: boolean;
+	/** Fold an extra value into each hit record (a hook to plant a non-determinism). */
+	onHitTap?: (target: any, info: any) => any;
+	gitCommit?: string;
+}
+
+export interface SmoothSimResult {
+	seed: string;
+	gitCommit: string | null;
+	config: {
+		entities: number;
+		ticks: number;
+		shots: number;
+		tickMs: number;
+		maxRewindMs: number;
+		radius: number;
+		buggify: boolean;
+	};
+	invariantViolations: Array<{ category: string; context: any }>;
+	metrics: {
+		entities: number;
+		ticks: number;
+		shots: number;
+		hits: number;
+		dropped: number;
+		injected: number;
+		events: number;
+	};
+	/** Every resolved hit, nearest-first per shot (the determinism signal). */
+	hitLog: Array<{
+		key: string;
+		dist: number;
+		fraction: number;
+		rewindAt: number;
+		fallback: boolean;
+		px: number;
+		py: number;
+		tap?: any;
+	}>;
+	/** Per-shot reach / rewind measurements (or `{ dropped: true }` for a replay-dropped shot). */
+	shotResults: any[];
+	finalState: {
+		entities: number;
+		ticks: number;
+		shots: number;
+		injected: number;
+		events: number;
+		hitCount: number;
+	};
+	/** True only on a replaySmoothSim result whose violations + state + hits + shots + metrics matched. */
+	reproduced?: boolean;
+}
+
+export function runSmoothSim(config?: SmoothSimConfig): Promise<SmoothSimResult>;
+export function replaySmoothSim(reproducer: SmoothSimResult): Promise<SmoothSimResult>;
+
+export interface SmoothSimSwarmRun {
+	seed: string;
+	ok: boolean;
+	buggified: boolean;
+	fingerprint: string;
+	violations: number;
+	fatals: number;
+	uncaught: number;
+	violationCategories: string[];
+	reproduced: boolean | null;
+	hits: number;
+}
+
+export interface SmoothSimSwarmSummary {
+	total: number;
+	passed: number;
+	failed: number;
+	firstFailingSeed: string | null;
+	failingSeeds: string[];
+	buggify: 'off' | 'on' | 'random';
+	buggified: number;
+	determinismChecks: number;
+	determinismFailures: number;
+	determinismFailingSeeds: string[];
+	gitCommit: string | null;
+	ok: boolean;
+}
+
+export interface SmoothSimSwarmConfig {
+	seeds?: Array<string | number>;
+	count?: number;
+	startSeed?: number;
+	base?: SmoothSimConfig;
+	buggify?: 'off' | 'on' | 'random';
+	buggifyProbability?: number;
+	checkRatio?: number;
+	gitCommit?: string;
+	onResult?: (run: SmoothSimSwarmRun, index: number) => void;
+}
+
+export interface SmoothSimSwarmResult {
+	summary: SmoothSimSwarmSummary;
+	runs: SmoothSimSwarmRun[];
+}
+
+export function runSmoothSimSwarm(config?: SmoothSimSwarmConfig): Promise<SmoothSimSwarmResult>;
+
+export const DEFAULT_SMOOTH_SEED: string;
