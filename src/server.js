@@ -76,6 +76,7 @@ import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShutti
 export { onShutdown, _resetLifecycle };
 import { introspect } from './server/introspect.js';
 export { introspect };
+import { _createAdminHandler } from './server/admin.js';
 // Bind framework-internal background teardown (cron scheduler + stale-reload
 // watchdogs) into the graceful-shutdown drain. One-way: lifecycle never imports
 // cron-engine / server.js, so this avoids an import cycle.
@@ -3275,7 +3276,7 @@ export function publish(topic, event, data, options) {
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin } = cfg;
 
 	if (bus !== undefined) _setBus(bus);
 	if (leader !== undefined) configureCron({ leader });
@@ -3311,5 +3312,16 @@ export function realtime(config) {
 		},
 	};
 	if (typeof upgradeFn === 'function') /** @type {any} */ (hooks).upgrade = upgradeFn;
+	// Admin / observability plane (opt-in, fail-closed): `admin: { requires }` adds
+	// a Web Request -> Response handler for the reserved `/__realtime/*` path. With
+	// no `admin` configured there is no handler at all - the route cannot exist
+	// without an explicit auth check. Mount it yourself (a SvelteKit `+server.js`
+	// re-exporting the hook) or let the adapter wire the reserved path to it.
+	if (admin !== undefined && admin !== null) {
+		if (typeof admin !== 'object') {
+			throw new Error('[svelte-realtime] realtime({ admin }): admin must be an object like { requires: (request) => boolean }');
+		}
+		/** @type {any} */ (hooks).admin = _createAdminHandler(admin);
+	}
 	return hooks;
 }

@@ -2225,6 +2225,26 @@ const snap = introspect();
 
 It is **counts-only by default** - PII-conscious. Opt into the structural detail explicitly: `introspect({ handlers: true })` adds the registered handler `paths` (code structure), and `introspect({ topics: true })` adds the top 20 topics by subscriber count (topic names can embed ids, so they are off by default). The read is pure (no mutation) and cheap (in-memory registry sizes), so it is safe to call on a scrape interval.
 
+### The admin route (`/__realtime`)
+
+Opt into an auth-gated HTTP endpoint with `realtime({ admin: { requires } })`. It returns an `admin(request)` handler - a Web `Request` -> `Response` router for the reserved `/__realtime/*` path that serves the snapshot at `GET /__realtime/introspect` (`?handlers=true` / `?topics=true` opt-ins).
+
+```js
+// hooks.ws.js
+import { realtime } from 'svelte-realtime/server';
+export const { open, close, message, init, shutdown, admin } = realtime({
+  admin: { requires: (request) => request.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}` }
+});
+```
+
+```js
+// src/routes/__realtime/[...path]/+server.js  (mount it yourself, or let the adapter wire it)
+import { admin } from '../../../hooks.ws.js';
+export const GET = ({ request }) => admin(request);
+```
+
+The route is **fail-closed**: with no `admin` configured there is no handler at all, and when configured **every** request runs `requires(request)` before any data is gathered. Only a strict `=== true` admits - a non-true return, a thrown check, or a rejected promise all deny with `403`, and the snapshot is never served on a denial. Responses carry `cache-control: no-store`. The `requires` check is yours: a bearer token, a session cookie, an IP allowlist, whatever your deployment trusts.
+
 ---
 
 ## Production assertions

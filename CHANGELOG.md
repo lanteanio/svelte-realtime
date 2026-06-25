@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.36] - 2026-06-26
+
+### Added
+
+- **`realtime({ admin: { requires } })`: an opt-in, fail-closed admin / observability plane.** When configured, `realtime()` returns an `admin(request)` handler - a framework-agnostic Web `Request` -> `Response` router for the reserved `/__realtime/*` path. Today `GET /__realtime/introspect` serves the {@link introspect} snapshot (with `?handlers=true` / `?topics=true` opt-ins). The route is **fail-closed**: with no `admin` configured there is no handler at all, and when configured EVERY request runs your `requires(request)` auth check before any data is gathered - only a strict `=== true` admits (a non-true return, a thrown check, or a rejected promise all deny with 403, and the snapshot is never served on a denial). Responses carry `cache-control: no-store`. Because it returns a Web `Response`, it drops straight into a SvelteKit `+server.js` route (`export const GET = ({ request }) => admin(request)`), or the adapter can wire the reserved path to it. Adversarially security-reviewed (7 bypass vectors, all closed).
+
 ## [0.6.0-next.35] - 2026-06-26
 
 ### Added

@@ -3610,6 +3610,19 @@ export interface RealtimeConfig {
 	 * wire. Omit for the single-tenant, zero-cost default.
 	 */
 	tenant?: ((user: any) => string | null | undefined) | null;
+	/**
+	 * Opt-in admin / observability plane. When set, `realtime()` returns an
+	 * `admin(request)` handler (a Web `Request` -> `Response` router) for the
+	 * reserved `/__realtime/*` path - today `GET /__realtime/introspect` serves the
+	 * {@link introspect} snapshot (with `?handlers=true` / `?topics=true` opt-ins).
+	 *
+	 * The route is **fail-closed**: with no `admin` configured there is no handler
+	 * at all, and when configured EVERY request runs `requires(request)` before any
+	 * data is gathered - only a strict `true` admits (a non-true return or a thrown
+	 * error denies with 403). Mount the handler yourself (a SvelteKit `+server.js`
+	 * re-exporting it) or let the adapter wire the reserved path to it.
+	 */
+	admin?: { requires: (request: Request) => boolean | Promise<boolean> } | null;
 }
 
 /**
@@ -3630,6 +3643,13 @@ export interface RealtimeHooks {
 	 */
 	shutdown(ctx: { platform: Platform }): Promise<void>;
 	upgrade?: (...args: any[]) => any;
+	/**
+	 * Admin / observability request handler (a Web `Request` -> `Response` router
+	 * for `/__realtime/*`). Present only when the caller passed `admin` in the
+	 * config. Fail-closed: every request runs the configured `requires` auth check
+	 * before any data is gathered.
+	 */
+	admin?: (request: Request) => Promise<Response>;
 }
 
 /**
