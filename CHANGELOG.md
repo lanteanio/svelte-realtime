@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.37] - 2026-06-26
+
+### Added
+
+- **`introspect()` now composes the adapter's transport-layer health under a `transport` key.** Alongside the dispatch snapshot (handlers, topics, push, cron, reactive, capacity), the snapshot carries `transport`: the connection count, backpressure posture, protection level, payload cap, and framework-invariant counters read from the adapter platform captured at `init`. The adapter snapshot is itself PII-free (counts and enums only, no topic names), so it is always included when available - no opt-in flag. On an older adapter without `platform.introspect`, or before `init({ platform })` has run, `transport` is `null`; a throwing platform never breaks the rest of the snapshot. Needs `svelte-adapter-uws >= 0.6.0-next.36`, which also auto-wires the reserved `/__realtime/*` route to the `admin(request)` handler so `GET /__realtime/introspect` returns the full dispatch + transport picture from one call. No dep floor bump - the feature degrades gracefully.
+
 ## [0.6.0-next.36] - 2026-06-26
 
 ### Added

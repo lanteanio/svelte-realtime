@@ -101,11 +101,25 @@ export function introspect(options = {}) {
 		cron = { jobs: cronRegistry.size };
 	}
 
+	// Transport-layer snapshot from the adapter platform captured at init
+	// (`setCronPlatform`). Older adapters (or a process that never wired init)
+	// have no `platform.introspect`, so this stays null - the dispatch snapshot
+	// is useful standalone. The adapter snapshot is itself PII-free (counts and
+	// enums only), so it is always included when available, with no opt-in flag.
+	let transport = null;
+	try {
+		const p = state.cronPlatform;
+		if (p && typeof p.introspect === 'function') transport = p.introspect();
+	} catch {
+		transport = null;
+	}
+
 	return {
 		shuttingDown: _isShuttingDown(),
 		inFlight: inFlightCount(),
 		handlers,
 		topics: _topicSnapshot(options.topics === true),
+		transport,
 		push: { users: _pushRegistry.size, sessions: _pushSessionRegistry.size },
 		cron,
 		reactive: {

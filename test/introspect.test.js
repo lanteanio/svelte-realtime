@@ -37,6 +37,8 @@ describe('introspect()', () => {
 		expect(snap.capacity).toMatchObject({ rateLimitBuckets: expect.any(Number), throttles: expect.any(Number), debounces: expect.any(Number), presenceRefs: expect.any(Number), lazyQueue: expect.any(Number) });
 		expect(typeof snap.metrics).toBe('boolean');
 		expect(typeof snap.admission).toBe('boolean');
+		// Transport key is always present (null when no adapter platform captured).
+		expect('transport' in snap).toBe(true);
 		// PII-free by default: no handler paths, no topic names.
 		expect(snap.handlers.paths).toBeUndefined();
 		expect(snap.topics.top).toBeUndefined();
@@ -84,5 +86,45 @@ describe('introspect()', () => {
 
 	it('reflects the graceful-shutdown gate', async () => {
 		expect(introspect().shuttingDown).toBe(false);
+	});
+
+	it('composes the adapter transport snapshot under `transport` when the platform provides it', async () => {
+		const { state } = await import('../src/server/state.js');
+		const saved = state.cronPlatform;
+		const fakeTransport = {
+			connections: 7, closedWsAborts: 0, protection: 'normal', maxPayloadLength: 1048576,
+			pressure: { active: false, reason: 'NONE', value: 0, subscriberRatio: 0, publishRate: 0, memoryMB: 0 },
+			assertions: {}
+		};
+		state.cronPlatform = { introspect: () => fakeTransport };
+		try {
+			expect(introspect().transport).toEqual(fakeTransport);
+		} finally {
+			state.cronPlatform = saved;
+		}
+	});
+
+	it('reports transport: null when no adapter platform is captured', async () => {
+		const { state } = await import('../src/server/state.js');
+		const saved = state.cronPlatform;
+		state.cronPlatform = null;
+		try {
+			expect(introspect().transport).toBeNull();
+		} finally {
+			state.cronPlatform = saved;
+		}
+	});
+
+	it('keeps transport null when the platform introspect throws (never breaks the snapshot)', async () => {
+		const { state } = await import('../src/server/state.js');
+		const saved = state.cronPlatform;
+		state.cronPlatform = { introspect: () => { throw new Error('boom'); } };
+		try {
+			const snap = introspect();
+			expect(snap.transport).toBeNull();
+			expect(typeof snap.handlers.total).toBe('number'); // rest of the snapshot intact
+		} finally {
+			state.cronPlatform = saved;
+		}
 	});
 });

@@ -3735,6 +3735,27 @@ export interface RealtimeIntrospection {
 		/** Top 20 topics by subscriber count - only present when called with `{ topics: true }`. */
 		top?: Array<{ topic: string; subscribers: number }>;
 	};
+	/**
+	 * Transport-layer snapshot from the adapter platform (connection count,
+	 * backpressure posture, protection level, payload cap, invariant counters).
+	 * PII-free, always included when the adapter provides `platform.introspect`;
+	 * `null` on older adapters or before `init({ platform })` ran.
+	 */
+	transport: {
+		connections: number;
+		closedWsAborts: number;
+		protection: 'normal' | 'elevated' | 'siege';
+		maxPayloadLength: number;
+		pressure: {
+			active: boolean;
+			reason: string;
+			value: number;
+			subscriberRatio: number;
+			publishRate: number;
+			memoryMB: number;
+		};
+		assertions: Record<string, number>;
+	} | null;
 	/** Push registry sizes (unique users / sessions with a live connection). */
 	push: { users: number; sessions: number };
 	cron: { jobs: number; running?: number; schedulerActive?: boolean; secondResolution?: boolean };

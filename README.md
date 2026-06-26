@@ -2219,11 +2219,15 @@ const snap = introspect();
 //   cron: { jobs: 3, running: 0, schedulerActive: true, secondResolution: false },
 //   reactive: { derived: 2, effect: 1, aggregate: 1, watchedTopics: 4 },
 //   capacity: { rateLimitBuckets: 9, throttles: 0, debounces: 0, presenceRefs: 0, lazyQueue: 0 },
-//   tenants: 0, metrics: true, admission: false
+//   tenants: 0, metrics: true, admission: false,
+//   transport: { connections: 38, protection: 'normal', maxPayloadLength: 1048576,
+//                pressure: { active: false, reason: 'NONE', ... }, closedWsAborts: 0, assertions: {} }
 // }
 ```
 
 It is **counts-only by default** - PII-conscious. Opt into the structural detail explicitly: `introspect({ handlers: true })` adds the registered handler `paths` (code structure), and `introspect({ topics: true })` adds the top 20 topics by subscriber count (topic names can embed ids, so they are off by default). The read is pure (no mutation) and cheap (in-memory registry sizes), so it is safe to call on a scrape interval.
+
+The `transport` key is the adapter's transport-layer health (connection count, backpressure posture, protection level, payload cap, invariant counters), composed in automatically when running on `svelte-adapter-uws >= 0.6.0-next.36`. It is itself PII-free (counts and enums only, no topic names), so it is always included with no opt-in. On an older adapter, or before `init({ platform })` has run, `transport` is `null`.
 
 ### The admin route (`/__realtime`)
 
@@ -2237,8 +2241,10 @@ export const { open, close, message, init, shutdown, admin } = realtime({
 });
 ```
 
+On `svelte-adapter-uws >= 0.6.0-next.36` you do not need to mount anything: when your handler exports `admin`, the adapter auto-wires the reserved `/__realtime/*` path to it (registered before the SSR catch-all, so it never hits page routing). To mount it yourself instead - on another adapter, or to put it under a different path - drop it into a `+server.js` route:
+
 ```js
-// src/routes/__realtime/[...path]/+server.js  (mount it yourself, or let the adapter wire it)
+// src/routes/__realtime/[...path]/+server.js  (only needed if NOT on adapter-uws >= next.36)
 import { admin } from '../../../hooks.ws.js';
 export const GET = ({ request }) => admin(request);
 ```
