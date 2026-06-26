@@ -462,7 +462,10 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// any handler running with this ctx) can arm the room's single pending alarm.
 	// Keyed by the wire topic so two tenants' same logical room never share an alarm.
 	if (streamOpts && streamOpts.alarm && typeof topic === 'string') {
-		_bindAlarmCtx(ctx, { wireTopic: topic, onAlarm: streamOpts.alarm.onAlarm });
+		// Pass the RPC path (`msg.rpc`, the registry key) + tenant as the durable row's
+		// resolver metadata so a cross-restart recovery poll can re-find onAlarm via
+		// registry.get(path) (the in-memory onAlarm closure is gone after a restart).
+		_bindAlarmCtx(ctx, { wireTopic: topic, onAlarm: streamOpts.alarm.onAlarm, path: msg.rpc, tenantId: ctx.tenantId });
 	}
 	const replayOpts = /** @type {any} */ (fn).__replay;
 	// Register the replay topic at subscribe for a dynamic (factory) topic so

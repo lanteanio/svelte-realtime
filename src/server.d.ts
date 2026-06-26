@@ -3460,31 +3460,63 @@ export function configureCron(
 ): void;
 
 /**
+ * Opaque-to-the-store resolver metadata persisted with an alarm so a cross-restart
+ * recovery poll can re-find its handler (`path` is the stream's RPC registry key;
+ * the in-memory `onAlarm` closure is gone after a restart). The store treats it as
+ * an opaque blob.
+ */
+export interface AlarmMeta {
+	path?: string;
+	tenantId?: string | null;
+}
+
+/** A due alarm returned by `AlarmStore.due(nowMs)` for the recovery poll. */
+export interface AlarmDue {
+	topic: string;
+	at: number;
+	meta?: AlarmMeta | null;
+}
+
+/**
  * A durable alarm store backing `live.alarm` across restarts + a cluster. The
  * in-memory default uses live process timers (an alarm survives the room going
  * idle within the process, but not a restart); a durable store persists
- * `{topic, at}` so an alarm survives a restart and - paired with a `leader` -
+ * `{topic, at, meta}` so an alarm survives a restart and - paired with a `leader` -
  * fires exactly once cluster-wide. The Postgres / Redis implementations live in
- * `svelte-adapter-uws-extensions`.
+ * `svelte-adapter-uws-extensions` (`createAlarmStore`).
  */
 export interface AlarmStore {
-	set(topic: string, at: number): void | Promise<void>;
-	get(topic: string): number | null | Promise<number | null>;
-	delete(topic: string): void | Promise<void>;
+	/** Persist (or replace) the alarm for `topic`, due at epoch-ms `at`. */
+	set(topic: string, at: number, meta?: AlarmMeta | null): void | Promise<void>;
+	/**
+	 * Remove the alarm for `topic`. Returns whether THIS call removed a present row -
+	 * the atomic claim that guarantees single-fire between the precise in-memory timer
+	 * and the recovery poll. (`void` is treated as a successful claim for back-compat.)
+	 */
+	delete(topic: string): boolean | void | Promise<boolean | void>;
+	/**
+	 * Optional. Return the alarms whose `at <= nowMs` (the recovery poll reads this on
+	 * the leader to fire alarms an instance left behind when it restarted before its
+	 * in-memory timer ran). Omit it and cross-restart recovery is disabled; in-memory
+	 * timers still fire while the process lives.
+	 */
+	due?(nowMs: number): AlarmDue[] | Promise<AlarmDue[]>;
 }
 
 /**
  * Configure `live.alarm`. `store` plugs a durable cluster store into the seam so
  * alarms survive a restart; `leader` gates firing to one instance (so an alarm
- * fires exactly once cluster-wide), mirroring `configureCron({ leader })`. Both
- * optional. Pass `null` to clear both. With neither, `live.alarm` runs
- * single-instance in-memory - correct for dev and a single box.
+ * fires exactly once cluster-wide), mirroring `configureCron({ leader })`; `pollMs`
+ * (default 15000) sets the recovery-poll cadence. All optional. Pass `null` to
+ * clear store + leader and reset the cadence. With neither store nor leader,
+ * `live.alarm` runs single-instance in-memory - correct for dev and a single box.
  */
 export function configureAlarm(
 	config:
 		| {
 			store?: AlarmStore | null;
 			leader?: (() => boolean) | null;
+			pollMs?: number;
 		}
 		| null
 ): void;

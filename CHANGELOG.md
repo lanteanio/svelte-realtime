@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.45] - 2026-06-26
+
+### Added
+
+- **`live.alarm` now survives a restart and fires once cluster-wide** when a durable store is wired. `configureAlarm({ store, leader })` gains a leader-gated recovery poll: the elected instance periodically sweeps the store for alarms whose deadline passed but whose owning instance restarted (or crashed) before its in-memory timer ran, re-resolves their handler, and fires them. The owning instance still fires precisely via its in-memory timer when it stays up; the poll is the safety net for orphans. Single-fire is guaranteed by an atomic store claim - `store.delete(topic)` returns whether THIS call removed the row, and both the in-memory timer and the poll fire only on winning that claim, so they can never double-fire. A durable store + leader make an alarm fire exactly once across the cluster; the in-memory default is unchanged (zero-config, survives the room going idle within the process). The Postgres / Redis stores ship in `svelte-adapter-uws-extensions` (`createAlarmStore`, `>= 0.6.0-next.33`); wire one with `configureAlarm({ store: createAlarmStore(client), leader: () => leader.isLeader() })`. `configureAlarm` also accepts `pollMs` (default 15000) to tune the recovery cadence.
+
+### Changed
+
+- **`configureAlarm` store seam.** A store now persists resolver metadata so the recovery poll can re-find a handler after a restart: `set(topic, at, meta)` gains a third `meta` argument (the stream's RPC path + tenant), `delete(topic)` is now read for its return value (the atomic single-fire claim), and an optional `due(nowMs)` enables the recovery poll. A store without `due` still works (in-memory timers fire while the process lives) but logs once that cross-restart recovery is off. Existing in-memory usage and the `{ leader }`-only configuration are unchanged. Note: renaming an alarm-bearing stream's RPC path across a deploy abandons that stream's in-flight durable alarms (the poll resolves handlers by path; a removed/renamed path is garbage-collected, never fired).
+
 ## [0.6.0-next.44] - 2026-06-26
 
 ### Added

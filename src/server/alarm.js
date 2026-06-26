@@ -6,23 +6,32 @@
 // server ctx (no ws - the room may be empty) and runs `onAlarm`, even if everyone
 // disconnected. Mirrors the cron engine's scheduler/leader/drain shape; durability
 // + cluster single-fire ride a pluggable store seam (in-memory default; the
-// extensions Postgres/Redis store is the follow-up layer), exactly like
-// `live.idempotent({ store })` / `live.lock({ lock })`.
-//
-// Design: __plans/0.6/b1-live-alarm-design.md
+// extensions Postgres/Redis `createAlarmStore` is the durable layer), exactly like
+// `live.idempotent({ store })` / `live.lock({ lock })`. A wired store also enables a
+// leader-gated recovery poll that re-fires alarms an instance left behind on restart.
 
-import { state } from './state.js';
+import { state, registry } from './state.js';
 import { _IS_DEV } from './env.js';
-import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
+import { wallEpoch, setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from '../shared/runtime.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
+import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { LiveError } from './live-error.js';
+
+/**
+ * @typedef {{ path?: string, tenantId?: string | null }} AlarmMeta
+ * Opaque-to-the-store resolver metadata persisted alongside `{topic, at}`. `path`
+ * is the stream's RPC registry key, so a cross-restart recovery poll can re-resolve
+ * `onAlarm` from `registry.get(path)` (the in-memory `onAlarm` closure is gone after
+ * a restart). The durable store treats it as an opaque blob; only the realtime poll
+ * interprets it.
+ */
 
 /**
  * Per-room pending alarms (the in-memory store). One entry per room, keyed by the
  * WIRE topic (already tenant-scoped, so two tenants' same logical room never
  * collide). `setAlarm` replaces the entry.
- * @type {Map<string, { at: number, timer: any, onAlarm: Function }>}
+ * @type {Map<string, { at: number, timer: any, onAlarm: Function, meta: AlarmMeta | null }>}
  */
 const _pending = new Map();
 
@@ -30,15 +39,29 @@ const _pending = new Map();
 const _MAX_ALARMS = 100000;
 let _alarmCapWarnFired = false;
 let _alarmPlatformWarnFired = false;
+let _alarmDueWarnFired = false;
 
 /**
  * Optional durable store seam (default null = in-memory live timers). A durable
- * store persists `{topic, at}` so alarms survive a restart and fire once
+ * store persists `{topic, at, meta}` so alarms survive a restart and fire once
  * cluster-wide; set it via `configureAlarm({ store })`. The realtime layer stays
  * cluster-agnostic - the durable Postgres/Redis store is the extensions layer.
- * @type {{ set: (topic: string, at: number) => any, get: (topic: string) => any, delete: (topic: string) => any } | null}
+ *
+ * - `set(topic, at, meta)` persists/replaces an alarm.
+ * - `delete(topic)` removes it and returns whether THIS call removed a present row
+ *   (the atomic claim that guarantees single-fire between the precise in-memory
+ *   timer and the recovery poll).
+ * - `due(nowMs)` (optional) returns the alarms whose `at <= nowMs` for the recovery
+ *   poll. Omit it and cross-restart recovery is disabled (a one-time dev warning) -
+ *   the in-memory timers still fire while the process lives.
+ * @type {{ set: (topic: string, at: number, meta?: AlarmMeta | null) => any, delete: (topic: string) => any, due?: (nowMs: number) => any } | null}
  */
 let _alarmStore = null;
+
+/** Recovery-poll cadence in ms (the leader sweeps `store.due(now)` this often). */
+let _alarmPollMs = 15000;
+/** @type {any} */ let _alarmPollTimer = null;
+/** @type {any} */ let _alarmStartupTimer = null;
 
 /**
  * Optional leader gate (default null = every instance fires its own in-memory
@@ -50,21 +73,38 @@ let _alarmLeader = null;
 
 /**
  * Configure the alarm subsystem. `store` plugs a durable cluster store into the
- * seam; `leader` gates firing to one instance. Both optional; `null` clears both.
+ * seam; `leader` gates firing to one instance; `pollMs` sets the recovery-poll
+ * cadence. All optional; `null` clears store + leader and resets the cadence.
  *
- * @param {{ store?: { set: Function, get: Function, delete: Function } | null, leader?: (() => boolean) | null } | null} config
+ * A store that implements `due(nowMs)` enables cross-restart recovery: the leader
+ * polls `due(now)` every `pollMs` and fires any alarm an instance left behind when
+ * it restarted before its in-memory timer ran. A store WITHOUT `due` still persists
+ * `set`/`delete` but only the in-memory timers fire (a one-time dev warning notes
+ * recovery is off). A `leader` without a `store` suppresses non-leader alarms with
+ * no way to recover them - configure a store for real cluster durability.
+ *
+ * @param {{ store?: { set: Function, delete: Function, due?: Function } | null, leader?: (() => boolean) | null, pollMs?: number } | null} config
  */
 export function configureAlarm(config) {
-	if (config === null) { _alarmStore = null; _alarmLeader = null; return; }
+	if (config === null) { _alarmStore = null; _alarmLeader = null; _alarmPollMs = 15000; _clearAlarmPoll(); return; }
 	if (typeof config !== 'object') {
 		throw new Error('[svelte-realtime] configureAlarm: config must be an object or null');
 	}
-	if (config.store === undefined && config.leader === undefined) {
+	if (config.store === undefined && config.leader === undefined && config.pollMs === undefined) {
 		throw new Error('[svelte-realtime] configureAlarm: config must include at least one of store or leader');
+	}
+	if (config.pollMs !== undefined) {
+		if (typeof config.pollMs !== 'number' || !Number.isFinite(config.pollMs) || config.pollMs < 1) {
+			throw new Error('[svelte-realtime] configureAlarm: pollMs must be a positive number');
+		}
+		_alarmPollMs = config.pollMs;
 	}
 	if (config.store !== undefined) {
 		if (config.store !== null && (typeof config.store !== 'object' || typeof config.store.set !== 'function' || typeof config.store.delete !== 'function')) {
 			throw new Error('[svelte-realtime] configureAlarm: store must implement set(topic, at) and delete(topic)');
+		}
+		if (config.store !== null && config.store.due !== undefined && typeof config.store.due !== 'function') {
+			throw new Error('[svelte-realtime] configureAlarm: store.due, when provided, must be a function due(nowMs)');
 		}
 		_alarmStore = config.store;
 	}
@@ -74,6 +114,19 @@ export function configureAlarm(config) {
 		}
 		_alarmLeader = config.leader;
 	}
+	// (Re)start or stop the recovery poll to match the current store. A store with
+	// `due` polls; anything else does not (and a store without `due` warns once).
+	_clearAlarmPoll();
+	if (_alarmStore && typeof _alarmStore.due === 'function') {
+		_ensureAlarmPoll();
+	} else if (_alarmStore && !_alarmDueWarnFired && _IS_DEV) {
+		_alarmDueWarnFired = true;
+		console.warn(
+			'[svelte-realtime] configureAlarm: the wired store has no due(nowMs); cross-restart alarm recovery is disabled.\n' +
+			'  In-memory timers still fire while the process lives, but alarms armed before a restart will not re-fire.\n' +
+			'  Provide due(nowMs) on the store for full durability.'
+		);
+	}
 }
 
 /**
@@ -82,17 +135,26 @@ export function configureAlarm(config) {
  * topic + onAlarm handler, so the handler can arm/read/cancel the room's single
  * pending alarm. The ctx is per-call, so no restore is needed (mirrors the
  * ctx.compensate shadow lifecycle).
+ *
+ * `path` (the stream's RPC registry key) + `tenantId` are captured as the durable
+ * row's resolver metadata so a cross-restart recovery poll can re-find `onAlarm`
+ * via `registry.get(path)` (see `_pollAlarms`). They are optional - a bare bind
+ * without them keeps the in-memory path working (durability just needs the live
+ * dispatch bind, which always supplies `path`).
  * @param {any} ctx
- * @param {{ wireTopic: string, onAlarm: Function }} binding
+ * @param {{ wireTopic: string, onAlarm: Function, path?: string, tenantId?: string | null }} binding
  */
 export function _bindAlarmCtx(ctx, binding) {
-	const { wireTopic, onAlarm } = binding;
-	ctx.setAlarm = (at) => _setAlarm(wireTopic, at, onAlarm);
+	const { wireTopic, onAlarm, path, tenantId } = binding;
+	const meta = (path !== undefined || (tenantId !== undefined && tenantId !== null))
+		? { path, tenantId: tenantId ?? null }
+		: null;
+	ctx.setAlarm = (at) => _setAlarm(wireTopic, at, onAlarm, meta);
 	ctx.getAlarm = () => _getAlarm(wireTopic);
 	ctx.deleteAlarm = () => _deleteAlarm(wireTopic);
 }
 
-function _setAlarm(wireTopic, at, onAlarm) {
+function _setAlarm(wireTopic, at, onAlarm, meta = null) {
 	if (typeof at !== 'number' || !Number.isFinite(at)) {
 		throw new LiveError('VALIDATION', '[svelte-realtime] ctx.setAlarm(at): at must be a finite epoch-ms number');
 	}
@@ -111,10 +173,11 @@ function _setAlarm(wireTopic, at, onAlarm) {
 		}
 		return;
 	}
-	_pending.set(wireTopic, { at, timer: _schedule(wireTopic, at), onAlarm });
+	_pending.set(wireTopic, { at, timer: _schedule(wireTopic, at), onAlarm, meta });
 	// Durable store (when wired): persist so the alarm survives a restart + fires
-	// once cluster-wide. Best-effort - the in-memory timer is the live path.
-	if (_alarmStore) { try { _alarmStore.set(wireTopic, at); } catch { /* best-effort */ } }
+	// once cluster-wide. Best-effort - the in-memory timer is the live path. `meta`
+	// carries the resolver path so a recovery poll can re-find onAlarm after a restart.
+	if (_alarmStore) { try { _alarmStore.set(wireTopic, at, meta); } catch { /* best-effort */ } }
 }
 
 /**
@@ -198,10 +261,33 @@ async function _fire(wireTopic) {
 		if (!isLeader) return;
 	}
 
-	// The firing instance owns the durable record: claim-and-delete so it cannot be
-	// re-fired by another instance's poll.
-	if (_alarmStore) { try { _alarmStore.delete(wireTopic); } catch { /* best-effort */ } }
+	// The firing instance claims the durable record atomically: `delete` returns
+	// whether THIS call removed a present row. If the recovery poll already fired
+	// (and claimed) it, the claim fails and we skip - this is the single-fire
+	// backstop between the precise in-memory timer and the poll. A store error fails
+	// OPEN (fire anyway): at-least-once is the durable-alarm contract, so onAlarm
+	// must be idempotent. No store -> the local one-shot above is the sole arbiter.
+	if (_alarmStore) {
+		let claimed;
+		try { claimed = await _alarmStore.delete(wireTopic); }
+		catch { claimed = true; }
+		if (!claimed) return;
+	}
 
+	await _invokeAlarm(wireTopic, entry.onAlarm, entry.meta);
+}
+
+/**
+ * Build a fresh ws-less server ctx for the room and run its `onAlarm`. Shared by
+ * the precise in-memory timer (`_fire`) and the cross-restart recovery poll
+ * (`_pollAlarms`); the caller has already claimed the alarm (one-shot / store
+ * claim), so this just reconstructs ctx and invokes the handler with in-flight
+ * accounting + error isolation - the same contract as a cron tick.
+ * @param {string} wireTopic
+ * @param {Function} onAlarm
+ * @param {AlarmMeta | null} meta
+ */
+async function _invokeAlarm(wireTopic, onAlarm, meta) {
 	const platform = state.cronPlatform;
 	if (!platform) {
 		if (_IS_DEV && !_alarmPlatformWarnFired) {
@@ -225,9 +311,10 @@ async function _fire(wireTopic) {
 		// pathological tenant resolver cannot double-prefix the already-scoped topic.
 		ctx.publish = (event, data) => ctx._publishWire(wireTopic, event, data);
 		// Re-bind the alarm helpers so onAlarm can re-arm (TTL refresh from inside the
-		// handler) or cancel its own room's alarm.
-		_bindAlarmCtx(ctx, { wireTopic, onAlarm: entry.onAlarm });
-		await entry.onAlarm(ctx);
+		// handler) or cancel its own room's alarm - carrying the same resolver meta so
+		// a re-armed alarm stays recoverable across a restart.
+		_bindAlarmCtx(ctx, { wireTopic, onAlarm, path: meta ? meta.path : undefined, tenantId: meta ? meta.tenantId : undefined });
+		await onAlarm(ctx);
 	} catch (err) {
 		if (state.serverErrorHandler) {
 			state.serverErrorHandler(wireTopic, err);
@@ -240,6 +327,84 @@ async function _fire(wireTopic) {
 }
 
 /**
+ * Recovery poll: the leader sweeps the durable store for alarms whose deadline has
+ * passed but whose owning instance never fired them (it restarted/crashed before
+ * its in-memory timer ran, so no `_pending` entry exists anywhere). For each, it
+ * re-resolves `onAlarm` from the registry by the persisted RPC path, claims the row
+ * atomically, and fires. Topics still live in `_pending` are skipped - the owner's
+ * precise timer fires those. Mirrors `cron-engine._tickCron`'s leader gate + lazy
+ * resolution + in-flight drain.
+ */
+export async function _pollAlarms() {
+	if (_isShuttingDown()) return;
+	if (!_alarmStore || typeof _alarmStore.due !== 'function') return;
+	// Resolve lazy stream modules so `registry.get(path).__streamOptions.alarm` is
+	// populated before we decide a row is stale (mirrors the cron tick).
+	if (!_isLazyResolved()) await _resolveAllLazy();
+	if (_isShuttingDown()) return;
+
+	// Leader gate: exactly one instance sweeps the shared store. A throwing leader
+	// fails closed (skip this tick) - the next tick retries.
+	if (_alarmLeader !== null) {
+		let isLeader;
+		try { isLeader = _alarmLeader(); }
+		catch (err) {
+			if (_IS_DEV) console.error('[svelte-realtime] configureAlarm leader threw; skipping alarm poll:', err);
+			return;
+		}
+		if (!isLeader) return;
+	}
+
+	let due;
+	try { due = await _alarmStore.due(wallEpoch()); }
+	catch (err) {
+		if (_IS_DEV) console.error('[svelte-realtime] alarm store due() failed; skipping poll:', err);
+		return;
+	}
+	if (!Array.isArray(due) || due.length === 0) return;
+
+	for (const row of due) {
+		if (_isShuttingDown()) return;
+		const wireTopic = row && row.topic;
+		if (typeof wireTopic !== 'string') continue;
+		// The owner's live timer fires this one precisely - don't race it from the poll.
+		if (_pending.has(wireTopic)) continue;
+		const meta = (row && row.meta) || null;
+		const path = meta && meta.path;
+		const fn = typeof path === 'string' ? registry.get(path) : undefined;
+		const onAlarm = fn && /** @type {any} */ (fn).__streamOptions
+			&& /** @type {any} */ (fn).__streamOptions.alarm
+			&& /** @type {any} */ (fn).__streamOptions.alarm.onAlarm;
+		// Claim the row regardless of resolvability: an atomic delete both arbitrates
+		// single-fire AND garbage-collects an orphan whose stream was removed/renamed
+		// (claimed but unresolvable -> drop, never accumulate).
+		let claimed;
+		try { claimed = await _alarmStore.delete(wireTopic); }
+		catch { continue; }
+		if (!claimed) continue; // another poller / the owner's timer won the claim
+		if (typeof onAlarm !== 'function') continue; // stale row GC'd above; nothing to run
+		await _invokeAlarm(wireTopic, onAlarm, meta);
+	}
+}
+
+/** Start the recovery poll (idempotent). Only meaningful when a store with `due` is wired. */
+function _ensureAlarmPoll() {
+	if (_alarmPollTimer) return;
+	_alarmPollTimer = setIntervalTimer(_pollAlarms, _alarmPollMs);
+	if (_alarmPollTimer && _alarmPollTimer.unref) _alarmPollTimer.unref();
+	// A short startup tick so a freshly-(re)started leader recovers overdue orphans
+	// promptly instead of waiting a full poll interval.
+	_alarmStartupTimer = setTimer(_pollAlarms, 1000);
+	if (_alarmStartupTimer && _alarmStartupTimer.unref) _alarmStartupTimer.unref();
+}
+
+/** Stop the recovery poll (clears both timers). */
+function _clearAlarmPoll() {
+	if (_alarmPollTimer) { clearIntervalTimer(_alarmPollTimer); _alarmPollTimer = null; }
+	if (_alarmStartupTimer) { clearTimer(_alarmStartupTimer); _alarmStartupTimer = null; }
+}
+
+/**
  * Reset all alarms (clears timers + the pending map + warn-once flags). Tests +
  * HMR. The store + leader config are user-provided refs captured once per process,
  * so they are intentionally NOT cleared (mirrors `_clearCron`).
@@ -248,8 +413,10 @@ async function _fire(wireTopic) {
 export function _resetAlarms() {
 	for (const e of _pending.values()) clearTimer(e.timer);
 	_pending.clear();
+	_clearAlarmPoll();
 	_alarmCapWarnFired = false;
 	_alarmPlatformWarnFired = false;
+	_alarmDueWarnFired = false;
 }
 
 /**

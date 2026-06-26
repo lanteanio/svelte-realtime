@@ -2410,19 +2410,22 @@ ctx.deleteAlarm();         // cancel
 
 Different from `live.cron` (which is recurring, schedule-based, and global): an alarm is **per-room**, **one-shot**, and set imperatively. The classic pattern is TTL-style cleanup - refresh the alarm on every write (`ctx.setAlarm(now + 30d)`); if it ever fires, the room has not been touched in 30 days, so clean it up. Exactly one pending alarm per room: `setAlarm` replaces the previous one, and a re-`setAlarm` inside `onAlarm` re-arms it. A long horizon is fine - a multi-week alarm is chased to its deadline in capped timer hops, so it fires when you asked, not ~24 days early (the `setTimeout` ceiling).
 
-By default alarms are in-memory: they survive the room going idle within the process but not a restart. For durability across restarts and exactly-once firing across a cluster, `configureAlarm({ store, leader })` plugs in a durable store + a leader gate (the same leader primitive cron uses), so a persisted alarm re-fires after a restart and only the elected instance runs the handler:
+By default alarms are in-memory: they survive the room going idle within the process but not a restart. For durability across restarts and exactly-once firing across a cluster, `configureAlarm({ store, leader })` plugs in a durable store + a leader gate (the same leader primitive cron uses). The owning instance still fires precisely via its in-memory timer; the elected leader also runs a recovery poll that sweeps the store for alarms an instance left behind when it restarted before its timer ran, and fires those. Single-fire is guaranteed by an atomic claim - the two paths can never both fire the same alarm:
 
 ```js
 // hooks.ws.js init - durable + cluster single-fire
 import { configureAlarm } from 'svelte-realtime/server';
+import { createAlarmStore } from 'svelte-adapter-uws-extensions/redis/alarm-store';
+// or: from 'svelte-adapter-uws-extensions/postgres/alarm-store'
 
 configureAlarm({
-  store: myDurableAlarmStore, // { set(topic, at), delete(topic) } backed by your DB
-  leader: () => amILeaderRightNow()
+  store: createAlarmStore(client), // durable, survives restart, fires once cluster-wide
+  leader: () => leader.isLeader(),  // the same leader primitive cron uses
+  pollMs: 15000                     // recovery-poll cadence (optional, default 15s)
 });
 ```
 
-The store is any object implementing the seam contract (`set(topic, at)` / `delete(topic)`), so you can back it with whatever durable store you already run; a Postgres/Redis-backed implementation is on the `svelte-adapter-uws-extensions` roadmap. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses).
+The store is any object implementing the seam contract (`set(topic, at, meta)` / `delete(topic)` returning whether it removed the row / an optional `due(nowMs)` for cross-restart recovery), so you can back it with whatever durable store you already run; `createAlarmStore` from `svelte-adapter-uws-extensions` ships Redis and Postgres implementations. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses). One caveat: the recovery poll re-finds a handler by the stream's RPC path, so renaming an alarm-bearing stream's path across a deploy abandons that stream's in-flight durable alarms (they are dropped, not fired) - keep the path stable, or drain alarms before renaming.
 
 ## Cron scheduling
 
