@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.41] - 2026-06-26
+
+### Added
+
+- **`live.push` / `live.notify` can now target a topic: `live.push({ topic }, event, data)`.** A broadcast-with-reply: it fans a request out to every subscriber of the topic (via the adapter's `platform.requestTopic`) and aggregates the replies into `{ replies, errors, count, delivered }` - partial success, so a subscriber that times out or errors lands in `errors` and never fails the whole call. `live.notify({ topic }, ...)` is the fire-and-forget broadcast. A target must still name exactly one of `userId` / `sessionId` / `topic` (naming zero, or more than one, throws `VALIDATION`). Single-instance today (walks this worker's subscribers); the cross-instance topic broadcast is a separate extensions primitive. Needs `svelte-adapter-uws >= 0.6.0-next.39` for `platform.requestTopic`; on an older adapter `live.push({ topic })` throws a clear `VALIDATION` error and `live.notify({ topic })` dev-warns and no-ops.
+
 ## [0.6.0-next.40] - 2026-06-26
 
 ### Changed

@@ -1844,6 +1844,19 @@ export namespace live {
 		data?: unknown,
 		options?: { timeoutMs?: number }
 	): Promise<TReply>;
+	/**
+	 * Topic target: broadcast a request to EVERY subscriber of `topic` (this
+	 * instance) and aggregate the replies. Partial success - a subscriber that
+	 * times out / errors / closed lands in `errors`, never failing the whole
+	 * call. Single-instance today (the cross-instance broadcast is a separate
+	 * extensions primitive). Needs `svelte-adapter-uws >= 0.6.0-next.39`.
+	 */
+	function push<TReply = unknown>(
+		target: { topic: string },
+		event: string,
+		data?: unknown,
+		options?: { timeoutMs?: number }
+	): Promise<{ replies: TReply[]; errors: Array<{ message: string }>; count: number; delivered: number }>;
 
 	/**
 	 * Send a server-initiated event to a connected user without awaiting
@@ -1886,7 +1899,7 @@ export namespace live {
 	 * ```
 	 */
 	function notify(
-		target: { userId: string } | { sessionId: string },
+		target: { userId: string } | { sessionId: string } | { topic: string },
 		event: string,
 		data?: unknown
 	): Promise<void>;

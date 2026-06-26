@@ -444,6 +444,14 @@ const _livePush = async function push(target, event, data, options) {
 		return _localPushRequest(_pushSessionRegistry.get(sessionId), event, data, options, 'sessionId', sessionId);
 	}
 
+	// topic target: broadcast a request to every subscriber of the topic and
+	// aggregate the replies (the request/reply analog of publish). Single-
+	// instance today (walks this worker's subscriber set); cluster fan-out is a
+	// separate extensions primitive.
+	if (targetKey === 'topic') {
+		return _broadcastTopicRequest(/** @type {any} */ (target).topic, event, data, options);
+	}
+
 	const userId = /** @type {any} */ (target).userId;
 
 	// Cluster-first when a remoteRegistry is configured: the registry's
@@ -477,23 +485,23 @@ const _livePush = async function push(target, event, data, options) {
 
 /**
  * Validate a push/notify target: exactly one known target key
- * (`userId` | `sessionId`), no unknown keys, and the chosen id is a non-empty
- * string. Returns the resolved key. `caller` flavors the error messages
- * (`'live.push'` / `'live.notify'`).
+ * (`userId` | `sessionId` | `topic`), no unknown keys, and the chosen id is a
+ * non-empty string. Returns the resolved key. `caller` flavors the error
+ * messages (`'live.push'` / `'live.notify'`).
  * @param {any} target @param {string} caller
- * @returns {'userId' | 'sessionId'}
+ * @returns {'userId' | 'sessionId' | 'topic'}
  */
 function _resolvePushTarget(target, caller) {
 	const keys = Object.keys(target);
-	const unknown = keys.filter((k) => k !== 'userId' && k !== 'sessionId');
+	const unknown = keys.filter((k) => k !== 'userId' && k !== 'sessionId' && k !== 'topic');
 	if (unknown.length > 0) {
 		throw new LiveError('VALIDATION', '[svelte-realtime] ' + caller + ': unsupported target keys: ' + unknown.join(', '));
 	}
-	const known = keys.filter((k) => k === 'userId' || k === 'sessionId');
+	const known = keys.filter((k) => k === 'userId' || k === 'sessionId' || k === 'topic');
 	if (known.length !== 1) {
-		throw new LiveError('VALIDATION', '[svelte-realtime] ' + caller + ': target must name exactly one of userId / sessionId');
+		throw new LiveError('VALIDATION', '[svelte-realtime] ' + caller + ': target must name exactly one of userId / sessionId / topic');
 	}
-	const key = /** @type {'userId' | 'sessionId'} */ (known[0]);
+	const key = /** @type {'userId' | 'sessionId' | 'topic'} */ (known[0]);
 	const id = target[key];
 	if (typeof id !== 'string' || id.length === 0) {
 		throw new LiveError('VALIDATION', '[svelte-realtime] ' + caller + ': target.' + key + ' must be a non-empty string');
@@ -522,6 +530,35 @@ async function _localPushRequest(entry, event, data, options, label, id) {
 		}
 	}
 	throw new LiveError('NOT_FOUND', "no active connection for " + label + " '" + id + "'");
+}
+
+/**
+ * Broadcast a request to every subscriber of `topic` (this instance) via the
+ * adapter's `platform.requestTopic` and aggregate the per-subscriber replies.
+ * Partial-success: a subscriber that times out / errors / closed lands in
+ * `errors`, never failing the whole call. Returns
+ * `{ replies, errors, count, delivered }`.
+ * @param {string} topic @param {string} event @param {any} data @param {any} options
+ * @returns {Promise<{ replies: any[], errors: Array<{ message: string }>, count: number, delivered: number }>}
+ */
+async function _broadcastTopicRequest(topic, event, data, options) {
+	const platform = state.cronPlatform;
+	if (!platform || typeof platform.requestTopic !== 'function') {
+		throw new LiveError('VALIDATION', '[svelte-realtime] live.push({ topic }): requires a captured platform with requestTopic (svelte-adapter-uws >= 0.6.0-next.39). Wire `realtime({ ... }).init` from your hooks.ws.js init({ platform }) hook.');
+	}
+	let results;
+	try {
+		results = await platform.requestTopic(topic, event, data, options || undefined);
+	} catch (err) {
+		throw _translatePushError(err);
+	}
+	const replies = [];
+	const errors = [];
+	for (const r of results) {
+		if (r && r.ok) replies.push(r.reply);
+		else errors.push({ message: (r && r.error) ? String(r.error) : 'unknown' });
+	}
+	return { replies, errors, count: results.length, delivered: replies.length };
 }
 
 /**
@@ -661,6 +698,21 @@ const _liveNotify = function notify(target, event, data) {
 		const sessionEntry = _pushSessionRegistry.get(/** @type {any} */ (target).sessionId);
 		if (sessionEntry) _deliverLocalNotify(sessionEntry);
 		// Offline + no session entry: silent no-op (fire-and-forget contract).
+		return Promise.resolve();
+	}
+
+	// topic target: fire-and-forget broadcast to every subscriber of the topic.
+	// Same delivery path as live.push({ topic }) but replies are discarded.
+	if (targetKey === 'topic') {
+		const platform = state.cronPlatform;
+		if (platform && typeof platform.requestTopic === 'function') {
+			try {
+				platform.requestTopic(/** @type {any} */ (target).topic, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS })
+					.catch(() => { /* discarded by design: notify never surfaces delivery state */ });
+			} catch { /* sync throw on a torn-down platform: silent, fire-and-forget */ }
+		} else if (_IS_DEV) {
+			console.warn('[svelte-realtime] live.notify({ topic }): platform.requestTopic unavailable (requires svelte-adapter-uws >= 0.6.0-next.39); broadcast silently no-op.');
+		}
 		return Promise.resolve();
 	}
 
