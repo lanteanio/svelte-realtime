@@ -8,21 +8,37 @@ const _guestIds = new WeakMap();
 let _guestIdCounter = 0;
 
 /**
- * Get a stable identity key for a connection. Uses ctx.user.id (or the
- * Postgres-convention `user_id` / camelCase `userId` aliases) if present,
- * otherwise assigns a unique guest ID that persists for the connection
- * lifetime. The id-key probe order mirrors `_defaultPushIdentify` so apps
- * that expose `user_id` in their session shape rate-limit per-user instead
- * of falling back to the per-connection bucket.
+ * Get the connection's AUTHENTICATED identity, or `null` when there is none.
+ * Reads ctx.user.id (or the Postgres-convention `user_id` / camelCase `userId`
+ * aliases) and stops there - it never falls back to a per-connection guest id.
+ * Use this when "anonymous" must be distinguishable from "authenticated" (e.g.
+ * a security boundary that should only apply to known users); use
+ * `_getIdentityKey` when every connection needs SOME stable key. Single source
+ * for the id-field probe order, shared by both.
  * @param {any} ctx
- * @returns {string}
+ * @returns {string | null}
  */
-export function _getIdentityKey(ctx) {
+export function _getAuthenticatedId(ctx) {
 	const u = ctx.user;
 	if (u) {
 		const id = u.id ?? u.user_id ?? u.userId;
 		if (id !== undefined && id !== null) return String(id);
 	}
+	return null;
+}
+
+/**
+ * Get a stable identity key for a connection. Uses the authenticated id when
+ * present (see `_getAuthenticatedId`), otherwise assigns a unique guest ID that
+ * persists for the connection lifetime. The id-key probe order mirrors
+ * `_defaultPushIdentify` so apps that expose `user_id` in their session shape
+ * rate-limit per-user instead of falling back to the per-connection bucket.
+ * @param {any} ctx
+ * @returns {string}
+ */
+export function _getIdentityKey(ctx) {
+	const authed = _getAuthenticatedId(ctx);
+	if (authed !== null) return authed;
 	if (!ctx.ws) return 'anon';
 	let guestId = _guestIds.get(ctx.ws);
 	if (!guestId) {

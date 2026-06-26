@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.42] - 2026-06-26
+## [0.6.0-next.43] - 2026-06-26
+
+### Fixed
+
+- **`live.idempotent` no longer lets one user receive another user's cached result via a shared idempotency key.** When the key comes from the client envelope (`rpc.with({ idempotencyKey })`, i.e. no `keyFrom`), two different authenticated users sending the SAME key for the same RPC under the same tenant previously collided in one cache slot, so the second caller got the first's result - a cross-user leak, since the client controls the envelope key. The cache slot is now also isolated by a non-privileged fingerprint (sha256) of the caller's authenticated user id, so each user gets their own slot structurally. Same-user idempotency is preserved (the fingerprint is a pure function of the user id, not the connection). The `keyFrom` path is unchanged (it is app-owned - encode `ctx.user` yourself for per-user, or share deliberately), and anonymous callers are unchanged (a client-random key still dedupes as before). The user id is hashed, never placed raw in a Redis / Postgres key or a log. Pre-existing cached entries cold-miss once after the upgrade and age out.
 
 ### Added
 

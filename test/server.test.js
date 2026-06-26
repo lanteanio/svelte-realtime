@@ -73,6 +73,7 @@ import {
 	_resetAssertCounters,
 	_resetMiddleware,
 	_getIdentityKey,
+	_getAuthenticatedId,
 	_resetReplayRouting,
 	WRAPPED_FOR_REPLAY
 } from '../src/server.js';
@@ -4727,6 +4728,23 @@ describe('rate-limit identity probes id, user_id, and userId', () => {
 
 	it('returns "anon" when neither user nor ws is present', () => {
 		expect(_getIdentityKey({})).toBe('anon');
+	});
+});
+
+describe('_getAuthenticatedId (authenticated id, no guest fallback)', () => {
+	it('returns the user id when present (id / user_id / userId, in that order)', () => {
+		expect(_getAuthenticatedId({ user: { id: 'u-1' } })).toBe('u-1');
+		expect(_getAuthenticatedId({ user: { user_id: 'u-2' } })).toBe('u-2');
+		expect(_getAuthenticatedId({ user: { userId: 'u-3' } })).toBe('u-3');
+		expect(_getAuthenticatedId({ user: { id: 'A', user_id: 'B' } })).toBe('A');
+		expect(_getAuthenticatedId({ user: { id: 42 } })).toBe('42');
+	});
+
+	it('returns null for anonymous (no user, or a user with no id) - never a guest id', () => {
+		expect(_getAuthenticatedId({})).toBeNull();
+		expect(_getAuthenticatedId({ user: null })).toBeNull();
+		expect(_getAuthenticatedId({ user: { name: 'no-id' }, ws: {} })).toBeNull();
+		expect(_getAuthenticatedId({ user: { id: null }, ws: {} })).toBeNull();
 	});
 });
 
@@ -10542,6 +10560,77 @@ describe('live.idempotent()', () => {
 		expect(calls).toBe(1);
 		expect(platform.sent[0].data.data).toBe(11);
 		expect(platform.sent[1].data.data).toBe(11);
+	});
+
+	it('envelope key is identity-scoped: two users with the SAME key do not share a slot', async () => {
+		let calls = 0;
+		const handler = live.idempotent({}, async (ctx) => { calls++; return ctx.user.id; });
+		__register('idem/id-scope', handler);
+		const platform = mockPlatform();
+		const wsA = mockWs({ id: 'user-A' });
+		const wsB = mockWs({ id: 'user-B' });
+		const key = 'shared-envelope-key';
+
+		handleRpc(wsA, toArrayBuffer({ rpc: 'idem/id-scope', id: '1', args: [], idempotencyKey: key }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(wsB, toArrayBuffer({ rpc: 'idem/id-scope', id: '2', args: [], idempotencyKey: key }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(2); // B re-ran, did NOT receive A's cached result
+		expect(platform.sent[0].data.data).toBe('user-A');
+		expect(platform.sent[1].data.data).toBe('user-B'); // not 'user-A' - no leak
+	});
+
+	it('envelope key dedupes for the SAME user across two connections', async () => {
+		let calls = 0;
+		const handler = live.idempotent({}, async (ctx) => { calls++; return ctx.user.id; });
+		__register('idem/id-same', handler);
+		const platform = mockPlatform();
+		const ws1 = mockWs({ id: 'user-A' });
+		const ws2 = mockWs({ id: 'user-A' }); // same user, different socket
+		const key = 'k';
+
+		handleRpc(ws1, toArrayBuffer({ rpc: 'idem/id-same', id: '1', args: [], idempotencyKey: key }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(ws2, toArrayBuffer({ rpc: 'idem/id-same', id: '2', args: [], idempotencyKey: key }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1); // identity scoping is per-user id, not per-connection
+		expect(platform.sent[1].data.data).toBe('user-A');
+	});
+
+	it('anonymous callers are NOT identity-scoped (unchanged: same key shares a slot)', async () => {
+		let calls = 0;
+		const handler = live.idempotent({}, async () => { calls++; return 'shared'; });
+		__register('idem/anon', handler);
+		const platform = mockPlatform();
+		const wsA = mockWs(); // no authenticated id
+		const wsB = mockWs(); // different connection, also anonymous
+		const key = 'anon-key';
+
+		handleRpc(wsA, toArrayBuffer({ rpc: 'idem/anon', id: '1', args: [], idempotencyKey: key }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(wsB, toArrayBuffer({ rpc: 'idem/anon', id: '2', args: [], idempotencyKey: key }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1); // no identity segment for anonymous; constant key as before
+	});
+
+	it('keyFrom is NOT auto identity-scoped: a fixed keyFrom is app-owned and shared across users', async () => {
+		let calls = 0;
+		const handler = live.idempotent({ keyFrom: () => 'fixed' }, async (ctx) => { calls++; return ctx.user.id; });
+		__register('idem/keyfrom-shared', handler);
+		const platform = mockPlatform();
+		const wsA = mockWs({ id: 'user-A' });
+		const wsB = mockWs({ id: 'user-B' });
+
+		handleRpc(wsA, toArrayBuffer({ rpc: 'idem/keyfrom-shared', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		handleRpc(wsB, toArrayBuffer({ rpc: 'idem/keyfrom-shared', id: '2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(calls).toBe(1); // app owns keyFrom; framework does not inject identity
+		expect(platform.sent[1].data.data).toBe('user-A'); // B got the shared result by app design
 	});
 
 	it('keyFrom takes precedence over envelope idempotencyKey', async () => {

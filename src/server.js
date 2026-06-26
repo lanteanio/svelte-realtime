@@ -60,7 +60,7 @@ import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensat
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
 import { _recordRpcMetrics, installMetrics } from './server/metrics.js';
 import { _shouldShed, _resetAdmission, installAdmission } from './server/admission.js';
-import { _getIdentityKey } from './server/identity.js';
+import { _getIdentityKey, _getAuthenticatedId } from './server/identity.js';
 import { _resetIdempotencyStore, _resetLock, installIdempotency } from './server/idempotency.js';
 import { installPush, pushHooks, _resetPushRegistry, _pushRegistry, _wsToPushUserId, _deregisterPushSession } from './server/push.js';
 import { installRateLimit, _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } from './server/rate-limit.js';
@@ -100,7 +100,7 @@ export { _armSilentTopicWatch, _resetSilentTopicWarning, _activatePublishRateWar
 export { _crdtLoadError, _setCrdtRuntime, _resetCrdt };
 export { pushHooks, _resetPushRegistry };
 export { _resetIdempotencyStore, _resetLock };
-export { _getIdentityKey };
+export { _getIdentityKey, _getAuthenticatedId };
 export { _resetAdmission };
 export { WRAPPED_FOR_REPLAY, _resetReplayRouting };
 export { assert, fatal, setFatalSink, resetFatalSink, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';

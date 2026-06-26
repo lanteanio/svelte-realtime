@@ -3,6 +3,7 @@ import { now as runtimeNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { assert } from '../shared/assert.js';
 import { LiveError } from './live-error.js';
 import { _tenantKey } from './tenant.js';
+import { _getAuthenticatedId } from './identity.js';
 import { createHash } from 'node:crypto';
 
 // Reserved keys for the cached-value envelope that carries the request
@@ -42,9 +43,10 @@ function _stableStringify(v) {
  * Fingerprint the request args so a replayed idempotency key carrying a
  * DIFFERENT payload is caught (a typed error) instead of silently returning the
  * first request's cached result. A correctness guard, not a security boundary:
- * the slot key is already namespaced by RPC path + tenant + the app's keyFrom
- * (which should encode identity). Best-effort - an args shape that cannot be
- * canonically serialized returns null and the check is skipped.
+ * the slot key is already namespaced by RPC path + tenant, plus the caller's
+ * authenticated identity on the envelope path (see the key construction below).
+ * Best-effort - an args shape that cannot be canonically serialized returns null
+ * and the check is skipped.
  * @param {any[]} args
  * @returns {string | null}
  */
@@ -54,6 +56,20 @@ function _fingerprintArgs(args) {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Non-privileged, stable fingerprint of a caller's authenticated identity, folded
+ * into the cache key so a client-supplied idempotency key cannot become an
+ * authz-bypass. Hashed (not the raw id) so the user id never lands in a Redis /
+ * Postgres key or a slow-log; fixed length so the key budget is bounded. A string
+ * input cannot make `createHash` throw, so this always returns a segment for an
+ * authenticated user (fail-closed: identity scoping is never silently skipped).
+ * @param {string} id
+ * @returns {string}
+ */
+function _fingerprintIdentity(id) {
+	return createHash('sha256').update(String(id)).digest('hex').slice(0, 32);
 }
 
 /** @type {{ acquire: (key: string, ttlSec: number) => Promise<any> } | null} */
@@ -329,6 +345,15 @@ function _assertConfigShape(helperName, cfg, allowed, hints) {
  * `rpc.with({ idempotencyKey })` helper). When neither is present, the call
  * runs as if the wrapper were absent.
  *
+ * The cache slot is automatically isolated by RPC path and by the connection's
+ * tenant, so the same key across different RPCs or tenants never collides. When
+ * the key comes from the client ENVELOPE (no `keyFrom`), it is ALSO isolated by
+ * the caller's authenticated identity, so one user can never receive another
+ * user's cached result by sending the same key - a client-controlled key is not
+ * an authz bypass. The `keyFrom` path is app-owned: encode `ctx.user` into the
+ * returned key yourself for per-user idempotency, or omit it for a deliberately
+ * shared slot. Anonymous callers are not identity-scoped (the key is used as-is).
+ *
  * Only successful results are cached. A throwing handler aborts the slot so
  * the next caller re-runs. Reusing the same key with a DIFFERENT request
  * payload throws `LiveError('IDEMPOTENCY_KEY_REUSED')` rather than silently
@@ -373,6 +398,23 @@ const _liveIdempotent = function idempotent(config, fn) {
 				'idempotencyKey must be a string no longer than 256 characters'
 			);
 		}
+		// Identity-scope the CLIENT-SUPPLIED envelope key (the keyFrom path is
+		// app-owned - the app encodes identity there if it wants per-user, and a
+		// deliberately shared key must keep working). The client controls the
+		// envelope key, so two different users sending the SAME key under the same
+		// RPC + tenant would otherwise collide in one slot and the second caller
+		// would receive the first's cached result - a cross-user leak / authz
+		// bypass. Folding a non-privileged fingerprint of the authenticated user id
+		// into the key gives each user their own slot, structurally. Anonymous
+		// callers (no authenticated id) are unchanged - a constant segment, so a
+		// client-random key still dedupes as before; a deliberately shared key
+		// across anonymous users stays the app's concern. Legacy entries (old key
+		// shape) cold-miss once and age out.
+		let scopedKey = userKey;
+		if (!keyFrom) {
+			const uid = _getAuthenticatedId(ctx);
+			if (uid !== null) scopedKey = _fingerprintIdentity(uid) + '\0' + userKey;
+		}
 		// Namespace the cache key by registered RPC path so the same
 		// userKey across different RPCs lands in different slots, then by the
 		// connection's tenant (when one is resolved) so the same key under two
@@ -381,7 +423,7 @@ const _liveIdempotent = function idempotent(config, fn) {
 		// tenant segment is first and `\0`-delimited (a validated tenant id has no
 		// `\0`), so it stays unambiguous. Null tenant -> unchanged.
 		const path = /** @type {any} */ (wrapper).__idempotencyPath;
-		const key = _tenantKey(ctx.tenantId, path ? 'rpc:' + path + ':' + userKey : userKey);
+		const key = _tenantKey(ctx.tenantId, path ? 'rpc:' + path + ':' + scopedKey : scopedKey);
 		// Fingerprint the request payload so a replayed key carrying a DIFFERENT
 		// body is rejected, not silently answered with the first call's result.
 		const fp = _fingerprintArgs(args);
