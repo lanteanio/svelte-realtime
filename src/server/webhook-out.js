@@ -4,7 +4,7 @@ import { request as httpsRequest } from 'node:https';
 import { lookup as nodeDnsLookup } from 'node:dns';
 import { createHmac, createHash } from 'node:crypto';
 import { checkUrl } from 'svelte-adapter-uws/safe-url';
-import { randomFloat, setTimer, clearTimer } from '../shared/runtime.js';
+import { randomFloat, setTimer, clearTimer, now } from '../shared/runtime.js';
 import { state } from './state.js';
 import { _IS_DEV } from './env.js';
 
@@ -313,10 +313,15 @@ async function _attemptDelivery(url, lookup, headers, body, config) {
  * redirect hop and pinning each connection to validated addresses. Follows up
  * to `maxRedirects` hops (default 5), re-running the full gate on each Location;
  * a redirect to a blocked host, a non-http(s) scheme, an https->http downgrade,
- * a missing Location, a loop, or hop-cap overflow ends delivery with a reported
- * failure. The terminal outcome is reported via `_reportWebhookOutFailure`.
+ * a missing Location, a loop, or hop-cap overflow ends delivery. Returns the
+ * terminal outcome (`{ ok: true }` or `{ ok: false, err, attempts }`); the
+ * CALLER reports it (so a replay can re-attempt without re-reporting). The SSRF
+ * and redirect logic is unchanged - only the failure path now returns instead
+ * of reporting.
+ *
+ * @returns {Promise<{ ok: true } | { ok: false, err: Error, attempts: number }>}
  */
-async function _deliverWebhookOut(initialUrl, headers, body, config, event, data) {
+async function _deliverWebhookOut(initialUrl, headers, body, config) {
 	const maxRedirects = Number.isInteger(config.maxRedirects) && config.maxRedirects >= 0 ? config.maxRedirects : 5;
 	// Canonicalise the initial URL so the loop-detection set matches the `.href`
 	// form every redirect hop is normalised to (case differences would otherwise
@@ -327,58 +332,57 @@ async function _deliverWebhookOut(initialUrl, headers, body, config, event, data
 	const seen = new Set();
 	for (let hop = 0; hop <= maxRedirects; hop++) {
 		if (seen.has(url)) {
-			_reportWebhookOutFailure(config, new Error('outbound webhook: redirect loop at "' + _redactUrl(url) + '"'), event, data, 0);
-			return;
+			return { ok: false, err: new Error('outbound webhook: redirect loop at "' + _redactUrl(url) + '"'), attempts: 0 };
 		}
 		seen.add(url);
 
 		const gate = await _ssrfGate(url, config);
 		if (!gate.ok) {
-			_reportWebhookOutFailure(config, new Error('outbound webhook: url "' + _redactUrl(url) + '" blocked by SSRF guard (' + gate.reason + ')'), event, data, 0);
-			return;
+			return { ok: false, err: new Error('outbound webhook: url "' + _redactUrl(url) + '" blocked by SSRF guard (' + gate.reason + ')'), attempts: 0 };
 		}
 
 		const result = await _attemptDelivery(url, gate.lookup, headers, body, config);
-		if (result.kind === 'delivered') return;
+		if (result.kind === 'delivered') return { ok: true };
 		if (result.kind === 'failed') {
-			_reportWebhookOutFailure(config, result.err, event, data, result.attempts);
-			return;
+			return { ok: false, err: result.err, attempts: result.attempts };
 		}
 
 		const next = _resolveRedirect(url, result.location);
 		if (!next.ok) {
-			_reportWebhookOutFailure(config, new Error('outbound webhook: ' + next.reason + ' following "' + _redactUrl(url) + '"'), event, data, 0);
-			return;
+			return { ok: false, err: new Error('outbound webhook: ' + next.reason + ' following "' + _redactUrl(url) + '"'), attempts: 0 };
 		}
 		url = next.url;
 	}
-	_reportWebhookOutFailure(config, new Error('outbound webhook: too many redirects (>' + maxRedirects + ')'), event, data, 0);
+	return { ok: false, err: new Error('outbound webhook: too many redirects (>' + maxRedirects + ')'), attempts: 0 };
 }
 
 /**
- * Fire one outbound webhook for a matching publish. Resolves the payload (a
- * `transform` returning null skips) and the URL through bounded callbacks,
- * attaches a stable idempotency-key header (keyed with the HMAC secret when set,
- * so an outsider who can induce the same publish cannot precompute and
- * replay/suppress it; a plain content hash otherwise) and an optional HMAC
- * signature, then delivers with per-hop SSRF gating + DNS pinning + retry. Runs
- * off the publish path; never throws.
+ * Run one outbound-webhook delivery and RETURN its terminal outcome - the
+ * shared core of `_fireWebhookOut` (normal publish) and `_replayWebhookOut`
+ * (admin replay). Resolves the payload (a `transform` returning null skips) and
+ * the URL through bounded callbacks, attaches a stable idempotency-key header
+ * (keyed with the HMAC secret when set, so an outsider who can induce the same
+ * publish cannot precompute and replay/suppress it; a plain content hash
+ * otherwise) and an optional HMAC signature, then delivers with per-hop SSRF
+ * gating + DNS pinning + retry. Never throws; reports nothing - the caller owns
+ * reporting + dead-letter capture from the returned outcome.
+ *
+ * @returns {Promise<{ ok: true } | { ok: false, err: Error, attempts: number }>}
  */
-export async function _fireWebhookOut(entry, topic, event, data, platform) {
+async function _runWebhookOut(entry, topic, event, data) {
 	const { config } = entry;
 	const cbMs = config.callbackTimeoutMs ?? 10000;
 	try {
 		const payload = config.transform
 			? await _callWithTimeout(() => config.transform(event, data), cbMs, 'transform')
 			: { event, data };
-		if (payload == null) return; // transform opted out
+		if (payload == null) return { ok: true }; // transform opted out: nothing to deliver
 
 		const url = typeof config.url === 'function'
 			? await _callWithTimeout(() => config.url(event, data), cbMs, 'url')
 			: config.url;
 		if (typeof url !== 'string' || url.length === 0) {
-			_reportWebhookOutFailure(config, new Error('outbound webhook: url resolved to a non-string'), event, data, 0);
-			return;
+			return { ok: false, err: new Error('outbound webhook: url resolved to a non-string'), attempts: 0 };
 		}
 
 		const body = JSON.stringify(payload);
@@ -400,8 +404,7 @@ export async function _fireWebhookOut(entry, topic, event, data, platform) {
 		if (idem != null) {
 			const key = String(idem);
 			if (/[\r\n\0]/.test(key) || key.length > 256) {
-				_reportWebhookOutFailure(config, new Error('outbound webhook: idempotency-key must be <=256 chars with no CR/LF/NUL'), event, data, 0);
-				return;
+				return { ok: false, err: new Error('outbound webhook: idempotency-key must be <=256 chars with no CR/LF/NUL'), attempts: 0 };
 			}
 			headers['idempotency-key'] = key;
 		}
@@ -411,8 +414,51 @@ export async function _fireWebhookOut(entry, topic, event, data, platform) {
 			headers['x-webhook-signature'] = 'sha256=' + createHmac('sha256', config.secret).update(body).digest('hex');
 		}
 
-		await _deliverWebhookOut(url, headers, body, config, event, data);
+		return await _deliverWebhookOut(url, headers, body, config);
 	} catch (err) {
-		_reportWebhookOutFailure(config, err, event, data, 0);
+		return { ok: false, err, attempts: 0 };
 	}
+}
+
+/**
+ * Fire one outbound webhook for a matching publish. Runs the delivery and, on a
+ * terminal failure, reports it (`onFailure` hook / server error handler / dev
+ * log) AND - when a dead-letter store is configured (`realtime({ webhooks: {
+ * deadLetter } })`) - retains the undeliverable event for admin inspection and
+ * replay. Runs off the publish path; never throws.
+ */
+export async function _fireWebhookOut(entry, topic, event, data, platform) {
+	void platform; // accepted for call-site parity; delivery reads entry.config
+	const r = await _runWebhookOut(entry, topic, event, data);
+	if (r.ok) return;
+	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
+	const store = state.webhookDeadLetter;
+	if (store) {
+		try {
+			store.add({
+				webhookId: entry.id,
+				topic,
+				event,
+				data,
+				attempts: r.attempts | 0,
+				error: String((r.err && r.err.message) || r.err || 'unknown'),
+				failedAt: now()
+			});
+		} catch { /* never let dead-letter capture break the (best-effort) webhook path */ }
+	}
+}
+
+/**
+ * Re-attempt delivery of a dead-lettered webhook event WITHOUT re-reporting or
+ * re-capturing it (the record already exists; the caller decides remove/keep
+ * from the returned outcome). Returns `{ ok: true }` on delivery (or a
+ * transform opt-out) or `{ ok: false, error }` with the redacted terminal
+ * message.
+ *
+ * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+ */
+export async function _replayWebhookOut(entry, topic, event, data) {
+	const r = await _runWebhookOut(entry, topic, event, data);
+	if (r.ok) return { ok: true };
+	return { ok: false, error: String((r.err && r.err.message) || r.err || 'unknown') };
 }

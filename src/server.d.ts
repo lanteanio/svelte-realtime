@@ -3623,7 +3623,81 @@ export interface RealtimeConfig {
 	 * re-exporting it) or let the adapter wire the reserved path to it.
 	 */
 	admin?: { requires: (request: Request) => boolean | Promise<boolean> } | null;
+
+	/**
+	 * Outbound-webhook plane. `webhooks.deadLetter` enables the dead-letter store
+	 * that retains UNDELIVERABLE outbound-webhook events (retry-exhausted,
+	 * SSRF-blocked, etc.) for admin inspection and replay, instead of reporting
+	 * then dropping them. Off by default (a DLQ retains attacker-influenced event
+	 * data). `true` uses the default in-memory store; a store instance gives a
+	 * cluster shared durable store; `false`/`null` disables. Equivalent to
+	 * `configureWebhooks({ deadLetter })`.
+	 */
+	webhooks?: { deadLetter?: boolean | DeadLetterStore | null } | null;
 }
+
+/** A retained, undeliverable outbound-webhook event. */
+export interface DeadLetterRecord {
+	/** Monotonic per-store record id. */
+	id: string;
+	/** The outbound-webhook registration path (used to replay it). */
+	webhookId: string;
+	/** The source topic whose publish triggered the webhook. */
+	topic: string;
+	/** The event name. */
+	event: string;
+	/** The original event payload (needed to replay). */
+	data: unknown;
+	/** Delivery attempts made (0 = a config / gate failure, never sent). */
+	attempts: number;
+	/** The redacted terminal error message. */
+	error: string;
+	/** Wall-clock ms when the delivery gave up. */
+	failedAt: number;
+}
+
+/** Storage interface for dead-lettered outbound-webhook events. */
+export interface DeadLetterStore {
+	add(rec: Omit<DeadLetterRecord, 'id'>): string;
+	get(id: string): DeadLetterRecord | null;
+	remove(id: string): boolean;
+	count(filter?: { topic?: string }): number;
+	list(filter?: { topic?: string; limit?: number }): DeadLetterRecord[];
+	summary(): { total: number; byTopic: Record<string, number>; oldest: number | null; newest: number | null };
+	clear(): void;
+}
+
+/**
+ * Create the default in-memory dead-letter store: a bounded, insertion-ordered
+ * ring with an optional TTL. A cluster deployment substitutes a durable store
+ * (Redis / Postgres) exposing the same interface.
+ */
+export function createDeadLetterStore(options?: { max?: number; ttlMs?: number }): DeadLetterStore;
+
+/**
+ * Configure the outbound-webhook plane. `deadLetter: true` enables the default
+ * in-memory dead-letter store; a store instance wires a custom/cluster store;
+ * `false`/`null` disables capture (the default). Also wired from
+ * `realtime({ webhooks })`.
+ */
+export function configureWebhooks(config?: { deadLetter?: boolean | DeadLetterStore | null }): void;
+
+/** The configured dead-letter store, or `null` when capture is off. */
+export function getDeadLetter(): DeadLetterStore | null;
+
+/**
+ * Replay dead-lettered outbound-webhook events. Re-attempts delivery for each
+ * matching record via its original webhook (by id); a successful re-fire removes
+ * the record. `dryRun` reports what would replay (and whether each webhook is
+ * still registered) without sending or removing.
+ */
+export function replayDeadLetter(opts?: { topic?: string; ids?: string[]; dryRun?: boolean }): Promise<{
+	dryRun: boolean;
+	total: number;
+	replayed: number;
+	removed: number;
+	results: Array<{ id: string; ok: boolean; status: string; error?: string }>;
+}>;
 
 /**
  * Shape returned by `realtime()`. Spread into `hooks.ws.js` exports.

@@ -45,6 +45,7 @@ import {
 	_derivedBySource,
 	_effectBySource,
 	_webhookOutBySource,
+	_webhookOutById,
 	_aggregateBySource,
 	_aggregateByTopic,
 	_watchedTopics,
@@ -85,7 +86,9 @@ export { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierF
 import { _armSilentTopicWatch, _disarmSilentTopicWatch, _resetSilentTopicWarning, _activatePublishRateWarning, _resetPublishRateWarning, installDevWarnings } from './server/dev-warnings.js';
 import { _drainUploadsOnClose, _resetUploadAutoDiscovery, installUpload } from './server/upload.js';
 import { _breakerRegister, installBreaker } from './server/breaker.js';
-import { _webhookRegister, _webhooksOutboundRegister } from './server/webhooks.js';
+import { _webhookRegister, _webhooksOutboundRegister, configureWebhooks, getDeadLetter, replayDeadLetter } from './server/webhooks.js';
+import { createDeadLetterStore } from './server/dead-letter.js';
+export { configureWebhooks, getDeadLetter, replayDeadLetter, createDeadLetterStore };
 import { _multiplayerRegister, installMultiplayer } from './server/multiplayer.js';
 import { _roomRegister, installRoom } from './server/room.js';
 import { _flagRegister, _derivedRegister, _effectRegister, _aggregateRegister, installReactiveFamilies } from './server/reactive-families.js';
@@ -1646,11 +1649,15 @@ export function __registerWebhookOut(path, fn) {
 	const sources = /** @type {any} */ (fn).__webhookOutSources;
 	const config = /** @type {any} */ (fn).__webhookOutConfig;
 	if (!sources || !config) return;
-	webhookOutRegistry.set(path, { sources, config });
+	// The registration path is the stable webhook id, carried on the entry so a
+	// dead-lettered event can be replayed by looking the webhook back up by id.
+	const entry = { id: path, sources, config };
+	webhookOutRegistry.set(path, entry);
+	_webhookOutById.set(path, entry);
 	for (const src of sources) {
 		let set = _webhookOutBySource.get(src);
 		if (!set) { set = new Set(); _webhookOutBySource.set(src, set); }
-		set.add(webhookOutRegistry.get(path));
+		set.add(entry);
 		_watchedTopics.add(src);
 	}
 	_maybeLateActivate();
@@ -3276,10 +3283,13 @@ export function publish(topic, event, data, options) {
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks } = cfg;
 
 	if (bus !== undefined) _setBus(bus);
 	if (leader !== undefined) configureCron({ leader });
+	// Outbound-webhook plane: `webhooks.deadLetter` enables the dead-letter store
+	// (retain + admin-replay undeliverable webhook events). Off unless configured.
+	if (webhooks !== undefined) configureWebhooks(webhooks);
 	// Multi-tenancy opt-in: a resolver mapping the server-trusted authenticated
 	// user (ws.getUserData()) to a tenant id auto-scopes every topic and key.
 	// Passing nothing (or null) leaves the framework single-tenant and zero-cost.

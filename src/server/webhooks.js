@@ -1,6 +1,8 @@
 // @ts-check
 import { checkUrl } from 'svelte-adapter-uws/safe-url';
-import { _redactUrl } from './webhook-out.js';
+import { _redactUrl, _replayWebhookOut } from './webhook-out.js';
+import { state, _webhookOutById } from './state.js';
+import { createDeadLetterStore } from './dead-letter.js';
 
 /**
  * Create a webhook-to-stream bridge.
@@ -99,3 +101,90 @@ export const _webhooksOutboundRegister = function outbound(sources, config) {
 		__webhookOutConfig: config
 	};
 };
+
+/**
+ * Configure the outbound-webhook plane. `deadLetter` enables the dead-letter
+ * store that retains UNDELIVERABLE outbound-webhook events (retry-exhausted,
+ * SSRF-blocked, etc.) for admin inspection + replay, instead of reporting then
+ * dropping them. Off by default - a DLQ retains attacker-influenced event data,
+ * so it is opt-in.
+ *
+ * Pass `true` for the default in-memory store, a store instance (e.g. a
+ * Redis/Postgres store for a cluster) for shared durability, or `false`/`null`
+ * to disable. Also wired from `realtime({ webhooks: { deadLetter } })`.
+ *
+ * @param {{ deadLetter?: boolean | object | null }} [config]
+ */
+export function configureWebhooks(config = {}) {
+	if (config.deadLetter !== undefined) {
+		if (config.deadLetter === true) {
+			if (!state.webhookDeadLetter) state.webhookDeadLetter = createDeadLetterStore();
+		} else if (config.deadLetter && typeof config.deadLetter === 'object') {
+			state.webhookDeadLetter = config.deadLetter;
+		} else {
+			state.webhookDeadLetter = null;
+		}
+	}
+}
+
+/**
+ * The configured dead-letter store, or `null` when capture is off. Read it to
+ * inspect or replay undeliverable outbound-webhook events from app code; the
+ * admin route uses the same store.
+ * @returns {any}
+ */
+export function getDeadLetter() {
+	return state.webhookDeadLetter;
+}
+
+/**
+ * Replay dead-lettered outbound-webhook events. Re-attempts delivery for each
+ * matching record via its original webhook (looked up by id); on a successful
+ * re-fire the record is removed. With `dryRun`, reports what WOULD replay (and
+ * whether each webhook is still registered) without sending or removing.
+ *
+ * @param {{ topic?: string, ids?: string[], dryRun?: boolean }} [opts]
+ * @returns {Promise<{ dryRun: boolean, total: number, replayed: number, removed: number, results: Array<{ id: string, ok: boolean, status: string, error?: string }> }>}
+ */
+export async function replayDeadLetter(opts = {}) {
+	const store = state.webhookDeadLetter;
+	const dryRun = opts.dryRun === true;
+	if (!store) return { dryRun, total: 0, replayed: 0, removed: 0, results: [] };
+
+	let records = store.list({ topic: opts.topic, limit: 1000000 });
+	if (Array.isArray(opts.ids) && opts.ids.length) {
+		const want = new Set(opts.ids.map(String));
+		records = records.filter((r) => want.has(r.id));
+	}
+
+	const results = [];
+	let replayed = 0;
+	let removed = 0;
+	for (const rec of records) {
+		const entry = _webhookOutById.get(rec.webhookId);
+		if (!entry) {
+			// The webhook was unregistered (e.g. removed from code) since the
+			// event was dead-lettered; it cannot be replayed.
+			results.push({ id: rec.id, ok: false, status: 'webhook-unregistered' });
+			continue;
+		}
+		if (dryRun) {
+			results.push({ id: rec.id, ok: true, status: 'would-replay' });
+			continue;
+		}
+		let outcome;
+		try {
+			outcome = await _replayWebhookOut(entry, rec.topic, rec.event, rec.data);
+		} catch (err) {
+			outcome = { ok: false, error: String((err && err.message) || err) };
+		}
+		if (outcome.ok) {
+			replayed++;
+			if (store.remove(rec.id)) removed++;
+			results.push({ id: rec.id, ok: true, status: 'replayed' });
+		} else {
+			results.push({ id: rec.id, ok: false, status: 'failed', error: outcome.error });
+		}
+	}
+	return { dryRun, total: records.length, replayed, removed, results };
+}

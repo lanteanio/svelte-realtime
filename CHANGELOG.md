@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.39] - 2026-06-26
+
+### Added
+
+- **Dead-letter queue for undeliverable outbound webhooks, with admin inspection + replay.** When an outbound webhook (`live.webhooks.outbound`) exhausts its retries - or is blocked by the SSRF gate, loops, etc. - the event used to be reported then dropped. With a dead-letter store configured (`realtime({ webhooks: { deadLetter: true } })` or `configureWebhooks({ deadLetter })`), the undeliverable event is now RETAINED for an operator to inspect and replay once the endpoint recovers. Off by default (a DLQ retains attacker-influenced event data); `true` uses the default bounded in-memory store, or pass a store instance for a cluster. New exports: `createDeadLetterStore()`, `configureWebhooks()`, `getDeadLetter()`, `replayDeadLetter()`. Admin commands on the `/__realtime` plane: `GET /dlq` (counts-only summary), `GET /dlq/<topic>` (records), `POST /dlq/<topic>/replay` with `{ dryRun, ids }` - a dry-run reports what would replay; a confirm re-fires each event through its original webhook and removes it on success. Replay re-runs the COMPLETE delivery path (the SSRF gate is re-applied at fire time, re-resolving and re-pinning), so a dead-lettered event can never be replayed to a now-internal or rebinding host.
+
 ## [0.6.0-next.38] - 2026-06-26
 
 ### Changed

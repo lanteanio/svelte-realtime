@@ -3587,6 +3587,30 @@ Delivery runs over `node:http`/`node:https` (no extra dependency). Each POST is 
 | `resolve` | `node:dns` | Custom DNS resolver `(hostname) => address \| address[] \| Promise<...>` for the pin. |
 | `onFailure` | - | Called on delivery failure after retries (or on a blocked URL / payload / redirect). |
 
+### Dead-letter queue
+
+By default an undeliverable webhook event (retries exhausted, or blocked by the SSRF gate / a redirect loop) is reported via `onFailure` and then dropped. Enable the **dead-letter queue** to retain it for inspection and replay once the endpoint recovers:
+
+```js
+// hooks.ws.js
+export const { open, close, message, init, shutdown, admin } = realtime({
+  webhooks: { deadLetter: true }, // default bounded in-memory store; pass a store instance for a cluster
+  admin: { requires: (request) => request.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}` }
+});
+```
+
+It is **off by default** - a DLQ retains the (attacker-influenceable) event payload, so you opt in. Inspect and replay it through the auth-gated admin plane, or programmatically with `getDeadLetter()` / `replayDeadLetter()`:
+
+| Command | Does |
+| --- | --- |
+| `GET /__realtime/dlq` | Counts-only summary: `{ total, byTopic, oldest, newest }`. |
+| `GET /__realtime/dlq/<topic>` | The retained records for a topic (`?limit=`, default 100), including the event data. |
+| `POST /__realtime/dlq/<topic>/replay` | Replay. Body `{ dryRun?: boolean, ids?: string[] }` - a dry-run reports what would replay; a confirm re-fires each event and removes it on success. |
+
+Replay re-runs the **complete** delivery path, so the SSRF gate is re-applied at fire time (re-resolving and re-pinning the host) - a dead-lettered event can never be replayed to a host that has since become internal or started rebinding. A record whose webhook was removed from your code since it failed reports `webhook-unregistered` rather than firing.
+
+`configureWebhooks({ deadLetter })` is the imperative equivalent of the `webhooks` config; `createDeadLetterStore({ max, ttlMs })` builds the default store (a cluster substitutes a durable Redis/Postgres store with the same interface).
+
 ---
 
 ## Signals

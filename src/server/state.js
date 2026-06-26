@@ -199,6 +199,9 @@ export const _effectBySource = new Map();
 /** @type {Map<string, Set<any>>} Source topic -> outbound-webhook entries that watch it */
 export const _webhookOutBySource = new Map();
 
+/** @type {Map<string, any>} Webhook registration path (id) -> the same entry object, for dead-letter replay lookup */
+export const _webhookOutById = new Map();
+
 /** @type {Map<string, Set<any>>} Source topic -> aggregate entries that watch it */
 export const _aggregateBySource = new Map();
 
@@ -265,6 +268,9 @@ export const state = {
 
 	/** @type {import('svelte-adapter-uws').Platform | null} */
 	cronPlatform: null,
+
+	/** @type {any} Dead-letter store for undeliverable outbound webhooks (null = capture off). */
+	webhookDeadLetter: null,
 
 	/** @type {import('svelte-adapter-uws').Platform | null} Captured platform for dynamic derived recomputation */
 	derivedPlatform: null,
