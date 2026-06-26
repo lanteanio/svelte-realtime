@@ -101,13 +101,14 @@ export function _createAdminHandler(adminConfig) {
 			if (!store) return _json({ enabled: false, topic, count: 0, records: [] }, 200);
 			const lim = parseInt(url.searchParams.get('limit') || '', 10);
 			const limit = Number.isInteger(lim) && lim > 0 ? lim : 100;
-			return _json({ enabled: true, topic, count: store.count({ topic }), records: store.list({ topic, limit }) }, 200);
+			// Store methods may be sync (in-memory) or async (Redis/Postgres); await tolerates both.
+			return _json({ enabled: true, topic, count: await store.count({ topic }), records: await store.list({ topic, limit }) }, 200);
 		}
 		if (pathname.endsWith('/dlq')) {
 			if (method !== 'GET') return _json({ error: 'method not allowed' }, 405);
 			const store = getDeadLetter();
 			if (!store) return _json({ enabled: false, total: 0, byTopic: {}, oldest: null, newest: null }, 200);
-			return _json({ enabled: true, ...store.summary() }, 200);
+			return _json({ enabled: true, ...(await store.summary()) }, 200);
 		}
 
 		const sub = pathname.slice(pathname.lastIndexOf('/') + 1);

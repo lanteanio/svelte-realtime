@@ -151,7 +151,9 @@ export async function replayDeadLetter(opts = {}) {
 	const dryRun = opts.dryRun === true;
 	if (!store) return { dryRun, total: 0, replayed: 0, removed: 0, results: [] };
 
-	let records = store.list({ topic: opts.topic, limit: 1000000 });
+	// `list` / `remove` may be sync (in-memory) or async (a Redis/Postgres
+	// cluster store); awaiting tolerates both (await on a non-Promise is a no-op).
+	let records = await store.list({ topic: opts.topic, limit: 1000000 });
 	if (Array.isArray(opts.ids) && opts.ids.length) {
 		const want = new Set(opts.ids.map(String));
 		records = records.filter((r) => want.has(r.id));
@@ -180,7 +182,7 @@ export async function replayDeadLetter(opts = {}) {
 		}
 		if (outcome.ok) {
 			replayed++;
-			if (store.remove(rec.id)) removed++;
+			if (await store.remove(rec.id)) removed++;
 			results.push({ id: rec.id, ok: true, status: 'replayed' });
 		} else {
 			results.push({ id: rec.id, ok: false, status: 'failed', error: outcome.error });

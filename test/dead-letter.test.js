@@ -198,3 +198,43 @@ describe('admin /dlq commands', () => {
 		expect(await res.json()).toMatchObject({ enabled: true });
 	});
 });
+
+// A cluster store (Redis / Postgres) exposes the same interface but ASYNC. The
+// capture, replay, and admin paths must await it. This fake async store proves
+// the retrofit works without a real backend.
+describe('async (cluster-shaped) dead-letter store', () => {
+	beforeEach(reset);
+
+	const asyncWrap = (s) => ({
+		add: (r) => Promise.resolve(s.add(r)),
+		get: (id) => Promise.resolve(s.get(id)),
+		remove: (id) => Promise.resolve(s.remove(id)),
+		count: (f) => Promise.resolve(s.count(f)),
+		list: (f) => Promise.resolve(s.list(f)),
+		summary: () => Promise.resolve(s.summary()),
+		clear: () => Promise.resolve(s.clear())
+	});
+
+	it('captures through an async add (fire-and-forget)', async () => {
+		const inner = createDeadLetterStore();
+		configureWebhooks({ deadLetter: asyncWrap(inner) });
+		await _fireWebhookOut({ id: 'w', config: { url: 'http://127.0.0.1:9/x' } }, 'orders', 'created', { id: 1 }, null);
+		await new Promise((r) => setTimeout(r, 0)); // let the async add settle
+		expect(inner.count()).toBe(1);
+	});
+
+	it('serves admin GET /dlq and POST replay through an async store', async () => {
+		const inner = createDeadLetterStore();
+		configureWebhooks({ deadLetter: asyncWrap(inner) });
+		_webhookOutById.set('w', { id: 'w', config: { url: 'http://example.com/x', transform: () => null } });
+		await inner.add({ webhookId: 'w', topic: 'orders', event: 'e', data: 1, attempts: 3, error: 'x', failedAt: 1 });
+
+		const admin = adminFor(() => true);
+		const sum = await admin(new Request('http://x/__realtime/dlq'));
+		expect(await sum.json()).toMatchObject({ enabled: true, total: 1 });
+
+		const replay = await admin(new Request('http://x/__realtime/dlq/orders/replay', { method: 'POST', body: '{}' }));
+		expect(await replay.json()).toMatchObject({ replayed: 1, removed: 1 });
+		expect(inner.count()).toBe(0);
+	});
+});

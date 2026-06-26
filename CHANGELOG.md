@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.40] - 2026-06-26
+
+### Changed
+
+- **The webhook dead-letter store interface is now awaited end-to-end**, so a durable CLUSTER store (Redis / Postgres) with async methods can be wired via `configureWebhooks({ deadLetter })`, not just the default in-memory store. Capture (`store.add`), `replayDeadLetter`, and the admin `/dlq` commands all tolerate both a synchronous (in-memory) and an asynchronous (cluster) store; a rejected async `add` is swallowed so dead-letter capture can never break the (best-effort) webhook path. Pairs with `svelte-adapter-uws-extensions` `./redis/dead-letter` (>= 0.6.0-next.30). No behaviour change for the in-memory store.
+
 ## [0.6.0-next.39] - 2026-06-26
 
 ### Added

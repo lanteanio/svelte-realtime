@@ -435,7 +435,11 @@ export async function _fireWebhookOut(entry, topic, event, data, platform) {
 	const store = state.webhookDeadLetter;
 	if (store) {
 		try {
-			store.add({
+			// `add` may be sync (in-memory store) or async (a Redis/Postgres
+			// cluster store). Fire-and-forget either way - swallow a rejected
+			// promise so dead-letter capture can never break the (best-effort)
+			// webhook path or surface an unhandled rejection.
+			const added = store.add({
 				webhookId: entry.id,
 				topic,
 				event,
@@ -444,6 +448,7 @@ export async function _fireWebhookOut(entry, topic, event, data, platform) {
 				error: String((r.err && r.err.message) || r.err || 'unknown'),
 				failedAt: now()
 			});
+			if (added && typeof added.then === 'function') added.catch(() => {});
 		} catch { /* never let dead-letter capture break the (best-effort) webhook path */ }
 	}
 }
