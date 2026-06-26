@@ -1643,6 +1643,24 @@ Errors thrown by the loader during an `invalidateOn` reload route through the sa
 
 ---
 
+## De-herding thundering-herd broadcasts
+
+When one broadcast makes many clients all act at once - a "go read-only" notice that triggers thousands of retries, a feature-flag flip that re-renders every screen, a "data changed" push that makes everyone refetch - the synchronized follow-up traffic can stampede the server at t+0. Pass `{ jitterMs }` to spread it:
+
+```js
+// One event; each client waits a random 0-5s before its handler runs.
+ctx.publish('route:i95', 'reroute', detour, { jitterMs: 5000 });
+```
+
+The server still sends a single frame (its outbound fan-out is unchanged). The frame carries the WINDOW, and **each client rolls its own** random delay in `[0, jitterMs)` before dispatching, so 50k clients ramp their reactions across the window instead of spiking together. Because the staggering is client-side, the server holds no per-subscriber timers.
+
+- Per-client and order-preserving: while a frame is deferred, later frames for the same stream are held behind it in arrival order (never overtaken).
+- The window is validated to `[0, 60000]` ms and clamped again on the client, so a bad value can never make a client defer for days.
+- `jitterMs` takes the direct publish path - it does not combine with replay capture or publish coalescing, because it is for rare control events, not hot streams.
+- Cluster-wide: the window rides the bus to every node (with `svelte-adapter-uws-extensions >= 0.6.0-next.34`), so subscribers on every worker stagger, not just the originating one.
+
+---
+
 ## Access control
 
 Use the `filter` / `access` option on `live.stream()` to control who can subscribe. The predicate receives `ctx` and is checked once at subscription time. If it returns `false`, the subscription is denied with `{ ok: false, code: 'FORBIDDEN', error: 'Access denied' }` and no data is sent. For per-event projection or filtering on a live stream, use the `transform` option on `live.stream({ transform })`.

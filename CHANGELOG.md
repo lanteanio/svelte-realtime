@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.45] - 2026-06-26
+## [0.6.0-next.46] - 2026-06-26
+
+### Added
+
+- **`ctx.publish(topic, event, data, { jitterMs })` - de-herd thundering-herd reactions.** When a single broadcast makes many clients all act at once (retry, refetch, re-render), `jitterMs` makes each client wait a random delay in `[0, jitterMs)` before its handler runs, so N clients ramp their follow-up actions across the window instead of stampeding the server at t+0. The server sends one frame (its outbound fan-out is unchanged); each client rolls its OWN offset, so the receivers genuinely spread. Per-client and FIFO-safe: while a frame is deferred, later frames for the same stream are held behind it in arrival order (never overtaken), bounded so a flood cannot grow the hold queue. The window is validated to `[0, 60000]` ms at the call site and clamped again on the client. Ideal for the proactive degradation push, feature-flag ramps, and contract-evolution notices. Needs `svelte-adapter-uws >= 0.6.0-next.40` for the `j` wire field; cluster-wide via `svelte-adapter-uws-extensions >= 0.6.0-next.34` (the bus relay carries the window across nodes). `jitterMs` takes the direct publish path, so it does not combine with replay capture or publish batching (it is a rare control event, not a hot stream).
 
 ### Added
 

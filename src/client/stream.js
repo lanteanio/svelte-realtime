@@ -9,6 +9,7 @@ import { assert } from '../shared/assert.js';
 import { mergeKeyField, rebuildIndex } from '../shared/merge.js';
 import { sanitizeRowData } from '../shared/safe-assign.js';
 import { now, randomFloat, setTimer, clearTimer, microtask } from '../client-runtime.js';
+import { createJitterDispatch } from './jitter-dispatch.js';
 import { _devtoolsStream, _devtoolsStreamEvent, _devtoolsStreamError } from './devtools-instrument.js';
 import { clientState, RpcError, _IS_DEV, _useRAF, _nextId, pending } from './internal-state.js';
 import { _addInFlight, _removeInFlight } from './health.js';
@@ -849,6 +850,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// Cache miss - trigger a full refetch (reset seq so we get full data)
 				_lastSeq = null;
 				if (topicUnsub) { topicUnsub(); topicUnsub = null; }
+				_jitter.clear();
 				initialLoaded = false;
 				fetching = false;
 				buffer = [];
@@ -876,6 +878,28 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				_recordHistory();
 			}
 		}
+	}
+
+	// De-herd dispatch: defers a frame carrying a jitter window `j` by a local
+	// random delay so this client's reaction spreads across the window instead of
+	// firing at t+0. Per stream instance (each client rolls its own offset).
+	const _jitter = createJitterDispatch(applyEvent);
+
+	/**
+	 * Install this stream's live-event listener (idempotent). Inbound frames buffer
+	 * until the initial load, then route through the de-herd dispatcher so a jittered
+	 * frame staggers. Shared by the normal subscribe path AND the `unchanged`
+	 * delta-sync resume path, so the two listener installs can never drift (a prior
+	 * copy on the resume path silently bypassed the dispatcher).
+	 */
+	function _subscribeLive() {
+		if (!topic || topicUnsub) return;
+		const topicStore = on(topic);
+		topicUnsub = topicStore.subscribe((envelope) => {
+			if (!envelope) return;
+			if (!initialLoaded) buffer.push(envelope);
+			else _jitter.dispatch(envelope);
+		});
 	}
 
 	/**
@@ -954,17 +978,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 				// Handle unchanged response (delta sync - nothing changed)
 				if (response.unchanged === true) {
-					if (topic && !topicUnsub) {
-						const topicStore = on(topic);
-						topicUnsub = topicStore.subscribe((envelope) => {
-							if (!envelope) return;
-							if (!initialLoaded) {
-								buffer.push(envelope);
-							} else {
-								applyEvent(envelope);
-							}
-						});
-					}
+					_subscribeLive();
 					initialLoaded = true;
 					// Drain anything buffered between listener attach and now
 					if (buffer.length > 0) {
@@ -1005,17 +1019,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 				// Attach topic listener BEFORE flipping initialLoaded, so events
 				// arriving between ws.subscribe(topic) (server-side) and now are buffered.
-				if (topic && !topicUnsub) {
-					const topicStore = on(topic);
-					topicUnsub = topicStore.subscribe((envelope) => {
-						if (!envelope) return;
-						if (!initialLoaded) {
-							buffer.push(envelope);
-						} else {
-							applyEvent(envelope);
-						}
-					});
-				}
+				_subscribeLive();
 
 				initialLoaded = true;
 				if (Array.isArray(currentValue)) currentValue = currentValue.slice();
@@ -1092,6 +1096,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			cancelAnimationFrame(_rafId);
 			_rafId = null;
 		}
+		_jitter.clear();
 		_bufA.length = 0;
 		_bufB.length = 0;
 		_activeBuf = _bufA;

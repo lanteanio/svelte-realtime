@@ -107,6 +107,15 @@ export function _getCtxHelpers(platform) {
 			// reach for the unwrapped `platform.publish` directly so the
 			// intent is explicit at the call site.
 			_assertNotReservedTopic(topic);
+			// De-herd window validation: clamp the `{ jitterMs }` contract at the call
+			// site so a bad value is a clear error, not a silently-huge client defer.
+			// 0 / absent = immediate (today's behavior); 60s ceiling matches the wire.
+			if (options && options.jitterMs !== undefined) {
+				const _j = options.jitterMs;
+				if (typeof _j !== 'number' || !Number.isFinite(_j) || _j < 0 || _j > 60000) {
+					throw new LiveError('VALIDATION', '[svelte-realtime] ctx.publish jitterMs must be a finite number of milliseconds in [0, 60000]');
+				}
+			}
 			// Volatile option translation. Per-call `options.volatile` or a
 			// topic registered as volatile turns into `seq: false` on the wire
 			// so reconnect with `lastSeenSeq` won't try to backfill the gap.
@@ -154,14 +163,20 @@ export function _getCtxHelpers(platform) {
 			// the same idea to the wire level so subscribers receive ONE frame
 			// per microtask containing every event they're entitled to.
 			if (_topicCoalesce.size === 0 && _topicTransform.size === 0) {
+				// A jittered publish carries a de-herd window `j` only on the single
+				// `platform.publish` envelope - not the replay buffer or the batch
+				// frame - so it takes the direct path. That is the right shape: jitter
+				// is a rare control event (degraded notice, flag flip, reroute), never
+				// a hot, replayed, or coalesced stream.
+				const _jittered = !!(finalOptions && finalOptions.jitterMs > 0);
 				// Replay-eligible topics route through `platform.replay.publish`
 				// so the bounded buffer captures the event for gap-fill on
 				// resume. The replay extension calls `platform.publish`
 				// internally, so the local broadcast still happens. Cannot
 				// batch through publishBatched in this case -- the extension's
 				// per-call write is what stamps the seq envelope.
-				if (_maybeReplayPublish(platform, topic, event, data)) return true;
-				if (!_hasBatched) return platform.publish(topic, event, data, finalOptions);
+				if (!_jittered && _maybeReplayPublish(platform, topic, event, data)) return true;
+				if (_jittered || !_hasBatched) return platform.publish(topic, event, data, finalOptions);
 				if (!pendingBatch) {
 					pendingBatch = [];
 					microtask(_flushBatch);
