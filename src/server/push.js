@@ -115,7 +115,12 @@ let _remoteRegistry = null;
  *   `request(userId, event, data, options)` method. When supplied,
  *   `live.push({ userId })` falls back to `remoteRegistry.request(...)`
  *   if the userId is not registered on this instance, enabling
- *   cluster-routed push. Pass `null` to clear.
+ *   cluster-routed push. If it ALSO exposes a
+ *   `requestSession(sessionId, event, data, options)` method (the
+ *   extensions connection registry created with a `sessionIdentify`
+ *   option does), `live.push({ sessionId })` / `live.notify({ sessionId })`
+ *   route cluster-wide too; otherwise the sessionId target stays
+ *   single-instance. Pass `null` to clear.
  *
  * The whole-config form `null` clears both slots.
  *
@@ -128,7 +133,7 @@ let _remoteRegistry = null;
  * but is brittle if your Redis client is created inside an async setup
  * function or behind a module that imports lazily.
  *
- * @param {{ identify?: ((ws: any) => string | null | undefined) | null, sessionIdentify?: ((ws: any) => string | null | undefined) | null, remoteRegistry?: { request: Function } | null } | null} config
+ * @param {{ identify?: ((ws: any) => string | null | undefined) | null, sessionIdentify?: ((ws: any) => string | null | undefined) | null, remoteRegistry?: { request: Function, requestSession?: Function } | null } | null} config
  *
  * @example
  * ```js
@@ -436,18 +441,31 @@ const _livePush = async function push(target, event, data, options) {
 
 	const targetKey = _resolvePushTarget(target, 'live.push');
 
-	// sessionId target: route through the local session registry. Cluster-wide
-	// sessionId routing is a separate extensions primitive (the remoteRegistry is
-	// userId-keyed), so this path is single-instance today.
+	// sessionId target: cluster-first when the remoteRegistry exposes
+	// requestSession (route to whichever instance owns the session cluster-wide,
+	// resume-aware), falling back to the local session entry on the brief
+	// registry-offline race after a fresh open - exactly mirroring the userId
+	// path below. Without a requestSession-capable registry this stays local-only.
 	if (targetKey === 'sessionId') {
 		const sessionId = /** @type {any} */ (target).sessionId;
-		return _localPushRequest(_pushSessionRegistry.get(sessionId), event, data, options, 'sessionId', sessionId);
+		const localSessionEntry = _pushSessionRegistry.get(sessionId);
+		if (_remoteRegistry && typeof _remoteRegistry.requestSession === 'function') {
+			try {
+				return await _remoteRegistry.requestSession(sessionId, event, data, options || undefined);
+			} catch (err) {
+				if (!(localSessionEntry && _isRegistryOfflineError(err))) throw _translatePushError(err);
+				// fall through to the (fresher) local entry below
+			}
+		}
+		return _localPushRequest(localSessionEntry, event, data, options, 'sessionId', sessionId);
 	}
 
 	// topic target: broadcast a request to every subscriber of the topic and
-	// aggregate the replies (the request/reply analog of publish). Single-
-	// instance today (walks this worker's subscriber set); cluster fan-out is a
-	// separate extensions primitive.
+	// aggregate the replies (the request/reply analog of publish). Cluster-wide
+	// when a topicBroadcast coordinator is wired, else this worker's subscribers.
+	// NOTE: the topic is used verbatim - unlike `ctx.publish`, a connection-less
+	// live.push({ topic }) has no ctx and so does NOT auto-apply tenant scoping;
+	// a multi-tenant caller must pass an already-tenant-qualified topic.
 	if (targetKey === 'topic') {
 		return _broadcastTopicRequest(/** @type {any} */ (target).topic, event, data, options);
 	}
@@ -533,8 +551,54 @@ async function _localPushRequest(entry, event, data, options, label, id) {
 }
 
 /**
- * Broadcast a request to every subscriber of `topic` (this instance) via the
- * adapter's `platform.requestTopic` and aggregate the per-subscriber replies.
+ * Cluster coordinators (`platform.topicBroadcast`) whose local-serve handler has
+ * been wired. Keyed by the coordinator so a re-wrapped platform that exposes the
+ * same coordinator does not double-register the handler.
+ * @type {WeakSet<object>}
+ */
+const _topicBroadcastWired = new WeakSet();
+
+/**
+ * Wire a topic-broadcast coordinator's local-serve handler once. The handler
+ * runs the adapter's single-instance `platform.requestTopic` over THIS instance's
+ * subscribers; the coordinator calls it both for the origin's own subscribers and
+ * for inbound peer broadcasts. Reads `state.cronPlatform` live so a re-init that
+ * swaps the platform reference still serves through the current one.
+ * @param {any} cluster
+ */
+function _ensureTopicBroadcastWired(cluster) {
+	if (!cluster || typeof cluster.onRequest !== 'function' || _topicBroadcastWired.has(cluster)) return;
+	_topicBroadcastWired.add(cluster);
+	cluster.onRequest((topic, event, data, opts) => {
+		const p = state.cronPlatform;
+		if (p && typeof p.requestTopic === 'function') return p.requestTopic(topic, event, data, opts);
+		return Promise.resolve([]);
+	});
+}
+
+/**
+ * Fold a list of per-subscriber outcomes (`{ ok, reply } | { ok: false, error }`)
+ * into the aggregate shape `{ replies, errors, count, delivered }`. Shared by the
+ * single-instance and cluster topic paths so both return an identical shape.
+ * @param {any[]} results
+ */
+function _aggregateTopicResults(results) {
+	const list = Array.isArray(results) ? results : [];
+	const replies = [];
+	const errors = [];
+	for (const r of list) {
+		if (r && r.ok) replies.push(r.reply);
+		else errors.push({ message: (r && r.error) ? String(r.error) : 'unknown' });
+	}
+	return { replies, errors, count: list.length, delivered: replies.length };
+}
+
+/**
+ * Broadcast a request to every subscriber of `topic` and aggregate the
+ * per-subscriber replies. Prefers the cluster coordinator
+ * (`platform.topicBroadcast`) when wired - which fans the request across every
+ * instance and aggregates cluster-wide - and otherwise falls back to the
+ * adapter's single-instance `platform.requestTopic` (this worker's subscribers).
  * Partial-success: a subscriber that times out / errors / closed lands in
  * `errors`, never failing the whole call. Returns
  * `{ replies, errors, count, delivered }`.
@@ -543,22 +607,25 @@ async function _localPushRequest(entry, event, data, options, label, id) {
  */
 async function _broadcastTopicRequest(topic, event, data, options) {
 	const platform = state.cronPlatform;
-	if (!platform || typeof platform.requestTopic !== 'function') {
+	const cluster = platform && platform.topicBroadcast;
+	let results;
+	if (cluster && typeof cluster.broadcast === 'function') {
+		_ensureTopicBroadcastWired(cluster);
+		try {
+			results = await cluster.broadcast(topic, event, data, options || undefined);
+		} catch (err) {
+			throw _translatePushError(err);
+		}
+	} else if (platform && typeof platform.requestTopic === 'function') {
+		try {
+			results = await platform.requestTopic(topic, event, data, options || undefined);
+		} catch (err) {
+			throw _translatePushError(err);
+		}
+	} else {
 		throw new LiveError('VALIDATION', '[svelte-realtime] live.push({ topic }): requires a captured platform with requestTopic (svelte-adapter-uws >= 0.6.0-next.39). Wire `realtime({ ... }).init` from your hooks.ws.js init({ platform }) hook.');
 	}
-	let results;
-	try {
-		results = await platform.requestTopic(topic, event, data, options || undefined);
-	} catch (err) {
-		throw _translatePushError(err);
-	}
-	const replies = [];
-	const errors = [];
-	for (const r of results) {
-		if (r && r.ok) replies.push(r.reply);
-		else errors.push({ message: (r && r.error) ? String(r.error) : 'unknown' });
-	}
-	return { replies, errors, count: results.length, delivered: replies.length };
+	return _aggregateTopicResults(results);
 }
 
 /**
@@ -692,27 +759,49 @@ const _liveNotify = function notify(target, event, data) {
 	}
 	const targetKey = _resolvePushTarget(target, 'live.notify');
 
-	// sessionId target: fire-and-forget delivery to the local session entry.
-	// Cluster sessionId routing is a separate extensions primitive.
+	// sessionId target: cluster-first fire-and-forget when the remoteRegistry
+	// exposes requestSession (route to the session's owning instance cluster-wide),
+	// else local delivery. Same silent contract and registry-offline local
+	// fallback as the userId notify path below.
 	if (targetKey === 'sessionId') {
-		const sessionEntry = _pushSessionRegistry.get(/** @type {any} */ (target).sessionId);
+		const sessionId = /** @type {any} */ (target).sessionId;
+		const sessionEntry = _pushSessionRegistry.get(sessionId);
+		if (_remoteRegistry && typeof _remoteRegistry.requestSession === 'function') {
+			try {
+				const p = _remoteRegistry.requestSession(sessionId, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS });
+				if (sessionEntry) {
+					p.catch((err) => { if (_isRegistryOfflineError(err)) _deliverLocalNotify(sessionEntry); });
+				} else {
+					p.catch(() => { /* silent: fire-and-forget contract */ });
+				}
+			} catch {
+				if (sessionEntry) _deliverLocalNotify(sessionEntry);
+			}
+			return Promise.resolve();
+		}
 		if (sessionEntry) _deliverLocalNotify(sessionEntry);
 		// Offline + no session entry: silent no-op (fire-and-forget contract).
 		return Promise.resolve();
 	}
 
 	// topic target: fire-and-forget broadcast to every subscriber of the topic.
-	// Same delivery path as live.push({ topic }) but replies are discarded.
+	// Same delivery path as live.push({ topic }) but replies are discarded -
+	// prefers the cluster coordinator when wired, else the single-instance fan-out.
 	if (targetKey === 'topic') {
 		const platform = state.cronPlatform;
-		if (platform && typeof platform.requestTopic === 'function') {
-			try {
+		const cluster = platform && platform.topicBroadcast;
+		try {
+			if (cluster && typeof cluster.broadcast === 'function') {
+				_ensureTopicBroadcastWired(cluster);
+				cluster.broadcast(/** @type {any} */ (target).topic, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS })
+					.catch(() => { /* discarded by design: notify never surfaces delivery state */ });
+			} else if (platform && typeof platform.requestTopic === 'function') {
 				platform.requestTopic(/** @type {any} */ (target).topic, event, data, { timeoutMs: _NOTIFY_INTERNAL_TIMEOUT_MS })
 					.catch(() => { /* discarded by design: notify never surfaces delivery state */ });
-			} catch { /* sync throw on a torn-down platform: silent, fire-and-forget */ }
-		} else if (_IS_DEV) {
-			console.warn('[svelte-realtime] live.notify({ topic }): platform.requestTopic unavailable (requires svelte-adapter-uws >= 0.6.0-next.39); broadcast silently no-op.');
-		}
+			} else if (_IS_DEV) {
+				console.warn('[svelte-realtime] live.notify({ topic }): no topicBroadcast or requestTopic available (requires svelte-adapter-uws >= 0.6.0-next.39); broadcast silently no-op.');
+			}
+		} catch { /* sync throw on a torn-down platform: silent, fire-and-forget */ }
 		return Promise.resolve();
 	}
 

@@ -1724,6 +1724,19 @@ export namespace live {
 			data?: unknown,
 			options?: { timeoutMs?: number }
 		): Promise<TReply>;
+		/**
+		 * Optional cluster-routed request/reply keyed by an app session id.
+		 * When present (the extensions connection registry created with a
+		 * `sessionIdentify` option exposes it), `live.push({ sessionId })` /
+		 * `live.notify({ sessionId })` route cluster-wide; absent, the
+		 * sessionId target stays single-instance.
+		 */
+		requestSession?<TReply = unknown>(
+			target: string,
+			event: string,
+			data?: unknown,
+			options?: { timeoutMs?: number }
+		): Promise<TReply>;
 	}
 
 	/**
@@ -1746,8 +1759,11 @@ export namespace live {
 	 * - `remoteRegistry` - wire a cluster-routing registry so `live.push`
 	 *   can reach users connected to other instances. When the userId is
 	 *   not registered locally, `live.push` falls through to
-	 *   `remoteRegistry.request(userId, ...)`. Pass `null` to clear.
-	 *   (Cluster routing is userId-keyed; sessionId routing is single-instance.)
+	 *   `remoteRegistry.request(userId, ...)`. If the registry also exposes
+	 *   `requestSession(sessionId, ...)` (the extensions connection registry
+	 *   created with a `sessionIdentify` option does), `live.push({ sessionId })`
+	 *   / `live.notify({ sessionId })` route cluster-wide too; otherwise the
+	 *   sessionId target stays single-instance. Pass `null` to clear.
 	 *
 	 * At least one of `identify` / `sessionIdentify` / `remoteRegistry` must be
 	 * provided per call; passing `{}` is a runtime error and rejected here at

@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.42] - 2026-06-26
+
+### Added
+
+- **`live.push({ topic })` / `live.notify({ topic })` now fan out across a cluster** when a topic-broadcast coordinator is wired. The single-instance version walked only this worker's subscribers; it now prefers `platform.topicBroadcast` (the new `svelte-adapter-uws-extensions/redis/topic-broadcast` coordinator, `>= 0.6.0-next.32`) to reach every subscriber of the topic on every instance and aggregate the replies cluster-wide, into the same `{ replies, errors, count, delivered }` shape. With no coordinator wired it falls back to the single-instance fan-out exactly as before - zero-config dev is unchanged. The coordinator's local-serve handler is wired automatically the first time a topic push runs.
+- **`live.push({ sessionId })` / `live.notify({ sessionId })` now route cluster-wide** when the configured `remoteRegistry` exposes `requestSession` (the extensions connection registry created with a `sessionIdentify` option does). Previously the sessionId target was single-instance even in a cluster; it now mirrors the userId path - cluster-first with a local fallback on the brief registry-offline race after a fresh open. Without a `requestSession`-capable registry it stays single-instance, unchanged.
+
+### Notes
+
+- `live.push({ topic })` / `live.notify({ topic })` use the topic verbatim. Unlike `ctx.publish`, these connection-less calls have no `ctx` and so do NOT auto-apply tenant scoping; a multi-tenant caller must pass an already-tenant-qualified topic (the same contract as `live.cron` publishing).
+
 ## [0.6.0-next.41] - 2026-06-26
 
 ### Added

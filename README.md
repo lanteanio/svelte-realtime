@@ -2047,7 +2047,7 @@ live.notify({ sessionId: 'sess-abc' }, 'tab:focus', {});
 
 A push/notify target names exactly one of `{ userId }`, `{ sessionId }`, or `{ topic }`. The userId and sessionId registries are independent: one connection can register under both, either, or neither, and the same `pushHooks.open` / `pushHooks.close` maintain both. Session routing is **resume-aware** by the same last-write-wins lifecycle as userId - a session that reconnects with the same id flips the target to its live socket, so a push always reaches the session's current connection. `NOT_FOUND` is thrown when no connection is registered for the sessionId.
 
-Session routing is single-instance today (the cluster `remoteRegistry` is userId-keyed); a session-keyed cluster registry is a separate extensions primitive.
+Session routing follows the cluster automatically when the configured `remoteRegistry` exposes `requestSession` - the extensions connection registry created with a `sessionIdentify` option does (`svelte-adapter-uws-extensions >= 0.6.0-next.32`), so `live.push({ sessionId })` reaches the session on whichever instance currently owns it. Without a `requestSession`-capable registry it stays single-instance.
 
 **Broadcast to a topic.** `live.push({ topic }, event, data)` fans a request out to **every** subscriber of the topic and aggregates the replies - the request/reply analog of `publish`:
 
@@ -2057,7 +2057,9 @@ const { replies, errors, count, delivered } = await live.push({ topic: 'room:42'
 live.notify({ topic: 'room:42' }, 'tab:refresh', {}); // fire-and-forget broadcast
 ```
 
-Partial success is the contract: a subscriber that times out or errors lands in `errors` and never fails the whole call. A target names exactly one of `{ userId }` / `{ sessionId }` / `{ topic }`. Single-instance today (walks this worker's subscribers); cross-instance topic broadcast is a separate extensions primitive. Needs `svelte-adapter-uws >= 0.6.0-next.39`.
+Partial success is the contract: a subscriber that times out or errors lands in `errors` and never fails the whole call. A target names exactly one of `{ userId }` / `{ sessionId }` / `{ topic }`. The broadcast follows the cluster when a topic-broadcast coordinator is wired (`platform.topicBroadcast = createTopicBroadcast(redis)` from `svelte-adapter-uws-extensions/redis/topic-broadcast`, `>= 0.6.0-next.32`) - it reaches every subscriber on every instance and aggregates cluster-wide; otherwise it walks this worker's subscribers. Needs `svelte-adapter-uws >= 0.6.0-next.39`.
+
+> Unlike `ctx.publish`, a connection-less `live.push({ topic })` / `live.notify({ topic })` has no `ctx` and so does **not** auto-apply tenant scoping - the topic is used verbatim. A multi-tenant caller must pass an already-tenant-qualified topic (the same contract as publishing from `live.cron`).
 
 `onPush(event, handler)` multiplexes multiple events over the adapter's single `onRequest` channel. Returning a value sends it as the reply; throwing rejects the server-side promise. Returns an unsubscribe function.
 
