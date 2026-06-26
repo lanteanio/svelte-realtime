@@ -324,6 +324,32 @@ export interface LiveContext<UserData = unknown> {
 		evalFn: (state: any, meta: CompensateMeta) => R | Promise<R>,
 		options?: CompensateOptions
 	) => Promise<R>;
+
+	/**
+	 * Arm the room's single pending alarm (live.alarm). Available only inside a
+	 * `live.stream` (or `live.room`) declared with an `{ alarm: { onAlarm } }`
+	 * config; calling it elsewhere throws. `at` is an absolute epoch-ms time. When
+	 * it arrives the framework runs `onAlarm` with a fresh server ctx - even if
+	 * every client has disconnected. Exactly one alarm per room: calling again
+	 * replaces the pending one. A past `at` fires on the next tick.
+	 *
+	 * Durable across restart + cluster single-fire when a store + leader are wired
+	 * via `configureAlarm`; in-memory (survives the room going idle within the
+	 * process) otherwise.
+	 *
+	 * @example
+	 * ```js
+	 * // TTL-style cleanup: refresh on activity, fire if untouched for 30 days.
+	 * ctx.setAlarm(Date.now() + 30 * 24 * 60 * 60 * 1000);
+	 * ```
+	 */
+	setAlarm: (at: number) => void;
+
+	/** The room's pending alarm time (epoch-ms), or `null` if none is set. */
+	getAlarm: () => number | null;
+
+	/** Cancel the room's pending alarm, if any. */
+	deleteAlarm: () => void;
 }
 
 /**
@@ -392,7 +418,24 @@ export interface RoomHistoryConfig {
 /**
  * Options for `live.stream()`.
  */
+export interface StreamAlarmConfig {
+	/**
+	 * Runs when a handler's `ctx.setAlarm(at)` reaches its scheduled time - with a
+	 * fresh server ctx, even if every client has disconnected. `ctx.publish(event,
+	 * data)` inside it publishes to this room; `ctx.setAlarm(...)` re-arms it.
+	 */
+	onAlarm: (ctx: LiveContext) => void | Promise<void>;
+}
+
 export interface StreamOptions {
+	/**
+	 * Per-room alarm (live.alarm). When set, a handler can call `ctx.setAlarm(at)`
+	 * to schedule a one-shot wake-up that runs `onAlarm` at time `at`, even if the
+	 * room has gone idle. Exactly one pending alarm per room. Durable + cluster
+	 * single-fire when a store + leader are wired via `configureAlarm`.
+	 */
+	alarm?: StreamAlarmConfig;
+
 	/**
 	 * Merge strategy for live updates.
 	 * - `'crud'` - append/update/delete by key (default)
@@ -3412,6 +3455,36 @@ export function configureCron(
 		| {
 			leader?: (() => boolean) | null;
 			bus?: { wrap(platform: any): any } | null;
+		}
+		| null
+): void;
+
+/**
+ * A durable alarm store backing `live.alarm` across restarts + a cluster. The
+ * in-memory default uses live process timers (an alarm survives the room going
+ * idle within the process, but not a restart); a durable store persists
+ * `{topic, at}` so an alarm survives a restart and - paired with a `leader` -
+ * fires exactly once cluster-wide. The Postgres / Redis implementations live in
+ * `svelte-adapter-uws-extensions`.
+ */
+export interface AlarmStore {
+	set(topic: string, at: number): void | Promise<void>;
+	get(topic: string): number | null | Promise<number | null>;
+	delete(topic: string): void | Promise<void>;
+}
+
+/**
+ * Configure `live.alarm`. `store` plugs a durable cluster store into the seam so
+ * alarms survive a restart; `leader` gates firing to one instance (so an alarm
+ * fires exactly once cluster-wide), mirroring `configureCron({ leader })`. Both
+ * optional. Pass `null` to clear both. With neither, `live.alarm` runs
+ * single-instance in-memory - correct for dev and a single box.
+ */
+export function configureAlarm(
+	config:
+		| {
+			store?: AlarmStore | null;
+			leader?: (() => boolean) | null;
 		}
 		| null
 ): void;

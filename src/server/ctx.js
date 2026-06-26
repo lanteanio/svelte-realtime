@@ -306,6 +306,23 @@ export function _getCtxHelpers(platform) {
  * @param {string | null} [idempotencyKey] Envelope-supplied idempotency key, or null. Internal use only.
  * @returns {any}
  */
+/**
+ * Default `ctx.setAlarm` / `ctx.deleteAlarm` outside an alarm-enabled stream: a
+ * clear error. A stream/room declared with `{ alarm: { onAlarm } }` shadows these
+ * with live closures (via `alarm.js#_bindAlarmCtx`) the same way a `history` room
+ * shadows `ctx.compensate`. Declared here (not imported from alarm.js) so the ctx
+ * module has no dependency on the alarm module - alarm.js depends on ctx, not the
+ * reverse.
+ */
+function _alarmUnavailable() {
+	throw new LiveError('VALIDATION', '[svelte-realtime] ctx.setAlarm / ctx.getAlarm / ctx.deleteAlarm require a live.stream (or live.room) declared with an { alarm: { onAlarm } } config.');
+}
+
+/** Default `ctx.getAlarm` outside an alarm-enabled stream: null (no alarm to read), not a throw. */
+function _alarmGetUnavailable() {
+	return null;
+}
+
 export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 	// Server-trusted tenant id for this connection (null when no resolver is
 	// configured -> single-tenant, zero-cost path). When set, ctx.publish prefixes
@@ -348,6 +365,13 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 		// swaps the value, never the shape.
 		compensate: _compensateUnavailable,
 		_compensateDepth: 0,
+		// Per-room alarm (live.alarm). Defaults throw / return-null outside an
+		// alarm-enabled stream; an alarm-enabled stream/room shadows them with live
+		// closures bound to the room topic (same value-swap-not-shape-change rule as
+		// compensate, to keep one hidden class).
+		setAlarm: _alarmUnavailable,
+		getAlarm: _alarmGetUnavailable,
+		deleteAlarm: _alarmUnavailable,
 		_idempotencyKey: idempotencyKey || null,
 		// Multi-tenancy. `tenantId` is the connection's server-trusted tenant (or
 		// null). `_publishWire` is the raw, non-prefixing publish for framework

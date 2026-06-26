@@ -17,6 +17,7 @@ import { _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } 
 import { _recordRpcMetrics } from './metrics.js';
 import { _shouldShed } from './admission.js';
 import { _getIdentityKey } from './identity.js';
+import { _bindAlarmCtx } from './alarm.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { _tenantTopic, _tenantKey } from './tenant.js';
 import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame } from './upload.js';
@@ -456,6 +457,13 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// prefixes the same way, matches. Null tenant -> unchanged (zero cost).
 	if (ctx.tenantId && typeof topic === 'string') topic = _tenantTopic(ctx.tenantId, topic);
 	const streamOpts = /** @type {any} */ (fn).__streamOptions;
+	// Per-room alarm (live.alarm): when this stream declares an `alarm` config, bind
+	// ctx.setAlarm/getAlarm/deleteAlarm to the resolved WIRE topic so the loader (and
+	// any handler running with this ctx) can arm the room's single pending alarm.
+	// Keyed by the wire topic so two tenants' same logical room never share an alarm.
+	if (streamOpts && streamOpts.alarm && typeof topic === 'string') {
+		_bindAlarmCtx(ctx, { wireTopic: topic, onAlarm: streamOpts.alarm.onAlarm });
+	}
 	const replayOpts = /** @type {any} */ (fn).__replay;
 	// Register the replay topic at subscribe for a dynamic (factory) topic so
 	// publishers auto-route through replay. A static topic is already registered at

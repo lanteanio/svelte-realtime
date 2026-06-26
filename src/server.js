@@ -73,6 +73,8 @@ import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierF
 import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy } from './server/lazy.js';
 import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError, _ensureCronInterval, _getCronLeader, _cronTimerActive, _stopCronScheduler } from './server/cron-engine.js';
 export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError };
+import { configureAlarm, _resetAlarms } from './server/alarm.js';
+export { configureAlarm, _resetAlarms };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
 export { onShutdown, _resetLifecycle };
 import { introspect } from './server/introspect.js';
@@ -995,6 +997,15 @@ live.stream = function stream(topic, initFn, options) {
 	}
 	if (streamOnError !== undefined && typeof streamOnError !== 'function') {
 		throw new Error('[svelte-realtime] live.stream onError must be a function (err, ctx, topic) => void');
+	}
+	// Per-room alarm (live.alarm). `{ alarm: { onAlarm } }` flows into
+	// __streamOptions via `...rest`; validate the shape here so a typo throws at
+	// declaration time and the dispatch loader-bind can trust it.
+	if (options && options.alarm !== undefined) {
+		const _a = options.alarm;
+		if (typeof _a !== 'object' || _a === null || typeof _a.onAlarm !== 'function') {
+			throw new Error('[svelte-realtime] live.stream alarm must be an object { onAlarm: (ctx) => {...} } - the handler that runs when ctx.setAlarm fires.');
+		}
 	}
 	let invalidatePatterns = null;
 	if (invalidateOn !== undefined) {
@@ -2731,6 +2742,9 @@ export function _prepareHmr() {
 
 	// Clear cron timers (but keep state.cronPlatform - it stays valid across HMR)
 	_clearCron();
+
+	// Clear pending alarm timers (live.alarm); keeps the store/leader config like cron.
+	_resetAlarms();
 
 	// Clear lazy queue and reset lazy init state
 	_lazyQueue.length = 0;

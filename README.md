@@ -2386,6 +2386,44 @@ If you also instrument with [Prometheus metrics](#prometheus-metrics), include `
 
 ---
 
+## Per-room alarms
+
+`live.alarm` is "wake this room once at time T, even if nobody is connected." Declare a stream (or room) with an `alarm` handler, then arm it imperatively from inside the room's handlers with `ctx.setAlarm(at)`:
+
+```js
+export default live.stream('doc:current', loadDoc, {
+  alarm: {
+    // Runs at the scheduled time with a fresh server ctx - even if every client
+    // has disconnected. ctx.publish(event, data) targets this room.
+    onAlarm: async (ctx) => {
+      await archiveIfStale();
+      ctx.publish('archived', { at: Date.now() });
+    }
+  }
+});
+
+// Inside any handler that runs with this room's ctx (the loader, a room action):
+ctx.setAlarm(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days from now
+const at = ctx.getAlarm(); // epoch-ms, or null
+ctx.deleteAlarm();         // cancel
+```
+
+Different from `live.cron` (which is recurring, schedule-based, and global): an alarm is **per-room**, **one-shot**, and set imperatively. The classic pattern is TTL-style cleanup - refresh the alarm on every write (`ctx.setAlarm(now + 30d)`); if it ever fires, the room has not been touched in 30 days, so clean it up. Exactly one pending alarm per room: `setAlarm` replaces the previous one, and a re-`setAlarm` inside `onAlarm` re-arms it. A long horizon is fine - a multi-week alarm is chased to its deadline in capped timer hops, so it fires when you asked, not ~24 days early (the `setTimeout` ceiling).
+
+By default alarms are in-memory: they survive the room going idle within the process but not a restart. For durability across restarts and exactly-once firing across a cluster, `configureAlarm({ store, leader })` plugs in a durable store + a leader gate (the same leader primitive cron uses), so a persisted alarm re-fires after a restart and only the elected instance runs the handler:
+
+```js
+// hooks.ws.js init - durable + cluster single-fire
+import { configureAlarm } from 'svelte-realtime/server';
+
+configureAlarm({
+  store: myDurableAlarmStore, // { set(topic, at), delete(topic) } backed by your DB
+  leader: () => amILeaderRightNow()
+});
+```
+
+The store is any object implementing the seam contract (`set(topic, at)` / `delete(topic)`), so you can back it with whatever durable store you already run; a Postgres/Redis-backed implementation is on the `svelte-adapter-uws-extensions` roadmap. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses).
+
 ## Cron scheduling
 
 Use `live.cron()` to run server-side functions on a schedule and publish results to a topic.

@@ -7,7 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.43] - 2026-06-26
+## [0.6.0-next.44] - 2026-06-26
+
+### Added
+
+- **`live.alarm`: a per-room durable alarm primitive.** Declare a stream (or room) with `{ alarm: { onAlarm } }`, then from any of its handlers call `ctx.setAlarm(at)` to schedule a one-shot wake-up at an absolute epoch-ms time. When it arrives the framework runs `onAlarm` with a fresh server context - **even if every client has disconnected** - so it is ideal for TTL-style cleanup ("refresh the alarm on each write; if it ever fires, the room has gone untouched"), draft expiry, lobby timeouts, and deferred follow-ups. Exactly one pending alarm per room: `ctx.setAlarm` replaces, `ctx.getAlarm()` reads it (epoch-ms or null), `ctx.deleteAlarm()` cancels. Inside `onAlarm`, `ctx.publish(event, data)` publishes to that room and `ctx.setAlarm(...)` re-arms it. Different from `live.cron` (recurring, schedule-based, global) - an alarm is per-room, one-shot, and set imperatively. Long horizons are handled correctly: a multi-week alarm is chased to its deadline in capped timer hops, so it does not fall foul of the ~24.8-day `setTimeout` ceiling (it fires when you asked, not ~24 days early). Zero-config in-memory by default (survives the room going idle within the process); `configureAlarm({ store, leader })` plugs a durable cluster store + leader gate so an alarm survives a restart and fires exactly once cluster-wide (the Postgres/Redis store ships in `svelte-adapter-uws-extensions`).
 
 ### Fixed
 
