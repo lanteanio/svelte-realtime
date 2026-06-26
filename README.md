@@ -2241,10 +2241,10 @@ export const { open, close, message, init, shutdown, admin } = realtime({
 });
 ```
 
-On `svelte-adapter-uws >= 0.6.0-next.36` you do not need to mount anything: when your handler exports `admin`, the adapter auto-wires the reserved `/__realtime/*` path to it (registered before the SSR catch-all, so it never hits page routing). To mount it yourself instead - on another adapter, or to put it under a different path - drop it into a `+server.js` route:
+On `svelte-adapter-uws >= 0.6.0-next.36` you do not need to mount anything: when your handler exports `admin`, the adapter auto-wires the reserved `/__realtime/*` path to it (registered before the SSR catch-all, so it never hits page routing). Relocate it with `websocket.adminPath: '/__ops'` or turn the auto-mount off with `websocket.adminPath: false`. The handler is **mount-prefix agnostic** (it routes on the final path segment), so you can also mount it yourself at any path - on another adapter, behind your own middleware, or under a different prefix:
 
 ```js
-// src/routes/__realtime/[...path]/+server.js  (only needed if NOT on adapter-uws >= next.36)
+// src/routes/__realtime/[...path]/+server.js  (only needed if NOT auto-mounted)
 import { admin } from '../../../hooks.ws.js';
 export const GET = ({ request }) => admin(request);
 ```

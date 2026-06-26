@@ -63,11 +63,23 @@ describe('realtime({ admin }) - the /__realtime admin handler', () => {
 		expect(denied.status).toBe(403);
 	});
 
-	it('matches the sub-path after /__realtime/ even when mounted under a prefix', async () => {
-		expect((await adminFor(() => true)(req('http://localhost/app/__realtime/introspect'))).status).toBe(200);
+	it('is mount-prefix agnostic: matches the command at any mount path', async () => {
+		const admin = adminFor(() => true);
+		// default prefix, a custom websocket.adminPath, a nested prefix, and a
+		// bare +server.js route all resolve the same `introspect` command.
+		expect((await admin(req('http://localhost/__realtime/introspect'))).status).toBe(200);
+		expect((await admin(req('http://localhost/__admin/introspect'))).status).toBe(200);
+		expect((await admin(req('http://localhost/ops/realtime/introspect'))).status).toBe(200);
+		expect((await admin(req('http://localhost/introspect'))).status).toBe(200);
 	});
 
 	it('tolerates a single trailing slash', async () => {
 		expect((await adminFor(() => true)(req('http://localhost/__realtime/introspect/'))).status).toBe(200);
+		expect((await adminFor(() => true)(req('http://localhost/__admin/introspect/'))).status).toBe(200);
+	});
+
+	it('404s a bare mount with no command segment', async () => {
+		expect((await adminFor(() => true)(req('http://localhost/__realtime'))).status).toBe(404);
+		expect((await adminFor(() => true)(req('http://localhost/__realtime/'))).status).toBe(404);
 	});
 });

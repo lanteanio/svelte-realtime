@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.38] - 2026-06-26
+
+### Changed
+
+- **The `admin(request)` handler is now mount-prefix agnostic.** It routes on the final path segment instead of a hard-coded `/__realtime/` marker, so it serves the same commands whether mounted at the adapter's default `/__realtime`, a custom `svelte-adapter-uws` `websocket.adminPath`, or a SvelteKit `+server.js` route at any path - the mount path is configured in one place (the adapter option, or your route filename), never duplicated into the handler. Backward compatible: `GET /__realtime/introspect` is unchanged. The fail-closed auth gate still runs first, and the handler is only reached on a path it was explicitly mounted on, so matching the command segment within that namespace is safe.
+
 ## [0.6.0-next.37] - 2026-06-26
 
 ### Added

@@ -1,7 +1,10 @@
 // @ts-check
 // The admin / observability HTTP handler: a framework-agnostic Web `Request` ->
-// `Response` router for the reserved `/__realtime/*` admin plane. It owns the
-// SECURITY gate (mandatory, fail-closed) and serves the `introspect()` snapshot.
+// `Response` router for the admin plane. It owns the SECURITY gate (mandatory,
+// fail-closed) and serves the `introspect()` snapshot. Routing is mount-prefix
+// agnostic (it matches the final path segment), so it serves the same commands
+// whether mounted at the adapter's default `/__realtime`, a custom
+// `websocket.adminPath`, or a `+server.js` route at any path.
 //
 // Configured via `realtime({ admin: { requires } })`. Without it there is no
 // admin handler at all (fail-closed by absence); with it, every request runs the
@@ -51,14 +54,16 @@ export function _createAdminHandler(adminConfig) {
 		} catch {
 			return _json({ error: 'bad request' }, 400);
 		}
-		// Route by the sub-path after the reserved `/__realtime/` marker, so the
-		// handler works whether it is mounted at the root or under a prefix. Other
-		// admin endpoints (e.g. health, DLQ replay) attach here as they ship.
-		const marker = '/__realtime/';
-		const at = url.pathname.indexOf(marker);
-		if (at === -1) return _json({ error: 'not found' }, 404);
-		// Tolerate a single trailing slash (`/introspect/`) a proxy may append.
-		const sub = url.pathname.slice(at + marker.length).replace(/\/$/, '');
+		// Route by the FINAL path segment, so the handler is mount-prefix agnostic:
+		// it serves the same commands no matter what prefix it is mounted under -
+		// the adapter's default `/__realtime`, a custom `websocket.adminPath`, or a
+		// SvelteKit `+server.js` route at any path. Trailing slashes a proxy may
+		// append are trimmed first. The auth gate already ran above, and the
+		// handler is only reached on a path it was explicitly mounted on, so
+		// matching the command segment within that namespace is safe. (Future
+		// multi-segment commands, e.g. DLQ replay, match their own path tail.)
+		const pathname = url.pathname.replace(/\/+$/, '');
+		const sub = pathname.slice(pathname.lastIndexOf('/') + 1);
 
 		if (sub === 'introspect') {
 			const opts = {
