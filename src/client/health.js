@@ -1,6 +1,7 @@
 // @ts-check
 import { writable } from 'svelte/store';
 import { connect as _connect, on } from 'svelte-adapter-uws/client';
+import { createJitterDispatch } from './jitter-dispatch.js';
 
 /**
  * Quiescence tracking: count of streams currently in `'loading'` or
@@ -78,6 +79,16 @@ let _healthSmoothDegraded = 0;
  * Counted because several documents can degrade and recover independently. */
 let _healthCrdtDegraded = 0;
 
+/**
+ * Richer companion to `health`: the server-pushed degradation detail. `active`
+ * mirrors the server `degraded` / `recovered` events; `mitigation` carries the
+ * precomputed client action (`bannerCopy`, `retryAfterMs`, `streams` / `rpcs` to
+ * treat as unavailable) while degraded; `recovery` carries any recovered-event hint
+ * (`refetch` / `clearCache`). `health` stays a plain string, so this is additive.
+ * @type {import('svelte/store').Writable<{ active: boolean, mitigation: any, recovery: any }>}
+ */
+const _degradationStore = writable({ active: false, mitigation: null, recovery: null });
+
 function _recomputeHealth() {
 	_healthStore.set(
 		_healthServerDegraded || _healthFlowDegraded || _healthSmoothDegraded > 0 || _healthCrdtDegraded > 0 ? 'degraded' : 'healthy'
@@ -109,13 +120,39 @@ export function _setCrdtDegraded(degraded) {
 	_recomputeHealth();
 }
 
+/**
+ * Apply a system-topic health event. Extracted so it can run AFTER the de-herd
+ * deferral below: a `degraded` event the server pushed with `{ jitterMs }` carries a
+ * `j` window, and the consumer must stagger like every other client (else the banner
+ * and the app's reaction fire at t+0, defeating the proactive mitigation push). Reads
+ * the optional `mitigation` / `recovery` block a degradation policy attached.
+ * @param {any} envelope
+ */
+function _applyHealthEvent(envelope) {
+	if (!envelope) return;
+	// The degradation policy attaches the mitigation / recovery inside the event
+	// DATA (`publish(systemChannel, 'degraded', { at, mitigation })`), so read it
+	// from `envelope.data`, not the top level. The de-herd window `j` is separate
+	// frame metadata the dispatcher already consumed before this runs.
+	const detail = envelope.data && typeof envelope.data === 'object' ? envelope.data : null;
+	if (envelope.event === 'degraded') {
+		_healthServerDegraded = true;
+		_degradationStore.set({ active: true, mitigation: (detail && detail.mitigation) || null, recovery: null });
+		_recomputeHealth();
+	} else if (envelope.event === 'recovered') {
+		_healthServerDegraded = false;
+		_degradationStore.set({ active: false, mitigation: null, recovery: (detail && detail.recovery) || null });
+		_recomputeHealth();
+	}
+}
+
 function _ensureHealthSubscription() {
 	if (_healthUnsub) return;
-	const offTopic = on(_HEALTH_TOPIC).subscribe((envelope) => {
-		if (!envelope) return;
-		if (envelope.event === 'degraded') { _healthServerDegraded = true; _recomputeHealth(); }
-		else if (envelope.event === 'recovered') { _healthServerDegraded = false; _recomputeHealth(); }
-	});
+	// Route the system topic through the de-herd dispatcher so a `degraded` event the
+	// server pushed with a jitter window staggers this client's reaction instead of
+	// firing at t+0. A non-jittered event dispatches immediately (unchanged).
+	const jitter = createJitterDispatch(_applyHealthEvent);
+	const offTopic = on(_HEALTH_TOPIC).subscribe((envelope) => { if (envelope) jitter.dispatch(envelope); });
 	// Fold the connection's internal flow-control health in as a second,
 	// OR-ed input. A boolean is the only thing that crosses this accessor;
 	// no internal accounting value surfaces. Older adapter connections that
@@ -127,7 +164,7 @@ function _ensureHealthSubscription() {
 			offFlow = conn._onLeaseDegraded((d) => { _healthFlowDegraded = !!d; _recomputeHealth(); });
 		}
 	} catch { /* connection not configured yet; flow health stays clear */ }
-	_healthUnsub = () => { offTopic(); offFlow(); };
+	_healthUnsub = () => { offTopic(); jitter.clear(); offFlow(); };
 }
 
 /**
@@ -156,6 +193,25 @@ export const health = {
 };
 
 /**
+ * Richer companion to `health`: the server-pushed degradation detail, from the same
+ * `degraded` / `recovered` system events. `{ active, mitigation, recovery }` - `active`
+ * tracks the SERVER breaker state (not the local flow / smooth / crdt inputs that also
+ * move `health`); `mitigation` is the precomputed client action a degradation policy
+ * attached (banner copy, retry-after, unavailable streams / rpcs) while degraded;
+ * `recovery` is the recovered-event hint. Lazy + additive - apps that only need the
+ * on/off state keep using `health`. When the degraded event was pushed with a jitter
+ * window, this store updates after this client's local de-herd delay.
+ *
+ * @type {import('svelte/store').Readable<{ active: boolean, mitigation: any, recovery: any }>}
+ */
+export const degradation = {
+	subscribe(fn) {
+		_ensureHealthSubscription();
+		return _degradationStore.subscribe(fn);
+	}
+};
+
+/**
  * Reset the health store and detach the system-topic subscription.
  * Tests only.
  * @internal
@@ -170,6 +226,7 @@ export function _resetHealth() {
 	_healthSmoothDegraded = 0;
 	_healthCrdtDegraded = 0;
 	_healthStore.set('healthy');
+	_degradationStore.set({ active: false, mitigation: null, recovery: null });
 }
 
 // Flow control is owned end to end by the adapter connection's send gate: it

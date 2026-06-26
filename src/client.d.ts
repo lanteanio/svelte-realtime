@@ -922,3 +922,43 @@ export const quiescent: Readable<boolean>;
  * ```
  */
 export const health: Readable<'healthy' | 'degraded'>;
+
+/** The precomputed client mitigation a degradation policy attached to the `degraded` event. */
+export interface DegradationMitigation {
+	/** Stream topics to treat as unavailable while degraded. */
+	streams?: string[];
+	/** RPC paths to treat as unavailable while degraded. */
+	rpcs?: string[];
+	/** How long (ms) to hold off before retrying. */
+	retryAfterMs?: number;
+	/** Ready-to-render notice text. */
+	bannerCopy?: string;
+}
+
+/** The recovered-event hint a degradation policy attached. */
+export interface DegradationRecovery {
+	refetch?: boolean;
+	clearCache?: boolean;
+	bannerCopy?: string;
+}
+
+/**
+ * Richer companion to `health`: the server-pushed degradation detail. `active` tracks
+ * the server breaker state (not the local flow / smooth / crdt inputs that also move
+ * `health`); `mitigation` carries the precomputed client action while degraded;
+ * `recovery` carries the recovered-event hint. Sourced from the same `__realtime`
+ * system events; when the degraded event was pushed with a jitter window, this store
+ * updates after this client's local de-herd delay. Additive - `health` stays a string.
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { degradation } from 'svelte-realtime/client';
+ * </script>
+ *
+ * {#if $degradation.active && $degradation.mitigation}
+ *   <Banner severity="warn">{$degradation.mitigation.bannerCopy}</Banner>
+ * {/if}
+ * ```
+ */
+export const degradation: Readable<{ active: boolean; mitigation: DegradationMitigation | null; recovery: DegradationRecovery | null }>;

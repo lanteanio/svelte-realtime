@@ -6,6 +6,7 @@ import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _fireWebhookOut } from './webhook-out.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic } from './tenant.js';
+import { _redactOrDrop, REDACT_DROP } from './publish-helpers.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -278,8 +279,11 @@ function _wrapPlatformPublish(platform) {
 								}
 							}
 						}
-						const computed = _computeWindowState(win, entry.reducers);
 						const winRef = win;
+						// Uniform piiRedact: redact the window output if its topic is a
+						// declared piiRedact stream (no-op otherwise; fail-closed skip).
+						const computed = _redactOrDrop(winRef.outputTopic, _computeWindowState(win, entry.reducers));
+						if (computed === REDACT_DROP) continue;
 						if (winRef.debounce > 0) {
 							if (winRef.timer) clearTimer(winRef.timer);
 							winRef.timer = setTimer(() => {
@@ -300,7 +304,10 @@ function _wrapPlatformPublish(platform) {
 					}
 				}
 
-				const computed = _computeAggregateState(entry.state, entry.reducers);
+				// Uniform piiRedact: redact the aggregate output if its topic is a
+				// declared piiRedact stream (no-op otherwise; fail-closed skip).
+				const computed = _redactOrDrop(entry.topic, _computeAggregateState(entry.state, entry.reducers));
+				if (computed === REDACT_DROP) continue;
 
 				if (entry.debounce > 0) {
 					if (entry.timer) clearTimer(entry.timer);
@@ -381,7 +388,10 @@ async function _recomputeDerived(entry, platform) {
 		} else {
 			result = await entry.fn();
 		}
-		platform.publish(entry.topic, 'set', result);
+		// Uniform piiRedact: a derived stream recomputes from sources and may
+		// carry PII; redact if its topic declared piiRedact (no-op otherwise).
+		const wire = _redactOrDrop(entry.topic, result);
+		if (wire !== REDACT_DROP) platform.publish(entry.topic, 'set', wire);
 	} catch (err) {
 		if (state.serverErrorHandler) {
 			try { state.serverErrorHandler('derived', err); } catch {}

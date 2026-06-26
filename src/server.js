@@ -23,6 +23,7 @@ import { lookup as nodeDnsLookup } from 'node:dns';
 import { LiveError } from './server/live-error.js';
 import { _runtimeRandom, _localHlc } from './server/runtime-fallbacks.js';
 import { _validPathRe, _validSegmentRe, _validUserIdReason, _MAX_USER_ID_LENGTH, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './server/validate.js';
+import { createPiiRedactor } from './server/pii-redact.js';
 import {
 	state,
 	registry,
@@ -32,6 +33,8 @@ import {
 	_silentTopicWatch,
 	_topicCoalesce,
 	_topicTransform,
+	_topicRedact,
+	_declaredRedact,
 	_topicVolatile,
 	_topicInvalidationWatch,
 	_ctxHelpersCache,
@@ -55,7 +58,7 @@ import { _IS_DEV } from './server/env.js';
 import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge } from './server/presence.js';
 import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
-import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs } from './server/publish-helpers.js';
+import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP } from './server/publish-helpers.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
 import { _recordRpcMetrics, installMetrics } from './server/metrics.js';
@@ -290,6 +293,7 @@ function _copyStreamMeta(target, source) {
 	if (source.__streamFilter) target.__streamFilter = source.__streamFilter;
 	if (source.__streamArgs) target.__streamArgs = source.__streamArgs;
 	if (source.__streamTransform) target.__streamTransform = source.__streamTransform;
+	if (source.__streamPiiRedact) target.__streamPiiRedact = source.__streamPiiRedact;
 	if (source.__streamVolatile) target.__streamVolatile = source.__streamVolatile;
 	if (source.__streamVersion !== undefined) target.__streamVersion = source.__streamVersion;
 	if (source.__streamMigrate) target.__streamMigrate = source.__streamMigrate;
@@ -359,6 +363,41 @@ function _unregisterTransform(ws, topic) {
  */
 export function _resetTransformRegistry() {
 	_topicTransform.clear();
+}
+
+/** Per-ws set of topics where this ws has contributed a redact refcount.
+ *  Mirrors _wsTransformContrib so the unregister side is idempotent + ws-aware. */
+const _wsRedactContrib = new WeakMap();
+
+function _registerRedact(ws, topic, redact, onError) {
+	let entry = _topicRedact.get(topic);
+	if (!entry) {
+		entry = { redact, onError: onError || null, refcount: 0 };
+		_topicRedact.set(topic, entry);
+	}
+	entry.refcount++;
+	let contrib = _wsRedactContrib.get(ws);
+	if (!contrib) { contrib = new Set(); _wsRedactContrib.set(ws, contrib); }
+	contrib.add(topic);
+}
+
+function _unregisterRedact(ws, topic) {
+	const contrib = _wsRedactContrib.get(ws);
+	if (!contrib || !contrib.has(topic)) return;
+	contrib.delete(topic);
+	const entry = _topicRedact.get(topic);
+	if (!entry) return;
+	entry.refcount--;
+	if (entry.refcount <= 0) _topicRedact.delete(topic);
+}
+
+/**
+ * Reset the per-topic redact registry. Tests only.
+ * @internal
+ */
+export function _resetRedactRegistry() {
+	_topicRedact.clear();
+	_declaredRedact.clear();
 }
 
 /** Per-ws set of topics where this ws has contributed a volatile refcount. */
@@ -486,7 +525,13 @@ async function _invalidationReload(watcher) {
 	try {
 		const result = await watcher.fn(watcher.ctx, ...watcher.args);
 		const initTransform = /** @type {any} */ (watcher.fn).__streamTransform;
-		const finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
+		let finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
+		const redactor = /** @type {any} */ (watcher.fn).__streamPiiRedact;
+		if (redactor && finalData != null) {
+			// Fail-closed: a throwing redactor must never broadcast un-redacted
+			// reload data, so skip the publish entirely.
+			try { finalData = redactor(finalData); } catch { return; }
+		}
 		try { watcher.platform.publish(watcher.topic, 'refreshed', finalData); } catch {}
 	} catch (err) {
 		if (watcher.onError) {
@@ -571,7 +616,13 @@ async function _staleReload(topic) {
 	try {
 		const result = await entry.fn(entry.ctx, ...entry.args);
 		const initTransform = /** @type {any} */ (entry.fn).__streamTransform;
-		const finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
+		let finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
+		const redactor = /** @type {any} */ (entry.fn).__streamPiiRedact;
+		if (redactor && finalData != null) {
+			// Fail-closed (see _invalidationReload): never broadcast un-redacted
+			// reload data; skip the publish on a redactor throw.
+			try { finalData = redactor(finalData); } catch { return; }
+		}
 		try { entry.platform.publish(topic, 'refreshed', finalData); } catch {}
 	} catch (err) {
 		if (entry.onError) {
@@ -677,6 +728,14 @@ function _trackStreamSub(ws, topic, fn) {
 			/** @type {any} */ (fn).__streamOnError || null
 		);
 	}
+	if (isFirstSubForTopic && /** @type {any} */ (fn).__streamPiiRedact) {
+		_registerRedact(
+			ws,
+			topic,
+			/** @type {any} */ (fn).__streamPiiRedact,
+			/** @type {any} */ (fn).__streamOnError || null
+		);
+	}
 	if (isFirstSubForTopic && /** @type {any} */ (fn).__streamVolatile) {
 		_registerVolatile(ws, topic);
 	}
@@ -703,6 +762,7 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 					topicMap.delete(topic);
 					_unregisterCoalesce(ws, topic);
 					_unregisterTransform(ws, topic);
+					_unregisterRedact(ws, topic);
 					_unregisterVolatile(ws, topic);
 					removedFromTopic = true;
 				}
@@ -968,7 +1028,7 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		_tagTopicFn(topic);
 	}
-	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, volatile: volatileOpt, staleAfterMs, onError: streamOnError, invalidateOn, ...rest } = options || {};
+	const { replay, onSubscribe, onUnsubscribe, filter, access, delta, version, migrate, coalesceBy, classOfService, args: argsSchema, transform, piiRedact, volatile: volatileOpt, staleAfterMs, onError: streamOnError, invalidateOn, ...rest } = options || {};
 	if (coalesceBy !== undefined && typeof coalesceBy !== 'function') {
 		throw new Error('[svelte-realtime] live.stream coalesceBy must be a function (data) => key');
 	}
@@ -980,6 +1040,13 @@ live.stream = function stream(topic, initFn, options) {
 	}
 	if (transform !== undefined && typeof transform !== 'function') {
 		throw new Error('[svelte-realtime] live.stream transform must be a function (data) => projection');
+	}
+	// piiRedact builds its redactor at declaration time so a bad config throws
+	// here, not on the first publish. createPiiRedactor validates the shape
+	// (modes, hashSalt) and returns a pure non-mutating (data) => redacted.
+	let _piiRedactor;
+	if (piiRedact !== undefined) {
+		_piiRedactor = createPiiRedactor(piiRedact);
 	}
 	if (volatileOpt !== undefined && typeof volatileOpt !== 'boolean') {
 		throw new Error('[svelte-realtime] live.stream volatile must be a boolean');
@@ -1054,6 +1121,18 @@ live.stream = function stream(topic, initFn, options) {
 	if (coalesceBy) /** @type {any} */ (initFn).__coalesceBy = coalesceBy;
 	if (argsSchema) /** @type {any} */ (initFn).__streamArgs = argsSchema;
 	if (transform) /** @type {any} */ (initFn).__streamTransform = transform;
+	if (_piiRedactor) {
+		/** @type {any} */ (initFn).__streamPiiRedact = _piiRedactor;
+		// Register the redactor at DECLARATION time for static topics so a
+		// publish to a replay+piiRedact topic with no current subscriber (cron
+		// tick, top-level publish(), reactive recompute, a write before anyone
+		// joins) still redacts before the buffer write. The subscribe-time
+		// `_topicRedact` registration covers dynamic topics (which only resolve a
+		// concrete topic at subscribe, the same moment their replay buffer arms).
+		if (typeof topic === 'string') {
+			_declaredRedact.set(topic, { redact: _piiRedactor, onError: streamOnError || null });
+		}
+	}
 	if (volatileOpt) /** @type {any} */ (initFn).__streamVolatile = true;
 	if (staleAfterMs) /** @type {any} */ (initFn).__streamStaleAfterMs = staleAfterMs;
 	if (streamOnError) /** @type {any} */ (initFn).__streamOnError = streamOnError;
@@ -3001,6 +3080,7 @@ export function unsubscribe(ws, topic, { platform }) {
 	topicMap.delete(topic);
 	_unregisterCoalesce(ws, topic);
 	_unregisterTransform(ws, topic);
+	_unregisterRedact(ws, topic);
 	_unregisterVolatile(ws, topic);
 
 	let fired = _firedUnsubscribes.get(ws);
@@ -3046,6 +3126,7 @@ export function close(ws, { platform, subscriptions }) {
 		for (const [topic, owners] of topicMap) {
 			_unregisterCoalesce(ws, topic);
 			_unregisterTransform(ws, topic);
+			_unregisterRedact(ws, topic);
 			_unregisterVolatile(ws, topic);
 			// Account for this ws leaving the topic's ws-set so the
 			// remainingSubscribers count handed to user hooks is accurate.
@@ -3242,6 +3323,15 @@ export function publish(topic, event, data, options) {
 	const platform = getPlatform();
 	if (!platform) {
 		throw new Error('[svelte-realtime] publish: platform has not been captured yet. Wire `realtime({ ... }).init` (or `setCronPlatform` + `_activateDerived`) from your hooks.ws.js init({ platform }) hook before calling publish() at module scope.');
+	}
+	// Out-of-band publish (SSR routes, webhooks, scripts) is a first-class wire
+	// egress, so it honors piiRedact uniformly. Fail-closed: a throwing redactor
+	// drops the publish rather than broadcasting raw PII. Topics with no
+	// redactor declared pass through untouched.
+	if (_topicRedact.size > 0 || _declaredRedact.size > 0) {
+		const redacted = _redactOrDrop(topic, data);
+		if (redacted === REDACT_DROP) return false;
+		data = redacted;
 	}
 	return platform.publish(topic, event, data, options);
 }

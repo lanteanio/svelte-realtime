@@ -9,7 +9,7 @@ import { monotonicNow } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
 import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './validate.js';
-import { state, registry, guards, cronRegistry } from './state.js';
+import { state, registry, guards, cronRegistry, _declaredRedact } from './state.js';
 import { _getBus } from './bus.js';
 import { _ensureWrap } from './reactive.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
@@ -475,6 +475,20 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	if (replayOpts && typeof topic === 'string' && (typeof rawTopic === 'function' || ctx.tenantId)) {
 		_registerReplayTopic(topic);
 	}
+	// Dynamic (factory) topic piiRedact: a factory topic has no static
+	// `_declaredRedact` entry (that map is keyed by the declaration-time string).
+	// After the last subscriber leaves, the refcounted `_topicRedact` entry is
+	// evicted - but a replay-eligible topic stays permanently registered, so a
+	// later zero-subscriber publish to the resolved wire topic (another RPC, a
+	// reactive recompute, top-level publish) would reach the buffer / cluster
+	// un-redacted. Register the resolved wire topic's redactor permanently here,
+	// mirroring `_registerReplayTopic`'s permanence (bounded by the same per-topic
+	// cardinality as the subscriber index). Tenant-scoped STATIC topics are
+	// covered instead by the tenant-prefix strip in `_resolveRedactor`.
+	const _dynRedactor = /** @type {any} */ (fn).__streamPiiRedact;
+	if (_dynRedactor && typeof rawTopic === 'function' && typeof topic === 'string') {
+		_declaredRedact.set(topic, { redact: _dynRedactor, onError: /** @type {any} */ (fn).__streamOnError || null });
+	}
 
 	const streamFilter = /** @type {any} */ (fn).__streamFilter;
 	if (streamFilter && !(await streamFilter(ctx, ...streamArgs))) {
@@ -554,8 +568,14 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 			if (currentVersion === clientVersion) {
 				return { id, ok: true, data: [], topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, unchanged: true, version: currentVersion };
 			}
-			const diff = await deltaOpts.diff(clientVersion);
+			let diff = await deltaOpts.diff(clientVersion);
 			if (diff !== null && diff !== undefined) {
+				// piiRedact on the user-bridged delta egress (this diff is computed
+				// fresh by the app, not served from the redacted replay buffer). A
+				// redactor throw is caught by the enclosing try and falls through to
+				// the loader - fail-closed, never returning raw diff.
+				const _redact = /** @type {any} */ (fn).__streamPiiRedact;
+				if (_redact) diff = _redact(diff);
 				return { id, ok: true, data: diff, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, delta: true, version: currentVersion };
 			}
 		} catch {}
@@ -596,8 +616,14 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// Seq-delta (user-provided bridge for older-than-buffer reconnects)
 	if (deltaOpts && typeof deltaOpts.fromSeq === 'function' && typeof clientSeq === 'number') {
 		try {
-			const events = await deltaOpts.fromSeq(clientSeq);
+			let events = await deltaOpts.fromSeq(clientSeq);
 			if (Array.isArray(events)) {
+				// piiRedact on the user-bridged seq-delta egress (these events come
+				// from the app's fromSeq bridge, not the redacted replay buffer).
+				// Fail-closed via the enclosing try; seq fields are preserved (not
+				// matched by the sensitive-key set).
+				const _redact = /** @type {any} */ (fn).__streamPiiRedact;
+				if (_redact) events = _redact(events);
 				let respSeq;
 				if (events.length > 0) {
 					const last = events[events.length - 1];
@@ -653,6 +679,21 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	const initTransform = /** @type {any} */ (fn).__streamTransform;
 	if (initTransform && resultData != null) {
 		resultData = _applyInitTransform(initTransform, resultData);
+	}
+
+	// PII redaction on the initial-load egress, after transform. The redactor
+	// is non-mutating and handles arrays itself, so it applies to the whole
+	// result. Fail-closed: a throwing redactor must never return un-redacted
+	// initial data, so drop to null and surface to the stream's onError.
+	const initRedact = /** @type {any} */ (fn).__streamPiiRedact;
+	if (initRedact && resultData != null) {
+		try {
+			resultData = initRedact(resultData);
+		} catch (err) {
+			const onErr = /** @type {any} */ (fn).__streamOnError;
+			if (onErr) { try { onErr(err, ctx, topic); } catch {} }
+			resultData = null;
+		}
 	}
 
 	// Schema migration
@@ -1088,19 +1129,22 @@ async function _runDirectCall(path, args, platform, options) {
 			const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 			throw new LiveError(code, code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied');
 		}
+		// Resolve the topic once so BOTH the loader-error handler and the
+		// redaction fail-closed handler below can pass it to onError. (The
+		// redact catch previously referenced an out-of-scope `topic`, throwing a
+		// ReferenceError instead of failing closed.) Resolution errors are
+		// swallowed - a best-effort label for onError.
+		let topic;
+		try {
+			const rawTopic = /** @type {any} */ (fn).__streamTopic;
+			topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, args) : rawTopic;
+		} catch {}
 		let result;
 		try {
 			result = await fn(ctx, ...args);
 		} catch (err) {
 			const streamOnError = /** @type {any} */ (fn).__streamOnError;
 			if (streamOnError) {
-				// Best-effort: resolve the topic for the error-handler so apps
-				// can log per-topic. Topic-resolution errors are swallowed.
-				let topic;
-				try {
-					const rawTopic = /** @type {any} */ (fn).__streamTopic;
-					topic = typeof rawTopic === 'function' ? _callTopicFn(rawTopic, ctx, args) : rawTopic;
-				} catch {}
 				try { await streamOnError(err, ctx, topic); } catch {}
 			}
 			throw err;
@@ -1112,6 +1156,24 @@ async function _runDirectCall(path, args, platform, options) {
 				result = { ...result, data: _applyInitTransform(initTransform, result.data) };
 			} else {
 				result = _applyInitTransform(initTransform, result);
+			}
+		}
+		// PII redaction on the resume/unchanged egress, after transform. Mirrors
+		// the paginated-vs-whole split above. Fail-closed: a throwing redactor
+		// nulls the data rather than returning un-redacted resume payload.
+		const initRedact = /** @type {any} */ (fn).__streamPiiRedact;
+		if (initRedact && result != null) {
+			try {
+				if (result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result) {
+					result = { ...result, data: initRedact(result.data) };
+				} else {
+					result = initRedact(result);
+				}
+			} catch (err) {
+				const onErr = /** @type {any} */ (fn).__streamOnError;
+				if (onErr) { try { onErr(err, ctx, topic); } catch {} }
+				if (result && typeof result === 'object' && !Array.isArray(result) && 'data' in result && 'hasMore' in result) result = { ...result, data: null };
+				else result = null;
 			}
 		}
 		return result;

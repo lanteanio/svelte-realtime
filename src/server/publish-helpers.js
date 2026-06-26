@@ -2,6 +2,57 @@
 import { now as runtimeNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
+import { _topicRedact, _declaredRedact } from './state.js';
+import { _stripAnyTenantTopic } from './tenant.js';
+
+/**
+ * Sentinel returned by `_redactOrDrop` when a topic's piiRedact redactor threw.
+ * Fail-closed: the caller MUST NOT publish on this value.
+ */
+export const REDACT_DROP = Symbol('svti.redact.drop');
+
+/**
+ * Resolve a topic's piiRedact redactor entry (or null) for a WIRE topic at a
+ * publish chokepoint. Checks the subscribe-time `_topicRedact` then the
+ * permanent `_declaredRedact`; on a miss, strips the tenant prefix and retries,
+ * so a tenant-scoped publish to a static piiRedact topic resolves the logical
+ * redactor even with no current subscriber (the subscribe-time entry is
+ * refcount-evicted; the declaration-time entry is keyed by the logical topic).
+ *
+ * @param {string} topic
+ * @returns {{ redact: Function, onError: Function | null } | null}
+ */
+export function _resolveRedactor(topic) {
+	let e = _topicRedact.get(topic) || _declaredRedact.get(topic);
+	if (e) return e;
+	const logical = _stripAnyTenantTopic(topic);
+	if (logical !== topic) e = _topicRedact.get(logical) || _declaredRedact.get(logical);
+	return e || null;
+}
+
+/**
+ * Apply a topic's piiRedact redactor for a fire-and-forget egress path
+ * (publishThrottled / publishDebounced / batch). Unlike the main `ctx.publish`
+ * closure - which throws if a throwing redactor has no `onError` observer -
+ * these deferred / trailing-edge paths cannot surface a throw to a caller, so a
+ * redactor throw fail-closes by DROPPING the publish (routed to `onError` if
+ * set). Returns the redacted data, the original data (no redactor registered),
+ * or `REDACT_DROP`.
+ *
+ * @param {string} topic
+ * @param {any} data
+ * @returns {any}
+ */
+export function _redactOrDrop(topic, data) {
+	const e = _resolveRedactor(topic);
+	if (!e) return data;
+	try {
+		return e.redact(data);
+	} catch (err) {
+		if (e.onError) { try { e.onError(err, null, topic); } catch {} }
+		return REDACT_DROP;
+	}
+}
 
 // Dev-warn dedup flags for the publish helpers below (one-shot per category).
 /** Dev-warn dedup: per-helper bad-args warning. Keys: 'publishThrottled', 'publishDebounced', 'throttle', 'debounce'. */
@@ -34,6 +85,15 @@ export const _debounces = new Map();
 export function _throttlePublish(platform, topic, event, data, ms) {
 	const entityKey = data && typeof data === 'object' && data.key !== undefined ? '\0' + data.key : '';
 	const key = topic + '\0' + event + entityKey;
+	// Uniform PII redaction: redact ONCE here (after the dedup key is taken from
+	// the original data) so every egress below - immediate, trailing-edge, and
+	// the at-capacity path - and the stored lastData all carry redacted data.
+	// Fail-closed: a throwing redactor drops this publish entirely.
+	{
+		const d = _redactOrDrop(topic, data);
+		if (d === REDACT_DROP) return;
+		data = d;
+	}
 	const existing = _throttles.get(key);
 	const now = runtimeNow();
 
@@ -77,6 +137,12 @@ export function _throttlePublish(platform, topic, event, data, ms) {
 export function _debouncePublish(platform, topic, event, data, ms) {
 	const entityKey = data && typeof data === 'object' && data.key !== undefined ? '\0' + data.key : '';
 	const key = topic + '\0' + event + entityKey;
+	// Uniform PII redaction (see _throttlePublish): redact once, fail-closed.
+	{
+		const d = _redactOrDrop(topic, data);
+		if (d === REDACT_DROP) return;
+		data = d;
+	}
 	const existing = _debounces.get(key);
 	if (existing) clearTimer(existing);
 

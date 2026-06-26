@@ -391,6 +391,7 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 | `replay` | `false` | Enable seq-based replay for gap-free reconnection |
 | `args` | - | Standard Schema (Zod / ArkType / Valibot) for stream arguments. Validated before topic resolution - prevents topic injection via malformed dynamic-topic args |
 | `transform` | - | `(data) => projection` applied to BOTH initial-load data (per-item for arrays) AND every live publish for this topic. Ship a wide row from the database, emit a narrow shape on the wire |
+| `piiRedact` | - | Uniform PII / sensitive-field redaction on this stream's wire egress (initial load + live + replay + reloads). `true` strips the default sensitive-key set; `{ fields: { email: 'mask', ssn: 'omit', userId: 'hash' }, hashSalt }` applies per-field modes; or `(data) => projection`. Fail-closed; redacts before the replay buffer. See [Redacting PII on the wire](#redacting-pii-on-the-wire) |
 | `coalesceBy` | - | `(data) => key` extractor. Publishes fan out via per-socket `sendCoalesced`; the latest value for each `(topic, key)` pair wins. For high-frequency latest-value streams (prices, cursors, presence). Cannot combine with `volatile` |
 | `volatile` | `false` | Mark messages fire-and-forget. Disables seq stamping for this topic so reconnects with `lastSeenSeq` won't try to backfill. Wire-level drop-on-backpressure is the adapter's default. For typing indicators, telemetry pings, cursors |
 | `staleAfterMs` | - | Per-topic staleness watchdog. If no events arrive for N ms, the loader re-runs and the result broadcasts as a `refreshed` event. Useful for streams whose source can quietly stop emitting. See [Stream lifecycle hooks](#stream-lifecycle-hooks) |
@@ -403,6 +404,37 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 | `delta` | - | Delta sync config (see [Delta sync and replay](#delta-sync-and-replay)) |
 | `version` | - | Schema version (see [Schema evolution](#schema-evolution)) |
 | `migrate` | - | Migration functions (see [Schema evolution](#schema-evolution)) |
+
+### Redacting PII on the wire
+
+`piiRedact` strips, masks, or pseudonymizes sensitive fields before a stream's data leaves the process. It runs the SAME projection for every subscriber, on every egress path - the initial load, live publishes (including `ctx.publishThrottled` / `ctx.publishDebounced` / `ctx.batch`), server-pushed reloads, the out-of-band top-level `publish()`, cron ticks that target the stream, and replay. Redaction happens BEFORE the replay buffer, so raw PII never rests in the buffer and a reconnecting client's gap-fill cannot leak it.
+
+```js
+// Strip the built-in sensitive-key set (token / secret / password / auth /
+// session / cookie / jwt / credential) - zero config.
+export const audit = live.stream('audit', loadAudit, { merge: 'crud', piiRedact: true });
+
+// Per-field modes. Rules match by key name at any nesting depth.
+export const tickets = live.stream('tickets', loadTickets, {
+  merge: 'crud',
+  piiRedact: {
+    fields: {
+      email: 'mask',     // -> '***'
+      ssn: 'omit',       // key removed
+      userId: 'hash'     // -> a stable salted HMAC pseudonym
+    },
+    hashSalt: process.env.PII_SALT,   // required when any field uses 'hash'
+    defaults: true                    // also strip the sensitive-key set (default true)
+  }
+});
+
+// Full control for scalar payloads or bespoke shaping.
+export const feed = live.stream('feed', loadFeed, { piiRedact: (data) => projectForWire(data) });
+```
+
+Modes: `omit` deletes the key; `mask` replaces the value with `'***'`; `hash` replaces it with a short HMAC-SHA256 pseudonym (the same input always maps to the same token, so analytics can join on it without holding the identity - set a stable `hashSalt` so the pseudonym is consistent across restarts and cluster instances yet not reversible).
+
+The redactor is non-mutating (your published object is never altered) and **fail-closed**: if it throws, the publish is dropped (or the initial data is nulled) rather than broadcasting raw fields. Redaction is UNIFORM by design - that is what keeps native fan-out intact and guarantees nothing un-redacted reaches the buffer. For per-audience differences (admins see a field, members do not), expose separate streams gated with [access control](#access-control) and give each the redaction it needs. Field-level redaction applies to object payloads; for a scalar payload, use the function form.
 
 ### Reconnection
 
@@ -446,8 +478,23 @@ Four reactive stores re-export from `svelte-realtime/client` for rendering conne
 | `failure` | `{ kind, class, code, reason } \| null` | Cause of the most recent non-open transition. `class` is `TERMINAL` (auth) / `EXHAUSTED` (max retries) / `THROTTLE` (4429) / `RETRY` / `AUTH` (HTTP preflight). Cleared on next `'open'`. Not set on intentional `close()` |
 | `quiescent` | `Readable<boolean>` | `true` when every active stream has settled (initial load + all reconnects). Continuous signal - a `false -> true` transition after a reconnect cycle marks "everything caught up" |
 | `health` | `'healthy' \| 'degraded'` | System-wide health, sourced from `degraded` / `recovered` events on the `__realtime` topic. Stays `'healthy'` until something publishes - typically the extensions package's pub/sub bus circuit breaker |
+| `degradation` | `Readable<{ active, mitigation, recovery }>` | The server-pushed degradation detail. `mitigation` carries the precomputed client action (`bannerCopy`, `retryAfterMs`, unavailable `streams` / `rpcs`) a degradation policy attached, so you render a notice + schedule a retry with zero per-failure code. Additive companion to `health` |
 
 `failure` and `quiescent` are pure additions; apps that don't use them pay nothing. `health` lazily subscribes to `__realtime` only on first read; never reading it = no subscription.
+
+When the extensions pub/sub bus is wired with a degradation policy (`createDegradationPolicy`), a `degraded` event carries a precomputed client mitigation. Read it off the `degradation` store to render a banner and hold off retries with zero per-failure app code:
+
+```svelte
+<script>
+  import { degradation } from 'svelte-realtime/client';
+</script>
+
+{#if $degradation.active && $degradation.mitigation}
+  <Banner severity="warn">{$degradation.mitigation.bannerCopy}</Banner>
+{/if}
+```
+
+Because the degraded event is pushed with the de-herd window, the `degradation` store (and the `health` flip) update after this client's own random delay, so a fleet ramps its reactions across the cooldown instead of retrying in lockstep.
 
 Apps that need richer health detail (reason strings, timestamps) can listen to the topic directly:
 

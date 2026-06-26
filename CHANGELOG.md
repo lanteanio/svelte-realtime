@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.6.0-next.46] - 2026-06-26
+## [0.6.0-next.48] - 2026-06-27
+
+### Added
+
+- **`piiRedact` stream option - uniform PII / sensitive-field redaction on a stream's wire egress.** Declare `live.stream(topic, loader, { piiRedact })` to strip, mask, or pseudonymize sensitive fields before they leave the process - the same projection for every subscriber, applied on EVERY egress path: the initial load, live publishes (including `ctx.publishThrottled` / `ctx.publishDebounced` / `ctx.batch`), server-pushed reloads (stale / invalidation), and replay. Crucially, redaction runs BEFORE the replay buffer, so raw PII never rests in the replay store and a reconnecting client's gap-fill cannot leak it. Three forms: `piiRedact: true` strips the built-in sensitive-key set (`token`/`secret`/`password`/`auth`/`session`/`cookie`/`jwt`/`credential`); `piiRedact: { fields: { email: 'mask', ssn: 'omit', userId: 'hash' }, hashSalt }` applies per-field modes (`omit` deletes, `mask` -> `'***'`, `hash` -> a stable salted HMAC pseudonym for join-without-identity); or a `(data) => projection` function for full control. Field rules match by key name at any nesting depth, and the redactor is non-mutating (your published object is never altered). Fail-closed by design: a throwing redactor drops the publish (or nulls the initial data) rather than broadcasting raw fields. For per-audience differences (admins see a field, members do not), compose with `guard` and separate streams - uniform redaction is what preserves native fan-out and the redact-before-buffer guarantee. Realtime-only; no adapter or extensions version bump required.
+
+## [0.6.0-next.47] - 2026-06-26
+
+### Added
+
+- **`degradation` store - the precomputed mitigation for a server-side degradation, surfaced client-side.** When the extensions pub/sub bus is wired with a degradation policy (`svelte-adapter-uws-extensions >= 0.6.0-next.35`), a `degraded` event now carries a precomputed client mitigation (which streams/rpcs to treat as unavailable, how long to hold off, ready-to-render banner copy). The new `degradation` store surfaces it: `{ active, mitigation, recovery }` - read `$degradation.mitigation.bannerCopy` / `.retryAfterMs` to render a notice and schedule a retry with zero per-failure app code. The existing `health` store is unchanged (still `Readable<'healthy' | 'degraded'>`), so this is purely additive. Because the degraded event is pushed with the de-herd window, the `degradation` store (and the `health` flip) update after this client's own random delay, so 50k clients ramp their reactions across the cooldown instead of retrying in lockstep.
+
+### Changed
+
+- **The `__realtime` system-health subscription now honors the de-herd window.** The health consumer previously applied a `degraded` / `recovered` event immediately; it now routes through the same de-herd dispatcher as streams, so a degraded event the server pushed with `{ jitterMs }` staggers this client's reaction (the whole point of the proactive mitigation push) rather than flipping at t+0. Non-jittered events are unaffected.
 
 ### Added
 

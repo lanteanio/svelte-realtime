@@ -427,6 +427,39 @@ export interface StreamAlarmConfig {
 	onAlarm: (ctx: LiveContext) => void | Promise<void>;
 }
 
+/**
+ * Redaction mode for a single field in a {@link PiiRedactConfig}.
+ *
+ * - `omit` - delete the key.
+ * - `mask` - replace the value with `'***'` regardless of type.
+ * - `hash` - replace the value with a short stable HMAC-SHA256 pseudonym
+ *   (join-without-identity for analytics); requires `hashSalt`.
+ */
+export type PiiRedactMode = 'omit' | 'mask' | 'hash';
+
+/**
+ * Declarative form of the `piiRedact` stream option.
+ *
+ * Field rules are matched by key NAME at ANY nesting depth. `defaults`
+ * (default `true`) additionally strips the built-in sensitive-key set
+ * (token/secret/password/auth/session/cookie/jwt/credential) via omit;
+ * explicit `fields` entries always win over the default strip. `hashSalt` is
+ * required when any field uses `'hash'` - it keys the pseudonym so it is
+ * stable across restarts and cluster instances yet not reversible.
+ */
+export interface PiiRedactRules {
+	fields?: Record<string, PiiRedactMode>;
+	defaults?: boolean;
+	hashSalt?: string;
+}
+
+/**
+ * Configuration for the `piiRedact` stream option (uniform wire-egress
+ * redaction). Either `true` (strip the default sensitive-key set), a custom
+ * `(data) => projection` redactor, or declarative {@link PiiRedactRules}.
+ */
+export type PiiRedactConfig = true | ((data: any) => any) | PiiRedactRules;
+
 export interface StreamOptions {
 	/**
 	 * Per-room alarm (live.alarm). When set, a handler can call `ctx.setAlarm(at)`
@@ -654,6 +687,37 @@ export interface StreamOptions {
 	 * ```
 	 */
 	transform?(data: any): any;
+
+	/**
+	 * PII / sensitive-field redaction applied to this stream's wire egress,
+	 * UNIFORMLY for every subscriber. Redaction runs immediately AFTER
+	 * `transform` and BEFORE the data reaches the replay buffer or the
+	 * fan-out, so raw PII never rests in the replay store and resume/gap-fill
+	 * cannot leak it. It applies on every egress path: the initial load, live
+	 * publishes, server-pushed reloads (stale / invalidation), and replay.
+	 *
+	 * For per-audience differences (admins see a field, members do not),
+	 * compose with `guard` + separate streams - redaction here is uniform by
+	 * design, which is what preserves native fan-out and the redact-before-
+	 * buffer guarantee.
+	 *
+	 * Fail-closed: a throwing redactor drops the publish (or nulls the initial
+	 * data) rather than broadcasting un-redacted fields. Field rules match by
+	 * key NAME at any nesting depth.
+	 *
+	 * - `true` - strip the default sensitive-key set
+	 *   (token/secret/password/auth/session/cookie/jwt/credential), omit mode.
+	 * - `(data) => projection` - a custom redactor (use for scalar payloads).
+	 * - `{ fields, defaults?, hashSalt? }` - declarative per-field modes.
+	 *
+	 * @example
+	 * ```js
+	 * live.stream(topic, loader, {
+	 *   piiRedact: { fields: { email: 'mask', ssn: 'omit', userId: 'hash' }, hashSalt: env.PII_SALT }
+	 * });
+	 * ```
+	 */
+	piiRedact?: PiiRedactConfig;
 
 	/**
 	 * Coalesce-key extractor for publishes to this stream's topic.

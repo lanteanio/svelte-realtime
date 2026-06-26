@@ -2,7 +2,7 @@
 export { assert, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
 export { __devtools } from './client/devtools-instrument.js';
-export { quiescent, _resetQuiescence, health, _resetHealth, _setSmoothDegraded, _setCrdtDegraded } from './client/health.js';
+export { quiescent, _resetQuiescence, health, degradation, _resetHealth, _setSmoothDegraded, _setCrdtDegraded } from './client/health.js';
 export { RpcError, empty, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, _resetDedupCoalesceWarned } from './client/internal-state.js';
 export { __upload, _resetUploadAutoDiscovery } from './client/upload.js';
 export { __rpc, __binaryRpc, __mpFields, batch, _resetClientPublishRateWarning } from './client/rpc.js';

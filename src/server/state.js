@@ -102,6 +102,38 @@ export const _topicCoalesce = new Map();
 export const _topicTransform = new Map();
 
 /**
+ * Per-topic PII redaction registry. When a stream registered with `piiRedact`
+ * (or `guard({ piiRedact })`) is subscribed, its topic is recorded here. The
+ * publish helper applies the redactor to the wire data immediately AFTER
+ * `transform`, before the replay buffer and the fan-out, so redaction is
+ * uniform across every subscriber and PII never rests in the replay store.
+ *
+ * Refcounted by ws-topic contributions, mirroring the transform registry. The
+ * `onError` observer (first subscriber-for-topic wins, same rule as transform)
+ * receives a throwing redactor; the publish is dropped fail-closed so raw data
+ * is never broadcast.
+ *
+ * @type {Map<string, { redact: Function, onError: Function | null, refcount: number }>}
+ */
+export const _topicRedact = new Map();
+
+/**
+ * Declaration-scoped PII redaction registry. Mirrors `_topicRedact` but is
+ * keyed and populated at stream DECLARATION time (for static string topics),
+ * not at subscribe time, and is never refcount-evicted. This is the
+ * security-load-bearing half: a `replay: true` + `piiRedact` topic can be
+ * published to (cron tick, top-level `publish()`, reactive recompute, an RPC
+ * write) while NO client is subscribed on this instance, and the buffer write
+ * must still be redacted or raw PII rests in the replay store and relays across
+ * the cluster. The subscriber-refcounted `_topicRedact` cannot cover that
+ * window; this map does (the redactor is built once at declaration). Every
+ * publish chokepoint resolves `_topicRedact.get(topic) || _declaredRedact.get(topic)`.
+ *
+ * @type {Map<string, { redact: Function, onError: Function | null }>}
+ */
+export const _declaredRedact = new Map();
+
+/**
  * Per-topic volatile registry. When a stream registered with `volatile: true`
  * is subscribed, its topic is recorded here. The publish helper translates
  * `volatile` topics + per-call `options.volatile === true` into the adapter's

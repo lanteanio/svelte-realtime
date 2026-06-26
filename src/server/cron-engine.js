@@ -7,6 +7,7 @@ import { _cronDateParts, _cronFieldMatch } from './cron.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _ensureWrap } from './reactive.js';
 import { _maybeReplayPublish } from './replay-routing.js';
+import { _redactOrDrop, REDACT_DROP } from './publish-helpers.js';
 import { _setBus } from './bus.js';
 import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
 
@@ -457,12 +458,20 @@ export async function _tickCron() {
 				const ctx = _buildCtx(null, null, cronPub, _h, null);
 				const result = await entry.fn(ctx);
 				if (result !== undefined) {
-					// Same auto-replay routing as ctx.publish: cron-published
-					// events to a replay-eligible topic flow through
-					// `platform.replay.publish` so the buffer captures them
-					// and reconnecting clients can replay missed ticks.
-					if (!_maybeReplayPublish(cronPub, entry.topic, 'set', result)) {
-						cronPub.publish(entry.topic, 'set', result);
+					// Uniform piiRedact: when the cron's topic is also a piiRedact
+					// stream, redact the tick BEFORE the replay buffer write and the
+					// broadcast, so raw PII never rests in the buffer (the same
+					// redact-before-buffer guarantee ctx.publish gives). A no-op for
+					// topics with no redactor; fail-closed drop on a redactor throw.
+					const wire = _redactOrDrop(entry.topic, result);
+					if (wire !== REDACT_DROP) {
+						// Same auto-replay routing as ctx.publish: cron-published
+						// events to a replay-eligible topic flow through
+						// `platform.replay.publish` so the buffer captures them
+						// and reconnecting clients can replay missed ticks.
+						if (!_maybeReplayPublish(cronPub, entry.topic, 'set', wire)) {
+							cronPub.publish(entry.topic, 'set', wire);
+						}
 					}
 				}
 				if (state.metricsInstruments) state.metricsInstruments.cronCount.inc({ path, status: 'ok' });

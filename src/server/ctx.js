@@ -2,9 +2,9 @@
 import { now as runtimeNow, microtask } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
-import { _ctxHelpersCache, _topicVolatile, _topicStaleWatch, _silentTopicWatch, _topicInvalidationWatch, _topicCoalesce, _topicTransform } from './state.js';
+import { _ctxHelpersCache, _topicVolatile, _topicStaleWatch, _silentTopicWatch, _topicInvalidationWatch, _topicCoalesce, _topicTransform, _topicRedact, _declaredRedact } from './state.js';
 import { _maybeReplayPublish } from './replay-routing.js';
-import { _checkPublishHelperArgs, _throttlePublish, _debouncePublish, _skipGate } from './publish-helpers.js';
+import { _checkPublishHelperArgs, _throttlePublish, _debouncePublish, _skipGate, _redactOrDrop, REDACT_DROP, _resolveRedactor } from './publish-helpers.js';
 import { _validUserIdReason } from './validate.js';
 import { _shouldShed } from './admission.js';
 import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
@@ -162,7 +162,7 @@ export function _getCtxHelpers(platform) {
 			// relay already coalesces per-microtask postMessages; this lifts
 			// the same idea to the wire level so subscribers receive ONE frame
 			// per microtask containing every event they're entitled to.
-			if (_topicCoalesce.size === 0 && _topicTransform.size === 0) {
+			if (_topicCoalesce.size === 0 && _topicTransform.size === 0 && _topicRedact.size === 0 && _declaredRedact.size === 0) {
 				// A jittered publish carries a de-herd window `j` only on the single
 				// `platform.publish` envelope - not the replay buffer or the batch
 				// frame - so it takes the direct path. That is the right shape: jitter
@@ -225,6 +225,25 @@ export function _getCtxHelpers(platform) {
 				}
 			} else {
 				wireData = data;
+			}
+			// PII redaction runs immediately after transform and before BOTH
+			// the replay buffer (_maybeReplayPublish below) and the fan-out, so
+			// it is uniform across every subscriber and raw PII never rests in
+			// the replay store. Fail-closed: a throwing redactor drops the
+			// publish (routed to the stream's onError if set) rather than
+			// broadcasting un-redacted data. The redactor is non-mutating, so a
+			// transform-less topic (wireData === data) is not corrupted in place.
+			const r = _resolveRedactor(topic);
+			if (r) {
+				try {
+					wireData = r.redact(wireData);
+				} catch (err) {
+					if (r.onError) {
+						try { r.onError(err, null, topic); } catch {}
+						return false;
+					}
+					throw err;
+				}
 			}
 			if (!c) {
 				// Transform-only topic: stays on the queued batched path,
@@ -300,7 +319,24 @@ export function _getCtxHelpers(platform) {
 				if (reason !== null) throw new LiveError('INVALID_USER_ID', 'ctx.signal: ' + reason);
 				return platform.publish('__signal:' + userId, event, data);
 			},
-			batch: (messages) => platform.batch ? platform.batch(messages) : messages.forEach((m) => publish(m.topic, m.event, m.data, m.options)),
+			batch: (messages) => {
+					// No native batch: fall back to the redacting `publish` closure
+					// per message (it applies piiRedact + replay routing itself).
+					if (!platform.batch) { for (const m of messages) publish(m.topic, m.event, m.data, m.options); return; }
+					// Native batch bypasses the `publish` closure, so apply uniform
+					// piiRedact here. Fail-closed: a message whose redactor throws is
+					// dropped from the batch rather than broadcast raw.
+					if (_topicRedact.size > 0 || _declaredRedact.size > 0) {
+						const out = [];
+						for (const m of messages) {
+							const d = _redactOrDrop(m.topic, m.data);
+							if (d === REDACT_DROP) continue;
+							out.push(d === m.data ? m : { ...m, data: d });
+						}
+						messages = out;
+					}
+					return platform.batch(messages);
+				},
 			shed: (className) => _shouldShed(platform, className),
 			skip: (key, ms) => _skipGate(key, ms)
 		};

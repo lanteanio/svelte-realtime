@@ -106,6 +106,21 @@ export function _stripTenantTopic(tenantId, topic) {
 	return typeof topic === 'string' && topic.startsWith(prefix) ? topic.slice(prefix.length) : topic;
 }
 
+/**
+ * Strip the tenant prefix from a WIRE topic WITHOUT knowing the tenant id.
+ * Used at publish chokepoints (e.g. redactor resolution) that hold the
+ * tenant-scoped wire string but not the id: `@t/<id>/<logical>` -> `<logical>`.
+ * Returns the topic unchanged when it carries no tenant prefix.
+ *
+ * @param {string} topic
+ * @returns {string}
+ */
+export function _stripAnyTenantTopic(topic) {
+	if (typeof topic !== 'string' || !topic.startsWith(_TENANT_TOPIC_NS)) return topic;
+	const slash = topic.indexOf('/', _TENANT_TOPIC_NS.length);
+	return slash === -1 ? topic : topic.slice(slash + 1);
+}
+
 /** The configured resolver, or null (opt-in: null = no tenancy = zero cost). */
 let _tenantResolver = null;
 
