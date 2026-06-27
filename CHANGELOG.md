@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`live.forget(userId, opts)` - right-to-erasure (GDPR Article 17).** A connection-less server action that purges every trace of a user across the framework's in-memory state and any wired durable store, scoped to one tenant. It is a SERVER action (not reachable from the wire), so your app owns the "may this user be erased" authorization at the call site. It cascades over an auditable surface - the push registry, presence refs (the grace timer is cleared and the cluster roster decremented), rate-limit buckets, and idempotency cached results (via a per-user reverse index, since the opaque cache key cannot be substring-matched) - and then awaits the durable `store.purgeUser` wired through `configureForget({ store })`, resolving ONLY after the durable delete confirms (resolving early would be a compliance lie). A durable failure rejects with `LiveError('FORGET_STORE_FAILED')` so an incomplete erasure can be retried. `opts.tenantId` is server-trusted (pass it from your own context, never the wire) and validated; `opts.onForget(record)` is a PII-free audit hook that receives a HASHED userId (never the raw id), the tenant, and the per-surface counts. The result is constant-shape (`{ ok: true, at, rowsAffected, surfaces }`) so re-exposing it to clients cannot turn it into a user-existence oracle. An in-flight idempotent RPC that commits during a `forget` is dropped (a per-user purge tombstone) so it cannot re-cache the erased user. Single-instance apps get complete erasure with no extra wiring; for a cluster, wire `configureForget({ store: createForgetStore({ ...your stores }), platform })` from `svelte-adapter-uws-extensions/forget-store`. New `live.forget`, `configureForget`, `ForgetResult`, and `ForgetStore` types in `server.d.ts`. Note: CRDT documents (`live.doc`/`map`/`array`) merge edits from many users into shared state, so a forgotten user's merged content is not surgically erasable - use the `onForget` hook to delete app-owned documents.
+
 ## [0.6.0-next.50] - 2026-06-27
 
 ### Fixed

@@ -1,5 +1,7 @@
 // @ts-check
 import { _presenceRef } from './state.js';
+import { clearTimer } from '../shared/runtime.js';
+import { _topicInTenant } from './tenant.js';
 
 /**
  * Direct handle to the in-memory presence-ref map for tests that need to seed
@@ -120,6 +122,48 @@ export async function _clusterPresenceRelease(platform, topic, key) {
 		// the count (or the hash TTL expires).
 		return { isLast: true };
 	}
+}
+
+/**
+ * Right-to-erasure (`live.forget`): drop every presence-ref entry a user holds,
+ * scoped to one tenant. Refs are keyed `topic\0userKey`; the userKey is the
+ * segment after the LAST `\0` (a validated wire topic and a validated userId
+ * each contain no `\0`, so there is exactly one separator). For each match the
+ * grace-leave timer is cleared FIRST (entries hold a live setTimeout), the local
+ * ref deleted, then - when a platform is wired - the cluster roster is
+ * decremented and, if this was the last holder cluster-wide, a `leave` is
+ * published so other replicas and subscribers drop the user; otherwise a phantom
+ * presence counter lingers in the Redis roster. A custom presence key that is
+ * not the userId is not user-addressable and is left untouched.
+ * @param {any} platform the configured forget platform, or null for single-instance
+ * @param {string | null} tenantId
+ * @param {string} userId
+ * @param {((wireTopic: string, event: string, data: any) => void) | null} [publishLeave]
+ * @returns {Promise<number>} refs removed
+ */
+export async function _purgePresenceUser(platform, tenantId, userId, publishLeave) {
+	if (typeof userId !== 'string' || userId.length === 0) return 0;
+	let n = 0;
+	for (const [refKey, ref] of [..._presenceRef]) {
+		const sep = refKey.lastIndexOf('\0');
+		if (sep < 0) continue;
+		const topic = refKey.slice(0, sep);
+		const key = refKey.slice(sep + 1);
+		if (key !== userId) continue;
+		if (!_topicInTenant(tenantId, topic)) continue;
+		if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
+		_presenceRef.delete(refKey);
+		n++;
+		if (platform) {
+			try {
+				const res = await _clusterPresenceRelease(platform, topic, key);
+				if (res && res.isLast && publishLeave) {
+					try { publishLeave(topic + ':presence', 'leave', { key }); } catch { /* publish best-effort */ }
+				}
+			} catch { /* cluster release best-effort; the local ref is already gone */ }
+		}
+	}
+	return n;
 }
 
 /**

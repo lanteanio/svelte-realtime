@@ -324,6 +324,33 @@ export const pushHooks = {
 };
 
 /**
+ * Right-to-erasure (`live.forget`): drop a user's push-registry entry and its
+ * ws reverse mapping. The userId registry is the durable-in-memory routing
+ * record keyed by raw userId (no tenant segment - it relies on globally-unique
+ * userIds, so the tenant cannot disambiguate here). The per-sessionId registry
+ * is keyed independently of userId, but a connection's userId and sessionId are
+ * normally the SAME socket, so draining that socket's session entry here covers
+ * the common case without a separate user->session index; sessions on other
+ * sockets are ws-bound and clear on their own disconnect.
+ *
+ * Returns the number of userId routing entries removed (0 or 1) so the forget
+ * cascade can total a per-surface count.
+ * @param {string} userId
+ * @returns {number}
+ */
+export function _purgePushUser(userId) {
+	const entry = _pushRegistry.get(userId);
+	if (!entry) return 0;
+	_pushRegistry.delete(userId);
+	if (entry.ws) {
+		_wsToPushUserId.delete(entry.ws);
+		// Same socket usually also carries the push sessionId; drain it too.
+		_deregisterPushSession(entry.ws);
+	}
+	return 1;
+}
+
+/**
  * Deregister a socket's sessionId push entry. Shared by `pushHooks.close`
  * (the direct one-arg path) and the realtime `close` drain in server.js, so a
  * single `export const close = pushHooks.close` covers the session registry too.

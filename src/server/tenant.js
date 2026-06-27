@@ -89,6 +89,22 @@ export function _tenantKey(tenantId, key) {
 }
 
 /**
+ * Whether a WIRE topic falls inside a tenant scope. With a `tenantId`, true iff
+ * the topic carries that tenant's namespace prefix; with `null`, true iff the
+ * topic carries NO tenant prefix (the single-tenant default). `live.forget`
+ * uses this to scope a per-user purge to one tenant's topics, so a null-tenant
+ * erasure can never reach another tenant's rooms and vice versa.
+ * @param {string | null | undefined} tenantId
+ * @param {string} topic
+ * @returns {boolean}
+ */
+export function _topicInTenant(tenantId, topic) {
+	if (typeof topic !== 'string') return false;
+	if (tenantId) return topic.startsWith(_TENANT_TOPIC_NS + tenantId + '/');
+	return !topic.startsWith(_TENANT_TOPIC_NS);
+}
+
+/**
  * Inverse of `_tenantTopic`: strip the tenant namespace from a WIRE topic back to
  * the logical topic. Returns the topic unchanged when there is no tenant or when
  * it does not carry this tenant's prefix (so it is safe to apply to an already-

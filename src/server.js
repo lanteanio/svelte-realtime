@@ -79,6 +79,8 @@ import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, 
 export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError };
 import { configureAlarm, _resetAlarms } from './server/alarm.js';
 export { configureAlarm, _resetAlarms };
+import { configureForget, _resetForget, installForget } from './server/forget.js';
+export { configureForget, _resetForget };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
 export { onShutdown, _resetLifecycle };
 import { introspect } from './server/introspect.js';
@@ -1531,6 +1533,8 @@ export function _resetTopicWsCounts() {
 installIdempotency(live);
 
 installPush(live);
+
+installForget(live);
 
 /**
  * Mark a function as RPC-callable with schema validation.

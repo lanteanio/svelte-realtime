@@ -436,6 +436,40 @@ Modes: `omit` deletes the key; `mask` replaces the value with `'***'`; `hash` re
 
 The redactor is non-mutating (your published object is never altered) and **fail-closed**: if it throws, the publish is dropped (or the initial data is nulled) rather than broadcasting raw fields. Redaction is UNIFORM by design - that is what keeps native fan-out intact and guarantees nothing un-redacted reaches the buffer. For per-audience differences (admins see a field, members do not), expose separate streams gated with [access control](#access-control) and give each the redaction it needs. Field-level redaction applies to object payloads; for a scalar payload, use the function form.
 
+### Right to erasure (`live.forget`)
+
+`live.forget(userId, opts)` purges every trace of a user across the framework's in-memory state and any wired durable store, scoped to one tenant - the erasure side of GDPR Article 17. It is a SERVER action (not reachable from the wire), so your app owns the "may this user be erased" check at the call site, typically inside an admin RPC after your own authorization.
+
+```js
+import { live } from 'svelte-realtime/server';
+
+// In an admin handler, after your own authz check:
+const res = await live.forget(targetUserId, {
+  tenantId: ctx.tenantId,                  // server-trusted; never read straight off the wire
+  onForget: ({ userIdHash, tenantId, rowsAffected }) =>
+    auditLog.write({ action: 'erasure', userIdHash, tenantId, rowsAffected })
+});
+// res = { ok: true, at, rowsAffected, surfaces: { push, presence, rateLimit, idempotency, durable } }
+```
+
+It cascades over the framework's in-memory user state (the push registry, presence rosters - clearing the grace timer and decrementing the cluster count, rate-limit buckets, and idempotency cached results via a per-user reverse index), then awaits the durable store's `purgeUser` and resolves ONLY after the durable delete confirms. A durable failure rejects with `LiveError('FORGET_STORE_FAILED')` so an incomplete erasure can be retried.
+
+The `onForget` audit hook receives a HASHED userId (never the raw id), so your audit log stays PII-free. The result is constant-shape, so if you ever re-expose `forget` to untrusted clients, map it to a fixed shape first - a `0`-vs-`N` `rowsAffected` would otherwise reveal whether a user exists.
+
+Single-instance apps get complete erasure with no extra wiring. For a cluster, wire the durable layer once - `createForgetStore` composes the backend stores you already use:
+
+```js
+import { configureForget } from 'svelte-realtime/server';
+import { createForgetStore } from 'svelte-adapter-uws-extensions/forget-store';
+
+configureForget({
+  store: createForgetStore({ registry, idempotency, presence, cursor }),
+  platform   // supplies the Redis handle the presence purge needs
+});
+```
+
+Stores whose payloads are app-defined (sessions, dead-letter, replay buffers, task inputs) take a `forgetUserId(payload)` extractor so they can find the user; without it they are a documented no-op. CRDT documents (`live.doc`/`map`/`array`) merge edits from many users into shared state, so a forgotten user's merged content is not surgically erasable - use the `onForget` hook to delete app-owned documents.
+
 ### Reconnection
 
 When the WebSocket reconnects, streams automatically refetch initial data and resubscribe. The store keeps showing stale data during the refetch - it does not reset to `undefined`.

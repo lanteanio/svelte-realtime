@@ -78,6 +78,34 @@ export function _consumeRateLimitBucket(bucketKey, points, windowMs) {
 }
 
 /**
+ * Right-to-erasure (`live.forget`): drop a user's rate-limit buckets. The
+ * default bucket key is `_tenantKey(tenantId, path + '\0' + userKey)`, so one
+ * user's buckets end with `\0{userId}` and, under multi-tenancy, start with
+ * `{tenantId}\0`. Both guards together scope the purge to a single tenant's
+ * buckets for a single user. A custom `key` resolver that returns a
+ * non-identity value is not user-addressable and is left untouched. Buckets are
+ * counters-only and short-lived (windowMs*2 sweep), so a rare over-match in a
+ * mixed tenant/no-tenant deployment at worst resets one rate-limit window - no
+ * PII is exposed.
+ * @param {string | null} tenantId
+ * @param {string} userId
+ * @returns {number} buckets removed
+ */
+export function _purgeRateLimitUser(tenantId, userId) {
+	if (typeof userId !== 'string' || userId.length === 0) return 0;
+	const suffix = '\0' + userId;
+	const prefix = tenantId ? tenantId + '\0' : null;
+	let n = 0;
+	for (const key of [..._rateLimits.keys()]) {
+		if (!key.endsWith(suffix)) continue;
+		if (prefix !== null && !key.startsWith(prefix)) continue;
+		_rateLimits.delete(key);
+		n++;
+	}
+	return n;
+}
+
+/**
  * Wraps a live() function with a sliding window rate limiter.
  *
  * @param {{ points: number, window: number, key?: (ctx: any) => string }} config

@@ -1931,6 +1931,66 @@ export namespace live {
 	): void;
 
 	/**
+	 * Right-to-erasure (GDPR Article 17): purge every trace of a user across the
+	 * framework's in-memory state and any wired durable store, scoped to one
+	 * tenant. A connection-less SERVER action - it is not reachable from the
+	 * wire, so the app owns the "should this user be erased" authorization at the
+	 * call site. Erases data at rest; it does NOT disconnect the user (do that
+	 * from `onForget` or your own socket handling if the session should end too).
+	 *
+	 * In-memory surfaces purged: the push registry, presence refs (grace timer
+	 * cleared, cluster roster decremented when a platform is wired), rate-limit
+	 * buckets, and idempotency cached results (via a per-user reverse index - the
+	 * opaque cache key cannot be substring-matched). Durable cluster rows
+	 * (Redis / Postgres) are erased through the `store.purgeUser` seam wired via
+	 * `configureForget({ store })`; the promise resolves ONLY after the durable
+	 * store confirms (resolving early would be a compliance lie). A durable
+	 * failure rejects with `LiveError('FORGET_STORE_FAILED')` so the incomplete
+	 * erasure can be retried.
+	 *
+	 * `tenantId` is server-trusted: pass it from your own context (`ctx.tenantId`
+	 * or your own logic), never straight off the wire. Defaults to `null`
+	 * (single-tenant). `mode`/`cascade` are reserved for the durable store.
+	 *
+	 * Note: the push routing registry is keyed by raw userId with no tenant
+	 * segment (it assumes globally-unique userIds), so in a multi-tenant
+	 * deployment that reuses userIds across tenants, a forget can clear another
+	 * tenant's push routing entry for the same userId. That entry is routing
+	 * state only (no data/PII) and self-heals on the user's next connect. All
+	 * other surfaces are tenant-scoped.
+	 *
+	 * The result carries per-surface counts for the trusted server caller. If you
+	 * re-expose forget to untrusted clients, map the result to a constant shape
+	 * so a 0-vs-N `rowsAffected` does not become a user-existence oracle.
+	 *
+	 * @example
+	 * ```js
+	 * // In an admin RPC handler, after your own authz check:
+	 * const res = await live.forget(targetUserId, {
+	 *   tenantId: ctx.tenantId,
+	 *   onForget: ({ userIdHash, tenantId, rowsAffected }) =>
+	 *     auditLog.write({ action: 'erasure', userIdHash, tenantId, rowsAffected })
+	 * });
+	 * ```
+	 */
+	function forget(
+		userId: string,
+		opts?: {
+			tenantId?: string | null;
+			cascade?: any;
+			mode?: 'delete' | 'anonymize';
+			onForget?: (record: {
+				userIdHash: string;
+				tenantId: string | null;
+				cascade: any;
+				rowsAffected: number;
+				surfaces: Record<string, number>;
+				at: number;
+			}) => void;
+		}
+	): Promise<ForgetResult>;
+
+	/**
 	 * Send a server-initiated request to a connected user and await the reply.
 	 * Routes through the push registry populated by `pushHooks.open` /
 	 * `pushHooks.close`, so the user must have an active connection on this
@@ -3621,6 +3681,53 @@ export function configureAlarm(
 			store?: AlarmStore | null;
 			leader?: (() => boolean) | null;
 			pollMs?: number;
+		}
+		| null
+): void;
+
+/**
+ * The resolved result of a `live.forget` cascade.
+ */
+export interface ForgetResult {
+	/**
+	 * Always `true` on a completed cascade. A constant-shape field so the result
+	 * cannot be turned into a user-existence oracle by a caller who re-exposes it.
+	 */
+	ok: true;
+	/** Wall-clock ms the cascade resolved (routed through the runtime seam). */
+	at: number;
+	/**
+	 * Total entries/rows removed across every in-memory surface plus the durable
+	 * store. Zero when the user had no data. Returned to the trusted server
+	 * caller; map to a constant shape before exposing to untrusted clients.
+	 */
+	rowsAffected: number;
+	/** Per-surface removal counts (in-memory descriptors plus `durable`). */
+	surfaces: Record<string, number>;
+}
+
+/**
+ * Durable right-to-erasure store: erases a user's durable cluster rows. The
+ * extensions `createForgetStore(...)` builds one; the realtime layer never
+ * imports it - it only duck-types `purgeUser`.
+ */
+export interface ForgetStore {
+	purgeUser(tenantId: string | null, userId: string, cascade: any): Promise<number | Record<string, number>>;
+}
+
+/**
+ * Configure `live.forget`. `store` plugs a durable cluster store into the
+ * erasure cascade (its `purgeUser` runs after the in-memory surfaces and the
+ * promise waits for it); `platform` supplies the Redis handle the presence purge
+ * needs to decrement the cluster roster. Both optional. Pass `null` to clear
+ * both. With neither, `live.forget` purges in-memory state only - correct for a
+ * single instance.
+ */
+export function configureForget(
+	config:
+		| {
+			store?: ForgetStore | null;
+			platform?: any;
 		}
 		| null
 ): void;

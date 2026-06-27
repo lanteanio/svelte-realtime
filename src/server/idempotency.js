@@ -86,21 +86,68 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	const results = new Map();
 	/** @type {Map<string, Promise<any>>} */
 	const inflight = new Map();
+	// Right-to-erasure reverse index. Idempotency cache keys are opaque
+	// (RPC path + tenant + a sha256 identity fingerprint), so `live.forget`
+	// cannot find a user's keys by substring without risking a collision miss
+	// or an over-delete - a security hole. Instead the store records, for each
+	// committed key, the tenant-scoped user key it belongs to (supplied by the
+	// caller via `acquire`'s `meta.user`), so forget can drop exactly that
+	// user's entries. The inverse map keeps every single-key drop (sweep,
+	// maxEntries eviction, commit, abort) O(1) so the index never leaks
+	// references to already-evicted keys.
+	/** @type {Map<string, Set<string>>} tenant-scoped user key -> cache keys */
+	const userKeys = new Map();
+	/** @type {Map<string, string>} cache key -> tenant-scoped user key */
+	const keyUser = new Map();
+	// Forget tombstones: the most recent purge time per tenant-scoped user key.
+	// A slot acquired at-or-before its user's last purge must NOT cache on commit
+	// - otherwise an idempotent RPC that was already in flight when `live.forget`
+	// ran would re-cache the forgotten user's freshly-computed result for the
+	// full TTL (a residual-PII window invisible to a purge that scans only
+	// already-committed keys). The clock seam is coarse (1Hz cache), so the
+	// at-or-before test conservatively drops every commit through the purge's
+	// clock tick - a brief grace window that also covers a queued duplicate
+	// request that re-acquires within the same tick. Swept with the 30s result
+	// sweep so the map stays bounded to recent erasures.
+	/** @type {Map<string, number>} tenant-scoped user key -> last purge ms */
+	const purgedAt = new Map();
 	let lastSweep = runtimeNow();
 
+	function _indexAdd(cacheKey, idemUser) {
+		if (!idemUser) return;
+		keyUser.set(cacheKey, idemUser);
+		let set = userKeys.get(idemUser);
+		if (!set) { set = new Set(); userKeys.set(idemUser, set); }
+		set.add(cacheKey);
+	}
+	function _indexDrop(cacheKey) {
+		const idemUser = keyUser.get(cacheKey);
+		if (idemUser === undefined) return;
+		keyUser.delete(cacheKey);
+		const set = userKeys.get(idemUser);
+		if (set) { set.delete(cacheKey); if (set.size === 0) userKeys.delete(idemUser); }
+	}
+
 	return {
-		async acquire(key, ttlSec) {
+		async acquire(key, ttlSec, meta) {
 			const now = runtimeNow();
 			if (now - lastSweep >= 30000) {
 				lastSweep = now;
 				for (const [k, e] of results) {
-					if (e.expiresAt <= now) results.delete(k);
+					if (e.expiresAt <= now) { results.delete(k); _indexDrop(k); }
+				}
+				// Drop tombstones older than the sweep window: any slot that was
+				// in flight across a purge has long since committed, so the
+				// tombstone has done its job and a new request may cache again.
+				for (const [u, t] of purgedAt) {
+					if (now - t >= 30000) purgedAt.delete(u);
 				}
 			}
 			const cached = results.get(key);
 			if (cached) {
 				if (cached.expiresAt > now) return { result: cached.value };
 				results.delete(key);
+				_indexDrop(key);
 			}
 			while (inflight.has(key)) {
 				try { await inflight.get(key); } catch {}
@@ -120,22 +167,64 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 				let i = 0;
 				for (const k of results.keys()) {
 					results.delete(k);
+					_indexDrop(k);
 					if (++i >= drop) break;
 				}
 			}
+			// The tenant-scoped user key this committed result belongs to, if the
+			// caller is authenticated (forget reverse index). Anonymous calls pass
+			// no user and stay unindexed. `meta` carries the raw { user, tenant } so
+			// a durable backend can denormalize them into separate columns; the
+			// in-memory index folds them into one key matching live.forget.
+			const idemUser = meta && typeof meta.user === 'string' ? _tenantKey(meta.tenant, meta.user) : null;
+			// Snapshot the acquire time so a commit racing a concurrent
+			// live.forget for this user is dropped (the tombstone below).
+			const acquiredAt = now;
 			const ttlMs = ttlSec * 1000;
 			return {
 				acquired: true,
 				async commit(value) {
-					if (ttlMs > 0) results.set(key, { value, expiresAt: runtimeNow() + ttlMs });
+					// Drop the cache write if this user was purged at-or-after this
+					// slot was acquired: the request was in flight when live.forget
+					// ran, so caching its result would resurrect the forgotten user.
+					const tomb = idemUser !== null ? purgedAt.get(idemUser) : undefined;
+					const forgotten = tomb !== undefined && tomb >= acquiredAt;
+					if (ttlMs > 0 && !forgotten) {
+						results.set(key, { value, expiresAt: runtimeNow() + ttlMs });
+						_indexAdd(key, idemUser);
+					}
 					inflight.delete(key);
 					if (resolveInflight) resolveInflight(value);
 				},
 				async abort() {
 					inflight.delete(key);
+					_indexDrop(key);
 					if (rejectInflight) rejectInflight(new Error('ABORTED'));
 				}
 			};
+		},
+		/**
+		 * Right-to-erasure: drop every cached + in-flight entry recorded under a
+		 * tenant-scoped user key. Returns the number of cached results removed.
+		 * @param {string} idemUser tenant-scoped user key (`_tenantKey(tenantId, userId)`)
+		 * @returns {number}
+		 */
+		purgeUser(idemUser) {
+			// Tombstone first: any commit for this user that races this purge (a
+			// request already in flight when forget ran) is dropped on commit, so
+			// it cannot re-cache the erased user. Recorded even when the user has
+			// no committed keys yet - the in-flight request may commit moments later.
+			purgedAt.set(idemUser, runtimeNow());
+			const set = userKeys.get(idemUser);
+			if (!set) return 0;
+			let n = 0;
+			for (const k of set) {
+				if (results.delete(k)) n++;
+				inflight.delete(k);
+				keyUser.delete(k);
+			}
+			userKeys.delete(idemUser);
+			return n;
 		}
 	};
 }
@@ -152,6 +241,22 @@ function _getDefaultIdempotencyStore() {
  */
 export function _resetIdempotencyStore() {
 	_defaultIdempotencyStore = null;
+}
+
+/**
+ * Right-to-erasure for the default in-process idempotency store: drop every
+ * cached + in-flight entry recorded under a tenant-scoped user key. No-op when
+ * no default store has been created yet, or when the active store predates the
+ * reverse index (a custom/durable store handles its own erasure through the
+ * `live.forget` store seam). Called by the forget descriptor table.
+ * @param {string} idemUser tenant-scoped user key (`_tenantKey(tenantId, userId)`)
+ * @returns {number} cached results removed
+ * @internal
+ */
+export function _purgeIdempotencyUser(idemUser) {
+	const store = /** @type {any} */ (_defaultIdempotencyStore);
+	if (!store || typeof store.purgeUser !== 'function') return 0;
+	return store.purgeUser(idemUser);
 }
 
 /**
@@ -410,10 +515,13 @@ const _liveIdempotent = function idempotent(config, fn) {
 		// client-random key still dedupes as before; a deliberately shared key
 		// across anonymous users stays the app's concern. Legacy entries (old key
 		// shape) cold-miss once and age out.
+		// The caller's authenticated identity (null for anonymous). Folded into
+		// the envelope key for per-user slotting (below) and recorded under the
+		// user for `live.forget` right-to-erasure (further down).
+		const uid = _getAuthenticatedId(ctx);
 		let scopedKey = userKey;
-		if (!keyFrom) {
-			const uid = _getAuthenticatedId(ctx);
-			if (uid !== null) scopedKey = _fingerprintIdentity(uid) + '\0' + userKey;
+		if (!keyFrom && uid !== null) {
+			scopedKey = _fingerprintIdentity(uid) + '\0' + userKey;
 		}
 		// Namespace the cache key by registered RPC path so the same
 		// userKey across different RPCs lands in different slots, then by the
@@ -428,7 +536,11 @@ const _liveIdempotent = function idempotent(config, fn) {
 		// body is rejected, not silently answered with the first call's result.
 		const fp = _fingerprintArgs(args);
 		const store = customStore || _getDefaultIdempotencyStore();
-		const slot = await store.acquire(key, ttlSec);
+		// Pass the raw (user, tenant) so the store can record this entry under the
+		// user for live.forget right-to-erasure - the in-memory store folds them
+		// into a key matching `_tenantKey(tenantId, userId)`, a durable backend
+		// denormalizes them into columns. Anonymous callers pass nothing.
+		const slot = await store.acquire(key, ttlSec, uid !== null ? { user: uid, tenant: ctx.tenantId } : undefined);
 		if (slot && slot.acquired) {
 			try {
 				const data = await fn(ctx, ...args);
