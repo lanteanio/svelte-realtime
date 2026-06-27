@@ -27,7 +27,7 @@ import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.j
 import svelteRealtime from '../src/vite.js';
 // Internal record map, for asserting a topic record is reclaimed (same module
 // instance server.js uses - ESM dedupes the import).
-import { _smoothTopics } from '../src/server/smooth.js';
+import { _smoothTopics, _resetSmoothFanoutWarning } from '../src/server/smooth.js';
 
 const textEncoder = new TextEncoder();
 const toArrayBuffer = (obj) => textEncoder.encode(JSON.stringify(obj)).buffer;
@@ -475,23 +475,53 @@ describe('live.smooth commands and the authoritative tick', () => {
 		expect(ev.options).toBeUndefined();
 	});
 
-	it('falls back to plain publish/send on a platform without the wire methods', async () => {
-		const { name } = declareShape({ tickMs: 20 });
-		const ws = mockWs({ id: 'u1' });
-		const platform = mockPlatform();
-		rt.queueDrain({
-			updates: [{ key: 'u1', state: { x: 2, y: 0 }, ws }],
-			acks: [{ key: 'u1', ws, id: 1, state: { x: 2, y: 0 } }],
-			idle: true
-		});
-		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 2 } }]]);
-		const sentBefore = platform.sent.length;
-		await vi.advanceTimersByTimeAsync(20);
-		const update = platform.published.find((p) => p.event === 'update');
-		expect(update).toBeDefined();
-		expect(update.options).toEqual({ compress: false });
-		const ack = platform.sent.slice(sentBefore).find((s) => s.event === 'ack');
-		expect(ack).toBeDefined();
+	it('falls back to plain publish/send on a platform without the wire methods, and warns once', async () => {
+		_resetSmoothFanoutWarning();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const { name } = declareShape({ tickMs: 20 });
+			const ws = mockWs({ id: 'u1' });
+			const platform = mockPlatform();
+			rt.queueDrain({
+				updates: [{ key: 'u1', state: { x: 2, y: 0 }, ws }],
+				acks: [{ key: 'u1', ws, id: 1, state: { x: 2, y: 0 } }],
+				idle: true
+			});
+			await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 2 } }]]);
+			const sentBefore = platform.sent.length;
+			await vi.advanceTimersByTimeAsync(20);
+			const update = platform.published.find((p) => p.event === 'update');
+			expect(update).toBeDefined();
+			expect(update.options).toEqual({ compress: false });
+			const ack = platform.sent.slice(sentBefore).find((s) => s.event === 'ack');
+			expect(ack).toBeDefined();
+			// The wire-less platform trips the one-shot dev warning.
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toContain('publishWire');
+		} finally {
+			warn.mockRestore();
+			_resetSmoothFanoutWarning();
+		}
+	});
+
+	it('warns at most once, and never when the platform provides the wire methods', async () => {
+		_resetSmoothFanoutWarning();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			// A platform WITH publishWire/sendWire never warns.
+			const { name: capable } = declareShape();
+			await call(mockWs({ id: 'u1' }), wirePlatform(), capable + '/shape/__smooth/sync', ['r1']);
+			expect(warn).not.toHaveBeenCalled();
+			// A wire-less platform warns - but only once, however many topics register on it.
+			const { name: a } = declareShape();
+			const { name: b } = declareShape();
+			await call(mockWs({ id: 'u2' }), mockPlatform(), a + '/shape/__smooth/sync', ['r1']);
+			await call(mockWs({ id: 'u3' }), mockPlatform(), b + '/shape/__smooth/sync', ['r1']);
+			expect(warn).toHaveBeenCalledTimes(1);
+		} finally {
+			warn.mockRestore();
+			_resetSmoothFanoutWarning();
+		}
 	});
 
 	it('re-arms the tick while the drain reports pending work and stops once idle', async () => {

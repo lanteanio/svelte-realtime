@@ -8,6 +8,7 @@ import { createInterestState } from './interest.js';
 import { createLagComp, rayCircleHit, rayAabbHit } from './lagcomp.js';
 import { createRttTracker } from './rtt.js';
 import { createMonotonicClock } from './monoclock.js';
+import { _IS_DEV } from './env.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); smooth registration reaches it through this, set at
@@ -214,6 +215,38 @@ const _SMOOTH_SNAPSHOT_MS = 1000;
  */
 const _SMOOTH_PENDING_GRACE_MS = 30000;
 
+/**
+ * One-shot dev guard. When live.smooth() runs on a platform that does not
+ * implement the binary wire (`publishWire`/`sendWire`), the tick degrades to
+ * plain JSON frames: peers still see each other and per-subscriber interest
+ * culling still applies (the relevancy walk is independent of the wire), but the
+ * author is no longer excluded from its own echo on the shared broadcast path
+ * (harmless - the client skips its own key) and frames are uncompacted JSON
+ * instead of the binary encoding. Every published svelte-adapter-uws that carries
+ * the smooth plugin also carries `publishWire`, so this only trips on a custom
+ * transport that omits it or a bare test double - exactly where the silent
+ * degrade is surprising. Fired once per process; the `_IS_DEV` gate short-circuits
+ * the whole check in production (a single boolean read; a bundler that inlines
+ * NODE_ENV drops it entirely), so the per-command path pays nothing.
+ */
+let _warnedLegacyFanout = false;
+
+/** Test seam: re-arm the legacy-fan-out dev warning. @internal */
+export function _resetSmoothFanoutWarning() {
+	_warnedLegacyFanout = false;
+}
+
+function _warnLegacyFanout() {
+	if (_warnedLegacyFanout) return;
+	_warnedLegacyFanout = true;
+	console.warn(
+		'[svelte-realtime] live.smooth() is running on a platform without the binary wire (publishWire/sendWire). ' +
+		'Smooth updates fall back to plain JSON frames: peers still see each other (interest culling still applies), but the ' +
+		'author is not excluded from its own echo on the broadcast path and frames are uncompacted JSON. Use svelte-adapter-uws ' +
+		'(or a platform that implements publishWire/sendWire) for the binary smooth wire.\n  See: https://svti.me/smooth'
+	);
+}
+
 /** Test seam: clear every smooth record, pending sync, and armed tick. */
 export function _resetSmooth() {
 	for (const rec of _smoothTopics.values()) {
@@ -330,6 +363,11 @@ export function _smoothRecord(name, cfg, platform, rt) {
 	// The record follows the caller's live platform: dev-server restarts and
 	// multi-platform test processes otherwise publish into a dead instance.
 	rec.platform = platform;
+	// A codec topic on a platform that cannot do the binary wire silently degrades
+	// to JSON (and loses author-exclusion on the broadcast path) - warn once in dev
+	// so a partial or custom platform surfaces it. `_IS_DEV` gates the whole check
+	// so production short-circuits on the first term.
+	if (_IS_DEV && rec.codec && typeof platform.publishWire !== 'function') _warnLegacyFanout();
 	return rec;
 }
 
