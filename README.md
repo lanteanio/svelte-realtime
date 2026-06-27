@@ -2833,7 +2833,7 @@ export const salaryByDept = live.aggregate('salary:reported', {
 
 Defaults: `k: 5`, `epsilon: 1.0`, `delta: 1e-5` (Gaussian), `sensitivity: 1`, `noise: 'laplace'`, `strategy: 'hybrid'`. `suppress` and `hybrid` require `contributor`; `perturb` is noise-only. Restrict noise to specific fields with `fields: ['avg']` (default: all numeric fields). Works across single-state and `lifetime` / `tumbling` / `sliding` windows (each window has its own cohort; a fresh window draws fresh noise; sliding counts the distinct-contributor union across active buckets). Default off - aggregates without `privacy` are unchanged.
 
-**Limitation.** Within one window the noise offset is constant (re-seeded per window, not per update), so an observer watching a live-updating aggregate sees exact deltas between updates. Proper continual-observation DP costs more noise and is a follow-up. Per-aggregate epsilon is independent, so budget correlated aggregates over the same source at the application layer.
+**Limitation.** Within one window the noise offset is constant (re-seeded per window - per tumbling boundary and per sliding slide; `lifetime` and single-state aggregates have no boundary so their offset is constant for the process), so an observer watching a live-updating aggregate sees exact deltas between updates. Proper continual-observation DP costs more noise and is a follow-up. Per-aggregate epsilon is independent, so budget correlated aggregates over the same source at the application layer. After a restart, a privacy aggregate restored from a `snapshot` re-earns its `k` from live contributors (the cohort is counted from live events, not persisted), so it holds the restored value until `k` distinct contributors arrive again.
 
 #### Built-in `combine` helpers
 

@@ -7,7 +7,7 @@ import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _fireWebhookOut } from './webhook-out.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic } from './tenant.js';
 import { _redactOrDrop, REDACT_DROP } from './publish-helpers.js';
-import { _gateAggregate } from './differential-privacy.js';
+import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -286,8 +286,9 @@ function _wrapPlatformPublish(platform) {
 						if (winRef.privacy && winRef.privacy.contributor) {
 							try {
 								const _c = winRef.privacy.contributor(data);
-								if (winRef.bucketCohorts) winRef.bucketCohorts[winRef.bucketIndex].add(_c);
-								else if (winRef.cohort) winRef.cohort.add(_c);
+								const _k = winRef.privacy.k;
+								if (winRef.bucketCohorts) _cohortAdd(winRef.bucketCohorts[winRef.bucketIndex], _c, _k);
+								else if (winRef.cohort) _cohortAdd(winRef.cohort, _c, _k);
 							} catch {}
 						}
 						// Privacy gate (k-anon suppress / DP noise), then uniform piiRedact
@@ -318,7 +319,7 @@ function _wrapPlatformPublish(platform) {
 
 				// Track the k-anonymity cohort from the event's contributor.
 				if (entry.privacy && entry.privacy.contributor) {
-					try { entry.cohort.add(entry.privacy.contributor(data)); } catch {}
+					try { _cohortAdd(entry.cohort, entry.privacy.contributor(data), entry.privacy.k); } catch {}
 				}
 				// Privacy gate (k-anon suppress / DP noise), then uniform piiRedact.
 				const _ga = _gateAggregate(entry, _computeAggregateState(entry.state, entry.reducers), entry.topic);

@@ -6,7 +6,8 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
 	_normalizeAggregatePrivacy,
 	_applyAggregatePrivacy,
-	_gateAggregate
+	_gateAggregate,
+	_cohortAdd
 } from '../src/server/differential-privacy.js';
 import { live, __registerAggregate, _activateDerived, _resetAggregates } from '../src/server.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -46,6 +47,38 @@ describe('_normalizeAggregatePrivacy', () => {
 	it('sorts fields for stable draw order', () => {
 		const cfg = _normalizeAggregatePrivacy({ strategy: 'perturb', fields: ['z', 'a', 'm'] }, 't');
 		expect(cfg.fields).toEqual(['a', 'm', 'z']);
+	});
+
+	it('rejects delta >= 1 (the Gaussian sigma goes NaN)', () => {
+		expect(() => _normalizeAggregatePrivacy({ strategy: 'perturb', noise: 'gaussian', delta: 1.5 }, 't')).toThrow(/delta must be < 1/);
+		expect(() => _normalizeAggregatePrivacy({ strategy: 'perturb', noise: 'gaussian', delta: 1e-6 }, 't')).not.toThrow();
+	});
+});
+
+describe('_cohortAdd (bounded + fail-soft)', () => {
+	it('caps the Set at k (gate only needs size >= k)', () => {
+		const s = new Set();
+		for (let i = 0; i < 1000; i++) _cohortAdd(s, 'user-' + i, 5);
+		expect(s.size).toBe(5);
+	});
+
+	it('skips a null/undefined contributor id (does not collapse the cohort)', () => {
+		const s = new Set();
+		_cohortAdd(s, undefined, 5);
+		_cohortAdd(s, null, 5);
+		expect(s.size).toBe(0);
+		_cohortAdd(s, 'real', 5);
+		expect(s.size).toBe(1);
+	});
+});
+
+describe('Laplace noise is always finite (clamped tail)', () => {
+	it('never returns Infinity/NaN across many seeds', () => {
+		const cfg = _normalizeAggregatePrivacy({ strategy: 'perturb', epsilon: 0.01, sensitivity: 1 }, 't');
+		for (let i = 0; i < 5000; i++) {
+			const v = _applyAggregatePrivacy({ x: 0 }, 99, 'seed ' + i, cfg).value.x;
+			expect(Number.isFinite(v)).toBe(true);
+		}
 	});
 });
 

@@ -1,4 +1,5 @@
 import { createSharedRandom } from 'svelte-adapter-uws/plugins/smooth/random';
+import { _IS_DEV } from './env.js';
 
 /**
  * Privacy layer for `live.aggregate({ privacy })`: k-anonymity suppression plus
@@ -18,8 +19,10 @@ import { createSharedRandom } from 'svelte-adapter-uws/plugins/smooth/random';
  *   every cluster replica (which each compute the full aggregate over the source
  *   firehose) emits IDENTICAL noise; a per-node random offset would let a client
  *   that reconnects to another node difference the two values and recover the
- *   truth, and would itself be a node fingerprint. The seed varies per window so
- *   a fresh window gets fresh noise.
+ *   truth, and would itself be a node fingerprint. The seed refreshes per
+ *   tumbling boundary and per sliding slide so each window draws fresh noise;
+ *   lifetime and single-state aggregates have no boundary, so their offset stays
+ *   constant (see KNOWN LIMITATION).
  *
  * KNOWN LIMITATION (documented; the sequential-composition accountant is a
  * deferred follow-up): within one window the noise offset is constant, so an
@@ -72,6 +75,11 @@ export function _normalizeAggregatePrivacy(privacy, label) {
 			cfg[num] = v;
 		}
 	}
+	// delta is a probability for the Gaussian mechanism; sigma = sqrt(2 ln(1.25/delta))
+	// goes imaginary (NaN) once delta >= 1.25, so reject delta >= 1 (it should be tiny).
+	if (cfg.delta >= 1) {
+		throw new Error(`[svelte-realtime] live.aggregate '${label}': privacy.delta must be < 1 (a probability for the Gaussian mechanism, typically very small e.g. 1e-5)`);
+	}
 	if (privacy.contributor !== undefined) {
 		if (typeof privacy.contributor !== 'function') {
 			throw new Error(`[svelte-realtime] live.aggregate '${label}': privacy.contributor must be a function (data) => id`);
@@ -110,7 +118,11 @@ function _hashSeed(str) {
 /** Zero-mean Laplace draw with scale b. inverse-CDF over one uniform draw. */
 function _laplace(gen, b) {
 	const u = gen.float() - 0.5;
-	return -b * Math.sign(u) * Math.log(1 - 2 * Math.abs(u));
+	// Clamp the inverse-CDF argument away from 0: a draw of exactly 0 (the only
+	// value where 1 - 2|u| = 0, probability ~2^-32) would give log(0) = -Infinity.
+	// The clamp caps the tail at a large-but-finite value instead.
+	const arg = Math.max(1 - 2 * Math.abs(u), 1e-12);
+	return -b * Math.sign(u) * Math.log(arg);
 }
 
 /** Zero-mean Gaussian draw with std sigma. Box-Muller over two uniform draws. */
@@ -126,7 +138,7 @@ function _gaussian(gen, sigma) {
  *
  * @param {Record<string, any>} computed - the reduced aggregate (compute() applied)
  * @param {number} cohortSize - distinct contributors observed for this window
- * @param {string} seedStr - `${tenantId}\0${topic}\0${windowStart}` (stable per replica + per window)
+ * @param {string} seedStr - `${tenantId} ${topic} ${windowStart}` (stable per replica + per window; tenantId is '' under the global-aggregate model)
  * @param {{ k: number, epsilon: number, delta: number, sensitivity: number, noise: 'laplace' | 'gaussian', strategy: string, fields: string[] | null }} cfg
  * @returns {{ suppress: true } | { suppress: false, value: Record<string, any> }}
  */
@@ -184,9 +196,46 @@ export function _gateAggregate(holder, computed, topic) {
 	} else {
 		cohortSize = holder.cohort ? holder.cohort.size : 0;
 	}
-	const seedStr = (holder._tenantId || '') + ' ' + topic + ' ' + (holder._windowStart || 0);
+	// NUL-joined so distinct (tenantId, topic, windowStart) triples cannot collide
+	// into the same seed (topics/ids never contain NUL). tenantId is '' under the
+	// global-aggregate model (aggregates are one entry per topic, already
+	// tenant-distinct upstream); the slot is reserved for future per-tenant identity.
+	const seedStr = (holder._tenantId || '') + ' ' + topic + ' ' + (holder._windowStart || 0);
 	const r = _applyAggregatePrivacy(computed, cohortSize, seedStr, cfg);
 	if (r.suppress) return { publish: false };
 	holder._lastWire = r.value;
 	return { publish: true, value: r.value };
+}
+
+/** Dev-warn dedup: one-shot when a contributor returns no id. */
+let _contributorWarned = false;
+
+/**
+ * Add a contributor id to a k-anonymity cohort Set, bounded and fail-soft:
+ *
+ * - A null/undefined id (a buggy `contributor`) cannot count toward k; warn once
+ *   in dev (such events would otherwise collapse to one cohort entry, leaving the
+ *   aggregate permanently suppressed) and skip it.
+ * - Stop growing the Set once it holds `k` distinct contributors: the gate only
+ *   asks `size >= k`, so retaining more wastes unbounded memory on a
+ *   high-cardinality contributor (a lifetime / single-state cohort never resets).
+ *   This bounds every cohort Set at O(k).
+ *
+ * @param {Set<any>} set
+ * @param {any} id
+ * @param {number} k
+ */
+export function _cohortAdd(set, id, k) {
+	if (id == null) {
+		if (_IS_DEV && !_contributorWarned) {
+			_contributorWarned = true;
+			console.warn(
+				'[svelte-realtime] live.aggregate privacy.contributor returned null/undefined; ' +
+				'k-anonymity cannot count this contributor, so the aggregate may stay suppressed. ' +
+				'Return a stable id (e.g. a user id) from contributor(data).'
+			);
+		}
+		return;
+	}
+	if (set.size < k) set.add(id);
 }

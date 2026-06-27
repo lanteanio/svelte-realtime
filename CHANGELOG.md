@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.50] - 2026-06-27
+
+### Fixed
+
+- **`live.aggregate({ privacy })` hardening (follow-up to next.49).** Adversarial review of the differential-privacy layer surfaced several issues, all fixed: (1) a **sliding window's noise seed never rotated** - it was fixed at `0` for the process lifetime, so the noise offset was constant and an observer could difference consecutive published values to recover the exact true deltas; the seed now refreshes per slide on the wall-clock slide epoch (replica-aligned), bounding the constant-offset exposure to one slide the way tumbling bounds it to one window. (2) The **k-anonymity cohort `Set` grew unbounded** with contributor cardinality on lifetime / single-state aggregates; it now stops growing once it holds `k` distinct contributors (the gate only asks `size >= k`), bounding every cohort at O(k). (3) A `contributor` that returns `null`/`undefined` no longer silently collapses the cohort into permanent suppression - it is skipped with a one-shot dev warning. (4) The **Laplace draw** now clamps its inverse-CDF argument so the ~2^-32 edge draw yields a large-but-finite value instead of `+Infinity`. (5) `privacy.delta >= 1` is now rejected at declaration (it would make the Gaussian sigma `NaN`). (6) A stray NUL byte in `differential-privacy.js` (an escape that was written as a raw control byte) was removed, and the seed / window-refresh docstrings were corrected. Snapshot-restored privacy aggregates re-earn `k` from live contributors after a restart - now documented.
+
 ## [0.6.0-next.49] - 2026-06-27
 
 ### Added

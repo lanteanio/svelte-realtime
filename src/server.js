@@ -2194,7 +2194,16 @@ function _registerWindowedAggregate(path, fn) {
 			} else {
 				win.cohort = privacy.contributor ? new Set() : null;
 			}
-			win._windowStart = win.type === 'tumbling' ? win.nextBoundary : 0;
+			// Seed the per-window noise. Tumbling: the boundary (fresh per window).
+			// Sliding: the wall-clock slide epoch (fresh per slide, and aligned
+			// across replicas which all floor the same clock) so the noise offset
+			// does not stay constant for the whole process - a constant offset on a
+			// continuously-sliding window lets an observer difference it away.
+			// Lifetime / single-state stay 0 (no boundary; the constant-offset
+			// continual-observation limit is documented).
+			win._windowStart = win.type === 'tumbling'
+				? win.nextBoundary
+				: (win.type === 'sliding' ? Math.floor(now / win.spec.slideMs) : 0);
 			win._lastWire = _computeWindowState(win, reducers);
 		}
 	}
@@ -2303,6 +2312,9 @@ function _scheduleNextSlide(entry, win) {
 		win.buckets[win.bucketIndex] = fresh;
 		// The evicted bucket's contributors leave the k-anonymity cohort too.
 		if (win.bucketCohorts) win.bucketCohorts[win.bucketIndex] = new Set();
+		// Refresh the noise seed each slide (wall-clock epoch, replica-aligned) so
+		// the DP offset does not stay constant for the whole process lifetime.
+		if (win.privacy) win._windowStart = Math.floor(runtimeNow() / win.spec.slideMs);
 		// Publish the post-slide combined state so a subscriber sees
 		// values dropping out of the window even when no fresh events
 		// are arriving.
