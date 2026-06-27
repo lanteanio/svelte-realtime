@@ -59,6 +59,7 @@ import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, 
 import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
 import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP } from './server/publish-helpers.js';
+import { _gateAggregate } from './server/differential-privacy.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
 import { _recordRpcMetrics, installMetrics } from './server/metrics.js';
@@ -2067,7 +2068,20 @@ export function __registerAggregate(path, fn) {
 	const snapshot = /** @type {any} */ (fn).__aggregateSnapshot;
 	const debounce = /** @type {any} */ (fn).__aggregateDebounce || 0;
 	if (!source || !topic) return;
-	const entry = { source, reducers, topic, state: { ...initState }, snapshot, debounce, timer: null, _reducerEntries: Object.entries(reducers), _hydrationPromise: null };
+	const privacy = /** @type {any} */ (fn).__aggregatePrivacy || null;
+	const entry = {
+		source, reducers, topic, state: { ...initState }, snapshot, debounce, timer: null,
+		_reducerEntries: Object.entries(reducers), _hydrationPromise: null,
+		// k-anon / DP privacy state. `cohort` counts distinct contributors (only
+		// when a contributor extractor is configured); `_lastWire` holds the last
+		// value that passed the gate (initialized to the zero state) so the
+		// initial-load loader and a held suppression never expose the live
+		// below-k aggregate. `_windowStart` 0 keeps the single-state seed stable.
+		privacy,
+		cohort: (privacy && privacy.contributor) ? new Set() : null,
+		_windowStart: 0,
+		_lastWire: privacy ? _computeAggregateState({ ...initState }, reducers) : undefined
+	};
 
 	if (snapshot) {
 		entry._hydrationPromise = (async () => {
@@ -2109,6 +2123,7 @@ function _registerWindowedAggregate(path, fn) {
 	const debounce = /** @type {any} */ (fn).__aggregateDebounce || 0;
 	const windowsSpec = /** @type {any} */ (fn).__aggregateWindows;
 	if (!source || !baseTopic || !windowsSpec) return;
+	const privacy = /** @type {any} */ (fn).__aggregatePrivacy || null;
 
 	const _reducerEntries = Object.entries(reducers);
 	/** @type {Map<string, any>} */
@@ -2121,7 +2136,8 @@ function _registerWindowedAggregate(path, fn) {
 		windowStates,
 		debounce,
 		_hydrationPromise: null,
-		windowed: true
+		windowed: true,
+		privacy
 	};
 
 	const now = runtimeNow();
@@ -2162,6 +2178,24 @@ function _registerWindowedAggregate(path, fn) {
 				debounce: winDebounce, timer: null,
 				slideTimer: null
 			});
+		}
+	}
+
+	// Per-window privacy state. cohort (lifetime/tumbling) or bucketCohorts
+	// (sliding) count distinct contributors; _windowStart seeds the per-window
+	// noise (the tumbling boundary, so each window draws fresh noise); _lastWire
+	// holds the last gated value (init = the zero window state) so the loader and
+	// a held suppression never reveal the live below-k window.
+	if (privacy) {
+		for (const win of windowStates.values()) {
+			win.privacy = privacy;
+			if (win.type === 'sliding') {
+				win.bucketCohorts = privacy.contributor ? win.buckets.map(() => new Set()) : null;
+			} else {
+				win.cohort = privacy.contributor ? new Set() : null;
+			}
+			win._windowStart = win.type === 'tumbling' ? win.nextBoundary : 0;
+			win._lastWire = _computeWindowState(win, reducers);
 		}
 	}
 
@@ -2236,6 +2270,9 @@ function _scheduleNextBoundary(entry, win) {
 		win.nextBoundary = win.spec.period
 			? _nextBoundaryForPeriod(now, win.spec.period, win.spec.tz || 'UTC')
 			: _nextBoundaryForDuration(now, win.spec.durationMs, win.spec.anchor || 0);
+		// A new window is a new k-anonymity cohort and a fresh noise seed.
+		if (win.cohort) win.cohort = new Set();
+		if (win.privacy) win._windowStart = win.nextBoundary;
 		_scheduleNextBoundary(entry, win);
 	}, delay);
 	// Don't keep the event loop alive solely for cron-like tumbling --
@@ -2264,6 +2301,8 @@ function _scheduleNextSlide(entry, win) {
 			if (r.init) fresh[field] = r.init();
 		}
 		win.buckets[win.bucketIndex] = fresh;
+		// The evicted bucket's contributors leave the k-anonymity cohort too.
+		if (win.bucketCohorts) win.bucketCohorts[win.bucketIndex] = new Set();
 		// Publish the post-slide combined state so a subscriber sees
 		// values dropping out of the window even when no fresh events
 		// are arriving.
@@ -2294,7 +2333,14 @@ function _publishWindow(entry, win) {
 	const platform = state.cronPlatform;
 	if (!platform) return;
 	const computed = _computeWindowState(win, entry.reducers);
-	platform.publish(win.outputTopic, 'set', computed);
+	// Privacy gate (k-anon suppress / DP noise) then piiRedact, mirroring the
+	// reduce-loop publish in reactive.js so the timer-driven boundary / slide
+	// publishes are gated identically.
+	const gated = _gateAggregate(win, computed, win.outputTopic);
+	if (!gated.publish) return; // below k: hold the last published value
+	const wire = _redactOrDrop(win.outputTopic, gated.value);
+	if (wire === REDACT_DROP) return;
+	platform.publish(win.outputTopic, 'set', wire);
 }
 
 /**

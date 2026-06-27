@@ -2,6 +2,7 @@
 import { live, getPlatform, publish } from '../server.js';
 import { _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState } from './reactive.js';
 import { _aggregateByTopic } from './state.js';
+import { _normalizeAggregatePrivacy } from './differential-privacy.js';
 
 // Seam: the flag cell/watcher and the window-spec validator stay in server.js
 // (shared with the staying __register* shims); the reactive families reach them
@@ -266,6 +267,9 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	const topic = options.topic;
 	const debounce = options?.debounce || 0;
 	const windowsSpec = options?.windows || null;
+	// k-anonymity + differential-privacy config; validated + normalized here so a
+	// bad shape throws at declaration, not on the first publish. null when absent.
+	const privacy = _normalizeAggregatePrivacy(options?.privacy, topic);
 
 	// Build initial state from init() functions
 	const initState = {};
@@ -302,6 +306,7 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 		/** @type {any} */ (root).__aggregateDebounce = debounce;
 		/** @type {any} */ (root).__aggregateWindows = windowsSpec;
 		/** @type {any} */ (root).__aggregateWindowKeys = windowKeys;
+		/** @type {any} */ (root).__aggregatePrivacy = privacy;
 
 		// Build per-window stream functions. Each is registered separately
 		// via the Vite plugin's per-window registry lines and exposed on
@@ -317,6 +322,8 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 				if (entry._hydrationPromise) await entry._hydrationPromise;
 				const winState = entry.windowStates.get(wn);
 				if (!winState) return _computeAggregateState(initState, reducers);
+				// With privacy, serve the last gated window value (see aggregateInit).
+				if (winState.privacy) return winState._lastWire;
 				return _computeWindowState(winState, reducers);
 			};
 			/** @type {any} */ (perWindowInit).__isStream = true;
@@ -339,6 +346,9 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 		if (entry) {
 			// Wait for snapshot hydration to finish before returning state
 			if (entry._hydrationPromise) await entry._hydrationPromise;
+			// With privacy, the initial load must serve the last GATED value
+			// (k-anon held / DP-noised), never the live below-k aggregate.
+			if (entry.privacy) return entry._lastWire;
 			return _computeAggregateState(entry.state, reducers);
 		}
 		return _computeAggregateState(initState, reducers);
@@ -354,5 +364,6 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	/** @type {any} */ (initFn).__aggregateInitState = initState;
 	/** @type {any} */ (initFn).__aggregateSnapshot = options?.snapshot || null;
 	/** @type {any} */ (initFn).__aggregateDebounce = debounce;
+	/** @type {any} */ (initFn).__aggregatePrivacy = privacy;
 	return initFn;
 };

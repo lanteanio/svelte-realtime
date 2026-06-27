@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.49] - 2026-06-27
+
+### Added
+
+- **`live.aggregate(source, reducers, { privacy })` - k-anonymity suppression and differential-privacy noise on a published aggregate.** Turns a live aggregate into a privacy-preserving one without touching its reducers. `privacy.strategy` selects the protection: `'suppress'` withholds the aggregate until at least `k` DISTINCT contributors have fed the window (counted via `privacy.contributor(data) => id`), holding the last published value below the threshold - never a null or a marker, because "the cohort just dropped below k" is itself the side-channel k-anonymity exists to close; `'perturb'` adds zero-mean Laplace (or Gaussian) noise to each numeric field; `'hybrid'` (default) does both. Defaults `k: 5`, `epsilon: 1.0`, `delta: 1e-5`, `sensitivity: 1`, `noise: 'laplace'`. The noise is drawn from a deterministic generator seeded by `(topic, window)`, so every cluster replica - each of which independently computes the full aggregate over the source firehose - emits IDENTICAL noise: a per-node random offset would let a client that reconnects to another node difference the two values and recover the truth. The initial-load subscribe and a held suppression both serve the last GATED value, never the live below-k aggregate. Works across all aggregate shapes: single-state, `lifetime` / `tumbling` / `sliding` windows (per-window cohort; a fresh window draws fresh noise; sliding counts the distinct-contributor union across active buckets). Default off - existing aggregates are unchanged. Known limitation (documented; a sequential-composition accountant is a follow-up): within one window the noise offset is constant, so an observer watching a live-updating aggregate sees exact deltas between updates; per-aggregate epsilon is independent, so budget correlated aggregates at the application layer. Realtime-only; no adapter or extensions bump. New `AggregatePrivacyConfig` type in `server.d.ts`.
+
 ## [0.6.0-next.48] - 2026-06-27
 
 ### Added

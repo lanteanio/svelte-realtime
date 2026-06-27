@@ -2810,6 +2810,31 @@ Output topics: `events:view:topk:last10min`, `events:view:topk:today`, `events:v
 <ul>{#each $trending.today?.top ?? [] as row}<li>{row.itemId}: {row.count}</li>{/each}</ul>
 ```
 
+#### Privacy: k-anonymity and differential privacy
+
+Pass a `privacy` option to turn an aggregate into a privacy-preserving one without changing its reducers. Two protections, chosen by `strategy`:
+
+- **k-anonymity** (`'suppress'` / `'hybrid'`) - the aggregate is not published until at least `k` DISTINCT contributors have fed the window, counted via `contributor(data)`. Below the threshold the last published value is held; it is never replaced with `null` or a marker, because "the cohort just dropped below k" is itself the signal k-anonymity exists to hide. A fresh subscribe also sees the held value, never the live below-k aggregate.
+- **differential privacy** (`'perturb'` / `'hybrid'`) - zero-mean Laplace (or Gaussian) noise is added to each numeric field. The noise is seeded by `(topic, window)`, so every cluster replica - each independently computing the full aggregate over the source firehose - produces identical noise (a per-node offset would let a client reconnecting to another node difference the values and recover the truth).
+
+```js
+export const salaryByDept = live.aggregate('salary:reported', {
+  avg: { init: () => ({ sum: 0, n: 0 }), reduce: (s, e, d) => ({ sum: s.sum + d.amount, n: s.n + 1 }), compute: (s) => s.n ? s.sum / s.n : 0 }
+}, {
+  topic: 'salary:by-dept',
+  privacy: {
+    strategy: 'hybrid',          // k-anon AND noise (the default)
+    k: 5,                        // hold until >= 5 distinct contributors
+    epsilon: 1.0,                // smaller epsilon = more noise = more privacy
+    contributor: (d) => d.userId // who fed this event (for the k-anon cohort)
+  }
+});
+```
+
+Defaults: `k: 5`, `epsilon: 1.0`, `delta: 1e-5` (Gaussian), `sensitivity: 1`, `noise: 'laplace'`, `strategy: 'hybrid'`. `suppress` and `hybrid` require `contributor`; `perturb` is noise-only. Restrict noise to specific fields with `fields: ['avg']` (default: all numeric fields). Works across single-state and `lifetime` / `tumbling` / `sliding` windows (each window has its own cohort; a fresh window draws fresh noise; sliding counts the distinct-contributor union across active buckets). Default off - aggregates without `privacy` are unchanged.
+
+**Limitation.** Within one window the noise offset is constant (re-seeded per window, not per update), so an observer watching a live-updating aggregate sees exact deltas between updates. Proper continual-observation DP costs more noise and is a follow-up. Per-aggregate epsilon is independent, so budget correlated aggregates over the same source at the application layer.
+
 #### Built-in `combine` helpers
 
 For the common reducer shapes:

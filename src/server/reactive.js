@@ -7,6 +7,7 @@ import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _fireWebhookOut } from './webhook-out.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic } from './tenant.js';
 import { _redactOrDrop, REDACT_DROP } from './publish-helpers.js';
+import { _gateAggregate } from './differential-privacy.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -280,9 +281,20 @@ function _wrapPlatformPublish(platform) {
 							}
 						}
 						const winRef = win;
-						// Uniform piiRedact: redact the window output if its topic is a
-						// declared piiRedact stream (no-op otherwise; fail-closed skip).
-						const computed = _redactOrDrop(winRef.outputTopic, _computeWindowState(win, entry.reducers));
+						// Track the k-anonymity cohort for this window from the event's
+						// contributor before gating the publish.
+						if (winRef.privacy && winRef.privacy.contributor) {
+							try {
+								const _c = winRef.privacy.contributor(data);
+								if (winRef.bucketCohorts) winRef.bucketCohorts[winRef.bucketIndex].add(_c);
+								else if (winRef.cohort) winRef.cohort.add(_c);
+							} catch {}
+						}
+						// Privacy gate (k-anon suppress / DP noise), then uniform piiRedact
+						// (a no-op unless this output topic is also a declared piiRedact stream).
+						const _gw = _gateAggregate(winRef, _computeWindowState(win, entry.reducers), winRef.outputTopic);
+						if (!_gw.publish) continue; // below k: hold the last published value
+						const computed = _redactOrDrop(winRef.outputTopic, _gw.value);
 						if (computed === REDACT_DROP) continue;
 						if (winRef.debounce > 0) {
 							if (winRef.timer) clearTimer(winRef.timer);
@@ -304,9 +316,14 @@ function _wrapPlatformPublish(platform) {
 					}
 				}
 
-				// Uniform piiRedact: redact the aggregate output if its topic is a
-				// declared piiRedact stream (no-op otherwise; fail-closed skip).
-				const computed = _redactOrDrop(entry.topic, _computeAggregateState(entry.state, entry.reducers));
+				// Track the k-anonymity cohort from the event's contributor.
+				if (entry.privacy && entry.privacy.contributor) {
+					try { entry.cohort.add(entry.privacy.contributor(data)); } catch {}
+				}
+				// Privacy gate (k-anon suppress / DP noise), then uniform piiRedact.
+				const _ga = _gateAggregate(entry, _computeAggregateState(entry.state, entry.reducers), entry.topic);
+				if (!_ga.publish) continue; // below k: hold the last published value
+				const computed = _redactOrDrop(entry.topic, _ga.value);
 				if (computed === REDACT_DROP) continue;
 
 				if (entry.debounce > 0) {
