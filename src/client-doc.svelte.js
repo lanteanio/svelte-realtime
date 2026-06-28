@@ -367,6 +367,28 @@ export class DocText extends DocView {
 	delete(index, length = 1) {
 		this.#entry().facet.delete(index, length);
 	}
+
+	/**
+	 * Encode a `[start, end)` range as a position anchor that survives concurrent
+	 * edits (the primitive a multiplayer selection binds to). Returns opaque bytes;
+	 * resolve them with `resolveRange`. Requires `svelte-adapter-uws >= 0.6.0-next.45`.
+	 * @param {number} start @param {number} end @returns {Uint8Array}
+	 */
+	anchorRange(start, end) {
+		return this.#entry().facet.anchorRange(start, end);
+	}
+
+	/**
+	 * Resolve anchor bytes from `anchorRange` to current `{ start, end }` offsets
+	 * (or `null`). Reads the reactive value, so a call inside a `$derived` re-resolves
+	 * on every edit - which is what keeps a rendered remote selection on the right text.
+	 * @param {Uint8Array} bytes @returns {{ start: number, end: number } | null}
+	 */
+	resolveRange(bytes) {
+		const entry = this.#entry();
+		void entry.holder.value; // reactive dependency: re-resolve on each edit
+		return entry.facet.resolveRange(bytes);
+	}
 }
 
 /**

@@ -326,6 +326,9 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 					}
 					if (mpInfo.selections) {
 						roomDeps.push(`setSelection: (...a) => ${name}._setField.fireAndForget(...args, ...a)`);
+						// The mode ('offset' | 'crdt') tells the room whether to send/resolve
+						// selections as raw offsets or as live.doc-anchored positions.
+						roomDeps.push(`selections: ${JSON.stringify(mpInfo.selections)}`);
 					}
 					if (mpInfo.hasLocks) {
 						roomDeps.push(`acquireLock: (...a) => ${name}._setField(...args, ...a)`);

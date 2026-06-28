@@ -970,8 +970,9 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		const sent = platform.wireSent.filter((s) => s.event === 'update');
 		expect(sent.filter((s) => s.ws === wsA).map((s) => s.data.key)).toEqual(['A']);
 		expect(sent.filter((s) => s.ws === wsB).map((s) => s.data.key)).toEqual(['B']);
-		// Every update is still relayed cross-instance (the non-owner over-delivers
-		// to its own locals in this version - safe, never under-delivers).
+		// Every update is still relayed cross-instance (the owner cannot cull per remote
+		// subscriber); each receiving instance runs its own cull over its local
+		// subscribers - see the non-owner receive-side cull tests below.
 		const relayed = sc.calls.relayBroadcast.filter((a) => a[1] === 'update').map((a) => a[2].key);
 		expect(relayed.sort()).toEqual(['A', 'B']);
 	});
@@ -1094,6 +1095,112 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		expect(ups).toHaveLength(2);
 		expect(ups[0].options).toEqual({ excludeWs: sub });
 		expect(ups[1].options).toBeUndefined();
+	});
+
+	it('non-owner culls a relayed update outside a local subscriber AoI and delivers one inside it', async () => {
+		const { name } = declareShape({
+			tickMs: 20,
+			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }) }
+		});
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const sub = mockWs({ id: 'viewer' });
+		fire(sub, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		// The owner answers with the catalog basis; this seeds the receive-side shadow,
+		// including the subscriber's own entity (which resolves its area-of-interest center).
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], {
+			ack: 0,
+			states: [{ key: 'viewer', state: { x: 0, y: 0 } }]
+		});
+		await vi.advanceTimersByTimeAsync(1);
+		// Two remote-owned entities move: one inside the viewer's AoI, one far outside.
+		sc.emit.broadcast(WT, 'update', { key: 'near', data: { x: 40, y: 0 } }, undefined, 0, 'A');
+		sc.emit.broadcast(WT, 'update', { key: 'far', data: { x: 500, y: 0 } }, undefined, 1, 'A');
+		// Relayed updates are buffered into the shadow, not immediately broadcast.
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(0);
+		await vi.advanceTimersByTimeAsync(20); // the receive-side cull tick fires
+		const sent = platform.wireSent
+			.filter((s) => s.event === 'update' && s.ws === sub)
+			.map((s) => s.data.key);
+		expect(sent).toEqual(['near']); // 'far' is culled; 'viewer' own entity is suppressed
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(0);
+	});
+
+	it('non-owner delivers a stationary remote entity present only in the cold-join snapshot (never under-delivers)', async () => {
+		const { name } = declareShape({
+			tickMs: 20,
+			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }) }
+		});
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const sub = mockWs({ id: 'viewer' });
+		fire(sub, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		// 'stat' is in the snapshot, in range, and never broadcasts a move - without the
+		// shadow seed the cull would have no state for it and drop it (an under-delivery).
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], {
+			ack: 0,
+			states: [
+				{ key: 'viewer', state: { x: 0, y: 0 } },
+				{ key: 'stat', state: { x: 60, y: 0 } }
+			]
+		});
+		await vi.advanceTimersByTimeAsync(1);
+		// A center report arms the cull tick with no entity having moved (a spectator
+		// refreshing its view over a still board) - the stationary in-range entity must
+		// still be delivered, from the shadow seed (first-sight catch-up).
+		await call(sub, platform, name + '/shape/__smooth/center', ['r1', { x: 0, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		const sent = platform.wireSent
+			.filter((s) => s.event === 'update' && s.ws === sub)
+			.map((s) => s.data.key);
+		expect(sent).toContain('stat');
+	});
+
+	it('interest off: a non-owner re-emits relayed updates immediately (no receive-side cull, byte-identical)', async () => {
+		const { name } = declareShape(); // no interest
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const sub = mockWs({ id: 'viewer' });
+		fire(sub, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], { ack: 0, states: [] });
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.broadcast(WT, 'update', { key: 'a', data: { x: 1 } }, undefined, 0, 'A');
+		// Immediate shared broadcast, no buffering, no per-socket cull walk.
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(1);
+		expect(platform.wireSent.filter((s) => s.event === 'update')).toHaveLength(0);
+	});
+
+	it('becoming the owner discards the receive-side shadow and resumes immediate delivery', async () => {
+		const { name } = declareShape({
+			tickMs: 20,
+			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }) }
+		});
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const sub = mockWs({ id: 'viewer' });
+		fire(sub, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], {
+			ack: 0,
+			states: [{ key: 'viewer', state: { x: 0, y: 0 } }]
+		});
+		await vi.advanceTimersByTimeAsync(1);
+		// While a non-owner, a relayed in-AoI update is buffered (culled), not published.
+		sc.emit.broadcast(WT, 'update', { key: 'near', data: { x: 10, y: 0 } }, undefined, 0, 'A');
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(0);
+		// This instance now wins the lease; a fresh sync acquires ownership and discards
+		// the shadow (the authoritative catalog supersedes it).
+		sc.setOwner(true);
+		await call(mockWs({ id: 'owner1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		// As the owner, a further relayed frame (a handoff-overlap straggler) is delivered
+		// immediately, not buffered into a now-discarded shadow.
+		sc.emit.broadcast(WT, 'update', { key: 'late', data: { x: 5, y: 0 } }, undefined, 5, 'A');
+		expect(
+			platform.wirePublished.filter((p) => p.event === 'update' && p.data.key === 'late')
+		).toHaveLength(1);
 	});
 
 	it('delivers a relayed ack to the registered local socket', async () => {

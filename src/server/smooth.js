@@ -331,10 +331,26 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			interest: cfg.interest ? createInterestState(cfg.interest) : null,
 			interestTick: 0,
 			interestDirty: false,
+			// Receive-side cull state (a cluster non-owner with interest on; empty and
+			// untouched otherwise, so the OFF path and the owner path are byte-identical).
+			// `shadow` is this instance's running view of every entity's last-known state -
+			// seeded from the cold-join sync snapshot and updated from inbound relay frames -
+			// so a non-owner can run the SAME relevancy cull the owner runs, delivering each
+			// local subscriber only the relayed updates inside its area of interest while
+			// never dropping a stationary in-range entity (the seed is what guarantees that).
+			// `pendingRelay` holds the relay frames buffered since the last cull tick
+			// (key -> { state, exclude }, where `exclude` is the author identity the owner
+			// named for that frame); `shadowDirty` demand-arms the cull tick.
+			shadow: new Map(),
+			pendingRelay: new Map(),
+			shadowDirty: false,
 			// Lag-compensation history ring (opt-in; null on the default path). When
 			// set, the tick records the post-drain catalog here and the __smoothShoot
 			// RPC rewinds against it. Gated entirely on cfg.hitTest so the OFF path is
-			// byte-identical and zero-cost (credo 4). Lives only on the owner.
+			// byte-identical and zero-cost (credo 4). The RING (record/rewind) is written
+			// and read only on the owner; on a non-owner the object still exists (created
+			// from cfg.hitTest) and the receive-side cull reads it as a `!== null` gate to
+			// decide whether to run the send-cadence estimator.
 			lagComp: cfg.hitTest
 				? createLagComp({
 						position: cfg.hitTest.position,
@@ -477,16 +493,105 @@ function _armSmoothTick(rec) {
 	}, rec.tickMs);
 }
 
+/**
+ * Per-subscriber relevancy delivery: send each local subscriber only the entities
+ * inside its area of interest this tick. Shared by the owner tick (authoritative
+ * catalog + drained updates) and the non-owner receive-side cull (shadow catalog +
+ * relayed updates), so the area-of-interest cull has ONE implementation and cannot
+ * drift between the two sides.
+ *
+ * `moved` carries the entities that changed this tick, each with the author identity
+ * to suppress for that frame (echo suppression): on the owner that is the commanded
+ * author under noEcho, on the non-owner it is the exclude identity the owner stamped
+ * onto the relay. An entity in range that did NOT move is delivered from `catalogByKey`
+ * (first-sight catch-up), and a subscriber's own entity is never caught up to itself
+ * under noEcho. Only a remote frame advances the send-cadence estimator (a client
+ * discards its own entity frame before measuring its interpolation delay).
+ * @param {any} rec
+ * @param {Map<string, Set<string>>} relevancy identity -> entity keys to deliver
+ * @param {Map<string, any>} catalogByKey full per-entity state, for catch-up
+ * @param {Map<string, { state: any, exclude: string | undefined }>} moved entities that changed this tick
+ * @param {number} t wall stamp for the send-cadence estimator (hitTest only)
+ */
+function _smoothDeliverCulled(rec, relevancy, catalogByKey, moved, t) {
+	for (const [identity, ws] of rec.registry) {
+		const relSet = relevancy.get(identity);
+		if (relSet === undefined) continue;
+		let delivered = false;
+		for (const key of relSet) {
+			const m = moved.get(key);
+			let state;
+			let exclude;
+			if (m !== undefined) {
+				state = m.state;
+				exclude = m.exclude;
+			} else {
+				// First-sight catch-up: in range, no update of its own this tick.
+				state = catalogByKey.get(key);
+				exclude = rec.noEcho ? key : undefined;
+			}
+			if (exclude !== undefined && identity === exclude) continue;
+			if (state !== undefined) {
+				_smoothSendTo(rec, ws, 'update', { key, data: state });
+				if (key !== identity) delivered = true;
+			}
+		}
+		if (delivered && rec.lagComp !== null) rec.interest.noteSend(identity, t, rec.tickMs);
+	}
+}
+
+/**
+ * Non-owner receive-side cull tick. A non-owner does not tick the authority, so when
+ * it has opted into interest it runs THIS instead of the owner tick: deliver each
+ * local subscriber only the relayed updates inside its area of interest, computed
+ * against the shadow catalog (seeded from the cold-join snapshot, updated from inbound
+ * relays). Demand-armed - an inbound relay frame (`shadowDirty`) or a reported center
+ * (`interestDirty`) arms it; it delivers once and does not re-arm. A no-op when there
+ * is nothing to cull (still board, no subscribers, or an empty shadow). Reached only
+ * for an interest topic on a non-owner; with interest off the broadcast path stays
+ * immediate and this never runs.
+ * @param {any} rec
+ */
+function _smoothCullTick(rec) {
+	if (rec.interest === null) return;
+	if (!(rec.shadowDirty || rec.interestDirty) || rec.registry.size === 0 || rec.shadow.size === 0) {
+		rec.shadowDirty = false;
+		rec.interestDirty = false;
+		rec.pendingRelay.clear();
+		return;
+	}
+	// The send-cadence stamp must be on the SAME clock axis the forwarded-shot path
+	// reads it on. A non-owner resolves a forwarded shot against the owner's
+	// reconstructed clock (_edgeOwnerNow), so stamp noteSend there too; fall back to
+	// the local wall clock until the first ack establishes the owner-clock basis.
+	// Only used when hitTest is on (noteSend is gated on rec.lagComp below).
+	const t = rec.lagComp !== null ? (_edgeOwnerNow(rec) ?? wallEpoch()) : 0;
+	const catalog = [];
+	for (const [key, state] of rec.shadow) catalog.push({ key, state });
+	const relevancy = rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++);
+	_smoothDeliverCulled(rec, relevancy, rec.shadow, rec.pendingRelay, t);
+	rec.pendingRelay.clear();
+	rec.shadowDirty = false;
+	rec.interestDirty = false;
+}
+
 function _smoothTick(rec) {
 	// Cluster owner: this instance ticks the topic's authority for clients across
 	// the cluster. Local subscribers get the broadcast directly; remote ones get
 	// it relayed (and their acks routed back). When falsy, the single-instance
 	// path below runs unchanged.
 	const cluster = rec.platform && rec.platform.smooth;
-	// A demoted owner (lost the lease on a failed renew) stops ticking entirely:
-	// it is no longer the authority, so it must not drain or relay stale state.
-	// Its local subscribers reconcile by re-syncing to the new owner.
-	if (cluster && !rec.owned) return;
+	// A non-owner does not tick the authority (a demoted owner that lost the lease is
+	// no longer authoritative and must not drain or relay stale state). When it has
+	// opted into interest it runs a receive-side relevancy cull instead - delivering
+	// each local subscriber only the relayed updates inside its area of interest. With
+	// interest off the cull tick is a no-op and the non-owner stays on the immediate
+	// broadcast path (byte-identical). Its local subscribers reconcile by re-syncing to
+	// the new owner after a handoff.
+	if (cluster && !rec.owned) {
+		_smoothCullTick(rec);
+		return;
+	}
 	// Drain first, publish after: `apply` is pure state -> state, so nothing
 	// can publish mid-drain, and subscribers observe each tick atomically -
 	// every update and acknowledgement below reflects the same drained state.
@@ -498,10 +603,12 @@ function _smoothTick(rec) {
 	// surrogate, so a local player still sees nearby remote players). The publish
 	// loop then delivers each local subscriber only the updates inside its area of
 	// interest. Null (skipped) when interest is off or there is nothing to publish,
-	// so the broadcast-all path is byte-identical. Cross-instance subscribers are
-	// still relayed every update (the non-owner over-delivers to its locals in this
-	// version - safe, never under-delivers; the cross-instance fine cull is a
-	// follow-up). The relevancy is keyed by local identity via `rec.registry`,
+	// so the broadcast-all path is byte-identical. The inter-instance relay below
+	// still fans every update out to every instance (the owner cannot cull per remote
+	// subscriber - it does not hold a remote subscriber's interest center); each
+	// RECEIVING instance then runs the same relevancy cull over its own local
+	// subscribers (_smoothCullTick), so the last hop to a remote client is culled too.
+	// The relevancy is keyed by local identity via `rec.registry`,
 	// which the single-instance sync/command paths now populate for interest too.
 	// The catalog is the post-drain authoritative state of every entity, so it is
 	// also the source for a delivery the relevancy pass forced but `updates` does
@@ -574,32 +681,17 @@ function _smoothTick(rec) {
 	if (relevancy) {
 		const catalogByKey = new Map();
 		for (let i = 0; i < catalog.length; i++) catalogByKey.set(catalog[i].key, catalog[i].state);
-		const updatesByKey = new Map();
-		for (let i = 0; i < updates.length; i++) updatesByKey.set(updates[i].key, updates[i]);
-		for (const [identity, ws] of rec.registry) {
-			const relSet = relevancy.get(identity);
-			if (relSet === undefined) continue;
-			let delivered = false;
-			for (const key of relSet) {
-				const u = updatesByKey.get(key);
-				if (key === identity && rec.noEcho && (u === undefined || u.commanded)) continue;
-				const state = u !== undefined ? u.state : catalogByKey.get(key);
-				if (state !== undefined) {
-					_smoothSendTo(rec, ws, 'update', { key, data: state });
-					// Only a REMOTE frame advances the cadence: the client discards its own
-					// entity frame before its interpolation-delay estimator (it predicts its
-					// own entity), so counting an own onMissing frame here would read a dense
-					// cadence for a sparsely-served shooter and re-introduce the honest miss.
-					if (key !== identity) delivered = true;
-				}
-			}
-			// Track this subscriber's REMOTE-frame cadence for the lag-comp reach: this is the
-			// interval the client measures to set its interpolation delay, so the server
-			// estimates that delay from its OWN send timing. Only a hitTest topic reads it
-			// (the shoot handler), so the plain-interest path pays nothing. `t` (wall) is
-			// the frame-stamp axis the client measures on.
-			if (delivered && rec.lagComp !== null) rec.interest.noteSend(identity, t, rec.tickMs);
+		// `moved` carries each entity that changed this tick with the author to suppress
+		// for that frame (the commanded author under noEcho). The shared delivery helper
+		// catches up in-range entities that did not move from `catalogByKey`. Only a
+		// remote frame advances the lag-comp send-cadence estimator (the client discards
+		// its own entity frame before measuring its interpolation delay).
+		const moved = new Map();
+		for (let i = 0; i < updates.length; i++) {
+			const u = updates[i];
+			moved.set(u.key, { state: u.state, exclude: rec.noEcho && u.commanded ? u.key : undefined });
 		}
+		_smoothDeliverCulled(rec, relevancy, catalogByKey, moved, t);
 	}
 	for (let i = 0; i < acks.length; i++) {
 		const a = acks[i];
@@ -911,8 +1003,13 @@ function _ensureSmoothCluster(smooth) {
 		},
 		// Every instance: the owner relayed a broadcast. Drop a seen/regressing
 		// seq (reset on an ownership handoff, since a fresh owner restarts the
-		// counter), then re-emit to local subscribers, excluding the author's
-		// local socket when the relay names one.
+		// counter), then deliver to local subscribers. With interest off, re-emit
+		// immediately to all (excluding the author's local socket when the relay names
+		// one) - byte-identical to the pre-cull behavior. With interest on, buffer
+		// `update` frames into the shadow catalog and deliver them culled per local
+		// subscriber on the cull tick; `event` and `remove` stay on the immediate
+		// broadcast path (over-deliver rather than risk a ghost or a dropped one-shot),
+		// matching the owner's policy.
 		onBroadcast: (wireTopic, event, data, excludeIdentity, seq, ownerInstance) => {
 			const rec = _smoothRecByWire(wireTopic);
 			if (!rec) return;
@@ -923,6 +1020,22 @@ function _ensureSmoothCluster(smooth) {
 			if (typeof seq === 'number') {
 				if (seq <= rec.lastSeenSeq) return;
 				rec.lastSeenSeq = seq;
+			}
+			if (rec.interest !== null && !rec.owned) {
+				if (event === 'update' && data && rec.registry.size > 0) {
+					// Buffer into the shadow catalog (the non-owner's running view) and
+					// arm the cull tick; the relayed `excludeIdentity` is the author the
+					// owner stamped, carried through as the per-frame echo exclude.
+					rec.shadow.set(data.key, data.data);
+					rec.pendingRelay.set(data.key, { state: data.data, exclude: excludeIdentity });
+					rec.shadowDirty = true;
+					_armSmoothTick(rec);
+					return;
+				}
+				if (event === 'remove' && data) {
+					rec.shadow.delete(data.key);
+					rec.pendingRelay.delete(data.key);
+				}
 			}
 			const excludeWs = excludeIdentity !== undefined ? rec.registry.get(excludeIdentity) : undefined;
 			_smoothPublish(rec, event, data, excludeWs);
@@ -1657,6 +1770,15 @@ export const _smoothRegister = function smooth(config) {
 			// socket that closed during either await releases the lease via
 			// _smoothForget rather than leaking it until the TTL.
 			rec.owned = owned;
+			// Became the ticking owner: the authoritative catalog supersedes any
+			// receive-side shadow built while this instance was a non-owner, so drop it
+			// (a later demotion rebuilds it from inbound relays). No-op when this
+			// instance was already the owner or interest is off (the maps stay empty).
+			if (owned && (rec.shadow.size > 0 || rec.pendingRelay.size > 0)) {
+				rec.shadow.clear();
+				rec.pendingRelay.clear();
+				rec.shadowDirty = false;
+			}
 			if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
 				rec.registry.delete(key);
 				if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
@@ -1677,6 +1799,15 @@ export const _smoothRegister = function smooth(config) {
 				rec.registry.delete(key);
 				if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
 				throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
+			}
+			// Seed the receive-side shadow catalog from the owner's snapshot so the cull
+			// can deliver a stationary in-range remote entity on first sight (an entity
+			// that has not moved since this client joined sends no relay frame, so without
+			// the seed it would be invisible - an under-delivery). The full snapshot is
+			// still returned to the joining client below (a safe over-deliver on join);
+			// only the ongoing relayed deltas are culled.
+			if (rec.interest !== null && reply && Array.isArray(reply.states)) {
+				for (let i = 0; i < reply.states.length; i++) rec.shadow.set(reply.states[i].key, reply.states[i].state);
 			}
 			return {
 				topic: name,
@@ -1743,10 +1874,10 @@ export const _smoothRegister = function smooth(config) {
 	// Report (or clear) a subscriber's area-of-interest center - the optional
 	// `smooth-center` override for a spectator / free-cam whose view is not its own
 	// entity's position. Volatile (a lost report is corrected by the next one), and
-	// inert unless the topic opted into `interest`. The center is consumed only by
-	// the instance that culls this subscriber (the owner, or single-instance); on a
-	// non-owner it is stored but dormant until the cross-instance cull lands. A null
-	// payload clears the override (reverting to the own-entity center).
+	// inert unless the topic opted into `interest`. The center is consumed by whichever
+	// instance culls this subscriber: the owner (or single-instance) via the tick, and
+	// now a non-owner via its receive-side cull tick. A null payload clears the override
+	// (reverting to the own-entity center).
 	smoothExport.__smoothCenter = live.volatile(async (ctx, ...args) => {
 		const roomArgs = args.slice(0, argCount);
 		if (guard) await guard(ctx, ...roomArgs);
@@ -1766,13 +1897,12 @@ export const _smoothRegister = function smooth(config) {
 		} else {
 			return;
 		}
-		// Force the next tick to recompute relevancy for the new center, and arm one
-		// when this instance is the ticking authority (the owner, or single-instance).
-		// A non-owner does not tick, so its stored center stays dormant (the non-owner
-		// over-delivers in this version regardless - safe).
+		// Force the next tick to recompute relevancy for the new center, and arm one:
+		// the owner tick (or single-instance), or a non-owner's receive-side cull tick
+		// so the new center takes effect on its locally-culled delivery too.
 		rec.interestDirty = true;
 		const cluster = ctx.platform && ctx.platform.smooth;
-		if (!cluster || rec.owned) _armSmoothTick(rec);
+		if (!cluster || rec.owned || rec.registry.size > 0) _armSmoothTick(rec);
 	});
 
 	// Fire-and-forget shot resolution: rewind every candidate to the instant the

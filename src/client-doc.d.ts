@@ -78,6 +78,18 @@ export class DocText extends DocView {
 	/** Throws on a read-only mount. */
 	insert(index: number, content: string): void;
 	delete(index: number, length?: number): void;
+	/**
+	 * Encode a `[start, end)` range as a position anchor that survives concurrent edits
+	 * (the primitive a multiplayer selection binds to). Returns opaque bytes; resolve
+	 * them with `resolveRange`. Requires `svelte-adapter-uws >= 0.6.0-next.45`.
+	 */
+	anchorRange(start: number, end: number): Uint8Array;
+	/**
+	 * Resolve anchor bytes from `anchorRange` to current `{ start, end }` offsets, or
+	 * `null` if the blob is malformed or unresolvable. Reads the reactive value, so a
+	 * call inside a `$derived` re-resolves on every edit.
+	 */
+	resolveRange(bytes: Uint8Array): { start: number; end: number } | null;
 }
 
 /**

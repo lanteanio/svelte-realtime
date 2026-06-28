@@ -1,6 +1,18 @@
 // @ts-check
 import { colorForKey } from './shared/color.js';
 
+// One-shot dev warnings for crdt-selection misuse, keyed by message so each DISTINCT
+// diagnostic surfaces once (the "bind a doc" hint and the "upgrade the adapter" hint
+// are different problems; a single shared latch would mask whichever fires second).
+const _warnedCrdtSelection = new Set();
+function _warnCrdtSelection(msg) {
+	if (_warnedCrdtSelection.has(msg)) return;
+	_warnedCrdtSelection.add(msg);
+	if (typeof console !== 'undefined' && console.warn) {
+		console.warn('[svelte-realtime] ' + msg);
+	}
+}
+
 /**
  * A tiny reactive holder for the local user's key. The generated namespace
  * owns one and the app sets it once with `namespace.identify(key)`; the
@@ -69,6 +81,8 @@ export class MultiplayerRoom {
 	#reportViewport;
 	#setTyping;
 	#setSelection;
+	#selectionMode;
+	#boundDoc = $state(null);
 	#acquireLock;
 	#releaseLock;
 	#react;
@@ -80,6 +94,8 @@ export class MultiplayerRoom {
 		this.#reportViewport = deps.reportViewport || deps.move;
 		this.#setTyping = deps.setTyping;
 		this.#setSelection = deps.setSelection;
+		// 'crdt' (live.doc-anchored) | 'offset' (raw) | null/undefined (no selections).
+		this.#selectionMode = deps.selections || null;
 		this.#acquireLock = deps.acquireLock;
 		this.#releaseLock = deps.releaseLock;
 		this.#react = deps.react;
@@ -138,15 +154,43 @@ export class MultiplayerRoom {
 	get locks() { return this.#locksDerived; }
 
 	// Remote selections, keyed by user. Self is excluded so an app renders only
-	// collaborators' ranges. Each value is the selection payload the holder sent.
-	#selectionsDerived = $derived(
-		Object.fromEntries(
-			dedupeByUser(this.#presence)
-				.filter((p) => p.selection != null && (this.me == null || p.key !== this.me))
-				.map((p) => [p.key, p.selection])
-		)
-	);
+	// collaborators' ranges. In offset mode each value is the raw payload the holder
+	// sent; in crdt mode each holder sent a doc-anchored position which is resolved
+	// here, against the bound live.doc, to current `{ field, start, end }` offsets -
+	// reactively, so a selection re-resolves onto the right characters as the document
+	// is edited. A crdt entry that cannot resolve (no bound doc, deleted container,
+	// stale anchor) is dropped rather than rendered wrong.
+	#selectionsDerived = $derived(this.#deriveSelections(this.#presence));
 	get selections() { return this.#selectionsDerived; }
+
+	/** @param {Array<Record<string, any>>} roster */
+	#deriveSelections(roster) {
+		const entries = dedupeByUser(roster).filter(
+			(p) => p.selection != null && (this.me == null || p.key !== this.me)
+		);
+		if (this.#selectionMode !== 'crdt') {
+			return Object.fromEntries(entries.map((p) => [p.key, p.selection]));
+		}
+		const doc = this.#boundDoc;
+		if (!doc || typeof doc.text !== 'function') return /** @type {Record<string, any>} */ ({});
+		const out = /** @type {Record<string, any>} */ ({});
+		for (const p of entries) {
+			const sel = p.selection;
+			if (!sel || typeof sel.field !== 'string' || !Array.isArray(sel.a)) continue;
+			// Resolve each peer independently and defensively: a single corrupt anchor
+			// (an older client, a mangled payload) must drop only ITS entry, never throw
+			// out of the derived and take down every collaborator's selection.
+			try {
+				const t = doc.text(sel.field);
+				if (!t || typeof t.resolveRange !== 'function') continue;
+				const r = t.resolveRange(new Uint8Array(sel.a));
+				if (r) out[p.key] = { field: sel.field, start: r.start, end: r.end };
+			} catch {
+				/* drop this peer's selection; keep the rest */
+			}
+		}
+		return out;
+	}
 
 	// The bounded ring of recent reactions. The send stream caps and GCs old
 	// taps, so an app renders the current window and lets entries fall off.
@@ -174,10 +218,40 @@ export class MultiplayerRoom {
 		return this.#setTyping ? this.#setTyping({ typing: !!on }) : undefined;
 	}
 
-	// Publish the local selection range. `null` clears it. Offset selections are
-	// a plain `{ start, end, nodePath }` object; the value is sent verbatim.
+	// Bind this room's live.doc so `selections: 'crdt'` selections anchor to and
+	// resolve against the shared document. Call once with the DocHandle for the same
+	// document the selections index into; a no-op for an offset-mode room.
+	bindDoc(doc) {
+		this.#boundDoc = doc || null;
+		return this;
+	}
+
+	// Publish the local selection range. `null` clears it.
+	//  - offset mode: a plain `{ start, end, nodePath }` object, sent verbatim.
+	//  - crdt mode: `{ field, start, end }` against a bound live.doc text container;
+	//    the offsets are encoded into a position anchor that survives concurrent edits
+	//    (sent as `{ field, a: number[] }`). Without a bound doc or a `field`, the send
+	//    is dropped with a one-shot dev warning rather than emitting a raw offset peers
+	//    on a crdt room cannot resolve.
 	setSelection(selection) {
-		return this.#setSelection ? this.#setSelection({ selection: selection ?? null }) : undefined;
+		if (!this.#setSelection) return undefined;
+		if (selection == null) return this.#setSelection({ selection: null });
+		if (this.#selectionMode === 'crdt') {
+			const doc = this.#boundDoc;
+			const field = selection.field;
+			if (!doc || typeof doc.text !== 'function' || typeof field !== 'string') {
+				_warnCrdtSelection('setSelection on a crdt-selection room needs a bound live.doc and a { field } - call room.bindDoc(doc) and pass { field, start, end }.');
+				return undefined;
+			}
+			const t = doc.text(field);
+			if (!t || typeof t.anchorRange !== 'function') {
+				_warnCrdtSelection('crdt selections require svelte-adapter-uws >= 0.6.0-next.45 (the live.doc text facet must expose anchorRange).');
+				return undefined;
+			}
+			const bytes = t.anchorRange(selection.start, selection.end);
+			return this.#setSelection({ selection: { field, a: Array.from(bytes) } });
+		}
+		return this.#setSelection({ selection });
 	}
 
 	// Claim an advisory lock on a key: stamps `lock:<key>` on the caller's

@@ -192,6 +192,27 @@ export const room = live.multiplayer({
 		expect(code).not.toContain('presence: room.presence(...args)');
 	});
 
+	it("wires the selection mode into the room when an export declares selections: 'crdt'", () => {
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const editor = live.multiplayer({
+  topic: (ctx, id) => 'doc:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  presence: (ctx) => ({ name: ctx.user.name }),
+  selections: 'crdt'
+});
+`
+		});
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:collab', {});
+
+		expect(code).toContain('setSelection: (...a) => editor._setField.fireAndForget(...args, ...a)');
+		// The mode rides into the room so the client picks the doc-anchored path.
+		expect(code).toContain('selections: "crdt"');
+	});
+
 	it('emits the rune-class import once even with two multiplayer exports', () => {
 		setup({
 			'collab.js': `
@@ -1037,6 +1058,33 @@ async function loadShippedRuneModule() {
 	localKeySource = mod.localKeySource;
 }
 
+// The shipped reactive doc layer (client-doc.svelte.js), compiled the same way, so the
+// real DocText can be exercised. (Full cross-module $state -> $derived reactivity is not
+// reproducible across two separately-compiled rune probes - a real app bundles one
+// shared Svelte runtime - so the doc-edit re-resolution is guarded at the DocText level:
+// resolveRange must READ the reactive text mirror, which is the dependency that makes the
+// room's selections $derived re-run on an edit in a real bundle.)
+const SHIPPED_DOC_PATH = resolve(import.meta.dirname, '..', 'src', 'client-doc.svelte.js');
+let DocText;
+
+async function loadShippedDocModule() {
+	mkdirSync(runeProbeRoot, { recursive: true });
+	const probeDir = mkdtempSync(resolve(runeProbeRoot, 'docprobe-'));
+	runeProbeDirs.push(probeDir);
+	// Stub the one realtime-internal import so the doc module compiles standalone.
+	writeFileSync(resolve(probeDir, 'client.js'), 'export function _setCrdtDegraded() {}\n');
+	const docSource = readFileSync(SHIPPED_DOC_PATH, 'utf8')
+		.replace(/(['"])\.\/client\.js\1/g, "'./client.js'");
+	const { js } = compileModule(docSource, {
+		filename: 'client-doc.svelte.js',
+		generate: 'client'
+	});
+	const docOut = resolve(probeDir, 'client-doc.js');
+	writeFileSync(docOut, js.code);
+	const mod = await import(pathToFileURL(docOut).href + '?t=' + ++runeProbeCounter);
+	DocText = mod.DocText;
+}
+
 describe('MultiplayerRoom roster aggregation', () => {
 	afterEach(() => {
 		// Remove only the dirs this test created, never the shared parent while
@@ -1429,6 +1477,128 @@ describe('MultiplayerRoom roster aggregation', () => {
 		// A cleared selection drops out of the map.
 		expect(r.selections).toEqual({});
 		r.destroy();
+	});
+
+	it('crdt mode: setSelection anchors offsets via the bound live.doc before sending', async () => {
+		await loadShippedRuneModule();
+		const sent = [];
+		// A stub doc whose text facet encodes (start,end) as the anchor bytes verbatim.
+		const doc = { text: () => ({ anchorRange: (s, e) => new Uint8Array([s, e]), resolveRange: () => null }) };
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([]),
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			selections: 'crdt',
+			setSelection: (delta) => { sent.push(delta); },
+			move: () => {}
+		});
+		r.bindDoc(doc);
+		r.setSelection({ field: 'body', start: 2, end: 5 });
+		r.setSelection(null);
+		expect(sent).toEqual([
+			{ selection: { field: 'body', a: [2, 5] } }, // anchored, not raw offsets
+			{ selection: null } // clear passes straight through
+		]);
+		r.destroy();
+	});
+
+	it('crdt mode: setSelection without a bound doc drops the send (no raw offset leaks)', async () => {
+		await loadShippedRuneModule();
+		const sent = [];
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([]),
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			selections: 'crdt',
+			setSelection: (delta) => { sent.push(delta); },
+			move: () => {}
+		});
+		r.setSelection({ field: 'body', start: 1, end: 2 }); // no bindDoc -> dropped + dev-warned
+		expect(sent).toEqual([]);
+		r.setSelection(null); // a clear still goes through (no doc needed)
+		expect(sent).toEqual([{ selection: null }]);
+		r.destroy();
+	});
+
+	it('crdt mode: selections resolves remote anchors via the bound doc, dropping unresolvable ones', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([
+			{ key: 'me', selection: { field: 'body', a: [0, 1] } },
+			{ key: 'alice', selection: { field: 'body', a: [2, 5] } },
+			{ key: 'bob', selection: { field: 'body', a: [9, 9] } }
+		]);
+		// resolveRange maps alice's anchor to offsets but fails bob's (stale / deleted).
+		const doc = {
+			text: () => ({
+				anchorRange: () => new Uint8Array(),
+				resolveRange: (bytes) => (bytes[0] === 2 ? { start: 2, end: 5 } : null)
+			})
+		};
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence,
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			selections: 'crdt',
+			move: () => {}
+		});
+		// Before binding a doc, a crdt room cannot resolve, so it renders nothing.
+		expect(r.selections).toEqual({});
+		r.bindDoc(doc); // #boundDoc is reactive: the derived re-resolves
+		flushSync();
+		expect(r.selections).toEqual({ alice: { field: 'body', start: 2, end: 5 } }); // bob dropped, self excluded
+		r.destroy();
+	});
+
+	it('crdt mode: one corrupt peer anchor drops only that peer, never the whole map', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([
+			{ key: 'alice', selection: { field: 'body', a: [2] } },
+			{ key: 'bob', selection: { field: 'body', a: [9] } } // bob's anchor makes resolveRange throw
+		]);
+		const doc = {
+			text: () => ({
+				anchorRange: () => new Uint8Array(),
+				resolveRange: (bytes) => {
+					if (bytes[0] === 9) throw new Error('corrupt anchor');
+					return { start: 2, end: 5 };
+				}
+			})
+		};
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence,
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			selections: 'crdt',
+			move: () => {}
+		});
+		r.bindDoc(doc);
+		flushSync();
+		// bob's throw is caught per-peer; alice's selection still resolves.
+		expect(r.selections).toEqual({ alice: { field: 'body', start: 2, end: 5 } });
+		r.destroy();
+	});
+
+	it('DocText.resolveRange reads the reactive text mirror (the dependency that re-resolves a selection on a doc edit)', async () => {
+		await loadShippedDocModule();
+		// A minimal shared-doc stub: the holder.value getter records reads, and the facet
+		// returns a fixed range. resolveRange MUST read holder.value (the $state text
+		// mirror) so that, in a real bundle, the room's selections $derived re-runs when
+		// the document is edited. If that read is dropped, this guard fails.
+		let holderReads = 0;
+		const shared = {
+			container: () => ({
+				holder: { get value() { holderReads++; return 'hello world'; } },
+				facet: { resolveRange: () => ({ start: 6, end: 11 }) }
+			})
+		};
+		const dt = new DocText(shared, 'body', () => {});
+		const r = dt.resolveRange(new Uint8Array([1]));
+		expect(r).toEqual({ start: 6, end: 11 }); // delegates to the facet
+		expect(holderReads).toBeGreaterThan(0); // and registers the reactive dependency
 	});
 
 	it('derives advisory lock holders from the roster and clears them when a holder leaves', async () => {

@@ -50,6 +50,8 @@ export interface MultiplayerRoomDeps {
 	setTyping?: (...args: any[]) => any;
 	/** Outbound presence-field send callback for selection ranges. */
 	setSelection?: (...args: any[]) => any;
+	/** Selection mode: `'crdt'` (live.doc-anchored) or `'offset'` (raw). */
+	selections?: 'offset' | 'crdt';
 	/** Outbound presence-field send callback for advisory lock acquisition. */
 	acquireLock?: (...args: any[]) => any;
 	/** Outbound presence-field send callback for advisory lock release. */
@@ -90,7 +92,13 @@ export class MultiplayerRoom {
 	get typing(): string[];
 	/** Advisory lock holders keyed by lock key: `{ lockKey: holderUserKey }`. */
 	get locks(): Record<string, any>;
-	/** Remote selection ranges keyed by user (self excluded). */
+	/**
+	 * Remote selection ranges keyed by user (self excluded). In `offset` mode each
+	 * value is the raw payload the holder sent. In `crdt` mode each value is resolved
+	 * against the bound live.doc to `{ field, start, end }` current offsets and re-
+	 * resolves reactively as the document is edited; an entry that cannot resolve is
+	 * omitted.
+	 */
 	get selections(): Record<string, any>;
 	/** The bounded ring of recent reactions. */
 	get reactions(): any[];
@@ -106,7 +114,20 @@ export class MultiplayerRoom {
 	acquireLock(lockKey: string): any;
 	/** Release an advisory lock on a key. */
 	releaseLock(lockKey: string): any;
-	/** Publish the local selection range; pass `null` to clear it. */
+	/**
+	 * Bind this room's live.doc so `selections: 'crdt'` selections anchor to and
+	 * resolve against the shared document (they survive concurrent edits). Call once
+	 * with the `DocHandle` for the same document the selections index into. A no-op for
+	 * an offset-mode room. Returns `this` for chaining.
+	 */
+	bindDoc(doc: { text(name?: string): any }): this;
+	/**
+	 * Publish the local selection range; pass `null` to clear it. In `offset` mode the
+	 * value is sent verbatim (e.g. `{ start, end, nodePath }`). In `crdt` mode pass
+	 * `{ field, start, end }` against a bound live.doc text container; the range is
+	 * encoded as a position anchor that survives concurrent edits. Without a bound doc
+	 * or a `field`, a crdt send is dropped with a one-shot dev warning.
+	 */
 	setSelection(selection: any): any;
 	/** Unsubscribe from the injected stores. Call when the room unmounts. */
 	destroy(): void;
