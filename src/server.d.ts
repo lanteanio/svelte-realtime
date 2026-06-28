@@ -3979,6 +3979,16 @@ export interface RealtimeConfig {
 	 * `configureWebhooks({ deadLetter })`.
 	 */
 	webhooks?: { deadLetter?: boolean | DeadLetterStore | null } | null;
+	/**
+	 * Opt-in protocol/contract version, an integer the app bumps only on a BREAKING
+	 * wire/contract change. Declare it identically here and in client `configure({
+	 * protocolVersion })` (one shared constant). A connecting client advertises its
+	 * baked version; when this server's version is higher (an older, incompatible
+	 * client bundle running against a freshly-deployed server), that one connection
+	 * receives a `protocol-stale` notice so it can prompt a reload. Unset (default)
+	 * leaves the signal off entirely.
+	 */
+	protocolVersion?: number;
 }
 
 /** A retained, undeliverable outbound-webhook event. */

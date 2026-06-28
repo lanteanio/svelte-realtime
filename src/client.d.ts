@@ -597,6 +597,17 @@ export function configure(config: {
 	 */
 	resumeGraceMs?: number;
 	/**
+	 * Opt-in protocol/contract version, an integer the app bumps only on a
+	 * BREAKING wire/contract change. Declare it identically here and in
+	 * `realtime({ protocolVersion })` on the server (one shared constant). The
+	 * client advertises it once on connect; a server running a higher version
+	 * replies with a one-shot notice that surfaces the `health` store as
+	 * `'outdated'` and logs a dev console warning, so a long-lived client running
+	 * a stale bundle after a breaking deploy knows to reload. Omit to leave the
+	 * signal off.
+	 */
+	protocolVersion?: number;
+	/**
 	 * `WS.bufferedAmount` threshold (in bytes) at which `.fireAndForget()`
 	 * sends are dropped silently and `__devtools.volatileDropped` ticks.
 	 * Sized for 120Hz cursor + drag traffic; raise it if your app
@@ -921,7 +932,7 @@ export const quiescent: Readable<boolean>;
  * {/if}
  * ```
  */
-export const health: Readable<'healthy' | 'degraded'>;
+export const health: Readable<'healthy' | 'degraded' | 'outdated'>;
 
 /** The precomputed client mitigation a degradation policy attached to the `degraded` event. */
 export interface DegradationMitigation {

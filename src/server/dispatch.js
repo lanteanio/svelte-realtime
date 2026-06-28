@@ -61,6 +61,61 @@ const _VOLATILE_WARN_CAP = 256;
 const _deprecationInformed = new WeakMap();
 
 /**
+ * Per-connection one-shot guard for the protocol-stale notice: a stale client is
+ * told once per connection, not on every frame it sends. Keyed by ws, GC'd with
+ * the socket.
+ * @type {WeakSet<object>}
+ */
+const _protocolSignaled = new WeakSet();
+
+/**
+ * Compare a connecting client's advertised protocol version to this server's
+ * declared `protocolVersion` (realtime({ protocolVersion })). When the server is
+ * NEWER than the client - an older, potentially-incompatible client bundle running
+ * against a freshly-deployed server - send that ONE connection a `protocol-stale`
+ * notice on the `__realtime` channel so the client can prompt a reload. Unicast via
+ * platform.send (NOT publish): staleness is a property of the one connection, never
+ * broadcast to every subscriber. Off entirely when the server declared no
+ * protocolVersion (one property read). One-shot per connection.
+ *
+ * The gate is REACTIVE to the client's own advertisement: a client that never sends
+ * a proto frame (a bundle predating this feature, or any client that did not set
+ * configure({ protocolVersion })) is never signaled. That is by design - the server
+ * cannot distinguish a silent old connection from a current one - and it is the one
+ * case the signal cannot cover.
+ * @param {object} ws
+ * @param {{ v?: unknown }} msg - the parsed { type: 'proto', v } frame
+ * @param {import('svelte-adapter-uws').Platform} platform
+ */
+function _protocolGate(ws, msg, platform) {
+	const server = state.serverProtocolVersion;
+	if (typeof server !== 'number') return; // signal not enabled on this server
+	const client = msg && typeof msg.v === 'number' ? msg.v : 0;
+	if (server <= client) return; // client is current (or ahead); nothing actionable
+	if (_protocolSignaled.has(ws)) return;
+	_protocolSignaled.add(ws);
+	try {
+		platform.send(ws, '__realtime', 'protocol-stale', { server, client });
+	} catch { /* a closed socket must never break the message hook */ }
+}
+
+/**
+ * Shared proto-frame interception for BOTH message hooks (the default `message` and
+ * the `createMessage`-built `customMessage`), so the protocol-compat signal fires on
+ * the custom-hook path (clustered / rate-limited deployments) too, and the two hooks
+ * cannot drift. Returns true when the frame was the connect-time proto advertisement
+ * (the caller should then return without running the RPC / onJsonMessage path).
+ * @param {object} ws
+ * @param {any} msg - the adapter-forwarded parsed control frame (ctx.msg), or undefined
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @returns {boolean}
+ */
+function _maybeHandleProto(ws, msg, platform) {
+	if (msg && msg.type === 'proto') { _protocolGate(ws, msg, platform); return true; }
+	return false;
+}
+
+/**
  * Return the one-shot `deprecation` signal for a `live.deprecate`-marked handler
  * the first time it responds on a connection (per ws+path), else undefined. Lets
  * the text and binary RPC response paths attach it uniformly with no per-call
@@ -1200,8 +1255,15 @@ async function _runDirectCall(path, args, platform, options) {
  * @param {any} ws
  * @param {{ data: ArrayBuffer, platform: import('svelte-adapter-uws').Platform }} ctx
  */
-export function message(ws, { data, platform }) {
+export function message(ws, { data, platform, msg }) {
 	_ensureWrap(platform);
+	// Protocol-compat signal: a client advertises its baked protocol version once on
+	// connect as { type: 'proto', v }. It is not an RPC, so handle it here and return
+	// (it never reaches handleRpc). `msg` is the adapter's forwarded parse of a
+	// control frame whose type matched none of the adapter's own; undefined on an
+	// older adapter / binary / parse-miss, in which case a proto frame simply isn't
+	// recognized (a no-op fall-through to handleRpc, which returns false for it).
+	if (_maybeHandleProto(ws, msg, platform)) return;
 	handleRpc(ws, data, platform);
 }
 
@@ -1263,6 +1325,10 @@ export function createMessage(options) {
 		} else {
 			p = platform;
 		}
+		// Protocol-compat signal, same as the default message() hook: a proto frame is
+		// not an RPC and never reaches handleRpc / onJsonMessage. Intercept it here so
+		// the signal works on the custom-hook (cluster / rate-limited) path too.
+		if (_maybeHandleProto(ws, forwardedMsg, p)) return;
 		const handled = handleRpc(ws, data, p, hasRpcOpts ? rpcOpts : undefined);
 		if (handled) return;
 

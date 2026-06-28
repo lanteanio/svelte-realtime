@@ -253,6 +253,17 @@ export const state = {
 	serverErrorHandler: null,
 
 	/**
+	 * The server's protocol/contract version, an opaque integer the app bumps
+	 * only on a BREAKING wire/contract change. Set via `realtime({ protocolVersion })`;
+	 * `undefined` (default) leaves the protocol-compat signal off entirely. When set,
+	 * a connecting client that advertises a lower version (an older, incompatible
+	 * bundle running against a newer server) is sent a one-shot `protocol-stale`
+	 * notice so it can prompt a reload. See `_protocolGate` in dispatch.js.
+	 * @type {number | undefined}
+	 */
+	serverProtocolVersion: undefined,
+
+	/**
 	 * Process-wide cluster bus. Single source of truth consulted by every
 	 * publish surface in the framework (RPC `ctx.publish`, cron tick,
 	 * reactive watchers' publish wrap, top-level `publish()` helper). When

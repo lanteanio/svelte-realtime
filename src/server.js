@@ -3449,7 +3449,18 @@ export function publish(topic, event, data, options) {
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion } = cfg;
+
+	// Protocol-compat signal (opt-in): an integer the app bumps only on a BREAKING
+	// wire/contract change. The client advertises its baked version on connect; a
+	// client older than this server is sent a one-shot `protocol-stale` notice. Left
+	// off (no compare, no signal) when unset.
+	if (protocolVersion !== undefined) {
+		if (typeof protocolVersion !== 'number' || !Number.isInteger(protocolVersion)) {
+			throw new Error('[svelte-realtime] realtime({ protocolVersion }): must be an integer');
+		}
+		state.serverProtocolVersion = protocolVersion;
+	}
 
 	if (bus !== undefined) _setBus(bus);
 	if (leader !== undefined) configureCron({ leader });

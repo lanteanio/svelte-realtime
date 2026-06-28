@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.52] - 2026-06-28
+
+### Added
+
+- **Connect-time protocol-compat signal: `configure({ protocolVersion })` + `realtime({ protocolVersion })`.** An opt-in integer the app bumps only on a BREAKING wire/contract change, declared identically on the client and server (one shared constant). The client advertises its baked version once per connection; when the server's declared version is higher - an older, incompatible client bundle running against a freshly-deployed server, the whole-session staleness case that per-stream `schemaVersion` migration cannot catch - that one connection receives a one-shot, unicast `protocol-stale` notice (never broadcast). The notice surfaces the `health` store as a new sticky `'outdated'` state (it takes precedence over the transient `'degraded'`/`'healthy'` axis and never clears for the session, since the fix is to reload) and logs a one-shot dev console warning, so a long-lived client knows to prompt a reload. Off entirely when unset (no frame sent, no compare): zero-config and zero-cost. Realtime-only - it rides the existing wire and the `__realtime` health channel, no adapter change. Validated symmetrically (both sides reject a non-integer), deduped per connection, and wired through both the default message hook and a custom `createMessage(...)` hook (the clustered / rate-limited path).
+- **Dev warning when `live.smooth()` runs on a platform without the binary wire.** A smooth topic needs the adapter's `publishWire`/`sendWire` to fan its tick out as compact binary frames and to exclude the author from its own broadcast echo. On a platform that implements only plain `publish`/`send` (a custom transport, an incomplete test double), the tick still delivers to peers and still applies interest culling, but degrades to uncompacted JSON and loses author-exclusion on the broadcast path. That silent degrade is now surfaced by a one-shot development console warning (zero production cost, gated behind `_IS_DEV`). Every published `svelte-adapter-uws` carries `publishWire`, so this never fires on a real adapter; it guards custom and portability-tier transports.
+
 ## [0.6.0-next.51] - 2026-06-27
 
 ### Added

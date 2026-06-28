@@ -2,6 +2,7 @@
 import { writable } from 'svelte/store';
 import { connect as _connect, on } from 'svelte-adapter-uws/client';
 import { createJitterDispatch } from './jitter-dispatch.js';
+import { _IS_DEV } from './internal-state.js';
 
 /**
  * Quiescence tracking: count of streams currently in `'loading'` or
@@ -59,9 +60,18 @@ export function _resetQuiescence() {
  * wiring the topic by hand.
  */
 const _HEALTH_TOPIC = '__realtime';
-const _healthStore = writable(/** @type {'healthy' | 'degraded'} */ ('healthy'));
+const _healthStore = writable(/** @type {'healthy' | 'degraded' | 'outdated'} */ ('healthy'));
 /** @type {(() => void) | null} */
 let _healthUnsub = null;
+
+// Sticky protocol-staleness latch. Unlike the degraded/recovered inputs (which
+// toggle), 'outdated' is permanent for the session - the client is running a stale
+// bundle against a newer server and must reload - so once set it short-circuits the
+// recompute and never clears until the page reloads (or a test reset).
+let _healthOutdated = false;
+// One dev warn per session for protocol staleness (it is a global condition, not
+// per-path like deprecation).
+let _protocolStaleWarned = false;
 
 // Three independent inputs OR into the single health state: a server-pushed
 // degraded/recovered event on the system topic, the connection's local
@@ -90,8 +100,29 @@ let _healthCrdtDegraded = 0;
 const _degradationStore = writable({ active: false, mitigation: null, recovery: null });
 
 function _recomputeHealth() {
+	// 'outdated' is sticky and wins over the transient degraded/healthy axis: a stale
+	// bundle stays flagged regardless of breaker/flow/smooth/crdt state.
+	if (_healthOutdated) { _healthStore.set('outdated'); return; }
 	_healthStore.set(
 		_healthServerDegraded || _healthFlowDegraded || _healthSmoothDegraded > 0 || _healthCrdtDegraded > 0 ? 'degraded' : 'healthy'
+	);
+}
+
+/**
+ * One-shot dev console warning that the client bundle is older than the server's
+ * declared protocol version. Mirrors the live.deprecate dev-warn contract (once per
+ * session, dev-only); production builds strip it.
+ * @param {any} detail - the protocol-stale event data ({ server, client })
+ */
+function _warnProtocolStale(detail) {
+	if (!_IS_DEV || _protocolStaleWarned) return;
+	_protocolStaleWarned = true;
+	const s = detail && typeof detail.server === 'number' ? detail.server : '?';
+	const c = detail && typeof detail.client === 'number' ? detail.client : '?';
+	console.warn(
+		'[svelte-realtime] this client is running an outdated bundle (protocol v' + c +
+		') against a newer server (protocol v' + s + '). Reload to get the latest client.\n' +
+		'  See: https://svti.me/protocol-stale'
 	);
 }
 
@@ -143,10 +174,17 @@ function _applyHealthEvent(envelope) {
 		_healthServerDegraded = false;
 		_degradationStore.set({ active: false, mitigation: null, recovery: (detail && detail.recovery) || null });
 		_recomputeHealth();
+	} else if (envelope.event === 'protocol-stale') {
+		// The server told THIS connection its bundle is older than the server's
+		// protocol version. Sticky: latch 'outdated' and warn once. Never clears for
+		// the session - the app must reload to pick up a compatible client.
+		_healthOutdated = true;
+		_recomputeHealth();
+		_warnProtocolStale(detail);
 	}
 }
 
-function _ensureHealthSubscription() {
+export function _ensureHealthSubscription() {
 	if (_healthUnsub) return;
 	// Route the system topic through the de-herd dispatcher so a `degraded` event the
 	// server pushed with a jitter window staggers this client's reaction instead of
@@ -174,6 +212,13 @@ function _ensureHealthSubscription() {
  * value is `'healthy'`; flips to `'degraded'` on a `degraded` event,
  * back to `'healthy'` on `recovered`.
  *
+ * Also emits the sticky `'outdated'` state when the server sends a
+ * `protocol-stale` notice (the client bundle is older than the server's
+ * declared `protocolVersion`). `'outdated'` is permanent for the session and
+ * takes precedence over the transient `'degraded'`/`'healthy'` axis - the app
+ * must reload to pick up a compatible client. Off unless `configure({
+ * protocolVersion })` opted in.
+ *
  * Subscription is lazy: the realtime client subscribes to `__realtime`
  * the first time any consumer subscribes to this store. Apps that
  * never read `health` pay no cost for the subscription.
@@ -183,7 +228,7 @@ function _ensureHealthSubscription() {
  * etc.) can listen to the topic directly via
  * `import { on } from 'svelte-adapter-uws/client'; on('__realtime')`.
  *
- * @type {import('svelte/store').Readable<'healthy' | 'degraded'>}
+ * @type {import('svelte/store').Readable<'healthy' | 'degraded' | 'outdated'>}
  */
 export const health = {
 	subscribe(fn) {
@@ -225,6 +270,8 @@ export function _resetHealth() {
 	_healthFlowDegraded = false;
 	_healthSmoothDegraded = 0;
 	_healthCrdtDegraded = 0;
+	_healthOutdated = false;
+	_protocolStaleWarned = false;
 	_healthStore.set('healthy');
 	_degradationStore.set({ active: false, mitigation: null, recovery: null });
 }

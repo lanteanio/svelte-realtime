@@ -3,6 +3,7 @@ import { connect as _connect, on, status, onRequest as _adapterOnRequest } from 
 import { now } from '../client-runtime.js';
 import { clientState, RpcError, _offlineQueue } from './internal-state.js';
 import { _sendRpc } from './rpc.js';
+import { _ensureHealthSubscription } from './health.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number }} OfflineEntry
@@ -35,10 +36,25 @@ let _replayingQueue = false;
  * threshold. Set `false` to silence it. Production builds strip the hint
  * regardless, so this only matters in development.
  *
- * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * `protocolVersion` is an opt-in integer the app bumps only on a BREAKING
+ * wire/contract change, declared identically here and in `realtime({ protocolVersion })`
+ * on the server (one shared constant). The client advertises it once on connect; a
+ * server running a higher version replies with a one-shot `protocol-stale` notice,
+ * which surfaces the `health` store as `'outdated'` and logs a dev console warning so
+ * a long-lived client running a stale bundle after a breaking deploy knows to reload.
+ * Omit it to leave the signal off.
+ *
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
 	clientState.config = config;
+
+	// Mirror the server's realtime({ protocolVersion }) integer validation so the
+	// shared-constant contract is symmetric and a typo (null / float) cannot quietly
+	// advertise a bad version that latches the client to a permanent 'outdated'.
+	if (config.protocolVersion !== undefined && !Number.isInteger(config.protocolVersion)) {
+		throw new Error('[svelte-realtime] configure({ protocolVersion }): must be an integer');
+	}
 
 	if (config.url !== undefined || config.auth !== undefined) {
 		/** @type {{ url?: string, auth?: boolean | string }} */
@@ -48,6 +64,15 @@ export function configure(config) {
 		_connect(connectArgs);
 	}
 
+	// Protocol-compat signal opt-in: ensure the __realtime listener is active so a
+	// server `protocol-stale` notice is observed (health -> 'outdated' + dev warn)
+	// even if the app never reads the `health` store directly. Idempotent. MUST run
+	// AFTER the url/auth `_connect(connectArgs)` above: _ensureHealthSubscription
+	// calls `_connect()` with no args, and the FIRST _connect call fixes the
+	// endpoint - so creating the listener's connection before the configured one
+	// would pin the default same-origin URL and make the adapter ignore url/auth.
+	if (config.protocolVersion !== undefined) _ensureHealthSubscription();
+
 	if (!_configListenerAttached) {
 		_configListenerAttached = true;
 		let isFirst = true;
@@ -55,6 +80,11 @@ export function configure(config) {
 			if (isFirst) { isFirst = false; return; }
 			if (s === 'open') {
 				clientState.isOffline = false;
+				// Advertise the baked protocol version once per (re)connect, before any
+				// queued RPC, so the server can compare and signal staleness early.
+				if (clientState.config.protocolVersion !== undefined) {
+					try { _connect().sendQueued({ type: 'proto', v: clientState.config.protocolVersion }); } catch { /* no connection handle yet */ }
+				}
 				if (clientState.config.onConnect) clientState.config.onConnect();
 				_drainOfflineQueue();
 			}
