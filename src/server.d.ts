@@ -2965,6 +2965,29 @@ export interface SmoothInterestConfig {
 	 * @default false
 	 */
 	cells?: boolean;
+	/**
+	 * Server-side gate on reported area-of-interest centers (`view.reportCenter`).
+	 * On a server-authoritative game topic an ungated report is a radar cheat: a
+	 * modified client can center replication anywhere on the map. `'any'`
+	 * (default) keeps reports ungated - the right default for self-selecting
+	 * surfaces (cursors, canvases, dashboards). `'own-entity'` clamps any
+	 * connection that owns a POSITIONED entity to that entity: its reports are
+	 * rejected, a previously-accepted override turns inert the moment the entity
+	 * exists, and only a connection with no positioned entity (a spectator /
+	 * free-cam, e.g. a state whose `position` resolves null) may report. A
+	 * callback decides per report - return `false` to reject, `true` to accept,
+	 * or a point to substitute (clamp instead of reject); it must be synchronous,
+	 * and a throw or malformed verdict rejects (a broken policy never widens
+	 * replication). A rejected report behaves like no report: the own-entity
+	 * center applies and any stale override is dropped. Clearing a center (a
+	 * null report) is always allowed. Applies identically in per-client and
+	 * cells mode, evaluated on the instance that receives the report.
+	 * @default 'any'
+	 */
+	centerPolicy?:
+		| 'any'
+		| 'own-entity'
+		| ((ctx: LiveContext<any>, center: SmoothPoint, ownPos: SmoothPoint | null) => boolean | SmoothPoint);
 	/** Reserved per-client bandwidth ceiling - accepted but inert in this version. */
 	budget?: number;
 }

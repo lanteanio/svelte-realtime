@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.57] - 2026-07-02
+
+### Added
+
+- **`interest.centerPolicy` - a server-side gate on reported area-of-interest centers.** The `view.reportCenter(x, y)` override was ungated: any connected client could recenter its replication anywhere, which on a server-authoritative game topic is a radar cheat - a modified client centers its area of interest on the flag carrier and reads the map (in per-client mode via the cull center, in cells mode via the subscribed cell block itself; it was never a hit exploit - the shot candidate gate is independently anchored to the shooter's rewound position). `centerPolicy: 'any'` (the default) keeps today's behavior byte-identical, which is the right polarity for self-selecting surfaces (cursors, canvases, dashboards) where choosing your own view is the feature. `centerPolicy: 'own-entity'` clamps every connection that owns a POSITIONED entity to that entity: its reports are rejected, and - because the precedence flips at every consumption site (the relevancy center, the join snapshot, the cell-block placement and follows) - an override accepted while the connection was still a spectator turns inert the moment it owns an entity, so there is no report-before-spawn race. A connection whose entity resolves no position (a spectator / free-cam state) keeps the free camera. The callback form `(ctx, center, ownPos) => boolean | { x, y }` decides per report: `false` rejects, `true` accepts, a point substitutes (clamp the radius instead of rejecting); it must be synchronous, and a throw or malformed verdict rejects - a broken policy never widens replication. A rejected report behaves like no report (the own-entity center applies, any previously-accepted override is dropped), clearing a center is allowed under every policy, the no-resolvable-center whole-board polarity is unchanged, and the gate applies identically in per-client and cells mode on whichever instance receives the report (centers are node-local; no relay path stores one). New `SmoothInterestConfig.centerPolicy` on the TypeScript surface.
+
 ## [0.6.0-next.56] - 2026-07-02
 
 ### Added

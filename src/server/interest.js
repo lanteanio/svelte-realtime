@@ -167,6 +167,12 @@ export function createInterestState(interest) {
 	const radius = interest.radius;
 	const bands = normalizeBands(interest);
 	const index = createSpatialIndex(interest.cell !== undefined ? { cell: interest.cell } : undefined);
+	// centerPolicy 'own-entity': the center precedence flips at every consumption
+	// site - a positioned own entity beats a reported override, so an override
+	// accepted while the connection was a spectator turns inert the moment it
+	// owns an entity. The report-time gate lives in the smooth handler (it can
+	// run the app callback); this flag is the always-on structural half.
+	const ownFirst = interest.centerPolicy === 'own-entity';
 
 	// Persistent across ticks.
 	/** @type {Map<string, { x: number, y: number }>} reported center override by identity */
@@ -332,11 +338,19 @@ export function createInterestState(interest) {
 			// null center is whole-board: every entity is a candidate, uncapped, so an
 			// uncentered subscriber (no own entity, no override) sees everything - the
 			// unreported-viewport safety contract - still delta-gated so a static board
-			// is not re-sent every tick.
-			let center = centers.get(identity);
-			if (center === undefined) {
+			// is not re-sent every tick. Under centerPolicy 'own-entity' the precedence
+			// flips: a positioned own entity beats the override (the radar gate).
+			let center;
+			if (ownFirst) {
 				const ownIdx = indexByKey.get(identity);
 				center = ownIdx !== undefined ? positions[ownIdx] : null;
+				if (center === null) center = centers.get(identity) ?? null;
+			} else {
+				center = centers.get(identity);
+				if (center === undefined) {
+					const ownIdx = indexByKey.get(identity);
+					center = ownIdx !== undefined ? positions[ownIdx] : null;
+				}
 			}
 			const wholeBoard = center === null || center === undefined;
 
@@ -435,7 +449,10 @@ export function createInterestState(interest) {
 		 * @returns {Array<{ key: string, state: any }>}
 		 */
 		snapshotFor(identity, catalog) {
-			let center = centers.get(identity);
+			// Same center precedence as compute: override first, own entity as the
+			// fallback - flipped under centerPolicy 'own-entity'.
+			const override = centers.get(identity);
+			let center = ownFirst ? undefined : override;
 			if (center === undefined) {
 				for (let i = 0; i < catalog.length; i++) {
 					if (catalog[i].key !== identity) continue;
@@ -444,6 +461,7 @@ export function createInterestState(interest) {
 					break;
 				}
 			}
+			if (center === undefined && ownFirst) center = override;
 			if (center === undefined) return catalog;
 			const r2 = radius * radius;
 			const out = [];

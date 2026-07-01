@@ -1730,6 +1730,169 @@ describe('live.smooth cross-node cells (cluster relay of cell topics)', () => {
 	});
 });
 
+describe('live.smooth interest.centerPolicy (the center-report gate)', () => {
+	let rt;
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(10000);
+		rt = fakeRuntime();
+		_setSmoothRuntime(rt.mod);
+	});
+	afterEach(() => {
+		_resetSmooth();
+		_setSmoothRuntime(null);
+		vi.useRealTimers();
+	});
+
+	// A positionless state models a spectator: it owns an entity (every synced
+	// connection does) but resolves no position, so it cannot anchor a clamp.
+	const posOf = { A: { x: 0, y: 0 }, B: { x: 500, y: 0 } };
+	const specPosition = (s) => (s.free ? null : { x: s.x, y: s.y });
+	const specInitial = (key) => (key === 'S' ? { free: true } : { ...(posOf[key] || { x: 0, y: 0 }) });
+
+	function declarePolicy(centerPolicy) {
+		return declareShape({
+			tickMs: 20,
+			initial: specInitial,
+			interest: { radius: 100, position: specPosition, centerPolicy }
+		});
+	}
+
+	function declareCellsPolicy(centerPolicy) {
+		return declareShape({
+			tickMs: 20,
+			initial: specInitial,
+			interest: { cells: true, radius: 100, cell: 256, position: specPosition, centerPolicy }
+		});
+	}
+
+	const CT = (cell) => '__smoothcell:shape:r1#' + cell;
+
+	it("preset 'own-entity': a positioned entity owner's report is ignored, a spectator's is honored", async () => {
+		const { name } = declarePolicy('own-entity');
+		const platform = wirePlatform();
+		const wsA = mockWs({ id: 'A' });
+		const wsB = mockWs({ id: 'B' });
+		const wsS = mockWs({ id: 'S' });
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsB, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsS, platform, name + '/shape/__smooth/sync', ['r1']);
+		// A owns a positioned entity at the origin: recentering on B is the radar
+		// move and is rejected. S is a spectator: its free-cam report is honored.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		await call(wsS, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		rt.queueDrain({
+			updates: [
+				{ key: 'B', state: { x: 501, y: 0 }, ws: wsB, commanded: false },
+				{ key: 'A', state: { x: 1, y: 0 }, ws: wsA, commanded: false }
+			],
+			acks: [],
+			idle: true
+		});
+		await call(wsB, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		const to = (ws) => platform.wireSent.filter((s) => s.event === 'update' && s.ws === ws).map((s) => s.data.key);
+		expect(to(wsS)).toEqual(['B']); // recentered onto B's area, A's move culled
+		// A stays centered on its own entity: B invisible. (S's always-visible
+		// spectator entity is caught up to everyone on first sight.)
+		expect(to(wsA).sort()).toEqual(['A', 'S']);
+		expect(to(wsA)).not.toContain('B');
+	});
+
+	it("preset 'own-entity' in cells mode: a player's report cannot move its block, a spectator's can", async () => {
+		const { name } = declareCellsPolicy('own-entity');
+		const platform = wirePlatform();
+		const wsA = mockWs({ id: 'A' });
+		const wsS = mockWs({ id: 'S' });
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsS, platform, name + '/shape/__smooth/sync', ['r1']);
+
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 10000, y: 10000 }]);
+		expect(wsA.isSubscribed(CT('39,39'))).toBe(false); // rejected: block stays at the entity
+		expect(wsA.isSubscribed(CT('0,0'))).toBe(true);
+
+		await call(wsS, platform, name + '/shape/__smooth/center', ['r1', { x: 10000, y: 10000 }]);
+		expect(wsS.isSubscribed(CT('39,39'))).toBe(true); // spectator free-cam honored
+	});
+
+	it('callback: a point substitutes, false rejects and drops the stale override, a throw rejects', async () => {
+		let behave = () => true;
+		const seen = [];
+		const { name } = declareCellsPolicy((ctx, center, ownPos) => {
+			seen.push({ center, ownPos });
+			return behave();
+		});
+		const platform = wirePlatform();
+		const ws = mockWs({ id: 'A' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+
+		// Substitute: the app clamps the far report to a nearer point.
+		behave = () => ({ x: 2000, y: 0 });
+		await call(ws, platform, name + '/shape/__smooth/center', ['r1', { x: 10000, y: 10000 }]);
+		expect(seen[0].center).toEqual({ x: 10000, y: 10000 });
+		expect(seen[0].ownPos).toEqual({ x: 0, y: 0 });
+		expect(ws.isSubscribed(CT('7,0'))).toBe(true); // placed at the substituted point
+		expect(ws.isSubscribed(CT('39,39'))).toBe(false);
+
+		// Reject: behaves like no report AND drops the previously-accepted override.
+		behave = () => false;
+		await call(ws, platform, name + '/shape/__smooth/center', ['r1', { x: 10000, y: 10000 }]);
+		expect(ws.isSubscribed(CT('0,0'))).toBe(true); // re-placed from the own entity
+		expect(ws.isSubscribed(CT('7,0'))).toBe(false); // the substituted block is gone
+
+		// A throwing policy rejects (fail safe) - the block does not move.
+		behave = () => { throw new Error('boom'); };
+		await call(ws, platform, name + '/shape/__smooth/center', ['r1', { x: 10000, y: 10000 }]);
+		expect(ws.isSubscribed(CT('39,39'))).toBe(false);
+		// A garbage verdict rejects too.
+		behave = () => 'yes';
+		await call(ws, platform, name + '/shape/__smooth/center', ['r1', { x: 10000, y: 10000 }]);
+		expect(ws.isSubscribed(CT('39,39'))).toBe(false);
+	});
+
+	it("a pre-entity report cannot persist as radar once the connection owns an entity ('own-entity')", async () => {
+		const { name } = declareCellsPolicy('own-entity');
+		const platform = wirePlatform();
+		const wsA = mockWs({ id: 'A' });
+		const wsC = mockWs({ id: 'C' });
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']); // the record exists
+
+		// C reports before ever syncing: it owns no entity anywhere, so the report
+		// is accepted (it IS a spectator at this instant) and the block is placed.
+		await call(wsC, platform, name + '/shape/__smooth/center', ['r1', { x: 10000, y: 10000 }]);
+		expect(wsC.isSubscribed(CT('39,39'))).toBe(true);
+
+		// Then it syncs and owns a positioned entity: the own entity now beats the
+		// stored override at every consumption site - the block re-places at the
+		// entity and the far subscription is gone. No report-time race to exploit.
+		await call(wsC, platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(wsC.isSubscribed(CT('0,0'))).toBe(true);
+		expect(wsC.isSubscribed(CT('39,39'))).toBe(false);
+	});
+
+	it('clearing a center (null report) is allowed under every policy and reverts cleanly', async () => {
+		const { name } = declarePolicy('own-entity');
+		const platform = wirePlatform();
+		const wsA = mockWs({ id: 'A' });
+		const wsS = mockWs({ id: 'S' });
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsS, platform, name + '/shape/__smooth/sync', ['r1']);
+		// The spectator narrows its view to B's area, then clears: whole board again.
+		await call(wsS, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		rt.queueDrain({ updates: [{ key: 'A', state: { x: 1, y: 0 }, ws: wsA, commanded: false }], acks: [], idle: true });
+		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		const toS = () => platform.wireSent.filter((s) => s.event === 'update' && s.ws === wsS).map((s) => s.data.key);
+		expect(toS()).not.toContain('A'); // A's move is outside the reported area
+
+		await call(wsS, platform, name + '/shape/__smooth/center', ['r1', null]);
+		rt.queueDrain({ updates: [{ key: 'A', state: { x: 2, y: 0 }, ws: wsA, commanded: false }], acks: [], idle: true });
+		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 2, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(toS()).toContain('A'); // whole board restored (no resolvable center)
+	});
+});
+
 describe('live.smooth interest validation', () => {
 	const base = { topic: 't', apply: () => ({}), initial: {} };
 	it('rejects a non-object interest', () => {
@@ -1758,6 +1921,14 @@ describe('live.smooth interest validation', () => {
 			...base,
 			interest: { radius: 500, position: (s) => ({ x: s.x, y: s.y }), lod: [{ within: 100, rate: 1 }, { within: 500, rate: 4 }], budget: 1000 }
 		})).not.toThrow();
+	});
+	it('validates centerPolicy: presets and a callback pass, anything else is rejected', () => {
+		const p = () => null;
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, centerPolicy: 'nope' } })).toThrow('centerPolicy');
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, centerPolicy: 5 } })).toThrow('centerPolicy');
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, centerPolicy: 'any' } })).not.toThrow();
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, centerPolicy: 'own-entity' } })).not.toThrow();
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, centerPolicy: () => true } })).not.toThrow();
 	});
 });
 

@@ -472,3 +472,28 @@ describe('snapshotFor (the interest-scoped join snapshot)', () => {
 		expect(state.candidatesAt(0, 0, 100).sort()).toEqual(['A', 'b']);
 	});
 });
+
+describe("centerPolicy 'own-entity' (the consumption-side precedence flip)", () => {
+	it('compute: a stored override is inert for a positioned entity owner, honored for a spectator', () => {
+		const state = createInterestState({ radius: 100, position, centerPolicy: 'own-entity' });
+		const catalog = [at('A', 0, 0), at('b', 50, 0), at('c', 500, 0)];
+		// The report-time gate lives in the smooth handler; a stored override here
+		// simulates one accepted before the connection owned an entity.
+		state.reportCenter('A', 500, 0);
+		const rel = state.compute(catalog, ['A'], 0);
+		expect(keysOf(rel.get('A'))).toEqual(['A', 'b']); // own entity beats the override
+		// A subscriber with no own entity still resolves through its override.
+		state.reportCenter('spec', 500, 0);
+		const rel2 = state.compute(catalog, ['spec'], 1);
+		expect(keysOf(rel2.get('spec'))).toEqual(['c']);
+	});
+
+	it('snapshotFor: the join roster centers on the own entity despite a stored override', () => {
+		const state = createInterestState({ radius: 100, position, centerPolicy: 'own-entity' });
+		const catalog = [at('A', 0, 0), at('b', 50, 0), at('c', 500, 0)];
+		state.reportCenter('A', 500, 0);
+		expect(state.snapshotFor('A', catalog).map((e) => e.key).sort()).toEqual(['A', 'b']);
+		state.reportCenter('spec', 500, 0);
+		expect(state.snapshotFor('spec', catalog).map((e) => e.key).sort()).toEqual(['c']);
+	});
+});

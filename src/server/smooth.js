@@ -375,6 +375,11 @@ export function _smoothRecord(name, cfg, platform, rt) {
 					entityCell: new Map(),
 					subs: new Map(),
 					centers: new Map(),
+					// Under centerPolicy 'own-entity' the precedence at every consumption
+					// site flips: a positioned own entity beats a stored center override,
+					// so an override accepted while the connection was a spectator turns
+					// inert the moment it owns an entity (no report-time race to exploit).
+					ownFirst: cfg.interest.centerPolicy === 'own-entity',
 					// A local subscriber's last-known own-entity position, maintained by
 					// the sync placement and the ack / relayed-update follow legs. The
 					// placement fallback for a node whose local authority holds no entity
@@ -682,13 +687,15 @@ function _updateCellSubs(rec, identity, ws, x, y) {
  * else from its own entity's current position, else from its last-known own
  * position (`cells.lastPos` - the fallback for a cluster non-owner, whose local
  * authority holds no entity). Called on join, on center report, and (for
- * own-entity followers) as the entity moves.
+ * own-entity followers) as the entity moves. Under centerPolicy 'own-entity' the
+ * precedence flips: a positioned own entity (or lastPos) beats the override, so
+ * only a connection with no entity anywhere resolves through its report.
  */
 function _placeCellSubscriber(rec, identity, ws) {
 	if (!ws) return;
 	const cells = rec.cells;
 	const center = cells.centers.get(identity);
-	if (center !== undefined) {
+	if (center !== undefined && !cells.ownFirst) {
 		_updateCellSubs(rec, identity, ws, center.x, center.y);
 		return;
 	}
@@ -701,7 +708,11 @@ function _placeCellSubscriber(rec, identity, ws) {
 		}
 	}
 	const last = cells.lastPos.get(identity);
-	if (last !== undefined) _updateCellSubs(rec, identity, ws, last.x, last.y);
+	if (last !== undefined) {
+		_updateCellSubs(rec, identity, ws, last.x, last.y);
+		return;
+	}
+	if (center !== undefined) _updateCellSubs(rec, identity, ws, center.x, center.y);
 }
 
 /**
@@ -719,7 +730,9 @@ function _smoothCellFollow(rec, identity, ws, state) {
 	let last = cells.lastPos.get(identity);
 	if (last === undefined) { last = { x: p.x, y: p.y }; cells.lastPos.set(identity, last); }
 	else { last.x = p.x; last.y = p.y; }
-	if (!cells.centers.has(identity)) _updateCellSubs(rec, identity, ws, p.x, p.y);
+	// Under 'own-entity' the entity always drives the block (a stored override is
+	// inert for an entity owner); otherwise a reported center wins.
+	if (cells.ownFirst || !cells.centers.has(identity)) _updateCellSubs(rec, identity, ws, p.x, p.y);
 }
 
 /** Drop a departed subscriber's cell bookkeeping. The platform auto-unsubscribes
@@ -748,10 +761,13 @@ function _releaseCellSubs(rec, identity) {
 function _smoothCellSnapshot(rec, identity, catalog) {
 	const cells = rec.cells;
 	const full = catalog !== undefined ? catalog : rec.authority.catalog();
-	let center = cells.centers.get(identity);
+	// Resolve the joiner's center: reported override, else its own entity in the
+	// roster being scoped (not the local authority, which is empty on a cluster
+	// non-owner scoping the owner's reply). Under centerPolicy 'own-entity' the
+	// precedence flips - a positioned own entity beats the override.
+	const override = cells.centers.get(identity);
+	let center = cells.ownFirst ? undefined : override;
 	if (center === undefined) {
-		// Resolve the own-entity center from the roster being scoped (not the local
-		// authority, which is empty on a cluster non-owner scoping the owner's reply).
 		for (let i = 0; i < full.length; i++) {
 			if (full[i].key !== identity) continue;
 			const p = cells.position(full[i].state);
@@ -759,6 +775,7 @@ function _smoothCellSnapshot(rec, identity, catalog) {
 			break;
 		}
 	}
+	if (center === undefined && cells.ownFirst) center = override;
 	if (center === undefined) return full; // no center -> whole board (safe over-deliver)
 	const block = _cellBlock(cells, center.x, center.y, 0);
 	const out = [];
@@ -776,6 +793,75 @@ function _smoothCellSnapshot(rec, identity, catalog) {
 		if (block.has(_cellKeyAt(cells, p.x, p.y))) out.push(e);
 	}
 	return out;
+}
+
+/**
+ * The caller's own-entity position as THIS instance can resolve it: the local
+ * authority (owner / single instance), else the receive-side view a cluster
+ * non-owner maintains (the interest shadow, or the cells follow's lastPos).
+ * Null when the identity owns no entity here or its position is unresolvable
+ * (an always-visible entity cannot anchor a clamp).
+ * @param {any} rec @param {string} key
+ * @returns {{ x: number, y: number } | null}
+ */
+function _smoothOwnPos(rec, key) {
+	const posFn = rec.cells ? rec.cells.position : rec.cfg.interest.position;
+	const own = rec.authority.get(key);
+	if (own !== undefined) {
+		let p = null;
+		try { p = posFn(own.state); } catch { p = null; }
+		return p && Number.isFinite(p.x) && Number.isFinite(p.y) ? { x: p.x, y: p.y } : null;
+	}
+	if (rec.cells) {
+		const last = rec.cells.lastPos.get(key);
+		return last !== undefined ? { x: last.x, y: last.y } : null;
+	}
+	const shadowState = rec.shadow.get(key);
+	if (shadowState !== undefined) {
+		let p = null;
+		try { p = posFn(shadowState); } catch { p = null; }
+		if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) return { x: p.x, y: p.y };
+	}
+	return null;
+}
+
+/**
+ * Evaluate `interest.centerPolicy` for a shape-valid reported center. Returns
+ * the point to apply, or null when the report is REJECTED. `'any'` (or unset)
+ * accepts everything - today's behavior, byte-identical. `'own-entity'` rejects
+ * a report from any connection whose identity resolves a positioned entity (the
+ * radar gate for authoritative games); a connection with no entity - a
+ * spectator / free-cam - reports freely. A callback decides per report:
+ * `false` rejects, `true` accepts, a finite point substitutes (clamp instead of
+ * reject). Anything else, including a throw, REJECTS - a broken policy must
+ * never widen replication (fail-safe polarity). Evaluated on the instance that
+ * received the report (centers are node-local; no relay path stores one).
+ * @param {any} rec @param {any} ctx @param {string} key
+ * @param {{ x: number, y: number }} center
+ * @returns {{ x: number, y: number } | null}
+ */
+function _smoothCenterPolicy(rec, ctx, key, center) {
+	const policy = rec.cfg.interest.centerPolicy;
+	if (policy === undefined || policy === 'any') return center;
+	const ownPos = _smoothOwnPos(rec, key);
+	if (policy === 'own-entity') {
+		return ownPos === null ? center : null;
+	}
+	let verdict;
+	try {
+		verdict = policy(ctx, { x: center.x, y: center.y }, ownPos);
+	} catch {
+		return null;
+	}
+	if (verdict === true) return center;
+	if (
+		verdict !== null && typeof verdict === 'object' &&
+		typeof verdict.x === 'number' && typeof verdict.y === 'number' &&
+		Number.isFinite(verdict.x) && Number.isFinite(verdict.y)
+	) {
+		return { x: verdict.x, y: verdict.y };
+	}
+	return null;
 }
 
 /**
@@ -944,7 +1030,9 @@ function _smoothTick(rec) {
 		if (rec.cells) {
 			_smoothCellUpdate(rec, u.key, u.state, t);
 			const ws = rec.registry.get(u.key);
-			if (ws && !rec.cells.centers.has(u.key)) {
+			// Under 'own-entity' the entity always drives the block (a stored
+			// override is inert for an entity owner).
+			if (ws && (rec.cells.ownFirst || !rec.cells.centers.has(u.key))) {
 				const p = rec.cells.position(u.state);
 				if (p && typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y)) {
 					_updateCellSubs(rec, u.key, ws, p.x, p.y);
@@ -1513,6 +1601,16 @@ function _validateInterest(it) {
 	if (it.cells !== undefined && typeof it.cells !== 'boolean') {
 		throw new Error('[svelte-realtime] live.smooth() interest.cells must be a boolean');
 	}
+	if (
+		it.centerPolicy !== undefined &&
+		it.centerPolicy !== 'any' &&
+		it.centerPolicy !== 'own-entity' &&
+		typeof it.centerPolicy !== 'function'
+	) {
+		throw new Error(
+			"[svelte-realtime] live.smooth() interest.centerPolicy must be 'any', 'own-entity', or a function (ctx, center, ownPos) => boolean | { x, y }"
+		);
+	}
 	let lod;
 	if (it.lod !== undefined) {
 		if (!Array.isArray(it.lod) || it.lod.length === 0) {
@@ -1536,7 +1634,7 @@ function _validateInterest(it) {
 			return { within: band.within, rate: band.rate };
 		});
 	}
-	return { radius: it.radius, position: it.position, lod, cell: it.cell, budget: it.budget, cells: it.cells === true };
+	return { radius: it.radius, position: it.position, lod, cell: it.cell, budget: it.budget, cells: it.cells === true, centerPolicy: it.centerPolicy };
 }
 
 /**
@@ -2076,8 +2174,10 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
  * `interest.budget` is reserved (inert). `interest.cells` switches to
  * population-scale cell-topic mode: area-of-interest becomes SUBSCRIPTION to
  * grid-cell topics (one encode per cell, native fan-out) instead of a
- * per-subscriber cull. Default off, so the broadcast-all path
- * is byte-identical).
+ * per-subscriber cull. `interest.centerPolicy` gates reported centers
+ * ('any' default = ungated; 'own-entity' clamps positioned-entity owners to
+ * their entity; a callback decides per report). Default off, so the
+ * broadcast-all path is byte-identical).
  *
  * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number, interest?: { radius: number, position: (state: any) => ({ x: number, y: number } | null), lod?: Array<{ within: number, rate: number }>, cell?: number, budget?: number } }} config
  */
@@ -2380,21 +2480,34 @@ export const _smoothRegister = function smooth(config) {
 		const center = args[argCount];
 		// Cells mode: the reported center (or its clearing) drives which cell topics
 		// this subscriber is subscribed to - server-driven interest as SUBSCRIPTION.
+		// A report passes interest.centerPolicy first ('any' accepts, byte-identical);
+		// a REJECTED report behaves like no report: any previously-accepted override
+		// is dropped and the block reverts to the own-entity center. Clearing (null)
+		// is allowed under every policy - reverting to the own entity is always safe.
 		if (rec.cells) {
 			if (center === null || center === undefined) {
 				rec.cells.centers.delete(key);
 				// Revert to following the own entity; re-place from its current position.
 				_placeCellSubscriber(rec, key, ctx.ws);
 			} else if (center && typeof center === 'object' && typeof center.x === 'number' && typeof center.y === 'number' && Number.isFinite(center.x) && Number.isFinite(center.y)) {
-				rec.cells.centers.set(key, { x: center.x, y: center.y });
-				_updateCellSubs(rec, key, ctx.ws, center.x, center.y);
+				const applied = _smoothCenterPolicy(rec, ctx, key, center);
+				if (applied === null) {
+					if (rec.cells.centers.delete(key)) _placeCellSubscriber(rec, key, ctx.ws);
+					return;
+				}
+				rec.cells.centers.set(key, applied);
+				_updateCellSubs(rec, key, ctx.ws, applied.x, applied.y);
 			}
 			return;
 		}
 		if (center === null || center === undefined) {
 			rec.interest.clearCenter(key);
-		} else if (typeof center === 'object') {
-			rec.interest.reportCenter(key, center.x, center.y); // reportCenter ignores a non-finite pair
+		} else if (center && typeof center === 'object' && typeof center.x === 'number' && typeof center.y === 'number' && Number.isFinite(center.x) && Number.isFinite(center.y)) {
+			// Same policy gate as cells mode; a rejected report clears any stale
+			// override so the cull recenters on the own entity.
+			const applied = _smoothCenterPolicy(rec, ctx, key, center);
+			if (applied === null) rec.interest.clearCenter(key);
+			else rec.interest.reportCenter(key, applied.x, applied.y);
 		} else {
 			return;
 		}
