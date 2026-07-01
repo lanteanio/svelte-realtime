@@ -1542,6 +1542,194 @@ describe('live.smooth cluster (platform.smooth)', () => {
 	});
 });
 
+describe('live.smooth cross-node cells (cluster relay of cell topics)', () => {
+	const WT = '__smooth:shape:r1';
+	const CT = (cell) => '__smoothcell:shape:r1#' + cell;
+	let rt;
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(10000);
+		rt = fakeRuntime();
+		_setSmoothRuntime(rt.mod);
+	});
+	afterEach(() => {
+		_resetSmooth();
+		_setSmoothRuntime(null);
+		vi.useRealTimers();
+	});
+
+	// radius 100 over a 256 grid: a block at the origin covers cells -1..0 on each
+	// axis; an entity at x=600 sits in cell "2,0", outside that block.
+	function declareCells() {
+		return declareShape({
+			tickMs: 20,
+			interest: { cells: true, radius: 100, cell: 256, position: (s) => ({ x: s.x, y: s.y }) }
+		});
+	}
+
+	/** Fire an RPC without awaiting the reply (for handlers that suspend on a relay). */
+	function fire(ws, platform, path, args) {
+		handleRpc(ws, toArrayBuffer({ rpc: path, id: 'x' + ++_id, args }), platform);
+	}
+
+	function clusterPlatform(sc) {
+		const platform = wirePlatform();
+		platform.smooth = sc.cluster;
+		return platform;
+	}
+
+	/** Sync a non-owner subscriber and answer the owner request with `states`. */
+	async function nonOwnerSync(sc, platform, name, ws, states) {
+		const before = platform.sent.length;
+		fire(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		const corr = sc.calls.requestSync[sc.calls.requestSync.length - 1][3];
+		sc.emit.syncReply(WT, corr, { ack: 0, states });
+		await vi.advanceTimersByTimeAsync(1);
+		return platform.sent[before]?.data;
+	}
+
+	it('the owner relays cell updates and transition removes with the shared broadcast seq', async () => {
+		const { name } = declareCells();
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+
+		rt.queueDrain({ updates: [{ key: 'u1', state: { x: 5, y: 0 }, ws, commanded: true }], acks: [], idle: false });
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		rt.queueDrain({ updates: [{ key: 'u1', state: { x: 600, y: 0 }, ws, commanded: true }], acks: [], idle: true });
+		await vi.advanceTimersByTimeAsync(20);
+
+		const relayed = sc.calls.relayBroadcast.map((r) => [r[0], r[1], r[4]]);
+		expect(relayed).toEqual([
+			[CT('0,0'), 'update', 0],
+			[CT('0,0'), 'remove', 1], // the transition tells the old cell to drop it...
+			[CT('2,0'), 'update', 2] // ...and the new cell gets the state
+		]);
+		expect(sc.calls.relayBroadcast[2][2]).toMatchObject({ key: 'u1', data: { x: 600, y: 0 } });
+	});
+
+	it('a non-owner republishes an inbound cell frame to ITS local cell topic, never the base topic', async () => {
+		const { name } = declareCells();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u2' });
+		await nonOwnerSync(sc, platform, name, ws, [{ key: 'u2', state: { x: 0, y: 0 } }]);
+
+		sc.emit.broadcast(CT('0,0'), 'update', { key: 'r9', data: { x: 5, y: 0 }, t: 1 }, undefined, 0, 'OWN');
+		const cellPub = platform.published.filter((p) => p.topic === CT('0,0') && p.event === 'update');
+		expect(cellPub).toHaveLength(1);
+		expect(cellPub[0].data).toEqual({ key: 'r9', data: { x: 5, y: 0 }, t: 1 });
+		// Not rebroadcast on the base wire topic, and never re-relayed (no loop).
+		expect(platform.wirePublished.filter((p) => p.topic === WT)).toHaveLength(0);
+		expect(sc.calls.relayBroadcast).toHaveLength(0);
+
+		// A replayed / regressing seq is dropped by the per-owner watermark.
+		sc.emit.broadcast(CT('0,0'), 'update', { key: 'r9', data: { x: 6, y: 0 }, t: 2 }, undefined, 0, 'OWN');
+		expect(platform.published.filter((p) => p.topic === CT('0,0') && p.event === 'update')).toHaveLength(1);
+	});
+
+	it('an owner ignores an inbound cell frame (no republish of a stale relay)', async () => {
+		const { name } = declareCells();
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		const before = platform.published.length;
+		sc.emit.broadcast(CT('0,0'), 'update', { key: 'r9', data: { x: 5, y: 0 }, t: 1 }, undefined, 0, 'OLD');
+		expect(platform.published.length).toBe(before);
+	});
+
+	it('an owner cluster sync places the joiner cell block (it previously received nothing until first motion)', async () => {
+		const { name } = declareCells();
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(ws.isSubscribed(CT('all'))).toBe(true);
+		expect(ws.isSubscribed(CT('0,0'))).toBe(true);
+		expect(ws.isSubscribed(CT('-1,-1'))).toBe(true); // the block covers radius on all sides
+	});
+
+	it('a non-owner sync places the block from the owner reply and scopes the client roster to it', async () => {
+		const { name } = declareCells();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u2' });
+		const reply = await nonOwnerSync(sc, platform, name, ws, [
+			{ key: 'u2', state: { x: 0, y: 0 } },
+			{ key: 'near', state: { x: 50, y: 0 } },
+			{ key: 'far', state: { x: 5000, y: 0 } }
+		]);
+		// Placement from the reply's own entry (the local authority is empty here).
+		expect(ws.isSubscribed(CT('all'))).toBe(true);
+		expect(ws.isSubscribed(CT('0,0'))).toBe(true);
+		// The owner's full catalog is scoped to the joiner's block before it goes out.
+		expect(reply.data.states.map((s) => s.key).sort()).toEqual(['near', 'u2']);
+		expect(reply.data.cells).toBe(1);
+	});
+
+	it('an ack re-places a non-owner subscriber own cell block (the follow has no local tick)', async () => {
+		const { name } = declareCells();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u2' });
+		await nonOwnerSync(sc, platform, name, ws, [{ key: 'u2', state: { x: 0, y: 0 } }]);
+		expect(ws.isSubscribed(CT('0,0'))).toBe(true);
+
+		sc.emit.ack(WT, 'u2', { id: 1, state: { x: 600, y: 0 }, t: Date.now() });
+		expect(ws.isSubscribed(CT('2,0'))).toBe(true); // moved block
+		expect(ws.isSubscribed(CT('-1,0'))).toBe(false); // left cell beyond the keep margin
+	});
+
+	it('a relayed cell update for a local identity follows it too (onMissing motion, no ack)', async () => {
+		const { name } = declareCells();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u2' });
+		await nonOwnerSync(sc, platform, name, ws, [{ key: 'u2', state: { x: 0, y: 0 } }]);
+
+		sc.emit.broadcast(CT('0,0'), 'update', { key: 'u2', data: { x: 600, y: 0 }, t: 1 }, undefined, 0, 'OWN');
+		expect(ws.isSubscribed(CT('2,0'))).toBe(true);
+	});
+
+	it('a reported center on a non-owner scopes the block; clearing re-places from the last-known position', async () => {
+		const { name } = declareCells();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws = mockWs({ id: 'u2' });
+		await nonOwnerSync(sc, platform, name, ws, [{ key: 'u2', state: { x: 0, y: 0 } }]);
+
+		await call(ws, platform, name + '/shape/__smooth/center', ['r1', { x: 10000, y: 10000 }]);
+		expect(ws.isSubscribed(CT('39,39'))).toBe(true);
+		expect(ws.isSubscribed(CT('0,0'))).toBe(false); // far outside the keep margin
+
+		// Clearing reverts to the own entity - resolved from lastPos on a non-owner
+		// (the local authority holds no entity here).
+		await call(ws, platform, name + '/shape/__smooth/center', ['r1', null]);
+		expect(ws.isSubscribed(CT('0,0'))).toBe(true);
+	});
+
+	it('the cluster close drain releases a departed subscriber cells bookkeeping', async () => {
+		const { name } = declareCells();
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const ws2 = mockWs({ id: 'u2' });
+		const ws3 = mockWs({ id: 'u3' });
+		await nonOwnerSync(sc, platform, name, ws2, [{ key: 'u2', state: { x: 0, y: 0 } }]);
+		await nonOwnerSync(sc, platform, name, ws3, [{ key: 'u3', state: { x: 0, y: 0 } }]);
+
+		const rec = _smoothTopics.get('shape:r1');
+		expect(rec.cells.subs.has('u2')).toBe(true);
+		close(ws2, { platform });
+		await vi.advanceTimersByTimeAsync(1);
+		expect(rec.cells.subs.has('u2')).toBe(false);
+		expect(rec.cells.lastPos.has('u2')).toBe(false);
+		expect(rec.cells.subs.has('u3')).toBe(true); // the survivor keeps its block
+	});
+});
+
 describe('live.smooth interest validation', () => {
 	const base = { topic: 't', apply: () => ({}), initial: {} };
 	it('rejects a non-object interest', () => {

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.56] - 2026-07-02
+
+### Added
+
+- **Cross-node cells: `interest: { cells: true }` now works across the cluster.** Cell-topic interest was single-instance: the tick's cell publishes reached only sockets connected to the topic's owning instance, no cluster sync path placed a cell subscription (even an owner-local joiner received nothing until its entity first moved or it reported a center), and a subscriber on a non-owning instance got a whole-board join roster stamped `cells: 1` with no deltas ever following. Now the owner relays each cell frame - update, and the transition/departure removes - with its cell topic over the smooth coordinator, on the same in-order channel and per-owner sequence watermark the base broadcasts already ride, and every other instance republishes it natively to its own subscribed sockets through its own codec (no frame bytes or wire ids cross the bus; each node runs its own cohort split, the same discipline the in-process worker relay uses). Each instance drives its own sockets' cell subscriptions: the cluster owner places a joiner's block at sync, a non-owner places it from the joiner's own entry in the owner's sync reply and then follows the subscriber's own entity from its acknowledgements and from relayed updates (covering server-driven motion), a reported center works on any instance and clearing it re-places from the last-known own position, and the client-facing join roster is cell-block scoped on every path (the owner's cross-instance reply stays the full catalog - it is the non-owner's own-position source). The cluster close drain now also releases a departed subscriber's cell bookkeeping (previously it accreted until topic teardown). No adapter or extensions change - the relay rides the existing coordinator surface, so any coordinator that carries smooth broadcasts carries cells. Residuals, documented in the README: a command-less remote entity teleported by `onMissing` beyond its subscriber's block stops the own-entity follow until a center report or resync, and a shot forwarded from a non-owning instance gates on the rewound-position radius rather than receipt-time cell membership (the same polarity per-client interest has on a cluster).
+
 ## [0.6.0-next.55] - 2026-07-02
 
 ### Added

@@ -45,6 +45,9 @@ export function mockPlatform() {
 			try { ws.subscribe(topic); } catch { return 'CONNECTION_CLOSED'; }
 			return null;
 		},
+		unsubscribe(ws, topic) {
+			try { ws.unsubscribe(topic); } catch { /* already closed */ }
+		},
 		requested: [],
 		_requestResolver: null,
 		async request(ws, event, data, options) {

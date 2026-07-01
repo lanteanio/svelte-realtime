@@ -179,6 +179,29 @@ function _smoothRecByWire(wireTopic) {
 }
 
 /**
+ * The reserved cell-topic prefix (`__smoothcell:`), captured beside
+ * `_smoothPrefix` so the cluster relay handler can resolve an inbound CELL
+ * frame back to its record. Cell topics are `<prefix><name>#<cellKey>`.
+ * @type {string | null}
+ */
+let _smoothCellPrefix = null;
+
+/**
+ * Resolve a relayed cell wire topic to its live record and cell key, or null.
+ * The cell key follows the LAST '#' (a cell key is `<cx>,<cy>` or `all`, never
+ * containing '#', while a topic name may).
+ */
+function _smoothCellRecByWire(wireTopic) {
+	if (_smoothCellPrefix === null || !wireTopic.startsWith(_smoothCellPrefix)) return null;
+	const rest = wireTopic.slice(_smoothCellPrefix.length);
+	const hash = rest.lastIndexOf('#');
+	if (hash <= 0) return null;
+	const rec = _smoothTopics.get(rest.slice(0, hash));
+	if (rec === undefined || rec.cells === null) return null;
+	return { rec, cellKey: rest.slice(hash + 1) };
+}
+
+/**
  * Cluster coordinators (`platform.smooth`) whose inbound relay handlers have
  * been wired. One registration per coordinator for the process lifetime: the
  * handlers dispatch by wireTopic to the live record. WeakSet so a replaced
@@ -352,6 +375,12 @@ export function _smoothRecord(name, cfg, platform, rt) {
 					entityCell: new Map(),
 					subs: new Map(),
 					centers: new Map(),
+					// A local subscriber's last-known own-entity position, maintained by
+					// the sync placement and the ack / relayed-update follow legs. The
+					// placement fallback for a node whose local authority holds no entity
+					// (a cluster non-owner). Bounded by the local registry; released with
+					// the subscriber.
+					lastPos: new Map(),
 					registered: false
 				}
 				: null,
@@ -404,10 +433,11 @@ export function _smoothRecord(name, cfg, platform, rt) {
 		if (cfg.hitTest) rec.aoi = _smoothAoi(rec);
 		_smoothTopics.set(name, rec);
 	}
-	// Capture the reserved prefix once so the cluster relay handlers can resolve
+	// Capture the reserved prefixes once so the cluster relay handlers can resolve
 	// a wire topic back to its record through `_smoothTopics` (no second index to
 	// drift across HMR).
 	_smoothPrefix = rt.SMOOTH_TOPIC_PREFIX;
+	_smoothCellPrefix = rt.CELL_TOPIC_PREFIX || '__smoothcell:';
 	// The record follows the caller's live platform: dev-server restarts and
 	// multi-platform test processes otherwise publish into a dead instance.
 	rec.platform = platform;
@@ -570,6 +600,21 @@ function _smoothPublishCell(rec, cellKey, event, data) {
 }
 
 /**
+ * Cross-node leg of a cell publish: a cluster OWNER relays the frame (with its
+ * cell topic) over the smooth coordinator so every other instance can republish
+ * it to ITS local cell subscribers. Rides the same relay - and the same
+ * `rec.eventSeq` counter - as the base-topic broadcasts, so the receiver's
+ * per-owner seq watermark covers base and cell frames alike, in channel order.
+ * A no-op single-instance and on a non-owner (byte-identical to before).
+ */
+function _smoothRelayCell(rec, cellKey, event, data) {
+	const cluster = rec.platform && rec.platform.smooth;
+	if (cluster && rec.owned && typeof cluster.relayBroadcast === 'function') {
+		cluster.relayBroadcast(rec.cells.prefix + cellKey, event, data, undefined, rec.eventSeq++);
+	}
+}
+
+/**
  * Route one entity update to its cell topic. On a cell transition, first tell the
  * old cell's subscribers to drop the entity (a subscriber of only the old cell
  * would otherwise keep a stale copy). A subscriber of BOTH cells resolves the
@@ -586,9 +631,11 @@ function _smoothCellUpdate(rec, key, state, t) {
 	const prev = cells.entityCell.get(key);
 	if (prev !== undefined && prev !== cellKey) {
 		_smoothPublishCell(rec, prev, 'remove', { key });
+		_smoothRelayCell(rec, prev, 'remove', { key });
 	}
 	cells.entityCell.set(key, cellKey);
 	_smoothPublishCell(rec, cellKey, 'update', { key, data: state, t });
+	_smoothRelayCell(rec, cellKey, 'update', { key, data: state, t });
 }
 
 /** Publish an entity removal to its last-known cell and forget it. */
@@ -596,6 +643,7 @@ function _smoothCellRemove(rec, key) {
 	const prev = rec.cells.entityCell.get(key);
 	if (prev !== undefined) {
 		_smoothPublishCell(rec, prev, 'remove', { key });
+		_smoothRelayCell(rec, prev, 'remove', { key });
 		rec.cells.entityCell.delete(key);
 	}
 }
@@ -631,8 +679,10 @@ function _updateCellSubs(rec, identity, ws, x, y) {
 
 /**
  * Place a subscriber's cell block from its explicit reported center if it has one,
- * else from its own entity's current position. Called on join, on center report,
- * and (for own-entity followers) as the entity moves.
+ * else from its own entity's current position, else from its last-known own
+ * position (`cells.lastPos` - the fallback for a cluster non-owner, whose local
+ * authority holds no entity). Called on join, on center report, and (for
+ * own-entity followers) as the entity moves.
  */
 function _placeCellSubscriber(rec, identity, ws) {
 	if (!ws) return;
@@ -645,8 +695,31 @@ function _placeCellSubscriber(rec, identity, ws) {
 	const own = rec.authority.get(identity);
 	if (own !== undefined) {
 		const p = cells.position(own.state);
-		if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) _updateCellSubs(rec, identity, ws, p.x, p.y);
+		if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+			_updateCellSubs(rec, identity, ws, p.x, p.y);
+			return;
+		}
 	}
+	const last = cells.lastPos.get(identity);
+	if (last !== undefined) _updateCellSubs(rec, identity, ws, last.x, last.y);
+}
+
+/**
+ * Own-entity follow from an authoritative state that arrived OFF the local tick
+ * (a cluster non-owner's ack, or a relayed cell update for a local identity):
+ * record the position and, unless a reported center overrides it, re-place the
+ * subscriber's cell block from it. The non-owner counterpart of the tick's
+ * own-entity follow.
+ */
+function _smoothCellFollow(rec, identity, ws, state) {
+	if (!ws) return;
+	const cells = rec.cells;
+	const p = cells.position(state);
+	if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return;
+	let last = cells.lastPos.get(identity);
+	if (last === undefined) { last = { x: p.x, y: p.y }; cells.lastPos.set(identity, last); }
+	else { last.x = p.x; last.y = p.y; }
+	if (!cells.centers.has(identity)) _updateCellSubs(rec, identity, ws, p.x, p.y);
 }
 
 /** Drop a departed subscriber's cell bookkeeping. The platform auto-unsubscribes
@@ -654,6 +727,7 @@ function _placeCellSubscriber(rec, identity, ws) {
 function _releaseCellSubs(rec, identity) {
 	rec.cells.subs.delete(identity);
 	rec.cells.centers.delete(identity);
+	rec.cells.lastPos.delete(identity);
 }
 
 /**
@@ -667,17 +741,22 @@ function _releaseCellSubs(rec, identity) {
  * same over-deliver polarity per-client interest holds for an unreported center),
  * and its OWN entity is always included - it is the client's reconciliation
  * basis, so a far reported center (a free-cam spectator whose entity waits
- * elsewhere) must never exclude it.
+ * elsewhere) must never exclude it. `catalog` overrides the local authority as
+ * the roster source - a cluster non-owner scopes the owner's sync-reply catalog
+ * with it (its own authority is empty there).
  */
-function _smoothCellSnapshot(rec, identity) {
+function _smoothCellSnapshot(rec, identity, catalog) {
 	const cells = rec.cells;
-	const full = rec.authority.catalog();
+	const full = catalog !== undefined ? catalog : rec.authority.catalog();
 	let center = cells.centers.get(identity);
 	if (center === undefined) {
-		const own = rec.authority.get(identity);
-		if (own !== undefined) {
-			const p = cells.position(own.state);
+		// Resolve the own-entity center from the roster being scoped (not the local
+		// authority, which is empty on a cluster non-owner scoping the owner's reply).
+		for (let i = 0; i < full.length; i++) {
+			if (full[i].key !== identity) continue;
+			const p = cells.position(full[i].state);
 			if (p && typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y)) center = { x: p.x, y: p.y };
+			break;
 		}
 	}
 	if (center === undefined) return full; // no center -> whole board (safe over-deliver)
@@ -1073,6 +1152,11 @@ export function _drainSmoothOnClose(ws) {
 			if (identity !== undefined) {
 				rec.registry.delete(identity);
 				if (rec.interest) rec.interest.releaseSubscriber(identity);
+				// Cells mode: free the departing subscriber's cell bookkeeping here
+				// too (the platform auto-unsubscribes the closed socket) - mirroring
+				// the single-instance branch below, so a churning cluster node does
+				// not accrete subs/centers entries until topic teardown.
+				if (rec.cells) _releaseCellSubs(rec, identity);
 				if (!rec.owned && typeof cluster.relayLeave === 'function') {
 					cluster.relayLeave(rec.wireTopic, identity, cluster.instanceId);
 				}
@@ -1154,7 +1238,7 @@ function _smoothForget(rec) {
 	}
 	rec.pendingSync.clear();
 	if (rec.interest) rec.interest.reset();
-	if (rec.cells) { rec.cells.entityCell.clear(); rec.cells.subs.clear(); rec.cells.centers.clear(); }
+	if (rec.cells) { rec.cells.entityCell.clear(); rec.cells.subs.clear(); rec.cells.centers.clear(); rec.cells.lastPos.clear(); }
 	if (rec.lagComp !== null) rec.lagComp.reset();
 	_smoothTopics.delete(rec.name);
 	const cluster = rec.platform && rec.platform.smooth;
@@ -1171,8 +1255,9 @@ function _smoothForget(rec) {
  */
 function _smoothRelayRemove(rec, key) {
 	if (rec.lagComp !== null) rec.lagComp.remove(key);
-	// Cells mode: the removal goes to the entity's last-known cell topic (single
-	// instance; cross-node cell relay is a follow-up). No base-topic broadcast.
+	// Cells mode: the removal goes to the entity's last-known cell topic, locally
+	// and (owner) relayed to the other instances inside _smoothCellRemove. No
+	// base-topic broadcast.
 	if (rec.cells) { _smoothCellRemove(rec, key); return; }
 	_smoothPublish(rec, 'remove', { key }, undefined);
 	const cluster = rec.platform && rec.platform.smooth;
@@ -1266,8 +1351,39 @@ function _ensureSmoothCluster(smooth) {
 		// `update` frames into the shadow catalog and deliver them culled per local
 		// subscriber on the cull tick; `event` and `remove` stay on the immediate
 		// broadcast path (over-deliver rather than risk a ghost or a dropped one-shot),
-		// matching the owner's policy.
+		// matching the owner's policy. A CELL-topic frame (cells mode) is resolved
+		// by its cell prefix and republished to this instance's own cell topic -
+		// native local fan-out to exactly the sockets subscribed to that cell here,
+		// never the base topic.
 		onBroadcast: (wireTopic, event, data, excludeIdentity, seq, ownerInstance) => {
+			const cellHit = _smoothCellRecByWire(wireTopic);
+			if (cellHit !== null) {
+				const rec = cellHit.rec;
+				// The owner stamps base events and cell frames from ONE counter
+				// (rec.eventSeq) on one in-order channel, so the record's per-owner
+				// watermark covers both families.
+				if (ownerInstance !== rec.lastSeenOwner) {
+					rec.lastSeenOwner = ownerInstance;
+					rec.lastSeenSeq = -1;
+				}
+				if (typeof seq === 'number') {
+					if (seq <= rec.lastSeenSeq) return;
+					rec.lastSeenSeq = seq;
+				}
+				// A live owner republishes nothing (its own publish already reached
+				// local sockets; its own relays are instanceId-suppressed anyway).
+				if (rec.owned) return;
+				_smoothPublishCell(rec, cellHit.cellKey, event, data);
+				// Own-entity follow: a relayed update for a LOCAL subscriber's own
+				// entity re-places its cell block (the non-owner has no tick follow).
+				// Covers server-driven (onMissing) motion; commanded motion is also
+				// followed on the ack path.
+				if (event === 'update' && data && typeof data.key === 'string') {
+					const ws = rec.registry.get(data.key);
+					if (ws !== undefined) _smoothCellFollow(rec, data.key, ws, data.data);
+				}
+				return;
+			}
 			const rec = _smoothRecByWire(wireTopic);
 			if (!rec) return;
 			if (ownerInstance !== rec.lastSeenOwner) {
@@ -1309,7 +1425,15 @@ function _ensureSmoothCluster(smooth) {
 				rec.lastOwnerWall = wallEpoch();
 			}
 			const ws = rec.registry.get(identity);
-			if (ws !== undefined) _smoothSendTo(rec, ws, 'ack', payload);
+			if (ws !== undefined) {
+				_smoothSendTo(rec, ws, 'ack', payload);
+				// Cells mode: the ack carries the authoritative post-drain state, so a
+				// non-owner follows its local subscriber's own entity from it (the
+				// non-owner counterpart of the tick's own-entity follow).
+				if (rec.cells && payload && payload.state !== undefined) {
+					_smoothCellFollow(rec, identity, ws, payload.state);
+				}
+			}
 		},
 		// Owner: a remote client left. Drop its surrogate entity and broadcast
 		// the removal so every instance forgets it.
@@ -2122,6 +2246,10 @@ export const _smoothRegister = function smooth(config) {
 				// socket (seeded from the snapshot when one was recovered, else the
 				// declared initial - identical to single-instance when snapshot is off).
 				const ensured = rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
+				// Cells mode: place the joiner's cell block now (from its just-ensured
+				// entity, or a retained reported center) - without this an owner-local
+				// joiner received nothing until its entity first moved.
+				if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
 				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothJoinSnapshot(rec, key), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
 			}
 			// Non-owner: ask the owner for the catalog. On a timeout, return a
@@ -2142,12 +2270,26 @@ export const _smoothRegister = function smooth(config) {
 			if (rec.interest !== null && reply && Array.isArray(reply.states)) {
 				for (let i = 0; i < reply.states.length; i++) rec.shadow.set(reply.states[i].key, reply.states[i].state);
 			}
+			// Cells mode on a non-owner: the local authority is empty, so place the
+			// joiner's cell block from its own entry in the owner's reply (recorded
+			// into lastPos by the follow), and scope the client-facing roster to its
+			// cell block - the owner's reply is deliberately the FULL catalog (it is
+			// also the own-position source here), but the client gets O(block).
+			let states = reply && Array.isArray(reply.states) ? reply.states : [];
+			if (rec.cells) {
+				if (ctx.ws) {
+					const ownEntry = states.find((s) => s && s.key === key);
+					if (ownEntry !== undefined) _smoothCellFollow(rec, key, ctx.ws, ownEntry.state);
+					else _placeCellSubscriber(rec, key, ctx.ws); // a reported center / lastPos fallback
+				}
+				states = _smoothCellSnapshot(rec, key, states);
+			}
 			return {
 				topic: name,
 				t: wallEpoch(),
 				you: key,
 				ack: reply ? reply.ack : 0,
-				states: reply ? reply.states : [],
+				states,
 				...(rec.lagComp !== null && { lc: 1 }),
 				...(rec.cells && { cells: 1 })
 			};
