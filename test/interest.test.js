@@ -426,3 +426,49 @@ describe('send cadence (lag-comp interpolation-delay estimate)', () => {
 		expect(state.interpDelayMs('B', 20)).toBe(40);
 	});
 });
+
+describe('snapshotFor (the interest-scoped join snapshot)', () => {
+	it('scopes the catalog to the radius around the own-entity center, keeping always-visible entities', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('A', 0, 0), at('near', 50, 0), at('far', 500, 0), { key: 'flag', state: { global: true } }];
+		const keys = state.snapshotFor('A', catalog).map((e) => e.key).sort();
+		expect(keys).toEqual(['A', 'flag', 'near']); // far is outside r=100
+	});
+
+	it('a reported center drives the scope, and the own entity is ALWAYS included (the reconciliation basis)', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('A', 0, 0), at('near', 50, 0), at('remote', 5000, 0)];
+		// A free-cam spectator watching 5000 units away: the roster is scoped to the
+		// watched area, but A's own entity must never fall out of its own snapshot.
+		state.reportCenter('A', 5000, 0);
+		const keys = state.snapshotFor('A', catalog).map((e) => e.key).sort();
+		expect(keys).toEqual(['A', 'remote']);
+	});
+
+	it('delivers the whole catalog to a subscriber with no resolvable center (over-deliver polarity)', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('a', 0, 0), at('b', 9999, 0)];
+		expect(state.snapshotFor('spectator', catalog)).toBe(catalog);
+		// An own entity whose position is null (always-visible) resolves no center either.
+		const withNull = [{ key: 'A', state: { global: true } }, at('b', 9999, 0)];
+		expect(state.snapshotFor('A', withNull)).toBe(withNull);
+	});
+
+	it('a throwing position() is treated as always-visible, never aborting the join', () => {
+		const state = createInterestState({ radius: 100, position: (s) => { if (s.boom) throw new Error('bad'); return { x: s.x, y: s.y }; } });
+		const catalog = [{ key: 'A', state: { x: 0, y: 0 } }, { key: 'b', state: { boom: true } }, { key: 'far', state: { x: 500, y: 0 } }];
+		const keys = state.snapshotFor('A', catalog).map((e) => e.key).sort();
+		expect(keys).toEqual(['A', 'b']);
+	});
+
+	it('does not perturb the retained candidatesAt snapshot (no shared scratch)', () => {
+		const state = createInterestState({ radius: 100, position });
+		// A compute pass retains its positions for the between-tick broadphase.
+		state.compute([at('A', 0, 0), at('b', 50, 0)], ['A'], 0);
+		expect(state.candidatesAt(0, 0, 100).sort()).toEqual(['A', 'b']);
+		// A join against a DIFFERENT catalog (an entity moved, another joined) must
+		// not rewrite the retained snapshot the shoot broadphase still reads.
+		state.snapshotFor('A', [at('A', 0, 0), at('b', 9000, 0), at('c', 10, 0)]);
+		expect(state.candidatesAt(0, 0, 100).sort()).toEqual(['A', 'b']);
+	});
+});

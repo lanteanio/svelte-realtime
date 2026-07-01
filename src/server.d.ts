@@ -2919,9 +2919,10 @@ export interface SmoothConfig {
 	/**
 	 * Opt-in server-rewind lag compensation: the server resolves `view.shoot(cmd)`
 	 * against the world as the shooter saw it, rewinding each candidate to the
-	 * instant the shooter rendered it. Requires `interest` (its relevancy set is
-	 * the candidate-security gate - you cannot hit what was never replicated to the
-	 * shooter). Off by default.
+	 * instant the shooter rendered it. Requires `interest` - the shooter's
+	 * replicated set (per-client relevancy membership, or its cell subscription
+	 * under `interest.cells`) is the candidate-security gate: you cannot hit what
+	 * was never replicated to the shooter. Off by default.
 	 */
 	hitTest?: SmoothHitTestConfig;
 }
@@ -2946,10 +2947,24 @@ export interface SmoothInterestConfig {
 	/**
 	 * Ascending level-of-detail bands: within `within` units, send every `rate`
 	 * ticks (the outer band's edge is the cull radius). `rate` is an integer >= 1.
+	 * Does not apply in cells mode (cell fan-out has no per-subscriber cadence).
 	 */
 	lod?: Array<{ within: number; rate: number }>;
-	/** Spatial-grid cell size (tuning; positive). */
+	/**
+	 * Spatial-grid cell size, in position units (positive). Per-client mode: a
+	 * tuning knob for the internal cull index. Cells mode: the side length of the
+	 * cell topics the world is gridded into. @default 256 in cells mode
+	 */
 	cell?: number;
+	/**
+	 * Population-scale mode: area-of-interest becomes SUBSCRIPTION to grid-cell
+	 * topics instead of a per-subscriber server-side cull. Each changed entity is
+	 * published once to its cell's topic and fans out natively (egress is
+	 * O(cells), not O(subscribers)); the server subscribes each socket to the
+	 * cell block covering its view. Requires svelte-adapter-uws >= 0.6.0-next.46.
+	 * @default false
+	 */
+	cells?: boolean;
 	/** Reserved per-client bandwidth ceiling - accepted but inert in this version. */
 	budget?: number;
 }
@@ -2990,7 +3005,9 @@ export interface SmoothHitTarget {
 
 /**
  * Server-rewind lag-compensation config for `live.smooth({ hitTest })`. Requires
- * `interest`. Provide exactly one narrowphase (`hitbox` or `resolve`).
+ * `interest` in either mode - the shooter's replicated set (per-client relevancy
+ * membership, or its cell subscription under `interest.cells`) is the candidate
+ * security gate. Provide exactly one narrowphase (`hitbox` or `resolve`).
  */
 export interface SmoothHitTestConfig {
 	/** The shot ray, resolved from the shooter's command and current state. */

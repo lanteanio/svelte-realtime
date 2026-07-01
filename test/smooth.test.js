@@ -1588,6 +1588,13 @@ describe('live.smooth hitTest validation (lag compensation)', () => {
 			hitTest: { shot, onHit, hitbox: { shape: 'circle', radius: 10 } }
 		})).toThrow('hitTest requires interest');
 	});
+	it('accepts hitTest with cell-topic interest (the cell subscription is the candidate gate)', () => {
+		expect(() => live.smooth({
+			topic: 't', apply: () => ({}), initial: {},
+			interest: { cells: true, radius: 500, position },
+			hitTest: { shot, onHit, hitbox: { shape: 'circle', radius: 10 } }
+		})).not.toThrow();
+	});
 	it('requires an onHit function', () => {
 		expect(() => live.smooth({ ...base, hitTest: { shot, hitbox: { shape: 'circle', radius: 10 } } })).toThrow('onHit');
 	});
@@ -1806,6 +1813,24 @@ describe('live.smooth interest (area-of-interest culling)', () => {
 		const after = _smoothTopics.get('shape:r1');
 		if (after) expect(after.registry.has('A')).toBe(false);
 		else expect(after).toBeUndefined();
+	});
+
+	it('scopes the join snapshot to the joiner area of interest (own entity + in-range + always-visible)', async () => {
+		const { name } = declareShape({
+			tickMs: 20,
+			initial: (key) => (key === 'F' ? { flag: true } : { ...(posOf[key] || { x: 0, y: 0 }) }),
+			interest: { radius: 100, position: (s) => (s.flag ? null : { x: s.x, y: s.y }) }
+		});
+		const platform = wirePlatform();
+		await call(mockWs({ id: 'B' }), platform, name + '/shape/__smooth/sync', ['r1']); // far entity at (500,0)
+		// F's own entity is always-visible (null position), so F resolves no center
+		// and gets the whole board - the over-deliver polarity.
+		const resF = await call(mockWs({ id: 'F' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(resF.data.states.map((s) => s.key).sort()).toEqual(['B', 'F']);
+		// A joins at the origin: its roster carries itself (the reconciliation
+		// basis), the always-visible F, and NOT the out-of-range B.
+		const resA = await call(mockWs({ id: 'A' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(resA.data.states.map((s) => s.key).sort()).toEqual(['A', 'F']);
 	});
 });
 
@@ -2512,6 +2537,182 @@ describe('live.smooth lag-compensated shoot', () => {
 		expect(second).toEqual(first);
 		// The stream must actually resolve hits (not a vacuous empty == empty assertion).
 		expect(first.filter((e) => e.key !== undefined).length).toBeGreaterThan(3);
+	});
+});
+
+describe('live.smooth lag-compensated shoot with cell-topic interest (cells mode)', () => {
+	let rt;
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(10000);
+		rt = fakeRuntime();
+		_setSmoothRuntime(rt.mod);
+	});
+	afterEach(() => {
+		_resetSmooth();
+		_setSmoothRuntime(null);
+		vi.useRealTimers();
+	});
+
+	const baseOnHit = (ctx, target) => {
+		ctx.applyTo(target.key, { damage: 25 });
+		ctx.emitEvent('hit', { victim: target.key, by: ctx.identity }, { key: target.key, toAuthor: true });
+		return { stop: true };
+	};
+
+	// radius 1000 over a 256-unit grid: a subscriber's block spans cells -4..3 on
+	// each axis around the origin, so the geometry below can place targets inside
+	// and outside the subscription precisely.
+	function cellHitShape(onHit = baseOnHit, htExtra = {}) {
+		return declareShape({
+			tickMs: 20,
+			interest: { cells: true, radius: 1000, cell: 256, position: (s) => ({ x: s.x, y: s.y }) },
+			hitTest: {
+				hitbox: { shape: 'circle', radius: 30 },
+				shot: { type: 'ray', origin: (cmd, sh) => ({ x: sh.x, y: sh.y }), dir: (cmd) => cmd.aim, maxDist: 2000 },
+				onHit,
+				...htExtra
+			}
+		});
+	}
+
+	async function moveTick(platform, ws, cmdPath, key, state) {
+		await call(ws, platform, cmdPath, ['r1', [{ id: 1, cmd: { step: 1 } }]]);
+		rt.queueDrain({ updates: [{ key, state, ws, commanded: true }], acks: [], idle: false });
+		await vi.advanceTimersByTimeAsync(20);
+		return Date.now();
+	}
+
+	function paths(name) {
+		return {
+			sync: name + '/shape/__smooth/sync',
+			cmd: name + '/shape/__smooth/command',
+			center: name + '/shape/__smooth/center',
+			shoot: name + '/shape/__smooth/shoot'
+		};
+	}
+
+	it('advertises both lc:1 and cells:1 on sync', async () => {
+		const { name } = cellHitShape();
+		const res = await call(mockWs({ id: 'u1' }), wirePlatform(), paths(name).sync, ['r1']);
+		expect(res.data.lc).toBe(1);
+		expect(res.data.cells).toBe(1);
+	});
+
+	it('resolves a hit on a target in a subscribed cell: damage via the authority and the hit event', async () => {
+		const { name } = cellHitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 }); // cell "0,0", subscribed
+
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+		const hitEvents = platform.wirePublished.filter((w) => w.event === 'event');
+		expect(hitEvents).toHaveLength(1);
+		expect(hitEvents[0].data.type).toBe('hit');
+		expect(hitEvents[0].data.data).toEqual({ victim: 'u2', by: 'u1' });
+	});
+
+	it('cannot hit a target beyond the subscribed block even when it is on the ray (default-deny)', async () => {
+		const { name } = cellHitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// On the ray and within maxDist (2000), but in cell "5,0" - outside the
+		// shooter's subscribed block (radius 1000 -> cells -4..3) and outside the
+		// exact radius at the rewind instant. Never replicated, never hittable.
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 1500, y: 0 });
+
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(rt.calls.inject).toEqual([]);
+		expect(platform.wirePublished.filter((w) => w.event === 'event')).toHaveLength(0);
+	});
+
+	it('gates on receipt-time cell membership alone when the ring space is custom (no rewound-shell fallback)', async () => {
+		// A custom hitTest.position (a different function instance) makes the shoot
+		// path skip the rewound geometric gate and fall back to pure receipt-time
+		// membership - which in cells mode IS the cell subscription.
+		const { name } = cellHitShape(baseOnHit, { position: (s) => ({ x: s.x, y: s.y }) });
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		const ws3 = mockWs({ id: 'u3' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		await call(ws3, platform, p.sync, ['r1']);
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 1500, y: 0 }); // unsubscribed cell "5,0"
+		await moveTick(platform, ws3, p.cmd, 'u3', { x: 100, y: 0 }); // subscribed cell "0,0"
+
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		// The subscribed target resolves; the unsubscribed one is not a candidate.
+		expect(rt.calls.inject).toEqual([{ key: 'u3', cmd: { damage: 25 } }]);
+	});
+
+	it('rewinds against the ring in cells mode: a render-time hit that would miss the current position', async () => {
+		const { name } = cellHitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		const tHit = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 0 }); // on the ray
+		const tMiss = await moveTick(platform, ws2, p.cmd, 'u2', { x: 100, y: 300 }); // moved off it
+
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tHit }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tMiss }]);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
+	it('recovers a target that left the shooter block mid-flight (the departed shell), and only then', async () => {
+		const { name } = cellHitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, p.sync, ['r1']);
+		await call(ws2, platform, p.sync, ['r1']);
+		// In the block (cell "3,0") when the shooter rendered it...
+		const tSeen = await moveTick(platform, ws2, p.cmd, 'u2', { x: 900, y: 0 });
+		// ...then out of the block (cell "7,0", beyond the radius) while the shot flew.
+		await moveTick(platform, ws2, p.cmd, 'u2', { x: 1800, y: 0 });
+
+		// The receipt-time set no longer lists u2, but the broadphase shell around the
+		// shooter's rewound position recovers it, and at tSeen it was in range: hit.
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: tSeen }]);
+		expect(rt.calls.inject).toEqual([{ key: 'u2', cmd: { damage: 25 } }]);
+
+		// A present-time shot finds it beyond the exact radius at the rewind instant: miss.
+		rt.calls.inject.length = 0;
+		await call(ws1, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() }]);
+		expect(rt.calls.inject).toEqual([]);
+	});
+
+	it('the cells join snapshot always includes the joiner own entity, even under a far reported center', async () => {
+		const { name } = cellHitShape();
+		const p = paths(name);
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		await call(ws1, platform, p.sync, ['r1']);
+		// A free-cam center far from the entity scopes the roster to the watched
+		// block - but the subscriber's own entity is its reconciliation basis and
+		// must survive the scope.
+		await call(ws1, platform, p.center, ['r1', { x: 10000, y: 10000 }]);
+		const res = await call(ws1, platform, p.sync, ['r1']);
+		expect(res.data.states.map((s) => s.key)).toContain('u1');
 	});
 });
 

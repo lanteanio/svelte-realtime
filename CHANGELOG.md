@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.55] - 2026-07-02
+
+### Added
+
+- **`hitTest` now composes with cell-topic interest (`interest: { cells: true }`).** Lag-compensated shooting previously required per-client interest - a cells topic rejected `hitTest` at registration. The shoot path now resolves its candidate set from whichever interest mode the topic runs, through one mode-agnostic accessor: under cells, the shooter's receipt-time replicated set is the entities whose current cell is in its subscribed cell block (the transmit gate - what the client actually received is exactly cell-scoped), the departed-shell broadphase is the cell block around the shooter's rewound position widened by one radius (the same 2x-radius recovery shell the per-client broadphase queries; block quantization only ever over-includes, and the exact-radius rewind trim re-applies the final gate), and the reach's interpolation-delay leg uses the dense-path estimate - twice the tick interval, the cadence a cells subscriber actually sees, since cell fan-out has no per-subscriber send walk to measure and no level-of-detail throttle. Everything else is shared with per-client mode: the per-tick ring capture, the rewind-instant membership gate, the replay defense, the reach clamp, nearest-first penetration, `defenderAllowance`, and the `detectionHook`. The security invariant is unchanged - you cannot hit what was never replicated to you: a target beyond the subscribed block (and beyond the radius at the rewind instant) is not a candidate even when it sits on the ray within `maxDist`. The registration rejection is removed; a population-scale arena topic can now declare `cells` and `hitTest` together.
+
+### Changed
+
+- **The per-client-interest join snapshot is scoped to the joiner's area of interest.** A syncing subscriber on an `interest` topic (without `cells`) previously received the full catalog. It now receives the in-range roster around its center (a reported override, else its own entity's position), every always-visible entity, and always its own entity; entities it later approaches are caught up on first sight by the relevancy pass, exactly as ongoing delivery already worked. A subscriber with no resolvable center still gets the whole board (the over-deliver polarity), and a cluster owner's cross-instance sync reply intentionally stays the full catalog - it also seeds the requesting instance's receive-side shadow, which serves every local subscriber there. This also removes a frozen-ghost artifact: a joiner no longer renders distant entities from the join roster whose motion its interest cull would never deliver.
+
+### Fixed
+
+- **The cells-mode join snapshot always includes the joiner's own entity.** A cells subscriber with a far reported center (a free-cam spectator whose entity waits elsewhere) could receive a join roster without its own entity, degrading its reconciliation basis to `initial` on a resync until the next acknowledgement corrected it. The own entity is now unconditionally part of the join snapshot, in both cells mode and the new per-client scoping.
+- **`interest.cells` was missing from the TypeScript surface.** `SmoothInterestConfig` now declares `cells?: boolean` (and documents `cell` as the cell-topic grid size in cells mode, default 256), so a TypeScript app can write `interest: { cells: true, ... }` without an excess-property error.
+- **README: corrected the stale claim that a non-owner's shot is inert on a cluster.** Cross-instance shot forwarding shipped with `svelte-adapter-uws-extensions >= 0.6.0-next.21`; the hit-detection section now documents the edge-measured, forwarded-durations design instead.
+
 ## [0.6.0-next.54] - 2026-07-01
 
 ### Added

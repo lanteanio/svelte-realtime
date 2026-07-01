@@ -123,10 +123,13 @@ function bandFor(bands, d2, prev) {
 /**
  * The adapter smoother's `targetDelay()`: twice the measured send interval, clamped
  * to [32, 250] ms. Kept byte-identical with that formula so the server's reach
- * estimate tracks the client's actual render delay.
+ * estimate tracks the client's actual render delay. Exported for the cells-mode
+ * shoot path, which has no per-subscriber send walk to measure - its fan-out
+ * delivers every changed frame every tick, so this dense-path estimate applied
+ * to the tick interval IS the cadence the client sees.
  * @param {number} intervalMs the (EWMA) interval between frames the client receives
  */
-function targetDelayMs(intervalMs) {
+export function targetDelayMs(intervalMs) {
 	const d = 2 * intervalMs;
 	return d < 32 ? 32 : d > 250 ? 250 : d;
 }
@@ -257,6 +260,24 @@ export function createInterestState(interest) {
 		if (pooled === undefined) { pooled = { x: 0, y: 0 }; posPool[i] = pooled; }
 		pooled.x = x; pooled.y = y;
 		return pooled;
+	}
+
+	/**
+	 * Resolve an entity's {x,y} for the join snapshot WITHOUT touching the pooled
+	 * per-tick scratch: `resolvePosition` writes into `posPool`, whose objects the
+	 * retained `positions` snapshot references between ticks (the candidatesAt
+	 * broadphase reads it), so a join must never route through the pool. Same
+	 * polarity otherwise - null on no position fn, a null/malformed result, or a
+	 * throw (all treated as always-visible by the caller).
+	 * @param {any} state
+	 */
+	function snapshotPosition(state) {
+		if (positionFn === null) return null;
+		let p;
+		try { p = positionFn(state); } catch { return null; }
+		if (p === null || p === undefined) return null;
+		if (typeof p.x !== 'number' || typeof p.y !== 'number' || !Number.isFinite(p.x) || !Number.isFinite(p.y)) return null;
+		return p;
 	}
 
 	/**
@@ -396,6 +417,53 @@ export function createInterestState(interest) {
 		clearCenter,
 		releaseSubscriber,
 		compute,
+		/**
+		 * The join-snapshot roster for a syncing subscriber, scoped to its area of
+		 * interest: the entities within the exact cull radius of its center (a
+		 * reported override, else its own entity's position in `catalog`), every
+		 * always-visible entity, and ALWAYS the subscriber's own entity - it is the
+		 * client's reconciliation basis, so a far reported center (a free-cam
+		 * spectator whose entity waits elsewhere) must never exclude it. A
+		 * subscriber with no resolvable center gets the whole catalog, the same
+		 * over-deliver polarity `compute` holds. LOD cadence does not apply (a join
+		 * over-delivers all in-range state once). Reads only `catalog` and the
+		 * reported centers - never the per-tick scratch - so it is safe on a cold
+		 * join before the first compute and never perturbs the retained
+		 * `candidatesAt` snapshot.
+		 * @param {string} identity
+		 * @param {Array<{ key: string, state: any }>} catalog
+		 * @returns {Array<{ key: string, state: any }>}
+		 */
+		snapshotFor(identity, catalog) {
+			let center = centers.get(identity);
+			if (center === undefined) {
+				for (let i = 0; i < catalog.length; i++) {
+					if (catalog[i].key !== identity) continue;
+					const p = snapshotPosition(catalog[i].state);
+					if (p !== null) center = p;
+					break;
+				}
+			}
+			if (center === undefined) return catalog;
+			const r2 = radius * radius;
+			const out = [];
+			for (let i = 0; i < catalog.length; i++) {
+				const entry = catalog[i];
+				if (entry.key === identity) {
+					out.push(entry);
+					continue;
+				}
+				const p = snapshotPosition(entry.state);
+				if (p === null) {
+					out.push(entry); // always-visible: everyone sees it
+					continue;
+				}
+				const dx = p.x - center.x;
+				const dy = p.y - center.y;
+				if (dx * dx + dy * dy <= r2) out.push(entry);
+			}
+			return out;
+		},
 		/**
 		 * The most recent per-subscriber relevancy: identity -> the entity keys
 		 * DELIVERED this tick. Each Set is owned per subscriber (not shared), so a

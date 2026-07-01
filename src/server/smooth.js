@@ -4,7 +4,7 @@ import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
 import { _tenantTopic } from './tenant.js';
-import { createInterestState } from './interest.js';
+import { createInterestState, targetDelayMs } from './interest.js';
 import { createLagComp, rayCircleHit, rayAabbHit } from './lagcomp.js';
 import { createRttTracker } from './rtt.js';
 import { createMonotonicClock } from './monoclock.js';
@@ -368,6 +368,11 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			shadow: new Map(),
 			pendingRelay: new Map(),
 			shadowDirty: false,
+			// The shoot path's mode-agnostic area-of-interest view (per-client
+			// relevancy or cell subscription), assigned right below when hitTest is
+			// on - it closes over the record, so it cannot be built inside this
+			// literal. Null otherwise (the OFF-path shape is unchanged).
+			aoi: null,
 			// Lag-compensation history ring (opt-in; null on the default path). When
 			// set, the tick records the post-drain catalog here and the __smoothShoot
 			// RPC rewinds against it. Gated entirely on cfg.hitTest so the OFF path is
@@ -394,6 +399,9 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			// demand-armed idle never leaves a gap in the ring a rewind could span.
 			lagCompLastActive: 0
 		};
+		// hitTest reads candidates / radius / interp-delay through one accessor so
+		// the shot handlers never branch on the interest mode (per-client vs cells).
+		if (cfg.hitTest) rec.aoi = _smoothAoi(rec);
 		_smoothTopics.set(name, rec);
 	}
 	// Capture the reserved prefix once so the cluster relay handlers can resolve
@@ -656,7 +664,10 @@ function _releaseCellSubs(rec, identity) {
  * population scale, and it matches exactly the cells the socket is subscribed to
  * (so a stationary in-block entity that sends no ongoing delta is still seen on
  * join). A subscriber with no resolvable center is delivered the whole board (the
- * same over-deliver polarity per-client interest holds for an unreported center).
+ * same over-deliver polarity per-client interest holds for an unreported center),
+ * and its OWN entity is always included - it is the client's reconciliation
+ * basis, so a far reported center (a free-cam spectator whose entity waits
+ * elsewhere) must never exclude it.
  */
 function _smoothCellSnapshot(rec, identity) {
 	const cells = rec.cells;
@@ -674,6 +685,10 @@ function _smoothCellSnapshot(rec, identity) {
 	const out = [];
 	for (let i = 0; i < full.length; i++) {
 		const e = full[i];
+		if (e.key === identity) {
+			out.push(e); // the joiner's own entity: its reconciliation basis
+			continue;
+		}
 		const p = cells.position(e.state);
 		if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' || !Number.isFinite(p.x) || !Number.isFinite(p.y)) {
 			out.push(e); // always-visible entity: everyone sees it (the `all` cell)
@@ -682,6 +697,20 @@ function _smoothCellSnapshot(rec, identity) {
 		if (block.has(_cellKeyAt(cells, p.x, p.y))) out.push(e);
 	}
 	return out;
+}
+
+/**
+ * The join-snapshot roster for a syncing subscriber: cell-block scoped in cells
+ * mode, area-of-interest scoped under per-client interest, the whole catalog on
+ * the broadcast path. Both scoped forms keep the whole-board fallback for an
+ * unresolvable center and always include the joiner's own entity. Only for a
+ * reply that goes straight to the joiner - the cluster owner's cross-instance
+ * sync reply stays the full catalog (see onSync).
+ */
+function _smoothJoinSnapshot(rec, identity) {
+	if (rec.cells) return _smoothCellSnapshot(rec, identity);
+	if (rec.interest !== null) return rec.interest.snapshotFor(identity, rec.authority.catalog());
+	return rec.authority.catalog();
 }
 
 /**
@@ -1206,6 +1235,10 @@ function _ensureSmoothCluster(smooth) {
 		},
 		// Owner: a non-owner asked for the catalog on behalf of a cold-joining
 		// client. Ensure its surrogate, answer with the client's basis + catalog.
+		// The FULL catalog, not the joiner-scoped join snapshot: this reply also
+		// seeds the requesting instance's receive-side shadow, which serves EVERY
+		// local subscriber there - scoping it to this one joiner would under-seed
+		// the others' cull (a stationary in-range entity would turn invisible).
 		onSync: (wireTopic, identity, originInstance, corr) => {
 			const rec = _smoothRecByWire(wireTopic);
 			if (!rec || !rec.owned) return;
@@ -1384,10 +1417,12 @@ function _validateInterest(it) {
 
 /**
  * Validate and normalize a `hitTest` config (server-rewind lag compensation).
- * `hitTest` REQUIRES `interest`: the relevancy set is the authoritative security
+ * `hitTest` REQUIRES `interest`: the replicated set is the authoritative security
  * gate (you cannot rewind/hit an entity that was never replicated to the
  * shooter), so a hitTest without an interest set has no candidate gate and is
- * rejected at registration. The shot ray (`shot`) is always required - it
+ * rejected at registration. Either interest mode provides the gate: per-client
+ * relevancy membership, or - under `interest.cells` - the shooter's cell
+ * subscription. The shot ray (`shot`) is always required - it
  * defines the geometry the framework rewinds around and hands to the narrowphase.
  * The narrowphase is either the declarative `hitbox` (circle/aabb, framework-
  * owned) or the `resolve` escape hatch (app-owned custom geometry); at least one
@@ -1404,11 +1439,6 @@ function _validateHitTest(ht, interest) {
 	if (interest === undefined) {
 		throw new Error(
 			'[svelte-realtime] live.smooth() hitTest requires interest - the relevancy set is the lag-compensation security gate (you cannot hit what was never replicated to the shooter)\n  See: https://svti.me/smooth'
-		);
-	}
-	if (interest.cells) {
-		throw new Error(
-			'[svelte-realtime] live.smooth() hitTest is not yet supported with cell-topic interest (interest.cells) - the shooter candidate set from cell subscriptions is a follow-up. Use per-client interest (omit interest.cells) when hitTest is enabled.\n  See: https://svti.me/smooth'
 		);
 	}
 	if (typeof ht.onHit !== 'function') {
@@ -1568,6 +1598,72 @@ export function _smoothRewindAt(nowMono, reach, rewindAge) {
 }
 
 /**
+ * The shoot path's mode-agnostic area-of-interest view: the exact gate radius,
+ * the shooter's receipt-time replicated set, the departed-shell broadphase
+ * around a rewound point, and the estimated client interpolation delay.
+ * Per-client interest answers from its relevancy state. Cells mode answers from
+ * the subscription maps: the replicated set is every entity whose current cell
+ * the shooter is subscribed to - the transmit gate, since what the client
+ * received is exactly cell-scoped - and the broadphase is the cell block around
+ * the rewound point widened by one radius, the same 2x-radius recovery shell
+ * the per-client broadphase queries (block quantization only ever over-includes,
+ * and the exact-radius rewind trim re-applies the final gate). Built once per
+ * record when hitTest is on, so the shot handlers never branch on the mode.
+ * @param {any} rec
+ */
+function _smoothAoi(rec) {
+	if (rec.cells !== null) {
+		const cells = rec.cells;
+		return {
+			get radius() {
+				return cells.radius;
+			},
+			candidatesFor(identity) {
+				const subs = cells.subs.get(identity);
+				if (subs === undefined) return undefined;
+				const out = [];
+				for (const [key, cellKey] of cells.entityCell) {
+					if (subs.has(cellKey)) out.push(key);
+				}
+				return out;
+			},
+			broadphase(x, y) {
+				// 'all' is never a block key, so always-visible entities stay out of
+				// the broadphase - a position-based shot cannot hit them (the same
+				// exclusion the per-client broadphase applies).
+				const block = _cellBlock(cells, x, y, cells.radius);
+				const out = [];
+				for (const [key, cellKey] of cells.entityCell) {
+					if (block.has(cellKey)) out.push(key);
+				}
+				return out;
+			},
+			interpDelayMs(identity, seedMs, now) {
+				// The cell fan-out has no per-subscriber send walk to measure, and it
+				// delivers every changed frame every tick (no LOD cadence), so the
+				// dense-path estimate - twice the tick interval, the same cold-start
+				// fallback per-client interest uses - IS the cadence the client sees.
+				return targetDelayMs(seedMs);
+			}
+		};
+	}
+	return {
+		get radius() {
+			return rec.interest.radius;
+		},
+		candidatesFor(identity) {
+			return rec.interest.getCandidates(identity);
+		},
+		broadphase(x, y) {
+			return rec.interest.candidatesAt(x, y, rec.interest.radius * 2);
+		},
+		interpDelayMs(identity, seedMs, now) {
+			return rec.interest.interpDelayMs(identity, seedMs, now);
+		}
+	};
+}
+
+/**
  * Edge measurement for a shot: from the shot payload compute the favor-shooter
  * reach WIDTH and the rewind AGE (both durations, axis-free), run the per-
  * connection replay defense + latch, and - when a `detectionHook` is configured
@@ -1614,7 +1710,7 @@ export function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
 		// Favor-the-shooter reach width = measured uplink (max-of-recent) + the
 		// client's interpolation delay; both server-measured, clamped to the cap.
 		const maxUp = st ? st.tracker.maxUplink() : null;
-		const serverInterp = rec.interest.interpDelayMs(shooterKey, rec.tickMs, now);
+		const serverInterp = rec.aoi.interpDelayMs(shooterKey, rec.tickMs, now);
 		reach = maxUp === null ? ht.maxRewindMs : Math.min(ht.maxRewindMs, maxUp + serverInterp);
 		// The rewind age is a pure duration the owner applies to its own present.
 		rewindAge = Math.max(0, now - rtStamp);
@@ -1650,8 +1746,10 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
 	// Candidate set, gated at the REWIND instant rather than at receipt: a target
 	// the shooter had on screen when it fired is a valid hit even if it drifted
 	// out of range in flight, and one that drifted in only after firing is not.
+	// `rec.aoi` resolves the receipt-time set / broadphase / radius from whichever
+	// interest mode the topic runs (per-client relevancy or cell subscription).
 	const candKeys = new Set();
-	const liveCand = rec.interest.getCandidates(shooterKey);
+	const liveCand = rec.aoi.candidatesFor(shooterKey);
 	if (liveCand !== undefined) for (const k of liveCand) if (k !== shooterKey) candKeys.add(k);
 	// The geometric gate compares ring positions against the interest radius, so
 	// it is only sound when the ring records the SAME position the interest set
@@ -1665,11 +1763,11 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
 		if (candKeys.size === 0) return;
 		world = rec.lagComp.rewind(candKeys, rewindAt);
 	} else {
-		const radius = rec.interest.radius;
+		const radius = rec.aoi.radius;
 		// Also broadphase the departed shell - entities near the shooter's rewound
 		// position the receipt-time set no longer lists (they left in flight). The
 		// exact gate below trims it back, so over-pulling is safe.
-		const near = rec.interest.candidatesAt(shooterAt.x, shooterAt.y, radius * 2);
+		const near = rec.aoi.broadphase(shooterAt.x, shooterAt.y);
 		for (let i = 0; i < near.length; i++) if (near[i] !== shooterKey) candKeys.add(near[i]);
 		if (candKeys.size === 0) return;
 		world = rec.lagComp.rewindWithin(candKeys, rewindAt, shooterAt.x, shooterAt.y, radius * radius);
@@ -1851,7 +1949,10 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
  * `interest.lod` is an ascending list of `{ within, rate }` level-of-detail
  * bands (send every `rate` ticks within that distance; the outer band's edge is
  * the cull radius), `interest.cell` tunes the spatial grid, and
- * `interest.budget` is reserved (inert). Default off, so the broadcast-all path
+ * `interest.budget` is reserved (inert). `interest.cells` switches to
+ * population-scale cell-topic mode: area-of-interest becomes SUBSCRIPTION to
+ * grid-cell topics (one encode per cell, native fan-out) instead of a
+ * per-subscriber cull. Default off, so the broadcast-all path
  * is byte-identical).
  *
  * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number, interest?: { radius: number, position: (state: any) => ({ x: number, y: number } | null), lod?: Array<{ within: number, rate: number }>, cell?: number, budget?: number } }} config
@@ -2021,7 +2122,7 @@ export const _smoothRegister = function smooth(config) {
 				// socket (seeded from the snapshot when one was recovered, else the
 				// declared initial - identical to single-instance when snapshot is off).
 				const ensured = rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
-				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: rec.cells ? _smoothCellSnapshot(rec, key) : rec.authority.catalog(), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
+				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothJoinSnapshot(rec, key), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
 			}
 			// Non-owner: ask the owner for the catalog. On a timeout, return a
 			// local-empty basis - incoming broadcasts reconcile the client.
@@ -2068,9 +2169,10 @@ export const _smoothRegister = function smooth(config) {
 			t: wallEpoch(),
 			you: key,
 			ack: ensured.lastAckedId,
-			// Cells mode: scope the join snapshot to the joiner's cell block (the
-			// roster fanout is O(n^2) if every joiner gets the whole board).
-			states: rec.cells ? _smoothCellSnapshot(rec, key) : rec.authority.catalog(),
+			// Interest on (either mode): scope the join snapshot to the joiner's
+			// area of interest (the roster fanout is O(n^2) if every joiner gets
+			// the whole board). Broadcast path: the full catalog, unchanged.
+			states: _smoothJoinSnapshot(rec, key),
 			...(rec.lagComp !== null && { lc: 1 }),
 			...(rec.cells && { cells: 1 })
 		};
