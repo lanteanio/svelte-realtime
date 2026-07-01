@@ -27,6 +27,7 @@ merge
 migration
 multiplayer
 presence
+protocol-stale
 publish-debounced
 publish-helper-args
 publish-throttled

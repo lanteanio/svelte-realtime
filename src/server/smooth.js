@@ -328,9 +328,33 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			// forces the next tick to run the relevancy pass even with no entity
 			// motion, so a reported area-of-interest center (the `smooth-center`
 			// frame) takes effect on a still board (a spectator panning the camera).
-			interest: cfg.interest ? createInterestState(cfg.interest) : null,
+			interest: cfg.interest && !cfg.interest.cells ? createInterestState(cfg.interest) : null,
 			interestTick: 0,
 			interestDirty: false,
+			// Spatial cell-topic interest (opt-in via interest.cells; null on the
+			// per-client-interest path and the OFF path, so both stay byte-identical).
+			// In cells mode area-of-interest is SUBSCRIPTION to grid-cell topics, not a
+			// per-subscriber server-side cull: each changed entity is published to its
+			// cell's topic via the stateless shared codec (one encode, native fan-out),
+			// and each subscriber is server-subscribed to the cell block covering its
+			// view. `entityCell` maps a key to its current cell key (for transition
+			// removes), `subs` maps a subscriber identity to its currently-subscribed
+			// cell set, `centers` holds an explicit reported center override (else the
+			// subscriber's own entity position drives its block). `all` is the reserved
+			// cell key for always-visible (null-position) entities every subscriber sees.
+			cells: cfg.interest && cfg.interest.cells
+				? {
+					size: cfg.interest.cell || 256,
+					radius: cfg.interest.radius,
+					position: cfg.interest.position,
+					codec: typeof rt.createCellWireCodec === 'function' ? rt.createCellWireCodec() : null,
+					prefix: (rt.CELL_TOPIC_PREFIX || '__smoothcell:') + name + '#',
+					entityCell: new Map(),
+					subs: new Map(),
+					centers: new Map(),
+					registered: false
+				}
+				: null,
 			// Receive-side cull state (a cluster non-owner with interest on; empty and
 			// untouched otherwise, so the OFF path and the owner path are byte-identical).
 			// `shadow` is this instance's running view of every entity's last-known state -
@@ -493,6 +517,173 @@ function _armSmoothTick(rec) {
 	}, rec.tickMs);
 }
 
+// --- Spatial cell-topic interest helpers (cells mode) ---------------------
+// Reached only when a topic opted into `interest: { cells: true }`. On every
+// other path `rec.cells` is null and none of this runs, so the per-client
+// interest path and the OFF path stay byte-identical.
+
+/** The cell key "cx,cy" for a position under the topic's cell size. */
+function _cellKeyAt(cells, x, y) {
+	return Math.floor(x / cells.size) + ',' + Math.floor(y / cells.size);
+}
+
+/**
+ * The set of cell keys covering the square block [center +- (radius + extra)].
+ * `extra` widens the block for hysteresis: the keep-set uses a one-cell margin so
+ * a subscriber hovering on a boundary does not thrash subscribe/unsubscribe.
+ * @returns {Set<string>}
+ */
+function _cellBlock(cells, x, y, extra) {
+	const r = cells.radius + extra;
+	const s = cells.size;
+	const cx0 = Math.floor((x - r) / s), cx1 = Math.floor((x + r) / s);
+	const cy0 = Math.floor((y - r) / s), cy1 = Math.floor((y + r) / s);
+	const out = new Set();
+	for (let cy = cy0; cy <= cy1; cy++) {
+		for (let cx = cx0; cx <= cx1; cx++) out.add(cx + ',' + cy);
+	}
+	return out;
+}
+
+/** Publish a cell-scoped frame (update / remove) via the stateless shared codec. */
+function _smoothPublishCell(rec, cellKey, event, data) {
+	const cells = rec.cells;
+	const platform = rec.platform;
+	const topic = cells.prefix + cellKey;
+	if (cells.codec && typeof platform.publishWire === 'function') {
+		if (!cells.registered && typeof platform.registerWireCodec === 'function') {
+			platform.registerWireCodec(cells.codec);
+			cells.registered = true;
+		}
+		platform.publishWire(topic, event, data, cells.codec);
+	} else if (typeof platform.publish === 'function') {
+		platform.publish(topic, event, data, { compress: false });
+	}
+}
+
+/**
+ * Route one entity update to its cell topic. On a cell transition, first tell the
+ * old cell's subscribers to drop the entity (a subscriber of only the old cell
+ * would otherwise keep a stale copy). A subscriber of BOTH cells resolves the
+ * remove/update pair by its own per-cell bookkeeping (a remove only drops the
+ * entity if it has not since been re-placed in another cell - client side).
+ */
+function _smoothCellUpdate(rec, key, state, t) {
+	const cells = rec.cells;
+	let cellKey = 'all';
+	const p = cells.position(state);
+	if (p && typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+		cellKey = _cellKeyAt(cells, p.x, p.y);
+	}
+	const prev = cells.entityCell.get(key);
+	if (prev !== undefined && prev !== cellKey) {
+		_smoothPublishCell(rec, prev, 'remove', { key });
+	}
+	cells.entityCell.set(key, cellKey);
+	_smoothPublishCell(rec, cellKey, 'update', { key, data: state, t });
+}
+
+/** Publish an entity removal to its last-known cell and forget it. */
+function _smoothCellRemove(rec, key) {
+	const prev = rec.cells.entityCell.get(key);
+	if (prev !== undefined) {
+		_smoothPublishCell(rec, prev, 'remove', { key });
+		rec.cells.entityCell.delete(key);
+	}
+}
+
+/**
+ * Server-driven cell subscription: subscribe `ws` to the cell block covering
+ * (x, y) plus the always-visible `all` cell, and unsubscribe cells it left
+ * (outside the hysteresis keep-block). A no-op delta touches no sockets, so a
+ * stationary subscriber pays nothing after its first placement, and a subscriber
+ * count rising never adds to the per-tick ENCODE cost (that stays O(cells)).
+ */
+function _updateCellSubs(rec, identity, ws, x, y) {
+	if (!ws) return;
+	const cells = rec.cells;
+	const platform = rec.platform;
+	if (typeof platform.subscribe !== 'function') return;
+	let cur = cells.subs.get(identity);
+	if (cur === undefined) { cur = new Set(); cells.subs.set(identity, cur); }
+	const want = _cellBlock(cells, x, y, 0);
+	want.add('all');
+	const keep = _cellBlock(cells, x, y, cells.size); // one-cell hysteresis margin
+	keep.add('all');
+	for (const ck of want) {
+		if (!cur.has(ck)) { platform.subscribe(ws, cells.prefix + ck); cur.add(ck); }
+	}
+	for (const ck of cur) {
+		if (!keep.has(ck)) {
+			if (typeof platform.unsubscribe === 'function') platform.unsubscribe(ws, cells.prefix + ck);
+			cur.delete(ck);
+		}
+	}
+}
+
+/**
+ * Place a subscriber's cell block from its explicit reported center if it has one,
+ * else from its own entity's current position. Called on join, on center report,
+ * and (for own-entity followers) as the entity moves.
+ */
+function _placeCellSubscriber(rec, identity, ws) {
+	if (!ws) return;
+	const cells = rec.cells;
+	const center = cells.centers.get(identity);
+	if (center !== undefined) {
+		_updateCellSubs(rec, identity, ws, center.x, center.y);
+		return;
+	}
+	const own = rec.authority.get(identity);
+	if (own !== undefined) {
+		const p = cells.position(own.state);
+		if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) _updateCellSubs(rec, identity, ws, p.x, p.y);
+	}
+}
+
+/** Drop a departed subscriber's cell bookkeeping. The platform auto-unsubscribes
+ * a closed socket, so this only frees the maps. */
+function _releaseCellSubs(rec, identity) {
+	rec.cells.subs.delete(identity);
+	rec.cells.centers.delete(identity);
+}
+
+/**
+ * The join snapshot for a cells-mode subscriber, scoped to its area of interest:
+ * only entities in the cell block covering its view (plus always-visible ones),
+ * not the whole roster. This is what keeps join O(block) instead of O(entities) -
+ * a full-catalog snapshot to every joiner is the O(n^2) roster fanout at
+ * population scale, and it matches exactly the cells the socket is subscribed to
+ * (so a stationary in-block entity that sends no ongoing delta is still seen on
+ * join). A subscriber with no resolvable center is delivered the whole board (the
+ * same over-deliver polarity per-client interest holds for an unreported center).
+ */
+function _smoothCellSnapshot(rec, identity) {
+	const cells = rec.cells;
+	const full = rec.authority.catalog();
+	let center = cells.centers.get(identity);
+	if (center === undefined) {
+		const own = rec.authority.get(identity);
+		if (own !== undefined) {
+			const p = cells.position(own.state);
+			if (p && typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y)) center = { x: p.x, y: p.y };
+		}
+	}
+	if (center === undefined) return full; // no center -> whole board (safe over-deliver)
+	const block = _cellBlock(cells, center.x, center.y, 0);
+	const out = [];
+	for (let i = 0; i < full.length; i++) {
+		const e = full[i];
+		const p = cells.position(e.state);
+		if (!p || typeof p.x !== 'number' || typeof p.y !== 'number' || !Number.isFinite(p.x) || !Number.isFinite(p.y)) {
+			out.push(e); // always-visible entity: everyone sees it (the `all` cell)
+			continue;
+		}
+		if (block.has(_cellKeyAt(cells, p.x, p.y))) out.push(e);
+	}
+	return out;
+}
+
 /**
  * Per-subscriber relevancy delivery: send each local subscriber only the entities
  * inside its area of interest this tick. Shared by the owner tick (authoritative
@@ -637,6 +828,22 @@ function _smoothTick(rec) {
 	rec.interestDirty = false;
 	for (let i = 0; i < updates.length; i++) {
 		const u = updates[i];
+		// Cells mode: route each changed entity to its cell topic (native shared
+		// fan-out), not the per-subscriber walk or the base broadcast. Egress is
+		// O(cells), not O(subscribers). The mover's own cell subscription follows it
+		// (unless it set an explicit reported center). No per-subscriber encode here,
+		// so a rising subscriber count never adds to the per-tick encode cost.
+		if (rec.cells) {
+			_smoothCellUpdate(rec, u.key, u.state, t);
+			const ws = rec.registry.get(u.key);
+			if (ws && !rec.cells.centers.has(u.key)) {
+				const p = rec.cells.position(u.state);
+				if (p && typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y)) {
+					_updateCellSubs(rec, u.key, ws, p.x, p.y);
+				}
+			}
+			continue;
+		}
 		// Echo suppression applies only to commanded updates: those owners get
 		// their copy through the acknowledgement. onMissing-driven motion
 		// produces no ack, so its owner must receive the broadcast or it
@@ -716,6 +923,10 @@ function _smoothTick(rec) {
 				if (rec.interest) {
 					rec.registry.delete(removed[j]);
 					rec.interest.releaseSubscriber(removed[j]);
+				}
+				if (rec.cells) {
+					rec.registry.delete(removed[j]);
+					_releaseCellSubs(rec, removed[j]);
 				}
 				_smoothRelayRemove(rec, removed[j]);
 			}
@@ -857,8 +1068,17 @@ export function _drainSmoothOnClose(ws) {
 				rec.registry.delete(removed[i]);
 				rec.interest.releaseSubscriber(removed[i]);
 			}
+			// Cells mode: drop the departing subscriber's identity map + cell
+			// bookkeeping (the platform auto-unsubscribes the closed socket).
+			if (rec.cells) {
+				rec.registry.delete(removed[i]);
+				_releaseCellSubs(rec, removed[i]);
+			}
 			if (rec.lagComp !== null) rec.lagComp.remove(removed[i]);
-			_smoothPublish(rec, 'remove', { key: removed[i] }, undefined);
+			// The departure goes to the entity's cell topic in cells mode, else the
+			// base broadcast.
+			if (rec.cells) _smoothCellRemove(rec, removed[i]);
+			else _smoothPublish(rec, 'remove', { key: removed[i] }, undefined);
 		}
 		if (rec.authority.size === 0) {
 			if (rec.timer !== null) clearTimer(rec.timer);
@@ -905,6 +1125,7 @@ function _smoothForget(rec) {
 	}
 	rec.pendingSync.clear();
 	if (rec.interest) rec.interest.reset();
+	if (rec.cells) { rec.cells.entityCell.clear(); rec.cells.subs.clear(); rec.cells.centers.clear(); }
 	if (rec.lagComp !== null) rec.lagComp.reset();
 	_smoothTopics.delete(rec.name);
 	const cluster = rec.platform && rec.platform.smooth;
@@ -921,6 +1142,9 @@ function _smoothForget(rec) {
  */
 function _smoothRelayRemove(rec, key) {
 	if (rec.lagComp !== null) rec.lagComp.remove(key);
+	// Cells mode: the removal goes to the entity's last-known cell topic (single
+	// instance; cross-node cell relay is a follow-up). No base-topic broadcast.
+	if (rec.cells) { _smoothCellRemove(rec, key); return; }
 	_smoothPublish(rec, 'remove', { key }, undefined);
 	const cluster = rec.platform && rec.platform.smooth;
 	if (cluster && rec.owned && typeof cluster.relayBroadcast === 'function') {
@@ -1129,6 +1353,9 @@ function _validateInterest(it) {
 	if (it.cell !== undefined && !(typeof it.cell === 'number' && Number.isFinite(it.cell) && it.cell > 0)) {
 		throw new Error('[svelte-realtime] live.smooth() interest.cell must be a positive number');
 	}
+	if (it.cells !== undefined && typeof it.cells !== 'boolean') {
+		throw new Error('[svelte-realtime] live.smooth() interest.cells must be a boolean');
+	}
 	let lod;
 	if (it.lod !== undefined) {
 		if (!Array.isArray(it.lod) || it.lod.length === 0) {
@@ -1152,7 +1379,7 @@ function _validateInterest(it) {
 			return { within: band.within, rate: band.rate };
 		});
 	}
-	return { radius: it.radius, position: it.position, lod, cell: it.cell, budget: it.budget };
+	return { radius: it.radius, position: it.position, lod, cell: it.cell, budget: it.budget, cells: it.cells === true };
 }
 
 /**
@@ -1177,6 +1404,11 @@ function _validateHitTest(ht, interest) {
 	if (interest === undefined) {
 		throw new Error(
 			'[svelte-realtime] live.smooth() hitTest requires interest - the relevancy set is the lag-compensation security gate (you cannot hit what was never replicated to the shooter)\n  See: https://svti.me/smooth'
+		);
+	}
+	if (interest.cells) {
+		throw new Error(
+			'[svelte-realtime] live.smooth() hitTest is not yet supported with cell-topic interest (interest.cells) - the shooter candidate set from cell subscriptions is a follow-up. Use per-client interest (omit interest.cells) when hitTest is enabled.\n  See: https://svti.me/smooth'
 		);
 	}
 	if (typeof ht.onHit !== 'function') {
@@ -1789,7 +2021,7 @@ export const _smoothRegister = function smooth(config) {
 				// socket (seeded from the snapshot when one was recovered, else the
 				// declared initial - identical to single-instance when snapshot is off).
 				const ensured = rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
-				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: rec.authority.catalog(), ...(rec.lagComp !== null && { lc: 1 }) };
+				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: rec.cells ? _smoothCellSnapshot(rec, key) : rec.authority.catalog(), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
 			}
 			// Non-owner: ask the owner for the catalog. On a timeout, return a
 			// local-empty basis - incoming broadcasts reconcile the client.
@@ -1815,22 +2047,32 @@ export const _smoothRegister = function smooth(config) {
 				you: key,
 				ack: reply ? reply.ack : 0,
 				states: reply ? reply.states : [],
-				...(rec.lagComp !== null && { lc: 1 })
+				...(rec.lagComp !== null && { lc: 1 }),
+				...(rec.cells && { cells: 1 })
 			};
 		}
 		const ensured = rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
 		// Interest topics need the identity -> socket map even single-instance (the
 		// cluster path keeps it for ack routing; interest reuses it as the
-		// per-subscriber relevancy and delivery set). No awaits follow, so the
+		// per-subscriber relevancy and delivery set; cells mode reuses it to follow a
+		// subscriber's own entity for its cell block). No awaits follow, so the
 		// liveness re-check above still holds.
-		if (rec.interest && ctx.ws) rec.registry.set(key, ctx.ws);
+		if ((rec.interest || rec.cells) && ctx.ws) rec.registry.set(key, ctx.ws);
+		// Cells mode: place the joiner's cell subscription block from its own entity's
+		// initial position now, so it starts receiving nearby cells immediately (the
+		// full catalog below is the safe over-deliver on join; ongoing deltas are
+		// cell-scoped).
+		if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
 		return {
 			topic: name,
 			t: wallEpoch(),
 			you: key,
 			ack: ensured.lastAckedId,
-			states: rec.authority.catalog(),
-			...(rec.lagComp !== null && { lc: 1 })
+			// Cells mode: scope the join snapshot to the joiner's cell block (the
+			// roster fanout is O(n^2) if every joiner gets the whole board).
+			states: rec.cells ? _smoothCellSnapshot(rec, key) : rec.authority.catalog(),
+			...(rec.lagComp !== null && { lc: 1 }),
+			...(rec.cells && { cells: 1 })
 		};
 	});
 
@@ -1859,9 +2101,11 @@ export const _smoothRegister = function smooth(config) {
 		const existing = rec.authority.get(key);
 		if (existing === undefined) {
 			rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
-			// Owner (or any interest topic): register this socket so its ack, author
-			// exclusion, and the interest relevancy cull can resolve it by identity.
-			if ((cluster || rec.interest) && ctx.ws) rec.registry.set(key, ctx.ws);
+			// Owner (or any interest / cells topic): register this socket so its ack,
+			// author exclusion, and the interest relevancy cull (or cells own-entity
+			// follow) can resolve it by identity.
+			if ((cluster || rec.interest || rec.cells) && ctx.ws) rec.registry.set(key, ctx.ws);
+			if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
 		} else if (ctx.ws && existing.ws !== ctx.ws) {
 			// One entity, one owning socket: the socket that last synced owns
 			// the command stream. A second tab takes over by syncing, never
@@ -1884,12 +2128,25 @@ export const _smoothRegister = function smooth(config) {
 		if (ctx.ws && _smoothClosedWs.has(ctx.ws)) return;
 		const name = resolveName(ctx, roomArgs);
 		const rec = _smoothTopics.get(name);
-		// Only a live, interest-on topic has a center map to update. No runtime load
-		// and no record creation: a center for a topic with no entities yet is moot
-		// (the relevancy pass has nothing to cull), so it is dropped, not buffered.
-		if (rec === undefined || !rec.interest) return;
+		// Only a live, interest-on or cells topic has a center to act on. No runtime
+		// load and no record creation: a center for a topic with no entities yet is
+		// moot, so it is dropped, not buffered.
+		if (rec === undefined || (!rec.interest && !rec.cells)) return;
 		const key = _getIdentityKey(ctx);
 		const center = args[argCount];
+		// Cells mode: the reported center (or its clearing) drives which cell topics
+		// this subscriber is subscribed to - server-driven interest as SUBSCRIPTION.
+		if (rec.cells) {
+			if (center === null || center === undefined) {
+				rec.cells.centers.delete(key);
+				// Revert to following the own entity; re-place from its current position.
+				_placeCellSubscriber(rec, key, ctx.ws);
+			} else if (center && typeof center === 'object' && typeof center.x === 'number' && typeof center.y === 'number' && Number.isFinite(center.x) && Number.isFinite(center.y)) {
+				rec.cells.centers.set(key, { x: center.x, y: center.y });
+				_updateCellSubs(rec, key, ctx.ws, center.x, center.y);
+			}
+			return;
+		}
 		if (center === null || center === undefined) {
 			rec.interest.clearCenter(key);
 		} else if (typeof center === 'object') {
