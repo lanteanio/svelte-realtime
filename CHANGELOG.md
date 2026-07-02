@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.59] - 2026-07-02
+
+### Added
+
+- **Smooth wire views (`live.smooth({ wire })`) - app-owned codecs at the client wire boundary.** A rich simulation state serializes to kilobytes of verbose JSON per entity per tick: the binary framing is compact, but any state richer than a bare `{x,y}` rides inside it as a JSON string, and the command batch spells out every field name at the command rate. `wire.state = { pack, unpack }` declares the state's compact wire form - packed at every client delivery (tick updates, acknowledgements, the sync roster, cell snapshots) and nowhere else; `wire.command = { pack, unpack }` is the inverse for inbound commands and shots, unpacked at the RPC entry (a malformed packed command is dropped, never applied - it can never reach the authority). Everything internal runs on the full state: the authority, lag-compensation capture and rewind, interest culling, the cluster relay and the non-owner shadow catalog, the warm-handoff snapshot - each instance packs independently at its own client edge, so cells mode and cross-node relays compose untouched. The client channel must declare the SAME pairs (share the module, like `apply`). Off by default - without `wire`, every frame is byte-identical to before. Requires svelte-adapter-uws >= 0.6.0-next.49 for the client-side half (peer range bumped).
+
 ## [0.6.0-next.58] - 2026-07-02
 
 ### Added

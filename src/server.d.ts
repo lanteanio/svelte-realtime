@@ -2938,6 +2938,25 @@ export interface SmoothConfig {
 	 * default; requires svelte-adapter-uws >= 0.6.0-next.47.
 	 */
 	onTick?: (world: SmoothWorld, t: number) => void | boolean;
+	/**
+	 * The topic's wire views: app-owned codec pairs applied at the CLIENT wire
+	 * boundary and nowhere else. `state` packs every state the clients receive
+	 * (tick updates, acknowledgements, the sync roster) into a compact
+	 * JSON-serializable form - a rich simulation state stops paying
+	 * verbose-JSON prices per entity per tick; `command` is the inverse for
+	 * inbound commands and shots, unpacked at the RPC entry (a malformed
+	 * packed command is dropped, never applied). Everything internal - the
+	 * authority, lag compensation, interest culling, the cluster relay, the
+	 * warm-handoff snapshot - runs on the full state; each instance packs
+	 * independently at its own client edge. The client channel must declare
+	 * the SAME pairs (share the module, like `apply`); requires
+	 * svelte-adapter-uws >= 0.6.0-next.49 for the client-side unpack. Off by
+	 * default - the wire carries the raw values, byte-identical.
+	 */
+	wire?: {
+		state?: { pack: (state: any) => any; unpack: (packed: any) => any };
+		command?: { pack: (cmd: any) => any; unpack: (packed: any) => any };
+	};
 }
 
 /**

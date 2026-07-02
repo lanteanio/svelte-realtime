@@ -3649,6 +3649,28 @@ The `world` view is the whole surface: `get`/`catalog` (reads), `set(key, state)
 
 Three things to know. Ticking stays demand-armed: when every entity rests, ticks - and `onTick` - stop until the next command or sync; return `true` from `onTick` to request the next tick anyway (the heartbeat for time-based logic like respawn timers - return it while timers are pending, and the topic goes fully idle when you stop). On a cluster, `onTick` runs on the topic's owning instance only (where the authoritative tick runs); server entities live with that tick, and after an ownership handoff the new owner's first `onTick` simply re-ensures them (with `snapshot: true`, their states recover through the same warm-handoff path as everyone else). And server entities share the key space with client identities, so give them their own namespace (an `npc:` prefix) - a client whose identity matched a server key would take the entity over at sync. A throwing `onTick` never kills the tick. Off by default; requires `svelte-adapter-uws >= 0.6.0-next.47`.
 
+**Wire views (`wire`)** shrink what crosses the wire when the simulation state is rich. The binary framing is already compact, but any state beyond a bare `{x, y}` rides inside it as a JSON string - and a real game state (velocities, animation, counters, flags) serializes to kilobytes of spelled-out field names and full-precision doubles, per entity, per tick; the command batch pays the same field-name price at the command rate. Declare the state's compact wire form once, in the shared module both sides import (exactly like `apply`):
+
+```js
+// shared/wire.js - the app owns its wire format
+export const wire = {
+  state: {
+    pack: (s) => [s.x, s.y, s.vx, s.vy, s.anim, s.frame, s.hp],
+    unpack: (a) => ({ x: a[0], y: a[1], vx: a[2], vy: a[3], anim: a[4], frame: a[5], hp: a[6] })
+  },
+  command: {
+    pack: (c) => [c.keys, c.commandId],
+    unpack: (a) => ({ keys: a[0], commandId: a[1] })
+  }
+};
+
+// server topic and client channel declare the SAME pairs:
+export const arena = live.smooth({ topic, apply, initial, wire });      // server
+const view = arena.smooth(arenaId, { apply, initial, wire });           // client
+```
+
+States pack at every client delivery - tick updates, acknowledgements, the sync roster, cell snapshots - and unpack on the client before the prediction and the interpolation consume them; commands (and shots) pack on transmit and unpack at the server's RPC entry, where a malformed packed command is dropped, never applied. Two guarantees make this safe to reach for. Everything internal runs on the full state - the authority, lag-compensation rewind, interest culling, the cluster relay and shadow catalog, the warm-handoff snapshot - each instance packs independently at its own client edge, so `interest`, `cells`, `hitTest`, and the cluster compose untouched. And the client's prediction always replays its ORIGINAL command objects - packing touches only the transmit copy, so quantizing in `pack` (rounding floats to a few decimals is the biggest single win) costs at most a sub-threshold reconciliation nudge, which the correction machinery absorbs by design. Off by default - without `wire`, every frame is byte-identical to before. Requires `svelte-adapter-uws >= 0.6.0-next.49`.
+
 ---
 
 ## Shared documents

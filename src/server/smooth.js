@@ -552,8 +552,45 @@ function _smoothSnapshotPayload(rec) {
 	return out;
 }
 
+// --- The wire view (config `wire`) -----------------------------------------
+// An app-owned codec pair applied at the CLIENT wire boundary and nowhere
+// else: states pack in `_smoothPublish` / `_smoothSendTo` / `_smoothPublishCell`
+// and the sync-reply roster; commands unpack at the command and shoot RPC
+// entries. Everything internal - the authority, the lag-compensation ring,
+// interest culling, the cluster relay, the shadow catalog, the warm-handoff
+// snapshot - runs on the full state, so every instance culls and rewinds
+// against real coordinates and packs independently at its own client edge.
+
+/** Pack one state for the client wire (identity without a `wire.state` codec). */
+function _smoothWireState(rec, state) {
+	const w = rec.cfg.wire;
+	return w !== undefined && w.state !== undefined ? w.state.pack(state) : state;
+}
+
+/** Pack a sync-reply roster for the client wire. */
+function _smoothWireStates(rec, states) {
+	const w = rec.cfg.wire;
+	if (w === undefined || w.state === undefined || !Array.isArray(states)) return states;
+	const out = new Array(states.length);
+	for (let i = 0; i < states.length; i++) {
+		out[i] = { key: states[i].key, state: w.state.pack(states[i].state) };
+	}
+	return out;
+}
+
+/** Rebuild a frame payload with its state packed, for the frames that carry
+ * one: an update's `data`, an ack's `state`. Every other event passes through. */
+function _smoothWireFrame(rec, event, data) {
+	const w = rec.cfg.wire;
+	if (w === undefined || w.state === undefined || data === null || typeof data !== 'object') return data;
+	if (event === 'update') return { ...data, data: w.state.pack(data.data) };
+	if (event === 'ack') return { ...data, state: w.state.pack(data.state) };
+	return data;
+}
+
 function _smoothPublish(rec, event, data, excludeWs) {
 	const platform = rec.platform;
+	data = _smoothWireFrame(rec, event, data);
 	if (rec.codec && typeof platform.publishWire === 'function') {
 		platform.publishWire(rec.wireTopic, event, data, rec.codec, excludeWs !== undefined ? { excludeWs } : undefined);
 	} else {
@@ -565,6 +602,7 @@ function _smoothPublish(rec, event, data, excludeWs) {
 
 function _smoothSendTo(rec, ws, event, data) {
 	const platform = rec.platform;
+	data = _smoothWireFrame(rec, event, data);
 	if (rec.codec && typeof platform.sendWire === 'function') {
 		platform.sendWire(ws, rec.wireTopic, event, data, rec.codec);
 	} else if (typeof platform.send === 'function') {
@@ -612,6 +650,7 @@ function _cellBlock(cells, x, y, extra) {
 function _smoothPublishCell(rec, cellKey, event, data) {
 	const cells = rec.cells;
 	const platform = rec.platform;
+	data = _smoothWireFrame(rec, event, data);
 	const topic = cells.prefix + cellKey;
 	if (cells.codec && typeof platform.publishWire === 'function') {
 		if (!cells.registered && typeof platform.registerWireCodec === 'function') {
@@ -1605,6 +1644,27 @@ function _ensureSmoothCluster(smooth) {
 }
 
 /**
+ * Validate the `wire` config: an object whose optional `state` and `command`
+ * entries each carry a pack/unpack function pair. An empty object normalizes
+ * to undefined (the off path stays byte-identical).
+ * @param {any} wire
+ */
+function _validateWire(wire) {
+	if (wire === null || typeof wire !== 'object') {
+		throw new Error('[svelte-realtime] live.smooth() wire must be an object with optional state and command codec pairs\n  See: https://svti.me/smooth');
+	}
+	for (const side of ['state', 'command']) {
+		const pair = wire[side];
+		if (pair === undefined) continue;
+		if (pair === null || typeof pair !== 'object' || typeof pair.pack !== 'function' || typeof pair.unpack !== 'function') {
+			throw new Error('[svelte-realtime] live.smooth() wire.' + side + ' must be { pack(value), unpack(packed) }');
+		}
+	}
+	if (wire.state === undefined && wire.command === undefined) return undefined;
+	return { state: wire.state, command: wire.command };
+}
+
+/**
  * Validate and normalize a `live.smooth({ interest })` config. Throws a
  * descriptive error on a malformed shape; returns the normalized interest the
  * relevancy pass consumes. `radius` and `position` are required when interest is
@@ -2373,9 +2433,21 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
  * per-subscriber cull. `interest.centerPolicy` gates reported centers
  * ('any' default = ungated; 'own-entity' clamps positioned-entity owners to
  * their entity; a callback decides per report). Default off, so the
- * broadcast-all path is byte-identical).
+ * broadcast-all path is byte-identical), `wire?` (the topic's wire views:
+ * app-owned codec pairs applied at the CLIENT wire boundary and nowhere else.
+ * `wire.state = { pack, unpack }` packs every state the clients receive -
+ * updates, acknowledgements, the sync roster - into a compact JSON-serializable
+ * form, so a rich simulation state stops paying verbose-JSON prices per tick;
+ * `wire.command = { pack, unpack }` is the inverse for inbound commands and
+ * shots, unpacked at the RPC entry (a malformed packed command is dropped,
+ * never applied). Everything internal - the authority, lag compensation,
+ * interest culling, the cluster relay and shadow catalog, the warm-handoff
+ * snapshot - runs on the full state; each instance packs independently at its
+ * own client edge. The client channel must declare the SAME pairs (share the
+ * module, like `apply`; requires svelte-adapter-uws >= 0.6.0-next.49 for the
+ * client-side unpack). Default off, byte-identical wire).
  *
- * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number, interest?: { radius: number, position: (state: any) => ({ x: number, y: number } | null), lod?: Array<{ within: number, rate: number }>, cell?: number, budget?: number } }} config
+ * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number, interest?: { radius: number, position: (state: any) => ({ x: number, y: number } | null), lod?: Array<{ within: number, rate: number }>, cell?: number, budget?: number }, wire?: { state?: { pack: (state: any) => any, unpack: (packed: any) => any }, command?: { pack: (cmd: any) => any, unpack: (packed: any) => any } } }} config
  */
 export const _smoothRegister = function smooth(config) {
 	if (!config || typeof config !== 'object') {
@@ -2411,6 +2483,7 @@ export const _smoothRegister = function smooth(config) {
 	if (config.onTick !== undefined && typeof config.onTick !== 'function') {
 		throw new Error('[svelte-realtime] live.smooth() onTick must be a function (world, t) => void | boolean\n  See: https://svti.me/smooth');
 	}
+	const wire = config.wire === undefined ? undefined : _validateWire(config.wire);
 	const interest = config.interest === undefined ? undefined : _validateInterest(config.interest);
 	const hitTest = config.hitTest === undefined ? undefined : _validateHitTest(config.hitTest, interest);
 	const cfg = {
@@ -2424,7 +2497,8 @@ export const _smoothRegister = function smooth(config) {
 		snapshotDebounceMs,
 		interest,
 		hitTest,
-		onTick: config.onTick
+		onTick: config.onTick,
+		wire
 	};
 	const guard = config.guard;
 	const argCount = config.topicArgs !== undefined
@@ -2550,7 +2624,7 @@ export const _smoothRegister = function smooth(config) {
 				// entity, or a retained reported center) - without this an owner-local
 				// joiner received nothing until its entity first moved.
 				if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
-				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothJoinSnapshot(rec, key), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
+				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothWireStates(rec, _smoothJoinSnapshot(rec, key)), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
 			}
 			// Non-owner: ask the owner for the catalog. On a timeout, return a
 			// local-empty basis - incoming broadcasts reconcile the client.
@@ -2589,7 +2663,7 @@ export const _smoothRegister = function smooth(config) {
 				t: wallEpoch(),
 				you: key,
 				ack: reply ? reply.ack : 0,
-				states,
+				states: _smoothWireStates(rec, states),
 				...(rec.lagComp !== null && { lc: 1 }),
 				...(rec.cells && { cells: 1 })
 			};
@@ -2614,7 +2688,7 @@ export const _smoothRegister = function smooth(config) {
 			// Interest on (either mode): scope the join snapshot to the joiner's
 			// area of interest (the roster fanout is O(n^2) if every joiner gets
 			// the whole board). Broadcast path: the full catalog, unchanged.
-			states: _smoothJoinSnapshot(rec, key),
+			states: _smoothWireStates(rec, _smoothJoinSnapshot(rec, key)),
 			...(rec.lagComp !== null && { lc: 1 }),
 			...(rec.cells && { cells: 1 })
 		};
@@ -2623,8 +2697,26 @@ export const _smoothRegister = function smooth(config) {
 	smoothExport.__smoothCommand = live.volatile(async (ctx, ...args) => {
 		const roomArgs = args.slice(0, argCount);
 		if (guard) await guard(ctx, ...roomArgs);
-		const batch = args[argCount];
+		let batch = args[argCount];
 		if (!Array.isArray(batch) || batch.length === 0) return;
+		// Wire view: commands arrive packed; unpack at the entry so everything
+		// downstream - the local enqueue AND the cross-node forward - runs on
+		// the full command. A malformed entry is dropped, never applied.
+		const wireCmd = cfg.wire !== undefined ? cfg.wire.command : undefined;
+		if (wireCmd !== undefined) {
+			const unpacked = [];
+			for (let i = 0; i < batch.length; i++) {
+				const c = batch[i];
+				if (c === null || typeof c !== 'object' || typeof c.id !== 'number') continue;
+				try {
+					unpacked.push({ id: c.id, cmd: wireCmd.unpack(c.cmd) });
+				} catch {
+					/* malformed packed command: drop the entry */
+				}
+			}
+			if (unpacked.length === 0) return;
+			batch = unpacked;
+		}
 		const name = resolveName(ctx, roomArgs);
 		const rt = await _loadSmoothRuntime();
 		// Liveness re-check after the awaits: a command from a socket whose
@@ -2727,8 +2819,17 @@ export const _smoothRegister = function smooth(config) {
 	smoothExport.__smoothShoot = live.volatile(async (ctx, ...args) => {
 		const roomArgs = args.slice(0, argCount);
 		if (guard) await guard(ctx, ...roomArgs);
-		const payload = args[argCount];
+		let payload = args[argCount];
 		if (payload === null || typeof payload !== 'object') return;
+		// Wire view: a shot's command arrives packed like any other command.
+		const wireShot = cfg.wire !== undefined ? cfg.wire.command : undefined;
+		if (wireShot !== undefined) {
+			try {
+				payload = { ...payload, cmd: wireShot.unpack(payload.cmd) };
+			} catch {
+				return; // malformed packed command: drop the shot
+			}
+		}
 		if (ctx.ws && _smoothClosedWs.has(ctx.ws)) return;
 		const name = resolveName(ctx, roomArgs);
 		const rec = _smoothTopics.get(name);
