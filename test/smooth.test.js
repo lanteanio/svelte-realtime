@@ -1946,6 +1946,19 @@ describe('live.smooth onTick (the server world hook)', () => {
 		expect(res.error).toContain('requires svelte-adapter-uws');
 	});
 
+	it('world.topic names the resolved room, so one hook can key per-room state', async () => {
+		const { name } = declareWorld();
+		const platform = wirePlatform();
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		let seen = null;
+		tickFn = (world) => {
+			seen = world.topic;
+		};
+		await runTick(platform, ws, name);
+		expect(seen).toBe('shape:r1');
+	});
+
 	it('world.set broadcasts the replaced state in the same tick (owner included)', async () => {
 		const { name } = declareWorld();
 		const platform = wirePlatform();

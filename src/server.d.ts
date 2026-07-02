@@ -2968,6 +2968,12 @@ export interface SmoothConfig {
  * sync.
  */
 export interface SmoothWorld {
+	/**
+	 * The resolved topic name this world belongs to. One `onTick` serves every
+	 * room of its topic family; this is the key that keeps each room's
+	 * server-side state (a bullet world, a match clock) apart.
+	 */
+	readonly topic: string;
 	/** The entity's authoritative state, or undefined. Treat as read-only - use `set` to change it. */
 	get(key: string): any;
 	/** Every entity's `{ key, state }` - the post-drain snapshot of this tick. */

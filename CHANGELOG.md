@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.60] - 2026-07-02
+
+### Added
+
+- **`world.topic` on the `onTick` world view.** One `onTick` hook serves every room of its topic family, but the world view carried no room identity - server-side per-room state (a projectile world, a match clock, a scoreboard) had nowhere sound to key. `world.topic` is the resolved topic name (the same string the wire topic derives from), so a hook keys a `Map` per room and cleans up on the room's last departure. Additive; every existing hook is unchanged.
+
 ## [0.6.0-next.59] - 2026-07-02
 
 ### Added

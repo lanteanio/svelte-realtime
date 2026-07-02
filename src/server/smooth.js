@@ -2020,6 +2020,12 @@ function _smoothWorld(rec) {
 		dirty = true;
 	}
 	const world = {
+		/** The resolved topic name this world belongs to. One onTick serves
+		 * every room of its topic family; this is the key that keeps each
+		 * room's server-side state (a bullet world, a match clock) apart. */
+		get topic() {
+			return rec.name;
+		},
 		/** The entity's authoritative state, or undefined. A read-only value:
 		 * assigning into it does not (and must not) reach the authority - use set. */
 		get(key) {
