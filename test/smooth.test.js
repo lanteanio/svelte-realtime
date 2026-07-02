@@ -49,11 +49,11 @@ async function call(ws, platform, path, args) {
  */
 function fakeRuntime() {
 	const entities = new Map();
-	const calls = { ensure: [], enqueue: [], drains: 0, removeWs: 0, inject: [] };
+	const calls = { ensure: [], enqueue: [], drains: 0, removeWs: 0, inject: [], set: [] };
 	let drainQueue = [];
 	const authority = {
-		ensure(key, ws, initial) {
-			calls.ensure.push({ key, initial });
+		ensure(key, ws, initial, opts) {
+			calls.ensure.push({ key, initial, ...(opts !== undefined && { opts }) });
 			let e = entities.get(key);
 			if (e === undefined) {
 				e = { state: initial, ws, lastAckedId: 0 };
@@ -63,6 +63,14 @@ function fakeRuntime() {
 				e.lastAckedId = 0;
 			}
 			return { state: e.state, lastAckedId: e.lastAckedId };
+		},
+		set(key, state) {
+			// Mirror the real authority: replace + wake; unknown keys ignored.
+			const e = entities.get(key);
+			if (e === undefined) return false;
+			calls.set.push({ key, state });
+			e.state = state;
+			return true;
 		},
 		get(key) {
 			return entities.get(key);
@@ -1890,6 +1898,218 @@ describe('live.smooth interest.centerPolicy (the center-report gate)', () => {
 		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 2, cmd: {} }]]);
 		await vi.advanceTimersByTimeAsync(20);
 		expect(toS()).toContain('A'); // whole board restored (no resolvable center)
+	});
+});
+
+describe('live.smooth onTick (the server world hook)', () => {
+	let rt;
+	// Behavior is swapped per test; the declared hook stays one stable function.
+	let tickFn;
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.setSystemTime(10000);
+		rt = fakeRuntime();
+		_setSmoothRuntime(rt.mod);
+		tickFn = null;
+	});
+	afterEach(() => {
+		_resetSmooth();
+		_setSmoothRuntime(null);
+		vi.useRealTimers();
+	});
+
+	function declareWorld(extra = {}) {
+		return declareShape({
+			tickMs: 20,
+			onTick: (world, t) => (tickFn ? tickFn(world, t) : undefined),
+			...extra
+		});
+	}
+
+	/** Arm one tick via a command and run it with the scripted drain result. */
+	async function runTick(platform, ws, name, drain) {
+		rt.queueDrain(drain || { updates: [], acks: [], events: [], idle: true });
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: ++_id, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+	}
+
+	it('rejects a non-function onTick at registration', () => {
+		expect(() => live.smooth({ topic: 't', apply: () => ({}), initial: {}, onTick: 5 })).toThrow('onTick must be a function');
+	});
+
+	it('fails actionably on an adapter authority without the server-entity surface', async () => {
+		const { name } = declareWorld();
+		delete rt.mod.createSmoothAuthority().set; // simulate an old adapter (shared authority object)
+		const platform = wirePlatform();
+		const res = await call(mockWs({ id: 'u1' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(res.ok).toBe(false);
+		expect(res.error).toContain('requires svelte-adapter-uws');
+	});
+
+	it('world.set broadcasts the replaced state in the same tick (owner included)', async () => {
+		const { name } = declareWorld();
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(ws2, platform, name + '/shape/__smooth/sync', ['r1']);
+		tickFn = (world) => {
+			expect(world.get('u2')).toEqual({ x: 0, y: 0 }); // post-drain read
+			world.set('u2', { x: 9, y: 9 });
+		};
+		await runTick(platform, ws1, name);
+		const sent = platform.wirePublished.filter((p) => p.event === 'update' && p.data.key === 'u2');
+		expect(sent).toHaveLength(1);
+		expect(sent[0].data.data).toEqual({ x: 9, y: 9 });
+		expect(sent[0].options).toBeUndefined(); // non-commanded: the owner receives it
+		expect(rt.entities.get('u2').state).toEqual({ x: 9, y: 9 });
+	});
+
+	it('world.set on an entity that moved this tick yields ONE frame and an ack with the final state', async () => {
+		const { name } = declareWorld();
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		tickFn = (world) => world.set('u1', { x: 50, y: 0 });
+		await runTick(platform, ws1, name, {
+			updates: [{ key: 'u1', state: { x: 1, y: 0 }, ws: ws1, commanded: true }],
+			acks: [{ key: 'u1', ws: ws1, id: 3, state: { x: 1, y: 0 } }],
+			idle: true
+		});
+		const updates = platform.wirePublished.filter((p) => p.event === 'update' && p.data.key === 'u1');
+		expect(updates).toHaveLength(1); // overwritten, not doubled
+		expect(updates[0].data.data).toEqual({ x: 50, y: 0 });
+		const acks = platform.wireSent.filter((s) => s.event === 'ack');
+		expect(acks).toHaveLength(1);
+		expect(acks[0].data.state).toEqual({ x: 50, y: 0 }); // the ack carries the FINAL state
+	});
+
+	it('world.ensure spawns an active server entity, broadcasts it, and is a read for existing keys', async () => {
+		const { name } = declareWorld();
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		tickFn = (world) => {
+			world.ensure('npc:1', { x: 5, y: 5 });
+			world.ensure('npc:2'); // no initialState: seeds via the declared initial
+		};
+		await runTick(platform, ws1, name);
+		await runTick(platform, ws1, name); // second tick re-ensures: must be a read
+		const npcEnsures = rt.calls.ensure.filter((e) => e.key.startsWith('npc:'));
+		expect(npcEnsures).toHaveLength(2); // one authority.ensure per key, ever
+		expect(npcEnsures[0]).toMatchObject({ key: 'npc:1', initial: { x: 5, y: 5 }, opts: { active: true } });
+		expect(npcEnsures[1]).toMatchObject({ key: 'npc:2', initial: { x: 0, y: 0 }, opts: { active: true } });
+		const spawn = platform.wirePublished.find((p) => p.event === 'update' && p.data.key === 'npc:1');
+		expect(spawn.data.data).toEqual({ x: 5, y: 5 });
+	});
+
+	it('world.applyTo injects through apply and arms the next tick', async () => {
+		const { name } = declareWorld();
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		tickFn = (world) => {
+			world.applyTo('u1', { damage: 5 });
+			tickFn = null; // once
+		};
+		await runTick(platform, ws1, name);
+		expect(rt.calls.inject).toEqual([{ key: 'u1', cmd: { damage: 5 } }]);
+		const drains = rt.calls.drains;
+		await vi.advanceTimersByTimeAsync(20); // the injection armed the next tick
+		expect(rt.calls.drains).toBe(drains + 1);
+	});
+
+	it('world.remove drops the entity with a departure broadcast', async () => {
+		const { name } = declareWorld();
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		const ws2 = mockWs({ id: 'u2' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(ws2, platform, name + '/shape/__smooth/sync', ['r1']);
+		tickFn = (world) => {
+			world.remove('u2');
+			tickFn = null;
+		};
+		await runTick(platform, ws1, name);
+		expect(rt.entities.has('u2')).toBe(false);
+		expect(platform.wirePublished.some((p) => p.event === 'remove' && p.data.key === 'u2')).toBe(true);
+	});
+
+	it('returning true from onTick sustains the tick with no motion (the heartbeat)', async () => {
+		const { name } = declareWorld();
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		let beats = 0;
+		tickFn = () => ++beats < 3; // request two more ticks, then rest
+		await runTick(platform, ws1, name); // beat 1 (idle drain - without the heartbeat this would be the last)
+		await vi.advanceTimersByTimeAsync(20); // beat 2
+		await vi.advanceTimersByTimeAsync(20); // beat 3 returns false
+		const drains = rt.calls.drains;
+		await vi.advanceTimersByTimeAsync(40); // no re-arm: ticking stopped
+		expect(beats).toBe(3);
+		expect(rt.calls.drains).toBe(drains);
+	});
+
+	it('a throwing onTick never kills the tick (the drained updates still publish)', async () => {
+		const { name } = declareWorld();
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		tickFn = () => {
+			throw new Error('boom');
+		};
+		await runTick(platform, ws1, name, {
+			updates: [{ key: 'u1', state: { x: 1, y: 0 }, ws: ws1, commanded: false }],
+			acks: [],
+			idle: true
+		});
+		const sent = platform.wirePublished.filter((p) => p.event === 'update' && p.data.key === 'u1');
+		expect(sent).toHaveLength(1);
+	});
+
+	it('a cluster non-owner never runs onTick (its tick is the receive-side cull)', async () => {
+		let ran = 0;
+		const { name } = declareShape({
+			tickMs: 20,
+			initial: () => ({ x: 0, y: 0 }),
+			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }) },
+			onTick: () => {
+				ran++;
+			}
+		});
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = wirePlatform();
+		platform.smooth = sc.cluster;
+		const ws = mockWs({ id: 'u2' });
+		handleRpc(ws, toArrayBuffer({ rpc: name + '/shape/__smooth/sync', id: 'w' + ++_id, args: ['r1'] }), platform);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply('__smooth:shape:r1', sc.calls.requestSync[0][3], { ack: 0, states: [] });
+		await vi.advanceTimersByTimeAsync(1);
+		// An inbound relayed update arms the non-owner's cull tick - which must
+		// return before the drain/hook site.
+		sc.emit.broadcast('__smooth:shape:r1', 'update', { key: 'r9', data: { x: 5, y: 0 } }, undefined, 0, 'OWN');
+		await vi.advanceTimersByTimeAsync(20);
+		expect(ran).toBe(0);
+	});
+
+	it('composes with cells mode: a world.set routes to the entity cell topic', async () => {
+		const { name } = declareShape({
+			tickMs: 20,
+			interest: { cells: true, radius: 100, cell: 256, position: (s) => ({ x: s.x, y: s.y }) },
+			onTick: (world, t) => (tickFn ? tickFn(world, t) : undefined)
+		});
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		tickFn = (world) => {
+			world.set('u1', { x: 600, y: 0 });
+			tickFn = null;
+		};
+		await runTick(platform, ws1, name);
+		const cellPub = platform.published.filter((p) => p.topic === '__smoothcell:shape:r1#2,0' && p.event === 'update');
+		expect(cellPub).toHaveLength(1);
+		expect(cellPub[0].data.data).toEqual({ x: 600, y: 0 });
 	});
 });
 

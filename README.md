@@ -3623,6 +3623,32 @@ Other knobs (all optional): `teleportThreshold` (position units - abort the rewi
 
 Requires `svelte-adapter-uws >= 0.6.0-next.29` - the client echoes the server-authored stamp the rewind window is computed from. **Off by default and gated end to end on `hitTest`**, so the broadcast hot path and the wire are byte-identical when it is off. Works single-instance and across the cluster: a shot from an instance that does not own the topic is measured at that edge (the replay defense and the latency picture run against the reconstructed owner clock) and forwarded as bounded durations to the owner, which resolves it on its own ring axis - the inter-instance hop is never folded into the rewind window. Forwarded shots need a coordinator that carries them (`svelte-adapter-uws-extensions >= 0.6.0-next.21`); on an older coordinator a non-owner's shot stays inert.
 
+**Server logic (`onTick`)** is the hook for everything the players do not command: knockback and other server forces, deaths and respawns, scripted movers, NPCs. Without it, `live.smooth` state changes only through client commands (plus `hitTest`'s `applyTo` inside a shot); with it, your server code runs once per authoritative tick - after the command drain, before the broadcast - so it reads the tick's settled states and everything it writes broadcasts atomically with that same tick:
+
+```js
+export const arena = live.smooth({
+  topic: (ctx, arenaId) => `arena:${arenaId}`,
+  apply,
+  initial: (key) => spawn(key),
+  onMissing: simulate,               // drives entities between commands - including server entities
+  onTick(world, t) {
+    for (const { key, state } of world.catalog()) {
+      if (state.hp <= 0 && t >= state.respawnAt) {
+        world.set(key, spawn(key));                        // respawn: replace + broadcast this tick
+      }
+    }
+    if (world.get('npc:guard') === undefined) {
+      world.ensure('npc:guard', { x: 400, y: 60, hp: 80 }); // a server entity: no connection owns it
+    }
+    world.applyTo('u7', { type: 'impulse', dx: 0, dy: -12 }); // through your shared apply, next tick
+  }
+});
+```
+
+The `world` view is the whole surface: `get`/`catalog` (reads), `set(key, state)` (replace + broadcast + wake - teleports, respawns), `applyTo(key, cmd)` (through the shared `apply`, exactly like the shot context's `applyTo`; lands on the next tick, since commands land on drains), `ensure(key, initialState?)` (a server entity - it starts active so `onMissing` drives it from its first tick, is remote to every client like any other peer, is fully hit-testable, and lives until `remove`; omitting `initialState` seeds it like a client entity, including from a warm-handoff snapshot), and `remove(key)` (departure broadcast). Everything composes downstream unchanged - interest culls NPCs like players, cells mode routes their updates to cell topics, `hitTest` rewinds them. An NPC that shoots needs no lag compensation (server aim has zero latency): resolve its attack in `onTick` and `applyTo` the victim.
+
+Three things to know. Ticking stays demand-armed: when every entity rests, ticks - and `onTick` - stop until the next command or sync; return `true` from `onTick` to request the next tick anyway (the heartbeat for time-based logic like respawn timers - return it while timers are pending, and the topic goes fully idle when you stop). On a cluster, `onTick` runs on the topic's owning instance only (where the authoritative tick runs); server entities live with that tick, and after an ownership handoff the new owner's first `onTick` simply re-ensures them (with `snapshot: true`, their states recover through the same warm-handoff path as everyone else). And server entities share the key space with client identities, so give them their own namespace (an `npc:` prefix) - a client whose identity matched a server key would take the entity over at sync. A throwing `onTick` never kills the tick. Off by default; requires `svelte-adapter-uws >= 0.6.0-next.47`.
+
 ---
 
 ## Shared documents

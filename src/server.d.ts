@@ -2925,6 +2925,58 @@ export interface SmoothConfig {
 	 * was never replicated to the shooter. Off by default.
 	 */
 	hitTest?: SmoothHitTestConfig;
+	/**
+	 * Opt-in server logic hook, run on the ticking instance (the topic owner on a
+	 * cluster) once per authoritative tick, after the command drain and before the
+	 * broadcast - so reads see the tick's settled states and every write
+	 * broadcasts atomically with it. `world` is the scoped authority view
+	 * (forces, deaths, respawns, scripted movers, server entities); `t` is the
+	 * tick's wall stamp (the same stamp acknowledgements carry). Return `true` to
+	 * request the next tick even with no entity motion - the heartbeat for
+	 * time-based logic like respawn timers (ticking is otherwise demand-armed and
+	 * stops when everything rests). A throwing hook never kills the tick. Off by
+	 * default; requires svelte-adapter-uws >= 0.6.0-next.47.
+	 */
+	onTick?: (world: SmoothWorld, t: number) => void | boolean;
+}
+
+/**
+ * The scoped authority view handed to `onTick` - the server-side world surface
+ * for game logic. It is a hook, not a game runtime: reads and writes on the
+ * topic's entities, nothing else. Server entities share the key space with
+ * client identities - give them their own namespace (e.g. an `npc:` prefix), or
+ * a client whose identity matches a server key would take the entity over at
+ * sync.
+ */
+export interface SmoothWorld {
+	/** The entity's authoritative state, or undefined. Treat as read-only - use `set` to change it. */
+	get(key: string): any;
+	/** Every entity's `{ key, state }` - the post-drain snapshot of this tick. */
+	catalog(): Array<{ key: string; state: any }>;
+	/**
+	 * REPLACE an entity's state (a teleport, a respawn, a scripted placement):
+	 * broadcasts this tick, wakes `onMissing` so simulation continues from the
+	 * new state. The discontinuous counterpart of `applyTo`. False for an
+	 * unknown key.
+	 */
+	set(key: string, state: any): boolean;
+	/**
+	 * Run a command through the shared `apply` (a knockback impulse, damage) -
+	 * the same semantics as the shoot context's `applyTo`: no acknowledgement, a
+	 * non-commanded update the owner receives. Applies on the NEXT tick
+	 * (commands land on drains). False for an unknown key.
+	 */
+	applyTo(key: string, command: any): boolean;
+	/**
+	 * Create a SERVER entity - no connection owns it; it starts active so
+	 * `onMissing` drives it from its first tick, and it lives until `remove`.
+	 * Omitting `initialState` seeds it like a client entity (a warm-handoff
+	 * snapshot state when one is pending, else the declared `initial(key)`).
+	 * For an existing key this is a read (it never rebinds). Returns the state.
+	 */
+	ensure(key: string, initialState?: any): any;
+	/** Remove an entity with the full departure broadcast. False for an unknown key. */
+	remove(key: string): boolean;
 }
 
 /** A 2D point in the topic's own position units. */

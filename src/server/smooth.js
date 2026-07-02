@@ -407,6 +407,13 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			// on - it closes over the record, so it cannot be built inside this
 			// literal. Null otherwise (the OFF-path shape is unchanged).
 			aoi: null,
+			// The server world view for the onTick hook (server game logic: forces,
+			// respawns, NPC drivers), assigned right below when onTick is configured.
+			// Null otherwise - the tick pays one null check. The warn latches keep a
+			// throwing hook / a key-collision warning to once per record in dev.
+			world: null,
+			worldThrowWarned: false,
+			worldEnsureWarned: false,
 			// Lag-compensation history ring (opt-in; null on the default path). When
 			// set, the tick records the post-drain catalog here and the __smoothShoot
 			// RPC rewinds against it. Gated entirely on cfg.hitTest so the OFF path is
@@ -436,6 +443,19 @@ export function _smoothRecord(name, cfg, platform, rt) {
 		// hitTest reads candidates / radius / interp-delay through one accessor so
 		// the shot handlers never branch on the interest mode (per-client vs cells).
 		if (cfg.hitTest) rec.aoi = _smoothAoi(rec);
+		if (cfg.onTick) {
+			// Version gate: the world view needs the authority's server-entity
+			// surface. Feature-detected (not version-compared) so a custom runtime
+			// that implements it passes; an old adapter fails actionably here - the
+			// first sync/command for the topic - rather than deep in a tick.
+			if (typeof rec.authority.set !== 'function') {
+				throw new LiveError(
+					'INTERNAL',
+					'live.smooth() onTick requires svelte-adapter-uws 0.6.0-next.47 or newer (the installed adapter authority has no server-entity surface)'
+				);
+			}
+			rec.world = _smoothWorld(rec);
+		}
 		_smoothTopics.set(name, rec);
 	}
 	// Capture the reserved prefixes once so the cluster relay handlers can resolve
@@ -982,6 +1002,12 @@ function _smoothTick(rec) {
 	// every update and acknowledgement below reflects the same drained state.
 	const { updates, acks, events = [], idle } = rec.authority.drain();
 	const t = wallEpoch();
+	// Server world hook (the ticking instance only - a cluster non-owner
+	// returned before the drain above). Runs post-drain so it reads the tick's
+	// settled states; its writes merge into this tick's updates/acks and land
+	// in the catalog taken below, so they broadcast, ring-record, and cull
+	// atomically with the drain.
+	const worldRun = rec.world !== null ? rec.world.run(updates, acks, t) : null;
 	// Area-of-interest: when this topic opted into interest, build the relevancy
 	// for THIS instance's local subscribers once per tick from the drained catalog
 	// (which on a cluster owner spans every entity cluster-wide, local and remote
@@ -1017,7 +1043,8 @@ function _smoothTick(rec) {
 		// Key the ring on the monotonic axis (immune to a wall backstep); `t` (wall)
 		// still drives the frame/ack stamps and the wall-axis idle grace below.
 		rec.lagComp.record(catalog, rec.monoClock.mono(t));
-		if (!idle) rec.lagCompLastActive = t;
+		// World-driven motion counts as live motion for the grace window too.
+		if (!idle || (worldRun !== null && worldRun.dirty)) rec.lagCompLastActive = t;
 	}
 	rec.interestDirty = false;
 	for (let i = 0; i < updates.length; i++) {
@@ -1207,7 +1234,9 @@ function _smoothTick(rec) {
 	// stay owned). Single-instance keeps the original demand-armed behavior.
 	if (cluster) {
 		_armSmoothTick(rec);
-	} else if (!idle) {
+	} else if (!idle || (worldRun !== null && worldRun.rearm)) {
+		// World mutation, a pending world injection, or the hook returning true
+		// (its explicit heartbeat) sustains the tick like drained motion does.
 		_armSmoothTick(rec);
 	} else if (rec.lagComp !== null && t - rec.lagCompLastActive < rec.cfg.hitTest.maxRewindMs) {
 		// hitTest grace: keep recording the still board for one rewind window after
@@ -1886,6 +1915,173 @@ function _smoothAoi(rec) {
 }
 
 /**
+ * The server world view handed to `onTick`: a scoped authority surface for
+ * server game logic (forces, deaths, respawns, scripted movers, NPCs). Built
+ * once per record when `onTick` is configured; `run` binds it to one tick's
+ * drain result, invokes the hook, and reports what it did so the tick can
+ * publish and re-arm. The hook runs post-drain, so reads see the tick's
+ * settled states, and every write lands in the SAME tick's broadcast (merged
+ * into `updates`, with a pending ack fixed up to keep carrying the final
+ * state - the invariant inject established) and in the catalog the rings and
+ * relevancy consume below the hook.
+ * @param {any} rec
+ */
+function _smoothWorld(rec) {
+	// One sentinel per record: the `ws` slot for server entities. The authority
+	// compares ws by reference, so re-ensuring a server key never resets it; no
+	// close path ever matches the sentinel, so a server entity lives until
+	// world.remove - the deliberate lifecycle (it also keeps its record alive).
+	const sentinel = { __smoothServer: true };
+	let updates = null;
+	let acks = null;
+	let dirty = false;
+	let armed = false;
+	// Merge one changed entity into THIS tick's updates: overwrite the drain's
+	// entry when the entity already moved this tick (one frame, final state),
+	// else append a non-commanded update (the owner must receive it - the same
+	// polarity onMissing/inject delivery holds). A pending ack for the entity is
+	// updated to the final state so the owner reconciles in one step.
+	function report(key, state, ws) {
+		let found = false;
+		for (let i = 0; i < updates.length; i++) {
+			if (updates[i].key === key) {
+				updates[i] = { key, state, ws: updates[i].ws, commanded: false };
+				found = true;
+				break;
+			}
+		}
+		if (!found) updates.push({ key, state, ws, commanded: false });
+		for (let i = 0; i < acks.length; i++) {
+			if (acks[i].key === key) {
+				acks[i].state = state;
+				break;
+			}
+		}
+		dirty = true;
+	}
+	const world = {
+		/** The entity's authoritative state, or undefined. A read-only value:
+		 * assigning into it does not (and must not) reach the authority - use set. */
+		get(key) {
+			const e = rec.authority.get(key);
+			return e === undefined ? undefined : e.state;
+		},
+		/** Every entity's `{ key, state }`, the post-drain snapshot. */
+		catalog() {
+			return rec.authority.catalog();
+		},
+		/**
+		 * REPLACE an entity's state (teleport, respawn, scripted placement):
+		 * broadcasts this tick, wakes onMissing. False for an unknown key.
+		 */
+		set(key, state) {
+			const e = rec.authority.get(key);
+			if (e === undefined) return false;
+			rec.authority.set(key, state);
+			report(key, state, e.ws);
+			return true;
+		},
+		/**
+		 * Run a command through the shared `apply` (a knockback impulse, damage) -
+		 * the same name and semantics as the shoot ctx's applyTo. Applies on the
+		 * NEXT tick (commands land on drains), which the hook's return arms.
+		 */
+		applyTo(key, cmd) {
+			if (typeof key !== 'string') return false;
+			if (rec.authority.inject(key, cmd)) {
+				armed = true;
+				return true;
+			}
+			return false;
+		},
+		/**
+		 * Create a SERVER entity (no connection): starts active, so onMissing
+		 * drives it from its first tick; broadcasts its spawn this tick. An
+		 * omitted initialState seeds through the warm-handoff-aware path (a
+		 * snapshot-recovered state, else the declared `initial(key)`). For an
+		 * EXISTING key this is a read - it never rebinds (rebinding a client
+		 * entity to the server sentinel would steal its command stream, so a
+		 * collision warns once in dev: give server entities their own key
+		 * namespace, e.g. a prefix).
+		 */
+		ensure(key, initialState) {
+			const existing = rec.authority.get(key);
+			if (existing !== undefined) {
+				if (_IS_DEV && existing.ws !== sentinel && !rec.worldEnsureWarned) {
+					rec.worldEnsureWarned = true;
+					console.warn(
+						'[svelte-realtime] live.smooth() onTick world.ensure(' + JSON.stringify(key) + ') targets an entity owned by a live connection; ' +
+						'server entities should use their own key namespace (e.g. a prefix). The call is a no-op read.'
+					);
+				}
+				return existing.state;
+			}
+			const state = initialState !== undefined ? initialState : _smoothSeed(rec, key);
+			rec.authority.ensure(key, sentinel, state, { active: true });
+			report(key, state, sentinel);
+			return state;
+		},
+		/**
+		 * Remove an entity with the full departure bundle every removal site
+		 * holds: authority drop, ring drop, registry/interest/cells release, and
+		 * the departure broadcast (cell-scoped in cells mode, cluster-relayed).
+		 */
+		remove(key) {
+			if (rec.authority.get(key) === undefined) return false;
+			for (let i = 0; i < updates.length; i++) {
+				if (updates[i].key === key) {
+					updates.splice(i, 1);
+					break;
+				}
+			}
+			rec.authority.remove(key);
+			if (rec.interest) {
+				rec.registry.delete(key);
+				rec.interest.releaseSubscriber(key);
+			}
+			if (rec.cells) {
+				rec.registry.delete(key);
+				_releaseCellSubs(rec, key);
+			}
+			_smoothRelayRemove(rec, key);
+			dirty = true;
+			return true;
+		}
+	};
+	return {
+		/**
+		 * Bind the view to this tick's drain result and run the hook. Returns
+		 * `{ dirty, rearm }`: `dirty` = state actually changed this tick (counts
+		 * as live motion for the hitTest grace window); `rearm` = the next tick
+		 * must fire (a mutation, a pending injection, or the hook returning true -
+		 * the explicit heartbeat for time-based logic like respawn timers).
+		 */
+		run(tickUpdates, tickAcks, t) {
+			updates = tickUpdates;
+			acks = tickAcks;
+			dirty = false;
+			armed = false;
+			let more = false;
+			try {
+				more = rec.cfg.onTick(world, t) === true;
+			} catch (err) {
+				// App logic riding the framework tick: a throw must never kill the
+				// tick (the drain's own updates still publish). Surface it once per
+				// record in dev rather than swallowing silently.
+				if (_IS_DEV && !rec.worldThrowWarned) {
+					rec.worldThrowWarned = true;
+					console.warn('[svelte-realtime] live.smooth() onTick threw; the tick continues without its remaining changes.', err);
+				}
+			}
+			const result = { dirty, rearm: dirty || armed || more };
+			updates = null;
+			acks = null;
+			return result;
+		}
+	};
+}
+
+/**
  * Edge measurement for a shot: from the shot payload compute the favor-shooter
  * reach WIDTH and the rewind AGE (both durations, axis-free), run the per-
  * connection replay defense + latch, and - when a `detectionHook` is configured
@@ -2212,6 +2408,9 @@ export const _smoothRegister = function smooth(config) {
 	if (!(typeof snapshotDebounceMs === 'number' && Number.isFinite(snapshotDebounceMs) && snapshotDebounceMs > 0)) {
 		throw new Error('[svelte-realtime] live.smooth() snapshotDebounceMs must be a positive number');
 	}
+	if (config.onTick !== undefined && typeof config.onTick !== 'function') {
+		throw new Error('[svelte-realtime] live.smooth() onTick must be a function (world, t) => void | boolean\n  See: https://svti.me/smooth');
+	}
 	const interest = config.interest === undefined ? undefined : _validateInterest(config.interest);
 	const hitTest = config.hitTest === undefined ? undefined : _validateHitTest(config.hitTest, interest);
 	const cfg = {
@@ -2224,7 +2423,8 @@ export const _smoothRegister = function smooth(config) {
 		snapshot: config.snapshot === true,
 		snapshotDebounceMs,
 		interest,
-		hitTest
+		hitTest,
+		onTick: config.onTick
 	};
 	const guard = config.guard;
 	const argCount = config.topicArgs !== undefined
