@@ -1025,6 +1025,36 @@ function _smoothTick(rec) {
 	// it relayed (and their acks routed back). When falsy, the single-instance
 	// path below runs unchanged.
 	const cluster = rec.platform && rec.platform.smooth;
+	// Clock fence: a fenced instance's wall clock is untrustworthy for the
+	// rewind axis and the owner-stamped `t` on ack/sync frames, so a fenced
+	// owner stands down through the same path a failed lease renewal takes -
+	// fenced behaves like dead, and crash takeover is an already-shipped,
+	// already-tested path. The lease is released proactively so a
+	// healthy-clocked sibling claims immediately instead of waiting out the
+	// TTL. Clustered mode only: fencing needs the cluster reference clock to
+	// measure against, and a single instance has no sibling to hand off to.
+	const clockFence = rec.platform && rec.platform.clockFence;
+	let clockFenced = false;
+	if (cluster && rec.owned && clockFence && typeof clockFence.fenced === 'function') {
+		// Contained like the release below: the predicate is app/extension-
+		// supplied, and a throw here would kill the tick permanently (the
+		// timer only re-arms at the tail). An erroring fence reads unfenced.
+		try { clockFenced = clockFence.fenced() === true; } catch { /* unfenced on error */ }
+	}
+	if (clockFenced) {
+		rec.owned = false;
+		_smoothClearSnapshotState(rec);
+		if (typeof cluster.releaseOwner === 'function') {
+			try {
+				const r = cluster.releaseOwner(rec.wireTopic);
+				if (r && typeof r.catch === 'function') r.catch(() => {});
+			} catch { /* release is best-effort; the lease TTL is the backstop */ }
+		}
+		if (rec.registry.size === 0) {
+			_smoothForget(rec);
+			return;
+		}
+	}
 	// A non-owner does not tick the authority (a demoted owner that lost the lease is
 	// no longer authoritative and must not drain or relay stale state). When it has
 	// opted into interest it runs a receive-side relevancy cull instead - delivering

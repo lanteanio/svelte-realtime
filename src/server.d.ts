@@ -3324,6 +3324,16 @@ export interface OutboundWebhookConfig {
 	 */
 	secret?: string;
 	/**
+	 * The retiring secret during a key rotation. While set, every request
+	 * carries TWO comma-separated signature entries (current key first), so
+	 * receivers still verifying against the old key keep accepting deliveries
+	 * while the fleet converges - the rotation stops being an availability
+	 * cliff. Receiver contract: split the header on commas and accept when
+	 * any entry matches. Drop this option once every receiver holds the new
+	 * key. Requires `secret`.
+	 */
+	previousSecret?: string;
+	/**
 	 * Override the `idempotency-key` header. Default: a content hash of
 	 * `(topic, event, body)`, stable across retries and a leader-transition
 	 * double-fire so receivers can dedup to effectively-once.
@@ -4128,6 +4138,17 @@ export interface RealtimeConfig {
 	 * leaves the signal off entirely.
 	 */
 	protocolVersion?: number;
+	/**
+	 * Enumeration-safe unknown paths (opt-in). When set, a wire RPC to an
+	 * unregistered path is answered exactly as a guard denial would answer the
+	 * same caller (`UNAUTHENTICATED` without a user, `FORBIDDEN` with one, the
+	 * same fixed messages), so probing cannot separate "exists but forbidden"
+	 * from "does not exist". Off by default: it changes the wire contract for
+	 * clients that key on `NOT_FOUND`. The RPC metric keeps recording
+	 * `NOT_FOUND` server-side either way - only the wire reply masks. The
+	 * dev-mode unknown-path console warning is unaffected. @default false
+	 */
+	maskNotFound?: boolean;
 }
 
 /** A retained, undeliverable outbound-webhook event. */

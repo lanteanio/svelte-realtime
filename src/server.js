@@ -3449,7 +3449,17 @@ export function publish(topic, event, data, options) {
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound } = cfg;
+
+	// Enumeration-safe unknown-path handling (opt-in): answer a wire RPC to an
+	// unregistered path exactly as a guard denial would answer the same caller,
+	// so probing cannot separate "exists but forbidden" from "does not exist".
+	if (maskNotFound !== undefined) {
+		if (typeof maskNotFound !== 'boolean') {
+			throw new Error('[svelte-realtime] realtime({ maskNotFound }): must be a boolean');
+		}
+		state.maskNotFound = maskNotFound;
+	}
 
 	// Protocol-compat signal (opt-in): an integer the app bumps only on a BREAKING
 	// wire/contract change. The client advertises its baked version on connect; a

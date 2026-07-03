@@ -1284,6 +1284,42 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		expect(sc.calls.renewOwner).toContain(WT);
 	});
 
+	it('a fenced owner stands down: releases the lease and stops renewing', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		let fenced = false;
+		platform.clockFence = { fenced: () => fenced };
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(40);
+		expect(sc.calls.renewOwner.length).toBeGreaterThanOrEqual(1);
+		const renewsBefore = sc.calls.renewOwner.length;
+
+		// The fence trips: the next tick demotes through the failed-renew path
+		// and proactively releases the lease so a healthy sibling claims
+		// immediately instead of waiting out the TTL.
+		fenced = true;
+		await vi.advanceTimersByTimeAsync(40);
+		expect(sc.calls.releaseOwner).toContain(WT);
+		await vi.advanceTimersByTimeAsync(200);
+		expect(sc.calls.renewOwner.length).toBe(renewsBefore);
+	});
+
+	it('an attached-but-healthy clock fence changes nothing', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const sc = scriptedSmoothCluster({ owner: true });
+		const platform = clusterPlatform(sc);
+		platform.clockFence = { fenced: () => false };
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(40);
+		expect(sc.calls.renewOwner.length).toBeGreaterThanOrEqual(1);
+		expect(sc.calls.releaseOwner).toHaveLength(0);
+	});
+
 	it('keeps renewing the lease while holding an IDLE entity (does not stop when the drain goes idle)', async () => {
 		const { name } = declareShape({ tickMs: 20 });
 		const sc = scriptedSmoothCluster({ owner: true });

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.63] - 2026-07-03
+
+### Added
+
+- **Outbound webhook signing-key rotation (`previousSecret`) - rotating the HMAC secret stops being an availability cliff.** While the retiring key is set alongside the current one, every delivery carries TWO comma-separated `x-webhook-signature` entries (current key first), so receivers still verifying against the old key keep accepting while the fleet converges; drop the option once every receiver holds the new key. Receiver contract: split the header on commas and accept when any entry matches - that convention is rotation-proof with either a single or a dual header. The default idempotency key stays keyed to the current secret only, so a rotation briefly reopens the leader-transition dedup window (retries of one delivery are unaffected - they reuse the computed headers). Both secrets are now validated at definition time (non-empty; `previousSecret` requires `secret`).
+- **`realtime({ maskNotFound: true })` - enumeration-safe unknown paths.** By default an unregistered path answers `NOT_FOUND` while a guard-denied existing path answers `FORBIDDEN`/`UNAUTHENTICATED`, which lets an unauthenticated prober map which paths exist. With the flag set, an unknown path is answered exactly as a guard denial would answer the same caller (same code selection, same fixed message), so probing cannot separate "exists but forbidden" from "does not exist". Opt-in because clients legitimately key on `NOT_FOUND`; the RPC metric keeps recording `NOT_FOUND` server-side either way, and the dev-mode unknown-path console warning still fires.
+- **Clustered `live.smooth` stands down on a fenced clock.** When the platform carries a clock fence (`platform.clockFence`, attached via the extensions clock-skew sampler's fence option and forwarded by `bus.wrap`), a topic owner whose instance is fenced demotes through the exact path a failed lease renewal takes - and proactively releases its ownership lease so a healthy-clocked sibling claims immediately instead of waiting out the TTL. A drifting wall clock skews the server-rewind time axis and the owner-stamped frame times silently; fencing converts that into a clean, already-tested owner handoff. No fence attached (or a healthy fence) is byte-identical.
+
+### Fixed
+
+- **Room guards now classify bare throws like every other guard.** `live.room({ guard })` called the app guard raw, so a guard that threw a plain `Error` surfaced to the client as `INTERNAL_ERROR` (5xx) with a distinguishable shape, unlike module guards. Room guards now route through the shared classifier: a bare throw maps to the uniform `FORBIDDEN`/`UNAUTHENTICATED` pair with the original error preserved server-side on `.cause`, and an app-thrown `LiveError` keeps its own code and message - across the data, presence, and cursor loaders and room actions.
+- **A denied room join no longer perturbs the public rooms list or the roster, even transiently.** The room guard used to run at the loader stage - after the wire subscribe and after the hook that publishes the enumeration `created`/`updated` delta and the presence join - so a denied joiner briefly appeared before rollback. The guard now also runs as the stream's pre-subscribe filter: a denial happens before the subscribe and before any side-effect hook, and the request is stamped so the loader does not run the app guard a second time on the same join. Server-side `.load()` and the stale-reload re-run still guard at the loader as before.
+
 ## [0.6.0-next.62] - 2026-07-03
 
 ### Fixed

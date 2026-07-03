@@ -80,6 +80,17 @@ export const _webhooksOutboundRegister = function outbound(sources, config) {
 	if (config.urlMode !== undefined && config.urlMode !== 'strict' && config.urlMode !== 'allowlist' && config.urlMode !== 'off') {
 		throw new Error("[svelte-realtime] live.webhooks.outbound: urlMode must be 'strict', 'allowlist', or 'off'");
 	}
+	if (config.secret !== undefined && (typeof config.secret !== 'string' || config.secret.length === 0)) {
+		throw new Error('[svelte-realtime] live.webhooks.outbound: secret must be a non-empty string');
+	}
+	if (config.previousSecret !== undefined) {
+		if (typeof config.previousSecret !== 'string' || config.previousSecret.length === 0) {
+			throw new Error('[svelte-realtime] live.webhooks.outbound: previousSecret must be a non-empty string');
+		}
+		if (config.secret === undefined) {
+			throw new Error('[svelte-realtime] live.webhooks.outbound: previousSecret requires secret (the current key) to be set');
+		}
+	}
 	// Fail fast on a static url: the always-on scheme gate plus, in
 	// strict/allowlist mode, the literal range floor are checked at definition
 	// time so a misconfigured endpoint is caught at boot, not on the first

@@ -233,6 +233,25 @@ export async function _runGuard(guardFn, ctx) {
 }
 
 /**
+ * The wire reply for an unregistered path. With `realtime({ maskNotFound })`
+ * set, answer exactly as `_runGuard` answers a denied caller - same code
+ * selection off the same user object, same fixed message - so probing cannot
+ * separate "exists but forbidden" from "does not exist". The RPC metric
+ * records NOT_FOUND either way; only the wire reply masks.
+ *
+ * @param {any} ws
+ * @returns {{ ok: false, code: string, error: string }}
+ */
+function _unknownPathReply(ws) {
+	if (state.maskNotFound) {
+		const user = typeof ws?.getUserData === 'function' ? ws.getUserData() : null;
+		const code = user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+		return { ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
+	}
+	return { ok: false, code: 'NOT_FOUND', error: 'Not found' };
+}
+
+/**
  * Check whether a raw WebSocket message is an RPC request and handle it.
  *
  * @param {any} ws
@@ -834,7 +853,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 			console.warn(`[svelte-realtime] RPC call to '${path}' - no such live function registered\n  See: https://svti.me/rpc`);
 		}
 		_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
-		return { id, ok: false, code: 'NOT_FOUND', error: 'Not found' };
+		return { id, ..._unknownPathReply(ws) };
 	}
 
 	const _h = _getCtxHelpers(platform);
@@ -954,7 +973,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
-		_respond(ws, platform, id, { ok: false, code: 'NOT_FOUND', error: 'Not found' });
+		_respond(ws, platform, id, _unknownPathReply(ws));
 		return;
 	}
 

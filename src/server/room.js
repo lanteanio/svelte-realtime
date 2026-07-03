@@ -1,6 +1,7 @@
 // @ts-check
 import { live, close, unsubscribe, handleRpc } from '../server.js';
 import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
+import { _runGuard } from './dispatch.js';
 import { LiveError } from './live-error.js';
 import { _validSegmentRe } from './validate.js';
 import { _IS_DEV } from './env.js';
@@ -274,8 +275,19 @@ export const _roomRegister = function room(config) {
 		}
 	};
 
+	// Classified guard runner shared by every room surface. Routing through
+	// _runGuard gives a bare-throwing room guard the same uniform 4xx pair as
+	// module guards (cause kept server-side) instead of a distinguishable
+	// INTERNAL_ERROR; an app-thrown LiveError keeps its own code and message.
+	const runRoomGuard = guardFn
+		? (ctx, args) => _runGuard((c) => guardFn(c, ...args), ctx)
+		: null;
+
 	const dataStream = live.stream(topicFn, async function roomInit(ctx, ...args) {
-		if (guardFn) await guardFn(ctx, ...args);
+		// The pre-subscribe filter below already ran the guard for a wire
+		// subscribe (and stamped the ctx); this loader-stage run covers the
+		// paths with no filter - `.load()` and the stale-reload re-run.
+		if (runRoomGuard && !(/** @type {any} */ (ctx))._roomGuardRan) await runRoomGuard(ctx, args);
 		const result = await initFn(ctx, ...args);
 		// onJoin runs after successful init so a failed init doesn't leave orphaned side effects
 		if (onJoin) {
@@ -398,6 +410,20 @@ export const _roomRegister = function room(config) {
 		} : undefined
 	});
 
+	// Pre-subscribe guard: the loader-stage guard above runs AFTER
+	// `platform.subscribe` and AFTER the `__onSubscribe` hook has published
+	// the enumeration delta and the presence join, so a denied joiner would
+	// momentarily perturb the public rooms list and roster before rollback.
+	// Exposing the guard as the stream filter runs it before any of that; it
+	// stamps the request ctx so the loader skips the duplicate run.
+	if (runRoomGuard) {
+		/** @type {any} */ (dataStream).__streamFilter = async (ctx, ...args) => {
+			await runRoomGuard(ctx, args);
+			/** @type {any} */ (ctx)._roomGuardRan = true;
+			return true;
+		};
+	}
+
 	/** @type {any} */ (roomExport).__isRoom = true;
 	/** @type {any} */ (roomExport).__dataStream = dataStream;
 	/** @type {any} */ (roomExport).__topicFn = topicFn;
@@ -453,7 +479,7 @@ export const _roomRegister = function room(config) {
 		/** @type {any} */ (roomExport).__presenceStream = live.stream(
 			(ctx, ...args) => topicFn(ctx, ...args) + ':presence',
 			async (ctx, ...args) => {
-				if (guardFn) await guardFn(ctx, ...args);
+				if (runRoomGuard) await runRoomGuard(ctx, args);
 				// The roster is keyed by the WIRE data topic (the data-stream's
 				// onSubscribe acquired it with the tenant-prefixed topic), so the
 				// loader must prefix the same way or a tenant would read an empty /
@@ -475,7 +501,7 @@ export const _roomRegister = function room(config) {
 		/** @type {any} */ (roomExport).__cursorStream = live.stream(
 			(ctx, ...args) => topicFn(ctx, ...args) + ':cursors',
 			async (ctx, ...args) => {
-				if (guardFn) await guardFn(ctx, ...args);
+				if (runRoomGuard) await runRoomGuard(ctx, args);
 				return [];
 			},
 			{ merge: 'cursor' }
@@ -493,7 +519,7 @@ export const _roomRegister = function room(config) {
 				continue;
 			}
 			const wrappedAction = live(async function roomAction(ctx, ...args) {
-				if (guardFn) await guardFn(ctx, ...args);
+				if (runRoomGuard) await runRoomGuard(ctx, args);
 				const roomArgs = args.slice(0, _roomArgCount);
 				const roomTopic = _callTopicFn(topicFn, ctx, roomArgs);
 				// The publish shadow feeds the LOGICAL roomTopic to the (scoped) wrapper

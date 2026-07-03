@@ -85,6 +85,7 @@ import { mockPlatform } from './helpers/mock-platform.js';
 import { toArrayBuffer } from './helpers/encode.js';
 import { installFakeRuntimeClock, releaseRuntimeClock } from './helpers/runtime-clock.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
+import { state } from '../src/server/state.js';
 
 const noopRegistry = () => ({
 	counter: () => ({ inc() {} }),
@@ -315,6 +316,54 @@ describe('handleRpc()', () => {
 
 		expect(platform.sent[0].data.ok).toBe(false);
 		expect(platform.sent[0].data.code).toBe('NOT_FOUND');
+	});
+
+	describe('maskNotFound (enumeration-safe unknown paths)', () => {
+		afterEach(() => {
+			state.maskNotFound = false;
+		});
+
+		it('answers an unknown path as a guard denial for a user-carrying caller', async () => {
+			state.maskNotFound = true;
+			handleRpc(ws, toArrayBuffer({ rpc: 'unknown/fn', id: 'm1', args: [] }), platform);
+			await new Promise((r) => setTimeout(r, 10));
+			expect(platform.sent[0].data.ok).toBe(false);
+			expect(platform.sent[0].data.code).toBe('FORBIDDEN');
+			expect(platform.sent[0].data.error).toBe('Access denied');
+		});
+
+		it('answers an unknown path as UNAUTHENTICATED for an anonymous caller', async () => {
+			state.maskNotFound = true;
+			ws.getUserData = () => null;
+			handleRpc(ws, toArrayBuffer({ rpc: 'unknown/fn', id: 'm2', args: [] }), platform);
+			await new Promise((r) => setTimeout(r, 10));
+			expect(platform.sent[0].data.code).toBe('UNAUTHENTICATED');
+			expect(platform.sent[0].data.error).toBe('Authentication required');
+		});
+
+		it('makes an unknown path indistinguishable from a guard-denied existing path', async () => {
+			state.maskNotFound = true;
+			const denyAll = guard(() => { throw new Error('secret internal reason'); });
+			__registerGuard('sealed', denyAll);
+			__register('sealed/real', live(async () => 'never'));
+
+			handleRpc(ws, toArrayBuffer({ rpc: 'sealed/real', id: 'p1', args: [] }), platform);
+			await new Promise((r) => setTimeout(r, 10));
+			handleRpc(ws, toArrayBuffer({ rpc: 'sealed/ghost', id: 'p2', args: [] }), platform);
+			await new Promise((r) => setTimeout(r, 10));
+
+			const denied = platform.sent.find((s) => s.event === 'p1').data;
+			const masked = platform.sent.find((s) => s.event === 'p2').data;
+			expect(masked.code).toBe(denied.code);
+			expect(masked.error).toBe(denied.error);
+			expect(masked.ok).toBe(false);
+		});
+
+		it('realtime({ maskNotFound }) validates and wires the flag', () => {
+			expect(() => realtime({ maskNotFound: 'yes' })).toThrow('must be a boolean');
+			realtime({ maskNotFound: true });
+			expect(state.maskNotFound).toBe(true);
+		});
 	});
 
 	it('returns INVALID_REQUEST for non-array args', async () => {
@@ -5933,6 +5982,96 @@ describe('live.room()', () => {
 		expect(resp.data.data).toEqual([{ id: 1 }]);
 	});
 
+	it('classifies a bare-throwing room guard as FORBIDDEN, never INTERNAL_ERROR', async () => {
+		const room = live.room({
+			topic: (ctx, roomId) => 'bare-guard-room:' + roomId,
+			init: async () => [],
+			guard: async () => { throw new Error('db exploded'); },
+			topicArgs: 1
+		});
+		__register('bare-guard-room/__data', room.__dataStream);
+
+		const wsUser = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(wsUser, toArrayBuffer({ rpc: 'bare-guard-room/__data', id: 'g1', args: ['a'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		const resp = platform.sent.find((s) => s.event === 'g1').data;
+		expect(resp.ok).toBe(false);
+		expect(resp.code).toBe('FORBIDDEN');
+		// The internal detail stays server-side.
+		expect(resp.error).toBe('Access denied');
+	});
+
+	it('a LiveError-throwing room guard keeps its app-chosen code', async () => {
+		const room = live.room({
+			topic: (ctx, roomId) => 'coded-guard-room:' + roomId,
+			init: async () => [],
+			guard: async () => { throw new LiveError('PAYMENT_REQUIRED', 'Upgrade to join'); },
+			topicArgs: 1
+		});
+		__register('coded-guard-room/__data', room.__dataStream);
+
+		const wsUser = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(wsUser, toArrayBuffer({ rpc: 'coded-guard-room/__data', id: 'g2', args: ['a'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		const resp = platform.sent.find((s) => s.event === 'g2').data;
+		expect(resp.code).toBe('PAYMENT_REQUIRED');
+		expect(resp.error).toBe('Upgrade to join');
+	});
+
+	it('a denied join never fires an enumeration delta (guard runs pre-subscribe)', async () => {
+		const room = live.room({
+			topic: (ctx, roomId) => 'sealed-lobby:' + roomId,
+			init: async () => [],
+			enumerable: true,
+			guard: async (ctx) => {
+				if (!ctx.user?.id) throw new LiveError('UNAUTHENTICATED', 'login required');
+			},
+			topicArgs: 1
+		});
+		__register('sealed-lobby/__data', room.__dataStream);
+
+		const wsAnon = mockWs();
+		wsAnon.getUserData = () => null;
+		const platform = mockPlatform();
+		handleRpc(wsAnon, toArrayBuffer({ rpc: 'sealed-lobby/__data', id: 'e1', args: ['vip'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 30));
+
+		const resp = platform.sent.find((s) => s.event === 'e1').data;
+		expect(resp.ok).toBe(false);
+		// No created/updated delta reached the public rooms stream, and no
+		// join was published to the room topic - the denial ran before the
+		// subscribe and its side-effect hook.
+		const leaked = platform.published.filter(
+			(p) => p.event === 'created' || p.event === 'updated' || p.event === 'join'
+		);
+		expect(leaked).toHaveLength(0);
+	});
+
+	it('runs the room guard once per wire join (filter stamps the request ctx)', async () => {
+		let guardRuns = 0;
+		const room = live.room({
+			topic: (ctx, roomId) => 'counted-room:' + roomId,
+			init: async () => [],
+			guard: async () => { guardRuns++; },
+			topicArgs: 1
+		});
+		__register('counted-room/__data', room.__dataStream);
+
+		const wsUser = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(wsUser, toArrayBuffer({ rpc: 'counted-room/__data', id: 'c1', args: ['a'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		expect(platform.sent.find((s) => s.event === 'c1').data.ok).toBe(true);
+		expect(guardRuns).toBe(1);
+
+		close(wsUser, { platform });
+	});
+
 	it('rollback after a guard-thrown denial cleans up _presenceRef (no phantom roster entries)', async () => {
 		// Regression: after N anonymous guard-denied visits, an authorized
 		// follow-up user must see ONLY themselves in the roster - not
@@ -6242,6 +6381,30 @@ describe('live.webhooks namespace + outbound', () => {
 	it('signs the body with HMAC when secret is set', async () => {
 		await fireOnce(['wh-sig'], { url: baseUrl + '/', urlMode: 'off', secret: 's3cret' }, { topic: 'wh-sig' });
 		expect(received[0].headers['x-webhook-signature']).toMatch(/^sha256=[0-9a-f]{64}$/);
+	});
+
+	it('signs with BOTH keys, current first, while previousSecret is set (rotation overlap)', async () => {
+		await fireOnce(['wh-rot'], { url: baseUrl + '/', urlMode: 'off', secret: 'new-key', previousSecret: 'old-key' }, { topic: 'wh-rot', event: 'created', data: { id: 1 } });
+		const header = received[0].headers['x-webhook-signature'];
+		expect(header).toMatch(/^sha256=[0-9a-f]{64},sha256=[0-9a-f]{64}$/);
+		const body = received[0].body;
+		const [current, previous] = header.split(',');
+		expect(current).toBe('sha256=' + createHmac('sha256', 'new-key').update(body).digest('hex'));
+		expect(previous).toBe('sha256=' + createHmac('sha256', 'old-key').update(body).digest('hex'));
+	});
+
+	it('keys the default idempotency-key to the CURRENT secret only during rotation', async () => {
+		await fireOnce(['wh-rot-idem'], { url: baseUrl + '/', urlMode: 'off', secret: 'new-key', previousSecret: 'old-key' }, { topic: 'wh-rot-idem', event: 'created', data: { id: 2 } });
+		const body = JSON.stringify({ event: 'created', data: { id: 2 } });
+		const material = 'wh-rot-idem\0created\0' + body;
+		expect(received[0].headers['idempotency-key'])
+			.toBe(createHmac('sha256', 'new-key').update('idem\0' + material).digest('hex'));
+	});
+
+	it('rejects invalid secret / previousSecret shapes at definition time', () => {
+		expect(() => live.webhooks.outbound(['orders'], { url: 'https://x.com', secret: '' })).toThrow(/secret/);
+		expect(() => live.webhooks.outbound(['orders'], { url: 'https://x.com', secret: 's', previousSecret: '' })).toThrow(/previousSecret/);
+		expect(() => live.webhooks.outbound(['orders'], { url: 'https://x.com', previousSecret: 'old' })).toThrow(/requires secret/);
 	});
 
 	it('the default idempotency-key is keyed (unforgeable) when a secret is set', async () => {

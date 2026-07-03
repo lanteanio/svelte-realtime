@@ -264,6 +264,16 @@ export const state = {
 	serverProtocolVersion: undefined,
 
 	/**
+	 * `realtime({ maskNotFound: true })`: answer a wire RPC to an unknown path
+	 * exactly as a guard denial would answer the same caller, so probing
+	 * cannot separate "exists but forbidden" from "does not exist". Off by
+	 * default (apps legitimately key on NOT_FOUND). The RPC metric keeps
+	 * recording NOT_FOUND either way - only the wire reply masks.
+	 * @type {boolean}
+	 */
+	maskNotFound: false,
+
+	/**
 	 * Process-wide cluster bus. Single source of truth consulted by every
 	 * publish surface in the framework (RPC `ctx.publish`, cron tick,
 	 * reactive watchers' publish wrap, top-level `publish()` helper). When

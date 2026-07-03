@@ -1819,7 +1819,17 @@ export const _guard = guard({ authenticated: true });
 export const _guard = guard({ authenticated: true }, (ctx) => ctx.user.role === 'admin');
 ```
 
-Bare `Error` throws from any guard auto-classify: thrown errors against an anonymous user produce `LiveError('UNAUTHENTICATED')`; thrown errors with a user produce `LiveError('FORBIDDEN')`. Original errors travel on `.cause` for server-side logging. Throw `LiveError(code, message)` explicitly to control the wire-visible code and message verbatim.
+Bare `Error` throws from any guard auto-classify: thrown errors against an anonymous user produce `LiveError('UNAUTHENTICATED')`; thrown errors with a user produce `LiveError('FORBIDDEN')`. Original errors travel on `.cause` for server-side logging. Throw `LiveError(code, message)` explicitly to control the wire-visible code and message verbatim. `live.room({ guard })` guards classify the same way, and a room guard runs **before** the subscribe goes through - a denied joiner never appears in the room enumeration or the presence roster, not even transiently.
+
+### Masking path existence (`maskNotFound`)
+
+By default, calling an unregistered path returns `NOT_FOUND` while a guard-denied existing path returns `FORBIDDEN`/`UNAUTHENTICATED` - which lets an unauthenticated prober map which paths exist. For auth-sensitive apps, opt into uniform answers:
+
+```js
+realtime({ maskNotFound: true });
+```
+
+An unknown path is then answered exactly as a guard denial would answer the same caller (same code, same message), so probing cannot separate "exists but forbidden" from "does not exist". Off by default because clients legitimately key on `NOT_FOUND`; the RPC metric keeps recording `NOT_FOUND` server-side either way, and the dev-mode unknown-path console warning still fires.
 
 ### `live.scoped(predicate, fn)`
 
@@ -3837,7 +3847,7 @@ To reach an internal endpoint on purpose, set `urlMode: 'allowlist'` + `allow: [
 
 #### Delivery
 
-Delivery runs over `node:http`/`node:https` (no extra dependency). Each POST is retried with **jittered** exponential backoff (default 3 attempts, 100ms - 5s) on a 5xx / 429 / network error / timeout; a 4xx (other than 429) is a permanent client error and is not retried. When `secret` is set the body is signed as `x-webhook-signature: sha256=<hex>`. The per-attempt `timeoutMs` covers DNS, connect, TTFB and body; user callbacks are bounded by `callbackTimeoutMs`. Exhausted retries (and blocked URLs / bad payloads / blocked redirects) call `onFailure(err, event, data, attempts)` - the error never contains the `secret`, the signature, or URL credentials.
+Delivery runs over `node:http`/`node:https` (no extra dependency). Each POST is retried with **jittered** exponential backoff (default 3 attempts, 100ms - 5s) on a 5xx / 429 / network error / timeout; a 4xx (other than 429) is a permanent client error and is not retried. When `secret` is set the body is signed as `x-webhook-signature: sha256=<hex>`; during a rotation (`previousSecret` set) the header carries two comma-separated entries, current key first, so a receiver should split on commas and accept when **any** entry matches - that convention makes it rotation-proof with either a single or a dual header. The per-attempt `timeoutMs` covers DNS, connect, TTFB and body; user callbacks are bounded by `callbackTimeoutMs`. Exhausted retries (and blocked URLs / bad payloads / blocked redirects) call `onFailure(err, event, data, attempts)` - the error never contains the `secret`, the signature, or URL credentials.
 
 #### Options
 
@@ -3846,6 +3856,7 @@ Delivery runs over `node:http`/`node:https` (no extra dependency). Each POST is 
 | `url` | (required) | Destination URL, or `(event, data) => string \| Promise<string>` for a per-event URL. SSRF-checked. |
 | `transform` | `{ event, data }` | Build the POST body. Return `null` to skip the event. |
 | `secret` | - | HMAC-SHA256 signing secret; adds `x-webhook-signature` and keys the default idempotency key. |
+| `previousSecret` | - | The retiring secret during a key rotation. While set, the signature header carries two comma-separated entries (current key first), so receivers holding either key keep accepting while the fleet converges; drop it once every receiver has the new key. Requires `secret`. |
 | `idempotencyKey` | keyed/content hash | Override the `idempotency-key` header value. |
 | `retry` | `{ attempts: 3, initialDelayMs: 100, maxDelayMs: 5000, backoffMultiplier: 2 }` | Retry policy (jittered). |
 | `timeoutMs` | `10000` | Per-attempt timeout (DNS + connect + TTFB + body). |

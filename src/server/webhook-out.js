@@ -409,9 +409,20 @@ async function _runWebhookOut(entry, topic, event, data) {
 			headers['idempotency-key'] = key;
 		}
 
-		// HMAC signature so the receiver can authenticate the payload.
+		// HMAC signature so the receiver can authenticate the payload. During a
+		// key rotation (`previousSecret` set) both keys sign, comma-separated,
+		// so a receiver still verifying against the old key keeps accepting
+		// deliveries while the fleet converges - the receiver contract is:
+		// split the header on commas, accept when ANY entry matches. The
+		// idempotency key above stays keyed to the CURRENT secret only, so a
+		// rotation briefly reopens the leader-transition dedup window (retries
+		// of one delivery are unaffected - they reuse the computed headers).
 		if (config.secret) {
-			headers['x-webhook-signature'] = 'sha256=' + createHmac('sha256', config.secret).update(body).digest('hex');
+			let signature = 'sha256=' + createHmac('sha256', config.secret).update(body).digest('hex');
+			if (config.previousSecret) {
+				signature += ',sha256=' + createHmac('sha256', config.previousSecret).update(body).digest('hex');
+			}
+			headers['x-webhook-signature'] = signature;
 		}
 
 		return await _deliverWebhookOut(url, headers, body, config);
