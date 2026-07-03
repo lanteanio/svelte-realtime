@@ -2885,8 +2885,30 @@ export interface SmoothConfig {
 	 * Reconciliation replays commands, so one-shot side effects must guard on
 	 * `ctx.firstTime`, and randomness must come from `ctx.rng` (reseeded per
 	 * command id - identical on prediction, replay, and the server).
+	 * `ctx.key` names the entity whose command is being applied - the
+	 * attribution handle for authoritative side effects (who fired the shot);
+	 * the same value on the authority and on the owner's own prediction (null
+	 * client-side until the first sync reply announces the identity; requires
+	 * svelte-adapter-uws >= 0.6.0-next.50). `ctx.emitEvent` fires a discrete
+	 * one-shot event (a shot, a hit) outside the reconciled state: emitted once
+	 * per command (replay-suppressed on the client, author-excluded on the
+	 * broadcast), delivered to `view.onEvent` with a shared
+	 * `<commandId>:<ordinal>` correlation key.
 	 */
-	apply: (state: any, command: any, ctx: { firstTime: boolean; rng: { reseed(seed: number): void; float(): number; u32(): number } }) => any;
+	apply: (
+		state: any,
+		command: any,
+		ctx: {
+			firstTime: boolean;
+			rng: { reseed(seed: number): void; float(): number; u32(): number };
+			key: string | null;
+			emitEvent(
+				type: string,
+				payload?: any,
+				opts?: { key?: string | number; toAuthor?: boolean; global?: boolean }
+			): string | undefined;
+		}
+	) => any;
 	/** Starting state for a new entity: a value, or `(key) => state`. */
 	initial: any | ((key: string) => any);
 	/** Guard run before sync and commands. Throw to deny, same shape as room guards. */

@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.61] - 2026-07-03
+
+### Added
+
+- **`ctx.key` in the smooth `apply` context - the attribution handle for authoritative side effects.** An `apply` that spawns the server's copy of a fired shot or logs a player action had no way to know WHOSE command it was applying: the state deliberately carries no identity, and threading one through every state would put it on the wire every tick. The server now names the entity for every application, and the owner's own prediction reports the same key (null until the first sync reply announces the identity), so an `apply` that reads it stays deterministic on both sides at zero wire cost. Requires svelte-adapter-uws >= 0.6.0-next.50. The `SmoothConfig.apply` context type also now declares `ctx.emitEvent`, which the README documented but the type omitted.
+
 ## [0.6.0-next.60] - 2026-07-02
 
 ### Added
