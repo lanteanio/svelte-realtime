@@ -190,3 +190,45 @@ describe('SmoothEntity reportCenter / clearCenter', () => {
 		expect(reports).toHaveLength(2);
 	});
 });
+
+describe('SmoothEntity state identity (raw state, no deep proxy)', () => {
+	afterEach(() => {
+		for (const dir of runeProbeDirs) {
+			if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+		}
+		runeProbeDirs.length = 0;
+		if (existsSync(runeProbeRoot) && readdirSync(runeProbeRoot).length === 0) {
+			rmSync(runeProbeRoot, { recursive: true, force: true });
+		}
+	});
+
+	// Apps hang shared immutable records off their states and compare them by
+	// reference (an identity-keyed Map, a frozen singleton). The view must hand
+	// back the channel's objects untouched: a deep $state proxy would wrap every
+	// nested read in a fresh proxy and silently break those comparisons.
+	it('local and remote hand back the channel frame objects by reference, nested records included', async () => {
+		const SmoothEntity = await loadSmoothEntity();
+		const ch = mockChannel();
+		const view = new SmoothEntity(ch, statusStore);
+
+		const RECORD = Object.freeze({ speed: 24, name: 'ak' });
+		const REGISTRY = new Map([[RECORD, 3]]);
+		const local = { x: 1, y: 2, weapon: RECORD };
+		const remoteState = { x: 5, y: 6, weapon: RECORD };
+		ch.frame(local, new Map([['peer', remoteState]]));
+
+		expect(view.local).toBe(local); // the frame object itself, not a wrapper
+		expect(view.local.weapon).toBe(RECORD); // nested reads keep identity
+		expect(REGISTRY.get(view.local.weapon)).toBe(3); // identity-keyed lookups resolve
+		expect(view.remote.get('peer')).toBe(remoteState);
+		expect(view.remote.get('peer').weapon).toBe(RECORD);
+
+		// Reactivity by replacement still holds: a new frame shows through.
+		const next = { x: 9, y: 9, weapon: RECORD };
+		ch.frame(next, new Map());
+		expect(view.local).toBe(next);
+		expect(view.remote.size).toBe(0);
+
+		view.destroy();
+	});
+});

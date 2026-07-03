@@ -28,8 +28,16 @@ import { _devtoolsSmoothRegister } from './client/devtools-instrument.js';
  */
 export class SmoothEntity {
 	#channel;
-	#local = $state();
-	#remote = $state(new Map());
+	// local and remote hold RAW state: the channel replaces both wholesale on
+	// every frame (it never mutates them in place), so reassignment is the
+	// only signal a consumer needs - and a deep $state proxy here would be
+	// actively harmful. Reading a nested object through the proxy returns a
+	// fresh proxy wrapper, which breaks any app that compares state internals
+	// by reference (a frozen record looked up in an identity-keyed Map stops
+	// matching), and lazily proxying a large entity state on the render path
+	// costs allocations every frame for reactivity nothing consumes.
+	#local = $state.raw();
+	#remote = $state.raw(new Map());
 	#status = $state('idle');
 	#overflowed = $state(false);
 	#unsubs = [];

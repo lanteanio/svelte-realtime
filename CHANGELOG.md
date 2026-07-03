@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.62] - 2026-07-03
+
+### Fixed
+
+- **`SmoothEntity.local` / `.remote` no longer wrap states in a deep reactive proxy.** The view's fields now hold raw state (`$state.raw`): the channel replaces both wholesale on every frame, so reassignment already carries all the reactivity a consumer can use - but the deep proxy meant every nested read through `view.local` returned a fresh proxy wrapper, which silently broke any app comparing state internals by reference (a frozen shared record looked up in an identity-keyed `Map` stopped matching, e.g. a weapon-record wire codec throwing on its own record), and lazily proxied a large entity state on the render path for nothing. States read through the view are now the channel's own objects, nested references included, and the per-frame proxy allocation is gone.
+
 ## [0.6.0-next.61] - 2026-07-03
 
 ### Added
