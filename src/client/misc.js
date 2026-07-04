@@ -24,6 +24,14 @@ let _replayingQueue = false;
  * window resumes from the retained seq/version/cursor so the server can
  * gap-fill instead of cold-rehydrating. Set to 0 to disable.
  *
+ * `resumeMaxCursorAgeMs` (default 60000) bounds how long a still-subscribed
+ * stream trusts its retained replay cursor across a reconnect. A brief socket
+ * bounce resumes from the retained seq (the server gap-fills); after an outage
+ * longer than this - a backgrounded tab, a device sleep, a tunnel drop - the
+ * stream drops the cursor and takes a full rehydrate, since the server may
+ * have pruned data by time in a way the seq alone does not reveal. Set to 0 to
+ * always rehydrate on reconnect. Independent of `resumeGraceMs`.
+ *
  * `volatileBackpressureBytes` (default 4 MB) is the `WS.bufferedAmount`
  * threshold at which `.fireAndForget()` sends are dropped silently and
  * `__devtools.volatileDropped` increments. Sized for 120Hz cursor + drag
@@ -44,7 +52,7 @@ let _replayingQueue = false;
  * a long-lived client running a stale bundle after a breaking deploy knows to reload.
  * Omit it to leave the signal off.
  *
- * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
  */
 export function configure(config) {
 	clientState.config = config;

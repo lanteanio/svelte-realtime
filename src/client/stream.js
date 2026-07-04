@@ -13,7 +13,7 @@ import { createJitterDispatch } from './jitter-dispatch.js';
 import { _devtoolsStream, _devtoolsStreamEvent, _devtoolsStreamError } from './devtools-instrument.js';
 import { clientState, RpcError, _IS_DEV, _useRAF, _nextId, pending } from './internal-state.js';
 import { _addInFlight, _removeInFlight } from './health.js';
-import { ensureListener, ensureDisconnectListener, ensureDenialsListener, _getTimeout, _getResumeGraceMs, _registerTopicErrorSetter, _unregisterTopicErrorSetter } from './connection.js';
+import { ensureListener, ensureDisconnectListener, ensureDenialsListener, _getTimeout, _getResumeGraceMs, _getResumeMaxCursorAgeMs, _registerTopicErrorSetter, _unregisterTopicErrorSetter } from './connection.js';
 import { _maybeHintPublishRate } from './rpc.js';
 
 /**
@@ -318,6 +318,23 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	let subCount = 0;
 	let pendingId = null;
 
+	/**
+	 * @type {number | null} Wall-clock ms when a live (already-opened) stream
+	 * first lost its connection, or null while connected. Reset each time the
+	 * lifecycle listeners re-establish a baseline. Lets a reconnect measure how
+	 * long the retained replay cursor has been stale and rehydrate fully past
+	 * the trust bound instead of gap-filling from an outdated seq.
+	 */
+	let _downAt = null;
+
+	/**
+	 * @type {number | null} Wall-clock ms when the WS subscription was released
+	 * into the resume-grace window, or null outside it. A resume-from-grace ages
+	 * its retained cursor from the EARLIER of this and _downAt (a socket that
+	 * dropped before the unsubscribe started aging the cursor sooner), so grace
+	 * resumes apply the same cursor time-check as a live reconnect.
+	 */
+	let _graceStartAt = null;
 
 	/** @type {number | null} Last known sequence number for replay */
 	let _lastSeq = null;
@@ -1104,6 +1121,20 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	}
 
 	/**
+	 * Drop only the replay/delta cursors so the next fetchAndSubscribe() omits
+	 * `seq`/`version` and the server answers with a full rehydrate instead of a
+	 * gap-fill. Unlike _resetSession this keeps currentValue and the display
+	 * model intact, so a too-stale reconnect refreshes in place with no blank
+	 * flash - the full `data` reply replaces the value when it lands.
+	 */
+	function _dropResumeCursors() {
+		_lastSeq = null;
+		_lastVersion = undefined;
+		_cursor = null;
+		_hasMore = false;
+	}
+
+	/**
 	 * Reset the in-memory data model and error state. Runs when the
 	 * resume-grace window expires with no new subscriber, or immediately
 	 * on cleanup when resumeGraceMs is 0. After this runs, the next
@@ -1130,6 +1161,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_cursor = null;
 		_hasMore = false;
 		_loadingMore = false;
+		_downAt = null;
+		_graceStartAt = null;
 		_devtoolsStream(path, null, 0, merge);
 	}
 
@@ -1157,6 +1190,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * resume-from-grace so both paths get the same listener setup.
 	 */
 	function _attachLifecycleListeners() {
+		// Fresh baseline: any outage clock from a prior listener generation is
+		// stale (that reconnect either completed or the stream released).
+		_downAt = null;
 		_quiescenceUnsub = _statusStore.subscribe((s) => {
 			const inFlight = s === 'loading' || s === 'reconnecting';
 			if (inFlight && !_countedInFlight) {
@@ -1175,7 +1211,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		// the lifetime baseline rather than treating it as a reconnect bounce.
 		let hasOpenedOnce = false;
 		statusUnsub = status.subscribe((s) => {
-			if (s !== 'open') return;
+			if (s !== 'open') {
+				// First step away from a live connection: record when the outage
+				// began (once) so the reconnect can measure how stale the retained
+				// cursor is. Only after we have opened at least once - the initial
+				// pre-open 'connecting' is not an outage.
+				if (hasOpenedOnce && _downAt === null) _downAt = now();
+				return;
+			}
 			if (!hasOpenedOnce) {
 				hasOpenedOnce = true;
 				return;
@@ -1207,6 +1250,15 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					initialLoaded = false;
 					fetching = false;
 					buffer = [];
+					// Cursor time-check: if the connection was down longer than a
+					// retained cursor is trusted, a seq/version gap-fill could
+					// silently miss data the server pruned by time (not by seq).
+					// Drop the resume cursor so the server sends a full rehydrate
+					// instead of trusting a stale watermark.
+					if (_downAt !== null && now() - _downAt > _getResumeMaxCursorAgeMs()) {
+						_dropResumeCursors();
+					}
+					_downAt = null;
 					fetchAndSubscribe();
 				}, delay);
 			}
@@ -1253,6 +1305,17 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 						_resumeGraceTimer = null;
 					}
 					_inGracePeriod = false;
+					// Cursor time-check, same rationale as the reconnect path: the
+					// retained cursor may be older than the trust bound - the grace
+					// idle plus any outage that began before the unsubscribe. Age it
+					// from the earlier of the socket drop and the grace release
+					// (read _downAt before _attachLifecycleListeners nulls it), and
+					// rehydrate fully past the bound instead of gap-filling stale.
+					const _agingSince = _downAt !== null ? _downAt : _graceStartAt;
+					if (_agingSince !== null && now() - _agingSince > _getResumeMaxCursorAgeMs()) {
+						_dropResumeCursors();
+					}
+					_graceStartAt = null;
 					// Flip status back to 'loading' so the newly-attached quiescence
 					// subscriber sees us as in-flight while the resume envelope is
 					// outstanding (it fires synchronously with the current value).
@@ -1288,6 +1351,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 								// from the retained seq via fetchAndSubscribe.
 								_releaseSubscription();
 								_inGracePeriod = true;
+								// Start (or keep) the cursor-aging clock: a socket that
+								// already dropped set _downAt earlier and wins; otherwise
+								// aging begins now, at the release.
+								_graceStartAt = now();
 								_resumeGraceTimer = setTimer(() => {
 									_resumeGraceTimer = null;
 									_inGracePeriod = false;

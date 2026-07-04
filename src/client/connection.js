@@ -113,6 +113,29 @@ export function _getResumeGraceMs() {
 	return _DEFAULT_RESUME_GRACE_MS;
 }
 
+const _DEFAULT_RESUME_MAX_CURSOR_AGE_MS = 60000;
+
+/**
+ * Maximum connection-downtime in ms for which a live stream still trusts its
+ * retained replay cursor on reconnect. A socket that bounces briefly resumes
+ * from the retained seq/version so the server gap-fills from its replay
+ * buffer; but after a long outage (a backgrounded tab, a device sleep, a
+ * tunnel drop) the cursor can be stale in a way seq alone does not reveal -
+ * the server may have pruned data by TIME while the seq is still within the
+ * ring - so a gap-fill would silently miss it. Beyond this bound the stream
+ * drops its cursor and takes a full rehydrate instead. Set to 0 to always
+ * rehydrate on reconnect; a very large value restores the old trust-the-seq
+ * behavior. Independent of `resumeGraceMs` (which bounds the unsubscribe
+ * retention window, a different axis).
+ *
+ * @returns {number}
+ */
+export function _getResumeMaxCursorAgeMs() {
+	const v = clientState.config.resumeMaxCursorAgeMs;
+	if (typeof v === 'number' && v >= 0) return v;
+	return _DEFAULT_RESUME_MAX_CURSOR_AGE_MS;
+}
+
 /**
  * Attach the __rpc topic listener once.
  * Listens for RPC responses and resolves/rejects the matching pending promise.

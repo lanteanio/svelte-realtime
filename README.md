@@ -1428,10 +1428,13 @@ Call `configure()` once at app startup. The hooks fire on state transitions only
 | `beforeReconnect()` | Called before each reconnection attempt (can be async) |
 | `timeout` | Default RPC timeout in ms (default `30000`). Per-call `.with({ timeout })` overrides. |
 | `resumeGraceMs` | Stream resume-grace window in ms (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to disable. |
+| `resumeMaxCursorAgeMs` | Max outage in ms a reconnect trusts the retained replay cursor before rehydrating fully (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to always rehydrate on reconnect. |
 
 ### Pause and resume without re-rehydrating
 
 When the last subscriber of a stream unsubs, the stream releases its WebSocket subscription immediately (giving the server back its slot, dropping the in-flight counter) but keeps the in-memory data model -- `currentValue`, the last seen `seq` / `version`, the pagination `cursor`, and any history -- for `resumeGraceMs` (default 60 seconds). If a new `subscribe()` lands inside that window, the stream re-attaches its listeners and sends the retained cursor on the resume envelope, so the server can fill the gap from its bounded replay buffer (or `delta.fromSeq`, or a truncated-cache fall-through to a full rehydrate) instead of cold-starting.
+
+A stream whose socket bounces while still subscribed reconnects and gap-fills the same way, but only while the outage stays under `resumeMaxCursorAgeMs` (default 60 seconds). After a longer outage -- a backgrounded tab, a device sleep, a tunnel drop -- the retained sequence number can point past data the server has since pruned by time, so a gap-fill would silently miss it; the stream instead drops the cursor and takes a full rehydrate, keeping the currently displayed value so there is no blank flash while the fresh data lands. The same bound applies to a grace resume whose retained cursor has aged past it. It is independent of `resumeGraceMs` (which bounds the unsubscribe-retention window, a different axis); set `resumeMaxCursorAgeMs: 0` to always rehydrate on reconnect.
 
 This is the default for two reasons:
 

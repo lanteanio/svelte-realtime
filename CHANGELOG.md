@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.64] - 2026-07-03
+
+### Added
+
+- **`configure({ resumeMaxCursorAgeMs })` (default 60000) - a reconnect after a long outage rehydrates instead of trusting a stale cursor.** A live stream whose socket bounces re-subscribes carrying its retained replay cursor so the server gap-fills from its buffer - correct for an ordinary blip. But after a long outage (a backgrounded tab, a device sleep, a tunnel drop) the server may have pruned data by time while the sequence number is still within its ring, so a gap-fill would silently miss it and leave the stream permanently behind. The stream now stamps when the connection dropped and, when the outage exceeds this bound, drops the cursor and takes a full rehydrate - keeping the currently displayed value so there is no blank flash while the fresh data lands. Set to 0 to always rehydrate on reconnect; a very large value restores the previous always-gap-fill behavior. Independent of `resumeGraceMs`, which bounds the unsubscribe-retention window (a different axis).
+
 ## [0.6.0-next.63] - 2026-07-03
 
 ### Added

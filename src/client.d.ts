@@ -597,6 +597,19 @@ export function configure(config: {
 	 */
 	resumeGraceMs?: number;
 	/**
+	 * Maximum connection-downtime for which a still-subscribed stream trusts
+	 * its retained replay cursor across a reconnect. A brief socket bounce
+	 * resumes from the retained seq (the server gap-fills from its replay
+	 * buffer); after an outage longer than this - a backgrounded tab, a device
+	 * sleep, a tunnel drop - the stream drops the cursor and takes a full
+	 * rehydrate, since the server may have pruned data by time in a way the seq
+	 * alone does not reveal. Set to 0 to always rehydrate on reconnect.
+	 * Independent of `resumeGraceMs`, which bounds the unsubscribe-retention
+	 * window (a different axis).
+	 * @default 60000
+	 */
+	resumeMaxCursorAgeMs?: number;
+	/**
 	 * Opt-in protocol/contract version, an integer the app bumps only on a
 	 * BREAKING wire/contract change. Declare it identically here and in
 	 * `realtime({ protocolVersion })` on the server (one shared constant). The

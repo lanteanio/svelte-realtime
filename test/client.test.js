@@ -2855,6 +2855,80 @@ describe('__stream() seq tracking', () => {
 	});
 });
 
+// - __stream() reconnect cursor time-check -----------------------------------
+
+describe('__stream() reconnect cursor time-check', () => {
+	it('drops the replay cursor and rehydrates fully when the outage exceeds resumeMaxCursorAgeMs', async () => {
+		// A long background/blackout makes the retained seq untrustworthy: the
+		// server may have pruned data by time while the seq is still in range,
+		// so a gap-fill would silently miss it. The stream must rehydrate.
+		configure({ resumeMaxCursorAgeMs: 1 });
+
+		const store = __stream('stale/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, {
+			ok: true,
+			data: [{ id: 1 }],
+			topic: 'stale-topic',
+			merge: 'crud',
+			key: 'id',
+			seq: 10
+		});
+		simulateTopicMessage('stale-topic', { event: 'created', data: { id: 2 }, seq: 11 });
+
+		// The outage lasts longer than the 1ms trust bound.
+		simulateStatus('disconnected');
+		await new Promise((r) => setTimeout(r, 20));
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+
+		// The reconnect subscribe omits seq: a full rehydrate, not a gap-fill.
+		expect(sendQueuedFn.mock.calls.length).toBeGreaterThanOrEqual(2);
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBeUndefined();
+		// The displayed data survived the reconnect - no blank flash before the
+		// rehydrate lands (the cursor drop keeps currentValue).
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 2 }]);
+
+		unsub();
+	});
+
+	it('keeps the replay cursor for a brief bounce within resumeMaxCursorAgeMs', async () => {
+		// An ordinary socket bounce still gap-fills from the retained seq - the
+		// default 60s bound comfortably covers it.
+		configure({ resumeMaxCursorAgeMs: 60000 });
+
+		const store = __stream('fresh/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, {
+			ok: true,
+			data: [{ id: 1 }],
+			topic: 'fresh-topic',
+			merge: 'crud',
+			key: 'id',
+			seq: 10
+		});
+		simulateTopicMessage('fresh-topic', { event: 'created', data: { id: 2 }, seq: 11 });
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(11);
+
+		unsub();
+	});
+});
+
 // - __rpc() issues propagation -----------------------------------------------
 
 describe('__rpc() issues', () => {
@@ -4532,6 +4606,38 @@ describe('stream resume-grace window', () => {
 		await flush();
 		const second = sendQueuedFn.mock.calls[0][0];
 		expect(second.seq).toBe(42);
+		unsub2();
+	});
+
+	it('drops the cursor on a grace resume once the retained cursor exceeds resumeMaxCursorAgeMs', async () => {
+		// The grace window stays open (60s) but the cursor-age bound is tiny: a
+		// resume landing past the bound must rehydrate, not gap-fill a stale seq.
+		// Covers the asymmetric resumeGraceMs > resumeMaxCursorAgeMs config (and,
+		// by aging from the earlier stamp, a socket that dropped before unsub).
+		configure({ resumeGraceMs: 60000, resumeMaxCursorAgeMs: 1 });
+
+		const store = __stream('grace-stale/seq', { merge: 'crud', key: 'id', replay: true });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, {
+			ok: true, data: [{ id: 1 }], topic: 'grace-stale', merge: 'crud', key: 'id', seq: 42
+		});
+
+		unsub();
+		await flush(); // grace window opens; _graceStartAt stamped
+		await new Promise((r) => setTimeout(r, 20)); // age past the 1ms bound
+
+		sendQueuedFn.mockClear();
+		const unsub2 = store.subscribe((v) => values.push(v));
+		await flush();
+		const second = sendQueuedFn.mock.calls[0][0];
+		// Resume within grace but past the age bound -> full rehydrate, no seq.
+		expect(second.seq).toBeUndefined();
+		// The retained value still survives the grace resume (no blank flash).
+		expect(values[values.length - 1]).toEqual([{ id: 1 }]);
 		unsub2();
 	});
 
