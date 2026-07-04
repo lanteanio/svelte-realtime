@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.65] - 2026-07-04
+
+### Added
+
+- **`live.smooth()` commands ride a binary frame instead of a JSON RPC.** A smoothed-entity channel flushes its predicted input at up to 60 Hz, and each flush was a JSON volatile RPC the server had to `JSON.parse` - about a million parses a second at scale. When the adapter offers binary ingress (`svelte-adapter-uws` >= `0.6.0-next.54`), the channel now negotiates an id-addressed binary frame and transmits each flush batch on it, decoded on the server straight into the same authority the JSON command RPC reached - so the applied commands are identical, guards, `wire.command` unpacking, ownership and cross-node relay all unchanged. The negotiation is automatic and transparent: it converges after the first sync (which is when the server has the topic's command route registered), and anything not negotiated - an older adapter, or a brief window before the binding is confirmed - transparently uses the existing JSON command path, so no command is ever lost. Nothing in the app changes; the win is purely on the wire. (Requires `svelte-adapter-uws` >= `0.6.0-next.54`; on an older adapter the JSON path is used unchanged.)
+
 ## [0.6.0-next.64] - 2026-07-03
 
 ### Added

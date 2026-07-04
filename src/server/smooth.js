@@ -8,6 +8,7 @@ import { createInterestState, targetDelayMs } from './interest.js';
 import { createLagComp, rayCircleHit, rayAabbHit } from './lagcomp.js';
 import { createRttTracker } from './rtt.js';
 import { createMonotonicClock } from './monoclock.js';
+import { _executeVolatileRpc } from './dispatch.js';
 import { _IS_DEV } from './env.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
@@ -55,6 +56,42 @@ const _SMOOTH_PLUGIN_SPECIFIER = 'svelte-adapter-uws' + '/plugins/smooth';
 // path against a real, rejecting resolution.
 let _smoothSpecifier = _SMOOTH_PLUGIN_SPECIFIER;
 
+// Whether the client->server binary command ingress route has been registered
+// with the adapter (once per process). The route is global (keyed by the smooth
+// command kind on the adapter's global ingress registry), so one registration
+// serves every smooth topic; the per-topic destination rides each client's
+// `ingress-bind`. Registered when the runtime resolves - and the runtime load is
+// warmed eagerly at declaration (see the export builder) so the route is armed
+// before any client binds.
+let _ingressRouteRegistered = false;
+
+/**
+ * Register the smooth command ingress route with the adapter, if the loaded
+ * runtime exposes the ingress surface (an adapter older than the ingress
+ * feature simply lacks it, and the client then stays on the JSON command path -
+ * no ack, no binary, no loss). Decode turns a `0x03` payload back into the
+ * `Array<{id,cmd}>` batch; route replays it through the SAME volatile-RPC
+ * executor the JSON path uses, so guards, `wire.command.unpack`, ownership,
+ * cross-node relay, and `authority.enqueue(key, batch)` all run identically.
+ * @param {any} rt - the loaded adapter smooth plugin module
+ */
+function _registerSmoothIngress(rt) {
+	if (_ingressRouteRegistered || !rt) return;
+	if (typeof rt.registerIngress !== 'function' ||
+		typeof rt.decodeSmoothCommandBatch !== 'function' ||
+		typeof rt.SMOOTH_COMMAND_CAPABILITY !== 'string') return;
+	_ingressRouteRegistered = true;
+	rt.registerIngress(rt.SMOOTH_COMMAND_CAPABILITY, {
+		decode: (payload, schemaVersion) => rt.decodeSmoothCommandBatch(payload, schemaVersion),
+		route: (ws, target, batch, platform) => {
+			// target = { path: '<module>/<name>/__smooth/command', room: [...roomArgs] }.
+			if (!ws || !target || typeof target.path !== 'string') return;
+			const room = Array.isArray(target.room) ? target.room : [];
+			_executeVolatileRpc(ws, { rpc: target.path, args: [...room, batch] }, platform);
+		}
+	});
+}
+
 function _loadSmoothRuntime() {
 	if (_smoothRuntime) return Promise.resolve(_smoothRuntime);
 	if (!_smoothRuntimePromise) {
@@ -68,6 +105,7 @@ function _loadSmoothRuntime() {
 					return _smoothRuntime !== null ? _smoothRuntime : mod;
 				}
 				_smoothRuntime = /** @type {any} */ (mod);
+				_registerSmoothIngress(_smoothRuntime);
 				return mod;
 			},
 			(err) => {
@@ -115,6 +153,7 @@ export function _smoothLoadError(err) {
 export function _setSmoothRuntime(mod) {
 	_smoothRuntime = mod;
 	_smoothRuntimePromise = null;
+	_registerSmoothIngress(mod);
 }
 
 /**

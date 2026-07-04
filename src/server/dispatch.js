@@ -383,7 +383,7 @@ async function _executeRpc(ws, msg, platform, options) {
  * @param {import('svelte-adapter-uws').Platform} platform
  * @param {{ beforeExecute?: (ws: any, rpcPath: string, args: any[]) => Promise<void> | void, onError?: (path: string, error: unknown, ctx: any) => void }} [options]
  */
-async function _executeVolatileRpc(ws, msg, platform, options) {
+export async function _executeVolatileRpc(ws, msg, platform, options) {
 	if (_IS_DEV) {
 		const path = msg.rpc;
 		const fn = await _resolveRegistryEntry(path);

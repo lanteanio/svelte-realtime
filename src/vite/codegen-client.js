@@ -174,7 +174,12 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			smLines.push(`    const channel = createSmoothChannel({ ...opts, transport: {`);
 			smLines.push(`      sendCommand: (batch) => ${name}._command.fireAndForget(...roomArgs, batch),`);
 			smLines.push(`      sendShoot: (payload) => ${name}._shoot.fireAndForget(...roomArgs, payload),`);
-			smLines.push(`      sync: () => ${name}._sync(...roomArgs)`);
+			smLines.push(`      sync: () => ${name}._sync(...roomArgs),`);
+			// Binary ingress target: the command RPC path + this channel's room args.
+			// The channel binds it (kind `smooth.command:1`) and transmits each flush
+			// batch as a `0x03` frame once negotiated, falling back to `sendCommand`
+			// (the JSON volatile RPC) whenever the binding is not live.
+			smLines.push(`      ingress: { path: ${JSON.stringify(modulePath + '/' + name + '/__smooth/command')}, room: roomArgs }`);
 			smLines.push(`    } });`);
 			// The area-of-interest center report rides its own volatile RPC, not the
 			// channel transport: it is a server-side culling hint, orthogonal to the
