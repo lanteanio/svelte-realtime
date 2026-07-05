@@ -177,6 +177,10 @@ export function _generateSsrStubs(filePath, modulePath) {
 			lines.push(`const _${name}_cursors = (...args) => readable(undefined);`);
 			subFactories.push(`cursors: _${name}_cursors`);
 		}
+		if (info.hasOwner) {
+			lines.push(`const _${name}_owner = (...args) => readable(undefined);`);
+			subFactories.push(`owner: _${name}_owner`);
+		}
 		// The lobby-browser view renders empty during SSR (no live subscription);
 		// the client RoomsList takes over on hydration.
 		if (info.isEnumerable) {
@@ -204,6 +208,10 @@ export function _generateSsrStubs(filePath, modulePath) {
 			lines.push(`const _${name}_cursors = (...args) => readable(undefined);`);
 			mpFactories.push(`cursors: _${name}_cursors`);
 		}
+		if (info.hasOwner) {
+			lines.push(`const _${name}_owner = (...args) => readable(undefined);`);
+			mpFactories.push(`owner: _${name}_owner`);
+		}
 		mpFactories.push(`status: readable('connecting')`);
 		mpFactories.push(`move: () => {}`);
 		mpFactories.push(`reportViewport: () => {}`);
@@ -226,9 +234,9 @@ export function _generateSsrStubs(filePath, modulePath) {
 		// field surface) so a field-only export renders room() on both sides and
 		// never throws board.room-is-not-a-function during SSR.
 		const ssrHasField = info.typing || info.hasLocks || info.selections || info.reactions;
-		if (info.hasPresence || info.hasCursors || ssrHasField) {
+		if (info.hasPresence || info.hasCursors || ssrHasField || info.hasOwner) {
 			mpFactories.push(`identify: () => {}`);
-			mpFactories.push(`room: () => ({ others: [], cursors: [], me: null, status: 'connecting', typing: [], locks: {}, selections: {}, reactions: [], move: () => {}, reportViewport: () => {}, setTyping: () => {}, acquireLock: () => {}, releaseLock: () => {}, setSelection: () => {}, react: () => {}, destroy: () => {} })`);
+			mpFactories.push(`room: () => ({ others: [], cursors: [], me: null, status: 'connecting', typing: [], locks: {}, selections: {}, reactions: [], owner: null, isOwner: false, move: () => {}, reportViewport: () => {}, setTyping: () => {}, acquireLock: () => {}, releaseLock: () => {}, setSelection: () => {}, react: () => {}, destroy: () => {} })`);
 		}
 		for (const action of info.actions) {
 			mpFactories.push(`${action}: () => Promise.resolve(undefined)`);

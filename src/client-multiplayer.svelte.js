@@ -76,6 +76,7 @@ export class MultiplayerRoom {
 	#presence = $state([]);
 	#cursors = $state([]);
 	#reactions = $state([]);
+	#owner = $state(null);
 	#status = $state('idle');
 	#move;
 	#reportViewport;
@@ -105,6 +106,13 @@ export class MultiplayerRoom {
 		if (deps.reactions) {
 			this.#unsubs.push(deps.reactions.subscribe((v) => { this.#reactions = v || []; }));
 		}
+		if (deps.owner) {
+			// The owner stream's value is { key, reason }; the view keeps the key
+			// (stringified like every roster key, so isOwner compares cleanly).
+			this.#unsubs.push(deps.owner.subscribe((v) => {
+				this.#owner = v && v.key != null ? String(v.key) : null;
+			}));
+		}
 	}
 
 	// Reads the reactive holder when one was injected (so identify(key) after
@@ -118,6 +126,15 @@ export class MultiplayerRoom {
 		return raw == null ? null : String(raw);
 	}
 	get status() { return this.#status; }
+
+	// The room's current owner key (null while unclaimed / vacated / not yet
+	// loaded), and whether the local user holds the role. isOwner needs
+	// identify(key) - with no local key it reads false, never a crash.
+	get owner() { return this.#owner; }
+	get isOwner() {
+		const me = this.me;
+		return me != null && this.#owner != null && me === this.#owner;
+	}
 
 	#othersDerived = $derived(
 		dedupeByUser(this.#presence)

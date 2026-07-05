@@ -12,6 +12,7 @@ import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot } from './h
 import { _getIdentityKey } from './identity.js';
 import { _tenantTopic, _tenantKey, _stripTenantTopic } from './tenant.js';
 import { _registerEnumGate, _seedEnumVisibility } from './rooms-gate.js';
+import { _ownerOnJoin, _ownerOnLeave, _ownerTransfer, _ownerGet, _ownerEmit } from './room-owner.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) and the rollback marker
 // set (_rollingBack) stay in server.js - the staying stream-subscribe rollback
@@ -51,7 +52,10 @@ export const _roomRegister = function room(config) {
 		merge: mergeMode = 'crud',
 		key: keyField = 'id',
 		meta: metaFn,
-		enumerable: enumerableFlag
+		enumerable: enumerableFlag,
+		owner: ownerFlag,
+		ownerOnly,
+		onOwnerChange
 	} = config;
 
 	/** @type {any} */ (topicFn).__topicUsesCtx = true;
@@ -75,6 +79,43 @@ export const _roomRegister = function room(config) {
 	}
 	const isEnumerable = enumerableFlag === true || typeof enumerableFlag === 'function' || typeof metaFn === 'function';
 	const listPredicate = typeof enumerableFlag === 'function' ? enumerableFlag : null;
+
+	// Room ownership (opt-in: `owner: true`). The first member to join a room
+	// holds the owner role; when the owner leaves (after the presence grace
+	// window) the role passes deterministically to the longest-joined remaining
+	// member; an emptied room clears it. The handoff is observable on the
+	// room's `:owner` sub-stream and via the onOwnerChange hook, which fires
+	// exactly once cluster-wide (on the replica that performed the change).
+	// Off by default - a room without it installs no owner bookkeeping.
+	if (ownerFlag !== undefined && typeof ownerFlag !== 'boolean') {
+		throw new Error('[svelte-realtime] live.room() owner must be true or false\n  See: https://svti.me/rooms');
+	}
+	const ownerEnabled = ownerFlag === true;
+	if (onOwnerChange !== undefined && typeof onOwnerChange !== 'function') {
+		throw new Error('[svelte-realtime] live.room() onOwnerChange must be a function (change) => void\n  See: https://svti.me/rooms');
+	}
+	if (onOwnerChange && !ownerEnabled) {
+		throw new Error('[svelte-realtime] live.room() onOwnerChange requires owner: true - without owner tracking the hook would never fire.\n  See: https://svti.me/rooms');
+	}
+	/** @type {Set<string> | null} */
+	let ownerGatedActions = null;
+	if (ownerOnly !== undefined) {
+		if (!ownerEnabled) {
+			throw new Error('[svelte-realtime] live.room() ownerOnly requires owner: true\n  See: https://svti.me/rooms');
+		}
+		if (!Array.isArray(ownerOnly) || ownerOnly.some((n) => typeof n !== 'string')) {
+			throw new Error('[svelte-realtime] live.room() ownerOnly must be an array of action names\n  See: https://svti.me/rooms');
+		}
+		if (!config.actions) {
+			throw new Error('[svelte-realtime] live.room() ownerOnly requires actions\n  See: https://svti.me/rooms');
+		}
+		for (const n of ownerOnly) {
+			if (typeof config.actions[n] !== 'function') {
+				throw new Error(`[svelte-realtime] live.room() ownerOnly names unknown action '${n}' - a typo here would silently leave the action ungated.\n  See: https://svti.me/rooms`);
+			}
+		}
+		ownerGatedActions = new Set(ownerOnly);
+	}
 
 	// Number of room-identifying args the topic function expects (excluding ctx).
 	// Used by room actions to separate room args from action-specific payload.
@@ -314,11 +355,13 @@ export const _roomRegister = function room(config) {
 	}, {
 		merge: mergeMode,
 		key: keyField,
-		onSubscribe: (presenceFn || isEnumerable) ? async (ctx, topic, args) => {
+		onSubscribe: (presenceFn || isEnumerable || ownerEnabled) ? async (ctx, topic, args) => {
 			// Enumeration is best-effort and must never suppress the presence join
 			// below - the two are independent concerns sharing one hook.
 			if (isEnumerable) { try { await _enumOnSub(ctx, topic, args); } catch { /* enum is best-effort */ } }
-			if (!presenceFn) return;
+			// Membership tracking (the ref map below) serves both presence and
+			// ownership; a room with either keeps it, a room with neither skips it.
+			if (!presenceFn && !ownerEnabled) return;
 			const userId = _getIdentityKey(ctx);
 			const refKey = topic + '\0' + userId;
 
@@ -339,13 +382,26 @@ export const _roomRegister = function room(config) {
 						clearTimer(r.timer);
 						const [t, u] = k.split('\0');
 						// Cluster release runs eagerly here too: an evicted entry
-						// would otherwise leak a phantom counter on Redis.
-						_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
-							if (res.isLast) {
-								// `t` is the wire data topic (the ref-map key is wire); publish raw
-								// so the `:presence` sub-topic is not prefixed a second time.
-								ctx._publishWire(t + ':presence', 'leave', { key: u });
-							}
+						// would otherwise leak a phantom counter on Redis. A null
+						// payload marks an entry whose presence acquire never ran
+						// (an owner-only room's membership ref) - skip the paired
+						// release for those.
+						if (r.data != null) {
+							_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
+								if (res.isLast) {
+									// `t` is the wire data topic (the ref-map key is wire); publish raw
+									// so the `:presence` sub-topic is not prefixed a second time.
+									ctx._publishWire(t + ':presence', 'leave', { key: u });
+								}
+							}).catch(() => {});
+						}
+						// The sweep spans every room's entries, so the owner release
+						// runs unconditionally; a topic without owner tracking is a
+						// cheap no-op inside the helper, and an owner-tracking topic
+						// evicted here must run its succession or the departed owner
+						// would linger until the roster TTL.
+						_ownerOnLeave(ctx.platform, t, u).then((change) => {
+							if (change) _ownerEmit(t, ctx.tenantId, change, ctx._publishWire);
 						}).catch(() => {});
 						if (onLeave) {
 							Promise.resolve().then(() => onLeave(ctx, t)).catch(() => {});
@@ -370,9 +426,20 @@ export const _roomRegister = function room(config) {
 			// Compute presence payload BEFORE storing the ref so the in-memory
 			// fallback in the presence stream's init can reconstruct the roster
 			// even when this user's join was published before they subscribed
-			// to the :presence topic.
-			const presenceData = presenceFn(ctx);
+			// to the :presence topic. An owner-only room stores a null payload:
+			// the entry drives membership transitions but never appears in a
+			// roster (the presence list skips null data).
+			const presenceData = presenceFn ? presenceFn(ctx) : null;
 			_presenceRef.set(refKey, { count: 1, timer: null, data: presenceData });
+			// Ownership join runs at the same identity 0->1 transition presence
+			// acquires on, and is independently best-effort: an owner failure
+			// must never suppress the presence join below (and vice versa).
+			if (ownerEnabled) {
+				try {
+					const change = await _ownerOnJoin(ctx.platform, topic, userId, onOwnerChange);
+					if (change) _ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
+				} catch { /* owner is best-effort */ }
+			}
 			// Cluster transition: bump shared count; only the first replica to
 			// reach 1 publishes 'join'. With no platform.redis the helper
 			// returns isFirst=true unconditionally, matching the in-memory path.
@@ -384,9 +451,9 @@ export const _roomRegister = function room(config) {
 				}
 			}
 		} : undefined,
-		onUnsubscribe: (presenceFn || isEnumerable) ? async (ctx, topic, remainingSubscribers) => {
+		onUnsubscribe: (presenceFn || isEnumerable || ownerEnabled) ? async (ctx, topic, remainingSubscribers) => {
 			if (isEnumerable) { try { await _enumOnUnsub(ctx, topic, remainingSubscribers); } catch { /* enum is best-effort */ } }
-			if (!presenceFn) return;
+			if (!presenceFn && !ownerEnabled) return;
 			const userId = _getIdentityKey(ctx);
 			const refKey = topic + '\0' + userId;
 
@@ -396,33 +463,40 @@ export const _roomRegister = function room(config) {
 			ref.count--;
 			if (ref.count > 0) return;
 
+			// The final release for this identity: presence publishes 'leave'
+			// when the cluster count hits 0, and ownership runs its succession
+			// at the same transition. Both are independently best-effort.
+			const releaseIdentity = () => {
+				if (presenceFn) {
+					_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
+						if (res.isLast) {
+							ctx._publishWire(topic + ':presence', 'leave', { key: userId });
+						}
+					}).catch(() => {});
+				}
+				if (ownerEnabled) {
+					_ownerOnLeave(ctx.platform, topic, userId).then((change) => {
+						if (change) _ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
+					}).catch(() => {});
+				}
+				if (onLeave) {
+					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
+				}
+			};
+
 			// On rollback (failed stream init), skip grace and release
 			// immediately. Cluster release decides whether this was the LAST
 			// subscriber across the cluster - only then do we publish 'leave'.
 			if (ctx.ws && _rollingBack.has(ctx.ws)) {
 				if (ref.timer) clearTimer(ref.timer);
 				_presenceRef.delete(refKey);
-				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
-					if (res.isLast) {
-						ctx._publishWire(topic + ':presence', 'leave', { key: userId });
-					}
-				}).catch(() => {});
-				if (onLeave) {
-					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
-				}
+				releaseIdentity();
 				return;
 			}
 
 			ref.timer = setTimer(() => {
 				_presenceRef.delete(refKey);
-				_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
-					if (res.isLast) {
-						ctx._publishWire(topic + ':presence', 'leave', { key: userId });
-					}
-				}).catch(() => {});
-				if (onLeave) {
-					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
-				}
+				releaseIdentity();
 			}, 5000);
 		} : undefined
 	});
@@ -448,6 +522,7 @@ export const _roomRegister = function room(config) {
 	/** @type {any} */ (roomExport).__hasCursors = !!cursorConfig;
 	/** @type {any} */ (roomExport).__cursorThrottle = typeof cursorConfig === 'object' ? cursorConfig.throttle || 50 : 50;
 	/** @type {any} */ (roomExport).__hasRooms = isEnumerable;
+	/** @type {any} */ (roomExport).__hasOwner = ownerEnabled;
 
 	// Enumeration stream (opt-in): one per-export stream whose snapshot is the
 	// active-rooms registry and whose live deltas (created/updated/deleted, fed by
@@ -547,6 +622,28 @@ export const _roomRegister = function room(config) {
 		);
 	}
 
+	// Owner stream (if enabled): the room's current owner as a small live
+	// value on the `:owner` sub-topic. The snapshot loader reads the shared
+	// store (Redis when wired, the local map otherwise) so a late joiner sees
+	// the current owner immediately; handoff events replace the value in
+	// place (merge 'set'). `reason` describes the transition that produced
+	// the value ('claimed' | 'succeeded' | 'transferred' | 'vacated'); a
+	// snapshot is not a transition, so it carries null.
+	if (ownerEnabled) {
+		/** @type {any} */ (roomExport).__ownerStream = live.stream(
+			(ctx, ...args) => topicFn(ctx, ...args) + ':owner',
+			async (ctx, ...args) => {
+				if (runRoomGuard) await runRoomGuard(ctx, args);
+				// The owner store is keyed by the WIRE data topic (the data
+				// stream's onSubscribe joined with the tenant-prefixed topic),
+				// so the loader must prefix the same way. Null tenant -> unchanged.
+				const dataTopic = _tenantTopic(ctx.tenantId, topicFn(ctx, ...args));
+				return { key: await _ownerGet(ctx.platform, dataTopic), reason: null };
+			},
+			{ merge: 'set' }
+		);
+	}
+
 	// Cursor stream (if enabled)
 	if (cursorConfig) {
 		/** @type {any} */ (roomExport).__cursorStream = live.stream(
@@ -579,13 +676,48 @@ export const _roomRegister = function room(config) {
 				// same room id would share one ring (cross-tenant state read). Null tenant
 				// -> wireRoomTopic === roomTopic, byte-identical.
 				const wireRoomTopic = _tenantTopic(ctx.tenantId, roomTopic);
+				// Owner-gated actions check the CURRENT owner right before the
+				// handler runs; no owner (unclaimed / vacated / store blip) denies
+				// - fail closed, an owner-only action never runs ownerless.
+				if (ownerGatedActions && ownerGatedActions.has(name)) {
+					const currentOwner = await _ownerGet(ctx.platform, wireRoomTopic);
+					if (currentOwner === null || currentOwner !== _getIdentityKey(ctx)) {
+						throw new LiveError('FORBIDDEN', `Room action '${name}' is owner-only`);
+					}
+				}
 				const originalPublish = ctx.publish;
 				ctx.publish = (event, data) => originalPublish(roomTopic, event, data);
+				const originalOwner = ctx.owner;
+				const originalIsOwner = ctx.isOwner;
+				const originalTransferOwner = ctx.transferOwner;
+				if (ownerEnabled) {
+					// Room-scoped ownership helpers, shadowed like ctx.publish so an
+					// action reads and hands off ownership without knowing the topic.
+					ctx.owner = () => _ownerGet(ctx.platform, wireRoomTopic);
+					ctx.isOwner = async () => {
+						const o = await _ownerGet(ctx.platform, wireRoomTopic);
+						return o !== null && o === _getIdentityKey(ctx);
+					};
+					ctx.transferOwner = async (to) => {
+						if (typeof to !== 'string' || to.length === 0) return false;
+						const change = await _ownerTransfer(ctx.platform, wireRoomTopic, _getIdentityKey(ctx), to);
+						if (change) _ownerEmit(wireRoomTopic, ctx.tenantId, change, ctx._publishWire);
+						return change !== null;
+					};
+				}
+				const restoreOwnerHelpers = () => {
+					if (ownerEnabled) {
+						ctx.owner = originalOwner;
+						ctx.isOwner = originalIsOwner;
+						ctx.transferOwner = originalTransferOwner;
+					}
+				};
 				if (historyStore === null) {
 					try {
 						return await fn(ctx, ...args);
 					} finally {
 						ctx.publish = originalPublish;
+						restoreOwnerHelpers();
 					}
 				}
 				const originalCompensate = ctx.compensate;
@@ -613,6 +745,7 @@ export const _roomRegister = function room(config) {
 				} finally {
 					ctx.publish = originalPublish;
 					ctx.compensate = originalCompensate;
+					restoreOwnerHelpers();
 				}
 			});
 			/** @type {any} */ (wrappedAction).__wrappedFn = fn;

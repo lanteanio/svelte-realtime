@@ -2,6 +2,7 @@
 import { _presenceRef } from './state.js';
 import { clearTimer } from '../shared/runtime.js';
 import { _topicInTenant } from './tenant.js';
+import { _ownerOnLeave, _ownerEmit } from './room-owner.js';
 
 /**
  * Direct handle to the in-memory presence-ref map for tests that need to seed
@@ -162,6 +163,13 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 				}
 			} catch { /* cluster release best-effort; the local ref is already gone */ }
 		}
+		// A purged user must also drop any room-owner role it holds, or the
+		// room would keep a forgotten identity as owner until the roster TTL.
+		// A topic without owner tracking is a no-op inside the helper.
+		try {
+			const change = await _ownerOnLeave(platform, topic, key);
+			if (change) _ownerEmit(topic, tenantId, change, publishLeave || (() => { /* no publish path wired */ }));
+		} catch { /* owner release best-effort; the membership is already gone */ }
 	}
 	return n;
 }

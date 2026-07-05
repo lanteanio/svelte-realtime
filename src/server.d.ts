@@ -350,6 +350,28 @@ export interface LiveContext<UserData = unknown> {
 
 	/** Cancel the room's pending alarm, if any. */
 	deleteAlarm: () => void;
+
+	/**
+	 * The room's current owner identity key, or `null` when the room has none.
+	 * Available only inside the actions of a `live.room` / `live.multiplayer`
+	 * declared with `owner: true`.
+	 */
+	owner?: () => Promise<string | null>;
+
+	/**
+	 * Whether the calling identity currently holds the room's owner role.
+	 * Available only inside the actions of a room declared with `owner: true`.
+	 */
+	isOwner?: () => Promise<boolean>;
+
+	/**
+	 * Hand the owner role to another member of the room. The caller must hold
+	 * the role and the target must be a current member; a refused transfer
+	 * returns `false` and changes nothing. A successful transfer publishes the
+	 * handoff on the room's owner stream and fires `onOwnerChange`. Available
+	 * only inside the actions of a room declared with `owner: true`.
+	 */
+	transferOwner?: (to: string) => Promise<boolean>;
 }
 
 /**
@@ -2832,6 +2854,48 @@ export interface RoomConfig {
 	 * bus (the standard cluster wiring). @default false
 	 */
 	enumerable?: boolean | ((ctx: LiveContext<any>, room: EnumeratedRoom) => boolean | Promise<boolean>);
+	/**
+	 * Opt into room ownership. The first member to join a room holds the owner
+	 * role; when the owner leaves (after the presence grace window) the role
+	 * passes deterministically to the longest-joined remaining member, and an
+	 * emptied room clears it. The generated `<export>.owner(...roomArgs)`
+	 * stream carries the live `{ key, reason }` value; inside actions,
+	 * `ctx.owner()` / `ctx.isOwner()` / `ctx.transferOwner(to)` read and hand
+	 * off the role. Members are keyed by the same identity presence uses (the
+	 * authenticated user id, or a per-connection guest id), so an authenticated
+	 * owner survives a reconnect inside the grace window. @default false
+	 */
+	owner?: boolean;
+	/**
+	 * Action names only the room's current owner may call; any other caller is
+	 * rejected with FORBIDDEN before the handler runs (a room with no owner
+	 * rejects too - fail closed). Requires `owner: true` and every named
+	 * action to exist.
+	 */
+	ownerOnly?: string[];
+	/**
+	 * Called on every ownership change, exactly once cluster-wide (on the
+	 * instance that performed the change). `reason` is `'claimed'` (first
+	 * member, or a stale owner healed), `'succeeded'` (the owner left and the
+	 * longest-joined member inherited), `'transferred'` (explicit
+	 * `ctx.transferOwner`), or `'vacated'` (the room emptied). Requires
+	 * `owner: true`.
+	 */
+	onOwnerChange?: (change: OwnerChange) => void;
+}
+
+/**
+ * One ownership change as `onOwnerChange` sees it.
+ */
+export interface OwnerChange {
+	/** The room's data topic (logical, tenant prefix stripped). */
+	topic: string;
+	/** The identity key now holding the role, or `null` when the room vacated. */
+	owner: string | null;
+	/** The identity key that held the role before, or `null` on a first claim. */
+	previous: string | null;
+	/** What produced the change. */
+	reason: 'claimed' | 'succeeded' | 'transferred' | 'vacated';
 }
 
 /**
@@ -2860,7 +2924,10 @@ export interface RoomExport {
 	__hasPresence: boolean;
 	__hasCursors: boolean;
 	__hasRooms: boolean;
+	__hasOwner: boolean;
 	__presenceStream?: any;
+	/** The owner stream (the room's live `{ key, reason }` value) when the room opts into ownership. */
+	__ownerStream?: any;
 	__cursorStream?: any;
 	/** The enumeration stream (active rooms) when the room opts into enumeration. */
 	__roomsStream?: any;
@@ -2920,6 +2987,12 @@ export interface MultiplayerConfig {
 	reactions?: boolean;
 	/** Enable a remote-selection surface. Offset-mode ranges are published onto the presence roster. */
 	selections?: 'offset' | 'crdt';
+	/** Opt into room ownership with deterministic succession. See `RoomConfig.owner`. @default false */
+	owner?: boolean;
+	/** Action names only the room's current owner may call. See `RoomConfig.ownerOnly`. */
+	ownerOnly?: string[];
+	/** Called on every ownership change, exactly once cluster-wide. See `RoomConfig.onOwnerChange`. */
+	onOwnerChange?: (change: OwnerChange) => void;
 }
 
 /**

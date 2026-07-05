@@ -390,6 +390,7 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 				const importPath = JSON.stringify(normalizedPath);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__data')}, __L(() => import(${importPath}).then(m => m.${name}.__dataStream)), ${JSON.stringify(rel)});`);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__presence')}, __L(() => import(${importPath}).then(m => m.${name}.__presenceStream)), ${JSON.stringify(rel)});`);
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__owner')}, __L(() => import(${importPath}).then(m => m.${name}.__ownerStream)), ${JSON.stringify(rel)});`);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursors')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorStream)), ${JSON.stringify(rel)});`);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursor/move')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorMove)), ${JSON.stringify(rel)});`);
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursor/reportViewport')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorReportViewport)), ${JSON.stringify(rel)});`);
@@ -412,6 +413,8 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__data')}, __L(() => import(${importPath}).then(m => m.${name}.__dataStream)), ${JSON.stringify(rel)});`);
 				// Register presence stream if present
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__presence')}, __L(() => import(${importPath}).then(m => m.${name}.__presenceStream)), ${JSON.stringify(rel)});`);
+				// Register owner stream if present
+				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__owner')}, __L(() => import(${importPath}).then(m => m.${name}.__ownerStream)), ${JSON.stringify(rel)});`);
 				// Register cursor stream if present
 				lines.push(`__register(${JSON.stringify(rel + '/' + name + '/__cursors')}, __L(() => import(${importPath}).then(m => m.${name}.__cursorStream)), ${JSON.stringify(rel)});`);
 				// Register the enumeration stream + one-shot snapshot if the room opted

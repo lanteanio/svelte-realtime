@@ -259,7 +259,7 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			// class lives in a separate rune-aware subpath, not in
 			// svelte-realtime/client, so its import is a standalone line.
 			const hasField = mpInfo.typing || mpInfo.hasLocks || mpInfo.selections || mpInfo.reactions;
-			const hasRoster = mpInfo.hasPresence || mpInfo.hasCursors || hasField;
+			const hasRoster = mpInfo.hasPresence || mpInfo.hasCursors || hasField || mpInfo.hasOwner;
 			if (hasRoster) {
 				if (!mpRuntimeImported) {
 					lines.push(`import { MultiplayerRoom, localKeySource } from 'svelte-realtime/multiplayer';`);
@@ -280,6 +280,9 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			}
 			if (mpInfo.hasCursors) {
 				mpLines.push(`  cursors: __stream(${JSON.stringify(modulePath + '/' + name + '/__cursors')}, ${JSON.stringify({ merge: 'cursor' })}, true),`);
+			}
+			if (mpInfo.hasOwner) {
+				mpLines.push(`  owner: __stream(${JSON.stringify(modulePath + '/' + name + '/__owner')}, ${JSON.stringify({ merge: 'set' })}, true),`);
 			}
 			// The presence-field send path (typing / selections / locks) and the
 			// reactions stream are emitted only when the export declares a field
@@ -344,6 +347,9 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 					roomDeps.push(`reactions: ${name}.reactions(...args)`);
 					roomDeps.push(`react: (...a) => ${name}._emitReaction.fireAndForget(...args, ...a)`);
 				}
+				if (mpInfo.hasOwner) {
+					roomDeps.push(`owner: ${name}.owner(...args)`);
+				}
 				mpLines.push(`  identify(key) { _${name}_me.set(key); },`);
 				mpLines.push(`  room(...args) { return new MultiplayerRoom({ ${roomDeps.join(', ')} }); },`);
 			}
@@ -378,6 +384,9 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			}
 			if (roomInfo.hasCursors) {
 				roomLines.push(`  cursors: __stream(${JSON.stringify(modulePath + '/' + name + '/__cursors')}, ${JSON.stringify({ merge: 'cursor' })}, true),`);
+			}
+			if (roomInfo.hasOwner) {
+				roomLines.push(`  owner: __stream(${JSON.stringify(modulePath + '/' + name + '/__owner')}, ${JSON.stringify({ merge: 'set' })}, true),`);
 			}
 			// Lobby-browser view (opt-in): a per-export enumeration stream of the
 			// active rooms, wrapped in the RoomsList rune. `game.rooms()` takes no

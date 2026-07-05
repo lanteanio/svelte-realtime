@@ -75,6 +75,7 @@ export async function _loadRegistryDirect(server, liveDir, dir) {
 					// does.
 					if (fn.__dataStream) __register(rel + '/' + name + '/__data', fn.__dataStream, rel);
 					if (fn.__presenceStream) __register(rel + '/' + name + '/__presence', fn.__presenceStream, rel);
+					if (fn.__ownerStream) __register(rel + '/' + name + '/__owner', fn.__ownerStream, rel);
 					if (fn.__cursorStream) __register(rel + '/' + name + '/__cursors', fn.__cursorStream, rel);
 					if (fn.__cursorMove) __register(rel + '/' + name + '/__cursor/move', fn.__cursorMove, rel);
 					if (fn.__cursorReportViewport) __register(rel + '/' + name + '/__cursor/reportViewport', fn.__cursorReportViewport, rel);
@@ -103,6 +104,7 @@ export async function _loadRegistryDirect(server, liveDir, dir) {
 				} else if (/** @type {any} */ (fn)?.__isRoom) {
 					if (fn.__dataStream) __register(rel + '/' + name + '/__data', fn.__dataStream, rel);
 					if (fn.__presenceStream) __register(rel + '/' + name + '/__presence', fn.__presenceStream, rel);
+					if (fn.__ownerStream) __register(rel + '/' + name + '/__owner', fn.__ownerStream, rel);
 					if (fn.__cursorStream) __register(rel + '/' + name + '/__cursors', fn.__cursorStream, rel);
 					if (fn.__roomsStream) __register(rel + '/' + name + '/__rooms', fn.__roomsStream, rel);
 					if (fn.__roomsSync) __register(rel + '/' + name + '/__roomsSync', fn.__roomsSync, rel);

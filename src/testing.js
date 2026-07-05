@@ -322,6 +322,7 @@ export function createTestEnv(options) {
 				const path = moduleName + '/' + name;
 				if (fn.__dataStream) __register(path + '/__data', fn.__dataStream);
 				if (fn.__presenceStream) __register(path + '/__presence', fn.__presenceStream);
+				if (fn.__ownerStream) __register(path + '/__owner', fn.__ownerStream);
 				if (fn.__cursorStream) __register(path + '/__cursors', fn.__cursorStream);
 				if (fn.__roomsStream) __register(path + '/__rooms', fn.__roomsStream);
 				if (fn.__roomsSync) __register(path + '/__roomsSync', fn.__roomsSync);

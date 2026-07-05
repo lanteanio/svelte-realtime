@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.69] - 2026-07-05
+
+### Added
+
+- **Room ownership with deterministic succession (`live.room({ owner: true })`).** A lobby needs someone in charge - the member who can start the game, kick a troll, close the room - and a host-as-boolean on app state breaks the moment that member disconnects. Opt in with `owner: true` and the room tracks an owner role: the first member to join claims it, the longest-joined remaining member inherits it when the owner leaves (after the same grace window presence uses, so an authenticated owner who reconnects in time keeps the role), and an emptied room clears it. Succession order is tracked join order (a monotonic per-room sequence), never message arrival order. The handoff is observable twice: clients get the generated `owner(...roomArgs)` sub-stream - a live `{ key, reason }` value with `reason` one of `claimed` / `succeeded` / `transferred` / `vacated` - and the server gets `onOwnerChange(change)`, fired exactly once per change cluster-wide (on the instance that performed it). `ownerOnly: ['start', 'kick']` gates named actions to the current owner (FORBIDDEN otherwise, fail closed - an ownerless room rejects too, and naming a nonexistent action throws at declaration); inside actions, `ctx.owner()` / `ctx.isOwner()` / `ctx.transferOwner(to)` read and hand off the role (transfer is a compare-and-set: caller must still hold it, target must be a member). Works with or without `presence` on the same join/leave transitions, passes through `live.multiplayer()` (the aggregated room view gains `room.owner` / `room.isOwner`), and is cluster-wide with `platform.redis`: every transition runs as one atomic script on a shared per-room roster (TTL-refreshed like cluster presence; a stale owner heals on the next join), so concurrent joins and leaves on different instances serialize and exactly one instance decides and announces each change. Off by default - a room without the knob is unchanged.
+
 ## [0.6.0-next.68] - 2026-07-05
 
 ### Added

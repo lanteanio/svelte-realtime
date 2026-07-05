@@ -495,8 +495,8 @@ export function _extractAggregateWindows(source, name) {
 }
 
 export function _extractRoomInfo(source, name) {
-	/** @type {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[], isEnumerable: boolean }} */
-	const info = { dataOpts: { merge: 'crud' }, hasPresence: false, hasCursors: false, actions: [], isEnumerable: false };
+	/** @type {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[], isEnumerable: boolean, hasOwner: boolean }} */
+	const info = { dataOpts: { merge: 'crud' }, hasPresence: false, hasCursors: false, actions: [], isEnumerable: false, hasOwner: false };
 
 	// Find the start of live.room({ ... }) call
 	const startPattern = new RegExp(
@@ -514,6 +514,8 @@ export function _extractRoomInfo(source, name) {
 	info.hasCursors = configKeys.has('cursors');
 	// Room enumeration is opt-in via `enumerable: true` or a `meta` function.
 	info.isEnumerable = configKeys.has('enumerable') || configKeys.has('meta');
+	// Room ownership is opt-in via `owner: true`.
+	info.hasOwner = configKeys.has('owner');
 
 	const mergeVal = _extractTopLevelStringProp(body, 'merge');
 	if (mergeVal) info.dataOpts.merge = mergeVal;
@@ -539,7 +541,7 @@ export function _extractRoomInfo(source, name) {
  * future client surface can be told which surfaces were declared.
  * @param {string} source
  * @param {string} name
- * @returns {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[], typing: boolean, hasLocks: boolean, reactions: boolean, selections: string | null }}
+ * @returns {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[], typing: boolean, hasLocks: boolean, reactions: boolean, selections: string | null, hasOwner: boolean }}
  */
 export function _extractMultiplayerInfo(source, name) {
 	const startPattern = new RegExp(
@@ -555,7 +557,8 @@ export function _extractMultiplayerInfo(source, name) {
 		typing: false,
 		hasLocks: false,
 		reactions: false,
-		selections: /** @type {string | null} */ (null)
+		selections: /** @type {string | null} */ (null),
+		hasOwner: false
 	};
 	if (!startMatch) return info;
 
@@ -570,6 +573,7 @@ export function _extractMultiplayerInfo(source, name) {
 	info.hasLocks = configKeys.has('locks');
 	info.reactions = configKeys.has('reactions');
 	info.selections = _extractTopLevelStringProp(body, 'selections') || null;
+	info.hasOwner = configKeys.has('owner');
 
 	const mergeVal = _extractTopLevelStringProp(body, 'merge');
 	if (mergeVal) info.dataOpts.merge = mergeVal;

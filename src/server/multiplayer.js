@@ -50,7 +50,10 @@ export const _multiplayerRegister = function multiplayer(config) {
 		key: config.key,
 		actions: config.actions,
 		topicArgs: config.topicArgs,
-		history: config.history
+		history: config.history,
+		owner: config.owner,
+		ownerOnly: config.ownerOnly,
+		onOwnerChange: config.onOwnerChange
 	});
 
 	/** @type {any} */ (roomExport).__isMultiplayer = true;

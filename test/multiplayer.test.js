@@ -101,6 +101,40 @@ describe('live.multiplayer() vite integration', () => {
 		expect(code).toContain('__registerRoomActions("collab/room"');
 	});
 
+	it('emits the owner stream stub and registration for an owner room, and omits both without the knob', () => {
+		const OWNER_SOURCE = `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, boardId) => 'board:' + boardId,
+  topicArgs: 1,
+  presence: (ctx) => ({ name: ctx.user.name }),
+  owner: true
+});
+export const game = live.room({
+  topic: (ctx, id) => 'game:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  owner: true
+});
+`;
+		setup({ 'collab.js': OWNER_SOURCE });
+
+		const plugin = createPlugin();
+		const stub = plugin.load('\0live:collab', {});
+		expect(stub).toContain('owner: __stream("collab/room/__owner"');
+		expect(stub).toContain('owner: __stream("collab/game/__owner"');
+		expect(stub).toContain('"merge":"set"');
+		const registry = plugin.load('\0live:__registry', {});
+		expect(registry).toContain('__register("collab/room/__owner"');
+		expect(registry).toContain('__register("collab/game/__owner"');
+		expect(registry).toContain('.__ownerStream');
+		teardown();
+
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+		const plainStub = createPlugin().load('\0live:collab', {});
+		expect(plainStub).not.toContain('__owner');
+	});
+
 	it('registers the cursor move and reportViewport handlers so the client stubs resolve', () => {
 		setup({ 'collab.js': MULTIPLAYER_SOURCE });
 
@@ -1138,6 +1172,46 @@ describe('MultiplayerRoom roster aggregation', () => {
 		expect(r.cursors.map((c) => c.key).sort()).toEqual(['alice', 'bob']);
 		expect(r.cursors.find((c) => c.key === 'alice').x).toBe(9);
 		r.destroy();
+	});
+
+	it('derives owner and isOwner from the owner store and refreshes on a handoff push', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([]);
+		const cursors = fakeStore([]);
+		const status = fakeStore('connected');
+		const owner = fakeStore({ key: 'alice', reason: null });
+		const r = new MultiplayerRoom({ me: 'alice', presence, cursors, status, owner, move: () => {} });
+
+		expect(r.owner).toBe('alice');
+		expect(r.isOwner).toBe(true);
+
+		owner.set({ key: 'bob', reason: 'succeeded' });
+		flushSync();
+		expect(r.owner).toBe('bob');
+		expect(r.isOwner).toBe(false);
+
+		owner.set({ key: null, reason: 'vacated' });
+		flushSync();
+		expect(r.owner).toBe(null);
+		expect(r.isOwner).toBe(false);
+		r.destroy();
+	});
+
+	it('owner reads null and isOwner false without an owner store or a local key', async () => {
+		await loadShippedRuneModule();
+		const presence = fakeStore([]);
+		const cursors = fakeStore([]);
+		const status = fakeStore('connected');
+		const bare = new MultiplayerRoom({ me: 'alice', presence, cursors, status, move: () => {} });
+		expect(bare.owner).toBe(null);
+		expect(bare.isOwner).toBe(false);
+		bare.destroy();
+
+		const owner = fakeStore({ key: 'alice', reason: null });
+		const anonymous = new MultiplayerRoom({ presence, cursors, status, owner, move: () => {} });
+		expect(anonymous.owner).toBe('alice');
+		expect(anonymous.isOwner).toBe(false); // me unknown: never a crash, never a false claim
+		anonymous.destroy();
 	});
 
 	it('excludes the local user from others when me is known', async () => {

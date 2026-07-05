@@ -42,6 +42,8 @@ export interface MultiplayerRoomDeps {
 	status: Readable<string>;
 	/** Reactions sub-stream (the bounded ring of recent emotes), when enabled. */
 	reactions?: Readable<any[]>;
+	/** Owner sub-stream (the room's `{ key, reason }` owner value), when enabled. */
+	owner?: Readable<{ key: string | null, reason: string | null } | undefined>;
 	/** Outbound cursor-move send callback. */
 	move?: (...args: any[]) => any;
 	/** Outbound viewport-report send callback. Falls back to `move`. */
@@ -102,6 +104,10 @@ export class MultiplayerRoom {
 	get selections(): Record<string, any>;
 	/** The bounded ring of recent reactions. */
 	get reactions(): any[];
+	/** The room's current owner key, or `null` while unclaimed / vacated / not yet loaded. */
+	get owner(): string | null;
+	/** Whether the local user holds the owner role. Needs `identify(key)`; reads `false` when `me` is unknown. */
+	get isOwner(): boolean;
 	/** Forward a cursor move to the injected send callback. */
 	move(...args: any[]): any;
 	/** Forward a viewport report to the injected send callback. */

@@ -3341,6 +3341,50 @@ const id   = codes.decode('7Qm2xK'); // "7Qm2xK"  -> 42        (or null if malfo
 
 `length` (default 6, `62^6` ~ 56.8 billion codes; max 8) and `rounds` (default 4) are configurable. The codec is pure and deterministic (safe under the DST simulator).
 
+### Room ownership (`owner: true`)
+
+A lobby needs someone in charge: the member who can start the game, kick a troll, or close the room. Modeling that as a boolean on your own state breaks the moment the host disconnects - now nobody can act. Opt in with `owner: true` and the room tracks an **owner role with deterministic succession**: the first member to join holds it, the longest-joined remaining member inherits it when the owner leaves, and an emptied room clears it.
+
+```js
+export const game = live.room({
+  topic: (ctx, id) => 'game:' + id,
+  topicArgs: 1,
+  init: async (ctx, id) => loadGame(id),
+  owner: true,
+  actions: {
+    start:  async (ctx, id) => beginMatch(id),          // owner-only (below)
+    kick:   async (ctx, id, who) => removePlayer(id, who),
+    invite: async (ctx, id, who) => addInvite(id, who)  // any member
+  },
+  ownerOnly: ['start', 'kick'],
+  onOwnerChange: ({ topic, owner, previous, reason }) => {
+    log.info('room %s owner: %s -> %s (%s)', topic, previous, owner, reason);
+  }
+});
+```
+```svelte
+<script>
+  import { game } from '$live/game';
+  const { data: gameId } = $props();
+  const owner = game.owner(gameId);   // { key, reason } - live
+</script>
+
+{#if $owner?.key}
+  <p>Host: {$owner.key}</p>
+{/if}
+```
+
+How it behaves:
+
+- **The first member claims; succession follows join order.** Every member gets a monotonically increasing join sequence when it enters the room. When the owner leaves, the live member with the lowest sequence inherits - the longest-joined member, computed from tracked state, never from message arrival order. A member who leaves and rejoins goes to the back of the order.
+- **The handoff is observable twice.** Clients get the `owner(...roomArgs)` sub-stream: a `{ key, reason }` value that snapshot-loads the current owner and replaces in place on every change (`reason` is `'claimed'`, `'succeeded'`, `'transferred'`, or `'vacated'`; `null` on the snapshot itself). The server gets `onOwnerChange`, fired **exactly once per change cluster-wide** - on the instance that performed it - so a side effect (log, notification, scoreboard write) never fans out N ways.
+- **Owner-gated actions.** `ownerOnly: ['start', 'kick']` rejects any other caller with `FORBIDDEN` before the handler runs; a room with no owner rejects too (fail closed - an owner-only action never runs ownerless). Misconfiguration is loud: naming an action that does not exist throws at declaration time, because a typo here would silently leave the action ungated.
+- **Inside actions**, `ctx.owner()` reads the current owner, `ctx.isOwner()` answers for the caller, and `ctx.transferOwner(to)` hands the role off explicitly - a compare-and-set that succeeds only when the caller still holds the role and the target is a current member (it returns `false` otherwise and changes nothing). In a `live.multiplayer()` room the aggregated view carries `room.owner` and `room.isOwner` directly.
+- **Identity and reconnect.** Members are keyed the way presence keys them: the authenticated user id when there is one, else a per-connection guest id. Departure waits out the same grace window presence uses, so an authenticated owner who reconnects within it keeps the role with no handoff; a guest owner's identity dies with its socket, so a guest reconnect runs succession - self-healing, but if ownership matters, authenticate.
+- **Works without `presence`.** `owner: true` alone tracks membership for the role without publishing any roster - and composes with `presence` on the same join/leave transitions when both are declared.
+- **Cluster-wide when `platform.redis` is wired.** Join order and the role live in a shared per-room roster (one hash per room, TTL-refreshed on activity, exactly like cluster presence), and every transition runs as one atomic script - concurrent joins and leaves on different instances serialize, exactly one instance decides each change, and the handoff event rides the publish bus to every subscriber. The same best-effort residual as presence applies: state orphaned by a crashed instance is TTL-bounded, and the next join heals a stale owner. Without `platform.redis`, ownership is tracked per instance (like presence).
+- **The owner is a role, not a permission system.** It answers "who is in charge of this room" - pair it with your room `guard` for who may *enter*, and with [per-caller visibility](#per-caller-visibility-enumerable-as-a-predicate) and [`shortCodes`](#unguessable-join--share-codes-shortcodes) for who can *find* the room. It is also distinct from cluster leadership (`configureCron({ leader })`), which elects an instance, not a member.
+
 ---
 
 ## Multiplayer
