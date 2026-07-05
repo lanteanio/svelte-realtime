@@ -3321,6 +3321,26 @@ The predicate receives the requesting connection's `ctx` and the room's card (`{
 - **Cost is opt-in and local to the export.** `enumerable: true` (and every other stream in the app) keeps the shared single-frame fan-out. With a predicate, each of this export's lobby deltas walks that channel's local subscribers and evaluates the predicate per subscriber - fine for lobby-scale channels; keep the predicate cheap and synchronous when you can. Async predicates are supported (an ACL lookup, say) and deltas stay strictly ordered per channel.
 - **Cluster and multi-worker deploys need the pub/sub bus** (the standard cluster wiring): filtered deltas are evaluated on the instance that holds each subscriber, which the bus already delivers to. The Redis roster snapshot is filtered per caller the same way the local one is.
 
+#### Unguessable join / share codes (`shortCodes`)
+
+Per-caller visibility hides a room's *existence*, but a room a user joins by a **code or share link** has a second exposure: if the code is the room's sequential id (`?game=1`, `?game=2`, ...), anyone can scan the id space to find and address rooms. `shortCodes()` turns a monotonic counter into an unguessable, non-sequential code and back:
+
+```js
+import { shortCodes } from 'svelte-realtime/server';
+
+const codes = shortCodes({ secret: process.env.CODE_SECRET }); // 6-char codes by default
+
+const code = codes.encode(gameId);   // 42        -> "7Qm2xK"  (unguessable, fixed length)
+const id   = codes.decode('7Qm2xK'); // "7Qm2xK"  -> 42        (or null if malformed)
+```
+
+- **Bijective and reversible.** Built on a keyed Feistel network, so the mapping is collision-free with no lookup table, and `decode` recovers the id with your secret - no database round-trip to resolve a code.
+- **Unguessable, not sequential.** Adjacent ids map to unrelated codes, so a code cannot be incremented to reach the next room. Keyed by your `secret`, which is what makes the scrambling unpredictable.
+- **Deterministic.** The same `secret` yields the same codes on every instance and across restarts, so a code minted anywhere resolves everywhere. Set a stable `secret` (an env var); without one a per-process random key is used and a dev warning fires - fine for a single dev instance, but codes then change on restart and differ per instance.
+- **Not a substitute for a guard.** A code is a hard-to-guess *handle*, not proof of authorization: `decode` is total over the code space, so validate the decoded id against your store and keep your room `guard` - exactly as you would treat any id a client sends. Pair the two and a private room is hidden from enumeration *and* unaddressable by a guessed code.
+
+`length` (default 6, `62^6` ~ 56.8 billion codes; max 8) and `rounds` (default 4) are configurable. The codec is pure and deterministic (safe under the DST simulator).
+
 ---
 
 ## Multiplayer

@@ -1109,6 +1109,45 @@ export function colorForKey(key: string): string;
 /** Raw deterministic hue (0..359) for a stable user key. */
 export function hueForKey(key: string): number;
 
+/** A keyed short-code codec returned by {@link shortCodes}. */
+export interface ShortCodes {
+	/**
+	 * Encode a sequence number in `[0, space)` to its unguessable, fixed-length
+	 * Base62 code. Throws if `n` is out of range.
+	 */
+	encode(n: number): string;
+	/**
+	 * Decode a code back to its sequence number, or `null` for a malformed code
+	 * (wrong length, or an out-of-alphabet character). A well-formed code decodes
+	 * to some in-range number even if this key never minted it - the mapping is
+	 * total - so validate the decoded id against your store, like any client input.
+	 */
+	decode(code: string): number | null;
+	/** The fixed code length in Base62 characters. */
+	readonly length: number;
+	/** The size of the code space (`62 ** length`); valid sequence numbers are `[0, space)`. */
+	readonly space: number;
+}
+
+/**
+ * Mint unguessable, sequential-free short codes from a monotonic counter - the
+ * companion to room enumeration for join-by-code and share-link rooms. Hand out
+ * `encode(id)` as the public code and recover the id with `decode(code)`, so a
+ * scanner cannot walk the id space to find or address rooms it has no code for.
+ * Bijective (collision-free, no lookup table), reversible with your `secret`, and
+ * deterministic across replicas. Pair it with a room `guard` - a code is a
+ * hard-to-guess handle, not proof of authorization.
+ *
+ * @param config
+ *   - `secret`: the operator key (strongly recommended - makes codes stable
+ *     across restarts and identical across cluster instances, and is what makes
+ *     them unguessable). Without it a per-process random key is used and a
+ *     one-time dev warning fires.
+ *   - `length`: code length in Base62 chars (fixed, zero-padded). Default 6; max 8.
+ *   - `rounds`: Feistel rounds. Default 4.
+ */
+export function shortCodes(config?: { secret?: string; length?: number; rounds?: number }): ShortCodes;
+
 /**
  * Maximum number of hop buckets a single sliding window may allocate.
  * Sliding state is `O(bucketCount * per-bucket state)`. Default 1000;

@@ -35,6 +35,7 @@ push-registry
 rooms
 rpc
 schema
+short-codes
 silent-topic
 skip-gate
 smooth

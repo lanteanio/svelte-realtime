@@ -113,6 +113,7 @@ export { _resetAdmission };
 export { WRAPPED_FOR_REPLAY, _resetReplayRouting };
 export { assert, fatal, setFatalSink, resetFatalSink, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
+import { createShortCode, fnv1a32 } from './shared/short-code.js';
 export { LiveError };
 export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge };
 
@@ -120,6 +121,56 @@ export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _cl
 // so app/game code can draw the same reproducible randomness outside `apply` (world
 // generation, spawns, deterministic tests) without importing the adapter subpath.
 export { createSharedRandom } from 'svelte-adapter-uws/plugins/smooth/random';
+
+/** One-time dev warning when shortCodes() runs without a configured secret. */
+let _shortCodesSecretWarned = false;
+
+/**
+ * Mint unguessable, sequential-free short codes from a monotonic counter - the
+ * companion to room enumeration for join-by-code and share-link rooms. An app
+ * that keys rooms by a sequential id hands out `codes.encode(id)` as the public
+ * code and recovers the id with `codes.decode(code)`, so a scanner cannot walk
+ * the id space (`?room=1`, `?room=2`, ...) to find or address rooms it was not
+ * given a code for. Bijective (collision-free, no lookup table), reversible with
+ * your secret, and deterministic across replicas.
+ *
+ * Pair it with a room `guard`: a code is a hard-to-guess handle, not proof of
+ * authorization - `decode` is total over the code space, so validate the
+ * decoded id against your store exactly as you would any client-supplied id.
+ *
+ * @param {{ secret?: string, length?: number, rounds?: number }} [config]
+ *   - `secret`: the operator key. STRONGLY recommended: it makes codes stable
+ *     across restarts and identical across cluster instances, and it is what
+ *     makes the codes unguessable. Without it a per-process random key is used
+ *     (fine for a single dev instance; codes then change on restart and differ
+ *     per instance) and a one-time dev warning fires.
+ *   - `length`: code length in Base62 chars (fixed, zero-padded). Default 6
+ *     (~56.8 billion codes); max 8.
+ *   - `rounds`: Feistel rounds. Default 4.
+ * @returns {{ encode: (n: number) => string, decode: (code: string) => number | null, length: number, space: number }}
+ */
+export function shortCodes(config) {
+	const cfg = config || {};
+	let seed;
+	if (typeof cfg.secret === 'string' && cfg.secret.length > 0) {
+		seed = fnv1a32(cfg.secret);
+	} else {
+		if (cfg.secret !== undefined && cfg.secret !== null) {
+			throw new Error('[svelte-realtime] shortCodes({ secret }): must be a non-empty string');
+		}
+		seed = randomU32();
+		if (_IS_DEV && !_shortCodesSecretWarned) {
+			_shortCodesSecretWarned = true;
+			console.warn(
+				'[svelte-realtime] shortCodes() called without a secret: using a per-process random key.\n' +
+				'  Codes will change on restart and differ across cluster instances until you set one.\n' +
+				'  Pass a stable operator secret:  shortCodes({ secret: process.env.CODE_SECRET })\n' +
+				'  See: https://svti.me/short-codes'
+			);
+		}
+	}
+	return createShortCode({ length: cfg.length, seed, rounds: cfg.rounds });
+}
 
 const textDecoder = new TextDecoder();
 

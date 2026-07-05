@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.68] - 2026-07-05
+
+### Added
+
+- **`shortCodes()` - unguessable, sequential-free join / share codes.** Room enumeration hides a room's *existence* from callers who cannot see it, but a room joined by a code or share link has a second exposure: if the code is the room's sequential id (`?game=1`, `?game=2`, ...), anyone can scan the id space to find and address rooms. `shortCodes({ secret })` turns a monotonic counter into an unguessable, non-sequential, fixed-length Base62 code and back - `codes.encode(id)` for the public code, `codes.decode(code)` to recover the id (or `null` if malformed). It is built on a keyed Feistel network, so the mapping is bijective (collision-free, no lookup table) and reversible with your secret (no DB round-trip to resolve a code), keyed so adjacent ids scatter to unrelated codes, and deterministic so a code minted on any instance resolves on every instance and across restarts. `length` (default 6, ~56.8 billion codes; max 8) and `rounds` (default 4) are configurable; the codec is pure and determinism-clean (safe under the DST simulator). Set a stable `secret` for production/cluster stability; without one a per-process random key is used and a one-time dev warning fires. A code is a hard-to-guess handle, not proof of authorization - `decode` is total over the space, so keep your room `guard` and validate the decoded id, exactly as you would any client-supplied id.
+
 ## [0.6.0-next.67] - 2026-07-05
 
 ### Added
