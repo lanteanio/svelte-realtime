@@ -6,7 +6,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const H = vi.hoisted(() => ({ cb: null }));
 vi.mock('svelte-adapter-uws/client', () => ({
 	on: (topic) => ({ subscribe: (fn) => { if (topic === '__realtime') H.cb = fn; return () => { H.cb = null; }; } }),
-	connect: () => null
+	connect: () => null,
+	setTopicManaged: () => {}
 }));
 
 import { health, _resetHealth, _ensureHealthSubscription } from '../src/client/health.js';

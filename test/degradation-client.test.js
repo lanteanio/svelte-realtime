@@ -6,7 +6,8 @@ import { setRuntimeEnv, resetRuntimeEnv } from '../src/client-runtime.js';
 const H = vi.hoisted(() => ({ cb: null }));
 vi.mock('svelte-adapter-uws/client', () => ({
 	on: (topic) => ({ subscribe: (fn) => { if (topic === '__realtime') H.cb = fn; return () => { H.cb = null; }; } }),
-	connect: () => null
+	connect: () => null,
+	setTopicManaged: () => {}
 }));
 
 import { health, degradation, _resetHealth } from '../src/client/health.js';

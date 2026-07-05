@@ -274,6 +274,23 @@ export const state = {
 	maskNotFound: false,
 
 	/**
+	 * Wire-subscribe authorization. When true (the default), realtime arms the
+	 * adapter's `platform.authorizeWireSubscribe()` at platform capture, so a
+	 * client's raw WebSocket `subscribe` frame is honored only for a topic the
+	 * server already authorized for that connection through a stream RPC (which
+	 * runs the guard / access filter / tenant scoping and then
+	 * `platform.subscribe`). This closes the bypass where a client subscribes
+	 * directly to a topic it was never granted - a private room, another
+	 * tenant's channel - and receives its fan-out. realtime's own client never
+	 * sends such raw frames (it attaches server-managed topics without a wire
+	 * subscribe), so pure-realtime apps see no behavior change. Set
+	 * `realtime({ authorizeWireSubscribe: false })` only for a hybrid app that
+	 * deliberately uses raw client-initiated adapter subscriptions and gates
+	 * them another way. @type {boolean}
+	 */
+	authorizeWireSubscribe: true,
+
+	/**
 	 * Process-wide cluster bus. Single source of truth consulted by every
 	 * publish surface in the framework (RPC `ctx.publish`, cron tick,
 	 * reactive watchers' publish wrap, top-level `publish()` helper). When

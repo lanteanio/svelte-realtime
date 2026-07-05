@@ -4177,6 +4177,20 @@ export interface RealtimeConfig {
 	 * dev-mode unknown-path console warning is unaffected. @default false
 	 */
 	maskNotFound?: boolean;
+	/**
+	 * Wire-subscribe authorization (default `true`). realtime arms the adapter
+	 * so a client's raw WebSocket `subscribe` frame is honored only for a topic
+	 * the server already authorized for that connection through a stream RPC
+	 * (which runs the guard / access filter / tenant scoping, then subscribes
+	 * the socket). This closes the bypass where a client subscribes directly to
+	 * a topic it was never granted - a private room, another tenant's channel -
+	 * and receives its fan-out. realtime's own client never sends such raw
+	 * frames (it attaches server-managed topics without a wire subscribe), so
+	 * pure-realtime apps see no behavior change. Set `false` only for a hybrid
+	 * app that deliberately uses raw client-initiated adapter subscriptions and
+	 * authorizes them another way (e.g. its own `subscribe` hook). @default true
+	 */
+	authorizeWireSubscribe?: boolean;
 }
 
 /** A retained, undeliverable outbound-webhook event. */

@@ -43,6 +43,7 @@ beforeEach(async () => {
 
 	vi.doMock('svelte-adapter-uws/client', () => ({
 		connect: connectFn,
+		setTopicManaged: () => {},
 		on: (topic) => ({
 			subscribe: (fn) => {
 				let fns = topicCallbacks.get(topic);

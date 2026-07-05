@@ -1,5 +1,13 @@
 // @ts-check
 import { connect as _connect, on, status } from 'svelte-adapter-uws/client';
+import * as _adapterClient from 'svelte-adapter-uws/client';
+// Server-managed subscription marking. Older adapters (before the wire-subscribe
+// authorization surface) lack it; degrade to a no-op, which leaves the prior
+// behavior exactly (the client sends its redundant subscribe frame, and no gate
+// is armed to reject it). Guarded once at module load.
+const setTopicManaged = typeof _adapterClient.setTopicManaged === 'function'
+	? _adapterClient.setTopicManaged
+	: () => {};
 import { writable } from 'svelte/store';
 // Namespace import lets .rune() access fromStore (Svelte 5 only) without
 // breaking the module under Svelte 4 - missing exports become undefined,
@@ -976,6 +984,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				if (topic && topic !== response.topic) _unregisterTopicErrorSetter(topic, _setError);
 				topic = response.topic || null;
 				if (topic) {
+					// The server already subscribed this connection to `topic` (this RPC
+					// ran platform.subscribe after the guard / access filter), so mark it
+					// server-managed: the client attaches its dispatch store WITHOUT
+					// emitting a redundant subscribe frame, and the reconnect
+					// resubscribe-batch skips it. Under wire-subscribe authorization that
+					// is what keeps a legitimate reconnect from racing the server's
+					// re-subscribe. Must precede _subscribeLive() below.
+					setTopicManaged(topic);
 					_registerTopicErrorSetter(topic, _setError);
 					ensureDenialsListener();
 				}

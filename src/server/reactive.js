@@ -108,6 +108,18 @@ export function _ensureWrap(platform) {
 	if (_activatedPlatforms.has(target)) return;
 	_activatedPlatforms.add(target);
 	_wrapPlatformPublish(target);
+	// Arm wire-subscribe authorization on the adapter (default on): a client's
+	// raw subscribe frame is then honored only for a topic the server already
+	// authorized for that connection via a stream RPC. Runs once per platform,
+	// here at the universal capture point so it covers every wiring path
+	// (`realtime().init`, `setCronPlatform`, `_activateDerived`, or first
+	// message). Optional-chained: an older adapter without the method degrades
+	// to the prior behavior. The `platform` reference (possibly a bus-wrapped
+	// seam) is used so a clustered deployment reaches the real flag through the
+	// forwarded method.
+	if (state.authorizeWireSubscribe && typeof (/** @type {any} */ (platform).authorizeWireSubscribe) === 'function') {
+		try { /** @type {any} */ (platform).authorizeWireSubscribe(); } catch {}
+	}
 }
 
 /**

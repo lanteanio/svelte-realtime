@@ -3449,7 +3449,7 @@ export function publish(topic, event, data, options) {
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe } = cfg;
 
 	// Enumeration-safe unknown-path handling (opt-in): answer a wire RPC to an
 	// unregistered path exactly as a guard denial would answer the same caller,
@@ -3459,6 +3459,17 @@ export function realtime(config) {
 			throw new Error('[svelte-realtime] realtime({ maskNotFound }): must be a boolean');
 		}
 		state.maskNotFound = maskNotFound;
+	}
+
+	// Wire-subscribe authorization (default on). Closes the raw-wire subscribe
+	// bypass: a client can only subscribe to a topic the server authorized for it
+	// through a stream RPC. Opt out only for a hybrid app that deliberately relies
+	// on raw client-initiated adapter subscriptions.
+	if (authorizeWireSubscribe !== undefined) {
+		if (typeof authorizeWireSubscribe !== 'boolean') {
+			throw new Error('[svelte-realtime] realtime({ authorizeWireSubscribe }): must be a boolean');
+		}
+		state.authorizeWireSubscribe = authorizeWireSubscribe;
 	}
 
 	// Protocol-compat signal (opt-in): an integer the app bumps only on a BREAKING

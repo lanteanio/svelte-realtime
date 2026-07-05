@@ -1924,6 +1924,14 @@ A few surfaces have no per-connection tenant, so the framework cannot scope them
 
 > Length note: a tenant-scoped wire topic is `@t/<tenantId>/<your topic>`. The tenant id is capped at 64 chars to leave headroom, but app topics are not length-capped - a topic already near the adapter/bus 256-char limit plus the tenant prefix can exceed it and have that one tenant's cross-instance deltas dropped (no cross-tenant exposure; the single-tenant path is unaffected). Keep topic names well under ~180 chars if you use long tenant ids.
 
+### Wire-subscribe authorization (why a guessable prefix is still safe)
+
+A tenant-scoped wire topic is `@t/<tenantId>/<topic>`, and the tenant id is a plain slug - so the wire topic is guessable. That is safe because realtime authorizes subscriptions in the **stream RPC** (the guard, the tenant scoping, `enumerable` predicates - all run there, and only then is the socket subscribed), and it arms the adapter so a client's **raw** WebSocket subscribe frame is honored only for a topic the server already authorized for that connection. A client cannot subscribe directly to `@t/<otherTenant>/<topic>` (or a private room's data topic it never joined through a guarded RPC) and receive its fan-out - the raw frame is denied.
+
+This is on by default and needs no configuration. realtime's own client never sends a raw subscribe frame for a stream topic (it attaches server-resolved topics without one), so there is no behavior change and no extra wire traffic. The same gate protects **room guards** and any per-topic authorization, not just tenancy.
+
+It requires `svelte-adapter-uws` >= `0.6.0-next.57`; on an older adapter the gate is simply not armed (the framework degrades to the prior behavior). Opt out with `realtime({ authorizeWireSubscribe: false })` **only** if your app deliberately uses raw client-initiated adapter subscriptions (outside realtime's RPC) and authorizes them another way - e.g. its own `subscribe` hook in `hooks.ws.js`.
+
 ---
 
 ## Rate limiting

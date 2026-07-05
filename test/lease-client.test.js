@@ -51,6 +51,7 @@ beforeEach(async () => {
 
 	vi.doMock('svelte-adapter-uws/client', () => ({
 		connect: vi.fn(() => conn),
+		setTopicManaged: () => {},
 		on: (topic) => ({
 			subscribe: (fn) => {
 				let fns = topicCallbacks.get(topic);
@@ -133,6 +134,7 @@ describe('realtime health folds the connection flow-control signal', () => {
 		const legacyConn = { sendQueued: vi.fn(), ready: () => Promise.resolve(), get bufferedAmount() { return 0; } };
 		vi.doMock('svelte-adapter-uws/client', () => ({
 			connect: vi.fn(() => legacyConn),
+			setTopicManaged: () => {},
 			on: (topic) => ({
 				subscribe: (fn) => {
 					let fns = topicCallbacks.get(topic);

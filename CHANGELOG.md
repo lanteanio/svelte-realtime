@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.67] - 2026-07-05
+
+### Added
+
+- **Wire-subscribe authorization (on by default): a client can no longer subscribe to a topic it was never granted.** realtime authorizes every subscription server-side in its stream RPC (the guard, the access filter, and tenant scoping all run there, then the socket is subscribed) - but that left the raw WebSocket layer open: a client could send a bare `{type:'subscribe', topic}` frame for a topic it never went through an RPC for - a private room's data topic, or another tenant's channel (`@t/<otherTenant>/...`, whose prefix is guessable and, deliberately, not `__`-blocked) - and receive that topic's fan-out, bypassing the room guard and tenant isolation. realtime now arms the adapter's wire-subscribe authorization at platform capture, so a client's raw subscribe frame is honored only for a topic the server already authorized for that connection. realtime's own client never sends such frames - it attaches each server-resolved topic as *managed* (dispatch only, no client subscribe frame, and skipped by the reconnect resubscribe-batch, since the server re-subscribes it through the RPC on reconnect) - so pure-realtime apps see no behavior change, no extra wire traffic, and reconnect is unaffected. Opt out with `realtime({ authorizeWireSubscribe: false })` only for a hybrid app that deliberately relies on raw client-initiated adapter subscriptions and authorizes them another way (e.g. its own `subscribe` hook). Requires `svelte-adapter-uws` >= `0.6.0-next.57`; on an older adapter both halves degrade to the prior behavior (no gate armed, a harmless redundant client subscribe frame). (Peer dep bumped to `^0.6.0-next.57`.)
+
 ## [0.6.0-next.66] - 2026-07-05
 
 ### Added
