@@ -13,6 +13,8 @@ import {
 	_presenceRefForTest
 } from '../src/server.js';
 import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId } from '../src/server/rooms-cluster.js';
+import { _clearEnumGatesForTests } from '../src/server/rooms-gate.js';
+import { _ensureWrap } from '../src/server/reactive.js';
 import { colorForKey, hueForKey } from '../src/shared/color.js';
 import { colorForKey as colorViaServer, hueForKey as hueViaServer } from '../src/server.js';
 import { colorForKey as colorViaClient, hueForKey as hueViaClient } from '../src/client.js';
@@ -2398,5 +2400,274 @@ describe('live.room enumeration (game.rooms())', () => {
 		expect(pub[0].t).toBe(game.__roomsStream.__streamTopic);
 		expect(pub[0].e).toBe('created');
 		expect(await _clusterRoomsList({ redis }, id)).toEqual([{ topic: 'game:1', args: [1], count: 1, meta: { ok: true } }]);
+	});
+});
+
+describe('live.room per-caller enumeration (enumerable predicate)', () => {
+	afterEach(() => {
+		_clearEnumGatesForTests();
+	});
+
+	/**
+	 * A platform whose publish/send surfaces are spies and whose subscriber
+	 * walk yields a scripted set, wrapped by the framework publish wrap so a
+	 * publish takes the exact path production deltas take. `published` records
+	 * shared broadcasts (the leak channel under test); `sent` records
+	 * per-subscriber frames.
+	 */
+	function makeGatePlatform(subscribers = new Map()) {
+		const published = [];
+		const sent = [];
+		const platform = {
+			publish(topic, event, data, options) {
+				published.push({ topic, event, data, options });
+				return true;
+			},
+			publishBatched(batch) {
+				for (const item of batch) published.push({ topic: item.topic, event: item.event, data: item.data, batched: true });
+				return true;
+			},
+			forEachSubscriber(topic, fn) {
+				for (const s of subscribers.get(topic) || []) fn(s.ws, s.user);
+			},
+			send(ws, topic, event, data) {
+				sent.push({ ws, topic, event, data });
+				return 1;
+			}
+		};
+		_ensureWrap(platform);
+		return { platform, published, sent };
+	}
+
+	/** Drain the per-channel delivery chain (async predicates defer by microtasks). */
+	const settle = () => new Promise((r) => setTimeout(r, 0));
+
+	/** The publish-capture ctx the delta hooks need, routed through the wrapped platform. */
+	function joinCtx(platform) {
+		const pub = (t, e, d) => platform.publish(t, e, d);
+		return { platform, publish: pub, _publishWire: pub };
+	}
+
+	it('accepts a predicate as enumerable and keeps the enumeration surface; rejects other types', () => {
+		const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], enumerable: () => true });
+		expect(game.__hasRooms).toBe(true);
+		expect(game.__roomsStream).toBeDefined();
+		expect(game.__roomsStream.__streamFilter).toBeTypeOf('function');
+		// A plain enumerable room carries no pre-subscribe filter (no gate to register).
+		const plain = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], enumerable: true });
+		expect(plain.__roomsStream.__streamFilter).toBeUndefined();
+		expect(() =>
+			live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], enumerable: /** @type {any} */ ('yes') })
+		).toThrow('enumerable must be true, false, or a predicate');
+	});
+
+	it('never broadcasts a gated channel and delivers each delta only to allowed subscribers', async () => {
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			meta: (id) => ({ name: 'g' + id, secret: String(id).startsWith('s') }),
+			enumerable: (ctx, room) => !room.meta.secret || ctx.user?.role === 'admin'
+		});
+		const enumTopic = game.__roomsStream.__streamTopic;
+		const admin = { ws: { id: 'wsA' }, user: { role: 'admin' } };
+		const guest = { ws: { id: 'wsG' }, user: { role: 'user' } };
+		const { platform, published, sent } = makeGatePlatform(new Map([[enumTopic, [admin, guest]]]));
+		const ds = game.__dataStream;
+		const ctx = joinCtx(platform);
+
+		// A secret room opens, gains a second player, loses one, closes.
+		await ds.__onSubscribe(ctx, 'game:s1', ['s1']);
+		await ds.__onSubscribe(ctx, 'game:s1', ['s1']);
+		await ds.__onUnsubscribe(ctx, 'game:s1', 1);
+		await ds.__onUnsubscribe(ctx, 'game:s1', 0);
+		await settle();
+
+		// THE LEAK TEST: not one frame of the gated channel took the shared fan-out.
+		expect(published.filter((p) => p.topic === enumTopic)).toEqual([]);
+		// The guest received nothing at all - no existence, no count, no meta.
+		expect(sent.filter((s) => s.ws === guest.ws)).toEqual([]);
+		// The admin received the full lifecycle.
+		const adminFrames = sent.filter((s) => s.ws === admin.ws);
+		expect(adminFrames.map((f) => f.event)).toEqual(['created', 'updated', 'updated', 'deleted']);
+		expect(adminFrames[0].data).toMatchObject({ topic: 'game:s1', count: 1, meta: { name: 'gs1', secret: true } });
+
+		// A public room reaches both.
+		sent.length = 0;
+		await ds.__onSubscribe(ctx, 'game:p1', ['p1']);
+		await settle();
+		expect(sent.filter((s) => s.ws === admin.ws).map((f) => f.event)).toEqual(['created']);
+		expect(sent.filter((s) => s.ws === guest.ws).map((f) => f.event)).toEqual(['created']);
+	});
+
+	it('grants and revokes live: a flipping answer converges the lobby via synthetic created/deleted', async () => {
+		const allowed = new Set(['u1']);
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			enumerable: (ctx) => allowed.has(ctx.user?.id)
+		});
+		const enumTopic = game.__roomsStream.__streamTopic;
+		const one = { ws: { id: 'ws1' }, user: { id: 'u1' } };
+		const two = { ws: { id: 'ws2' }, user: { id: 'u2' } };
+		const { platform, sent } = makeGatePlatform(new Map([[enumTopic, [one, two]]]));
+		const ds = game.__dataStream;
+		const ctx = joinCtx(platform);
+
+		await ds.__onSubscribe(ctx, 'game:7', [7]); // created: u1 only
+		allowed.add('u2');
+		await ds.__onSubscribe(ctx, 'game:7', [7]); // updated: u2's first sight -> a GRANT as 'created'
+		allowed.delete('u1');
+		await ds.__onSubscribe(ctx, 'game:7', [7]); // updated: u1 loses access -> a REVOKE as 'deleted'
+		await settle();
+
+		expect(sent.filter((s) => s.ws === one.ws).map((f) => f.event)).toEqual(['created', 'updated', 'deleted']);
+		expect(sent.filter((s) => s.ws === two.ws).map((f) => f.event)).toEqual(['created', 'updated']);
+		// The revoke carries nothing but the key the subscriber already knew.
+		const revoke = sent.filter((s) => s.ws === one.ws).at(-1);
+		expect(revoke.data).toEqual({ topic: 'game:7' });
+	});
+
+	it('filters the snapshot per caller and seeds the shown set, so a real deleted reaches only who saw the room', async () => {
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			meta: (id) => ({ open: !String(id).startsWith('s') }),
+			enumerable: (ctx, room) => room.meta.open || ctx.user?.role === 'admin'
+		});
+		const enumTopic = game.__roomsStream.__streamTopic;
+		const viewer = { ws: { id: 'wsV' }, user: { role: 'user' } };
+		const { platform, sent } = makeGatePlatform(new Map([[enumTopic, [viewer]]]));
+		const ds = game.__dataStream;
+		const ctx = joinCtx(platform);
+
+		// Two rooms open BEFORE the viewer looks at the lobby.
+		await ds.__onSubscribe(ctx, 'game:p1', ['p1']);
+		await ds.__onSubscribe(ctx, 'game:s1', ['s1']);
+		await settle();
+		sent.length = 0;
+
+		// The viewer subscribes: the pre-subscribe filter registers the gate,
+		// the loader filters the snapshot and seeds the shown set.
+		const viewerCtx = { user: viewer.user, ws: viewer.ws, platform, tenantId: null };
+		expect(game.__roomsStream.__streamFilter(viewerCtx)).toBe(true);
+		const snap = await game.__roomsStream(viewerCtx);
+		expect(snap.map((r) => r.topic)).toEqual(['game:p1']); // the secret room is not in the snapshot
+
+		// Both rooms close. Only the room the viewer SAW produces a frame - a
+		// 'deleted' for the unseen room would itself leak its existence.
+		await ds.__onUnsubscribe(ctx, 'game:s1', 0);
+		await ds.__onUnsubscribe(ctx, 'game:p1', 0);
+		await settle();
+		expect(sent.map((f) => [f.event, f.data.topic])).toEqual([['deleted', 'game:p1']]);
+	});
+
+	it('filters the one-shot list() and the cluster snapshot with the same predicate', async () => {
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			meta: (id) => ({ open: !String(id).startsWith('s') }),
+			enumerable: (ctx, room) => room.meta.open || ctx.user?.role === 'admin'
+		});
+		game.__setEnumId('lobby/gated');
+		const redis = makeFakeRedis();
+		const { platform } = makeGatePlatform();
+		/** @type {any} */ (platform).redis = redis;
+		const ctx = joinCtx(platform);
+		const ds = game.__dataStream;
+		await ds.__onSubscribe(ctx, 'game:p1', ['p1']);
+		await ds.__onSubscribe(ctx, 'game:s1', ['s1']);
+		await settle();
+
+		// The cluster roster holds both rooms; each caller sees only what it may.
+		const userSnap = await game.__roomsSync({ user: { role: 'user' }, ws: null, platform, tenantId: null });
+		expect(userSnap.map((r) => r.topic)).toEqual(['game:p1']);
+		const adminSnap = await game.__roomsSync({ user: { role: 'admin' }, ws: null, platform, tenantId: null });
+		expect(adminSnap.map((r) => r.topic).sort()).toEqual(['game:p1', 'game:s1']);
+	});
+
+	it('preserves per-channel delta order under an async predicate', async () => {
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			enumerable: async () => true
+		});
+		const enumTopic = game.__roomsStream.__streamTopic;
+		const viewer = { ws: { id: 'wsV' }, user: {} };
+		const { platform, sent } = makeGatePlatform(new Map([[enumTopic, [viewer]]]));
+		const ds = game.__dataStream;
+		const ctx = joinCtx(platform);
+		await ds.__onSubscribe(ctx, 'game:7', [7]);
+		await ds.__onSubscribe(ctx, 'game:7', [7]);
+		await ds.__onSubscribe(ctx, 'game:7', [7]);
+		await settle();
+		expect(sent.map((f) => [f.event, f.data.count])).toEqual([['created', 1], ['updated', 2], ['updated', 3]]);
+	});
+
+	it('fails closed: a throwing predicate denies, and a platform without the walk drops instead of broadcasting', async () => {
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			enumerable: () => { throw new Error('boom'); }
+		});
+		const enumTopic = game.__roomsStream.__streamTopic;
+		const viewer = { ws: { id: 'wsV' }, user: {} };
+		const { platform, published, sent } = makeGatePlatform(new Map([[enumTopic, [viewer]]]));
+		const ds = game.__dataStream;
+		await ds.__onSubscribe(joinCtx(platform), 'game:7', [7]);
+		await settle();
+		expect(published.filter((p) => p.topic === enumTopic)).toEqual([]);
+		expect(sent).toEqual([]);
+
+		// A minimal platform (no forEachSubscriber/send): the delta is dropped,
+		// never degraded to the shared broadcast that would leak.
+		const bare = live.room({ topic: (ctx, id) => 'g:' + id, topicArgs: 1, init: async () => [], enumerable: () => true });
+		const barePublished = [];
+		const barePlatform = { publish(topic, event, data) { barePublished.push({ topic, event, data }); return true; } };
+		_ensureWrap(barePlatform);
+		await bare.__dataStream.__onSubscribe(joinCtx(barePlatform), 'g:1', [1]);
+		await settle();
+		expect(barePublished.filter((p) => p.topic === bare.__roomsStream.__streamTopic)).toEqual([]);
+	});
+
+	it('gates items inside a batched publish and lets the rest broadcast', async () => {
+		const game = live.room({
+			topic: (ctx, id) => 'game:' + id,
+			topicArgs: 1,
+			init: async () => [],
+			enumerable: (ctx) => ctx.user?.ok === true
+		});
+		const enumTopic = game.__roomsStream.__streamTopic;
+		const yes = { ws: { id: 'wsY' }, user: { ok: true } };
+		const no = { ws: { id: 'wsN' }, user: { ok: false } };
+		const { platform, published, sent } = makeGatePlatform(new Map([[enumTopic, [yes, no]]]));
+		// Gate registered the way a delivering replica registers it: at subscribe.
+		expect(game.__roomsStream.__streamFilter({ tenantId: null })).toBe(true);
+		platform.publishBatched([
+			{ topic: 'scores', event: 'set', data: { a: 1 } },
+			{ topic: enumTopic, event: 'created', data: { topic: 'game:7', args: [7], count: 1 } },
+			{ topic: 'scores', event: 'set', data: { a: 2 } }
+		]);
+		await settle();
+		// The ungated items broadcast; the gated one took the walk.
+		expect(published.map((p) => p.topic)).toEqual(['scores', 'scores']);
+		expect(sent.map((f) => [f.ws.id, f.event])).toEqual([['wsY', 'created']]);
+	});
+
+	it('leaves enumerable:true broadcasting unchanged even while another export is gated', async () => {
+		const gated = live.room({ topic: (ctx, id) => 'a:' + id, topicArgs: 1, init: async () => [], enumerable: () => true });
+		const open = live.room({ topic: (ctx, id) => 'b:' + id, topicArgs: 1, init: async () => [], enumerable: true });
+		const { platform, published } = makeGatePlatform();
+		// Register the gated export's channel so the interception branch is live.
+		expect(gated.__roomsStream.__streamFilter({ tenantId: null })).toBe(true);
+		await open.__dataStream.__onSubscribe(joinCtx(platform), 'b:1', [1]);
+		await settle();
+		const frames = published.filter((p) => p.topic === open.__roomsStream.__streamTopic);
+		expect(frames.map((f) => f.event)).toEqual(['created']);
 	});
 });

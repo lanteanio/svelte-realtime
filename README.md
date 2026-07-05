@@ -3291,6 +3291,28 @@ How it behaves:
 
 - **Cluster-wide when `platform.redis` is wired.** With the same Redis client presence uses, `rooms()` aggregates across every instance: a room opens on the first subscriber anywhere, `count` is the live subscriber total summed across the cluster, and the room closes only when its last subscriber leaves anywhere. The snapshot is a shared Redis roster (one hash per room export) and the live deltas ride the publish bus to every instance, so a lobby browser works behind a load balancer. `meta(args)` is resolved once per open (by the instance that opens the room) and crosses the wire as JSON, so it must be a pure, JSON-serializable function of the room args. The roster is best-effort and eventually consistent (the right model for a discovery view, like cluster presence): a Redis blip is reconciled on the next subscribe or unsubscribe, and the roster carries a TTL refreshed on that activity - so a crashed instance cannot leak a phantom count, and a room with no membership change for the whole window expires and reappears on its next change. Without `platform.redis` (zero-config dev, or a single instance) `rooms()` lists the rooms active on the connected instance, byte-identical to before.
 
+#### Per-caller visibility (`enumerable` as a predicate)
+
+Some rooms should not appear in everyone's lobby - private matches, clan lobbies, invite-only sessions. Pass `enumerable` a predicate instead of `true` and each caller sees only the rooms it is allowed to see:
+
+```js
+export const game = live.room({
+  topic: (ctx, id) => 'game:' + id,
+  topicArgs: 1,
+  init: async (ctx, id) => loadGame(id),
+  meta: (id) => ({ name: nameFor(id), clan: clanFor(id), private: isPrivate(id) }),
+  enumerable: (ctx, room) => !room.meta.private || ctx.user?.clan === room.meta.clan
+});
+```
+
+The predicate receives the requesting connection's `ctx` and the room's card (`{ topic, args, count, meta }`) and returns a boolean (or a promise of one). What it guarantees:
+
+- **A denied room never crosses the wire to that caller.** Not in the `rooms()` snapshot, not in `list()`, not in an SSR load - and not in the live deltas either: the enumeration channel stops broadcasting and delivers each delta per subscriber, so a caller cannot learn a hidden room's existence, its player count, or its meta by simply staying subscribed.
+- **Visibility is live.** The predicate runs on every delta, so an answer that changes later converges the lobby in place: a room the caller could not see arrives as a fresh entry the moment access is granted, and a room it could see disappears the moment access is revoked - carrying nothing but the key the caller already knew.
+- **Fail closed.** A predicate that throws or rejects denies. There is no configuration in which a hidden room degrades to visible.
+- **Cost is opt-in and local to the export.** `enumerable: true` (and every other stream in the app) keeps the shared single-frame fan-out. With a predicate, each of this export's lobby deltas walks that channel's local subscribers and evaluates the predicate per subscriber - fine for lobby-scale channels; keep the predicate cheap and synchronous when you can. Async predicates are supported (an ACL lookup, say) and deltas stay strictly ordered per channel.
+- **Cluster and multi-worker deploys need the pub/sub bus** (the standard cluster wiring): filtered deltas are evaluated on the instance that holds each subscriber, which the bus already delivers to. The Redis roster snapshot is filtered per caller the same way the local one is.
+
 ---
 
 ## Multiplayer

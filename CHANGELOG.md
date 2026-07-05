@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.66] - 2026-07-05
+
+### Added
+
+- **Per-caller room visibility: `enumerable` accepts a predicate `(ctx, room) => boolean | Promise<boolean>`.** Room enumeration listed every active room of an export to every caller in the tenant - private matches, clan lobbies and invite-only sessions had no way to hide. With a predicate, each caller sees only the rooms it is allowed to see, and a denied room never crosses the wire to that caller in any form: not in the `rooms()` snapshot, not in `list()`, not in an SSR load, and not in the live deltas - the enumeration channel stops broadcasting and delivers each `created`/`updated`/`deleted` per subscriber, evaluated with that subscriber's own `ctx`, so a hidden room leaks neither its existence nor its player count nor its meta. Visibility is live: an answer that changes later grants the room into that caller's lobby as a fresh entry or revokes it in place (carrying nothing but the key the caller already knew), with deltas strictly ordered per channel even under an async predicate. Fail closed everywhere: a throwing or rejecting predicate denies, and a platform without per-subscriber delivery drops the delta rather than degrading to a broadcast. `enumerable: true`, `meta`-only opt-in, and every non-enumerated stream keep the shared single-frame fan-out, byte-identical to before; cluster and multi-worker deploys evaluate each subscriber on the instance that holds it via the standard pub/sub bus wiring. The `room` argument is typed as `EnumeratedRoom` (`{ topic, args, count, meta }`).
+
 ## [0.6.0-next.65] - 2026-07-04
 
 ### Added

@@ -11,6 +11,7 @@ import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableE
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot } from './history-compensation.js';
 import { _getIdentityKey } from './identity.js';
 import { _tenantTopic, _tenantKey, _stripTenantTopic } from './tenant.js';
+import { _registerEnumGate, _seedEnumVisibility } from './rooms-gate.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) and the rollback marker
 // set (_rollingBack) stay in server.js - the staying stream-subscribe rollback
@@ -55,15 +56,25 @@ export const _roomRegister = function room(config) {
 
 	/** @type {any} */ (topicFn).__topicUsesCtx = true;
 
-	// Room enumeration (opt-in: a `meta` function or `enumerable: true`). When on,
-	// a per-export registry tracks which of this room's topics currently have
+	// Room enumeration (opt-in: a `meta` function or `enumerable`). When on, a
+	// per-export registry tracks which of this room's topics currently have
 	// subscribers (and how many), so `game.rooms()` can render a live lobby
 	// browser. Off by default - a room without it installs no registry hooks and
 	// no enumeration stream, so it is byte-identical to before.
+	//
+	// `enumerable` also accepts a predicate `(ctx, room) => boolean` that makes
+	// visibility per-caller: it runs with the requesting connection's ctx
+	// against each room - in the snapshot and, via the enumeration gate, on
+	// every live delta per subscriber - and a room it denies never reaches that
+	// caller's wire (no existence, no count, no meta).
 	if (metaFn !== undefined && typeof metaFn !== 'function') {
 		throw new Error('[svelte-realtime] live.room() meta must be a function (args) => ({ ... })\n  See: https://svti.me/rooms');
 	}
-	const isEnumerable = enumerableFlag === true || typeof metaFn === 'function';
+	if (enumerableFlag !== undefined && typeof enumerableFlag !== 'boolean' && typeof enumerableFlag !== 'function') {
+		throw new Error('[svelte-realtime] live.room() enumerable must be true, false, or a predicate (ctx, room) => boolean\n  See: https://svti.me/rooms');
+	}
+	const isEnumerable = enumerableFlag === true || typeof enumerableFlag === 'function' || typeof metaFn === 'function';
+	const listPredicate = typeof enumerableFlag === 'function' ? enumerableFlag : null;
 
 	// Number of room-identifying args the topic function expects (excluding ctx).
 	// Used by room actions to separate room args from action-specific payload.
@@ -224,6 +235,10 @@ export const _roomRegister = function room(config) {
 		const dataTopic = _stripTenantTopic(ctx.tenantId, topic);
 		const rosterId = _tenantKey(ctx.tenantId, enumId);
 		const channel = _tenantTopic(ctx.tenantId, enumTopic);
+		// A per-caller predicate gates the channel BEFORE this delta is
+		// published, so the origin instance can never broadcast it raw - even
+		// when no local lobby viewer has registered the gate via subscribe.
+		if (listPredicate) _registerEnumGate(channel, listPredicate);
 		if (_clusterRedis(ctx)) {
 			const res = await _clusterRoomsAcquire(ctx.platform, rosterId, dataTopic, safeArgs, () => _roomMeta(safeArgs));
 			if (!res) return;
@@ -256,6 +271,8 @@ export const _roomRegister = function room(config) {
 		const dataTopic = _stripTenantTopic(ctx.tenantId, topic);
 		const rosterId = _tenantKey(ctx.tenantId, enumId);
 		const channel = _tenantTopic(ctx.tenantId, enumTopic);
+		// Same pre-publish gating as the subscribe hook (see _enumOnSub).
+		if (listPredicate) _registerEnumGate(channel, listPredicate);
 		if (_clusterRedis(ctx)) {
 			const res = await _clusterRoomsRelease(ctx.platform, rosterId, dataTopic);
 			if (!res) return;
@@ -443,17 +460,51 @@ export const _roomRegister = function room(config) {
 		const _roomsSnapshot = async (ctx) => {
 			// Read only the requesting connection's tenant partition / roster key, so
 			// a lobby viewer enumerates its own tenant's rooms and never another's.
+			let list = null;
 			if (_clusterRedis(ctx)) {
-				const list = await _clusterRoomsList(ctx.platform, _tenantKey(ctx.tenantId, enumId));
-				if (list) return list;
+				list = await _clusterRoomsList(ctx.platform, _tenantKey(ctx.tenantId, enumId));
 			}
-			return Array.from(_roomsIndexFor(ctx.tenantId).values(), (e) => ({ ...e }));
+			if (!list) list = Array.from(_roomsIndexFor(ctx.tenantId).values(), (e) => ({ ...e }));
+			if (!listPredicate) return list;
+			// Per-caller visibility: the predicate runs with the REQUESTING
+			// connection's ctx against each room, on the local and the cluster
+			// snapshot alike, so a denied room never appears in this caller's
+			// lobby - not its existence, not its count, not its meta. A throw
+			// denies that one room (fail closed) without aborting the rest.
+			const visible = [];
+			for (const room of list) {
+				let ok = false;
+				try {
+					const r = listPredicate(ctx, room);
+					ok = (r && typeof r.then === 'function') ? !!(await r) : !!r;
+				} catch {
+					ok = false;
+				}
+				if (ok) visible.push(room);
+			}
+			// Seed the connection's shown set with what this snapshot revealed,
+			// so the delta gate can later revoke exactly these rooms and no
+			// others. `.load()` / `.list()` run with no socket and skip it.
+			if (ctx.ws) _seedEnumVisibility(ctx.ws, _tenantTopic(ctx.tenantId, enumTopic), visible.map((r) => r.topic));
+			return visible;
 		};
-		/** @type {any} */ (roomExport).__roomsStream = live.stream(
+		const roomsStream = live.stream(
 			enumTopic,
 			_roomsSnapshot,
 			{ merge: 'crud', key: 'topic' }
 		);
+		if (listPredicate) {
+			// Gate the subscriber's tenant channel BEFORE the wire subscribe
+			// happens (the stream filter runs ahead of platform.subscribe in the
+			// dispatch path), so a delta can never race a brand-new subscriber
+			// onto a not-yet-gated channel. Always allows; it exists for the
+			// registration side effect.
+			/** @type {any} */ (roomsStream).__streamFilter = (ctx) => {
+				_registerEnumGate(_tenantTopic(ctx.tenantId, enumTopic), listPredicate);
+				return true;
+			};
+		}
+		/** @type {any} */ (roomExport).__roomsStream = roomsStream;
 		/** @type {any} */ (roomExport).__roomsSync = live(_roomsSnapshot);
 		// Re-bind the enumeration identity to the export's stable module path so
 		// every replica agrees on the pub/sub topic and the Redis roster key.

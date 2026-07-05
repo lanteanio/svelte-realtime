@@ -8,6 +8,7 @@ import { _fireWebhookOut } from './webhook-out.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic } from './tenant.js';
 import { _redactOrDrop, REDACT_DROP } from './publish-helpers.js';
 import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
+import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms-gate.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -348,14 +349,32 @@ function _wrapPlatformPublish(platform) {
 	// is also what runs when an inbound message arrives from another
 	// instance, so cluster-relayed events fire derived / effect /
 	// aggregate watchers on the receiving instance.
+	//
+	// It is also the single seam where a per-caller-gated room enumeration
+	// channel diverts from the shared broadcast: local-origin AND cluster-
+	// inbound deltas both land here immediately before the local fan-out, so
+	// the gate's per-subscriber walk always runs on the instance that holds
+	// the sockets. Watchers still fire on the raw delta - server-side derived
+	// / effect / aggregate code is trusted; only the wire is per-caller.
 	function derivedPublishLocal(topic, event, data, opts) {
+		if (_enumGates.size !== 0 && _enumGateIntercept(platform, topic, event, data)) {
+			fireWatchers(topic, event, data);
+			return true;
+		}
 		const result = originalPublish(topic, event, data, opts);
 		fireWatchers(topic, event, data);
 		return result;
 	}
 
 	function derivedPublishBatchedLocal(batch) {
-		const result = originalPublishBatched ? originalPublishBatched(batch) : undefined;
+		let rest = batch;
+		if (_enumGates.size !== 0 && Array.isArray(batch)) {
+			// Divert gated enumeration deltas to the per-subscriber walk; only
+			// the remainder broadcasts. Untouched batches come back as the same
+			// array, so the common case stays allocation-free.
+			rest = _enumGateInterceptBatch(platform, batch);
+		}
+		const result = (originalPublishBatched && (!Array.isArray(rest) || rest.length > 0)) ? originalPublishBatched(rest) : undefined;
 		if (Array.isArray(batch) && _watchedTopics.size > 0) {
 			for (const item of batch) {
 				if (!item || typeof item.topic !== 'string') continue;

@@ -2777,10 +2777,38 @@ export interface RoomConfig {
 	 */
 	meta?: (...args: any[]) => any;
 	/**
-	 * Opt into room enumeration without per-room metadata (a count-only lobby).
-	 * Implied by `meta`. @default false
+	 * Opt into room enumeration. `true` lists this export's active rooms to
+	 * every caller of the generated `<export>.rooms()` (a count-only lobby
+	 * without `meta`; implied by `meta`).
+	 *
+	 * A predicate makes visibility per-caller: it runs with the requesting
+	 * connection's ctx against each room - in the snapshot AND on every live
+	 * delta, per subscriber - and a room it denies never reaches that caller's
+	 * wire: not its existence, not its count, not its meta. Visibility is
+	 * live: an answer that changes later grants ('created') or revokes
+	 * ('deleted') the room on that subscriber's lobby in place. A throw or
+	 * rejection denies (fail closed). Keep it cheap - it runs per room on each
+	 * snapshot and per subscriber on each delta; per-caller filtering across
+	 * multiple instances or workers additionally requires the cluster pub/sub
+	 * bus (the standard cluster wiring). @default false
 	 */
-	enumerable?: boolean;
+	enumerable?: boolean | ((ctx: LiveContext<any>, room: EnumeratedRoom) => boolean | Promise<boolean>);
+}
+
+/**
+ * One active room as the enumeration surface sees it: the entry shape of the
+ * `rooms()` lobby snapshot and the `room` argument of an `enumerable`
+ * predicate.
+ */
+export interface EnumeratedRoom {
+	/** The room's data topic (the enumeration key). */
+	topic: string;
+	/** The room-identifying args the topic function received. */
+	args: any[];
+	/** The live subscriber count. */
+	count: number;
+	/** The `meta(args)` card captured when the room opened (undefined without `meta`). */
+	meta: any;
 }
 
 /**
