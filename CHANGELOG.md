@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.71] - 2026-07-06
+
+### Changed
+
+- **Outbound-webhook delivery now rides the adapter's `plugins/webhooks` primitive - no behavior change.** The generic transport engine behind `live.webhooks.outbound` (SSRF gating with per-hop DNS pinning, HMAC signing, idempotency keys, and jittered exponential-backoff retry) moved into `svelte-adapter-uws/plugins/webhooks` (`deliverWebhook`), where a future cluster-wide retry-budget and per-endpoint ejection layer can build on it. realtime keeps the event-coupled glue: failure reporting (`onFailure` / the server error handler / a dev log) and dead-letter capture. Deliveries are byte-identical - same signatures, same headers, same retry semantics. (Peer dep bumped to `^0.6.0-next.60`.)
+
 ## [0.6.0-next.70] - 2026-07-06
 
 ### Fixed
