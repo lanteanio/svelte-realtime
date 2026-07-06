@@ -30,7 +30,7 @@ async function loadSmoothEntity() {
 	// or the devtools instrument: the shared degraded-health flag (`./client.js`)
 	// and the smooth devtools registrar (`./client/devtools-instrument.js`), the
 	// latter a no-op that returns a no-op unregister.
-	writeFileSync(resolve(probeDir, 'client.js'), 'export function _setSmoothDegraded() {}\n');
+	writeFileSync(resolve(probeDir, 'client.js'), 'export function _setSmoothDegraded(v) { (globalThis.__degradedCalls ??= []).push(v); }\n');
 	mkdirSync(resolve(probeDir, 'client'), { recursive: true });
 	writeFileSync(resolve(probeDir, 'client', 'devtools-instrument.js'), 'export function _devtoolsSmoothRegister() { return () => {}; }\n');
 
@@ -50,11 +50,18 @@ function mockChannel() {
 		self: 'me',
 		fire: null,
 		frame: null,
+		overflow: null,
+		stall: null,
 		destroyed: false,
 		onFrame(cb) {
 			ch.frame = cb;
 		},
-		onOverflow() {},
+		onOverflow(cb) {
+			ch.overflow = cb;
+		},
+		onStall(cb) {
+			ch.stall = cb;
+		},
 		onEvent(cb) {
 			ch.fire = cb;
 		},
@@ -68,7 +75,13 @@ function mockChannel() {
 	return ch;
 }
 
-const statusStore = { subscribe: (fn) => (fn('connected'), () => {}) };
+// The freshness tag the adapter attaches to each remote frame state; Symbol.for
+// so it matches the rune's key without importing the adapter.
+const SMOOTH_FRESHNESS = Symbol.for('svelte-adapter-uws.smooth.freshness');
+
+// The adapter connection-status store emits 'open' on connect (never
+// 'connected' - the vocabulary the earlier center-resend bug checked).
+const statusStore = { subscribe: (fn) => (fn('open'), () => {}) };
 
 describe('SmoothEntity onEvent fan-out', () => {
 	afterEach(() => {
@@ -170,24 +183,101 @@ describe('SmoothEntity reportCenter / clearCenter', () => {
 		const SmoothEntity = await loadSmoothEntity();
 		const ch = mockChannel();
 		let emit;
+		// Real adapter status vocabulary: 'connecting' -> 'open' on connect,
+		// 'disconnected' -> 'connecting' -> 'open' on a reconnect.
 		const status = { subscribe: (fn) => { emit = fn; fn('connecting'); return () => {}; } };
 		const reports = [];
 		const view = new SmoothEntity(ch, status, (c) => reports.push(c));
 
-		emit('connected'); // initial connect, no center yet -> no pending re-send
+		emit('open'); // initial connect, no center yet -> no pending re-send
 		view.reportCenter(7, 8); // sent immediately
 		ch.frame({ x: 0, y: 0 }, new Map()); // a frame with nothing pending -> no extra send
 		expect(reports).toEqual([{ x: 7, y: 8 }]);
 
-		// Reconnect: the server has dropped the center; the next frame re-establishes it.
-		emit('reconnecting');
-		emit('connected');
+		// Reconnect on a new socket: the server has dropped the center; the next
+		// frame re-establishes it.
+		emit('disconnected');
+		emit('connecting');
+		emit('open');
 		ch.frame({ x: 0, y: 0 }, new Map());
 		expect(reports).toEqual([{ x: 7, y: 8 }, { x: 7, y: 8 }]);
 
 		// A second frame does not re-send again (the flag was cleared).
 		ch.frame({ x: 0, y: 0 }, new Map());
 		expect(reports).toHaveLength(2);
+	});
+
+	it('does not re-send the center on a socket-survived suspended -> open refocus', async () => {
+		const SmoothEntity = await loadSmoothEntity();
+		const ch = mockChannel();
+		let emit;
+		const status = { subscribe: (fn) => { emit = fn; fn('connecting'); return () => {}; } };
+		const reports = [];
+		const view = new SmoothEntity(ch, status, (c) => reports.push(c));
+
+		emit('open');
+		view.reportCenter(7, 8);
+		ch.frame({ x: 0, y: 0 }, new Map());
+		expect(reports).toEqual([{ x: 7, y: 8 }]);
+
+		// Background then foreground with the socket alive: server interest is
+		// intact (the adapter soft-resumes in place), so no re-send.
+		emit('suspended');
+		emit('open');
+		ch.frame({ x: 0, y: 0 }, new Map());
+		expect(reports).toEqual([{ x: 7, y: 8 }]);
+		view.destroy();
+	});
+});
+
+describe('SmoothEntity stall and freshness', () => {
+	afterEach(() => {
+		for (const dir of runeProbeDirs) {
+			if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+		}
+		runeProbeDirs.length = 0;
+		if (existsSync(runeProbeRoot) && readdirSync(runeProbeRoot).length === 0) {
+			rmSync(runeProbeRoot, { recursive: true, force: true });
+		}
+	});
+
+	it('surfaces stalled and folds it into degraded health', async () => {
+		globalThis.__degradedCalls = [];
+		const SmoothEntity = await loadSmoothEntity();
+		const ch = mockChannel();
+		const view = new SmoothEntity(ch, statusStore);
+		expect(view.stalled).toBe(false);
+		ch.stall(true);
+		expect(view.stalled).toBe(true);
+		expect(globalThis.__degradedCalls).toEqual([true]); // stall alone flips degraded
+		ch.stall(false);
+		expect(view.stalled).toBe(false);
+		expect(globalThis.__degradedCalls).toEqual([true, false]);
+		view.destroy();
+	});
+
+	it('keeps degraded set while either overflow or stall is active', async () => {
+		globalThis.__degradedCalls = [];
+		const SmoothEntity = await loadSmoothEntity();
+		const ch = mockChannel();
+		const view = new SmoothEntity(ch, statusStore);
+		ch.overflow(true); // -> degraded true
+		ch.stall(true); // still degraded, no new transition
+		ch.overflow(false); // stall still active -> stays degraded
+		ch.stall(false); // both clear -> degraded false
+		expect(globalThis.__degradedCalls).toEqual([true, false]);
+		view.destroy();
+	});
+
+	it('reports per-entity freshness from the remote frame tag', async () => {
+		const SmoothEntity = await loadSmoothEntity();
+		const ch = mockChannel();
+		const view = new SmoothEntity(ch, statusStore);
+		const other = { x: 5, y: 5, [SMOOTH_FRESHNESS]: 'coasting' };
+		ch.frame({ x: 0, y: 0 }, new Map([['other', other]]));
+		expect(view.freshness('other')).toBe('coasting');
+		expect(view.freshness('absent')).toBeUndefined();
+		view.destroy();
 	});
 });
 

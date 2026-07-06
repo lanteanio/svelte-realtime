@@ -30,10 +30,11 @@ export { failure } from 'svelte-adapter-uws/client';
 
 /**
  * Re-export `status` from the adapter client.
- * Reactive store holding the connection status: 'loading', 'connected',
- * 'reconnecting', or 'error'. The generated multiplayer namespace exposes this
- * as its `status` view so a collaborative surface can react to connectivity
- * without a separate adapter import.
+ * Reactive store holding the connection status: 'connecting', 'open',
+ * 'suspended' (WebSocket open but the tab is backgrounded), 'disconnected'
+ * (will retry), or 'failed' (terminal). The generated multiplayer namespace
+ * exposes this as its `status` view so a collaborative surface can react to
+ * connectivity without a separate adapter import.
  */
 export { status } from 'svelte-adapter-uws/client';
 

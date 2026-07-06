@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.70] - 2026-07-06
+
+### Fixed
+
+- **A free-cam's area-of-interest center now survives a reconnect (it silently did not).** `SmoothEntity` re-sends a reported interest center on the first frame after a reconnect, because the server drops per-topic interest state when the prior connection closes. That re-send gated on the connection status reaching `'connected'` - a value the adapter status store never emits (it emits `'open'`), so the branch was dead: after a real reconnect a spectator or free-cam's culling silently reverted to own-entity, dropping the entities it was watching. Fixed to gate on `'open'`. A `'suspended' -> 'open'` refocus (the tab came back and the socket survived) is deliberately excluded - the server never reset interest, so re-sending would be a redundant request on every tab switch. Also corrected the stale connection-status vocabulary in the re-exported `status` doc.
+
+### Added
+
+- **`SmoothEntity.stalled` + per-entity `freshness(key)` - the client half of the adapter's blackout signals (needs adapter next.59).** `stalled` reports a REMOTE blackout - no inbound authority frame past the channel's stall window while entities are tracked, a world gone quiet on a still-open socket that `overflowed` (which watches the LOCAL command window) never catches - and folds into the shared `health` store as `'degraded'` alongside `overflowed`, so a `health`-driven banner covers both failure modes. `freshness(key)` returns `'live'`, `'coasting'` (dead-reckoned within the extrapolation cap), or `'stale'` (frozen on stale data) for a remote entity, so a renderer can dim or flag a coasting ghost; the same tag rides each `remote` state under the exported `SMOOTH_FRESHNESS` Symbol for a renderer that reads it inline.
+
 ## [0.6.0-next.69] - 2026-07-05
 
 ### Added

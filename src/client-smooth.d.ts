@@ -18,6 +18,23 @@ export interface SmoothEvent<Data = any> {
 }
 
 /**
+ * The render freshness of a remote entity: `'live'` (position covered by real
+ * samples), `'coasting'` (dead-reckoned past the newest sample, within the
+ * extrapolation cap), or `'stale'` (extrapolation exhausted - frozen on stale
+ * data). Read via {@link SmoothEntity.freshness} or off a `remote` state under
+ * {@link SMOOTH_FRESHNESS}.
+ */
+export type SmoothFreshness = 'live' | 'coasting' | 'stale';
+
+/**
+ * Symbol key under which each remote frame state carries its {@link SmoothFreshness}.
+ * A Symbol, so it never collides with an app field and stays invisible to JSON;
+ * read `state[SMOOTH_FRESHNESS]` on a `remote` entry to dim or flag a coasted or
+ * stalled entity. Absent on non-positional states.
+ */
+export const SMOOTH_FRESHNESS: unique symbol;
+
+/**
  * Reactive view over one smoothed entity channel: instant local input
  * (predicted, server-reconciled) plus interpolated remote entities, read
  * through runes at display rate. Constructed by the generated `smooth(...)`
@@ -45,13 +62,23 @@ export class SmoothEntity<State = any, Command = any> {
 	constructor(channel: any, status?: Readable<string>, reportCenter?: (center: { x: number; y: number } | null) => void);
 	/** The rendered local state: predicted, with corrections eased in. */
 	readonly local: State;
-	/** Remote entities, keyed by entity key, positions interpolated. */
+	/** Remote entities, keyed by entity key, positions interpolated. Each
+	 * positional state also carries its {@link SmoothFreshness} under the
+	 * {@link SMOOTH_FRESHNESS} Symbol key. */
 	readonly remote: Map<string, State>;
-	/** The connection status passthrough. */
+	/** The connection status passthrough: 'connecting' | 'open' | 'suspended' |
+	 * 'disconnected' | 'failed' (idle before the first value). */
 	readonly status: string;
 	/** True while prediction is killed pending recovery (also folds into
 	 * the shared `health` store as 'degraded'). */
 	readonly overflowed: boolean;
+	/** True while the remote world is stalled: no inbound authority frame past the
+	 * channel's stall window while entities are tracked (a blackout on a still-open
+	 * socket). Also folds into the shared `health` store as 'degraded'. */
+	readonly stalled: boolean;
+	/** The render freshness of remote entity `key` this frame, or `undefined` for
+	 * an absent or non-positional entity. */
+	freshness(key: string): SmoothFreshness | undefined;
 	/** The caller's own entity key, once the server announced it. */
 	readonly self: string | null;
 	/** Submit one command: instant locally, authoritative on the server.
