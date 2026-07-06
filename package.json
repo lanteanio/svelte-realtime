@@ -1,6 +1,6 @@
 {
   "name": "svelte-realtime",
-  "version": "0.6.0-next.71",
+  "version": "0.6.0-next.72",
   "publishConfig": {
     "tag": "next"
   },
@@ -97,7 +97,7 @@
   "peerDependencies": {
     "@sveltejs/kit": "^2.0.0",
     "svelte": "^4.0.0 || ^5.0.0",
-    "svelte-adapter-uws": "^0.6.0-next.60"
+    "svelte-adapter-uws": "^0.6.0-next.61"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",

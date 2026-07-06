@@ -1,5 +1,6 @@
 // @ts-check
 import { checkUrl } from 'svelte-adapter-uws/safe-url';
+import { createRetryBudget, createWebhookBreaker } from 'svelte-adapter-uws/plugins/webhooks';
 import { _redactUrl, _replayWebhookOut } from './webhook-out.js';
 import { state, _webhookOutById } from './state.js';
 import { createDeadLetterStore } from './dead-letter.js';
@@ -114,17 +115,29 @@ export const _webhooksOutboundRegister = function outbound(sources, config) {
 };
 
 /**
- * Configure the outbound-webhook plane. `deadLetter` enables the dead-letter
- * store that retains UNDELIVERABLE outbound-webhook events (retry-exhausted,
- * SSRF-blocked, etc.) for admin inspection + replay, instead of reporting then
- * dropping them. Off by default - a DLQ retains attacker-influenced event data,
- * so it is opt-in.
+ * Configure the outbound-webhook plane.
  *
- * Pass `true` for the default in-memory store, a store instance (e.g. a
- * Redis/Postgres store for a cluster) for shared durability, or `false`/`null`
- * to disable. Also wired from `realtime({ webhooks: { deadLetter } })`.
+ * `deadLetter` enables the dead-letter store that retains UNDELIVERABLE
+ * outbound-webhook events (retry-exhausted, SSRF-blocked, etc.) for admin
+ * inspection + replay, instead of reporting then dropping them. Off by default -
+ * a DLQ retains attacker-influenced event data, so it is opt-in.
  *
- * @param {{ deadLetter?: boolean | object | null }} [config]
+ * `budget` rations retry AMPLIFICATION so a storm of failing deliveries to one
+ * endpoint cannot launch unbounded retry work (the first attempt of each
+ * delivery always proceeds). `breaker` ejects a persistently-failing endpoint:
+ * an open circuit fast-fails to the dead-letter store without touching the
+ * network, and heals after a probe succeeds. Both are keyed by the webhook's
+ * registration id, so one endpoint cannot trip or starve another. Off by
+ * default.
+ *
+ * Each option takes `true` for the built-in single-instance default (an
+ * in-memory store / an in-process token bucket / an in-process breaker), an
+ * instance for a cluster (e.g. a Redis dead-letter store, or a shared
+ * budget/breaker coordinator) for cross-instance durability, or `false`/`null`
+ * to disable. Also wired from `realtime({ webhooks: { deadLetter, budget,
+ * breaker } })`.
+ *
+ * @param {{ deadLetter?: boolean | object | null, budget?: boolean | object | null, breaker?: boolean | object | null }} [config]
  */
 export function configureWebhooks(config = {}) {
 	if (config.deadLetter !== undefined) {
@@ -134,6 +147,31 @@ export function configureWebhooks(config = {}) {
 			state.webhookDeadLetter = config.deadLetter;
 		} else {
 			state.webhookDeadLetter = null;
+		}
+	}
+	if (config.budget !== undefined) {
+		if (config.budget === true) {
+			if (!state.webhookBudget) state.webhookBudget = createRetryBudget();
+		} else if (config.budget && typeof config.budget === 'object') {
+			if (typeof config.budget.take !== 'function') {
+				throw new Error('[svelte-realtime] configureWebhooks({ budget }): a budget must have a take(key) method (or pass true for the built-in)');
+			}
+			state.webhookBudget = config.budget;
+		} else {
+			state.webhookBudget = null;
+		}
+	}
+	if (config.breaker !== undefined) {
+		if (config.breaker === true) {
+			if (!state.webhookBreaker) state.webhookBreaker = createWebhookBreaker();
+		} else if (config.breaker && typeof config.breaker === 'object') {
+			const b = config.breaker;
+			if (typeof b.guard !== 'function' || typeof b.success !== 'function' || typeof b.failure !== 'function') {
+				throw new Error('[svelte-realtime] configureWebhooks({ breaker }): a breaker must have guard(key), success(key), and failure(err, key) methods (or pass true for the built-in)');
+			}
+			state.webhookBreaker = b;
+		} else {
+			state.webhookBreaker = null;
 		}
 	}
 }

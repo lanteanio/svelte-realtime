@@ -342,6 +342,12 @@ export const state = {
 	/** @type {any} Dead-letter store for undeliverable outbound webhooks (null = capture off). */
 	webhookDeadLetter: null,
 
+	/** @type {any} Retry budget for outbound webhooks (null = unrationed). */
+	webhookBudget: null,
+
+	/** @type {any} Endpoint-ejection breaker for outbound webhooks (null = no ejection). */
+	webhookBreaker: null,
+
 	/** @type {import('svelte-adapter-uws').Platform | null} Captured platform for dynamic derived recomputation */
 	derivedPlatform: null,
 

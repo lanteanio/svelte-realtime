@@ -4263,11 +4263,18 @@ export interface RealtimeConfig {
 	 * that retains UNDELIVERABLE outbound-webhook events (retry-exhausted,
 	 * SSRF-blocked, etc.) for admin inspection and replay, instead of reporting
 	 * then dropping them. Off by default (a DLQ retains attacker-influenced event
-	 * data). `true` uses the default in-memory store; a store instance gives a
-	 * cluster shared durable store; `false`/`null` disables. Equivalent to
-	 * `configureWebhooks({ deadLetter })`.
+	 * data). `webhooks.budget` rations retry amplification and `webhooks.breaker`
+	 * ejects a persistently-failing endpoint (fast-fail to the DLQ, healing after
+	 * a probe succeeds), both keyed by the webhook's registration id. Each takes
+	 * `true` for the built-in single-instance default, an instance for a cluster
+	 * (a shared store / budget / breaker), or `false`/`null` to disable.
+	 * Equivalent to `configureWebhooks({ deadLetter, budget, breaker })`.
 	 */
-	webhooks?: { deadLetter?: boolean | DeadLetterStore | null } | null;
+	webhooks?: {
+		deadLetter?: boolean | DeadLetterStore | null;
+		budget?: boolean | import('svelte-adapter-uws/plugins/webhooks').RetryBudget | null;
+		breaker?: boolean | import('svelte-adapter-uws/plugins/webhooks').WebhookBreaker | null;
+	} | null;
 	/**
 	 * Opt-in protocol/contract version, an integer the app bumps only on a BREAKING
 	 * wire/contract change. Declare it identically here and in client `configure({
@@ -4344,12 +4351,19 @@ export interface DeadLetterStore {
 export function createDeadLetterStore(options?: { max?: number; ttlMs?: number }): DeadLetterStore;
 
 /**
- * Configure the outbound-webhook plane. `deadLetter: true` enables the default
- * in-memory dead-letter store; a store instance wires a custom/cluster store;
- * `false`/`null` disables capture (the default). Also wired from
+ * Configure the outbound-webhook plane. `deadLetter` captures undeliverable
+ * events; `budget` rations retry amplification; `breaker` ejects a
+ * persistently-failing endpoint (fast-fail to the DLQ, healing after a probe
+ * succeeds), keyed by the webhook's registration id. Each takes `true` for the
+ * built-in single-instance default, an instance for a cluster (a shared store /
+ * budget / breaker), or `false`/`null` to disable (the default). Also wired from
  * `realtime({ webhooks })`.
  */
-export function configureWebhooks(config?: { deadLetter?: boolean | DeadLetterStore | null }): void;
+export function configureWebhooks(config?: {
+	deadLetter?: boolean | DeadLetterStore | null;
+	budget?: boolean | import('svelte-adapter-uws/plugins/webhooks').RetryBudget | null;
+	breaker?: boolean | import('svelte-adapter-uws/plugins/webhooks').WebhookBreaker | null;
+}): void;
 
 /** The configured dead-letter store, or `null` when capture is off. */
 export function getDeadLetter(): DeadLetterStore | null;

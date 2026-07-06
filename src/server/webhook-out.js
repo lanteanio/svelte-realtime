@@ -11,6 +11,21 @@ import { _IS_DEV } from './env.js';
 /** Re-exported for the registration-time SSRF validation message in webhooks.js. */
 export { redactUrl as _redactUrl };
 
+/**
+ * Assemble the optional delivery-control hooks for one webhook entry: the
+ * configured retry budget + endpoint-ejection breaker (wired via
+ * `configureWebhooks` / `realtime({ webhooks })`), keyed by the webhook's
+ * registration id so one endpoint's failures cannot trip or starve another.
+ * Returns undefined when neither is configured, so an unconfigured delivery is
+ * byte-identical to the bare call.
+ */
+function _webhookHooks(entry) {
+	const budget = state.webhookBudget;
+	const breaker = state.webhookBreaker;
+	if (!budget && !breaker) return undefined;
+	return { budget: budget || undefined, breaker: breaker || undefined, key: entry.id };
+}
+
 function _reportWebhookOutFailure(config, err, event, data, attempts) {
 	if (config.onFailure) {
 		try {
@@ -26,7 +41,7 @@ function _reportWebhookOutFailure(config, err, event, data, attempts) {
 
 export async function _fireWebhookOut(entry, topic, event, data, platform) {
 	void platform; // accepted for call-site parity; delivery reads entry.config
-	const r = await deliverWebhook(entry.config, topic, event, data);
+	const r = await deliverWebhook(entry.config, topic, event, data, _webhookHooks(entry));
 	if (r.ok) return;
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
 	const store = state.webhookDeadLetter;
@@ -47,7 +62,7 @@ export async function _fireWebhookOut(entry, topic, event, data, platform) {
 }
 
 export async function _replayWebhookOut(entry, topic, event, data) {
-	const r = await deliverWebhook(entry.config, topic, event, data);
+	const r = await deliverWebhook(entry.config, topic, event, data, _webhookHooks(entry));
 	if (r.ok) return { ok: true };
 	return { ok: false, error: String((r.err && r.err.message) || r.err || 'unknown') };
 }

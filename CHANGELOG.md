@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.72] - 2026-07-06
+
+### Added
+
+- **Outbound-webhook delivery controls: a retry budget and endpoint ejection (`realtime({ webhooks: { budget, breaker } })`).** Outbound webhooks fan out one fire-and-forget delivery per subscribed endpoint per publish with no ceiling, so a busy topic pointed at a slow or failing endpoint can pile up unbounded in-flight retries. Two opt-in controls bound that, both off by default and keyed by the webhook's registration id so one endpoint cannot trip or starve another. `budget` rations retry *amplification* - a token consumed before each backoff, distinct from the per-delivery `attempts` cap, so a storm of failing deliveries cannot launch unbounded retry work while every delivery's first attempt still proceeds. `breaker` ejects a persistently-failing endpoint: once its circuit opens, deliveries fast-fail straight to the dead-letter store without touching the network, and the endpoint heals automatically after a probe delivery succeeds. Each takes `true` for the built-in single-instance default (an in-process token bucket / circuit breaker from the adapter's `plugins/webhooks`), an instance for a cluster (a shared budget/breaker coordinator), or `false`/`null` to disable; also configurable at runtime via `configureWebhooks({ budget, breaker })`. Both apply to admin dead-letter replay too, so a bulk replay to a downed endpoint self-limits instead of re-hammering it. Requires `svelte-adapter-uws` >= `0.6.0-next.61` (peer dep bumped). Unconfigured, delivery is byte-identical to before.
+
 ## [0.6.0-next.71] - 2026-07-06
 
 ### Changed

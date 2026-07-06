@@ -3536,8 +3536,9 @@ export function realtime(config) {
 
 	if (bus !== undefined) _setBus(bus);
 	if (leader !== undefined) configureCron({ leader });
-	// Outbound-webhook plane: `webhooks.deadLetter` enables the dead-letter store
-	// (retain + admin-replay undeliverable webhook events). Off unless configured.
+	// Outbound-webhook plane: `webhooks.deadLetter` retains + admin-replays
+	// undeliverable events; `webhooks.budget`/`webhooks.breaker` ration retries
+	// and eject a failing endpoint. Off unless configured.
 	if (webhooks !== undefined) configureWebhooks(webhooks);
 	// Multi-tenancy opt-in: a resolver mapping the server-trusted authenticated
 	// user (ws.getUserData()) to a tenant id auto-scopes every topic and key.
