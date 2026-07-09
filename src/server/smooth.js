@@ -712,6 +712,53 @@ function _smoothSendTo(rec, ws, event, data) {
 	}
 }
 
+/**
+ * Broadcast one tick's update frames. On a platform with the batched wire
+ * fan-out, every update travels in ONE frame per capable viewer (per-entry
+ * author exclusion and the per-entry JSON envelopes handled inside the
+ * platform walk); an older platform, a single update, or a codec-less record
+ * take the per-entity path unchanged. Entries: { key, state, excludeWs? }.
+ */
+function _smoothPublishUpdates(rec, list) {
+	if (list.length === 0) return;
+	const platform = rec.platform;
+	if (rec.codec && list.length > 1 && typeof platform.publishWireBatch === 'function') {
+		const entries = new Array(list.length);
+		for (let i = 0; i < list.length; i++) {
+			entries[i] = {
+				data: _smoothWireFrame(rec, 'update', { key: list[i].key, data: list[i].state }),
+				excludeWs: list[i].excludeWs
+			};
+		}
+		platform.publishWireBatch(rec.wireTopic, 'update', entries, rec.codec);
+		return;
+	}
+	for (let i = 0; i < list.length; i++) {
+		_smoothPublish(rec, 'update', { key: list[i].key, data: list[i].state }, list[i].excludeWs);
+	}
+}
+
+/**
+ * Deliver one subscriber's culled update set. On a platform with the batched
+ * single-target wire send, the whole set is one frame; otherwise the
+ * per-entity sends this call replaces. Entries: { key, state }.
+ */
+function _smoothSendUpdatesTo(rec, ws, list) {
+	if (list.length === 0) return;
+	const platform = rec.platform;
+	if (rec.codec && list.length > 1 && typeof platform.sendWireBatch === 'function') {
+		const entries = new Array(list.length);
+		for (let i = 0; i < list.length; i++) {
+			entries[i] = { data: _smoothWireFrame(rec, 'update', { key: list[i].key, data: list[i].state }) };
+		}
+		platform.sendWireBatch(ws, rec.wireTopic, 'update', entries, rec.codec);
+		return;
+	}
+	for (let i = 0; i < list.length; i++) {
+		_smoothSendTo(rec, ws, 'update', { key: list[i].key, data: list[i].state });
+	}
+}
+
 function _armSmoothTick(rec) {
 	if (rec.timer !== null) return;
 	rec.timer = setTimer(() => {
@@ -1064,6 +1111,9 @@ function _smoothDeliverCulled(rec, relevancy, catalogByKey, moved, t) {
 		const relSet = relevancy.get(identity);
 		if (relSet === undefined) continue;
 		let delivered = false;
+		// This subscriber's whole culled set collects and flushes as ONE
+		// batched frame (per-entity on an older platform).
+		const toSend = [];
 		for (const key of relSet) {
 			const m = moved.get(key);
 			let state;
@@ -1078,10 +1128,11 @@ function _smoothDeliverCulled(rec, relevancy, catalogByKey, moved, t) {
 			}
 			if (exclude !== undefined && identity === exclude) continue;
 			if (state !== undefined) {
-				_smoothSendTo(rec, ws, 'update', { key, data: state });
+				toSend.push({ key, state });
 				if (key !== identity) delivered = true;
 			}
 		}
+		_smoothSendUpdatesTo(rec, ws, toSend);
 		// The cadence seed is the WIRE interval (tickMs widened by the broadcast
 		// gate), not the sim interval - the estimator's cold-start guess must
 		// match what a subscriber actually receives.
@@ -1256,6 +1307,10 @@ function _smoothTick(rec) {
 		if (!idle || (worldRun !== null && worldRun.dirty)) rec.lagCompLastActive = t;
 	}
 	rec.interestDirty = false;
+	// Broadcast updates collect here and flush as ONE batched fan-out after the
+	// loop (per-entry author exclusion rides along); the relay and the cells
+	// routing stay per-entity inside the loop.
+	const broadcastUpdates = [];
 	for (let i = 0; i < wireUpdates.length; i++) {
 		const u = wireUpdates[i];
 		// Cells mode: route each changed entity to its cell topic (native shared
@@ -1288,10 +1343,10 @@ function _smoothTick(rec) {
 			// own subscribers all see the move).
 			if (!relevancy) {
 				const localAuthor = rec.noEcho && u.commanded ? rec.registry.get(u.key) : undefined;
-				_smoothPublish(rec, 'update', { key: u.key, data: u.state }, localAuthor);
+				broadcastUpdates.push({ key: u.key, state: u.state, excludeWs: localAuthor });
 			}
 			// Relay to other instances. Only a remote (surrogate) author needs a
-			// cross-instance exclude - a local author is already excluded (above, or
+			// cross-instance exclude - a local author is already excluded (below, or
 			// by the relevancy walk's own-update suppression) and is on no other
 			// instance. The entity key IS the author identity.
 			const relayExclude = rec.noEcho && u.commanded && _isSmoothSurrogate(u.ws) ? u.key : undefined;
@@ -1302,9 +1357,13 @@ function _smoothTick(rec) {
 			// Interest-on: updates fan out per subscriber after this loop (the
 			// relevancy walk below), so nothing broadcasts here.
 		} else {
-			_smoothPublish(rec, 'update', { key: u.key, data: u.state }, rec.noEcho && u.commanded ? u.ws : undefined);
+			broadcastUpdates.push({ key: u.key, state: u.state, excludeWs: rec.noEcho && u.commanded ? u.ws : undefined });
 		}
 	}
+	// One tick, one fan-out: every collected update in a single batched frame
+	// per capable viewer (per-entity on an older platform). Acks, events, and
+	// removals keep their own frames below, exactly as before.
+	_smoothPublishUpdates(rec, broadcastUpdates);
 	// Interest-on: deliver each LOCAL subscriber (single-instance, or the owner
 	// side of a cluster) the CURRENT state of every entity the relevancy pass marked
 	// for it this tick - the entities inside its area of interest that changed since

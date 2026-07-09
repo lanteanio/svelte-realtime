@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.77] - 2026-07-09
+
+### Changed
+
+- **Smoothed-entity updates leave in one frame per tick when the platform offers the batched wire fan-out.** The tick's broadcast loop now collects its update frames and hands them to the adapter's `publishWireBatch` in one call - each entry still carrying its own author exclusion (a commanded update suppresses its author's socket, onMissing motion reaches its owner) - and the interest-culled walk hands each subscriber's whole visible set to `sendWireBatch` as one frame instead of one send per entity. On the wire that cuts the per-entity frame overhead (opcode, stamp, WebSocket framing, and the send syscall) to once per connection per tick, and it composes with `broadcastHz` (fewer, fuller flushes) and the adapter's repeat-set field delta (steady motion stops re-listing its field names). Fully feature-detected: an older installed adapter without the batch surface, a single-update tick, and a codec-less record keep the per-entity path byte-identical to before, acks/events/removes keep their own frames, cells mode is untouched (its cell-topic fan-out is already encode-once), and the cluster relay stays per-entity (each instance batches at its own egress). Batching engages with `svelte-adapter-uws` >= 0.6.0-next.68 installed; the declared peer range is unchanged.
+
+## [0.6.0-next.76] - 2026-07-09
+
+### Added
+
+- **A resource-leak churn harness over the realtime layer's structural registries (`test/sim-leak.test.js`).** The registries that grow and shrink with connection life - the per-topic subscriber index, the refcounted transform/redact/volatile/coalesce registrations, the presence reference map with its leave grace timer, the smoothed-entity record map with its per-subscriber bookkeeping - now have a churn regression gate: clients join and leave across cycles under fresh identities and fresh topics every cycle (so a retained entry can never be masked by key reuse), the harness samples every registry's size at each cycle's end, and a monotonic growth trend fails the test. The trend verdict comes from the adapter's published leak kernel (`createResourceTracker` / `structuralResourceProbes` / `assertNoResourceGrowth` on `svelte-adapter-uws/sim`, dev-time only - the shipped package is unchanged), so both repos share one definition of what a leak looks like in a series. The harness proves its own teeth with a planted per-connection retention (detected) against the identical churn with a correct release path (clean), and the smoothed-entity leg churns players through a record held live by an anchor subscriber with interest culling on, so a per-subscriber entry that failed to shed would accumulate visibly instead of vanishing with a reclaimed record. Behavior is untouched: this is test surface only, plus the repo's installed adapter refreshed to `0.6.0-next.67`, which also means the smooth-runtime integration tests now exercise the adapter's current temporal-codec wire paths instead of the pre-codec plugin.
+
 ## [0.6.0-next.75] - 2026-07-09
 
 ### Added
