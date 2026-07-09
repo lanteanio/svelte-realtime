@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.73] - 2026-07-09
+
+### Added
+
+- **`live.smooth({ broadcastHz })`: the wire broadcast cadence can now drop below the simulation tick rate.** A smoothed topic broadcasts every changed entity to every viewer each tick, and at scale that fan-out is bandwidth-bound long before it is CPU-bound - a 60Hz tick times a full room saturates the NIC while the cores idle. With `broadcastHz` set, the simulation keeps ticking at `tickMs` (commands drain, acknowledgements return, discrete events fire, the lag-compensation ring records - all per-tick, so the owner's reconciliation and one-shot actions never lag), but continuous entity updates go on the wire only every Nth tick. The authoritative drain reports per-tick deltas, so skipped ticks are not simply dropped: their movers accumulate, and the send tick re-reads each mover's CURRENT authoritative state - motion across skipped ticks is coalesced into one frame, never lost, and an entity that stops moving always gets its final rest state flushed immediately (the demand-armed tick may stop; viewers must not be left a frame behind). The owner-echo exclusion follows the LAST motion in the window: a trailing commanded change was acknowledged with the final state (excludable), a trailing `onMissing`/injected change was not (the owner receives the broadcast). The shipped client interpolation covers the widened gap out of the box (`interpolationMs: 'auto'` tracks the measured arrival interval), and the lag-compensation reach estimator seeds from the wire interval rather than the tick interval, so a gated topic's rewind window stays honest. Works unchanged across interest culling, cell-topic mode, and the cluster relay (the gate runs on the ticking owner; every instance re-emits what it receives). A 60Hz simulation broadcasting at 20Hz cuts steady-state fan-out bandwidth to a third, multiplying with the adapter's smooth-wire field delta (svelte-adapter-uws 0.6.0-next.66). Off by default: without the option every tick broadcasts, byte-identical to before.
+
 ## [0.6.0-next.72] - 2026-07-06
 
 ### Added

@@ -196,6 +196,12 @@ describe('live.smooth config validation', () => {
 	it('rejects a non-positive tickMs', () => {
 		expect(() => live.smooth({ topic: 't', apply: () => ({}), initial: {}, tickMs: 0 })).toThrow('tickMs');
 	});
+	it('rejects a non-positive broadcastHz', () => {
+		expect(() => live.smooth({ topic: 't', apply: () => ({}), initial: {}, broadcastHz: 0 })).toThrow('broadcastHz');
+		expect(() => live.smooth({ topic: 't', apply: () => ({}), initial: {}, broadcastHz: -20 })).toThrow('broadcastHz');
+		expect(() => live.smooth({ topic: 't', apply: () => ({}), initial: {}, broadcastHz: NaN })).toThrow('broadcastHz');
+		expect(() => live.smooth({ topic: 't', apply: () => ({}), initial: {}, broadcastHz: '20' })).toThrow('broadcastHz');
+	});
 	it('rejects a queueCap that is not an integer of at least 1', () => {
 		expect(() => live.smooth({ topic: 't', apply: () => ({}), initial: {}, queueCap: 0 })).toThrow('queueCap');
 		expect(() => live.smooth({ topic: 't', apply: () => ({}), initial: {}, queueCap: 1.5 })).toThrow('queueCap');
@@ -435,6 +441,147 @@ describe('live.smooth commands and the authoritative tick', () => {
 		// onMissing motion produced no acknowledgement, so the owner must hear the broadcast.
 		expect(platform.wirePublished[1].data).toEqual({ key: 'u2', data: { x: 7, y: 0 } });
 		expect(platform.wirePublished[1].options).toBeUndefined();
+	});
+
+	it('broadcastHz gates updates to every Nth tick, coalescing skipped motion into the current state', async () => {
+		// tickMs 20 = 50 ticks/s; broadcastHz 25 = broadcast every 2nd tick.
+		const { name } = declareShape({ tickMs: 20, broadcastHz: 25 });
+		const ws = mockWs({ id: 'u1' });
+		const platform = wirePlatform();
+		rt.queueDrain({
+			updates: [{ key: 'u1', state: { x: 1, y: 0 }, ws, commanded: true }],
+			acks: [{ key: 'u1', ws, id: 1, state: { x: 1, y: 0 } }],
+			idle: false
+		});
+		rt.queueDrain({
+			updates: [{ key: 'u1', state: { x: 2, y: 0 }, ws, commanded: true }],
+			acks: [{ key: 'u1', ws, id: 2, state: { x: 2, y: 0 } }],
+			idle: false
+		});
+		rt.queueDrain({
+			updates: [{ key: 'u1', state: { x: 3, y: 0 }, ws, commanded: true }],
+			acks: [{ key: 'u1', ws, id: 3, state: { x: 3, y: 0 } }],
+			idle: true
+		});
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 1 } }]]);
+
+		// Tick 1 (skipped): no update on the wire, but the acknowledgement still
+		// went out - the owner's reconciliation never lags behind the gate.
+		await vi.advanceTimersByTimeAsync(20);
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(0);
+		expect(platform.wireSent).toHaveLength(1);
+		expect(platform.wireSent[0].data.id).toBe(1);
+
+		// Tick 2 (send): ONE update carrying the CURRENT state - the skipped
+		// tick's motion is coalesced, not replayed and not lost.
+		await vi.advanceTimersByTimeAsync(20);
+		let ups = platform.wirePublished.filter((p) => p.event === 'update');
+		expect(ups).toHaveLength(1);
+		expect(ups[0].data).toEqual({ key: 'u1', data: { x: 2, y: 0 } });
+		expect(ups[0].options).toEqual({ excludeWs: ws });
+		expect(platform.wireSent).toHaveLength(2);
+
+		// Tick 3 (off-cadence but idle): motion stopped, so the final rest state
+		// flushes immediately instead of waiting out the gate.
+		await vi.advanceTimersByTimeAsync(20);
+		ups = platform.wirePublished.filter((p) => p.event === 'update');
+		expect(ups).toHaveLength(2);
+		expect(ups[1].data).toEqual({ key: 'u1', data: { x: 3, y: 0 } });
+		expect(platform.wireSent).toHaveLength(3);
+	});
+
+	it('a gated flush carries every mover of the window, each at its current state', async () => {
+		const { name } = declareShape({ tickMs: 20, broadcastHz: 25 });
+		const w1 = mockWs({ id: 'u1' });
+		const w2 = mockWs({ id: 'u2' });
+		const platform = wirePlatform();
+		// u2 moves only on the skipped tick; u1 moves on both. The flush must
+		// carry BOTH - u1 at its newest state, u2 at its last (still-current) one.
+		rt.queueDrain({
+			updates: [
+				{ key: 'u1', state: { x: 1, y: 0 }, ws: w1, commanded: true },
+				{ key: 'u2', state: { x: 10, y: 0 }, ws: w2, commanded: false }
+			],
+			acks: [],
+			idle: false
+		});
+		rt.queueDrain({
+			updates: [{ key: 'u1', state: { x: 2, y: 0 }, ws: w1, commanded: true }],
+			acks: [],
+			idle: true
+		});
+		await call(w1, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 1 } }]]);
+		// u2 needs an entity for the flush to read its current state from.
+		await call(w2, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 10 } }]]);
+
+		await vi.advanceTimersByTimeAsync(20);
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(0);
+		await vi.advanceTimersByTimeAsync(20);
+		const ups = platform.wirePublished.filter((p) => p.event === 'update');
+		expect(ups).toHaveLength(2);
+		expect(ups[0].data).toEqual({ key: 'u1', data: { x: 2, y: 0 } });
+		expect(ups[1].data).toEqual({ key: 'u2', data: { x: 10, y: 0 } });
+	});
+
+	it('the flush exclusion follows the LAST motion: trailing onMissing reaches the owner', async () => {
+		const { name } = declareShape({ tickMs: 20, broadcastHz: 25 });
+		const ws = mockWs({ id: 'u1' });
+		const platform = wirePlatform();
+		// Commanded on the skipped tick (acked), then onMissing on the send tick
+		// (no ack): the owner's last ack does NOT carry the final state, so the
+		// flushed update must NOT be owner-excluded.
+		rt.queueDrain({
+			updates: [{ key: 'u1', state: { x: 1, y: 0 }, ws, commanded: true }],
+			acks: [{ key: 'u1', ws, id: 1, state: { x: 1, y: 0 } }],
+			idle: false
+		});
+		rt.queueDrain({
+			updates: [{ key: 'u1', state: { x: 1, y: 5 }, ws, commanded: false }],
+			acks: [],
+			idle: true
+		});
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 1 } }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		await vi.advanceTimersByTimeAsync(20);
+		const ups = platform.wirePublished.filter((p) => p.event === 'update');
+		expect(ups).toHaveLength(1);
+		expect(ups[0].data).toEqual({ key: 'u1', data: { x: 1, y: 5 } });
+		expect(ups[0].options).toBeUndefined();
+	});
+
+	it('a mover removed before the flush is skipped - its departure already broadcast', async () => {
+		const { name } = declareShape({ tickMs: 20, broadcastHz: 25 });
+		const ws = mockWs({ id: 'u1' });
+		const platform = wirePlatform();
+		rt.queueDrain({
+			updates: [{ key: 'u1', state: { x: 1, y: 0 }, ws, commanded: true }],
+			acks: [],
+			idle: false
+		});
+		rt.queueDrain({ updates: [], acks: [], idle: true });
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 1 } }]]);
+		await vi.advanceTimersByTimeAsync(20); // skipped tick: u1 pends
+		rt.entities.delete('u1'); // the entity departs before the send tick
+		await vi.advanceTimersByTimeAsync(20); // idle flush: nothing to read, nothing sent
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(0);
+	});
+
+	it('discrete events stay per-tick under the gate', async () => {
+		const { name } = declareShape({ tickMs: 20, broadcastHz: 25 });
+		const ws = mockWs({ id: 'u1' });
+		const platform = wirePlatform();
+		rt.queueDrain({
+			updates: [{ key: 'u1', state: { x: 1, y: 0 }, ws, commanded: true }],
+			acks: [],
+			events: [{ type: 'shot', key: '1:0', data: {}, id: 1, opts: null, ws, commanded: true }],
+			idle: false
+		});
+		rt.queueDrain({ updates: [], acks: [], idle: true });
+		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 1 } }]]);
+		// The skipped tick withholds the update but fires the one-shot event NOW.
+		await vi.advanceTimersByTimeAsync(20);
+		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(0);
+		expect(platform.wirePublished.filter((p) => p.event === 'event')).toHaveLength(1);
 	});
 
 	it('publishes drain events author-excluded, except toAuthor and global which reach the author', async () => {

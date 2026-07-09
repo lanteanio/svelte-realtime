@@ -340,6 +340,18 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			codec: rt.createSmoothWireCodec(),
 			platform,
 			tickMs: cfg.tickMs,
+			// Broadcast cadence gate (broadcastHz): entity updates go on the wire
+			// every Nth tick instead of every tick, the client interpolation covering
+			// the widened gap. 1 (the default) is the byte-identical every-tick path.
+			// `pendingWire` accumulates the movers of skipped ticks (key -> the LAST
+			// tick's commanded flag, which decides the owner-echo exclusion at flush);
+			// the send tick re-reads each mover's CURRENT authoritative state, so
+			// skipped motion is coalesced, never lost.
+			broadcastEvery: cfg.broadcastHz
+				? Math.max(1, Math.round(1000 / cfg.tickMs / cfg.broadcastHz))
+				: 1,
+			tickNo: 0,
+			pendingWire: new Map(),
 			noEcho: cfg.noEcho,
 			timer: null,
 			// Cluster bookkeeping (unused on the single-instance path). `cfg` is
@@ -1019,7 +1031,10 @@ function _smoothDeliverCulled(rec, relevancy, catalogByKey, moved, t) {
 				if (key !== identity) delivered = true;
 			}
 		}
-		if (delivered && rec.lagComp !== null) rec.interest.noteSend(identity, t, rec.tickMs);
+		// The cadence seed is the WIRE interval (tickMs widened by the broadcast
+		// gate), not the sim interval - the estimator's cold-start guess must
+		// match what a subscriber actually receives.
+		if (delivered && rec.lagComp !== null) rec.interest.noteSend(identity, t, rec.tickMs * rec.broadcastEvery);
 	}
 }
 
@@ -1116,6 +1131,41 @@ function _smoothTick(rec) {
 	// in the catalog taken below, so they broadcast, ring-record, and cull
 	// atomically with the drain.
 	const worldRun = rec.world !== null ? rec.world.run(updates, acks, t) : null;
+	// Broadcast cadence gate (broadcastHz): the simulation keeps ticking at
+	// tickMs - commands drain, acknowledgements return, events fire, the
+	// lag-compensation ring records - but continuous entity updates go on the
+	// wire only every broadcastEvery-th tick. The drain reports PER-TICK deltas,
+	// so a skipped tick's movers are accumulated into `pendingWire` rather than
+	// dropped, and the send tick re-reads each mover's CURRENT authoritative
+	// state - motion across skipped ticks is coalesced into one frame, never
+	// lost. The stored flag is the LAST tick's `commanded`: a trailing commanded
+	// change was acknowledged with the final state (the owner already holds it,
+	// so the echo exclusion may apply), a trailing onMissing/injected change was
+	// not (the owner must receive the broadcast). An idle drain with pending
+	// motion flushes immediately: the single-instance tick stops re-arming at
+	// idle, and the final rest state must reach the viewers before it does. A
+	// mover removed between accumulation and flush is skipped - its departure
+	// was already broadcast by the remove path. Everything below the gate
+	// consumes `wireUpdates`; on the default path it IS the drain's updates
+	// array, so the every-tick behavior is byte-identical.
+	let wireUpdates = updates;
+	if (rec.broadcastEvery > 1) {
+		for (let i = 0; i < updates.length; i++) {
+			rec.pendingWire.set(updates[i].key, updates[i].commanded);
+		}
+		rec.tickNo++;
+		if (rec.pendingWire.size > 0 && (rec.tickNo % rec.broadcastEvery === 0 || idle)) {
+			wireUpdates = [];
+			for (const [key, commanded] of rec.pendingWire) {
+				const e = rec.authority.get(key);
+				if (e === undefined) continue;
+				wireUpdates.push({ key, state: e.state, ws: e.ws, commanded });
+			}
+			rec.pendingWire.clear();
+		} else {
+			wireUpdates = [];
+		}
+	}
 	// Area-of-interest: when this topic opted into interest, build the relevancy
 	// for THIS instance's local subscribers once per tick from the drained catalog
 	// (which on a cluster owner spans every entity cluster-wide, local and remote
@@ -1142,7 +1192,7 @@ function _smoothTick(rec) {
 	// either wants it (one allocation when both are on), but compute relevancy only
 	// on the interest cadence (so the interest LOD counter is unchanged when the
 	// catalog was taken solely for lag compensation).
-	const wantInterest = rec.interest !== null && (updates.length > 0 || rec.interestDirty);
+	const wantInterest = rec.interest !== null && (wireUpdates.length > 0 || rec.interestDirty);
 	const catalog = (rec.lagComp !== null || wantInterest) ? rec.authority.catalog() : null;
 	const relevancy = wantInterest
 		? rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++)
@@ -1155,8 +1205,8 @@ function _smoothTick(rec) {
 		if (!idle || (worldRun !== null && worldRun.dirty)) rec.lagCompLastActive = t;
 	}
 	rec.interestDirty = false;
-	for (let i = 0; i < updates.length; i++) {
-		const u = updates[i];
+	for (let i = 0; i < wireUpdates.length; i++) {
+		const u = wireUpdates[i];
 		// Cells mode: route each changed entity to its cell topic (native shared
 		// fan-out), not the per-subscriber walk or the base broadcast. Egress is
 		// O(cells), not O(subscribers). The mover's own cell subscription follows it
@@ -1225,8 +1275,8 @@ function _smoothTick(rec) {
 		// remote frame advances the lag-comp send-cadence estimator (the client discards
 		// its own entity frame before measuring its interpolation delay).
 		const moved = new Map();
-		for (let i = 0; i < updates.length; i++) {
-			const u = updates[i];
+		for (let i = 0; i < wireUpdates.length; i++) {
+			const u = wireUpdates[i];
 			moved.set(u.key, { state: u.state, exclude: rec.noEcho && u.commanded ? u.key : undefined });
 		}
 		_smoothDeliverCulled(rec, relevancy, catalogByKey, moved, t);
@@ -2262,8 +2312,10 @@ export function _smoothEdgeMeasure(rec, ctx, payload, shooterKey, now) {
 		}
 		// Favor-the-shooter reach width = measured uplink (max-of-recent) + the
 		// client's interpolation delay; both server-measured, clamped to the cap.
+		// The interpolation seed is the WIRE interval (tickMs widened by the
+		// broadcast gate) - the client renders behind the cadence it receives.
 		const maxUp = st ? st.tracker.maxUplink() : null;
-		const serverInterp = rec.aoi.interpDelayMs(shooterKey, rec.tickMs, now);
+		const serverInterp = rec.aoi.interpDelayMs(shooterKey, rec.tickMs * rec.broadcastEvery, now);
 		reach = maxUp === null ? ht.maxRewindMs : Math.min(ht.maxRewindMs, maxUp + serverInterp);
 		// The rewind age is a pure duration the owner applies to its own present.
 		rewindAge = Math.max(0, now - rtStamp);
@@ -2481,7 +2533,14 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
  * shared step), `initial` (starting state, or `(key) => state`), `guard?`
  * (auth check, same shape as room guards), `onMissing?` (per-tick
  * continuation for command-less entities; omitted = hold position),
- * `tickMs?` (authoritative tick interval, default 50), `noEcho?` (suppress
+ * `tickMs?` (authoritative tick interval, default 50), `broadcastHz?` (wire
+ * broadcast rate: entity updates are sent every Nth tick - N derived from
+ * tickMs - instead of every tick, with the motion of skipped ticks coalesced
+ * into the next frame (an entity's CURRENT state, never a stale one) and the
+ * client interpolation covering the widened gap. Acknowledgements, discrete
+ * events, and removals stay per-tick, so the owner's reconciliation and
+ * one-shot actions never lag. The final rest state always flushes when motion
+ * stops. Default: broadcast every tick, byte-identical), `noEcho?` (suppress
  * echoing an owner's own commanded updates in broadcasts, default true - the
  * acknowledgement carries the owner's copy; onMissing motion has no
  * acknowledgement and always broadcasts to the owner too), `queueCap?`
@@ -2522,7 +2581,7 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
  * module, like `apply`; requires svelte-adapter-uws >= 0.6.0-next.49 for the
  * client-side unpack). Default off, byte-identical wire).
  *
- * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number, interest?: { radius: number, position: (state: any) => ({ x: number, y: number } | null), lod?: Array<{ within: number, rate: number }>, cell?: number, budget?: number }, wire?: { state?: { pack: (state: any) => any, unpack: (packed: any) => any }, command?: { pack: (cmd: any) => any, unpack: (packed: any) => any } } }} config
+ * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, broadcastHz?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number, interest?: { radius: number, position: (state: any) => ({ x: number, y: number } | null), lod?: Array<{ within: number, rate: number }>, cell?: number, budget?: number }, wire?: { state?: { pack: (state: any) => any, unpack: (packed: any) => any }, command?: { pack: (cmd: any) => any, unpack: (packed: any) => any } } }} config
  */
 export const _smoothRegister = function smooth(config) {
 	if (!config || typeof config !== 'object') {
@@ -2544,6 +2603,9 @@ export const _smoothRegister = function smooth(config) {
 	const tickMs = config.tickMs === undefined ? 50 : config.tickMs;
 	if (!(typeof tickMs === 'number' && Number.isFinite(tickMs) && tickMs > 0)) {
 		throw new Error('[svelte-realtime] live.smooth() tickMs must be a positive number');
+	}
+	if (config.broadcastHz !== undefined && !(typeof config.broadcastHz === 'number' && Number.isFinite(config.broadcastHz) && config.broadcastHz > 0)) {
+		throw new Error('[svelte-realtime] live.smooth() broadcastHz must be a positive number');
 	}
 	if (config.queueCap !== undefined && !(typeof config.queueCap === 'number' && Number.isInteger(config.queueCap) && config.queueCap >= 1)) {
 		throw new Error('[svelte-realtime] live.smooth() queueCap must be an integer of at least 1');
@@ -2567,6 +2629,7 @@ export const _smoothRegister = function smooth(config) {
 		onMissing: config.onMissing,
 		queueCap: config.queueCap,
 		tickMs,
+		broadcastHz: config.broadcastHz,
 		noEcho: config.noEcho !== false,
 		snapshot: config.snapshot === true,
 		snapshotDebounceMs,

@@ -1,119 +1,119 @@
 {
-  "name": "svelte-realtime",
-  "version": "0.6.0-next.72",
-  "publishConfig": {
-    "tag": "next"
-  },
-  "description": "Realtime RPC and reactive subscriptions for SvelteKit, built on svelte-adapter-uws",
-  "author": "Kevin Radziszewski",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/lanteanio/svelte-realtime.git"
-  },
-  "homepage": "https://github.com/lanteanio/svelte-realtime#readme",
-  "bugs": {
-    "url": "https://github.com/lanteanio/svelte-realtime/issues"
-  },
-  "type": "module",
-  "bin": {
-    "svelte-realtime": "./src/cli.js"
-  },
-  "exports": {
-    ".": {
-      "types": "./src/server.d.ts",
-      "default": "./src/server.js"
-    },
-    "./server": {
-      "types": "./src/server.d.ts",
-      "default": "./src/server.js"
-    },
-    "./client": {
-      "types": "./src/client.d.ts",
-      "default": "./src/client.js"
-    },
-    "./multiplayer": {
-      "types": "./src/client-multiplayer.d.ts",
-      "default": "./src/client-multiplayer.svelte.js"
-    },
-    "./smooth": {
-      "types": "./src/client-smooth.d.ts",
-      "default": "./src/client-smooth.svelte.js"
-    },
-    "./doc": {
-      "types": "./src/client-doc.d.ts",
-      "default": "./src/client-doc.svelte.js"
-    },
-    "./rooms": {
-      "types": "./src/client-rooms.d.ts",
-      "default": "./src/client-rooms.svelte.js"
-    },
-    "./vite": {
-      "types": "./src/vite.d.ts",
-      "default": "./src/vite.js"
-    },
-    "./devtools": {
-      "types": "./src/devtools.d.ts",
-      "default": "./src/devtools.js"
-    },
-    "./testing": {
-      "types": "./src/testing.d.ts",
-      "default": "./src/testing.js"
-    },
-    "./testing/client": {
-      "types": "./src/testing-client.d.ts",
-      "default": "./src/testing-client.js"
-    },
-    "./hooks": {
-      "types": "./src/hooks.d.ts",
-      "default": "./src/hooks.js"
-    },
-    "./sim": {
-      "types": "./src/sim.d.ts",
-      "default": "./src/sim.js"
-    }
-  },
-  "files": [
-    "src",
-    "LICENSE",
-    "README.md",
-    "MIGRATION.md"
-  ],
-  "scripts": {
-    "check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js",
-    "pretest": "npm run check",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:e2e": "playwright test --config test/e2e/playwright.config.js",
-    "test:chaos": "playwright test --config test/chaos/playwright.config.js",
-    "test:fuzz": "node test/fuzz-wire.mjs"
-  },
-  "engines": {
-    "node": ">=22.0.0"
-  },
-  "dependencies": {
-    "@clack/prompts": "^0.10.1"
-  },
-  "peerDependencies": {
-    "@sveltejs/kit": "^2.0.0",
-    "svelte": "^4.0.0 || ^5.0.0",
-    "svelte-adapter-uws": "^0.6.0-next.61"
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.59.1",
-    "fast-check": "^4.7.0",
-    "svelte-adapter-uws-extensions": "^0.6.0-next.20",
-    "vitest": "^4.0.18"
-  },
-  "keywords": [
-    "svelte",
-    "sveltekit",
-    "websocket",
-    "rpc",
-    "realtime",
-    "pubsub",
-    "uwebsockets",
-    "streams",
-    "live"
-  ]
+	"name": "svelte-realtime",
+	"version": "0.6.0-next.73",
+	"publishConfig": {
+		"tag": "next"
+	},
+	"description": "Realtime RPC and reactive subscriptions for SvelteKit, built on svelte-adapter-uws",
+	"author": "Kevin Radziszewski",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/lanteanio/svelte-realtime.git"
+	},
+	"homepage": "https://github.com/lanteanio/svelte-realtime#readme",
+	"bugs": {
+		"url": "https://github.com/lanteanio/svelte-realtime/issues"
+	},
+	"type": "module",
+	"bin": {
+		"svelte-realtime": "./src/cli.js"
+	},
+	"exports": {
+		".": {
+			"types": "./src/server.d.ts",
+			"default": "./src/server.js"
+		},
+		"./server": {
+			"types": "./src/server.d.ts",
+			"default": "./src/server.js"
+		},
+		"./client": {
+			"types": "./src/client.d.ts",
+			"default": "./src/client.js"
+		},
+		"./multiplayer": {
+			"types": "./src/client-multiplayer.d.ts",
+			"default": "./src/client-multiplayer.svelte.js"
+		},
+		"./smooth": {
+			"types": "./src/client-smooth.d.ts",
+			"default": "./src/client-smooth.svelte.js"
+		},
+		"./doc": {
+			"types": "./src/client-doc.d.ts",
+			"default": "./src/client-doc.svelte.js"
+		},
+		"./rooms": {
+			"types": "./src/client-rooms.d.ts",
+			"default": "./src/client-rooms.svelte.js"
+		},
+		"./vite": {
+			"types": "./src/vite.d.ts",
+			"default": "./src/vite.js"
+		},
+		"./devtools": {
+			"types": "./src/devtools.d.ts",
+			"default": "./src/devtools.js"
+		},
+		"./testing": {
+			"types": "./src/testing.d.ts",
+			"default": "./src/testing.js"
+		},
+		"./testing/client": {
+			"types": "./src/testing-client.d.ts",
+			"default": "./src/testing-client.js"
+		},
+		"./hooks": {
+			"types": "./src/hooks.d.ts",
+			"default": "./src/hooks.js"
+		},
+		"./sim": {
+			"types": "./src/sim.d.ts",
+			"default": "./src/sim.js"
+		}
+	},
+	"files": [
+		"src",
+		"LICENSE",
+		"README.md",
+		"MIGRATION.md"
+	],
+	"scripts": {
+		"check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js",
+		"pretest": "npm run check",
+		"test": "vitest run",
+		"test:watch": "vitest",
+		"test:e2e": "playwright test --config test/e2e/playwright.config.js",
+		"test:chaos": "playwright test --config test/chaos/playwright.config.js",
+		"test:fuzz": "node test/fuzz-wire.mjs"
+	},
+	"engines": {
+		"node": ">=22.0.0"
+	},
+	"dependencies": {
+		"@clack/prompts": "^0.10.1"
+	},
+	"peerDependencies": {
+		"@sveltejs/kit": "^2.0.0",
+		"svelte": "^4.0.0 || ^5.0.0",
+		"svelte-adapter-uws": "^0.6.0-next.61"
+	},
+	"devDependencies": {
+		"@playwright/test": "^1.59.1",
+		"fast-check": "^4.7.0",
+		"svelte-adapter-uws-extensions": "^0.6.0-next.20",
+		"vitest": "^4.0.18"
+	},
+	"keywords": [
+		"svelte",
+		"sveltekit",
+		"websocket",
+		"rpc",
+		"realtime",
+		"pubsub",
+		"uwebsockets",
+		"streams",
+		"live"
+	]
 }

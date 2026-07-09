@@ -3062,6 +3062,18 @@ export interface SmoothConfig {
 	/** Authoritative tick interval in milliseconds. @default 50 */
 	tickMs?: number;
 	/**
+	 * Wire broadcast rate in Hz: entity updates are sent every Nth tick (N
+	 * derived from `tickMs`) instead of every tick, with the motion of skipped
+	 * ticks coalesced into the next frame (each entity's CURRENT state, never a
+	 * stale one) and the client interpolation covering the widened gap - the
+	 * simulation keeps ticking at `tickMs`, only the on-wire cadence drops.
+	 * Acknowledgements, discrete events, and removals stay per-tick, so the
+	 * owner's reconciliation and one-shot actions never lag, and the final rest
+	 * state always flushes when motion stops. Off by default: every tick
+	 * broadcasts, byte-identical.
+	 */
+	broadcastHz?: number;
+	/**
 	 * Suppress echoing an owner's own commanded updates in broadcasts - the
 	 * acknowledgement carries the owner's copy. `onMissing` motion has no
 	 * acknowledgement and always broadcasts to the owner too. @default true

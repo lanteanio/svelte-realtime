@@ -291,7 +291,7 @@ export async function runSmoothSim(config = {}) {
 				const relSet = relevancy ? relevancy.get(identity) : undefined;
 				let delivered = false;
 				if (relSet) for (const key of relSet) if (key !== identity) { delivered = true; break; }
-				if (delivered) rec.interest.noteSend(identity, wall, rec.tickMs);
+				if (delivered) rec.interest.noteSend(identity, wall, rec.tickMs * rec.broadcastEvery);
 			}
 			rec.lagComp.record(catalog, rec.monoClock.mono(wall));
 		}
