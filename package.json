@@ -1,6 +1,6 @@
 {
 	"name": "svelte-realtime",
-	"version": "0.6.0-next.74",
+	"version": "0.6.0-next.75",
 	"publishConfig": {
 		"tag": "next"
 	},
@@ -86,7 +86,8 @@
 		"test:watch": "vitest",
 		"test:e2e": "playwright test --config test/e2e/playwright.config.js",
 		"test:chaos": "playwright test --config test/chaos/playwright.config.js",
-		"test:fuzz": "node test/fuzz-wire.mjs"
+		"test:fuzz": "node test/fuzz-wire.mjs",
+		"sim:golden": "node scripts/sim-golden.js"
 	},
 	"engines": {
 		"node": ">=22.0.0"

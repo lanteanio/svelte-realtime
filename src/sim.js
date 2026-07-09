@@ -359,3 +359,148 @@ export async function runLiveSimSwarm(config = {}) {
 		runs
 	};
 }
+
+// - Golden-set regression gate ------------------------------------------------
+// The swarms above prove each seed reproduces ITSELF; these pin the fingerprints
+// to a COMMITTED baseline, so a code change that deterministically alters sim
+// behavior (which self-reproduction passes unnoticed) fails loudly against the
+// corpus. Self-contained mirrors of the adapter's buildSimGoldens/checkSimGoldens
+// contract (same corpus schema, same report shape) for the same reason the swarm
+// is: importing the engine from the installed adapter would couple publish order.
+// Generic over any swarm result with the shared run shape, so ONE pair serves
+// both the live-dispatch swarm and the smooth lag-compensation swarm.
+
+/**
+ * Numeric-aware seed comparator: "2" sorts before "10". Numeric seeds sort
+ * ahead of non-numeric ones, which sort lexically. Keeps the committed golden
+ * corpus and the drift report in a stable, human-scannable order.
+ * @param {string|number} a
+ * @param {string|number} b
+ */
+function compareSeeds(a, b) {
+	const na = Number(a);
+	const nb = Number(b);
+	const aNum = Number.isFinite(na);
+	const bNum = Number.isFinite(nb);
+	if (aNum && bNum) return na - nb || String(a).localeCompare(String(b));
+	if (aNum) return -1;
+	if (bNum) return 1;
+	return String(a).localeCompare(String(b));
+}
+
+/**
+ * Project a swarm result (`runLiveSimSwarm` or `runSmoothSimSwarm`) into a
+ * committable golden corpus: one entry per seed carrying the structural
+ * fingerprint the swarm already stamped plus a small digest for triage, and
+ * corpus-level metadata (the swarm config the fingerprints are only comparable
+ * under). Pure - no clock, no environment, no fingerprint recomputation - so it
+ * stays inside the determinism seam; a runner outside the seam stamps
+ * recordedAt / gitCommit.
+ *
+ * Entries are sorted by seed (numeric-aware) so the committed file has a stable,
+ * reviewable diff. A per-seed weight (default 1) sets how much that seed's drift
+ * counts against the gate budget; weight 0 is a watch-list seed (recorded and
+ * reported on drift, but never fails the gate).
+ *
+ * @param {{ summary: any, runs: any[] }} swarmResult
+ * @param {{ weights?: Record<string, number>, gitCommit?: string|null, recordedAt?: string|null, swarm?: object|null }} [opts]
+ */
+export function buildSimGoldens(swarmResult, opts = {}) {
+	const weights = opts.weights || {};
+	const entries = swarmResult.runs.map((r) => ({
+		seed: String(r.seed),
+		weight: weights[r.seed] ?? weights[String(r.seed)] ?? 1,
+		fingerprint: r.fingerprint,
+		digest: {
+			violations: r.violations,
+			fatals: r.fatals,
+			uncaught: r.uncaught,
+			violationCategories: r.violationCategories,
+			buggified: r.buggified
+		}
+	}));
+	entries.sort((a, b) => compareSeeds(a.seed, b.seed));
+	return {
+		schemaVersion: 1,
+		gitCommit: opts.gitCommit ?? swarmResult.summary?.gitCommit ?? null,
+		recordedAt: opts.recordedAt ?? null,
+		swarm: opts.swarm ?? null,
+		entries
+	};
+}
+
+/**
+ * Compare a golden corpus against a fresh swarm result, weighting each drifted
+ * seed by its recorded weight. Pure. The runner runs exactly the corpus seeds
+ * under the corpus config, so an entry is matched (fingerprint identical),
+ * changed (fingerprint differs - deterministic behavior moved), or missing
+ * (seed absent from the run); a seed present in the run but absent from the
+ * corpus is counted as 'added' but never gates. driftWeight is the summed
+ * weight over {changed, missing}; the gate passes when there is no config
+ * mismatch and driftWeight is within maxDriftWeight (default 0 - any drift on
+ * a weighted seed fails). An intentional behavior change is blessed by
+ * regenerating the corpus, whose diff is the reviewable record of what moved.
+ *
+ * @param {any} golden a corpus from {@link buildSimGoldens}
+ * @param {{ summary: any, runs: any[] }} swarmResult
+ * @param {{ maxDriftWeight?: number }} [opts]
+ */
+export function checkSimGoldens(golden, swarmResult, opts = {}) {
+	const maxDriftWeight = opts.maxDriftWeight ?? 0;
+	const actual = new Map();
+	for (const r of swarmResult.runs) actual.set(String(r.seed), r);
+
+	// The corpus fingerprints are comparable only to a run produced under the
+	// same swarm config - the buggify mode above all, since it decides which
+	// seeds are faulted. A mismatch means the runner ran the wrong config; fail
+	// loudly rather than silently comparing incomparable fingerprints.
+	let configMismatch = null;
+	const gBuggify = golden.swarm ? golden.swarm.buggify : undefined;
+	const aBuggify = swarmResult.summary ? swarmResult.summary.buggify : undefined;
+	if (gBuggify !== undefined && gBuggify !== null && aBuggify !== undefined && gBuggify !== aBuggify) {
+		configMismatch = "buggify mode differs: corpus recorded '" + gBuggify + "', run used '" + aBuggify +
+			"' - fingerprints are not comparable; regenerate the corpus or fix the runner config";
+	}
+
+	const drifts = [];
+	let changed = 0;
+	let missing = 0;
+	let matched = 0;
+	let totalWeight = 0;
+	let driftWeight = 0;
+	for (const entry of golden.entries) {
+		const w = entry.weight ?? 1;
+		totalWeight += w;
+		const a = actual.get(String(entry.seed));
+		if (!a) {
+			missing++;
+			driftWeight += w;
+			drifts.push({ seed: entry.seed, weight: w, kind: 'missing', golden: { fingerprint: entry.fingerprint, digest: entry.digest }, actual: null });
+			continue;
+		}
+		if (a.fingerprint === entry.fingerprint) {
+			matched++;
+		} else {
+			changed++;
+			driftWeight += w;
+			drifts.push({
+				seed: entry.seed,
+				weight: w,
+				kind: 'changed',
+				golden: { fingerprint: entry.fingerprint, digest: entry.digest },
+				actual: {
+					fingerprint: a.fingerprint,
+					digest: { violations: a.violations, fatals: a.fatals, uncaught: a.uncaught, violationCategories: a.violationCategories, buggified: a.buggified }
+				}
+			});
+		}
+	}
+
+	let added = 0;
+	const goldenSeeds = new Set(golden.entries.map((e) => String(e.seed)));
+	for (const r of swarmResult.runs) if (!goldenSeeds.has(String(r.seed))) added++;
+
+	drifts.sort((x, y) => (y.weight - x.weight) || compareSeeds(x.seed, y.seed));
+	const ok = configMismatch === null && driftWeight <= maxDriftWeight;
+	return { ok, totalWeight, driftWeight, maxDriftWeight, drifts, configMismatch, counts: { changed, missing, added, matched } };
+}

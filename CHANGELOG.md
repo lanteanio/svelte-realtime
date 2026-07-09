@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.75] - 2026-07-09
+
+### Added
+
+- **The deterministic sims gain a committed golden-set regression gate (`buildSimGoldens` / `checkSimGoldens` on `svelte-realtime/sim`).** The seed swarms prove each seed reproduces itself, but a code change that deterministically alters sim behavior still reproduces the new behavior, so the swarms pass it unnoticed. The gate pins the per-seed structural fingerprints to a committed baseline: `buildSimGoldens` projects a swarm result - the live-dispatch swarm (`runLiveSimSwarm`) or the smooth lag-compensation swarm (`runSmoothSimSwarm`), one function serves both - into a corpus (`{ seed, weight, fingerprint, digest }` plus the swarm config the fingerprints are only comparable under), and `checkSimGoldens` re-runs those seeds and fails when the weighted sum of drifted fingerprints exceeds a budget (default `0` - any drift on a weighted seed fails; a `weight: 0` seed is a watch-list entry that reports but never gates, and a config mismatch fails loudly rather than comparing incomparable fingerprints). A `npm run sim:golden` runner verifies the committed corpora and `--update` re-blesses them all-or-nothing (refusing to write anything off a broken or nondeterministic tree - every seed is re-checked through the replay self-gate before it may enter a corpus). Two corpora are committed under `test/dst-goldens/` - the live RPC/stream dispatch under a seeded chaos drop, and the smooth shot-resolution path with buggified lag and teleports - and `test/sim-golden.test.js` runs both against HEAD as part of the ordinary suite, so the gate needs no separate CI wiring. An intentional behavior change is blessed by re-running `--update` and committing the corpus diff, which is the reviewable record of exactly what moved. Mirrors the adapter's golden gate contract (same corpus schema, same report shape), self-contained for the same publish-order-decoupling reason the swarm is.
+
 ## [0.6.0-next.74] - 2026-07-09
 
 ### Added

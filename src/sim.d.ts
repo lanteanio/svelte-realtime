@@ -232,3 +232,69 @@ export interface SmoothSimSwarmResult {
 export function runSmoothSimSwarm(config?: SmoothSimSwarmConfig): Promise<SmoothSimSwarmResult>;
 
 export const DEFAULT_SMOOTH_SEED: string;
+
+// - Golden-set regression gate ------------------------------------------------
+
+/** One committed golden: a seed's structural fingerprint + a triage digest. */
+export interface SimGoldenEntry {
+	seed: string;
+	/** Drift budget weight; 0 = watch-list (reported, never gates). @default 1 */
+	weight: number;
+	fingerprint: string;
+	digest: {
+		violations: number;
+		fatals: number;
+		uncaught: number;
+		violationCategories: string[];
+		buggified: boolean;
+	};
+}
+
+/** A committed golden corpus: entries plus the swarm config they are only comparable under. */
+export interface SimGoldenCorpus {
+	schemaVersion: 1;
+	gitCommit: string | null;
+	recordedAt: string | null;
+	swarm: object | null;
+	entries: SimGoldenEntry[];
+}
+
+/** One drifted seed in a golden check: the recorded vs the freshly-observed
+ *  fingerprint + digest, for triage. */
+export interface SimGoldenDrift {
+	seed: string;
+	weight: number;
+	kind: 'changed' | 'missing';
+	golden: { fingerprint: string; digest: SimGoldenEntry['digest'] };
+	/** null when the seed was missing from the run. */
+	actual: { fingerprint: string; digest: SimGoldenEntry['digest'] } | null;
+}
+
+/** The result of checking a corpus against a fresh swarm. */
+export interface SimGoldenReport {
+	/** True iff there is no config mismatch and driftWeight <= maxDriftWeight. */
+	ok: boolean;
+	totalWeight: number;
+	driftWeight: number;
+	maxDriftWeight: number;
+	/** Drifted seeds, sorted weight-desc then seed. */
+	drifts: SimGoldenDrift[];
+	/** Non-null when the run's swarm config is incomparable to the corpus. */
+	configMismatch: string | null;
+	counts: { changed: number; missing: number; added: number; matched: number };
+}
+
+/**
+ * Project a swarm result (live or smooth) into a committable golden corpus. Pure.
+ */
+export function buildSimGoldens(
+	swarmResult: LiveSimSwarmResult | SmoothSimSwarmResult,
+	opts?: { weights?: Record<string, number>; gitCommit?: string | null; recordedAt?: string | null; swarm?: object | null }
+): SimGoldenCorpus;
+
+/** Compare a golden corpus against a fresh swarm result (weighted drift gate). Pure. */
+export function checkSimGoldens(
+	golden: SimGoldenCorpus,
+	swarmResult: LiveSimSwarmResult | SmoothSimSwarmResult,
+	opts?: { maxDriftWeight?: number }
+): SimGoldenReport;
