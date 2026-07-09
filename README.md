@@ -3644,10 +3644,13 @@ export const arena = live.smooth({
       { within: 400, rate: 1 },                // near: every tick
       { within: 800, rate: 3 },                // mid: every 3rd tick
       { within: 1200, rate: 8 }                // fringe: every 8th tick
-    ]
+    ],
+    budget: 64                                  // optional per-subscriber delivery ceiling (entities per tick)
   }
 });
 ```
+
+`budget` puts a hard per-subscriber ceiling on how many entities one tick delivers: past it the due set trims farthest-first (band, then distance - the fringe fades before the duel next to you), and a trimmed entity stays owed, delivering the moment the budget frees, so motion is throttled, never lost. The ceiling also tightens itself for a subscriber whose socket is backpressured - the server reads each connection's outbound queue as it culls, scaling the budget down smoothly (to a floor of one) as the queue approaches the transport's shedding limit - so a congested client sheds its fringe gracefully instead of having the transport drop arbitrary frames, and a lagging shooter's rewind reach widens automatically with its real delivery cadence. Always-visible entities ride above the ceiling. Per-client interest mode only (`cells` mode fans out per cell and has no per-subscriber walk to bound - combining them throws).
 
 The area-of-interest centre is the subscriber's own entity by default, so a player-centric game needs no extra wiring. A spectator or free-cam whose view is not its own entity calls `view.reportCenter(x, y)` to point culling at where the camera looks (and `view.clearCenter()` to revert); the report rides a volatile send, an unchanged centre is dropped, and it takes effect even on a still board, so panning across a paused scene reveals what is there.
 

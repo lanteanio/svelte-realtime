@@ -3239,7 +3239,19 @@ export interface SmoothInterestConfig {
 		| 'any'
 		| 'own-entity'
 		| ((ctx: LiveContext<any>, center: SmoothPoint, ownPos: SmoothPoint | null) => boolean | SmoothPoint);
-	/** Reserved per-client bandwidth ceiling - accepted but inert in this version. */
+	/**
+	 * Per-subscriber delivery ceiling (an integer of at least 1): at most this
+	 * many entities are delivered to one subscriber per tick. Past the ceiling
+	 * the due set trims farthest-first (band, then distance - the fringe demotes
+	 * before the action around the player); a trimmed entity stays due and
+	 * delivers as soon as the budget frees, so motion is throttled, never lost.
+	 * The ceiling scales down automatically for a subscriber whose socket is
+	 * backpressured (read from the connection's outbound queue each tick), so
+	 * congestion sheds the fringe smoothly instead of letting the transport
+	 * drop arbitrary frames at its limit. Always-visible entities (a null
+	 * `position`) bypass the ceiling. Per-client interest mode only - combining
+	 * it with `cells` throws at declaration. Off by default (uncapped).
+	 */
 	budget?: number;
 }
 

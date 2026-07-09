@@ -278,6 +278,45 @@ const _SMOOTH_SNAPSHOT_MS = 1000;
 const _SMOOTH_PENDING_GRACE_MS = 30000;
 
 /**
+ * The outbound-queue window that scales a subscriber's `interest.budget` down.
+ * Below LOW (the adapter pressure sampler's "notable queue" bar) the full budget
+ * applies; at HIGH (the uWS default `maxBackpressure`, where the adapter starts
+ * shedding frames outright) the budget floors at 1 - the innermost entity still
+ * flows, and a socket this wedged is about to be degraded by the transport
+ * anyway. Linear in between: congestion sheds the fringe first, smoothly,
+ * instead of letting the transport drop arbitrary frames at the cliff.
+ */
+const _SMOOTH_BUDGET_BUFFERED_LOW = 65536;
+const _SMOOTH_BUDGET_BUFFERED_HIGH = 1048576;
+
+/**
+ * Build the per-tick effective-budget reader for a topic with `interest.budget`
+ * set: the configured ceiling, scaled by the subscriber socket's CURRENT
+ * outbound queue depth. The read is per subscriber per tick (one native
+ * `getBufferedAmount` getter - the same accessor the adapter's pressure sampler
+ * walks); a platform whose sockets do not expose it (the deterministic sim, a
+ * bare test double) reads as unbuffered and keeps the full budget, so the pure
+ * relevancy pass stays deterministic wherever the transport is.
+ * @param {any} rec @param {number} budget
+ * @returns {(identity: string) => number | undefined}
+ */
+function _smoothBudgetOf(rec, budget) {
+	return (identity) => {
+		const ws = rec.registry.get(identity);
+		if (ws === undefined) return budget;
+		let buffered = 0;
+		if (typeof ws.getBufferedAmount === 'function') {
+			try { buffered = ws.getBufferedAmount(); } catch { buffered = 0; }
+		}
+		if (!(typeof buffered === 'number' && Number.isFinite(buffered)) || buffered <= _SMOOTH_BUDGET_BUFFERED_LOW) return budget;
+		if (buffered >= _SMOOTH_BUDGET_BUFFERED_HIGH) return 1;
+		const scale = 1 - (buffered - _SMOOTH_BUDGET_BUFFERED_LOW) / (_SMOOTH_BUDGET_BUFFERED_HIGH - _SMOOTH_BUDGET_BUFFERED_LOW);
+		const b = Math.floor(budget * scale);
+		return b >= 1 ? b : 1;
+	};
+}
+
+/**
  * One-shot dev guard. When live.smooth() runs on a platform that does not
  * implement the binary wire (`publishWire`/`sendWire`), the tick degrades to
  * plain JSON frames: peers still see each other and per-subscriber interest
@@ -458,6 +497,10 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			// on - it closes over the record, so it cannot be built inside this
 			// literal. Null otherwise (the OFF-path shape is unchanged).
 			aoi: null,
+			// The per-subscriber effective-budget reader (interest.budget), assigned
+			// right below when the budget is set - same closes-over-the-record
+			// reason as aoi. Null otherwise (uncapped, byte-identical).
+			budgetOf: null,
 			// The server world view for the onTick hook (server game logic: forces,
 			// respawns, NPC drivers), assigned right below when onTick is configured.
 			// Null otherwise - the tick pays one null check. The warn latches keep a
@@ -494,6 +537,14 @@ export function _smoothRecord(name, cfg, platform, rt) {
 		// hitTest reads candidates / radius / interp-delay through one accessor so
 		// the shot handlers never branch on the interest mode (per-client vs cells).
 		if (cfg.hitTest) rec.aoi = _smoothAoi(rec);
+		// Per-subscriber delivery ceiling (interest.budget): the effective-budget
+		// reader the relevancy pass consults, scaled live by each subscriber
+		// socket's outbound queue. Null (the default) keeps the pass uncapped and
+		// byte-identical. Closes over the record (it reads the live registry), so
+		// it cannot be built inside the literal - the aoi precedent above.
+		if (rec.interest !== null && cfg.interest && cfg.interest.budget) {
+			rec.budgetOf = _smoothBudgetOf(rec, cfg.interest.budget);
+		}
 		if (cfg.onTick) {
 			// Version gate: the world view needs the authority's server-entity
 			// surface. Feature-detected (not version-compared) so a custom runtime
@@ -1066,7 +1117,7 @@ function _smoothCullTick(rec) {
 	const t = rec.lagComp !== null ? (_edgeOwnerNow(rec) ?? wallEpoch()) : 0;
 	const catalog = [];
 	for (const [key, state] of rec.shadow) catalog.push({ key, state });
-	const relevancy = rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++);
+	const relevancy = rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++, rec.budgetOf ?? undefined);
 	_smoothDeliverCulled(rec, relevancy, rec.shadow, rec.pendingRelay, t);
 	rec.pendingRelay.clear();
 	rec.shadowDirty = false;
@@ -1195,7 +1246,7 @@ function _smoothTick(rec) {
 	const wantInterest = rec.interest !== null && (wireUpdates.length > 0 || rec.interestDirty);
 	const catalog = (rec.lagComp !== null || wantInterest) ? rec.authority.catalog() : null;
 	const relevancy = wantInterest
-		? rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++)
+		? rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++, rec.budgetOf ?? undefined)
 		: null;
 	if (rec.lagComp !== null && catalog !== null) {
 		// Key the ring on the monotonic axis (immune to a wall backstep); `t` (wall)
@@ -1789,8 +1840,11 @@ function _validateWire(wire) {
  * relevancy pass consumes. `radius` and `position` are required when interest is
  * on (without a resolvable position there is nothing to cull on); `lod` bands,
  * when given, must be strictly ascending by `within` with an integer send-`rate`
- * of at least 1; `cell` tunes the spatial grid. `budget` is accepted but inert in
- * this version (a reserved per-client bandwidth ceiling).
+ * of at least 1; `cell` tunes the spatial grid. `budget` is the per-subscriber
+ * delivery ceiling (an integer of at least 1) the per-client cull enforces,
+ * scaled down further for a backpressured socket; it applies to the per-client
+ * interest mode only, so combining it with `cells` (which fans out per cell,
+ * with no per-subscriber walk to bound) is a config contradiction and throws.
  * @param {any} it
  */
 function _validateInterest(it) {
@@ -1808,6 +1862,14 @@ function _validateInterest(it) {
 	}
 	if (it.cells !== undefined && typeof it.cells !== 'boolean') {
 		throw new Error('[svelte-realtime] live.smooth() interest.cells must be a boolean');
+	}
+	if (it.budget !== undefined) {
+		if (!(typeof it.budget === 'number' && Number.isInteger(it.budget) && it.budget >= 1)) {
+			throw new Error('[svelte-realtime] live.smooth() interest.budget must be an integer of at least 1');
+		}
+		if (it.cells === true) {
+			throw new Error('[svelte-realtime] live.smooth() interest.budget applies to the per-client interest mode; cells mode fans out per cell and has no per-subscriber delivery walk to bound');
+		}
 	}
 	if (
 		it.centerPolicy !== undefined &&
@@ -2561,7 +2623,13 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
  * `interest.lod` is an ascending list of `{ within, rate }` level-of-detail
  * bands (send every `rate` ticks within that distance; the outer band's edge is
  * the cull radius), `interest.cell` tunes the spatial grid, and
- * `interest.budget` is reserved (inert). `interest.cells` switches to
+ * `interest.budget` caps how many entities are delivered to one subscriber per
+ * tick: past the ceiling the due set trims farthest-first (fringe bands demote
+ * before the action around the player), a trimmed entity stays due and delivers
+ * as soon as the budget frees, and the ceiling scales down automatically for a
+ * subscriber whose socket is backpressured - congestion sheds the fringe
+ * smoothly instead of letting the transport drop arbitrary frames. Per-client
+ * interest mode only (with `cells` it throws). `interest.cells` switches to
  * population-scale cell-topic mode: area-of-interest becomes SUBSCRIPTION to
  * grid-cell topics (one encode per cell, native fan-out) instead of a
  * per-subscriber cull. `interest.centerPolicy` gates reported centers

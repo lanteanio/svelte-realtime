@@ -219,6 +219,25 @@ export function createInterestState(interest) {
 	const subSet = new Set();
 	/** @type {number[]} empty always-visible list for candidatesAt (ring-less entities are never hit candidates) */
 	const noAlwaysVisible = [];
+	// Per-subscriber budget scratch (pooled; touched only when a delivery budget
+	// is active for the subscriber, so the uncapped path allocates nothing). The
+	// due banded entries collect here so an over-budget tick can trim the
+	// farthest ones; parallel arrays keep the scan allocation-free.
+	/** @type {string[]} */
+	const dueKeys = [];
+	/** @type {number[]} */
+	const dueBand = [];
+	/** @type {number[]} */
+	const dueD2 = [];
+	/** @type {number[]} previous band per due entry (-1 = first sight) */
+	const duePrevBand = [];
+	/** @type {any[]} previous last-sent state per due entry */
+	const duePrevSent = [];
+	/** @type {number[]} sortable index scratch for the over-budget trim */
+	const dueOrder = [];
+	/** Nearest-first order for the trim: band, then distance, then key (deterministic). */
+	const dueCompare = (a, b) =>
+		dueBand[a] - dueBand[b] || dueD2[a] - dueD2[b] || (dueKeys[a] < dueKeys[b] ? -1 : 1);
 
 	/**
 	 * Record a subscriber's reported area-of-interest center (the optional
@@ -303,12 +322,30 @@ export function createInterestState(interest) {
 	 * a fringe entity's motion accumulated across throttled ticks is flushed on its
 	 * next due tick whether or not it happened to move on that exact tick.
 	 *
+	 * When a delivery budget is active for a subscriber (`budgetOf` returns a
+	 * finite count), at most that many BANDED entities are delivered to it this
+	 * tick: the due set is trimmed farthest-first (band, then distance - the
+	 * fringe demotes before the action around the player), and a trimmed entry's
+	 * LOD record is reverted to its pre-tick value, so the entity stays due and
+	 * delivers as soon as the budget frees - throttled, never lost. Always-visible
+	 * entities and whole-board (uncentered) subscribers bypass the budget: the
+	 * first are an explicit app statement, the second is the over-deliver safety
+	 * polarity, and neither has a distance to trim by. The candidate membership
+	 * (`getCandidates`) is untouched by a trim - an entity delivered earlier is
+	 * still on the shooter's screen and stays hittable; one never delivered never
+	 * entered the membership at all.
+	 *
 	 * @param {Array<{ key: string, state: any }>} catalog the authority catalog
 	 * @param {Iterable<string>} subscribers the local subscriber identities
 	 * @param {number} tick a monotonic integer tick counter (drives the LOD cadence)
+	 * @param {(identity: string) => number | undefined} [budgetOf] the effective
+	 *   per-subscriber delivery budget for this tick (already scaled by whatever
+	 *   pressure signal the caller reads); a non-finite / undefined return means
+	 *   uncapped. Kept as an injected read so this pass stays clock- and I/O-free.
 	 * @returns {Map<string, Set<string>>} identity -> entity keys to deliver this tick
 	 */
-	function compute(catalog, subscribers, tick) {
+	function compute(catalog, subscribers, tick, budgetOf) {
+		const budgeted = typeof budgetOf === 'function';
 		const n = catalog.length;
 
 		// 1. Resolve every entity's position once; collect the always-visible ones.
@@ -358,6 +395,14 @@ export function createInterestState(interest) {
 			if (lodForS === undefined) { lodForS = new Map(); lod.set(identity, lodForS); }
 			const relevant = new Set();
 			seen.clear();
+			// Resolve this subscriber's effective delivery budget once per tick.
+			let cap = Infinity;
+			if (budgeted) {
+				const b = budgetOf(identity);
+				if (typeof b === 'number' && Number.isFinite(b) && b >= 1) cap = Math.floor(b);
+			}
+			const capped = cap !== Infinity;
+			let dueCount = 0;
 
 			// 4. The candidate set is the in-radius cull when centered, or every entity
 			// when whole-board. Each candidate is delivered only when its state changed
@@ -398,9 +443,43 @@ export function createInterestState(interest) {
 				// so a stationary in-range entity is never re-sent.
 				const cadence = prevBand < 0 || band !== prevBand || rate <= 1 || tick % rate === hashes[idx] % rate;
 				const due = changed && cadence;
-				if (due) relevant.add(key);
+				if (due) {
+					relevant.add(key);
+					if (capped) {
+						// Record what the trim below needs: the sort keys (band, d2)
+						// and the pre-tick LOD record to revert a trimmed entry to.
+						dueKeys[dueCount] = key;
+						dueBand[dueCount] = band;
+						dueD2[dueCount] = d2;
+						duePrevBand[dueCount] = prevBand;
+						duePrevSent[dueCount] = prevSent;
+						dueCount++;
+					}
+				}
 				lodForS.set(key, { band, sent: due ? state : prevSent });
 			}
+			// Over budget: keep the `cap` nearest due entries (band, then distance,
+			// then key - fully deterministic) and revert the rest to their pre-tick
+			// LOD record, so a trimmed entity stays due and delivers when the budget
+			// frees. A reverted first-sight entry is REMOVED (it was never delivered,
+			// so it must not enter the candidate membership); a reverted known entry
+			// keeps its old band, so a dropped band-crossing re-detects and delivers
+			// promptly once there is room.
+			if (capped && dueCount > cap) {
+				dueOrder.length = dueCount;
+				for (let i = 0; i < dueCount; i++) dueOrder[i] = i;
+				dueOrder.sort(dueCompare);
+				for (let i = cap; i < dueCount; i++) {
+					const j = dueOrder[i];
+					const key = dueKeys[j];
+					relevant.delete(key);
+					if (duePrevBand[j] < 0) lodForS.delete(key);
+					else lodForS.set(key, { band: duePrevBand[j], sent: duePrevSent[j] });
+				}
+			}
+			// Release the pooled state references so a departed entity's last state
+			// is not retained by the scratch until the next capped tick.
+			for (let i = 0; i < dueCount; i++) duePrevSent[i] = undefined;
 			// Forget entities that left this subscriber's range, so a re-entry is a
 			// fresh first-sight (delivered at once) and the map stays bounded by the
 			// live in-range set rather than every entity ever seen.

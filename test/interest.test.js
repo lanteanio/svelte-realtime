@@ -237,6 +237,106 @@ describe('interest relevancy', () => {
 	});
 });
 
+describe('delivery budget (interest.budget via the compute budgetOf reader)', () => {
+	it('trims the due set farthest-first to the cap', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('A', 0, 0), at('b', 10, 0), at('c', 50, 0), at('d', 90, 0)];
+		const rel = state.compute(catalog, ['A'], 0, () => 2);
+		// Four due first-sights, budget 2: the two nearest survive (A itself at
+		// d2=0, then b); the fringe (c, d) is demoted.
+		expect(keysOf(rel.get('A'))).toEqual(['A', 'b']);
+		// A trimmed first-sight was never delivered, so it must not have entered
+		// the candidate membership (you cannot be hit by what you were never sent).
+		expect([...state.getCandidates('A')].sort()).toEqual(['A', 'b']);
+	});
+
+	it('a trimmed entity stays due and delivers as soon as the budget frees', () => {
+		const state = createInterestState({ radius: 100, position });
+		// The SAME state references across ticks: nothing moves, so the only
+		// deliveries are the ones still owed.
+		const catalog = [at('A', 0, 0), at('b', 10, 0), at('c', 50, 0), at('d', 90, 0)];
+		expect(keysOf(state.compute(catalog, ['A'], 0, () => 2).get('A'))).toEqual(['A', 'b']);
+		// Budget freed: exactly the starved pair delivers - throttled, never lost -
+		// and the already-delivered pair is not re-sent.
+		expect(keysOf(state.compute(catalog, ['A'], 1, () => 10).get('A'))).toEqual(['c', 'd']);
+		// Now everyone is a candidate.
+		expect([...state.getCandidates('A')].sort()).toEqual(['A', 'b', 'c', 'd']);
+	});
+
+	it('under sustained pressure the nearest keep flowing and the fringe starves', () => {
+		const state = createInterestState({ radius: 100, position });
+		let catalog = [at('A', 0, 0), at('b', 10, 0), at('c', 50, 0)];
+		expect(keysOf(state.compute(catalog, ['A'], 0, () => 2).get('A'))).toEqual(['A', 'b']);
+		// Everything moves (fresh states): still only the two nearest fit.
+		catalog = [at('A', 1, 0), at('b', 11, 0), at('c', 51, 0)];
+		expect(keysOf(state.compute(catalog, ['A'], 1, () => 2).get('A'))).toEqual(['A', 'b']);
+		catalog = [at('A', 2, 0), at('b', 12, 0), at('c', 52, 0)];
+		expect(keysOf(state.compute(catalog, ['A'], 2, () => 2).get('A'))).toEqual(['A', 'b']);
+	});
+
+	it('an inner band survives an outer band regardless of raw distance order', () => {
+		const state = createInterestState({
+			radius: 100,
+			position,
+			lod: [{ within: 20, rate: 1 }, { within: 100, rate: 1 }]
+		});
+		// Subscriber's center is s at the origin; b sits in band 0, c and d in band 1.
+		const catalog = [at('s', 0, 0), at('b', 15, 0), at('c', 30, 0), at('d', 60, 0)];
+		const rel = state.compute(catalog, ['s'], 0, () => 3);
+		// Keep: s (band 0, d2 0), b (band 0), then the nearest band-1 entry (c).
+		expect(keysOf(rel.get('s'))).toEqual(['b', 'c', 's']);
+	});
+
+	it('always-visible entities bypass the budget', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('A', 0, 0), at('b', 10, 0), { key: 'world', state: { global: true } }];
+		const rel = state.compute(catalog, ['A'], 0, () => 1);
+		// Budget 1 bounds the banded entries (A wins at d2=0); the always-visible
+		// entity rides above the ceiling - it is an explicit app statement.
+		expect(keysOf(rel.get('A'))).toEqual(['A', 'world']);
+	});
+
+	it('a whole-board (uncentered) subscriber bypasses the budget', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('a', 0, 0), at('b', 50, 0), at('c', 999, 0)];
+		const rel = state.compute(catalog, ['spectator'], 0, () => 1);
+		// No center means no distance to trim by: the over-deliver safety polarity wins.
+		expect(keysOf(rel.get('spectator'))).toEqual(['a', 'b', 'c']);
+	});
+
+	it('an equal-distance tie breaks by key, deterministically', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('s', 0, 0), at('right', 10, 0), at('left', -10, 0)];
+		const rel = state.compute(catalog, ['s'], 0, () => 2);
+		// s at d2=0, then left/right tie at d2=100: 'left' < 'right' lexically.
+		expect(keysOf(rel.get('s'))).toEqual(['left', 's']);
+	});
+
+	it('a non-finite or missing budget read means uncapped', () => {
+		const state = createInterestState({ radius: 100, position });
+		const catalog = [at('A', 0, 0), at('b', 10, 0), at('c', 50, 0)];
+		expect(keysOf(state.compute(catalog, ['A'], 0, () => Infinity).get('A'))).toEqual(['A', 'b', 'c']);
+		const state2 = createInterestState({ radius: 100, position });
+		expect(keysOf(state2.compute(catalog, ['A'], 0, () => undefined).get('A'))).toEqual(['A', 'b', 'c']);
+	});
+
+	it('a trimmed known entity keeps its motion and delivers it on the freed tick', () => {
+		const state = createInterestState({ radius: 100, position });
+		// Tick 0, uncapped: b delivered at s0.
+		const b0 = at('b', 40, 0);
+		expect(keysOf(state.compute([at('A', 0, 0), b0], ['A'], 0).get('A'))).toEqual(['A', 'b']);
+		// Tick 1: b moved (fresh state) but a nearer newcomer takes the only slot.
+		const b1 = at('b', 41, 0);
+		const rel1 = state.compute([at('A', 1, 0), at('near', 5, 0), b1], ['A'], 1, () => 2);
+		expect(keysOf(rel1.get('A'))).toEqual(['A', 'near']);
+		// b stays a candidate (it WAS delivered at s0 and is still on screen).
+		expect([...state.getCandidates('A')]).toContain('b');
+		// Tick 2, freed: b's accumulated motion flushes (still-due against s0).
+		const rel2 = state.compute([at('A', 1, 0), at('near', 5, 0), b1].map((e) => e), ['A'], 2, () => 10);
+		expect(keysOf(rel2.get('A'))).toContain('b');
+	});
+});
+
 describe('getCandidates (lag-comp candidate set)', () => {
 	it('returns the FULL in-range membership, including a stationary entity the deltas drop', () => {
 		const state = createInterestState({ radius: 100, position });

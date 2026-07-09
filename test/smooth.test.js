@@ -566,6 +566,41 @@ describe('live.smooth commands and the authoritative tick', () => {
 		expect(platform.wirePublished.filter((p) => p.event === 'update')).toHaveLength(0);
 	});
 
+	it('interest.budget bounds per-subscriber delivery, and a backpressured socket tightens it', async () => {
+		const { name } = declareShape({
+			tickMs: 20,
+			initial: (key) => ({ A: { x: 0, y: 0 }, B: { x: 10, y: 0 }, C: { x: 20, y: 0 } }[key] || { x: 0, y: 0 }),
+			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }), budget: 2 }
+		});
+		const platform = wirePlatform();
+		const wsA = mockWs({ id: 'A' });
+		const wsB = mockWs({ id: 'B' });
+		const wsC = mockWs({ id: 'C' });
+		// B's socket is wedged past the transport's shed point: its ceiling floors to 1.
+		wsB.getBufferedAmount = () => 2 * 1024 * 1024;
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsB, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsC, platform, name + '/shape/__smooth/sync', ['r1']);
+		rt.queueDrain({
+			updates: [
+				{ key: 'A', state: { x: 1, y: 0 }, ws: wsA, commanded: false },
+				{ key: 'B', state: { x: 11, y: 0 }, ws: wsB, commanded: false },
+				{ key: 'C', state: { x: 21, y: 0 }, ws: wsC, commanded: false }
+			],
+			acks: [],
+			idle: true
+		});
+		await call(wsA, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: {} }]]);
+		await vi.advanceTimersByTimeAsync(20);
+		const sent = platform.wireSent.filter((s) => s.event === 'update');
+		// A (healthy socket): the full budget of 2 - itself and its nearest neighbour.
+		expect(sent.filter((s) => s.ws === wsA).map((s) => s.data.key).sort()).toEqual(['A', 'B']);
+		// B (congested): floored to 1 - only the nearest entity flows.
+		expect(sent.filter((s) => s.ws === wsB).map((s) => s.data.key)).toEqual(['B']);
+		// C (healthy): the full budget of 2.
+		expect(sent.filter((s) => s.ws === wsC).map((s) => s.data.key).sort()).toEqual(['B', 'C']);
+	});
+
 	it('discrete events stay per-tick under the gate', async () => {
 		const { name } = declareShape({ tickMs: 20, broadcastHz: 25 });
 		const ws = mockWs({ id: 'u1' });
@@ -2337,6 +2372,16 @@ describe('live.smooth interest validation', () => {
 			...base,
 			interest: { radius: 500, position: (s) => ({ x: s.x, y: s.y }), lod: [{ within: 100, rate: 1 }, { within: 500, rate: 4 }], budget: 1000 }
 		})).not.toThrow();
+	});
+	it('rejects a malformed budget', () => {
+		const p = () => null;
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, budget: 0 } })).toThrow('interest.budget');
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, budget: 1.5 } })).toThrow('interest.budget');
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, budget: '50' } })).toThrow('interest.budget');
+	});
+	it('rejects budget combined with cells (no per-subscriber walk to bound)', () => {
+		const p = () => null;
+		expect(() => live.smooth({ ...base, interest: { radius: 100, position: p, cells: true, budget: 50 } })).toThrow('cells mode');
 	});
 	it('validates centerPolicy: presets and a callback pass, anything else is rejected', () => {
 		const p = () => null;

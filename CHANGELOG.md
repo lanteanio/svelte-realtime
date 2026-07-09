@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.74] - 2026-07-09
+
+### Added
+
+- **`interest.budget` is now live: a per-subscriber delivery ceiling on the area-of-interest cull, driven by each connection's real outbound backpressure.** The option existed as an accepted-but-inert reserved knob; it now does what it says. With `budget` set (an integer, the maximum entities delivered to one subscriber per tick), an over-budget tick trims the due set farthest-first - by level-of-detail band, then distance, then key, fully deterministically - so the fringe fades before the action around the player. A trimmed entity's delivery record is reverted, not advanced: it stays owed and delivers the moment the budget frees, so motion under pressure is throttled, never lost, and a trimmed-but-previously-delivered entity remains in the shooter's lag-compensation candidate set (it is still on screen) while a never-delivered one never enters it. The ceiling scales itself per subscriber from the connection's live outbound queue (`getBufferedAmount`, the same accessor the adapter's pressure sampler walks): full budget below a 64 KB queue, floored to one entity at the transport's 1 MB shedding limit, linear in between - so a congested client sheds its fringe smoothly instead of having the transport drop arbitrary frames at the cliff, and because the send-cadence estimator only counts real deliveries, a budget-throttled shooter's rewind reach widens automatically to match what it actually renders. Always-visible entities (a null `position`) and whole-board (uncentered) subscribers bypass the ceiling - the first is an explicit app statement, the second is the over-deliver safety polarity. The relevancy pass itself stays pure (the budget reader is injected, so the deterministic simulator and any clock-free harness are unaffected), platforms whose sockets do not expose a queue read as unbuffered, and a malformed `budget` (or combining it with `cells` mode, which fans out per cell and has no per-subscriber walk to bound) now throws at declaration instead of being silently ignored. Without `budget` the cull is byte-identical to before.
+
 ## [0.6.0-next.73] - 2026-07-09
 
 ### Added
