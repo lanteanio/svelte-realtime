@@ -1096,17 +1096,18 @@ function _smoothJoinSnapshot(rec, identity) {
  * `moved` carries the entities that changed this tick, each with the author identity
  * to suppress for that frame (echo suppression): on the owner that is the commanded
  * author under noEcho, on the non-owner it is the exclude identity the owner stamped
- * onto the relay. An entity in range that did NOT move is delivered from `catalogByKey`
- * (first-sight catch-up), and a subscriber's own entity is never caught up to itself
+ * onto the relay. An entity in range that did NOT move is delivered via `lookup`
+ * (first-sight catch-up: the owner reads the authority, the non-owner its shadow),
+ * and a subscriber's own entity is never caught up to itself
  * under noEcho. Only a remote frame advances the send-cadence estimator (a client
  * discards its own entity frame before measuring its interpolation delay).
  * @param {any} rec
  * @param {Map<string, Set<string>>} relevancy identity -> entity keys to deliver
- * @param {Map<string, any>} catalogByKey full per-entity state, for catch-up
+ * @param {(key: string) => any} lookup current per-entity state, for catch-up
  * @param {Map<string, { state: any, exclude: string | undefined }>} moved entities that changed this tick
  * @param {number} t wall stamp for the send-cadence estimator (hitTest only)
  */
-function _smoothDeliverCulled(rec, relevancy, catalogByKey, moved, t) {
+function _smoothDeliverCulled(rec, relevancy, lookup, moved, t) {
 	for (const [identity, ws] of rec.registry) {
 		const relSet = relevancy.get(identity);
 		if (relSet === undefined) continue;
@@ -1123,7 +1124,7 @@ function _smoothDeliverCulled(rec, relevancy, catalogByKey, moved, t) {
 				exclude = m.exclude;
 			} else {
 				// First-sight catch-up: in range, no update of its own this tick.
-				state = catalogByKey.get(key);
+				state = lookup(key);
 				exclude = rec.noEcho ? key : undefined;
 			}
 			if (exclude !== undefined && identity === exclude) continue;
@@ -1169,7 +1170,7 @@ function _smoothCullTick(rec) {
 	const catalog = [];
 	for (const [key, state] of rec.shadow) catalog.push({ key, state });
 	const relevancy = rec.interest.compute(catalog, rec.registry.keys(), rec.interestTick++, rec.budgetOf ?? undefined);
-	_smoothDeliverCulled(rec, relevancy, rec.shadow, rec.pendingRelay, t);
+	_smoothDeliverCulled(rec, relevancy, (key) => rec.shadow.get(key), rec.pendingRelay, t);
 	rec.pendingRelay.clear();
 	rec.shadowDirty = false;
 	rec.interestDirty = false;
@@ -1309,8 +1310,9 @@ function _smoothTick(rec) {
 	rec.interestDirty = false;
 	// Broadcast updates collect here and flush as ONE batched fan-out after the
 	// loop (per-entry author exclusion rides along); the relay and the cells
-	// routing stay per-entity inside the loop.
-	const broadcastUpdates = [];
+	// routing stay per-entity inside the loop. Allocated on first use: the
+	// interest and cells paths never push (their delivery runs elsewhere).
+	let broadcastUpdates = null;
 	for (let i = 0; i < wireUpdates.length; i++) {
 		const u = wireUpdates[i];
 		// Cells mode: route each changed entity to its cell topic (native shared
@@ -1343,7 +1345,7 @@ function _smoothTick(rec) {
 			// own subscribers all see the move).
 			if (!relevancy) {
 				const localAuthor = rec.noEcho && u.commanded ? rec.registry.get(u.key) : undefined;
-				broadcastUpdates.push({ key: u.key, state: u.state, excludeWs: localAuthor });
+				(broadcastUpdates ??= []).push({ key: u.key, state: u.state, excludeWs: localAuthor });
 			}
 			// Relay to other instances. Only a remote (surrogate) author needs a
 			// cross-instance exclude - a local author is already excluded (below, or
@@ -1357,13 +1359,13 @@ function _smoothTick(rec) {
 			// Interest-on: updates fan out per subscriber after this loop (the
 			// relevancy walk below), so nothing broadcasts here.
 		} else {
-			broadcastUpdates.push({ key: u.key, state: u.state, excludeWs: rec.noEcho && u.commanded ? u.ws : undefined });
+			(broadcastUpdates ??= []).push({ key: u.key, state: u.state, excludeWs: rec.noEcho && u.commanded ? u.ws : undefined });
 		}
 	}
 	// One tick, one fan-out: every collected update in a single batched frame
 	// per capable viewer (per-entity on an older platform). Acks, events, and
 	// removals keep their own frames below, exactly as before.
-	_smoothPublishUpdates(rec, broadcastUpdates);
+	if (broadcastUpdates !== null) _smoothPublishUpdates(rec, broadcastUpdates);
 	// Interest-on: deliver each LOCAL subscriber (single-instance, or the owner
 	// side of a cluster) the CURRENT state of every entity the relevancy pass marked
 	// for it this tick - the entities inside its area of interest that changed since
@@ -1377,19 +1379,22 @@ function _smoothTick(rec) {
 	// the cursor viewport cull does. Events and removals stay on the shared broadcast
 	// path (over-deliver rather than risk a ghost or a dropped one-shot).
 	if (relevancy) {
-		const catalogByKey = new Map();
-		for (let i = 0; i < catalog.length; i++) catalogByKey.set(catalog[i].key, catalog[i].state);
 		// `moved` carries each entity that changed this tick with the author to suppress
 		// for that frame (the commanded author under noEcho). The shared delivery helper
-		// catches up in-range entities that did not move from `catalogByKey`. Only a
-		// remote frame advances the lag-comp send-cadence estimator (the client discards
-		// its own entity frame before measuring its interpolation delay).
+		// catches up in-range entities that did not move straight from the authority
+		// (`get` is O(1) and hands back the same state object the catalog carried -
+		// nothing mutates entries between the post-drain snapshot and this delivery).
+		// Only a remote frame advances the lag-comp send-cadence estimator (the client
+		// discards its own entity frame before measuring its interpolation delay).
 		const moved = new Map();
 		for (let i = 0; i < wireUpdates.length; i++) {
 			const u = wireUpdates[i];
 			moved.set(u.key, { state: u.state, exclude: rec.noEcho && u.commanded ? u.key : undefined });
 		}
-		_smoothDeliverCulled(rec, relevancy, catalogByKey, moved, t);
+		_smoothDeliverCulled(rec, relevancy, (key) => {
+			const e = rec.authority.get(key);
+			return e === undefined ? undefined : e.state;
+		}, moved, t);
 	}
 	for (let i = 0; i < acks.length; i++) {
 		const a = acks[i];

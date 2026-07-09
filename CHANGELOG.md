@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.78] - 2026-07-09
+
+### Changed
+
+- **The smoothed-entity owner tick sheds its two dead per-tick allocations on the interest path.** Every moving tick with interest culling on materialized a Map over the FULL post-drain catalog - O(entities) allocations and inserts, independent of how much actually moved - purely so the delivery walk could look up the current state of an entity a subscriber just moved into range of (the first-sight catch-up, typically a handful of keys per tick). The walk now reads the authority's own entity map through a lookup at exactly the keys it needs: the authority hands back the same state object the catalog carried, nothing mutates entries between the post-drain snapshot and delivery in the same tick, and the non-owner cull path already worked this way against its shadow - so owner and non-owner delivery are now symmetrical and the per-tick materialization is gone (measured 8.0us -> 1.0us per moving tick at 500 entities and 211us -> 1.4us at 8000 on the delivery-prep seam, `bench/smooth-deliver-lookup.mjs`; the cost used to scale with the lobby, the lookup scales with the actual catch-up traffic). The broadcast update collector rode along: it was allocated every tick but never written on the interest and cells paths (their delivery runs elsewhere), so it now allocates only when the broadcast path actually collects. Delivery bytes, ordering, echo suppression, and the interest-off path are byte-identical.
+
 ## [0.6.0-next.77] - 2026-07-09
 
 ### Changed
