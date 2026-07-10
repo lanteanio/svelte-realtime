@@ -713,7 +713,15 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 *   the display via `_recomputeDisplay()` instead.
 	 */
 	function _applyMerge(envelope) {
-		if (envelope.seq !== undefined) _lastSeq = envelope.seq;
+		// Monotonic resume cursor: `_lastSeq` is what a resubscribe sends as
+		// `request.seq` for gap-fill, so it must only ADVANCE. A multi-node
+		// cluster can deliver two concurrently-published events with inverted
+		// seqs (seq is minted atomically but the fan-out order is PUBLISH
+		// arrival order); applying them in arrival order is fine - the merge is
+		// key-based - but letting the cursor regress would re-deliver the gap
+		// on the next reconnect. A fresh session starts from null, and a full
+		// rehydrate response reassigns the cursor authoritatively elsewhere.
+		if (envelope.seq !== undefined && (_lastSeq === null || envelope.seq > _lastSeq)) _lastSeq = envelope.seq;
 		if (_optimisticQueue.length > 0) {
 			// optimistic.queue invariant: when queue is non-empty the un-overlaid
 			// server state pair (_serverValue, _serverIndex) must be set. Both

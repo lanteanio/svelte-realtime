@@ -31,7 +31,7 @@ import { LiveError } from './live-error.js';
  * Per-room pending alarms (the in-memory store). One entry per room, keyed by the
  * WIRE topic (already tenant-scoped, so two tenants' same logical room never
  * collide). `setAlarm` replaces the entry.
- * @type {Map<string, { at: number, timer: any, onAlarm: Function, meta: AlarmMeta | null }>}
+ * @type {Map<string, { at: number, timer: any, onAlarm: Function, meta: AlarmMeta | null, misfireMs?: number }>}
  */
 const _pending = new Map();
 
@@ -142,19 +142,19 @@ export function configureAlarm(config) {
  * without them keeps the in-memory path working (durability just needs the live
  * dispatch bind, which always supplies `path`).
  * @param {any} ctx
- * @param {{ wireTopic: string, onAlarm: Function, path?: string, tenantId?: string | null }} binding
+ * @param {{ wireTopic: string, onAlarm: Function, path?: string, tenantId?: string | null, misfireMs?: number }} binding
  */
 export function _bindAlarmCtx(ctx, binding) {
-	const { wireTopic, onAlarm, path, tenantId } = binding;
+	const { wireTopic, onAlarm, path, tenantId, misfireMs } = binding;
 	const meta = (path !== undefined || (tenantId !== undefined && tenantId !== null))
 		? { path, tenantId: tenantId ?? null }
 		: null;
-	ctx.setAlarm = (at) => _setAlarm(wireTopic, at, onAlarm, meta);
+	ctx.setAlarm = (at) => _setAlarm(wireTopic, at, onAlarm, meta, misfireMs);
 	ctx.getAlarm = () => _getAlarm(wireTopic);
 	ctx.deleteAlarm = () => _deleteAlarm(wireTopic);
 }
 
-function _setAlarm(wireTopic, at, onAlarm, meta = null) {
+function _setAlarm(wireTopic, at, onAlarm, meta = null, misfireMs = undefined) {
 	if (typeof at !== 'number' || !Number.isFinite(at)) {
 		throw new LiveError('VALIDATION', '[svelte-realtime] ctx.setAlarm(at): at must be a finite epoch-ms number');
 	}
@@ -173,7 +173,7 @@ function _setAlarm(wireTopic, at, onAlarm, meta = null) {
 		}
 		return;
 	}
-	_pending.set(wireTopic, { at, timer: _schedule(wireTopic, at), onAlarm, meta });
+	_pending.set(wireTopic, { at, timer: _schedule(wireTopic, at), onAlarm, meta, misfireMs });
 	// Durable store (when wired): persist so the alarm survives a restart + fires
 	// once cluster-wide. Best-effort - the in-memory timer is the live path. `meta`
 	// carries the resolver path so a recovery poll can re-find onAlarm after a restart.
@@ -274,7 +274,21 @@ async function _fire(wireTopic) {
 		if (!claimed) return;
 	}
 
-	await _invokeAlarm(wireTopic, entry.onAlarm, entry.meta);
+	// Misfire policy: with `misfireMs` set, an alarm firing later than its
+	// deadline plus the threshold is dropped instead of run - AFTER the claim,
+	// so the durable row is still consumed (a stale alarm is spent, not
+	// re-fired forever). Default (unset) keeps fire-when-late: "fire ASAP" is
+	// a valid intent for a merely-delayed timer.
+	const firedAt = wallEpoch();
+	const lateMs = Math.max(0, firedAt - entry.at);
+	if (typeof entry.misfireMs === 'number' && lateMs > entry.misfireMs) {
+		if (_IS_DEV) {
+			console.warn('[svelte-realtime] alarm for "' + wireTopic + '" missed its window by ' + lateMs + 'ms (misfireMs=' + entry.misfireMs + '); skipped.');
+		}
+		return;
+	}
+
+	await _invokeAlarm(wireTopic, entry.onAlarm, entry.meta, { at: entry.at, firedAt, lateMs, recovered: false, misfireMs: entry.misfireMs });
 }
 
 /**
@@ -286,8 +300,13 @@ async function _fire(wireTopic) {
  * @param {string} wireTopic
  * @param {Function} onAlarm
  * @param {AlarmMeta | null} meta
+ * @param {{ at: number, firedAt: number, lateMs: number, recovered: boolean, misfireMs?: number } | null} fire
+ *   Fire-time visibility surfaced to the handler as `ctx.alarm`: the scheduled
+ *   deadline, when it actually ran, how late that is, and whether the recovery
+ *   poll (not the precise in-memory timer) fired it. Without this, a restart-
+ *   recovered alarm running hours late is indistinguishable from an on-time one.
  */
-async function _invokeAlarm(wireTopic, onAlarm, meta) {
+async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 	const platform = state.cronPlatform;
 	if (!platform) {
 		if (_IS_DEV && !_alarmPlatformWarnFired) {
@@ -312,8 +331,12 @@ async function _invokeAlarm(wireTopic, onAlarm, meta) {
 		ctx.publish = (event, data) => ctx._publishWire(wireTopic, event, data);
 		// Re-bind the alarm helpers so onAlarm can re-arm (TTL refresh from inside the
 		// handler) or cancel its own room's alarm - carrying the same resolver meta so
-		// a re-armed alarm stays recoverable across a restart.
-		_bindAlarmCtx(ctx, { wireTopic, onAlarm, path: meta ? meta.path : undefined, tenantId: meta ? meta.tenantId : undefined });
+		// a re-armed alarm stays recoverable across a restart, and the same misfire
+		// policy so a re-armed alarm keeps it.
+		_bindAlarmCtx(ctx, { wireTopic, onAlarm, path: meta ? meta.path : undefined, tenantId: meta ? meta.tenantId : undefined, misfireMs: fire ? fire.misfireMs : undefined });
+		if (fire) {
+			ctx.alarm = Object.freeze({ at: fire.at, firedAt: fire.firedAt, lateMs: fire.lateMs, recovered: fire.recovered });
+		}
 		await onAlarm(ctx);
 	} catch (err) {
 		if (state.serverErrorHandler) {
@@ -372,9 +395,9 @@ export async function _pollAlarms() {
 		const meta = (row && row.meta) || null;
 		const path = meta && meta.path;
 		const fn = typeof path === 'string' ? registry.get(path) : undefined;
-		const onAlarm = fn && /** @type {any} */ (fn).__streamOptions
-			&& /** @type {any} */ (fn).__streamOptions.alarm
-			&& /** @type {any} */ (fn).__streamOptions.alarm.onAlarm;
+		const alarmOpts = fn && /** @type {any} */ (fn).__streamOptions
+			&& /** @type {any} */ (fn).__streamOptions.alarm;
+		const onAlarm = alarmOpts && alarmOpts.onAlarm;
 		// Claim the row regardless of resolvability: an atomic delete both arbitrates
 		// single-fire AND garbage-collects an orphan whose stream was removed/renamed
 		// (claimed but unresolvable -> drop, never accumulate).
@@ -383,7 +406,20 @@ export async function _pollAlarms() {
 		catch { continue; }
 		if (!claimed) continue; // another poller / the owner's timer won the claim
 		if (typeof onAlarm !== 'function') continue; // stale row GC'd above; nothing to run
-		await _invokeAlarm(wireTopic, onAlarm, meta);
+		// Misfire policy on the recovery path: the stream's declared threshold is
+		// re-resolved from the registry (the persisted row stays policy-free). The
+		// claim above already consumed the row, so a skipped stale alarm is spent.
+		const at = typeof (row && row.at) === 'number' ? row.at : null;
+		const firedAt = wallEpoch();
+		const lateMs = at !== null ? Math.max(0, firedAt - at) : 0;
+		const misfireMs = typeof alarmOpts.misfireMs === 'number' ? alarmOpts.misfireMs : undefined;
+		if (at !== null && misfireMs !== undefined && lateMs > misfireMs) {
+			if (_IS_DEV) {
+				console.warn('[svelte-realtime] recovered alarm for "' + wireTopic + '" missed its window by ' + lateMs + 'ms (misfireMs=' + misfireMs + '); skipped.');
+			}
+			continue;
+		}
+		await _invokeAlarm(wireTopic, onAlarm, meta, { at: at !== null ? at : firedAt, firedAt, lateMs, recovered: true, misfireMs });
 	}
 }
 

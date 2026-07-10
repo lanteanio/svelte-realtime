@@ -2854,6 +2854,46 @@ describe('__stream() seq tracking', () => {
 
 		unsub();
 	});
+
+	it('the resume cursor is monotonic: an out-of-order live event cannot regress it', async () => {
+		// A multi-node cluster can deliver two concurrently-published events with
+		// inverted seqs (seq is minted atomically, fan-out order is PUBLISH
+		// arrival). The events apply in arrival order (key-based merge absorbs
+		// that), but the retained gap-fill cursor must keep the HIGHEST seen seq
+		// or the next reconnect re-delivers the whole inverted gap.
+		const store = __stream('seqmono/data', { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent1 = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent1.id, {
+			ok: true,
+			data: [{ id: 1 }],
+			topic: 'seqmono-topic',
+			merge: 'crud',
+			key: 'id',
+			seq: 10
+		});
+
+		// Inverted arrival: seq 13 lands before seq 12.
+		simulateTopicMessage('seqmono-topic', { event: 'created', data: { id: 3 }, seq: 13 });
+		simulateTopicMessage('seqmono-topic', { event: 'created', data: { id: 2 }, seq: 12 });
+
+		// Both events applied regardless of order.
+		expect(values[values.length - 1]).toEqual([{ id: 1 }, { id: 3 }, { id: 2 }]);
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+
+		// The reconnect gap-fill resumes from 13, not the regressed 12.
+		expect(sendQueuedFn.mock.calls.length).toBeGreaterThanOrEqual(2);
+		const sent2 = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(sent2.seq).toBe(13);
+
+		unsub();
+	});
 });
 
 // - __stream() reconnect cursor time-check -----------------------------------

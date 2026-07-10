@@ -1127,6 +1127,9 @@ live.stream = function stream(topic, initFn, options) {
 		if (typeof _a !== 'object' || _a === null || typeof _a.onAlarm !== 'function') {
 			throw new Error('[svelte-realtime] live.stream alarm must be an object { onAlarm: (ctx) => {...} } - the handler that runs when ctx.setAlarm fires.');
 		}
+		if (_a.misfireMs !== undefined && (typeof _a.misfireMs !== 'number' || !Number.isFinite(_a.misfireMs) || _a.misfireMs < 0)) {
+			throw new Error('[svelte-realtime] live.stream alarm.misfireMs must be a non-negative finite number (ms of tolerated lateness before a fire is skipped).');
+		}
 	}
 	let invalidatePatterns = null;
 	if (invalidateOn !== undefined) {

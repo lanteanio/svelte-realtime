@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.80] - 2026-07-10
+
+### Added
+
+- **`ctx.alarm` - fire-time visibility inside `onAlarm`.** A durable alarm can fire late - a restart-recovered one arbitrarily so - but the handler could not tell: the pending entry is consumed before `onAlarm` runs, so `ctx.getAlarm()` is already `null` and the scheduled deadline existed nowhere the handler could reach. `ctx.alarm` now carries `{ at, firedAt, lateMs, recovered }` - the scheduled deadline, when the handler actually ran, the difference, and whether the cross-restart recovery poll (rather than the precise in-memory timer) fired it - so a time-sensitive handler can decide what a late fire means.
+- **`alarm.misfireMs` - declarative misfire policy.** For handlers where a late fire would be *wrong* rather than merely delayed (an auction close, a game round end), `alarm: { onAlarm, misfireMs }` skips any fire that lands more than `misfireMs` past its deadline - on both the timer path and the recovery poll, with the durable row still consumed (a stale alarm is spent, never retried forever). A re-armed alarm inherits the policy. The default (unset) keeps fire-when-late, which is right for TTL cleanup and reminders. Validated at declaration time.
+
+### Fixed
+
+- **Stream `filter`/`access` typings now match the runtime.** The dispatch layer has always called subscribe-time predicates with the stream's call arguments after `ctx` (`filter(ctx, docId)` for a stream subscribed as `doc(docId)`), and the args-aware `live.access` helpers rely on it - but the declared types were ctx-only, so a TypeScript (or checkJS) user writing a per-argument predicate got a spurious type error steering them toward re-parsing the topic string. The declarations now carry `...args: any[]`, matching `live.gate`, `live.access.any/all`, and `live.scoped`.
+- **The client's replay resume cursor is now monotonic.** A multi-node cluster can deliver two concurrently-published events with inverted seqs (seq is minted atomically, fan-out order is publish arrival). The events themselves apply fine in arrival order - the merge is key-based - but the retained gap-fill cursor took every event's seq verbatim, so an inverted pair could regress it and the next reconnect would re-deliver the whole gap. The cursor now only advances; a full rehydrate still reassigns it authoritatively.
+
 ## [0.6.0-next.79] - 2026-07-10
 
 ### Added

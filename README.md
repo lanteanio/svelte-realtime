@@ -2715,6 +2715,22 @@ configureAlarm({
 
 The store is any object implementing the seam contract (`set(topic, at, meta)` / `delete(topic)` returning whether it removed the row / an optional `due(nowMs)` for cross-restart recovery), so you can back it with whatever durable store you already run; `createAlarmStore` from `svelte-adapter-uws-extensions` ships Redis and Postgres implementations. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses). One caveat: the recovery poll re-finds a handler by the stream's RPC path, so renaming an alarm-bearing stream's path across a deploy abandons that stream's in-flight durable alarms (they are dropped, not fired) - keep the path stable, or drain alarms before renaming.
 
+A durable alarm can fire late - a restart-recovered alarm arbitrarily so. Inside `onAlarm`, `ctx.alarm` says exactly how the fire happened: `{ at, firedAt, lateMs, recovered }` - the scheduled deadline, when the handler actually ran, the difference, and whether the recovery poll (rather than the precise in-memory timer) fired it. For handlers where a late fire would be wrong rather than merely delayed (an auction close, a game round end), declare a misfire threshold and stale fires are skipped declaratively - the alarm is consumed, never run:
+
+```js
+export default live.stream('auction:current', loadAuction, {
+  alarm: {
+    onAlarm: async (ctx) => {
+      // ctx.alarm.lateMs is available here for finer-grained decisions
+      await closeAuction(ctx);
+    },
+    misfireMs: 60000 // fired more than 60s past its deadline -> skip, don't close a long-dead auction
+  }
+});
+```
+
+The default (no `misfireMs`) keeps fire-when-late, which is right for TTL cleanup and reminders - late is still useful.
+
 ## Cron scheduling
 
 Use `live.cron()` to run server-side functions on a schedule and publish results to a topic.

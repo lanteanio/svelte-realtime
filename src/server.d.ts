@@ -380,6 +380,16 @@ export interface LiveContext<UserData = unknown> {
 	deleteAlarm: () => void;
 
 	/**
+	 * Fire-time visibility, present ONLY inside `onAlarm`: the scheduled
+	 * deadline (`at`), when the handler actually ran (`firedAt`), how late that
+	 * is (`lateMs`, >= 0), and whether the cross-restart recovery poll rather
+	 * than the precise in-memory timer fired it (`recovered`). A recovered
+	 * alarm can run arbitrarily late - check `lateMs` before a time-sensitive
+	 * action, or declare `alarm.misfireMs` to skip stale fires declaratively.
+	 */
+	alarm?: { at: number; firedAt: number; lateMs: number; recovered: boolean };
+
+	/**
 	 * The room's current owner identity key, or `null` when the room has none.
 	 * Available only inside the actions of a `live.room` / `live.multiplayer`
 	 * declared with `owner: true`.
@@ -473,8 +483,24 @@ export interface StreamAlarmConfig {
 	 * Runs when a handler's `ctx.setAlarm(at)` reaches its scheduled time - with a
 	 * fresh server ctx, even if every client has disconnected. `ctx.publish(event,
 	 * data)` inside it publishes to this room; `ctx.setAlarm(...)` re-arms it.
+	 *
+	 * Inside the handler, `ctx.alarm` carries fire-time visibility:
+	 * `{ at, firedAt, lateMs, recovered }` - the scheduled deadline, when the
+	 * handler actually ran, how late that is, and whether the cross-restart
+	 * recovery poll (rather than the precise in-memory timer) fired it. A
+	 * restart-recovered alarm can run arbitrarily late; check `ctx.alarm.lateMs`
+	 * when the action is time-sensitive.
 	 */
 	onAlarm: (ctx: LiveContext) => void | Promise<void>;
+	/**
+	 * Misfire threshold in ms. When set, an alarm that fires later than its
+	 * scheduled time plus this threshold is SKIPPED instead of run (the durable
+	 * row is still consumed, so a stale alarm is spent, not retried forever).
+	 * Unset (the default) keeps fire-when-late: a delayed or restart-recovered
+	 * alarm always runs, which is right for TTL cleanup and reminders; set a
+	 * threshold when a late fire would be wrong (auction close, game round end).
+	 */
+	misfireMs?: number;
 }
 
 /**
@@ -597,14 +623,20 @@ export interface StreamOptions {
 	 * subscription with an "Access denied" error. The framework awaits the
 	 * return before inspecting it, so async predicates that consult a DB
 	 * or session store are safe. For per-event filtering, use `pipe.filter()`.
+	 *
+	 * Receives the stream's call arguments after `ctx` - for a dynamic topic
+	 * like `live.stream('doc:current', ...)` subscribed as `doc(docId)`, the
+	 * predicate is called `filter(ctx, docId)`, so per-argument authorization
+	 * needs no re-parse of the topic string.
 	 */
-	filter?(ctx: LiveContext<any>): boolean | Promise<boolean>;
+	filter?(ctx: LiveContext<any>, ...args: any[]): boolean | Promise<boolean>;
 
 	/**
 	 * Subscribe-time access predicate (alias for `filter`). Sync or async.
+	 * Receives the stream's call arguments after `ctx`, same as `filter`.
 	 * Use `live.access` helpers to build predicates.
 	 */
-	access?(ctx: LiveContext<any>): boolean | Promise<boolean>;
+	access?(ctx: LiveContext<any>, ...args: any[]): boolean | Promise<boolean>;
 
 	/**
 	 * Schema version number. Increment when the data shape changes.

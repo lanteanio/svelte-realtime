@@ -280,6 +280,125 @@ describe('live.alarm', () => {
 		});
 	});
 
+	describe('fire-time visibility (ctx.alarm) + misfire policy', () => {
+		function memStore() {
+			const rows = new Map();
+			return {
+				rows,
+				set: (t, at, meta) => { rows.set(t, { at, meta: meta ?? null }); },
+				delete: (t) => { const had = rows.has(t); rows.delete(t); return had; },
+				due: (now) => [...rows.entries()].filter(([, r]) => r.at <= now).map(([t, r]) => ({ topic: t, at: r.at, meta: r.meta }))
+			};
+		}
+
+		it('exposes ctx.alarm = { at, firedAt, lateMs, recovered:false } on a timer fire', async () => {
+			let seen = null;
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, { wireTopic: 'room:vis', onAlarm: (c) => { seen = c.alarm; } });
+			const at = Date.now() + 5;
+			ctx.setAlarm(at);
+			await tick(30);
+			expect(seen).not.toBeNull();
+			expect(seen.at).toBe(at);
+			expect(seen.firedAt).toBeGreaterThanOrEqual(at);
+			expect(seen.lateMs).toBe(seen.firedAt - at);
+			expect(seen.recovered).toBe(false);
+			expect(Object.isFrozen(seen)).toBe(true);
+		});
+
+		it('a past-deadline fire reports positive lateMs', async () => {
+			let seen = null;
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, { wireTopic: 'room:late', onAlarm: (c) => { seen = c.alarm; } });
+			ctx.setAlarm(Date.now() - 500); // "fire ASAP" intent
+			await tick(30);
+			expect(seen).not.toBeNull();
+			expect(seen.lateMs).toBeGreaterThanOrEqual(500 - 5);
+		});
+
+		it('misfireMs skips a fire past the threshold (entry consumed, not retried)', async () => {
+			let fired = 0;
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, { wireTopic: 'room:mf-skip', onAlarm: () => { fired++; }, misfireMs: 100 });
+			ctx.setAlarm(Date.now() - 1000); // already 1000ms past the window
+			await tick(30);
+			expect(fired).toBe(0);
+			expect(ctx.getAlarm()).toBeNull(); // spent, not pending
+		});
+
+		it('misfireMs within the threshold still fires', async () => {
+			let fired = 0;
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, { wireTopic: 'room:mf-ok', onAlarm: () => { fired++; }, misfireMs: 60000 });
+			ctx.setAlarm(Date.now() + 5);
+			await tick(30);
+			expect(fired).toBe(1);
+		});
+
+		it('misfireMs consumes the durable row on skip (claimed, no re-fire)', async () => {
+			let fired = 0;
+			const store = memStore();
+			configureAlarm({ store });
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, { wireTopic: 'room:mf-durable', onAlarm: () => { fired++; }, misfireMs: 100 });
+			ctx.setAlarm(Date.now() - 1000);
+			await tick(30);
+			expect(fired).toBe(0);
+			expect(store.rows.has('room:mf-durable')).toBe(false); // claimed before the skip
+		});
+
+		it('a recovered alarm exposes recovered:true + lateMs from the persisted at', async () => {
+			let seen = null;
+			const fn = live.stream('topic:rooms/rec-vis', () => ({}), { alarm: { onAlarm: (c) => { seen = c.alarm; } } });
+			registry.set('rooms/rec-vis', fn);
+			try {
+				const store = memStore();
+				configureAlarm({ store });
+				const at = Date.now() - 2000;
+				store.set('room:rec-vis', at, { path: 'rooms/rec-vis', tenantId: null });
+				await _pollAlarms();
+				expect(seen).not.toBeNull();
+				expect(seen.at).toBe(at);
+				expect(seen.recovered).toBe(true);
+				expect(seen.lateMs).toBeGreaterThanOrEqual(2000 - 5);
+			} finally {
+				registry.delete('rooms/rec-vis');
+			}
+		});
+
+		it('the recovery poll honors the stream-declared misfireMs (skip claims + GCs the row)', async () => {
+			let fired = 0;
+			const fn = live.stream('topic:rooms/rec-mf', () => ({}), { alarm: { onAlarm: () => { fired++; }, misfireMs: 100 } });
+			registry.set('rooms/rec-mf', fn);
+			try {
+				const store = memStore();
+				configureAlarm({ store });
+				store.set('room:rec-mf', Date.now() - 5000, { path: 'rooms/rec-mf', tenantId: null });
+				await _pollAlarms();
+				expect(fired).toBe(0);
+				expect(store.rows.has('room:rec-mf')).toBe(false); // claimed + dropped
+			} finally {
+				registry.delete('rooms/rec-mf');
+			}
+		});
+
+		it('a re-armed alarm keeps the misfire policy', async () => {
+			let fired = 0;
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, {
+				wireTopic: 'room:mf-rearm',
+				onAlarm: (c) => {
+					fired++;
+					if (fired === 1) c.setAlarm(Date.now() - 1000); // re-arm already past the window
+				},
+				misfireMs: 100
+			});
+			ctx.setAlarm(Date.now() + 5); // first fire is on time
+			await tick(40);
+			expect(fired).toBe(1); // the stale re-arm was skipped by the inherited policy
+		});
+	});
+
 	describe('live.stream alarm option', () => {
 		it('accepts a valid alarm config and marks __streamOptions.alarm', () => {
 			const onAlarm = () => {};
@@ -291,6 +410,14 @@ describe('live.alarm', () => {
 			expect(() => live.stream('room:bad1', () => ({}), { alarm: {} })).toThrow(/onAlarm/);
 			expect(() => live.stream('room:bad2', () => ({}), { alarm: { onAlarm: 'nope' } })).toThrow(/onAlarm/);
 			expect(() => live.stream('room:bad3', () => ({}), { alarm: 42 })).toThrow(/alarm/);
+		});
+
+		it('validates misfireMs at declaration time', () => {
+			const onAlarm = () => {};
+			expect(() => live.stream('room:mf1', () => ({}), { alarm: { onAlarm, misfireMs: -1 } })).toThrow(/misfireMs/);
+			expect(() => live.stream('room:mf2', () => ({}), { alarm: { onAlarm, misfireMs: NaN } })).toThrow(/misfireMs/);
+			expect(() => live.stream('room:mf3', () => ({}), { alarm: { onAlarm, misfireMs: '5s' } })).toThrow(/misfireMs/);
+			expect(() => live.stream('room:mf4', () => ({}), { alarm: { onAlarm, misfireMs: 60000 } })).not.toThrow();
 		});
 	});
 
