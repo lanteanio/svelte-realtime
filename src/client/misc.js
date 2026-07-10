@@ -4,10 +4,13 @@ import { now } from '../client-runtime.js';
 import { clientState, RpcError, _offlineQueue } from './internal-state.js';
 import { _sendRpc } from './rpc.js';
 import { _ensureHealthSubscription } from './health.js';
+import { _configureOfflinePersistence, _offlineReady, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean } from './offline.js';
 
 /**
- * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number }} OfflineEntry
+ * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, restored?: boolean }} OfflineEntry
  */
+
+const _CONFLICT_RESOLUTIONS = new Set(['lww', 'server-win', 'custom']);
 
 /** @type {boolean} */
 let _configListenerAttached = false;
@@ -52,10 +55,35 @@ let _replayingQueue = false;
  * a long-lived client running a stale bundle after a breaking deploy knows to reload.
  * Omit it to leave the signal off.
  *
- * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void } }} config
+ * The `offline` object grows the durable-queue options: `persist` (true =
+ * IndexedDB in a browser, in-memory elsewhere; or a custom store) makes
+ * queued mutations survive a reload, `persistKey` scopes the persisted queue
+ * (pass your user id so one browser profile never replays user A's mutations
+ * as user B), and `conflictResolution` + `onConflict` decide what a REPLAYED
+ * mutation does when the server rejects it with `LiveError('CONFLICT')`:
+ * `'server-win'` (default) drops it, `'lww'` re-issues it once (the local
+ * write wins by being applied last), `'custom'` asks `onConflict(call, error)`
+ * - return an args array to re-issue once with merged args, anything else to
+ * drop. The `'batch'` replay strategy is an alias of `'concurrent'`.
+ *
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void, persist?: boolean | import('./offline-store.js').OfflineStore, persistKey?: string, conflictResolution?: 'lww' | 'server-win' | 'custom', onConflict?: (call: { path: string, args: any[], queuedAt: number }, error: any) => any } }} config
  */
 export function configure(config) {
 	clientState.config = config;
+
+	if (config.offline) {
+		const cr = config.offline.conflictResolution;
+		if (cr !== undefined && !_CONFLICT_RESOLUTIONS.has(cr)) {
+			throw new Error("[svelte-realtime] configure({ offline.conflictResolution }): must be 'lww', 'server-win', or 'custom'");
+		}
+		if (config.offline.onConflict !== undefined && typeof config.offline.onConflict !== 'function') {
+			throw new Error('[svelte-realtime] configure({ offline.onConflict }): must be a function');
+		}
+		if (cr === 'custom' && typeof config.offline.onConflict !== 'function') {
+			throw new Error("[svelte-realtime] configure({ offline }): conflictResolution 'custom' requires an onConflict hook");
+		}
+		_configureOfflinePersistence(config.offline);
+	}
 
 	// Mirror the server's realtime({ protocolVersion }) integer validation so the
 	// shared-constant contract is symmetric and a typo (null / float) cannot quietly
@@ -105,80 +133,146 @@ export function configure(config) {
 }
 
 /**
- * Drain the offline queue on reconnection.
+ * Drain the offline queue on reconnection. Awaits the one-shot persistence
+ * rehydrate first (a drain must never race the restore and replay a
+ * half-loaded queue), holds the `uploading` backpressure signal while
+ * replaying, settles each entry's durability (persisted copy dropped,
+ * checkpoint advanced on success), and routes CONFLICT rejections through
+ * the configured resolution instead of the plain error path.
  */
 async function _drainOfflineQueue() {
-	if (_offlineQueue.length === 0 || _replayingQueue) return;
+	if (_replayingQueue) return;
 	_replayingQueue = true;
+	try {
+		await _offlineReady();
+		if (_offlineQueue.length === 0) return;
+		_setUploading(true);
 
-	const offlineOpts = clientState.config.offline;
-	const beforeReplay = offlineOpts?.beforeReplay;
-	const onReplayError = offlineOpts?.onReplayError;
-	const maxAge = offlineOpts?.maxAge || 0;
-	const nowMs = now();
+		const offlineOpts = clientState.config.offline;
+		const beforeReplay = offlineOpts?.beforeReplay;
+		const onReplayError = offlineOpts?.onReplayError;
+		const onConflict = offlineOpts?.onConflict;
+		const conflictResolution = offlineOpts?.conflictResolution || 'server-win';
+		const maxAge = offlineOpts?.maxAge || 0;
+		const nowMs = now();
 
-	// Filter the queue
-	/** @type {OfflineEntry[]} */
-	let queue = [];
-	for (const entry of _offlineQueue) {
-		if (maxAge > 0 && nowMs - entry.queuedAt > maxAge) {
-			entry.reject(new RpcError('STALE', 'Offline mutation expired'));
-			continue;
+		// Track whether any earlier-seq entry failed in THIS drain: a later
+		// success then leaves a hole in the upload order (gapDetected).
+		let anyFailure = false;
+
+		/** @param {OfflineEntry} entry @param {any} result */
+		function settleOk(entry, result) {
+			_settlePersist(entry, true, anyFailure);
+			entry.resolve(result);
 		}
-		if (beforeReplay) {
-			const keep = beforeReplay({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt });
-			if (!keep) {
-				entry.reject(new RpcError('STALE', 'Offline mutation dropped by beforeReplay filter'));
+
+		/** @param {OfflineEntry} entry @param {any} err */
+		function settleFail(entry, err) {
+			anyFailure = true;
+			_settlePersist(entry, false);
+			if (onReplayError) {
+				onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
+			}
+			entry.reject(err);
+		}
+
+		/**
+		 * Replay one entry, applying the conflict stance: a CONFLICT rejection
+		 * (the canonical app-thrown "server state moved under this write" code)
+		 * resolves per policy - server-win drops, lww re-issues the same call
+		 * once, custom asks onConflict for merged args (array = one re-issue,
+		 * anything else = drop). One retry ever; a second CONFLICT drops.
+		 * @param {OfflineEntry} entry
+		 */
+		async function replayOne(entry) {
+			let args = entry.args;
+			let retried = false;
+			for (;;) {
+				try {
+					const result = await _sendRpc(entry.path, args, entry.idempotencyKey, entry.timeout);
+					settleOk(entry, result);
+					return;
+				} catch (err) {
+					if (err && err.code === 'CONFLICT' && !retried) {
+						const call = { path: entry.path, args, queuedAt: entry.queuedAt };
+						if (conflictResolution === 'lww') {
+							retried = true;
+							continue;
+						}
+						if (conflictResolution === 'custom') {
+							let merged;
+							try { merged = onConflict ? onConflict(call, err) : undefined; } catch { merged = undefined; }
+							if (Array.isArray(merged)) {
+								retried = true;
+								args = merged;
+								continue;
+							}
+							settleFail(entry, err);
+							return;
+						}
+						// server-win: the server state stands; notify and drop.
+						if (onConflict) {
+							try { onConflict(call, err); } catch { /* observer only */ }
+						}
+						settleFail(entry, err);
+						return;
+					}
+					settleFail(entry, err);
+					return;
+				}
+			}
+		}
+
+		// Filter the queue
+		/** @type {OfflineEntry[]} */
+		let queue = [];
+		for (const entry of _offlineQueue) {
+			if (maxAge > 0 && nowMs - entry.queuedAt > maxAge) {
+				settleFail(entry, new RpcError('STALE', 'Offline mutation expired'));
 				continue;
 			}
-		}
-		queue.push(entry);
-	}
-	_offlineQueue.length = 0;
-
-	// Apply custom filter function
-	if (typeof offlineOpts?.replay === 'function') {
-		queue = offlineOpts.replay(queue);
-	}
-
-	// Replay using the configured strategy
-	const strategy = offlineOpts?.replay;
-	if ((strategy === 'concurrent' || strategy === 'batch') && queue.length > 0) {
-		// Concurrent strategy: send queued calls with concurrency limit to avoid flooding
-		const concurrency = 10;
-		for (let i = 0; i < queue.length; i += concurrency) {
-			const chunk = queue.slice(i, i + concurrency);
-			const promises = chunk.map(entry => {
-				const promise = _sendRpc(entry.path, entry.args, entry.idempotencyKey, entry.timeout);
-				promise.then(
-					(result) => entry.resolve(result),
-					(err) => {
-						if (onReplayError) {
-							onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
-						}
-						entry.reject(err);
-					}
-				);
-				return promise.catch(() => {}); // swallow for Promise.all
-			});
-			await Promise.all(promises);
-		}
-	} else {
-		// Sequential strategy (default)
-		for (const entry of queue) {
-			try {
-				const result = await _sendRpc(entry.path, entry.args, entry.idempotencyKey, entry.timeout);
-				entry.resolve(result);
-			} catch (err) {
-				if (onReplayError) {
-					onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
+			if (beforeReplay) {
+				const keep = beforeReplay({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt });
+				if (!keep) {
+					settleFail(entry, new RpcError('STALE', 'Offline mutation dropped by beforeReplay filter'));
+					continue;
 				}
-				entry.reject(err);
+			}
+			queue.push(entry);
+		}
+		_offlineQueue.length = 0;
+		_bumpPending();
+
+		// Apply custom filter function
+		if (typeof offlineOpts?.replay === 'function') {
+			queue = offlineOpts.replay(queue);
+		}
+
+		// Replay using the configured strategy
+		const strategy = offlineOpts?.replay;
+		if ((strategy === 'concurrent' || strategy === 'batch') && queue.length > 0) {
+			// Concurrent strategy: send queued calls with concurrency limit to avoid flooding
+			const concurrency = 10;
+			for (let i = 0; i < queue.length; i += concurrency) {
+				const chunk = queue.slice(i, i + concurrency);
+				await Promise.all(chunk.map((entry) => replayOne(entry)));
+			}
+		} else {
+			// Sequential strategy (default)
+			for (const entry of queue) {
+				await replayOne(entry);
 			}
 		}
-	}
 
-	_replayingQueue = false;
+		// A fully-clean drain (no failure, nothing left queued) closes any
+		// upload-order hole a PREVIOUS drain left; a drain that itself failed
+		// must leave the gap visible for the app to act on.
+		if (!anyFailure) _clearGapIfClean();
+	} finally {
+		_bumpPending();
+		_setUploading(false);
+		_replayingQueue = false;
+	}
 }
 
 /**

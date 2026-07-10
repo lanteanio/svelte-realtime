@@ -374,13 +374,85 @@ function _alarmGetUnavailable() {
 	return null;
 }
 
+/**
+ * The `ctx.batch(fn)` atomic collector: run `fn`, buffer every `ctx.publish`
+ * it makes - across awaits - then publish them all when `fn` returns (or its
+ * promise resolves), and drop them ALL when it throws (or rejects). A rejected
+ * handler never leaves a partial publish trail.
+ *
+ * Two deliberate contrasts to document at the call site:
+ * - Bare `ctx.publish` outside a collector flushes at each microtask boundary,
+ *   so an `await` splits publishes into separate wire batches and a pre-await
+ *   publish is already gone when a later throw happens. Inside `ctx.batch(fn)`
+ *   the publishes are HELD across awaits precisely so a post-await throw can
+ *   retract them - atomicity is the entire point of the collector form.
+ * - The client-side `batch(fn)` shares the name and callback shape but has the
+ *   opposite failure contract (each collected RPC settles independently).
+ *
+ * Only `ctx.publish` is collected. `publishThrottled` / `publishDebounced`
+ * (timer-deferred), `signal` (point-to-point), `ctx.tenant(id).publish` (an
+ * explicit cross-tenant escape), and the framework-internal `_publishWire`
+ * all pass through immediately - they are not broadcast side-effects of the
+ * handler's own resolution.
+ *
+ * Buffered messages flush through the REAL publish closure, so tenant
+ * scoping, redaction, replay routing, invalidation, and the microtask
+ * auto-batch all still apply - the collector only defers, it never bypasses.
+ * Nesting composes: the inner collector's flush routes into the outer
+ * collector's shadow. The shadow lives on the per-invocation ctx object, so
+ * concurrent handlers can never observe each other's collector.
+ *
+ * Residual edge (accepted): a throw DURING flush (e.g. a redactor throwing at
+ * commit time) can leave earlier buffered messages already published - the
+ * drop-before-flush guarantee covers `fn`'s own failure, which is the
+ * atomicity the feature promises.
+ *
+ * @param {any} ctx
+ * @param {(ctx: any) => any} fn
+ */
+function _collectBatch(ctx, fn) {
+	// Capture the EXACT current publish reference: the tenant-scoped wrapper
+	// when the connection is tenant-resolved, or an outer collector's shadow
+	// when nested.
+	const realPublish = ctx.publish;
+	/** @type {Array<[string, string, any, any]>} */
+	const buffer = [];
+	ctx.publish = (topic, event, data, options) => {
+		buffer.push([topic, event, data, options]);
+		return true;
+	};
+	const flush = () => {
+		ctx.publish = realPublish;
+		for (const [topic, event, data, options] of buffer) realPublish(topic, event, data, options);
+	};
+	const drop = () => {
+		ctx.publish = realPublish;
+		buffer.length = 0;
+	};
+	let result;
+	try {
+		result = fn(ctx);
+	} catch (err) {
+		drop();
+		throw err;
+	}
+	if (result && typeof result.then === 'function') {
+		return result.then(
+			(value) => { flush(); return value; },
+			(err) => { drop(); throw err; }
+		);
+	}
+	flush();
+	return result;
+}
+
 export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 	// Server-trusted tenant id for this connection (null when no resolver is
 	// configured -> single-tenant, zero-cost path). When set, ctx.publish prefixes
 	// every topic to the tenant's wire namespace; ctx._publishWire stays the raw
 	// helper for framework code that already holds a wire topic (no double-prefix).
 	const tenantId = _resolveTenant(user);
-	return {
+	const ctx = {
 		user,
 		ws,
 		platform,
@@ -434,4 +506,11 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 		_publishWire: helpers.publish,
 		tenant: (id) => _makeTenantScope(helpers.publish, id)
 	};
+	// `ctx.batch(fn)` atomic-collector overload beside the list form. Assigned
+	// after the literal so the closure can capture the ctx instance (the
+	// collector shadows THIS invocation's ctx.publish - per-call by
+	// construction, so concurrent handlers never interfere); a value swap on
+	// an existing slot, so the hidden class is unchanged.
+	ctx.batch = (arg) => (typeof arg === 'function' ? _collectBatch(ctx, arg) : helpers.batch(arg));
+	return ctx;
 }

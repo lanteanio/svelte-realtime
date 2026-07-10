@@ -208,6 +208,34 @@ export interface StreamStore<T = any> extends Readable<T> {
 	readonly error: Readable<RpcError | null>;
 	/** Reactive store holding the connection status: 'loading', 'connected', 'reconnecting', or 'error'. */
 	readonly status: Readable<'loading' | 'connected' | 'reconnecting' | 'error'>;
+	/**
+	 * The per-subscription attach lifecycle, distinct from `status` (a health
+	 * projection): `initialized -> attaching -> attached -> detached | failed`.
+	 * `attaching` covers every in-flight subscribe (first attach, reconnect,
+	 * resume); `attached` means the server confirmed the subscription;
+	 * `detached` means the WS handles are released (explicit `detach()` or the
+	 * resume-grace release); `failed` holds until a retry re-enters
+	 * `attaching`.
+	 */
+	readonly phase: Readable<'initialized' | 'attaching' | 'attached' | 'detached' | 'failed'>;
+	/**
+	 * Explicitly attach the subscription; resolves once the server confirmed
+	 * it (`attached`), rejects when the attach fails. Holds an internal retain
+	 * so the stream stays attached with no UI subscriber, and the
+	 * auto-reattach machinery re-attaches it across outages. The
+	 * "don't publish until fully attached" pattern: `await store.attach()`
+	 * before issuing the RPC that publishes - delivery is then guaranteed
+	 * rather than racing the subscribe. Idempotent.
+	 */
+	attach(): Promise<void>;
+	/**
+	 * Explicitly detach: release the `attach()` retain and, when no other
+	 * subscriber remains, tear the subscription down immediately (no
+	 * resume-grace retention), resting in the `detached` phase. With live UI
+	 * subscribers the stream stays attached on their behalf. A later
+	 * `subscribe()`/`attach()` re-attaches from scratch.
+	 */
+	detach(): void;
 	/** Apply an instant UI update. Returns a rollback function. */
 	optimistic(event: string, data: any): () => void;
 	/**
@@ -438,6 +466,31 @@ export function batch<T extends Promise<any>[]>(
 ): Promise<{ [K in keyof T]: Awaited<T[K]> }>;
 
 /**
+ * First-class reactive-stream primitive for Svelte 5 fine-grained reactivity:
+ * wrap any store-shaped source (an object with `subscribe`, or a bare
+ * subscribe function) into a `{ readonly current }` handle backed by Svelte's
+ * `createSubscriber` protocol - only the `$derived` / template expressions
+ * that actually READ `.current` re-evaluate when the source updates, and the
+ * upstream subscription starts on first read and stops when the last
+ * reader's effect tears down. `.rune()` on every stream store delegates
+ * here. Throws under Svelte 4 (the `{ subscribe }` store contract is the
+ * version-portable baseline).
+ *
+ * @example
+ * ```svelte
+ * <script>
+ *   import { createReactiveStream } from 'svelte-realtime/client';
+ *   import { todos } from '$live/todos';
+ *   const items = createReactiveStream(todos); // same handle .rune() returns
+ * </script>
+ * <p>{items.current?.length ?? 0} items</p>
+ * ```
+ */
+export function createReactiveStream<T = any>(
+	source: { subscribe: (fn: (value: T) => void) => () => void } | ((fn: (value: T) => void) => () => void)
+): { readonly current: T };
+
+/**
  * Create a callable binary RPC function for a given path.
  * Sends the first argument as raw binary and remaining args as JSON in a header.
  * Used by generated client stubs for `live.binary()` exports.
@@ -645,14 +698,91 @@ export function configure(config: {
 		queue?: boolean;
 		/** Maximum queue size before oldest entries are dropped. @default 100 */
 		maxQueue?: number;
+		/** Drop queued mutations older than this (ms) at replay time. @default 0 (no age limit) */
+		maxAge?: number;
 		/** Replay strategy on reconnect: 'sequential' (default), 'concurrent' (10-at-a-time), or a custom filter function. 'batch' is accepted as an alias for 'concurrent'. */
 		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]);
 		/** Filter function called before replaying each queued call. Return false to drop. */
 		beforeReplay?(call: { path: string; args: any[]; queuedAt: number }): boolean;
 		/** Called when a replayed call fails. */
 		onReplayError?(call: { path: string; args: any[]; queuedAt: number }, error: any): void;
+		/**
+		 * Durable persistence: queued mutations survive a page reload. `true`
+		 * uses IndexedDB in a browser (an in-memory fallback under SSR/node);
+		 * pass a custom `OfflineStore` to own the storage. Every persisted
+		 * mutation is guaranteed an idempotency key (synthesized when the call
+		 * supplied none), so a replay after reload dedups server-side: a
+		 * mutation that reached the server before the crash answers with its
+		 * original result instead of applying twice. Persistence failures
+		 * degrade to in-memory with one dev warning - the queue never breaks
+		 * because storage did.
+		 * @default false
+		 */
+		persist?: boolean | OfflineStore;
+		/**
+		 * Scope for the persisted queue (pass your user id so one browser
+		 * profile never replays user A's mutations as user B after re-login).
+		 * @default 'default'
+		 */
+		persistKey?: string;
+		/**
+		 * What a REPLAYED mutation does when the server rejects it with
+		 * `LiveError('CONFLICT')` (the canonical "server state moved under
+		 * this write" code): `'server-win'` (default) drops it (the server
+		 * state stands), `'lww'` re-issues it once (the local write wins by
+		 * being applied last), `'custom'` asks `onConflict`. One retry ever;
+		 * a second CONFLICT drops. CRDT documents never enter this path -
+		 * merging is their own semantics.
+		 * @default 'server-win'
+		 */
+		conflictResolution?: 'lww' | 'server-win' | 'custom';
+		/**
+		 * Conflict hook. Under `'custom'`: return an args array to re-issue
+		 * the call once with merged args, anything else to drop. Under
+		 * `'server-win'`: a pure notification (return value ignored).
+		 * Required when `conflictResolution` is `'custom'`.
+		 */
+		onConflict?(call: { path: string; args: any[]; queuedAt: number }, error: any): any;
 	};
 }): void;
+
+/**
+ * The durable-offline-queue storage contract (`offline.persist`). Async
+ * key-value with prefix scans; `createIndexedDbStore()` (browser default) and
+ * `createMemoryStore()` implement it, and tests inject fakes through it.
+ */
+export interface OfflineStore {
+	getAll(prefix: string): Promise<Array<{ key: string; value: any }>>;
+	put(key: string, value: any): Promise<void>;
+	delete(key: string): Promise<void>;
+	clear(prefix: string): Promise<void>;
+}
+
+/** The IndexedDB `OfflineStore` (database `svelte-realtime`, lazy open). */
+export function createIndexedDbStore(): OfflineStore;
+/** The in-memory `OfflineStore` (SSR / node / test fallback). */
+export function createMemoryStore(): OfflineStore;
+
+/**
+ * Live count of queued offline mutations (enqueue, settle, and restore all
+ * move it) - the consumer surface for "N pending edits" indicators.
+ */
+export const pendingMutations: Readable<number>;
+
+/**
+ * True while a reconnect drain is replaying the offline queue - the UI
+ * backpressure signal ("pause local writes while the upload pipe is busy").
+ */
+export const uploading: Readable<boolean>;
+
+/**
+ * The current upload checkpoint for the configured queue: `lastUploadedSeq`
+ * is the highest enqueue seq that replayed successfully; `gapDetected` is
+ * true when a later mutation succeeded while an earlier one failed (a hole in
+ * the upload order - consider refetching affected streams), clearing on the
+ * next fully-clean drain. Persisted alongside the queue when `persist` is on.
+ */
+export function offlineCheckpoint(): { lastUploadedSeq: number; gapDetected: boolean };
 
 /**
  * Register a handler for point-to-point signals.

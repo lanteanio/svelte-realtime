@@ -28,6 +28,10 @@ import { _purgePushUser } from './push.js';
 import { _purgePresenceUser } from './presence.js';
 import { _purgeRateLimitUser } from './rate-limit.js';
 import { _purgeIdempotencyUser } from './idempotency.js';
+import { _purgeSmoothUser } from './smooth.js';
+import { _purgeAggregateCohorts } from './reactive.js';
+import { _purgeCrdtDocs } from './crdt.js';
+import { state } from './state.js';
 
 /**
  * Optional durable forget store (default null = in-memory state only). A wired
@@ -102,7 +106,27 @@ const _descriptors = [
 	// socket disconnects. A connection-less leave broadcast is a follow-up.
 	{ name: 'presence', run: (t, u) => _purgePresenceUser(_forgetPlatform, t, u, null) },
 	{ name: 'rateLimit', run: (t, u) => _purgeRateLimitUser(t, u) },
-	{ name: 'idempotency', run: (t, u) => _purgeIdempotencyUser(_tenantKey(t, u)) }
+	{ name: 'idempotency', run: (t, u) => _purgeIdempotencyUser(_tenantKey(t, u)) },
+	// Smooth/game state: the subscriber registry (identity -> ws, whose RTT
+	// tracker - a measured-latency fingerprint - rides the same entry),
+	// cross-instance surrogates, interest state (reported center = a literal
+	// user location, LOD memory, send cadence), and the lag-comp movement
+	// ring when the entity key is the identity.
+	{ name: 'smooth', run: (_t, u) => _purgeSmoothUser(u) },
+	// The webhook dead-letter queue retains full event payloads on delivery
+	// exhaustion. Purge rides the store's own purgeUser (the in-memory store
+	// stamps a capture-time userId via its forgetUserId extractor; the durable
+	// stores implement the same contract). A store without purgeUser - or
+	// records captured without an extractor - cannot attribute events to a
+	// user and reports 0 (the documented limitation, never a silent lie).
+	{ name: 'webhookDeadLetter', run: (t, u) => {
+		const dl = state.webhookDeadLetter;
+		return dl && typeof dl.purgeUser === 'function' ? dl.purgeUser(t, u) : 0;
+	} },
+	// k-anonymity cohorts: withdraw the user from every live aggregate's
+	// contributor set so the k-gate re-evaluates without them (reducer state
+	// is non-invertible by design; the cohort governs publication).
+	{ name: 'aggregateCohorts', run: (_t, u) => _purgeAggregateCohorts(u) }
 ];
 
 /**
@@ -145,7 +169,25 @@ const _liveForget = async function forget(userId, opts) {
 	// (ctx.tenantId or its own logic), NEVER straight off the wire. Validated to
 	// the delimiter-safe charset so it cannot smuggle a `\0` into a scan match.
 	const tenantId = o.tenantId == null ? null : _validTenantId(o.tenantId);
+	// cascade: `true` (default) runs the standard purge surface; the object
+	// form extends it - `{ crdt: [...] }` names whole documents to drop (a
+	// forgotten user's CRDT edits are merged with no per-user attribution, so
+	// the whole-document drop is the only true erasure; only the app knows
+	// which documents the user contributed to). The value is also threaded to
+	// every descriptor and the durable store unchanged.
 	const cascade = o.cascade === undefined ? true : o.cascade;
+	/** @type {string[] | null} */
+	let crdtDocs = null;
+	if (cascade !== undefined && typeof cascade === 'object' && cascade !== null) {
+		if (cascade.crdt !== undefined) {
+			if (!Array.isArray(cascade.crdt) || cascade.crdt.some((n) => typeof n !== 'string' || n.length === 0)) {
+				throw new LiveError('INVALID_REQUEST', 'live.forget: cascade.crdt must be an array of non-empty document topic names');
+			}
+			crdtDocs = cascade.crdt;
+		}
+	} else if (typeof cascade !== 'boolean') {
+		throw new LiveError('INVALID_REQUEST', 'live.forget: cascade must be a boolean or an object ({ crdt?: string[] })');
+	}
 	if (o.onForget !== undefined && typeof o.onForget !== 'function') {
 		throw new LiveError('INVALID_REQUEST', 'live.forget: onForget must be a function');
 	}
@@ -174,6 +216,20 @@ const _liveForget = async function forget(userId, opts) {
 			const n = typeof count === 'number' && count > 0 ? count : 0;
 			surfaces[d.name] = n;
 			rowsAffected += n;
+		}
+
+		// Whole-document CRDT drops (cascade.crdt): erase the named documents'
+		// loaded replicas. Deleting the durably persisted copies is the app's
+		// half, in its own persist store.
+		if (crdtDocs !== null) {
+			let dropped = 0;
+			try {
+				dropped = _purgeCrdtDocs(crdtDocs);
+			} catch (err) {
+				if (_IS_DEV) console.error('[svelte-realtime] live.forget cascade.crdt threw:', err);
+			}
+			surfaces.crdtDocs = dropped;
+			rowsAffected += dropped;
 		}
 
 		// Durable store: erase the user's cluster rows and WAIT for confirmation -

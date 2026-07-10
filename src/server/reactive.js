@@ -451,6 +451,48 @@ async function _recomputeDerived(entry, platform) {
 }
 
 /**
+ * Right-to-erasure purge for the k-anonymity cohorts: remove one contributor
+ * id from every live aggregate's cohort set (single-state, per-window, and
+ * per-hop-bucket alike). The k-gate re-evaluates on the next publish - a
+ * cohort shrunk below `k` re-suppresses until enough distinct contributors
+ * return, which is the privacy-safe polarity. Reducer STATE is untouched:
+ * reducer folds are generally non-invertible, and the aggregate values they
+ * hold are exactly the statistical outputs the k-gate governs - removing the
+ * user from the cohort is what withdraws the user from the publishing
+ * decision. The cohort key is whatever `privacy.contributor(data)` returns;
+ * this purge removes the userId-valued key (apps whose contributor keys are
+ * not user ids purge through their own key mapping).
+ *
+ * Returns the number of cohort sets the id was removed from, for the forget
+ * cascade's per-surface count.
+ * @param {string} contributorId
+ * @returns {number}
+ */
+export function _purgeAggregateCohorts(contributorId) {
+	let count = 0;
+	/** @type {Set<any>} an aggregate may be registered under several source topics */
+	const seen = new Set();
+	for (const entries of _aggregateBySource.values()) {
+		for (const entry of entries) {
+			if (seen.has(entry)) continue;
+			seen.add(entry);
+			if (entry.cohort && entry.cohort.delete(contributorId)) count++;
+			if (entry.windowStates) {
+				for (const win of entry.windowStates.values()) {
+					if (win.cohort && win.cohort.delete(contributorId)) count++;
+					if (win.bucketCohorts) {
+						for (const bucket of win.bucketCohorts) {
+							if (bucket && bucket.delete(contributorId)) count++;
+						}
+					}
+				}
+			}
+		}
+	}
+	return count;
+}
+
+/**
  * Activate a dynamic derived instance for a resolved topic.
  * Wires the instance's resolved sources into _derivedBySource so publishes trigger recomputation.
  * @param {Function} fn - The derived compute function

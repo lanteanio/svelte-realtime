@@ -4,6 +4,7 @@ import { now, microtask, setTimer, clearTimer } from '../client-runtime.js';
 import { __devtools, _devtoolsStart, _devtoolsEnd, _devtoolsVolatileSent } from './devtools-instrument.js';
 import { ensureListener, ensureDisconnectListener, _getTimeout } from './connection.js';
 import { clientState, RpcError, pending, _nextId, _dedupMap, _dedupCoalesceWarned, _isDev, _IS_DEV, _textEncoder, _getBinaryFrame, _offlineQueue, _publishRateHintWarned, _publishRateWindows, _PUBLISH_RATE_HINT_THRESHOLD, _PUBLISH_RATE_HINT_WINDOW_MS, _PUBLISH_RATE_HINT_DEDUP_MAX } from './internal-state.js';
+import { _enqueuePersist, _settlePersist } from './offline.js';
 
 /**
  * Dev-only: warn once per RPC path when the microtask dedup map
@@ -423,9 +424,17 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
 			if (_offlineQueue.length >= maxQueue) {
 				// Drop oldest
 				const dropped = _offlineQueue.shift();
-				if (dropped) dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped'));
+				if (dropped) {
+					dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped'));
+					_settlePersist(dropped, false);
+				}
 			}
-			_offlineQueue.push({ path, args, queuedAt: now(), resolve, reject, idempotencyKey, timeout });
+			const entry = { path, args, queuedAt: now(), resolve, reject, idempotencyKey, timeout };
+			_offlineQueue.push(entry);
+			// Durability write-through: stamps the monotone seq, synthesizes an
+			// idempotency key when absent (replay-after-reload dedups
+			// server-side), and persists when configured.
+			_enqueuePersist(entry);
 		});
 	}
 

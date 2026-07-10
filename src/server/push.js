@@ -324,30 +324,45 @@ export const pushHooks = {
 };
 
 /**
- * Right-to-erasure (`live.forget`): drop a user's push-registry entry and its
- * ws reverse mapping. The userId registry is the durable-in-memory routing
- * record keyed by raw userId (no tenant segment - it relies on globally-unique
- * userIds, so the tenant cannot disambiguate here). The per-sessionId registry
- * is keyed independently of userId, but a connection's userId and sessionId are
- * normally the SAME socket, so draining that socket's session entry here covers
- * the common case without a separate user->session index; sessions on other
- * sockets are ws-bound and clear on their own disconnect.
+ * Right-to-erasure (`live.forget`): drop a user's push-registry entry, its ws
+ * reverse mapping, and EVERY session entry the user's sockets hold. The userId
+ * registry is the durable-in-memory routing record keyed by raw userId (no
+ * tenant segment - it relies on globally-unique userIds, so the tenant cannot
+ * disambiguate here). Session entries are keyed independently of userId, so
+ * beyond the common same-socket drain, a scan over the bounded session
+ * registry attributes each entry's socket back to its userId through the ws
+ * reverse map - a session the user registered on ANOTHER socket (an older
+ * connection whose userId routing was superseded) must not survive its owner's
+ * erasure.
  *
- * Returns the number of userId routing entries removed (0 or 1) so the forget
- * cascade can total a per-surface count.
+ * Returns the number of routing/session entries removed so the forget cascade
+ * can total a per-surface count.
  * @param {string} userId
  * @returns {number}
  */
 export function _purgePushUser(userId) {
+	let count = 0;
 	const entry = _pushRegistry.get(userId);
-	if (!entry) return 0;
-	_pushRegistry.delete(userId);
-	if (entry.ws) {
-		_wsToPushUserId.delete(entry.ws);
-		// Same socket usually also carries the push sessionId; drain it too.
-		_deregisterPushSession(entry.ws);
+	if (entry) {
+		_pushRegistry.delete(userId);
+		count++;
+		if (entry.ws) {
+			_wsToPushUserId.delete(entry.ws);
+			// Same socket usually also carries the push sessionId; drain it too.
+			_deregisterPushSession(entry.ws);
+		}
 	}
-	return 1;
+	// Cross-socket sessions: O(sessions) over the bounded registry, forget-only
+	// (never a hot path). Only the primary socket's reverse-map entry was
+	// deleted above; every OTHER socket the user registered from still maps
+	// back to the userId, which is exactly how this scan attributes them.
+	for (const sessionEntry of [..._pushSessionRegistry.values()]) {
+		if (sessionEntry.ws && _wsToPushUserId.get(sessionEntry.ws) === userId) {
+			_deregisterPushSession(sessionEntry.ws);
+			count++;
+		}
+	}
+	return count;
 }
 
 /**

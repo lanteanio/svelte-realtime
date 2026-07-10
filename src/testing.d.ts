@@ -89,6 +89,24 @@ export function expectGuardRejects(
 ): Promise<LiveError>;
 
 /**
+ * Record a response under a ref for later deterministic replay: capture a
+ * real handler/service response once (from a live run, an integration test,
+ * or by hand) and unit-test against it without the flaky/expensive source.
+ * The response must be JSON-serializable (wire responses always are).
+ */
+export function recordResponse(ref: string, response: any): void;
+
+/**
+ * Replay a recorded response - a fresh deep copy per call, so one test
+ * mutating the value never contaminates another. Throws on an unknown ref
+ * (a typo'd fixture name fails loudly, not as `undefined`).
+ */
+export function replayResponse(ref: string): any;
+
+/** Drop recorded responses (all, or one ref). Call from afterEach when fixtures should not leak across tests. */
+export function clearRecordedResponses(ref?: string): void;
+
+/**
  * Test environment returned by `createTestEnv()`.
  */
 export interface TestEnv {

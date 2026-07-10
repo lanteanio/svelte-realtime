@@ -17,6 +17,8 @@
 
 import { introspect } from './introspect.js';
 import { getDeadLetter, replayDeadLetter } from './webhooks.js';
+import { state } from './state.js';
+import { monotonicNow } from '../shared/runtime.js';
 
 // `no-store` so an admin snapshot can never linger in a shared/intermediary cache
 // (defense-in-depth - the endpoint is already auth-gated and typically same-origin).
@@ -112,6 +114,27 @@ export function _createAdminHandler(adminConfig) {
 		}
 
 		const sub = pathname.slice(pathname.lastIndexOf('/') + 1);
+
+		if (sub === 'metrics') {
+			// The pause-aware lifeline scrape: serves the PRE-SERIALIZED snapshot
+			// the live.metrics lifeline interval renders in the background, so a
+			// scrape costs O(1) at request time and keeps answering while the
+			// process is melting - no serialization work joins the overloaded
+			// loop. The snapshot age rides a header so the scraper can tell a
+			// fresh read from a wedged renderer.
+			if (method !== 'GET') return _json({ error: 'method not allowed' }, 405);
+			const lifeline = state.metricsLifeline;
+			if (!lifeline || lifeline.text === null) {
+				return _json({ error: 'metrics lifeline not enabled', hint: 'live.metrics(registry, { lifeline: true })' }, 503);
+			}
+			return new Response(lifeline.text, {
+				status: 200,
+				headers: {
+					'content-type': 'text/plain; version=0.0.4; charset=utf-8',
+					'x-snapshot-age-ms': String(Math.max(0, Math.round(monotonicNow() - lifeline.at)))
+				}
+			});
+		}
 
 		if (sub === 'introspect') {
 			const opts = {

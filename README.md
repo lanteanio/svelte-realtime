@@ -449,10 +449,11 @@ const res = await live.forget(targetUserId, {
   onForget: ({ userIdHash, tenantId, rowsAffected }) =>
     auditLog.write({ action: 'erasure', userIdHash, tenantId, rowsAffected })
 });
-// res = { ok: true, at, rowsAffected, surfaces: { push, presence, rateLimit, idempotency, durable } }
+// res = { ok: true, at, rowsAffected, surfaces: { push, presence, rateLimit,
+//         idempotency, smooth, webhookDeadLetter, aggregateCohorts, durable, crdtDocs? } }
 ```
 
-It cascades over the framework's in-memory user state (the push registry, presence rosters - clearing the grace timer and decrementing the cluster count, rate-limit buckets, and idempotency cached results via a per-user reverse index), then awaits the durable store's `purgeUser` and resolves ONLY after the durable delete confirms. A durable failure rejects with `LiveError('FORGET_STORE_FAILED')` so an incomplete erasure can be retried.
+It cascades over the framework's in-memory user state - the push registry AND every push session the user holds across sockets, presence rosters (clearing the grace timer and decrementing the cluster count; a held room-owner role releases too), rate-limit buckets, idempotency cached results via a per-user reverse index, the smooth/game state the user leaves behind (subscriber registry entry with its RTT tracker, cross-instance surrogates, interest state including the reported center - a literal user location - and the lag-comp movement ring when the entity key is the identity), the webhook dead-letter queue (see the extractor note below), and the k-anonymity cohorts of every live aggregate (the user is withdrawn from the contributor sets so the k-gate re-evaluates without them; reducer state is untouched - folds are non-invertible, and the cohort is what governs publication) - then awaits the durable store's `purgeUser` and resolves ONLY after the durable delete confirms. A durable failure rejects with `LiveError('FORGET_STORE_FAILED')` so an incomplete erasure can be retried.
 
 The `onForget` audit hook receives a HASHED userId (never the raw id), so your audit log stays PII-free. The result is constant-shape, so if you ever re-expose `forget` to untrusted clients, map it to a fixed shape first - a `0`-vs-`N` `rowsAffected` would otherwise reveal whether a user exists.
 
@@ -468,7 +469,17 @@ configureForget({
 });
 ```
 
-Stores whose payloads are app-defined (sessions, dead-letter, replay buffers, task inputs) take a `forgetUserId(payload)` extractor so they can find the user; without it they are a documented no-op. CRDT documents (`live.doc`/`map`/`array`) merge edits from many users into shared state, so a forgotten user's merged content is not surgically erasable - use the `onForget` hook to delete app-owned documents.
+Stores whose payloads are app-defined (sessions, dead-letter, replay buffers, task inputs) take a `forgetUserId(payload)` extractor so they can find the user; without it they are a documented no-op. The in-memory webhook dead-letter store follows the same contract: `configureWebhooks({ deadLetter: createDeadLetterStore({ forgetUserId: ({ data }) => data.authorId }) })` stamps each retained event with its authoring user at capture time so forget can drop them.
+
+CRDT documents (`live.doc`/`map`/`array`) merge edits from many users into shared state, so a forgotten user's merged content is not surgically erasable BY CONSTRUCTION - the only true erasure is dropping the whole document, and only your app knows which documents the user contributed to. Name them in the cascade:
+
+```js
+await live.forget(targetUserId, {
+  cascade: { crdt: ['notes:42', 'board:7'] }   // whole-document drops
+});
+```
+
+The named documents' loaded server replicas are destroyed WITHOUT persisting (an erasure never writes back the state it erases; requires `svelte-adapter-uws >= 0.6.0-next.71`), connected editors observe them as unloaded, and a re-open cold-loads from your persistence - deleting the persisted copies is your `persist`-store's half of the erasure. There is deliberately no `anonymize` mode: for durable rows the row delete is the only clean erasure, and for statistical retention `live.aggregate({ privacy })` already keeps k-gated aggregates without per-user rows.
 
 ### Reconnection
 
@@ -561,6 +572,25 @@ Returns an object with a single `current` getter, backed by Svelte's `fromStore`
 
 `rune()` requires Svelte 5 (the `fromStore` export is not available in Svelte 4) and throws a descriptive error if called against an older runtime. Apps still on Svelte 4 use the `$store` auto-subscribe syntax instead.
 
+### `createReactiveStream(source)` - the first-class primitive
+
+`rune()` delegates to `createReactiveStream`, exported so ANY store-shaped source (or a bare subscribe function) gets the same fine-grained handle - only the `$derived`/template expressions that actually read `.current` re-evaluate on updates, and the upstream subscription starts on first read and stops when the last reader's effect tears down:
+
+```svelte
+<script>
+  import { createReactiveStream } from 'svelte-realtime/client';
+  import { todos } from '$live/todos';
+
+  const items = createReactiveStream(todos);          // same handle todos.rune() returns
+  const clock = createReactiveStream((set) => {       // any subscribe fn works
+    const t = setInterval(() => set(Date.now()), 1000);
+    return () => clearInterval(t);
+  });
+</script>
+```
+
+Same Svelte 5 requirement as `rune()`; the `{ subscribe }` store contract stays the version-portable baseline.
+
 ### `store.map(fn)` - per-item projection
 
 Returns a mapped store with the same `{ subscribe, rune, map }` shape as the source. Idiomatic alternative to `$derived.by(() => ($stream ?? []).map(...))` and avoids the `$derived(() => ...)` footgun where storing a function reference instead of its return value silently breaks rendering.
@@ -640,6 +670,27 @@ To show errors, subscribe to the `.error` store:
 ```
 
 Defensive patterns like `($store ?? []).filter(...)` work correctly because `$store` is always an array or `undefined`.
+
+### Attach lifecycle: `store.phase`, `attach()`, `detach()`
+
+Beside `status` (a health projection), every stream store exposes the per-subscription attach machine as a read-only `phase` store - `initialized -> attaching -> attached -> detached | failed` - plus explicit controls:
+
+```js
+import { board } from '$live/game';
+
+// "Don't publish until fully attached": once attach() resolves, the server
+// has confirmed this connection's subscription, so the broadcast your RPC
+// triggers is guaranteed to reach you - no race with the subscribe.
+await board.attach();
+await placePiece(x, y);
+
+// Later - done for real (no resume-grace retention):
+board.detach();
+```
+
+- `attach()` holds an internal retain, so the stream stays attached with no UI subscriber and auto-reattaches across outages; it resolves on the server's confirmation (the loader response - no extra wire frame) and rejects when the attach fails (e.g. a `FORBIDDEN` denial). Idempotent.
+- `detach()` releases the retain and, when no other subscriber remains, tears the subscription down immediately - detach means "done", not "component unmounted, maybe coming back" (that case is the automatic resume-grace window). With live UI subscribers the stream stays attached on their behalf.
+- `attaching` covers every in-flight subscribe (first attach, reconnect, resume); `failed` holds until a retry re-enters `attaching`; the resume-grace release reads as `detached`.
 
 For RPC calls, errors are thrown as `RpcError` with a `code` field:
 
@@ -1057,6 +1108,28 @@ export const resetBoard = live(async (ctx, boardId) => {
 });
 ```
 
+### Atomic publishing (`ctx.batch(fn)`)
+
+Pass a function instead of a list and `ctx.batch` becomes an all-or-nothing collector: every `ctx.publish` the function makes - **including after `await`s** - is buffered, published together when the function returns (or its promise resolves), and dropped entirely when it throws (or rejects). A rejected handler never leaves a partial publish trail:
+
+```js
+export const transferFunds = live(async (ctx, from, to, amount) => {
+  return ctx.batch(async () => {
+    ctx.publish(`account:${from}`, 'debited', { amount });
+    await db.transfer(from, to, amount); // throws -> NOTHING above is published
+    ctx.publish(`account:${to}`, 'credited', { amount });
+    return 'ok';
+  });
+});
+```
+
+Two contrasts worth knowing:
+
+- **Bare `ctx.publish` flushes at each microtask boundary** - an `await` splits publishes into separate wire batches, and a publish made before the `await` is already sent when a later throw happens. Inside `ctx.batch(fn)` the publishes are held across awaits precisely so a post-await throw can retract them; atomicity is the point of the collector form.
+- **The client-side `batch(fn)` shares the name and shape but not the failure contract**: it collects RPC calls into one frame and each settles independently. The server collector is deliberately all-or-nothing.
+
+Only `ctx.publish` is collected. `ctx.publishThrottled` / `ctx.publishDebounced` (timer-deferred), `ctx.signal` (point-to-point), and `ctx.tenant(id).publish` (the explicit cross-tenant escape) pass through immediately. Buffered messages flush through the real publish path, so tenant scoping, redaction, replay routing, and the microtask auto-batch all still apply. Nesting composes: an inner collector flushes into the outer one. The collector returns the function's return value.
+
 ---
 
 ## Volatile RPC (fire-and-forget)
@@ -1393,6 +1466,58 @@ configure({
 ```
 
 When offline queuing is enabled, RPC calls made while disconnected return promises that resolve when the call is replayed after reconnection. If the queue overflows, the oldest entry is dropped and its promise rejects with `QUEUE_FULL`. If `maxAge` is set, queued calls older than that threshold are rejected with `STALE` at replay time.
+
+### Durable persistence (survive a reload)
+
+By default the queue lives in memory and dies with the tab. Turn on `persist` and queued mutations survive reloads and browser restarts - stored in IndexedDB, restored on the next load, and replayed on reconnect:
+
+```js
+configure({
+  offline: {
+    queue: true,
+    persist: true,            // IndexedDB (in-memory fallback under SSR/node)
+    persistKey: currentUserId // scope the stored queue per user
+  }
+});
+```
+
+- **Server-side dedup is guaranteed.** Every persisted mutation carries an idempotency key (synthesized when the call did not supply one), so a replay after reload always dedups: a mutation that reached the server before the crash answers with its original result instead of applying twice. Pair the handlers with `live.idempotent` server-side.
+- **`persistKey` prevents cross-user replay.** One browser profile, two logins: without a per-user key, user B's session would replay user A's stored mutations. Pass your user id (or any stable scope).
+- **Restored mutations have no promise holders** (the page reloaded); their outcomes surface through `onReplayError` / `onConflict` only.
+- **Storage failures degrade, never break.** A blocked or broken IndexedDB (private windows, storage pressure) falls back to in-memory with one dev warning. A custom store implementing `{ getAll, put, delete, clear }` (see `OfflineStore`) can replace IndexedDB entirely.
+
+### Upload checkpoint and consumer stores
+
+```js
+import { pendingMutations, uploading, offlineCheckpoint } from 'svelte-realtime/client';
+```
+
+- `pendingMutations` - readable store with the live queued-mutation count; the data source for a "3 pending edits" indicator.
+- `uploading` - readable store, `true` while a reconnect drain is replaying: the UI backpressure signal ("pause local writes while the upload pipe is busy").
+- `offlineCheckpoint()` - `{ lastUploadedSeq, gapDetected }`: the highest enqueue seq that replayed successfully, and whether a later mutation succeeded while an earlier one failed (a hole in the upload order - consider refetching affected data). Persisted alongside the queue; `gapDetected` clears on the next fully-clean drain.
+
+### Conflict resolution (replayed mutations)
+
+When a REPLAYED mutation is rejected by the server with `LiveError('CONFLICT')` - the canonical app-thrown code for "the server state moved under this write" - the queue resolves it per policy instead of the plain error path:
+
+```js
+configure({
+  offline: {
+    queue: true,
+    conflictResolution: 'custom',                  // 'server-win' (default) | 'lww' | 'custom'
+    onConflict(call, error) {
+      // Return an args array to re-issue ONCE with merged args; anything else drops.
+      return [mergeArgs(call.args, error.data)];
+    }
+  }
+});
+```
+
+- `'server-win'` (default): drop the local mutation - the server state stands. `onConflict` is notified (return value ignored).
+- `'lww'`: re-issue the same call once - the local write wins by being applied last.
+- `'custom'`: `onConflict(call, error)` decides (args array = one re-issue with merged args, anything else = drop).
+
+One retry ever - a second CONFLICT drops. Server-side, apps encode their preconditions in the handler (a version check, an updated-at compare) and throw `LiveError('CONFLICT')` when they fail. CRDT documents never enter this path: merging is the type's own semantics.
 
 ---
 
@@ -2333,6 +2458,49 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 - `svelte_realtime_cron_total` - cron execution count by path and status
 - `svelte_realtime_cron_errors_total` - cron errors by path
 - `svelte_realtime_assertion_violations_total` - production-assertion violations by category (see "Production assertions" below)
+
+### Cohort-stratified metrics - never trust the aggregate
+
+An aggregate p99 that looks healthy can hide a cohort - old devices, cellular links, a far region - that is entirely broken, because the fast majority drowns it in the quantile. Pass a `cohort` classifier and every RPC series carries the caller's cohort label:
+
+```js
+live.metrics(registry, {
+  // Classified ONCE per connection from whatever your upgrade hook stashed
+  // on the connection's user data. Keep the cardinality SMALL.
+  cohort: (userData) => `${userData.deviceClass}-${userData.netClass}` // 'desktop-fast', 'mobile-3g', ...
+});
+```
+
+Distinct labels are bounded at 16 (overflow folds into `'other'`; a pre-identification guard path or a throwing classifier reads `'unknown'`). The unlabeled aggregate stays derivable by summing - dashboard the per-cohort series first and the aggregate as context, not the other way around.
+
+### Per-subsystem performance budgets
+
+Declare how long a subsystem is ALLOWED to take, measure what it ACTUALLY takes, and let the dashboard render budget vs actual over time - the drift is the early warning, the exceeded counter is the alert:
+
+```js
+const tickBudget = live.perfBudget('tick', 8); // 8ms per game tick
+
+// Per iteration - either wrap:
+tickBudget.measure(() => runTick());
+// ...or record a duration you already have:
+tickBudget.track(elapsedMs);
+```
+
+Emits `svelte_realtime_perf_budget_seconds` (gauge - the declaration), `svelte_realtime_perf_actual_seconds` (histogram), and `svelte_realtime_perf_budget_exceeded_total` (counter), all labeled by `subsystem`. Requires `live.metrics()` first.
+
+### Pause-aware lifeline `/metrics`
+
+A `/metrics` handler that serializes the registry inline competes with whatever is melting the event loop - exactly when you need the numbers most, the scrape adds work or stalls. The lifeline decouples them: the registry is pre-serialized on a background interval into an in-memory snapshot, and the admin route serves THAT string in O(1):
+
+```js
+live.metrics(registry, { lifeline: true }); // or { lifeline: { intervalMs: 5000 } }
+```
+
+`GET <adminPath>/metrics` (behind the same fail-closed `realtime({ admin })` auth gate as `/dlq` and `/introspect`) answers with the snapshot; its age rides the `x-snapshot-age-ms` header, so the scraper can tell a fresh read from a wedged renderer. Requires a registry with `serialize()` - the extensions `createMetrics()` qualifies. The plain `app.get('/metrics', metrics.handler)` mount above remains fine for normal operation; the lifeline is the degraded-day path.
+
+### Push, not poll
+
+Polling burns CPU and database work re-reading unchanged data and adds up to a full interval of latency; a publish costs nothing until something actually changes. That principle is structural in this framework - loaders re-run on `invalidateOn` topic publishes, `live.derived` recomputes on source publishes, `live.alarm` schedules per-room work - so reaching for a poll loop almost always means a push primitive fits better. `live.poll(fn, intervalMs)` exists for the genuine leftovers (an external system with no change feed) and works exactly as named, but it nudges once per process (dev only) toward the push shapes before you build on it. It returns a stop function.
 
 ---
 
@@ -4772,7 +4940,26 @@ expect(adminOnly(createTestContext({ user: { role: 'viewer' } }))).toBe(false);
 expect(adminOnly(createTestContext())).toBe(false);
 ```
 
-The returned shape mirrors the production `_buildCtx`: `user`, `ws`, `platform`, `publish`, `cursor`, `throttle`, `debounce`, `signal`, `batch`, `shed`, `requestId`. Helpers default to no-op stubs (`publish` returns `true`, `shed` returns `false`, etc.), which is correct for predicates that only read `ctx.user` or `ctx.cursor`.
+The returned shape mirrors the production `_buildCtx`: `user`, `ws`, `platform`, `publish`, `cursor`, `throttle`, `debounce`, `signal`, `batch`, `shed`, `requestId`. Helpers default to no-op stubs (`publish` returns `true`, `shed` returns `false`, etc.), which is correct for predicates that only read `ctx.user` or `ctx.cursor`. `ctx.batch` mirrors the production semantics in both forms - the list form publishes through `ctx.publish` (observable when your test overrides it), and the collector form buffers/flushes/drops exactly like the server, so handler code that relies on the all-or-nothing guarantee tests truthfully.
+
+### Recorded-response fixtures
+
+Capture a real response once - from a live run, an integration test, or by hand - and replay it deterministically in unit tests, instead of re-hitting a source that is expensive or flaky to produce live:
+
+```js
+import { recordResponse, replayResponse, clearRecordedResponses } from 'svelte-realtime/testing';
+
+// Once (e.g. pasted from a live capture, or written in a beforeAll):
+recordResponse('billing/invoice@paid', { ok: true, data: { id: 'inv_1', status: 'paid', total: 4200 } });
+
+// In tests - a fresh deep copy per call, so mutation never leaks across tests:
+const res = replayResponse('billing/invoice@paid');
+expect(renderInvoice(res.data)).toContain('paid');
+
+afterEach(() => clearRecordedResponses());
+```
+
+Responses must be JSON-serializable (wire responses always are); an unknown ref throws with the list of recorded refs, so a typo'd fixture name fails loudly instead of returning `undefined`.
 
 ### Asserting guard rejections
 

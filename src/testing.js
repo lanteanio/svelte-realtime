@@ -24,7 +24,7 @@ import { sanitizeRowData } from './shared/safe-assign.js';
  *   throttle: () => void,
  *   debounce: () => void,
  *   signal: () => boolean,
- *   batch: () => void,
+ *   batch: (arg: Array<{ topic: string, event: string, data?: any, options?: any }> | ((ctx: any) => any)) => any,
  *   shed: () => boolean,
  *   requestId: string
  * }}
@@ -41,7 +41,7 @@ import { sanitizeRowData } from './shared/safe-assign.js';
  */
 export function createTestContext(options) {
 	const opts = options || {};
-	return {
+	const ctx = {
 		user: opts.user ?? null,
 		ws: opts.ws ?? null,
 		platform: opts.platform ?? null,
@@ -50,10 +50,42 @@ export function createTestContext(options) {
 		throttle: () => {},
 		debounce: () => {},
 		signal: () => true,
-		batch: () => {},
+		batch: /** @type {any} */ (() => {}),
 		shed: () => false,
 		requestId: opts.requestId ?? 'test-req'
 	};
+	// Mirror the production ctx.batch semantics so handler code under test
+	// behaves like it will in production: the list form publishes each message
+	// through ctx.publish (observable when a test overrides it); the collector
+	// form runs the fn with ctx.publish shadowed into a buffer, flushing on
+	// return/resolve and dropping everything on throw/reject.
+	ctx.batch = (arg) => {
+		if (typeof arg !== 'function') {
+			for (const m of arg || []) ctx.publish(m.topic, m.event, m.data, m.options);
+			return;
+		}
+		const realPublish = ctx.publish;
+		const buffer = [];
+		ctx.publish = (topic, event, data, o) => { buffer.push([topic, event, data, o]); return true; };
+		const flush = () => { ctx.publish = realPublish; for (const args of buffer) realPublish(...args); };
+		const drop = () => { ctx.publish = realPublish; buffer.length = 0; };
+		let result;
+		try {
+			result = arg(ctx);
+		} catch (err) {
+			drop();
+			throw err;
+		}
+		if (result && typeof result.then === 'function') {
+			return result.then(
+				(value) => { flush(); return value; },
+				(err) => { drop(); throw err; }
+			);
+		}
+		flush();
+		return result;
+	};
+	return ctx;
 }
 
 /**
@@ -71,6 +103,60 @@ export function createTestContext(options) {
  * @param {string} [expectedCode]
  * @returns {Promise<LiveError>}
  */
+/**
+ * Recorded-response fixtures: capture a real handler/service response ONCE
+ * (from a live run, an integration test, or by hand) and replay it
+ * deterministically in unit tests - the pattern for testing code against
+ * responses that are expensive or flaky to produce live. Refs are plain
+ * strings; the replay returns a deep copy so one test mutating the value can
+ * never contaminate another.
+ * @type {Map<string, string>} ref -> JSON snapshot
+ */
+const _recordedResponses = new Map();
+
+/**
+ * Record a response under a ref for later replay. The response must be
+ * JSON-serializable (wire responses always are).
+ * @param {string} ref
+ * @param {any} response
+ */
+export function recordResponse(ref, response) {
+	if (typeof ref !== 'string' || ref.length === 0) {
+		throw new Error('[svelte-realtime] recordResponse: ref must be a non-empty string');
+	}
+	let snapshot;
+	try {
+		snapshot = JSON.stringify(response === undefined ? null : response);
+	} catch (err) {
+		throw new Error('[svelte-realtime] recordResponse: response must be JSON-serializable: ' + (err && /** @type {any} */ (err).message));
+	}
+	_recordedResponses.set(ref, snapshot);
+}
+
+/**
+ * Replay a recorded response (a fresh deep copy per call). Throws on an
+ * unknown ref - a typo'd fixture name must fail loudly, not return undefined.
+ * @param {string} ref
+ * @returns {any}
+ */
+export function replayResponse(ref) {
+	const snapshot = _recordedResponses.get(ref);
+	if (snapshot === undefined) {
+		throw new Error('[svelte-realtime] replayResponse: no recorded response for ref "' + ref + '" (recorded: ' + (_recordedResponses.size ? [..._recordedResponses.keys()].join(', ') : 'none') + ')');
+	}
+	return JSON.parse(snapshot);
+}
+
+/**
+ * Drop recorded responses (all of them, or one ref). Call from afterEach when
+ * fixtures should not leak across tests.
+ * @param {string} [ref]
+ */
+export function clearRecordedResponses(ref) {
+	if (ref === undefined) _recordedResponses.clear();
+	else _recordedResponses.delete(ref);
+}
+
 export async function expectGuardRejects(promise, expectedCode = 'FORBIDDEN') {
 	let err = /** @type {any} */ (null);
 	let resolved = false;

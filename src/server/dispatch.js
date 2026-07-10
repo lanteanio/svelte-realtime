@@ -905,11 +905,11 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 			const dep = _deprecationSignal(ws, path, fn);
 			if (dep) /** @type {any} */ (_result).deprecation = dep;
 		}
-		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart);
+		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart, ws);
 		return _result;
 	} catch (err) {
 		if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx);
-		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart);
+		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		if (err instanceof LiveError) {
 			/** @type {any} */
 			const result = { id, ok: false, code: err.code, error: err.message };
@@ -1010,9 +1010,9 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
 				if (_dep) _resp.deprecation = _dep;
 				_respond(ws, platform, id, _resp);
 		});
-		_recordRpcMetrics(path, '', _metricsStart);
+		_recordRpcMetrics(path, '', _metricsStart, ws);
 	} catch (err) {
-		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart);
+		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		if (err instanceof LiveError) {
 			_respond(ws, platform, id, { ok: false, code: err.code, error: err.message });
 		} else {

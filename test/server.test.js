@@ -7022,6 +7022,34 @@ describe('createTestContext()', () => {
 		expect(ctx.user).toBeNull();
 	});
 
+	it('ctx.batch list form publishes through ctx.publish (observable via override)', () => {
+		const ctx = createTestContext();
+		const seen = [];
+		ctx.publish = (topic, event, data) => { seen.push([topic, event, data]); return true; };
+		ctx.batch([{ topic: 't1', event: 'a', data: 1 }, { topic: 't2', event: 'b', data: 2 }]);
+		expect(seen).toEqual([['t1', 'a', 1], ['t2', 'b', 2]]);
+	});
+
+	it('ctx.batch(fn) mirrors the production collector: flush on return, drop on throw', async () => {
+		const ctx = createTestContext();
+		const seen = [];
+		ctx.publish = (topic, event, data) => { seen.push(event); return true; };
+
+		expect(ctx.batch(() => { ctx.publish('t', 'kept', 1); return 42; })).toBe(42);
+		expect(seen).toEqual(['kept']);
+
+		seen.length = 0;
+		expect(() => ctx.batch(() => { ctx.publish('t', 'dropped', 1); throw new Error('x'); })).toThrow('x');
+		expect(seen).toEqual([]);
+		// The shadow is restored after the throw.
+		ctx.publish('t', 'after', 1);
+		expect(seen).toEqual(['after']);
+
+		seen.length = 0;
+		await expect(ctx.batch(async () => { ctx.publish('t', 'held', 1); throw new Error('y'); })).rejects.toThrow('y');
+		expect(seen).toEqual([]);
+	});
+
 	it('exercises a guard predicate directly', () => {
 		const adminOnly = (ctx) => ctx.user?.role === 'admin';
 		expect(adminOnly(createTestContext({ user: { role: 'admin' } }))).toBe(true);
@@ -9211,6 +9239,205 @@ describe('ctx.publish auto microtask-batch', () => {
 		await new Promise((r) => setTimeout(r, 10));
 
 		expect(platform.batched[0][0]).toMatchObject({ options: { seq: false } });
+	});
+});
+
+// - ctx.batch(fn) atomic collector (all-or-nothing publish) -------------------
+
+describe('ctx.batch(fn) atomic collector', () => {
+	it('flushes collected publishes when the fn resolves (one wire batch)', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			return ctx.batch(async () => {
+				ctx.publish('t1', 'a', 1);
+				await new Promise((r) => setTimeout(r, 0));
+				ctx.publish('t2', 'b', 2);
+				return 'done';
+			});
+		});
+		__register('collector/resolve', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'collector/resolve', id: 'c1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		// Bare publishes across an await split into two batches; the collector
+		// holds them so both land in ONE flush (then one auto-batch microtask).
+		expect(platform.batched).toHaveLength(1);
+		expect(platform.batched[0].map((m) => m.event)).toEqual(['a', 'b']);
+		const response = platform.sent[0]?.data;
+		expect(response.ok).toBe(true);
+		expect(response.data).toBe('done');
+	});
+
+	it('drops EVERY collected publish when the fn throws synchronously', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			try {
+				ctx.batch(() => {
+					ctx.publish('t', 'a', 1);
+					throw new Error('nope');
+				});
+			} catch {
+				return 'caught';
+			}
+		});
+		__register('collector/syncthrow', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'collector/syncthrow', id: 'c2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched).toHaveLength(0);
+		expect(platform.published).toHaveLength(0);
+		expect(platform.sent[0]?.data?.data).toBe('caught');
+	});
+
+	it('retracts pre-await publishes when the fn rejects after the await', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			try {
+				await ctx.batch(async () => {
+					ctx.publish('t', 'a', 1);
+					await new Promise((r) => setTimeout(r, 0));
+					throw new Error('post-await failure');
+				});
+			} catch {
+				return 'caught';
+			}
+		});
+		__register('collector/asyncthrow', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'collector/asyncthrow', id: 'c3', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+
+		// The bare-publish path would already have flushed 'a' at the await
+		// boundary; the collector held it, so the throw retracts it entirely.
+		expect(platform.batched).toHaveLength(0);
+		expect(platform.published).toHaveLength(0);
+	});
+
+	it('restores ctx.publish after the collector settles (later publishes flow)', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			try {
+				ctx.batch(() => {
+					ctx.publish('t', 'dropped', 1);
+					throw new Error('x');
+				});
+			} catch { /* swallowed */ }
+			ctx.publish('t', 'after', 2);
+			return 'ok';
+		});
+		__register('collector/restore', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'collector/restore', id: 'c4', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched).toHaveLength(1);
+		expect(platform.batched[0].map((m) => m.event)).toEqual(['after']);
+	});
+
+	it('nests: the inner flush routes into the outer buffer; an outer throw drops all', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			try {
+				ctx.batch(() => {
+					ctx.publish('t', 'outer', 1);
+					ctx.batch(() => {
+						ctx.publish('t', 'inner', 2);
+					});
+					throw new Error('outer fails');
+				});
+			} catch {
+				return 'caught';
+			}
+		});
+		__register('collector/nested', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'collector/nested', id: 'c5', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched).toHaveLength(0);
+		expect(platform.published).toHaveLength(0);
+	});
+
+	it('nested success flushes inner and outer together', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			return ctx.batch(() => {
+				ctx.publish('t', 'outer1', 1);
+				ctx.batch(() => ctx.publish('t', 'inner', 2));
+				ctx.publish('t', 'outer2', 3);
+				return 'ok';
+			});
+		});
+		__register('collector/nestok', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'collector/nestok', id: 'c6', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(platform.batched).toHaveLength(1);
+		expect(platform.batched[0].map((m) => m.event)).toEqual(['outer1', 'inner', 'outer2']);
+	});
+
+	it('signal passes through immediately inside a collector (not collected)', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			try {
+				ctx.batch(() => {
+					ctx.signal('u2', 'ping', 1);
+					ctx.publish('t', 'a', 1);
+					throw new Error('x');
+				});
+			} catch {
+				return 'caught';
+			}
+		});
+		__register('collector/signal', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'collector/signal', id: 'c7', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// The signal went out (point-to-point, not a collected broadcast);
+		// the collected publish was dropped.
+		expect(platform.published.some((p) => p.topic === '__signal:u2')).toBe(true);
+		expect(platform.batched).toHaveLength(0);
+	});
+
+	it('the list form is unchanged (regression)', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatformWithBatched();
+
+		const handler = live(async (ctx) => {
+			ctx.batch([
+				{ topic: 't1', event: 'a', data: 1 },
+				{ topic: 't2', event: 'b', data: 2 }
+			]);
+			return 'ok';
+		});
+		__register('collector/list', handler);
+
+		handleRpc(ws, toArrayBuffer({ rpc: 'collector/list', id: 'c8', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// The mock exposes a native platform.batch (a per-message publish
+		// loop), so the list form routes there - each message lands as a
+		// direct platform.publish, exactly as before the fn overload.
+		expect(platform.published.map((m) => m.event)).toEqual(['a', 'b']);
+		expect(platform.batched).toHaveLength(0);
 	});
 });
 

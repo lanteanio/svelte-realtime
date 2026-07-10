@@ -241,7 +241,65 @@ describe('live.forget - shape + descriptors', () => {
 	});
 
 	it('the descriptor table covers every known in-memory user-keyed surface', () => {
-		expect(_forgetSurfaceNames()).toEqual(['push', 'presence', 'rateLimit', 'idempotency']);
+		expect(_forgetSurfaceNames()).toEqual([
+			'push', 'presence', 'rateLimit', 'idempotency',
+			'smooth', 'webhookDeadLetter', 'aggregateCohorts'
+		]);
+	});
+
+	it('every identity-annotated collection in src/server is classified (reflective completeness guard)', async () => {
+		// The forget-completeness security requirement: a new user-keyed
+		// in-memory store must not appear without a purge descriptor. This scan
+		// finds module/factory collections whose adjacent doc comment speaks of
+		// identities/user ids and requires each FILE to be classified below -
+		// either purged through a named descriptor or exempt with a reason. A
+		// new file (or a newly annotated collection in an unclassified file)
+		// fails here until someone classifies it.
+		const fs = await import('node:fs');
+		const path = await import('node:path');
+		const dir = path.join(process.cwd(), 'src', 'server');
+		const collectionRe = /new (Weak)?(Map|Set)\(/;
+		const identityRe = /identity|user\s?id|userid|by user|per user|per-user/i;
+
+		/** file -> descriptor name that purges it, or 'exempt: <reason>' */
+		const classified = {
+			'push.js': 'push',
+			'interest.js': 'smooth', // purged through the smooth descriptor (rec.interest.purgeIdentity)
+			'smooth.js': 'smooth',
+			'lagcomp.js': 'smooth', // purged through the smooth descriptor (rec.lagComp.remove)
+			'room-owner.js': 'presence', // the owner role releases inside the presence purge
+			'rate-limit.js': 'rateLimit',
+			'idempotency.js': 'idempotency',
+			'dead-letter.js': 'webhookDeadLetter',
+			'reactive.js': 'aggregateCohorts',
+			'presence.js': 'presence'
+		};
+		const descriptorNames = new Set(_forgetSurfaceNames());
+
+		const unclassified = [];
+		for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+			const lines = fs.readFileSync(path.join(dir, file), 'utf8').split('\n');
+			let flagged = false;
+			for (let i = 0; i < lines.length && !flagged; i++) {
+				if (!collectionRe.test(lines[i])) continue;
+				let ctx = '';
+				for (let j = i - 1; j >= 0 && j >= i - 8; j--) {
+					const t = lines[j].trim();
+					if (t.startsWith('*') || t.startsWith('//') || t.startsWith('/*')) ctx = t + '\n' + ctx;
+					else break;
+				}
+				if (identityRe.test(ctx)) flagged = true;
+			}
+			if (!flagged) continue;
+			const cls = classified[file];
+			if (cls === undefined) {
+				unclassified.push(file);
+			} else if (!cls.startsWith('exempt:')) {
+				// A classification naming a descriptor must name a REAL one.
+				expect(descriptorNames.has(cls), file + ' claims descriptor "' + cls + '" which does not exist').toBe(true);
+			}
+		}
+		expect(unclassified, 'identity-keyed collections without a forget classification: add a purge descriptor (and classify the file here) or an exempt entry with a reason').toEqual([]);
 	});
 });
 
@@ -257,5 +315,169 @@ describe('configureForget - validation', () => {
 		configureForget(null);
 		const res = await live.forget('u1');
 		expect(res.surfaces.durable).toBeUndefined();
+	});
+});
+
+describe('live.forget - smooth/game state', () => {
+	afterEach(async () => {
+		const { _smoothTopics } = await import('../src/server/smooth.js');
+		_smoothTopics.clear();
+	});
+
+	it('purges the registry entry, surrogates, interest state, and lag-comp ring', async () => {
+		const { _smoothTopics } = await import('../src/server/smooth.js');
+		const { createInterestState } = await import('../src/server/interest.js');
+
+		const ws = {};
+		const interest = createInterestState({ radius: 100 });
+		interest.reportCenter('u1', 10, 20);
+		interest.reportCenter('u2', 30, 40);
+		const rings = new Map([['u1', {}], ['e9', {}]]);
+		const rec = {
+			registry: new Map([['u1', ws], ['u2', {}]]),
+			surrogates: new Map([
+				['inst-a' + SEP + 'u1', { s: 1 }],
+				['inst-a' + SEP + 'u2', { s: 2 }]
+			]),
+			interest,
+			lagComp: { get size() { return rings.size; }, remove: (k) => rings.delete(k) }
+		};
+		_smoothTopics.set('arena', rec);
+
+		const res = await live.forget('u1');
+
+		expect(rec.registry.has('u1')).toBe(false);
+		expect(rec.registry.has('u2')).toBe(true);
+		expect(rec.surrogates.has('inst-a' + SEP + 'u1')).toBe(false);
+		expect(rec.surrogates.has('inst-a' + SEP + 'u2')).toBe(true);
+		expect(rings.has('u1')).toBe(false);
+		expect(rings.has('e9')).toBe(true);
+		expect(res.surfaces.smooth).toBeGreaterThanOrEqual(3); // registry + surrogate + interest + ring
+		// The other user's interest center survives (snapshot for u2 still centered).
+		expect(interest.snapshotFor('u2', [])).toEqual([]);
+	});
+});
+
+describe('live.forget - webhook dead-letter queue', () => {
+	afterEach(async () => {
+		const { configureWebhooks } = await import('../src/server.js');
+		configureWebhooks({ deadLetter: false });
+	});
+
+	it('purges dead-lettered events stamped by the forgetUserId extractor', async () => {
+		const { configureWebhooks, createDeadLetterStore } = await import('../src/server.js');
+		const store = createDeadLetterStore({ forgetUserId: ({ data }) => data && data.author });
+		configureWebhooks({ deadLetter: store });
+		store.add({ webhookId: 'wh1', topic: 't', event: 'e', data: { author: 'u1', body: 'x' }, attempts: 3, error: 'down' });
+		store.add({ webhookId: 'wh1', topic: 't', event: 'e', data: { author: 'u2', body: 'y' }, attempts: 3, error: 'down' });
+		store.add({ webhookId: 'wh1', topic: 't', event: 'e', data: { body: 'unattributed' }, attempts: 3, error: 'down' });
+
+		const res = await live.forget('u1');
+
+		expect(res.surfaces.webhookDeadLetter).toBe(1);
+		expect(store.count()).toBe(2);
+		expect(store.list().every((r) => r.userId !== 'u1')).toBe(true);
+	});
+
+	it('reports 0 for a store without purgeUser (documented limitation, no throw)', async () => {
+		const { configureWebhooks } = await import('../src/server.js');
+		configureWebhooks({ deadLetter: { add: () => '1', get: () => null, remove: () => false, count: () => 0, list: () => [], summary: () => ({}), clear: () => {} } });
+		const res = await live.forget('u1');
+		expect(res.surfaces.webhookDeadLetter).toBe(0);
+	});
+});
+
+describe('live.forget - aggregate k-anonymity cohorts', () => {
+	afterEach(async () => {
+		const { _aggregateBySource } = await import('../src/server/state.js');
+		_aggregateBySource.clear();
+	});
+
+	it('withdraws the user from single-state, window, and hop-bucket cohorts', async () => {
+		const { _aggregateBySource } = await import('../src/server/state.js');
+		const entry = {
+			cohort: new Set(['u1', 'u2']),
+			windowStates: new Map([
+				['w1', { cohort: new Set(['u1', 'u3']) }],
+				['w2', { bucketCohorts: [new Set(['u1']), new Set(['u2', 'u1'])] }]
+			])
+		};
+		// The same entry registered under two source topics counts once.
+		_aggregateBySource.set('topic-a', [entry]);
+		_aggregateBySource.set('topic-b', [entry]);
+
+		const res = await live.forget('u1');
+
+		expect(res.surfaces.aggregateCohorts).toBe(4);
+		expect(entry.cohort.has('u1')).toBe(false);
+		expect(entry.cohort.has('u2')).toBe(true);
+		expect(entry.windowStates.get('w1').cohort.has('u1')).toBe(false);
+		expect(entry.windowStates.get('w2').bucketCohorts[0].size).toBe(0);
+		expect(entry.windowStates.get('w2').bucketCohorts[1].has('u2')).toBe(true);
+	});
+});
+
+describe('live.forget - cascade.crdt whole-document drop', () => {
+	afterEach(async () => {
+		const { _crdtDecls } = await import('../src/server/crdt.js');
+		_crdtDecls.clear();
+	});
+
+	it('validates the cascade shape', async () => {
+		await expect(live.forget('u1', { cascade: 5 })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		await expect(live.forget('u1', { cascade: { crdt: 'not-array' } })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		await expect(live.forget('u1', { cascade: { crdt: ['ok', ''] } })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		await expect(live.forget('u1', { cascade: true })).resolves.toMatchObject({ ok: true });
+		await expect(live.forget('u1', { cascade: { crdt: [] } })).resolves.toMatchObject({ ok: true });
+	});
+
+	it('drops named documents through the authority and counts them', async () => {
+		const { _crdtDecls } = await import('../src/server/crdt.js');
+		const dropped = [];
+		_crdtDecls.set('decl-1', {
+			key: 'decl-1',
+			authority: { drop: (t) => { dropped.push(t); return t === 'notes:42'; } }
+		});
+
+		const res = await live.forget('u1', { cascade: { crdt: ['notes:42', 'notes:404'] } });
+
+		expect(dropped).toEqual(['notes:42', 'notes:404']);
+		expect(res.surfaces.crdtDocs).toBe(1);
+		expect(res.rowsAffected).toBeGreaterThanOrEqual(1);
+	});
+
+	it('reports 0 when the adapter authority has no drop()', async () => {
+		const { _crdtDecls } = await import('../src/server/crdt.js');
+		_crdtDecls.set('decl-1', { key: 'decl-1', authority: {} });
+		const res = await live.forget('u1', { cascade: { crdt: ['notes:42'] } });
+		expect(res.surfaces.crdtDocs).toBe(0);
+	});
+});
+
+describe('live.forget - cross-socket push sessions', () => {
+	it('drains session entries the user holds on sockets other than the routing socket', async () => {
+		const { _pushSessionRegistry, _wsToPushSessionId } = await import('../src/server/push.js');
+		const primaryWs = {};
+		const otherWs = {};
+		_pushRegistry.set('u1', { ws: primaryWs, platform: {} });
+		_wsToPushUserId.set(primaryWs, 'u1');
+		// A session the user registered from ANOTHER socket (superseded routing).
+		_wsToPushUserId.set(otherWs, 'u1');
+		_pushSessionRegistry.set('sess-other', { ws: otherWs, platform: {} });
+		_wsToPushSessionId.set(otherWs, 'sess-other');
+		// An unrelated user's session survives.
+		const strangerWs = {};
+		_wsToPushUserId.set(strangerWs, 'u2');
+		_pushSessionRegistry.set('sess-stranger', { ws: strangerWs, platform: {} });
+		_wsToPushSessionId.set(strangerWs, 'sess-stranger');
+
+		const res = await live.forget('u1');
+
+		expect(_pushRegistry.has('u1')).toBe(false);
+		expect(_pushSessionRegistry.has('sess-other')).toBe(false);
+		expect(_pushSessionRegistry.has('sess-stranger')).toBe(true);
+		expect(res.surfaces.push).toBe(2);
+
+		_pushSessionRegistry.clear();
 	});
 });

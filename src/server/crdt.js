@@ -3,6 +3,7 @@ import { live } from '../server.js';
 import { wallEpoch } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _tenantTopic } from './tenant.js';
+import { _IS_DEV } from './env.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); crdt registration reaches it through this, set at init.
@@ -101,7 +102,7 @@ export function _setCrdtRuntime(mod) {
  * authority reads its hooks through a facade over `current`).
  * @type {Map<string, { key: string, authority: any, codec: any, prefix: string, platform: any, current: any, accessByWs: WeakMap<any, Map<string, any>> }>}
  */
-const _crdtDecls = new Map();
+export const _crdtDecls = new Map();
 
 /**
  * Per-socket acquired documents, for the close drain: ws -> Map of
@@ -150,6 +151,48 @@ function _crdtRelease(rec, ws, name) {
 	const acc = rec.accessByWs.get(ws);
 	if (acc) acc.delete(name);
 	if (rec.authority) rec.authority.release(name);
+}
+
+let _crdtDropWarned = false;
+
+/**
+ * Right-to-erasure whole-document drop: erase the named documents' loaded
+ * server replicas across every declaration. A forgotten user's edits are
+ * merged into CRDT document state with no per-user attribution, so surgical
+ * removal is impossible by construction - dropping the WHOLE document is the
+ * only true erasure the framework can perform, and the app names which
+ * documents via `live.forget(userId, { cascade: { crdt: [...] } })` (only the
+ * app knows which documents the user contributed to). The drop destroys the
+ * replica WITHOUT persisting (an erasure never writes back the state it
+ * erases); deleting the durably persisted copy is the app's half, in its own
+ * `persist` store. Connected editors observe the document as unloaded; their
+ * local replicas die with their sessions.
+ *
+ * Returns the number of replicas dropped. On an adapter whose authority
+ * predates `drop()`, dev-warns once and returns what it could do (0 for those
+ * declarations) - the forget result then under-counts rather than lies.
+ * @param {string[]} names bare document topic names
+ * @returns {number}
+ */
+export function _purgeCrdtDocs(names) {
+	let count = 0;
+	for (const rec of _crdtDecls.values()) {
+		if (!rec.authority) continue;
+		if (typeof rec.authority.drop !== 'function') {
+			if (_IS_DEV && !_crdtDropWarned) {
+				_crdtDropWarned = true;
+				console.warn(
+					'[svelte-realtime] live.forget cascade.crdt: this adapter\'s document authority has no drop(topic) ' +
+					'(needs svelte-adapter-uws >= 0.6.0-next.71); the loaded replicas were NOT dropped.'
+				);
+			}
+			continue;
+		}
+		for (const name of names) {
+			if (rec.authority.drop(name)) count++;
+		}
+	}
+	return count;
 }
 
 /**

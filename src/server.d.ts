@@ -138,6 +138,34 @@ export interface LiveContext<UserData = unknown> {
 	 */
 	signal(userId: string, event: string, data: any): void;
 	/**
+	 * Publish a list of messages in one call. Uses the adapter's native batch
+	 * primitive when present (per-message `ctx.publish` otherwise). Uniform
+	 * redaction applies; a message whose redactor throws is dropped from the
+	 * batch rather than broadcast raw.
+	 */
+	batch(messages: Array<{ topic: string; event: string; data?: any; options?: any }>): void;
+	/**
+	 * Atomic publish collector: runs `fn`, buffers every `ctx.publish` it makes
+	 * - across `await`s - then publishes them all when `fn` returns (or its
+	 * promise resolves) and drops them ALL when it throws (or rejects). A
+	 * rejected handler never leaves a partial publish trail.
+	 *
+	 * Contrast with bare `ctx.publish`, which flushes at each microtask
+	 * boundary (an `await` splits publishes into separate wire batches, and a
+	 * pre-await publish is already sent when a later throw happens) - inside
+	 * the collector, publishes are held across awaits precisely so a
+	 * post-await throw can retract them. Note the client-side `batch(fn)`
+	 * shares the shape but settles each collected RPC independently; the
+	 * server collector is deliberately all-or-nothing.
+	 *
+	 * Only `ctx.publish` is collected: `publishThrottled` / `publishDebounced`,
+	 * `signal`, and `ctx.tenant(id).publish` pass through immediately.
+	 * Buffered messages flush through the real publish path (tenant scoping,
+	 * redaction, replay routing, and the microtask auto-batch all apply).
+	 * Nesting composes. Returns `fn`'s return value.
+	 */
+	batch<T>(fn: (ctx: this) => T): T;
+	/**
 	 * The connection's server-trusted tenant id, or `null` when no tenant resolver
 	 * is configured (`realtime({ tenant })`). When set, the framework auto-scopes
 	 * every topic and key by it. Never read off the wire - resolved from the
@@ -2011,7 +2039,16 @@ export namespace live {
 	 *
 	 * `tenantId` is server-trusted: pass it from your own context (`ctx.tenantId`
 	 * or your own logic), never straight off the wire. Defaults to `null`
-	 * (single-tenant). `mode`/`cascade` are reserved for the durable store.
+	 * (single-tenant).
+	 *
+	 * `cascade` defaults to `true` (the standard purge surface). The object
+	 * form extends the cascade: `cascade: { crdt: ['doc-topic', ...] }` drops
+	 * the named CRDT documents' loaded server replicas whole (a forgotten
+	 * user's edits are merged with no per-user attribution, so the
+	 * whole-document drop is the only true erasure; only the app knows which
+	 * documents the user contributed to). The drop never persists; deleting
+	 * the durably persisted copies is the app's half, in its own `persist`
+	 * store. The cascade value is also threaded to the durable store.
 	 *
 	 * Note: the push routing registry is keyed by raw userId with no tenant
 	 * segment (it assumes globally-unique userIds), so in a multi-tenant
@@ -2038,12 +2075,11 @@ export namespace live {
 		userId: string,
 		opts?: {
 			tenantId?: string | null;
-			cascade?: any;
-			mode?: 'delete' | 'anonymize';
+			cascade?: boolean | { crdt?: string[] };
 			onForget?: (record: {
 				userIdHash: string;
 				tenantId: string | null;
-				cascade: any;
+				cascade: boolean | { crdt?: string[] };
 				rowsAffected: number;
 				surfaces: Record<string, number>;
 				at: number;
@@ -2611,7 +2647,64 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function metrics(registry: MetricsRegistry): void;
+	function metrics(registry: MetricsRegistry, options?: {
+		/**
+		 * Stratify the RPC series by client cohort (device class, network
+		 * class, region - whatever your upgrade hook stashed on the
+		 * connection's user data). Classified ONCE per connection and cached;
+		 * distinct labels are bounded at 16 (overflow folds into `'other'`;
+		 * a missing socket or throwing classifier reads `'unknown'`). Never
+		 * trust the aggregate: a healthy-looking p99 can hide a cohort that
+		 * is entirely broken, because the fast majority drowns it.
+		 */
+		cohort?: (userData: any) => string;
+		/**
+		 * Pause-aware scrape path: pre-serialize the registry on a background
+		 * interval (default 5000 ms, unref'd) into an in-memory snapshot and
+		 * serve THAT from the admin route `GET <adminPath>/metrics` - a
+		 * scrape costs O(1) at request time (snapshot age rides the
+		 * `x-snapshot-age-ms` header), so it keeps answering while the
+		 * process is melting instead of adding serialization work to the
+		 * overloaded loop. Requires a registry with `serialize()` and the
+		 * `realtime({ admin })` route for auth.
+		 */
+		lifeline?: boolean | { intervalMs?: number };
+	}): void;
+
+	/**
+	 * Per-subsystem performance budget with drift tracking: declare how long
+	 * a subsystem is ALLOWED to take, measure what it ACTUALLY takes, and let
+	 * dashboards render budget vs actual over time (the drift is the early
+	 * warning; the exceeded counter is the alert). Requires `live.metrics()`
+	 * first. Emits `svelte_realtime_perf_budget_seconds` (gauge),
+	 * `svelte_realtime_perf_actual_seconds` (histogram), and
+	 * `svelte_realtime_perf_budget_exceeded_total` (counter), labeled by
+	 * `subsystem`.
+	 *
+	 * @example
+	 * ```js
+	 * const tickBudget = live.perfBudget('tick', 8);
+	 * // per tick:
+	 * tickBudget.measure(() => runTick());   // or tickBudget.track(elapsedMs)
+	 * ```
+	 */
+	function perfBudget(subsystem: string, budgetMs: number): {
+		/** Record one observed duration (ms). Over-budget observations count toward the exceeded total. */
+		track(ms: number): void;
+		/** Time a sync or async fn (rejections still tracked) and return its result. */
+		measure<T>(fn: () => T): T;
+	};
+
+	/**
+	 * Push, not poll. This helper IS a polling loop (`fn` every
+	 * `intervalMs`; stop via the returned function) - but reaching for it
+	 * earns a one-time dev nudge toward the push-shaped primitive that
+	 * almost always fits better: `live.stream` with `invalidateOn`,
+	 * `live.derived`, or `live.alarm`. Polling burns CPU/DB on unchanged
+	 * data and adds up to a full interval of latency; a publish costs
+	 * nothing until something actually changes.
+	 */
+	function poll(fn: () => void | Promise<void>, intervalMs: number): () => void;
 
 	/**
 	 * One of the four pressure reasons emitted by the adapter, in fixed
@@ -4364,6 +4457,14 @@ export interface DeadLetterStore {
 	count(filter?: { topic?: string }): number;
 	list(filter?: { topic?: string; limit?: number }): DeadLetterRecord[];
 	summary(): { total: number; byTopic: Record<string, number>; oldest: number | null; newest: number | null };
+	/**
+	 * Right-to-erasure purge: drop every record whose capture-time userId
+	 * stamp (the `forgetUserId` extractor) matches. Records captured without
+	 * an extractor carry no stamp and are not user-attributable. Optional so
+	 * a minimal custom store still satisfies the interface; `live.forget`
+	 * reports 0 for a store without it.
+	 */
+	purgeUser?(tenantId: string | null, userId: string): number | Promise<number>;
 	clear(): void;
 }
 
@@ -4372,7 +4473,18 @@ export interface DeadLetterStore {
  * ring with an optional TTL. A cluster deployment substitutes a durable store
  * (Redis / Postgres) exposing the same interface.
  */
-export function createDeadLetterStore(options?: { max?: number; ttlMs?: number }): DeadLetterStore;
+export function createDeadLetterStore(options?: {
+	max?: number;
+	ttlMs?: number;
+	/**
+	 * Right-to-erasure attribution: extracts the authoring userId from an
+	 * event at capture time so `live.forget` can purge the forgotten user's
+	 * dead-lettered events via `purgeUser`. The retained payload is
+	 * app-defined, so without this the store cannot tell whose event a record
+	 * holds and records are not user-purgeable.
+	 */
+	forgetUserId?: (event: { topic: string; event: string; data: unknown }) => string | null | undefined;
+}): DeadLetterStore;
 
 /**
  * Configure the outbound-webhook plane. `deadLetter` captures undeliverable

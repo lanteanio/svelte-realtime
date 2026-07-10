@@ -20,6 +20,10 @@ import { now } from '../shared/runtime.js';
  * @property {number} attempts - Delivery attempts made (0 = a config / gate failure, never sent).
  * @property {string} error - The redacted terminal error message.
  * @property {number} failedAt - Wall-clock ms (runtime seam) when the delivery gave up.
+ * @property {string | null} userId - The authoring userId extracted at capture time
+ *   by the store's `forgetUserId` option (null when unset or not extractable).
+ *   Right-to-erasure attribution: the event payload is app-defined, so the store
+ *   cannot tell whose event a record holds without the extractor.
  */
 
 /**
@@ -34,6 +38,16 @@ import { now } from '../shared/runtime.js';
 export function createDeadLetterStore(options = {}) {
 	const max = Number.isInteger(options.max) && options.max > 0 ? options.max : 1000;
 	const ttlMs = Number.isInteger(options.ttlMs) && options.ttlMs > 0 ? options.ttlMs : 0;
+	if (options.forgetUserId !== undefined && typeof options.forgetUserId !== 'function') {
+		throw new Error('dead-letter: forgetUserId must be a function ({ topic, event, data }) => userId');
+	}
+	// Right-to-erasure: a retained event payload is app-defined, so the store
+	// cannot tell whose event it holds. When set, this extracts the authoring
+	// userId at capture time so `live.forget` can drop the forgotten user's
+	// dead-lettered events (else a later replay re-emits them). Unset =>
+	// records are not user-purgeable (same contract as the durable stores'
+	// forgetUserId option).
+	const forgetUserId = options.forgetUserId;
 	/** @type {Map<string, DeadLetterRecord>} insertion-ordered */
 	const records = new Map();
 	let seq = 0;
@@ -59,6 +73,13 @@ export function createDeadLetterStore(options = {}) {
 		add(rec) {
 			_expire();
 			const id = String(++seq);
+			let userId = null;
+			if (forgetUserId) {
+				try {
+					const u = forgetUserId({ topic: rec.topic, event: rec.event, data: rec.data });
+					if (typeof u === 'string' && u.length > 0) userId = u;
+				} catch { /* extractor best-effort */ }
+			}
 			/** @type {DeadLetterRecord} */
 			const record = {
 				id,
@@ -68,7 +89,8 @@ export function createDeadLetterStore(options = {}) {
 				data: rec.data,
 				attempts: rec.attempts | 0,
 				error: rec.error,
-				failedAt: typeof rec.failedAt === 'number' ? rec.failedAt : now()
+				failedAt: typeof rec.failedAt === 'number' ? rec.failedAt : now(),
+				userId
 			};
 			records.set(id, record);
 			while (records.size > max) {
@@ -88,6 +110,29 @@ export function createDeadLetterStore(options = {}) {
 		/** @param {string} id @returns {boolean} */
 		remove(id) {
 			return records.delete(id);
+		},
+
+		/**
+		 * Right-to-erasure purge: drop every record whose capture-time `userId`
+		 * stamp matches. Records captured without a `forgetUserId` extractor
+		 * carry no stamp and are not user-attributable (documented limitation,
+		 * same contract as the durable stores). O(n) over the bounded ring.
+		 * The `tenantId` parameter exists for signature parity with the
+		 * durable-store seam; the in-memory stamp is already the app's own id.
+		 * @param {string | null} _tenantId
+		 * @param {string} userId
+		 * @returns {number}
+		 */
+		purgeUser(_tenantId, userId) {
+			if (typeof userId !== 'string' || userId.length === 0) return 0;
+			let n = 0;
+			for (const [id, rec] of records) {
+				if (rec.userId === userId) {
+					records.delete(id);
+					n++;
+				}
+			}
+			return n;
 		},
 
 		/**

@@ -25,6 +25,42 @@ import { ensureListener, ensureDisconnectListener, ensureDenialsListener, _getTi
 import { _maybeHintPublishRate } from './rpc.js';
 
 /**
+ * First-class reactive-stream primitive for Svelte 5 fine-grained reactivity:
+ * wrap any store-shaped source (an object with `subscribe`, or a bare
+ * subscribe function) into a `{ readonly current }` handle backed by Svelte's
+ * `createSubscriber` protocol - only the `$derived` / template expressions
+ * that actually READ `.current` re-evaluate when the source updates, and the
+ * upstream subscription starts on first read and stops when the last reader's
+ * effect tears down.
+ *
+ * Implemented over `svelte/store`'s `fromStore`, which drives
+ * `createSubscriber` internally on Svelte 5.7+ - routing through the store
+ * module (a namespace import whose missing exports become `undefined`, not
+ * module-load errors) is what keeps this file loadable under the `^4 || ^5`
+ * peer range while `svelte/reactivity` itself only exists on 5. Under Svelte
+ * 4 this throws with guidance; the `{ subscribe }` store contract is the
+ * version-portable baseline.
+ *
+ * `.rune()` on every stream/mapped store delegates here; the generated $live
+ * accessors expose it the same way (`todos.rune()` in a component).
+ *
+ * @param {{ subscribe: (fn: (value: any) => void) => (() => void) } | ((fn: (value: any) => void) => (() => void))} source
+ * @returns {{ readonly current: any }}
+ */
+export function createReactiveStream(source) {
+	if (typeof _svelteStore.fromStore !== 'function') {
+		throw new Error(
+			'[svelte-realtime] createReactiveStream / .rune() requires Svelte 5 (svelte/store does not export fromStore)'
+		);
+	}
+	const store = typeof source === 'function' ? { subscribe: source } : source;
+	if (!store || typeof store.subscribe !== 'function') {
+		throw new Error('[svelte-realtime] createReactiveStream requires a store ({ subscribe }) or a subscribe function');
+	}
+	return _svelteStore.fromStore(/** @type {any} */ (store));
+}
+
+/**
  * Microtask-batched stream subscribe RPCs.
  * Collects all subscribe RPCs within a single microtask and sends them as one batch frame.
  * @type {Array<any> | null}
@@ -235,12 +271,7 @@ function _createMappedStore(source, fn) {
 			};
 		},
 		rune() {
-			if (typeof _svelteStore.fromStore !== 'function') {
-				throw new Error(
-					'[svelte-realtime] .rune() requires Svelte 5 (svelte/store does not export fromStore)'
-				);
-			}
-			return _svelteStore.fromStore(this);
+			return createReactiveStream(this);
 		},
 		map(g) {
 			if (typeof g !== 'function') {
@@ -284,11 +315,30 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	let _status = 'loading';
 	const _statusStore = writable(/** @type {'loading' | 'connected' | 'reconnecting' | 'error'} */ ('loading'));
 
+	// The per-subscription attach lifecycle, distinct from `status` (a health
+	// projection): initialized -> attaching -> attached -> detached | failed.
+	// `attaching` covers every in-flight subscribe envelope (first attach,
+	// reconnect, resume); `attached` means the server confirmed the
+	// subscription (the loader response IS the ack - no separate frame
+	// exists on the wire); `detached` means the WS handles are released
+	// (explicit detach() or the resume-grace release); `failed` tracks the
+	// error state until a retry re-enters `attaching`.
+	/** @type {'initialized' | 'attaching' | 'attached' | 'detached' | 'failed'} */
+	let _phase = 'initialized';
+	const _phaseStore = writable(/** @type {'initialized' | 'attaching' | 'attached' | 'detached' | 'failed'} */ ('initialized'));
+
+	function _setPhase(/** @type {'initialized' | 'attaching' | 'attached' | 'detached' | 'failed'} */ p) {
+		if (_phase === p) return;
+		_phase = p;
+		_phaseStore.set(p);
+	}
+
 	function _setError(/** @type {RpcError} */ err) {
 		_error = err;
 		_errorStore.set(err);
 		_status = 'error';
 		_statusStore.set('error');
+		_setPhase('failed');
 		_devtoolsStreamError(path, err);
 	}
 
@@ -936,6 +986,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			_setError(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 			return;
 		}
+		_setPhase('attaching');
 		fetching = true;
 		initialLoaded = false;
 		buffer = [];
@@ -981,6 +1032,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				_clearError();
 				_status = 'connected';
 				_statusStore.set('connected');
+				_setPhase('attached');
 				if (topic && topic !== response.topic) _unregisterTopicErrorSetter(topic, _setError);
 				topic = response.topic || null;
 				if (topic) {
@@ -1134,6 +1186,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_bufB.length = 0;
 		_activeBuf = _bufA;
 		fetching = false;
+		_setPhase('detached');
 	}
 
 	/**
@@ -1179,6 +1232,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_loadingMore = false;
 		_downAt = null;
 		_graceStartAt = null;
+		_setPhase('initialized');
 		_devtoolsStream(path, null, 0, merge);
 	}
 
@@ -1198,6 +1252,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	let _resumeGraceTimer = null;
 	/** @type {boolean} Whether the stream is in the resume-grace window (released WS, retained data) */
 	let _inGracePeriod = false;
+	/** @type {(() => void) | null} The internal retain `attach()` holds (a store subscriber that ignores values), so an attached stream needs no UI subscriber */
+	let _attachHold = null;
+	/** @type {boolean} Set by detach(): the next last-unsubscriber cleanup tears down IMMEDIATELY (no resume grace) and rests in the 'detached' phase */
+	let _detachRequested = false;
 
 	/**
 	 * Wire up the per-subscribe lifecycle listeners: quiescence tracking
@@ -1303,6 +1361,70 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		__streamArgs: dynamicArgs,
 		error: { subscribe: _errorStore.subscribe },
 		status: { subscribe: _statusStore.subscribe },
+		phase: { subscribe: _phaseStore.subscribe },
+
+		/**
+		 * Explicitly attach the subscription and resolve once the server has
+		 * confirmed it ('attached'), or reject when the attach fails. Holds an
+		 * internal retain so the stream stays attached with no UI subscriber;
+		 * with the retain in place the auto-reattach machinery (reconnect
+		 * resubscribe, resume) keeps re-entering 'attaching' -> 'attached' on
+		 * every outage. The "don't publish until fully attached" pattern:
+		 * `await store.attach()` before issuing the RPC that publishes - the
+		 * server subscribed this connection before the resolve, so delivery is
+		 * guaranteed rather than racing the subscribe (events landing between
+		 * the server-side subscribe and the resolve are buffered and drained).
+		 * Idempotent: an attached stream resolves immediately.
+		 * @returns {Promise<void>}
+		 */
+		attach() {
+			if (_attachHold === null) {
+				_attachHold = this.subscribe(() => {});
+			}
+			if (_phase === 'attached') return Promise.resolve();
+			// Already failed with no retry in flight (e.g. a FORBIDDEN denial):
+			// reject now instead of hanging - the caller decides whether to
+			// detach() and re-attach().
+			if (_phase === 'failed' && _error !== null) return Promise.reject(_error);
+			return new Promise((resolve, reject) => {
+				let settled = false;
+				const un = _phaseStore.subscribe((p) => {
+					if (settled) return;
+					if (p === 'attached') {
+						settled = true;
+						microtask(un);
+						resolve();
+					} else if (p === 'failed') {
+						settled = true;
+						microtask(un);
+						reject(_error || new RpcError('STREAM_ERROR', `Stream '${path}' failed to attach`));
+					}
+				});
+			});
+		},
+
+		/**
+		 * Explicitly detach: release the `attach()` retain and, when no other
+		 * subscriber remains, tear the subscription down IMMEDIATELY (no
+		 * resume-grace retention - detach means "done", not "maybe coming
+		 * back"), resting in the 'detached' phase. With live UI subscribers
+		 * the stream stays attached on their behalf; detach() then only drops
+		 * the retain. A later subscribe()/attach() re-attaches from scratch.
+		 */
+		detach() {
+			if (_attachHold !== null) {
+				const hold = _attachHold;
+				_attachHold = null;
+				// Arm the grace-less teardown ONLY for the unsubscribe this call
+				// itself triggers; if other subscribers remain after the hold
+				// releases, the flag is cleared below so it can never hijack
+				// their eventual last-unsubscribe.
+				_detachRequested = true;
+				hold();
+			}
+			if (subCount > 0) _detachRequested = false;
+		},
+
 		subscribe(fn) {
 			if (subCount++ === 0) {
 				if (_pendingCleanup) {
@@ -1357,6 +1479,16 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					microtask(() => {
 						if (_pendingCleanup && subCount === 0) {
 							_pendingCleanup = false;
+							if (_detachRequested) {
+								// Explicit detach(): tear down NOW - the caller said "done",
+								// not "component unmounted, maybe coming back" - and rest in
+								// the 'detached' phase (a later subscribe()/attach() re-runs
+								// the machine from 'attaching').
+								_detachRequested = false;
+								cleanup();
+								_setPhase('detached');
+								return;
+							}
 							const graceMs = _getResumeGraceMs();
 							if (graceMs > 0) {
 								// Release WS handles immediately (give server back the
@@ -1792,12 +1924,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		 * ```
 		 */
 		rune() {
-			if (typeof _svelteStore.fromStore !== 'function') {
-				throw new Error(
-					'[svelte-realtime] .rune() requires Svelte 5 (svelte/store does not export fromStore)'
-				);
-			}
-			return _svelteStore.fromStore(this);
+			return createReactiveStream(this);
 		},
 
 		/**

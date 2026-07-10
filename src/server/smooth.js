@@ -348,6 +348,50 @@ function _warnLegacyFanout() {
 	);
 }
 
+/**
+ * Right-to-erasure purge: drop every identity-keyed trace one user holds
+ * across ALL smooth topics - the subscriber registry entry (identity -> ws;
+ * its socket's RTT tracker rides along via the WeakMap, reachable only while
+ * the registry still holds the ws), cross-instance surrogates for the
+ * identity, the interest state (reported center = a literal user location,
+ * LOD memory, send cadence, last relevancy), and the lag-comp movement-history
+ * ring when the entity key IS the identity. Entity state in the app's own
+ * catalog is app data the app removes through its own ops.
+ *
+ * Returns the number of entries removed, for the forget cascade's per-surface
+ * count. Called from the forget descriptor table.
+ * @param {string} identity
+ * @returns {number}
+ */
+export function _purgeSmoothUser(identity) {
+	let count = 0;
+	const surrogateSuffix = '\u0000' + identity;
+	for (const rec of _smoothTopics.values()) {
+		const ws = rec.registry.get(identity);
+		if (ws !== undefined) {
+			// Delete the RTT tracker FIRST (a measured-latency fingerprint):
+			// the registry entry is the last strong reference that makes the
+			// socket's WeakMap slot addressable by identity.
+			_lcRtt.delete(ws);
+			rec.registry.delete(identity);
+			count++;
+		}
+		for (const key of rec.surrogates.keys()) {
+			if (key.endsWith(surrogateSuffix)) {
+				rec.surrogates.delete(key);
+				count++;
+			}
+		}
+		if (rec.interest) count += rec.interest.purgeIdentity(identity);
+		if (rec.lagComp) {
+			const before = rec.lagComp.size;
+			rec.lagComp.remove(identity);
+			count += before - rec.lagComp.size;
+		}
+	}
+	return count;
+}
+
 /** Test seam: clear every smooth record, pending sync, and armed tick. */
 export function _resetSmooth() {
 	for (const rec of _smoothTopics.values()) {

@@ -6736,6 +6736,150 @@ describe('__stream() rune()', () => {
 	});
 });
 
+// - stream .phase + attach()/detach() (per-subscription lifecycle) ------------
+
+describe('stream .phase and attach()/detach()', () => {
+	it('walks initialized -> attaching -> attached on the first subscribe', async () => {
+		const store = __stream('phase/ok', { merge: 'crud', key: 'id' });
+		const phases = [];
+		store.phase.subscribe((p) => phases.push(p));
+		expect(phases).toEqual(['initialized']);
+
+		const unsub = store.subscribe(() => {});
+		await flush();
+		expect(phases[phases.length - 1]).toBe('attaching');
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'phase-ok', merge: 'crud', key: 'id' });
+		expect(phases[phases.length - 1]).toBe('attached');
+		unsub();
+	});
+
+	it('enters failed on a rejected subscribe', async () => {
+		const store = __stream('phase/fail', { merge: 'crud', key: 'id' });
+		const phases = [];
+		store.phase.subscribe((p) => phases.push(p));
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'FORBIDDEN', error: 'no' });
+		expect(phases[phases.length - 1]).toBe('failed');
+		unsub();
+	});
+
+	it('attach() holds the subscription with no UI subscriber and resolves on attached', async () => {
+		const store = __stream('phase/attach', { merge: 'crud', key: 'id' });
+		const p = store.attach();
+		await flush();
+
+		// The internal retain drove a real subscribe envelope.
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect(sent.rpc).toBe('phase/attach');
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'phase-attach', merge: 'crud', key: 'id' });
+
+		await expect(p).resolves.toBeUndefined();
+		// Idempotent: an attached stream resolves immediately.
+		await expect(store.attach()).resolves.toBeUndefined();
+		store.detach();
+	});
+
+	it('attach() rejects when the subscribe fails', async () => {
+		const store = __stream('phase/attachfail', { merge: 'crud', key: 'id' });
+		const p = store.attach();
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'FORBIDDEN', error: 'denied' });
+		await expect(p).rejects.toMatchObject({ code: 'FORBIDDEN' });
+		store.detach();
+	});
+
+	it('detach() tears down immediately (no resume grace) and rests detached', async () => {
+		const store = __stream('phase/detach', { merge: 'crud', key: 'id' });
+		const phases = [];
+		store.phase.subscribe((p) => phases.push(p));
+
+		const p = store.attach();
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 'phase-detach', merge: 'crud', key: 'id' });
+		await p;
+
+		store.detach();
+		await flush();
+		expect(phases[phases.length - 1]).toBe('detached');
+
+		// No grace retention: the session reset already ran, so a fresh
+		// attach() cold-starts a brand-new subscribe envelope.
+		const callsBefore = sendQueuedFn.mock.calls.length;
+		const p2 = store.attach();
+		await flush();
+		expect(sendQueuedFn.mock.calls.length).toBe(callsBefore + 1);
+		const sent2 = sendQueuedFn.mock.calls[callsBefore][0];
+		simulateRpcResponse(sent2.id, { ok: true, data: [], topic: 'phase-detach', merge: 'crud', key: 'id' });
+		await expect(p2).resolves.toBeUndefined();
+		store.detach();
+	});
+
+	it('detach() with live UI subscribers only drops the retain (stream stays attached)', async () => {
+		const store = __stream('phase/uistay', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'phase-uistay', merge: 'crud', key: 'id' });
+		await store.attach(); // adds the retain beside the UI subscriber
+
+		store.detach();
+		await flush();
+		const phases = [];
+		store.phase.subscribe((p) => phases.push(p));
+		expect(phases[0]).toBe('attached');
+		unsub();
+	});
+});
+
+// - createReactiveStream (first-class Svelte 5 primitive) ---------------------
+
+describe('createReactiveStream()', () => {
+	it('wraps a store into a { current } handle that tracks updates', async () => {
+		const { createReactiveStream } = await import('../src/client.js');
+		let set;
+		const store = {
+			subscribe(fn) { set = fn; fn('a'); return () => {}; }
+		};
+		const r = createReactiveStream(store);
+		expect(r.current).toBe('a');
+		set('b');
+		expect(r.current).toBe('b');
+	});
+
+	it('accepts a bare subscribe function', async () => {
+		const { createReactiveStream } = await import('../src/client.js');
+		const r = createReactiveStream((fn) => { fn(42); return () => {}; });
+		expect(r.current).toBe(42);
+	});
+
+	it('rejects a source without a subscribe contract', async () => {
+		const { createReactiveStream } = await import('../src/client.js');
+		expect(() => createReactiveStream({})).toThrow(/store .* or a subscribe function/);
+		expect(() => createReactiveStream(null)).toThrow();
+	});
+
+	it('is the primitive .rune() delegates to (same handle shape)', async () => {
+		const store = __stream('crs/items', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 'crs-items', merge: 'crud', key: 'id' });
+
+		const { createReactiveStream } = await import('../src/client.js');
+		const viaPrimitive = createReactiveStream(store);
+		const viaRune = store.rune();
+		expect(viaPrimitive.current).toEqual(viaRune.current);
+		unsub();
+	});
+});
+
 // - __stream() .map() projection helper --------------------------------------
 
 describe('__stream() map()', () => {

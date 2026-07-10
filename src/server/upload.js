@@ -654,12 +654,12 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				_respondUpload(ws, platform, streamId, { ok: true, data: result });
 			}
 		});
-		_recordRpcMetrics(path, '', _metricsStart);
+		_recordRpcMetrics(path, '', _metricsStart, ws);
 	} catch (err) {
 		if (upload.phase !== 'settled') {
 			upload.phase = 'settled';
 			const code = err instanceof LiveError ? err.code : 'INTERNAL_ERROR';
-			_recordRpcMetrics(path || '__invalid__', code, _metricsStart);
+			_recordRpcMetrics(path || '__invalid__', code, _metricsStart, ws);
 			if (err instanceof LiveError) {
 				_respondUpload(ws, platform, streamId, { ok: false, code: err.code, error: err.message });
 			} else {
@@ -670,7 +670,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				_respondUpload(ws, platform, streamId, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
 			}
 		} else {
-			_recordRpcMetrics(path || '__invalid__', err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart);
+			_recordRpcMetrics(path || '__invalid__', err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		}
 		// Make sure any pending for-await wakes up if we exited via throw.
 		if (upload.ctrl && !upload.ctrl.signal.aborted) {

@@ -263,6 +263,25 @@ export function createInterestState(interest) {
 		centers.delete(identity);
 		lod.delete(identity);
 		sendCadence.delete(identity);
+		// The last computed relevancy set is rebuilt every tick from live
+		// subscribers, but a released identity's entry must not linger between
+		// ticks (it holds the entity keys the subscriber was last shown).
+		last.delete(identity);
+	}
+
+	/**
+	 * Right-to-erasure purge: drop every identity-keyed trace this state holds
+	 * for one subscriber - the reported center override (a literal user
+	 * location), the LOD band memory, the send-cadence estimator, and the last
+	 * relevancy set. Returns 1 when anything was held, for the forget cascade's
+	 * per-surface count.
+	 * @param {string} identity
+	 * @returns {number}
+	 */
+	function purgeIdentity(identity) {
+		const had = centers.has(identity) || lod.has(identity) || sendCadence.has(identity) || last.has(identity);
+		releaseSubscriber(identity);
+		return had ? 1 : 0;
 	}
 
 	/**
@@ -509,6 +528,7 @@ export function createInterestState(interest) {
 		reportCenter,
 		clearCenter,
 		releaseSubscriber,
+		purgeIdentity,
 		compute,
 		/**
 		 * The join-snapshot roster for a syncing subscriber, scoped to its area of
