@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:svelte-realtime-frames:revision-1",
+  "title": "svelte-realtime extension frames, revision 1",
+  "description": "JSON Schema for the control frames the svelte-realtime layer adds on top of the Lantean protocol (svelte-adapter-uws/protocol.schema.json). The core protocol's frame-level forward-compatibility rule passes unrecognized application control frames through to the application handler; these are those frames for this package. A validator for mixed ecosystem traffic accepts a frame when it matches EITHER the core schema or this one. Additional properties are permitted everywhere: a peer ignores fields it does not recognize.",
+  "oneOf": [
+    { "$ref": "#/$defs/proto" }
+  ],
+  "$defs": {
+    "proto": {
+      "type": "object",
+      "description": "Protocol-revision advertisement, client to server, sent once after connect when configure({ protocolVersion }) is set. A server running a NEWER revision answers with a 'protocol-stale' data event on the '__realtime' topic (once per connection); it never disconnects over a revision mismatch, and a client that never advertises is never signaled.",
+      "required": ["type", "v"],
+      "properties": {
+        "type": { "const": "proto" },
+        "v": {
+          "type": "number",
+          "description": "The client bundle's svelte-realtime protocol revision."
+        }
+      }
+    }
+  }
+}

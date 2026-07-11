@@ -1990,9 +1990,11 @@ describe('live.multiplayer() SSR stub', () => {
 		const code = plugin.load('\0live:collab', { ssr: true });
 
 		// The server stub stays rune-free: identify is a no-op and room()
-		// returns a plain empty-state object so an SSR render does not crash.
+		// returns a plain empty-state object (named, so bindDoc can chain
+		// back to it like the client's return-this) so SSR does not crash.
 		expect(code).toContain('identify: () => {}');
-		expect(code).toContain('room: () => ({');
+		expect(code).toContain('room: () => { const _v = {');
+		expect(code).toContain('bindDoc: () => _v');
 		expect(code).toContain('others: []');
 		expect(code).toContain('me: null');
 		expect(code).not.toContain('MultiplayerRoom');
@@ -2007,7 +2009,7 @@ describe('live.multiplayer() SSR stub', () => {
 		const plugin = createSsrPlugin();
 		const code = plugin.load('\0live:collab', { ssr: true });
 
-		expect(code).toContain('room: () => ({');
+		expect(code).toContain('room: () => { const _v = {');
 		expect(code).not.toContain('MultiplayerRoom');
 	});
 });

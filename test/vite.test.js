@@ -318,6 +318,47 @@ describe('load (SSR)', () => {
 		expect(code).toContain('export * from ');
 		expect(code).toContain('chat.js');
 	});
+
+	it('wraps live.flag exports in a readable stub so $flag works during SSR', () => {
+		setup({
+			'flags.js': `
+import { live } from 'svelte-realtime/server';
+export const banner = live.flag('flag:banner', false);
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:flags', { ssr: true });
+
+		// The raw server export is a flag handle without .subscribe; SSR must
+		// shadow it with a readable (static shape, matching the client stub).
+		expect(code).toContain('const _banner = readable(undefined);');
+		expect(code).toContain('_banner.hydrate = (d) => readable(d);');
+		expect(code).toContain('__directCall("flags/banner"');
+		expect(code).toContain('export { _banner as banner };');
+	});
+
+	it('multiplayer room() stub carries bindDoc returning the view (chainable, like the client)', () => {
+		setup({
+			'editor.js': `
+import { live } from 'svelte-realtime/server';
+export const editor = live.multiplayer({
+	topic: (ctx, id) => 'editor:' + id,
+	init: async () => ({}),
+	presence: (ctx) => ({ id: ctx.user?.id }),
+	selections: 'crdt'
+});
+`
+		});
+
+		const plugin = createPlugin();
+		const code = plugin.load('\0live:editor', { ssr: true });
+
+		// A page calling editor.room(id).bindDoc(doc) at component top level
+		// must not crash during SSR; bindDoc chains back to the same view.
+		expect(code).toContain('bindDoc: () => _v');
+		expect(code).toMatch(/room: \(\) => \{ const _v = \{/);
+	});
 });
 
 // - registry module ----------------------------------------------------------

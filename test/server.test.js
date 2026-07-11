@@ -25,8 +25,10 @@ import {
 	__registerWebhookOut,
 	__registerAggregate,
 	__registerFlag,
+	__registerDerived,
 	__directCall,
 	_activateDerived,
+	_prepareHmr,
 	_clearCron,
 	_tickCron,
 	__registerCron,
@@ -5381,8 +5383,6 @@ describe('live.derived()', () => {
 });
 
 // - _activateDerived + __registerDerived --------------------------
-
-import { __registerDerived, _activateDerived, _prepareHmr } from '../src/server.js';
 
 describe('derived stream activation', () => {
 	it('recomputes and publishes when source topic publishes', async () => {

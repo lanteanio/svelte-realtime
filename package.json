@@ -1,6 +1,6 @@
 {
 	"name": "svelte-realtime",
-	"version": "0.6.0-next.80",
+	"version": "0.6.0-next.81",
 	"publishConfig": {
 		"tag": "next"
 	},
@@ -77,10 +77,11 @@
 		"src",
 		"LICENSE",
 		"README.md",
-		"MIGRATION.md"
+		"MIGRATION.md",
+		"protocol.schema.json"
 	],
 	"scripts": {
-		"check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js",
+		"check": "node scripts/check-types.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
 		"pretest": "npm run check",
 		"test": "vitest run",
 		"test:watch": "vitest",

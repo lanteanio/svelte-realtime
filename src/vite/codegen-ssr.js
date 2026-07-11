@@ -49,6 +49,16 @@ export function _generateSsrStubs(filePath, modulePath) {
 			if (_isDynamicExport(source, name, apiName)) dynamicNames.add(name);
 		}
 	}
+	// live.flag() exports take the static-readable shape unconditionally --
+	// the client stub emits them as plain set-merge readables (never
+	// factory-shaped), and the registry registers the same `module/name`
+	// direct-call path streams use, so `.load()` hydration works as-is.
+	FLAG_EXPORT_RE.lastIndex = 0;
+	while ((match = FLAG_EXPORT_RE.exec(source)) !== null) {
+		const name = match[1];
+		if (!/^\w+$/.test(name)) continue;
+		storeNames.push(name);
+	}
 	AGGREGATE_EXPORT_RE.lastIndex = 0;
 	while ((match = AGGREGATE_EXPORT_RE.exec(source)) !== null) {
 		const aggName = match[1];
@@ -236,7 +246,11 @@ export function _generateSsrStubs(filePath, modulePath) {
 		const ssrHasField = info.typing || info.hasLocks || info.selections || info.reactions;
 		if (info.hasPresence || info.hasCursors || ssrHasField || info.hasOwner) {
 			mpFactories.push(`identify: () => {}`);
-			mpFactories.push(`room: () => ({ others: [], cursors: [], me: null, status: 'connecting', typing: [], locks: {}, selections: {}, reactions: [], owner: null, isOwner: false, move: () => {}, reportViewport: () => {}, setTyping: () => {}, acquireLock: () => {}, releaseLock: () => {}, setSelection: () => {}, react: () => {}, destroy: () => {} })`);
+			// The view is named so bindDoc can return it - the client
+			// MultiplayerRoom.bindDoc(doc) returns `this` for chaining, and a
+			// page calling room(id).bindDoc(doc) at component top level must
+			// get the same shape back during SSR.
+			mpFactories.push(`room: () => { const _v = { others: [], cursors: [], me: null, status: 'connecting', typing: [], locks: {}, selections: {}, reactions: [], owner: null, isOwner: false, move: () => {}, reportViewport: () => {}, setTyping: () => {}, acquireLock: () => {}, releaseLock: () => {}, setSelection: () => {}, react: () => {}, bindDoc: () => _v, destroy: () => {} }; return _v; }`);
 		}
 		for (const action of info.actions) {
 			mpFactories.push(`${action}: () => Promise.resolve(undefined)`);

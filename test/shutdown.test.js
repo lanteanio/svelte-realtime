@@ -8,7 +8,7 @@ import {
 	_exitInFlight,
 	inFlightCount
 } from '../src/server/lifecycle.js';
-import { __register, handleRpc, _clearCron, realtime } from '../src/server.js';
+import { __register, handleRpc, _clearCron, realtime, live } from '../src/server.js';
 import { _ensureCronInterval, _cronTimerActive } from '../src/server/cron-engine.js';
 import { _handleUploadChunkFrame } from '../src/server/upload.js';
 import { mockWs } from './helpers/mock-ws.js';
@@ -172,5 +172,37 @@ describe('graceful shutdown - onShutdown + in-flight drain + reject-new', () => 
 		const resp = platform.sent.find((m) => m.topic === '__upload');
 		expect(resp).toBeTruthy();
 		expect(resp.data.code).toBe('UNAVAILABLE');
+	});
+
+	// The upload handler holds the ONLY in-flight increment for its stream;
+	// every exit path must give it back, or each upload permanently inflates
+	// the count and every later drain burns its full budget.
+
+	it('a completed upload returns the in-flight count to baseline', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		__register('shutdown-test/upload', live.upload(async (ctx) => {
+			let bytes = 0;
+			for await (const chunk of ctx.stream) bytes += chunk.byteLength;
+			return { bytes };
+		}));
+		expect(inFlightCount()).toBe(0);
+		_handleUploadChunkFrame(ws, uploadChunk0Frame(2, { rpc: 'shutdown-test/upload', args: [] }), platform, {});
+		await flush();
+		await flush();
+		const resp = platform.sent.find((m) => m.topic === '__upload');
+		expect(resp.data.ok).toBe(true);
+		expect(inFlightCount()).toBe(0);
+	});
+
+	it('an upload that fails early (unknown rpc) returns the in-flight count to baseline', async () => {
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		expect(inFlightCount()).toBe(0);
+		_handleUploadChunkFrame(ws, uploadChunk0Frame(3, { rpc: 'shutdown-test/missing', args: [] }), platform, {});
+		await flush();
+		const resp = platform.sent.find((m) => m.topic === '__upload');
+		expect(resp.data.ok).toBe(false);
+		expect(inFlightCount()).toBe(0);
 	});
 });

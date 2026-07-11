@@ -677,6 +677,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			try { upload.ctrl.abort(err instanceof Error ? err : new Error(String(err))); } catch {}
 		}
 	} finally {
+		_exitInFlight();
 		_cleanupUpload(ws, perWs, streamId);
 	}
 }

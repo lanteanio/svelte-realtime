@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.81] - 2026-07-11
+
+### Added
+
+- **`protocol.schema.json` - the composable extension-frame schema.** This package extends the core wire protocol with its own control frames (today: the connect-time `{ type: 'proto', v }` revision advertisement), riding the core protocol's frame-level forward-compatibility rule. The published schema lets a consumer validating mixed ecosystem traffic accept a frame when it matches either the core schema (`svelte-adapter-uws/protocol.schema.json`, whose description now points here) or this one.
+
+### Fixed
+
+- **Graceful shutdown no longer waits the full drain budget after uploads.** The upload handler counted itself as in-flight work for the shutdown drain but never gave the count back - the paired decrement the code's own comment promised was missing on every exit path (success, handler throw, cancel, disconnect, early validation failure). One completed upload therefore inflated the in-flight count forever, so every later shutdown burned its whole drain budget (default 5 s) instead of resolving when idle, and `inFlightCount()` reported phantom work. The decrement now runs in the handler's `finally`, restoring the baseline on every path.
+- **The SSR multiplayer `room()` stub now carries `bindDoc`.** The client `MultiplayerRoom.bindDoc(doc)` (binding a `live.doc` so CRDT-anchored selections resolve against the shared document) returns the room view for chaining, but the server-side stub's room view lacked the method entirely - a page calling `board.room(id).bindDoc(doc)` at component top level crashed server rendering with "bindDoc is not a function". The stub view now exposes `bindDoc` returning the same view, mirroring the client contract.
+- **`live.flag` exports now get an SSR readable stub.** The SSR codegen collected every stream-shaped export except flags, so a flag fell through to the raw server-module re-export - a flag handle with no `.subscribe` - and any page reading `$flag` crashed server rendering with `store_invalid_shape`. Flags now take the same static-readable stub streams get (`readable(undefined)` + `.hydrate()` + `.load()` over the flag's registered direct-call path), matching the client stub's always-static shape, so `$flag` renders during SSR and `+page.server.js` hydration via `.load(platform)` works.
+
+### Documentation
+
+- **The `live.idempotent` distributed-store example now imports a real subpath.** The shipped typings (and an old changelog entry) said to import `createIdempotencyStore` from `svelte-adapter-uws-extensions/idempotency`, a subpath that package has never exported - copying the example produced `ERR_PACKAGE_PATH_NOT_EXPORTED`. The example now uses `svelte-adapter-uws-extensions/redis/idempotency` and mentions the Postgres twin.
+
 ## [0.6.0-next.80] - 2026-07-10
 
 ### Added
@@ -1957,7 +1973,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Server-derived:** `keyFrom: (ctx, input) => \`order:${ctx.user.id}:${input.clientOrderId}\`` - the framework computes the key, the client doesn't need to know about idempotency.
   - **Client-supplied:** the client calls `createOrder.with({ idempotencyKey: crypto.randomUUID() })(payload)` and the key rides on the wire envelope.
 
-  Default TTL is 48 hours. Default store is a bounded in-process map (zero-config). Concurrent in-flight calls with the same key share one handler invocation; only successful results are cached, so a thrown handler aborts the slot and the next caller re-runs. Composes with `live()`, `live.validated()`, `live.rateLimit()`, and other wrappers. For multi-instance deployments, pass `store: createIdempotencyStore(redis)` from `svelte-adapter-uws-extensions/idempotency` - the in-process store and the distributed store implement the same three-state `acquire(key, ttlSec)` contract, so the swap is a one-line change.
+  Default TTL is 48 hours. Default store is a bounded in-process map (zero-config). Concurrent in-flight calls with the same key share one handler invocation; only successful results are cached, so a thrown handler aborts the slot and the next caller re-runs. Composes with `live()`, `live.validated()`, `live.rateLimit()`, and other wrappers. For multi-instance deployments, pass `store: createIdempotencyStore(redis)` from `svelte-adapter-uws-extensions/redis/idempotency` - the in-process store and the distributed store implement the same three-state `acquire(key, ttlSec)` contract, so the swap is a one-line change.
 
   Until now, the only client-side dedup was a microtask-window collapse of identical RPC calls (`_dedupMap`). That helped against double-clicks but did nothing for a retry 200 ms later: the server happily re-ran the handler. This closes that gap.
 

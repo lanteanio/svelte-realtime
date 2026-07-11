@@ -1819,7 +1819,9 @@ export namespace live {
 	 *
 	 * Default store is in-process and bounded. For multi-instance deployments,
 	 * pass `store: createIdempotencyStore(redis)` from
-	 * `svelte-adapter-uws-extensions/idempotency`.
+	 * `svelte-adapter-uws-extensions/redis/idempotency` (or the durable
+	 * Postgres twin from `svelte-adapter-uws-extensions/postgres/idempotency` -
+	 * same three-state `acquire` contract).
 	 *
 	 * @param config - Idempotency configuration
 	 * @param fn - Handler function (ctx, ...args)
@@ -1839,7 +1841,7 @@ export namespace live {
 	 * @example
 	 * ```js
 	 * // Client-supplied key, multi-instance store
-	 * import { createIdempotencyStore } from 'svelte-adapter-uws-extensions/idempotency';
+	 * import { createIdempotencyStore } from 'svelte-adapter-uws-extensions/redis/idempotency';
 	 * const store = createIdempotencyStore(redis);
 	 *
 	 * export const charge = live.idempotent(
