@@ -51,6 +51,105 @@ import { _stripTenantTopic } from './tenant.js';
 const _OWNER_KEY_PREFIX = '__live-room-owner:';
 const _OWNER_TTL_SEC = 3600;
 
+// First-joiner owner delivery, sequenced (not timed).
+//
+// The first-and-only member of an owner room claims ownership on its DATA
+// stream subscribe (`_ownerOnJoin`), while the client's owner value comes from
+// the paired `:owner` sub-stream subscribe. Those are two subscribes in one wire
+// batch on one socket, resolved by two independent async chains; a value emitted
+// off the data-join (a live publish, or a deferred unicast) can reach the socket
+// BEFORE the client has registered the `:owner` topic store from that stream's
+// subscribe response, and is then dropped - the pre-claim `null` snapshot wins.
+// A timer cannot fix this: the subscribe response lags behind its own replay
+// round-trips by a variable amount, so no fixed delay orders after it.
+//
+// The fix SEQUENCES the value into the subscribe response itself: a per-(socket,
+// wire-topic) barrier is opened synchronously when the data-stream subscribe
+// resolves its topic (dispatch, in the batch's synchronous prefix, before any
+// loader body runs), the data-join RESOLVES it with the claimed owner, and the
+// `:owner` loader AWAITS it and returns that value as its snapshot. The client
+// registers the store from a response that already carries the owner - there is
+// no racing second frame. A `null` resolution (a late joiner that claimed
+// nothing, a reconnect, a hook that threw) makes the loader read the shared
+// store instead, so a non-first subscriber still sees the current owner.
+//
+// Determinism preserved: a plain resolved Promise, no clock/RNG/timer. Keyed in
+// a WeakMap by the socket so a disconnect drops any unconsumed barrier for free.
+/** @type {WeakMap<any, Map<string, { promise: Promise<any>, resolve: (v: any) => void, expected: boolean, settled: boolean }>>} */
+const _ownerClaimByWs = new WeakMap();
+
+function _ownerClaimSlot(ws, topic, create) {
+	if (!ws) return undefined;
+	let m = _ownerClaimByWs.get(ws);
+	if (!m) {
+		if (!create) return undefined;
+		m = new Map();
+		_ownerClaimByWs.set(ws, m);
+	}
+	let slot = m.get(topic);
+	if (!slot && create) {
+		/** @type {(v: any) => void} */
+		let resolve = () => {};
+		const promise = new Promise((r) => { resolve = r; });
+		slot = { promise, resolve, expected: false, settled: false };
+		m.set(topic, slot);
+	}
+	return slot;
+}
+
+/**
+ * Open the claim barrier for a socket's owner-room data-stream subscribe. Called
+ * synchronously at dispatch topic-resolution (before the paired `:owner` loader
+ * can run this batch), so `expected` is set when that loader checks. Idempotent.
+ * @param {any} ws
+ * @param {string} topic wire data topic
+ */
+export function _ownerClaimBegin(ws, topic) {
+	const slot = _ownerClaimSlot(ws, topic, true);
+	if (slot) slot.expected = true;
+}
+
+/**
+ * Resolve the barrier with the claimed owner (first write wins). The data-join
+ * calls this with `{ key, reason }` after `_ownerOnJoin`; dispatch calls it with
+ * `null` after the subscribe hook as a settle, so an early-return/throw path
+ * never leaves the `:owner` loader waiting.
+ * @param {any} ws
+ * @param {string} topic wire data topic
+ * @param {{ key: string, reason: string } | null} value
+ */
+export function _ownerClaimResolve(ws, topic, value) {
+	const slot = _ownerClaimSlot(ws, topic, true);
+	if (slot && !slot.settled) {
+		slot.settled = true;
+		slot.resolve(value ?? null);
+	}
+}
+
+/**
+ * The `:owner` loader's read: if a data-join for this socket+room is in flight
+ * this batch (barrier opened), await its claimed owner and return it; otherwise
+ * (a late/lone subscribe with no fresh claim) return undefined so the caller
+ * reads the shared store. Consumes the barrier so a later resubscribe is clean.
+ * @param {any} ws
+ * @param {string} topic wire data topic
+ * @returns {Promise<{ key: string, reason: string } | undefined>}
+ */
+export async function _ownerClaimAwait(ws, topic) {
+	const slot = _ownerClaimSlot(ws, topic, false);
+	if (!slot || !slot.expected) return undefined;
+	const value = await slot.promise;
+	const m = _ownerClaimByWs.get(ws);
+	if (m) { m.delete(topic); if (m.size === 0) _ownerClaimByWs.delete(ws); }
+	return value && value.key != null ? value : undefined;
+}
+
+/** Reset all in-flight claim barriers (tests only). @internal */
+export function _resetOwnerClaimsForTests() {
+	// A WeakMap has no clear(); tests create fresh ws objects per case, so stale
+	// entries are unreachable. This exists for symmetry with _resetOwnerForTests.
+}
+
 /**
  * Local per-topic owner state. In single-instance mode it is authoritative:
  * `members` maps each identity to its join sequence and `owner`/`seq` carry

@@ -12,7 +12,7 @@ import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot } from './h
 import { _getIdentityKey } from './identity.js';
 import { _tenantTopic, _tenantKey, _stripTenantTopic } from './tenant.js';
 import { _registerEnumGate, _seedEnumVisibility } from './rooms-gate.js';
-import { _ownerOnJoin, _ownerOnLeave, _ownerTransfer, _ownerGet, _ownerEmit } from './room-owner.js';
+import { _ownerOnJoin, _ownerOnLeave, _ownerTransfer, _ownerGet, _ownerEmit, _ownerClaimResolve, _ownerClaimAwait } from './room-owner.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { _bindAlarmCtx } from './alarm.js';
 
@@ -448,6 +448,7 @@ export const _roomRegister = function room(config) {
 			// acquires on, and is independently best-effort: an owner failure
 			// must never suppress the presence join below (and vice versa).
 			if (ownerEnabled) {
+				let ownerValue = null;
 				try {
 					const change = await _ownerOnJoin(ctx.platform, topic, userId, onOwnerChange);
 					if (change) {
@@ -457,26 +458,22 @@ export const _roomRegister = function room(config) {
 						// window where the emit would run before that subscribe registered it.
 						// Only when the replay extension is wired; single-process needs neither.
 						if (ctx.platform && ctx.platform.replay) _registerReplayTopic(topic + ':owner');
+						// Fan the change out to EXISTING subscribers (and across the cluster)
+						// via the :owner topic. The FIRST-JOINER's own store, however, is
+						// seeded by the claim barrier below - sequenced into that socket's
+						// :owner subscribe RESPONSE - so it never depends on this emit winning
+						// the race against its own subscribe-ack (an earlier deferred-unicast
+						// attempt did, and lost). A redundant same-value 'set' reaching the
+						// first joiner later is an idempotent merge:'set' no-op.
 						_ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
-						// The live emit above races the first joiner OWN owner-stream subscribe:
-						// that subscribe response (its snapshot, and the client attaching its
-						// on(:owner) listener) can be delayed behind its Redis round-trips while
-						// this emit needs only one, so the emit can hit the socket before the
-						// client registers the :owner topic store and is dropped - leaving the
-						// null snapshot as the surviving value. Deliver the claimed owner as a
-						// deferred unicast to the joining socket: setTimer(0) fires after this
-						// subscribe batch response, so the client has attached on(:owner) and
-						// applies it (merge:set). Targeted, so it does not depend on topic
-						// fan-out timing, and it runs single-instance too.
-						if (change.owner && ctx.ws && ctx.platform && typeof ctx.platform.send === 'function') {
-							const _ownerWire = topic + ':owner';
-							const _ownerVal = { key: change.owner, reason: change.reason };
-							const _joinWs = ctx.ws;
-							const _plat = ctx.platform;
-							setTimer(() => { try { _plat.send(_joinWs, _ownerWire, 'set', _ownerVal); } catch { /* best-effort */ } }, 0);
-						}
+						if (change.owner) ownerValue = { key: change.owner, reason: change.reason };
 					}
 				} catch { /* owner is best-effort */ }
+				// Sequence the claimed owner into the paired :owner subscribe response
+				// (see room-owner.js): the loader awaits this. A null value (no claim on
+				// this join, a reconnect, or a throw) makes the loader read the shared
+				// store, so a non-first subscriber still sees the current owner.
+				_ownerClaimResolve(ctx.ws, topic, ownerValue);
 			}
 			// Cluster transition: bump shared count; only the first replica to
 			// reach 1 publishes 'join'. With no platform.redis the helper
@@ -690,6 +687,13 @@ export const _roomRegister = function room(config) {
 				// stream's onSubscribe joined with the tenant-prefixed topic),
 				// so the loader must prefix the same way. Null tenant -> unchanged.
 				const dataTopic = _tenantTopic(ctx.tenantId, topicFn(ctx, ...args));
+				// First-joiner delivery: if this socket's paired data-join is claiming
+				// ownership in this same batch, return the CLAIMED owner as the snapshot -
+				// sequenced strictly after the claim, so it rides the very response the
+				// client registers the :owner store from (no racing second frame). A
+				// non-first / lone subscribe (no in-flight claim) reads the shared store.
+				const claimed = await _ownerClaimAwait(ctx.ws, dataTopic);
+				if (claimed) return { key: claimed.key, reason: claimed.reason };
 				return { key: await _ownerGet(ctx.platform, dataTopic), reason: null };
 			},
 			// Flag-shaped delivery: one latest value, seeded to any fresh or racing

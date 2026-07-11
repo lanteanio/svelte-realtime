@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.84] - 2026-07-11
+
+### Fixed
+
+- **A room `owner: true` now delivers ownership to the first-and-only joiner - sequenced, not timed.** The two prior attempts (next.82's replay-buffer seed, next.83's deferred targeted unicast) both raced and lost: the claim runs on the room's DATA-stream subscribe, while the client's owner value comes from the paired `:owner` sub-stream subscribe RESPONSE - two subscribes in one wire batch on one socket, settled by two independent async chains. Any value pushed off the data-join (a live `set`, or a `setTimer(0)` unicast) can reach the socket BEFORE the client has registered the `:owner` topic store from that response - which itself lags behind the owner subscribe's own replay round-trips by a variable amount - and is then dropped, leaving the pre-claim `null` snapshot as the surviving value. No fixed delay can order after a variable-latency response. The claimed owner is now SEQUENCED into the `:owner` subscribe response itself: a per-(socket, wire-topic) barrier is opened synchronously when the data-stream subscribe resolves its topic (before any loader in the batch runs), the data-join resolves it with the claimed owner, and the `:owner` loader awaits it and returns that value as its snapshot. The client registers its store from a response that already carries the owner - there is no racing second frame. A non-first subscriber (no in-flight claim) reads the shared store as before, and the loader never waits on a claim that will not come (a reconnect or early return settles the barrier to `null`).
+
 ## [0.6.0-next.83] - 2026-07-11
 
 ### Added

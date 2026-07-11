@@ -20,6 +20,7 @@ import { _getIdentityKey } from './identity.js';
 import { _bindAlarmCtx } from './alarm.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { _tenantTopic, _tenantKey } from './tenant.js';
+import { _ownerClaimBegin, _ownerClaimResolve } from './room-owner.js';
 import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame } from './upload.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 
@@ -530,6 +531,13 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// `topic`) are all keyed by the tenant-scoped string - and a publish, which
 	// prefixes the same way, matches. Null tenant -> unchanged (zero cost).
 	if (ctx.tenantId && typeof topic === 'string') topic = _tenantTopic(ctx.tenantId, topic);
+	// First-joiner owner delivery: if this is an owner-room DATA stream, open the
+	// per-socket claim barrier NOW - synchronously, in the batch's sync prefix,
+	// before ANY loader body in this batch can run (the paired :owner stream's
+	// loader among them). The data-join resolves it with the claimed owner; that
+	// loader awaits it. Sequencing the value into the subscribe response is what
+	// closes the race a timer could not (see room-owner.js).
+	if (typeof topic === 'string' && /** @type {any} */ (fn).__hasOwner) _ownerClaimBegin(ws, topic);
 	const streamOpts = /** @type {any} */ (fn).__streamOptions;
 	// Per-room alarm (live.alarm): when this stream declares an `alarm` config, bind
 	// ctx.setAlarm/getAlarm/deleteAlarm to the resolved WIRE topic so the loader (and
@@ -624,6 +632,12 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		// presence hook ignores it.
 		try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic, streamArgs); } catch {}
 	}
+	// Settle the owner-claim barrier this subscribe opened: a no-op when the
+	// data-join already resolved it with the claimed owner, otherwise resolves it
+	// to null so the paired :owner loader (a reconnect, an early return, or a hook
+	// that threw) reads the shared store instead of waiting on a claim that will
+	// never come.
+	if (typeof topic === 'string' && /** @type {any} */ (fn).__hasOwner) _ownerClaimResolve(ws, topic, null);
 
 	if (/** @type {any} */ (fn).__isDerived && !state.activateDerivedCalled && !state.warnedActivateDerived) {
 		if (_IS_DEV) {

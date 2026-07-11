@@ -1,6 +1,6 @@
 {
 	"name": "svelte-realtime",
-	"version": "0.6.0-next.83",
+	"version": "0.6.0-next.84",
 	"publishConfig": {
 		"tag": "next"
 	},
