@@ -2928,6 +2928,12 @@ export namespace live {
  * Room configuration for `live.room()`.
  */
 export interface RoomConfig {
+	/**
+	 * Arm a single durable alarm from inside this room - its data-stream loader,
+	 * `onJoin`, or any room action - via `ctx.setAlarm(at)`. `onAlarm(ctx)` runs
+	 * when it fires, and a restart-recovered fire re-resolves through the room.
+	 */
+	alarm?: StreamAlarmConfig;
 	/** Function that computes the room topic from context and args. */
 	topic: (ctx: LiveContext<any>, ...args: any[]) => string;
 	/** Function that returns initial data for the room. */
@@ -3074,6 +3080,12 @@ export interface RoomExport {
  * reserved field-surface declarations.
  */
 export interface MultiplayerConfig {
+	/**
+	 * Arm a single durable alarm from inside this room - its loader, `onJoin`,
+	 * or any room action - via `ctx.setAlarm(at)`. `onAlarm(ctx)` runs when it
+	 * fires, and a restart-recovered fire re-resolves through the room.
+	 */
+	alarm?: StreamAlarmConfig;
 	/** Function that computes the room topic from context and args. */
 	topic: (ctx: LiveContext<any>, ...args: any[]) => string;
 	/** Initial data for the room's data stream. Defaults to an empty list. */

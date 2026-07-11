@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.83] - 2026-07-11
+
+### Added
+
+- **`alarm` on `live.room` and `live.multiplayer`.** A room now accepts an `{ alarm: { onAlarm } }` config - the surface the README, the `setAlarm` type doc, and the `ctx.setAlarm` error string already promised, but room construction silently dropped it, so `ctx.setAlarm` inside a room threw the very error that named rooms as supported. A room's data-stream loader, its `onJoin`, and any room action can now call `ctx.setAlarm` / `ctx.getAlarm` / `ctx.deleteAlarm`; the alarm is keyed by the room's wire topic (one pending alarm per room, exactly as on a stream) and a restart-recovered fire re-resolves `onAlarm` through the room's data-stream registry entry, so an alarm armed inside an action survives a restart. Declaring it validates the shape with a room-flavored error; a room without `alarm` is byte-identical.
+
+### Fixed
+
+- **A room `owner: true` now delivers ownership to the first-and-only joiner.** next.82 made the `:owner` sub-stream flag-shaped so a fresh subscriber is seeded the cluster-latest owner from the replay buffer, but that seeds only a subscribe that lands AFTER the buffer is written - and the first joiner's own owner-stream subscribe reads its snapshot (`null`) before its own join claims ownership and writes the buffer. The claim's live `set` emit then races that subscribe's response: the response (which is when the client attaches its `on(:owner)` listener) can be delayed behind the owner subscribe's replay round-trips, so the emit reaches the socket before the topic listener exists and is dropped, leaving the `null` snapshot as the surviving value. The data-stream join now also delivers the claimed owner as a deferred, targeted unicast to the joining socket, ordered after the subscribe batch's response (so the client has attached its listener) - the claiming first joiner now observes itself as owner. Targeted, so it does not depend on topic fan-out timing, and it runs single-instance as well as under a cluster.
+- **`.shared.js` helper modules under `src/live` are no longer treated as live modules.** The `<name>.shared.js` convention (pure helpers - `apply`, geometry, validators - imported by both the client and the server) is the framework's own documented layout, but discovery collected these files like any live module, so prewarm, the registry, and type generation each warned that a shared export `is not wrapped in live()` (and that the file `has no live() exports`). They are now excluded from discovery. Separately, the documented `import { apply } from '$live/board.shared.js'` could not resolve - the resolver appended `.js` again (`board.shared.js.js`) and hard-errored, and the extensionless form served a generated stub that dropped the non-live exports - so `$live/<name>.shared(.js)` now resolves straight to the real file on disk, serving its plain exports untouched.
+
+### Documentation
+
+- **The multiplayer roster example reads `person.data.name`.** The entry shape is `{ key, data, color }` (the server builds `{ key, data }`; the client `others` adds `color` and never flattens `data`), so the example now renders `person.data.name` rather than the non-existent `person.name`.
+- **The instance-level cursor example calls `room.move({ x, y })`.** A room instance from `board.room(boardId)` pre-binds the board id into its sends, so the previous `room.move(boardId, { x, y })` sent the id twice; the export-level `board.move(boardId, payload)` form is unchanged.
+- **The smooth `initial` examples clarify client-vs-server shape.** A client `.smooth()` factory's `initial` must be a plain state value (its pre-sync placeholder and replay base); the `(key) => state` form is a server-side convenience. The two client snippets that reused the server's function-form `initial` now pass a value.
+- **The Rooms section distinguishes a plain room from `live.multiplayer`.** A plain room exposes `presence` as the raw stream you iterate yourself; the aggregated roster (`me` / `others` with the current user excluded, plus `identify(key)`) is what `live.multiplayer` adds on top.
+
 ## [0.6.0-next.82] - 2026-07-11
 
 ### Fixed

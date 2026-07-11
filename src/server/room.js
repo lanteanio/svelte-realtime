@@ -14,6 +14,7 @@ import { _tenantTopic, _tenantKey, _stripTenantTopic } from './tenant.js';
 import { _registerEnumGate, _seedEnumVisibility } from './rooms-gate.js';
 import { _ownerOnJoin, _ownerOnLeave, _ownerTransfer, _ownerGet, _ownerEmit } from './room-owner.js';
 import { _registerReplayTopic } from './replay-routing.js';
+import { _bindAlarmCtx } from './alarm.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) and the rollback marker
 // set (_rollingBack) stay in server.js - the staying stream-subscribe rollback
@@ -56,8 +57,18 @@ export const _roomRegister = function room(config) {
 		enumerable: enumerableFlag,
 		owner: ownerFlag,
 		ownerOnly,
-		onOwnerChange
+		onOwnerChange,
+		alarm: alarmCfg
 	} = config;
+
+	if (alarmCfg !== undefined) {
+		if (typeof alarmCfg !== 'object' || alarmCfg === null || typeof alarmCfg.onAlarm !== 'function') {
+			throw new Error('[svelte-realtime] live.room() alarm must be an object { onAlarm: (ctx) => {...} } - the handler that runs when ctx.setAlarm fires.');
+		}
+		if (alarmCfg.misfireMs !== undefined && (typeof alarmCfg.misfireMs !== 'number' || !Number.isFinite(alarmCfg.misfireMs) || alarmCfg.misfireMs < 0)) {
+			throw new Error('[svelte-realtime] live.room() alarm.misfireMs must be a non-negative finite number (ms of tolerated lateness before a fire is skipped).');
+		}
+	}
 
 	/** @type {any} */ (topicFn).__topicUsesCtx = true;
 
@@ -356,6 +367,7 @@ export const _roomRegister = function room(config) {
 	}, {
 		merge: mergeMode,
 		key: keyField,
+		alarm: alarmCfg,
 		onSubscribe: (presenceFn || isEnumerable || ownerEnabled) ? async (ctx, topic, args) => {
 			// Enumeration is best-effort and must never suppress the presence join
 			// below - the two are independent concerns sharing one hook.
@@ -446,6 +458,23 @@ export const _roomRegister = function room(config) {
 						// Only when the replay extension is wired; single-process needs neither.
 						if (ctx.platform && ctx.platform.replay) _registerReplayTopic(topic + ':owner');
 						_ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
+						// The live emit above races the first joiner OWN owner-stream subscribe:
+						// that subscribe response (its snapshot, and the client attaching its
+						// on(:owner) listener) can be delayed behind its Redis round-trips while
+						// this emit needs only one, so the emit can hit the socket before the
+						// client registers the :owner topic store and is dropped - leaving the
+						// null snapshot as the surviving value. Deliver the claimed owner as a
+						// deferred unicast to the joining socket: setTimer(0) fires after this
+						// subscribe batch response, so the client has attached on(:owner) and
+						// applies it (merge:set). Targeted, so it does not depend on topic
+						// fan-out timing, and it runs single-instance too.
+						if (change.owner && ctx.ws && ctx.platform && typeof ctx.platform.send === 'function') {
+							const _ownerWire = topic + ':owner';
+							const _ownerVal = { key: change.owner, reason: change.reason };
+							const _joinWs = ctx.ws;
+							const _plat = ctx.platform;
+							setTimer(() => { try { _plat.send(_joinWs, _ownerWire, 'set', _ownerVal); } catch { /* best-effort */ } }, 0);
+						}
 					}
 				} catch { /* owner is best-effort */ }
 			}
@@ -609,6 +638,20 @@ export const _roomRegister = function room(config) {
 		};
 	}
 
+	// Registration-path base-module-path capture for durable alarm recovery: an
+	// action-armed alarm binds to the data stream's registry key (<base>/__data)
+	// so a cross-restart poll re-resolves onAlarm. Chains an enumerable room's
+	// __setEnumId so both the enum re-bind and the capture run. Registration
+	// (codegen / test harness / HMR) calls it once before the first subscribe.
+	let roomBasePath = null;
+	if (alarmCfg) {
+		const _prevSetEnumId = /** @type {any} */ (roomExport).__setEnumId;
+		/** @type {any} */ (roomExport).__setEnumId = (id) => {
+			if (typeof id === 'string' && id.length > 0) roomBasePath = id;
+			if (_prevSetEnumId) _prevSetEnumId(id);
+		};
+	}
+
 	// Presence stream (if enabled)
 	if (presenceFn) {
 		/** @type {any} */ (roomExport).__presenceStream = live.stream(
@@ -694,6 +737,20 @@ export const _roomRegister = function room(config) {
 				// same room id would share one ring (cross-tenant state read). Null tenant
 				// -> wireRoomTopic === roomTopic, byte-identical.
 				const wireRoomTopic = _tenantTopic(ctx.tenantId, roomTopic);
+				if (alarmCfg) {
+					// ctx.setAlarm/getAlarm/deleteAlarm inside a room action arm the room's
+					// single pending alarm, keyed by the wire room topic. Durable recovery
+					// re-resolves onAlarm from the data stream's registry entry (<base>/__data);
+					// an unregistered room stays in-memory only. Bound per call, so no restore
+					// is needed (the ctx is discarded after the handler returns).
+					_bindAlarmCtx(ctx, {
+						wireTopic: wireRoomTopic,
+						onAlarm: alarmCfg.onAlarm,
+						path: roomBasePath ? roomBasePath + '/__data' : undefined,
+						tenantId: ctx.tenantId,
+						misfireMs: alarmCfg.misfireMs
+					});
+				}
 				// Owner-gated actions check the CURRENT owner right before the
 				// handler runs; no owner (unclaimed / vacated / store blip) denies
 				// - fail closed, an owner-only action never runs ownerless.

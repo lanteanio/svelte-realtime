@@ -53,7 +53,8 @@ export const _multiplayerRegister = function multiplayer(config) {
 		history: config.history,
 		owner: config.owner,
 		ownerOnly: config.ownerOnly,
-		onOwnerChange: config.onOwnerChange
+		onOwnerChange: config.onOwnerChange,
+		alarm: config.alarm
 	});
 
 	/** @type {any} */ (roomExport).__isMultiplayer = true;

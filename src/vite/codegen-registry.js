@@ -548,7 +548,7 @@ export function _findLiveFiles(dir) {
 		const stat = statSync(full);
 		if (stat.isDirectory()) {
 			results.push(..._findLiveFiles(full));
-		} else if (/\.[jt]s$/.test(entry) && !entry.endsWith('.d.ts') && !entry.endsWith('.test.js') && !entry.endsWith('.test.ts')) {
+		} else if (/\.[jt]s$/.test(entry) && !entry.endsWith('.d.ts') && !entry.endsWith('.test.js') && !entry.endsWith('.test.ts') && !/\.shared\.[jt]s$/.test(entry)) {
 			results.push(full);
 		}
 	}

@@ -3395,6 +3395,8 @@ On the client, the room export becomes an object with sub-streams and actions. R
 <button onclick={() => board.addCard(boardId, 'New card')}>Add</button>
 ```
 
+A plain room exposes `presence` as the raw stream you iterate yourself. The aggregated roster - `me` and `others` with the current user excluded, plus `identify(key)` - is what `live.multiplayer` adds on top of a room.
+
 ### Room hooks shortcut
 
 Rooms expose a `.hooks` property for one-liner wiring in `hooks.ws.js`:
@@ -3619,14 +3621,14 @@ Name the current user once with `board.identify(key)` - the same identity you al
 
   function onPointerMove(e) {
     // move() is volatile (fire-and-forget) - lossy under disconnect is the contract.
-    room.move(boardId, { x: e.clientX, y: e.clientY });
+    room.move({ x: e.clientX, y: e.clientY });
   }
 </script>
 
 <div onpointermove={onPointerMove}>
   <ul class="roster">
     {#each room.others as person (person.key)}
-      <li style:color={person.color}>{person.name}</li>
+      <li style:color={person.color}>{person.data.name}</li>
     {/each}
   </ul>
 
@@ -3889,7 +3891,7 @@ export const arena = live.smooth({
 
 ```svelte
 <script>
-  const view = arena.smooth(arenaId, { apply, initial });
+  const view = arena.smooth(arenaId, { apply, initial: { x: 0, y: 0 } });   // client: initial is a plain placeholder value (the server may use (key) => state)
   view.onEvent((e) => { if (e.type === 'hit') spark(e.data.at); });
 
   function onfire(angle) {
@@ -3962,7 +3964,7 @@ export const wire = {
 
 // server topic and client channel declare the SAME pairs:
 export const arena = live.smooth({ topic, apply, initial, wire });      // server
-const view = arena.smooth(arenaId, { apply, initial, wire });           // client
+const view = arena.smooth(arenaId, { apply, initial: { x: 0, y: 0 }, wire });           // client
 ```
 
 States pack at every client delivery - tick updates, acknowledgements, the sync roster, cell snapshots - and unpack on the client before the prediction and the interpolation consume them; commands (and shots) pack on transmit and unpack at the server's RPC entry, where a malformed packed command is dropped, never applied. Two guarantees make this safe to reach for. Everything internal runs on the full state - the authority, lag-compensation rewind, interest culling, the cluster relay and shadow catalog, the warm-handoff snapshot - each instance packs independently at its own client edge, so `interest`, `cells`, `hitTest`, and the cluster compose untouched. And the client's prediction always replays its ORIGINAL command objects - packing touches only the transmit copy, so quantizing in `pack` (rounding floats to a few decimals is the biggest single win) costs at most a sub-threshold reconciliation nudge, which the correction machinery absorbs by design. Off by default - without `wire`, every frame is byte-identical to before. Requires `svelte-adapter-uws >= 0.6.0-next.49`.

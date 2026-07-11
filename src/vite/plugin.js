@@ -65,6 +65,14 @@ export default function svelteRealtime(options) {
 			if (id === '/@svelte-realtime-registry') return REGISTRY_ID;
 			if (id.startsWith('$live/')) {
 				const modulePath = id.slice(6); // strip '$live/'
+				// Shared helper modules (e.g. board.shared.js) are plain modules the app
+				// imports on both sides; resolve them to the real file on disk so their
+				// non-live exports pass through untouched - no client stub, and no false
+				// not-wrapped-in-live() scan. Strip a trailing .js/.ts so _resolveFile finds it.
+				if (/\.shared(\.[jt]s)?$/.test(modulePath)) {
+					const real = _resolveFile(liveDir, modulePath.replace(/\.[jt]s$/, ''));
+					if (real) return real;
+				}
 				return VIRTUAL_PREFIX + modulePath;
 			}
 			return null;
