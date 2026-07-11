@@ -2938,6 +2938,12 @@ export const _smoothRegister = function smooth(config) {
 				// entity, or a retained reported center) - without this an owner-local
 				// joiner received nothing until its entity first moved.
 				if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
+				// A server-driven topic (onTick) exists only because the tick runs, so a
+				// client that subscribes and watches without sending a command first must
+				// still start the tick - otherwise it sees zero server entities. Idempotent
+				// (a pending timer is a no-op) and gated on an onTick world so non-onTick
+				// topics stay byte-identical (they legitimately arm on the first command).
+				if (rec.world !== null) _armSmoothTick(rec);
 				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothWireStates(rec, _smoothJoinSnapshot(rec, key)), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
 			}
 			// Non-owner: ask the owner for the catalog. On a timeout, return a
@@ -2994,6 +3000,12 @@ export const _smoothRegister = function smooth(config) {
 		// full catalog below is the safe over-deliver on join; ongoing deltas are
 		// cell-scoped).
 		if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
+		// A server-driven topic (onTick) exists only because the tick runs, so a
+		// client that subscribes and watches without sending a command first must
+		// still start the tick - otherwise it sees zero server entities. Idempotent
+		// (a pending timer is a no-op) and gated on an onTick world so non-onTick
+		// topics stay byte-identical (they legitimately arm on the first command).
+		if (rec.world !== null) _armSmoothTick(rec);
 		return {
 			topic: name,
 			t: wallEpoch(),

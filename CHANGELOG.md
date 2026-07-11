@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.82] - 2026-07-11
+
+### Fixed
+
+- **A server-driven `live.smooth({ onTick })` topic now starts ticking when a client subscribes, not only when one sends input.** The smooth tick is demand-armed - a client command or a `reportCenter` armed it - but the subscribe/sync handlers only ensured the joining client's own entity and never armed the tick. A topic whose entities exist purely because `onTick` runs (moving NPCs, targets, projectiles) therefore stayed frozen for a client that subscribed and only watched: `onTick` never ran, so those server-driven entities never came into existence for it. Both sync paths (single-instance and the cluster owned path) now arm the tick when the subscribed topic has an `onTick` world, so a watching-but-idle subscriber sees server motion from the first tick. Gated on the presence of an `onTick` world, so a client-authority topic (no `onTick`) is byte-identical and still waits for the first command. Arming is idempotent and the existing idle-stop still applies, so a hook with nothing to do lets the tick rest.
+- **A room `owner: true` now delivers ownership to the first joiner.** The owner value reached a subscriber over two uncoordinated channels - the `:owner` sub-stream's init snapshot (a point-in-time read) and the live emit published when the claim lands. For the first joiner the claim is caused by that same join, so under a cluster (`platform.redis`) the snapshot could read the pre-claim `null` while the claim's emit missed the just-subscribing socket, leaving the client's `owner` store `null` forever (a later subscriber read the claimed owner fine). The `:owner` sub-stream is now flag-shaped: a single-entry replay buffer seeds any fresh or racing subscriber the cluster-latest owner through the same path `live.flag` uses, and the data-stream join registers the `:owner` topic for replay before it emits so the claim reliably reaches the buffer. The buffer engages only when the replay extension is wired; a single-process app needs neither (its snapshot-plus-emit path already delivers) and does not register the topic, so it emits no "replay extension missing" warning.
+
 ## [0.6.0-next.81] - 2026-07-11
 
 ### Added

@@ -547,7 +547,12 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// declaration with its raw string; under a tenant it must ALSO register the
 	// per-tenant WIRE topic here, or the wire-keyed publish would miss the buffer.
 	if (replayOpts && typeof topic === 'string' && (typeof rawTopic === 'function' || ctx.tenantId)) {
-		_registerReplayTopic(topic);
+		// An implicit-replay stream (internal, e.g. the room owner) engages the
+		// buffer only when the replay extension is present. Registering it without
+		// a platform.replay would burn a permanent registry slot and make
+		// _maybeReplayPublish warn about a missing extension the app never opted
+		// into; a user-declared replay stream still registers (and warns) as before.
+		if (!(/** @type {any} */ (fn).__implicitReplay) || platform.replay) _registerReplayTopic(topic);
 	}
 	// Dynamic (factory) topic piiRedact: a factory topic has no static
 	// `_declaredRedact` entry (that map is keyed by the declaration-time string).

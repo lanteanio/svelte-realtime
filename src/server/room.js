@@ -13,6 +13,7 @@ import { _getIdentityKey } from './identity.js';
 import { _tenantTopic, _tenantKey, _stripTenantTopic } from './tenant.js';
 import { _registerEnumGate, _seedEnumVisibility } from './rooms-gate.js';
 import { _ownerOnJoin, _ownerOnLeave, _ownerTransfer, _ownerGet, _ownerEmit } from './room-owner.js';
+import { _registerReplayTopic } from './replay-routing.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) and the rollback marker
 // set (_rollingBack) stay in server.js - the staying stream-subscribe rollback
@@ -437,7 +438,15 @@ export const _roomRegister = function room(config) {
 			if (ownerEnabled) {
 				try {
 					const change = await _ownerOnJoin(ctx.platform, topic, userId, onOwnerChange);
-					if (change) _ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
+					if (change) {
+						// Seed the owner replay buffer before the emit so a racing first-joiner
+						// subscribe reads the just-claimed owner from the buffer. Registering the
+						// wire :owner topic here (not only at owner-stream subscribe) closes the
+						// window where the emit would run before that subscribe registered it.
+						// Only when the replay extension is wired; single-process needs neither.
+						if (ctx.platform && ctx.platform.replay) _registerReplayTopic(topic + ':owner');
+						_ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
+					}
 				} catch { /* owner is best-effort */ }
 			}
 			// Cluster transition: bump shared count; only the first replica to
@@ -640,8 +649,17 @@ export const _roomRegister = function room(config) {
 				const dataTopic = _tenantTopic(ctx.tenantId, topicFn(ctx, ...args));
 				return { key: await _ownerGet(ctx.platform, dataTopic), reason: null };
 			},
-			{ merge: 'set' }
+			// Flag-shaped delivery: one latest value, seeded to any fresh or racing
+			// subscriber from the shared replay buffer, so the first joiner of an owner
+			// room observes the ownership its own join just claimed even when that claim
+			// (performed on the data stream) races this owner-stream subscribe. The
+			// buffer engages only when the replay extension is wired; the __implicitReplay
+			// gate in dispatch keeps single-process apps from registering the topic or
+			// warning about a replay extension they never opted into.
+			{ merge: 'set', replay: { size: 1 } }
 		);
+		/** @type {any} */ (roomExport).__ownerStream.__isFlag = true;
+		/** @type {any} */ (roomExport).__ownerStream.__implicitReplay = true;
 	}
 
 	// Cursor stream (if enabled)

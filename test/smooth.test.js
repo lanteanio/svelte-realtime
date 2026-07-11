@@ -2324,6 +2324,46 @@ describe('live.smooth onTick (the server world hook)', () => {
 		expect(ran).toBe(0);
 	});
 
+	it('arms the tick on a bare subscribe so a watching-but-idle client sees server-driven entities', async () => {
+		const { name } = declareWorld();
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		let spawned = false;
+		// The hook spawns a server entity: proves onTick RAN and produced an entity a
+		// purely-watching subscriber (no client command) can see. Before the fix the
+		// tick never armed without a client command, so onTick never ran.
+		tickFn = (world) => { world.ensure('npc:1', { x: 1, y: 2 }); spawned = true; };
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(rt.calls.drains).toBe(0);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(spawned).toBe(true);
+		expect(rt.calls.drains).toBeGreaterThan(0);
+		const spawn = platform.wirePublished.find((p) => p.event === 'update' && p.data.key === 'npc:1');
+		expect(spawn && spawn.data.data).toEqual({ x: 1, y: 2 });
+	});
+
+	it('does not arm the tick on a bare subscribe when there is no onTick world (client-authority unchanged)', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const platform = wirePlatform();
+		const ws1 = mockWs({ id: 'u1' });
+		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(60);
+		// A client-authority topic still waits for its first command before ticking.
+		expect(rt.calls.drains).toBe(0);
+	});
+
+	it('arms the tick on a bare subscribe in the cluster owned path too', async () => {
+		let ran = 0;
+		const { name } = declareShape({ tickMs: 20, onTick: () => { ran++; } });
+		const sc = scriptedSmoothCluster({ owner: true, instanceId: 'A' });
+		const platform = wirePlatform();
+		platform.smooth = sc.cluster;
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(ran).toBeGreaterThan(0);
+	});
+
 	it('composes with cells mode: a world.set routes to the entity cell topic', async () => {
 		const { name } = declareShape({
 			tickMs: 20,

@@ -4,6 +4,7 @@ import { _resetOwnerForTests, _ownerGet, _ownerOnJoin, _ownerOnLeave } from '../
 import { _purgePresenceUser } from '../src/server/presence.js';
 import { _extractRoomInfo, _extractMultiplayerInfo } from '../src/vite/extract-options.js';
 import { state } from '../src/server/state.js';
+import { _maybeReplayPublish, _resetReplayRouting } from '../src/server/replay-routing.js';
 
 // ---------------------------------------------------------------------------
 // Room ownership: `live.room({ owner: true })` tracks a per-room owner role.
@@ -92,6 +93,57 @@ describe('live.room owner - declaration', () => {
 		});
 		expect(board.__hasOwner).toBe(true);
 		expect(typeof board.__ownerStream).toBe('function');
+	});
+});
+
+describe('live.room owner - first-joiner delivery (flag-shaped :owner stream)', () => {
+	beforeEach(() => { _resetReplayRouting(); });
+	afterEach(() => { _resetReplayRouting(); });
+
+	function replayPlatform() {
+		const published = [];
+		return {
+			_published: published,
+			replay: {
+				publish: (_p, topic, event, data) => { published.push({ topic, event, data }); return Promise.resolve(); },
+				since: async () => [],
+				seq: async () => 0
+			}
+		};
+	}
+
+	it('declares the :owner stream flag-shaped so a fresh/racing subscriber can be seeded the latest owner', () => {
+		const game = mkRoom();
+		// merge:'set' single latest value, plus the replay/flag markers that route the
+		// ownership emit into the shared buffer and serve it to a fresh/racing connect.
+		expect(game.__ownerStream.__streamOptions.merge).toBe('set');
+		expect(game.__ownerStream.__replay).toEqual({ size: 1 });
+		expect(game.__ownerStream.__isFlag).toBe(true);
+		expect(game.__ownerStream.__implicitReplay).toBe(true);
+	});
+
+	it('a cluster join registers the :owner topic so the ownership emit reaches the replay buffer', async () => {
+		const game = mkRoom();
+		const ds = game.__dataStream;
+		const platform = replayPlatform();
+		const pub = [];
+		await ds.__onSubscribe(mkCtx('alice', (t, e, d) => pub.push({ t, e, d }), platform), 'game:7', [7]);
+		// The join registered game:7:owner as replay-eligible (platform.replay present),
+		// so the ownership publish now routes into the buffer for fresh-subscribe seeding.
+		const routed = _maybeReplayPublish(platform, 'game:7:owner', 'set', { key: 'alice', reason: 'claimed' });
+		expect(routed).toBe(true);
+		expect(platform._published).toContainEqual({ topic: 'game:7:owner', event: 'set', data: { key: 'alice', reason: 'claimed' } });
+	});
+
+	it('a single-process join does not mark :owner replay-eligible (no spurious replay-extension warning)', async () => {
+		const game = mkRoom();
+		const ds = game.__dataStream;
+		const pub = [];
+		// No platform.replay -> single process. The join must NOT register :owner, so
+		// _maybeReplayPublish stays inert and never warns about a replay extension the
+		// app never opted into.
+		await ds.__onSubscribe(mkCtx('alice', (t, e, d) => pub.push({ t, e, d }), {}), 'game:7', [7]);
+		expect(_maybeReplayPublish({}, 'game:7:owner', 'set', { key: 'alice', reason: 'claimed' })).toBe(false);
 	});
 });
 
