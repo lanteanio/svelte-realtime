@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0-next.85] - 2026-07-12
+
+### Fixed
+
+- **The room `owner: true` first-joiner claim barrier now actually engages.** next.84 added the barrier that sequences the claimed owner into the `:owner` subscribe response, but it never opened: dispatch resolves a room subscribe to the DATA-stream handler and opens the barrier only when it reads `__hasOwner` off THAT handler, while the flag was set on the public room export object - a different object. So `_ownerClaimBegin` never fired, the `:owner` loader found no barrier and read the pre-claim `null`, and the first-and-only joiner never saw itself as owner. The flag is now also set on the data-stream handler dispatch reads. The regression test was rewritten to drive the real batched (data + `:owner`) subscribe frame through `handleRpc` and assert the value the client receives in the `:owner` response - the previous test hand-opened the barrier and so could not catch a barrier that never opens.
+
 ## [0.6.0-next.84] - 2026-07-11
 
 ### Fixed

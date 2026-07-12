@@ -558,6 +558,12 @@ export const _roomRegister = function room(config) {
 	/** @type {any} */ (roomExport).__cursorThrottle = typeof cursorConfig === 'object' ? cursorConfig.throttle || 50 : 50;
 	/** @type {any} */ (roomExport).__hasRooms = isEnumerable;
 	/** @type {any} */ (roomExport).__hasOwner = ownerEnabled;
+	// The public export carries __hasOwner for codegen, but dispatch resolves a
+	// room subscribe to the DATA-stream handler (registered at <room>/__data) and
+	// reads __hasOwner off THAT fn to open the first-joiner owner-claim barrier.
+	// It is a different object than roomExport, so the flag must live on it too or
+	// the barrier never opens (and the sequenced owner snapshot silently no-ops).
+	/** @type {any} */ (dataStream).__hasOwner = ownerEnabled;
 
 	// Enumeration stream (opt-in): one per-export stream whose snapshot is the
 	// active-rooms registry and whose live deltas (created/updated/deleted, fed by
