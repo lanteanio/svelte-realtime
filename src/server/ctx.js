@@ -2,7 +2,7 @@
 import { now as runtimeNow, microtask } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
-import { _ctxHelpersCache, _topicVolatile, _topicStaleWatch, _silentTopicWatch, _topicInvalidationWatch, _topicCoalesce, _topicTransform, _topicRedact, _declaredRedact } from './state.js';
+import { _ctxHelpersCache, _topicVolatile, _topicStaleWatch, _silentTopicWatch, _topicInvalidationWatch, _topicCoalesce, _topicTransform, _topicRedact, _declaredRedact, _declaredRedactPattern } from './state.js';
 import { _maybeReplayPublish } from './replay-routing.js';
 import { _checkPublishHelperArgs, _throttlePublish, _debouncePublish, _skipGate, _redactOrDrop, REDACT_DROP, _resolveRedactor } from './publish-helpers.js';
 import { _validUserIdReason } from './validate.js';
@@ -162,7 +162,7 @@ export function _getCtxHelpers(platform) {
 			// relay already coalesces per-microtask postMessages; this lifts
 			// the same idea to the wire level so subscribers receive ONE frame
 			// per microtask containing every event they're entitled to.
-			if (_topicCoalesce.size === 0 && _topicTransform.size === 0 && _topicRedact.size === 0 && _declaredRedact.size === 0) {
+			if (_topicCoalesce.size === 0 && _topicTransform.size === 0 && _topicRedact.size === 0 && _declaredRedact.size === 0 && _declaredRedactPattern.size === 0) {
 				// A jittered publish carries a de-herd window `j` only on the single
 				// `platform.publish` envelope - not the replay buffer or the batch
 				// frame - so it takes the direct path. That is the right shape: jitter
@@ -238,11 +238,19 @@ export function _getCtxHelpers(platform) {
 				try {
 					wireData = r.redact(wireData);
 				} catch (err) {
-					if (r.onError) {
+					// A pattern-registry match is a heuristic: a throw signals the
+					// topic is likely not this stream's, so pass the (un-redacted)
+					// data through raw rather than dropping an unrelated publish -
+					// raw is the pre-registry cluster-transient baseline. Exact /
+					// subscribed / static matches stay strictly fail-closed.
+					if (r.failOpen) {
+						// wireData is unchanged (the throwing assignment did not land).
+					} else if (r.onError) {
 						try { r.onError(err, null, topic); } catch {}
 						return false;
+					} else {
+						throw err;
 					}
-					throw err;
 				}
 			}
 			if (!c) {
@@ -326,7 +334,7 @@ export function _getCtxHelpers(platform) {
 					// Native batch bypasses the `publish` closure, so apply uniform
 					// piiRedact here. Fail-closed: a message whose redactor throws is
 					// dropped from the batch rather than broadcast raw.
-					if (_topicRedact.size > 0 || _declaredRedact.size > 0) {
+					if (_topicRedact.size > 0 || _declaredRedact.size > 0 || _declaredRedactPattern.size > 0) {
 						const out = [];
 						for (const m of messages) {
 							const d = _redactOrDrop(m.topic, m.data);

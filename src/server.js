@@ -35,6 +35,8 @@ import {
 	_topicTransform,
 	_topicRedact,
 	_declaredRedact,
+	_declaredRedactPattern,
+	_declaredStreamTopic,
 	_topicVolatile,
 	_topicInvalidationWatch,
 	_ctxHelpersCache,
@@ -452,7 +454,13 @@ function _unregisterRedact(ws, topic) {
 export function _resetRedactRegistry() {
 	_topicRedact.clear();
 	_declaredRedact.clear();
+	_declaredRedactPattern.clear();
+	_declaredStreamTopic.clear();
+	_redactPatternWarned.clear();
 }
+
+/** One-shot dedup for the same-pattern differing-redactor collision warning (keyed by pattern). */
+const _redactPatternWarned = new Set();
 
 /** Per-ws set of topics where this ws has contributed a volatile refcount. */
 const _wsVolatileContrib = new WeakMap();
@@ -994,6 +1002,77 @@ function _deriveTopicPattern(value) {
 	}
 }
 
+/** One topic segment for a dynamic-redact pattern placeholder: any run that does not cross the `/` or `:` separators. */
+const _REDACT_SEGMENT = '[^/:]+';
+
+/**
+ * Compile a derived topic pattern (`chat/{arg0}`, produced by
+ * `_deriveTopicPattern` from a factory topic) into a matcher for the
+ * dynamic-topic redactor registry. Each run of `{argN}` placeholders becomes a
+ * single segment matcher; the literal parts are escaped and the whole is anchored.
+ *
+ * Returns `null` (the stream gets no cluster-transient coverage - a documented
+ * residual, never a leak into OTHER streams) when the matcher would be
+ * dangerously broad:
+ * - `<dynamic>` - the factory threw on placeholder args (e.g. it reads a ctx
+ *   property); it cannot be derived to a literal skeleton.
+ * - no `{argN}` placeholder - a constant-returning factory, not a real pattern.
+ * - NO leading literal prefix (the pattern starts with a placeholder, e.g.
+ *   `{arg1}:{arg2}` from `(ctx, id, kind) => id + ':' + kind`). Its regex would
+ *   be `^.+<sep>.+$`, which matches nearly every topic and would redact - or,
+ *   with a throwing custom redactor, drop the publishes of - UNRELATED streams
+ *   app-wide. A leaked frame for the intended stream is far less harmful than
+ *   corrupting every co-located stream, so a variable-first topic is skipped.
+ *   Idiomatic dynamic topics carry a namespace prefix (`chat:`, `room/`), which
+ *   both anchors the matcher to the stream's own topic space and gives the
+ *   publish hot path a `startsWith` short-circuit.
+ *
+ * Each placeholder matches ONE topic SEGMENT (`[^/:]+`, excluding the `/` and
+ * `:` separators), not `.+`. A greedy `.+` would cross separators and match a
+ * NESTED co-located topic: `chat/{room}` -> `^chat/.+$` would swallow a
+ * non-redact `chat/typing/5`; segment-bounding (`^chat/[^/:]+$`) excludes that
+ * multi-segment neighbour. It does NOT, however, exclude a FLAT single-segment
+ * neighbour: `chat/typing` still matches `^chat/[^/:]+$`. That collateral is
+ * prevented not by the regex but by the resolver: `_matchRedactPattern` skips
+ * any topic another stream/channel declared explicitly (the OWNERSHIP guard over
+ * `_declaredStreamTopic`), and a pattern match is FAIL-OPEN, so even an
+ * UNDECLARED co-located publish is passed through raw (not dropped) when the
+ * redactor throws on its foreign shape. So the regex bounds the match to one
+ * segment; the resolver guarantees a matched-but-foreign topic is never
+ * corrupted or dropped.
+ *
+ * Residuals (documented, narrow): (a) if a resolved id itself contains `/` or
+ * `:` (`chat/a/b`), the never-subscribed cluster-transient publish to it is not
+ * matched - its OWN PII, not a neighbour's, and the subscribe-time exact entry
+ * still covers it once subscribed; (b) an UNDECLARED ad-hoc publish to a topic
+ * in the pattern's namespace under a fields redactor has that field omitted
+ * (non-destructive - the message is still delivered); (c) separators other than
+ * `/` and `:` (e.g. `-`) are not segment boundaries, so a `chat-{room}` factory
+ * beside a `chat-typing-5` topic relies on the ownership guard / fail-open, not
+ * the regex, if that neighbour is declared / throws.
+ *
+ * Adjacent placeholders collapse to one segment so the regex never contains a
+ * quadratic `[^/:]+[^/:]+` (a long non-matching topic would otherwise burn CPU
+ * on the publish path).
+ *
+ * @param {string} pattern
+ * @returns {{ regex: RegExp, prefix: string } | null}
+ */
+function _compileRedactPattern(pattern) {
+	if (pattern === '<dynamic>') return null;
+	const firstPlaceholder = pattern.search(/\{arg\d+\}/);
+	if (firstPlaceholder === -1) return null;   // no placeholder -> not a dynamic pattern
+	if (firstPlaceholder === 0) return null;    // no leading literal anchor -> would over-match app-wide
+	const prefix = pattern.slice(0, firstPlaceholder);
+	let body = '';
+	for (const tok of pattern.split(/(\{arg\d+\})/)) {
+		if (tok === '') continue;
+		if (/^\{arg\d+\}$/.test(tok)) { if (!body.endsWith(_REDACT_SEGMENT)) body += _REDACT_SEGMENT; }
+		else body += tok.replace(/[.+?^${}()|[\]\\*]/g, '\\$&');
+	}
+	return { regex: new RegExp('^' + body + '$'), prefix };
+}
+
 /**
  * Centralize topic patterns in one place so stream definitions and any
  * out-of-band consumers (SQL triggers, Postgres NOTIFY shapes, doc
@@ -1174,6 +1253,10 @@ live.stream = function stream(topic, initFn, options) {
 	/** @type {any} */ (initFn).__isStream = true;
 	/** @type {any} */ (initFn).__isLive = true;
 	/** @type {any} */ (initFn).__streamTopic = topic;
+	// Ownership index: record every STATIC topic (piiRedact or not) so a
+	// neighbouring piiRedact factory's derived pattern never claims a topic this
+	// stream declared explicitly. See `_declaredStreamTopic`.
+	if (typeof topic === 'string') _declaredStreamTopic.add(topic);
 	/** @type {any} */ (initFn).__streamOptions = merged;
 	if (coalesceBy) /** @type {any} */ (initFn).__coalesceBy = coalesceBy;
 	if (argsSchema) /** @type {any} */ (initFn).__streamArgs = argsSchema;
@@ -1185,9 +1268,40 @@ live.stream = function stream(topic, initFn, options) {
 		// tick, top-level publish(), reactive recompute, a write before anyone
 		// joins) still redacts before the buffer write. The subscribe-time
 		// `_topicRedact` registration covers dynamic topics (which only resolve a
-		// concrete topic at subscribe, the same moment their replay buffer arms).
+		// concrete topic at subscribe, the same moment their replay buffer arms)
+		// on THIS instance; the pattern registration below covers the resolved
+		// topics this instance never subscribed to (the cluster-transient case).
 		if (typeof topic === 'string') {
 			_declaredRedact.set(topic, { redact: _piiRedactor, onError: streamOnError || null });
+		} else if (typeof topic === 'function') {
+			// Dynamic (factory) topic: register the redactor keyed by the derived
+			// pattern so a publish to a resolved topic this instance never
+			// subscribed to still redacts send-side (before the wire, buffer, and
+			// cluster relay). The redactor is uniform per stream, so one pattern
+			// entry covers every resolved instance of this topic.
+			const _pattern = _deriveTopicPattern(topic);
+			const _compiled = _compileRedactPattern(_pattern);
+			if (_compiled) {
+				// Two distinct factory streams that derive the SAME pattern claim the
+				// same topic space; only one redactor can key the pattern, so the
+				// later wins and the other stream's redaction is silently lost. That
+				// is a leak, so warn once per pattern (dev). Composing the two is
+				// unsafe - double-hash would produce pseudonyms inconsistent with the
+				// subscribe-path single hash. Dedup by pattern so an HMR reload of one
+				// stream (which mints a fresh redactor closure for the same topic)
+				// warns at most once rather than on every reload.
+				const _prev = _declaredRedactPattern.get(_pattern);
+				if (_IS_DEV && _prev && _prev.redact !== _piiRedactor && !_redactPatternWarned.has(_pattern)) {
+					_redactPatternWarned.add(_pattern);
+					console.warn(
+						'[svelte-realtime] piiRedact factory topic pattern "' + _pattern + '" was declared more than ' +
+						'once with a different redactor. If these are two distinct streams sharing a topic space, the ' +
+						'later declaration wins for redacting resolved topics no local subscriber has claimed - give ' +
+						'them distinct topic shapes. (A dev HMR reload of one stream also triggers this and is harmless.)'
+					);
+				}
+				_declaredRedactPattern.set(_pattern, { regex: _compiled.regex, prefix: _compiled.prefix, redact: _piiRedactor, onError: streamOnError || null, failOpen: true });
+			}
 		}
 	}
 	if (volatileOpt) /** @type {any} */ (initFn).__streamVolatile = true;
@@ -1237,6 +1351,10 @@ live.channel = function channel(topic, options) {
 	/** @type {any} */ (initFn).__isChannel = true;
 	/** @type {any} */ (initFn).__streamTopic = topic;
 	/** @type {any} */ (initFn).__streamOptions = merged;
+	// Ownership index (see `_declaredStreamTopic`): a static channel topic is an
+	// explicit declaration, so a neighbouring piiRedact factory pattern must not
+	// claim it - the typing-indicator-beside-chat case is exactly this.
+	if (typeof topic === 'string') _declaredStreamTopic.add(topic);
 	return initFn;
 };
 
@@ -3444,11 +3562,20 @@ export function publish(topic, event, data, options) {
 	// egress, so it honors piiRedact uniformly. Fail-closed: a throwing redactor
 	// drops the publish rather than broadcasting raw PII. Topics with no
 	// redactor declared pass through untouched.
-	if (_topicRedact.size > 0 || _declaredRedact.size > 0) {
+	if (_topicRedact.size > 0 || _declaredRedact.size > 0 || _declaredRedactPattern.size > 0) {
 		const redacted = _redactOrDrop(topic, data);
 		if (redacted === REDACT_DROP) return false;
 		data = redacted;
 	}
+	// Route replay-eligible topics through the replay buffer, exactly like
+	// ctx.publish and cron auto-publish. Without this, an out-of-band publish()
+	// (SSR route, webhook, script) and a live.flag().set() - which calls this
+	// export - would broadcast live but never write the shared buffer or carry an
+	// authoritative seq, so a replica that booted after the write, or a subscriber
+	// offline during it, would serve/resume stale. A jittered control event keeps
+	// the direct path (matching ctx.publish); a topic with no replay registration
+	// falls through to the bare publish untouched.
+	if (!(options && options.jitterMs > 0) && _maybeReplayPublish(platform, topic, event, data)) return true;
 	return platform.publish(topic, event, data, options);
 }
 

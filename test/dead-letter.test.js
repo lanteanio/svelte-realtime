@@ -60,6 +60,34 @@ describe('createDeadLetterStore', () => {
 		expect(ids).toContain(keep);
 		expect(ids).toContain(newest);
 	});
+
+	it('forget tombstone: drops a record whose delivery raced a purge; keeps a new one and other users', () => {
+		const s = createDeadLetterStore({ forgetUserId: ({ data }) => data.author });
+		// live.forget(u1) runs against an empty store, setting a tombstone.
+		expect(s.purgeUser(null, 'u1')).toBe(0);
+		// A delivery that STARTED before the forget now fails and would be captured.
+		// Its payload is the erased user's, so it must be dropped (returns null).
+		const dropped = s.add({ webhookId: 'w', topic: 'orders', event: 'created', data: { author: 'u1', body: 'PII' }, attempts: 3, error: 'x', failedAt: Date.now(), startedAt: 1000 });
+		expect(dropped).toBeNull();
+		expect(s.count()).toBe(0);
+		// A genuinely NEW u1 delivery that started AFTER the forget is retained.
+		const later = Date.now() + 3600000;
+		const kept = s.add({ webhookId: 'w', topic: 'orders', event: 'created', data: { author: 'u1', body: 'new' }, attempts: 3, error: 'x', failedAt: later + 1, startedAt: later });
+		expect(kept).not.toBeNull();
+		expect(s.count()).toBe(1);
+		// A different user's in-flight delivery is unaffected by u1's tombstone.
+		const other = s.add({ webhookId: 'w', topic: 'orders', event: 'created', data: { author: 'u2', body: 'x' }, attempts: 3, error: 'x', failedAt: Date.now(), startedAt: 1000 });
+		expect(other).not.toBeNull();
+		expect(s.count()).toBe(2);
+	});
+
+	it('forget tombstone: without a forgetUserId extractor, records are unattributable and never tombstone-dropped', () => {
+		const s = createDeadLetterStore(); // no extractor
+		s.purgeUser(null, 'u1');
+		const id = s.add({ webhookId: 'w', topic: 'orders', event: 'created', data: { author: 'u1' }, attempts: 1, error: 'x', failedAt: Date.now(), startedAt: 1000 });
+		expect(id).not.toBeNull(); // unattributable -> retained (documented limitation)
+		expect(s.count()).toBe(1);
+	});
 });
 
 describe('webhook dead-letter capture', () => {
@@ -82,6 +110,21 @@ describe('webhook dead-letter capture', () => {
 	it('does not capture when no store is configured (off by default)', async () => {
 		await _fireWebhookOut(failingEntry, 'orders', 'created', { id: 7 }, null);
 		expect(getDeadLetter()).toBeNull();
+	});
+
+	it('_fireWebhookOut threads the delivery start time into the store (for the forget tombstone)', async () => {
+		const store = createDeadLetterStore({ forgetUserId: ({ data }) => data.author });
+		let capturedRec = null;
+		const origAdd = store.add.bind(store);
+		store.add = (rec) => { capturedRec = rec; return origAdd(rec); };
+		configureWebhooks({ deadLetter: store });
+		await _fireWebhookOut(failingEntry, 'orders', 'created', { author: 'u1' }, null);
+		expect(capturedRec).not.toBeNull();
+		expect(typeof capturedRec.startedAt).toBe('number');
+		expect(capturedRec.startedAt).toBeGreaterThan(0);
+		// startedAt is captured before delivery, failedAt after - both from the same
+		// runtime clock seam, so the start is always at or before the failure.
+		expect(capturedRec.failedAt).toBeGreaterThanOrEqual(capturedRec.startedAt);
 	});
 
 	it('accepts an explicit store instance', () => {

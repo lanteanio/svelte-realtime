@@ -3,6 +3,7 @@ import { _presenceRef } from './state.js';
 import { clearTimer } from '../shared/runtime.js';
 import { _topicInTenant } from './tenant.js';
 import { _ownerOnLeave, _ownerEmit } from './room-owner.js';
+import { _maybeReplayPublish } from './replay-routing.js';
 
 /**
  * Direct handle to the in-memory presence-ref map for tests that need to seed
@@ -144,6 +145,19 @@ export async function _clusterPresenceRelease(platform, topic, key) {
  */
 export async function _purgePresenceUser(platform, tenantId, userId, publishLeave) {
 	if (typeof userId !== 'string' || userId.length === 0) return 0;
+	// Owner succession, unlike a presence leave, does NOT self-heal on the
+	// forgotten user's later disconnect: the purge already dropped its presence
+	// ref, so a subsequent close hits `if (!ref) return` and never re-runs
+	// succession. So the `:owner` change must be published even though the forget
+	// cascade wires no `publishLeave`. Route it through the platform, via the
+	// replay buffer when the `:owner` topic is replay-eligible (it is, once
+	// claimed or an owner stream is subscribed), so live subscribers update AND a
+	// resuming client gap-fills the successor rather than reading the erased owner.
+	const _ownerPublish = platform
+		? (wireTopic, event, data) => {
+			if (!_maybeReplayPublish(platform, wireTopic, event, data)) platform.publish(wireTopic, event, data);
+		}
+		: null;
 	let n = 0;
 	for (const [refKey, ref] of [..._presenceRef]) {
 		const sep = refKey.lastIndexOf('\0');
@@ -168,7 +182,7 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 		// A topic without owner tracking is a no-op inside the helper.
 		try {
 			const change = await _ownerOnLeave(platform, topic, key);
-			if (change) _ownerEmit(topic, tenantId, change, publishLeave || (() => { /* no publish path wired */ }));
+			if (change) _ownerEmit(topic, tenantId, change, publishLeave || _ownerPublish || (() => { /* no platform: nothing to publish through */ }));
 		} catch { /* owner release best-effort; the membership is already gone */ }
 	}
 	return n;

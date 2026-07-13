@@ -658,6 +658,33 @@ describe('live.room owner - forget purge', () => {
 		expect(pub).toContainEqual({ topic: 'game:7:owner', event: 'set', data: { key: 'bob', reason: 'succeeded' } });
 		expect(changes.at(-1)).toEqual({ topic: 'game:7', owner: 'bob', previous: 'alice', reason: 'succeeded' });
 	});
+
+	it('PUBLISHES succession to subscribers with a null publishLeave (the real forget cascade path)', async () => {
+		// forget.js calls _purgePresenceUser(platform, t, u, null) - no publishLeave.
+		// Owner succession must still reach subscribers (it does NOT self-heal on the
+		// forgotten user's later disconnect), routed through the platform.
+		const changes = [];
+		const game = mkRoom({
+			presence: (ctx) => ({ name: ctx.user.id }),
+			onOwnerChange: (c) => changes.push(c)
+		});
+		const ds = game.__dataStream;
+		const published = [];
+		// The wire publish the forget cascade uses (no platform.replay here, so the
+		// owner change falls to a bare platform.publish and is captured).
+		const platform = { publish: (topic, event, data) => { published.push({ topic, event, data }); } };
+		const subCap = () => {};
+		await ds.__onSubscribe(mkCtx('alice', subCap), 'game:7', [7]);
+		await ds.__onSubscribe(mkCtx('bob', subCap), 'game:7', [7]);
+		published.length = 0;
+
+		const removed = await _purgePresenceUser(platform, null, 'alice', null);
+		await flushAsync();
+		expect(removed).toBe(1);
+		// The successor reaches subscribers through the platform, not a swallowed no-op.
+		expect(published).toContainEqual({ topic: 'game:7:owner', event: 'set', data: { key: 'bob', reason: 'succeeded' } });
+		expect(changes.at(-1)).toEqual({ topic: 'game:7', owner: 'bob', previous: 'alice', reason: 'succeeded' });
+	});
 });
 
 describe('owner codegen extraction', () => {

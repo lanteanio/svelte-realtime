@@ -278,6 +278,64 @@ describe('live.alarm', () => {
 			await _pollAlarms(); // guarded: no due -> no-op
 			expect(fired).toBe(0);
 		});
+
+		it('a store-backed alarm armed on a NON-leader still fires PRECISELY via its own timer', async () => {
+			// With a store, the atomic delete-claim - not the leader gate - arbitrates
+			// single-fire, so the arming instance (a non-leader, the common case since
+			// clients are load-balanced) must fire on time rather than wait for the
+			// leader's up-to-pollMs-late recovery sweep.
+			let fired = 0;
+			const store = memStore();
+			configureAlarm({ store, leader: () => false });
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, { wireTopic: 'room:nonleader-precise', onAlarm: () => { fired++; }, path: 'rooms/x', tenantId: null });
+			ctx.setAlarm(Date.now() + 5);
+			await tick(30);
+			expect(fired).toBe(1);                                        // fired precisely, not dropped/late
+			expect(store.rows.has('room:nonleader-precise')).toBe(false); // its own claim consumed the row
+		});
+
+		it('a store-backed non-leader alarm with misfireMs < pollMs is NOT silently dropped', async () => {
+			// Pre-fix, a non-leader precise fire returned at the leader gate, leaving
+			// only the recovery sweep - which drops any alarm later than misfireMs. A
+			// healthy cluster thus silently dropped the majority of misfire-guarded
+			// alarms. The precise fire is on time, so misfireMs never trips.
+			let fired = 0;
+			const store = memStore();
+			configureAlarm({ store, leader: () => false });
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, { wireTopic: 'room:nonleader-mf', onAlarm: () => { fired++; }, misfireMs: 100 });
+			ctx.setAlarm(Date.now() + 5);
+			await tick(30);
+			expect(fired).toBe(1);
+		});
+
+		it('the store claim single-fires: after a non-leader fires precisely, the leader recovery poll does not re-fire', async () => {
+			let fired = 0;
+			const store = memStore();
+			configureAlarm({ store, leader: () => false });
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, { wireTopic: 'room:sf', onAlarm: () => { fired++; }, path: 'rooms/sf', tenantId: null });
+			ctx.setAlarm(Date.now() + 5);
+			await tick(30);
+			expect(fired).toBe(1);
+			// The leader's recovery poll now runs; the row was already claimed/deleted.
+			configureAlarm({ store, leader: () => true });
+			await _pollAlarms();
+			expect(fired).toBe(1); // no double-fire - the atomic delete-claim arbitrated
+		});
+
+		it('WITHOUT a store, the leader gate still applies to the precise timer (leader-only firing preserved)', async () => {
+			// The discouraged leader-without-store config keeps today's behavior: the
+			// in-memory timer is the sole arbiter, so only the leader fires.
+			let fired = 0;
+			configureAlarm({ leader: () => false });
+			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+			_bindAlarmCtx(ctx, { wireTopic: 'room:nostore-nonleader', onAlarm: () => { fired++; } });
+			ctx.setAlarm(Date.now() + 5);
+			await tick(30);
+			expect(fired).toBe(0);
+		});
 	});
 
 	describe('fire-time visibility (ctx.alarm) + misfire policy', () => {

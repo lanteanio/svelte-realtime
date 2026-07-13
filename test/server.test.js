@@ -11093,6 +11093,49 @@ describe('live.idempotent()', () => {
 		expect(platform.sent[1].data.data).toBe('ok');
 	});
 
+	it('a commit failure leaves the slot intact and does NOT double-apply on retry', async () => {
+		// A durable store can apply its record (SET) then lose the ack, or reject
+		// after a partial write. A single catch around handler+commit used to call
+		// slot.abort() on a commit throw, deleting the committed record so a retry
+		// re-ran the handler and double-applied the effect. Now the handler and the
+		// commit have SEPARATE error scopes: a commit failure never aborts, surfaces
+		// a typed IDEMPOTENCY_COMMIT_UNKNOWN, and a retry reads the durably-applied
+		// record instead of re-running.
+		let calls = 0;
+		let aborted = false;
+		let record;   // the durably-applied record - survives the lost ack
+		const store = {
+			async acquire() {
+				if (record !== undefined) return { acquired: false, pending: false, result: record };
+				return {
+					acquired: true,
+					async commit(value) { record = value; throw new Error('commit ack lost'); },
+					async abort() { aborted = true; record = undefined; }
+				};
+			}
+		};
+		const handler = live.idempotent({ keyFrom: () => 'op', store }, async () => { calls++; return 'effect'; });
+		__register('idem/commit-fail', handler);
+		const ws = mockWs();
+		const platform = mockPlatform();
+
+		// First call: handler runs, commit throws (ack lost). Must NOT abort the
+		// (durably committed) record and must surface IDEMPOTENCY_COMMIT_UNKNOWN.
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/commit-fail', id: '1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toBe(1);
+		expect(aborted).toBe(false);
+		expect(platform.sent[0].data.ok).toBe(false);
+		expect(platform.sent[0].data.code).toBe('IDEMPOTENCY_COMMIT_UNKNOWN');
+
+		// Retry with the same key: the record is present, so the handler must NOT
+		// run again - no double-apply.
+		handleRpc(ws, toArrayBuffer({ rpc: 'idem/commit-fail', id: '2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		expect(calls).toBe(1);
+		expect(platform.sent[1].data).toMatchObject({ ok: true, data: 'effect' });
+	});
+
 	it('caches an undefined result (acquired flag is the discriminant, not result presence)', async () => {
 		let calls = 0;
 		const handler = live.idempotent(
@@ -12090,8 +12133,21 @@ describe('three-tier reconnect (replay -> delta.fromSeq -> rehydrate)', () => {
 // out via the `WRAPPED_FOR_REPLAY` marker for back-compat.
 
 describe('auto-replay routing', () => {
+	// getPlatform() (used by the top-level publish()) resolves
+	// state.derivedPlatform || state.cronPlatform; clear a platform leaked from an
+	// earlier suite so the out-of-band publish() tests resolve the platform each
+	// test sets, then restore.
+	let _savedDerived, _savedCron;
 	beforeEach(() => {
 		_resetReplayRouting();
+		_savedDerived = state.derivedPlatform;
+		_savedCron = state.cronPlatform;
+		state.derivedPlatform = null;
+		state.cronPlatform = null;
+	});
+	afterEach(() => {
+		state.derivedPlatform = _savedDerived;
+		state.cronPlatform = _savedCron;
 	});
 
 	/** Build a fake platform.replay surface that records all calls. */
@@ -12189,6 +12245,54 @@ describe('auto-replay routing', () => {
 		expect(platform.replay.calls).toEqual([]);
 		expect(platform.published.length).toBe(1);
 		expect(platform.published[0].topic).toBe('cron-bare/topic');
+	});
+
+	it('top-level publish() to a replay-eligible topic auto-routes through platform.replay.publish', () => {
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		setCronPlatform(platform);
+		const stream = live.stream('oob/replay', async () => [], { merge: 'crud', key: 'id', replay: true });
+		__register('oob/replay', stream);
+
+		const ok = publish('oob/replay', 'created', { id: 7 });
+		expect(ok).toBe(true);
+		// Routed to the shared buffer, not just broadcast live.
+		expect(platform.replay.calls).toEqual([{ topic: 'oob/replay', event: 'created', data: { id: 7 } }]);
+		expect(platform.published).toEqual([{ topic: 'oob/replay', event: 'created', data: { id: 7 } }]);
+	});
+
+	it('top-level publish() to a NON-replay-eligible topic uses bare platform.publish', () => {
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		setCronPlatform(platform);
+		publish('oob/not-registered', 'created', { id: 1 });
+		expect(platform.replay.calls).toEqual([]);
+		expect(platform.published.length).toBe(1);
+		expect(platform.published[0].topic).toBe('oob/not-registered');
+	});
+
+	it('a jittered top-level publish() stays on the direct path (control event, no buffer write)', () => {
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		setCronPlatform(platform);
+		const stream = live.stream('oob/jit', async () => [], { merge: 'crud', key: 'id', replay: true });
+		__register('oob/jit', stream);
+		publish('oob/jit', 'created', { id: 2 }, { jitterMs: 50 });
+		expect(platform.replay.calls).toEqual([]);           // jittered = direct path
+		expect(platform.published.length).toBe(1);
+	});
+
+	it('live.flag().set() lands in the replay buffer (cluster-latest), not just a live broadcast', () => {
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		setCronPlatform(platform);
+		const flag = live.flag('flag/feature');
+		__register('flag/feature', flag);
+		flag.set('LATEST');
+		// The flag's default single-entry replay buffer must capture the set, so a
+		// replica that boots after it (or a fresh subscriber) reads the latest value.
+		expect(platform.replay.calls).toEqual([{ topic: 'flag/feature', event: 'set', data: 'LATEST' }]);
+		expect(platform.published).toEqual([{ topic: 'flag/feature', event: 'set', data: 'LATEST' }]);
 	});
 
 	it('dev-warns ONCE per topic when replay: true is declared but platform.replay is missing', async () => {

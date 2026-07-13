@@ -2,13 +2,13 @@
 // Covers the pure redactor (createPiiRedactor) plus the live-publish,
 // redact-before-buffer, initial-load, fail-closed, and registry-cleanup paths.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createPiiRedactor, SENSITIVE_KEY_RE } from '../src/server/pii-redact.js';
-import { live, __register, handleRpc, close, publish, _resetRedactRegistry } from '../src/server.js';
+import { live, __register, handleRpc, close, publish, setBus, _activateDerived, _resetRedactRegistry } from '../src/server.js';
 import { _buildCtx, _getCtxHelpers } from '../src/server/ctx.js';
-import { _topicRedact, _declaredRedact, state } from '../src/server/state.js';
+import { _topicRedact, _declaredRedact, _declaredRedactPattern, _declaredStreamTopic, state } from '../src/server/state.js';
 import { _registerReplayTopic, _resetReplayRouting } from '../src/server/replay-routing.js';
-import { _redactOrDrop, _resolveRedactor } from '../src/server/publish-helpers.js';
+import { _redactOrDrop, _resolveRedactor, REDACT_DROP } from '../src/server/publish-helpers.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { toArrayBuffer } from './helpers/encode.js';
@@ -326,5 +326,272 @@ describe('piiRedact - declaration-time coverage (zero-subscriber + out-of-band)'
 		expect(_declaredRedact.has('secret')).toBe(true);
 		expect(_resolveRedactor('@t/acme/secret')).toBeTruthy();
 		expect(_redactOrDrop('@t/acme/secret', { ssn: '999-88', name: 'Bo' })).toEqual({ name: 'Bo' });
+	});
+});
+
+describe('piiRedact - cluster-transient DYNAMIC topic (never-subscribed instance)', () => {
+	// A recording bus mirroring the extensions' redis/pubsub `wrap`: records a
+	// relay for each publish where `options.relay !== false`. The relayed frame
+	// is exactly what reaches a PEER instance that DOES hold the subscriber, so
+	// asserting it stays redacted proves the cluster-transient leak is closed at
+	// the source (send-side, before the wire).
+	const makeRecordingBus = () => {
+		const relays = [];
+		return {
+			relays,
+			wrap(platform) {
+				return {
+					...platform,
+					publish(topic, event, data, options) {
+						const result = platform.publish(topic, event, data, options);
+						if (!options || options.relay !== false) relays.push({ topic, event, data, options });
+						return result;
+					}
+				};
+			}
+		};
+	};
+
+	let savedCron;
+	beforeEach(() => { savedCron = state.cronPlatform; });
+	afterEach(() => {
+		state.cronPlatform = savedCron;
+		setBus(null);
+		_resetRedactRegistry();
+		_resetReplayRouting();
+	});
+
+	it('registers a matchable pattern for a factory topic, not an exact entry', () => {
+		__register('pii/dyn-reg', live.stream((ctx, room) => 'room:' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { ssn: 'omit' } } }));
+		// No exact entry for any resolved topic (nobody subscribed), but the
+		// derived pattern is registered so a publish resolves the redactor.
+		expect(_declaredRedact.has('room:7')).toBe(false);
+		expect(_declaredRedactPattern.size).toBeGreaterThan(0);
+		expect(_resolveRedactor('room:7')).toBeTruthy();
+	});
+
+	it('does NOT over-match a topic outside the factory pattern', () => {
+		__register('pii/dyn-precise', live.stream((ctx, room) => 'room:' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { ssn: 'omit' } } }));
+		expect(_resolveRedactor('room:9')).toBeTruthy();     // matches the pattern
+		expect(_resolveRedactor('lobby:9')).toBeNull();      // different namespace - untouched
+		expect(_resolveRedactor('room')).toBeNull();         // prefix only, no variable segment
+	});
+
+	it('skips a pure pass-through (x) => x topic - no match-everything footgun', () => {
+		__register('pii/passthrough', live.stream((x) => x, async () => ({}), { merge: 'set', piiRedact: true }));
+		// The derived pattern is {arg0} alone (no literal anchor); registering it
+		// would redact every topic, so it is intentionally not registered.
+		expect(_declaredRedactPattern.size).toBe(0);
+		expect(_resolveRedactor('anything-at-all')).toBeNull();
+	});
+
+	it('skips a variable-first factory - no app-wide over-redaction or publish DoS', () => {
+		// (ctx, uid, kind) => uid + ':' + kind derives `{arg1}:{arg2}`, whose
+		// matcher would be `^.+:.+$` and redact EVERY colon topic. A throwing
+		// custom redactor would then drop unrelated streams' publishes entirely.
+		// Such a variable-first pattern is skipped, so co-located streams are safe.
+		__register('pii/varfirst', live.stream(
+			(ctx, uid, kind) => uid + ':' + kind,
+			async () => ({}),
+			{ merge: 'set', piiRedact: (d) => ({ id: d.user.id }) }   // throws on any shape without `user`
+		));
+		expect(_declaredRedactPattern.size).toBe(0);
+		expect(_resolveRedactor('presence:main')).toBeNull();
+		// An unrelated, non-redact publish is untouched (not redacted, not dropped).
+		const platform = mockPlatform();
+		const ok = _buildCtx(null, null, platform, _getCtxHelpers(platform), null)
+			.publish('presence:main', 'set', { secret: 'KEEP-ME', count: 42 });
+		expect(ok).not.toBe(false);
+		expect(platform.published).toHaveLength(1);
+		expect(platform.published[0].data).toEqual({ secret: 'KEEP-ME', count: 42 });
+	});
+
+	it('skips a variable-first-with-suffix factory (broad blast radius)', () => {
+		// (ctx, x) => x + ':chat' derives `{arg1}:chat` -> `^.+:chat$`, matching
+		// any co-located topic ending in :chat; treated like variable-first.
+		__register('pii/suffix', live.stream((ctx, x) => x + ':chat', async () => ({}), { merge: 'set', piiRedact: true }));
+		expect(_declaredRedactPattern.size).toBe(0);
+		expect(_resolveRedactor('room:chat')).toBeNull();
+	});
+
+	it('bounds a placeholder to one segment - does not over-match a nested co-located topic', () => {
+		// (ctx, room) => 'chat/' + room derives `chat/{arg1}` -> `^chat/[^/:]+$`,
+		// which matches the stream's own `chat/5` but NOT a nested non-redact
+		// sub-stream like `chat/typing/5` (a greedy `.+` would swallow it).
+		__register('pii/nested', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { ssn: 'omit' } } }));
+		expect(_resolveRedactor('chat/5')).toBeTruthy();
+		expect(_resolveRedactor('chat/typing/5')).toBeNull();
+		expect(_resolveRedactor('chat/rooms:9')).toBeNull();
+	});
+
+	it('collapses adjacent placeholders so the matcher is not quadratic', () => {
+		// (ctx, a, b) => 'foo' + a + b + 'bar' derives `foo{arg1}{arg2}bar`; the
+		// two adjacent placeholders must collapse to one segment, never `X+X+`.
+		__register('pii/adjacent', live.stream((ctx, a, b) => 'foo' + a + b + 'bar', async () => ({}), { merge: 'set', piiRedact: true }));
+		const entry = [..._declaredRedactPattern.values()][0];
+		expect(entry.regex.source).toBe('^foo[^/:]+bar$');
+		expect(entry.regex.source).not.toContain('[^/:]+[^/:]+');
+		expect(entry.regex.test('fooXYbar')).toBe(true);
+	});
+
+	it('keeps the full literal prefix when the topic contains a literal brace', () => {
+		// `a{b}/` + arg derives `a{b}/{arg1}`; the prefix must be the run up to the
+		// PLACEHOLDER (`a{b}/`), not up to the first literal `{`.
+		__register('pii/brace', live.stream((ctx, id) => 'a{b}/' + id, async () => ({}), { merge: 'set', piiRedact: true }));
+		const entry = [..._declaredRedactPattern.values()][0];
+		expect(entry.prefix).toBe('a{b}/');
+		expect(_resolveRedactor('a{b}/7')).toBeTruthy();
+		expect(_resolveRedactor('other/7')).toBeNull();
+	});
+
+	it('warns when two streams derive the same pattern with different redactors', () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			__register('pii/dup-a', live.stream((ctx, room) => 'dup:' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { a: 'omit' } } }));
+			expect(warn).not.toHaveBeenCalled();   // first declaration is silent
+			__register('pii/dup-b', live.stream((ctx, room) => 'dup:' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { b: 'omit' } } }));
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toContain('dup:{arg1}');
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('clears the dynamic pattern registry on reset', () => {
+		__register('pii/dyn-reset', live.stream((ctx, room) => 'room:' + room, async () => ({}), { merge: 'set', piiRedact: true }));
+		expect(_declaredRedactPattern.size).toBeGreaterThan(0);
+		_resetRedactRegistry();
+		expect(_declaredRedactPattern.size).toBe(0);
+	});
+
+	it('redacts a live ctx.publish to a resolved dynamic topic NEVER subscribed on this instance', async () => {
+		__register('pii/dyn-live', live.stream((ctx, room) => 'room:' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { ssn: 'omit' } } }));
+		// This instance subscribes to room 1 only.
+		const ws = mockWs({ id: 'a1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'pii/dyn-live', id: 's1', args: ['1'], stream: true }), platform);
+		await flush();
+		expect(_declaredRedact.has('room:2')).toBe(false);   // never subscribed to room 2
+
+		// A publish to room 2 (another origin has that subscriber) - the leak.
+		const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
+		ctx.publish('room:2', 'set', { ssn: '111-22-3333', name: 'Ann' });
+		const pub = platform.published.find((p) => p.topic === 'room:2');
+		expect(pub).toBeTruthy();
+		expect(pub.data).toEqual({ name: 'Ann' });
+		expect(JSON.stringify(pub.data)).not.toContain('111-22-3333');
+	});
+
+	it('redacts the RELAYED frame for a never-subscribed dynamic topic (cluster-transient)', async () => {
+		__register('pii/dyn-relay', live.stream((ctx, room) => 'room:' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { ssn: 'omit' } } }));
+		const bus = makeRecordingBus();
+		setBus(bus);
+		const platform = mockPlatform();
+		_activateDerived(platform);          // installs the reactive relay wrap on platform.publish
+		state.cronPlatform = platform;       // getPlatform() resolves this for the out-of-band publish()
+
+		// This instance holds a room-1 subscriber; room 2 lives on a peer.
+		const ws = mockWs({ id: 'r1' });
+		handleRpc(ws, toArrayBuffer({ rpc: 'pii/dyn-relay', id: 's1', args: ['1'], stream: true }), platform);
+		await flush();
+
+		// Out-of-band publish to room 2 - relays to the peer that has the subscriber.
+		publish('room:2', 'msg', { ssn: '111-22-3333', name: 'Ann' });
+
+		const local = platform.published.find((p) => p.topic === 'room:2');
+		const relayed = bus.relays.find((r) => r.topic === 'room:2');
+		expect(local).toBeTruthy();
+		expect(relayed).toBeTruthy();
+		expect(relayed.data).toEqual({ name: 'Ann' });
+		// The raw SSN must never leave this instance on the cluster relay.
+		expect(JSON.stringify(relayed.data)).not.toContain('111-22-3333');
+		expect(JSON.stringify(local.data)).not.toContain('111-22-3333');
+	});
+
+	// --- OWNERSHIP guard + FAIL-OPEN: a pattern match is a heuristic and must
+	// never strip or drop a co-located stream. ---
+
+	const publishVia = (platform, topic, event, data) =>
+		_buildCtx(null, null, platform, _getCtxHelpers(platform), null).publish(topic, event, data);
+
+	it('records every static stream/channel topic in the ownership index', () => {
+		__register('pii/own-fac', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: true }));
+		__register('pii/own-chan', live.channel('chat/typing', { merge: 'set' }));
+		expect(_declaredStreamTopic.has('chat/typing')).toBe(true);   // the static channel is indexed
+		expect(_declaredStreamTopic.has('chat/room1')).toBe(false);   // a resolved factory instance is NOT
+	});
+
+	it('does NOT drop a co-located static channel a throwing factory redactor would otherwise swallow', () => {
+		// chat/{room} redactor expects the chat shape and throws on anything else.
+		__register('pii/chat', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: (d) => ({ author: d.author.name, text: d.text }) }));
+		__register('pii/typing', live.channel('chat/typing', { merge: 'set' }));   // co-located flat sibling
+		// Ownership guard: the pattern does not claim the explicitly-declared topic.
+		expect(_resolveRedactor('chat/typing')).toBeNull();
+		const platform = mockPlatform();
+		const ok = publishVia(platform, 'chat/typing', 'set', { user: 'bob', typing: true });
+		expect(ok).not.toBe(false);                                    // NOT dropped
+		expect(platform.published).toHaveLength(1);
+		expect(platform.published[0].data).toEqual({ user: 'bob', typing: true });   // delivered raw
+	});
+
+	it('does NOT strip a co-located static sibling field (fields redactor)', () => {
+		__register('pii/chat2', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { user: 'omit' }, defaults: false } }));
+		__register('pii/typing2', live.channel('chat/typing', { merge: 'set' }));
+		expect(_resolveRedactor('chat/typing')).toBeNull();
+		const platform = mockPlatform();
+		publishVia(platform, 'chat/typing', 'set', { user: 'bob', typing: true });
+		expect(platform.published[0].data).toEqual({ user: 'bob', typing: true });   // user NOT stripped
+	});
+
+	it('excludes a static sibling in a colon namespace but still covers resolved instances', () => {
+		__register('pii/room', live.stream((ctx, id) => 'room:' + id, async () => ({}), { merge: 'set', piiRedact: { fields: { ssn: 'omit' } } }));
+		__register('pii/lobby', live.channel('room:lobby', { merge: 'set' }));
+		expect(_resolveRedactor('room:lobby')).toBeNull();     // declared static -> excluded
+		expect(_resolveRedactor('room:42')).toBeTruthy();      // resolved dynamic instance -> covered
+	});
+
+	it('fail-open (ctx.publish): an UNDECLARED matching topic whose redactor throws passes through raw, not dropped', () => {
+		__register('pii/chat3', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: (d) => ({ author: d.author.name }) }));
+		expect(_declaredStreamTopic.has('chat/adhoc')).toBe(false);   // not a declared stream
+		const entry = _resolveRedactor('chat/adhoc');
+		expect(entry).toBeTruthy();
+		expect(entry.failOpen).toBe(true);
+		const platform = mockPlatform();
+		const ok = publishVia(platform, 'chat/adhoc', 'set', { note: 'hi' });   // redactor throws on this shape
+		expect(ok).not.toBe(false);                                   // NOT dropped (fail-open)
+		expect(platform.published).toHaveLength(1);
+		expect(platform.published[0].data).toEqual({ note: 'hi' });   // raw pass-through, = pre-fix baseline
+	});
+
+	it('fail-open (_redactOrDrop / deferred path): a throwing pattern match returns the data, not REDACT_DROP', () => {
+		__register('pii/chat4', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: (d) => ({ author: d.author.name }) }));
+		const out = _redactOrDrop('chat/adhoc', { note: 'hi' });
+		expect(out).not.toBe(REDACT_DROP);
+		expect(out).toEqual({ note: 'hi' });
+	});
+
+	it('still redacts a real resolved instance when the redactor SUCCEEDS (the fix keeps working)', () => {
+		__register('pii/chat5', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: (d) => ({ text: d.text }) }));
+		const platform = mockPlatform();
+		publishVia(platform, 'chat/room5', 'set', { text: 'hello', ssn: '111-22-3333' });
+		expect(platform.published[0].data).toEqual({ text: 'hello' });   // the factory's own topic still redacts
+		expect(JSON.stringify(platform.published[0].data)).not.toContain('111-22-3333');
+	});
+
+	it('does NOT index a dynamic factory as a literal (only strings), so resolved instances stay pattern-matchable', () => {
+		__register('pii/dyn-c', live.stream((ctx, room) => 'chat/' + room, async () => ({}), { merge: 'set', piiRedact: true }));
+		// Only string topics enter the ownership index; the derived pattern skeleton
+		// never does. A co-located sibling written as a constant-returning factory is
+		// a documented residual - declare co-located topics as strings for ownership.
+		expect(_declaredStreamTopic.has('chat/{arg1}')).toBe(false);  // the pattern skeleton is not a literal entry
+		expect(_resolveRedactor('chat/anyroom')).toBeTruthy();        // a resolved instance is still covered
+	});
+
+	it('clears the ownership index on reset', () => {
+		__register('pii/reg', live.stream((ctx, id) => 'x:' + id, async () => ({}), { merge: 'set', piiRedact: true }));
+		__register('pii/static', live.channel('x:static', { merge: 'set' }));
+		expect(_declaredStreamTopic.size).toBeGreaterThan(0);
+		_resetRedactRegistry();
+		expect(_declaredStreamTopic.size).toBe(0);
 	});
 });

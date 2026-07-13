@@ -542,17 +542,37 @@ const _liveIdempotent = function idempotent(config, fn) {
 		// denormalizes them into columns. Anonymous callers pass nothing.
 		const slot = await store.acquire(key, ttlSec, uid !== null ? { user: uid, tenant: ctx.tenantId } : undefined);
 		if (slot && slot.acquired) {
+			let data;
 			try {
-				const data = await fn(ctx, ...args);
+				data = await fn(ctx, ...args);
+			} catch (err) {
+				// PRE-COMMIT handler failure: nothing was recorded, so release the
+				// slot and let a legitimate retry run the handler again.
+				try { await slot.abort(); } catch {}
+				throw err;
+			}
+			// Handler succeeded; its effect has run. A commit failure now is
+			// AMBIGUOUS - the store may have durably applied the record and only
+			// lost the acknowledgement, or it may have rejected before writing.
+			// Aborting here would delete a possibly-committed record and let a
+			// retry re-run the handler and DOUBLE-APPLY the effect, so the commit
+			// is deliberately OUTSIDE the abort scope. The slot is left intact for
+			// the store to reconcile, and the caller gets a typed
+			// IDEMPOTENCY_COMMIT_UNKNOWN so it reconciles rather than blindly retrying.
+			try {
 				// Wrap the result with its request fingerprint (skipped only when the
 				// args could not be serialized). The envelope is opaque to the store
 				// and is unwrapped before it ever reaches the caller.
 				await slot.commit(fp != null ? { [_FP]: fp, [_VAL]: data } : data);
-				return data;
 			} catch (err) {
-				try { await slot.abort(); } catch {}
-				throw err;
+				const unknown = new LiveError(
+					'IDEMPOTENCY_COMMIT_UNKNOWN',
+					'the idempotency record could not be confirmed committed after the handler ran; the effect may have applied - reconcile before retrying rather than re-running'
+				);
+				/** @type {any} */ (unknown).cause = err;
+				throw unknown;
 			}
+			return data;
 		}
 		if (slot && slot.pending) {
 			throw new LiveError('CONFLICT', 'A request with this idempotency key is already in progress');

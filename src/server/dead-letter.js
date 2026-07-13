@@ -10,6 +10,13 @@
 
 import { now } from '../shared/runtime.js';
 
+// A forget tombstone lives long enough to catch a webhook delivery that was
+// already in flight when `live.forget` ran and only fails (and would be
+// captured) AFTER the purge swept the store. Sized well above a normal retry
+// budget; a single delivery whose total duration (initial attempt + all
+// backoff) exceeds this is a narrow documented residual.
+const _DEAD_LETTER_TOMBSTONE_MS = 10 * 60 * 1000;
+
 /**
  * @typedef {object} DeadLetterRecord
  * @property {string} id - Monotonic per-store record id.
@@ -51,6 +58,14 @@ export function createDeadLetterStore(options = {}) {
 	/** @type {Map<string, DeadLetterRecord>} insertion-ordered */
 	const records = new Map();
 	let seq = 0;
+	// Forget tombstones: the most recent purge time per authoring userId. A record
+	// whose delivery was already in flight when `live.forget` ran (started before
+	// the purge, fails after it) is captured by `add` AFTER the purge scanned the
+	// store, so without this it would resurrect the forgotten user's event. Mirrors
+	// the idempotency store's racing-commit tombstone. Swept by age so the map
+	// stays bounded to recent erasures.
+	/** @type {Map<string, number>} authoring userId -> last purge ms */
+	const purgedAt = new Map();
 
 	// Drop expired records on access. O(n) over a bounded store; webhook failures
 	// are rare, so this is never a hot path. No reliance on monotone time - a
@@ -63,16 +78,34 @@ export function createDeadLetterStore(options = {}) {
 		}
 	}
 
+	// Drop tombstones older than the window: any delivery in flight across such an
+	// old purge has long since failed-and-been-dropped or succeeded, so the
+	// tombstone has done its job. Keeps the map bounded to recent erasures.
+	function _sweepTombstones() {
+		if (purgedAt.size === 0) return;
+		const cutoff = now() - _DEAD_LETTER_TOMBSTONE_MS;
+		for (const [u, t] of purgedAt) {
+			if (t < cutoff) purgedAt.delete(u);
+		}
+	}
+
 	return {
 		/**
-		 * Retain an undeliverable event. Returns the new record id. Evicts the
-		 * oldest record when over `max`.
-		 * @param {Omit<DeadLetterRecord, 'id'>} rec
-		 * @returns {string}
+		 * Retain an undeliverable event. Returns the new record id, or `null` when a
+		 * forget tombstone drops the record (its delivery was in flight when
+		 * `live.forget` ran). Evicts the oldest record when over `max`.
+		 * @param {Omit<DeadLetterRecord, 'id'> & { startedAt?: number }} rec
+		 *   `startedAt` is the delivery start time (threaded by `_fireWebhookOut`);
+		 *   used only for the forget-race tombstone, never stored.
+		 * @returns {string | null}
 		 */
 		add(rec) {
 			_expire();
-			const id = String(++seq);
+			_sweepTombstones();
+			// Extract the authoring userId FIRST so a forget tombstone can drop a
+			// record whose delivery raced a purge. purgeUser scans only records
+			// already present, so a late-arriving in-flight capture would otherwise
+			// resurrect the forgotten user's event past a confirmed erasure.
 			let userId = null;
 			if (forgetUserId) {
 				try {
@@ -80,6 +113,18 @@ export function createDeadLetterStore(options = {}) {
 					if (typeof u === 'string' && u.length > 0) userId = u;
 				} catch { /* extractor best-effort */ }
 			}
+			if (userId !== null) {
+				const tomb = purgedAt.get(userId);
+				// The delivery began at rec.startedAt (falling back to failedAt when a
+				// caller does not thread it). A purge at-or-after the delivery start
+				// means live.forget ran while this delivery was in flight, so dropping
+				// the record completes the erasure (the same at-or-before-acquire test
+				// the idempotency store applies to a racing commit).
+				const startedAt = typeof rec.startedAt === 'number' ? rec.startedAt
+					: (typeof rec.failedAt === 'number' ? rec.failedAt : now());
+				if (tomb !== undefined && tomb >= startedAt) return null;
+			}
+			const id = String(++seq);
 			/** @type {DeadLetterRecord} */
 			const record = {
 				id,
@@ -125,6 +170,12 @@ export function createDeadLetterStore(options = {}) {
 		 */
 		purgeUser(_tenantId, userId) {
 			if (typeof userId !== 'string' || userId.length === 0) return 0;
+			// Tombstone FIRST: a delivery already in flight when this purge runs is
+			// captured (add) only after we return, so record the purge time so that
+			// late add() drops it. Recorded even with zero matching records - the
+			// in-flight delivery may fail moments later.
+			purgedAt.set(userId, now());
+			_sweepTombstones();
 			let n = 0;
 			for (const [id, rec] of records) {
 				if (rec.userId === userId) {
@@ -186,6 +237,7 @@ export function createDeadLetterStore(options = {}) {
 
 		clear() {
 			records.clear();
+			purgedAt.clear();
 		}
 	};
 }

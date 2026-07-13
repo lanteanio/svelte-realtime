@@ -248,10 +248,20 @@ async function _fire(wireTopic) {
 	_pending.delete(wireTopic);
 	clearTimer(entry.timer);
 
-	// Cluster leader gate: with a durable store + leader, only the elected instance
-	// runs the handler. Single-instance (no leader) always fires. A throwing leader
-	// fails closed (skip) - better to miss one fire than to double-fire.
-	if (_alarmLeader !== null) {
+	// Cluster leader gate - applied to the PRECISE path only when there is NO
+	// durable store to arbitrate. With a store, the atomic `delete`-claim below
+	// already guarantees exactly one instance fires (the arming instance's precise
+	// timer or the leader's recovery sweep, whichever claims the row first). Gating
+	// the precise path on leadership as well would throw away on-time firing for
+	// every alarm armed on a NON-leader - the majority, since clients are
+	// load-balanced: its precise timer would return here, and it would fire only
+	// via the leader's up-to-pollMs-late recovery sweep, or be dropped entirely
+	// when misfireMs < pollMs. So with a store, let the arming instance fire
+	// precisely and rely on the claim for single-fire. Without a store the
+	// in-memory timer is the sole arbiter, so the discouraged leader-without-store
+	// config keeps leader-only firing. A throwing leader fails closed (skip) -
+	// better to miss one fire than to double-fire.
+	if (_alarmLeader !== null && _alarmStore === null) {
 		let isLeader;
 		try { isLeader = _alarmLeader(); }
 		catch (err) {

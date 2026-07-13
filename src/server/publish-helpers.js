@@ -2,7 +2,7 @@
 import { now as runtimeNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
-import { _topicRedact, _declaredRedact } from './state.js';
+import { _topicRedact, _declaredRedact, _declaredRedactPattern, _declaredStreamTopic } from './state.js';
 import { _stripAnyTenantTopic } from './tenant.js';
 
 /**
@@ -19,15 +19,56 @@ export const REDACT_DROP = Symbol('svti.redact.drop');
  * redactor even with no current subscriber (the subscribe-time entry is
  * refcount-evicted; the declaration-time entry is keyed by the logical topic).
  *
+ * Last, on a miss against both exact maps, scans the declaration-time DYNAMIC
+ * pattern registry so a publish to a resolved factory topic this instance never
+ * subscribed to still redacts (the cluster-transient case). The exact maps win
+ * so a subscribed or static topic never pays the scan; the scan itself is over
+ * the number of declared piiRedact factory streams (a handful), each gated by a
+ * literal-prefix `startsWith` before the regex. A pattern entry carries
+ * `failOpen: true` so a publish chokepoint knows the match was a heuristic and
+ * must pass through raw (not drop) if the redactor throws.
+ *
  * @param {string} topic
- * @returns {{ redact: Function, onError: Function | null } | null}
+ * @returns {{ redact: Function, onError: Function | null, failOpen?: boolean } | null}
  */
 export function _resolveRedactor(topic) {
 	let e = _topicRedact.get(topic) || _declaredRedact.get(topic);
 	if (e) return e;
 	const logical = _stripAnyTenantTopic(topic);
-	if (logical !== topic) e = _topicRedact.get(logical) || _declaredRedact.get(logical);
-	return e || null;
+	if (logical !== topic) {
+		e = _topicRedact.get(logical) || _declaredRedact.get(logical);
+		if (e) return e;
+	}
+	if (_declaredRedactPattern.size > 0) {
+		const m = _matchRedactPattern(topic);
+		if (m) return m;
+		if (logical !== topic) return _matchRedactPattern(logical);
+	}
+	return null;
+}
+
+/**
+ * Scan the dynamic-topic redactor patterns for the first whose compiled matcher
+ * accepts `topic`. Each entry is short-circuited by its literal prefix before
+ * the regex runs. Returns the matching entry or null.
+ *
+ * OWNERSHIP guard: a topic another stream/channel declared explicitly (present
+ * in `_declaredStreamTopic`) is never pattern-matched. A factory pattern
+ * (`chat/{arg0}` -> `^chat/[^/:]+$`) would otherwise claim a co-located static
+ * `chat/typing` and apply the wrong stream's redactor to it - stripping its
+ * fields or, with a throwing redactor, dropping its publishes. The explicit
+ * declaration wins: that topic keeps its own redaction contract (or none).
+ *
+ * @param {string} topic
+ * @returns {{ redact: Function, onError: Function | null, failOpen?: boolean } | null}
+ */
+function _matchRedactPattern(topic) {
+	if (_declaredStreamTopic.has(topic)) return null;
+	for (const entry of _declaredRedactPattern.values()) {
+		if (entry.prefix && !topic.startsWith(entry.prefix)) continue;
+		if (entry.regex.test(topic)) return entry;
+	}
+	return null;
 }
 
 /**
@@ -39,6 +80,12 @@ export function _resolveRedactor(topic) {
  * set). Returns the redacted data, the original data (no redactor registered),
  * or `REDACT_DROP`.
  *
+ * A pattern-registry match (`e.failOpen`) is the exception: the topic only
+ * HEURISTICALLY belongs to the stream, so a throw there means the data is likely
+ * not this stream's shape. Dropping it would silently lose an unrelated
+ * publish, so the fail-open path passes the original data through raw - which is
+ * exactly the pre-registry cluster-transient baseline, never worse.
+ *
  * @param {string} topic
  * @param {any} data
  * @returns {any}
@@ -49,6 +96,7 @@ export function _redactOrDrop(topic, data) {
 	try {
 		return e.redact(data);
 	} catch (err) {
+		if (e.failOpen) return data;
 		if (e.onError) { try { e.onError(err, null, topic); } catch {} }
 		return REDACT_DROP;
 	}

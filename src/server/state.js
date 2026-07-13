@@ -134,6 +134,66 @@ export const _topicRedact = new Map();
 export const _declaredRedact = new Map();
 
 /**
+ * Declaration-scoped PII redaction registry for DYNAMIC (factory) topics,
+ * keyed by the derived topic PATTERN. Mirrors `_declaredRedact` but matches a
+ * resolved wire topic by pattern rather than by exact string, and is populated
+ * at declaration time from the factory's derived pattern (`chat/{arg0}`) - never
+ * refcount-evicted.
+ *
+ * This closes the cluster-transient dynamic-topic residual: an instance
+ * publishing to a resolved dynamic topic it never locally subscribed to has no
+ * exact `_topicRedact`/`_declaredRedact` entry, so a raw frame would reach the
+ * buffer and relay across the cluster. The redactor is UNIFORM per stream, so
+ * matching the resolved topic against the declaration pattern recovers it on the
+ * publishing instance - redaction stays send-side, before the wire, needing no
+ * cross-instance relay protocol. Only patterns with a leading literal PREFIX
+ * register (a variable-first topic like `{arg0}:{arg1}` is skipped, since its
+ * `^.+:.+$` matcher would redact unrelated streams app-wide), and each
+ * placeholder matches ONE `/`- or `:`-delimited segment (`[^/:]+`).
+ *
+ * A pattern match is a HEURISTIC - it guesses a resolved topic belongs to this
+ * factory stream. Two guards keep that guess from harming a co-located stream:
+ * (1) the OWNERSHIP guard - a topic another stream/channel declared explicitly
+ * (`_declaredStreamTopic`) is never pattern-matched, so a static `chat/typing`
+ * beside a `chat/{room}` factory is untouched; and (2) the match is FAIL-OPEN
+ * (`failOpen: true`) - if the redactor throws on a pattern-matched topic (a
+ * strong signal the data is not this stream's shape), the publish passes through
+ * RAW instead of being dropped. Raw is exactly the pre-fix cluster-transient
+ * baseline, so enabling this registry never DROPS a publish that would otherwise
+ * have been delivered. The narrow residual is an UNDECLARED ad-hoc publish to a
+ * topic inside the pattern's namespace under a fields redactor (its field is
+ * omitted - non-destructive, message still delivered), and two distinct factory
+ * streams that derive the SAME skeleton (`chat/{room}` vs `chat/{thread}` -> both
+ * `chat/{arg1}`: later-declared wins, dev-warned); give those distinct shapes.
+ *
+ * @type {Map<string, { regex: RegExp, prefix: string, redact: Function, onError: Function | null, failOpen: boolean }>}
+ */
+export const _declaredRedactPattern = new Map();
+
+/**
+ * Ownership index for the dynamic-topic redactor scan: the set of every STATIC
+ * (string) topic any `live.stream` / `live.channel` declared, regardless of
+ * whether it has piiRedact. `_matchRedactPattern` consults it so a factory
+ * pattern (`chat/{arg0}` -> `^chat/[^/:]+$`) never claims a topic another stream
+ * declared explicitly as a string - a co-located static `chat/typing` typing
+ * indicator keeps its own redaction contract (or none) instead of being
+ * field-stripped or fail-closed-dropped by the neighbouring factory's redactor.
+ * Populated at declaration; cleared with the redact registry and on full reset,
+ * so its lifecycle mirrors the stream registry it indexes.
+ *
+ * Only STRING topics are indexed: a topic factory is deliberately never invoked
+ * at declaration (the framework calls it only at subscribe, with validated args),
+ * so a co-located sibling written as a rare constant-returning factory
+ * (`(ctx) => 'chat/typing'`) is a documented residual - its fields-redactor field
+ * is omitted (non-destructive; message delivered), and a throwing redactor is
+ * passed through raw by the fail-open path. Declare a co-located topic as a
+ * string to get ownership protection.
+ *
+ * @type {Set<string>}
+ */
+export const _declaredStreamTopic = new Set();
+
+/**
  * Per-topic volatile registry. When a stream registered with `volatile: true`
  * is subscribed, its topic is recorded here. The publish helper translates
  * `volatile` topics + per-call `options.volatile === true` into the adapter's

@@ -41,6 +41,10 @@ function _reportWebhookOutFailure(config, err, event, data, attempts) {
 
 export async function _fireWebhookOut(entry, topic, event, data, platform) {
 	void platform; // accepted for call-site parity; delivery reads entry.config
+	// Capture when delivery began so the dead-letter store's forget tombstone can
+	// tell an in-flight-during-forget capture (drop) from a post-forget one. A
+	// long retry budget can outlive a live.forget that ran mid-delivery.
+	const startedAt = now();
 	const r = await deliverWebhook(entry.config, topic, event, data, _webhookHooks(entry));
 	if (r.ok) return;
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
@@ -54,7 +58,8 @@ export async function _fireWebhookOut(entry, topic, event, data, platform) {
 				data,
 				attempts: r.attempts | 0,
 				error: String((r.err && r.err.message) || r.err || 'unknown'),
-				failedAt: now()
+				failedAt: now(),
+				startedAt
 			});
 			if (added && typeof added.then === 'function') added.catch(() => {});
 		} catch { /* never let dead-letter capture break the (best-effort) webhook path */ }
