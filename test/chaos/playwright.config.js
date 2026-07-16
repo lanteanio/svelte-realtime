@@ -16,6 +16,6 @@ export default defineConfig({
 	globalTeardown: './global-teardown.js',
 	use: { headless: true },
 	projects: [
-		{ name: 'chaos', testMatch: 'multi-instance.spec.js' }
+		{ name: 'chaos', testMatch: ['multi-instance.spec.js', 'room-lobby-cluster.spec.js'] }
 	]
 });

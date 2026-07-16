@@ -78,7 +78,18 @@ const _OWNER_TTL_SEC = 3600;
 /** @type {WeakMap<any, Map<string, { promise: Promise<any>, resolve: (v: any) => void, expected: boolean, settled: boolean }>>} */
 const _ownerClaimByWs = new WeakMap();
 
-function _ownerClaimSlot(ws, topic, create) {
+// The same barrier machinery serves the `:presence` sub-stream's first-joiner
+// self delivery: the data-join's presence acquire races the paired `:presence`
+// loader inside one parallel subscribe batch (the acquire's shared-roster write
+// - delayed further by the owner join's round-trips in an owner room - can land
+// AFTER the loader's roster read), and the acquire's live 'join' can hit the
+// socket before the client registers the `:presence` store, so the joiner never
+// sees itself. Slots are keyed per (socket, wire data topic) with a `\0`
+// namespace suffix separating the presence barrier from the owner barrier on
+// the same topic (a validated wire topic contains no `\0`).
+const _PRESENCE_CLAIM_NS = '\0presence';
+
+function _ownerClaimSlot(ws, key, create) {
 	if (!ws) return undefined;
 	let m = _ownerClaimByWs.get(ws);
 	if (!m) {
@@ -86,15 +97,37 @@ function _ownerClaimSlot(ws, topic, create) {
 		m = new Map();
 		_ownerClaimByWs.set(ws, m);
 	}
-	let slot = m.get(topic);
+	let slot = m.get(key);
 	if (!slot && create) {
 		/** @type {(v: any) => void} */
 		let resolve = () => {};
 		const promise = new Promise((r) => { resolve = r; });
 		slot = { promise, resolve, expected: false, settled: false };
-		m.set(topic, slot);
+		m.set(key, slot);
 	}
 	return slot;
+}
+
+function _claimBeginKey(ws, key) {
+	const slot = _ownerClaimSlot(ws, key, true);
+	if (slot) slot.expected = true;
+}
+
+function _claimResolveKey(ws, key, value) {
+	const slot = _ownerClaimSlot(ws, key, true);
+	if (slot && !slot.settled) {
+		slot.settled = true;
+		slot.resolve(value ?? null);
+	}
+}
+
+async function _claimAwaitKey(ws, key) {
+	const slot = _ownerClaimSlot(ws, key, false);
+	if (!slot || !slot.expected) return undefined;
+	const value = await slot.promise;
+	const m = _ownerClaimByWs.get(ws);
+	if (m) { m.delete(key); if (m.size === 0) _ownerClaimByWs.delete(ws); }
+	return value && value.key != null ? value : undefined;
 }
 
 /**
@@ -105,8 +138,7 @@ function _ownerClaimSlot(ws, topic, create) {
  * @param {string} topic wire data topic
  */
 export function _ownerClaimBegin(ws, topic) {
-	const slot = _ownerClaimSlot(ws, topic, true);
-	if (slot) slot.expected = true;
+	_claimBeginKey(ws, topic);
 }
 
 /**
@@ -119,11 +151,7 @@ export function _ownerClaimBegin(ws, topic) {
  * @param {{ key: string, reason: string } | null} value
  */
 export function _ownerClaimResolve(ws, topic, value) {
-	const slot = _ownerClaimSlot(ws, topic, true);
-	if (slot && !slot.settled) {
-		slot.settled = true;
-		slot.resolve(value ?? null);
-	}
+	_claimResolveKey(ws, topic, value);
 }
 
 /**
@@ -136,12 +164,67 @@ export function _ownerClaimResolve(ws, topic, value) {
  * @returns {Promise<{ key: string, reason: string } | undefined>}
  */
 export async function _ownerClaimAwait(ws, topic) {
-	const slot = _ownerClaimSlot(ws, topic, false);
-	if (!slot || !slot.expected) return undefined;
-	const value = await slot.promise;
+	return _claimAwaitKey(ws, topic);
+}
+
+/**
+ * Open the presence self-delivery barrier for a socket's presence-room
+ * data-stream subscribe. Called synchronously at dispatch topic-resolution
+ * (before the paired `:presence` loader can run this batch), so `expected` is
+ * set when that loader checks. Idempotent.
+ * @param {any} ws
+ * @param {string} topic wire data topic
+ */
+export function _presenceClaimBegin(ws, topic) {
+	_claimBeginKey(ws, topic + _PRESENCE_CLAIM_NS);
+}
+
+/**
+ * Resolve the barrier with the joiner's own roster entry. The data-join calls
+ * this with `{ key, data }` the moment the presence payload exists (before the
+ * shared-roster acquire lands); dispatch calls it with `null` after the
+ * subscribe hook as a settle, so an early-return/throw path never leaves the
+ * `:presence` loader waiting.
+ * @param {any} ws
+ * @param {string} topic wire data topic
+ * @param {{ key: string, data: any } | null} value
+ */
+export function _presenceClaimResolve(ws, topic, value) {
+	_claimResolveKey(ws, topic + _PRESENCE_CLAIM_NS, value);
+}
+
+/**
+ * The `:presence` loader's read: if a data-join for this socket+room is in
+ * flight this batch (barrier opened), await its roster entry so the snapshot
+ * can carry the joiner's own presence even when the shared-roster write has
+ * not landed yet; otherwise (a lone presence viewer with no paired data-join)
+ * return undefined so the roster is served as read. Consumes the barrier.
+ * @param {any} ws
+ * @param {string} topic wire data topic
+ * @returns {Promise<{ key: string, data: any } | undefined>}
+ */
+export async function _presenceClaimAwait(ws, topic) {
+	return _claimAwaitKey(ws, topic + _PRESENCE_CLAIM_NS);
+}
+
+/**
+ * Drop any claim barriers a socket holds for a room's wire data topic - the
+ * owner slot and the presence slot. Called when the socket's data-stream
+ * subscription for the topic drains: a slot left by a data-join that never
+ * paired with a sub-stream subscribe in its own batch must not outlive the
+ * membership, or a LATER lone :owner / :presence subscribe on the same socket
+ * would consume the stale claim (a departed member injected into the roster,
+ * a long-vacated first-claim served as the owner snapshot).
+ * @param {any} ws
+ * @param {string} topic wire data topic
+ */
+export function _claimBarriersClear(ws, topic) {
+	if (!ws) return;
 	const m = _ownerClaimByWs.get(ws);
-	if (m) { m.delete(topic); if (m.size === 0) _ownerClaimByWs.delete(ws); }
-	return value && value.key != null ? value : undefined;
+	if (!m) return;
+	m.delete(topic);
+	m.delete(topic + _PRESENCE_CLAIM_NS);
+	if (m.size === 0) _ownerClaimByWs.delete(ws);
 }
 
 /** Reset all in-flight claim barriers (tests only). @internal */

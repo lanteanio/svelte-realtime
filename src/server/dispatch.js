@@ -20,7 +20,7 @@ import { _getIdentityKey } from './identity.js';
 import { _bindAlarmCtx } from './alarm.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { _tenantTopic, _tenantKey } from './tenant.js';
-import { _ownerClaimBegin, _ownerClaimResolve } from './room-owner.js';
+import { _ownerClaimBegin, _ownerClaimResolve, _presenceClaimBegin, _presenceClaimResolve } from './room-owner.js';
 import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame } from './upload.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 
@@ -468,13 +468,30 @@ async function _executeBatch(ws, msg, platform, options) {
 	_respond(ws, platform, '__batch', { batch: results });
 }
 
+// Settle both per-socket claim barriers a stream subscribe opened (the owner
+// barrier and the presence self-delivery barrier), keyed by the wire topic.
+// Called on EVERY exit of _executeStreamRpc after the barriers are opened - the
+// happy path AND every early return (a guard/shed rejection, a subscribe denial
+// or throw). Idempotent: a no-op once the paired data-join resolved the real
+// owner/roster entry, otherwise a null resolution so the paired :owner/:presence
+// loader in this batch reads the shared store instead of awaiting a claim that
+// never comes. An unresolved barrier hangs the whole batch (its Promise.all
+// never settles) and leaks the in-flight counter, blocking a graceful shutdown.
+function _settleClaimBarriers(ws, topic, fn) {
+	if (typeof topic !== 'string') return;
+	if (/** @type {any} */ (fn).__hasOwner) _ownerClaimResolve(ws, topic, null);
+	if (/** @type {any} */ (fn).__hasPresence) _presenceClaimResolve(ws, topic, null);
+}
+
 /**
  * Stream branch of `_executeSingleRpc`: validate args, gate, resolve topic,
  * subscribe, run optional channel/delta/replay/seq-delta short-circuits, run
  * the loader, apply transform/migration, build the response envelope.
  *
  * Mutates `subscribedRef.topic` on successful subscribe so the caller's
- * catch block can roll the subscription back if a later step throws. May
+ * catch block can roll the subscription back if a later step throws, and
+ * `subscribedRef.claimTopic` while a claim barrier is open so the caller's
+ * catch can settle it if a throw escapes before the happy-path settle. May
  * itself throw inside `fn(ctx, ...streamArgs)`; that bubbles up to the
  * caller's catch.
  *
@@ -484,7 +501,7 @@ async function _executeBatch(ws, msg, platform, options) {
  * @param {any} ctx
  * @param {any[]} args
  * @param {{ id: string, seq?: number, schemaVersion?: number, version?: any }} msg
- * @param {{ topic: any }} subscribedRef
+ * @param {{ topic: any, claimTopic?: any }} subscribedRef
  * @returns {Promise<any>}
  */
 async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
@@ -538,6 +555,21 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// loader awaits it. Sequencing the value into the subscribe response is what
 	// closes the race a timer could not (see room-owner.js).
 	if (typeof topic === 'string' && /** @type {any} */ (fn).__hasOwner) _ownerClaimBegin(ws, topic);
+	// Same sequencing for a presence room's DATA stream: the paired :presence
+	// loader awaits the joiner's own roster entry off the data-join, so the
+	// barrier must be open before any loader body in this batch runs.
+	if (typeof topic === 'string' && /** @type {any} */ (fn).__hasPresence) _presenceClaimBegin(ws, topic);
+	// Record the topic whose barriers we just opened so the caller's catch settles
+	// them if a throw escapes before the happy-path settle below - the room guard
+	// (`__streamFilter`) denies by THROWING, not returning false, so a guarded
+	// room's data-join throws straight past the early-return settles. The paired
+	// sub-stream loaders throw on the same guard before awaiting, so the batch does
+	// not hang today, but the open barrier would otherwise outlive the failed join
+	// (no subscribe = no unsubscribe drain to clear it) and a LATER lone
+	// :presence / :owner subscribe on this socket would await it forever. Cleared
+	// at the happy-path settle so a later loader throw never re-settles a consumed
+	// barrier. Set only when a barrier actually opened.
+	if (typeof topic === 'string' && (/** @type {any} */ (fn).__hasOwner || /** @type {any} */ (fn).__hasPresence)) subscribedRef.claimTopic = topic;
 	const streamOpts = /** @type {any} */ (fn).__streamOptions;
 	// Per-room alarm (live.alarm): when this stream declares an `alarm` config, bind
 	// ctx.setAlarm/getAlarm/deleteAlarm to the resolved WIRE topic so the loader (and
@@ -579,6 +611,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 
 	const streamFilter = /** @type {any} */ (fn).__streamFilter;
 	if (streamFilter && !(await streamFilter(ctx, ...streamArgs))) {
+		_settleClaimBarriers(ws, topic, fn);
 		const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 		return { id, ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 	}
@@ -587,9 +620,11 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	if (classOfService && state.admissionConfig) {
 		try {
 			if (_shouldShed(platform, classOfService)) {
+				_settleClaimBarriers(ws, topic, fn);
 				return { id, ok: false, code: 'OVERLOADED', error: `Stream class '${classOfService}' shed under pressure` };
 			}
 		} catch (err) {
+			_settleClaimBarriers(ws, topic, fn);
 			return { id, ok: false, code: 'INVALID_REQUEST', error: /** @type {Error} */ (err).message };
 		}
 	}
@@ -618,9 +653,11 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 			ws.subscribe(topic);
 		}
 	} catch {
+		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
 	}
 	if (_subscribeDenial) {
+		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: _subscribeDenial, error: _subscribeDenial === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 	}
 	_trackStreamSub(ws, topic, fn);
@@ -632,12 +669,16 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		// presence hook ignores it.
 		try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic, streamArgs); } catch {}
 	}
-	// Settle the owner-claim barrier this subscribe opened: a no-op when the
-	// data-join already resolved it with the claimed owner, otherwise resolves it
-	// to null so the paired :owner loader (a reconnect, an early return, or a hook
-	// that threw) reads the shared store instead of waiting on a claim that will
-	// never come.
-	if (typeof topic === 'string' && /** @type {any} */ (fn).__hasOwner) _ownerClaimResolve(ws, topic, null);
+	// Settle both claim barriers this subscribe opened on the happy path: a no-op
+	// when the data-join already resolved with the claimed owner / roster entry,
+	// otherwise a null resolution so the paired :owner / :presence loader (a
+	// reconnect, an eviction-cap early return, or a hook that threw) reads the
+	// shared store instead of waiting on a claim that will never come.
+	_settleClaimBarriers(ws, topic, fn);
+	// Barrier settled on the happy path: the caller's catch must not re-settle it
+	// (a later loader throw would otherwise recreate a slot the paired loader has
+	// already consumed).
+	subscribedRef.claimTopic = null;
 
 	if (/** @type {any} */ (fn).__isDerived && !state.activateDerivedCalled && !state.warnedActivateDerived) {
 		if (_IS_DEV) {
@@ -877,7 +918,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 
 	const _h = _getCtxHelpers(platform);
 	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey);
-	const _subscribedRef = { topic: null };
+	const _subscribedRef = { topic: null, claimTopic: null };
 
 	try {
 		const _result = await _runWithMiddleware(ctx, async () => {
@@ -928,6 +969,13 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 		return _result;
 	} catch (err) {
 		if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx);
+		// A throw that escaped after the claim barriers opened but before the
+		// happy-path settle (the guard `__streamFilter` throws, an internal
+		// bookkeeping failure) would leave a paired :owner/:presence loader in this
+		// batch - and any later lone sub-stream subscribe on this socket - awaiting
+		// a claim that never resolves. Settle to null here (cleared on the happy
+		// path, so this only fires on that pre-settle throw window).
+		if (_subscribedRef.claimTopic) _settleClaimBarriers(ws, _subscribedRef.claimTopic, fn);
 		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		if (err instanceof LiveError) {
 			/** @type {any} */

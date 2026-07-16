@@ -308,7 +308,35 @@ const _liveForget = async function forget(userId, opts) {
 				// A durable failure is a real erasure failure (an un-purged row is
 				// a compliance breach). Surface it to the caller - unlike an
 				// in-memory surface, we do NOT swallow it, so the app can retry.
-				if (_IS_DEV) console.error('[svelte-realtime] live.forget durable store.purgeUser threw:', err);
+				// Log without the `ownerSuccessions` the store attaches for
+				// announcement: those carry SUCCESSOR user ids (other users), which
+				// must not reach a log even in dev (credo: no PII in logs). The
+				// message + underlying failure reasons stay for debuggability.
+				if (_IS_DEV) {
+					const logErr = err && typeof err === 'object' && 'ownerSuccessions' in /** @type {any} */ (err)
+						? { message: /** @type {any} */ (err).message, failures: /** @type {any} */ (err).failures, partialCounts: /** @type {any} */ (err).partialCounts }
+						: err;
+					console.error('[svelte-realtime] live.forget durable store.purgeUser threw:', logErr);
+				}
+				// The store may have COMMITTED some owner successions before a
+				// sibling room's transient failure aborted the leg: those evictions
+				// are durable and authoritative, so announce them now even though the
+				// overall erasure is incomplete and will be retried. The retry
+				// re-drives only the failed rooms (a committed room reads o != userId
+				// and reports nothing), so each committed succession reaches the
+				// `:owner` wire exactly once. Best-effort and fully guarded: a throw
+				// here must never mask FORGET_STORE_FAILED (which would tell the caller
+				// the partially-failed erasure need not be retried).
+				const committed = err && Array.isArray(/** @type {any} */ (err).ownerSuccessions)
+					? /** @type {any} */ (err).ownerSuccessions
+					: null;
+				if (committed && committed.length) {
+					try {
+						_publishOwnerSuccessions(tenantId, committed);
+					} catch (pubErr) {
+						if (_IS_DEV) console.error('[svelte-realtime] live.forget announce-on-failure threw:', pubErr);
+					}
+				}
 				throw new LiveError('FORGET_STORE_FAILED', 'live.forget: durable store.purgeUser failed; the erasure is incomplete and must be retried');
 			}
 			// Publish the store's owner successions AFTER the durable try/catch:

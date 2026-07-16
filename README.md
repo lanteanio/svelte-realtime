@@ -1807,6 +1807,20 @@ export { message, close, unsubscribe } from 'svelte-realtime/server';
 
 `onUnsubscribe` fires for both static and dynamic topics. For dynamic topics, the server tracks which stream produced each subscription and fires the correct hook. The `unsubscribe` hook fires as soon as the client drops a topic; `close` only fires for topics still active at disconnect time. There is no double-firing.
 
+> **Writing your own `unsubscribe` hook?** If your app exports a custom `unsubscribe` (for example to notify an adapter plugin), it REPLACES the framework's - so every drain that rides it stops running on live-socket topic drops: a room's enumeration registry never decrements, the presence `leave` never publishes, and owner succession never runs until the socket closes. Chain the framework's handler from yours:
+>
+> ```js
+> // src/hooks.ws.js
+> import { unsubscribe as realtimeUnsubscribe } from 'svelte-realtime/server';
+>
+> export function unsubscribe(ws, topic, ctx) {
+>   myPlugin.hooks.unsubscribe(ws, topic, ctx);
+>   realtimeUnsubscribe(ws, topic, ctx);
+> }
+> ```
+>
+> The same rule applies to a custom `close` hook - route it through `pushHooks.close(ws, ctx)` (or call the framework's `close` directly) so stream bookkeeping drains there too.
+
 The third argument `remainingSubscribers` counts OTHER WebSockets still holding a realtime-stream subscription to the topic after the current one drops. Use it to tear down upstream feeds (CDC connections, polling loops, external pub/sub follows) when the count reaches zero. Existing 2-argument `(ctx, topic) => ...` handlers continue to work; the third arg is silently ignored.
 
 ### Staleness watchdog and per-stream `onError`

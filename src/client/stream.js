@@ -8,6 +8,63 @@ import * as _adapterClient from 'svelte-adapter-uws/client';
 const setTopicManaged = typeof _adapterClient.setTopicManaged === 'function'
 	? _adapterClient.setTopicManaged
 	: () => {};
+const _hasManagedMarking = typeof _adapterClient.setTopicManaged === 'function';
+
+// Explicit wire release for server-managed topics. The adapter client sends no
+// unsubscribe frame for a topic marked managed (symmetric to the subscribe
+// frame it never sent) - but the SERVER holds real wire state for it (the
+// stream RPC ran platform.subscribe), and the client is the only party that
+// knows when the last local stream ref let go. Without the frame the server
+// keeps the socket subscribed and the app's unsubscribe hook chain never runs,
+// so every server-side unsubscribe drain (a room's enumeration registry
+// release, the presence leave, the owner succession) waits for socket close -
+// on a lobby that is the "member count climbs on join/leave cycling" leak.
+// Refcounted per topic across stream instances (two instances can share one
+// wire topic, e.g. under stream-cache overflow), so releasing one never kills
+// the other's live subscription. The frame is duplicate-safe server-side: a
+// second unsubscribe for a gone topic is a no-op that re-runs an idempotent
+// drain. No-op wherever the adapter lacks managed marking (older adapters
+// send the frame themselves via their own topic refcount).
+/** @type {Map<string, number>} wire topic -> live managed stream refs */
+const _managedTopicRefs = new Map();
+
+function _managedRefAcquire(t) {
+	_managedTopicRefs.set(t, (_managedTopicRefs.get(t) || 0) + 1);
+}
+
+/** @returns {boolean} true when this release dropped the last ref */
+function _managedRefRelease(t) {
+	const n = _managedTopicRefs.get(t) || 0;
+	if (n <= 1) {
+		_managedTopicRefs.delete(t);
+		return true;
+	}
+	_managedTopicRefs.set(t, n - 1);
+	return false;
+}
+
+// Release one managed-topic ref and, when it was the last local ref, send the
+// explicit unsubscribe frame the adapter client suppresses for managed topics.
+// The adapter's send() gates on readyState === OPEN, so the frame is delivered
+// on an open OR backgrounded ('suspended') socket - the latter is still a live
+// wire that carries frames, just a tab that flipped document.hidden - and
+// silently no-ops on any other state, where the server's own close/idle drain
+// releases the subscription instead. We do NOT read the adapter `status` store
+// to decide: subscribing to it routes through ensureConnection and re-creates
+// (and reconnects) a connection the app explicitly closed, so a `terminated`
+// client skips the socket entirely - a closed connection has no server-side
+// subscription to release anyway. Known residual: if another stream instance's
+// subscribe RPC for the SAME topic is in flight (server already ran
+// platform.subscribe, response not yet resolved - possible only when two
+// instances share one wire topic, e.g. under stream-cache overflow), that
+// instance holds no ref yet and this frame drops its fresh subscription; the
+// window is a single RPC round-trip and the pre-fix alternative leaked EVERY
+// released subscription until socket close.
+function _sendManagedRelease(releasedTopic) {
+	if (!_managedRefRelease(releasedTopic)) return;
+	if (clientState.terminated) return;
+	try { _connect().send({ type: 'unsubscribe', topic: releasedTopic }); } catch { /* best-effort; the close/idle drain covers it */ }
+}
 import { writable } from 'svelte/store';
 // Namespace import lets .rune() access fromStore (Svelte 5 only) without
 // breaking the module under Svelte 4 - missing exports become undefined,
@@ -364,6 +421,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 	/** @type {(() => void) | null} */
 	let topicUnsub = null;
+
+	/** @type {string | null} Managed wire topic this instance holds a `_managedTopicRefs` ref on (see the module-level release machinery). */
+	let _managedHeldTopic = null;
 
 	/** @type {(() => void) | null} */
 	let statusUnsub = null;
@@ -1052,6 +1112,18 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// is what keeps a legitimate reconnect from racing the server's
 					// re-subscribe. Must precede _subscribeLive() below.
 					setTopicManaged(topic);
+					// Hold a managed-topic ref so the wire release on the LAST local
+					// ref can send the explicit unsubscribe frame the adapter client
+					// suppresses for managed topics. Idempotent across re-resolves of
+					// the same topic (resume, reconnect); a topic switch (the server
+					// resolved this stream to a different wire topic) moves the ref
+					// and releases the old topic on the wire, since nothing else
+					// unsubscribes the old server-side subscription.
+					if (_hasManagedMarking && _managedHeldTopic !== topic) {
+						if (_managedHeldTopic) _sendManagedRelease(_managedHeldTopic);
+						_managedRefAcquire(topic);
+						_managedHeldTopic = topic;
+					}
 					_registerTopicErrorSetter(topic, _setError);
 					ensureDenialsListener();
 				}
@@ -1168,6 +1240,17 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		if (topicUnsub) {
 			topicUnsub();
 			topicUnsub = null;
+		}
+		// Tell the server this stream let go of its server-managed topic: the
+		// adapter client sends no unsubscribe frame for managed topics, so
+		// without this the server keeps the socket subscribed and the app's
+		// unsubscribe hook chain (room enumeration release, presence leave,
+		// owner succession) never runs until socket close. Only the LAST local
+		// ref sends; a closed socket skips (the server's close drain covers it).
+		if (_managedHeldTopic) {
+			const releasedTopic = _managedHeldTopic;
+			_managedHeldTopic = null;
+			_sendManagedRelease(releasedTopic);
 		}
 		if (statusUnsub) {
 			statusUnsub();

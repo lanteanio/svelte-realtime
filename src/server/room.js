@@ -12,7 +12,7 @@ import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot } from './h
 import { _getIdentityKey } from './identity.js';
 import { _tenantTopic, _tenantKey, _stripTenantTopic } from './tenant.js';
 import { _registerEnumGate, _seedEnumVisibility } from './rooms-gate.js';
-import { _ownerOnJoin, _ownerOnLeave, _ownerTransfer, _ownerGet, _ownerEmit, _ownerClaimResolve, _ownerClaimAwait } from './room-owner.js';
+import { _ownerOnJoin, _ownerOnLeave, _ownerTransfer, _ownerGet, _ownerEmit, _ownerClaimResolve, _ownerClaimAwait, _presenceClaimResolve, _presenceClaimAwait, _claimBarriersClear } from './room-owner.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { _bindAlarmCtx } from './alarm.js';
 
@@ -386,6 +386,9 @@ export const _roomRegister = function room(config) {
 				// Refresh LRU position so active entries survive eviction
 				_presenceRef.delete(refKey);
 				_presenceRef.set(refKey, ref);
+				// A reconnect still resolves the self-delivery barrier so a paired
+				// :presence loader in this batch never waits on the dispatch settle.
+				if (presenceFn) _presenceClaimResolve(ctx.ws, topic, { key: userId, data: ref.data });
 				return;
 			}
 
@@ -444,6 +447,15 @@ export const _roomRegister = function room(config) {
 			// roster (the presence list skips null data).
 			const presenceData = presenceFn ? presenceFn(ctx) : null;
 			_presenceRef.set(refKey, { count: 1, timer: null, data: presenceData });
+			// Sequence the joiner's OWN roster entry into the paired :presence
+			// subscribe response (see room-owner.js): the batch runs its items in
+			// parallel, so the :presence loader's shared-roster read can beat the
+			// cluster acquire below (an owner room delays it further behind the
+			// owner join's round-trips), and the acquire's live 'join' can hit the
+			// socket before the client registers the :presence store - dropped,
+			// and the joiner never sees itself. Resolved BEFORE the owner join so
+			// the loader never waits on those round-trips.
+			if (presenceData) _presenceClaimResolve(ctx.ws, topic, { key: userId, data: presenceData });
 			// Ownership join runs at the same identity 0->1 transition presence
 			// acquires on, and is independently best-effort: an owner failure
 			// must never suppress the presence join below (and vice versa).
@@ -489,6 +501,12 @@ export const _roomRegister = function room(config) {
 		onUnsubscribe: (presenceFn || isEnumerable || ownerEnabled) ? async (ctx, topic, remainingSubscribers) => {
 			if (isEnumerable) { try { await _enumOnUnsub(ctx, topic, remainingSubscribers); } catch { /* enum is best-effort */ } }
 			if (!presenceFn && !ownerEnabled) return;
+			// Drop this socket's claim barriers for the room the moment its
+			// data-stream subscription drains: a slot from a join that never
+			// paired with an :owner / :presence subscribe in its own batch must
+			// not outlive the membership, or a later lone sub-stream subscribe
+			// on this socket would consume the stale claim.
+			_claimBarriersClear(ctx.ws, topic);
 			const userId = _getIdentityKey(ctx);
 			const refKey = topic + '\0' + userId;
 
@@ -564,6 +582,9 @@ export const _roomRegister = function room(config) {
 	// It is a different object than roomExport, so the flag must live on it too or
 	// the barrier never opens (and the sequenced owner snapshot silently no-ops).
 	/** @type {any} */ (dataStream).__hasOwner = ownerEnabled;
+	// Same object-identity lesson for the presence self-delivery barrier:
+	// dispatch opens it off the DATA-stream handler's flag, not the export's.
+	/** @type {any} */ (dataStream).__hasPresence = !!presenceFn;
 
 	// Enumeration stream (opt-in): one per-export stream whose snapshot is the
 	// active-rooms registry and whose live deltas (created/updated/deleted, fed by
@@ -671,7 +692,18 @@ export const _roomRegister = function room(config) {
 				// loader reconstructs the roster even when this user's join
 				// was published before they subscribed to :presence (the live
 				// merge takes over from here).
-				return _clusterPresenceList(ctx.platform, dataTopic);
+				const roster = await _clusterPresenceList(ctx.platform, dataTopic);
+				// First-joiner self delivery: if this socket's paired data-join is
+				// acquiring presence in this same batch, sequence its own entry into
+				// this snapshot - the shared-roster read above can run before that
+				// acquire lands, and the acquire's live 'join' can reach the socket
+				// before the client registers this store. A lone presence viewer
+				// (no paired data-join) resolves undefined and is never injected.
+				const self = await _presenceClaimAwait(ctx.ws, dataTopic);
+				if (self && self.data != null && !roster.some((e) => e.key === self.key)) {
+					roster.push({ key: self.key, data: self.data });
+				}
+				return roster;
 			},
 			{ merge: 'presence' }
 		);

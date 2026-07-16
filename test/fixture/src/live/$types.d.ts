@@ -73,12 +73,29 @@ declare module '$live/echo' {
   export const empty: Readable<undefined>;
 }
 
+declare module '$live/lobby' {
+  import type { StreamStore } from 'svelte-realtime/client';
+  import type { Readable } from 'svelte/store';
+
+  export const lobby: { data: (...args: any[]) => StreamStore<any>, presence?: (...args: any[]) => StreamStore<any>, cursors?: (...args: any[]) => StreamStore<any>, owner?: (...args: any[]) => StreamStore<any>, [action: string]: (...args: any[]) => Promise<any> | ((...args: any[]) => StreamStore<any>) };
+  export const empty: Readable<undefined>;
+}
+
 declare module '$live/lock' {
   import type { Readable } from 'svelte/store';
   export const readLog: (...args: any[]) => Promise<any>;
   export const resetLog: (...args: any[]) => Promise<any>;
   export const ordered: (...args: any[]) => Promise<any>;
   export const bounded: (...args: any[]) => Promise<any>;
+  export const empty: Readable<undefined>;
+}
+
+declare module '$live/multiplayer' {
+  import type { StreamStore } from 'svelte-realtime/client';
+  import type { Readable } from 'svelte/store';
+
+  export const moveCursor: (...args: any[]) => Promise<any>;
+  export const room: { data: (...args: any[]) => StreamStore<any>, presence?: (...args: any[]) => StreamStore<any>, cursors?: (...args: any[]) => StreamStore<any>, owner?: (...args: any[]) => StreamStore<any>, status: import('svelte/store').Readable<string>, move: (...args: any[]) => void, reportViewport: (...args: any[]) => void, identify: (key: string) => void, room: (...args: any[]) => import('svelte-realtime/multiplayer').MultiplayerRoom, [action: string]: any };
   export const empty: Readable<undefined>;
 }
 
@@ -98,7 +115,7 @@ declare module '$live/room' {
   import type { Readable } from 'svelte/store';
 
   export const setCursor: (...args: any[]) => Promise<any>;
-  export const board: { data: (...args: any[]) => StreamStore<any>, presence?: (...args: any[]) => StreamStore<any>, cursors?: (...args: any[]) => StreamStore<any>, [action: string]: (...args: any[]) => Promise<any> | ((...args: any[]) => StreamStore<any>) };
+  export const board: { data: (...args: any[]) => StreamStore<any>, presence?: (...args: any[]) => StreamStore<any>, cursors?: (...args: any[]) => StreamStore<any>, owner?: (...args: any[]) => StreamStore<any>, [action: string]: (...args: any[]) => Promise<any> | ((...args: any[]) => StreamStore<any>) };
   export const empty: Readable<undefined>;
 }
 

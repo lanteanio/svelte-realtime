@@ -20,8 +20,12 @@ test('single-chunk upload round-trips byte count and args', async ({ page }) => 
 
 test('multi-chunk upload with explicit small chunkSize sends sequential frames', async ({ page }) => {
 	const r = await page.evaluate(() => window.__test.multiChunk(20, 4));
-	// 20 bytes / 4-byte chunks = 5 chunks
-	expect(r).toMatchObject({ label: 'multi', bytes: 20, chunks: 5 });
+	// `chunkSize` (deprecated alias of `frameSize`) caps the WIRE FRAME, and
+	// the per-chunk payload is frame minus the 12-byte chunk header and the
+	// args JSON - clamped to at least 1 byte. A 4-byte frame budget cannot
+	// carry even the header, so the payload degrades to 1 byte per frame:
+	// 20 bytes ride 20 sequential frames, reassembled in order server-side.
+	expect(r).toMatchObject({ label: 'multi', bytes: 20, chunks: 20 });
 	expect(r.firstByte).toBe(1);
 	expect(r.lastByte).toBe(20);
 });

@@ -4,7 +4,7 @@
 // (resolve-after-confirm + failure surfacing), the PII-free onForget hook, the
 // descriptor-completeness guard, and the constant-shape result.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { live, configureForget, _resetForget } from '../src/server.js';
 import { _pushRegistry, _wsToPushUserId } from '../src/server/push.js';
 import { _presenceRef, _rateLimits } from '../src/server/state.js';
@@ -426,6 +426,105 @@ describe('live.forget - durable store owner-succession envelope', () => {
 		const res = await live.forget('u1');
 		expect(res.ok).toBe(true);
 		expect(res.surfaces.durable).toBe(2);
+	});
+
+	it('announces a succession the store COMMITTED before a sibling room failed, on the incomplete-erasure path', async () => {
+		// The store evicted the erased user as owner of one room (committed
+		// durably) but a sibling room hit a transient error, so purgeUser rejects
+		// to force a retry and carries the committed succession on the error. It
+		// must still reach the wire now: the retry finds the committed room already
+		// handed off (o != userId in-script) and reports nothing for it, so this is
+		// the only chance to announce it to already-subscribed clients.
+		const published = [];
+		const platform = { publish: (t, e, d) => published.push({ t, e, d }) };
+		configureForget({
+			platform,
+			store: {
+				async purgeUser() {
+					const err = new Error('createForgetStore: 1 of 3 store(s) failed to purge; incomplete');
+					/** @type {any} */ (err).ownerSuccessions = [{ topic: 'board/1', owner: 'u2', reason: 'succeeded' }];
+					/** @type {any} */ (err).failures = [new Error('Connection is closed')];
+					throw err;
+				}
+			}
+		});
+		// The erasure is still signalled incomplete (the sibling room must retry)...
+		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		// ...yet the committed room's successor already reached subscribers.
+		expect(published).toContainEqual({ t: 'board/1:owner', e: 'set', d: { key: 'u2', reason: 'succeeded' } });
+	});
+
+	it('a throwing publish on the failure path still rejects as FORGET_STORE_FAILED, not the bus error', async () => {
+		// The announce-on-failure is best-effort and fully guarded: a broken bus
+		// must not mask FORGET_STORE_FAILED, which is what tells the caller the
+		// partially-failed erasure still needs a retry.
+		configureForget({
+			platform: { publish: () => { throw new Error('bus down'); } },
+			store: {
+				async purgeUser() {
+					const err = new Error('incomplete');
+					/** @type {any} */ (err).ownerSuccessions = [{ topic: 'board/1', owner: 'u2', reason: 'succeeded' }];
+					throw err;
+				}
+			}
+		});
+		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+	});
+
+	it('routes a COMMITTED succession through the :owner replay buffer on the failure path too (resumer gap-fills the successor, not the erased owner)', async () => {
+		// Success-path parity for the incomplete-erasure announcement: the emit must
+		// land in the shared buffer, not only the live bus, or a client resuming
+		// after the partial forget would gap-fill the ERASED owner from a stale
+		// buffer instead of the committed successor.
+		const buffered = [];
+		const bare = [];
+		const platform = {
+			publish: (t, e, d) => bare.push({ t, e, d }),
+			replay: {
+				publish: (_p, topic, event, data) => { buffered.push({ topic, event, data }); return Promise.resolve(); },
+				since: async () => [],
+				seq: async () => 0
+			}
+		};
+		configureForget({
+			platform,
+			store: {
+				async purgeUser() {
+					const err = new Error('1 of 2 store(s) failed to purge; incomplete');
+					/** @type {any} */ (err).ownerSuccessions = [{ topic: 'board/9', owner: 'u3', reason: 'succeeded' }];
+					throw err;
+				}
+			}
+		});
+		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		expect(buffered).toContainEqual({ topic: 'board/9:owner', event: 'set', data: { key: 'u3', reason: 'succeeded' } });
+		expect(bare).toEqual([]); // buffer, not bare
+	});
+
+	it('redacts the successor ids from the dev diagnostic on the incomplete-erasure path (no PII in logs)', async () => {
+		// The committed successions carry SUCCESSOR user ids (other users); the
+		// purgeUser-threw diagnostic must log the failure reasons but never those ids
+		// (credo: no PII in logs). Guards against a regression that logs the raw error.
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			configureForget({
+				platform: { publish: () => {} },
+				store: {
+					async purgeUser() {
+						const err = new Error('1 of 2 store(s) failed to purge; incomplete');
+						/** @type {any} */ (err).ownerSuccessions = [{ topic: 'board/1', owner: 'secret-successor-id', reason: 'succeeded' }];
+						/** @type {any} */ (err).failures = [new Error('Connection is closed')];
+						throw err;
+					}
+				}
+			});
+			await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+			const logged = JSON.stringify(errSpy.mock.calls);
+			expect(logged).not.toContain('secret-successor-id');
+			expect(logged).not.toContain('ownerSuccessions');
+		} finally {
+			errSpy.mockRestore();
+		}
 	});
 });
 
