@@ -12295,6 +12295,79 @@ describe('auto-replay routing', () => {
 		expect(platform.published).toEqual([{ topic: 'flag/feature', event: 'set', data: 'LATEST' }]);
 	});
 
+	it('single-process live.flag().set() (no platform.replay) broadcasts bare and does NOT warn to install the extension', () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			// No platform.replay: a single-process app. The flag's default buffer
+			// has nowhere to write, but per live.flag's contract that loses
+			// nothing (the cached value is authoritative in one process). F4 routes
+			// flag.set() through _maybeReplayPublish; the implicit-default marker
+			// must keep the missing-extension warn silent here.
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const flag = live.flag('flag/single-proc-implicit');
+			__register('flag/single-proc-implicit', flag);
+			flag.set('ON');
+			// Still broadcasts live via a bare platform.publish.
+			expect(platform.published).toEqual([{ topic: 'flag/single-proc-implicit', event: 'set', data: 'ON' }]);
+			// ...and no "install the replay extension" warning fired.
+			const warned = warnSpy.mock.calls.some((c) => String(c[0]).includes('platform.replay'));
+			expect(warned).toBe(false);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	it('a flag declared with an EXPLICIT replay still warns when no extension is installed (opt-in preserved)', () => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			// An explicit `replay` IS a user opt-in, so a missing extension is a
+			// real misconfiguration and must still surface the install warning -
+			// the implicit-suppression only covers the framework's own default.
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			const flag = live.flag('flag/explicit-optin', false, { replay: { size: 3 } });
+			__register('flag/explicit-optin', flag);
+			flag.set('ON');
+			const warned = warnSpy.mock.calls.some(
+				(c) => String(c[0]).includes('flag/explicit-optin') && String(c[0]).includes('platform.replay')
+			);
+			expect(warned).toBe(true);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	it('top-level publish() applies a subscribe-registered transform before the replay buffer', async () => {
+		const platform = mockPlatform();
+		platform.replay = fakeReplay();
+		setCronPlatform(platform);
+
+		// A { replay, transform } stream. Transform is subscribe-time only, so a
+		// real subscribe populates _topicTransform via the production path.
+		const stream = live.stream('oob/xform', async () => [], {
+			merge: 'crud', key: 'id', replay: true,
+			transform: (row) => ({ id: row.id, label: row.label })
+		});
+		__register('oob/xform', stream);
+		const ws = mockWs({ id: 'u1' });
+		handleRpc(ws, toArrayBuffer({ rpc: 'oob/xform', id: 'xs1', args: [], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		// Isolate the out-of-band publish from anything the subscribe recorded.
+		platform.replay.calls.length = 0;
+		platform.published.length = 0;
+
+		const ok = publish('oob/xform', 'created', { id: 1, label: 'L', secret: 'x' });
+		expect(ok).toBe(true);
+		// The buffer (what a resuming subscriber gap-fills) carries the PROJECTED
+		// shape, matching what a live subscriber saw via ctx.publish - not the raw
+		// value with its un-projected `secret` field.
+		expect(platform.replay.calls).toEqual([{ topic: 'oob/xform', event: 'created', data: { id: 1, label: 'L' } }]);
+		expect(platform.replay.calls[0].data).not.toHaveProperty('secret');
+		expect(platform.published).toEqual([{ topic: 'oob/xform', event: 'created', data: { id: 1, label: 'L' } }]);
+	});
+
 	it('dev-warns ONCE per topic when replay: true is declared but platform.replay is missing', async () => {
 		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		try {

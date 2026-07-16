@@ -8,7 +8,7 @@
 // `configureWebhooks({ deadLetter })`. A cluster deployment passes a durable
 // store instance (Redis / Postgres) with the same interface.
 
-import { now } from '../shared/runtime.js';
+import { now, monotonicNow } from '../shared/runtime.js';
 
 // A forget tombstone lives long enough to catch a webhook delivery that was
 // already in flight when `live.forget` ran and only fails (and would be
@@ -64,7 +64,7 @@ export function createDeadLetterStore(options = {}) {
 	// store, so without this it would resurrect the forgotten user's event. Mirrors
 	// the idempotency store's racing-commit tombstone. Swept by age so the map
 	// stays bounded to recent erasures.
-	/** @type {Map<string, number>} authoring userId -> last purge ms */
+	/** @type {Map<string, number>} authoring userId -> last purge time (monotonic ms) */
 	const purgedAt = new Map();
 
 	// Drop expired records on access. O(n) over a bounded store; webhook failures
@@ -83,7 +83,7 @@ export function createDeadLetterStore(options = {}) {
 	// tombstone has done its job. Keeps the map bounded to recent erasures.
 	function _sweepTombstones() {
 		if (purgedAt.size === 0) return;
-		const cutoff = now() - _DEAD_LETTER_TOMBSTONE_MS;
+		const cutoff = monotonicNow() - _DEAD_LETTER_TOMBSTONE_MS;
 		for (const [u, t] of purgedAt) {
 			if (t < cutoff) purgedAt.delete(u);
 		}
@@ -95,8 +95,9 @@ export function createDeadLetterStore(options = {}) {
 		 * forget tombstone drops the record (its delivery was in flight when
 		 * `live.forget` ran). Evicts the oldest record when over `max`.
 		 * @param {Omit<DeadLetterRecord, 'id'> & { startedAt?: number }} rec
-		 *   `startedAt` is the delivery start time (threaded by `_fireWebhookOut`);
-		 *   used only for the forget-race tombstone, never stored.
+		 *   `startedAt` is the delivery start time as a MONOTONIC stamp (threaded by
+		 *   `_fireWebhookOut` via `monotonicNow`); used only for the forget-race
+		 *   tombstone, never stored.
 		 * @returns {string | null}
 		 */
 		add(rec) {
@@ -115,13 +116,17 @@ export function createDeadLetterStore(options = {}) {
 			}
 			if (userId !== null) {
 				const tomb = purgedAt.get(userId);
-				// The delivery began at rec.startedAt (falling back to failedAt when a
-				// caller does not thread it). A purge at-or-after the delivery start
-				// means live.forget ran while this delivery was in flight, so dropping
-				// the record completes the erasure (the same at-or-before-acquire test
-				// the idempotency store applies to a racing commit).
-				const startedAt = typeof rec.startedAt === 'number' ? rec.startedAt
-					: (typeof rec.failedAt === 'number' ? rec.failedAt : now());
+				// The delivery began at rec.startedAt (a MONOTONIC stamp threaded by
+				// `_fireWebhookOut`). A purge at-or-after the delivery start means
+				// live.forget ran while this delivery was in flight, so dropping the
+				// record completes the erasure (the same at-or-before-acquire test the
+				// idempotency store applies to a racing commit). Both sides are monotonic
+				// so the comparison is step-immune. A caller that does not thread
+				// startedAt falls back to the current monotonic time (never the wall
+				// `failedAt`, which would mix clock domains): an unattributed start is
+				// treated as "now", so it is not tombstoned - the pre-fix direction for
+				// that untraced path, never a raw-PII drop nor a resurrection.
+				const startedAt = typeof rec.startedAt === 'number' ? rec.startedAt : monotonicNow();
 				if (tomb !== undefined && tomb >= startedAt) return null;
 			}
 			const id = String(++seq);
@@ -173,8 +178,14 @@ export function createDeadLetterStore(options = {}) {
 			// Tombstone FIRST: a delivery already in flight when this purge runs is
 			// captured (add) only after we return, so record the purge time so that
 			// late add() drops it. Recorded even with zero matching records - the
-			// in-flight delivery may fail moments later.
-			purgedAt.set(userId, now());
+			// in-flight delivery may fail moments later. The purge time and the
+			// delivery start time are both MONOTONIC (runtime `monotonicNow`): a
+			// backward wall-clock step (NTP correction) could otherwise make
+			// purgeTime < startedAt and resurrect the erased user's payload, and the
+			// ~1s-cached wall clock could stamp a purge and a genuinely-later new
+			// delivery identically and over-drop the new one. Monotonic time is
+			// step-immune and sub-ms, closing both.
+			purgedAt.set(userId, monotonicNow());
 			_sweepTombstones();
 			let n = 0;
 			for (const [id, rec] of records) {

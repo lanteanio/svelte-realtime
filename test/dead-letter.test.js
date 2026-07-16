@@ -12,6 +12,7 @@ import {
 	replayDeadLetter,
 	realtime
 } from '../src/server.js';
+import { monotonicNow, setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { _fireWebhookOut } from '../src/server/webhook-out.js';
 import { state, _webhookOutById } from '../src/server/state.js';
 
@@ -81,6 +82,36 @@ describe('createDeadLetterStore', () => {
 		expect(s.count()).toBe(2);
 	});
 
+	it('forget tombstone uses MONOTONIC time: a backward wall-clock step cannot resurrect an in-flight delivery', () => {
+		let mono = 1000;
+		let wall = 1000; // wall and monotonic aligned at delivery start
+		setRuntimeEnv({ clock: { now: () => wall, monotonic: () => mono, wallEpoch: () => wall } });
+		try {
+			const s = createDeadLetterStore({ forgetUserId: ({ data }) => data.author });
+			const startedAt = monotonicNow(); // 1000 - an in-flight delivery's start
+			// A backward NTP step drags WALL below the delivery's start while MONOTONIC
+			// keeps advancing; live.forget(u1) runs now.
+			wall = 500;   // stepped back, below the wall time the delivery started at
+			mono = 2000;  // monotonic moves forward
+			s.purgeUser(null, 'u1'); // monotonic tomb = 2000 (a wall tomb would be 500)
+			// The in-flight delivery fails and is captured. A wall tombstone (500 >= 1000)
+			// is FALSE and would RETAIN the erased user's PII; monotonic (2000 >= 1000) drops it.
+			const dropped = s.add({ webhookId: 'w', topic: 'o', event: 'e', data: { author: 'u1', body: 'PII' }, attempts: 3, error: 'x', failedAt: wall, startedAt });
+			expect(dropped).toBeNull();
+			expect(s.count()).toBe(0);
+			// A genuinely NEW u1 delivery that starts AFTER the purge (monotonic 3000) is
+			// still kept - the drop is scoped to in-flight deliveries, and monotonic's
+			// sub-ms precision keeps a just-after start distinct from the purge instant
+			// (the ~1s-cached wall clock could otherwise collide them and over-drop it).
+			mono = 3000;
+			const kept = s.add({ webhookId: 'w', topic: 'o', event: 'e', data: { author: 'u1', body: 'new' }, attempts: 3, error: 'x', failedAt: wall, startedAt: monotonicNow() });
+			expect(kept).not.toBeNull();
+			expect(s.count()).toBe(1);
+		} finally {
+			resetRuntimeEnv();
+		}
+	});
+
 	it('forget tombstone: without a forgetUserId extractor, records are unattributable and never tombstone-dropped', () => {
 		const s = createDeadLetterStore(); // no extractor
 		s.purgeUser(null, 'u1');
@@ -122,9 +153,12 @@ describe('webhook dead-letter capture', () => {
 		expect(capturedRec).not.toBeNull();
 		expect(typeof capturedRec.startedAt).toBe('number');
 		expect(capturedRec.startedAt).toBeGreaterThan(0);
-		// startedAt is captured before delivery, failedAt after - both from the same
-		// runtime clock seam, so the start is always at or before the failure.
-		expect(capturedRec.failedAt).toBeGreaterThanOrEqual(capturedRec.startedAt);
+		// startedAt is a MONOTONIC stamp (the step-immune forget tombstone reads it),
+		// captured at delivery start, so it is at or before the current monotonic time.
+		// failedAt is a separate WALL stamp (operator-facing record age) and is NOT
+		// comparable to startedAt across clock domains.
+		expect(capturedRec.startedAt).toBeLessThanOrEqual(monotonicNow());
+		expect(typeof capturedRec.failedAt).toBe('number');
 	});
 
 	it('accepts an explicit store instance', () => {

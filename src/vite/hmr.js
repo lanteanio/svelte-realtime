@@ -88,11 +88,15 @@ export async function _loadRegistryDirect(server, liveDir, dir) {
 						}
 					}
 				} else if (/** @type {any} */ (fn)?.__isSmooth) {
-					// A smooth export carries only its two send handlers; the
-					// authoritative tick machinery hangs off the handlers'
-					// first use, never off registration.
+					// A smooth export carries its send handlers (command / sync / center,
+					// plus shoot for a hitTest topic); the authoritative tick machinery
+					// hangs off the handlers' first use, never off registration. Must
+					// mirror the initial codegen registry (codegen-registry.js) or a hot
+					// reload silently drops center/shoot until a full reload.
 					if (fn.__smoothCommand) __register(rel + '/' + name + '/__smooth/command', fn.__smoothCommand, rel);
 					if (fn.__smoothSync) __register(rel + '/' + name + '/__smooth/sync', fn.__smoothSync, rel);
+					if (fn.__smoothCenter) __register(rel + '/' + name + '/__smooth/center', fn.__smoothCenter, rel);
+					if (fn.__smoothShoot) __register(rel + '/' + name + '/__smooth/shoot', fn.__smoothShoot, rel);
 				} else if (/** @type {any} */ (fn)?.__isDoc) {
 					// A document export carries its three send handlers; the
 					// replica authority hangs off the handlers' first use, and

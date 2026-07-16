@@ -29,6 +29,21 @@ const _replayEligibleTopics = new Set();
 const _replayMissingWarned = new Set();
 
 /**
+ * Topics whose replay eligibility is an IMPLICIT framework default rather than
+ * a user opt-in -- currently a `live.flag`'s default single-entry buffer. The
+ * topic still routes to `platform.replay` when the extension is installed, but
+ * the missing-extension dev warn is suppressed for these: the user never asked
+ * for replay, so a single-process flag app (which loses nothing) should not be
+ * told to install an extension. A flag declared with an EXPLICIT `replay` is a
+ * real opt-in and is NOT marked implicit, so it still warns. Mirrors the
+ * dynamic room-owner `__implicitReplay` gate in `dispatch.js`. Cleared by
+ * `_resetReplayRouting()`.
+ *
+ * @type {Set<string>}
+ */
+const _implicitReplayTopics = new Set();
+
+/**
  * Public well-known marker: a user-managed platform proxy that already
  * routes replay-eligible publishes through `platform.replay.publish(...)`
  * itself can opt out of the framework's auto-routing by setting this
@@ -50,10 +65,14 @@ export const WRAPPED_FOR_REPLAY = Symbol.for('svelte-realtime.wrapped-for-replay
  * subscribe. Idempotent; a topic registered twice stays in the set once.
  *
  * @param {string} topic
+ * @param {boolean} [implicit] - true when the topic's replay is a framework
+ *   default (e.g. a flag's single-entry buffer) rather than a user opt-in;
+ *   suppresses the missing-extension dev warn while still routing to the buffer.
  */
-export function _registerReplayTopic(topic) {
+export function _registerReplayTopic(topic, implicit) {
 	if (typeof topic === 'string' && topic.length > 0) {
 		_replayEligibleTopics.add(topic);
+		if (implicit) _implicitReplayTopics.add(topic);
 	}
 }
 
@@ -88,7 +107,7 @@ export function _maybeReplayPublish(platform, topic, event, data) {
 	if (!_replayEligibleTopics.has(topic)) return false;
 	const replay = platform && /** @type {any} */ (platform).replay;
 	if (!replay || typeof replay.publish !== 'function') {
-		if (_IS_DEV && !_replayMissingWarned.has(topic)) {
+		if (_IS_DEV && !_replayMissingWarned.has(topic) && !_implicitReplayTopics.has(topic)) {
 			_replayMissingWarned.add(topic);
 			console.warn(
 				"[svelte-realtime] live.stream('" + topic + "', ..., { replay: true }) is declared but " +
@@ -135,4 +154,5 @@ export function _maybeReplayPublish(platform, topic, event, data) {
 export function _resetReplayRouting() {
 	_replayEligibleTopics.clear();
 	_replayMissingWarned.clear();
+	_implicitReplayTopics.clear();
 }

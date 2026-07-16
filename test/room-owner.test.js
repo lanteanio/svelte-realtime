@@ -45,6 +45,7 @@ function mkRoom(extra = {}) {
 beforeEach(() => {
 	_resetOwnerForTests();
 	_presenceRefForTest().clear();
+	_resetReplayRouting();
 });
 
 afterEach(() => {
@@ -684,6 +685,43 @@ describe('live.room owner - forget purge', () => {
 		// The successor reaches subscribers through the platform, not a swallowed no-op.
 		expect(published).toContainEqual({ topic: 'game:7:owner', event: 'set', data: { key: 'bob', reason: 'succeeded' } });
 		expect(changes.at(-1)).toEqual({ topic: 'game:7', owner: 'bob', previous: 'alice', reason: 'succeeded' });
+	});
+
+	it('advances the :owner replay buffer even when the forget instance never locally registered :owner (a resumer gap-fills the successor, not the erased owner)', async () => {
+		// The cross-instance hole: succession runs on an instance that never held a
+		// local :owner subscriber (a load-balanced forget, a dedicated erasure job),
+		// so :owner is not in THIS instance's replay-eligible set. Pre-fix,
+		// _maybeReplayPublish's local-eligibility gate missed and the buffer was
+		// never advanced -> a resuming/fresh client gap-fills the ERASED owner. The
+		// fix registers the replay-backed :owner topic when the extension is present.
+		const game = mkRoom({ presence: (ctx) => ({ name: ctx.user.id }) });
+		const ds = game.__dataStream;
+		// Subscribe with the default (no-replay) platform, so the claim does NOT
+		// register game:701:owner as replay-eligible on this instance.
+		const subCap = () => {};
+		await ds.__onSubscribe(mkCtx('alice', subCap), 'game:701', [701]);
+		await ds.__onSubscribe(mkCtx('bob', subCap), 'game:701', [701]);
+
+		// A replay-capable platform (the extension buffer): replay.publish records
+		// the buffer write and re-broadcasts live, mirroring the production extension.
+		const buffer = [];
+		const published = [];
+		const platform = {
+			publish: (topic, event, data) => { published.push({ topic, event, data }); },
+			replay: {
+				publish: (p, topic, event, data) => { buffer.push({ topic, event, data }); p.publish(topic, event, data); return true; },
+				seq: async () => buffer.length,
+				since: async () => buffer.slice()
+			}
+		};
+
+		const removed = await _purgePresenceUser(platform, null, 'alice', null);
+		await flushAsync();
+		expect(removed).toBe(1);
+		// The successor is written to the :owner replay buffer (what a resumer/fresh
+		// connect reads), not merely broadcast live - so a resumer reads 'bob'.
+		expect(buffer).toContainEqual({ topic: 'game:701:owner', event: 'set', data: { key: 'bob', reason: 'succeeded' } });
+		expect(published).toContainEqual({ topic: 'game:701:owner', event: 'set', data: { key: 'bob', reason: 'succeeded' } });
 	});
 });
 

@@ -1,5 +1,5 @@
 // @ts-check
-import { now as runtimeNow, setTimer, clearTimer } from '../shared/runtime.js';
+import { now as runtimeNow, monotonicNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { assert } from '../shared/assert.js';
 import { LiveError } from './live-error.js';
 import { _tenantKey } from './tenant.js';
@@ -12,6 +12,15 @@ import { createHash } from 'node:crypto';
 // exact key would be treated as the envelope.
 const _FP = '__srk_idem_fp';
 const _VAL = '__srk_idem_v';
+
+// Forget-tombstone grace window (ms). A commit is dropped when its slot was
+// acquired at-or-before the user's last purge PLUS this window - not merely
+// at-or-before it. Acquire and purge times are sub-ms MONOTONIC stamps, so
+// without an explicit grace a duplicate re-acquiring microseconds after the
+// purge would slip past and re-cache the erased user. 1000ms reproduces the
+// coarse ~1s over-drop the old 1Hz cached-wall clock produced implicitly (a
+// duplicate re-acquiring within the same wall tick as the purge was dropped).
+const _IDEMPOTENCY_FORGET_GRACE_MS = 1000;
 
 /**
  * Deterministic stable serialization: object keys sorted recursively so two
@@ -99,17 +108,20 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	const userKeys = new Map();
 	/** @type {Map<string, string>} cache key -> tenant-scoped user key */
 	const keyUser = new Map();
-	// Forget tombstones: the most recent purge time per tenant-scoped user key.
-	// A slot acquired at-or-before its user's last purge must NOT cache on commit
+	// Forget tombstones: the most recent purge time per tenant-scoped user key,
+	// stamped in MONOTONIC time (step-immune, sub-ms). A slot acquired at-or-before
+	// its user's last purge (plus the grace window) must NOT cache on commit
 	// - otherwise an idempotent RPC that was already in flight when `live.forget`
 	// ran would re-cache the forgotten user's freshly-computed result for the
 	// full TTL (a residual-PII window invisible to a purge that scans only
-	// already-committed keys). The clock seam is coarse (1Hz cache), so the
-	// at-or-before test conservatively drops every commit through the purge's
-	// clock tick - a brief grace window that also covers a queued duplicate
-	// request that re-acquires within the same tick. Swept with the 30s result
-	// sweep so the map stays bounded to recent erasures.
-	/** @type {Map<string, number>} tenant-scoped user key -> last purge ms */
+	// already-committed keys). Monotonic time closes an NTP-backward-step hole a
+	// wall stamp carried: a backward wall step could drag the purge time below the
+	// in-flight acquire time and let the commit through. The explicit grace window
+	// reproduces the coarse ~1s over-drop the old cached-wall clock gave implicitly
+	// (a duplicate re-acquiring in the same wall tick as the purge was dropped),
+	// now that both stamps are sub-ms. Swept with the 30s result sweep so the map
+	// stays bounded to recent erasures.
+	/** @type {Map<string, number>} tenant-scoped user key -> last purge monotonic ms */
 	const purgedAt = new Map();
 	let lastSweep = runtimeNow();
 
@@ -131,6 +143,14 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	return {
 		async acquire(key, ttlSec, meta) {
 			const now = runtimeNow();
+			// Snapshot the acquire time at ARRIVAL (MONOTONIC), before the inflight
+			// wait loop below. A duplicate that parks waiting for an in-flight sibling
+			// must keep its true arrival time as `acquiredAt`: if it re-stamped after
+			// the wait, a duplicate that arrived BEFORE a concurrent live.forget but
+			// re-ran after it (once the racing sibling was dropped) would slip past the
+			// tombstone drop and re-cache the erased user. Reading it here, next to the
+			// wall `now`, mirrors how the dead-letter store threads its true start time.
+			const acquiredAt = monotonicNow();
 			if (now - lastSweep >= 30000) {
 				lastSweep = now;
 				for (const [k, e] of results) {
@@ -139,8 +159,12 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 				// Drop tombstones older than the sweep window: any slot that was
 				// in flight across a purge has long since committed, so the
 				// tombstone has done its job and a new request may cache again.
+				// Tombstone times are MONOTONIC, so age them against monotonicNow()
+				// (never the wall `now` above - mixing domains would mis-drop a
+				// tombstone across an NTP step).
+				const monoCutoff = monotonicNow() - 30000;
 				for (const [u, t] of purgedAt) {
-					if (now - t >= 30000) purgedAt.delete(u);
+					if (t < monoCutoff) purgedAt.delete(u);
 				}
 			}
 			const cached = results.get(key);
@@ -177,18 +201,19 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 			// a durable backend can denormalize them into separate columns; the
 			// in-memory index folds them into one key matching live.forget.
 			const idemUser = meta && typeof meta.user === 'string' ? _tenantKey(meta.tenant, meta.user) : null;
-			// Snapshot the acquire time so a commit racing a concurrent
-			// live.forget for this user is dropped (the tombstone below).
-			const acquiredAt = now;
 			const ttlMs = ttlSec * 1000;
 			return {
 				acquired: true,
 				async commit(value) {
 					// Drop the cache write if this user was purged at-or-after this
-					// slot was acquired: the request was in flight when live.forget
-					// ran, so caching its result would resurrect the forgotten user.
+					// slot was acquired (within the grace window): the request was in
+					// flight when live.forget ran, so caching its result would
+					// resurrect the forgotten user. Both stamps are MONOTONIC so a
+					// backward wall step cannot let the commit through; the grace
+					// window also drops a duplicate that re-acquires just after the
+					// purge, matching the old cached-wall over-drop.
 					const tomb = idemUser !== null ? purgedAt.get(idemUser) : undefined;
-					const forgotten = tomb !== undefined && tomb >= acquiredAt;
+					const forgotten = tomb !== undefined && tomb + _IDEMPOTENCY_FORGET_GRACE_MS >= acquiredAt;
 					if (ttlMs > 0 && !forgotten) {
 						results.set(key, { value, expiresAt: runtimeNow() + ttlMs });
 						_indexAdd(key, idemUser);
@@ -214,7 +239,10 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 			// request already in flight when forget ran) is dropped on commit, so
 			// it cannot re-cache the erased user. Recorded even when the user has
 			// no committed keys yet - the in-flight request may commit moments later.
-			purgedAt.set(idemUser, runtimeNow());
+			// MONOTONIC (step-immune, sub-ms): a backward wall step could otherwise
+			// stamp the purge below an in-flight acquire and let the commit through,
+			// re-caching the erased user's PII for the full TTL.
+			purgedAt.set(idemUser, monotonicNow());
 			const set = userKeys.get(idemUser);
 			if (!set) return 0;
 			let n = 0;

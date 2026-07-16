@@ -457,6 +457,42 @@ describe('piiRedact - cluster-transient DYNAMIC topic (never-subscribed instance
 		}
 	});
 
+	it('warns that a piiRedact factory with an uncompilable topic has no cluster-transient coverage', () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			// The idiomatic multi-tenant shape: a ctx-reading factory derives
+			// '<dynamic>' (it throws on the {argN} sentinels), so it gets NO pattern
+			// coverage - pre-fix that was silent, hiding a raw-PII-relay gap on a
+			// never-subscribed instance.
+			__register('pii/ctxread', live.stream((ctx, room) => ctx.user.org + ':' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { ssn: 'omit' } } }));
+			expect(_declaredRedactPattern.size).toBe(0);
+			expect(warn).toHaveBeenCalledTimes(1);
+			const msg = warn.mock.calls[0][0];
+			expect(msg).toContain('NO cluster-transient redaction coverage');
+			expect(msg).toContain('<dynamic>');
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('warns for a variable-first uncompilable factory, but NOT for a compilable one or a factory without piiRedact', () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			// Variable-first (no leading literal) is skipped -> warned, naming the skeleton.
+			__register('pii/varfirst-warn', live.stream((ctx, uid, kind) => uid + ':' + kind, async () => ({}), { merge: 'set', piiRedact: { fields: { ssn: 'omit' } } }));
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toContain('{arg1}:{arg2}');
+			warn.mockClear();
+			// Compilable (leading literal namespace) -> covered, no no-coverage warn.
+			__register('pii/covered-nowarn', live.stream((ctx, room) => 'chat:' + room, async () => ({}), { merge: 'set', piiRedact: { fields: { ssn: 'omit' } } }));
+			// A factory WITHOUT piiRedact never reaches the pattern-registration block.
+			__register('pii/noredact-nowarn', live.stream((ctx, room) => ctx.user.org + ':' + room, async () => ({}), { merge: 'set' }));
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it('clears the dynamic pattern registry on reset', () => {
 		__register('pii/dyn-reset', live.stream((ctx, room) => 'room:' + room, async () => ({}), { merge: 'set', piiRedact: true }));
 		expect(_declaredRedactPattern.size).toBeGreaterThan(0);

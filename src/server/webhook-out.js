@@ -1,6 +1,6 @@
 // @ts-check
 import { deliverWebhook, redactUrl } from 'svelte-adapter-uws/plugins/webhooks';
-import { now } from '../shared/runtime.js';
+import { now, monotonicNow } from '../shared/runtime.js';
 import { state } from './state.js';
 import { _IS_DEV } from './env.js';
 
@@ -41,10 +41,11 @@ function _reportWebhookOutFailure(config, err, event, data, attempts) {
 
 export async function _fireWebhookOut(entry, topic, event, data, platform) {
 	void platform; // accepted for call-site parity; delivery reads entry.config
-	// Capture when delivery began so the dead-letter store's forget tombstone can
-	// tell an in-flight-during-forget capture (drop) from a post-forget one. A
-	// long retry budget can outlive a live.forget that ran mid-delivery.
-	const startedAt = now();
+	// Capture when delivery began (MONOTONIC, so the tombstone match is immune to a
+	// wall-clock step) so the dead-letter store's forget tombstone can tell an
+	// in-flight-during-forget capture (drop) from a post-forget one. A long retry
+	// budget can outlive a live.forget that ran mid-delivery.
+	const startedAt = monotonicNow();
 	const r = await deliverWebhook(entry.config, topic, event, data, _webhookHooks(entry));
 	if (r.ok) return;
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);

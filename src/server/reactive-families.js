@@ -3,6 +3,7 @@ import { live, getPlatform, publish } from '../server.js';
 import { _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState } from './reactive.js';
 import { _aggregateByTopic } from './state.js';
 import { _normalizeAggregatePrivacy } from './differential-privacy.js';
+import { _registerReplayTopic } from './replay-routing.js';
 
 // Seam: the flag cell/watcher and the window-spec validator stay in server.js
 // (shared with the staying __register* shims); the reactive families reach them
@@ -96,15 +97,28 @@ export const _flagRegister = function flag(topic, initialValue, options) {
 	// to opt out (single-process apps lose nothing - the cached value is
 	// authoritative in one process).
 	const streamOpts = { merge: 'set' };
+	let implicitReplay = false;
 	if (options && options.replay === false) {
 		// opt out: leave replay unset
 	} else if (options && options.replay) {
 		/** @type {any} */ (streamOpts).replay = options.replay;
 	} else {
 		/** @type {any} */ (streamOpts).replay = { size: 1 };
+		implicitReplay = true;
 	}
 	const stream = live.stream(topic, initFn, streamOpts);
 	/** @type {any} */ (stream).__isFlag = true;
+	// The default single-entry buffer is a framework default the user never
+	// opted into, so mark the topic implicit: a single-process app (no
+	// `platform.replay`) must not get the "install the replay extension" warn -
+	// live.flag's contract is that single-process apps lose nothing. The topic
+	// is already replay-eligible (registered inside live.stream); this
+	// re-registration only adds the implicit marker. A flag with an EXPLICIT
+	// `replay` is a real opt-in and stays un-marked, so it still warns.
+	if (implicitReplay) {
+		_registerReplayTopic(topic, true);
+		/** @type {any} */ (stream).__implicitReplay = true;
+	}
 	/**
 	 * Read the flag's current value on the server (synchronous). On a running
 	 * replica this stays fresh from boot within a tick of any inbound `set` via

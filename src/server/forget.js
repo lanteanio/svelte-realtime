@@ -25,23 +25,31 @@ import { _validIdReason, _MAX_USER_ID_LENGTH } from './validate.js';
 import { LiveError } from './live-error.js';
 import { createHash } from 'node:crypto';
 import { _purgePushUser } from './push.js';
-import { _purgePresenceUser } from './presence.js';
+import { _purgePresenceUser, _ownerReplayPublisher } from './presence.js';
 import { _purgeRateLimitUser } from './rate-limit.js';
 import { _purgeIdempotencyUser } from './idempotency.js';
 import { _purgeSmoothUser } from './smooth.js';
 import { _purgeAggregateCohorts } from './reactive.js';
 import { _purgeCrdtDocs } from './crdt.js';
+import { _ownerEmit } from './room-owner.js';
 import { state } from './state.js';
 
 /**
  * Optional durable forget store (default null = in-memory state only). A wired
  * store erases the user's durable cluster rows (Redis registry / presence /
  * cursor / session / idempotency, Postgres idempotency, ...). Duck-typed:
- * `purgeUser(tenantId, userId, cascade) => Promise<number | Record<string,
- * number>>` returning rows removed (a number) or a per-store breakdown. The
- * extensions `createForgetStore(...)` builds one; the realtime layer never
- * imports it. Set via `configureForget({ store })`.
- * @type {{ purgeUser: (tenantId: string | null, userId: string, cascade: any) => Promise<number | Record<string, number>> } | null}
+ * `purgeUser(tenantId, userId, cascade)` returns rows removed as a number, a
+ * per-store breakdown object, OR the richer owner-succession envelope
+ * `{ rowsAffected?, ownerSuccessions? }`. The envelope (detected by an
+ * `ownerSuccessions` array) carries the `:owner` changes the store's cluster-wide
+ * owner eviction produced for rooms this instance could not resolve locally (a
+ * remote-only room, or an identity still connected elsewhere whose local
+ * connection-count never reached zero here); realtime publishes each so live
+ * subscribers and resumers see the successor rather than the erased owner. Each
+ * entry is `{ topic, owner, reason }` (owner null + reason 'vacated' when the room
+ * emptied). The extensions `createForgetStore(...)` builds one; the realtime layer
+ * never imports it. Set via `configureForget({ store })`.
+ * @type {{ purgeUser: (tenantId: string | null, userId: string, cascade: any) => Promise<number | Record<string, number> | { rowsAffected?: number | Record<string, number>, ownerSuccessions?: Array<{ topic: string, owner: string | null, reason: string }> }> } | null}
  */
 let _forgetStore = null;
 
@@ -153,6 +161,36 @@ export function _forgetSurfaceNames() {
  *   (in-memory descriptors + `durable`).
  */
 
+/**
+ * Publish the `:owner` successions a durable store reported from its cluster-wide
+ * owner eviction. Each is a wire `:owner` `set` for the room's successor (or a
+ * `vacated` null), routed through the same replay path a room succession uses so
+ * live subscribers update and a resuming client gap-fills the successor. Runs on
+ * the forgetting instance; a malformed entry or a missing platform is skipped.
+ * The `onOwnerChange` SERVER hook is deliberately NOT fired here - it is bound to
+ * a room's local join state (its `_ownerRooms` entry), which the forgetting
+ * instance need not hold (a remote-only room, a dedicated erasure runner), so only
+ * the cluster-safe wire announcement is emitted; the hook still fires for a
+ * locally-resolved succession on the instance that holds the room.
+ * @param {string | null} tenantId
+ * @param {any[]} successions
+ * @returns {number} well-formed entries announced (each publish is best-effort:
+ *   a throwing platform swallows inside `_ownerEmit` and still counts)
+ */
+function _publishOwnerSuccessions(tenantId, successions) {
+	const publish = _ownerReplayPublisher(_forgetPlatform);
+	if (!publish) return 0;
+	let n = 0;
+	for (const s of successions) {
+		if (!s || typeof s.topic !== 'string' || s.topic.length === 0) continue;
+		const owner = typeof s.owner === 'string' ? s.owner : null;
+		const reason = typeof s.reason === 'string' ? s.reason : 'succeeded';
+		_ownerEmit(s.topic, tenantId, { owner, previous: null, reason, _hook: null }, publish);
+		n++;
+	}
+	return n;
+}
+
 const _liveForget = async function forget(userId, opts) {
 	if (typeof userId !== 'string' || userId.length === 0) {
 		throw new LiveError('INVALID_REQUEST', 'live.forget(userId) requires a non-empty userId string');
@@ -234,17 +272,30 @@ const _liveForget = async function forget(userId, opts) {
 
 		// Durable store: erase the user's cluster rows and WAIT for confirmation -
 		// resolving before the durable delete confirms would be a compliance lie
-		// (GDPR must wait for durable confirmation). The store may return a total
-		// (number) or a per-store breakdown (object); both fold into the count.
+		// (GDPR must wait for durable confirmation). The return shapes are handled
+		// below (count, breakdown, or the owner-succession envelope).
 		if (_forgetStore) {
+			let successions = null;
 			try {
 				const durable = await _forgetStore.purgeUser(tenantId, userId, cascade);
-				if (typeof durable === 'number') {
-					surfaces.durable = durable > 0 ? durable : 0;
+				// The store may return a total (number), a per-store count
+				// breakdown (object), or the owner-succession envelope
+				// `{ rowsAffected?, ownerSuccessions? }` - detected by an
+				// `ownerSuccessions` array (a plain count breakdown never carries
+				// one). Split the counts from the successions; the counts fold as
+				// before, the successions publish `:owner` for the rooms the store
+				// evicted the user from as owner cluster-wide.
+				let counts = durable;
+				if (durable && typeof durable === 'object' && Array.isArray(/** @type {any} */ (durable).ownerSuccessions)) {
+					successions = /** @type {any} */ (durable).ownerSuccessions;
+					counts = /** @type {any} */ (durable).rowsAffected;
+				}
+				if (typeof counts === 'number') {
+					surfaces.durable = counts > 0 ? counts : 0;
 					rowsAffected += surfaces.durable;
-				} else if (durable && typeof durable === 'object') {
+				} else if (counts && typeof counts === 'object') {
 					let sum = 0;
-					for (const v of Object.values(durable)) {
+					for (const v of Object.values(counts)) {
 						const n = typeof v === 'number' && v > 0 ? v : 0;
 						sum += n;
 					}
@@ -259,6 +310,14 @@ const _liveForget = async function forget(userId, opts) {
 				// in-memory surface, we do NOT swallow it, so the app can retry.
 				if (_IS_DEV) console.error('[svelte-realtime] live.forget durable store.purgeUser threw:', err);
 				throw new LiveError('FORGET_STORE_FAILED', 'live.forget: durable store.purgeUser failed; the erasure is incomplete and must be retried');
+			}
+			// Publish the store's owner successions AFTER the durable try/catch:
+			// the authoritative eviction already committed in the store, so the
+			// wire announcement is best-effort by construction and an exotic throw
+			// out of it must never misreport as FORGET_STORE_FAILED (which would
+			// tell the caller to retry an erasure that succeeded).
+			if (successions !== null) {
+				surfaces.ownerSuccessions = _publishOwnerSuccessions(tenantId, successions);
 			}
 		}
 

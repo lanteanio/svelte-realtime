@@ -126,6 +126,7 @@ export const shape = live.smooth({ topic: (ctx, id) => 'shape:' + id, apply, ini
 		expect(code).toContain('_command: __rpc("board/shape/__smooth/command")');
 		expect(code).toContain('_sync: __rpc("board/shape/__smooth/sync")');
 		expect(code).toContain('_center: __rpc("board/shape/__smooth/center")');
+		expect(code).toContain('_shoot: __rpc("board/shape/__smooth/shoot")');
 		// The area-of-interest center wires the per-topic RPC into SmoothEntity's
 		// third argument (the report fn), bound to the room args.
 		expect(code).toContain('new SmoothEntity(channel, status, (center) => shape._center.fireAndForget(...roomArgs, center))');
@@ -398,7 +399,7 @@ export const messages = live.stream('messages', async (ctx) => []);
 		expect(code).toContain('__register("chat/send"');
 	});
 
-	it('registers the command, sync, and center handlers for a live.smooth() export', () => {
+	it('registers the command, sync, center, and shoot handlers for a live.smooth() export', () => {
 		setup({
 			'board.js': `
 import { live } from 'svelte-realtime/server';
@@ -414,6 +415,11 @@ export const shape = live.smooth({ topic: (ctx, id) => 'shape:' + id, apply, ini
 		expect(code).toContain('__register("board/shape/__smooth/sync"');
 		expect(code).toContain('__register("board/shape/__smooth/center"');
 		expect(code).toContain('m.shape.__smoothCenter');
+		// Regression: the shoot RPC must be registered server-side too, or the
+		// client's _shoot.fireAndForget() hits an unregistered path and hitTest
+		// onHit never fires (the wire path stays dead while sim tests pass).
+		expect(code).toContain('__register("board/shape/__smooth/shoot"');
+		expect(code).toContain('m.shape.__smoothShoot');
 	});
 
 	it('returns empty comment when no live dir exists', () => {

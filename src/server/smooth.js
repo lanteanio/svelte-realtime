@@ -3139,9 +3139,11 @@ export const _smoothRegister = function smooth(config) {
 
 	// Fire-and-forget shot resolution: rewind every candidate to the instant the
 	// shooter saw the world, test the shot against those historical positions, and
-	// apply the result authoritatively. Registered only when `hitTest` is set, so
-	// the default smooth surface never gains this RPC (credo-4). Volatile - a lost
-	// shot is the app's to retransmit, never the framework's; there is no reply.
+	// apply the result authoritatively. Registered for every smooth surface
+	// alongside command/sync/center (the client always exposes shoot()); on a topic
+	// with no `hitTest` the handler is a safe no-op - `rec.lagComp === null` returns
+	// early below. Volatile - a lost shot is the app's to retransmit, never the
+	// framework's; there is no reply.
 	smoothExport.__smoothShoot = live.volatile(async (ctx, ...args) => {
 		const roomArgs = args.slice(0, argCount);
 		if (guard) await guard(ctx, ...roomArgs);

@@ -3,7 +3,7 @@ import { _presenceRef } from './state.js';
 import { clearTimer } from '../shared/runtime.js';
 import { _topicInTenant } from './tenant.js';
 import { _ownerOnLeave, _ownerEmit } from './room-owner.js';
-import { _maybeReplayPublish } from './replay-routing.js';
+import { _maybeReplayPublish, _registerReplayTopic } from './replay-routing.js';
 
 /**
  * Direct handle to the in-memory presence-ref map for tests that need to seed
@@ -127,6 +127,32 @@ export async function _clusterPresenceRelease(platform, topic, key) {
 }
 
 /**
+ * Build the `:owner` publish closure that routes an ownership change through the
+ * replay buffer. The `:owner` sub-stream is replay-backed by construction (room.js
+ * declares `__replay: { size: 1 }`), but `_maybeReplayPublish` writes the buffer
+ * only when THIS instance already registered the topic as replay-eligible (a local
+ * claim or a local `:owner` subscribe). A succession driven by a purge on an
+ * instance that never held a local `:owner` subscriber - a load-balanced forget
+ * request, a dedicated erasure job, or the durable-store owner-succession fan-in -
+ * would otherwise advance no buffer, leaving a later resumer or fresh connect to
+ * gap-fill the erased owner. Registering here (idempotent, mirroring room.js's
+ * claim-time registration) keeps the buffer advanced; `_maybeReplayPublish` still
+ * owns the WRAPPED_FOR_REPLAY defer and the sync-throw fallback. Falls back to a
+ * bare publish when the topic is not replay-eligible or no replay extension is
+ * wired (single-process is unchanged). Null platform -> null (nothing to publish
+ * through). Shared by the presence purge and the `live.forget` store fan-in.
+ * @param {any} platform
+ * @returns {((wireTopic: string, event: string, data: any) => void) | null}
+ */
+export function _ownerReplayPublisher(platform) {
+	if (!platform) return null;
+	return (wireTopic, event, data) => {
+		if (platform.replay) _registerReplayTopic(wireTopic);
+		if (!_maybeReplayPublish(platform, wireTopic, event, data)) platform.publish(wireTopic, event, data);
+	};
+}
+
+/**
  * Right-to-erasure (`live.forget`): drop every presence-ref entry a user holds,
  * scoped to one tenant. Refs are keyed `topic\0userKey`; the userKey is the
  * segment after the LAST `\0` (a validated wire topic and a validated userId
@@ -149,15 +175,11 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 	// forgotten user's later disconnect: the purge already dropped its presence
 	// ref, so a subsequent close hits `if (!ref) return` and never re-runs
 	// succession. So the `:owner` change must be published even though the forget
-	// cascade wires no `publishLeave`. Route it through the platform, via the
-	// replay buffer when the `:owner` topic is replay-eligible (it is, once
-	// claimed or an owner stream is subscribed), so live subscribers update AND a
-	// resuming client gap-fills the successor rather than reading the erased owner.
-	const _ownerPublish = platform
-		? (wireTopic, event, data) => {
-			if (!_maybeReplayPublish(platform, wireTopic, event, data)) platform.publish(wireTopic, event, data);
-		}
-		: null;
+	// cascade wires no `publishLeave`. Route it through the platform and, when the
+	// replay extension is present, through the `:owner` replay buffer, so live
+	// subscribers update AND a resuming or fresh client gap-fills the successor
+	// rather than reading the erased owner.
+	const _ownerPublish = _ownerReplayPublisher(platform);
 	let n = 0;
 	for (const [refKey, ref] of [..._presenceRef]) {
 		const sep = refKey.lastIndexOf('\0');

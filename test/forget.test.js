@@ -11,7 +11,8 @@ import { _presenceRef, _rateLimits } from '../src/server/state.js';
 import { _tenantKey, _tenantTopic } from '../src/server/tenant.js';
 import { _resetIdempotencyStore } from '../src/server/idempotency.js';
 import { _forgetSurfaceNames } from '../src/server/forget.js';
-import { setTimer, clearTimer } from '../src/shared/runtime.js';
+import { _resetReplayRouting } from '../src/server/replay-routing.js';
+import { setTimer, clearTimer, setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 
 // The framework joins key segments with a NUL byte (`_tenantKey`, presence ref
 // keys, rate-limit bucket keys). Build it via fromCharCode so the SOURCE stays
@@ -166,6 +167,123 @@ describe('live.forget - idempotency reverse index', () => {
 		expect(calls).toBe(2);
 	});
 
+	it('forget tombstone uses MONOTONIC time: a backward wall step cannot resurrect an in-flight commit', async () => {
+		let wall = 1000;
+		let mono = 1000; // wall and monotonic aligned when the request acquires
+		setRuntimeEnv({ clock: { now: () => wall, monotonic: () => mono, wallEpoch: () => wall } });
+		try {
+			let calls = 0;
+			let release;
+			const gate = new Promise((r) => { release = r; });
+			const fn = live.idempotent({}, async () => { calls++; await gate; return { secret: 'PII' }; });
+			const ctx = { user: { id: 'u1' }, tenantId: 't1', _idempotencyKey: 'k' };
+
+			const inflight = fn(ctx); // acquires the slot at monotonic 1000, parks at the gate
+			await flush();
+			expect(calls).toBe(1);
+
+			// A backward NTP step drags WALL below the acquire time while MONOTONIC
+			// advances. A wall tombstone (500 >= 1000 -> false) would RETAIN the erased
+			// user's PII; the monotonic tombstone (2000 + grace >= 1000 -> true) drops it.
+			wall = 500;
+			mono = 2000;
+			await live.forget('u1', { tenantId: 't1' }); // tombstone at monotonic 2000
+			release();
+			await inflight;
+
+			// The forgotten user's result must NOT be cached: a re-run re-executes
+			// the handler instead of returning the dropped commit's cached value.
+			await fn(ctx);
+			expect(calls).toBe(2);
+		} finally {
+			resetRuntimeEnv();
+		}
+	});
+
+	it('forget tombstone grace window: drops a duplicate re-acquiring just after the purge, then caches again once past it', async () => {
+		let wall = 1000;
+		let mono = 1000;
+		setRuntimeEnv({ clock: { now: () => wall, monotonic: () => mono, wallEpoch: () => wall } });
+		try {
+			let calls = 0;
+			const fn = live.idempotent({}, async (ctx, x) => { calls++; return { x }; });
+			const ctx = { user: { id: 'u1' }, tenantId: 't1', _idempotencyKey: 'k' };
+
+			// Seed a cached result (also creates the default store so forget has a
+			// tombstone target).
+			await fn(ctx, 1);
+			await fn(ctx, 1); // cache hit
+			expect(calls).toBe(1);
+
+			// Forget at monotonic 1000: drops the cached entry and sets the tombstone.
+			await live.forget('u1', { tenantId: 't1' });
+
+			// A duplicate re-acquiring WITHIN the grace window (500ms after the purge)
+			// is still dropped - the deliberate over-drop the old cached-wall clock gave
+			// implicitly - so its commit does not re-cache the forgotten user.
+			mono = 1500;
+			await fn(ctx, 1); // cache miss (forget dropped it), re-runs
+			expect(calls).toBe(2);
+			await fn(ctx, 1); // within grace: prior commit was dropped, re-runs again
+			expect(calls).toBe(3);
+
+			// Past the grace window (2000ms after the purge) the store recovers: a new
+			// request caches normally and the next identical call is a cache hit.
+			mono = 3000;
+			await fn(ctx, 1); // cache miss, re-runs, and now COMMITS (past grace)
+			expect(calls).toBe(4);
+			await fn(ctx, 1); // cache hit -> handler not re-run
+			expect(calls).toBe(4);
+		} finally {
+			resetRuntimeEnv();
+		}
+	});
+
+	it('forget tombstone: a duplicate WAITING on an in-flight sibling across a forget must not re-cache forgotten PII', async () => {
+		// The racing request here is a DUPLICATE that arrived before live.forget but
+		// parked in the inflight-wait loop; when its in-flight sibling is dropped it
+		// re-runs AFTER the purge. Its acquire time is snapshotted at arrival (before
+		// the wait), so it stays tombstoned even though its re-run and commit land past
+		// the grace window - otherwise it would cache the erased user's freshly-computed
+		// result for the full TTL (the exact leak idempotency exists to prevent).
+		let wall = 1000;
+		let mono = 1000;
+		setRuntimeEnv({ clock: { now: () => wall, monotonic: () => mono, wallEpoch: () => wall } });
+		try {
+			let calls = 0;
+			let release;
+			const gate = new Promise((r) => { release = r; });
+			const fn = live.idempotent({}, async () => {
+				calls++;
+				if (calls === 1) await gate; // only the first (in-flight) call parks
+				return { secret: 'PII-' + calls };
+			});
+			const ctx = { user: { id: 'u1' }, tenantId: 't1', _idempotencyKey: 'k' };
+
+			const r1 = fn(ctx); // acquires at monotonic 1000, parks at the gate
+			await flush();
+			expect(calls).toBe(1);
+			const r2 = fn(ctx); // same key -> parks in the inflight-wait loop (arrival 1000)
+			await flush();
+
+			// Forget WHILE both are pending, then advance the clock well past the grace.
+			await live.forget('u1', { tenantId: 't1' }); // tombstone at monotonic 1000
+			wall = 3000;
+			mono = 3000;
+			release(); // r1 resolves and is dropped; r2 wakes, re-acquires, re-runs
+			await r1;
+			await r2;
+
+			// r2 arrived before the forget, so its commit must be dropped: a fresh call
+			// re-runs the handler instead of returning r2's forgotten result from cache.
+			const r3 = await fn(ctx);
+			expect(r3).not.toEqual({ secret: 'PII-2' });
+			expect(calls).toBe(3);
+		} finally {
+			resetRuntimeEnv();
+		}
+	});
+
 	it('does not erase another user / tenant cached results', async () => {
 		let calls = 0;
 		const fn = live.idempotent({}, async (ctx, x) => { calls++; return { x }; });
@@ -207,6 +325,107 @@ describe('live.forget - durable store seam', () => {
 		const res = await live.forget('u1');
 		expect(res.surfaces.durable).toBeUndefined();
 		expect(res.rowsAffected).toBe(1);
+	});
+});
+
+describe('live.forget - durable store owner-succession envelope', () => {
+	beforeEach(() => { _resetReplayRouting(); });
+	afterEach(() => { _resetReplayRouting(); });
+
+	it('publishes each store-reported succession on the room :owner topic and folds the counts', async () => {
+		// The store evicted the erased user as owner of two rooms cluster-wide
+		// (rooms this instance holds no local refs for) and reports the changes.
+		const published = [];
+		const platform = { publish: (t, e, d) => published.push({ t, e, d }) };
+		configureForget({
+			platform,
+			store: {
+				async purgeUser() {
+					return {
+						rowsAffected: { registry: 2, session: 1 },
+						ownerSuccessions: [
+							{ topic: 'board/1', owner: 'u2', reason: 'succeeded' },
+							{ topic: 'board/2', owner: null, reason: 'vacated' }
+						]
+					};
+				}
+			}
+		});
+		const res = await live.forget('u1');
+		expect(res.surfaces.durable).toBe(3);
+		expect(res.surfaces.ownerSuccessions).toBe(2);
+		// The successor (and the vacated null) reach subscribers on every replica
+		// via the :owner wire event - the value a connected room.owner store shows.
+		expect(published).toContainEqual({ t: 'board/1:owner', e: 'set', d: { key: 'u2', reason: 'succeeded' } });
+		expect(published).toContainEqual({ t: 'board/2:owner', e: 'set', d: { key: null, reason: 'vacated' } });
+	});
+
+	it('routes a store-reported succession through the :owner replay buffer so a resumer gap-fills the successor', async () => {
+		// Mirrors the F3 fix: the forgetting instance need not hold a local :owner
+		// subscriber, so the topic is registered replay-eligible and the emit lands
+		// in the shared buffer, not only on the live bus.
+		const buffered = [];
+		const bare = [];
+		const platform = {
+			publish: (t, e, d) => bare.push({ t, e, d }),
+			replay: {
+				publish: (_p, topic, event, data) => { buffered.push({ topic, event, data }); return Promise.resolve(); },
+				since: async () => [],
+				seq: async () => 0
+			}
+		};
+		configureForget({
+			platform,
+			store: { async purgeUser() { return { rowsAffected: 1, ownerSuccessions: [{ topic: 'board/9', owner: 'u3', reason: 'succeeded' }] }; } }
+		});
+		const res = await live.forget('u1');
+		expect(res.surfaces.ownerSuccessions).toBe(1);
+		expect(buffered).toContainEqual({ topic: 'board/9:owner', event: 'set', data: { key: 'u3', reason: 'succeeded' } });
+		expect(bare).toEqual([]); // routed through the buffer, not the bare publish
+	});
+
+	it('a plain count return (no envelope) stays byte-identical - no ownerSuccessions surface', async () => {
+		configureForget({ store: { async purgeUser() { return { registry: 2, session: 3 }; } } });
+		const res = await live.forget('u1');
+		expect(res.surfaces.durable).toBe(5);
+		expect('ownerSuccessions' in res.surfaces).toBe(false);
+	});
+
+	it('skips malformed succession entries and defaults a missing reason to succeeded', async () => {
+		const published = [];
+		const platform = { publish: (t, e, d) => published.push({ t, e, d }) };
+		configureForget({
+			platform,
+			store: {
+				async purgeUser() {
+					return { rowsAffected: 0, ownerSuccessions: [null, {}, { topic: '' }, { topic: 'room/1', owner: 'u2' }] };
+				}
+			}
+		});
+		const res = await live.forget('u1');
+		expect(res.surfaces.ownerSuccessions).toBe(1);
+		expect(published).toEqual([{ t: 'room/1:owner', e: 'set', d: { key: 'u2', reason: 'succeeded' } }]);
+	});
+
+	it('an envelope with no platform wired publishes nothing and reports zero (no throw)', async () => {
+		configureForget({ store: { async purgeUser() { return { rowsAffected: 4, ownerSuccessions: [{ topic: 'board/1', owner: 'u2', reason: 'succeeded' }] }; } } });
+		configureForget({ platform: null });
+		const res = await live.forget('u1');
+		expect(res.surfaces.durable).toBe(4);
+		expect(res.surfaces.ownerSuccessions).toBe(0);
+	});
+
+	it('a throwing publish never fails the forget - the durable erasure already confirmed', async () => {
+		// The store committed the eviction; the wire announcement is best-effort.
+		// A broken bus must not surface as FORGET_STORE_FAILED, which would tell
+		// the caller to retry an erasure that succeeded.
+		configureForget({
+			platform: { publish: () => { throw new Error('bus down'); } },
+			store: { async purgeUser() { return { rowsAffected: 2, ownerSuccessions: [{ topic: 'board/1', owner: 'u2', reason: 'succeeded' }] }; } }
+		});
+		const res = await live.forget('u1');
+		expect(res.ok).toBe(true);
+		expect(res.surfaces.durable).toBe(2);
 	});
 });
 

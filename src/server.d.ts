@@ -2069,7 +2069,10 @@ export namespace live {
 	 * `configureForget({ store })`; the promise resolves ONLY after the durable
 	 * store confirms (resolving early would be a compliance lie). A durable
 	 * failure rejects with `LiveError('FORGET_STORE_FAILED')` so the incomplete
-	 * erasure can be retried.
+	 * erasure can be retried. A store reporting cluster-wide owner evictions
+	 * (the `ownerSuccessions` envelope) has each successor published on the
+	 * room's `:owner` topic through the replay buffer, so subscribers and
+	 * resumers on every replica see the successor instead of the erased owner.
 	 *
 	 * `tenantId` is server-trusted: pass it from your own context (`ctx.tenantId`
 	 * or your own logic), never straight off the wire. Defaults to `null`
@@ -4154,17 +4157,38 @@ export interface ForgetResult {
 	 * caller; map to a constant shape before exposing to untrusted clients.
 	 */
 	rowsAffected: number;
-	/** Per-surface removal counts (in-memory descriptors plus `durable`). */
+	/**
+	 * Per-surface removal counts (in-memory descriptors plus `durable`, plus
+	 * `crdtDocs` when the cascade named documents and `ownerSuccessions` when
+	 * the durable store reported cluster-wide owner evictions).
+	 */
 	surfaces: Record<string, number>;
+}
+
+/**
+ * A cluster-wide room-owner change the durable forget store produced while
+ * evicting the erased user as owner: `topic` is the room's wire data topic,
+ * `owner` the successor identity (or null when the room emptied), `reason`
+ * `'succeeded'` or `'vacated'`. `live.forget` publishes each on the room's
+ * `:owner` topic through the replay buffer.
+ */
+export interface ForgetOwnerSuccession {
+	topic: string;
+	owner: string | null;
+	reason: string;
 }
 
 /**
  * Durable right-to-erasure store: erases a user's durable cluster rows. The
  * extensions `createForgetStore(...)` builds one; the realtime layer never
- * imports it - it only duck-types `purgeUser`.
+ * imports it - it only duck-types `purgeUser`. The return may be a total
+ * (number), a per-store count breakdown, or the owner-succession envelope
+ * `{ rowsAffected?, ownerSuccessions? }` carrying the `:owner` changes the
+ * store's cluster-wide owner eviction produced for rooms the forgetting
+ * instance could not resolve locally.
  */
 export interface ForgetStore {
-	purgeUser(tenantId: string | null, userId: string, cascade: any): Promise<number | Record<string, number>>;
+	purgeUser(tenantId: string | null, userId: string, cascade: any): Promise<number | Record<string, number> | { rowsAffected?: number | Record<string, number>, ownerSuccessions?: ForgetOwnerSuccession[] }>;
 }
 
 /**

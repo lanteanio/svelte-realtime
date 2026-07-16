@@ -457,10 +457,14 @@ export function _resetRedactRegistry() {
 	_declaredRedactPattern.clear();
 	_declaredStreamTopic.clear();
 	_redactPatternWarned.clear();
+	_redactUncompilableWarned.clear();
 }
 
 /** One-shot dedup for the same-pattern differing-redactor collision warning (keyed by pattern). */
 const _redactPatternWarned = new Set();
+
+/** One-shot dedup for the "piiRedact factory has no cluster-transient coverage" warning (keyed by factory source). */
+const _redactUncompilableWarned = new Set();
 
 /** Per-ws set of topics where this ws has contributed a volatile refcount. */
 const _wsVolatileContrib = new WeakMap();
@@ -1301,6 +1305,33 @@ live.stream = function stream(topic, initFn, options) {
 					);
 				}
 				_declaredRedactPattern.set(_pattern, { regex: _compiled.regex, prefix: _compiled.prefix, redact: _piiRedactor, onError: streamOnError || null, failOpen: true });
+			} else if (_IS_DEV) {
+				// The derived skeleton could not be compiled to a safe matcher: a
+				// ctx-reading or destructuring factory ('<dynamic>'), a constant, or a
+				// variable-first topic with no leading literal. So this piiRedact factory
+				// gets NO cluster-transient coverage - an instance publishing to a
+				// resolved topic it never subscribed to relays the RAW frame to the peer
+				// holding the subscriber, which never re-redacts. Silent by default
+				// pre-fix; warn once per distinct factory (keyed by source, so an
+				// unchanged HMR reload does not re-warn) so the gap is visible.
+				const _key = String(topic);
+				if (!_redactUncompilableWarned.has(_key)) {
+					_redactUncompilableWarned.add(_key);
+					const _firstPh = _pattern.search(/\{arg\d+\}/);
+					const _why = _pattern === '<dynamic>'
+						? 'its topic reads ctx or destructures its args, so it cannot be reduced to a literal skeleton'
+						: _firstPh === -1
+							? 'its topic resolves to a constant (declare it as a static string topic instead)'
+							: 'its topic starts with a variable, so it has no leading literal namespace to anchor the match';
+					console.warn(
+						'[svelte-realtime] a piiRedact factory topic has NO cluster-transient redaction coverage - ' + _why +
+						' (derived skeleton: "' + _pattern + '"). In a cluster, an instance that publishes to a resolved ' +
+						'topic it never subscribed to relays the RAW, un-redacted frame to the peer holding the subscriber, ' +
+						'which never re-redacts. Give the topic a leading literal namespace and single-segment args - e.g. ' +
+						"(ctx, roomId) => 'chat:' + roomId - not a ctx-derived or variable-first topic. Single-instance, and " +
+						'any topic a local subscriber has resolved, are unaffected.'
+					);
+				}
 			}
 		}
 	}
@@ -3557,6 +3588,31 @@ export function publish(topic, event, data, options) {
 	const platform = getPlatform();
 	if (!platform) {
 		throw new Error('[svelte-realtime] publish: platform has not been captured yet. Wire `realtime({ ... }).init` (or `setCronPlatform` + `_activateDerived`) from your hooks.ws.js init({ platform }) hook before calling publish() at module scope.');
+	}
+	// A topic registered with `transform` projects its wire shape once per
+	// publish, applied BEFORE redaction and BEFORE the replay buffer, exactly as
+	// ctx.publish does. Without this an out-of-band publish() (or a
+	// live.flag().set(), which routes here) to a `{ replay, transform }` topic
+	// wrote the RAW value to the buffer while a live subscriber saw the projected
+	// shape - so a resuming subscriber gap-filled a frame inconsistent with the
+	// live stream. Only the subscribe-time `_topicTransform` registry carries
+	// transforms (there is no declaration-time transform map), matching
+	// ctx.publish; a topic with no registered transform is untouched. onError
+	// parity with ctx.publish: a throwing transform with an observer drops the
+	// publish (return false), otherwise the throw propagates.
+	if (_topicTransform.size > 0) {
+		const t = _topicTransform.get(topic);
+		if (t) {
+			try {
+				data = t.transform(data);
+			} catch (err) {
+				if (t.onError) {
+					try { t.onError(err, null, topic); } catch {}
+					return false;
+				}
+				throw err;
+			}
+		}
 	}
 	// Out-of-band publish (SSR routes, webhooks, scripts) is a first-class wire
 	// egress, so it honors piiRedact uniformly. Fail-closed: a throwing redactor
