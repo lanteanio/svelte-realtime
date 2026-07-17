@@ -17,6 +17,31 @@ const _cohortByWs = new WeakMap();
 const _cohortSeen = new Set();
 const _MAX_COHORTS = 16;
 
+// Label-LENGTH bounds - a backstop, NOT the cardinality fix. The cardinality
+// fold (collapsing an unregistered, client-controlled path to `__unknown__` and
+// a malformed request to `__invalid__`) MUST happen at each emit site where
+// registration is known - the RPC dispatch and the upload handler - because only
+// there can a registered path be told from an attacker's arbitrary one. A short
+// unregistered path folded here would still be one series per value, so a new
+// emit site that forwards a raw client path must fold it before calling this.
+// What this choke point guarantees is label SIZE: a non-string or over-length
+// path/code can never bloat a label or slip through as a distinct long series.
+// A registered rpc path is well under 96 chars and a framework/app error code
+// well under 64; anything longer folds to a sentinel.
+const _MAX_METRIC_PATH_LEN = 96;
+const _MAX_METRIC_CODE_LEN = 64;
+
+/** @param {any} p @returns {string} the path label, folded to a bounded sentinel when non-string or over-length */
+function _metricPath(p) {
+	if (typeof p !== 'string') return '__unknown__';
+	return p.length <= _MAX_METRIC_PATH_LEN ? p : '__toolong__';
+}
+
+/** @param {string} c @returns {string} the code label, folded to a bounded sentinel when over-length */
+function _metricCode(c) {
+	return c.length <= _MAX_METRIC_CODE_LEN ? c : '__toolong__';
+}
+
 /**
  * Resolve the cohort label for a socket through the configured classifier.
  * `'unknown'` when no socket is in scope (guard paths that reject before a
@@ -59,6 +84,9 @@ function _cohortOf(ws) {
 export function _recordRpcMetrics(path, code, startTime, ws) {
 	const mi = state.metricsInstruments;
 	if (!mi) return;
+	// Bound both label values so no path/code can inflate series cardinality.
+	path = _metricPath(path);
+	if (code) code = _metricCode(code);
 	const status = code ? 'error' : 'ok';
 	if (mi.cohortFn) {
 		const cohort = _cohortOf(ws);

@@ -900,7 +900,9 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 	}
 
 	if (rawArgs !== undefined && !Array.isArray(rawArgs)) {
-		_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
+		// Pre-registry (path not yet resolved), so it may be unregistered and
+		// client-controlled: fold to a bounded label rather than record the raw path.
+		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
 		return { id, ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' };
 	}
 
@@ -912,7 +914,10 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 		if (_IS_DEV) {
 			console.warn(`[svelte-realtime] RPC call to '${path}' - no such live function registered\n  See: https://svti.me/rpc`);
 		}
-		_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
+		// Fold the unregistered (client-controlled) path to a bounded label - an
+		// unauthenticated caller must not be able to allocate a metric series per
+		// distinct unknown path. See metrics.js for the length backstop.
+		_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
 		return { id, ..._unknownPathReply(ws) };
 	}
 
@@ -1031,7 +1036,9 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
 	}
 
 	if (extraArgs !== undefined && !Array.isArray(extraArgs)) {
-		_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
+		// Pre-registry (path not yet resolved), so it may be unregistered and
+		// client-controlled: fold to a bounded label rather than record the raw path.
+		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
 		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' });
 		return;
 	}
@@ -1039,7 +1046,10 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
 	if (!_isLazyResolved()) await _resolveAllLazy();
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
-		_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
+		// Fold the unregistered (client-controlled) path to a bounded label - an
+		// unauthenticated caller must not be able to allocate a metric series per
+		// distinct unknown path. See metrics.js for the length backstop.
+		_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
 		_respond(ws, platform, id, _unknownPathReply(ws));
 		return;
 	}

@@ -537,6 +537,11 @@ export function _handleUploadControlFrame(ws, data, platform) {
 async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, options) {
 	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 	let path = '';
+	// Only a path confirmed to resolve to a registered endpoint may be used as a
+	// metric label; until then any exit (including a throw into the catch) folds
+	// to a bounded sentinel so a client-controlled unregistered path cannot
+	// allocate a distinct metric series.
+	let pathRegistered = false;
 	/** @type {any} */ let ctx = null;
 
 	// Count the upload handler as in-flight so onShutdown's drain waits for it.
@@ -568,10 +573,14 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		if (upload.phase === 'settled') return;
 
 		if (!fn) {
-			_recordRpcMetrics(path, 'NOT_FOUND', _metricsStart);
+			// Unregistered, client-controlled path (from the upload chunk-0 args
+			// header): fold to a bounded label, mirroring the RPC NOT_FOUND sites.
+			_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
 			upload.fail('NOT_FOUND', 'Not found');
 			return;
 		}
+		// Resolved to a registered endpoint: `path` is now a bounded registry key.
+		pathRegistered = true;
 		if (!/** @type {any} */ (fn).__isUpload) {
 			_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
 			upload.fail('INVALID_REQUEST', 'Not an upload endpoint');
@@ -659,7 +668,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		if (upload.phase !== 'settled') {
 			upload.phase = 'settled';
 			const code = err instanceof LiveError ? err.code : 'INTERNAL_ERROR';
-			_recordRpcMetrics(path || '__invalid__', code, _metricsStart, ws);
+			_recordRpcMetrics(pathRegistered ? path : '__unknown__', code, _metricsStart, ws);
 			if (err instanceof LiveError) {
 				_respondUpload(ws, platform, streamId, { ok: false, code: err.code, error: err.message });
 			} else {
@@ -670,7 +679,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				_respondUpload(ws, platform, streamId, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
 			}
 		} else {
-			_recordRpcMetrics(path || '__invalid__', err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
+			_recordRpcMetrics(pathRegistered ? path : '__unknown__', err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		}
 		// Make sure any pending for-await wakes up if we exited via throw.
 		if (upload.ctrl && !upload.ctrl.signal.aborted) {

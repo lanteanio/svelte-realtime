@@ -5,7 +5,11 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-next.88] - 2026-07-17
+## [0.6.0-next.89] - 2026-07-17
+
+### Security
+
+- **RPC metrics no longer let an unauthenticated caller explode Prometheus series cardinality through unknown paths.** With `live.metrics()` enabled, `_recordRpcMetrics` labelled every RPC series with the raw request `path` - and an unregistered path carried the CLIENT's arbitrary string, so N distinct unknown paths created N series (`svelte_realtime_rpc_total{path=...}`, `..._errors_total{path,code}`), inflating registry memory and scrape/query cost with no authentication required (the extensions registry cap only sheds after the first 10,000). The RPC dispatch AND the streaming-upload handler now fold an unregistered path to `__unknown__` and a malformed pre-registry request to `__invalid__` before they emit - across text, binary, and upload (chunk-0 args-header) frames - so every not-found probe collapses to a single series; and `_recordRpcMetrics` length-bounds both the path and code labels (a non-string or over-length path folds to `__unknown__` / `__toolong__`, an over-length code to `__toolong__`) as a choke-point backstop for label SIZE. The cardinality fold lives at the emit sites (where a registered path can be told from an attacker's arbitrary one), not in the length backstop. Registered paths keep their real label (bounded by the registry), the cohort label stays bounded at 16, and metrics remain opt-in and otherwise unchanged.
 
 ### Fixed
 
