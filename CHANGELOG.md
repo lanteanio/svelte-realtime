@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`loadMore` on a keyed stream now upserts by key instead of blindly concatenating the page, so paginating past an entry already received as a live `created` event no longer crashes the keyed render.** A paginated `merge: 'crud'` (or `presence` / `cursor`) stream applied every `loadMore` page by plain array concat: an entry that had already landed in the client array via a live event and was later re-served inside a page slice appeared under the same key twice, and a Svelte 5 keyed `{#each}` throws `each_key_duplicate` on duplicates (dev AND prod) and aborts the render before the DOM commit - the visible list silently froze at its pre-click state while the data layer (`hasMore`, cursor) kept advancing, leaving a dead Load-more button. Page rows carrying the stream's key now dedupe against its key index: a row whose key already exists replaces the existing row in place (server-confirmed page data supersedes a plain optimistic row with the same key, matching the live reconcile semantics), duplicate keys inside a single page collapse to the last row, and only genuinely new rows concat (front for `prepend: true`, back otherwise). Rows served without the key field cannot be indexed and are still appended as-is. A `loadMore` resolving while an optimistic `mutate` is in flight now also applies the page to the un-overlaid server state and recomputes the display - previously the page was concatenated into the display overlay and silently discarded by the next queue replay. An in-flight mutation keeps overlaying the page until it settles: a page row is a snapshot of the row as of the page query, not a confirmation of a mutation that is still in flight, so it never marks the pending change as server-confirmed. `merge: 'set'` / `'latest'` keep plain concat (no key index exists). Superseding a row copies the array before replacing into it, so applying a page never writes through to an array a consumer already holds (including one adopted by `hydrate()`).
+
 ## [0.6.0-next.89] - 2026-07-17
 
 ### Security

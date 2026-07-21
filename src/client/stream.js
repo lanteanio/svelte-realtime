@@ -546,6 +546,73 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	}
 
 	/**
+	 * Apply one loadMore page to a (value, index) pair and return a fresh
+	 * array reference (the index is rebuilt for it in place).
+	 *
+	 * For keyed merge strategies the page is deduped against the index
+	 * first: an entry whose key is already present (typically received
+	 * earlier as a live 'created' event and later re-served by the page
+	 * slice) replaces the existing row in place instead of being
+	 * concatenated. A blind concat would put the same key in the array
+	 * twice, and a keyed {#each} throws each_key_duplicate on duplicates
+	 * and aborts the render before the DOM commit. A page row supersedes
+	 * a plain optimistic row carrying the same key (queue-mode overlays
+	 * are instead protected by the caller routing the page to
+	 * _serverValue and replaying the queue on top). `set` / `latest` keep
+	 * plain concat (no key index exists to dedupe against).
+	 *
+	 * Scope: this dedupes rows that CARRY the key field. Rows missing it
+	 * are appended as-is - they cannot be indexed (rebuildIndex skips
+	 * undefined keys), so a keyed stream served keyless rows can still
+	 * render duplicate undefined keys. `max` is likewise not enforced
+	 * here; only the live-event path trims.
+	 *
+	 * @param {any[]} value
+	 * @param {Map<any, number>} index
+	 * @param {any[]} page
+	 * @returns {any[]}
+	 */
+	function _appendPage(value, index, page) {
+		let base = value;
+		let fresh = page;
+		if (merge !== 'set' && merge !== 'latest') {
+			const k = mergeKeyField(merge, key);
+			/** @type {Map<any, number>} key -> position in `fresh`, so a page that repeats a key keeps only its last row */
+			const pagePos = new Map();
+			fresh = [];
+			for (const item of page) {
+				const kv = item != null ? item[k] : undefined;
+				if (kv === undefined) {
+					fresh.push(item);
+					continue;
+				}
+				_optimisticKeys.delete(kv);
+				const existing = index.get(kv);
+				if (existing !== undefined) {
+					// Copy before the first in-place write: `value` may be an
+					// array the store has already emitted, or - after hydrate() -
+					// the caller's own load() data, which must never be mutated.
+					// Copy-on-first-write keeps the common no-overlap page free
+					// of the extra copy (the concat below already allocates).
+					if (base === value) base = value.slice();
+					base[existing] = item;
+					continue;
+				}
+				const seen = pagePos.get(kv);
+				if (seen !== undefined) {
+					fresh[seen] = item;
+					continue;
+				}
+				pagePos.set(kv, fresh.length);
+				fresh.push(item);
+			}
+		}
+		const next = prepend ? fresh.concat(base) : base.concat(fresh);
+		_rebuildIndexFn(next, index);
+		return next;
+	}
+
+	/**
 	 * Record current state in history after a mutation (if history enabled).
 	 * Called after currentValue has been updated and a new reference created.
 	 */
@@ -1823,17 +1890,36 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 						if (response.hasMore !== undefined) _hasMore = response.hasMore;
 						if (response.cursor !== undefined) _cursor = response.cursor;
 
-						if (Array.isArray(response.data) && Array.isArray(currentValue)) {
-							if (prepend) {
-								currentValue = response.data.concat(currentValue);
-							} else {
-								currentValue = currentValue.concat(response.data);
-							}
-						} else if (response.data !== undefined) {
-							currentValue = response.data;
+						// Queue mode: currentValue is a display overlay recomputed
+						// from _serverValue on every queue transition, so a page
+						// concatenated into currentValue would vanish on the next
+						// _recomputeDisplay. Apply the page to the un-overlaid
+						// server state and recompute the display instead.
+						if (_optimisticQueue.length > 0 && Array.isArray(response.data) && Array.isArray(_serverValue)) {
+							_serverValue = _appendPage(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), response.data);
+							// A page row must NOT absorb an in-flight queue entry with
+							// the same key. A live event means "this change just
+							// committed"; a page row only means "this is the row as of
+							// the page query", which routinely PREDATES the in-flight
+							// mutation. Absorbing it would mark the entry
+							// serverConfirmed, so the replay would skip it and settle
+							// would never graduate it onto _serverValue - silently
+							// discarding a mutation the server accepted. Replaying the
+							// queue on top of the page is already duplicate-free: a
+							// keyed change whose key is in the index replaces the row
+							// rather than appending a second one.
+							_recomputeDisplay();
+							resolve(_hasMore);
+							return;
 						}
 
-						_rebuildIndex();
+						if (Array.isArray(response.data) && Array.isArray(currentValue)) {
+							currentValue = _appendPage(currentValue, _index, response.data);
+						} else if (response.data !== undefined) {
+							currentValue = response.data;
+							_rebuildIndex();
+						}
+
 						store.set(currentValue);
 						resolve(_hasMore);
 					},

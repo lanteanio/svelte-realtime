@@ -37,7 +37,9 @@ test('cancel mid-upload rejects with CANCELLED on the client', async ({ page }) 
 });
 
 test('progress events fire with monotonically increasing sent counts', async ({ page }) => {
-	// Force chunkSize=8 so a 64-byte payload produces 8 progress events
+	// chunkSize=8 caps the WIRE FRAME below the 12-byte chunk header, so the
+	// per-frame payload clamps to 1 byte: 64 bytes ride 64 frames, giving at
+	// least 8 progress events (the assertion below is a floor, not a count).
 	const r = await page.evaluate(() => window.__test.peekProgress(64, 8));
 	expect(r.result.bytes).toBe(64);
 	expect(r.events.length).toBeGreaterThanOrEqual(8);

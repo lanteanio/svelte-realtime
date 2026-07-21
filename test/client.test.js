@@ -3120,6 +3120,267 @@ describe('__stream() pagination', () => {
 
 		unsub();
 	});
+
+	// A paginated crud stream can receive an entry as a live 'created' event
+	// and later get the SAME entry re-served inside a loadMore page slice.
+	// A blind concat duplicates the key, and a keyed {#each} then throws
+	// each_key_duplicate and aborts the render pre-commit (list silently
+	// freezes). loadMore must upsert page rows that carry the key.
+	async function setupPaginated(path, topic, initial, responseExtra = {}) {
+		const store = __stream(path, { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: initial,
+			topic,
+			merge: 'crud',
+			key: 'id',
+			hasMore: true,
+			cursor: 'cur1',
+			...responseExtra
+		});
+		return { store, values, unsub, last: () => values[values.length - 1] };
+	}
+
+	/** Fire loadMore and answer it with the given page slice. */
+	async function loadPage(store, page) {
+		const morePromise = store.loadMore();
+		const moreSent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(moreSent.id, { ok: true, data: page, hasMore: false, cursor: null });
+		return morePromise;
+	}
+
+	function ids(arr) {
+		return arr.map((x) => x.id);
+	}
+
+	it('loadMore dedupes a page entry already received as a live created event', async () => {
+		const ctx = await setupPaginated('pag/dedupe', 'pag-dedupe-topic', [{ id: 1, name: 'first' }]);
+
+		simulateTopicMessage('pag-dedupe-topic', { event: 'created', data: { id: 99, name: 'live' } });
+		expect(ids(ctx.last())).toEqual([1, 99]);
+
+		await loadPage(ctx.store, [{ id: 2, name: 'old' }, { id: 99, name: 'paged' }]);
+
+		// No duplicate key, existing row upserted in place, fresh row appended
+		expect(ids(ctx.last())).toEqual([1, 99, 2]);
+		expect(ctx.last()[1]).toEqual({ id: 99, name: 'paged' });
+		expect(new Set(ids(ctx.last())).size).toBe(ctx.last().length);
+
+		ctx.unsub();
+	});
+
+	it('loadMore dedupes with prepend: true (page goes to the front, no duplicate key)', async () => {
+		const ctx = await setupPaginated('pag/dedupe-pre', 'pag-dedupe-pre-topic', [{ id: 1 }], { prepend: true });
+
+		simulateTopicMessage('pag-dedupe-pre-topic', { event: 'created', data: { id: 99, name: 'live' } });
+		expect(ids(ctx.last())).toEqual([99, 1]);
+
+		await loadPage(ctx.store, [{ id: 99, name: 'paged' }, { id: 0, name: 'older' }]);
+
+		expect(ids(ctx.last())).toEqual([0, 99, 1]);
+		expect(ctx.last()[1]).toEqual({ id: 99, name: 'paged' });
+
+		ctx.unsub();
+	});
+
+	it('loadMore page copy supersedes a plain optimistic row, same as a live event would', async () => {
+		const ctx = await setupPaginated('pag/opt', 'pag-opt-topic', [{ id: 1, name: 'A' }]);
+
+		ctx.store.optimistic('created', { id: 't1', name: 'Pending' });
+		expect(ids(ctx.last())).toEqual([1, 't1']);
+
+		await loadPage(ctx.store, [{ id: 't1', name: 'ServerCopy' }, { id: 2, name: 'B' }]);
+
+		// Server-confirmed page data reconciles the optimistic row in place
+		// (identical to the live-event reconcile semantics); no duplicate key
+		expect(ids(ctx.last())).toEqual([1, 't1', 2]);
+		expect(ctx.last()[1]).toEqual({ id: 't1', name: 'ServerCopy' });
+
+		ctx.unsub();
+	});
+
+	it('loadMore during an in-flight mutate applies the page to server state (survives queue drain)', async () => {
+		const ctx = await setupPaginated('pag/queue', 'pag-queue-topic', [{ id: 1, name: 'A' }]);
+
+		let resolveOp;
+		const opPromise = ctx.store.mutate(
+			() => new Promise((r) => { resolveOp = r; }),
+			{ event: 'created', data: { id: 't1', name: 'Pending' } }
+		);
+		expect(ids(ctx.last())).toEqual([1, 't1']);
+
+		await loadPage(ctx.store, [{ id: 2, name: 'B' }, { id: 1, name: 'A2' }]);
+
+		// Page visible immediately, overlaid entry still present, no duplicate of id 1
+		expect(ids(ctx.last())).toEqual([1, 2, 't1']);
+		expect(ctx.last()[0]).toEqual({ id: 1, name: 'A2' });
+
+		// The resolved value is not applied: settle graduates the optimistic
+		// change itself, so the row keeps the 'Pending' body until a live event
+		// supersedes it.
+		resolveOp({ ok: true });
+		await opPromise;
+
+		// After the queue drains the page rows must survive (they were applied
+		// to the un-overlaid server state, not the discarded display overlay)
+		expect(ids(ctx.last())).toEqual([1, 2, 't1']);
+		expect(ctx.last()[1]).toEqual({ id: 2, name: 'B' });
+		expect(ctx.last()[2]).toEqual({ id: 't1', name: 'Pending' });
+		expect(new Set(ids(ctx.last())).size).toBe(ctx.last().length);
+
+		ctx.unsub();
+	});
+
+	it('loadMore page row does not confirm an in-flight mutate on the same key', async () => {
+		const ctx = await setupPaginated('pag/collide', 'pag-collide-topic', [{ id: 5, name: 'Old' }]);
+
+		let resolveOp;
+		const opPromise = ctx.store.mutate(
+			() => new Promise((r) => { resolveOp = r; }),
+			{ event: 'updated', data: { id: 5, name: 'New' } }
+		);
+		expect(ctx.last()[0]).toEqual({ id: 5, name: 'New' });
+
+		// The page re-serves row 5 as it looked at query time, i.e. BEFORE the
+		// in-flight rename. It is not a confirmation of that rename.
+		await loadPage(ctx.store, [{ id: 5, name: 'Old' }, { id: 6, name: 'F' }]);
+
+		// Optimistic edit still overlays the older page copy, page row appended
+		expect(ctx.last()[0]).toEqual({ id: 5, name: 'New' });
+		expect(ids(ctx.last())).toEqual([5, 6]);
+
+		resolveOp({ id: 5, name: 'New' });
+		await opPromise;
+
+		// The rename succeeded, so it must survive the drain (a page row that
+		// absorbed the queue entry would drop it back to 'Old')
+		expect(ctx.last()[0]).toEqual({ id: 5, name: 'New' });
+		expect(new Set(ids(ctx.last())).size).toBe(ctx.last().length);
+
+		ctx.unsub();
+	});
+
+	it('loadMore page row does not resurrect a row an in-flight mutate is deleting', async () => {
+		const ctx = await setupPaginated('pag/del', 'pag-del-topic', [{ id: 1, name: 'A' }, { id: 2, name: 'B' }]);
+
+		let resolveOp;
+		const opPromise = ctx.store.mutate(
+			() => new Promise((r) => { resolveOp = r; }),
+			{ event: 'deleted', data: { id: 1 } }
+		);
+		expect(ids(ctx.last())).toEqual([2]);
+
+		// The page still carries row 1 - it was queried before the delete.
+		// (crud delete is an O(1) swap-remove, so compare membership, not order.)
+		await loadPage(ctx.store, [{ id: 1, name: 'A' }, { id: 3, name: 'C' }]);
+		expect(new Set(ids(ctx.last()))).toEqual(new Set([2, 3]));
+
+		resolveOp({ ok: true });
+		await opPromise;
+
+		// The delete succeeded, so row 1 must stay gone after the drain
+		expect(new Set(ids(ctx.last()))).toEqual(new Set([2, 3]));
+		expect(ids(ctx.last())).not.toContain(1);
+
+		ctx.unsub();
+	});
+
+	it('loadMore dedupes a presence page against a live join', async () => {
+		const ctx = await setupPaginated('pag/pres', 'pag-pres-topic', [{ key: 'u1', name: 'One' }], {
+			merge: 'presence'
+		});
+
+		simulateTopicMessage('pag-pres-topic', { event: 'join', data: { key: 'u9', name: 'Live' } });
+		expect(ctx.last().map((x) => x.key)).toEqual(['u1', 'u9']);
+
+		await loadPage(ctx.store, [{ key: 'u2', name: 'Two' }, { key: 'u9', name: 'Paged' }]);
+
+		expect(ctx.last().map((x) => x.key)).toEqual(['u1', 'u9', 'u2']);
+		expect(ctx.last()[1]).toEqual({ key: 'u9', name: 'Paged' });
+		expect(new Set(ctx.last().map((x) => x.key)).size).toBe(ctx.last().length);
+
+		ctx.unsub();
+	});
+
+	it('loadMore dedupes a cursor page against a live update', async () => {
+		const ctx = await setupPaginated('pag/cur', 'pag-cur-topic', [{ key: 'c1', x: 1 }], {
+			merge: 'cursor'
+		});
+
+		simulateTopicMessage('pag-cur-topic', { event: 'update', data: { key: 'c9', x: 9 } });
+		expect(ctx.last().map((x) => x.key)).toEqual(['c1', 'c9']);
+
+		await loadPage(ctx.store, [{ key: 'c2', x: 2 }, { key: 'c9', x: 99 }]);
+
+		expect(ctx.last().map((x) => x.key)).toEqual(['c1', 'c9', 'c2']);
+		expect(ctx.last()[1]).toEqual({ key: 'c9', x: 99 });
+		expect(new Set(ctx.last().map((x) => x.key)).size).toBe(ctx.last().length);
+
+		ctx.unsub();
+	});
+
+	it('loadMore does not mutate an array the store already emitted', async () => {
+		const ctx = await setupPaginated('pag/emit', 'pag-emit-topic', [{ id: 1, name: 'A' }]);
+		const alreadyEmitted = ctx.last();
+		const before = JSON.parse(JSON.stringify(alreadyEmitted));
+
+		// The page supersedes row 1, which is an in-place replace on the working
+		// array. Every publish site in this file copies before emitting, and
+		// hydrate() adopts the caller's array as-is, so a page must never write
+		// through to an array a consumer is already holding.
+		await loadPage(ctx.store, [{ id: 1, name: 'A2' }, { id: 2, name: 'B' }]);
+
+		expect(alreadyEmitted).toEqual(before);
+		expect(ctx.last()[0]).toEqual({ id: 1, name: 'A2' });
+
+		ctx.unsub();
+	});
+
+	it('loadMore collapses duplicate keys inside a single page (last row wins)', async () => {
+		const ctx = await setupPaginated('pag/inpage', 'pag-inpage-topic', [{ id: 1 }]);
+
+		await loadPage(ctx.store, [{ id: 5, name: 'first' }, { id: 5, name: 'second' }]);
+
+		expect(ids(ctx.last())).toEqual([1, 5]);
+		expect(ctx.last()[1]).toEqual({ id: 5, name: 'second' });
+
+		ctx.unsub();
+	});
+
+	// These pages must carry KEY-BEARING rows that repeat a key WITHIN the page.
+	// rebuildIndex keeps no index for set/latest, so an existing-key replace can
+	// never fire for them and could not tell the guarded path from the unguarded
+	// one; the in-page collapse is the only behaviour the guard actually gates.
+	it('loadMore keeps plain concat for merge: set (no key index to dedupe against)', async () => {
+		const ctx = await setupPaginated('pag/set', 'pag-set-topic', [{ id: 1 }, { id: 2 }], {
+			merge: 'set'
+		});
+
+		await loadPage(ctx.store, [{ id: 5, n: 'a' }, { id: 5, n: 'b' }]);
+
+		// Both id 5 rows survive: set never dedupes, in-page or otherwise
+		expect(ids(ctx.last())).toEqual([1, 2, 5, 5]);
+		expect(ctx.last()[2]).toEqual({ id: 5, n: 'a' });
+
+		ctx.unsub();
+	});
+
+	it('loadMore keeps plain concat for merge: latest (no key index to dedupe against)', async () => {
+		const ctx = await setupPaginated('pag/latest', 'pag-latest-topic', [{ id: 1 }, { id: 2 }], {
+			merge: 'latest'
+		});
+
+		await loadPage(ctx.store, [{ id: 5, n: 'a' }, { id: 5, n: 'b' }]);
+
+		expect(ids(ctx.last())).toEqual([1, 2, 5, 5]);
+		expect(ctx.last()[2]).toEqual({ id: 5, n: 'a' });
+
+		ctx.unsub();
+	});
 });
 
 // - Binary RPC (client) --------------------------------------------
