@@ -120,6 +120,39 @@ export default function svelteRealtime(options) {
 			return null;
 		},
 
+		transform(code, id, options) {
+			// Co-locate the live registry with the WebSocket hooks module in
+			// dev. svelte-adapter-uws loads src/hooks.ws.* via ssrLoadModule and
+			// binds its `message` handler to whatever `svelte-realtime/server`
+			// instance that load produced. On a cold `npm run dev`, Vite's
+			// first-run dependency optimization tears down and rebuilds the SSR
+			// module graph, so the registry load fired on the server's
+			// 'listening' event can land in a DIFFERENT `svelte-realtime/server`
+			// instance than the one the adapter's `message` reads - leaving the
+			// registry empty and every RPC / stream failing with "no such live
+			// function registered" until a restart with a warm cache. Importing
+			// the registry FROM the hooks module makes it a dependency in the
+			// exact same graph, so the handler and its registrations always share
+			// one instance - the first `npm run dev` behaves identically to every
+			// one after it. Production build packaging uses the SSR-input path in
+			// config() below, so this dev-only seam never touches built output.
+			if (!isDev) return null;
+			// Only the server (SSR) graph loads hooks.ws; gating on ssr keeps
+			// the server-side registry import out of any client bundle even if
+			// a client module ever pulled the hooks file in.
+			const ssr = options?.ssr ?? isSsr;
+			if (!ssr) return null;
+			const clean = id.split('?')[0].split(sep).join('/');
+			// Scope to THIS project's src/hooks.ws.{js,ts,mjs} (root-anchored so a
+			// sibling package's hooks file in a monorepo is never rewritten with
+			// our registry). Mirrors the .js/.ts/.mjs set the adapter discovers.
+			const rootNorm = root.split(sep).join('/');
+			if (!clean.startsWith(rootNorm + '/')) return null;
+			if (!/\/src\/hooks\.ws\.(?:js|ts|mjs)$/.test(clean)) return null;
+			if (code.includes('/@svelte-realtime-registry')) return null;
+			return { code: `import '/@svelte-realtime-registry';\n` + code, map: null };
+		},
+
 		config(config, { command }) {
 			// During SSR build, inject the registry as an additional input
 			if (command === 'build' && config.build?.ssr) {

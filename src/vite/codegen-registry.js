@@ -558,7 +558,7 @@ export function _findLiveFiles(dir) {
 }
 
 /**
- * Check that src/hooks.ws.{js,ts} exists and exports the `message` handler.
+ * Check that src/hooks.ws.{js,ts,mjs} exists and exports the `message` handler.
  * Warns at build/dev startup if the file is missing or misconfigured.
  * @param {string} root
  * @param {string} liveDir
@@ -569,9 +569,11 @@ export function _checkHooksFile(root, liveDir, dir) {
 	if (files.length === 0) return;
 
 	const hooksPath = resolve(root, 'src/hooks.ws');
-	const hooksJs = hooksPath + '.js';
-	const hooksTs = hooksPath + '.ts';
-	const found = existsSync(hooksJs) ? hooksJs : existsSync(hooksTs) ? hooksTs : null;
+	// Match the extension set the adapter discovers (js, ts, mjs) so a project
+	// using hooks.ws.mjs is not falsely told its hooks file is missing.
+	const found = ['.js', '.ts', '.mjs']
+		.map((ext) => hooksPath + ext)
+		.find((p) => existsSync(p)) || null;
 
 	if (!found) {
 		console.warn(
@@ -588,11 +590,18 @@ export function _checkHooksFile(root, liveDir, dir) {
 	let source;
 	try { source = readFileSync(found, 'utf-8'); } catch { return; }
 
-	const hasMessage = /export\s*\{[^}]*\bmessage\b[^}]*\}\s*from\s+['"]svelte-realtime\/server['"]/.test(source)
+	// Recognise every way a hooks file can export `message`:
+	//   - direct re-export:    export { message } from 'svelte-realtime/server'
+	//   - import-then-export:  import { message } from '...'; export { message }
+	//     (the scaffold and e2e fixture both use this two-statement form)
+	//   - local declaration:   export const/function message = ...
+	// The specifier-list regex covers the first two without needing a `from`
+	// clause; a leading `from` (the direct re-export) still satisfies it.
+	const hasMessage = /export\s*\{[^}]*\bmessage\b[^}]*\}/.test(source)
 		|| /export\s+(?:const|function|async\s+function)\s+message\b/.test(source);
 
 	if (!hasMessage) {
-		const name = found.endsWith('.ts') ? 'src/hooks.ws.ts' : 'src/hooks.ws.js';
+		const name = 'src/hooks.ws' + (found.match(/\.(?:js|ts|mjs)$/)?.[0] || '.js');
 		console.warn(
 			`[svelte-realtime] ${name} exists but does not export a \`message\` handler - ` +
 			`WebSocket RPC calls from ${dir}/ will go unhandled.\n` +
