@@ -4,6 +4,9 @@ import { resolve, relative, dirname, sep, posix } from 'path';
 
 const VIRTUAL_PREFIX = '\0live:';
 const REGISTRY_ID = '\0live:__registry';
+// Public specifier user code (the injected hooks import) can reference; the
+// resolveId hook maps it to REGISTRY_ID.
+const REGISTRY_PUBLIC_ID = '/@svelte-realtime-registry';
 const LIVE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\s*\(/g;
 const VALIDATED_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.validated\s*\(/g;
 const STREAM_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.stream\s*\(/g;
@@ -692,7 +695,7 @@ export default function svelteRealtime(options) {
 
 		resolveId(id) {
 			if (id === REGISTRY_ID) return REGISTRY_ID;
-			if (id === '/@svelte-realtime-registry') return REGISTRY_ID;
+			if (id === REGISTRY_PUBLIC_ID) return REGISTRY_ID;
 			if (id.startsWith('$live/')) {
 				const modulePath = id.slice(6); // strip '$live/'
 				return VIRTUAL_PREFIX + modulePath;
@@ -740,6 +743,39 @@ export default function svelteRealtime(options) {
 			}
 
 			return null;
+		},
+
+		transform(code, id, options) {
+			// Co-locate the live registry with the WebSocket hooks module in
+			// dev. svelte-adapter-uws loads src/hooks.ws.* via ssrLoadModule and
+			// binds its `message` handler to whatever `svelte-realtime/server`
+			// instance that load produced. On a cold `npm run dev`, Vite's
+			// first-run dependency optimization tears down and rebuilds the SSR
+			// module graph, so the registry load fired on the server's
+			// 'listening' event can land in a DIFFERENT `svelte-realtime/server`
+			// instance than the one the adapter's `message` reads - leaving the
+			// registry empty and every RPC / stream failing with "no such live
+			// function registered" until a restart with a warm cache. Importing
+			// the registry FROM the hooks module makes it a dependency in the
+			// exact same graph, so the handler and its registrations always share
+			// one instance - the first `npm run dev` behaves identically to every
+			// one after it. Production build packaging uses the SSR-input path in
+			// config() below, so this dev-only seam never touches built output.
+			if (!isDev) return null;
+			// Only the server (SSR) graph loads hooks.ws; gating on ssr keeps
+			// the server-side registry import out of any client bundle even if
+			// a client module ever pulled the hooks file in.
+			const ssr = options?.ssr ?? isSsr;
+			if (!ssr) return null;
+			const clean = id.split('?')[0].split(sep).join('/');
+			// Scope to THIS project's src/hooks.ws.{js,ts,mjs} (root-anchored so a
+			// sibling package's hooks file in a monorepo is never rewritten with
+			// our registry). Mirrors the .js/.ts/.mjs set the adapter discovers.
+			const rootNorm = root.split(sep).join('/');
+			if (!clean.startsWith(rootNorm + '/')) return null;
+			if (!/\/src\/hooks\.ws\.(?:js|ts|mjs)$/.test(clean)) return null;
+			if (code.includes(REGISTRY_PUBLIC_ID)) return null;
+			return { code: `import ${JSON.stringify(REGISTRY_PUBLIC_ID)};\n` + code, map: null };
 		},
 
 		config(config, { command }) {
@@ -2093,7 +2129,7 @@ function _findLiveFiles(dir) {
 }
 
 /**
- * Check that src/hooks.ws.{js,ts} exists and exports the `message` handler.
+ * Check that src/hooks.ws.{js,ts,mjs} exists and exports the `message` handler.
  * Warns at build/dev startup if the file is missing or misconfigured.
  * @param {string} root
  * @param {string} liveDir
@@ -2104,9 +2140,11 @@ function _checkHooksFile(root, liveDir, dir) {
 	if (files.length === 0) return;
 
 	const hooksPath = resolve(root, 'src/hooks.ws');
-	const hooksJs = hooksPath + '.js';
-	const hooksTs = hooksPath + '.ts';
-	const found = existsSync(hooksJs) ? hooksJs : existsSync(hooksTs) ? hooksTs : null;
+	// Match the extension set the adapter discovers (js, ts, mjs) so a project
+	// using hooks.ws.mjs is not falsely told its hooks file is missing.
+	const found = ['.js', '.ts', '.mjs']
+		.map((ext) => hooksPath + ext)
+		.find((p) => existsSync(p)) || null;
 
 	if (!found) {
 		console.warn(
@@ -2123,11 +2161,18 @@ function _checkHooksFile(root, liveDir, dir) {
 	let source;
 	try { source = readFileSync(found, 'utf-8'); } catch { return; }
 
-	const hasMessage = /export\s*\{[^}]*\bmessage\b[^}]*\}\s*from\s+['"]svelte-realtime\/server['"]/.test(source)
+	// Recognise every way a hooks file can export `message`:
+	//   - direct re-export:    export { message } from 'svelte-realtime/server'
+	//   - import-then-export:  import { message } from '...'; export { message }
+	//     (the scaffold and e2e fixture both use this two-statement form)
+	//   - local declaration:   export const/function message = ...
+	// The specifier-list regex covers the first two without needing a `from`
+	// clause; a leading `from` (the direct re-export) still satisfies it.
+	const hasMessage = /export\s*\{[^}]*\bmessage\b[^}]*\}/.test(source)
 		|| /export\s+(?:const|function|async\s+function)\s+message\b/.test(source);
 
 	if (!hasMessage) {
-		const name = found.endsWith('.ts') ? 'src/hooks.ws.ts' : 'src/hooks.ws.js';
+		const name = 'src/hooks.ws' + (found.match(/\.(?:js|ts|mjs)$/)?.[0] || '.js');
 		console.warn(
 			`[svelte-realtime] ${name} exists but does not export a \`message\` handler - ` +
 			`WebSocket RPC calls from ${dir}/ will go unhandled.\n` +

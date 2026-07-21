@@ -758,6 +758,67 @@ export function upgrade() { return {}; }
 		expect(warns.some(w => w.includes('hooks.ws'))).toBe(false);
 	});
 
+	it('does not warn for the scaffold import-then-export message form', () => {
+		// The CLI scaffold and the e2e fixture both write
+		//   import { message } from 'svelte-realtime/server';
+		//   export { message };
+		// (a bare specifier re-export with no `from` clause). This must be
+		// recognised as exporting the handler - it previously tripped a false
+		// "does not export a message handler" warning that sent newcomers
+		// chasing a non-bug.
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+		mkdirSync(resolve(testRoot, 'src'), { recursive: true });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.ts'), `
+import { message } from 'svelte-realtime/server';
+export { message };
+export function upgrade() { return { id: 'x' }; }
+`);
+
+		const warns = [];
+		const origWarn = console.warn;
+		console.warn = (...args) => warns.push(args.join(' '));
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		console.warn = origWarn;
+
+		expect(warns.some(w => w.includes('does not export'))).toBe(false);
+	});
+
+	it('does not warn for import-then-export with sibling handlers', () => {
+		// The e2e fixture exports several handlers at once:
+		//   export { message, close, unsubscribe };
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+		mkdirSync(resolve(testRoot, 'src'), { recursive: true });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.js'), `
+import { message, close, unsubscribe } from 'svelte-realtime/server';
+export { message, close, unsubscribe };
+export function upgrade() { return { id: 'x' }; }
+`);
+
+		const warns = [];
+		const origWarn = console.warn;
+		console.warn = (...args) => warns.push(args.join(' '));
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		console.warn = origWarn;
+
+		expect(warns.some(w => w.includes('does not export'))).toBe(false);
+	});
+
 	it('does not warn when no live modules exist', () => {
 		teardown(); // no src/live/ at all
 
@@ -807,6 +868,76 @@ describe('resolveId (registry URL)', () => {
 	it('resolves /@svelte-realtime-registry to the registry virtual module', () => {
 		const plugin = createPlugin();
 		expect(plugin.resolveId('/@svelte-realtime-registry')).toBe('\0live:__registry');
+	});
+});
+
+// - registry / hooks co-location transform (cold-start dev registry fix) -----
+
+describe('registry co-location transform', () => {
+	afterEach(teardown);
+
+	const SSR = { ssr: true };
+
+	function devPlugin() {
+		const plugin = svelteRealtime({ dir: 'src/live' });
+		plugin.configResolved({ root: testRoot, build: {}, command: 'serve' });
+		return plugin;
+	}
+
+	it('imports the registry from src/hooks.ws.ts in dev so the handler and registry share one module instance', () => {
+		const plugin = devPlugin();
+		const out = plugin.transform(
+			`import { message } from 'svelte-realtime/server';\nexport { message };\n`,
+			resolve(testRoot, 'src/hooks.ws.ts'),
+			SSR
+		);
+		expect(out).toBeTruthy();
+		expect(out.code).toContain('/@svelte-realtime-registry');
+		// original source is preserved after the injected import
+		expect(out.code).toContain('export { message }');
+		// the injected import comes first so registration runs before the
+		// handler is bound
+		expect(out.code.indexOf('/@svelte-realtime-registry'))
+			.toBeLessThan(out.code.indexOf('export { message }'));
+	});
+
+	it('also injects for hooks.ws.js and hooks.ws.mjs', () => {
+		const plugin = devPlugin();
+		for (const ext of ['js', 'mjs']) {
+			const out = plugin.transform('export const upgrade = () => ({});\n', resolve(testRoot, `src/hooks.ws.${ext}`), SSR);
+			expect(out && out.code.includes('/@svelte-realtime-registry')).toBe(true);
+		}
+	});
+
+	it('is idempotent - never double-injects', () => {
+		const plugin = devPlugin();
+		const id = resolve(testRoot, 'src/hooks.ws.ts');
+		const first = plugin.transform('export {};\n', id, SSR);
+		const second = plugin.transform(first.code, id, SSR);
+		expect(second).toBeNull();
+	});
+
+	it('leaves non-hooks modules untouched', () => {
+		const plugin = devPlugin();
+		expect(plugin.transform('whatever', resolve(testRoot, 'src/routes/+page.svelte'), SSR)).toBeNull();
+		expect(plugin.transform('whatever', resolve(testRoot, 'src/live/chat.ts'), SSR)).toBeNull();
+	});
+
+	it('does not inject into the client graph (ssr false) - keeps server code out of the browser bundle', () => {
+		const plugin = devPlugin();
+		expect(plugin.transform('export {};\n', resolve(testRoot, 'src/hooks.ws.ts'), { ssr: false })).toBeNull();
+	});
+
+	it('does not inject a sibling package hooks file outside this project root (monorepo scope)', () => {
+		const plugin = devPlugin();
+		const sibling = resolve(testRoot, '..').split('\\').join('/') + '/other-pkg/src/hooks.ws.ts';
+		expect(plugin.transform('export {};\n', sibling, SSR)).toBeNull();
+	});
+
+	it('does not inject during build (production packaging uses the SSR input path)', () => {
+		const plugin = svelteRealtime({ dir: 'src/live' });
+		plugin.configResolved({ root: testRoot, build: {}, command: 'build' });
+		expect(plugin.transform('export {};\n', resolve(testRoot, 'src/hooks.ws.ts'), SSR)).toBeNull();
 	});
 });
 

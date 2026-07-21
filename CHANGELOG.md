@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.11] - 2026-07-21
+
+### Fixed
+
+- **Dev server: live functions were "not registered" on the very first `npm run dev` (reported in #6).** On a cold start (empty `node_modules/.vite`), Vite runs its first-pass dependency optimization and rebuilds the SSR module graph while the page loads. That teardown could split `svelte-realtime/server` into two module instances: the one `svelte-adapter-uws` bound its `message` handler to, and a second one the plugin's one-shot registry load (fired on the server's `listening` event) populated. The handler then read an empty registry, so every RPC and stream failed with `RpcError: Not found` / `[svelte-realtime] RPC call to '...' - no such live function registered`, and the page sat on "Connecting...". It self-healed only after a restart with a warm cache, so a brand-new user following the getting-started counter hit it on their first run while the maintained test suite (warm cache) never did. The Vite plugin now imports the generated registry directly from your `src/hooks.ws.*` module in dev, making the registry a dependency of the exact module graph the handler is bound to. The cold and warm paths are now identical: the first `npm run dev` behaves like every one after it. Production builds are unaffected (packaging already injects the registry through the SSR input). Regression tests cover the injection for `.ts` / `.js` / `.mjs` hooks, idempotency, non-hooks modules, and the build-time no-op.
+
+- **Removed a false "does not export a `message` handler" warning for the scaffold's own hooks form.** The scaffold and the e2e fixture write `import { message } from 'svelte-realtime/server';` followed by a bare `export { message };` (a re-export with no `from` clause). The hooks check only recognised `export { message } from '...'` and `export const/function message`, so it warned "WebSocket RPC calls will go unhandled" on a file that was, in fact, wired correctly - sending newcomers to chase a non-bug. The check now recognises any `export { ... message ... }` specifier list, with or without a `from` clause.
+
 ## [0.5.10] - 2026-05-25
 
 ### Fixed
