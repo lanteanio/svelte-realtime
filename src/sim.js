@@ -251,7 +251,7 @@ export async function replayLiveSim(reproducer) {
 // swarm contract.
 
 /**
- * Structural fingerprint (the "unseed"): an 8-hex-char FNV-1a digest of the
+ * Structural fingerprint: an 8-hex-char FNV-1a digest of the
  * byte-stable result fields. Same seed -> same fingerprint.
  * @param {any} result a runLiveSim result
  */
@@ -270,22 +270,22 @@ function liveFingerprint(result) {
 /**
  * Run a swarm of seeds against the realtime sim. Same contract as the adapter's
  * runSimSwarm: a seed range (`count`/`startSeed`) or explicit `seeds`, a
- * `buggify` knob (off/on/random) that enables a chaos drop (`faultProfile.dropRate`,
+ * `faultMode` knob (off/on/random) that enables a chaos drop (`faultProfile.dropRate`,
  * default 0.2) on the publish path, and `checkRatio` for a determinism re-check.
  * Chaos drop is all-or-nothing, so convergence still holds under it - a violation
  * is a real bug. Returns `{ summary, runs }`.
  *
  * @param {{
  *   seeds?: Array<string | number>, count?: number, startSeed?: number,
- *   base?: object, buggify?: 'off' | 'on' | 'random', faultProfile?: { dropRate?: number },
- *   buggifyProbability?: number, checkRatio?: number, gitCommit?: string,
+ *   base?: object, faultMode?: 'off' | 'on' | 'random', faultProfile?: { dropRate?: number },
+ *   faultProbability?: number, checkRatio?: number, gitCommit?: string,
  *   onResult?: (run: any, index: number) => void
  * }} [config]
  */
 export async function runLiveSimSwarm(config = {}) {
 	const base = config.base || {};
-	const buggify = config.buggify || 'off';
-	const buggifyProbability = config.buggifyProbability ?? 0.25;
+	const faultMode = config.faultMode || 'off';
+	const faultProbability = config.faultProbability ?? 0.25;
 	const checkRatio = config.checkRatio ?? 0;
 	const dropRate = (config.faultProfile && config.faultProfile.dropRate) ?? 0.2;
 
@@ -308,9 +308,9 @@ export async function runLiveSimSwarm(config = {}) {
 	for (let i = 0; i < seeds.length; i++) {
 		const seed = seeds[i];
 
-		let buggified = buggify === 'on';
-		if (buggify === 'random') buggified = seededRng(seed + ':buggify')() < buggifyProbability;
-		const chaos = buggified ? { dropRate } : (base.chaos || null);
+		let faulted = faultMode === 'on';
+		if (faultMode === 'random') faulted = seededRng(seed + ':faultmode')() < faultProbability;
+		const chaos = faulted ? { dropRate } : (base.chaos || null);
 
 		const result = await runLiveSim({ ...base, seed, chaos });
 		if (gitCommit === null && result.gitCommit) gitCommit = result.gitCommit;
@@ -327,7 +327,7 @@ export async function runLiveSimSwarm(config = {}) {
 		const run = {
 			seed,
 			ok: !failed && reproduced !== false,
-			buggified,
+			faulted,
 			fingerprint: liveFingerprint(result),
 			violations: result.invariantViolations.length,
 			fatals: 0,
@@ -348,8 +348,8 @@ export async function runLiveSimSwarm(config = {}) {
 			failed: failingSeeds.length,
 			firstFailingSeed: failingSeeds.length ? failingSeeds[0] : null,
 			failingSeeds,
-			buggify,
-			buggified: runs.filter((r) => r.buggified).length,
+			faultMode,
+			faulted: runs.filter((r) => r.faulted).length,
 			determinismChecks,
 			determinismFailures,
 			determinismFailingSeeds,
@@ -416,7 +416,7 @@ export function buildSimGoldens(swarmResult, opts = {}) {
 			fatals: r.fatals,
 			uncaught: r.uncaught,
 			violationCategories: r.violationCategories,
-			buggified: r.buggified
+			faulted: r.faulted
 		}
 	}));
 	entries.sort((a, b) => compareSeeds(a.seed, b.seed));
@@ -451,14 +451,14 @@ export function checkSimGoldens(golden, swarmResult, opts = {}) {
 	for (const r of swarmResult.runs) actual.set(String(r.seed), r);
 
 	// The corpus fingerprints are comparable only to a run produced under the
-	// same swarm config - the buggify mode above all, since it decides which
+	// same swarm config - the fault mode above all, since it decides which
 	// seeds are faulted. A mismatch means the runner ran the wrong config; fail
 	// loudly rather than silently comparing incomparable fingerprints.
 	let configMismatch = null;
-	const gBuggify = golden.swarm ? golden.swarm.buggify : undefined;
-	const aBuggify = swarmResult.summary ? swarmResult.summary.buggify : undefined;
-	if (gBuggify !== undefined && gBuggify !== null && aBuggify !== undefined && gBuggify !== aBuggify) {
-		configMismatch = "buggify mode differs: corpus recorded '" + gBuggify + "', run used '" + aBuggify +
+	const gFaultMode = golden.swarm ? golden.swarm.faultMode : undefined;
+	const aFaultMode = swarmResult.summary ? swarmResult.summary.faultMode : undefined;
+	if (gFaultMode !== undefined && gFaultMode !== null && aFaultMode !== undefined && gFaultMode !== aFaultMode) {
+		configMismatch = "fault mode differs: corpus recorded '" + gFaultMode + "', run used '" + aFaultMode +
 			"' - fingerprints are not comparable; regenerate the corpus or fix the runner config";
 	}
 
@@ -490,7 +490,7 @@ export function checkSimGoldens(golden, swarmResult, opts = {}) {
 				golden: { fingerprint: entry.fingerprint, digest: entry.digest },
 				actual: {
 					fingerprint: a.fingerprint,
-					digest: { violations: a.violations, fatals: a.fatals, uncaught: a.uncaught, violationCategories: a.violationCategories, buggified: a.buggified }
+					digest: { violations: a.violations, fatals: a.fatals, uncaught: a.uncaught, violationCategories: a.violationCategories, faulted: a.faulted }
 				}
 			});
 		}

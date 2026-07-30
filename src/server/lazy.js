@@ -76,8 +76,38 @@ export async function _resolveAllLazy() {
 			}
 		}
 		_lazyResolved = true;
+		// Config assertions that need the FULL registration set have to re-run
+		// here: the Vite codegen registers every aggregate lazily, so at
+		// `_activateDerived` time the registry is still empty and an init-time
+		// check would pass vacuously on exactly the apps it protects.
+		//
+		// Reported, never thrown. This runs inside the shared `_lazyInitPromise`,
+		// which the RPC/cron/alarm paths await OUTSIDE their own try blocks and
+		// fire-and-forget, so a throw here becomes an unhandled rejection - process
+		// termination under Node's default, i.e. a crash loop under a supervisor,
+		// with the triggering call never answered. A loud, repeated console error
+		// is the right volume for a config mistake; the publish-time throw in the
+		// privacy gate remains the actual enforcement.
+		if (_afterResolve) {
+			try {
+				_afterResolve();
+			} catch (err) {
+				console.error('[svelte-realtime] configuration error found after lazy registration:\n', err);
+			}
+		}
 	})();
 	return _lazyInitPromise;
+}
+
+/** @type {(() => void) | null} Hook run once the lazy queue has fully drained. */
+let _afterResolve = null;
+
+/**
+ * Register a callback to run after the lazy queue drains (see `_resolveAllLazy`).
+ * @param {() => void} fn
+ */
+export function _setAfterLazyResolve(fn) {
+	_afterResolve = fn;
 }
 
 /** Live read of the lazy-resolved flag - the staying RPC / cron paths gate on it. */

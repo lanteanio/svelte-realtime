@@ -212,7 +212,20 @@ function _wrapPlatformPublish(platform) {
 		// Guard against infinite recursion (aggregate publishes back through this wrapper)
 		if (_publishDepth > 8) return;
 		_publishDepth++;
+		// try/finally, not a bare decrement at the end: a watcher that THROWS (the
+		// aggregate privacy gate refuses to emit without an operator secret, a
+		// redactor blows up, a compute() has a bug) would otherwise leak the
+		// counter. Nine leaked throws and the guard above is permanently true, so
+		// every derived stream, effect, flag cell and aggregate stops firing
+		// silently for the rest of the process lifetime.
+		try {
+			_fireWatchersInner(topic, event, data);
+		} finally {
+			_publishDepth--;
+		}
+	}
 
+	function _fireWatchersInner(topic, event, data) {
 		// Check if any derived stream watches this topic
 		const derivedEntries = _derivedBySource.get(topic);
 		if (derivedEntries) {
@@ -351,8 +364,6 @@ function _wrapPlatformPublish(platform) {
 				}
 			}
 		}
-
-		_publishDepth--;
 	}
 
 	// Inner publish used by the bus-wrap surrogate. Does the local

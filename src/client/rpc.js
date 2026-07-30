@@ -194,7 +194,16 @@ export function __rpc(path) {
 	 */
 	rpcCall.fireAndForget = function fireAndForget(...args) {
 		if (clientState.terminated) return;
-		if (clientState.isOffline) { _volatileDropped++; return; }
+		// Mirror to devtools here too, not only on the backpressure branch below.
+		// The panel assigns the WHOLE counter rather than incrementing, so an offline
+		// drop that bumped `_volatileDropped` silently was invisible until the next
+		// backpressure drop, at which point the field jumped by every offline drop
+		// accumulated since. The counter covers all drop reasons; so must the mirror.
+		if (clientState.isOffline) {
+			_volatileDropped++;
+			if (__devtools) __devtools.volatileDropped = _volatileDropped;
+			return;
+		}
 		if (clientState.batchCollector) {
 			if (_IS_DEV) {
 				throw new Error(
@@ -445,13 +454,27 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
 	// dropped here (documented limitation).
 	if (clientState.batchCollector) {
 		clientState.batchCollector.push(idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args });
+		// Batched calls used to be invisible in DevTools entirely: this branch
+		// returns before the `_devtoolsStart` below, and stored the RAW resolve and
+		// reject, so nothing sent inside `batch()` ever reached the pending map or
+		// the history ring. Not a leak - nothing was started - but a real hole in
+		// the panel, since batching is exactly where bulk app traffic lives.
+		_devtoolsStart(path, id, args);
 		return new Promise((resolve, reject) => {
-			pending.set(id, { resolve, reject, timer: null });
+			pending.set(id, {
+				resolve(v) { _devtoolsEnd(id, true, v); resolve(v); },
+				reject(e) { _devtoolsEnd(id, false, e); reject(e); },
+				timer: null
+			});
 		});
 	}
 
-	_devtoolsStart(path, id, args);
+	// `_connect()` runs FIRST. It can throw - `connection.js` wraps its own call in
+	// a try/catch for exactly that (not callable yet under SSR) - and registering
+	// with devtools beforehand would strand a pending entry, with its captured
+	// args, that nothing can ever sweep: no timer is armed until below.
 	const conn = _connect();
+	_devtoolsStart(path, id, args);
 	const effectiveTimeout = timeout || _getTimeout();
 	// Sleep-detect threshold scales with the effective timeout so longer
 	// timeouts don't misfire as SLEEP_TIMEOUT. Floor at 90s preserves the
@@ -500,8 +523,10 @@ export function __binaryRpc(path) {
 
 		const id = _nextId();
 
-		_devtoolsStart(path, id, args);
+		// `_connect()` first - see the note in `_sendRpc`. A throw here before the
+		// devtools registration would strand an unsweepable pending entry.
 		const conn = _connect();
+		_devtoolsStart(path, id, args);
 
 		return new Promise((resolve, reject) => {
 			const _startTime = now();
@@ -529,12 +554,36 @@ export function __binaryRpc(path) {
 			if (headerBytes.length > 0xFFFF) {
 				pending.delete(id);
 				clearTimer(timer);
-				reject(new RpcError('PAYLOAD_TOO_LARGE', 'Binary RPC header exceeds 65535 bytes'));
+				// `reject` here is the raw executor reject, NOT the instrumented wrapper
+				// stored on the pending entry, and `pending` is the RPC map rather than
+				// `__devtools.pending`. Without an explicit end the devtools ring never
+				// learns this call settled and keeps the entry - with its args - for the
+				// life of the page. The timeout branches above are the same shape and
+				// stay correct the same way: by calling `_devtoolsEnd` explicitly, NOT
+				// by going through the wrapper. Any new bail-out here owes one too.
+				const err = new RpcError('PAYLOAD_TOO_LARGE', 'Binary RPC header exceeds 65535 bytes');
+				_devtoolsEnd(id, false, err);
+				reject(err);
 				return;
 			}
-			const bufBytes = ArrayBuffer.isView(buffer)
-				? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
-				: new Uint8Array(buffer);
+			// A DETACHED buffer (the payload was transferred to a worker - hash a File
+			// off-thread, then upload it) throws here. Unguarded, the throw escapes the
+			// executor as a bare TypeError with no `code`, breaking the binary-RPC error
+			// contract, and leaves the pending entry with its timer armed: 30s later the
+			// sweeper writes a FABRICATED TIMEOUT record for a call that was never sent.
+			let bufBytes;
+			try {
+				bufBytes = ArrayBuffer.isView(buffer)
+					? new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+					: new Uint8Array(buffer);
+			} catch {
+				pending.delete(id);
+				clearTimer(timer);
+				const err = new RpcError('INVALID_REQUEST', 'Binary RPC payload is detached (transferred) and cannot be sent');
+				_devtoolsEnd(id, false, err);
+				reject(err);
+				return;
+			}
 			const size = 3 + headerBytes.length + bufBytes.length;
 			const frame = _getBinaryFrame(size);
 			frame[0] = 0x00;

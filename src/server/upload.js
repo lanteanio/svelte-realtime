@@ -2,7 +2,7 @@
 import { monotonicNow } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
-import { _validPathRe } from './validate.js';
+import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './validate.js';
 import { state } from './state.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _recordRpcMetrics } from './metrics.js';
@@ -132,8 +132,11 @@ function _respondUpload(ws, platform, streamId, payload) {
  * Parse an upload chunk frame. Returns null if the frame is malformed.
  *
  * @param {ArrayBuffer} data
+ * @param {number} [maxDepth] - envelope depth bound for the chunk-0 args header;
+ *   defaults to the same bound the RPC paths use. Threaded from the caller so an
+ *   app that tunes `maxEnvelopeDepth` gets ONE bound across every ingress.
  */
-function _parseUploadChunkFrame(data) {
+function _parseUploadChunkFrame(data, maxDepth = _DEFAULT_MAX_ENVELOPE_DEPTH) {
 	const byteLength = data.byteLength;
 	if (byteLength < 10) return null;
 
@@ -168,6 +171,11 @@ function _parseUploadChunkFrame(data) {
 		} catch {
 			return null;
 		}
+		// Same post-parse depth cap as the RPC envelope paths (dispatch.js):
+		// the uint16 argsLen budget (~64 KB) still admits ~30000 nesting
+		// levels, enough to stack-overflow a host-app recursive walker on the
+		// handler args. Treated as malformed: drop the frame.
+		if (exceedsEnvelopeDepth(argsHeader, maxDepth)) return null;
 	}
 
 	const payload = byteLength > payloadOffset ? data.slice(payloadOffset) : null;
@@ -353,10 +361,12 @@ function _createUploadEntry(ws, perWs, streamId, platform) {
  * @param {any} ws
  * @param {ArrayBuffer} data
  * @param {import('svelte-adapter-uws').Platform} platform
- * @param {{ beforeExecute?: Function, onError?: Function }} [options]
+ * @param {{ beforeExecute?: Function, onError?: Function, maxEnvelopeDepth?: number }} [options]
  */
 export function _handleUploadChunkFrame(ws, data, platform, options) {
-	const parsed = _parseUploadChunkFrame(data);
+	// Same normalization as the text/binary RPC ingresses in dispatch.js, so the
+	// three paths cannot drift on a falsy/omitted option.
+	const parsed = _parseUploadChunkFrame(data, (options && options.maxEnvelopeDepth) || _DEFAULT_MAX_ENVELOPE_DEPTH);
 	if (!parsed) {
 		if (_IS_DEV) console.warn('[svelte-realtime] Malformed upload chunk frame; dropping\n  See: https://svti.me/uploads');
 		return;

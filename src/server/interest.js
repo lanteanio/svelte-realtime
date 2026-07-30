@@ -174,9 +174,30 @@ export function createInterestState(interest) {
 	// run the app callback); this flag is the always-on structural half.
 	const ownFirst = interest.centerPolicy === 'own-entity';
 
+	// Minimum center movement that owes a relevancy pass. A fraction of the
+	// interest radius: below this the culled set cannot meaningfully change, so
+	// recomputing it is pure cost. Scaling off the radius keeps it correct for
+	// any world unit (pixels, metres, tiles) instead of guessing an absolute.
+	const centerEpsilon = typeof radius === 'number' && radius > 0 ? radius / 64 : 0;
+	const CENTER_EPSILON_SQ = centerEpsilon * centerEpsilon;
+
 	// Persistent across ticks.
 	/** @type {Map<string, { x: number, y: number }>} reported center override by identity */
 	const centers = new Map();
+	/**
+	 * Per identity: the center the last relevancy pass was owed at, plus whether
+	 * a revert-to-own-entity has already been accounted for. Separate from
+	 * `centers` because it must survive `clearCenter` - see `reportCenter`.
+	 * @type {Map<string, { x: number, y: number, cleared: boolean }>}
+	 */
+	const passCenters = new Map();
+	/**
+	 * Per identity: entity keys that left this subscriber's area of interest on
+	 * the most recent `compute`. Populated per pass and read by the delivery
+	 * layer, which sends each one a targeted `remove`.
+	 * @type {Map<string, string[]>}
+	 */
+	const exits = new Map();
 	/** @type {Map<string, Map<string, { band: number, sent: any }>>} per subscriber: entity key -> last LOD band + last-sent state */
 	const lod = new Map();
 	/**
@@ -243,24 +264,71 @@ export function createInterestState(interest) {
 	 * Record a subscriber's reported area-of-interest center (the optional
 	 * `smooth-center` client frame). Overrides the own-entity default until
 	 * cleared. A non-finite report is ignored (the center stays whatever it was).
+	 * Returns whether the effective center CHANGED, so the caller can skip
+	 * forcing a relevancy pass for an identical re-report.
 	 * @param {string} identity @param {number} x @param {number} y
+	 * @returns {boolean}
 	 */
 	function reportCenter(identity, x, y) {
 		if (typeof x === 'number' && typeof y === 'number' && Number.isFinite(x) && Number.isFinite(y)) {
-			let c = centers.get(identity);
-			if (c === undefined) { centers.set(identity, { x, y }); }
+			// The stored override always tracks the latest report, so whenever the
+			// next pass runs it culls from the true position.
+			const c = centers.get(identity);
+			if (c === undefined) centers.set(identity, { x, y });
 			else { c.x = x; c.y = y; }
+			// Only a move beyond the threshold OWES a pass. Exact equality alone is
+			// not a defence: a subscriber alternating between two centers a
+			// millimetre apart would force the full O(subscribers x entities)
+			// relevancy pass every tick at ~800 bytes/s.
+			//
+			// The reference point lives in its OWN map, deliberately outliving
+			// `clearCenter`. Keeping it inside the override entry made
+			// report -> clear -> report a free bypass: each report hit the
+			// "no entry yet" branch and owed a pass without the threshold ever
+			// being consulted, so an attacker forced a pass per tick without
+			// moving at all.
+			const p = passCenters.get(identity);
+			if (p === undefined) { passCenters.set(identity, { x, y, cleared: false }); return true; }
+			const dx = x - p.x;
+			const dy = y - p.y;
+			// Measured from the center the last pass was owed at, not the previous
+			// report, so a slow drift accumulates into a pass instead of being
+			// thresholded away one step at a time.
+			//
+			// A sub-threshold report leaves `cleared` ALONE. Resetting it here would
+			// re-arm the clear side of a report/clear oscillation, so the pair still
+			// bought one pass per cycle for zero movement.
+			if (dx * dx + dy * dy < CENTER_EPSILON_SQ) return false;
+			p.x = x; p.y = y;
+			p.cleared = false;
+			return true;
 		}
+		return false;
 	}
 
-	/** Drop a subscriber's reported center, reverting it to the own-entity default. */
+	/**
+	 * Drop a subscriber's reported center, reverting it to the own-entity
+	 * default. Returns whether an override was held AND the revert has not
+	 * already been accounted for (false -> no relevancy pass is owed).
+	 * @param {string} identity
+	 * @returns {boolean}
+	 */
 	function clearCenter(identity) {
-		centers.delete(identity);
+		if (!centers.delete(identity)) return false;
+		// A repeated clear/report cycle must not owe a pass every time. The first
+		// clear after a report is a genuine revert to the own-entity center and
+		// owes one; a second clear with no intervening move does not.
+		const p = passCenters.get(identity);
+		if (p === undefined) return true;
+		if (p.cleared) return false;
+		p.cleared = true;
+		return true;
 	}
 
 	/** Forget all state for a departed subscriber (called from the close path). */
 	function releaseSubscriber(identity) {
 		centers.delete(identity);
+		passCenters.delete(identity);
 		lod.delete(identity);
 		sendCadence.delete(identity);
 		// The last computed relevancy set is rebuilt every tick from live
@@ -385,6 +453,9 @@ export function createInterestState(interest) {
 		else index.release(); // drop any stale bins from a prior indexed tick; the flat path reads positions directly
 
 		const relevancy = new Map();
+		// Per-subscriber range-exits for THIS pass, drained by the delivery layer.
+		// Rebuilt every pass, so it can never outgrow the live subscriber set.
+		exits.clear();
 		subSet.clear();
 		for (const identity of subscribers) {
 			subSet.add(identity);
@@ -502,8 +573,23 @@ export function createInterestState(interest) {
 			// Forget entities that left this subscriber's range, so a re-entry is a
 			// fresh first-sight (delivered at once) and the map stays bounded by the
 			// live in-range set rather than every entity ever seen.
+			//
+			// Record the exits too. Forgetting server-side is not enough: the client
+			// drops a remote entity only on an explicit `remove` frame or its TTL
+			// sweep, and interest-exit sent neither - so a subscriber panning across
+			// a board kept accumulating entities it can no longer see, shedding them
+			// only once the sweep caught up. The caller turns these into per-subscriber
+			// `remove` frames so the release is immediate and deterministic.
 			if (lodForS.size > seen.size) {
-				for (const key of lodForS.keys()) if (!seen.has(key)) lodForS.delete(key);
+				let exited;
+				for (const key of lodForS.keys()) {
+					if (seen.has(key)) continue;
+					lodForS.delete(key);
+					// An entity that left the CATALOG (deleted, disconnected) already
+					// gets a broadcast remove; only range-exits need a targeted one.
+					if (indexByKey.has(key)) (exited ??= []).push(key);
+				}
+				if (exited !== undefined) exits.set(identity, exited);
 			}
 			relevancy.set(identity, relevant);
 		}
@@ -511,6 +597,8 @@ export function createInterestState(interest) {
 		// 5. Forget state for subscribers that are gone - a backstop to the explicit
 		// releaseSubscriber on close, so a missed release can never leak.
 		for (const id of centers.keys()) if (!subSet.has(id)) centers.delete(id);
+		// Same sweep for the threshold memory, which outlives an override.
+		for (const id of passCenters.keys()) if (!subSet.has(id)) passCenters.delete(id);
 		for (const id of lod.keys()) if (!subSet.has(id)) lod.delete(id);
 		for (const id of sendCadence.keys()) if (!subSet.has(id)) sendCadence.delete(id);
 
@@ -530,6 +618,15 @@ export function createInterestState(interest) {
 		releaseSubscriber,
 		purgeIdentity,
 		compute,
+		/**
+		 * Entity keys that left `identity`'s area of interest on the most recent
+		 * `compute`, or undefined when none did. The delivery layer turns these
+		 * into targeted `remove` frames so a subscriber releases an out-of-range
+		 * entity immediately instead of waiting for the client's TTL sweep.
+		 * @param {string} identity
+		 * @returns {string[] | undefined}
+		 */
+		exitsFor(identity) { return exits.get(identity); },
 		/**
 		 * The join-snapshot roster for a syncing subscriber, scoped to its area of
 		 * interest: the entities within the exact cull radius of its center (a

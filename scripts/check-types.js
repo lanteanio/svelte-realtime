@@ -12,9 +12,21 @@
  *
  * It guards the drift class where an `exports` entry points at a missing or
  * mistyped declaration (silently degrading consumers to `any`) or a file that
- * never gets published. It is dependency-free on purpose: no TypeScript install
- * is required, so it runs anywhere `node` does. Run via `npm run check`; wired
- * into `pretest` so the unit run enforces it.
+ * never gets published.
+ *
+ * It then TYPECHECKS the shipped declarations, with `skipLibCheck` OFF. The
+ * resolve-and-ship checks above cannot see an error INSIDE a `.d.ts`, and
+ * `skipLibCheck: true` is the SvelteKit/TS project default, so a declaration
+ * file that does not compile against itself is invisible to us and to most
+ * consumers - while anyone who typechecks library types sees that surface as
+ * broken. (This is exactly how a `UploadContext extends LiveContext` member
+ * collision shipped.)
+ *
+ * The structural checks stay dependency-free so they run anywhere `node` does.
+ * The typecheck rung needs TypeScript; when it is not installed the rung SKIPS
+ * with a notice rather than failing, so a clean install without the devDependency
+ * still passes `npm run check`. Add `typescript` to devDependencies to make it
+ * enforcing. Run via `npm run check`; wired into `pretest`.
  */
 import { readFileSync, existsSync } from 'node:fs';
 import { dirname, resolve, join } from 'node:path';
@@ -101,6 +113,45 @@ for (const field of ['main', 'module']) {
 const declarations = checked.filter((c) => TYPE_CONDITIONS.has(c.condition));
 console.log(`check-types: ${pkg.name}@${pkg.version}`);
 console.log(`  ${checked.length} export target(s) checked, ${declarations.length} declaration file(s).`);
+
+// Typecheck rung: compile every shipped declaration with skipLibCheck OFF, so an
+// error INSIDE a .d.ts (a member collision, a broken extends, a dangling import)
+// fails here instead of only for the consumers who happen to check lib types.
+let ts = null;
+try {
+	ts = (await import('typescript')).default;
+} catch {
+	console.log('  ~ typecheck SKIPPED: typescript is not installed (add it to devDependencies to enforce).');
+}
+
+if (ts) {
+	const files = [...new Set(declarations.map((d) => resolve(root, d.target)))].filter((f) => existsSync(f));
+	const program = ts.createProgram(files, {
+		noEmit: true,
+		strict: true,
+		skipLibCheck: false,
+		skipDefaultLibCheck: false,
+		target: ts.ScriptTarget.ES2022,
+		module: ts.ModuleKind.ESNext,
+		moduleResolution: ts.ModuleResolutionKind.Bundler
+	});
+	// Only OUR declarations: a consumer's node_modules typing problem is not this
+	// package's gate to fail on.
+	const own = new Set(files.map((f) => f.replace(/\\/g, '/')));
+	const diagnostics = ts.getPreEmitDiagnostics(program)
+		.filter((d) => d.file && own.has(d.file.fileName.replace(/\\/g, '/')));
+
+	if (diagnostics.length) {
+		console.error(`\ncheck-types FAILED: ${diagnostics.length} type error(s) in shipped declarations:`);
+		for (const d of diagnostics) {
+			const { line, character } = d.file.getLineAndCharacterOfPosition(d.start ?? 0);
+			const rel = d.file.fileName.replace(root.replace(/\\/g, '/'), '').replace(/^[/\\]/, '');
+			console.error(`  x ${rel}(${line + 1},${character + 1}): TS${d.code}: ${ts.flattenDiagnosticMessageText(d.messageText, ' ')}`);
+		}
+		process.exit(1);
+	}
+	console.log(`  ${files.length} declaration file(s) typecheck clean (strict, skipLibCheck off).`);
+}
 
 if (errors.length) {
 	console.error(`\ncheck-types FAILED (${errors.length} problem(s)):`);

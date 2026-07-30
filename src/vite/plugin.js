@@ -60,9 +60,15 @@ export default function svelteRealtime(options) {
 			}
 		},
 
-		resolveId(id) {
-			if (id === REGISTRY_ID) return REGISTRY_ID;
-			if (id === '/@svelte-realtime-registry') return REGISTRY_ID;
+		resolveId(id, importer, resolveOptions) {
+			// The registry is server-only: it enumerates every
+			// registered RPC / stream / cron / webhook path and its module URLs
+			// disclose the dev machine's absolute paths, so it must never
+			// resolve for the client graph - an anonymous HTTP client of a dev
+			// server could otherwise fetch it. Mirrors the transform gate below.
+			const ssr = resolveOptions?.ssr ?? isSsr;
+			if (id === REGISTRY_ID) return ssr ? REGISTRY_ID : null;
+			if (id === '/@svelte-realtime-registry') return ssr ? REGISTRY_ID : null;
 			if (id.startsWith('$live/')) {
 				const modulePath = id.slice(6); // strip '$live/'
 				// Shared helper modules (e.g. board.shared.js) are plain modules the app
@@ -81,8 +87,14 @@ export default function svelteRealtime(options) {
 		load(id, loadOptions) {
 			const ssr = loadOptions?.ssr ?? isSsr;
 
-			// Registry module
+			// Registry module (server graph only).
 			if (id === REGISTRY_ID) {
+				// This gate - not the resolveId one - is what actually closes client
+				// access. Vite skips resolveId whenever a module node already exists
+				// in that environment's graph, so a stale client-graph node (or an
+				// /@id/-prefixed or query-suffixed request) can carry the id straight
+				// here. Do not drop this as redundant.
+				if (!ssr) return null;
 				const srcDir = resolve(root, 'src');
 				const topicsRegistry = _buildTopicsRegistry(srcDir, liveDir);
 				return _generateRegistry(liveDir, dir, topicsRegistry);

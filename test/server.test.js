@@ -76,6 +76,8 @@ import {
 	_resetMiddleware,
 	_getIdentityKey,
 	_getAuthenticatedId,
+	_resetUnusableIdWarning,
+	_resetOwnerAliasWarning,
 	_resetReplayRouting,
 	WRAPPED_FOR_REPLAY
 } from '../src/server.js';
@@ -85,6 +87,7 @@ import { createHash, createHmac } from 'node:crypto';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { toArrayBuffer } from './helpers/encode.js';
+import { _handleUploadChunkFrame } from '../src/server/upload.js';
 import { installFakeRuntimeClock, releaseRuntimeClock } from './helpers/runtime-clock.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { state } from '../src/server/state.js';
@@ -272,6 +275,58 @@ describe('handleRpc()', () => {
 			const data = toArrayBuffer({ rpc: 'x/y', id: 'i', args: [payload] });
 			expect(handleRpc(ws, data, platform)).toBe(false);
 			expect(handleRpc(ws, data, platform, { maxEnvelopeDepth: 200 })).toBe(true);
+		});
+
+		// The upload ingress is the THIRD path that parses a client envelope, and it
+		// took the bound from a different place than handleRpc did - so an app that
+		// LOWERED maxEnvelopeDepth got the built-in 64 on uploads while its RPCs
+		// honoured the tighter value. One bound has to cover every ingress or the
+		// tuning is a false assurance on the path that accepts the biggest payloads.
+		it('honors a custom maxEnvelopeDepth on the upload ingress too', async () => {
+			// chunk-0 frame: 0x01 0x03, streamId, seq 0, uint16 args length, args JSON.
+			function chunk0(streamId, argsObj) {
+				const argsJson = new TextEncoder().encode(JSON.stringify(argsObj));
+				const buf = new ArrayBuffer(12 + argsJson.length);
+				const view = new DataView(buf);
+				view.setUint8(0, 0x01);
+				view.setUint8(1, 0x03);
+				view.setUint32(2, streamId, false);
+				view.setUint32(6, 0, false);
+				view.setUint16(10, argsJson.length, false);
+				new Uint8Array(buf).set(argsJson, 12);
+				return buf;
+			}
+			// ~6 levels deep: comfortably inside the default 64, well over a cap of 3.
+			const header = { rpc: 'depth-upload/missing', args: [{ a: { b: { c: { d: 1 } } } }] };
+
+			// The unknown-rpc answer is resolved asynchronously, so both directions are
+			// asserted after a flush - which also makes the negative case meaningful
+			// (nothing arrives even once the microtask queue has drained).
+			const flush = () => new Promise((r) => setTimeout(r, 0));
+
+			// Driven through handleRpc, NOT _handleUploadChunkFrame directly: the bug
+			// was the ingress failing to pass the app's bound through, so a test that
+			// calls the internal function cannot fail if someone drops `options` at
+			// the dispatch call site - which is precisely the drift this guards.
+			//
+			// Assert the CODE, not merely that something was sent: every upload
+			// failure path answers on __upload, so a topic-only check would still
+			// pass if the args header were parsed but discarded.
+			const pDefault = mockPlatform();
+			handleRpc(mockWs({ id: 'depth-a' }), chunk0(9001, header), pDefault, {});
+			await flush();
+			const answered = pDefault.sent.find((m) => m.topic === '__upload');
+			expect(answered).toBeTruthy();
+			// NOT_FOUND proves the header survived intact: a dropped/blanked header
+			// would fail earlier with INVALID_REQUEST ('missing rpc path').
+			expect(answered.data.code).toBe('NOT_FOUND');
+
+			// With the tighter bound the same frame is over-deep: dropped as malformed,
+			// so nothing is sent at all.
+			const pTight = mockPlatform();
+			handleRpc(mockWs({ id: 'depth-b' }), chunk0(9002, header), pTight, { maxEnvelopeDepth: 3 });
+			await flush();
+			expect(pTight.sent.some((m) => m.topic === '__upload')).toBe(false);
 		});
 
 		it('does not stack-overflow on pathologically deep input (iterative check)', () => {
@@ -5261,6 +5316,110 @@ describe('live.access', () => {
 		expect(filter({ user: {} })).toBe(false);
 	});
 
+	// A present-but-empty id is the standard no-session sentinel
+	// (`{ id: session?.userId ?? '' }`), and a boolean or plain object identifies
+	// nobody - yet every one of them is `!= null`, so a bare presence check let an
+	// anonymous connection through these gates. Same hole the authenticated-identity
+	// classification closed, on the surface documented as the way to close it.
+	it('owner()/team() reject a present-but-empty or non-identifying value', () => {
+		const owner = live.access.owner();
+		expect(owner({ user: { id: '' } })).toBe(false);
+		expect(owner({ user: { id: false } })).toBe(false);
+		expect(owner({ user: { id: {} } })).toBe(false);
+		expect(owner({ user: { remoteAddress: '1.2.3.4' } })).toBe(false);
+		// `0` is a legitimate id and object ids (ObjectId, Buffer, Decimal) still pass.
+		expect(owner({ user: { id: 0 } })).toBe(true);
+		expect(owner({ user: { id: { toString: () => 'abc123' } } })).toBe(true);
+		expect(live.access.team()({ user: { teamId: '' } })).toBe(false);
+		expect(live.access.team()({ user: { teamId: 't1' } })).toBe(true);
+	});
+
+	// `in` walks the prototype chain, so a role of 'constructor' matched a map that
+	// never declared it and the looked-up "rule" was an Object.prototype member.
+	// The gate site is a TRUTHY test, so map['constructor'] -> Object(ctx) and
+	// map['toString'] -> '[object Undefined]' both ADMITTED the connection. Any app
+	// mapping a client-influenced role claim onto ctx.user.role was one string away
+	// from passing a gate it never declared.
+	// `owner()` reads ONE field while the authenticated guard probes three aliases,
+	// so a `{ user_id }` session passes the guard and is denied here. Widening the
+	// probe would ADMIT connections that are denied today - an authorization
+	// change, not a fix - so the behaviour stands and the surprise is made loud.
+	it('warns once when owner() denies a session the guard would authenticate via another alias', async () => {
+		_resetOwnerAliasWarning();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const filter = live.access.owner();
+			const g = guard({ authenticated: true });
+
+			// The asymmetry itself, pinned: guard accepts, owner() denies.
+			await expect(g({ user: { user_id: 'u1' } })).resolves.toBeUndefined();
+			expect(filter({ user: { user_id: 'u1' } })).toBe(false);
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toMatch(/user_id/);
+
+			// One-shot.
+			expect(filter({ user: { userId: 'u2' } })).toBe(false);
+			expect(warn).toHaveBeenCalledTimes(1);
+
+			// Naming the field is the documented way out, and must not warn.
+			_resetOwnerAliasWarning();
+			warn.mockClear();
+			expect(live.access.owner('user_id')({ user: { user_id: 'u1' } })).toBe(true);
+			expect(warn).not.toHaveBeenCalled();
+
+			// A genuinely anonymous connection has no alias to suggest - stay quiet.
+			expect(filter({ user: { id: '' } })).toBe(false);
+			expect(filter({ user: null })).toBe(false);
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+			_resetOwnerAliasWarning();
+		}
+	});
+
+	it('role() does not match inherited Object.prototype keys', () => {
+		const filter = live.access.role({ admin: true });
+		expect(filter({ user: { role: 'admin' } })).toBe(true);
+		for (const evil of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__', 'isPrototypeOf']) {
+			expect(filter({ user: { role: evil } })).toBe(false);
+		}
+		// A non-string role must not index the map by its coerced form either.
+		expect(filter({ user: { role: 0 } })).toBe(false);
+		expect(filter({ user: { role: {} } })).toBe(false);
+	});
+
+	// The README documents `{ admin: true, viewer: false }`. `false` is not a
+	// function, so the old code CALLED it and threw a TypeError, which the
+	// dispatcher reported as INTERNAL_ERROR - fail-closed, but a 5xx for what is
+	// an ordinary denial, and every such subscribe logged as a server fault.
+	it('role() denies on a non-function, non-true rule instead of throwing', () => {
+		const filter = live.access.role({ admin: true, viewer: false });
+		expect(filter({ user: { role: 'admin' } })).toBe(true);
+		expect(filter({ user: { role: 'viewer' } })).toBe(false);
+		expect(filter({ user: { role: 'other' } })).toBe(false);
+	});
+
+	// Vacuous truth must not admit: a rule list that resolved empty (config-driven,
+	// env-gated, or a .filter() that matched nothing) allowed EVERY connection.
+	// `any()` is already correct - vacuous false denies.
+	it('all() with no predicates denies rather than failing open', async () => {
+		expect(await live.access.all()({ user: null })).toBe(false);
+		expect(await live.access.any()({ user: null })).toBe(false);
+		// Non-empty still behaves normally.
+		expect(await live.access.all(() => true)({ user: { id: 'u1' } })).toBe(true);
+	});
+
+	// The empty sentinel is worse on the comparing predicates: the caller supplies
+	// the value compared against it, so `''` on both sides matched exactly.
+	it('org()/user() reject an empty expected value even when the caller sends the same empty value', () => {
+		expect(live.access.org()({ user: { organization_id: '' } }, '')).toBe(false);
+		expect(live.access.user()({ user: { user_id: '' } }, '')).toBe(false);
+		// A real id still matches, and still by strict equality on the RAW value -
+		// the identity check validates, it must not coerce a numeric id to a string.
+		expect(live.access.org()({ user: { organization_id: 42 } }, 42)).toBe(true);
+		expect(live.access.org()({ user: { organization_id: 42 } }, '42')).toBe(false);
+	});
+
 	it('any() returns true if any predicate matches', async () => {
 		const filter = live.access.any(
 			live.access.owner(),
@@ -6387,10 +6546,14 @@ describe('live.webhooks namespace + outbound', () => {
 		await fireOnce(['wh-rot'], { url: baseUrl + '/', urlMode: 'off', secret: 'new-key', previousSecret: 'old-key' }, { topic: 'wh-rot', event: 'created', data: { id: 1 } });
 		const header = received[0].headers['x-webhook-signature'];
 		expect(header).toMatch(/^sha256=[0-9a-f]{64},sha256=[0-9a-f]{64}$/);
-		const body = received[0].body;
+		// The signed material is `<unix-seconds>.<rawBody>`, with the timestamp
+		// shipped alongside so the receiver can bound replay.
+		const timestamp = received[0].headers['x-webhook-timestamp'];
+		expect(timestamp).toMatch(/^\d+$/);
+		const material = timestamp + '.' + received[0].body;
 		const [current, previous] = header.split(',');
-		expect(current).toBe('sha256=' + createHmac('sha256', 'new-key').update(body).digest('hex'));
-		expect(previous).toBe('sha256=' + createHmac('sha256', 'old-key').update(body).digest('hex'));
+		expect(current).toBe('sha256=' + createHmac('sha256', 'new-key').update(material).digest('hex'));
+		expect(previous).toBe('sha256=' + createHmac('sha256', 'old-key').update(material).digest('hex'));
 	});
 
 	it('keys the default idempotency-key to the CURRENT secret only during rotation', async () => {
@@ -8967,6 +9130,67 @@ describe('schema evolution', () => {
 		expect(response.ok).toBe(true);
 		expect(response.data[0].extra).toBeUndefined();
 		expect(migrateSpy).not.toHaveBeenCalled();
+	});
+
+	// schemaVersion arrives on the client frame, so it is attacker-controlled.
+	// The migration loop runs (serverVersion - clientSchemaVersion) iterations
+	// per item: a large negative value burns the event loop synchronously, and
+	// -Infinity (JSON -1e999) never terminates. Anything outside
+	// [0, serverVersion) must therefore migrate NOTHING rather than loop.
+	for (const [label, schemaVersion] of [
+		['negative', -1e7],
+		['-Infinity (JSON -1e999)', -Infinity],
+		['+Infinity (JSON 1e999)', Infinity],
+		['fractional', 1.5],
+		['at serverVersion', 2],
+		['above serverVersion', 99]
+	]) {
+		it(`ignores a hostile schemaVersion (${label}) instead of migrating`, async () => {
+			const migrateSpy = vi.fn((item) => ({ ...item, extra: true }));
+			const fn = live.stream('todos', async () => [{ id: 1, text: 'Test' }], {
+				merge: 'crud', key: 'id',
+				version: 2,
+				migrate: { 1: migrateSpy }
+			});
+			__register('schema/hostile', fn);
+
+			const ws = mockWs({ id: 'u1' });
+			const platform = mockPlatform();
+			// JSON.stringify turns -Infinity/NaN into null, so build the frame text
+			// by hand to reproduce exactly what a raw-WS client can put on the wire.
+			const onWire = schemaVersion === -Infinity ? '-1e999'
+				: schemaVersion === Infinity ? '1e999'
+				: String(schemaVersion);
+			const raw = `{"rpc":"schema/hostile","id":"sv1","args":[],"stream":true,"schemaVersion":${onWire}}`;
+			const started = Date.now();
+			handleRpc(ws, new TextEncoder().encode(raw).buffer, platform);
+			await new Promise((r) => setTimeout(r, 10));
+
+			// Returns promptly - the loop never runs.
+			expect(Date.now() - started).toBeLessThan(1000);
+			expect(migrateSpy).not.toHaveBeenCalled();
+			const response = platform.sent[0]?.data;
+			expect(response.ok).toBe(true);
+			expect(response.data[0].extra).toBeUndefined();
+		});
+	}
+
+	it('still migrates for a valid in-range schemaVersion (the guard is not over-broad)', async () => {
+		const migrateSpy = vi.fn((item) => ({ ...item, extra: true }));
+		const fn = live.stream('todos', async () => [{ id: 1, text: 'Test' }], {
+			merge: 'crud', key: 'id',
+			version: 2,
+			migrate: { 1: migrateSpy }
+		});
+		__register('schema/valid', fn);
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'schema/valid', id: 'sv2', args: [], stream: true, schemaVersion: 1 }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(migrateSpy).toHaveBeenCalled();
+		expect(platform.sent[0]?.data.data[0].extra).toBe(true);
 	});
 });
 
@@ -13876,9 +14100,195 @@ describe('guard({ authenticated })', () => {
 		await expect(g({ user: null })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
 	});
 
-	it('passes when ctx.user is non-null', async () => {
+	it('passes when ctx.user carries an authenticated id', async () => {
 		const g = guard({ authenticated: true });
 		await expect(g({ user: { user_id: 'u1' } })).resolves.toBeUndefined();
+	});
+
+	// The adapter ALWAYS upgrades with a non-null userData, so a ctx.user null
+	// check never fires on a real socket. These pin the authenticated-identity
+	// semantics instead - id present and non-empty, not merely "user object".
+	it('throws UNAUTHENTICATED for an adapter-shaped anonymous userData', async () => {
+		const g = guard({ authenticated: true });
+		await expect(g({ user: { remoteAddress: '127.0.0.1' } })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+	});
+
+	it('throws UNAUTHENTICATED for a present-but-empty id (the no-session sentinel)', async () => {
+		const g = guard({ authenticated: true });
+		await expect(g({ user: { id: '' } })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+		await expect(g({ user: { id: false } })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+		await expect(g({ user: { id: {} } })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+	});
+
+	it('passes for id 0 - falsiness alone must not decide', async () => {
+		const g = guard({ authenticated: true });
+		await expect(g({ user: { id: 0 } })).resolves.toBeUndefined();
+	});
+
+	// An object id is normal outside plain SQL, but only when it stringifies to a
+	// real identity. A value whose only stringification is a generic tag is the
+	// same string for EVERY instance, so accepting one collapses every connection
+	// onto one identity - the same rate-limit bucket, idempotency slot and room
+	// ownership. A forgotten `await` is the canonical way to produce it.
+	it('accepts a meaningful object id but rejects a generic-tag one', async () => {
+		const g = guard({ authenticated: true });
+		// Mongo ObjectId / Prisma Decimal shape: a real custom toString.
+		await expect(g({ user: { id: { toString: () => '507f1f77bcf86cd799439011' } } })).resolves.toBeUndefined();
+		// A forgotten await: String(Promise) is '[object Promise]' for every instance.
+		await expect(g({ user: { id: Promise.resolve('u1') } })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+		await expect(g({ user: { id: new Map() } })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+		await expect(g({ user: { id: {} } })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+	});
+
+	it('reads a binary id as bytes, so distinct uuids stay distinct', () => {
+		// String(Buffer) is a UTF-8 DECODE: these two both become replacement
+		// characters and would otherwise be the same identity.
+		const a = _getAuthenticatedId({ user: { id: Buffer.from([0xff, 0xfe]) } });
+		const b = _getAuthenticatedId({ user: { id: Buffer.from([0xff, 0xff]) } });
+		expect(a).toBe('fffe');
+		expect(b).toBe('ffff');
+		expect(a).not.toBe(b);
+		// A 0x00 byte must not reach an identity that is later NUL-joined.
+		expect(_getAuthenticatedId({ user: { id: Buffer.from([0x00, 0x01]) } })).toBe('0001');
+	});
+
+	// A TRANSFERRED id leaves the view over a detached buffer, and constructing a
+	// Uint8Array over one throws. Every other unusable shape here returns null, so
+	// this must too: the throw would escape into the connection path and fail the
+	// upgrade outright rather than demoting the connection to a guest id.
+	it('returns null for a detached (transferred) binary id instead of throwing', async () => {
+		const buf = new Uint8Array([1, 2, 3, 4]);
+		structuredClone(buf.buffer, { transfer: [buf.buffer] });
+		expect(buf.buffer.detached).toBe(true);
+		expect(() => _getAuthenticatedId({ user: { id: buf } })).not.toThrow();
+		expect(_getAuthenticatedId({ user: { id: buf } })).toBe(null);
+		// ...and the guard reports it as anonymous rather than as a server fault.
+		const g = guard({ authenticated: true });
+		await expect(g({ user: { id: buf } })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+		// The demotion the rationale promises is real: a per-connection guest key,
+		// not a throw and not every such connection colliding on one constant.
+		expect(_getIdentityKey({ ws: {}, user: { id: buf } })).toMatch(/^__guest_/);
+
+		// The inner guard in `_scalarId` must be pinned by the DIAGNOSTIC, not by
+		// the absence of a throw: the whole-body guard added to `_getAuthenticatedId`
+		// also catches this, so "returns null without throwing" holds either way and
+		// cannot tell the two apart. Naming the cause is what only the inner one does.
+		_resetUnusableIdWarning();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			expect(_getAuthenticatedId({ user: { id: buf } })).toBe(null);
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toMatch(/detached/);
+		} finally {
+			warn.mockRestore();
+			_resetUnusableIdWarning();
+		}
+	});
+
+	// The derived key is rebuilt per MESSAGE (rate limiting, smooth, multiplayer)
+	// and becomes a Map key and a topic fragment, so an uncapped binary id is
+	// megabyte-scale string churn on every frame.
+	// `ctx.user` is the app's session object, passed through verbatim from
+	// getUserData(), so ANY read on it may be a throwing getter or a Proxy trap.
+	// Guarding only the binary-id constructor left this door open, and the call
+	// site outside the dispatch try/catch turns an escaping throw into an
+	// unhandled rejection - process death, not a failed request.
+	it('returns null when the session object throws on read instead of escaping', async () => {
+		const throwingField = { get id() { throw new Error('session getter blew up'); } };
+		expect(() => _getAuthenticatedId({ user: throwingField })).not.toThrow();
+		expect(_getAuthenticatedId({ user: throwingField })).toBe(null);
+
+		// A Proxy trap over the whole session object is the same class of hazard.
+		const proxied = new Proxy({}, { get() { throw new Error('proxy trap blew up'); } });
+		expect(() => _getAuthenticatedId({ user: proxied })).not.toThrow();
+		expect(_getAuthenticatedId({ user: proxied })).toBe(null);
+
+		// ...as is a ctx whose `user` accessor itself throws.
+		const badCtx = { get user() { throw new Error('ctx.user blew up'); } };
+		expect(() => _getAuthenticatedId(badCtx)).not.toThrow();
+		expect(_getAuthenticatedId(badCtx)).toBe(null);
+
+		// The guard reports it as anonymous rather than as a server fault.
+		const g = guard({ authenticated: true });
+		await expect(g({ user: throwingField })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+	});
+
+	// Without this the demotion is entirely silent, and its consequences are not:
+	// rate limits fall back to a per-socket bucket and idempotency keys lose their
+	// per-user scope, so two callers sharing a client-chosen key collide in one
+	// slot. One-shot, so it cannot spam a per-message path.
+	it('warns once in dev when a present id is unusable, and stays silent for the empty sentinel', () => {
+		_resetUnusableIdWarning();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			// The documented no-session sentinel is not a bug and must stay silent...
+			expect(_getAuthenticatedId({ user: { id: '' } })).toBe(null);
+			// ...and neither is a session with no id field at all.
+			expect(_getAuthenticatedId({ user: {} })).toBe(null);
+			expect(warn).not.toHaveBeenCalled();
+
+			// A forgotten await is the canonical unusable shape.
+			expect(_getAuthenticatedId({ user: { id: Promise.resolve('u1') } })).toBe(null);
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toMatch(/present but unusable/);
+
+			// One-shot: a second unusable id does not warn again.
+			expect(_getAuthenticatedId({ user: { id: new Map() } })).toBe(null);
+			expect(warn).toHaveBeenCalledTimes(1);
+		} finally {
+			warn.mockRestore();
+			_resetUnusableIdWarning();
+		}
+	});
+
+	it('rejects an over-long binary id rather than building an unbounded key', () => {
+		// 64 bytes is the largest real id shape (a SHA-512 digest) and still works.
+		expect(_getAuthenticatedId({ user: { id: new Uint8Array(64).fill(7) } })).toBe('07'.repeat(64));
+		expect(_getAuthenticatedId({ user: { id: new Uint8Array(65) } })).toBe(null);
+		expect(_getAuthenticatedId({ user: { id: new Uint8Array(1 << 20) } })).toBe(null);
+	});
+
+	// `'' ?? x` yields `''`, so a chained probe would let an empty `id` swallow a
+	// perfectly good `user_id` and lock a REAL user out. Each alias is probed
+	// independently for exactly this shape.
+	it('falls through an empty id to a valid user_id alias', async () => {
+		const g = guard({ authenticated: true });
+		await expect(g({ user: { id: '', user_id: 'u1' } })).resolves.toBeUndefined();
+		await expect(g({ user: { id: null, userId: 'u2' } })).resolves.toBeUndefined();
+		await expect(g({ user: { id: {}, user_id: 'u3' } })).resolves.toBeUndefined();
+		// ...but no valid alias anywhere is still anonymous.
+		await expect(g({ user: { id: '', user_id: '' } })).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
+	});
+
+	// End-to-end through the real dispatch path, which is where the original
+	// bypass lived: the guarded handler must not run for an anonymous socket.
+	it('an anonymous socket cannot reach a guarded handler through handleRpc', async () => {
+		let ran = false;
+		__registerGuard('sec', guard({ authenticated: true }));
+		__register('sec/guarded', live(async () => { ran = true; return 'TOP-SECRET'; }));
+
+		const anonWs = mockWs({});           // adapter shape: { remoteAddress, __subscriptions }
+		const platform = mockPlatform();
+		handleRpc(anonWs, toArrayBuffer({ rpc: 'sec/guarded', id: 'g1', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(ran).toBe(false);
+		expect(platform.sent[0]?.data).toMatchObject({ ok: false, code: 'UNAUTHENTICATED' });
+		expect(JSON.stringify(platform.sent[0]?.data)).not.toContain('TOP-SECRET');
+	});
+
+	it('an authenticated socket does reach the same guarded handler', async () => {
+		let ran = false;
+		__registerGuard('sec2', guard({ authenticated: true }));
+		__register('sec2/guarded', live(async () => { ran = true; return 'ok'; }));
+
+		const ws = mockWs({ id: 'u1' });
+		const platform = mockPlatform();
+		handleRpc(ws, toArrayBuffer({ rpc: 'sec2/guarded', id: 'g2', args: [] }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+
+		expect(ran).toBe(true);
+		expect(platform.sent[0]?.data).toMatchObject({ ok: true, data: 'ok' });
 	});
 
 	it('composes with function-style middleware (auth runs first)', async () => {

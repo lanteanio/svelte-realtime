@@ -867,6 +867,10 @@ export function combine(...args: [...Readable<any>[], (...values: any[]) => any]
  * `null` in production builds (tree-shaken).
  */
 export const __devtools: {
+	/**
+	 * Fixed-size ring, pre-filled with `null` and overwritten in place - filter
+	 * the holes out and sort by `seq` before reading it as a timeline.
+	 */
 	history: Array<{
 		path: string;
 		args: any[];
@@ -874,9 +878,48 @@ export const __devtools: {
 		result: any;
 		duration: number;
 		time: number;
-	}>;
-	streams: Map<string, { path: string; topic: string | null; subCount: number }>;
+		seq: number;
+	} | null>;
+	streams: Map<
+		string,
+		{
+			path: string;
+			topic: string | null;
+			subCount: number;
+			/** Merge strategy reported by the server, passed through verbatim. */
+			merge: string | null;
+			lastEventTime: number | null;
+			lastEvent: string | null;
+			error: { code: string; message: string } | null;
+			/** FIFO ring of the most recent events, capped at 20. */
+			recentEvents: Array<{ event: string; data: any; ts: number }>;
+		}
+	>;
 	pending: Map<string, { path: string; args: any[]; startTime: number }>;
+	/**
+	 * Fixed-size ring of fire-and-forget sends, `null`-filled like `history`.
+	 * Its `seq` runs on a counter of its own, so it does NOT interleave with
+	 * `history[].seq` - sort within one ring, never across both.
+	 */
+	volatile: Array<{ path: string; args: any[]; time: number; seq: number } | null>;
+	/** Volatile sends dropped since page load, across every drop reason. */
+	volatileDropped: number;
+	/**
+	 * Keys blanked to `[REDACTED]` in captured payloads. Matching is on the whole
+	 * key and case-insensitive, so `add('paymentMethod')` works as written but a
+	 * substring will not match. Two things it cannot reach: a stream error string
+	 * and a rejected RPC's `message`, both bare strings that a key-based redactor
+	 * has no purchase on - keep secrets out of error text.
+	 */
+	redactKeys: Set<string>;
+	/**
+	 * When true, per-stream event PAYLOAD capture is suspended (the panel's pause
+	 * button). `lastEvent`/`lastEventTime` still update, and RPC history, pending
+	 * and volatile capture are unaffected.
+	 */
+	paused: boolean;
+	/** Pull-based smoothed-channel telemetry accessors, called on panel refresh. */
+	smooth: Set<() => any>;
 } | null;
 
 /**

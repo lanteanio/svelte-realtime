@@ -1226,7 +1226,9 @@ export interface ShortCodes {
  *     them unguessable). Without it a per-process random key is used and a
  *     one-time dev warning fires.
  *   - `length`: code length in Base62 chars (fixed, zero-padded). Default 6; max 8.
- *   - `rounds`: Feistel rounds. Default 4.
+ *   - `rounds`: Feistel rounds. Default 4, and 4 is also the MINIMUM (max 64) -
+ *     each round mixes one 32-bit round key, so a lower count caps the effective
+ *     key space however strong `secret` is. A value outside the range throws.
  */
 export function shortCodes(config?: { secret?: string; length?: number; rounds?: number }): ShortCodes;
 
@@ -1397,10 +1399,24 @@ export interface UploadOptions {
 }
 
 /**
- * Context passed to `live.upload()` handlers. Extends `LiveContext` with
- * three streaming-only fields.
+ * Context passed to `live.upload()` handlers. Extends `LiveContext` with three
+ * streaming-only fields, and REPLACES one member.
+ *
+ * `signal` is an `AbortSignal` here, not `LiveContext`'s point-to-point
+ * `signal(userId, event, data)` method. That is not a typing convenience: the
+ * upload runtime assigns `ctx.signal = <AbortController>.signal` on the
+ * per-upload context, so the method is genuinely unreachable inside a
+ * `live.upload()` handler. The base member is therefore `Omit`ted rather than
+ * redeclared - redeclaring it with an incompatible type made this interface fail
+ * to compile against its own base (TS2430), which only stayed invisible because
+ * `skipLibCheck: true` is the SvelteKit/TS default. Consumers who typecheck
+ * library types saw the whole upload surface as broken.
+ *
+ * To send a point-to-point signal from an upload handler, publish to the signal
+ * topic directly - `ctx.publish('__signal:' + userId, event, data)` - or do it
+ * from a regular `live()` handler.
  */
-export interface UploadContext<UserData = unknown> extends LiveContext<UserData> {
+export interface UploadContext<UserData = unknown> extends Omit<LiveContext<UserData>, 'signal'> {
 	/** Async iterable yielding `Uint8Array` chunks in arrival order. */
 	stream: AsyncIterable<Uint8Array>;
 	/**
@@ -2837,11 +2853,17 @@ export namespace live {
 	 * For per-event filtering, use `pipe.filter()`.
 	 */
 	const access: {
-		/** Only allow subscription if `ctx.user[field]` is present. Default field: `'id'`. */
+		/**
+		 * Only allow subscription if `ctx.user[field]` IDENTIFIES somebody. Default
+		 * field: `'id'`. Stricter than a presence check on purpose: `''` is the usual
+		 * no-session sentinel and is not `null`, so presence alone admitted anonymous
+		 * connections. A boolean or plain object is rejected too; `0` and object ids
+		 * (ObjectId, Buffer uuid, Decimal) are accepted.
+		 */
 		owner(field?: string): (ctx: LiveContext<any>) => boolean;
 		/** Role-based access: map role names to boolean or predicate. */
 		role(map: Record<string, true | ((ctx: LiveContext<any>) => boolean)>): (ctx: LiveContext<any>) => boolean;
-		/** Only allow subscription if `ctx.user.teamId` is present. */
+		/** Only allow subscription if `ctx.user.teamId` identifies a team (same rule as `owner`). */
 		team(): (ctx: LiveContext<any>) => boolean;
 		/**
 		 * Org-scoped access: an extracted value (default arg 0) must equal
@@ -3123,8 +3145,15 @@ export interface MultiplayerConfig {
 	 * Enable advisory lock surfaces by key. These are collaborative awareness
 	 * locks (a holder announces intent), published onto the presence roster, not
 	 * distributed mutual exclusion.
+	 *
+	 * An ARRAY is an allowlist: only those keys may be locked. `true` enables the
+	 * surface with NO allowlist, so any key is lockable - which the runtime has
+	 * always accepted, while this type declared `string[]` alone and the README
+	 * only showed the array form. Prefer the array: it is the form that bounds
+	 * what clients can create. `true` stays bounded by the per-delta, per-value
+	 * and 16 KB entry caps, so it is not an unbounded surface, just an unlisted one.
 	 */
-	locks?: string[];
+	locks?: string[] | true;
 	/** Enable an ephemeral reactions surface on a dedicated reactions stream. */
 	reactions?: boolean;
 	/** Enable a remote-selection surface. Offset-mode ranges are published onto the presence roster. */
@@ -3625,8 +3654,10 @@ export interface OutboundWebhookConfig {
 	transform?: (event: string, data: any) => any;
 	/**
 	 * HMAC-SHA256 secret. When set, each request carries
-	 * `x-webhook-signature: sha256=<hex>` over the body so the receiver can
-	 * authenticate it.
+	 * `x-webhook-signature: sha256=<hex>` over `<unix-seconds>.<body>` with the
+	 * timestamp alongside as `x-webhook-timestamp`, so the receiver can
+	 * authenticate the payload AND reject stale (replayed) deliveries - the
+	 * documented receiver contract tolerates 5 minutes of skew.
 	 */
 	secret?: string;
 	/**
@@ -3765,18 +3796,21 @@ export namespace pipe {
  * Accepts middleware functions (variadic) and/or a single declarative
  * options object as the first argument:
  *
- * - `{ authenticated: true }` - throws `UNAUTHENTICATED` unless
- *   `ctx.user` is non-null. Cheaper to write than the equivalent
- *   function and harder to forget.
+ * - `{ authenticated: true }` - throws `UNAUTHENTICATED` unless the
+ *   connection carries an authenticated identity, i.e. `ctx.user` has a
+ *   non-empty `id` (or `user_id` / `userId`). A non-null `ctx.user` is NOT
+ *   enough: the adapter always upgrades with a userData object, so an
+ *   anonymous socket has `ctx.user = { remoteAddress }` and is rejected.
+ *   Cheaper to write than the equivalent function and harder to forget.
  *
  * Function-style middleware composes: `guard({ authenticated: true }, customCheck)`
  * runs the auth check first, then `customCheck(ctx)`. If any throws,
  * the chain stops.
  *
  * Bare `Error`s thrown from a guard are auto-classified to a typed
- * `LiveError`: `UNAUTHENTICATED` when `ctx.user` is null, `FORBIDDEN`
- * otherwise. Throw `new LiveError('FORBIDDEN', '...')` directly when
- * you want a specific code or message.
+ * `LiveError`: `UNAUTHENTICATED` when the connection has no authenticated
+ * identity, `FORBIDDEN` otherwise. Throw `new LiveError('FORBIDDEN', '...')`
+ * directly when you want a specific code or message.
  *
  * @example
  * ```js
@@ -4483,6 +4517,18 @@ export interface RealtimeConfig {
 	 * dev-mode unknown-path console warning is unaffected. @default false
 	 */
 	maskNotFound?: boolean;
+	/**
+	 * Operator secret keying the differential-privacy noise seed for
+	 * `live.aggregate({ privacy })` with a `perturb` / `hybrid` strategy. The
+	 * per-window noise is seeded by HMAC-SHA256 of this secret over
+	 * tenant|topic|windowStart, so every replica sharing the secret draws
+	 * identical noise while a subscriber (who does not have it) cannot recompute
+	 * and subtract the draws. REQUIRED for noise strategies: without it a
+	 * `perturb` / `hybrid` aggregate throws at publish time rather than emit
+	 * attacker-removable noise. k-anonymity-only (`suppress`) aggregates do not
+	 * need it. @default undefined
+	 */
+	privacySecret?: string;
 	/**
 	 * Wire-subscribe authorization (default `true`). realtime arms the adapter
 	 * so a client's raw WebSocket `subscribe` frame is honored only for a topic

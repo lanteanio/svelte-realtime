@@ -74,20 +74,20 @@ describe('runLiveSimSwarm', () => {
 		expect(b.summary).toEqual(a.summary);
 	});
 
-	it('buggify:on enables a chaos drop yet convergence still holds; fingerprints change', async () => {
-		const on = await runLiveSimSwarm({ count: 4, startSeed: 1, buggify: 'on', faultProfile: { dropRate: 0.5 } });
+	it('faultMode:on enables a chaos drop yet convergence still holds; fingerprints change', async () => {
+		const on = await runLiveSimSwarm({ count: 4, startSeed: 1, faultMode: 'on', faultProfile: { dropRate: 0.5 } });
 		const off = await runLiveSimSwarm({ count: 4, startSeed: 1 });
-		expect(on.runs.every((r) => r.buggified)).toBe(true);
+		expect(on.runs.every((r) => r.faulted)).toBe(true);
 		expect(on.summary.ok).toBe(true);
 		expect(on.runs.some((r, i) => r.fingerprint !== off.runs[i].fingerprint)).toBe(true);
 	});
 
-	it('buggify:random faults a reproducible, non-trivial subset', async () => {
-		const a = await runLiveSimSwarm({ count: 16, startSeed: 1, buggify: 'random', faultProfile: { dropRate: 0.5 }, buggifyProbability: 0.5 });
-		const b = await runLiveSimSwarm({ count: 16, startSeed: 1, buggify: 'random', faultProfile: { dropRate: 0.5 }, buggifyProbability: 0.5 });
-		expect(a.summary.buggified).toBeGreaterThan(0);
-		expect(a.summary.buggified).toBeLessThan(16);
-		expect(b.runs.map((r) => r.buggified)).toEqual(a.runs.map((r) => r.buggified));
+	it('faultMode:random faults a reproducible, non-trivial subset', async () => {
+		const a = await runLiveSimSwarm({ count: 16, startSeed: 1, faultMode: 'random', faultProfile: { dropRate: 0.5 }, faultProbability: 0.5 });
+		const b = await runLiveSimSwarm({ count: 16, startSeed: 1, faultMode: 'random', faultProfile: { dropRate: 0.5 }, faultProbability: 0.5 });
+		expect(a.summary.faulted).toBeGreaterThan(0);
+		expect(a.summary.faulted).toBeLessThan(16);
+		expect(b.runs.map((r) => r.faulted)).toEqual(a.runs.map((r) => r.faulted));
 		expect(a.summary.ok).toBe(true);
 	});
 

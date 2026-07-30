@@ -2069,15 +2069,31 @@ describe('__rpc().fireAndForget()', () => {
 		}).toThrow(/cannot be used inside batch/);
 	});
 
-	it('drops silently when disconnected and ticks the counter', async () => {
+	// This test previously asserted NOTHING - it called fireAndForget and then only
+	// described in a comment what it would have liked to check, so it passed against
+	// any behaviour at all. It now pins the mirror, which was genuinely broken: the
+	// offline branch bumped the module counter without copying it to devtools, and
+	// the backpressure branch assigns the WHOLE counter, so the field stayed stale
+	// and then jumped by every accumulated offline drop at the next backpressure one.
+	it('drops silently when disconnected and mirrors the counter to devtools', async () => {
+		expect(__devtools).not.toBeNull();
 		const fn = __rpc('vol/offline');
-		simulateStatus('closed');
-		// Drive an _isOffline transition via the disconnect listener
+		// The old version of this test sent `'closed'`, which the config status
+		// listener does not act on at all - only 'disconnected'/'failed' set
+		// `isOffline` - and the listener also skips its FIRST status. So it never
+		// reached the offline branch it was named for, and asserted nothing either.
+		// Sent twice so it lands whether or not the first-status skip is still armed.
+		configure({});
+		simulateStatus('disconnected');
+		simulateStatus('disconnected');
 		await new Promise((r) => setTimeout(r, 10));
+		// The counter moving IS the proof the offline branch ran: on any other path
+		// `fireAndForget` sends instead of dropping and never touches it.
+		const before = __devtools.volatileDropped;
 		fn.fireAndForget('x');
-		// Hard to assert _isOffline directly without exporting; we observe that
-		// sendQueued was not called (offline) and counter incremented.
-		// In dev, this path doesn't throw - it silently no-ops.
+		expect(__devtools.volatileDropped).toBe(before + 1);
+		fn.fireAndForget('y');
+		expect(__devtools.volatileDropped).toBe(before + 2);
 	});
 
 	it('emits a one-shot dev warning on first backpressure drop', () => {
@@ -3018,6 +3034,45 @@ describe('__stream() dynamic subscribe wrapper (Bug #4 fix)', () => {
 });
 
 // - Bug #5: batch() cleanup on throw --------------------------------
+
+describe('batch() devtools instrumentation', () => {
+	// The batch branch returns before the normal `_devtoolsStart` and used to store
+	// the raw resolve/reject, so calls made inside `batch()` never appeared in the
+	// pending map or the history ring at all - a blind spot over exactly the path
+	// bulk traffic uses.
+	it('records batched calls in the devtools pending map and history ring', async () => {
+		expect(__devtools).not.toBeNull();
+		// TWO calls deliberately: a batch of one is sent as a bare RPC frame rather
+		// than a batch envelope, so a single-call batch would not exercise this path.
+		const add = __rpc('batch/dt-add');
+		const mul = __rpc('batch/dt-mul');
+		const promise = batch(() => [add(2, 3), mul(4, 5)]);
+		// Selected by shape, not by index: other frames can precede the batch.
+		const sent = sendQueuedFn.mock.calls.map((c) => c[0]).find((m) => m && m.batch);
+		expect(sent).toBeTruthy();
+		// In flight: visible in pending, which it never was before.
+		expect([...__devtools.pending.values()].some((e) => e.path === 'batch/dt-add')).toBe(true);
+
+		simulateTopicMessage('__rpc', {
+			event: '__batch',
+			data: {
+				batch: [
+					{ id: sent.batch[0].id, ok: true, data: 5 },
+					{ id: sent.batch[1].id, ok: true, data: 20 }
+				]
+			}
+		});
+		await promise;
+
+		// Settled: off the pending map and onto the history ring, both of them.
+		expect([...__devtools.pending.values()].some((e) => e.path === 'batch/dt-add')).toBe(false);
+		const done = __devtools.history.filter(Boolean);
+		expect(done.map((r) => r.path)).toEqual(expect.arrayContaining(['batch/dt-add', 'batch/dt-mul']));
+		const rec = done.find((r) => r.path === 'batch/dt-add');
+		expect(rec.ok).toBe(true);
+		expect(rec.result).toBe(5);
+	});
+});
 
 describe('batch() cleanup on throw (Bug #5 fix)', () => {
 	it('cleans up if fn() throws synchronously', () => {
@@ -5674,6 +5729,78 @@ describe('__stream() CRUD delete swap-remove', () => {
 		expect(last.map(i => i.id).sort()).toEqual([2, 3, 5]);
 
 		unsub();
+	});
+});
+
+// - Binary RPC oversized header ----------------------------------------------
+
+describe('binary RPC oversized header', () => {
+	// The bail-out rejects through the RAW executor reject, not the instrumented
+	// wrapper stored on the pending entry, and the `pending.delete(id)` beside it
+	// clears the RPC map rather than `__devtools.pending`. So the devtools ring
+	// never learned the call had settled and kept the entry - with its args - for
+	// the life of the page. Every other settle on this path goes through the
+	// wrapper; this was the only one that did not.
+	it('clears the devtools pending entry when the header bails out', async () => {
+		expect(__devtools).not.toBeNull();
+		const before = __devtools.pending.size;
+		const call = __binaryRpc('upload/oversized-header');
+		// Args are serialized into the header verbatim, so this pushes it past 65535.
+		await expect(call(new ArrayBuffer(4), 'x'.repeat(70000))).rejects.toMatchObject({
+			code: 'PAYLOAD_TOO_LARGE'
+		});
+		expect(__devtools.pending.size).toBe(before);
+		expect([...__devtools.pending.values()].some((e) => e.path === 'upload/oversized-header')).toBe(false);
+		// Removal alone is not the point - the call must be RECORDED as settled, or
+		// a fix that merely deleted the pending entry would pass while the panel
+		// still lost the call. Pin the history record too.
+		const rec = __devtools.history.filter(Boolean).sort((a, b) => a.seq - b.seq).at(-1);
+		expect(rec.path).toBe('upload/oversized-header');
+		expect(rec.ok).toBe(false);
+		expect(rec.result.code).toBe('PAYLOAD_TOO_LARGE');
+	});
+
+	// Same input class as the server-side detached-id fix, and likelier here: hash
+	// a File in a worker via transfer, then try to upload it. Unguarded, building
+	// the view throws a bare TypeError with no `code` - breaking the binary-RPC
+	// error contract - and strands the pending entry with its 30s timer still
+	// armed, so the sweeper later writes a FABRICATED TIMEOUT for a call that was
+	// never sent.
+	it('rejects a detached (transferred) payload with a code, not a bare TypeError', async () => {
+		expect(__devtools).not.toBeNull();
+		const ab = new ArrayBuffer(8);
+		structuredClone(ab, { transfer: [ab] });
+		expect(ab.detached).toBe(true);
+		const call = __binaryRpc('upload/detached');
+		await expect(call(ab)).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		expect([...__devtools.pending.values()].some((e) => e.path === 'upload/detached')).toBe(false);
+	});
+
+	// `_connect()` can throw - it is not callable under SSR, which is why
+	// connection.js wraps its own call in try/catch. Registering with devtools
+	// BEFORE it stranded a pending entry, with its captured args, that nothing
+	// could ever sweep: no timer is armed until afterwards. This is an ordering
+	// guarantee, not error handling - the throw still propagates to the caller,
+	// it just must not leave a ghost entry behind.
+	it('does not strand a devtools pending entry when _connect() throws', async () => {
+		expect(__devtools).not.toBeNull();
+		const before = __devtools.pending.size;
+		// Persistent, not `...Once`: something ahead of `_sendRpc` consumes a
+		// one-shot implementation, which silently let the real call succeed and made
+		// this assertion meaningless. `connectFn` is rebuilt in beforeEach, so
+		// clobbering it here cannot leak into another test.
+		connectFn.mockImplementation(() => { throw new Error('not callable yet (SSR)'); });
+		const fn = __rpc('probe/connect-throws');
+		try {
+			const p = fn('x');
+			// NOT awaited: with the connection dead this promise never settles, which
+			// is the caller's problem, not this test's. Only attach a sink so the
+			// rejection (if any) is not unhandled.
+			if (p && typeof p.catch === 'function') p.catch(() => {});
+		} catch { /* a synchronous throw is expected; the ghost entry is the point */ }
+		await flush();
+		expect(__devtools.pending.size).toBe(before);
+		expect([...__devtools.pending.values()].some((e) => e.path === 'probe/connect-throws')).toBe(false);
 	});
 });
 

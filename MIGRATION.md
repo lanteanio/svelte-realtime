@@ -486,7 +486,7 @@ If you wrote `ctx.throttle('move:id', 50)` thinking it would gate handler execut
 
 ### Realtime rate-limit identity probes `id`, `user_id`, and `userId`
 
-**What changed.** Pre-fix, the default per-handler rate-limit identity key read only `ctx.user.id`. Apps with sessions whose shape uses Postgres-convention `user_id` or camelCase `userId` fell back to the per-connection guest bucket - defeating per-user rate limits exactly when they mattered most. `_getIdentityKey` now reads `ctx.user.id ?? ctx.user.user_id ?? ctx.user.userId`.
+**What changed.** Pre-fix, the default per-handler rate-limit identity key read only `ctx.user.id`. Apps with sessions whose shape uses Postgres-convention `user_id` or camelCase `userId` fell back to the per-connection guest bucket - defeating per-user rate limits exactly when they mattered most. `_getIdentityKey` now reads `id`, then `user_id`, then `userId`. Each alias is probed independently rather than chained with `??`, so an empty-string `id` (a common "no session" sentinel) falls through to a valid `user_id` instead of swallowing the probe. A value that is not a usable identity - an empty string, a boolean, a plain `{}`, or something whose only stringification is a generic `[object Promise]` tag - is treated as no identity at all and falls back to the per-connection guest bucket.
 
 **How to migrate.** No action required if your session shape exposes any of the three. If your session uses a different field, override:
 

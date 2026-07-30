@@ -6,7 +6,6 @@ import {
 	monotonicNow,
 	wallEpoch,
 	randomFloat,
-	randomU32,
 	randomUuid,
 	randomBytes,
 	setTimer,
@@ -61,12 +60,12 @@ import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, 
 import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
 import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP } from './server/publish-helpers.js';
-import { _gateAggregate } from './server/differential-privacy.js';
+import { _gateAggregate, _resetNoiseBlockCache } from './server/differential-privacy.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
 import { _recordRpcMetrics, installMetrics } from './server/metrics.js';
 import { _shouldShed, _resetAdmission, installAdmission } from './server/admission.js';
-import { _getIdentityKey, _getAuthenticatedId } from './server/identity.js';
+import { _getIdentityKey, _getAuthenticatedId, _isIdentityValue, _resetUnusableIdWarning } from './server/identity.js';
 import { _resetIdempotencyStore, _resetLock, installIdempotency } from './server/idempotency.js';
 import { installPush, pushHooks, _resetPushRegistry, _pushRegistry, _wsToPushUserId, _deregisterPushSession } from './server/push.js';
 import { installRateLimit, _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } from './server/rate-limit.js';
@@ -76,7 +75,7 @@ import { _getCtxHelpers, _buildCtx, installCtx } from './server/ctx.js';
 import { _ensureWrap, _maybeLateActivate, _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState, installReactive } from './server/reactive.js';
 import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, installCrdt } from './server/crdt.js';
 import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
-import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy } from './server/lazy.js';
+import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy, _setAfterLazyResolve } from './server/lazy.js';
 import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError, _ensureCronInterval, _getCronLeader, _cronTimerActive, _stopCronScheduler } from './server/cron-engine.js';
 export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError };
 import { configureAlarm, _resetAlarms } from './server/alarm.js';
@@ -110,12 +109,12 @@ export { _armSilentTopicWatch, _resetSilentTopicWarning, _activatePublishRateWar
 export { _crdtLoadError, _setCrdtRuntime, _resetCrdt };
 export { pushHooks, _resetPushRegistry };
 export { _resetIdempotencyStore, _resetLock };
-export { _getIdentityKey, _getAuthenticatedId };
+export { _getIdentityKey, _getAuthenticatedId, _resetUnusableIdWarning };
 export { _resetAdmission };
 export { WRAPPED_FOR_REPLAY, _resetReplayRouting };
 export { assert, fatal, setFatalSink, resetFatalSink, getAssertionCounters, _resetAssertCounters } from './shared/assert.js';
 export { colorForKey, hueForKey } from './shared/color.js';
-import { createShortCode, fnv1a32 } from './shared/short-code.js';
+import { createShortCode } from './shared/short-code.js';
 export { LiveError };
 export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge };
 
@@ -148,19 +147,25 @@ let _shortCodesSecretWarned = false;
  *     per instance) and a one-time dev warning fires.
  *   - `length`: code length in Base62 chars (fixed, zero-padded). Default 6
  *     (~56.8 billion codes); max 8.
- *   - `rounds`: Feistel rounds. Default 4.
+ *   - `rounds`: Feistel rounds. Default and MINIMUM 4 - each round mixes one
+ *     32-bit round key, so fewer rounds cap the effective key space at about
+ *     2^32 per round regardless of how strong `secret` is.
  * @returns {{ encode: (n: number) => string, decode: (code: string) => number | null, length: number, space: number }}
  */
 export function shortCodes(config) {
 	const cfg = config || {};
+	/** @type {Uint8Array} */
 	let seed;
 	if (typeof cfg.secret === 'string' && cfg.secret.length > 0) {
-		seed = fnv1a32(cfg.secret);
+		// 256 bits of key material: HMAC-SHA256 of the operator secret. Squashing
+		// the secret to a 32-bit seed (the old fnv1a32 derivation) lets one known
+		// (id, code) pair recover the key by offline brute force in seconds.
+		seed = createHmac('sha256', cfg.secret).update('svelte-realtime short-code').digest();
 	} else {
 		if (cfg.secret !== undefined && cfg.secret !== null) {
 			throw new Error('[svelte-realtime] shortCodes({ secret }): must be a non-empty string');
 		}
-		seed = randomU32();
+		seed = randomBytes(32); // determinism-allow: per-process CSPRNG key for the no-secret default (codes are documented to change on restart); never used when an operator secret is set
 		if (_IS_DEV && !_shortCodesSecretWarned) {
 			_shortCodesSecretWarned = true;
 			console.warn(
@@ -1466,6 +1471,43 @@ export function _resetMiddleware() {
  * Access predicates receive only `ctx` and are checked once at subscription time.
  * For per-event filtering, use `pipe.filter()`.
  */
+/** Dev-warn dedup: one-shot when `owner()` denies a session that the
+ * authenticated guard would have accepted through a different id alias. */
+let _ownerAliasMissWarned = false;
+
+/** Test hook: re-arm the one-shot warning below. */
+export function _resetOwnerAliasWarning() {
+	_ownerAliasMissWarned = false;
+}
+
+/**
+ * `owner()` reads ONE field; `guard({ authenticated: true })` probes `id`,
+ * `user_id` and `userId` in turn. A session shaped `{ user_id }` therefore passes
+ * the guard and is denied by `owner()`, which from the app side reads as a
+ * framework bug rather than a configuration one. Widening the probe would admit
+ * connections that are denied today - an authorization change, not a fix - so the
+ * behaviour stands and this makes it visible. Dev-only and one-shot.
+ *
+ * Every read is guarded: `ctx.user` is the app's session object and may be a
+ * Proxy or carry throwing getters, and a diagnostic must never become the fault.
+ * @param {any} ctx
+ */
+function _warnOwnerAliasMiss(ctx) {
+	if (_ownerAliasMissWarned) return;
+	try {
+		const u = ctx && ctx.user;
+		if (!u) return;
+		const alias = _isIdentityValue(u.user_id) ? 'user_id' : (_isIdentityValue(u.userId) ? 'userId' : null);
+		if (!alias) return;
+		_ownerAliasMissWarned = true;
+		console.warn(
+			`[svelte-realtime] live.access.owner() denied a connection whose identity lives in \`${alias}\`, not \`id\`.\n` +
+			'  owner() reads the ONE field you name (default `id`); guard({ authenticated: true }) probes id / user_id / userId.\n' +
+			`  Name the field explicitly - live.access.owner('${alias}') - or expose that value as \`id\`.`
+		);
+	} catch { /* a diagnostic must never throw into an access decision */ }
+}
+
 live.access = {
 	/**
 	 * Only allow subscription if `ctx.user[field]` is present (authenticated with that field).
@@ -1474,7 +1516,26 @@ live.access = {
 	 * @returns {(ctx: any) => boolean}
 	 */
 	owner(field = 'id') {
-		return (ctx) => ctx.user?.[field] != null;
+		// `_isIdentityValue`, not `!= null`: the field has to identify somebody. An
+		// empty string is the standard no-session sentinel (`{ id: session?.userId
+		// ?? '' }`) and is `!= null`, so a bare presence check let an anonymous
+		// connection through the owner gate - the same hole the authenticated-guard
+		// classification closed. `0` is still a valid id; object ids still work.
+		//
+		// Same VALUE rule as `guard({ authenticated: true })`, but deliberately NOT
+		// the same FIELD probe: the guard tries `id`/`user_id`/`userId` in turn,
+		// while this reads the one field you named. A `{ user_id }`-shaped session
+		// therefore passes the guard and fails `owner()`. Widening the probe here
+		// would admit connections that are denied today, so it is not something to
+		// change silently - but the mismatch must not be silent either, hence the
+		// one-shot dev warning below. It fires only on the DEFAULT field, only in
+		// dev, and only when another alias would have identified the connection.
+		const probesDefaultField = field === 'id';
+		return (ctx) => {
+			const allowed = _isIdentityValue(ctx.user?.[field]);
+			if (!allowed && probesDefaultField && _IS_DEV) _warnOwnerAliasMiss(ctx);
+			return allowed;
+		};
 	},
 
 	/**
@@ -1485,9 +1546,28 @@ live.access = {
 	role(map) {
 		return (ctx) => {
 			const role = ctx.user?.role;
-			if (!role || !(role in map)) return false;
+			// Must be a non-empty STRING. A non-string role would index the map by
+			// its coerced form, which is not what the caller declared.
+			if (typeof role !== 'string' || role.length === 0) return false;
+			// `hasOwnProperty`, NOT `in`: `in` walks the prototype chain, so a role
+			// of 'constructor' or 'toString' matched an app map that never declared
+			// it, and the looked-up "rule" was then an Object.prototype member. The
+			// gate site is a TRUTHY test, so `map['constructor']` -> `Object(ctx)`
+			// (a truthy object) and `map['toString']` -> '[object Undefined]' (a
+			// truthy string) both ADMITTED the connection. Any app that maps a
+			// client-influenced role claim onto ctx.user.role was one such string
+			// away from passing a role gate it never declared.
+			if (!Object.prototype.hasOwnProperty.call(map, role)) return false;
 			const rule = map[role];
-			return rule === true ? true : rule(ctx);
+			// A non-function, non-`true` value denies rather than being CALLED. The
+			// documented `{ viewer: false }` shape used to reach `rule(ctx)` and
+			// throw a TypeError, which the dispatcher turned into INTERNAL_ERROR -
+			// fail-closed, but it reported a server fault for an ordinary denial and
+			// logged every such subscribe as a 5xx.
+			if (typeof rule !== 'function') return rule === true;
+			// Returned as-is, not coerced: a predicate may be async, and the gate
+			// awaits it. `!!` here would turn a pending Promise<false> into an admit.
+			return rule(ctx);
 		};
 	},
 
@@ -1497,7 +1577,8 @@ live.access = {
 	 * @returns {(ctx: any) => boolean}
 	 */
 	team() {
-		return (ctx) => ctx.user?.teamId != null;
+		// Same rule as `owner()` - see the note there on why presence is not enough.
+		return (ctx) => _isIdentityValue(ctx.user?.teamId);
 	},
 
 	/**
@@ -1514,7 +1595,12 @@ live.access = {
 		const from = (opts && opts.from) || ((_ctx, ...args) => args[0]);
 		return (ctx, ...args) => {
 			const expected = ctx && ctx.user && ctx.user[orgField];
-			if (expected == null) return false;
+			// Must identify an org, not merely be present: `''` is the no-session
+			// sentinel and `'' == null` is false, so the old check accepted it and a
+			// caller passing `''` as the compared value matched it exactly. The raw
+			// `expected` is what gets compared below, so a numeric org id still needs
+			// a numeric argument - this validates, it does not coerce.
+			if (!_isIdentityValue(expected)) return false;
 			const actual = from(ctx, ...args);
 			return actual != null && actual === expected;
 		};
@@ -1536,7 +1622,8 @@ live.access = {
 		const from = (opts && opts.from) || ((_ctx, ...args) => args[0]);
 		return (ctx, ...args) => {
 			const expected = ctx && ctx.user && ctx.user[userField];
-			if (expected == null) return false;
+			// Same rule as `org()` above - validates, does not coerce.
+			if (!_isIdentityValue(expected)) return false;
 			const actual = from(ctx, ...args);
 			return actual != null && actual === expected;
 		};
@@ -1571,6 +1658,13 @@ live.access = {
 	 */
 	all(...predicates) {
 		return async (ctx, ...args) => {
+			// Vacuous truth must not admit. `all()` over an empty list returned true,
+			// so a rule list that resolved empty - config-driven, env-gated, or a
+			// `.filter()` that matched nothing - silently allowed EVERY connection,
+			// anonymous included. An access combinator with nothing to check has not
+			// authorized anything, so it denies. (`any()` is already correct: vacuous
+			// false denies.) An app that means "no restriction" omits `access`.
+			if (predicates.length === 0) return false;
 			for (const p of predicates) {
 				if (!(await p(ctx, ...args))) return false;
 			}
@@ -2461,35 +2555,77 @@ function _registerWindowedAggregate(path, fn) {
  * @param {any} entry
  * @param {any} win
  */
+/**
+ * Report a window publish that threw. Deliberately loud and repeated (once per
+ * window, not deduped): the usual cause is a misconfiguration - a `perturb` /
+ * `hybrid` aggregate with no `realtime({ privacySecret })` - and a silenced
+ * one-shot warning is how that ships to production unnoticed.
+ *
+ * @param {any} entry
+ * @param {unknown} err
+ */
+function _warnAggregateWindowFailure(entry, err) {
+	console.error(
+		"[svelte-realtime] live.aggregate '" + ((entry && (entry.baseTopic || entry.topic)) || 'unknown') + "': window publish failed; " +
+		'the window keeps tumbling and will retry on the next boundary.\n  ' +
+		((err && /** @type {any} */ (err).message) || String(err))
+	);
+}
+
 function _scheduleNextBoundary(entry, win) {
+	// Forward progress is not optional. The callback advances `nextBoundary`
+	// inside its try block, so anything that throws first (an app `init()`, say)
+	// leaves it at the boundary that just fired - and the `finally` re-arm would
+	// then schedule at delay 0, spinning a hot loop that throws every macrotask.
+	// Advance a stale boundary here instead, so a repeatedly-failing window
+	// degrades to one failure per period rather than a pinned core.
+	const nowMs = runtimeNow();
+	if (!(win.nextBoundary > nowMs)) {
+		win.nextBoundary = win.spec.period
+			? _nextBoundaryForPeriod(nowMs, win.spec.period, win.spec.tz || 'UTC')
+			: _nextBoundaryForDuration(nowMs, win.spec.durationMs, win.spec.anchor || 0);
+	}
 	const delay = Math.max(0, win.nextBoundary - runtimeNow());
 	win.boundaryTimer = setTimer(() => {
 		win.boundaryTimer = null;
-		// Final publish of the closing window so subscribers see the
-		// pre-reset state before the new window starts. If a debounce is
-		// pending, flush it inline rather than letting the new state
-		// race the published value.
-		if (win.timer) {
-			clearTimer(win.timer);
-			win.timer = null;
+		try {
+			// Final publish of the closing window so subscribers see the
+			// pre-reset state before the new window starts. If a debounce is
+			// pending, flush it inline rather than letting the new state
+			// race the published value.
+			if (win.timer) {
+				clearTimer(win.timer);
+				win.timer = null;
+			}
+			// A publish that throws (the privacy gate refusing to emit without an
+			// operator secret, a redactor blowing up) must not take the schedule
+			// with it - report and carry on.
+			try {
+				_publishWindow(entry, win);
+			} catch (err) {
+				_warnAggregateWindowFailure(entry, err);
+			}
+			// Reset state to init() for the new window.
+			const fresh = {};
+			for (const [field, r] of entry._reducerEntries) {
+				if (r.init) fresh[field] = r.init();
+			}
+			win.state = fresh;
+			// Compute the next boundary off the fired-at time, not the current
+			// clock, so a slow/blocked event loop does not drift the schedule.
+			const now = runtimeNow();
+			win.nextBoundary = win.spec.period
+				? _nextBoundaryForPeriod(now, win.spec.period, win.spec.tz || 'UTC')
+				: _nextBoundaryForDuration(now, win.spec.durationMs, win.spec.anchor || 0);
+			// A new window is a new k-anonymity cohort and a fresh noise seed.
+			if (win.cohort) win.cohort = new Set();
+			if (win.privacy) win._windowStart = win.nextBoundary;
+		} finally {
+			// Always re-arm: an uncaught throw above would otherwise leave the
+			// window permanently un-scheduled, dead for the process lifetime even
+			// after the operator fixes the configuration.
+			_scheduleNextBoundary(entry, win);
 		}
-		_publishWindow(entry, win);
-		// Reset state to init() for the new window.
-		const fresh = {};
-		for (const [field, r] of entry._reducerEntries) {
-			if (r.init) fresh[field] = r.init();
-		}
-		win.state = fresh;
-		// Compute the next boundary off the fired-at time, not the current
-		// clock, so a slow/blocked event loop does not drift the schedule.
-		const now = runtimeNow();
-		win.nextBoundary = win.spec.period
-			? _nextBoundaryForPeriod(now, win.spec.period, win.spec.tz || 'UTC')
-			: _nextBoundaryForDuration(now, win.spec.durationMs, win.spec.anchor || 0);
-		// A new window is a new k-anonymity cohort and a fresh noise seed.
-		if (win.cohort) win.cohort = new Set();
-		if (win.privacy) win._windowStart = win.nextBoundary;
-		_scheduleNextBoundary(entry, win);
 	}, delay);
 	// Don't keep the event loop alive solely for cron-like tumbling --
 	// matches the cron interval's implicit ref behavior; tests / clean
@@ -2510,27 +2646,35 @@ function _scheduleNextBoundary(entry, win) {
 function _scheduleNextSlide(entry, win) {
 	win.slideTimer = setTimer(() => {
 		win.slideTimer = null;
-		// Advance the ring head and clear the new current bucket.
-		win.bucketIndex = (win.bucketIndex + 1) % win.bucketCount;
-		const fresh = {};
-		for (const [field, r] of entry._reducerEntries) {
-			if (r.init) fresh[field] = r.init();
+		try {
+			// Advance the ring head and clear the new current bucket.
+			win.bucketIndex = (win.bucketIndex + 1) % win.bucketCount;
+			const fresh = {};
+			for (const [field, r] of entry._reducerEntries) {
+				if (r.init) fresh[field] = r.init();
+			}
+			win.buckets[win.bucketIndex] = fresh;
+			// The evicted bucket's contributors leave the k-anonymity cohort too.
+			if (win.bucketCohorts) win.bucketCohorts[win.bucketIndex] = new Set();
+			// Refresh the noise seed each slide (wall-clock epoch, replica-aligned) so
+			// the DP offset does not stay constant for the whole process lifetime.
+			if (win.privacy) win._windowStart = Math.floor(runtimeNow() / win.spec.slideMs);
+			// Publish the post-slide combined state so a subscriber sees
+			// values dropping out of the window even when no fresh events
+			// are arriving.
+			if (win.timer) {
+				clearTimer(win.timer);
+				win.timer = null;
+			}
+			try {
+				_publishWindow(entry, win);
+			} catch (err) {
+				_warnAggregateWindowFailure(entry, err);
+			}
+		} finally {
+			// Always re-arm - see _scheduleNextBoundary.
+			_scheduleNextSlide(entry, win);
 		}
-		win.buckets[win.bucketIndex] = fresh;
-		// The evicted bucket's contributors leave the k-anonymity cohort too.
-		if (win.bucketCohorts) win.bucketCohorts[win.bucketIndex] = new Set();
-		// Refresh the noise seed each slide (wall-clock epoch, replica-aligned) so
-		// the DP offset does not stay constant for the whole process lifetime.
-		if (win.privacy) win._windowStart = Math.floor(runtimeNow() / win.spec.slideMs);
-		// Publish the post-slide combined state so a subscriber sees
-		// values dropping out of the window even when no fresh events
-		// are arriving.
-		if (win.timer) {
-			clearTimer(win.timer);
-			win.timer = null;
-		}
-		_publishWindow(entry, win);
-		_scheduleNextSlide(entry, win);
 	}, win.spec.slideMs);
 	if (typeof win.slideTimer.unref === 'function') win.slideTimer.unref();
 }
@@ -2590,6 +2734,10 @@ export function _resetAggregates() {
 	}
 	aggregateRegistry.clear();
 	_aggregateByTopic.clear();
+	// Drop the keyed-noise block memo with the aggregates that produced it: it
+	// retains derived key material whose lifetime should not outlive them (HMR
+	// reloads, test teardown).
+	_resetNoiseBlockCache();
 	for (const [src, set] of _aggregateBySource) {
 		// Drop only aggregate entries; effects/derived may share the source.
 		if (set.size === 0) {
@@ -2630,8 +2778,8 @@ live.gate = function gate(predicate, fn) {
 
 /**
  * Wrap a live function with an authorization predicate. Throws when the
- * predicate returns false: UNAUTHENTICATED if `ctx.user` is null,
- * FORBIDDEN otherwise. Predicate may be sync or async.
+ * predicate returns false: UNAUTHENTICATED when the connection carries no
+ * authenticated identity, FORBIDDEN otherwise. Predicate may be sync or async.
  *
  * For STREAMS, prefer the `access` option on `live.stream({ access: ... })`
  * so the gate fires before subscribe-side bookkeeping. Use `live.scoped`
@@ -2661,7 +2809,10 @@ live.scoped = function scoped(predicate, fn) {
 	const wrapper = async function scopedWrapper(ctx, ...args) {
 		const ok = await predicate(ctx, ...args);
 		if (!ok) {
-			const code = ctx && ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+			// Authenticated-identity semantics, not a ctx.user null check: the
+			// adapter always upgrades with a non-null userData, so `ctx.user`
+			// alone would classify every anonymous connection as FORBIDDEN.
+			const code = ctx && _getAuthenticatedId(ctx) !== null ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 			throw new LiveError(code, code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied');
 		}
 		return fn(ctx, ...args);
@@ -3025,6 +3176,47 @@ export function _activateDerived(platform) {
 	// branch-predicted to false); the install cost is one closure scope
 	// per platform, paid once at init.
 	_ensureWrap(platform);
+	// Eagerly-registered aggregates are checked now; lazily-registered ones (what
+	// the Vite codegen emits) are checked again when the lazy queue drains.
+	_assertPrivacySecretConfigured();
+}
+
+// Re-run the config assertion once the lazy queue has drained, so a
+// codegen-registered aggregate cannot slip past the init-time check.
+_setAfterLazyResolve(_assertPrivacySecretConfigured);
+
+/**
+ * Fail at INIT, not at the first noise draw. A `perturb` aggregate would throw
+ * on its first publish, but a `hybrid` one suppresses below k and so only
+ * throws at the arbitrary later moment its cohort first reaches k - which is
+ * exactly the misconfiguration that reaches production unnoticed. By init both
+ * the registrations and the `realtime({ privacySecret })` config are known, so
+ * the check can be complete and up front.
+ */
+function _assertPrivacySecretConfigured() {
+	if (typeof state.privacySecret === 'string' && state.privacySecret.length > 0) return;
+	const offenders = [];
+	for (const [path, entry] of aggregateRegistry) {
+		if (!entry) continue;
+		// Windowed entries keep per-window state in a `windowStates` MAP and carry
+		// the shared config on the entry; single-state entries carry it directly.
+		// Read both, and read the map rather than a `windows` array that has never
+		// existed on either shape.
+		const cfgs = [entry.privacy];
+		if (entry.windowStates && typeof entry.windowStates.values === 'function') {
+			for (const win of entry.windowStates.values()) if (win) cfgs.push(win.privacy);
+		}
+		if (cfgs.some((/** @type {any} */ c) => c && (c.strategy === 'perturb' || c.strategy === 'hybrid'))) {
+			offenders.push(entry.baseTopic || entry.topic || path);
+		}
+	}
+	if (offenders.length === 0) return;
+	throw new Error(
+		'[svelte-realtime] live.aggregate privacy: differential-privacy noise requires an operator secret, but ' +
+		offenders.length + " aggregate(s) declare a noise strategy without one: '" + offenders.join("', '") + "'.\n" +
+		'  Set realtime({ privacySecret: process.env.PRIVACY_SECRET }) - the same value on every replica, so they ' +
+		"draw identical noise. Use strategy 'suppress' for k-anonymity only."
+	);
 }
 
 installLazy({ registerCron: __registerCron, register: __register, registerDerived: __registerDerived, registerEffect: __registerEffect, registerWebhookOut: __registerWebhookOut, registerAggregate: __registerAggregate });
@@ -3682,11 +3874,24 @@ export function publish(topic, event, data, options) {
  *   leader?: (() => boolean) | null,
  *   upgrade?: (...args: any[]) => any,
  *   onError?: (path: string, error: unknown) => void,
+ *   privacySecret?: string,
  * }} [config]
  */
 export function realtime(config) {
 	const cfg = config || {};
-	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe } = cfg;
+	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret } = cfg;
+
+	// Differential-privacy key (opt-in, required for DP noise): the operator
+	// secret that keys the per-window noise seed (HMAC-SHA256 over
+	// tenant|topic|windowStart). Share it across every replica so they draw
+	// identical noise. Without it a `perturb` / `hybrid` privacy aggregate
+	// refuses to publish rather than emit attacker-removable noise.
+	if (privacySecret !== undefined) {
+		if (typeof privacySecret !== 'string' || privacySecret.length === 0) {
+			throw new Error('[svelte-realtime] realtime({ privacySecret }): must be a non-empty string');
+		}
+		state.privacySecret = privacySecret;
+	}
 
 	// Enumeration-safe unknown-path handling (opt-in): answer a wire RPC to an
 	// unregistered path exactly as a guard denial would answer the same caller,

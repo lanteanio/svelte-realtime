@@ -59,7 +59,7 @@ export function replayLiveSim(reproducer: LiveSimResult): Promise<LiveSimResult>
 export interface LiveSimSwarmRun {
 	seed: string;
 	ok: boolean;
-	buggified: boolean;
+	faulted: boolean;
 	fingerprint: string;
 	violations: number;
 	fatals: number;
@@ -74,8 +74,8 @@ export interface LiveSimSwarmSummary {
 	failed: number;
 	firstFailingSeed: string | null;
 	failingSeeds: string[];
-	buggify: 'off' | 'on' | 'random';
-	buggified: number;
+	faultMode: 'off' | 'on' | 'random';
+	faulted: number;
 	determinismChecks: number;
 	determinismFailures: number;
 	determinismFailingSeeds: string[];
@@ -88,10 +88,10 @@ export interface LiveSimSwarmConfig {
 	count?: number;
 	startSeed?: number;
 	base?: LiveSimConfig;
-	buggify?: 'off' | 'on' | 'random';
-	/** Chaos profile applied when a run is buggified (default { dropRate: 0.2 }). */
+	faultMode?: 'off' | 'on' | 'random';
+	/** Chaos profile applied when a run is faulted (default { dropRate: 0.2 }). */
 	faultProfile?: { dropRate?: number };
-	buggifyProbability?: number;
+	faultProbability?: number;
 	checkRatio?: number;
 	gitCommit?: string;
 	onResult?: (run: LiveSimSwarmRun, index: number) => void;
@@ -128,7 +128,7 @@ export interface SmoothSimConfig {
 	radius?: number;
 	/** Widen the shot lag past the reach and teleport a target mid-run, exercising
 	 *  the reach clamp / window fallback / discontinuity guard. */
-	buggify?: boolean;
+	faultMode?: boolean;
 	/** Fold an extra value into each hit record (a hook to plant a non-determinism). */
 	onHitTap?: (target: any, info: any) => any;
 	gitCommit?: string;
@@ -144,7 +144,7 @@ export interface SmoothSimResult {
 		tickMs: number;
 		maxRewindMs: number;
 		radius: number;
-		buggify: boolean;
+		faultMode: boolean;
 	};
 	invariantViolations: Array<{ category: string; context: any }>;
 	metrics: {
@@ -187,7 +187,7 @@ export function replaySmoothSim(reproducer: SmoothSimResult): Promise<SmoothSimR
 export interface SmoothSimSwarmRun {
 	seed: string;
 	ok: boolean;
-	buggified: boolean;
+	faulted: boolean;
 	fingerprint: string;
 	violations: number;
 	fatals: number;
@@ -203,8 +203,8 @@ export interface SmoothSimSwarmSummary {
 	failed: number;
 	firstFailingSeed: string | null;
 	failingSeeds: string[];
-	buggify: 'off' | 'on' | 'random';
-	buggified: number;
+	faultMode: 'off' | 'on' | 'random';
+	faulted: number;
 	determinismChecks: number;
 	determinismFailures: number;
 	determinismFailingSeeds: string[];
@@ -217,8 +217,8 @@ export interface SmoothSimSwarmConfig {
 	count?: number;
 	startSeed?: number;
 	base?: SmoothSimConfig;
-	buggify?: 'off' | 'on' | 'random';
-	buggifyProbability?: number;
+	faultMode?: 'off' | 'on' | 'random';
+	faultProbability?: number;
 	checkRatio?: number;
 	gitCommit?: string;
 	onResult?: (run: SmoothSimSwarmRun, index: number) => void;
@@ -246,7 +246,7 @@ export interface SimGoldenEntry {
 		fatals: number;
 		uncaught: number;
 		violationCategories: string[];
-		buggified: boolean;
+		faulted: boolean;
 	};
 }
 

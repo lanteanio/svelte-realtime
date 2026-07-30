@@ -203,7 +203,7 @@ The `ctx` object passed to every server function contains:
 | `ctx.requestId` | Correlation id from `platform.requestId` (per WS connection or per HTTP request); honors `X-Request-ID` |
 | `ctx.throttle` | `(topic, event, data, ms)` - publish at most once per `ms` ms |
 | `ctx.debounce` | `(topic, event, data, ms)` - publish after `ms` ms of silence |
-| `ctx.signal` | `(userId, event, data)` - point-to-point message |
+| `ctx.signal` | `(userId, event, data)` - point-to-point message (an upload handler's `ctx.signal` is an `AbortSignal` instead - see [Streaming uploads](#streaming-uploads)) |
 | `ctx.batch` | `(messages)` - publish multiple messages in one call via `platform.batch()` |
 
 Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `remoteAddress`) in addition to whatever your `upgrade()` function returned. These are stripped automatically by the adapter before broadcasting to other clients.
@@ -1934,13 +1934,32 @@ export const myOrders = live.stream(
 
 | Helper | Description |
 |---|---|
-| `live.access.owner(field?)` | Subscription allowed if `ctx.user[field]` is present (default: `'id'`) |
-| `live.access.team()` | Subscription allowed if `ctx.user.teamId` is present |
+| `live.access.owner(field?)` | Subscription allowed if `ctx.user[field]` identifies somebody (default: `'id'`) |
+| `live.access.team()` | Subscription allowed if `ctx.user.teamId` identifies a team |
 | `live.access.role(map)` | Role-based: `{ admin: true, viewer: (ctx) => ... }` |
 | `live.access.org(opts?)` | Subscription allowed if `args[0]` matches `ctx.user.organization_id`. Configurable via `{ from, orgField }` |
 | `live.access.user(opts?)` | Subscription allowed if `args[0]` matches `ctx.user.user_id`. Configurable via `{ from, userField }` |
 | `live.access.any(...predicates)` | OR: any predicate returning true allows the subscription |
-| `live.access.all(...predicates)` | AND: all predicates must return true |
+| `live.access.all(...predicates)` | AND: all predicates must return true (with no predicates it denies) |
+
+"Identifies somebody" is a stricter test than "is present", and deliberately so: an empty
+string is the usual no-session sentinel (`{ id: session?.userId ?? '' }`) yet it is not
+`null`, so a presence check would admit an anonymous connection. A boolean or a plain
+object is rejected for the same reason. `0` is a valid id, and an object id (Mongo
+`ObjectId`, a `Buffer` uuid, a Prisma `Decimal`) is accepted by `owner()` and `team()`,
+which only test the field.
+
+`org()` and `user()` apply that same test to the expected value and then compare the
+**raw** value with `===`, so a numeric org id requires a numeric argument. Note the
+consequence for object ids: `===` is reference equality, so an `ObjectId` or `Buffer` in
+`ctx.user.organization_id` can never equal a value that arrived over the wire. For those
+shapes pass a `from` that normalizes both sides, e.g.
+`live.access.org({ from: (ctx, id) => String(id) })` against a string column, or compare
+in your own predicate.
+
+`role(map)` looks up **own** keys only, so a role of `'constructor'` or `'toString'` does
+not match a map that never declared it, and a mapped value that is neither `true` nor a
+function denies rather than throwing.
 
 `live.access.org` and `live.access.user` follow the SQL `[table]_id` convention. Override the field for non-default user shapes:
 
@@ -1958,7 +1977,14 @@ access: live.access.org({ orgField: 'organizationId' })
 
 ### Authentication shorthand on guards
 
-`guard()` accepts an options object alongside the existing variadic-function shape. `{ authenticated: true }` rejects calls with no `ctx.user` as `UNAUTHENTICATED`:
+`guard()` accepts an options object alongside the existing variadic-function shape. `{ authenticated: true }` rejects any connection without an **authenticated identity** as `UNAUTHENTICATED` - that means `ctx.user` carries a non-empty `id` (or the `user_id` / `userId` aliases).
+
+> **A non-null `ctx.user` is not enough.** `svelte-adapter-uws` always upgrades a socket with a userData object, so an anonymous connection arrives as `ctx.user = { remoteAddress: '...' }`. The gate keys off the id, not off `ctx.user` being present. If your `upgrade()` hook returns a session shape with no id field (for example Auth.js `session.user` = `{ name, email, image }`, or an OIDC payload keyed on `sub`), map it to an `id` or those calls will be rejected:
+>
+> ```js
+> // svelte.config.js - upgrade hook
+> return session ? { id: session.user.sub, ...session.user } : null;
+> ```
 
 ```js
 // src/live/_guard.js
@@ -3078,7 +3104,7 @@ Output topics: `events:view:topk:last10min`, `events:view:topk:today`, `events:v
 Pass a `privacy` option to turn an aggregate into a privacy-preserving one without changing its reducers. Two protections, chosen by `strategy`:
 
 - **k-anonymity** (`'suppress'` / `'hybrid'`) - the aggregate is not published until at least `k` DISTINCT contributors have fed the window, counted via `contributor(data)`. Below the threshold the last published value is held; it is never replaced with `null` or a marker, because "the cohort just dropped below k" is itself the signal k-anonymity exists to hide. A fresh subscribe also sees the held value, never the live below-k aggregate.
-- **differential privacy** (`'perturb'` / `'hybrid'`) - zero-mean Laplace (or Gaussian) noise is added to each numeric field. The noise is seeded by `(topic, window)`, so every cluster replica - each independently computing the full aggregate over the source firehose - produces identical noise (a per-node offset would let a client reconnecting to another node difference the values and recover the truth).
+- **differential privacy** (`'perturb'` / `'hybrid'`) - zero-mean Laplace (or Gaussian) noise is added to each numeric field. The noise is seeded by `HMAC-SHA256(privacySecret, tenant|topic|window)` - keyed by the operator secret set via `realtime({ privacySecret })`, so every cluster replica sharing the secret (each independently computing the full aggregate over the source firehose) produces identical noise, while a subscriber who does not have the secret cannot recompute the draws and subtract them (a per-node random offset would let a client reconnecting to another node difference the values and recover the truth). **A noise strategy requires `realtime({ privacySecret })`** - without it the aggregate refuses to publish (it throws at publish time) rather than emit attacker-removable noise; k-anonymity-only (`'suppress'`) aggregates need no secret.
 
 ```js
 export const salaryByDept = live.aggregate('salary:reported', {
@@ -3273,7 +3299,7 @@ export const avatar = live.upload(async (ctx, name, mime) => {
 The handler signature is `(ctx, ...args)` like a regular RPC. `ctx` carries the usual fields plus three streaming extras:
 
 - `ctx.stream` - `AsyncIterable<Uint8Array>` yielding chunks in arrival order.
-- `ctx.signal` - `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, or `maxBufferedChunks` overflow. Wire any cleanup you need to it.
+- `ctx.signal` - `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, or `maxBufferedChunks` overflow. Wire any cleanup you need to it. **Note this replaces the point-to-point `ctx.signal(userId, event, data)` method** for the duration of an upload handler - the upload runtime assigns the `AbortSignal` onto the context, so the method is not reachable here. To send a point-to-point signal from an upload handler, publish to the topic directly with `ctx.publish('__signal:' + userId, event, data)`, or do it from a regular `live()` handler.
 - `ctx.upload` - `{ id }` for log correlation.
 
 Guards and global middleware run once before the first chunk is consumed. An unauthorised client never gets to send bytes.
@@ -3549,7 +3575,9 @@ const id   = codes.decode('7Qm2xK'); // "7Qm2xK"  -> 42        (or null if malfo
 - **Deterministic.** The same `secret` yields the same codes on every instance and across restarts, so a code minted anywhere resolves everywhere. Set a stable `secret` (an env var); without one a per-process random key is used and a dev warning fires - fine for a single dev instance, but codes then change on restart and differ per instance.
 - **Not a substitute for a guard.** A code is a hard-to-guess *handle*, not proof of authorization: `decode` is total over the code space, so validate the decoded id against your store and keep your room `guard` - exactly as you would treat any id a client sends. Pair the two and a private room is hidden from enumeration *and* unaddressable by a guessed code.
 
-`length` (default 6, `62^6` ~ 56.8 billion codes; max 8) and `rounds` (default 4) are configurable. The codec is pure and deterministic (safe under the DST simulator).
+`length` (default 6, `62^6` ~ 56.8 billion codes; max 8) and `rounds` (minimum and default 4) are configurable. Each Feistel round mixes one 32-bit round key, so a low round count caps the effective key space no matter how strong your `secret` is - values below 4 are rejected for that reason. The codec is pure and deterministic (safe under the DST simulator).
+
+> **Upgrading from 0.6.0-next.89 or earlier: existing codes change.** The key is now derived by HMAC-SHA256 over your `secret` instead of being squashed into a 32-bit seed (which one known `(id, code)` pair could recover offline in about 30 seconds). The same `secret` therefore produces a **different code for the same id**, and because `decode` is total over the code space an old link does not fail cleanly - it resolves to a *different* id. If you have codes in circulation (share links, printed invites), validate the decoded id against your store before trusting it - the guidance above, which now carries real weight - or mint fresh codes and retire the old links.
 
 ### Room ownership (`owner: true`)
 
@@ -4159,7 +4187,40 @@ To reach an internal endpoint on purpose, set `urlMode: 'allowlist'` + `allow: [
 
 #### Delivery
 
-Delivery runs over `node:http`/`node:https` (no extra dependency). Each POST is retried with **jittered** exponential backoff (default 3 attempts, 100ms - 5s) on a 5xx / 429 / network error / timeout; a 4xx (other than 429) is a permanent client error and is not retried. When `secret` is set the body is signed as `x-webhook-signature: sha256=<hex>`; during a rotation (`previousSecret` set) the header carries two comma-separated entries, current key first, so a receiver should split on commas and accept when **any** entry matches - that convention makes it rotation-proof with either a single or a dual header. The per-attempt `timeoutMs` covers DNS, connect, TTFB and body; user callbacks are bounded by `callbackTimeoutMs`. Exhausted retries (and blocked URLs / bad payloads / blocked redirects) call `onFailure(err, event, data, attempts)` - the error never contains the `secret`, the signature, or URL credentials.
+Delivery runs over `node:http`/`node:https` (no extra dependency). Each POST is retried with **jittered** exponential backoff (default 3 attempts, 100ms - 5s) on a 5xx / 429 / network error / timeout; a 4xx (other than 429) is a permanent client error and is not retried. When `secret` is set the delivery is signed Stripe/GitHub style: the HMAC binds `<unix-seconds>.<body>`, sent as `x-webhook-signature: sha256=<hex>` with the timestamp alongside as `x-webhook-timestamp`, so a captured (body, signature) pair stops verifying once it is stale instead of replaying forever. During a rotation (`previousSecret` set) the signature header carries two comma-separated entries, current key first, so a receiver should split on commas and accept when **any** entry matches - that convention makes it rotation-proof with either a single or a dual header. The per-attempt `timeoutMs` covers DNS, connect, TTFB and body; user callbacks are bounded by `callbackTimeoutMs`. Exhausted retries (and blocked URLs / bad payloads / blocked redirects) call `onFailure(err, event, data, attempts)` - the error never contains the `secret`, the signature, or URL credentials (failure messages carry only the URL's origin).
+
+Receiver verification contract (implement exactly this on your endpoint):
+
+```js
+import { createHmac, timingSafeEqual } from 'node:crypto';
+
+const TOLERANCE_S = 300; // 5 minutes of clock skew / replay window
+
+function verifyWebhook(headers, rawBody, secrets) {
+    const entries = String(headers['x-webhook-signature'] || '').split(',');
+    const matches = (material) =>
+        secrets.some((s) => {
+            const expected = 'sha256=' + createHmac('sha256', s).update(material).digest('hex');
+            return entries.some((e) => {
+                const a = Buffer.from(e), b = Buffer.from(expected);
+                return a.length === b.length && timingSafeEqual(a, b);
+            });
+        });
+    const ts = headers['x-webhook-timestamp'];
+    if (ts !== undefined) {
+        // Current scheme: reject stale deliveries BEFORE checking the HMAC.
+        if (!/^\d+$/.test(ts)) return false;
+        if (Math.abs(Date.now() / 1000 - Number(ts)) > TOLERANCE_S) return false;
+        return matches(`${ts}.${rawBody}`);
+    }
+    // Transition only: legacy body-only signatures (no timestamp header) from
+    // a sender that has not upgraded yet. These carry no freshness guarantee -
+    // drop this branch once every sender emits x-webhook-timestamp.
+    return matches(rawBody);
+}
+```
+
+The freshness check is what closes capture-replay: without it any observed (body, signature) pair re-verifies indefinitely. Keep `TOLERANCE_S` small (5 minutes is the sender's contract) and prefer `https` webhook URLs so the signed material is not observable on the wire in the first place. Note also that the signature, timestamp, and `idempotency-key` headers are **not** forwarded across a redirect to a different origin - a cross-origin redirect target receives the body and `content-type` only, so a validly-signed payload can never be smuggled to a third host through an open redirect (set `maxRedirects: 0` to refuse redirects entirely).
 
 #### Options
 
@@ -4167,7 +4228,7 @@ Delivery runs over `node:http`/`node:https` (no extra dependency). Each POST is 
 |---|---|---|
 | `url` | (required) | Destination URL, or `(event, data) => string \| Promise<string>` for a per-event URL. SSRF-checked. |
 | `transform` | `{ event, data }` | Build the POST body. Return `null` to skip the event. |
-| `secret` | - | HMAC-SHA256 signing secret; adds `x-webhook-signature` and keys the default idempotency key. |
+| `secret` | - | HMAC-SHA256 signing secret; signs `<timestamp>.<body>` (`x-webhook-signature` + `x-webhook-timestamp`) and keys the default idempotency key. |
 | `previousSecret` | - | The retiring secret during a key rotation. While set, the signature header carries two comma-separated entries (current key first), so receivers holding either key keep accepting while the fleet converges; drop it once every receiver has the new key. Requires `secret`. |
 | `idempotencyKey` | keyed/content hash | Override the `idempotency-key` header value. |
 | `retry` | `{ attempts: 3, initialDelayMs: 100, maxDelayMs: 5000, backoffMultiplier: 2 }` | Retry policy (jittered). |
@@ -4845,7 +4906,7 @@ The Streams tab lists every store currently mounted on the page. For each one it
 
 **Click any stream row to expand a per-stream payload preview** - the most recent 20 envelopes, time + event name + JSON data. Toggle Pretty / Raw via the header buttons (Raw shows full JSON up to ~500 chars; Pretty truncates at ~200 with overflow indicator). Pause stops capturing new events without affecting the live `last:` timestamp; Clear events drops every stream's ring buffer in one click. Pretty/Raw + Pause states persist across reloads via `localStorage`.
 
-**Privacy.** Captured payloads are walked once at write time with key-based redaction. The default redact list covers `password`, `token`, `apiKey` / `api_key`, `secret`, `authorization`, `cookie`, `sessionid` / `session_id`, `csrf` / `csrftoken`. Override or extend at runtime:
+**Privacy.** Captured payloads are walked once at write time with key-based redaction - **every** captured surface, not just the Streams tab: RPC args and results (pending map and history ring), fire-and-forget / volatile send args, and stream-event payloads all pass through the same redactor before they are stored on `window.__svelte_realtime_devtools`. That matters because RPC args are the canonical credential carrier (`login({ password })`, `refresh({ token })`), and everything captured stays reachable from the page's JS context for the rest of the session. The default redact list covers `password`, `token`, `apiKey` / `api_key`, `secret`, `authorization`, `cookie`, `sessionid` / `session_id`, `csrf` / `csrftoken`. Override or extend at runtime:
 
 ```js
 import { __devtools } from 'svelte-realtime/client';
@@ -4855,7 +4916,9 @@ if (__devtools) {
 }
 ```
 
-Match is case-insensitive and exact-key (no substring fuzz). Redacted values render as `'[REDACTED]'`. Recursion is capped at depth 5 (deeper structures show `'[depth-cap]'`) and arrays at 50 items so a malformed-large payload doesn't pin a graph in memory.
+Match is case-insensitive and exact-key (no substring fuzz) - `token` is redacted, `sessionToken` is not, so add the exact keys your payloads use. Redacted values render as `'[REDACTED]'`.
+
+> **Error messages are not redacted.** Redaction blanks a value sitting under a matching *key*; an error message is a bare string with no keys, so it is captured verbatim. If your server echoes user input into error text (`invalid password 'hunter2'`), that text lands in the devtools capture. Keep secrets out of error messages - good practice regardless, since the same text usually reaches your logs. Recursion is capped at depth 5 (deeper structures show `'[depth-cap]'`) and arrays at 50 items so a malformed-large payload doesn't pin a graph in memory.
 
 The RPC tab shows pending calls (with elapsed time) and a 50-entry ring buffer of recent results (ok/err, duration). The Connection tab summarizes the same counters.
 

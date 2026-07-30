@@ -10,7 +10,7 @@ import { _shouldShed } from './admission.js';
 import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
 import { _compensateUnavailable } from './history-compensation.js';
 import { _observeSilentTopicPublish, _activatePublishRateWarning } from './dev-warnings.js';
-import { _resolveTenant, _tenantTopic, _makeTenantScope } from './tenant.js';
+import { _resolveTenant, _tenantTopic, _makeTenantScope, _TENANT_TOPIC_NS, _isTenancyEnabled } from './tenant.js';
 
 /**
  * Reject a publish to a `__`-prefixed (framework-internal) topic. Shared by the
@@ -52,6 +52,123 @@ function _getScopedPublish(rawPublish, tenantId) {
 		byTenant.set(tenantId, scoped);
 	}
 	return scoped;
+}
+
+/**
+ * Unscoped (null-tenant) publish wrapper, memoized per raw-publish. The null
+ * tenant's namespace is "every topic NOT starting with @t/" (_topicInTenant):
+ * its ctx.publish receives no prefix, so without this guard a handler that
+ * publishes to a client-influenced topic writes straight into another
+ * tenant's wire channel. Framework code that already holds a wire topic uses
+ * `ctx._publishWire` (the raw helper) and is unaffected. Memoized so the
+ * single-tenant path allocates one wrapper per platform, not one per RPC.
+ * @type {WeakMap<Function, Function>}
+ */
+const _unscopedPublishCache = new WeakMap();
+function _getUnscopedPublish(rawPublish) {
+	let scoped = _unscopedPublishCache.get(rawPublish);
+	if (!scoped) {
+		scoped = function publish(topic, event, data, options) {
+			return rawPublish(_ctxTopic(null, topic, 'ctx.publish'), event, data, options);
+		};
+		_unscopedPublishCache.set(rawPublish, scoped);
+	}
+	return scoped;
+}
+
+/**
+ * Map a handler-supplied LOGICAL topic into the connection's tenant namespace.
+ * One rule for every publish surface: a scoped connection is prefixed into its
+ * own namespace, an unscoped (null-tenant) one is refused the `@t/` prefix
+ * entirely. Without this, a handler that reaches a deferred or batched publish
+ * with a client-influenced topic escapes the isolation `ctx.publish` enforces.
+ * @param {string | null} tenantId
+ * @param {any} topic
+ * @param {string} surface - helper name, for the error message
+ */
+function _ctxTopic(tenantId, topic, surface) {
+	// A non-string passes through UNTOUCHED so the helper's own argument
+	// validation still sees the caller's real value. Mapping it first would
+	// launder `null` into the string '@t/<id>/null' on a tenant connection, so
+	// the bad-args dev warning would never fire and garbage would be published.
+	if (typeof topic !== 'string') return topic;
+	// Reserved-prefix guard on BOTH branches. The scoped branch always had it;
+	// leaving it off the unscoped one would make these surfaces the way to
+	// forge a framework-internal channel (e.g. '__signal:<victim>') that
+	// `ctx.publish` refuses.
+	_assertNotReservedTopic(topic);
+	if (tenantId !== null) return _tenantTopic(tenantId, topic);
+	// Unconditional, NOT gated on a resolver being configured, so it matches the
+	// subscribe boundary (`_executeStreamRpc` refuses a resolved `@t/` topic
+	// whenever `ctx.tenantId` is null, tenancy configured or not). Keeping the two
+	// aligned is what makes turning tenancy ON later a non-breaking change: an app
+	// can never accumulate `@t/`-named topics while single-tenant and then have
+	// them re-interpreted as tenant channels. Not a blanket reservation, though:
+	// `ctx.publish` on the no-tenancy fast path (see `_buildCtx`, where it stays
+	// the bare helper and so never reaches here) and the top-level `publish()`
+	// export both still accept such a topic.
+	if (topic.startsWith(_TENANT_TOPIC_NS)) {
+		throw new LiveError(
+			'INVALID_TOPIC',
+			surface + "() refuses '" + _TENANT_TOPIC_NS + "'-prefixed topics on an unscoped (null-tenant) " +
+			'connection; those are reserved for tenant-scoped wire channels. Use ctx.tenant(id).publish(...) ' +
+			'for an explicit cross-tenant publish.'
+		);
+	}
+	return topic;
+}
+
+/**
+ * Tenant-aware wrappers for the publish surfaces that are NOT `ctx.publish`:
+ * the timer-deferred helpers and the list form of `ctx.batch`. Memoized per
+ * (helpers, tenant) so the single-tenant default path allocates one set per
+ * platform rather than one per RPC.
+ * @type {WeakMap<object, Map<string, any>>}
+ */
+/**
+ * Apply the connection's tenant namespace to every message in a batch, whatever
+ * iterable shape it arrived in. Returns an ARRAY so downstream consumers get a
+ * stable, re-iterable value (a generator would already be drained by the map).
+ * @param {any} messages
+ * @param {string | null} tenantId
+ */
+function _mapBatchTopics(messages, tenantId) {
+	if (messages == null || typeof messages === 'string') return messages;
+	const list = Array.isArray(messages)
+		? messages
+		: (typeof messages[Symbol.iterator] === 'function' ? Array.from(messages) : null);
+	if (list === null) return messages; // not iterable: let helpers.batch reject it
+	return list.map((m) => (m && typeof m === 'object'
+		? { ...m, topic: _ctxTopic(tenantId, m.topic, 'ctx.batch') }
+		: m));
+}
+
+const _scopedHelperCache = new WeakMap();
+function _getScopedHelpers(helpers, tenantId) {
+	let byTenant = _scopedHelperCache.get(helpers);
+	if (!byTenant) { byTenant = new Map(); _scopedHelperCache.set(helpers, byTenant); }
+	const key = tenantId === null ? '\0none' : tenantId;
+	let wrapped = byTenant.get(key);
+	if (!wrapped) {
+		const wrapTopic = (fn, surface) => (...args) => {
+			args[0] = _ctxTopic(tenantId, args[0], surface);
+			return fn(...args);
+		};
+		wrapped = {
+			publishThrottled: wrapTopic(helpers.publishThrottled, 'ctx.publishThrottled'),
+			publishDebounced: wrapTopic(helpers.publishDebounced, 'ctx.publishDebounced'),
+			throttle: wrapTopic(helpers.throttle, 'ctx.throttle'),
+			debounce: wrapTopic(helpers.debounce, 'ctx.debounce'),
+			// NORMALIZE first, then map. `helpers.batch` iterates whatever it is
+			// given (the no-native fallback uses for..of, and an adapter's native
+			// batch does too), so an Array.isArray check alone let a Set or a
+			// generator sail past the namespace rule with its topics untouched -
+			// the guard has to cover every iterable, not just the literal form.
+			batch: (messages) => helpers.batch(_mapBatchTopics(messages, tenantId))
+		};
+		byTenant.set(key, wrapped);
+	}
+	return wrapped;
 }
 
 // Seam callbacks injected by server.js at init. The stale-watch + invalidation
@@ -459,19 +576,34 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 	// configured -> single-tenant, zero-cost path). When set, ctx.publish prefixes
 	// every topic to the tenant's wire namespace; ctx._publishWire stays the raw
 	// helper for framework code that already holds a wire topic (no double-prefix).
-	const tenantId = _resolveTenant(user);
+	// With no resolver configured no connection can ever be scoped, so `@t/`
+	// carries no meaning and the tenant prefix work is pure overhead. The
+	// reserved-prefix guard still has to run though: handing back the bare
+	// helpers here is what previously left `ctx.publishThrottled('__signal:victim',
+	// ...)` wide open on every single-tenant app, which is almost all of them.
+	// `_getScopedHelpers(helpers, null)` keeps the guard and skips the prefixing,
+	// and is memoized per platform so the default path still allocates one wrapper
+	// set, not one per RPC.
+	const tenancy = _isTenancyEnabled();
+	const tenantId = tenancy ? _resolveTenant(user) : null;
+	const scopedHelpers = _getScopedHelpers(helpers, tenantId);
 	const ctx = {
 		user,
 		ws,
 		platform,
-		publish: tenantId ? _getScopedPublish(helpers.publish, tenantId) : helpers.publish,
+		// ctx.publish already guards `__` inside the raw helper closure, so the
+		// no-tenancy path can stay the bare reference here.
+		publish: !tenancy ? helpers.publish : (tenantId ? _getScopedPublish(helpers.publish, tenantId) : _getUnscopedPublish(helpers.publish)),
 		cursor,
-		publishThrottled: helpers.publishThrottled,
-		publishDebounced: helpers.publishDebounced,
-		throttle: helpers.throttle,
-		debounce: helpers.debounce,
+		// Same tenant namespace as ctx.publish: the deferred helpers and the
+		// batch list form take a handler-supplied topic too, so they cannot be
+		// the raw helper or they become the escape hatch the guard just closed.
+		publishThrottled: scopedHelpers.publishThrottled,
+		publishDebounced: scopedHelpers.publishDebounced,
+		throttle: scopedHelpers.throttle,
+		debounce: scopedHelpers.debounce,
 		signal: helpers.signal,
-		batch: helpers.batch,
+		batch: scopedHelpers.batch,
 		shed: helpers.shed,
 		skip: helpers.skip,
 		requestId: platform.requestId,
@@ -519,6 +651,6 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 	// collector shadows THIS invocation's ctx.publish - per-call by
 	// construction, so concurrent handlers never interfere); a value swap on
 	// an existing slot, so the hidden class is unchanged.
-	ctx.batch = (arg) => (typeof arg === 'function' ? _collectBatch(ctx, arg) : helpers.batch(arg));
+	ctx.batch = (arg) => (typeof arg === 'function' ? _collectBatch(ctx, arg) : scopedHelpers.batch(arg));
 	return ctx;
 }

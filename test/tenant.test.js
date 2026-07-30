@@ -10,9 +10,11 @@ import {
 	_stripTenantTopic
 } from '../src/server/tenant.js';
 import { _clusterRoomsList } from '../src/server/rooms-cluster.js';
-import { live, __registerDerived } from '../src/server.js';
+import { live, __register, __registerDerived, handleRpc } from '../src/server.js';
 import { state, _derivedBySource } from '../src/server/state.js';
+import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
+import { toArrayBuffer } from './helpers/encode.js';
 
 afterEach(() => _resetTenantResolver());
 
@@ -337,5 +339,202 @@ describe('live.tenant: dynamic derived watches its own tenant sources (H3)', () 
 		expect(_derivedBySource.has('@t/a/orders:shared')).toBe(true);
 		expect(_derivedBySource.has('@t/b/orders:shared')).toBe(true);
 		expect(_derivedBySource.has('orders:shared')).toBe(false);
+	});
+});
+
+describe('live.tenant: unscoped (null-tenant) connections cannot enter the @t/ wire namespace', () => {
+	// A null-tenant connection's namespace is "every topic NOT starting with
+	// @t/" (_topicInTenant). Before the fix, a client-controlled dynamic topic
+	// arg of '@t/<victim>/...' resolved RAW as the wire topic: cross-tenant
+	// subscribe AND publish.
+
+	function registerPassThroughStream() {
+		// Pass-through factory topic (client arg becomes the topic verbatim),
+		// the documented dynamic-topic shape the attack needs.
+		__register('feed/view', live.stream(
+			(x) => x,
+			async (ctx, x) => ['snapshot:' + x],
+			{ merge: 'latest' }
+		));
+	}
+
+	async function subscribe(ws, platform, id, arg) {
+		platform.sent.length = 0;
+		handleRpc(ws, toArrayBuffer({ rpc: 'feed/view', id, args: [arg], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 10));
+		return platform.sent[0] && platform.sent[0].data;
+	}
+
+	it('rejects a null-tenant subscribe whose resolved topic starts with @t/', async () => {
+		_setTenantResolver((user) => (user && typeof user.tid === 'string' ? user.tid : null));
+		registerPassThroughStream();
+		const platform = mockPlatform();
+		const guest = mockWs(); // anonymous -> resolver yields null tenant
+
+		const resp = await subscribe(guest, platform, 'g1', '@t/victim/room1');
+		expect(resp.ok).toBe(false);
+		expect(resp.code).toBe('INVALID_REQUEST');
+		expect(guest.isSubscribed('@t/victim/room1')).toBe(false);
+		expect(guest.getTopics()).toEqual([]);
+	});
+
+	it('still lets a null-tenant connection subscribe to ordinary topics', async () => {
+		_setTenantResolver((user) => (user && typeof user.tid === 'string' ? user.tid : null));
+		registerPassThroughStream();
+		const platform = mockPlatform();
+		const guest = mockWs();
+
+		const resp = await subscribe(guest, platform, 'g2', 'room1');
+		expect(resp.ok).toBe(true);
+		expect(resp.topic).toBe('room1');
+		expect(guest.isSubscribed('room1')).toBe(true);
+	});
+
+	it("keeps a scoped tenant's '@t/...' arg wrapped into its OWN namespace", async () => {
+		_setTenantResolver((user) => (user && typeof user.tid === 'string' ? user.tid : null));
+		registerPassThroughStream();
+		const platform = mockPlatform();
+		const scoped = mockWs({ id: 'u1', tid: 'tenantB' });
+
+		const resp = await subscribe(scoped, platform, 's1', '@t/tenantA/room1');
+		expect(resp.ok).toBe(true);
+		// The whole logical topic is prefixed - the socket lands in its own
+		// tenant's namespace, never in tenantA's.
+		expect(resp.topic).toBe('@t/tenantB/@t/tenantA/room1');
+		expect(scoped.isSubscribed('@t/tenantB/@t/tenantA/room1')).toBe(true);
+		expect(scoped.isSubscribed('@t/tenantA/room1')).toBe(false);
+	});
+
+	it('refuses ctx.publish to an @t/-prefixed topic from an unscoped connection', () => {
+		_setTenantResolver((user) => (user && typeof user.tid === 'string' ? user.tid : null));
+		const p = mockPlatform();
+		const ctx = ctxFor(p, { id: 'guest1' }); // resolver yields null tenant
+		expect(ctx.tenantId).toBe(null);
+		expect(() => ctx.publish('@t/victim/room1', 'update', { forged: true })).toThrow(/'@t\/'-prefixed/);
+		expect(p.published).toEqual([]);
+		// The raw wire helper (framework-internal) is unaffected.
+		ctx._publishWire('@t/victim/room1:presence', 'join', {});
+		expect(p.published).toHaveLength(1);
+	});
+
+	it("keeps a scoped tenant's ctx.publish of '@t/...' inside its own namespace", () => {
+		_setTenantResolver((user) => user.org);
+		const p = mockPlatform();
+		const ctx = ctxFor(p, { id: 'u1', org: 'b' });
+		ctx.publish('@t/a/room1', 'update', { v: 1 });
+		expect(p.published[0].topic).toBe('@t/b/@t/a/room1');
+	});
+
+	// ctx.publish is not the only surface that takes a handler-supplied topic.
+	// The timer-deferred helpers and the batch list form reach platform.publish
+	// too, so each must apply the SAME namespace rule or it becomes the escape
+	// hatch. One case per surface, both directions.
+	for (const surface of ['publishThrottled', 'publishDebounced', 'throttle', 'debounce']) {
+		it(`refuses ctx.${surface} to an @t/-prefixed topic from an unscoped connection`, () => {
+			_setTenantResolver((user) => (user && typeof user.tid === 'string' ? user.tid : null));
+			const p = mockPlatform();
+			const ctx = ctxFor(p, { id: 'guest1' });
+			expect(ctx.tenantId).toBe(null);
+			expect(() => ctx[surface]('@t/victim/room1', 'update', { forged: true }, 50)).toThrow(/'@t\/'-prefixed/);
+			expect(p.published).toEqual([]);
+		});
+
+		it(`scopes ctx.${surface} into the connection's own tenant namespace`, async () => {
+			_setTenantResolver((user) => user.org);
+			const p = mockPlatform();
+			const ctx = ctxFor(p, { id: 'u1', org: 'b' });
+			// Unique topic per surface: the throttle/debounce registries are keyed
+			// by topic+event and shared across these cases.
+			const topic = 'room-' + surface;
+			ctx[surface](topic, 'update', { v: 1 }, 20);
+			// The debounce family is trailing-edge, so it publishes after the delay.
+			if (surface.toLowerCase().includes('debounce')) await new Promise((r) => setTimeout(r, 60));
+			expect(p.published[0].topic).toBe('@t/b/' + topic);
+		});
+	}
+
+	// helpers.batch iterates whatever it is handed, so an Array.isArray check
+	// alone let a Set or a generator past the namespace rule with its topics
+	// untouched - the guard has to cover every iterable shape.
+	it('applies the namespace rule to a non-array iterable batch', () => {
+		_setTenantResolver((user) => user.org);
+		const p = mockPlatform();
+		const ctx = ctxFor(p, { id: 'u1', org: 'b' });
+		ctx.batch(new Set([{ topic: 'room1', event: 'update', data: { v: 1 } }]));
+		const topics = (p.batched || p.published).map((m) => m.topic);
+		expect(topics).toEqual(['@t/b/room1']);
+	});
+
+	it('refuses an @t/-prefixed topic inside a non-array iterable batch', () => {
+		_setTenantResolver((user) => (user && typeof user.tid === 'string' ? user.tid : null));
+		const p = mockPlatform();
+		const ctx = ctxFor(p, { id: 'guest1' });
+		function* gen() { yield { topic: '@t/victim/room1', event: 'update', data: { forged: true } }; }
+		expect(() => ctx.batch(gen())).toThrow(/'@t\/'-prefixed/);
+		expect(p.published).toEqual([]);
+	});
+
+	// The reserved-prefix guard must hold on the DEFAULT single-tenant path too,
+	// not only when a resolver happens to be installed - otherwise these surfaces
+	// are the way to forge a framework-internal channel on almost every app.
+	it('refuses a __-prefixed topic on the deferred surfaces with no tenancy configured', () => {
+		_resetTenantResolver();
+		const p = mockPlatform();
+		const ctx = ctxFor(p, { id: 'u1' });
+		expect(() => ctx.publishThrottled('__signal:victim', 'evt', { forged: 1 }, 50)).toThrow(/'__'-prefixed/);
+		expect(() => ctx.publishDebounced('__signal:victim', 'evt', { forged: 1 }, 50)).toThrow(/'__'-prefixed/);
+		expect(() => ctx.batch([{ topic: '__signal:victim', event: 'evt', data: { forged: 1 } }])).toThrow(/'__'-prefixed/);
+		expect(p.published).toEqual([]);
+	});
+
+	// The `@t/` refusal is deliberately NOT gated on a resolver being configured:
+	// the subscribe boundary refuses a resolved `@t/` topic whenever tenantId is
+	// null (dispatch.js, `!ctx.tenantId`), tenancy configured or not, and the
+	// deferred surfaces match it. That alignment is what keeps turning tenancy ON
+	// later a non-breaking change - an app cannot accumulate `@t/`-named topics
+	// while single-tenant and then have them re-read as tenant channels. Pinned
+	// here because the obvious "fix" is to gate this on _isTenancyEnabled(), which
+	// would quietly re-open exactly that trap.
+	it('refuses an @t/ topic on the deferred surfaces with no tenancy configured', () => {
+		_resetTenantResolver();
+		const p = mockPlatform();
+		const ctx = ctxFor(p, { id: 'u1' });
+		for (const surface of ['publishThrottled', 'publishDebounced', 'throttle', 'debounce']) {
+			expect(() => ctx[surface]('@t/a/room1', 'update', { v: 1 }, 20)).toThrow(/'@t\/'-prefixed/);
+		}
+		expect(() => ctx.batch([{ topic: '@t/a/room1', event: 'update', data: { v: 1 } }])).toThrow(/'@t\/'-prefixed/);
+		expect(p.published).toEqual([]);
+	});
+
+	// The one surface that does NOT refuse it, recorded so the divergence is a
+	// known fact rather than a surprise. With no resolver configured ctx.publish
+	// stays the bare helper reference (the single-tenant fast path), so it has no
+	// per-connection wrapper in which to apply the rule. Harmless in itself - with
+	// no tenancy there are no `@t/` channels to reach - and such a topic is
+	// unusable anyway because the subscribe side refuses it. Closing it would cost
+	// a wrapper frame plus a startsWith on every publish on the default path.
+	it('documents ctx.publish as the one surface that accepts @t/ with no tenancy configured', () => {
+		_resetTenantResolver();
+		const p = mockPlatform();
+		const ctx = ctxFor(p, { id: 'u1' });
+		ctx.publish('@t/a/room1', 'update', { v: 1 });
+		expect(p.published.map((m) => m.topic)).toEqual(['@t/a/room1']);
+	});
+
+	it('refuses ctx.batch to an @t/-prefixed topic from an unscoped connection', () => {
+		_setTenantResolver((user) => (user && typeof user.tid === 'string' ? user.tid : null));
+		const p = mockPlatform();
+		const ctx = ctxFor(p, { id: 'guest1' });
+		expect(() => ctx.batch([{ topic: '@t/victim/room1', event: 'update', data: { forged: true } }])).toThrow(/'@t\/'-prefixed/);
+		expect(p.published).toEqual([]);
+	});
+
+	it("scopes ctx.batch into the connection's own tenant namespace", () => {
+		_setTenantResolver((user) => user.org);
+		const p = mockPlatform();
+		const ctx = ctxFor(p, { id: 'u1', org: 'b' });
+		ctx.batch([{ topic: 'room1', event: 'update', data: { v: 1 } }]);
+		const topics = (p.batched || p.published).map((m) => m.topic);
+		expect(topics).toEqual(['@t/b/room1']);
 	});
 });

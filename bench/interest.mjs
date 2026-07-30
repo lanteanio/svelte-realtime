@@ -1,6 +1,6 @@
 // @ts-check
 //
-// Benchmarks for K4 area-of-interest relevancy. Run with: node bench/interest.mjs
+// Benchmarks for area-of-interest relevancy. Run with: node bench/interest.mjs
 //
 // Two questions a number, not an assertion, has to answer:
 //
@@ -8,11 +8,11 @@
 //      subscriber is delivered, and what does that pass cost, as the entity count
 //      climbs from one arena to a whole lobby.
 //
-//   2. The credo-4 merge blocker: turning interest OFF must cost nothing. The
+//   2. The performance merge blocker: turning interest OFF must cost nothing. The
 //      publish loop gains exactly one `rec.interest && updates.length > 0` gate
 //      (false) and one `if (relevancy)` gate (false) per tick, plus one extra
 //      falsy check per update. This measures that the interest-off publish loop is
-//      within noise of the pre-K4 broadcast-all loop.
+//      within noise of the ungated broadcast-all loop.
 
 import { createInterestState } from '../src/server/interest.js';
 
@@ -102,15 +102,15 @@ function benchCull() {
 	console.log();
 }
 
-// --- 2. credo-4: interest-OFF publish loop is free ---------------------------
+// --- 2. hot path: interest-OFF publish loop is free --------------------------
 //
 // Replicates the exact shape of _smoothTick's update fan-out for an interest-off
-// topic (rec.interest === null, single instance), with and without the K4 gate,
+// topic (rec.interest === null, single instance), with and without the interest gate,
 // over a representative tick's worth of updates. A no-op "publish" stands in for
 // the real publishWire so the loop overhead is what is measured, not the wire.
 
 function benchInterestOffGate() {
-	console.log('--- credo-4: interest-off publish loop overhead (gate must be free) ---');
+	console.log('--- interest-off publish loop overhead (gate must be free) ---');
 	const recOff = { interest: null, noEcho: true };
 	const cluster = false;
 	const updates = [];
@@ -119,7 +119,7 @@ function benchInterestOffGate() {
 	let sink = 0;
 	const publish = (u) => { sink += u.key.length; };
 
-	// The actual K4 interest-off path: the gate computes null, the per-update else
+	// The actual interest-off path: the gate computes null, the per-update else
 	// runs the unchanged broadcast, the trailing cull loop is skipped.
 	function withGate() {
 		for (let r = 0; r < 20000; r++) {
@@ -133,7 +133,7 @@ function benchInterestOffGate() {
 			if (relevancy) { /* unreached */ }
 		}
 	}
-	// The pre-K4 baseline: the same fan-out with no gate at all.
+	// The ungated baseline: the same fan-out with no gate at all.
 	function baseline() {
 		for (let r = 0; r < 20000; r++) {
 			for (let i = 0; i < updates.length; i++) publish(updates[i]);
@@ -146,13 +146,13 @@ function benchInterestOffGate() {
 	const perCallG = (g.best * 1e6) / (20000 * updates.length);
 	const perCallB = (b.best * 1e6) / (20000 * updates.length);
 	const overheadPct = ((g.best - b.best) / b.best) * 100;
-	console.log(`with K4 gate: ${formatNs(perCallG)}/update    baseline: ${formatNs(perCallB)}/update`);
-	console.log(`overhead:     ${overheadPct.toFixed(2)}%  (target: within measurement noise)`);
+	console.log(`with interest gate: ${formatNs(perCallG)}/update    baseline: ${formatNs(perCallB)}/update`);
+	console.log(`overhead:           ${overheadPct.toFixed(2)}%  (target: within measurement noise)`);
 	console.log(`(sink ${sink} - keeps the loop from being optimised away)`);
 	console.log();
 }
 
-console.log('svelte-realtime K4 area-of-interest benchmark');
+console.log('svelte-realtime area-of-interest benchmark');
 console.log('='.repeat(72));
 console.log();
 benchCull();

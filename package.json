@@ -1,6 +1,6 @@
 {
 	"name": "svelte-realtime",
-	"version": "0.6.0-next.89",
+	"version": "0.6.0-next.90",
 	"publishConfig": {
 		"tag": "next"
 	},
@@ -99,13 +99,17 @@
 	"peerDependencies": {
 		"@sveltejs/kit": "^2.0.0",
 		"svelte": "^4.0.0 || ^5.0.0",
-		"svelte-adapter-uws": "^0.6.0-next.61"
+		"svelte-adapter-uws": "^0.6.0-next.87"
 	},
 	"devDependencies": {
 		"@playwright/test": "^1.59.1",
 		"fast-check": "^4.7.0",
-		"svelte-adapter-uws-extensions": "^0.6.0-next.20",
+		"svelte-adapter-uws-extensions": "^0.6.0-next.63",
+		"typescript": "^6.0.3",
 		"vitest": "^4.0.18"
+	},
+	"overrides": {
+		"cookie": "^0.7.2"
 	},
 	"keywords": [
 		"svelte",

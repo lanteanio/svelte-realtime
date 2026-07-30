@@ -3,7 +3,7 @@
 // one seed. These tests prove (a) the runner resolves real hits and upholds the per-
 // shot domain invariants, (b) the determinism gate reproduces a clean run, (c) the
 // gate is NOT vacuously green - a planted non-determinism is caught, and (d) the swarm
-// stays green and deterministic across many seeds, including the buggify paths.
+// stays green and deterministic across many seeds, including the faultMode paths.
 
 import { describe, it, expect } from 'vitest';
 import { runSmoothSim, replaySmoothSim, runSmoothSimSwarm, DEFAULT_SMOOTH_SEED } from '../src/sim.js';
@@ -57,10 +57,10 @@ describe('runSmoothSim', () => {
 		expect(replay.reproduced).toBe(false);
 	});
 
-	it('stays deterministic and invariant-clean under buggify (teleport + over-window lag)', async () => {
-		const r = await runSmoothSim({ seed: 'bug-1', buggify: true });
+	it('stays deterministic and invariant-clean under faultMode (teleport + over-window lag)', async () => {
+		const r = await runSmoothSim({ seed: 'bug-1', faultMode: true });
 		expect(r.invariantViolations).toEqual([]);
-		// Non-vacuous on the buggify path too: shots still land hits (the rewound
+		// Non-vacuous on the faultMode path too: shots still land hits (the rewound
 		// narrowphase is exercised), so the determinism compare is never empty == empty.
 		expect(r.metrics.hits).toBeGreaterThan(0);
 		const replay = await replaySmoothSim(r);
@@ -90,14 +90,14 @@ describe('runSmoothSimSwarm', () => {
 		expect(s.runs.filter((r) => r.hits > 0).length).toBeGreaterThan(s.runs.length / 2);
 	});
 
-	it('buggify=random keeps every seed deterministic and clean', async () => {
-		const s = await runSmoothSimSwarm({ count: 40, buggify: 'random', checkRatio: 0.5 });
+	it('faultMode=random keeps every seed deterministic and clean', async () => {
+		const s = await runSmoothSimSwarm({ count: 40, faultMode: 'random', checkRatio: 0.5 });
 		expect(s.summary.ok).toBe(true);
-		expect(s.summary.buggified).toBeGreaterThan(0);
+		expect(s.summary.faulted).toBeGreaterThan(0);
 		expect(s.summary.determinismFailures).toBe(0);
-		// The buggified runs collectively land hits - their determinism check is not
+		// The faulted runs collectively land hits - their determinism check is not
 		// silently passing on empty hit logs.
-		expect(s.runs.filter((r) => r.buggified).reduce((n, r) => n + r.hits, 0)).toBeGreaterThan(0);
+		expect(s.runs.filter((r) => r.faulted).reduce((n, r) => n + r.hits, 0)).toBeGreaterThan(0);
 	});
 
 	it('the same seeds fingerprint identically across two swarm runs', async () => {

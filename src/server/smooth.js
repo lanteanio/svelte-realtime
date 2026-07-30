@@ -200,6 +200,32 @@ export const _smoothClosedWs = new WeakSet();
 const _lcRtt = new WeakMap();
 
 /**
+ * Window over which re-syncs are counted (see `_SMOOTH_SYNC_MAX_PER_WINDOW`).
+ * The sync reply's roster costs O(catalog) to build AND serialize, and the RPC
+ * has no transport-level rate limit, so an unthrottled stream of ~60-byte sync
+ * frames is a large work-per-byte asymmetry against a populated topic.
+ */
+const _SMOOTH_RESYNC_WINDOW_MS = 1000;
+
+/**
+ * Hard ceiling on re-syncs per IDENTITY per window. Past this many syncs in one
+ * window the RPC is refused instead of answered.
+ *
+ * Sized for legitimate bursts, not for steady state: a client syncs on join and
+ * on reconnect, so several in a second is a flapping network (fine), while a
+ * sustained stream is a flood (refused).
+ *
+ * SCOPE, stated honestly: the key is `_getIdentityKey`, so an AUTHENTICATED user
+ * shares one allowance across all their sockets and tabs - a real global cap for
+ * that user. An ANONYMOUS connection gets a per-socket guest key, so this bounds
+ * a socket, not an attacker: N sockets buy N allowances. It removes the trivial
+ * single-socket flood and raises the cost of the rest; it is not a substitute for
+ * `live.rateLimit` or a connection cap on an app that allows anonymous smooth
+ * topics. The work-per-byte asymmetry itself is inherent to answering a re-sync.
+ */
+const _SMOOTH_SYNC_MAX_PER_WINDOW = 5;
+
+/**
  * The reserved wire-topic prefix (`__smooth:`), captured from the loaded
  * runtime so the cluster relay handlers - which receive the wire topic, not the
  * bare name - can resolve a record back through `_smoothTopics` by stripping it.
@@ -374,6 +400,9 @@ export function _purgeSmoothUser(identity) {
 			// socket's WeakMap slot addressable by identity.
 			_lcRtt.delete(ws);
 			rec.registry.delete(identity);
+			// Defensive like the interest/lagComp purges below: a record shape
+			// missing the throttle map must not abort the rest of the erasure.
+			if (rec.syncRate) rec.syncRate.delete(identity);
 			count++;
 		}
 		for (const key of rec.surrogates.keys()) {
@@ -488,6 +517,9 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			interest: cfg.interest && !cfg.interest.cells ? createInterestState(cfg.interest) : null,
 			interestTick: 0,
 			interestDirty: false,
+			// Per-identity re-sync allowance (see _smoothSyncAdmit). Entries follow
+			// the registry's lifecycle (dropped on close / purge).
+			syncRate: new Map(),
 			// Spatial cell-topic interest (opt-in via interest.cells; null on the
 			// per-client-interest path and the OFF path, so both stay byte-identical).
 			// In cells mode area-of-interest is SUBSCRIPTION to grid-cell topics, not a
@@ -555,7 +587,7 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			// Lag-compensation history ring (opt-in; null on the default path). When
 			// set, the tick records the post-drain catalog here and the __smoothShoot
 			// RPC rewinds against it. Gated entirely on cfg.hitTest so the OFF path is
-			// byte-identical and zero-cost (credo 4). The RING (record/rewind) is written
+			// byte-identical and zero-cost. The RING (record/rewind) is written
 			// and read only on the owner; on a non-owner the object still exists (created
 			// from cfg.hitTest) and the receive-side cull reads it as a `!== null` gate to
 			// decide whether to run the send-cadence estimator.
@@ -1131,6 +1163,52 @@ function _smoothJoinSnapshot(rec, identity) {
 }
 
 /**
+ * The sync reply's wire-packed roster, always built fresh.
+ *
+ * Deliberately NOT cached. A cached roster is a snapshot of `e.state` values,
+ * and the authority REPLACES those objects on every command, so a reused roster
+ * hands back stale positions. The deltas do not repair it either: a tick only
+ * carries entities whose state changed THAT tick, so an entity that moved during
+ * the cache window and then stopped is never re-sent and the client stays wrong
+ * until it moves again. That lands squarely on the reconnect case a re-sync
+ * exists to serve. The flood this function used to be throttled against is
+ * bounded by `_SMOOTH_SYNC_MAX_PER_WINDOW` at the RPC instead, which also caps
+ * the reply serialization a cache could never remove.
+ */
+function _smoothSyncRoster(rec, identity) {
+	return _smoothWireStates(rec, _smoothJoinSnapshot(rec, identity));
+}
+
+/**
+ * Per-connection re-sync admission. Returns false when this identity has
+ * already spent its allowance for the current window.
+ *
+ * A NEGATIVE elapsed (a backwards clock step) rolls the window over rather than
+ * comparing against a future timestamp - otherwise a single step could pin the
+ * window open and lock a legitimate client out for as long as the skew lasts.
+ * Rolling over fails open for one window, which is the safe direction: the
+ * attacker does not control the server clock, and a stuck-closed limiter would
+ * break reconnects.
+ *
+ * A PINNED clock (the deterministic-simulation seams hold `wallEpoch` constant)
+ * gives `elapsed === 0`, which never rolls the window over - so the allowance is
+ * spent once and never refills. That is deliberate: a simulation replays a fixed
+ * script rather than flooding, and silently disabling the limiter under the seam
+ * would mean the property under test is not the one that ships.
+ */
+function _smoothSyncAdmit(rec, identity) {
+	const now = wallEpoch();
+	let entry = rec.syncRate.get(identity);
+	const elapsed = entry === undefined ? Infinity : now - entry.windowStart;
+	if (entry === undefined || elapsed >= _SMOOTH_RESYNC_WINDOW_MS || elapsed < 0) {
+		entry = { windowStart: now, count: 0 };
+		rec.syncRate.set(identity, entry);
+	}
+	entry.count++;
+	return entry.count <= _SMOOTH_SYNC_MAX_PER_WINDOW;
+}
+
+/**
  * Per-subscriber relevancy delivery: send each local subscriber only the entities
  * inside its area of interest this tick. Shared by the owner tick (authoritative
  * catalog + drained updates) and the non-owner receive-side cull (shadow catalog +
@@ -1178,6 +1256,18 @@ function _smoothDeliverCulled(rec, relevancy, lookup, moved, t) {
 			}
 		}
 		_smoothSendUpdatesTo(rec, ws, toSend);
+		// Release what left this subscriber's range. Without it the client holds an
+		// out-of-range entity until its TTL sweep reaps it, so panning an interest
+		// center across a board inflates the received set well past the radius
+		// subset and only sheds it once movement stops.
+		const exited = rec.interest.exitsFor(identity);
+		if (exited !== undefined) {
+			for (let i = 0; i < exited.length; i++) {
+				// Never evict the subscriber's own entity - it is always relevant to
+				// itself regardless of where the reported center is looking.
+				if (exited[i] !== identity) _smoothSendTo(rec, ws, 'remove', { key: exited[i] });
+			}
+		}
 		// The cadence seed is the WIRE interval (tickMs widened by the broadcast
 		// gate), not the sim interval - the estimator's cold-start guess must
 		// match what a subscriber actually receives.
@@ -1585,6 +1675,7 @@ export function _drainSmoothOnClose(ws) {
 			}
 			if (identity !== undefined) {
 				rec.registry.delete(identity);
+				if (rec.syncRate) rec.syncRate.delete(identity);
 				if (rec.interest) rec.interest.releaseSubscriber(identity);
 				// Cells mode: free the departing subscriber's cell bookkeeping here
 				// too (the platform auto-unsubscribes the closed socket) - mirroring
@@ -1609,6 +1700,8 @@ export function _drainSmoothOnClose(ws) {
 		}
 		const removed = rec.authority.removeWs(ws);
 		for (let i = 0; i < removed.length; i++) {
+			// A departed identity's re-sync allowance goes with it.
+			if (rec.syncRate) rec.syncRate.delete(removed[i]);
 			// Interest topics carry an identity -> socket map and per-subscriber band
 			// state keyed by identity (the entity key IS the identity); drop both.
 			if (rec.interest) {
@@ -2858,13 +2951,28 @@ export const _smoothRegister = function smooth(config) {
 				ctx.ws.subscribe(rec.wireTopic);
 			} catch {}
 		}
-		// Liveness re-check after the awaits above: if the socket closed while
-		// the guard / runtime load / subscribe was pending, the close drain has
-		// already run, and ensuring now would create a ghost entity bound to a
-		// freed handle (or steal ownership from a live tab).
+		// Re-sync flood cutoff, AFTER admission (a denied subscribe must not be
+		// able to consume anyone's allowance) and before any O(catalog) work. The
+		// reply carries the whole roster, so an unthrottled stream of ~60-byte
+		// sync frames is a large work-per-byte asymmetry against a populated
+		// topic; a real client syncs on join and on reconnect, never in a stream.
+		// Liveness re-check FIRST: if the socket closed while the guard / runtime
+		// load / subscribe was pending, the close drain has already run, and
+		// ensuring now would create a ghost entity bound to a freed handle (or
+		// steal ownership from a live tab). It also has to precede the allowance
+		// bookkeeping below - the drain for this socket is already done, so an
+		// entry minted after it would be orphaned in `rec.syncRate` forever, one
+		// per attacker socket, keyed by a guest id nothing can re-derive.
 		if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
 			if (rec.authority.size === 0 && rec.timer === null) _smoothForget(rec);
 			throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
+		}
+		if (!_smoothSyncAdmit(rec, _getIdentityKey(ctx))) {
+			throw new LiveError(
+				'RATE_LIMITED',
+				'smooth re-sync rate exceeded (max ' + _SMOOTH_SYNC_MAX_PER_WINDOW + ' per ' +
+				_SMOOTH_RESYNC_WINDOW_MS + 'ms per identity); back off and retry'
+			);
 		}
 		const key = _getIdentityKey(ctx);
 		const cluster = ctx.platform && ctx.platform.smooth;
@@ -2944,7 +3052,7 @@ export const _smoothRegister = function smooth(config) {
 				// (a pending timer is a no-op) and gated on an onTick world so non-onTick
 				// topics stay byte-identical (they legitimately arm on the first command).
 				if (rec.world !== null) _armSmoothTick(rec);
-				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothWireStates(rec, _smoothJoinSnapshot(rec, key)), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
+				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothSyncRoster(rec, key), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
 			}
 			// Non-owner: ask the owner for the catalog. On a timeout, return a
 			// local-empty basis - incoming broadcasts reconcile the client.
@@ -3014,7 +3122,7 @@ export const _smoothRegister = function smooth(config) {
 			// Interest on (either mode): scope the join snapshot to the joiner's
 			// area of interest (the roster fanout is O(n^2) if every joiner gets
 			// the whole board). Broadcast path: the full catalog, unchanged.
-			states: _smoothWireStates(rec, _smoothJoinSnapshot(rec, key)),
+			states: _smoothSyncRoster(rec, key),
 			...(rec.lagComp !== null && { lc: 1 }),
 			...(rec.cells && { cells: 1 })
 		};
@@ -3118,20 +3226,34 @@ export const _smoothRegister = function smooth(config) {
 			}
 			return;
 		}
+		// Membership gate: only a live subscriber of this topic may steer
+		// the per-client relevancy cull. Without it one ~40-byte frame from ANY
+		// connection forced a full O(subscribers x catalog) interest.compute()
+		// pass per tick on an otherwise idle board. The registry is the local
+		// subscriber set on every interest path (single-instance and cluster),
+		// and centers are node-local, so the local registry is the whole check.
+		// (Cells mode above deliberately accepts a pre-sync spectator report; its
+		// block placement costs O(block) and self-diffs, never a catalog pass.)
+		if (!rec.registry.has(key)) return;
+		let centerChanged;
 		if (center === null || center === undefined) {
-			rec.interest.clearCenter(key);
+			centerChanged = rec.interest.clearCenter(key);
 		} else if (center && typeof center === 'object' && typeof center.x === 'number' && typeof center.y === 'number' && Number.isFinite(center.x) && Number.isFinite(center.y)) {
 			// Same policy gate as cells mode; a rejected report clears any stale
 			// override so the cull recenters on the own entity.
 			const applied = _smoothCenterPolicy(rec, ctx, key, center);
-			if (applied === null) rec.interest.clearCenter(key);
-			else rec.interest.reportCenter(key, applied.x, applied.y);
+			if (applied === null) centerChanged = rec.interest.clearCenter(key);
+			else centerChanged = rec.interest.reportCenter(key, applied.x, applied.y);
 		} else {
 			return;
 		}
 		// Force the next tick to recompute relevancy for the new center, and arm one:
 		// the owner tick (or single-instance), or a non-owner's receive-side cull tick
-		// so the new center takes effect on its locally-culled delivery too.
+		// so the new center takes effect on its locally-culled delivery too. An
+		// identical re-report (or a clear with nothing held) changes no center, so
+		// it owes no pass (repeated reports must not repeat the O(S x N)
+		// recompute).
+		if (!centerChanged) return;
 		rec.interestDirty = true;
 		const cluster = ctx.platform && ctx.platform.smooth;
 		if (!cluster || rec.owned || rec.registry.size > 0) _armSmoothTick(rec);

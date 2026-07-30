@@ -504,7 +504,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 	it('redacts the successor ids from the dev diagnostic on the incomplete-erasure path (no PII in logs)', async () => {
 		// The committed successions carry SUCCESSOR user ids (other users); the
 		// purgeUser-threw diagnostic must log the failure reasons but never those ids
-		// (credo: no PII in logs). Guards against a regression that logs the raw error.
+		// (no PII in logs). Guards against a regression that logs the raw error.
 		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 		try {
 			configureForget({
@@ -653,6 +653,7 @@ describe('live.forget - smooth/game state', () => {
 		const rings = new Map([['u1', {}], ['e9', {}]]);
 		const rec = {
 			registry: new Map([['u1', ws], ['u2', {}]]),
+			syncRate: new Map([['u1', { windowStart: 0, count: 1 }], ['u2', { windowStart: 0, count: 1 }]]),
 			surrogates: new Map([
 				['inst-a' + SEP + 'u1', { s: 1 }],
 				['inst-a' + SEP + 'u2', { s: 2 }]
@@ -666,6 +667,8 @@ describe('live.forget - smooth/game state', () => {
 
 		expect(rec.registry.has('u1')).toBe(false);
 		expect(rec.registry.has('u2')).toBe(true);
+		expect(rec.syncRate.has('u1')).toBe(false);
+		expect(rec.syncRate.has('u2')).toBe(true);
 		expect(rec.surrogates.has('inst-a' + SEP + 'u1')).toBe(false);
 		expect(rec.surrogates.has('inst-a' + SEP + 'u2')).toBe(true);
 		expect(rings.has('u1')).toBe(false);

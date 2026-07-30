@@ -257,6 +257,57 @@ describe('live.smooth sync', () => {
 		expect(rt.calls.ensure).toHaveLength(1);
 	});
 
+	// A re-sync exists to recover correct state, so it must never serve a
+	// remembered roster. The authority REPLACES e.state on every command, and a
+	// tick only carries entities that changed THAT tick, so an entity that moved
+	// and then stopped would never be re-sent to a client handed a cached roster.
+	it('always serves fresh state, including a state-only change with no membership change', async () => {
+		const { name } = declareShape();
+		const wsA = mockWs({ id: 'A' });
+		const platform = wirePlatform();
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(mockWs({ id: 'B' }), platform, name + '/shape/__smooth/sync', ['r1']);
+
+		rt.entities.get('B').state = { x: 99, y: 99 };
+		const res2 = await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(res2.ok).toBe(true);
+		expect(res2.data.states.find((s) => s.key === 'B').state).toEqual({ x: 99, y: 99 });
+		expect(res2.data.you).toBe('A');
+
+		// A leave+rejoin returns the catalog to its original SIZE - the case a
+		// size-based invalidation misses, and exactly the reconnect a re-sync serves.
+		rt.entities.delete('B');
+		rt.entities.set('C', { state: { x: 5, y: 5 }, ws: {}, lastAckedId: 0 });
+		const res3 = await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(res3.data.states.map((s) => s.key).sort()).toEqual(['A', 'C']);
+		expect(res3.data.states.find((s) => s.key === 'C').state).toEqual({ x: 5, y: 5 });
+	});
+
+	it('refuses a re-sync flood from one connection, and lets a legitimate burst through', async () => {
+		const { name } = declareShape();
+		const wsA = mockWs({ id: 'A' });
+		const platform = wirePlatform();
+
+		// A reconnect burst stays under the allowance.
+		for (let i = 0; i < 5; i++) {
+			const ok = await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+			expect(ok.ok).toBe(true);
+		}
+		// Past it the RPC is refused rather than answered with the whole roster.
+		const denied = await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(denied.ok).toBe(false);
+		expect(denied.code).toBe('RATE_LIMITED');
+
+		// The allowance is per connection, so another client is unaffected.
+		const other = await call(mockWs({ id: 'Z' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(other.ok).toBe(true);
+
+		// It refills on the next window.
+		await vi.advanceTimersByTimeAsync(1100);
+		const after = await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(after.ok).toBe(true);
+	});
+
 	it('resolves a function-shaped initial per entity key', async () => {
 		const { name } = declareShape({ initial: (key) => ({ x: 0, y: 0, who: key }) });
 		const res = await call(mockWs({ id: 'u2' }), wirePlatform(), name + '/shape/__smooth/sync', ['r1']);
@@ -1021,7 +1072,7 @@ describe('live.smooth() vite integration', () => {
 	it('registers the command and sync paths in the build registry', () => {
 		setup({ 'board.js': SMOOTH_SOURCE, 'board.shared.js': SHARED_SOURCE });
 		const plugin = createPlugin();
-		const registry = plugin.load('\0live:__registry', {});
+		const registry = plugin.load('\0live:__registry', { ssr: true });
 		expect(registry).toContain('board/shape/__smooth/command');
 		expect(registry).toContain('board/shape/__smooth/sync');
 		expect(registry).toContain('__smoothCommand');
@@ -2513,6 +2564,52 @@ describe('live.smooth interest (area-of-interest culling)', () => {
 	const updatesSent = (platform) => platform.wireSent.filter((s) => s.event === 'update');
 	const updatesPublished = (platform) => platform.wirePublished.filter((p) => p.event === 'update');
 
+	// An entity that leaves the radius has to be RELEASED, not just stopped being
+	// updated. The client drops a remote entity only on an explicit `remove` or
+	// its TTL sweep, so without a targeted remove a panning subscriber keeps
+	// accumulating entities it can no longer see and only sheds them once the
+	// sweep catches up.
+	it('sends a targeted remove when an entity leaves a subscriber area of interest', async () => {
+		const { name } = declareInterest();
+		const wsA = mockWs({ id: 'A' });
+		const wsB = mockWs({ id: 'B' });
+		const platform = wirePlatform();
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsB, platform, name + '/shape/__smooth/sync', ['r1']);
+		// Look at B (500,0) so it is inside the radius-100 area of interest.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		const removesTo = (ws) => platform.wireSent.filter((s) => s.event === 'remove' && s.ws === ws);
+		expect(removesTo(wsA)).toHaveLength(0);
+
+		// Pan far away: B is now out of range and must be released.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 5000, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		const removed = removesTo(wsA).map((s) => s.data.key);
+		expect(removed).toContain('B');
+		// The subscriber's OWN entity is never evicted, wherever it is looking.
+		expect(removed).not.toContain('A');
+	});
+
+	it('does not re-send a remove for an entity that already left', async () => {
+		const { name } = declareInterest();
+		const wsA = mockWs({ id: 'A' });
+		const wsB = mockWs({ id: 'B' });
+		const platform = wirePlatform();
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsB, platform, name + '/shape/__smooth/sync', ['r1']);
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 5000, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		const after1 = platform.wireSent.filter((s) => s.event === 'remove' && s.ws === wsA).length;
+		// Another pass with nothing newly leaving owes no further removes.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 5100, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		const after2 = platform.wireSent.filter((s) => s.event === 'remove' && s.ws === wsA).length;
+		expect(after2).toBe(after1);
+	});
+
 	it('delivers each subscriber only the updates inside its area of interest, via the per-subscriber wire', async () => {
 		const { name } = declareInterest();
 		const wsA = mockWs({ id: 'A' });
@@ -2692,6 +2789,125 @@ describe('live.smooth interest (area-of-interest culling)', () => {
 		const resA = await call(mockWs({ id: 'A' }), platform, name + '/shape/__smooth/sync', ['r1']);
 		expect(resA.data.states.map((s) => s.key).sort()).toEqual(['A', 'F']);
 	});
+
+	it('ignores a center report from a connection that is not a subscriber', async () => {
+		const { name } = declareInterest();
+		const platform = wirePlatform();
+		await call(mockWs({ id: 'A' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		const rec = _smoothTopics.get('shape:r1');
+		// X never synced, so it holds no registry membership: its report must not
+		// dirty relevancy nor arm a tick (which would force a full O(S x N)
+		// interest.compute() pass) on the idle board.
+		await call(mockWs({ id: 'X' }), platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		expect(rec.interestDirty).toBe(false);
+		expect(rec.timer).toBe(null);
+	});
+
+	it('forces a relevancy pass only when a subscriber center actually changes', async () => {
+		const { name } = declareInterest();
+		const platform = wirePlatform();
+		const wsA = mockWs({ id: 'A' });
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		const rec = _smoothTopics.get('shape:r1');
+		// A first report is a new center: dirty + an armed tick, as before.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		expect(rec.interestDirty).toBe(true);
+		expect(rec.timer).not.toBe(null);
+		// The armed tick consumes the dirty flag and disarms on the idle board.
+		await vi.advanceTimersByTimeAsync(20);
+		expect(rec.interestDirty).toBe(false);
+		expect(rec.timer).toBe(null);
+		// An identical re-report changes nothing: no dirty, no tick, no pass.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		expect(rec.interestDirty).toBe(false);
+		expect(rec.timer).toBe(null);
+		// A moved center still forces the pass.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 400, y: 0 }]);
+		expect(rec.interestDirty).toBe(true);
+		await vi.advanceTimersByTimeAsync(20);
+		// Clearing with an override held forces one last pass; clearing again is a no-op.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', null]);
+		expect(rec.interestDirty).toBe(true);
+		await vi.advanceTimersByTimeAsync(20);
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', null]);
+		expect(rec.interestDirty).toBe(false);
+		expect(rec.timer).toBe(null);
+	});
+
+	// Exact equality alone is not a defence. A subscriber that alternates between
+	// two near-identical centers defeats it and forces the full O(subscribers x
+	// entities) pass on every frame - the actual DoS, at ~800 bytes/s.
+	it('ignores sub-threshold center jitter, including an alternating A/B attack', async () => {
+		const { name } = declareInterest();
+		const platform = wirePlatform();
+		const wsA = mockWs({ id: 'A' });
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		const rec = _smoothTopics.get('shape:r1');
+
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(rec.interestDirty).toBe(false);
+
+		// Alternate by a hair, many times. None of it owes a pass.
+		for (let i = 0; i < 20; i++) {
+			await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500 + (i % 2) * 0.001, y: 0 }]);
+			expect(rec.interestDirty).toBe(false);
+			expect(rec.timer).toBe(null);
+		}
+
+		// A real move still does.
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 900, y: 0 }]);
+		expect(rec.interestDirty).toBe(true);
+	});
+
+	// The threshold memory has to outlive a clear, or report -> clear -> report
+	// is a free bypass: each report would hit the "no entry yet" branch and owe a
+	// pass without the threshold ever being consulted - a pass per tick for zero
+	// movement, which is the whole attack.
+	it('ignores a report/clear/report cycle that never moves', async () => {
+		const { name } = declareInterest();
+		const platform = wirePlatform();
+		const wsA = mockWs({ id: 'A' });
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		const rec = _smoothTopics.get('shape:r1');
+
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', null]);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(rec.interestDirty).toBe(false);
+
+		// Now oscillate report/clear at the SAME point. Nothing moves, so nothing
+		// is owed after the first revert.
+		for (let i = 0; i < 10; i++) {
+			await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+			expect(rec.interestDirty).toBe(false);
+			await call(wsA, platform, name + '/shape/__smooth/center', ['r1', null]);
+			expect(rec.interestDirty).toBe(false);
+		}
+	});
+
+	// A slow drift must not be thresholded away one step at a time: the
+	// comparison is against the center the last pass was owed at, not the
+	// previous report, so accumulated movement eventually owes a pass.
+	it('accumulates a slow drift into a pass', async () => {
+		const { name } = declareInterest();
+		const platform = wirePlatform();
+		const wsA = mockWs({ id: 'A' });
+		await call(wsA, platform, name + '/shape/__smooth/sync', ['r1']);
+		const rec = _smoothTopics.get('shape:r1');
+
+		await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: 0, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(rec.interestDirty).toBe(false);
+
+		let dirty = false;
+		for (let i = 1; i <= 200 && !dirty; i++) {
+			await call(wsA, platform, name + '/shape/__smooth/center', ['r1', { x: i * 0.5, y: 0 }]);
+			dirty = rec.interestDirty;
+		}
+		expect(dirty).toBe(true);
+	});
 });
 
 describe('live.smooth lag-compensated shoot', () => {
@@ -2787,7 +3003,7 @@ describe('live.smooth lag-compensated shoot', () => {
 		expect(platform.wirePublished.filter((w) => w.event === 'event')).toHaveLength(0);
 	});
 
-	it('cannot hit an entity outside the shooter candidate set (credo-5 default-deny)', async () => {
+	it('cannot hit an entity outside the shooter candidate set (default-deny)', async () => {
 		const { name } = hitShape();
 		const p = paths(name);
 		const platform = wirePlatform();

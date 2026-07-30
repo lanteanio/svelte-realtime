@@ -152,10 +152,10 @@ function recordingPlatform() {
  *   tickMs?: number,
  *   maxRewindMs?: number,
  *   radius?: number,
- *   buggify?: boolean,
+ *   faultMode?: boolean,
  *   onHitTap?: (target: any, info: any) => any,
  *   gitCommit?: string
- * }} [config] `buggify` widens the shot lag past the favor-shooter reach and teleports
+ * }} [config] `faultMode` widens the shot lag past the favor-shooter reach and teleports
  *   a target into the rewindable window late in the run, exercising the reach clamp, the
  *   over-window fallback, and the ring's teleport guard - paths the determinism property
  *   must survive too. `onHitTap` folds an extra value into each hit record (a test hook
@@ -170,7 +170,7 @@ export async function runSmoothSim(config = {}) {
 	const tickMs = config.tickMs ?? 50;
 	const maxRewindMs = config.maxRewindMs ?? 1000;
 	const radius = config.radius ?? 1000;
-	const buggified = config.buggify === true;
+	const faulted = config.faultMode === true;
 	const onHitTap = typeof config.onHitTap === 'function' ? config.onHitTap : null;
 
 	const rng = seededRng(seed);
@@ -196,7 +196,7 @@ export async function runSmoothSim(config = {}) {
 		for (let i = 1; i < entityCount; i++) targets.push('u' + i);
 
 		// The shape: a circle hitbox + a ray shot + an interest cull. teleportThreshold
-		// is armed only under buggify so the OFF path stays the common (always-on gap
+		// is armed only under faultMode so the OFF path stays the common (always-on gap
 		// guard) geometry. Declared through the real `live.smooth` normalizer so the cfg
 		// (including the hitTest.position -> interest.position default the ring-space gate
 		// keys on) is exactly what production builds.
@@ -215,7 +215,7 @@ export async function runSmoothSim(config = {}) {
 				hitbox: { shape: 'circle', radius: 30 },
 				shot: { type: 'ray', origin: (cmd, sh) => ({ x: sh.x, y: sh.y }), dir: (cmd) => cmd.aim, maxDist: radius * 2 },
 				maxRewindMs,
-				teleportThreshold: buggified ? radius * 0.5 : undefined,
+				teleportThreshold: faulted ? radius * 0.5 : undefined,
 				onHit: (ctx, target, info) => {
 					const entry = {
 						key: target.key,
@@ -274,11 +274,11 @@ export async function runSmoothSim(config = {}) {
 				const v = vel.get(k);
 				let nx = p.x + v.vx;
 				let ny = p.y + v.vy;
-				// A late teleport (buggify only), placed inside the rewindable window so a
+				// A late teleport (faultMode only), placed inside the rewindable window so a
 				// reach-clamped shot rewinds into the straddling bracket and the ring's
 				// teleport guard fires (the jump exceeds teleportThreshold, so sample returns
 				// null and the target is excluded - deterministically).
-				if (buggified && k === targets[0] && t === ticks - 2) { nx += radius; ny += radius; }
+				if (faulted && k === targets[0] && t === ticks - 2) { nx += radius; ny += radius; }
 				const np = { x: nx, y: ny };
 				pos.set(k, np);
 				auth._set(k, { id: k }, np);
@@ -307,8 +307,8 @@ export async function runSmoothSim(config = {}) {
 			const now = lastTick + (i + 1) * tickMs;
 			const tk = targets[Math.floor(rng() * targets.length)];
 			// A modest lag (in window, under the typical reach) on the common path so the
-			// rewind lands near `rt`; buggify widens it past the reach to exercise the clamp.
-			const lag = buggified ? Math.floor(rng() * (maxRewindMs * 0.9)) : Math.floor(rng() * 140);
+			// rewind lands near `rt`; faultMode widens it past the reach to exercise the clamp.
+			const lag = faulted ? Math.floor(rng() * (maxRewindMs * 0.9)) : Math.floor(rng() * 140);
 			let rtStamp = now - lag;
 			if (rtStamp < prevRt) rtStamp = prevRt;
 			prevRt = rtStamp;
@@ -361,7 +361,7 @@ export async function runSmoothSim(config = {}) {
 		return {
 			seed,
 			gitCommit: config.gitCommit ?? (typeof process !== 'undefined' ? process.env.GIT_COMMIT : null) ?? null,
-			config: { entities: entityCount, ticks, shots, tickMs, maxRewindMs, radius, buggify: buggified },
+			config: { entities: entityCount, ticks, shots, tickMs, maxRewindMs, radius, faultMode: faulted },
 			invariantViolations: violations,
 			metrics: {
 				entities: entityCount,
@@ -387,7 +387,7 @@ export async function runSmoothSim(config = {}) {
 // catalog, so after tick `k` the entity sits at `spawn + vel * (k + 1)`. Used only to
 // aim a shot near where the target was at the rewind instant (so honest shots resolve);
 // never fed into the resolution itself, so its precision only affects hit yield, not
-// determinism. The buggify teleport perturbs one target past this closed form, which
+// determinism. The faultMode teleport perturbs one target past this closed form, which
 // only costs that shot a miss.
 function ringPosAt(spawn, vel, key, k) {
 	const s = spawn.get(key);
@@ -414,7 +414,7 @@ export async function replaySmoothSim(reproducer) {
 }
 
 /**
- * Structural fingerprint (the "unseed"): an 8-hex-char FNV-1a digest of the byte-stable
+ * Structural fingerprint: an 8-hex-char FNV-1a digest of the byte-stable
  * result fields. Same seed -> same fingerprint.
  * @param {any} result a runSmoothSim result
  */
@@ -433,21 +433,21 @@ function smoothFingerprint(result) {
 
 /**
  * Run a swarm of seeds against the lag-compensation sim. Same contract as the adapter /
- * realtime swarms: a seed range (`count`/`startSeed`) or explicit `seeds`, a `buggify`
+ * realtime swarms: a seed range (`count`/`startSeed`) or explicit `seeds`, a `faultMode`
  * knob (off/on/random) that widens the shot lag and arms a mid-run teleport, and
  * `checkRatio` for the two-pass determinism re-check. An invariant violation or a non-
  * reproduced re-check fails the seed. Returns `{ summary, runs }`.
  *
  * @param {{
  *   seeds?: Array<string | number>, count?: number, startSeed?: number,
- *   base?: object, buggify?: 'off' | 'on' | 'random', buggifyProbability?: number,
+ *   base?: object, faultMode?: 'off' | 'on' | 'random', faultProbability?: number,
  *   checkRatio?: number, gitCommit?: string, onResult?: (run: any, index: number) => void
  * }} [config]
  */
 export async function runSmoothSimSwarm(config = {}) {
 	const base = config.base || {};
-	const buggify = config.buggify || 'off';
-	const buggifyProbability = config.buggifyProbability ?? 0.25;
+	const faultMode = config.faultMode || 'off';
+	const faultProbability = config.faultProbability ?? 0.25;
 	const checkRatio = config.checkRatio ?? 0;
 
 	let seeds;
@@ -469,10 +469,10 @@ export async function runSmoothSimSwarm(config = {}) {
 	for (let i = 0; i < seeds.length; i++) {
 		const seed = seeds[i];
 
-		let buggified = buggify === 'on';
-		if (buggify === 'random') buggified = seededRng(seed + ':buggify')() < buggifyProbability;
+		let faulted = faultMode === 'on';
+		if (faultMode === 'random') faulted = seededRng(seed + ':faultmode')() < faultProbability;
 
-		const result = await runSmoothSim({ ...base, seed, buggify: buggified });
+		const result = await runSmoothSim({ ...base, seed, faultMode: faulted });
 		if (gitCommit === null && result.gitCommit) gitCommit = result.gitCommit;
 
 		const failed = result.invariantViolations.length > 0;
@@ -487,7 +487,7 @@ export async function runSmoothSimSwarm(config = {}) {
 		const run = {
 			seed,
 			ok: !failed && reproduced !== false,
-			buggified,
+			faulted,
 			fingerprint: smoothFingerprint(result),
 			violations: result.invariantViolations.length,
 			fatals: 0,
@@ -509,8 +509,8 @@ export async function runSmoothSimSwarm(config = {}) {
 			failed: failingSeeds.length,
 			firstFailingSeed: failingSeeds.length ? failingSeeds[0] : null,
 			failingSeeds,
-			buggify,
-			buggified: runs.filter((r) => r.buggified).length,
+			faultMode,
+			faulted: runs.filter((r) => r.faulted).length,
 			determinismChecks,
 			determinismFailures,
 			determinismFailingSeeds,

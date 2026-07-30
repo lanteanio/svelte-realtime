@@ -3,6 +3,7 @@ import { live } from '../server.js';
 import { _getIdentityKey } from './identity.js';
 import { _clusterPresenceMerge } from './presence.js';
 import { _tenantTopic } from './tenant.js';
+import { _IS_DEV } from './env.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); multiplayer registration reaches it through this,
@@ -10,6 +11,67 @@ import { _tenantTopic } from './tenant.js';
 let _callTopicFn;
 export function installMultiplayer(seams) {
 	_callTopicFn = seams.callTopicFn;
+}
+
+// Sticky presence-field bounds: a roster entry is rewritten in full
+// per merge and served verbatim to every late joiner, so a client must not
+// grow it without limit. A sticky value is a boolean lock flag or a small
+// selection range, so anything larger than this is dropped, and a single
+// delta stamps at most this many sticky fields. The roster merge
+// (_clusterPresenceMerge) additionally caps the accumulated entry size.
+const _STICKY_MAX_KEYS = 64;
+const _STICKY_VALUE_MAX_BYTES = 1024;
+
+/**
+ * A sticky value persists only when its serialized form fits the bound; null
+ * (the release path) always fits. Unserializable values are dropped.
+ * @param {any} v
+ */
+function _stickyValueFits(v) {
+	if (v == null) return true;
+	// Bytes, not UTF-16 code units - same unit the roster entry cap uses.
+	try { return Buffer.byteLength(JSON.stringify(v), 'utf8') <= _STICKY_VALUE_MAX_BYTES; } catch { return false; }
+}
+
+/**
+ * One-time dev warning per reason. Sticky drops are individually silent by
+ * design (a hostile client must not get a per-frame error channel), but an app
+ * that misconfigures `locks` or overshoots the value bound would otherwise see
+ * its locks simply never persist, with nothing to point at.
+ * @type {Set<string>}
+ */
+const _stickyDropWarned = new Set();
+
+/**
+ * `detail` carries a client-supplied key, so it is stripped of control bytes and
+ * truncated before it reaches the log. A raw key could otherwise inject newlines
+ * to forge log lines, or emit a megabyte per warning.
+ * @param {string} s
+ */
+function _logSafe(s) {
+	let out = '';
+	for (let i = 0; i < s.length && out.length < 64; i++) {
+		const c = s.charCodeAt(i);
+		out += c < 0x20 || c === 0x7f ? '.' : s[i];
+	}
+	return out.length < s.length ? out + '...' : out;
+}
+
+function _warnStickyDrop(reason, detail) {
+	// Dedup is keyed on `reason`, which is always a program constant, so the set
+	// stays bounded no matter what a client sends.
+	if (!_IS_DEV || _stickyDropWarned.has(reason)) return;
+	_stickyDropWarned.add(reason);
+	console.warn(
+		'[svelte-realtime] live.multiplayer(): dropping a sticky presence field - ' + reason + ' (' + _logSafe(String(detail)) + ').\n' +
+		'  The field will not persist on the roster entry. This warning fires once per reason per process.\n' +
+		'  See: https://svti.me/multiplayer'
+	);
+}
+
+/** Test seam: forget which sticky-drop warnings have fired. */
+export function _resetStickyDropWarnings() {
+	_stickyDropWarned.clear();
 }
 
 export const _multiplayerRegister = function multiplayer(config) {
@@ -136,14 +198,43 @@ export const _multiplayerRegister = function multiplayer(config) {
 		_publishPresenceField(ctx, args);
 		// Persist the sticky subset onto the roster after the forward publish so a
 		// late joiner who loads the roster still sees it. selection (when
-		// selections are enabled) and lock:<k> (when locks are enabled) are sticky;
-		// typing and everything else stay ephemeral. Reactions ride a separate path.
+		// selections are enabled) and declared lock:<k> keys (when locks are
+		// enabled) are sticky; typing and everything else stay ephemeral.
+		// Reactions ride a separate path.
 		const delta = args[_cursorArgCount];
 		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
 			const sticky = {};
+			let stickyCount = 0;
 			for (const k of Object.keys(delta)) {
-				if (k === 'selection') { if (config.selections) sticky[k] = delta[k]; }
-				else if (k.slice(0, 5) === 'lock:') { if (config.locks) sticky[k] = delta[k]; }
+				if (stickyCount >= _STICKY_MAX_KEYS) {
+					_warnStickyDrop('more than ' + _STICKY_MAX_KEYS + ' sticky keys in one delta', 'key ' + k);
+					break;
+				}
+				if (k === 'selection') {
+					if (!config.selections) continue;
+					if (!_stickyValueFits(delta[k])) {
+						_warnStickyDrop('value exceeds ' + _STICKY_VALUE_MAX_BYTES + ' bytes serialized', 'selection');
+						continue;
+					}
+					sticky[k] = delta[k];
+					stickyCount++;
+				} else if (k.slice(0, 5) === 'lock:') {
+					// Locks persist only when declared: an array declaration is
+					// the allowlist of lockable keys (`locks: ['title']` allows
+					// `lock:title` and nothing else), so undeclared keys can
+					// never accumulate on the roster entry.
+					if (!config.locks) continue;
+					if (Array.isArray(config.locks) && !config.locks.includes(k.slice(5))) {
+						_warnStickyDrop('lock key is not in the declared locks allowlist', k);
+						continue;
+					}
+					if (!_stickyValueFits(delta[k])) {
+						_warnStickyDrop('value exceeds ' + _STICKY_VALUE_MAX_BYTES + ' bytes serialized', k);
+						continue;
+					}
+					sticky[k] = delta[k];
+					stickyCount++;
+				}
 			}
 			if (Object.keys(sticky).length > 0) {
 				// The roster store is keyed by the WIRE data topic (the data-stream's

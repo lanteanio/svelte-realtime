@@ -89,7 +89,7 @@ export function configureForget(config) {
 
 /**
  * PII-free fingerprint of a userId for the audit hook - a forget record must
- * never carry the raw id it is erasing (credo rule 5). Matches the idempotency
+ * never carry the raw id it is erasing (no PII in logs). Matches the idempotency
  * identity fingerprint (sha256, 32 hex chars).
  * @param {string} userId
  * @returns {string}
@@ -310,7 +310,7 @@ const _liveForget = async function forget(userId, opts) {
 				// in-memory surface, we do NOT swallow it, so the app can retry.
 				// Log without the `ownerSuccessions` the store attaches for
 				// announcement: those carry SUCCESSOR user ids (other users), which
-				// must not reach a log even in dev (credo: no PII in logs). The
+				// must not reach a log even in dev (no PII in logs). The
 				// message + underlying failure reasons stay for debuggability.
 				if (_IS_DEV) {
 					const logErr = err && typeof err === 'object' && 'ownerSuccessions' in /** @type {any} */ (err)

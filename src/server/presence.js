@@ -42,13 +42,39 @@ export function _presenceRefForTest() {
 const _PRESENCE_KEY_PREFIX = '__live-presence:';
 const _PRESENCE_TTL_SEC = 3600;
 
+// Bound on a roster entry's serialized size after a sticky merge:
+// the entry is rewritten in full per merge and served verbatim to every
+// late joiner, so a client must not grow it without limit. A merge that
+// SHRINKS the entry always applies, so a release can never be pinned by
+// the cap.
+const _PRESENCE_ENTRY_MAX_BYTES = 16384;
+
+/**
+ * Cap check for a sticky merge: the merged entry must stay under the byte
+ * bound, unless the merge shrinks the entry (a release must always apply).
+ *
+ * BYTES, not `String.length`: the Lua twin measures `#encoded` (bytes) and a
+ * JS `.length` is UTF-16 code units, so a value of 4-byte characters would let
+ * the in-memory path (the default, zero-config, no-redis path) admit roughly 4x
+ * what the cluster path admits. One unit or the two diverge.
+ *
+ * @param {string} curJson serialized entry before the merge
+ * @param {string} nextJson serialized entry after the merge
+ */
+function _presenceMergeWithinCap(curJson, nextJson) {
+	const nextBytes = Buffer.byteLength(nextJson, 'utf8');
+	return nextBytes <= _PRESENCE_ENTRY_MAX_BYTES || nextBytes <= Buffer.byteLength(curJson, 'utf8');
+}
+
 // Atomic sticky-field merge into a roster entry's data field, gated on the
 // entry still being present. KEYS[1] = the roster hash; ARGV = count field,
-// data field, the JSON delta (null value = delete the field), the TTL. Returns
-// 0 (and writes nothing) when the count field is gone, so a release that lands
-// between a read and a write cannot resurrect a phantom data row with no count.
+// data field, the JSON delta (null value = delete the field), the TTL, the
+// entry byte cap. Returns 0 (and writes nothing) when the count field is
+// gone, so a release that lands between a read and a write cannot resurrect
+// a phantom data row with no count. Returns 2 (and writes nothing) when the
+// merged entry would exceed the byte cap without shrinking the entry.
 // One round-trip; the JS fallback below covers a redis without scripting.
-const _PRESENCE_MERGE_SCRIPT =
+export const _PRESENCE_MERGE_SCRIPT =
 	"if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then return 0 end\n" +
 	"local raw = redis.call('HGET', KEYS[1], ARGV[2])\n" +
 	"local cur = {}\n" +
@@ -56,6 +82,7 @@ const _PRESENCE_MERGE_SCRIPT =
 	"local delta = cjson.decode(ARGV[3])\n" +
 	"for k, v in pairs(delta) do if v == cjson.null then cur[k] = nil else cur[k] = v end end\n" +
 	"local encoded; if next(cur) == nil then encoded = '{}' else encoded = cjson.encode(cur) end\n" +
+	"if #encoded > tonumber(ARGV[5]) and (not raw or #encoded > #raw) then return 2 end\n" +
 	"redis.call('HSET', KEYS[1], ARGV[2], encoded)\n" +
 	"redis.call('EXPIRE', KEYS[1], ARGV[4])\n" +
 	"return 1";
@@ -254,7 +281,9 @@ export async function _clusterPresenceList(platform, topic) {
  * only carries the sticky subset onto the roster entry so a subscriber who
  * loads the roster after the update still sees the field. An entry only exists
  * once presence has been set, so a missing entry (no live roster row) is a
- * no-op: there is nothing to stamp the field onto.
+ * no-op: there is nothing to stamp the field onto. The merged entry is capped
+ * at `_PRESENCE_ENTRY_MAX_BYTES` serialized (growth beyond the cap is dropped;
+ * a merge that shrinks the entry always applies).
  *
  * @param {any} platform
  * @param {string} topic
@@ -265,9 +294,19 @@ export async function _clusterPresenceMerge(platform, topic, key, delta) {
 	// In-memory roster (the no-redis snapshot path reads ref.data by reference).
 	const ref = _presenceRef.get(topic + '\0' + key);
 	if (ref && ref.data && typeof ref.data === 'object') {
+		const next = { ...ref.data };
 		for (const k of Object.keys(delta)) {
-			if (delta[k] == null) delete ref.data[k]; else ref.data[k] = delta[k];
+			if (delta[k] == null) delete next[k]; else next[k] = delta[k];
 		}
+		// Apply only within the entry byte cap; a merge that shrinks
+		// the entry always applies so a release can never be pinned by the cap.
+		let nextJson, curJson;
+		// `?? null` / `?? ''`: JSON.stringify RETURNS undefined (it does not throw)
+		// for a value whose toJSON yields undefined, and Buffer.byteLength would
+		// then throw out of the merge.
+		try { nextJson = JSON.stringify(next) ?? null; } catch { nextJson = null; }
+		try { curJson = JSON.stringify(ref.data) ?? ''; } catch { curJson = ''; }
+		if (nextJson !== null && _presenceMergeWithinCap(curJson, nextJson)) ref.data = next;
 	}
 	// Cluster roster (the redis snapshot path reads the 'd:'+key JSON field).
 	const redis = platform && platform.redis;
@@ -281,7 +320,7 @@ export async function _clusterPresenceMerge(platform, topic, key, delta) {
 		try {
 			await redis.eval(
 				_PRESENCE_MERGE_SCRIPT, 1, hKey, countField, dataField,
-				JSON.stringify(delta), String(_PRESENCE_TTL_SEC)
+				JSON.stringify(delta), String(_PRESENCE_TTL_SEC), String(_PRESENCE_ENTRY_MAX_BYTES)
 			);
 		} catch { /* redis blip: in-memory already merged; forward update already sent */ }
 		return;
@@ -297,8 +336,10 @@ export async function _clusterPresenceMerge(platform, topic, key, delta) {
 		for (const k of Object.keys(delta)) {
 			if (delta[k] == null) delete cur[k]; else cur[k] = delta[k];
 		}
+		const encoded = JSON.stringify(cur);
+		if (!_presenceMergeWithinCap(raw, encoded)) return;
 		if (typeof redis.hexists === 'function' && !(await redis.hexists(hKey, countField))) return;
-		await redis.hset(hKey, dataField, JSON.stringify(cur));
+		await redis.hset(hKey, dataField, encoded);
 		try { await redis.expire(hKey, _PRESENCE_TTL_SEC); } catch { /* best-effort */ }
 	} catch { /* redis blip: in-memory already merged; forward update already sent */ }
 }

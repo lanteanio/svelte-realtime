@@ -351,6 +351,18 @@ export const state = {
 	authorizeWireSubscribe: true,
 
 	/**
+	 * Operator secret keying the differential-privacy noise seed
+	 * (`live.aggregate({ privacy })` with a `perturb` / `hybrid` strategy). Set via
+	 * `realtime({ privacySecret })`; shared by every cluster replica so all of
+	 * them draw identical noise for the same window. `null` (default) leaves
+	 * noise strategies refusing to publish (a keyless seed would be
+	 * attacker-recomputable - the "noise" could simply be subtracted).
+	 * k-anonymity-only (`suppress`) aggregates do not need it.
+	 * @type {string | null}
+	 */
+	privacySecret: null,
+
+	/**
 	 * Process-wide cluster bus. Single source of truth consulted by every
 	 * publish surface in the framework (RPC `ctx.publish`, cron tick,
 	 * reactive watchers' publish wrap, top-level `publish()` helper). When

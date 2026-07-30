@@ -42,9 +42,16 @@ describe('resolveId', () => {
 		expect(plugin.resolveId('$live/rooms/lobby')).toBe('\0live:rooms/lobby');
 	});
 
-	it('resolves registry ID', () => {
+	it('resolves registry ID for the server (SSR) graph only', () => {
 		const plugin = createPlugin();
-		expect(plugin.resolveId('\0live:__registry')).toBe('\0live:__registry');
+		// Server graph: resolves (the registry carries the full RPC route map).
+		expect(plugin.resolveId('\0live:__registry', undefined, { ssr: true })).toBe('\0live:__registry');
+		expect(plugin.resolveId('/@svelte-realtime-registry', undefined, { ssr: true })).toBe('\0live:__registry');
+		// Client graph: never resolves - an anonymous HTTP client of a dev
+		// server must not fetch the route map.
+		expect(plugin.resolveId('\0live:__registry', undefined, { ssr: false })).toBeNull();
+		expect(plugin.resolveId('/@svelte-realtime-registry', undefined, { ssr: false })).toBeNull();
+		expect(plugin.resolveId('/@svelte-realtime-registry')).toBeNull();
 	});
 
 	it('returns null for non-$live imports', () => {
@@ -378,7 +385,7 @@ export const messages = live.stream('messages', async (ctx) => []);
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag, __registerWebhookOut } from 'svelte-realtime/server'");
 		expect(code).toContain('__register("chat/sendMessage"');
@@ -393,7 +400,7 @@ export const messages = live.stream('messages', async (ctx) => []);
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('__register("admin/deleteUser"');
 		expect(code).toContain('__register("chat/send"');
@@ -409,7 +416,7 @@ export const shape = live.smooth({ topic: (ctx, id) => 'shape:' + id, apply, ini
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('__register("board/shape/__smooth/command"');
 		expect(code).toContain('__register("board/shape/__smooth/sync"');
@@ -425,7 +432,7 @@ export const shape = live.smooth({ topic: (ctx, id) => 'shape:' + id, apply, ini
 	it('returns empty comment when no live dir exists', () => {
 		teardown();
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('No live modules found');
 	});
@@ -635,7 +642,7 @@ export const items = live.stream('legacy:topic', async () => []);
 		});
 
 		const plugin = createPlugin();
-		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		const warns = captureWarns(() => plugin.load('\0live:__registry', { ssr: true }));
 		expect(warns.some(w => w.includes('not in your TOPICS registry'))).toBe(false);
 	});
 
@@ -655,7 +662,7 @@ export const wrong = live.stream('mistyped-topic', async () => []);
 		});
 
 		const plugin = createPlugin();
-		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		const warns = captureWarns(() => plugin.load('\0live:__registry', { ssr: true }));
 		expect(warns.some(w => w.includes("topic 'mistyped-topic' is not in your TOPICS registry"))).toBe(true);
 	});
 
@@ -674,7 +681,7 @@ export const items = live.stream('feed:notices', async () => []);
 		});
 
 		const plugin = createPlugin();
-		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		const warns = captureWarns(() => plugin.load('\0live:__registry', { ssr: true }));
 		expect(warns.some(w => w.includes('not in your TOPICS registry'))).toBe(false);
 	});
 
@@ -698,7 +705,7 @@ export const room = live.stream('room:org-1:lobby', async () => []);
 		});
 
 		const plugin = createPlugin();
-		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		const warns = captureWarns(() => plugin.load('\0live:__registry', { ssr: true }));
 		const offending = warns.filter(w => w.includes('not in your TOPICS registry'));
 		expect(offending).toEqual([]);
 	});
@@ -718,7 +725,7 @@ export const wrong = live.channel('not-a-channel', { merge: 'presence' });
 		});
 
 		const plugin = createPlugin();
-		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		const warns = captureWarns(() => plugin.load('\0live:__registry', { ssr: true }));
 		expect(warns.some(w => w.includes("live.channel topic 'not-a-channel'") && w.includes('not in your TOPICS registry'))).toBe(true);
 	});
 
@@ -736,7 +743,7 @@ export const bad = live.stream('sys:wrongbeat', async () => null);
 		});
 
 		const plugin = createPlugin();
-		const warns = captureWarns(() => plugin.load('\0live:__registry', {}));
+		const warns = captureWarns(() => plugin.load('\0live:__registry', { ssr: true }));
 		expect(warns.some(w => w.includes("'sys:heartbeat'"))).toBe(false);
 		expect(warns.some(w => w.includes("'sys:wrongbeat'") && w.includes('not in your TOPICS registry'))).toBe(true);
 	});
@@ -951,9 +958,13 @@ export function upgrade() { return {}; }
 // - resolveId: /@svelte-realtime-registry (Finding 2) ------------------------
 
 describe('resolveId (registry URL)', () => {
-	it('resolves /@svelte-realtime-registry to the registry virtual module', () => {
+	it('resolves /@svelte-realtime-registry to the registry virtual module for the server graph only', () => {
 		const plugin = createPlugin();
-		expect(plugin.resolveId('/@svelte-realtime-registry')).toBe('\0live:__registry');
+		expect(plugin.resolveId('/@svelte-realtime-registry', undefined, { ssr: true })).toBe('\0live:__registry');
+		// Client graph: never resolves - an anonymous GET of the URL
+		// on a dev server would otherwise receive the full RPC route map.
+		expect(plugin.resolveId('/@svelte-realtime-registry', undefined, { ssr: false })).toBeNull();
+		expect(plugin.resolveId('/@svelte-realtime-registry')).toBeNull();
 	});
 });
 
@@ -1317,7 +1328,7 @@ export const inbox = live.stream(
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/inbox'");
+		expect(content).toContain('declare module "$live/inbox"');
 		// Static shape: bare StreamStore, no `(...) =>` factory wrapper before the &
 		expect(content).toMatch(/export const inbox: StreamStore<[^>]+> & \{ load\(/);
 		expect(content).not.toMatch(/export const inbox: \([^)]*\) => StreamStore/);
@@ -1368,7 +1379,7 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		expect(existsSync(typesPath)).toBe(true);
 
 		const content = readFileSync(typesPath, 'utf-8');
-		expect(content).toContain("declare module '$live/chat'");
+		expect(content).toContain('declare module "$live/chat"');
 		expect(content).toContain('sendMessage');
 		expect(content).toContain('(...args: any[]) => Promise<any>');
 		expect(content).toContain('messages');
@@ -1388,7 +1399,7 @@ export const avatar = live.upload(async (ctx, name) => ({ name }));
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/uploads'");
+		expect(content).toContain('declare module "$live/uploads"');
 		expect(content).toContain('UploadHandle');
 		expect(content).toContain("import type { UploadHandle } from 'svelte-realtime/client'");
 		expect(content).toMatch(/avatar:\s*\(source:\s*Blob\s*\|\s*ArrayBuffer/);
@@ -1411,7 +1422,7 @@ export const sendMessage = live(async (ctx: LiveContext, text: string, roomId: n
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/chat'");
+		expect(content).toContain('declare module "$live/chat"');
 		expect(content).toContain('sendMessage');
 		expect(content).toContain('text: string');
 		expect(content).toContain('roomId: number');
@@ -1437,7 +1448,7 @@ export const feed = live.stream(
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/feed'");
+		expect(content).toContain('declare module "$live/feed"');
 		expect(content).toContain('...args: any[]');
 		expect(content).not.toContain('{ user }');
 	});
@@ -1459,7 +1470,7 @@ export const room = live.stream(
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/rooms'");
+		expect(content).toContain('declare module "$live/rooms"');
 		expect(content).toContain('...args: any[]');
 	});
 
@@ -1480,7 +1491,7 @@ export const mixed = live.stream(
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/mixed'");
+		expect(content).toContain('declare module "$live/mixed"');
 		expect(content).toContain('...args: any[]');
 		expect(content).not.toContain('{ user');
 	});
@@ -1502,7 +1513,7 @@ export const feed = live.stream(
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/commas'");
+		expect(content).toContain('declare module "$live/commas"');
 		expect(content).not.toContain("b')");
 		expect(content).toContain('roomId');
 	});
@@ -1524,7 +1535,7 @@ export const feed = live.stream(
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/cmp'");
+		expect(content).toContain('declare module "$live/cmp"');
 		expect(content).toContain('docId');
 	});
 
@@ -1545,7 +1556,7 @@ export const feed = live.stream(
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/generic'");
+		expect(content).toContain('declare module "$live/generic"');
 		expect(content).toContain('docId');
 	});
 
@@ -1567,7 +1578,7 @@ export const items = live.stream('items', async (ctx: LiveContext): Promise<Item
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/items'");
+		expect(content).toContain('declare module "$live/items"');
 		expect(content).toContain('StreamStore<Item[] | undefined | { error: RpcError }>');
 	});
 
@@ -1599,8 +1610,8 @@ export const cards = live.stream('cards', async (ctx) => [], { merge: 'crud' });
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/chat'");
-		expect(content).toContain("declare module '$live/admin'");
+		expect(content).toContain('declare module "$live/chat"');
+		expect(content).toContain('declare module "$live/admin"');
 	});
 
 	it('skips generation when typedImports is false', () => {
@@ -1626,7 +1637,7 @@ export const join = live(async (ctx) => {});
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/rooms/lobby'");
+		expect(content).toContain('declare module "$live/rooms/lobby"');
 	});
 
 	it('imports StreamStore from svelte-realtime/client for stream exports', () => {
@@ -1799,7 +1810,7 @@ export const refreshStats = live.cron('*/5 * * * *', 'stats', async () => {});
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('__registerCron("jobs/refreshStats"');
 		expect(code).toContain("import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, __registerFlag, __registerWebhookOut }");
@@ -2070,7 +2081,7 @@ export const submit = live.validated(schema, async (ctx, input) => {});
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/forms'");
+		expect(content).toContain('declare module "$live/forms"');
 		expect(content).toContain('submit');
 	});
 });
@@ -2108,7 +2119,7 @@ export const summary = live.derived(['orders', 'inventory'], async () => {
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('__register("stats/summary"');
 		expect(code).toContain('__registerDerived("stats/summary"');
@@ -2184,7 +2195,7 @@ export const maintenance = live.flag('flag:maintenance', false);
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('__register("flags/maintenance"');
 		expect(code).not.toContain('__registerDerived("flags/maintenance"');
@@ -2201,7 +2212,7 @@ export const bare = live.flag('flag:bare');
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		// Watcher install is hoisted to registry load (eager), keyed by topic,
 		// alongside the lazy stream __register.
@@ -2223,7 +2234,7 @@ export const dynamic = live.flag('flag:dynamic', computed);
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		// Non-literal second arg is not forwarded - the registry never evaluates
 		// user expressions - but the watcher install is still emitted.
@@ -2243,7 +2254,7 @@ export const maintenance = live.flag('flag:maintenance', false);
 		plugin.buildStart();
 
 		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
-		expect(content).toContain("declare module '$live/flags'");
+		expect(content).toContain('declare module "$live/flags"');
 		expect(content).toContain('maintenance');
 		expect(content).toContain('StreamStore<any>');
 	});
@@ -2297,7 +2308,7 @@ export const chat = live.room({
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('__register("rooms/chat/__data"');
 		expect(code).toContain('__registerRoomActions("rooms/chat"');
@@ -2450,7 +2461,7 @@ export const typing = live.channel('typing:lobby', { merge: 'presence' });
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('__register("collab/typing"');
 	});
@@ -2492,7 +2503,7 @@ export const notifySlack = live.webhooks.outbound(['alerts'], { url: 'https://ho
 `
 		});
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 		expect(code).toContain('__registerWebhookOut("hooks/notifySlack"');
 	});
 
@@ -2747,7 +2758,7 @@ export const send = live(async (ctx, text) => {});
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		// The generated import path should be JSON.stringify'd (double-quoted)
 		// so it never breaks if the path contains quotes
@@ -2792,7 +2803,7 @@ export const handler = live(async (ctx) => 'ok');
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		// Pre-fix: __register('foo/handler', ...) / __registerGuard('foo', ...)
 		// Post-fix: __register("foo/handler", ...) / __registerGuard("foo", ...)
@@ -2808,7 +2819,7 @@ export const handler = live(async (ctx) => 'ok');
 		// one. Pre-fix, that path got dropped verbatim into a single-quoted
 		// JS string literal in the generated registry, breaking out into a
 		// syntax error at best (build fails) and arbitrary expression at
-		// worst (Codex's PoC was an RCE in the generated server bundle).
+		// worst (a working PoC reached RCE in the generated server bundle).
 		setup({
 			"weird'name.js": `
 import { live } from 'svelte-realtime/server';
@@ -2817,7 +2828,7 @@ export const handler = live(async (ctx) => 'ok');
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		// Treat the registry as a freshly-generated script and parse it.
 		// Pre-fix this throws a SyntaxError because the embedded `'` ends
@@ -2836,6 +2847,33 @@ export const handler = live(async (ctx) => 'ok');
 			'__registerRoomActions',
 			body
 		)).not.toThrow();
+	});
+	it('JSON-quotes the module name in $types.d.ts so a hostile filename cannot inject declarations', () => {
+		// A filename containing `'` is legal on NTFS/ext4/APFS. Pre-fix the
+		// raw filename broke out of the single-quoted module-name string and
+		// injected arbitrary declaration text; post-fix it stays inside a
+		// JSON-quoted string.
+		setup({
+			"x'; export type PWNED = 1; declare module 'y.ts": `
+import { live } from 'svelte-realtime/server';
+export const a = live(async () => 1);
+`,
+			'ok.js': `
+import { live } from 'svelte-realtime/server';
+export const b = live(async () => 1);
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		// The payload appears exactly once, inside the quoted module name of
+		// a well-formed `declare module "..." {` opener - never at statement
+		// level.
+		const pwnedLines = content.split('\n').filter((l) => l.includes('PWNED'));
+		expect(pwnedLines).toHaveLength(1);
+		expect(pwnedLines[0]).toBe(`declare module "$live/x'; export type PWNED = 1; declare module 'y" {`);
 	});
 });
 
@@ -2857,7 +2895,7 @@ export const feed2 = live.stream('same-topic', async () => [], { merge: 'crud' }
 		});
 
 		const plugin = createPlugin();
-		expect(() => plugin.load('\0live:__registry', {})).toThrow('Duplicate stream topic');
+		expect(() => plugin.load('\0live:__registry', { ssr: true })).toThrow('Duplicate stream topic');
 	});
 
 	it('throws when a stream uses a reserved __ prefix', () => {
@@ -2869,7 +2907,7 @@ export const feed = live.stream('__reserved', async () => [], { merge: 'crud' })
 		});
 
 		const plugin = createPlugin();
-		expect(() => plugin.load('\0live:__registry', {})).toThrow('reserved');
+		expect(() => plugin.load('\0live:__registry', { ssr: true })).toThrow('reserved');
 	});
 });
 
@@ -2892,7 +2930,7 @@ export const myRoom = live.room({
 		});
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		// Room sub-handlers should get explicit module path 'rooms' (not 'rooms/myRoom')
 		expect(code).toContain('__register("rooms/myRoom/__data"');

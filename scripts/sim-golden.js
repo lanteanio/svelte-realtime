@@ -17,7 +17,7 @@
 //
 // One corpus per sim: the live-dispatch swarm (RPC + stream fan-out under a
 // seeded chaos drop) and the smooth lag-compensation swarm (the shot-resolution
-// path, buggify widening lag + arming a teleport). Each corpus records the swarm
+// path, faultMode widening lag + arming a teleport). Each corpus records the swarm
 // knobs its fingerprints are only comparable under; verify re-runs exactly the
 // corpus seeds under exactly the corpus config.
 
@@ -31,13 +31,13 @@ const CONFIGS = [
 		name: 'live-dispatch',
 		file: 'test/dst-goldens/live-dispatch.golden.json',
 		run: runLiveSimSwarm,
-		swarm: { count: 40, startSeed: 1, buggify: 'random', buggifyProbability: 0.25, faultProfile: { dropRate: 0.2 }, base: {} }
+		swarm: { count: 40, startSeed: 1, faultMode: 'random', faultProbability: 0.25, faultProfile: { dropRate: 0.2 }, base: {} }
 	},
 	{
 		name: 'smooth-lagcomp',
 		file: 'test/dst-goldens/smooth-lagcomp.golden.json',
 		run: runSmoothSimSwarm,
-		swarm: { count: 40, startSeed: 1, buggify: 'random', buggifyProbability: 0.25, base: {} }
+		swarm: { count: 40, startSeed: 1, faultMode: 'random', faultProbability: 0.25, base: {} }
 	}
 ];
 
@@ -64,8 +64,8 @@ async function buildCorpus(cfg) {
 		gitCommit,
 		recordedAt: new Date().toISOString(),
 		swarm: {
-			buggify: cfg.swarm.buggify,
-			buggifyProbability: cfg.swarm.buggifyProbability,
+			faultMode: cfg.swarm.faultMode,
+			faultProbability: cfg.swarm.faultProbability,
 			...(cfg.swarm.faultProfile !== undefined && { faultProfile: cfg.swarm.faultProfile }),
 			base: cfg.swarm.base
 		}
@@ -84,8 +84,8 @@ async function verify(cfg) {
 	// Run EXACTLY the corpus seeds under EXACTLY the corpus config.
 	const { summary, runs } = await cfg.run({
 		seeds: corpus.entries.map((e) => e.seed),
-		buggify: swarm.buggify,
-		buggifyProbability: swarm.buggifyProbability,
+		faultMode: swarm.faultMode,
+		faultProbability: swarm.faultProbability,
 		...(swarm.faultProfile !== undefined && { faultProfile: swarm.faultProfile }),
 		base: swarm.base,
 		gitCommit

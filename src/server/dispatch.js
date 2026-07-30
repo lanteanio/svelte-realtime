@@ -16,7 +16,7 @@ import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } from './rate-limit.js';
 import { _recordRpcMetrics } from './metrics.js';
 import { _shouldShed } from './admission.js';
-import { _getIdentityKey } from './identity.js';
+import { _getIdentityKey, _getAuthenticatedId } from './identity.js';
 import { _bindAlarmCtx } from './alarm.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { _tenantTopic, _tenantKey } from './tenant.js';
@@ -151,14 +151,19 @@ function _deprecationSignal(ws, path, fn) {
  * Create a per-module guard. Accepts middleware functions (variadic) and/or
  * a single declarative options object as the first argument:
  *
- * - `{ authenticated: true }` - throws UNAUTHENTICATED unless `ctx.user`
- *   is non-null. Cheaper to write than the equivalent function and harder
- *   to forget.
+ * - `{ authenticated: true }` - throws UNAUTHENTICATED unless the connection
+ *   carries an authenticated identity (`_getAuthenticatedId`: a `ctx.user`
+ *   with an `id` / `user_id` / `userId` field). Anonymous adapter-shaped
+ *   userData (`{}` / `{ remoteAddress }`) does NOT pass - the adapter always
+ *   upgrades with a non-null userData object, so a bare null check would
+ *   never fire on a real socket. Cheaper to write than the equivalent
+ *   function and harder to forget.
  *
  * Function-style middleware composes: `guard({ authenticated: true }, customCheck)`
  * runs the auth check first, then `customCheck(ctx)`. If any throws, the
  * chain stops. Bare-error throws are auto-classified to LiveError
- * (UNAUTHENTICATED if no user, FORBIDDEN otherwise) at the call site.
+ * (UNAUTHENTICATED if no authenticated identity, FORBIDDEN otherwise) at the
+ * call site.
  *
  * @param {...(Function | { authenticated?: boolean })} parts
  * @returns {Function}
@@ -195,7 +200,7 @@ export function guard(...parts) {
 }
 
 async function _guardAuthenticated(ctx) {
-	if (!ctx || ctx.user == null) {
+	if (!ctx || _getAuthenticatedId(ctx) === null) {
 		throw new LiveError('UNAUTHENTICATED', 'Authentication required');
 	}
 }
@@ -206,8 +211,9 @@ async function _guardAuthenticated(ctx) {
  * - LiveError thrown by the guard -> propagated as-is (caller-controlled
  *   code AND message reach the client).
  * - Bare Error / non-Error thrown -> wrapped as
- *   `LiveError(UNAUTHENTICATED, 'Authentication required')` when
- *   `ctx.user` is null, otherwise `LiveError(FORBIDDEN, 'Access denied')`.
+ *   `LiveError(UNAUTHENTICATED, 'Authentication required')` when the
+ *   connection has no authenticated identity (`_getAuthenticatedId`),
+ *   otherwise `LiveError(FORBIDDEN, 'Access denied')`.
  *   The original error is preserved on `.cause` for server-side logging
  *   but is NOT propagated to the client (avoids accidentally leaking
  *   internal details like a DB error message through a guard).
@@ -225,7 +231,7 @@ export async function _runGuard(guardFn, ctx) {
 		await guardFn(ctx);
 	} catch (err) {
 		if (err instanceof LiveError) throw err;
-		const code = ctx && ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+		const code = ctx && _getAuthenticatedId(ctx) !== null ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 		const msg = code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied';
 		const wrapped = new LiveError(code, msg);
 		/** @type {any} */ (wrapped).cause = err;
@@ -246,7 +252,10 @@ export async function _runGuard(guardFn, ctx) {
 function _unknownPathReply(ws) {
 	if (state.maskNotFound) {
 		const user = typeof ws?.getUserData === 'function' ? ws.getUserData() : null;
-		const code = user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+		// Authenticated-identity semantics (not user-non-null): anonymous
+		// adapter-shaped userData (`{ remoteAddress }`) must classify as
+		// UNAUTHENTICATED, same as the guard paths.
+		const code = _getAuthenticatedId({ user }) !== null ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 		return { ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 	}
 	return { ok: false, code: 'NOT_FOUND', error: 'Not found' };
@@ -276,6 +285,14 @@ export function handleRpc(ws, data, platform, options) {
 			try {
 				const headerJson = textDecoder.decode(data.slice(3, 3 + headerLen));
 				const header = JSON.parse(headerJson);
+				// Same post-parse depth cap as the text-RPC path below: the
+				// uint16 header budget (~64 KB) still admits ~30000 nesting
+				// levels, enough to stack-overflow a host-app recursive walker
+				// on the header's args.
+				const maxEnvelopeDepth = (options && options.maxEnvelopeDepth) || _DEFAULT_MAX_ENVELOPE_DEPTH;
+				if (exceedsEnvelopeDepth(header, maxEnvelopeDepth)) {
+					return false;
+				}
 				if (typeof header.rpc === 'string' && typeof header.id === 'string') {
 					const payload = data.slice(3 + headerLen);
 					_executeBinaryRpc(ws, header, payload, platform, options);
@@ -541,6 +558,16 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	if (typeof topic === 'string' && topic.startsWith('__')) {
 		return { id, ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' };
 	}
+	// Same boundary for the tenant namespace on an UNSCOPED (null-tenant)
+	// connection: its namespace is "every topic NOT starting with @t/"
+	// (_topicInTenant), but no prefix is applied below for a null tenant, so a
+	// client-influenced dynamic topic starting with '@t/' would resolve RAW and
+	// land the socket inside another tenant's wire channel. A SCOPED connection
+	// is safe - the prefix below wraps the whole logical topic into its own
+	// namespace - so only the null tenant is rejected here.
+	if (!ctx.tenantId && typeof topic === 'string' && topic.startsWith('@t/')) {
+		return { id, ok: false, code: 'INVALID_REQUEST', error: 'Reserved topic prefix' };
+	}
 	// Tenant prefix once, here, at the boundary: from this point `topic` is the
 	// WIRE topic, so subscribe bookkeeping, replay registration, the
 	// subscribe/unsubscribe hooks, and the topic-keyed registries
@@ -582,37 +609,15 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		_bindAlarmCtx(ctx, { wireTopic: topic, onAlarm: streamOpts.alarm.onAlarm, path: msg.rpc, tenantId: ctx.tenantId, misfireMs: streamOpts.alarm.misfireMs });
 	}
 	const replayOpts = /** @type {any} */ (fn).__replay;
-	// Register the replay topic at subscribe for a dynamic (factory) topic so
-	// publishers auto-route through replay. A static topic is already registered at
-	// declaration with its raw string; under a tenant it must ALSO register the
-	// per-tenant WIRE topic here, or the wire-keyed publish would miss the buffer.
-	if (replayOpts && typeof topic === 'string' && (typeof rawTopic === 'function' || ctx.tenantId)) {
-		// An implicit-replay stream (internal, e.g. the room owner) engages the
-		// buffer only when the replay extension is present. Registering it without
-		// a platform.replay would burn a permanent registry slot and make
-		// _maybeReplayPublish warn about a missing extension the app never opted
-		// into; a user-declared replay stream still registers (and warns) as before.
-		if (!(/** @type {any} */ (fn).__implicitReplay) || platform.replay) _registerReplayTopic(topic);
-	}
-	// Dynamic (factory) topic piiRedact: a factory topic has no static
-	// `_declaredRedact` entry (that map is keyed by the declaration-time string).
-	// After the last subscriber leaves, the refcounted `_topicRedact` entry is
-	// evicted - but a replay-eligible topic stays permanently registered, so a
-	// later zero-subscriber publish to the resolved wire topic (another RPC, a
-	// reactive recompute, top-level publish) would reach the buffer / cluster
-	// un-redacted. Register the resolved wire topic's redactor permanently here,
-	// mirroring `_registerReplayTopic`'s permanence (bounded by the same per-topic
-	// cardinality as the subscriber index). Tenant-scoped STATIC topics are
-	// covered instead by the tenant-prefix strip in `_resolveRedactor`.
-	const _dynRedactor = /** @type {any} */ (fn).__streamPiiRedact;
-	if (_dynRedactor && typeof rawTopic === 'function' && typeof topic === 'string') {
-		_declaredRedact.set(topic, { redact: _dynRedactor, onError: /** @type {any} */ (fn).__streamOnError || null });
-	}
+	// NOTE: replay-topic and dynamic-piiRedact registration for this topic
+	// happen AFTER the access filter + subscribe admission below - a denied
+	// subscribe must leave no permanent registry entry (and must not make an
+	// attacker-chosen topic replay-eligible).
 
 	const streamFilter = /** @type {any} */ (fn).__streamFilter;
 	if (streamFilter && !(await streamFilter(ctx, ...streamArgs))) {
 		_settleClaimBarriers(ws, topic, fn);
-		const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+		const code = _getAuthenticatedId(ctx) !== null ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 		return { id, ok: false, code, error: code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 	}
 
@@ -662,6 +667,49 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	}
 	_trackStreamSub(ws, topic, fn);
 	subscribedRef.topic = topic;
+
+	// Replay-topic + dynamic-piiRedact registration, performed only now that
+	// the subscribe is ADMITTED (access filter passed, platform.subscribe
+	// accepted). Running these pre-guard let every denied frame mint a
+	// permanent registry entry keyed by an attacker-chosen topic and make that
+	// topic replay-eligible. Re-admission of a previously-denied topic is
+	// covered naturally: registration runs on every admitted subscribe.
+	//
+	// Deliberate trade-off, and the opposite of room.js's ordering: registering
+	// AFTER `await platform.subscribe` leaves a narrow window where a concurrent
+	// publish to a first-subscribed dynamic/tenant topic is not yet
+	// replay-eligible and so misses the buffer. room.js registers before its
+	// subscribe precisely to close that window, but it is not taking an
+	// attacker-chosen topic string. Here the topic is client-influenced, so
+	// paying one possibly-unbuffered event on a first subscribe beats handing
+	// every denied frame a permanent registry entry. Do not "fix" the ordering
+	// without restoring an equivalent bound on denied registrations.
+	// Register the replay topic at subscribe for a dynamic (factory) topic so
+	// publishers auto-route through replay. A static topic is already registered at
+	// declaration with its raw string; under a tenant it must ALSO register the
+	// per-tenant WIRE topic here, or the wire-keyed publish would miss the buffer.
+	if (replayOpts && typeof topic === 'string' && (typeof rawTopic === 'function' || ctx.tenantId)) {
+		// An implicit-replay stream (internal, e.g. the room owner) engages the
+		// buffer only when the replay extension is present. Registering it without
+		// a platform.replay would burn a permanent registry slot and make
+		// _maybeReplayPublish warn about a missing extension the app never opted
+		// into; a user-declared replay stream still registers (and warns) as before.
+		if (!(/** @type {any} */ (fn).__implicitReplay) || platform.replay) _registerReplayTopic(topic);
+	}
+	// Dynamic (factory) topic piiRedact: a factory topic has no static
+	// `_declaredRedact` entry (that map is keyed by the declaration-time string).
+	// After the last subscriber leaves, the refcounted `_topicRedact` entry is
+	// evicted - but a replay-eligible topic stays permanently registered, so a
+	// later zero-subscriber publish to the resolved wire topic (another RPC, a
+	// reactive recompute, top-level publish) would reach the buffer / cluster
+	// un-redacted. Register the resolved wire topic's redactor permanently here,
+	// mirroring `_registerReplayTopic`'s permanence (bounded by the same per-topic
+	// cardinality as the subscriber index). Tenant-scoped STATIC topics are
+	// covered instead by the tenant-prefix strip in `_resolveRedactor`.
+	const _dynRedactor = /** @type {any} */ (fn).__streamPiiRedact;
+	if (_dynRedactor && typeof rawTopic === 'function' && typeof topic === 'string') {
+		_declaredRedact.set(topic, { redact: _dynRedactor, onError: /** @type {any} */ (fn).__streamOnError || null });
+	}
 
 	if (/** @type {any} */ (fn).__onSubscribe) {
 		// `streamArgs` (3rd arg) lets a room enumeration registry capture the
@@ -830,10 +878,16 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		}
 	}
 
-	// Schema migration
+	// Schema migration. `schemaVersion` arrives on the client frame, so
+	// re-validate the client's own contract (subscribeAt: "must be a
+	// non-negative integer") at the trust boundary: anything else - negative,
+	// fractional, NaN, or -Infinity (JSON -1e999) - means NO migration. A
+	// negative value would otherwise send `_migrateItem`'s `from < to` loop
+	// into an unbounded spin (-Infinity: a permanent one), wedging the
+	// event loop on a single frame.
 	const serverVersion = /** @type {any} */ (fn).__streamVersion;
 	const migrateFns = /** @type {any} */ (fn).__streamMigrate;
-	if (serverVersion !== undefined && migrateFns && typeof clientSchemaVersion === 'number' && clientSchemaVersion < serverVersion) {
+	if (serverVersion !== undefined && migrateFns && Number.isInteger(clientSchemaVersion) && clientSchemaVersion >= 0 && clientSchemaVersion < serverVersion) {
 		resultData = _migrateData(resultData, clientSchemaVersion, serverVersion, migrateFns);
 	}
 
@@ -1277,7 +1331,7 @@ async function _runDirectCall(path, args, platform, options) {
 		}
 		const streamFilter = /** @type {any} */ (fn).__streamFilter;
 		if (streamFilter && !(await streamFilter(ctx, ...args))) {
-			const code = ctx.user ? 'FORBIDDEN' : 'UNAUTHENTICATED';
+			const code = _getAuthenticatedId(ctx) !== null ? 'FORBIDDEN' : 'UNAUTHENTICATED';
 			throw new LiveError(code, code === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied');
 		}
 		// Resolve the topic once so BOTH the loader-error handler and the

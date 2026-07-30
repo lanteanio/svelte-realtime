@@ -97,7 +97,11 @@ export function _generateTypeDeclarations(liveDir, dir) {
 		const errorCodes = _extractErrorCodes(source);
 		if (errorCodes.length > 0) {
 			needsRpcError = true;
-			const union = errorCodes.map(c => `'${c}'`).join(' | ');
+			// JSON.stringify, not a raw `'${c}'`: the extractor happens to restrict
+			// codes to \w+ today, so a raw interpolation is safe only by accident.
+			// Quoting here keeps the invariant (every generated string literal is
+			// escaped) true on its own terms if that pattern ever widens.
+			const union = errorCodes.map(c => JSON.stringify(c)).join(' | ');
 			exports.push(`  export type ErrorCode = ${union};`);
 		}
 
@@ -351,7 +355,10 @@ export function _generateTypeDeclarations(liveDir, dir) {
 		_warnUnsafeExports(source, `${dir}/${rel}`, handledNames);
 
 		if (exports.length > 0) {
-			declarations.push(`declare module '$live/${rel}' {`);
+			// JSON.stringify the module name like every other codegen
+			// interpolation: a crafted filename must not break out of
+			// the module-name string and inject declaration text.
+			declarations.push(`declare module ${JSON.stringify('$live/' + rel)} {`);
 			if (needsStreamStore || needsRpcError || needsUploadHandle) {
 				const clientImports = [];
 				if (needsStreamStore) clientImports.push('StreamStore');

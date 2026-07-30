@@ -780,7 +780,7 @@ describe('live.doc vite integration', () => {
 	it('registers the three send paths in the build registry', () => {
 		setup({ 'board.js': DOC_SOURCE });
 		const plugin = createPlugin();
-		const registry = plugin.load('\0live:__registry', {});
+		const registry = plugin.load('\0live:__registry', { ssr: true });
 		for (const exp of ['board', 'cards', 'todos']) {
 			expect(registry).toContain('board/' + exp + '/__doc/sync');
 			expect(registry).toContain('board/' + exp + '/__doc/update');

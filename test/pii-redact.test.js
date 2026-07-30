@@ -7,7 +7,7 @@ import { createPiiRedactor, SENSITIVE_KEY_RE } from '../src/server/pii-redact.js
 import { live, __register, handleRpc, close, publish, setBus, _activateDerived, _resetRedactRegistry } from '../src/server.js';
 import { _buildCtx, _getCtxHelpers } from '../src/server/ctx.js';
 import { _topicRedact, _declaredRedact, _declaredRedactPattern, _declaredStreamTopic, state } from '../src/server/state.js';
-import { _registerReplayTopic, _resetReplayRouting } from '../src/server/replay-routing.js';
+import { _registerReplayTopic, _resetReplayRouting, _maybeReplayPublish } from '../src/server/replay-routing.js';
 import { _redactOrDrop, _resolveRedactor, REDACT_DROP } from '../src/server/publish-helpers.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -629,5 +629,76 @@ describe('piiRedact - cluster-transient DYNAMIC topic (never-subscribed instance
 		expect(_declaredStreamTopic.size).toBeGreaterThan(0);
 		_resetRedactRegistry();
 		expect(_declaredStreamTopic.size).toBe(0);
+	});
+});
+
+// Replay-topic + dynamic-piiRedact registration happens only AFTER the
+// subscribe is admitted (access filter + platform.subscribe). Pre-fix, every
+// DENIED subscribe frame minted a permanent registry entry keyed by the
+// attacker-chosen topic and made that topic replay-eligible.
+describe('piiRedact/replay registration is post-admission', () => {
+	afterEach(() => { _resetRedactRegistry(); _resetReplayRouting(); });
+
+	function replayPlatform(replayWrites) {
+		const platform = mockPlatform();
+		platform.replay = {
+			publish: (p, topic) => { replayWrites.push(topic); return true; },
+			since: async () => null,
+			seq: async () => 0
+		};
+		return platform;
+	}
+
+	it('a denied subscribe leaves no replay/redact registration and no replay eligibility', async () => {
+		const replayWrites = [];
+		const platform = replayPlatform(replayWrites);
+		__register('pii/deny-reg', live.stream(
+			(ctx, room) => 'room:' + room,
+			async () => [],
+			{ merge: 'latest', replay: true, piiRedact: { fields: { ssn: 'omit' } }, filter: () => false }
+		));
+
+		const attacker = mockWs();
+		const redactBefore = _declaredRedact.size;
+		for (let i = 0; i < 4; i++) {
+			handleRpc(attacker, toArrayBuffer({ rpc: 'pii/deny-reg', id: 'd' + i, args: ['evil-' + i], stream: true }), platform);
+		}
+		await new Promise((r) => setTimeout(r, 20));
+
+		// Every frame was denied; no subscription...
+		expect(attacker.getTopics()).toEqual([]);
+		// ...and crucially no permanent registry entries...
+		expect(_declaredRedact.size).toBe(redactBefore);
+		// ...and the attacker-chosen topic is NOT replay-eligible (no buffer write).
+		expect(_maybeReplayPublish(platform, 'room:evil-0', 'update', { ssn: '123' })).toBe(false);
+		expect(replayWrites).toEqual([]);
+	});
+
+	it('an admitted subscribe registers replay + redact (and re-admission after a denial)', async () => {
+		const replayWrites = [];
+		const platform = replayPlatform(replayWrites);
+		let allow = false;
+		__register('pii/admit-reg', live.stream(
+			(ctx, room) => 'room:' + room,
+			async () => [],
+			{ merge: 'latest', replay: true, piiRedact: { fields: { ssn: 'omit' } }, filter: () => allow }
+		));
+
+		const ws = mockWs({ id: 'u1' });
+		const redactBefore = _declaredRedact.size;
+		// First a DENIED subscribe: must register nothing.
+		handleRpc(ws, toArrayBuffer({ rpc: 'pii/admit-reg', id: 'a1', args: ['room-1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+		expect(_declaredRedact.size).toBe(redactBefore);
+		expect(_maybeReplayPublish(platform, 'room:room-1', 'update', { ssn: '123' })).toBe(false);
+
+		// Re-admission: the same topic is now admitted and must register fully.
+		allow = true;
+		handleRpc(ws, toArrayBuffer({ rpc: 'pii/admit-reg', id: 'a2', args: ['room-1'], stream: true }), platform);
+		await new Promise((r) => setTimeout(r, 20));
+		expect(ws.isSubscribed('room:room-1')).toBe(true);
+		expect(_declaredRedact.size).toBe(redactBefore + 1);
+		expect(_maybeReplayPublish(platform, 'room:room-1', 'update', { ssn: '123' })).toBe(true);
+		expect(replayWrites).toEqual(['room:room-1']);
 	});
 });

@@ -3,6 +3,7 @@ import { live } from '../server.js';
 import { wallEpoch } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _tenantTopic } from './tenant.js';
+import { _getAuthenticatedId } from './identity.js';
 import { _IS_DEV } from './env.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
@@ -438,7 +439,14 @@ export function _crdtRegister(kind, config) {
 			access = { read: true, write: true, comment: true };
 		}
 		if (!access.read) {
-			throw new LiveError('FORBIDDEN', 'document read denied');
+			// Same authenticated-identity classification the RPC/stream gates use:
+			// an anonymous connection gets UNAUTHENTICATED so a client can tell
+			// "log in" from "you may not have this", instead of always FORBIDDEN.
+			const authed = _getAuthenticatedId(ctx) !== null;
+			throw new LiveError(
+				authed ? 'FORBIDDEN' : 'UNAUTHENTICATED',
+				authed ? 'document read denied' : 'Authentication required'
+			);
 		}
 		const name = resolveName(ctx, roomArgs);
 		const rt = await _loadCrdtRuntime();

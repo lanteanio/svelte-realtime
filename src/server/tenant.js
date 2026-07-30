@@ -33,7 +33,7 @@ export const _MAX_TENANT_ID_LEN = 64;
 // a scoped topic still passes the reserved-prefix guard and the cluster bus
 // validator. Pure prepend, so it COMMUTES with suffixing (`prefix(X) + ':presence'
 // === prefix(X + ':presence')`) - the property the room sub-topic derivation relies on.
-const _TENANT_TOPIC_NS = '@t/';
+export const _TENANT_TOPIC_NS = '@t/';
 
 /**
  * Validate a tenant id and return it, or throw a loud error. A misconfigured
@@ -156,6 +156,17 @@ export function _setTenantResolver(fn) {
 /** Reset to the unscoped default (test helper). @internal */
 export function _resetTenantResolver() {
 	_tenantResolver = null;
+}
+
+/**
+ * Whether a tenant resolver is configured at all. With none, no connection can
+ * ever be scoped, so `@t/` carries no meaning and the per-publish namespace
+ * guards are pure cost - `_buildCtx` uses this to keep the single-tenant default
+ * path on the bare helpers, as documented at the top of this module.
+ * @returns {boolean}
+ */
+export function _isTenancyEnabled() {
+	return _tenantResolver !== null;
 }
 
 /**

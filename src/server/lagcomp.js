@@ -15,12 +15,14 @@
 // time-correct stance (e.g. a crouched-then-stood target's hitbox) while the
 // framework only ever LERPs the position. State stays app-opaque.
 //
-// Grounded in Valve Source player_lagcompensation.cpp (correct_time clamp,
-// bracketing-frame lerp with an explicit never-extrapolate assert, the teleport
-// guard) and idTech3 antilag (client-stamped time, "no lerping forward"); the
-// ring shape mirrors the client smoother's SampleRing (parallel typed arrays).
+// Four invariants bound the rewind: the requested correction time is clamped to
+// the window the server can measure, the read is a lerp BETWEEN two bracketing
+// records with an explicit never-extrapolate assert, a teleport-sized jump
+// across the bracketing pair aborts the rewind for that entity, and the
+// shooter's instant is client-stamped so a reading is never lerped forward.
+// The ring shape mirrors the client smoother's SampleRing (parallel typed arrays).
 
-const _DEFAULT_MAX_REWIND_MS = 1000; // Source sv_maxunlag (a ceiling, not a target)
+const _DEFAULT_MAX_REWIND_MS = 1000; // A reach ceiling, not a target: past 1s a rewind stops being a correction.
 
 /**
  * @param {number} cap
@@ -163,7 +165,7 @@ export function createLagComp(opts) {
 		 * The rewound, candidate-gated world: every entity in `candidateKeys` that
 		 * has a servable history, sampled to `at`. The caller (the shoot handler)
 		 * passes the shooter's interest candidate set (minus self), so an entity
-		 * the shooter never had replicated is never in the map (credo-5 default-deny:
+		 * the shooter never had replicated is never in the map (default-deny:
 		 * you cannot hit what was never sent to you). Entities omitted: no history,
 		 * or a teleport-straddle (sample returned null).
 		 *

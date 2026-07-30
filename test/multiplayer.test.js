@@ -12,6 +12,7 @@ import {
 	_clusterPresenceMerge,
 	_presenceRefForTest
 } from '../src/server.js';
+import { _PRESENCE_MERGE_SCRIPT } from '../src/server/presence.js';
 import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId } from '../src/server/rooms-cluster.js';
 import { _clearEnumGatesForTests } from '../src/server/rooms-gate.js';
 import { _ensureWrap } from '../src/server/reactive.js';
@@ -93,7 +94,7 @@ describe('live.multiplayer() vite integration', () => {
 		setup({ 'collab.js': MULTIPLAYER_SOURCE });
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('__register("collab/room/__data"');
 		expect(code).toContain('__register("collab/room/__presence"');
@@ -124,7 +125,7 @@ export const game = live.room({
 		expect(stub).toContain('owner: __stream("collab/room/__owner"');
 		expect(stub).toContain('owner: __stream("collab/game/__owner"');
 		expect(stub).toContain('"merge":"set"');
-		const registry = plugin.load('\0live:__registry', {});
+		const registry = plugin.load('\0live:__registry', { ssr: true });
 		expect(registry).toContain('__register("collab/room/__owner"');
 		expect(registry).toContain('__register("collab/game/__owner"');
 		expect(registry).toContain('.__ownerStream');
@@ -139,7 +140,7 @@ export const game = live.room({
 		setup({ 'collab.js': MULTIPLAYER_SOURCE });
 
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		// The client stub emits __rpc("collab/room/__cursor/move") and
 		// __rpc("collab/room/__cursor/reportViewport"); the registry must
@@ -325,13 +326,13 @@ export const send = live(async (ctx, text) => null);
 
 		const plugin = createPlugin();
 		const stubA = plugin.load('\0live:plain', {});
-		const registryA = plugin.load('\0live:__registry', {});
+		const registryA = plugin.load('\0live:__registry', { ssr: true });
 
 		teardown();
 		setup({ 'plain.js': plainSource });
 		const plugin2 = createPlugin();
 		const stubB = plugin2.load('\0live:plain', {});
-		const registryB = plugin2.load('\0live:__registry', {});
+		const registryB = plugin2.load('\0live:__registry', { ssr: true });
 
 		expect(stubB).toBe(stubA);
 		expect(registryB).toBe(registryA);
@@ -690,10 +691,12 @@ function makeFakeRedis() {
 			const m = hashes.get(h);
 			return m && m.has(field) ? 1 : 0;
 		},
-		async eval(_script, _numKeys, hKey, countField, dataField, deltaJson) {
+		async eval(_script, _numKeys, hKey, countField, dataField, deltaJson, _ttl, maxBytes) {
 			// Emulates the atomic sticky-merge script: gated on the count field
 			// still existing, merge the JSON delta into the data field (a null
-			// value deletes the key); the TTL refresh is a no-op here.
+			// value deletes the key), refuse growth past the byte cap (a merge
+			// that shrinks the entry always applies); the TTL refresh is a
+			// no-op here.
 			const m = hashes.get(hKey);
 			if (!m || !m.has(countField)) return 0;
 			let cur = {};
@@ -701,7 +704,14 @@ function makeFakeRedis() {
 			if (raw != null) { try { const p = JSON.parse(raw); if (p && typeof p === 'object') cur = p; } catch { /* corrupt: start fresh */ } }
 			const delta = JSON.parse(deltaJson);
 			for (const k of Object.keys(delta)) { if (delta[k] == null) delete cur[k]; else cur[k] = delta[k]; }
-			m.set(dataField, JSON.stringify(cur));
+			const encoded = JSON.stringify(cur);
+			const cap = maxBytes ? parseInt(maxBytes, 10) : Infinity;
+			// BYTES, mirroring the script's `#encoded` - Lua's `#` counts bytes,
+			// so a `.length` here would silently diverge on any multi-byte value.
+			const encodedBytes = Buffer.byteLength(encoded, 'utf8');
+			const rawBytes = raw == null ? 0 : Buffer.byteLength(raw, 'utf8');
+			if (encodedBytes > cap && (raw == null || encodedBytes > rawBytes)) return 2;
+			m.set(dataField, encoded);
 			return 1;
 		},
 		async expire() { return 1; }
@@ -896,6 +906,190 @@ describe('live.multiplayer() sticky presence fields', () => {
 		await _clusterPresenceMerge(platform, 'board:b1', 'alice', { 'lock:title': true });
 		const roster = await _clusterPresenceList(platform, 'board:b1');
 		expect(roster.find((e) => e.key === 'alice')).toBeUndefined();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Sticky lock keys are validated against the declared locks array
+// (undeclared keys never persist) and bounded in count, value size, and
+// accumulated entry size - a client must not grow its roster entry without
+// limit (the entry is rewritten per merge and served to every late joiner).
+// ---------------------------------------------------------------------------
+
+describe('live.multiplayer() sticky lock bounds', () => {
+	const makeRoom = () => live.multiplayer({
+		topic: (ctx, boardId) => 'board:' + boardId,
+		init: async () => [],
+		presence: (ctx) => ({ name: ctx.user?.name }),
+		locks: ['title'],
+		selections: 'offset',
+		topicArgs: 1
+	});
+	const makeCtx = (platform, published) => ({
+		user: { id: 'alice', name: 'Alice' },
+		platform,
+		publish: (topic, event, data) => published && published.push({ topic, event, data })
+	});
+
+	it('drops undeclared lock keys - only the declared locks allowlist persists', async () => {
+		const redis = makeFakeRedis();
+		const platform = { redis };
+		const room = makeRoom();
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+		const ctx = makeCtx(platform, []);
+
+		// Declared: lock:title persists. Undeclared: dropped even though the
+		// locks surface is enabled.
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': true, 'lock:cell:0': true, 'lock:evil': true });
+		const roster = await _clusterPresenceList(platform, 'board:b1');
+		const alice = roster.find((e) => e.key === 'alice');
+		expect(alice.data['lock:title']).toBe(true);
+		expect('lock:cell:0' in alice.data).toBe(false);
+		expect('lock:evil' in alice.data).toBe(false);
+
+		// The forward publish is unaffected: subscribers still see the raw
+		// delta live; only the persisted sticky subset is filtered.
+	});
+
+	it('replays the accumulation PoC: many frames of undeclared keys leave the roster entry untouched', async () => {
+		const redis = makeFakeRedis();
+		const platform = { redis };
+		const room = live.multiplayer({
+			topic: (ctx, roomId) => 'doc:' + roomId,
+			presence: (ctx) => ({ name: 'attacker' }),
+			locks: ['lock:cell:A1'],
+			topicArgs: 1
+		});
+		await _clusterPresenceAcquire(platform, 'doc:room1', 'attacker-1', { name: 'attacker' });
+		const ctx = { user: { id: 'attacker-1' }, tenantId: null, platform, publish: () => {} };
+
+		let seq = 0;
+		for (let r = 0; r < 40; r++) {
+			const delta = {};
+			for (let i = 0; i < 200; i++) delta['lock:cell:' + (seq++)] = 1;
+			await room.__presenceUpdate(ctx, 'room1', delta);
+		}
+		const roster = await _clusterPresenceList(platform, 'doc:room1');
+		const attacker = roster.find((e) => e.key === 'attacker-1');
+		expect(attacker).toBeDefined();
+		// 8000 undeclared keys sent; none persisted. The entry stays at the
+		// presence payload only.
+		expect(Object.keys(attacker.data)).toEqual(['name']);
+	});
+
+	it('drops oversized sticky values but keeps the release (null) path', async () => {
+		const redis = makeFakeRedis();
+		const platform = { redis };
+		const room = makeRoom();
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+		const ctx = makeCtx(platform);
+
+		// A legit lock value persists; an oversized one (> 1 KB serialized)
+		// is dropped; an oversized selection is dropped too.
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': true });
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': 'x'.repeat(4096) });
+		await room.__presenceUpdate(ctx, 'b1', { selection: { start: 0, end: 5, pad: 'x'.repeat(4096) } });
+		let roster = await _clusterPresenceList(platform, 'board:b1');
+		let alice = roster.find((e) => e.key === 'alice');
+		expect(alice.data['lock:title']).toBe(true);
+		expect('selection' in alice.data).toBe(false);
+
+		// Release always applies (null is never size-capped).
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': null });
+		roster = await _clusterPresenceList(platform, 'board:b1');
+		alice = roster.find((e) => e.key === 'alice');
+		expect('lock:title' in alice.data).toBe(false);
+	});
+
+	it('caps the accumulated roster entry size even for an unrestricted (non-array) locks declaration', async () => {
+		const redis = makeFakeRedis();
+		const platform = { redis };
+		// `locks: true` accepts any lock key, so the entry byte cap is what
+		// bounds cross-frame accumulation.
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: true,
+			topicArgs: 1
+		});
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+		const ctx = makeCtx(platform);
+
+		for (let r = 0; r < 40; r++) {
+			const delta = {};
+			for (let i = 0; i < 64; i++) delta['lock:k' + r + ':' + i] = 'v'.repeat(32);
+			await room.__presenceUpdate(ctx, 'b1', delta);
+		}
+		const roster = await _clusterPresenceList(platform, 'board:b1');
+		const alice = roster.find((e) => e.key === 'alice');
+		const bytes = JSON.stringify(alice.data).length;
+		// Pre-fix: 40 frames x 64 keys grew the entry to >100 KB. Post-fix the
+		// entry stays under the merge cap (16 KB) - growth beyond it is dropped.
+		expect(bytes).toBeLessThanOrEqual(16384);
+	});
+
+	it('the in-memory (no redis) merge path applies the same entry cap', async () => {
+		const refMap = _presenceRefForTest();
+		const refKey = 'board:b7\0alice';
+		refMap.set(refKey, { count: 1, timer: null, data: { name: 'Alice' } });
+		try {
+			for (let r = 0; r < 40; r++) {
+				const delta = {};
+				for (let i = 0; i < 64; i++) delta['lock:k' + r + ':' + i] = 'v'.repeat(32);
+				await _clusterPresenceMerge({}, 'board:b7', 'alice', delta);
+			}
+			const data = refMap.get(refKey).data;
+			expect(JSON.stringify(data).length).toBeLessThanOrEqual(16384);
+			// The original presence field survives.
+			expect(data.name).toBe('Alice');
+			// A shrink (release of everything) always applies, even at the cap.
+			const release = {};
+			for (const k of Object.keys(data)) if (k.startsWith('lock:')) release[k] = null;
+			await _clusterPresenceMerge({}, 'board:b7', 'alice', release);
+			expect(Object.keys(refMap.get(refKey).data)).toEqual(['name']);
+		} finally {
+			refMap.delete(refKey);
+		}
+	});
+
+	// The in-memory path and the Lua path must admit the SAME entry. Lua's `#`
+	// counts bytes; a JS `.length` counts UTF-16 code units, so a value built
+	// from 4-byte characters is where the two silently diverge - the no-redis
+	// default would accept roughly 4x what the cluster accepts.
+	it('measures the entry cap in BYTES, so single-node and cluster agree on multi-byte values', async () => {
+		// Each emoji is 4 UTF-8 bytes but 2 UTF-16 code units.
+		const wide = '\u{1F600}'.repeat(3000); // 12000 bytes, 6000 code units
+		const refMap = _presenceRefForTest();
+		const refKey = 'board:b8\0alice';
+
+		// In-memory path.
+		refMap.set(refKey, { count: 1, timer: null, data: { name: 'Alice' } });
+		try {
+			await _clusterPresenceMerge({}, 'board:b8', 'alice', { 'lock:a': wide, 'lock:b': wide });
+			const memBytes = Buffer.byteLength(JSON.stringify(refMap.get(refKey).data), 'utf8');
+			expect(memBytes).toBeLessThanOrEqual(16384);
+
+			// Cluster path, same delta, through the script twin.
+			const platform = { redis: makeFakeRedis() };
+			await _clusterPresenceAcquire(platform, 'board:b8', 'alice', { name: 'Alice' });
+			await _clusterPresenceMerge(platform, 'board:b8', 'alice', { 'lock:a': wide, 'lock:b': wide });
+			const roster = await _clusterPresenceList(platform, 'board:b8');
+			const entry = roster.find((e) => e.key === 'alice');
+			const clusterBytes = Buffer.byteLength(JSON.stringify(entry.data), 'utf8');
+			expect(clusterBytes).toBeLessThanOrEqual(16384);
+
+			// The whole point: both paths made the SAME admit/refuse decision.
+			expect(Object.keys(entry.data).sort()).toEqual(Object.keys(refMap.get(refKey).data).sort());
+		} finally {
+			refMap.delete(refKey);
+		}
+	});
+
+	// Structural guard: the shipped script must keep measuring bytes and keep
+	// its ARGV order, since nothing in CI can execute real Lua.
+	it('the merge script measures bytes and reads the cap from ARGV[5]', () => {
+		expect(_PRESENCE_MERGE_SCRIPT).toContain('#encoded > tonumber(ARGV[5])');
+		expect(_PRESENCE_MERGE_SCRIPT).toContain('#encoded > #raw');
 	});
 });
 
@@ -1901,7 +2095,7 @@ describe('live.multiplayer() field codegen', () => {
 	it('registers the presence-field, reactions stream, and reaction handlers in the registry', () => {
 		setup({ 'collab.js': FIELD_SOURCE });
 		const plugin = createPlugin();
-		const code = plugin.load('\0live:__registry', {});
+		const code = plugin.load('\0live:__registry', { ssr: true });
 
 		expect(code).toContain('__register("collab/room/__presence/update"');
 		expect(code).toContain('.__presenceUpdate');

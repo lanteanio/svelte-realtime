@@ -1,5 +1,6 @@
-import { createSharedRandom } from 'svelte-adapter-uws/plugins/smooth/random';
+import { createHmac } from 'node:crypto';
 import { _IS_DEV } from './env.js';
+import { state } from './state.js';
 
 /**
  * Privacy layer for `live.aggregate({ privacy })`: k-anonymity suppression plus
@@ -14,15 +15,21 @@ import { _IS_DEV } from './env.js';
  *   itself the side-channel k-anonymity exists to close.
  *
  * - differential privacy (`perturb` / `hybrid`): zero-mean Laplace or Gaussian
- *   noise is added to each numeric aggregate field. The noise is drawn from a
- *   generator SEEDED by `hash(tenantId, topic, windowStart)` - deterministic, so
- *   every cluster replica (which each compute the full aggregate over the source
- *   firehose) emits IDENTICAL noise; a per-node random offset would let a client
- *   that reconnects to another node difference the two values and recover the
- *   truth, and would itself be a node fingerprint. The seed refreshes per
- *   tumbling boundary and per sliding slide so each window draws fresh noise;
- *   lifetime and single-state aggregates have no boundary, so their offset stays
- *   constant (see KNOWN LIMITATION).
+ *   noise is added to each numeric aggregate field. The uniforms are drawn
+ *   DIRECTLY from `HMAC-SHA256(privacySecret, counter | tenantId|topic|windowStart)`
+ *   in counter mode - keyed by the operator secret (`realtime({ privacySecret })`), so a
+ *   subscriber cannot recompute the draws and subtract them (an unkeyed seed
+ *   over public inputs makes the "noise" removable and provides zero privacy);
+ *   deterministic under the shared secret, so every cluster replica (which each
+ *   compute the full aggregate over the source firehose) emits IDENTICAL noise;
+ *   a per-node random offset would let a client that reconnects to another node
+ *   difference the two values and recover the truth, and would itself be a node
+ *   fingerprint. The seed refreshes per tumbling boundary and per sliding slide
+ *   so each window draws fresh noise; lifetime and single-state aggregates have
+ *   no boundary, so their offset stays constant (see KNOWN LIMITATION). Noise
+ *   strategies REFUSE to run without a configured secret (see
+ *   `_applyAggregatePrivacy`) - failing loudly beats silently emitting
+ *   removable noise.
  *
  * KNOWN LIMITATION (documented; the sequential-composition accountant is a
  * deferred follow-up): within one window the noise offset is constant, so an
@@ -32,9 +39,12 @@ import { _IS_DEV } from './env.js';
  * aggregates over one source are additively de-anonymizing - surface epsilon in
  * the audit and budget across aggregates at the application layer.
  *
- * The generator is the adapter's deterministic mulberry32 (`createSharedRandom`,
- * pure 32-bit integer arithmetic, no global RNG and no clock) so the noise is
- * reproducible under deterministic simulation.
+ * The uniform stream is pure keyed hashing (no global RNG and no clock), so the
+ * noise is reproducible under deterministic simulation. It deliberately does NOT
+ * seed a small PRNG: a 32-bit seed would leave the whole per-window noise vector
+ * one of 2^32 candidates, and for integer-valued fields the published fraction
+ * pins the draw, so an offline search would recover and subtract the noise. The
+ * search space has to be the key's, not the seed width's.
  */
 
 const DEFAULTS = { k: 5, epsilon: 1.0, delta: 1e-5, sensitivity: 1, noise: 'laplace', strategy: 'hybrid' };
@@ -103,23 +113,100 @@ export function _normalizeAggregatePrivacy(privacy, label) {
 }
 
 /**
- * 32-bit FNV-1a hash of a string -> an unsigned int seed for the generator.
- * @param {string} str
+ * First-block memo for the keyed uniform stream. The block is a pure function
+ * of (seedStr, secret), and every publish inside one window re-derives the same
+ * one, so a tiny cache keeps the HMAC off the per-publish aggregate path.
+ * Bounded: aggregates are few and the key changes once per window.
+ * @type {Map<string, Buffer>}
  */
-function _hashSeed(str) {
-	let h = 0x811c9dc5;
-	for (let i = 0; i < str.length; i++) {
-		h ^= str.charCodeAt(i);
-		h = Math.imul(h, 0x01000193);
+const _noiseBlockCache = new Map();
+const _NOISE_BLOCK_CACHE_MAX = 64;
+/**
+ * The secret every cached block was derived under. Blocks are a function of
+ * (secret, seedStr), so a changed secret invalidates all of them - keeping the
+ * secret out of the cache KEYS while still making it part of cache identity.
+ * @type {string | null}
+ */
+let _noiseBlockCacheSecret = null;
+
+/**
+ * Keyed uniform stream for the noise draws: counter-mode HMAC-SHA256 under the
+ * operator `privacySecret`, expanded 48 bits at a time.
+ *
+ * Deliberately NOT "HMAC down to a PRNG seed": seeding a 32-bit generator would
+ * leave the whole per-window noise vector one of only 2^32 possibilities, and
+ * for integer-valued fields the published fraction pins the draw, so an
+ * offline search recovers the noise and subtracts it. Drawing straight from the
+ * MAC stream keeps the search space the key's, not the seed width's.
+ *
+ * The stream restarts per call, so a given (tenant, topic, window) always yields
+ * the same vector - replicas sharing the secret agree, which is what the
+ * cross-replica consistency requirement needs.
+ *
+ * @param {string} str - `${tenantId} ${topic} ${windowStart}` (public material)
+ * @param {string} secret - operator privacy secret (never published)
+ * @returns {{ float: () => number }}
+ */
+function _keyedUniforms(str, secret) {
+	// Fixed-width big-endian counter PREFIX, so no (str, counter) pair can be
+	// confused with a different one the way a plain string join could.
+	const derive = (counter) => {
+		const ctr = Buffer.alloc(4);
+		ctr.writeUInt32BE(counter, 0);
+		return createHmac('sha256', secret).update(ctr).update(str).digest();
+	};
+	if (_noiseBlockCacheSecret !== secret) {
+		_noiseBlockCache.clear();
+		_noiseBlockCacheSecret = secret;
 	}
-	return h >>> 0;
+	// EVERY block is memoized, not just the first. A 32-byte block yields 5 draws,
+	// and Gaussian takes 2 draws per field, so a 6-field aggregate already needs a
+	// third block. Caching block 0 alone would make a wide aggregate pay MORE
+	// HMACs per publish than the single-HMAC scheme this replaced - a regression
+	// on the reactive publish hot path.
+	let blocks = _noiseBlockCache.get(str);
+	if (blocks === undefined) {
+		if (_noiseBlockCache.size >= _NOISE_BLOCK_CACHE_MAX) {
+			_noiseBlockCache.delete(/** @type {string} */ (_noiseBlockCache.keys().next().value));
+		}
+		blocks = [];
+		_noiseBlockCache.set(str, blocks);
+	}
+	const blockAt = (i) => {
+		let b = blocks[i];
+		if (b === undefined) { b = derive(i); blocks[i] = b; }
+		return b;
+	};
+	let block = blockAt(0);
+	let off = 0;
+	let counter = 0;
+	return {
+		float() {
+			if (off + 6 > block.length) {
+				block = blockAt(++counter);
+				off = 0;
+			}
+			// 48 bits: exactly representable in a double, so no precision loss.
+			let v = 0;
+			for (let i = 0; i < 6; i++) v = v * 256 + block[off + i];
+			off += 6;
+			return v / 281474976710656; // 2^48
+		}
+	};
+}
+
+/** Drop every memoized noise block (test/reset seam). */
+export function _resetNoiseBlockCache() {
+	_noiseBlockCache.clear();
+	_noiseBlockCacheSecret = null;
 }
 
 /** Zero-mean Laplace draw with scale b. inverse-CDF over one uniform draw. */
 function _laplace(gen, b) {
 	const u = gen.float() - 0.5;
 	// Clamp the inverse-CDF argument away from 0: a draw of exactly 0 (the only
-	// value where 1 - 2|u| = 0, probability ~2^-32) would give log(0) = -Infinity.
+	// value where 1 - 2|u| = 0, probability 2^-48 off the 48-bit keyed stream)
+	// would give log(0) = -Infinity.
 	// The clamp caps the tail at a large-but-finite value instead.
 	const arg = Math.max(1 - 2 * Math.abs(u), 1e-12);
 	return -b * Math.sign(u) * Math.log(arg);
@@ -140,9 +227,10 @@ function _gaussian(gen, sigma) {
  * @param {number} cohortSize - distinct contributors observed for this window
  * @param {string} seedStr - `${tenantId} ${topic} ${windowStart}` (stable per replica + per window; tenantId is '' under the global-aggregate model)
  * @param {{ k: number, epsilon: number, delta: number, sensitivity: number, noise: 'laplace' | 'gaussian', strategy: string, fields: string[] | null }} cfg
+ * @param {string | null} [secret] - operator privacy secret (`realtime({ privacySecret })`); REQUIRED before any noise is drawn
  * @returns {{ suppress: true } | { suppress: false, value: Record<string, any> }}
  */
-export function _applyAggregatePrivacy(computed, cohortSize, seedStr, cfg) {
+export function _applyAggregatePrivacy(computed, cohortSize, seedStr, cfg, secret) {
 	if (cfg.strategy !== 'perturb' && cohortSize < cfg.k) {
 		// Below k: hold the last value. Never emit null / a marker - that leaks
 		// the sub-threshold transition k-anonymity is meant to hide.
@@ -154,7 +242,17 @@ export function _applyAggregatePrivacy(computed, cohortSize, seedStr, cfg) {
 	if (!computed || typeof computed !== 'object') {
 		return { suppress: false, value: computed };
 	}
-	const gen = createSharedRandom(_hashSeed(seedStr));
+	// Fail loudly, never silently: noise seeded from public inputs alone is
+	// attacker-recomputable (a subscriber subtracts it and recovers the exact
+	// aggregate), so emitting it would advertise privacy while providing none.
+	if (typeof secret !== 'string' || secret.length === 0) {
+		throw new Error(
+			'[svelte-realtime] live.aggregate privacy: differential-privacy noise requires an operator secret. ' +
+			'Set realtime({ privacySecret: process.env.PRIVACY_SECRET }) (shared by every replica). ' +
+			"Use strategy 'suppress' for k-anonymity-only."
+		);
+	}
+	const gen = _keyedUniforms(seedStr, secret);
 	const scale = cfg.noise === 'gaussian'
 		? Math.sqrt(2 * Math.log(1.25 / cfg.delta)) * cfg.sensitivity / cfg.epsilon
 		: cfg.sensitivity / cfg.epsilon;
@@ -197,11 +295,13 @@ export function _gateAggregate(holder, computed, topic) {
 		cohortSize = holder.cohort ? holder.cohort.size : 0;
 	}
 	// NUL-joined so distinct (tenantId, topic, windowStart) triples cannot collide
-	// into the same seed (topics/ids never contain NUL). tenantId is '' under the
-	// global-aggregate model (aggregates are one entry per topic, already
-	// tenant-distinct upstream); the slot is reserved for future per-tenant identity.
-	const seedStr = (holder._tenantId || '') + ' ' + topic + ' ' + (holder._windowStart || 0);
-	const r = _applyAggregatePrivacy(computed, cohortSize, seedStr, cfg);
+	// into the same seed - topics and ids never contain NUL, whereas a space
+	// separator would be ambiguous the moment either field could hold one.
+	// tenantId is '' under the global-aggregate model (aggregates are one entry
+	// per topic, already tenant-distinct upstream); the slot is reserved for a
+	// future per-tenant identity.
+	const seedStr = (holder._tenantId || '') + '\0' + topic + '\0' + (holder._windowStart || 0);
+	const r = _applyAggregatePrivacy(computed, cohortSize, seedStr, cfg, state.privacySecret);
 	if (r.suppress) return { publish: false };
 	holder._lastWire = r.value;
 	return { publish: true, value: r.value };
