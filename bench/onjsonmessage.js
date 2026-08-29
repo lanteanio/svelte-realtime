@@ -14,9 +14,9 @@
 //
 // Expected: variant is meaningfully faster on a per-frame basis. The
 // absolute number matters for cursor-style high-rate frames (60-120 Hz per
-// client) where every microsecond on the hot path adds up. The credo says
-// "single-digit-percent regressions on hot primitives are blockers"; this
-// is the opposite -- a measurable improvement on the same hot primitive.
+// client) where every microsecond on the hot path adds up. A single-digit
+// percent regression on a hot primitive is a blocker; this is the opposite
+// - a measurable improvement on the same one.
 
 import { performance } from 'node:perf_hooks';
 import { createMessage } from '../server.js';

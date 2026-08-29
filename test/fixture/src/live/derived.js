@@ -1,8 +1,8 @@
 // Live module backing the derived-stream e2e tests.
 //
 // Activation: the test fixture's hooks.ws.js does not call
-// `_activateDerived(platform)` in `open` (we are not allowed to
-// modify hooks.ws.js for this slice). Instead, every RPC that
+// `_activateDerived(platform)` in `open`, and this module does not
+// change hooks.ws.js to make it. Instead, every RPC that
 // publishes to a source topic ensures activation idempotently via
 // `ctx.platform`. The first RPC call wraps platform.publish; later
 // calls are no-ops thanks to the WeakSet guard inside the helper.

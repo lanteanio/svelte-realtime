@@ -899,6 +899,14 @@ import('svelte-realtime/devtools');
 
 		async handleHotUpdate({ file, server }) {
 			if (!file.startsWith(liveDir)) return;
+			// The generated $types.d.ts must never re-enter this handler: the
+			// rewrite below would bump its mtime, produce the next change event
+			// and loop forever, full-reloading every connected client each time.
+			// Returning [] tells Vite the update is handled with no modules
+			// affected, so it does not fall back to a full reload.
+			if (file.endsWith('.d.ts')) return [];
+			// Same non-module filter as the add/unlink watcher.
+			if (!/\.[jt]s$/.test(file) || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
 			_fileCache.delete(file);
 			_codeCache.delete('client:' + file);
 			_codeCache.delete('ssr:' + file);
@@ -2192,7 +2200,14 @@ function _writeTypeDeclarations(liveDir, dir) {
 	const typesPath = resolve(liveDir, '$types.d.ts');
 	const content = _generateTypeDeclarations(liveDir, dir);
 	if (content) {
-		writeFileSync(typesPath, content);
+		// Skip identical rewrites: an mtime bump re-enters file watchers, and
+		// with a second Vite instance on the same checkout it would ping-pong
+		// regeneration between the two processes indefinitely.
+		let existing = null;
+		try { existing = readFileSync(typesPath, 'utf-8'); } catch {}
+		if (existing !== content) {
+			writeFileSync(typesPath, content);
+		}
 	} else if (existsSync(typesPath)) {
 		// Remove stale declarations when all live modules are deleted
 		try { rmSync(typesPath); } catch {}

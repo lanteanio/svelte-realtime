@@ -4102,7 +4102,7 @@ export const combineMerge = (...buckets) => {
  * partition rather than the full firehose) will produce divergent
  * per-worker state and inconsistent per-window publishes. For sharded
  * sources, layer a leader gate later (symmetric to `configureCron({
- * leader })`) - not shipped in this slice.
+ * leader })`). No such gate ships here.
  *
  * @param {string} source - Topic to watch for events
  * @param {Record<string, { init?: () => any, reduce?: (acc: any, event: string, data: any) => any, compute?: (state: any) => any, combine?: (...buckets: any[]) => any }>} reducers

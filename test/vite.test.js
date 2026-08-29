@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync } from 'fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, readFileSync, statSync, utimesSync } from 'fs';
 import { resolve } from 'path';
 import svelteRealtime from '../vite.js';
 
@@ -1293,6 +1293,40 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		expect(content).toContain('export const empty: Readable<undefined>');
 	});
 
+	it('does not rewrite $types.d.ts when the content is unchanged', () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const sendMessage = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const typesPath = resolve(liveDir, '$types.d.ts');
+		// Backdate the file so any rewrite is visible as a newer mtime
+		const past = new Date(Date.now() - 60_000);
+		utimesSync(typesPath, past, past);
+		const before = statSync(typesPath).mtimeMs;
+
+		plugin.buildStart();
+		expect(statSync(typesPath).mtimeMs).toBe(before);
+
+		// A real content change must still be written out
+		writeFileSync(
+			resolve(liveDir, 'chat.js'),
+			`
+import { live } from 'svelte-realtime/server';
+export const sendMessage = live(async (ctx, text) => {});
+export const deleteMessage = live(async (ctx, id) => {});
+`
+		);
+		plugin.buildStart();
+		expect(statSync(typesPath).mtimeMs).toBeGreaterThan(before);
+		expect(readFileSync(typesPath, 'utf-8')).toContain('deleteMessage');
+	});
+
 	it('emits UploadHandle types for live.upload() exports', () => {
 		setup({
 			'uploads.js': `
@@ -1631,7 +1665,7 @@ export const notifications = live.channel('notifications');
 	});
 });
 
-// - live.validated() client stubs (Phase 12) ---------------------------------
+// - live.validated() client stubs --------------------------------------------
 
 describe('live.validated() stubs', () => {
 	afterEach(teardown);
@@ -1687,7 +1721,7 @@ export const send = live.validated(schema, async (ctx, input) => {});
 	});
 });
 
-// - live.cron() registration (Phase 14) --------------------------------------
+// - live.cron() registration -------------------------------------------------
 
 describe('live.cron() registration', () => {
 	afterEach(teardown);
@@ -1732,7 +1766,7 @@ export const tick = live.cron('* * * * *', 'tick', async () => {});
 	});
 });
 
-// - SSR stubs with .load() (Phase 11) ----------------------------------------
+// - SSR stubs with .load() ---------------------------------------------------
 
 describe('SSR stubs with .load()', () => {
 	afterEach(teardown);
@@ -1876,7 +1910,7 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 	});
 });
 
-// - Replay option extraction (Phase 15) --------------------------------------
+// - Replay option extraction -------------------------------------------------
 
 describe('replay option extraction', () => {
 	afterEach(teardown);
@@ -1910,7 +1944,7 @@ export const feed = live.stream('feed', async (ctx) => [], { merge: 'latest', re
 	});
 });
 
-// - DevTools injection (Phase 13) --------------------------------------------
+// - DevTools injection -------------------------------------------------------
 
 describe('devtools injection', () => {
 	it('injects devtools middleware in dev mode via configureServer', () => {
@@ -1955,7 +1989,7 @@ describe('devtools injection', () => {
 	});
 });
 
-// - live.validated() type declarations (Phase 12) ----------------------------
+// - live.validated() type declarations ---------------------------------------
 
 describe('live.validated() type declarations', () => {
 	afterEach(teardown);
@@ -2210,7 +2244,7 @@ export const board = live.room({
 	});
 });
 
-// - live.channel() client stubs (Phase 35) -----------------------------------
+// - live.channel() client stubs ----------------------------------------------
 
 describe('live.channel() vite integration', () => {
 	afterEach(teardown);
@@ -2288,7 +2322,7 @@ export const stripe = live.webhook('payments', {
 	});
 });
 
-// - Schema evolution (Phase 42) ----------------------------------------------
+// - Schema evolution ---------------------------------------------------------
 
 describe('schema evolution', () => {
 	afterEach(teardown);
@@ -2488,6 +2522,57 @@ export const send = live(async (ctx, text) => {});
 		expect(restored).toBe(true);
 		expect(errors.some(e => e.includes('HMR failed'))).toBe(true);
 		expect(errors.some(e => e.includes('Previous handlers restored'))).toBe(true);
+	});
+
+	it('ignores the generated $types.d.ts and suppresses the fallback full reload', async () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`
+		});
+
+		const plugin = createPlugin();
+		plugin.buildStart();
+
+		const typesPath = resolve(liveDir, '$types.d.ts');
+		expect(existsSync(typesPath)).toBe(true);
+		const before = readFileSync(typesPath, 'utf-8');
+
+		const server = createMockServer();
+		let ssrLoads = 0;
+		const origLoad = server.ssrLoadModule.bind(server);
+		server.ssrLoadModule = async (id) => { ssrLoads++; return origLoad(id); };
+
+		const result = await plugin.handleHotUpdate({ file: typesPath, server });
+
+		// [] = handled with no affected modules, so Vite does not full-reload
+		expect(result).toEqual([]);
+		expect(server.invalidated).toHaveLength(0);
+		expect(ssrLoads).toBe(0);
+		// The handler must not have rewritten its own trigger file
+		expect(readFileSync(typesPath, 'utf-8')).toBe(before);
+	});
+
+	it('ignores test files in the live dir', async () => {
+		setup({
+			'chat.js': `
+import { live } from 'svelte-realtime/server';
+export const send = live(async (ctx, text) => {});
+`,
+			'chat.test.js': `export const probe = 1;`
+		});
+
+		const plugin = createPlugin();
+		const server = createMockServer();
+
+		const result = await plugin.handleHotUpdate({
+			file: resolve(liveDir, 'chat.test.js'),
+			server,
+		});
+
+		expect(result).toBeUndefined();
+		expect(server.invalidated).toHaveLength(0);
 	});
 
 	it('ignores files outside liveDir', async () => {

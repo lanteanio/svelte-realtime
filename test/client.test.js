@@ -2263,7 +2263,7 @@ describe('__stream() cursor merge', () => {
 	});
 });
 
-// - __stream() hydrate (Phase 11) --------------------------------------------
+// - __stream() hydrate -------------------------------------------------------
 
 describe('__stream() hydrate', () => {
 	it('sets initial data from SSR before subscribing to live updates', () => {
@@ -2730,7 +2730,7 @@ describe('__stream() initial-connect status handling', () => {
 	});
 });
 
-// - __stream() seq tracking (Phase 15) ---------------------------------------
+// - __stream() seq tracking --------------------------------------------------
 
 describe('__stream() seq tracking', () => {
 	it('sends seq on reconnect request', async () => {
@@ -2791,7 +2791,7 @@ describe('__rpc() issues', () => {
 	});
 });
 
-// - Phase 16 Bug #4: Dynamic stream subscribe wrapper stability ---------------
+// - Dynamic stream subscribe wrapper stability --------------------------------
 
 describe('__stream() dynamic subscribe wrapper (Bug #4 fix)', () => {
 	it('does not nest wrappers on repeated cache hits', () => {
@@ -2813,7 +2813,7 @@ describe('__stream() dynamic subscribe wrapper (Bug #4 fix)', () => {
 	});
 });
 
-// - Phase 16 Bug #5: batch() cleanup on throw --------------------------------
+// - batch() cleanup on throw -------------------------------------------------
 
 describe('batch() cleanup on throw (Bug #5 fix)', () => {
 	it('cleans up if fn() throws synchronously', () => {
@@ -2828,7 +2828,7 @@ describe('batch() cleanup on throw (Bug #5 fix)', () => {
 	});
 });
 
-// - Phase 19: Stream pagination (client) -------------------------------------
+// - Stream pagination (client) -----------------------------------------------
 
 describe('__stream() pagination', () => {
 	it('tracks hasMore and cursor from server response', async () => {
@@ -2918,7 +2918,7 @@ describe('__stream() pagination', () => {
 	});
 });
 
-// - Phase 22: Binary RPC (client) --------------------------------------------
+// - Binary RPC (client) ------------------------------------------------------
 
 describe('__binaryRpc()', () => {
 	it('sends binary frame with header and payload', () => {
@@ -3655,7 +3655,7 @@ describe('__upload() frameSize hard cap + chunkSize alias', () => {
 	});
 });
 
-// - Phase 23: configure() ---------------------------------------------------
+// - configure() -------------------------------------------------------------
 
 describe('configure()', () => {
 	it('is a callable function', () => {
@@ -3953,7 +3953,7 @@ describe('combine()', () => {
 	});
 });
 
-// - Undo/Redo (Phase 36) ----------------------------------------------------
+// - Undo/Redo ---------------------------------------------------------------
 
 describe('stream undo/redo', () => {
 	it('canUndo is false before enableHistory', () => {
@@ -4098,7 +4098,7 @@ describe('stream undo/redo', () => {
 	});
 });
 
-// - pauseHistory / resumeHistory (Phase 36) ----------------------------------
+// - pauseHistory / resumeHistory ---------------------------------------------
 
 describe('stream pauseHistory / resumeHistory', () => {
 	it('pauseHistory suppresses undo snapshots while events still apply', async () => {
@@ -4218,7 +4218,7 @@ describe('stream pauseHistory / resumeHistory', () => {
 	});
 });
 
-// - onSignal() (Phase 43) ----------------------------------------------------
+// - onSignal() ---------------------------------------------------------------
 
 describe('onSignal()', () => {
 	it('fires callback when a signal is received', () => {
@@ -4287,7 +4287,7 @@ describe('onSignal()', () => {
 	});
 });
 
-// - .when() (Phase 40: gate) -------------------------------------------------
+// - .when() (gate) -----------------------------------------------------------
 
 describe('.when(condition)', () => {
 	it('.when(false) keeps store as undefined and makes no RPC call', () => {

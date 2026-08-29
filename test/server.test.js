@@ -2113,7 +2113,7 @@ describe('platform.send() return value', () => {
 	});
 });
 
-// - live.validated() (Phase 12) ----------------------------------------------
+// - live.validated() ---------------------------------------------------------
 
 describe('live.validated()', () => {
 	it('passes through when schema validates successfully (Zod-like)', async () => {
@@ -2299,7 +2299,7 @@ describe('live.validated()', () => {
 	});
 });
 
-// - __directCall() (Phase 11) ------------------------------------------------
+// - __directCall() -----------------------------------------------------------
 
 describe('__directCall()', () => {
 	it('calls a registered live function directly without WebSocket', async () => {
@@ -2395,7 +2395,7 @@ describe('__directCall()', () => {
 	});
 });
 
-// - live.cron() (Phase 14) ---------------------------------------------------
+// - live.cron() --------------------------------------------------------------
 
 describe('live.cron()', () => {
 	it('marks function with cron metadata', () => {
@@ -3933,7 +3933,7 @@ describe('0.5.7 single-wrap invariant (every publish relays exactly once)', () =
 	});
 });
 
-// - Replay / seq handling (Phase 15) -----------------------------------------
+// - Replay / seq handling ----------------------------------------------------
 
 describe('replay stream response', () => {
 	it('includes seq in response when replay is enabled and platform supports it', async () => {
@@ -4008,7 +4008,7 @@ describe('issues propagation', () => {
 	});
 });
 
-// - Phase 16: _clearCron() ---------------------------------------------------
+// - _clearCron() -------------------------------------------------------------
 
 describe('_clearCron()', () => {
 	it('is a callable function', () => {
@@ -4017,7 +4017,7 @@ describe('_clearCron()', () => {
 	});
 });
 
-// - Phase 16: onCronError() --------------------------------------------------
+// - onCronError() ------------------------------------------------------------
 
 describe('onCronError()', () => {
 	it('is a callable function', () => {
@@ -4026,7 +4026,7 @@ describe('onCronError()', () => {
 	});
 });
 
-// - Phase 18: onError hook ---------------------------------------------------
+// - onError hook -------------------------------------------------------------
 
 describe('handleRpc() onError', () => {
 	it('calls onError when a non-LiveError is thrown', async () => {
@@ -4078,7 +4078,7 @@ describe('handleRpc() onError', () => {
 	});
 });
 
-// - Phase 18: createMessage with onError -------------------------------------
+// - createMessage with onError -----------------------------------------------
 
 describe('createMessage() with onError', () => {
 	it('passes onError through to handleRpc', async () => {
@@ -4108,7 +4108,7 @@ describe('createMessage() with onError', () => {
 	});
 });
 
-// - Phase 19: Stream pagination ----------------------------------------------
+// - Stream pagination --------------------------------------------------------
 
 describe('handleRpc() stream pagination', () => {
 	it('passes through hasMore and cursor from paginated initFn response', async () => {
@@ -4172,7 +4172,7 @@ describe('handleRpc() stream pagination', () => {
 	});
 });
 
-// - Phase 20: Stream lifecycle hooks -----------------------------------------
+// - Stream lifecycle hooks ---------------------------------------------------
 
 describe('live.stream() lifecycle hooks', () => {
 	it('fires onSubscribe after ws.subscribe', async () => {
@@ -4197,7 +4197,7 @@ describe('live.stream() lifecycle hooks', () => {
 	});
 });
 
-// - Phase 20: close() -------------------------------------------------------
+// - close() -----------------------------------------------------------------
 
 describe('close()', () => {
 	it('does not fire onUnsubscribe when socket was not subscribed to the topic', () => {
@@ -4294,7 +4294,7 @@ describe('close()', () => {
 	});
 });
 
-// - Phase 21: Global middleware ----------------------------------------------
+// - Global middleware --------------------------------------------------------
 
 describe('live.middleware()', () => {
 	it('runs before guard and handler', async () => {
@@ -4570,7 +4570,7 @@ describe('live.upload({ reauthEvery })', () => {
 	});
 });
 
-// - Phase 22: Binary RPC ----------------------------------------------------
+// - Binary RPC --------------------------------------------------------------
 
 describe('handleRpc() binary', () => {
 	it('handles binary RPC frames', async () => {
@@ -4663,7 +4663,7 @@ describe('handleRpc() binary', () => {
 	});
 });
 
-// - Phase 27: Throttle / Debounce -------------------------------------------
+// - Throttle / Debounce -----------------------------------------------------
 
 describe('ctx.throttle and ctx.debounce', () => {
 	let ws, platform;
@@ -4973,7 +4973,7 @@ describe('ctx.throttle / ctx.debounce deprecation warnings', () => {
 	});
 });
 
-// - Phase 26/32: live.access helpers ----------------------------------------
+// - live.access helpers -----------------------------------------------------
 
 describe('live.access', () => {
 	it('owner() checks ctx.user[field] is present', () => {
@@ -5078,7 +5078,7 @@ describe('live.access', () => {
 	});
 });
 
-// - Phase 26/32: live.stream with filter/access option ----------------------
+// - live.stream with filter/access option -----------------------------------
 
 describe('live.stream() with filter/access', () => {
 	it('stores filter function from filter option', () => {
@@ -5101,7 +5101,7 @@ describe('live.stream() with filter/access', () => {
 	});
 });
 
-// - Phase 30: live.derived() ------------------------------------------------
+// - live.derived() ----------------------------------------------------------
 
 describe('live.derived()', () => {
 	it('marks function with __isDerived and __isStream', () => {
@@ -5128,7 +5128,7 @@ describe('live.derived()', () => {
 	});
 });
 
-// - Phase 30: _activateDerived + __registerDerived --------------------------
+// - _activateDerived + __registerDerived ------------------------------------
 
 import { __registerDerived, _activateDerived, _prepareHmr } from '../server.js';
 
@@ -5543,7 +5543,7 @@ describe('missing _activateDerived warning', () => {
 	});
 });
 
-// - Phase 24: live.room() ---------------------------------------------------
+// - live.room() -------------------------------------------------------------
 
 describe('live.room()', () => {
 	it('creates a room export with __isRoom and sub-streams', () => {
@@ -5856,7 +5856,7 @@ describe('live.room()', () => {
 	});
 });
 
-// - Phase 31: live.webhook() ------------------------------------------------
+// - live.webhook() ----------------------------------------------------------
 
 describe('live.webhook()', () => {
 	it('creates a webhook handler with metadata', () => {
@@ -5924,7 +5924,7 @@ describe('live.webhook()', () => {
 	});
 });
 
-// - Phase 33: Delta sync (server side) --------------------------------------
+// - Delta sync (server side) ------------------------------------------------
 
 describe('delta sync in streams', () => {
 	let ws, platform;
@@ -6034,7 +6034,7 @@ describe('delta sync in streams', () => {
 	});
 });
 
-// - Phase 28: Test utilities ------------------------------------------------
+// - Test utilities ----------------------------------------------------------
 
 import { createTestEnv, expectGuardRejects, createTestContext } from '../test.js';
 
@@ -6394,7 +6394,7 @@ describe('TestStream.simulatePublish()', () => {
 	});
 });
 
-// - Phase 35: live.channel() -------------------------------------------------
+// - live.channel() -----------------------------------------------------------
 
 describe('live.channel()', () => {
 	it('sets __isChannel, __isStream and __isLive flags', () => {
@@ -6554,7 +6554,7 @@ describe('derived stream handleRpc response', () => {
 	});
 });
 
-// - Phase 37: live.rateLimit() -----------------------------------------------
+// - live.rateLimit() ---------------------------------------------------------
 
 describe('live.rateLimit()', () => {
 	it('sets __isLive and __isRateLimited flags', () => {
@@ -6798,7 +6798,7 @@ describe('live.rateLimits() registry config', () => {
 	});
 });
 
-// - Phase 38: live.effect() --------------------------------------------------
+// - live.effect() ------------------------------------------------------------
 
 describe('live.effect()', () => {
 	it('sets __isEffect flag and metadata', () => {
@@ -6873,7 +6873,7 @@ describe('live.effect()', () => {
 	});
 });
 
-// - Phase 43: live.signal() --------------------------------------------------
+// - live.signal() ------------------------------------------------------------
 
 describe('live.signal()', () => {
 	it('ctx.signal publishes to __signal:{userId} topic', async () => {
@@ -6916,7 +6916,7 @@ describe('live.signal()', () => {
 	});
 });
 
-// - Phase 39: live.aggregate() -----------------------------------------------
+// - live.aggregate() ---------------------------------------------------------
 
 describe('live.aggregate()', () => {
 	it('sets aggregate metadata', () => {
@@ -7640,7 +7640,7 @@ describe('_activateDerived late-activation', () => {
 	});
 });
 
-// - Phase 40: live.gate() ----------------------------------------------------
+// - live.gate() --------------------------------------------------------------
 
 describe('live.gate()', () => {
 	it('sets gate metadata on the wrapped function', () => {
@@ -7800,7 +7800,7 @@ describe('stream filter/access', () => {
 	});
 });
 
-// - Phase 41: pipe() ---------------------------------------------------------
+// - pipe() -------------------------------------------------------------------
 
 describe('pipe()', () => {
 	it('preserves stream metadata on piped function', () => {
@@ -7899,7 +7899,7 @@ describe('pipe()', () => {
 	});
 });
 
-// - Phase 42: Schema Evolution -----------------------------------------------
+// - Schema Evolution ---------------------------------------------------------
 
 describe('schema evolution', () => {
 	it('stores version and migrate metadata on stream function', () => {
