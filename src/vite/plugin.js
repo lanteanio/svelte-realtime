@@ -286,6 +286,14 @@ import('svelte-realtime/devtools');
 
 		async handleHotUpdate({ file, server }) {
 			if (!file.startsWith(liveDir)) return;
+			// The generated $types.d.ts must never re-enter this handler: the
+			// rewrite below would bump its mtime, produce the next change event
+			// and loop forever, full-reloading every connected client each time.
+			// Returning [] tells Vite the update is handled with no modules
+			// affected, so it does not fall back to a full reload.
+			if (file.endsWith('.d.ts')) return [];
+			// Same non-module filter as the add/unlink watcher.
+			if (!/\.[jt]s$/.test(file) || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
 			_fileCache.delete(file);
 			_codeCache.delete('client:' + file);
 			_codeCache.delete('ssr:' + file);

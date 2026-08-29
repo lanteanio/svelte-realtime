@@ -1,5 +1,5 @@
 // @ts-check
-import { existsSync, writeFileSync, rmSync } from 'fs';
+import { existsSync, readFileSync, writeFileSync, rmSync } from 'fs';
 import { resolve, relative } from 'path';
 import { _readCached } from './source-cache.js';
 import { _findLiveFiles } from './codegen-registry.js';
@@ -23,7 +23,14 @@ export function _writeTypeDeclarations(liveDir, dir) {
 	const typesPath = resolve(liveDir, '$types.d.ts');
 	const content = _generateTypeDeclarations(liveDir, dir);
 	if (content) {
-		writeFileSync(typesPath, content);
+		// Skip identical rewrites: an mtime bump re-enters file watchers, and
+		// with a second Vite instance on the same checkout it would ping-pong
+		// regeneration between the two processes indefinitely.
+		let existing = null;
+		try { existing = readFileSync(typesPath, 'utf-8'); } catch {}
+		if (existing !== content) {
+			writeFileSync(typesPath, content);
+		}
 	} else if (existsSync(typesPath)) {
 		// Remove stale declarations when all live modules are deleted
 		try { rmSync(typesPath); } catch {}
