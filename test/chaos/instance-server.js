@@ -9,10 +9,13 @@
 //                     wires the extensions Redis pubsub bus so this
 //                     instance fans out publishes to the cluster)
 // argv[4] = INSTANCE_ID (optional, for log prefixing)
+// argv[5] = CLEANUP_PORT (localhost-only authenticated shutdown endpoint)
+// argv[6] = CLEANUP_TOKEN (proves PID ownership before persisted cleanup)
 
 import { execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
+import { createServer } from 'node:http';
 import path from 'node:path';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -21,11 +24,31 @@ const fixtureDir = path.resolve(__dirname, '../fixture');
 const port = process.argv[2] || process.env.PORT;
 const redisUrl = process.argv[3] || process.env.REDIS_URL;
 const instanceId = process.argv[4] || process.env.INSTANCE_ID || 'inst';
+const cleanupPort = Number(process.argv[5]);
+const cleanupToken = process.argv[6];
 
-if (!port) {
-	console.error('chaos instance-server: pass a port via argv[2] or PORT env');
+if (!port || !Number.isInteger(cleanupPort) || cleanupPort <= 0 || !cleanupToken) {
+	console.error('chaos instance-server: pass PORT, CLEANUP_PORT, and CLEANUP_TOKEN');
 	process.exit(1);
 }
+
+const cleanupServer = createServer((request, response) => {
+	if (request.method !== 'POST' || request.url !== '/__chaos__/shutdown') {
+		response.writeHead(404).end();
+		return;
+	}
+	if (request.headers['x-chaos-cleanup-token'] !== cleanupToken) {
+		response.writeHead(403).end();
+		return;
+	}
+	response.writeHead(202, { 'content-type': 'text/plain' });
+	response.end('shutting down');
+	setTimeout(() => process.exit(0), 25).unref();
+});
+await new Promise((resolve, reject) => {
+	cleanupServer.once('error', reject);
+	cleanupServer.listen(cleanupPort, '127.0.0.1', resolve);
+});
 
 const buildIndex = path.join(fixtureDir, 'build', 'index.js');
 if (!existsSync(buildIndex)) {

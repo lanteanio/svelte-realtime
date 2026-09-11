@@ -50,7 +50,9 @@ export function createTestContext(options?: {
 	user?: any;
 	ws?: any;
 	platform?: any;
+	connectionId?: string;
 	requestId?: string;
+	traceContext?: import('./server.js').OperationTraceContext | null;
 	cursor?: any;
 }): {
 	user: any;
@@ -63,7 +65,10 @@ export function createTestContext(options?: {
 	signal: () => boolean;
 	batch: () => void;
 	shed: () => boolean;
+	connectionId: string | undefined;
 	requestId: string;
+	traceContext: import('./server.js').OperationTraceContext | null;
+	trace: import('./server.js').OperationTrace | null;
 };
 
 /**

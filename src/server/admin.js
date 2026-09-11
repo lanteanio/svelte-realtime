@@ -2,7 +2,7 @@
 // The admin / observability HTTP handler: a framework-agnostic Web `Request` ->
 // `Response` router for the admin plane. It owns the SECURITY gate (mandatory,
 // fail-closed) and serves the `introspect()` snapshot plus the dead-letter-queue
-// commands (`GET /dlq`, `GET /dlq/<topic>`, `POST /dlq/<topic>/replay`). Routing
+// commands, exact-id transport diagnostics, and the dead-letter queue. Routing
 // is mount-prefix agnostic (final path segment for single-segment commands, path
 // tail for the multi-segment DLQ commands), so it serves the same commands
 // whether mounted at the adapter's default `/__realtime`, a custom
@@ -75,9 +75,31 @@ export function _createAdminHandler(adminConfig) {
 		const pathname = url.pathname.replace(/\/+$/, '');
 		const method = request.method || 'GET';
 
+		// Detailed cross-worker divergence evidence is never part of a log or
+		// public/default snapshot. The opaque id emitted by the adapter resolves
+		// here only AFTER the mandatory auth gate above has admitted the request.
+		let m;
+		if ((m = pathname.match(/\/diagnostics\/([^/]+)$/))) {
+			if (method !== 'GET') return _json({ error: 'method not allowed' }, 405);
+			const diagnosticId = _decodeSegment(m[1]);
+			if (diagnosticId.length === 0 || diagnosticId.length > 128) {
+				return _json({ error: 'diagnostic not found' }, 404);
+			}
+			const platform = /** @type {any} */ (state.cronPlatform);
+			let diagnostic = null;
+			try {
+				if (platform && typeof platform.diagnostic === 'function') {
+					diagnostic = await platform.diagnostic(diagnosticId);
+				}
+			} catch {
+				diagnostic = null;
+			}
+			if (!diagnostic) return _json({ error: 'diagnostic not found' }, 404);
+			return _json(diagnostic, 200);
+		}
+
 		// Dead-letter queue (undeliverable outbound webhooks). Multi-segment
 		// commands matched by path tail so they stay mount-prefix agnostic.
-		let m;
 		if ((m = pathname.match(/\/dlq\/([^/]+)\/replay$/))) {
 			if (method !== 'POST') return _json({ error: 'method not allowed' }, 405);
 			const topic = _decodeSegment(m[1]);

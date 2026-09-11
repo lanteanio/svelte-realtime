@@ -10,6 +10,7 @@ import { _maybeReplayPublish } from './replay-routing.js';
 import { _redactOrDrop, REDACT_DROP } from './publish-helpers.js';
 import { _setBus } from './bus.js';
 import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
+import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let _cronInterval = null;
@@ -481,10 +482,17 @@ export async function _tickCron() {
 					state.metricsInstruments.cronErrors.inc({ path });
 				}
 				if (state.serverErrorHandler) {
-					state.serverErrorHandler(path, err);
-				} else if (_IS_DEV) {
-					console.error(`[svelte-realtime] Cron '${path}' error:`, err, '\n  See: https://svti.me/cron');
+					try { state.serverErrorHandler(path, err); } catch { /* observer-only */ }
 				}
+				emitOperationalEvent({
+					source: 'svelte-realtime',
+					component: 'server.cron',
+					event: 'cron.execution.failed',
+					severity: 'error',
+					dataClass: 'application',
+					message: 'A cron handler failed; the scheduler remains active.',
+					attributes: { path, error: diagnosticErrorMessage(err), help: 'https://svti.me/cron' }
+				});
 			} finally {
 				_cronRunning.delete(path);
 				_exitInFlight();

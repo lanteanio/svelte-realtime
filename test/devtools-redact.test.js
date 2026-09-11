@@ -1,11 +1,8 @@
-// The devtools redactKeys mitigation must cover the RPC and volatile
-// capture paths, not just stream events. _devtoolsStart / _devtoolsEnd /
-// _devtoolsVolatileSent store args and results in window-reachable rings
-// (window.__svelte_realtime_devtools), so credential-carrying calls like
-// login({ password }) must land there redacted, exactly as stream-event
-// payloads already do.
+// The safe default must retain metadata only on every surface. The explicit
+// unsafe mode is covered separately so its redactKeys defense still applies to
+// RPC, volatile, and stream capture consistently.
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import {
 	__devtools,
 	_devtoolsStart,
@@ -22,7 +19,109 @@ import {
 // no hint as to why, unless we supply one.
 const GATE = 'devtools instrumentation is off - is PROD or NODE_ENV set in this shell?';
 
+describe('devtools metadata-only default', () => {
+	beforeEach(() => {
+		expect(__devtools, GATE).toBeTruthy();
+		__devtools.unsafeCapturePayloads = false;
+	});
+
+	it('retains no topic, argument, result, event, or error value by default', () => {
+		const secrets = [
+			'org:customer-123:secret',
+			'hunter2-PASS',
+			'alice@example.test',
+			'Bearer top-secret',
+			"invalid password 'hunter2'"
+		];
+		_devtoolsStart('auth/login', 'dt-safe-default', [{
+			password: secrets[1],
+			email: secrets[2],
+			authorization: secrets[3]
+		}]);
+		_devtoolsVolatileSent('auth/ping', [{ token: secrets[3] }]);
+		_devtoolsStream('chat/secure', secrets[0], 1, 'crud');
+		_devtoolsStreamEvent('chat/secure', 'created', { password: secrets[1], text: secrets[2] });
+		_devtoolsStreamError('chat/secure', { code: 'FORBIDDEN', message: secrets[4] });
+		_devtoolsEnd('dt-safe-default', true, { token: secrets[3], email: secrets[2] });
+
+		const retained = JSON.stringify({
+			history: __devtools.history,
+			volatile: __devtools.volatile,
+			streams: [...__devtools.streams.entries()]
+		});
+		for (const secret of secrets) expect(retained).not.toContain(secret);
+		const history = __devtools.history.filter(Boolean).at(-1);
+		expect(history.args[0]).toMatchObject({ dataClass: 'confidential', captured: false, type: 'object' });
+		expect(history.result).toMatchObject({ dataClass: 'confidential', captured: false, type: 'object' });
+		const stream = __devtools.streams.get('chat/secure');
+		expect(stream.topic).toBe('[topic omitted; chars=23]');
+		expect(stream.error).toEqual({ code: 'FORBIDDEN', message: '[message omitted]' });
+		expect(stream.recentEvents.at(-1).data).toMatchObject({ captured: false, type: 'object' });
+	});
+
+	it('does not read hostile payload properties in metadata-only mode', () => {
+		const hostile = new Proxy({}, {
+			ownKeys() {
+				throw new Error('must not escape');
+			},
+			get() {
+				throw new Error('must not escape');
+			}
+		});
+		expect(() => _devtoolsStart('x/hostile', 'dt-hostile-default', [hostile])).not.toThrow();
+		expect(() => _devtoolsEnd('dt-hostile-default', true, hostile)).not.toThrow();
+	});
+
+	it('fails closed for revoked Proxy arguments and rejected results in metadata-only mode', () => {
+		const revocable = Proxy.revocable({}, {});
+		revocable.revoke();
+		expect(() => _devtoolsStart('x/revoked', 'dt-revoked-default', [revocable.proxy])).not.toThrow();
+		expect(__devtools.pending.get('dt-revoked-default').args[0]).toMatchObject({
+			dataClass: 'confidential',
+			captured: false,
+			type: 'object'
+		});
+		expect(() => _devtoolsEnd('dt-revoked-default', false, revocable.proxy)).not.toThrow();
+		expect(__devtools.history.filter(Boolean).at(-1).result).toMatchObject({
+			dataClass: 'confidential',
+			captured: false,
+			type: 'object',
+			errorName: 'Error',
+			code: 'UNKNOWN'
+		});
+	});
+
+	it('purges payload-bearing captures when the unsafe opt-in is disabled', () => {
+		__devtools.unsafeCapturePayloads = true;
+		_devtoolsStart('auth/login', 'dt-purge', [{ note: 'purge-me' }]);
+		_devtoolsEnd('dt-purge', true, { profile: 'purge-me-too' });
+		expect(JSON.stringify(__devtools.history)).toContain('purge-me');
+		__devtools.unsafeCapturePayloads = false;
+		expect(__devtools.history.every((entry) => entry === null)).toBe(true);
+		expect(__devtools.pending.size).toBe(0);
+		expect(__devtools.volatile.every((entry) => entry === null)).toBe(true);
+	});
+});
+
 describe('devtools redaction on the RPC/volatile paths', () => {
+	beforeEach(() => {
+		expect(__devtools, GATE).toBeTruthy();
+		__devtools.unsafeCapturePayloads = true;
+	});
+
+	afterEach(() => {
+		__devtools.unsafeCapturePayloads = false;
+	});
+
+	it('fails closed for revoked Proxy arguments and rejected results in unsafe mode', () => {
+		const revocable = Proxy.revocable([], {});
+		revocable.revoke();
+		expect(() => _devtoolsStart('x/revoked', 'dt-revoked-unsafe', [revocable.proxy])).not.toThrow();
+		expect(__devtools.pending.get('dt-revoked-unsafe').args).toEqual(['[unreadable]']);
+		expect(() => _devtoolsEnd('dt-revoked-unsafe', false, revocable.proxy)).not.toThrow();
+		expect(__devtools.history.filter(Boolean).at(-1).result).toBe('[unreadable]');
+	});
+
 	it('redacts pending args while the RPC is in flight', () => {
 		// Asserted rather than skipped. `if (!__devtools) return` turns every test in
 		// this file into a green no-op the moment instrumentation is absent - which is

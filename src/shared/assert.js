@@ -11,7 +11,7 @@
  * Behavior:
  *   - On violation: increments the per-category counter on the module-level
  *     Map, fires the optional metrics hook bound via `wireAssertionMetrics`,
- *     and logs a structured `[realtime/assert] {...}` line.
+ *     and logs a structured package-attributed diagnostic line.
  *   - In test mode (VITEST or NODE_ENV=test) the assert THROWS so vitest
  *     surfaces the failure as a test error.
  *   - In production it does NOT throw - a thrown exception inside a publish
@@ -21,6 +21,8 @@
  *
  * @module svelte-realtime/shared/assert
  */
+
+import { formatDiagnostic } from './diagnostic-format.js';
 
 const _IS_TEST_MODE = !!(typeof process !== 'undefined' && process && process.env && (process.env.VITEST || process.env.NODE_ENV === 'test'));
 
@@ -70,7 +72,14 @@ export function assert(cond, category, context) {
 		try { onViolation(category); } catch { /* hook best-effort */ }
 	}
 	const payload = JSON.stringify(context === undefined ? { category } : { category, context });
-	console.error('[realtime/assert] ' + payload);
+	console.error(formatDiagnostic({
+		source: 'svelte-realtime',
+		component: 'runtime.assertion',
+		event: 'invariant.violated',
+		severity: 'warn',
+		message: category,
+		attributes: context === undefined ? { category } : { category, context }
+	}));
 	if (_IS_TEST_MODE) {
 		throw new Error('realtime assertion failed: ' + category + ' ' + payload);
 	}
@@ -82,7 +91,7 @@ export function assert(cond, category, context) {
  * subscription indexes have diverged). On violation it records the SAME
  * per-category counter and fires the SAME metrics hook as `assert` (one
  * namespace; the severity rides the structured log as `severity: 'fatal'`),
- * logs a `[realtime/fatal]` line, and then:
+ * logs a fatal package-attributed diagnostic line, and then:
  *   - In test mode (VITEST or NODE_ENV=test) it THROWS so vitest surfaces the
  *     failure as a test error.
  *   - In production it schedules a DEFERRED worker termination (exit code 78)
@@ -108,7 +117,14 @@ export function fatal(cond, category, context) {
 		try { onViolation(category); } catch { /* hook best-effort */ }
 	}
 	const payload = JSON.stringify(context === undefined ? { category, severity: 'fatal' } : { category, context, severity: 'fatal' });
-	console.error('[realtime/fatal] ' + payload);
+	console.error(formatDiagnostic({
+		source: 'svelte-realtime',
+		component: 'runtime.assertion',
+		event: 'invariant.violated',
+		severity: 'fatal',
+		message: category,
+		attributes: context === undefined ? { category } : { category, context }
+	}));
 	if (_isTestModeNow()) {
 		throw new Error('realtime fatal: ' + category + ' ' + payload);
 	}

@@ -7,14 +7,14 @@ import { sanitizeRowData } from './shared/safe-assign.js';
  * predicates, or any function that takes `ctx` and synchronously
  * returns a value. The shape mirrors the production `_buildCtx` (user,
  * ws, platform, publish, cursor, throttle, debounce, signal, batch,
- * shed, requestId) but every helper is a no-op so the context can be
+ * shed, connectionId, requestId) but every helper is a no-op so the context can be
  * exercised without spinning up a harness.
  *
  * For full publish/subscribe round-trips, prefer `createTestEnv()` --
  * this helper is for direct invocation patterns like
  * `expect(myGuard(ctx)).toBe(false)`.
  *
- * @param {{ user?: any, ws?: any, platform?: any, requestId?: string, cursor?: any }} [options]
+ * @param {{ user?: any, ws?: any, platform?: any, connectionId?: string, requestId?: string, cursor?: any }} [options]
  * @returns {{
  *   user: any,
  *   ws: any,
@@ -26,6 +26,7 @@ import { sanitizeRowData } from './shared/safe-assign.js';
  *   signal: () => boolean,
  *   batch: (arg: Array<{ topic: string, event: string, data?: any, options?: any }> | ((ctx: any) => any)) => any,
  *   shed: () => boolean,
+ *   connectionId: string | undefined,
  *   requestId: string
  * }}
  *
@@ -41,10 +42,24 @@ import { sanitizeRowData } from './shared/safe-assign.js';
  */
 export function createTestContext(options) {
 	const opts = options || {};
+	const requestId = opts.requestId ?? 'test-req';
+	const connectionId = opts.connectionId ?? opts.platform?.connectionId ?? (opts.ws ? opts.platform?.requestId ?? 'test-connection' : undefined);
+	const hasTraceContext = Object.prototype.hasOwnProperty.call(opts, 'traceContext');
+	let contextPlatform = opts.platform ?? null;
+	if (contextPlatform) {
+		contextPlatform = Object.create(contextPlatform);
+		const properties = {
+			requestId: { value: requestId, enumerable: true },
+			connectionId: { value: connectionId, enumerable: true }
+		};
+		if (hasTraceContext) properties.traceContext = { value: opts.traceContext ?? null, enumerable: true };
+		Object.defineProperties(contextPlatform, properties);
+	}
+	const traceContext = hasTraceContext ? (opts.traceContext ?? null) : (contextPlatform?.traceContext ?? null);
 	const ctx = {
 		user: opts.user ?? null,
 		ws: opts.ws ?? null,
-		platform: opts.platform ?? null,
+		platform: contextPlatform,
 		publish: () => true,
 		cursor: opts.cursor ?? null,
 		throttle: () => {},
@@ -52,7 +67,10 @@ export function createTestContext(options) {
 		signal: () => true,
 		batch: /** @type {any} */ (() => {}),
 		shed: () => false,
-		requestId: opts.requestId ?? 'test-req'
+		connectionId,
+		requestId,
+		traceContext,
+		trace: contextPlatform?.trace ?? null
 	};
 	// Mirror the production ctx.batch semantics so handler code under test
 	// behaves like it will in production: the list form publishes each message

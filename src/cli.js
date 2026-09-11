@@ -1,10 +1,20 @@
 #!/usr/bin/env node
 // @ts-check
 import { execFileSync } from 'child_process';
-import { writeFileSync, existsSync, mkdirSync } from 'fs';
+import { writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
 import { resolve, join } from 'path';
 import * as p from '@clack/prompts';
-import { detectAgent, parseArgs, VALID_NAME_RE } from './cli-utils.js';
+import {
+	detectAgent,
+	parseArgs,
+	renderScaffoldAuthWarningStatement,
+	renderViteConfig,
+	runScaffoldVerification,
+	SCAFFOLD_ADAPTER_SPEC,
+	SCAFFOLD_REALTIME_SPEC,
+	SCAFFOLD_UWS_SPEC,
+	VALID_NAME_RE
+} from './cli-utils.js';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -57,11 +67,7 @@ const SCAFFOLD_PLACEHOLDER = true;
 
 export function upgrade() {
 \tif (SCAFFOLD_PLACEHOLDER) {
-\t\tconsole.warn(
-\t\t\t'[svelte-realtime] upgrade() is the scaffold default. ' +
-\t\t\t\t'Every connection gets a random UUID identity. ' +
-\t\t\t\t'Edit src/hooks.ws.ts before deploying - see the SECURITY block at the top of the file.'
-\t\t);
+\t\t${renderScaffoldAuthWarningStatement()}
 \t}
 \treturn { id: crypto.randomUUID() };
 }
@@ -81,7 +87,7 @@ if ('help' in parsed) {
 }
 
 if ('error' in parsed) {
-	console.error(parsed.error);
+	console.error('[svelte-realtime]', parsed.error);
 	process.exit(1);
 }
 
@@ -140,65 +146,43 @@ if (p.isCancel(template)) {
 }
 
 const agent = detectAgent(process.env.npm_config_user_agent);
+const add = agent === 'npm' ? 'install' : 'add';
 
 if (template === 'demo') {
 	p.log.step('Cloning demo repository');
 	run('git', ['clone', DEMO_REPO, name]);
 
-	p.log.step('Installing dependencies');
-	run(bin(agent), ['install'], dest);
-
-	p.outro(`Done. cd ${name} && ${agent} run dev`);
-	process.exit(0);
+	p.log.step('Installing the audited dependency tuple');
+	run(bin(agent), [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);
+	run(bin(agent), [add, SCAFFOLD_UWS_SPEC], dest);
 }
 
-p.log.step('Creating SvelteKit project');
-run(bin('npx'), ['-y', 'sv', 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
+if (template !== 'demo') {
+	p.log.step('Creating SvelteKit project');
+	run(bin('npx'), ['-y', 'sv', 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
 
-p.log.step('Installing dependencies');
-const add = agent === 'npm' ? 'install' : 'add';
-run(bin(agent), [add, 'svelte-adapter-uws', 'svelte-realtime'], dest);
-run(bin(agent), [add, 'uNetworking/uWebSockets.js#v20.60.0'], dest);
-run(bin(agent), [add, '-D', 'ws'], dest);
+	p.log.step('Installing dependencies');
+	run(bin(agent), [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);
+	run(bin(agent), [add, SCAFFOLD_UWS_SPEC], dest);
+	run(bin(agent), [add, '-D', 'ws'], dest);
 
-p.log.step('Configuring svelte-realtime');
+	p.log.step('Configuring svelte-realtime');
 
-writeFileSync(
-	join(dest, 'svelte.config.js'),
-	`import adapter from 'svelte-adapter-uws';
+	// sv currently writes the SvelteKit options directly into vite.config.ts.
+	// Keeping a second sidecar makes the adapter setting look configured while
+	// SvelteKit ignores it, so remove any generated sidecar before writing the
+	// consolidated configuration.
+	rmSync(join(dest, 'svelte.config.js'), { force: true });
+	writeFileSync(join(dest, 'vite.config.ts'), renderViteConfig());
 
-/** @type {import('@sveltejs/kit').Config} */
-const config = {
-\tkit: {
-\t\tadapter: adapter({ websocket: true })
-\t}
-};
+	writeFileSync(join(dest, 'src', 'hooks.ws.ts'), UPGRADE_HOOK_SCAFFOLD);
 
-export default config;
-`
-);
+	if (template === 'example') {
+		mkdirSync(join(dest, 'src', 'live'), { recursive: true });
 
-writeFileSync(
-	join(dest, 'vite.config.ts'),
-	`import { sveltekit } from '@sveltejs/kit/vite';
-import uws from 'svelte-adapter-uws/vite';
-import realtime from 'svelte-realtime/vite';
-import { defineConfig } from 'vite';
-
-export default defineConfig({
-\tplugins: [sveltekit(), uws(), realtime()]
-});
-`
-);
-
-writeFileSync(join(dest, 'src', 'hooks.ws.ts'), UPGRADE_HOOK_SCAFFOLD);
-
-if (template === 'example') {
-	mkdirSync(join(dest, 'src', 'live'), { recursive: true });
-
-	writeFileSync(
-		join(dest, 'src', 'live', 'counter.ts'),
-		`import { live } from 'svelte-realtime/server';
+		writeFileSync(
+			join(dest, 'src', 'live', 'counter.ts'),
+			`import { live } from 'svelte-realtime/server';
 
 let count = 0;
 
@@ -212,11 +196,11 @@ export const counter = live.stream('count', () => {
 \treturn count;
 }, { merge: 'set' });
 `
-	);
+		);
 
-	writeFileSync(
-		join(dest, 'src', 'routes', '+page.svelte'),
-		`<script lang="ts">
+		writeFileSync(
+			join(dest, 'src', 'routes', '+page.svelte'),
+			`<script lang="ts">
 \timport { increment, counter } from '$live/counter';
 </script>
 
@@ -230,12 +214,20 @@ export const counter = live.stream('count', () => {
 
 <button onclick={() => increment()}>+1</button>
 `
-	);
+		);
+	}
 }
 
-p.log.success('Configured.');
+runScaffoldVerification({
+	agent,
+	dest,
+	bin,
+	run,
+	onStep: (message) => p.log.step(message),
+	onSuccess: (message) => p.log.success(message)
+});
 
-p.outro(`Done. cd ${name} && ${agent} run dev`);
+p.outro(`Verified. cd ${name} && ${agent} run dev`);
 
 // ---------------------------------------------------------------------------
 

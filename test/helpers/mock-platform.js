@@ -7,6 +7,8 @@ export function mockPlatform() {
 		published: [],
 		sent: [],
 		coalesced: [],
+		wireSubscribeModes: [],
+		_wireSubscribeMode: null,
 		connections: 0,
 		publish(topic, event, data, options) {
 			p.published.push({ topic, event, data, options });
@@ -45,6 +47,15 @@ export function mockPlatform() {
 			try { ws.subscribe(topic); } catch { return 'CONNECTION_CLOSED'; }
 			return null;
 		},
+		authorizeWireSubscribe(mode = 'legacy') {
+			if (mode !== 'legacy' && mode !== 'strict') {
+				throw new TypeError("authorizeWireSubscribe mode must be 'legacy' or 'strict'");
+			}
+			p.wireSubscribeModes.push(mode);
+			if (mode === 'strict' || p._wireSubscribeMode === 'strict') p._wireSubscribeMode = 'strict';
+			else p._wireSubscribeMode = 'legacy';
+			return p._wireSubscribeMode;
+		},
 		unsubscribe(ws, topic) {
 			try { ws.unsubscribe(topic); } catch { /* already closed */ }
 		},
@@ -73,6 +84,8 @@ export function mockPlatform() {
 			p.published.length = 0;
 			p.sent.length = 0;
 			p.coalesced.length = 0;
+			p.wireSubscribeModes.length = 0;
+			p._wireSubscribeMode = null;
 			p.requested.length = 0;
 			p._requestResolver = null;
 		},

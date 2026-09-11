@@ -1,8 +1,16 @@
 // @ts-check
 import { state } from './state.js';
 
-/** Valid pressure reasons accepted in admission rules. Mirrors the adapter's PressureReason enum. */
-const _PRESSURE_REASONS = new Set(['NONE', 'PUBLISH_RATE', 'SUBSCRIBERS', 'MEMORY']);
+/**
+ * Every pressure reason emitted by the supported adapter. The tuple is the
+ * runtime validation oracle and the public contract consumers can spread when
+ * a class should shed under any active pressure.
+ * @type {readonly ['NONE', 'SUBSCRIBERS', 'PUBLISH_RATE', 'PSI', 'CPU_QUOTA', 'CAPACITY', 'MEMORY']}
+ */
+export const PRESSURE_REASONS = Object.freeze([
+	'NONE', 'SUBSCRIBERS', 'PUBLISH_RATE', 'PSI', 'CPU_QUOTA', 'CAPACITY', 'MEMORY'
+]);
+const _PRESSURE_REASON_SET = new Set(PRESSURE_REASONS);
 
 /**
  * Configure pressure-aware admission control. Each named class maps to
@@ -32,10 +40,10 @@ const _liveAdmission = function admission(config) {
 	for (const [name, rule] of Object.entries(config.classes)) {
 		if (Array.isArray(rule)) {
 			for (const r of rule) {
-				if (!_PRESSURE_REASONS.has(r)) {
+				if (!_PRESSURE_REASON_SET.has(r)) {
 					throw new Error(
 						`[svelte-realtime] live.admission: class '${name}' has unknown pressure reason '${r}'. ` +
-						`Valid: ${[..._PRESSURE_REASONS].join(', ')}`
+						`Valid: ${PRESSURE_REASONS.join(', ')}`
 					);
 				}
 			}

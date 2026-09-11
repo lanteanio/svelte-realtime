@@ -5,7 +5,7 @@ import { now } from '../client-runtime.js';
 
 /**
  * Default key names whose values are replaced with `'[REDACTED]'` when
- * captured into the per-stream payload preview. Case-insensitive match
+ * explicitly unsafe payload capture is enabled. Case-insensitive match
  * against the ENTIRE key (substring match would over-redact). Apps can
  * override or extend via `__devtools.redactKeys = new Set([...])`; entries are
  * normalized to lowercase at the top of each redaction walk, so a mixed-case
@@ -21,6 +21,7 @@ const _DEFAULT_REDACT_KEYS = new Set([
 const _MAX_STREAM_EVENTS = 20;
 
 const _DEVTOOLS_VOLATILE_MAX = 100;
+let _unsafeCapturePayloads = false;
 
 /**
  * @type {{
@@ -30,6 +31,7 @@ const _DEVTOOLS_VOLATILE_MAX = 100;
  *   volatile: any[],
  *   volatileDropped: number,
  *   redactKeys: Set<string>,
+ *   unsafeCapturePayloads: boolean,
  *   paused: boolean,
  *   smooth: Set<() => any>
  * } | null}
@@ -42,6 +44,24 @@ export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.en
 		volatile: new Array(_DEVTOOLS_VOLATILE_MAX).fill(null),
 		volatileDropped: 0,
 		redactKeys: new Set(_DEFAULT_REDACT_KEYS),
+		get unsafeCapturePayloads() {
+			return _unsafeCapturePayloads;
+		},
+		set unsafeCapturePayloads(value) {
+			_unsafeCapturePayloads = value === true;
+			if (_unsafeCapturePayloads) return;
+			// Turning unsafe capture back off is also a purge boundary. Values
+			// captured while the opt-in was active must not remain reachable from
+			// the page-global devtools object after the operator disables it.
+			this.history.fill(null);
+			this.pending.clear();
+			this.volatile.fill(null);
+			for (const stream of this.streams.values()) {
+				if (stream.topic !== null) stream.topic = '[topic omitted]';
+				if (stream.error) stream.error = { code: stream.error.code, message: '[message omitted]' };
+				stream.recentEvents = [];
+			}
+		},
 		paused: false,
 		// Live smoothed-channel telemetry accessors (the "smooth" tab). Pull-based:
 		// each entry is a `() => channel.stats()` the panel calls on its refresh
@@ -56,13 +76,77 @@ let _devtoolsVolatileIdx = 0;
 let _devtoolsVolatileSeq = 0;
 
 /**
+ * Metadata-only description used by default. It never reads an object
+ * property value or retains a field name (although it may enumerate names to
+ * count own fields), so credentials remain absent even when they use an
+ * unexpected key or sit in a bare string. Every reflection step is guarded:
+ * even a revoked Proxy degrades to metadata instead of escaping into the RPC
+ * path this instrumentation observes.
+ * @param {any} value
+ * @returns {{ dataClass: 'confidential', captured: false, type: string, length?: number, fields?: number }}
+ */
+function _devtoolsMetadata(value) {
+	const type = value === null ? 'null' : typeof value;
+	try {
+		if (value === null) return { dataClass: 'confidential', captured: false, type };
+		if (type === 'string') {
+			return { dataClass: 'confidential', captured: false, type, length: value.length };
+		}
+		if (Array.isArray(value)) {
+			let length;
+			try { length = value.length; } catch {}
+			return {
+				dataClass: 'confidential',
+				captured: false,
+				type: 'array',
+				...(typeof length === 'number' ? { length } : {})
+			};
+		}
+		if (type === 'object') {
+			let fields;
+			try { fields = Object.keys(value).length; } catch {}
+			return {
+				dataClass: 'confidential',
+				captured: false,
+				type,
+				...(typeof fields === 'number' ? { fields } : {})
+			};
+		}
+		return { dataClass: 'confidential', captured: false, type };
+	} catch {
+		// `Array.isArray` itself throws for a revoked Proxy. Preserve only the
+		// primitive `typeof` result, which is safe even after revocation.
+		return { dataClass: 'confidential', captured: false, type };
+	}
+}
+
+/** @param {any[]} args @returns {any[]} */
+function _devtoolsCaptureArgs(args) {
+	try {
+		if (!__devtools || !__devtools.unsafeCapturePayloads) {
+			return args.map((value) => _devtoolsMetadata(value));
+		}
+		return _devtoolsRedact(args, __devtools.redactKeys, 0, new WeakSet());
+	} catch {
+		// Instrumentation is observational. A hostile argument container or
+		// mutable redaction configuration must never change call semantics.
+		return ['[unreadable]'];
+	}
+}
+
+/** @param {string | null} topic @returns {string | null} */
+function _devtoolsCaptureTopic(topic) {
+	if (topic === null || !__devtools || __devtools.unsafeCapturePayloads) return topic;
+	return '[topic omitted; chars=' + topic.length + ']';
+}
+
+/**
  * Record a fire-and-forget RPC send for devtools. Send-only - there is no
  * matching completion event because the wire shape carries no `id` and the
  * server never replies. Ring buffer is bounded (`_DEVTOOLS_VOLATILE_MAX`,
  * drop-oldest) so a high-frequency 60-120Hz mover can't anchor unbounded
- * dev-mode memory. Args are redacted before storage, exactly as stream-event
- * payloads are, so a `login({ password })` send never lands in the ring in
- * plaintext.
+ * dev-mode memory. Args retain metadata only by default. With the explicit
+ * unsafe opt-in they pass through the shared key redactor before storage.
  * @param {string} path
  * @param {any[]} args
  */
@@ -70,7 +154,7 @@ export function _devtoolsVolatileSent(path, args) {
 	if (!__devtools) return;
 	__devtools.volatile[_devtoolsVolatileIdx] = {
 		path,
-		args: _devtoolsRedact(args, __devtools.redactKeys, 0, new WeakSet()),
+		args: _devtoolsCaptureArgs(args),
 		time: now(),
 		seq: ++_devtoolsVolatileSeq
 	};
@@ -88,6 +172,7 @@ export function _devtoolsVolatileSent(path, args) {
  * @returns {any}
  */
 function _devtoolsRedact(value, redactKeys, depth, seen, dropStack) {
+	try {
 	// Normalize the KEY SET to lowercase once, at the top of each walk. Only the
 	// payload key was being lowercased, so the match was case-insensitive on one
 	// side only: the documented extension `__devtools.redactKeys.add('paymentMethod')`
@@ -133,6 +218,13 @@ function _devtoolsRedact(value, redactKeys, depth, seen, dropStack) {
 		}
 	}
 	return out;
+	} catch {
+		// Reflection on a Proxy can throw at `Array.isArray`, iteration,
+		// `Object.keys`, slicing, or property access. Unsafe capture may retain
+		// values by explicit opt-in, but it still must not alter application
+		// behavior; collapse an unreadable subtree to a fixed sentinel.
+		return '[unreadable]';
+	}
 }
 
 /** Ring buffer index for devtools history (O(1) insertion, no array.shift) */
@@ -141,9 +233,8 @@ let _devtoolsSeq = 0;
 const _DEVTOOLS_HISTORY_MAX = 50;
 
 /**
- * Record an RPC call start for devtools. Args are redacted before storage
- * (the same redactor the stream-event path applies), so credential-carrying
- * calls like `login({ password })` never sit in the pending map in plaintext.
+ * Record an RPC call start for devtools. Args retain metadata only by default;
+ * the explicit unsafe opt-in applies the same key redactor as stream events.
  * @param {string} path
  * @param {string} id
  * @param {any[]} args
@@ -152,13 +243,14 @@ export function _devtoolsStart(path, id, args) {
 	if (!__devtools) return;
 	__devtools.pending.set(id, {
 		path,
-		args: _devtoolsRedact(args, __devtools.redactKeys, 0, new WeakSet()),
+		args: _devtoolsCaptureArgs(args),
 		startTime: now()
 	});
 }
 
 /**
- * Redact a settled RPC result for storage.
+ * Capture a settled RPC result. The default returns metadata only; the
+ * branches below are reached only after unsafe payload capture is enabled.
  *
  * An Error needs its own branch: `message` and `stack` are own but NON-enumerable,
  * so the generic key walk (which uses Object.keys) would silently drop them and a
@@ -200,9 +292,9 @@ function _safeRead(obj, key) {
  * @returns {boolean}
  */
 function _isErrorShaped(result) {
-	if (result instanceof Error) return true;
-	if (!result || typeof result !== 'object') return false;
 	try {
+		if (result instanceof Error) return true;
+		if (!result || typeof result !== 'object') return false;
 		return typeof result.message === 'string' && 'stack' in result;
 	} catch {
 		return false;
@@ -211,6 +303,21 @@ function _isErrorShaped(result) {
 
 function _devtoolsResult(result, ok) {
 	if (!__devtools) return result;
+	if (!__devtools.unsafeCapturePayloads) {
+		const metadata = _devtoolsMetadata(result);
+		if (ok !== false) return metadata;
+		const rawName = _safeRead(result, 'name');
+		const rawCode = _safeRead(result, 'code');
+		return {
+			...metadata,
+			errorName: typeof rawName === 'string' && /^[A-Za-z][A-Za-z0-9_.:-]{0,63}$/.test(rawName)
+				? rawName
+				: 'Error',
+			code: typeof rawCode === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(rawCode)
+				? rawCode
+				: 'UNKNOWN'
+		};
+	}
 	const keys = __devtools.redactKeys;
 	// Gated on `ok === false`. Shape alone is not enough: a SUCCESSFUL call may
 	// legitimately resolve to error-shaped data (an error-log row is the obvious
@@ -232,7 +339,10 @@ function _devtoolsResult(result, ok) {
 		// touches a non-enumerable `stack`, so nothing is read that the guard above
 		// has not already read.
 		const extras = /** @type {Record<string, any>} */ ({});
-		for (const k of Object.keys(/** @type {any} */ (result))) {
+		let enumerableKeys;
+		try { enumerableKeys = Object.keys(/** @type {any} */ (result)); }
+		catch { return '[unreadable]'; }
+		for (const k of enumerableKeys) {
 			if (k === 'stack') continue;
 			try { extras[k] = /** @type {any} */ (result)[k]; } catch { extras[k] = '[unreadable]'; }
 		}
@@ -251,8 +361,8 @@ function _devtoolsResult(result, ok) {
 }
 
 /**
- * Record an RPC call completion for devtools. The result is redacted before
- * it lands in the history ring; the args were already redacted at start.
+ * Record an RPC call completion for devtools. The safe default stores
+ * metadata; unsafe capture stores key-redacted values.
  * @param {string} id
  * @param {boolean} ok
  * @param {any} result
@@ -290,7 +400,7 @@ export function _devtoolsStream(path, topic, subCount, merge) {
 		const existing = __devtools.streams.get(path);
 		__devtools.streams.set(path, {
 			path,
-			topic,
+			topic: _devtoolsCaptureTopic(topic),
 			subCount,
 			merge: merge || existing?.merge || null,
 			lastEventTime: existing?.lastEventTime || null,
@@ -302,10 +412,9 @@ export function _devtoolsStream(path, topic, subCount, merge) {
 }
 
 /**
- * Record a pub/sub event arrival for devtools, including a redacted +
- * depth/array-capped snapshot of the payload pushed to a per-stream
- * ring buffer (capped at `_MAX_STREAM_EVENTS`). Skips capture entirely
- * when `__devtools.paused` is true.
+ * Record a pub/sub event arrival for devtools. The safe default pushes
+ * metadata to the bounded ring; unsafe capture pushes a key-redacted,
+ * depth/array-capped snapshot. Skips capture when paused.
  * @param {string} path
  * @param {string} eventType
  * @param {any} [data]
@@ -317,10 +426,12 @@ export function _devtoolsStreamEvent(path, eventType, data) {
 	e.lastEventTime = now();
 	e.lastEvent = eventType;
 	if (__devtools.paused) return;
-	const redacted = data === undefined
+	const captured = data === undefined
 		? undefined
-		: _devtoolsRedact(data, __devtools.redactKeys, 0, new WeakSet());
-	e.recentEvents.push({ event: eventType, data: redacted, ts: e.lastEventTime });
+		: (__devtools.unsafeCapturePayloads
+			? _devtoolsRedact(data, __devtools.redactKeys, 0, new WeakSet())
+			: _devtoolsMetadata(data));
+	e.recentEvents.push({ event: eventType, data: captured, ts: e.lastEventTime });
 	if (e.recentEvents.length > _MAX_STREAM_EVENTS) {
 		e.recentEvents.splice(0, e.recentEvents.length - _MAX_STREAM_EVENTS);
 	}
@@ -335,12 +446,24 @@ export function _devtoolsStreamError(path, err) {
 	if (!__devtools) return;
 	const e = __devtools.streams.get(path);
 	if (!e) return;
-	// NOT redacted, and it cannot be: redaction is key-based and an error message
-	// is a bare string. This is the one devtools field the panel renders, so a
-	// server error that echoes user input ("invalid password 'hunter2'") is
-	// captured verbatim. Documented as a limitation rather than papered over with
-	// a redactor call that would be a no-op on a string.
-	e.error = err ? { code: err.code || 'UNKNOWN', message: err.message || String(err) } : null;
+	if (!err) {
+		e.error = null;
+		return;
+	}
+	const rawCode = _safeRead(err, 'code');
+	const code = typeof rawCode === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/.test(rawCode)
+		? rawCode
+		: 'UNKNOWN';
+	if (!__devtools.unsafeCapturePayloads) {
+		e.error = { code, message: '[message omitted]' };
+		return;
+	}
+	const rawMessage = _safeRead(err, 'message');
+	let message = typeof rawMessage === 'string' && rawMessage ? rawMessage : 'Unknown stream error';
+	if (typeof rawMessage !== 'string') {
+		try { message = String(err); } catch {}
+	}
+	e.error = { code, message };
 }
 
 /**

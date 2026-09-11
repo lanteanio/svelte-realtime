@@ -66,6 +66,7 @@ let current = defaultEnv;
 export const now = () => current.clock.now();
 export const monotonicNow = () => current.clock.monotonic();
 export const wallEpoch = () => current.clock.wallEpoch();
+export const wallIso = () => new Date(current.clock.wallEpoch()).toISOString();
 export const randomFloat = () => current.rng.float();
 export const randomU32 = () => current.rng.u32();
 export const randomUuid = () => current.rng.uuid();

@@ -5,6 +5,23 @@ import { _redactUrl, _replayWebhookOut } from './webhook-out.js';
 import { state, _webhookOutById } from './state.js';
 import { createDeadLetterStore } from './dead-letter.js';
 
+async function _handleInboundWebhook(req, config, topic) {
+	let event;
+	try {
+		event = await config.verify({ body: req.body, headers: req.headers });
+	} catch {
+		return { status: 400, body: 'Verification failed' };
+	}
+
+	const mapped = await config.transform(event);
+	if (!mapped) return { status: 200, body: 'Ignored' };
+
+	if (req.platform) {
+		req.platform.publish(topic, mapped.event, mapped.data);
+	}
+	return { status: 200, body: 'OK' };
+}
+
 /**
  * Create a webhook-to-stream bridge.
  *
@@ -33,20 +50,13 @@ export const _webhookRegister = function webhook(topic, config) {
 		 * @returns {{ status: number, body?: string }}
 		 */
 		async handle(req) {
-			let event;
-			try {
-				event = await config.verify({ body: req.body, headers: req.headers });
-			} catch {
-				return { status: 400, body: 'Verification failed' };
-			}
-
-			const mapped = await config.transform(event);
-			if (!mapped) return { status: 200, body: 'Ignored' };
-
-			if (req.platform) {
-				req.platform.publish(topic, mapped.event, mapped.data);
-			}
-			return { status: 200, body: 'OK' };
+			const trace = req.platform?.trace;
+			if (!trace?.enabled) return _handleInboundWebhook(req, config, topic);
+			return trace.run('realtime.webhook.inbound', {
+				kind: 'server',
+				parent: trace.extract(req.headers),
+				attributes: { 'messaging.system': 'webhook', 'messaging.operation': 'receive' }
+			}, () => _handleInboundWebhook(req, config, topic));
 		}
 	};
 
@@ -225,7 +235,14 @@ export async function replayDeadLetter(opts = {}) {
 		}
 		let outcome;
 		try {
-			outcome = await _replayWebhookOut(entry, rec.topic, rec.event, rec.data);
+			outcome = await _replayWebhookOut(
+				entry,
+				rec.topic,
+				rec.event,
+				rec.data,
+				rec.traceContext ?? null,
+				state.cronPlatform
+			);
 		} catch (err) {
 			outcome = { ok: false, error: String((err && err.message) || err) };
 		}

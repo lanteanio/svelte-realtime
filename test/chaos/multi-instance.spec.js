@@ -21,8 +21,15 @@ async function openOn(browser, baseURL, identity, route) {
 	const ctx = await browser.newContext({ baseURL });
 	await ctx.addCookies([{ name: 'user', value: identity, domain: u.hostname, path: '/' }]);
 	const page = await ctx.newPage();
-	await page.goto(route);
-	await page.waitForFunction(() => window.__test);
+	for (let attempt = 0; attempt < 2; attempt++) {
+		await page.goto(route);
+		try {
+			await page.waitForFunction(() => window.__test, null, { timeout: 10_000 });
+			break;
+		} catch (error) {
+			if (attempt === 1) throw error;
+		}
+	}
 	await page.evaluate(() => window.__test.ready ? window.__test.ready() : null);
 	return { ctx, page };
 }

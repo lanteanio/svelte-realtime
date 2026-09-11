@@ -60,7 +60,7 @@ export function _resetQuiescence() {
  * wiring the topic by hand.
  */
 const _HEALTH_TOPIC = '__realtime';
-const _healthStore = writable(/** @type {'healthy' | 'degraded' | 'outdated'} */ ('healthy'));
+const _healthStore = writable(/** @type {'healthy' | 'degraded' | 'outdated' | 'incompatible'} */ ('healthy'));
 /** @type {(() => void) | null} */
 let _healthUnsub = null;
 
@@ -69,6 +69,9 @@ let _healthUnsub = null;
 // bundle against a newer server and must reload - so once set it short-circuits the
 // recompute and never clears until the page reloads (or a test reset).
 let _healthOutdated = false;
+// Strict range-policy mismatch. Unlike `outdated`, this also covers a newer
+// client reaching a rolled-back server and a missing/invalid advertisement.
+let _healthIncompatible = false;
 // One dev warn per session for protocol staleness (it is a global condition, not
 // per-path like deprecation).
 let _protocolStaleWarned = false;
@@ -100,11 +103,28 @@ let _healthCrdtDegraded = 0;
 const _degradationStore = writable({ active: false, mitigation: null, recovery: null });
 
 function _recomputeHealth() {
+	if (_healthIncompatible) { _healthStore.set('incompatible'); return; }
 	// 'outdated' is sticky and wins over the transient degraded/healthy axis: a stale
 	// bundle stays flagged regardless of breaker/flow/smooth/crdt state.
 	if (_healthOutdated) { _healthStore.set('outdated'); return; }
 	_healthStore.set(
 		_healthServerDegraded || _healthFlowDegraded || _healthSmoothDegraded > 0 || _healthCrdtDegraded > 0 ? 'degraded' : 'healthy'
+	);
+}
+
+/** @param {any} detail */
+function _warnProtocolMismatch(detail) {
+	if (!_IS_DEV || _protocolStaleWarned) return;
+	_protocolStaleWarned = true;
+	const reason = detail && typeof detail.reason === 'string' ? detail.reason : 'unknown';
+	const current = detail?.server && typeof detail.server.current === 'number' ? detail.server.current : '?';
+	const minimum = detail?.server && typeof detail.server.minimum === 'number' ? detail.server.minimum : '?';
+	const client = detail && typeof detail.client === 'number' ? detail.client : 'missing';
+	console.warn(
+		'[svelte-realtime] this connection is protocol-incompatible (reason=' + reason +
+		', client=' + client + ', server=' + minimum + '..' + current + '). ' +
+		'Reload or restore a compatible release tuple.\n' +
+		'  See: https://svti.me/protocol-stale'
 	);
 }
 
@@ -181,6 +201,10 @@ function _applyHealthEvent(envelope) {
 		_healthOutdated = true;
 		_recomputeHealth();
 		_warnProtocolStale(detail);
+	} else if (envelope.event === 'protocol-mismatch') {
+		_healthIncompatible = true;
+		_recomputeHealth();
+		_warnProtocolMismatch(detail);
 	}
 }
 
@@ -212,11 +236,13 @@ export function _ensureHealthSubscription() {
  * value is `'healthy'`; flips to `'degraded'` on a `degraded` event,
  * back to `'healthy'` on `recovered`.
  *
- * Also emits the sticky `'outdated'` state when the server sends a
+ * Also emits the sticky `'outdated'` state when the legacy server policy sends a
  * `protocol-stale` notice (the client bundle is older than the server's
  * declared `protocolVersion`). `'outdated'` is permanent for the session and
  * takes precedence over the transient `'degraded'`/`'healthy'` axis - the app
- * must reload to pick up a compatible client. Off unless `configure({
+ * must reload to pick up a compatible client. A strict range-policy mismatch
+ * emits sticky `'incompatible'`, including a newer client rejected by a
+ * rolled-back server or a missing/invalid advertisement. Off unless `configure({
  * protocolVersion })` opted in.
  *
  * Subscription is lazy: the realtime client subscribes to `__realtime`
@@ -228,7 +254,7 @@ export function _ensureHealthSubscription() {
  * etc.) can listen to the topic directly via
  * `import { on } from 'svelte-adapter-uws/client'; on('__realtime')`.
  *
- * @type {import('svelte/store').Readable<'healthy' | 'degraded' | 'outdated'>}
+ * @type {import('svelte/store').Readable<'healthy' | 'degraded' | 'outdated' | 'incompatible'>}
  */
 export const health = {
 	subscribe(fn) {
@@ -271,6 +297,7 @@ export function _resetHealth() {
 	_healthSmoothDegraded = 0;
 	_healthCrdtDegraded = 0;
 	_healthOutdated = false;
+	_healthIncompatible = false;
 	_protocolStaleWarned = false;
 	_healthStore.set('healthy');
 	_degradationStore.set({ active: false, mitigation: null, recovery: null });

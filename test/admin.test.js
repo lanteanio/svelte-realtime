@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { realtime, __register, live } from '../src/server.js';
+import { state } from '../src/server/state.js';
 
 const adminFor = (requires) => /** @type {any} */ (realtime({ admin: { requires } })).admin;
 const req = (url = 'http://localhost/__realtime/introspect', init) => new Request(url, init);
@@ -51,6 +52,36 @@ describe('realtime({ admin }) - the /__realtime admin handler', () => {
 
 	it('404s an unknown /__realtime sub-path', async () => {
 		expect((await adminFor(() => true)(req('http://localhost/__realtime/nope'))).status).toBe(404);
+	});
+
+	it('auth-gates exact-id transport diagnostics and never lists detail publicly', async () => {
+		const previous = state.cronPlatform;
+		let lookups = 0;
+		state.cronPlatform = /** @type {any} */ ({
+			diagnostic(id) {
+				lookups++;
+				return id === 'diag-123' ? {
+					diagnosticId: id,
+					affectedStreams: [{ streamId: 'h1:abcdefghijklmnopqrstuv', gapLowerBound: 2 }]
+				} : null;
+			}
+		});
+		try {
+			const denied = await adminFor(() => false)(req('http://localhost/__realtime/diagnostics/diag-123'));
+			expect(denied.status).toBe(403);
+			expect(lookups).toBe(0);
+
+			const found = await adminFor(() => true)(req('http://localhost/__realtime/diagnostics/diag-123'));
+			expect(found.status).toBe(200);
+			expect(found.headers.get('cache-control')).toBe('no-store');
+			expect(await found.json()).toMatchObject({ diagnosticId: 'diag-123' });
+			expect(lookups).toBe(1);
+
+			expect((await adminFor(() => true)(req('http://localhost/__realtime/diagnostics/missing'))).status).toBe(404);
+			expect((await adminFor(() => true)(req('http://localhost/__realtime/diagnostics/diag-123', { method: 'POST' }))).status).toBe(405);
+		} finally {
+			state.cronPlatform = previous;
+		}
 	});
 
 	it('passes the request to the auth gate (header-based check)', async () => {

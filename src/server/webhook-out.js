@@ -2,7 +2,7 @@
 import { deliverWebhook, redactUrl } from 'svelte-adapter-uws/plugins/webhooks';
 import { now, monotonicNow } from '../shared/runtime.js';
 import { state } from './state.js';
-import { _IS_DEV } from './env.js';
+import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 // The generic SSRF-gated, retrying delivery engine now lives in the adapter
 // plugin (svelte-adapter-uws/plugins/webhooks); this module is the realtime glue
@@ -19,11 +19,16 @@ export { redactUrl as _redactUrl };
  * Returns undefined when neither is configured, so an unconfigured delivery is
  * byte-identical to the bare call.
  */
-function _webhookHooks(entry) {
+function _webhookHooks(entry, traceContext) {
 	const budget = state.webhookBudget;
 	const breaker = state.webhookBreaker;
-	if (!budget && !breaker) return undefined;
-	return { budget: budget || undefined, breaker: breaker || undefined, key: entry.id };
+	if (!budget && !breaker && !traceContext) return undefined;
+	return {
+		budget: budget || undefined,
+		breaker: breaker || undefined,
+		key: entry.id,
+		traceContext: traceContext || undefined
+	};
 }
 
 function _reportWebhookOutFailure(config, err, event, data, attempts) {
@@ -34,19 +39,37 @@ function _reportWebhookOutFailure(config, err, event, data, attempts) {
 		} catch { /* swallow listener errors */ }
 	} else if (state.serverErrorHandler) {
 		try { state.serverErrorHandler('webhook', err); } catch {}
-	} else if (_IS_DEV) {
-		console.error('[svelte-realtime] Outbound webhook failed:', err);
 	}
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.webhook',
+		event: 'webhook.delivery.failed',
+		severity: 'error',
+		dataClass: 'application',
+		message: 'An outbound webhook exhausted its delivery policy.',
+		attributes: { event, attempts: attempts | 0, error: diagnosticErrorMessage(err) }
+	});
 }
 
-export async function _fireWebhookOut(entry, topic, event, data, platform) {
-	void platform; // accepted for call-site parity; delivery reads entry.config
+function _reportDeadLetterFailure(entry, err) {
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.webhook',
+		event: 'webhook.dead-letter.persist-failed',
+		severity: 'error',
+		dataClass: 'application',
+		message: 'A failed webhook could not be persisted to the dead-letter store.',
+		attributes: { webhookId: entry.id, error: diagnosticErrorMessage(err) }
+	});
+}
+
+async function _fireWebhookOutInner(entry, topic, event, data, traceContext) {
 	// Capture when delivery began (MONOTONIC, so the tombstone match is immune to a
 	// wall-clock step) so the dead-letter store's forget tombstone can tell an
 	// in-flight-during-forget capture (drop) from a post-forget one. A long retry
 	// budget can outlive a live.forget that ran mid-delivery.
 	const startedAt = monotonicNow();
-	const r = await deliverWebhook(entry.config, topic, event, data, _webhookHooks(entry));
+	const r = await deliverWebhook(entry.config, topic, event, data, _webhookHooks(entry, traceContext));
 	if (r.ok) return;
 	_reportWebhookOutFailure(entry.config, r.err, event, data, r.attempts);
 	const store = state.webhookDeadLetter;
@@ -60,15 +83,40 @@ export async function _fireWebhookOut(entry, topic, event, data, platform) {
 				attempts: r.attempts | 0,
 				error: String((r.err && r.err.message) || r.err || 'unknown'),
 				failedAt: now(),
-				startedAt
+				startedAt,
+				traceContext
 			});
-			if (added && typeof added.then === 'function') added.catch(() => {});
-		} catch { /* never let dead-letter capture break the (best-effort) webhook path */ }
+			if (added && typeof added.then === 'function') added.catch((err) => _reportDeadLetterFailure(entry, err));
+		} catch (err) {
+			_reportDeadLetterFailure(entry, err);
+		}
 	}
 }
 
-export async function _replayWebhookOut(entry, topic, event, data) {
-	const r = await deliverWebhook(entry.config, topic, event, data, _webhookHooks(entry));
+export async function _fireWebhookOut(entry, topic, event, data, platform) {
+	const trace = platform?.trace;
+	if (!trace?.enabled) {
+		return _fireWebhookOutInner(entry, topic, event, data, platform?.traceContext ?? null);
+	}
+	return trace.run('realtime.webhook.outbound', {
+		kind: 'producer',
+		parent: platform.traceContext,
+		attributes: { 'messaging.system': 'webhook', 'messaging.operation': 'publish' }
+	}, () => _fireWebhookOutInner(entry, topic, event, data, trace.current()));
+}
+
+async function _replayWebhookOutInner(entry, topic, event, data, traceContext) {
+	const r = await deliverWebhook(entry.config, topic, event, data, _webhookHooks(entry, traceContext));
 	if (r.ok) return { ok: true };
 	return { ok: false, error: String((r.err && r.err.message) || r.err || 'unknown') };
+}
+
+export async function _replayWebhookOut(entry, topic, event, data, traceContext = null, platform = null) {
+	const trace = platform?.trace;
+	if (!trace?.enabled) return _replayWebhookOutInner(entry, topic, event, data, traceContext);
+	return trace.run('realtime.webhook.replay', {
+		kind: 'producer',
+		parent: traceContext,
+		attributes: { 'messaging.system': 'webhook', 'messaging.operation': 'publish' }
+	}, () => _replayWebhookOutInner(entry, topic, event, data, trace.current()));
 }

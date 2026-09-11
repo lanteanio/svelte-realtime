@@ -17,9 +17,10 @@ import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { LiveError } from './live-error.js';
+import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 /**
- * @typedef {{ path?: string, tenantId?: string | null }} AlarmMeta
+ * @typedef {{ alarmId?: string, path?: string, tenantId?: string | null }} AlarmMeta
  * Opaque-to-the-store resolver metadata persisted alongside `{topic, at}`. `path`
  * is the stream's RPC registry key, so a cross-restart recovery poll can re-resolve
  * `onAlarm` from `registry.get(path)` (the in-memory `onAlarm` closure is gone after
@@ -40,6 +41,8 @@ const _MAX_ALARMS = 100000;
 let _alarmCapWarnFired = false;
 let _alarmPlatformWarnFired = false;
 let _alarmDueWarnFired = false;
+const _alarmUnresolvedWarned = new Set();
+const _MAX_UNRESOLVED_WARNINGS = 256;
 
 /**
  * Optional durable store seam (default null = in-memory live timers). A durable
@@ -142,13 +145,17 @@ export function configureAlarm(config) {
  * without them keeps the in-memory path working (durability just needs the live
  * dispatch bind, which always supplies `path`).
  * @param {any} ctx
- * @param {{ wireTopic: string, onAlarm: Function, path?: string, tenantId?: string | null, misfireMs?: number }} binding
+ * @param {{ wireTopic: string, onAlarm: Function, alarmId?: string, path?: string, tenantId?: string | null, misfireMs?: number }} binding
  */
 export function _bindAlarmCtx(ctx, binding) {
-	const { wireTopic, onAlarm, path, tenantId, misfireMs } = binding;
-	const meta = (path !== undefined || (tenantId !== undefined && tenantId !== null))
-		? { path, tenantId: tenantId ?? null }
-		: null;
+	const { wireTopic, onAlarm, alarmId, path, tenantId, misfireMs } = binding;
+	let meta = null;
+	if (alarmId !== undefined || path !== undefined || (tenantId !== undefined && tenantId !== null)) {
+		meta = {};
+		if (alarmId !== undefined) meta.alarmId = alarmId;
+		if (path !== undefined) meta.path = path;
+		meta.tenantId = tenantId ?? null;
+	}
 	ctx.setAlarm = (at) => _setAlarm(wireTopic, at, onAlarm, meta, misfireMs);
 	ctx.getAlarm = () => _getAlarm(wireTopic);
 	ctx.deleteAlarm = () => _deleteAlarm(wireTopic);
@@ -343,17 +350,24 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 		// handler) or cancel its own room's alarm - carrying the same resolver meta so
 		// a re-armed alarm stays recoverable across a restart, and the same misfire
 		// policy so a re-armed alarm keeps it.
-		_bindAlarmCtx(ctx, { wireTopic, onAlarm, path: meta ? meta.path : undefined, tenantId: meta ? meta.tenantId : undefined, misfireMs: fire ? fire.misfireMs : undefined });
+		_bindAlarmCtx(ctx, { wireTopic, onAlarm, alarmId: meta ? meta.alarmId : undefined, path: meta ? meta.path : undefined, tenantId: meta ? meta.tenantId : undefined, misfireMs: fire ? fire.misfireMs : undefined });
 		if (fire) {
 			ctx.alarm = Object.freeze({ at: fire.at, firedAt: fire.firedAt, lateMs: fire.lateMs, recovered: fire.recovered });
 		}
 		await onAlarm(ctx);
 	} catch (err) {
 		if (state.serverErrorHandler) {
-			state.serverErrorHandler(wireTopic, err);
-		} else if (_IS_DEV) {
-			console.error('[svelte-realtime] alarm onAlarm error for "' + wireTopic + '":', err);
+			try { state.serverErrorHandler(wireTopic, err); } catch { /* observer-only */ }
 		}
+		emitOperationalEvent({
+			source: 'svelte-realtime',
+			component: 'server.alarm',
+			event: 'alarm.execution.failed',
+			severity: 'error',
+			dataClass: 'application',
+			message: 'An alarm handler failed; the scheduler remains active.',
+			attributes: { topic: wireTopic, error: diagnosticErrorMessage(err) }
+		});
 	} finally {
 		_exitInFlight();
 	}
@@ -404,18 +418,55 @@ export async function _pollAlarms() {
 		if (_pending.has(wireTopic)) continue;
 		const meta = (row && row.meta) || null;
 		const path = meta && meta.path;
-		const fn = typeof path === 'string' ? registry.get(path) : undefined;
+		const alarmId = meta && meta.alarmId;
+		let fn;
+		let duplicateId = false;
+		if (typeof alarmId === 'string') {
+			for (const candidate of registry.values()) {
+				const options = /** @type {any} */ (candidate)?.__streamOptions?.alarm;
+				if (!options || options.id !== alarmId) continue;
+				if (fn && fn !== candidate) { duplicateId = true; break; }
+				fn = candidate;
+			}
+		}
+		// Rows written before stable ids were staged have no alarmId and keep
+		// their legacy path resolver. Once a row carries an id, that identity is
+		// authoritative: falling back to a reused path when the id is absent in
+		// this release could execute retained work in the wrong handler.
+		if (typeof alarmId !== 'string' && typeof path === 'string') fn = registry.get(path);
 		const alarmOpts = fn && /** @type {any} */ (fn).__streamOptions
 			&& /** @type {any} */ (fn).__streamOptions.alarm;
 		const onAlarm = alarmOpts && alarmOpts.onAlarm;
-		// Claim the row regardless of resolvability: an atomic delete both arbitrates
-		// single-fire AND garbage-collects an orphan whose stream was removed/renamed
-		// (claimed but unresolvable -> drop, never accumulate).
+		// Never consume an alarm this release cannot resolve. That preserves the row
+		// for a compatible worker or rollback instead of turning a path rename into
+		// silent data loss. The incident/release runbook owns terminal disposition.
+		if (duplicateId || typeof onAlarm !== 'function') {
+			const identity = typeof alarmId === 'string' ? 'id:' + alarmId : 'path:' + String(path);
+			if (_alarmUnresolvedWarned.size < _MAX_UNRESOLVED_WARNINGS && !_alarmUnresolvedWarned.has(identity)) {
+				_alarmUnresolvedWarned.add(identity);
+				emitOperationalEvent({
+					source: 'svelte-realtime',
+					component: 'server.alarm',
+					event: 'alarm.recovery.unresolved',
+					severity: 'error',
+					dataClass: 'code',
+					message: 'A durable alarm could not be resolved by this release and was retained.',
+					attributes: {
+						alarmId: alarmId ?? null,
+						path: path ?? null,
+						reason: duplicateId ? 'duplicate-id'
+							: typeof alarmId === 'string' ? 'missing-id' : 'missing-handler'
+					}
+				});
+			}
+			continue;
+		}
+		// Claim only after a unique resolver exists. Atomic delete still arbitrates
+		// the recovery poll against the precise timer and other workers.
 		let claimed;
 		try { claimed = await _alarmStore.delete(wireTopic); }
 		catch { continue; }
 		if (!claimed) continue; // another poller / the owner's timer won the claim
-		if (typeof onAlarm !== 'function') continue; // stale row GC'd above; nothing to run
 		// Misfire policy on the recovery path: the stream's declared threshold is
 		// re-resolved from the registry (the persisted row stays policy-free). The
 		// claim above already consumed the row, so a skipped stale alarm is spent.
@@ -463,6 +514,7 @@ export function _resetAlarms() {
 	_alarmCapWarnFired = false;
 	_alarmPlatformWarnFired = false;
 	_alarmDueWarnFired = false;
+	_alarmUnresolvedWarned.clear();
 }
 
 /**

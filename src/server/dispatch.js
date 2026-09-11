@@ -5,7 +5,8 @@
 // (subscription bookkeeping, registry/guard/lazy resolvers, middleware, shared
 // validators) lives in server.js and is injected once at init via installDispatch.
 import { assert } from '../shared/assert.js';
-import { monotonicNow } from '../shared/runtime.js';
+import { diagnosticErrorMessage, emitOperationalEvent, formatDiagnostic } from '../shared/diagnostic.js';
+import { monotonicNow, randomUuid } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
 import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './validate.js';
@@ -21,10 +22,55 @@ import { _bindAlarmCtx } from './alarm.js';
 import { _registerReplayTopic } from './replay-routing.js';
 import { _tenantTopic, _tenantKey } from './tenant.js';
 import { _ownerClaimBegin, _ownerClaimResolve, _presenceClaimBegin, _presenceClaimResolve } from './room-owner.js';
-import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame } from './upload.js';
+import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame, _rejectUploadForProtocol } from './upload.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
+import { protocolMismatchMessage, protocolMismatchReason } from './protocol-policy.js';
 
 const textDecoder = new TextDecoder();
+
+function diagnosticError(error) {
+	let name = 'Error';
+	let code = null;
+	try {
+		if (typeof error?.name === 'string') name = error.name;
+	} catch {
+		// Preserve the response path when application code throws a hostile Proxy.
+	}
+	try {
+		if (error?.code != null) code = diagnosticErrorMessage(error.code);
+	} catch {
+		// Leave code absent when reading it itself throws.
+	}
+	return {
+		name,
+		code,
+		message: diagnosticErrorMessage(error)
+	};
+}
+
+const _MAX_REQUEST_ID_LENGTH = 128;
+
+/**
+ * Resolve a client envelope id into the bounded identifier exposed to handler
+ * code. Valid printable-ASCII ids are preserved exactly so clients can join
+ * logs to their own envelope; malformed ids get a fresh safe server id.
+ * @param {unknown} value
+ */
+function _operationRequestId(value) {
+	if (typeof value !== 'string' || value.length < 1 || value.length > _MAX_REQUEST_ID_LENGTH) return randomUuid();
+	for (let i = 0; i < value.length; i++) {
+		const code = value.charCodeAt(i);
+		if (code < 0x21 || code > 0x7e) return randomUuid();
+	}
+	return value;
+}
+
+/** @param {any} result @param {string} requestId */
+function _withFailureRequestId(result, requestId) {
+	return result && result.ok === false && result.requestId === undefined
+		? { ...result, requestId }
+		: result;
+}
 
 // Seam: stateful staying machinery (subscription bookkeeping, registry/guard/lazy
 // resolvers, middleware, shared validators), injected once by server.js at init.
@@ -70,6 +116,66 @@ const _deprecationInformed = new WeakMap();
 const _protocolSignaled = new WeakSet();
 
 /**
+ * First protocol advertisement received on each connection. A changed second
+ * advertisement is invalid: compatibility cannot be renegotiated after calls
+ * may already have run.
+ * @type {WeakMap<object, { received: true, value: unknown }>}
+ */
+const _protocolAdvertisement = new WeakMap();
+
+/** @param {object} ws */
+function _protocolMismatch(ws) {
+	const policy = state.serverProtocolPolicy;
+	if (!policy) return null;
+	const advertisement = _protocolAdvertisement.get(ws);
+	const received = advertisement !== undefined;
+	const value = advertisement?.value;
+	const reason = protocolMismatchReason(policy, received, value);
+	if (!reason) return null;
+	return {
+		code: 'PROTOCOL_MISMATCH',
+		reason,
+		server: { current: policy.current, minimum: policy.minimum },
+		client: Number.isSafeInteger(value) && /** @type {number} */ (value) >= 0 ? value : null,
+		action: policy.onMismatch
+	};
+}
+
+/**
+ * Tell only the affected connection about a range mismatch. This is advisory
+ * metadata; `_protocolRejection` owns whether application work is denied.
+ * @param {object} ws
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @param {ReturnType<typeof _protocolMismatch>} mismatch
+ */
+function _signalProtocolMismatch(ws, platform, mismatch) {
+	if (!mismatch || _protocolSignaled.has(ws)) return;
+	_protocolSignaled.add(ws);
+	try {
+		platform.send(ws, '__realtime', 'protocol-mismatch', mismatch);
+	} catch { /* a closed socket must never break the message hook */ }
+}
+
+/**
+ * Return the typed application rejection for a strict incompatible connection,
+ * or null when policy is disabled, compatible, or staged as notify-only.
+ * @param {object} ws
+ * @param {import('svelte-adapter-uws').Platform} platform
+ */
+function _protocolRejection(ws, platform) {
+	const mismatch = _protocolMismatch(ws);
+	if (!mismatch) return null;
+	_signalProtocolMismatch(ws, platform, mismatch);
+	if (state.serverProtocolPolicy?.onMismatch !== 'reject') return null;
+	return {
+		ok: false,
+		code: 'PROTOCOL_MISMATCH',
+		error: protocolMismatchMessage(mismatch.reason),
+		protocol: mismatch
+	};
+}
+
+/**
  * Compare a connecting client's advertised protocol version to this server's
  * declared `protocolVersion` (realtime({ protocolVersion })). When the server is
  * NEWER than the client - an older, potentially-incompatible client bundle running
@@ -91,6 +197,20 @@ const _protocolSignaled = new WeakSet();
 function _protocolGate(ws, msg, platform) {
 	const server = state.serverProtocolVersion;
 	if (typeof server !== 'number') return; // signal not enabled on this server
+	const policy = state.serverProtocolPolicy;
+	if (policy) {
+		const previous = _protocolAdvertisement.get(ws);
+		if (!previous) {
+			_protocolAdvertisement.set(ws, { received: true, value: msg?.v });
+		} else if (!Object.is(previous.value, msg?.v)) {
+			// A connection gets one immutable compatibility identity. Mark a
+			// conflicting re-advertisement invalid rather than letting a client
+			// switch versions after work may already have executed.
+			_protocolAdvertisement.set(ws, { received: true, value: null });
+		}
+		_signalProtocolMismatch(ws, platform, _protocolMismatch(ws));
+		return;
+	}
 	const client = msg && typeof msg.v === 'number' ? msg.v : 0;
 	if (server <= client) return; // client is current (or ahead); nothing actionable
 	if (_protocolSignaled.has(ws)) return;
@@ -300,7 +420,17 @@ export function handleRpc(ws, data, platform, options) {
 				}
 			} catch (err) {
 				if (_IS_DEV) {
-					console.warn('[svelte-realtime] Failed to parse binary RPC header:', err, '\n  See: https://svti.me/binary');
+					console.warn(formatDiagnostic({
+						source: 'svelte-realtime',
+						component: 'server.rpc',
+						event: 'rpc.binary-header.parse-failed',
+						severity: 'warn',
+						message: 'A binary RPC header could not be parsed.',
+						attributes: {
+							error: diagnosticError(err),
+							help: 'https://svti.me/binary'
+						}
+					}));
 				}
 			}
 		}
@@ -309,12 +439,22 @@ export function handleRpc(ws, data, platform, options) {
 
 	// Upload chunk: byte[0] = 0x01 (live.upload streaming)
 	if (bytes[0] === _UPLOAD_FRAME_CHUNK) {
+		const rejection = _protocolRejection(ws, platform);
+		if (rejection) {
+			_rejectUploadForProtocol(ws, data, platform, rejection);
+			return true;
+		}
 		_handleUploadChunkFrame(ws, data, platform, options);
 		return true;
 	}
 
 	// Upload control: byte[0] = 0x02 (cancel etc)
 	if (bytes[0] === _UPLOAD_FRAME_CONTROL) {
+		const rejection = _protocolRejection(ws, platform);
+		if (rejection) {
+			_rejectUploadForProtocol(ws, data, platform, rejection);
+			return true;
+		}
 		_handleUploadControlFrame(ws, data, platform);
 		return true;
 	}
@@ -407,13 +547,18 @@ export async function _executeVolatileRpc(ws, msg, platform, options) {
 		const fn = await _resolveRegistryEntry(path);
 		if (fn && !_hasVolatileMarker(fn) && !_volatileWarnSet.has(path)) {
 			if (_volatileWarnSet.size < _VOLATILE_WARN_CAP) _volatileWarnSet.add(path);
-			console.warn(
-				`[svelte-realtime] handler '${path}' received a fire-and-forget call but is not marked live.volatile(). ` +
-				"Errors will be silently dropped (no reply is sent). Wrap the handler with live.volatile() to make this intent explicit.\n  See: https://svti.me/volatile"
-			);
+			console.warn(formatDiagnostic({
+				source: 'svelte-realtime',
+				component: 'server.rpc',
+				event: 'rpc.volatile.unmarked',
+				severity: 'warn',
+				message: 'A fire-and-forget call reached a handler that is not marked live.volatile(); errors will be silently dropped.',
+				attributes: { path, help: 'https://svti.me/volatile' }
+			}));
 		}
 	}
-	/** @type {any} */ (msg).id = '__volatile';
+	/** @type {any} */ (msg).id = randomUuid();
+	/** @type {any} */ (msg).__volatile = true;
 	await _executeSingleRpc(ws, /** @type {any} */ (msg), platform, options);
 	// No _respond - fire-and-forget contract.
 }
@@ -451,7 +596,7 @@ async function _executeBatch(ws, msg, platform, options) {
 	if (batch.length > 50) {
 		_recordRpcMetrics('__batch__', 'INVALID_REQUEST', _batchMetricsStart);
 		_respond(ws, platform, '__batch', {
-			batch: [{ id: '', ok: false, code: 'INVALID_REQUEST', error: 'Batch exceeds maximum of 50 calls' }]
+			batch: [{ id: '', ok: false, code: 'INVALID_REQUEST', error: 'Batch exceeds maximum of 50 calls', requestId: randomUuid() }]
 		});
 		return;
 	}
@@ -467,7 +612,7 @@ async function _executeBatch(ws, msg, platform, options) {
 			const call = batch[i];
 			if (!call || typeof call.rpc !== 'string' || typeof call.id !== 'string') {
 				_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _batchMetricsStart);
-				results[i] = { id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id' };
+				results[i] = { id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id', requestId: _operationRequestId(call?.id) };
 				continue;
 			}
 			results[i] = await _executeSingleRpc(ws, call, platform, options);
@@ -476,7 +621,7 @@ async function _executeBatch(ws, msg, platform, options) {
 		results = await Promise.all(batch.map((call) => {
 			if (!call || typeof call.rpc !== 'string' || typeof call.id !== 'string') {
 				_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _batchMetricsStart);
-				return { id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id' };
+				return { id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id', requestId: _operationRequestId(call?.id) };
 			}
 			return _executeSingleRpc(ws, call, platform, options);
 		}));
@@ -606,7 +751,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		// Pass the RPC path (`msg.rpc`, the registry key) + tenant as the durable row's
 		// resolver metadata so a cross-restart recovery poll can re-find onAlarm via
 		// registry.get(path) (the in-memory onAlarm closure is gone after a restart).
-		_bindAlarmCtx(ctx, { wireTopic: topic, onAlarm: streamOpts.alarm.onAlarm, path: msg.rpc, tenantId: ctx.tenantId, misfireMs: streamOpts.alarm.misfireMs });
+		_bindAlarmCtx(ctx, { wireTopic: topic, onAlarm: streamOpts.alarm.onAlarm, alarmId: streamOpts.alarm.id, path: msg.rpc, tenantId: ctx.tenantId, misfireMs: streamOpts.alarm.misfireMs });
 	}
 	const replayOpts = /** @type {any} */ (fn).__replay;
 	// NOTE: replay-topic and dynamic-piiRedact registration for this topic
@@ -922,7 +1067,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
  * @param {{ rpc: string, id: string, args?: any[], stream?: boolean }} msg
  * @param {import('svelte-adapter-uws').Platform} platform
  * @param {{ beforeExecute?: (ws: any, rpcPath: string, args: any[]) => Promise<void> | void, onError?: (path: string, error: unknown, ctx: any) => void }} [options]
- * @returns {Promise<{ id: string, ok: boolean, data?: any, code?: string, error?: string }>}
+ * @returns {Promise<{ id: string, ok: boolean, data?: any, code?: string, error?: string, requestId?: string }>}
  */
 /**
  * Graceful-shutdown wrapper around the RPC funnel (text + volatile + batch +
@@ -933,18 +1078,31 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
  * no gap between the gate check and the in-flight increment.
  */
 async function _executeSingleRpc(ws, msg, platform, options) {
+	const requestId = _operationRequestId(msg.id);
+	const protocolRejection = _protocolRejection(ws, platform);
+	if (protocolRejection) {
+		return { id: msg.id, ...protocolRejection, requestId };
+	}
 	if (_isShuttingDown()) {
-		return { id: msg.id, ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down' };
+		return { id: msg.id, ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down', requestId };
 	}
 	_enterInFlight();
 	try {
-		return await _executeSingleRpcInner(ws, msg, platform, options);
+		const trace = platform?.trace;
+		const result = trace?.enabled
+			? await trace.run('realtime.rpc', {
+				kind: 'server',
+				parent: platform.traceContext,
+				attributes: { 'rpc.system': 'svelte-realtime' }
+			}, () => _executeSingleRpcInner(ws, msg, platform, options, requestId))
+			: await _executeSingleRpcInner(ws, msg, platform, options, requestId);
+		return _withFailureRequestId(result, requestId);
 	} finally {
 		_exitInFlight();
 	}
 }
 
-async function _executeSingleRpcInner(ws, msg, platform, options) {
+async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 	const { rpc: path, id, args: rawArgs, stream: isStream, cursor: clientCursor } = msg;
 	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
@@ -966,7 +1124,14 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
 		if (_IS_DEV) {
-			console.warn(`[svelte-realtime] RPC call to '${path}' - no such live function registered\n  See: https://svti.me/rpc`);
+			console.warn(formatDiagnostic({
+				source: 'svelte-realtime',
+				component: 'server.rpc',
+				event: 'rpc.path.not-found',
+				severity: 'warn',
+				message: 'An RPC call did not match a registered live function.',
+				attributes: { path, help: 'https://svti.me/rpc' }
+			}));
 		}
 		// Fold the unregistered (client-controlled) path to a bounded label - an
 		// unauthenticated caller must not be able to allocate a metric series per
@@ -976,7 +1141,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 	}
 
 	const _h = _getCtxHelpers(platform);
-	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey);
+	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId);
 	const _subscribedRef = { topic: null, claimTopic: null };
 
 	try {
@@ -1017,10 +1182,9 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 		// Deprecation signal (live.deprecate): one-shot per (ws, path), attached to
 		// the first ok response so the client warns once. Covers text/batch/
 		// stream-subscribe (all flow through here); binary RPC attaches its own.
-		// Skip fire-and-forget calls (id '__volatile', set in _executeVolatileRpc):
-		// no response is sent, so consuming the one-shot would silently swallow it
-		// and starve a later real call to the same deprecated path.
-		if (_result && _result.ok !== false && id !== '__volatile') {
+		// Skip fire-and-forget calls: no response is sent, so consuming the
+		// one-shot would silently swallow it and starve a later real call.
+		if (_result && _result.ok !== false && !msg.__volatile) {
 			const dep = _deprecationSignal(ws, path, fn);
 			if (dep) /** @type {any} */ (_result).deprecation = dep;
 		}
@@ -1045,14 +1209,20 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
 		if (options?.onError) {
 			try { options.onError(path, err, ctx); } catch {}
 		}
-		if (_IS_DEV) {
-			console.warn(
-				`[svelte-realtime] '${path}' threw a non-LiveError:`,
-				err,
-				'\nUse throw new LiveError(code, message) for client-visible errors. Raw errors are hidden from clients.\n  See: https://svti.me/errors'
-			);
-			console.error(`[svelte-realtime] Error in '${path}':`, err);
-		}
+		emitOperationalEvent({
+				source: 'svelte-realtime',
+				component: 'server.rpc',
+				event: 'rpc.execution.non-live-error',
+				severity: 'warn',
+				dataClass: 'application',
+				message: 'An RPC handler threw a non-LiveError; raw errors are hidden from clients.',
+				attributes: {
+					path,
+					requestId,
+					error: diagnosticError(err),
+					help: 'https://svti.me/errors'
+				}
+			});
 		return { id, ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' };
 	}
 }
@@ -1067,25 +1237,31 @@ async function _executeSingleRpcInner(ws, msg, platform, options) {
  * @param {{ beforeExecute?: Function, onError?: Function }} [options]
  */
 async function _executeBinaryRpc(ws, header, payload, platform, options) {
+	const requestId = _operationRequestId(header.id);
+	const protocolRejection = _protocolRejection(ws, platform);
+	if (protocolRejection) {
+		_respond(ws, platform, header.id, protocolRejection, requestId);
+		return;
+	}
 	if (_isShuttingDown()) {
-		_respond(ws, platform, header.id, { ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down' });
+		_respond(ws, platform, header.id, { ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down' }, requestId);
 		return;
 	}
 	_enterInFlight();
 	try {
-		await _executeBinaryRpcInner(ws, header, payload, platform, options);
+		await _executeBinaryRpcInner(ws, header, payload, platform, options, requestId);
 	} finally {
 		_exitInFlight();
 	}
 }
 
-async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
+async function _executeBinaryRpcInner(ws, header, payload, platform, options, requestId) {
 	const { rpc: path, id, args: extraArgs } = header;
 	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
 	if (!_validPathRe.test(path)) {
 		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
-		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' });
+		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' }, requestId);
 		return;
 	}
 
@@ -1093,7 +1269,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
 		// Pre-registry (path not yet resolved), so it may be unregistered and
 		// client-controlled: fold to a bounded label rather than record the raw path.
 		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
-		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' });
+		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' }, requestId);
 		return;
 	}
 
@@ -1104,25 +1280,25 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
 		// unauthenticated caller must not be able to allocate a metric series per
 		// distinct unknown path. See metrics.js for the length backstop.
 		_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
-		_respond(ws, platform, id, _unknownPathReply(ws));
+		_respond(ws, platform, id, _unknownPathReply(ws), requestId);
 		return;
 	}
 
 	if (!/** @type {any} */ (fn).__isBinary) {
 		_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
-		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Not a binary endpoint' });
+		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Not a binary endpoint' }, requestId);
 		return;
 	}
 
 	const maxBinarySize = /** @type {any} */ (fn).__maxBinarySize || 10485760;
 	if (payload.byteLength > maxBinarySize) {
 		_recordRpcMetrics(path, 'PAYLOAD_TOO_LARGE', _metricsStart);
-		_respond(ws, platform, id, { ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Binary payload exceeds size limit' });
+		_respond(ws, platform, id, { ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Binary payload exceeds size limit' }, requestId);
 		return;
 	}
 
 	const _h = _getCtxHelpers(platform);
-	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null);
+	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null, null, requestId);
 
 	try {
 		await _runWithMiddleware(ctx, async () => {
@@ -1139,21 +1315,32 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options) {
 				const _resp = { ok: true, data: result };
 				const _dep = _deprecationSignal(ws, path, fn);
 				if (_dep) _resp.deprecation = _dep;
-				_respond(ws, platform, id, _resp);
+				_respond(ws, platform, id, _resp, requestId);
 		});
 		_recordRpcMetrics(path, '', _metricsStart, ws);
 	} catch (err) {
 		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		if (err instanceof LiveError) {
-			_respond(ws, platform, id, { ok: false, code: err.code, error: err.message });
+			_respond(ws, platform, id, { ok: false, code: err.code, error: err.message }, requestId);
 		} else {
 			if (options?.onError) {
 				try { options.onError(path, err, ctx); } catch {}
 			}
-			if (_IS_DEV) {
-				console.error(`[svelte-realtime] Error in binary '${path}':`, err, '\n  See: https://svti.me/binary');
-			}
-			_respond(ws, platform, id, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
+			emitOperationalEvent({
+					source: 'svelte-realtime',
+					component: 'server.rpc',
+					event: 'rpc.binary.execution-failed',
+					severity: 'error',
+					dataClass: 'application',
+					message: 'A binary RPC handler failed.',
+					attributes: {
+						path,
+						requestId,
+						error: diagnosticError(err),
+						help: 'https://svti.me/binary'
+					}
+				});
+			_respond(ws, platform, id, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' }, requestId);
 		}
 	}
 }
@@ -1196,34 +1383,66 @@ function _migrateItem(item, fromVersion, toVersion, migrateFns) {
 		if (fn) {
 			result = fn(result);
 		} else if (_IS_DEV) {
-			console.warn(`[svelte-realtime] Missing migration function for version ${v} -> ${v + 1}\n  See: https://svti.me/schema`);
+			console.warn(formatDiagnostic({
+				source: 'svelte-realtime',
+				component: 'server.rpc',
+				event: 'rpc.schema.migration-missing',
+				severity: 'warn',
+				message: 'An RPC schema migration function is missing.',
+				attributes: { fromVersion: v, toVersion: v + 1, help: 'https://svti.me/schema' }
+			}));
 		}
 	}
 	return result;
 }
 
-function _respond(ws, platform, correlationId, payload) {
+function _respond(ws, platform, correlationId, payload, requestId) {
+	payload = requestId ? _withFailureRequestId(payload, requestId) : payload;
 	if (_IS_DEV) {
 		// Estimate size without double-serialization.
 		const data = payload.data;
 		if ((Array.isArray(data) && data.length > 5000) || (typeof data === 'string' && data.length > 800_000)) {
-			console.warn(
-				`[svelte-realtime] RPC response for '${correlationId}' contains ${data.length} items - ` +
-				"large responses may exceed maxPayloadLength (default 1 MB; raise `websocket.maxPayloadLength` in svelte.config.js if needed).\n  See: https://svti.me/adapter-config"
-			);
+			console.warn(formatDiagnostic({
+				source: 'svelte-realtime',
+				component: 'server.rpc',
+				event: 'rpc.response.large',
+				severity: 'warn',
+				message: 'An RPC response may exceed maxPayloadLength.',
+				attributes: {
+					correlationId,
+					length: data.length,
+					help: 'https://svti.me/adapter-config'
+				}
+			}));
 		}
 	}
 	try {
 		const result = platform.send(ws, '__rpc', correlationId, payload);
 		if (result === 0 && _IS_DEV) {
-			console.warn(
-				`[svelte-realtime] RPC response was not delivered (backpressure or closed connection)`
-			);
+			console.warn(formatDiagnostic({
+				source: 'svelte-realtime',
+				component: 'server.rpc',
+				event: 'rpc.response.undelivered',
+				severity: 'warn',
+				message: 'An RPC response was not delivered.',
+				attributes: { correlationId, reason: 'backpressure-or-closed' }
+			}));
 		}
 	} catch (err) {
 		// uWS throws when accessing a closed WebSocket - expected during mid-RPC disconnect.
 		if (_IS_DEV) {
-			console.warn(`[svelte-realtime] RPC response for '${correlationId}' could not be delivered (client likely disconnected)`);
+			console.warn(formatDiagnostic({
+				source: 'svelte-realtime',
+				component: 'server.rpc',
+				event: 'rpc.response.undelivered',
+				severity: 'warn',
+				message: 'An RPC response was not delivered.',
+				attributes: {
+					correlationId,
+					reason: 'send-threw',
+					error: diagnosticError(err)
+				}
+			}));
 		}
 	}
 }
@@ -1262,6 +1481,15 @@ export async function __directCall(path, args, platform, options) {
 		return await _runDirectCall(path, args, platform, options);
 	} catch (err) {
 		if (!hasFallback) throw err;
+		emitOperationalEvent({
+			source: 'svelte-realtime',
+			component: 'server.direct-call',
+			event: 'direct-call.fallback.used',
+			severity: 'error',
+			dataClass: 'application',
+			message: 'A direct live-function call failed and returned its configured fallback.',
+			attributes: { path, error: diagnosticError(err) }
+		});
 		if (onError) {
 			try { onError(err); } catch {}
 		}
@@ -1481,6 +1709,10 @@ export function createMessage(options) {
 		if (_maybeHandleProto(ws, forwardedMsg, p)) return;
 		const handled = handleRpc(ws, data, p, hasRpcOpts ? rpcOpts : undefined);
 		if (handled) return;
+		// A strict range mismatch contains custom JSON/plugin dispatch too. RPCs
+		// above receive their typed PROTOCOL_MISMATCH response; untyped custom
+		// envelopes are dropped after the same one-shot system notice.
+		if (_protocolRejection(ws, p)) return;
 
 		// JSON-envelope dispatch. Plugin-layer frames (cursor `{type:'cursor',...}`,
 		// future presence-snapshot, typing indicators, etc.) reach a single

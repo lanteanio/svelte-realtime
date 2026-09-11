@@ -2,11 +2,12 @@ services:
   redis:
     image: redis:7-alpine
     container_name: svelte-realtime-chaos-redis
-    # Bind to an OS-assigned host port so we never collide with productive
-    # Redis instances on this machine. The chaos harness reads the actual
-    # port via `docker compose port redis 6379` after `up`.
+    # global-setup reserves an OS-free host port and supplies it for the whole
+    # run. An anonymous "0:6379" binding is not stable across `compose stop`
+    # / `compose start` on Docker Desktop, which strands reconnecting clients
+    # on the old port and turns the recovery drill into a harness failure.
     ports:
-      - "0:6379"
+      - "${CHAOS_REDIS_PORT:-0}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 1s

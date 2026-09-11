@@ -7,6 +7,8 @@ describe('runLiveSim', () => {
 		expect(r.invariantViolations).toEqual([]);
 		expect(r.metrics.clients).toBe(3);
 		expect(r.metrics.rpcChecks).toBe(3);
+		expect(r.metrics.authoritativeChecks).toBe(3);
+		expect(r.metrics.completeSubscribers).toBe(3);
 		expect(r.finalState.topics).toEqual(['feed']);
 		// Every subscriber received the same 4 events.
 		expect(r.clientFrames.map((f) => f.length)).toEqual([4, 4, 4]);
@@ -38,14 +40,35 @@ describe('runLiveSim', () => {
 		expect((await replayLiveSim(original)).reproduced).toBe(true);
 	});
 
-	it('drops every publish under chaos dropRate 1 yet all subscribers stay converged', async () => {
+	it('recovers every subscriber to authoritative state after total publish loss', async () => {
 		const r = await runLiveSim({ seed: 'chaos-1', clients: 3, events: 5, chaos: { dropRate: 1 } });
-		// Every publish was dropped (all-or-nothing), so every subscriber missed the
-		// same events and the streams are still identical - convergence holds.
+		// Every incremental publish was dropped, then the fault was cleared and a
+		// full authoritative snapshot recovered all subscribers.
 		expect(r.metrics.chaosDropped).toBe(5);
-		expect(r.clientFrames.map((f) => f.length)).toEqual([0, 0, 0]);
+		expect(r.metrics.recoveryPublishes).toBe(1);
+		expect(r.metrics.completeSubscribers).toBe(3);
+		expect(r.clientFrames.map((f) => f.length)).toEqual([1, 1, 1]);
+		expect(r.clientFrames[0][0]).toEqual({
+			event: 'refreshed',
+			data: Array.from({ length: 5 }, (_, id) => ({ id, n: id }))
+		});
 		expect(r.invariantViolations).toEqual([]);
 		expect((await replayLiveSim(r)).reproduced).toBe(true);
+	});
+
+	it('rejects equal staleness when total loss is not followed by recovery', async () => {
+		const r = await runLiveSim({
+			seed: 'chaos-no-recovery',
+			clients: 3,
+			events: 5,
+			chaos: { dropRate: 1 },
+			recoverAfterFault: false
+		});
+		expect(r.clientFrames.map((f) => f.length)).toEqual([0, 0, 0]);
+		expect(r.metrics.authoritativeChecks).toBe(3);
+		expect(r.metrics.completeSubscribers).toBe(0);
+		expect(r.invariantViolations).toHaveLength(3);
+		expect(r.invariantViolations.every((v) => v.category === 'live.stream-incomplete')).toBe(true);
 	});
 
 	it('reproduces a partially-chaotic run bit-for-bit', async () => {

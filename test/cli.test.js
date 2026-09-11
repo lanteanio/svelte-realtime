@@ -2,7 +2,20 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
-import { parseArgs, detectAgent } from '../src/cli-utils.js';
+import {
+	parseArgs,
+	detectAgent,
+	formatScaffoldAuthWarning,
+	packageExecArgs,
+	renderScaffoldAuthWarningStatement,
+	renderViteConfig,
+	renderFirstRunTranscript,
+	runScaffoldVerification,
+	SCAFFOLD_ADAPTER_SPEC,
+	SCAFFOLD_EXTENSIONS_SPEC,
+	SCAFFOLD_REALTIME_SPEC,
+	SCAFFOLD_UWS_SPEC
+} from '../src/cli-utils.js';
 
 const _here = dirname(fileURLToPath(import.meta.url));
 const _cliSrc = readFileSync(resolve(_here, '..', 'src', 'cli.js'), 'utf8');
@@ -147,6 +160,85 @@ describe('detectAgent', () => {
 	});
 });
 
+// - deterministic first-success route --------------------------------------
+
+describe('newcomer scaffold contract', () => {
+	it('pins the audited adapter, realtime, and native addon tuple', () => {
+		expect(SCAFFOLD_ADAPTER_SPEC).toBe('svelte-adapter-uws@0.6.0-next.91');
+		expect(SCAFFOLD_REALTIME_SPEC).toBe('svelte-realtime@0.6.0-next.91');
+		expect(SCAFFOLD_EXTENSIONS_SPEC).toBe('svelte-adapter-uws-extensions@0.6.0-next.64');
+		expect(SCAFFOLD_UWS_SPEC).toBe(
+			'https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz'
+		);
+		expect(_cliSrc).not.toContain('uNetworking/uWebSockets.js#v20.60.0');
+	});
+
+	it.each([
+		['npm', ['exec', '--', 'svelte-adapter-uws-preflight']],
+		['pnpm', ['exec', 'svelte-adapter-uws-preflight']],
+		['yarn', ['exec', 'svelte-adapter-uws-preflight']],
+		['bun', ['x', 'svelte-adapter-uws-preflight']]
+	])('runs the installed prerequisite gate with %s', (agent, expected) => {
+		expect(packageExecArgs(agent, 'svelte-adapter-uws-preflight')).toEqual(expected);
+	});
+
+	it('generates one consolidated current-sv configuration', () => {
+		const config = renderViteConfig();
+		expect(config).toContain("import adapter from 'svelte-adapter-uws'");
+		expect(config).toContain('sveltekit({');
+		expect(config).toContain('adapter: adapter({ websocket: true })');
+		expect(config).toContain('uws()');
+		expect(config).toContain('realtime()');
+		expect(_cliSrc).toContain("rmSync(join(dest, 'svelte.config.js'), { force: true })");
+	});
+
+	it('executes preflight and build in order through the injected real runner contract', () => {
+		const events = [];
+		runScaffoldVerification({
+			agent: 'npm',
+			dest: 'fresh-app',
+			bin: (name) => name + '.cmd',
+			run: (file, args, cwd) => events.push({ file, args, cwd }),
+			onStep: (message) => events.push({ step: message }),
+			onSuccess: (message) => events.push({ success: message })
+		});
+		expect(events).toEqual([
+			{ step: 'Checking Node, OS, architecture, libc, and uWebSockets.js' },
+			{
+				file: 'npm.cmd',
+				args: ['exec', '--', 'svelte-adapter-uws-preflight'],
+				cwd: 'fresh-app'
+			},
+			{ step: 'Building the production app' },
+			{ file: 'npm.cmd', args: ['run', 'build'], cwd: 'fresh-app' },
+			{ success: 'Production build verified' }
+		]);
+	});
+
+	it('has one common verification/success exit after both template branches', () => {
+		expect(_cliSrc.match(/runScaffoldVerification\(/g)).toHaveLength(1);
+		expect(_cliSrc.match(/p\.outro\(/g)).toHaveLength(1);
+		expect(_cliSrc).not.toContain("p.log.success('Configured.')");
+		const demo = _cliSrc.indexOf("if (template === 'demo')");
+		const normal = _cliSrc.indexOf("if (template !== 'demo')");
+		const verify = _cliSrc.indexOf('runScaffoldVerification({');
+		const success = _cliSrc.indexOf('p.outro(`Verified.');
+		expect(normal).toBeGreaterThan(demo);
+		expect(verify).toBeGreaterThan(normal);
+		expect(success).toBeGreaterThan(verify);
+	});
+
+	it('does not install the mutable demo manifest before pinning the audited tuple', () => {
+		const demo = _cliSrc.slice(
+			_cliSrc.indexOf("if (template === 'demo')"),
+			_cliSrc.indexOf("if (template !== 'demo')")
+		);
+		expect(demo).not.toContain("run(bin(agent), ['install'], dest)");
+		expect(demo.indexOf('SCAFFOLD_ADAPTER_SPEC')).toBeGreaterThan(0);
+		expect(demo.indexOf('SCAFFOLD_UWS_SPEC')).toBeGreaterThan(0);
+	});
+});
+
 // - Scaffolded hooks.ws.ts carries a security warning header --------------
 
 describe('init scaffold security', () => {
@@ -190,11 +282,18 @@ describe('init scaffold security', () => {
 		expect(_cliSrc).toContain('const SCAFFOLD_PLACEHOLDER = true;');
 		expect(_cliSrc).toContain('if (SCAFFOLD_PLACEHOLDER)');
 		expect(_cliSrc).toContain('console.warn');
-		expect(_cliSrc).toContain('[svelte-realtime] upgrade() is the scaffold default');
+		expect(formatScaffoldAuthWarning()).toBe(
+			'[SR-ONBOARD-001] Scaffold authentication is still permissive: Every connection receives a random UUID. Replace upgrade() in src/hooks.ws.ts and delete SCAFFOLD_PLACEHOLDER before deployment.'
+		);
+		expect(renderScaffoldAuthWarningStatement()).toBe(
+			'console.warn("[SR-ONBOARD-001] Scaffold authentication is still permissive: Every connection receives a random UUID. Replace upgrade() in src/hooks.ws.ts and delete SCAFFOLD_PLACEHOLDER before deployment.");'
+		);
+		expect(_cliSrc).toContain('renderScaffoldAuthWarningStatement()');
+		expect(_cliSrc).not.toContain('JSON.stringify(formatScaffoldAuthWarning())');
 	});
 
 	it('the warning message references the file path so the developer can jump straight to it', () => {
-		expect(_cliSrc).toContain('Edit src/hooks.ws.ts before deploying');
+		expect(formatScaffoldAuthWarning()).toContain('src/hooks.ws.ts');
 	});
 
 	it('the same scaffolded hook is written for both minimal and example templates', () => {
@@ -208,6 +307,17 @@ describe('init scaffold security', () => {
 		expect(writeCalls).not.toBeNull();
 		expect(writeCalls?.[1]).toContain('UPGRADE_HOOK_SCAFFOLD');
 		expect(writeCalls?.[1]).not.toMatch(/template\s*===/);
+	});
+});
+
+describe('accepted first-run transcript', () => {
+	it('contains every owned success checkpoint and the canonical warning once', () => {
+		const transcript = renderFirstRunTranscript();
+		expect(transcript).toContain('preflight OK');
+		expect(transcript).toContain('Production build verified');
+		expect(transcript).toContain('Verified. cd my-app && npm run dev');
+		expect(transcript.match(/SR-ONBOARD-001/g)).toHaveLength(1);
+		expect(transcript).toContain(formatScaffoldAuthWarning());
 	});
 });
 

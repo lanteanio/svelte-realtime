@@ -11,6 +11,7 @@ import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
 import { _compensateUnavailable } from './history-compensation.js';
 import { _observeSilentTopicPublish, _activatePublishRateWarning } from './dev-warnings.js';
 import { _resolveTenant, _tenantTopic, _makeTenantScope, _TENANT_TOPIC_NS, _isTenancyEnabled } from './tenant.js';
+import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../error-registry.js';
 
 /**
  * Reject a publish to a `__`-prefixed (framework-internal) topic. Shared by the
@@ -441,7 +442,12 @@ export function _getCtxHelpers(platform) {
 			},
 			signal: (userId, event, data) => {
 				const reason = _validUserIdReason(userId);
-				if (reason !== null) throw new LiveError('INVALID_USER_ID', 'ctx.signal: ' + reason);
+				if (reason !== null) {
+					throw new LiveError(
+						realtimeErrorCode(REALTIME_ERROR_IDS.INVALID_USER_ID),
+						realtimeErrorMessage(REALTIME_ERROR_IDS.INVALID_USER_ID, ' ' + reason)
+					);
+				}
 				return platform.publish('__signal:' + userId, event, data);
 			},
 			batch: (messages) => {
@@ -571,7 +577,7 @@ function _collectBatch(ctx, fn) {
 	return result;
 }
 
-export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
+export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, operationRequestId) {
 	// Server-trusted tenant id for this connection (null when no resolver is
 	// configured -> single-tenant, zero-cost path). When set, ctx.publish prefixes
 	// every topic to the tenant's wire namespace; ctx._publishWire stays the raw
@@ -587,10 +593,24 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 	const tenancy = _isTenancyEnabled();
 	const tenantId = tenancy ? _resolveTenant(user) : null;
 	const scopedHelpers = _getScopedHelpers(helpers, tenantId);
+	const connectionId = ws && platform ? (platform.connectionId ?? platform.requestId) : undefined;
+	const requestId = operationRequestId ?? platform?.requestId;
+	// A WebSocket Platform is connection-scoped at the adapter boundary. Give
+	// each handler a lightweight view whose requestId follows this operation,
+	// while retaining the stable socket id for diagnostics that need both.
+	// Inheritance preserves the full platform API without copying mutable state.
+	let contextPlatform = platform;
+	if (ws && platform) {
+		contextPlatform = Object.create(platform);
+		Object.defineProperties(contextPlatform, {
+			requestId: { value: requestId, enumerable: true },
+			connectionId: { value: connectionId, enumerable: true }
+		});
+	}
 	const ctx = {
 		user,
 		ws,
-		platform,
+		platform: contextPlatform,
 		// ctx.publish already guards `__` inside the raw helper closure, so the
 		// no-tenancy path can stay the bare reference here.
 		publish: !tenancy ? helpers.publish : (tenantId ? _getScopedPublish(helpers.publish, tenantId) : _getUnscopedPublish(helpers.publish)),
@@ -606,7 +626,13 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey) {
 		batch: scopedHelpers.batch,
 		shed: helpers.shed,
 		skip: helpers.skip,
-		requestId: platform.requestId,
+		connectionId,
+		requestId,
+		// W3C operation context and vendor-neutral span boundary projected by
+		// the adapter. The context is captured for this handler while the trace
+		// helper remains the shared immutable surface.
+		traceContext: contextPlatform?.traceContext ?? null,
+		trace: contextPlatform?.trace ?? null,
 		// Clock and RNG come from the adapter platform's injectable runtime when
 		// present, so a loader/handler reads the same swappable source a seeded
 		// harness controls (ctx.now(), ctx.random.uuid(), etc.). Older adapters

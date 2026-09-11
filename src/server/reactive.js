@@ -9,6 +9,7 @@ import { _resolveTenant, _tenantTopic, _stripTenantTopic } from './tenant.js';
 import { _redactOrDrop, REDACT_DROP } from './publish-helpers.js';
 import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
 import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms-gate.js';
+import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -113,12 +114,12 @@ export function _ensureWrap(platform) {
 	// authorized for that connection via a stream RPC. Runs once per platform,
 	// here at the universal capture point so it covers every wiring path
 	// (`realtime().init`, `setCronPlatform`, `_activateDerived`, or first
-	// message). Optional-chained: an older adapter without the method degrades
-	// to the prior behavior. The `platform` reference (possibly a bus-wrapped
-	// seam) is used so a clustered deployment reaches the real flag through the
-	// forwarded method.
+	// message). The realtime() init hook feature-detects and confirms strict mode
+	// before reaching this point; direct primitive wiring remains best-effort.
+	// The `platform` reference (possibly a bus-wrapped seam) is used so a
+	// clustered deployment reaches the real flag through the forwarded method.
 	if (state.authorizeWireSubscribe && typeof (/** @type {any} */ (platform).authorizeWireSubscribe) === 'function') {
-		try { /** @type {any} */ (platform).authorizeWireSubscribe(); } catch {}
+		try { /** @type {any} */ (platform).authorizeWireSubscribe('strict'); } catch {}
 	}
 }
 
@@ -455,9 +456,16 @@ async function _recomputeDerived(entry, platform) {
 	} catch (err) {
 		if (state.serverErrorHandler) {
 			try { state.serverErrorHandler('derived', err); } catch {}
-		} else if (_IS_DEV) {
-			console.error(`[svelte-realtime] Derived stream '${entry.topic}' error:`, err, '\n  See: https://svti.me/derived');
 		}
+		emitOperationalEvent({
+			source: 'svelte-realtime',
+			component: 'server.reactive',
+			event: 'reactive.derived.failed',
+			severity: 'error',
+			dataClass: 'application',
+			message: 'A derived stream recomputation failed; later source events may retry it.',
+			attributes: { topic: entry.topic, error: diagnosticErrorMessage(err), help: 'https://svti.me/derived' }
+		});
 	}
 }
 
@@ -622,8 +630,15 @@ async function _fireEffect(entry, event, data, platform) {
 	} catch (err) {
 		if (state.serverErrorHandler) {
 			try { state.serverErrorHandler('effect', err); } catch {}
-		} else if (_IS_DEV) {
-			console.error('[svelte-realtime] Effect error:', err);
 		}
+		emitOperationalEvent({
+			source: 'svelte-realtime',
+			component: 'server.reactive',
+			event: 'reactive.effect.failed',
+			severity: 'error',
+			dataClass: 'application',
+			message: 'A reactive effect handler failed.',
+			attributes: { error: diagnosticErrorMessage(err) }
+		});
 	}
 }

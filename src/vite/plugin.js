@@ -8,6 +8,7 @@ import { _checkHooksFile, _buildTopicsRegistry, _generateRegistry, _resolveFile,
 import { _generateSsrStubs } from './codegen-ssr.js';
 import { _generateClientStubs } from './codegen-client.js';
 import { _loadRegistryDirect, _hmrReloadRegistry } from './hmr.js';
+import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 
 /**
  * Vite plugin for svelte-realtime.
@@ -106,7 +107,10 @@ export default function svelteRealtime(options) {
 				const filePath = _resolveFile(liveDir, modulePath);
 
 				if (!filePath) {
-					this.error(`[svelte-realtime] Could not resolve $live/${modulePath} - file not found in ${dir}/`);
+					this.error(realtimeErrorMessage(
+						REALTIME_ERROR_IDS.LIVE_RESOLVE,
+						modulePath + ' - file not found in ' + dir + '/'
+					));
 					return null;
 				}
 

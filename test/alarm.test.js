@@ -172,13 +172,13 @@ describe('live.alarm', () => {
 			expect(ops).toEqual([['set', 'room:store', at], ['delete', 'room:store']]);
 		});
 
-		it('passes the resolver meta (path/tenantId) to store.set', () => {
+		it('passes stable id, legacy path, and tenant metadata to store.set', () => {
 			let captured;
 			configureAlarm({ store: { set: (t, at, meta) => { captured = meta; }, delete: () => true, due: () => [] } });
 			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
-			_bindAlarmCtx(ctx, { wireTopic: '@t/acme/room:7', onAlarm: () => {}, path: 'rooms/messages', tenantId: 'acme' });
+			_bindAlarmCtx(ctx, { wireTopic: '@t/acme/room:7', onAlarm: () => {}, alarmId: 'room-message-expiry', path: 'rooms/messages', tenantId: 'acme' });
 			ctx.setAlarm(Date.now() + 1000);
-			expect(captured).toEqual({ path: 'rooms/messages', tenantId: 'acme' });
+			expect(captured).toEqual({ alarmId: 'room-message-expiry', path: 'rooms/messages', tenantId: 'acme' });
 		});
 	});
 
@@ -196,8 +196,8 @@ describe('live.alarm', () => {
 		}
 
 		const registered = [];
-		function registerAlarmStream(path, onAlarm) {
-			const fn = live.stream('topic:' + path, () => ({}), { alarm: { onAlarm } });
+		function registerAlarmStream(path, onAlarm, id) {
+			const fn = live.stream('topic:' + path, () => ({}), { alarm: { onAlarm, ...(id ? { id } : {}) } });
 			registry.set(path, fn);
 			registered.push(path);
 			return fn;
@@ -246,12 +246,58 @@ describe('live.alarm', () => {
 			expect(fired).toBe(0);
 		});
 
-		it('garbage-collects a stale row whose stream was removed (claims, never fires)', async () => {
+		it('retains an unresolved row for a compatible worker or rollback', async () => {
 			const store = memStore();
 			configureAlarm({ store });
 			store.set('room:gone', Date.now() - 1000, { path: 'rooms/does-not-exist' });
 			await _pollAlarms();
-			expect(store.rows.has('room:gone')).toBe(false); // claimed + dropped, can't accumulate
+			expect(store.rows.has('room:gone')).toBe(true);
+		});
+
+		it('recovers an in-flight alarm by stable id after its RPC path is renamed', async () => {
+			let fired = 0;
+			registerAlarmStream('rooms/new-name', () => { fired++; }, 'room-expiry');
+			const store = memStore();
+			configureAlarm({ store });
+			store.set('room:renamed', Date.now() - 1000, {
+				alarmId: 'room-expiry',
+				path: 'rooms/old-name',
+				tenantId: null
+			});
+			await _pollAlarms();
+			expect(fired).toBe(1);
+			expect(store.rows.has('room:renamed')).toBe(false);
+		});
+
+		it('does not fall back to a reused path when the persisted stable id is missing', async () => {
+			let wrongHandlerFired = 0;
+			registerAlarmStream('rooms/reused-path', () => { wrongHandlerFired++; }, 'different-alarm');
+			const store = memStore();
+			configureAlarm({ store });
+			store.set('room:missing-id', Date.now() - 1000, {
+				alarmId: 'retired-alarm',
+				path: 'rooms/reused-path',
+				tenantId: null
+			});
+			await _pollAlarms();
+			expect(wrongHandlerFired).toBe(0);
+			expect(store.rows.has('room:missing-id')).toBe(true);
+		});
+
+		it('fails closed and retains the row when a stable alarm id is duplicated', async () => {
+			let fired = 0;
+			registerAlarmStream('rooms/duplicate-a', () => { fired++; }, 'duplicate-alarm');
+			registerAlarmStream('rooms/duplicate-b', () => { fired++; }, 'duplicate-alarm');
+			const store = memStore();
+			configureAlarm({ store });
+			store.set('room:duplicate', Date.now() - 1000, {
+				alarmId: 'duplicate-alarm',
+				path: 'rooms/gone',
+				tenantId: null
+			});
+			await _pollAlarms();
+			expect(fired).toBe(0);
+			expect(store.rows.has('room:duplicate')).toBe(true);
 		});
 
 		it('the recovery poll is leader-gated', async () => {
@@ -458,10 +504,18 @@ describe('live.alarm', () => {
 	});
 
 	describe('live.stream alarm option', () => {
-		it('accepts a valid alarm config and marks __streamOptions.alarm', () => {
+	it('accepts a valid alarm config and marks __streamOptions.alarm', () => {
 			const onAlarm = () => {};
-			const s = live.stream('room:opt', () => ({}), { alarm: { onAlarm } });
+			const s = live.stream('room:opt', () => ({}), { alarm: { id: 'room-expiry.v1', onAlarm } });
 			expect(s.__streamOptions.alarm.onAlarm).toBe(onAlarm);
+			expect(s.__streamOptions.alarm.id).toBe('room-expiry.v1');
+		});
+
+		it('validates the stable alarm id at declaration time', () => {
+			const onAlarm = () => {};
+			expect(() => live.stream('room:id1', () => ({}), { alarm: { id: '', onAlarm } })).toThrow(/alarm\.id/);
+			expect(() => live.stream('room:id2', () => ({}), { alarm: { id: 'bad id', onAlarm } })).toThrow(/alarm\.id/);
+			expect(() => live.stream('room:id3', () => ({}), { alarm: { id: 'room-expiry:v2', onAlarm } })).not.toThrow();
 		});
 
 		it('rejects a malformed alarm config at declaration time', () => {

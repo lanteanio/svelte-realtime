@@ -75,6 +75,34 @@ async function flush() {
 	for (let k = 0; k < 16; k++) await Promise.resolve();
 }
 
+// Fold the recorded wire frames into the authoritative CRUD state a real
+// client is expected to expose. In particular, refreshed is a full snapshot:
+// it is the recovery boundary that makes loss before the boundary irrelevant.
+function replayCrudState(frames, key) {
+	let state = [];
+	for (const { event, data } of frames) {
+		if (event === 'refreshed' || event === 'set') {
+			state = Array.isArray(data) ? data.map((item) => item) : data;
+			continue;
+		}
+		if (!Array.isArray(state) || !data || typeof data !== 'object') continue;
+		const index = state.findIndex((item) => item && item[key] === data[key]);
+		if (event === 'created') {
+			if (index >= 0) state[index] = data;
+			else state.push(data);
+		} else if (event === 'updated') {
+			if (index >= 0) state[index] = data;
+		} else if (event === 'deleted' && index >= 0) {
+			state.splice(index, 1);
+		}
+	}
+	return state;
+}
+
+function stateSize(state) {
+	return Array.isArray(state) ? state.length : (state == null ? 0 : 1);
+}
+
 /**
  * The default sim module: an echo RPC and a `feed` stream. Kept dependency-free
  * so a zero-config run exercises the RPC + stream fan-out path.
@@ -107,7 +135,17 @@ async function defaultScenario(api, opts) {
 	await api.flush();
 	const topic = streams[0] && streams[0].topic;
 	if (topic) {
-		for (let n = 0; n < opts.events; n++) api.publish(topic, 'created', { id: n, n });
+		const authoritative = [];
+		for (let n = 0; n < opts.events; n++) {
+			const item = { id: n, n };
+			authoritative.push(item);
+			api.publish(topic, 'created', item);
+		}
+		api.authoritative(topic, authoritative);
+		if (opts.chaos && opts.recoverAfterFault) {
+			api.clearFaults();
+			api.recover(topic, authoritative);
+		}
 	}
 	await api.flush();
 }
@@ -120,8 +158,9 @@ async function defaultScenario(api, opts) {
  *   clients?: number,
  *   events?: number,
  *   chaos?: { dropRate: number } | null,
+ *   recoverAfterFault?: boolean,
  *   module?: () => Record<string, any>,
- *   scenario?: (api: any, opts: { clients: number, events: number }) => void | Promise<void>,
+ *   scenario?: (api: any, opts: { clients: number, events: number, chaos: { dropRate: number } | null, recoverAfterFault: boolean }) => void | Promise<void>,
  *   gitCommit?: string
  * }} [config]
  * @returns {Promise<any>} a LiveSimResult
@@ -131,6 +170,7 @@ export async function runLiveSim(config = {}) {
 	const clients = config.clients ?? 3;
 	const events = config.events ?? 5;
 	const chaos = config.chaos ?? null;
+	const recoverAfterFault = config.recoverAfterFault !== false;
 	const moduleFactory = config.module || defaultModule;
 	const scenario = config.scenario || defaultScenario;
 
@@ -151,7 +191,10 @@ export async function runLiveSim(config = {}) {
 
 		/** @type {Array<{ topic: string | null, events: any[] }>} */
 		const recordedStreams = [];
+		/** @type {Map<string, { expected: any, encoded: string, key: string }>} */
+		const authoritativeStates = new Map();
 		let rpcChecks = 0;
+		let recoveryPublishes = 0;
 
 		const api = {
 			now: () => FIXED_EPOCH,
@@ -165,6 +208,22 @@ export async function runLiveSim(config = {}) {
 				};
 			},
 			publish: (topic, event, data) => env.platform.publish(topic, event, data),
+			/** Register the state every subscriber must expose after faults clear. */
+			authoritative(topic, state, options = {}) {
+				const expected = JSON.parse(JSON.stringify(state));
+				authoritativeStates.set(topic, {
+					expected,
+					encoded: JSON.stringify(expected),
+					key: options.key || 'id'
+				});
+			},
+			/** Clear the deterministic publish fault before attempting recovery. */
+			clearFaults: () => env.chaos.disable(),
+			/** Publish a full-state recovery boundary over the real fan-out path. */
+			recover(topic, state) {
+				recoveryPublishes++;
+				return env.platform.publish(topic, 'refreshed', state);
+			},
 			flush,
 			/** Assert an RPC result; a mismatch is an invariant violation. */
 			expect(actual, expected, label) {
@@ -175,7 +234,7 @@ export async function runLiveSim(config = {}) {
 			}
 		};
 
-		await scenario(api, { clients, events });
+		await scenario(api, { clients, events, chaos, recoverAfterFault });
 		await flush();
 
 		// Invariant: every set of streams subscribed to the SAME topic converged
@@ -197,20 +256,65 @@ export async function runLiveSim(config = {}) {
 			}
 		}
 
+		// Convergence alone is insufficient: every subscriber can be identically
+		// stale after an all-or-nothing drop. Scenarios register authoritative
+		// post-fault state, and this oracle independently replays each subscriber's
+		// frames to prove recovery and completeness.
+		let authoritativeChecks = 0;
+		let completeSubscribers = 0;
+		const completeness = new Map();
+		for (const [topic, oracle] of authoritativeStates) {
+			const streams = recordedStreams.filter((stream) => stream.topic === topic);
+			let complete = 0;
+			for (let i = 0; i < streams.length; i++) {
+				authoritativeChecks++;
+				const actual = replayCrudState(streams[i].events, oracle.key);
+				if (JSON.stringify(actual) === oracle.encoded) {
+					complete++;
+					completeSubscribers++;
+				} else {
+					recordViolation('live.stream-incomplete', {
+						topic,
+						subscriber: i,
+						expectedItems: stateSize(oracle.expected),
+						actualItems: stateSize(actual)
+					});
+				}
+			}
+			completeness.set(topic, {
+				authoritativeItems: stateSize(oracle.expected),
+				completeSubscribers: complete
+			});
+		}
+
 		// Deterministic, sorted structural snapshot for the replay self-gate.
 		const topics = [...byTopic.keys()].sort();
 		const finalState = {
 			topics,
-			perTopic: topics.map((t) => ({ topic: t, subscribers: byTopic.get(t).length, events: JSON.parse(byTopic.get(t)[0]).length })),
+			perTopic: topics.map((t) => ({
+				topic: t,
+				subscribers: byTopic.get(t).length,
+				events: JSON.parse(byTopic.get(t)[0]).length,
+				authoritativeItems: completeness.get(t)?.authoritativeItems ?? null,
+				completeSubscribers: completeness.get(t)?.completeSubscribers ?? null
+			})),
 			rpcChecks
 		};
 
 		return {
 			seed,
 			gitCommit: config.gitCommit ?? (typeof process !== 'undefined' ? process.env.GIT_COMMIT : null) ?? null,
-			config: { clients, events, chaos: chaos || null },
+			config: { clients, events, chaos: chaos || null, recoverAfterFault },
 			invariantViolations: violations,
-			metrics: { clients, events, rpcChecks, chaosDropped: env.chaos.dropped },
+			metrics: {
+				clients,
+				events,
+				rpcChecks,
+				chaosDropped: env.chaos.dropped,
+				recoveryPublishes,
+				authoritativeChecks,
+				completeSubscribers
+			},
 			clientFrames: recordedStreams.map((s) => s.events.map((e) => ({ event: e.event, data: e.data }))),
 			finalState,
 			_module: config.module,

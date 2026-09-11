@@ -5,11 +5,102 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0-next.91] - 2026-08-02
+
+### Added
+
+- **Production-shaped capacity evidence now has one ecosystem launch gate.**
+  The README routes workload owners to the adapter's versioned peak/SLO/topology
+  worksheet, open-arrival runner, and machine-readable result. Realtime traffic
+  must model established connections and acknowledgement/fan-out completion,
+  not replace every message with a fresh socket or measure publisher enqueue
+  alone; passing evidence includes peak p50/p95/p99 and errors, the first
+  saturated resource, generator integrity, and recovery under continued load.
+
+- **The ecosystem privacy and retention boundary is now explicit.** The README
+  routes deployers to the adapter-owned versioned processing inventory and
+  host-fillable RoPA, DPA, and transfer worksheet. It distinguishes
+  `live.forget` coverage from browser, telemetry, backup, application, and
+  unregistered-store deletion so a successful coordinator call is not treated
+  as universal erasure.
+
+- **Canonical ecosystem identity at the package front door.** The README now
+  names the GitHub owner, documentation, hosted demo, and `svti.me` runtime-help
+  redirect domain; npm's `homepage` now points to the canonical documentation
+  site presented by the package instead of the repository README.
+
+- **Correlated resource-control recovery route.** Incident guidance now links
+  realtime's server `degraded`/`recovered` events and independent client health
+  inputs to the ecosystem response matrix and overload-plus-Redis-latency cold
+  drill. Recovery requires bounded rehydration and application-state agreement;
+  a transport recovery event alone does not clear the operational gate.
+
+- **Enforceable protocol windows and rename-safe durable alarms.** Servers may
+  replace the legacy numeric protocol notice with
+  `{ current, minimum, onMismatch }`: notify mode supports range expansion,
+  while reject mode returns a typed `PROTOCOL_MISMATCH` result before RPC,
+  batch, binary, upload, or custom application dispatch. Missing, malformed,
+  too-old, and too-new advertisements are contained, and client health exposes
+  a sticky `incompatible` state. Alarm registrations may now carry a stable
+  `id`; recovery resolves that id before the legacy function path and retains
+  unresolved or duplicate rows for explicit operator disposition instead of
+  silently claiming or dropping them.
+
+- **W3C operation tracing across RPC and webhook seams.** With the adapter's
+  optional tracing provider configured, every RPC receives an isolated
+  `ctx.traceContext` and `ctx.trace`, and runs inside a bounded
+  `realtime.rpc` span. Inbound webhooks extract their parent before verify /
+  transform / publish; outbound webhooks inject a producer context, and
+  dead-letter records retain it for replay. Redis/Postgres bus and durable-work
+  wrappers consume the same structural Platform surface. Older/custom
+  platforms without tracing keep the prior no-span behavior.
+
+- **Production operational-event sink.** `setOperationalEventSink()` now
+  configures the process-wide structured sink shared with the adapter and
+  extensions, with canonical JSON console output by default and console
+  failover for a broken custom sink. RPC, upload, cron, alarm, reactive,
+  `live.poll`, webhook delivery, and dead-letter persistence failures no
+  longer disappear when an optional `onError` callback is absent.
+
+- **Authenticated exact-id transport diagnostics.** The fail-closed admin
+  handler now resolves `GET <adminPath>/diagnostics/<diagnosticId>` after the
+  mandatory `requires(request)` gate. It exposes the adapter's bounded
+  cross-worker sequence evidence without putting stream identifiers in logs or
+  default introspection; unknown/expired ids return `404` and every response is
+  `no-store`.
+
+- **Per-operation RPC correlation.** WebSocket handlers now expose a stable
+  `ctx.connectionId` beside a bounded per-envelope `ctx.requestId`.
+  `ctx.platform.requestId` follows the operation so downstream task/job helpers
+  persist the right id, and RPC failure payloads echo it as `requestId`.
+
+- **External diagnostic values are routable and bidi-safe.** RPC paths,
+  correlation IDs, and execution error details now remain in structured
+  `attributes` under stable event identities. Canonical physical console
+  lines visibly escape controls, bidirectional formatting characters, and
+  non-ASCII text while preserving exact values for the adapter parser.
+
+- **Owned first-run transcript and scaffold warning.** The scaffold auth warning now has one canonical code/title/body contract (`SR-ONBOARD-001`) consumed by the generated hook and documentation. The release gate regenerates an accepted newcomer transcript from the same source and rejects drift; all templates share its preflight, production-build confirmation, sole `Verified` exit, and exact expected first-browser warning.
+
+- **Package-attributed diagnostics.** Realtime soft and fatal assertions now use the ecosystem `[oss-realtime/diagnostic source=svelte-realtime component=... event=... severity=...]` grammar and versioned JSON envelope. The adapter's `parseDiagnostic()` recognizes the previous realtime prefix families during the documented 0.6 migration window.
+
+- **Deterministic newcomer preflight and first production build.** The non-interactive quick start and CLI scaffold now install the exact adapter/realtime/uWebSockets.js tuple audited together, run the adapter's Node/OS/architecture/libc/native-addon preflight, write one consolidated current-sv `vite.config.ts` instead of an ignored adapter sidecar, and require `npm run build` to pass before reporting success. A failed prerequisite or build stops at that boundary with the failing command instead of promising a working counter.
+
+- **Generated runtime error reference.** The package now ships a registry-derived reference for the `INVALID_USER_ID` signal failure, unresolved `$live` modules, and both upload-size failure boundaries. Runtime messages are built from that registry and append a stable ID plus package-local help route; each entry records cause, consequence, automatic recovery, next action, and owning sources. `npm run check` rejects missing sources or generated-page drift.
 
 ### Fixed
 
 - **Vite plugin: self-sustaining HMR loop through `$types.d.ts` regeneration - full-reload storm for every connected browser (reported in #9, fixed on the 0.5.x line in 0.5.12).** `handleHotUpdate` filtered only on the live directory, so the plugin's own generated `src/live/$types.d.ts` fed back into its own handler, and `_writeTypeDeclarations` rewrote the file unconditionally - a fresh mtime per pass scheduled the next change event. Once anything touched `$types.d.ts` after the watcher was armed (most commonly a second Vite instance on the same checkout, e.g. a Playwright test server next to the dev server, whose `buildStart()` write ignited it), the loop sustained itself forever: a full SSR registry reload per tick and a full reload of every connected client, since the file is not in the module graph and Vite falls back to `full-reload`. `handleHotUpdate` now returns `[]` for `.d.ts` files (handled, no affected modules) and skips test files like the add/unlink watcher, and `_writeTypeDeclarations` compares existing content before writing, so an unchanged regeneration is a no-op - which also removes the cross-process ignition entirely. Regression tests pin the ignored `.d.ts` event, the ignored test-file event, and the mtime-stable idempotent write.
+
+### Security
+
+- **DevTools retains metadata only unless payload capture is explicitly
+  enabled.** RPC and volatile arguments, RPC results, stream payloads, stream
+  topics, and error messages are omitted by default; records keep only type,
+  count, timing, status, and stable structural fields. Setting
+  `__devtools.unsafeCapturePayloads = true` restores the prior key-redacted
+  payload previews. Turning it off again purges payload-bearing rings, pending
+  entries, stream previews, topics, and messages.
 
 ## [0.6.0-next.90] - 2026-07-30
 
@@ -46,6 +137,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING (`live.aggregate({ privacy })`): a `perturb` or `hybrid` strategy now requires `realtime({ privacySecret })`** and fails at init rather than at the first noise draw, so a misconfigured `hybrid` aggregate cannot boot cleanly and start throwing later when its cohort first reaches `k`. `suppress` (k-anonymity only) needs no secret.
 
 ### Fixed
+
+- **Admission rules recognize every adapter pressure reason.** The public,
+  frozen `PRESSURE_REASONS` tuple now drives registration validation and the
+  `live.PressureReason` type for `NONE`, `SUBSCRIBERS`, `PUBLISH_RATE`, `PSI`,
+  `CPU_QUOTA`, `CAPACITY`, and `MEMORY`. Class-of-service and `ctx.shed()`
+  policies can therefore refuse urgent host/protection pressure instead of
+  rejecting the names at boot or silently admitting matching snapshots.
 
 - **A transferred (detached) binary id no longer terminates the process.** `_scalarId` reads a `Buffer`/`Uint8Array` id as bytes by constructing a view over its backing buffer, and that construction THROWS once the buffer has been detached - which is what happens to an id transferred to a worker. The throw was not contained to the call: the unknown-path reply reads the identity from a site OUTSIDE the dispatch try/catch, on a path that is fired without a `.catch`, so it surfaced as an unhandled promise rejection - process termination under Node's default, a crash loop rather than one failed request. It now returns `null` like every other unusable id shape, demoting that connection to a guest identity. Binary ids are additionally capped at 64 bytes: the derived key is rebuilt per message and used as a Map key and topic fragment, so an uncapped id was megabytes of string churn per frame.
 
@@ -280,7 +378,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Wire-subscribe authorization (on by default): a client can no longer subscribe to a topic it was never granted.** realtime authorizes every subscription server-side in its stream RPC (the guard, the access filter, and tenant scoping all run there, then the socket is subscribed) - but that left the raw WebSocket layer open: a client could send a bare `{type:'subscribe', topic}` frame for a topic it never went through an RPC for - a private room's data topic, or another tenant's channel (`@t/<otherTenant>/...`, whose prefix is guessable and, deliberately, not `__`-blocked) - and receive that topic's fan-out, bypassing the room guard and tenant isolation. realtime now arms the adapter's wire-subscribe authorization at platform capture, so a client's raw subscribe frame is honored only for a topic the server already authorized for that connection. realtime's own client never sends such frames - it attaches each server-resolved topic as *managed* (dispatch only, no client subscribe frame, and skipped by the reconnect resubscribe-batch, since the server re-subscribes it through the RPC on reconnect) - so pure-realtime apps see no behavior change, no extra wire traffic, and reconnect is unaffected. Opt out with `realtime({ authorizeWireSubscribe: false })` only for a hybrid app that deliberately relies on raw client-initiated adapter subscriptions and authorizes them another way (e.g. its own `subscribe` hook). Requires `svelte-adapter-uws` >= `0.6.0-next.57`; on an older adapter both halves degrade to the prior behavior (no gate armed, a harmless redundant client subscribe frame). (Peer dep bumped to `^0.6.0-next.57`.)
+- **Wire-subscribe authorization (on by default): a client can no longer subscribe to a topic it was never granted.** realtime authorizes every subscription server-side in its stream RPC (the guard, the access filter, and tenant scoping all run there, then the socket is subscribed) - but that left the raw WebSocket layer open: a client could send a bare `{type:'subscribe', topic}` frame for a topic it never went through an RPC for - a private room's data topic, or another tenant's channel (`@t/<otherTenant>/...`, whose prefix is guessable and, deliberately, not `__`-blocked) - and receive that topic's fan-out, bypassing the room guard and tenant isolation. realtime now requests the adapter's strict wire policy, so every raw subscribe requires BOTH the existing server grant and an application subscribe-hook allow. A permissive hybrid hook can no longer replace the tenant or room grant. realtime's own client never sends such frames, so pure-realtime apps see no behavior change or extra wire traffic. Startup fails closed when the adapter cannot confirm strict support; upgrade the adapter or explicitly opt out with `realtime({ authorizeWireSubscribe: false })` only when the app accepts responsibility for every raw subscription.
 
 ## [0.6.0-next.66] - 2026-07-05
 

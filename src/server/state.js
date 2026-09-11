@@ -324,6 +324,13 @@ export const state = {
 	serverProtocolVersion: undefined,
 
 	/**
+	 * Range policy for coordinated rollout/rollback containment. Undefined keeps
+	 * the legacy one-way notice semantics of numeric `protocolVersion`.
+	 * @type {{ current: number, minimum: number, onMismatch: 'notify' | 'reject' } | undefined}
+	 */
+	serverProtocolPolicy: undefined,
+
+	/**
 	 * `realtime({ maskNotFound: true })`: answer a wire RPC to an unknown path
 	 * exactly as a guard denial would answer the same caller, so probing
 	 * cannot separate "exists but forbidden" from "does not exist". Off by

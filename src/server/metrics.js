@@ -3,6 +3,7 @@ import { monotonicNow, setIntervalTimer, clearIntervalTimer } from '../shared/ru
 import { wireAssertionMetrics } from '../shared/assert.js';
 import { state } from './state.js';
 import { _IS_DEV } from './env.js';
+import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 /**
  * Per-connection cohort cache: classify each socket ONCE (device/network/geo
@@ -272,8 +273,30 @@ const _livePoll = function poll(fn, intervalMs) {
 	const timer = setIntervalTimer(() => {
 		try {
 			const out = fn();
-			if (out && typeof (/** @type {any} */ (out).catch) === 'function') /** @type {any} */ (out).catch(() => {});
-		} catch { /* a throwing tick must not kill the interval */ }
+			if (out && typeof (/** @type {any} */ (out).catch) === 'function') {
+				/** @type {any} */ (out).catch((err) => {
+					emitOperationalEvent({
+						source: 'svelte-realtime',
+						component: 'server.poll',
+						event: 'poll.tick.failed',
+						severity: 'error',
+						dataClass: 'application',
+						message: 'A live.poll callback rejected; the interval remains active.',
+						attributes: { error: diagnosticErrorMessage(err) }
+					});
+				});
+			}
+		} catch (err) {
+			emitOperationalEvent({
+				source: 'svelte-realtime',
+				component: 'server.poll',
+				event: 'poll.tick.failed',
+				severity: 'error',
+				dataClass: 'application',
+				message: 'A live.poll callback threw; the interval remains active.',
+				attributes: { error: diagnosticErrorMessage(err) }
+			});
+		}
 	}, intervalMs);
 	let stopped = false;
 	return () => {

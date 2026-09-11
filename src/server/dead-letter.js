@@ -27,6 +27,8 @@ const _DEAD_LETTER_TOMBSTONE_MS = 10 * 60 * 1000;
  * @property {number} attempts - Delivery attempts made (0 = a config / gate failure, never sent).
  * @property {string} error - The redacted terminal error message.
  * @property {number} failedAt - Wall-clock ms (runtime seam) when the delivery gave up.
+ * @property {{ traceparent: string, tracestate?: string } | null} traceContext
+ *   W3C context captured for a later replay.
  * @property {string | null} userId - The authoring userId extracted at capture time
  *   by the store's `forgetUserId` option (null when unset or not extractable).
  *   Right-to-erasure attribution: the event payload is app-defined, so the store
@@ -140,6 +142,7 @@ export function createDeadLetterStore(options = {}) {
 				attempts: rec.attempts | 0,
 				error: rec.error,
 				failedAt: typeof rec.failedAt === 'number' ? rec.failedAt : now(),
+				traceContext: rec.traceContext ?? null,
 				userId
 			};
 			records.set(id, record);

@@ -14,23 +14,63 @@
   <a href="https://svelte-realtime.dev">Documentation</a> · <a href="https://svelte-realtime.dev/tutorial">Tutorial</a> · <a href="https://svelte-realtime-demo.lantean.io">Live Demo</a>
 </p>
 
+**Official links:** [GitHub owner](https://github.com/lanteanio) | [Documentation](https://svelte-realtime.dev/) | [Live demo](https://svelte-realtime-demo.lantean.io/) | `svti.me` is the ecosystem-owned runtime-help redirect domain.
+
 ---
 
-Write server functions. Import them in components. Call them over WebSocket. No boilerplate, no manual pub/sub wiring, no protocol design.
+After the scaffold's native preflight and production build pass, write server
+functions, import them in components, and call them over WebSocket. The runtime
+removes manual pub/sub and protocol wiring; it does not hide the platform,
+native-addon, authentication, or build prerequisites.
 
 **Upgrading from 0.4.x?** See the [migration guide](./MIGRATION.md) for every breaking change between 0.4.x and 0.5.x.
+
+The shared [translation contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/TRANSLATING.md)
+defines the English source locale, application-owned catalogs, stable
+machine-field boundary, placeholder rules, and bidirectional-text handling
+across all three ecosystem packages.
+
+The canonical [privacy integration contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/PRIVACY-INTEGRATION.md)
+maps browser, in-process, Redis/Postgres, durable-work, telemetry, and
+application-owned data across all three packages. Its generated
+[host worksheet](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/privacy/v1/ropa-dpa-transfer-checklist.md)
+must be completed for the deployment; `live.forget` is one erasure leg and
+does not clear browsers, observability backends, backups, or unregistered
+stores.
+
+During an incident, start from the ecosystem's versioned
+[operations pack v1](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/operations/v1/README.md).
+It routes process, Redis, durable-work and state-delivery failures to cold
+runbooks with explicit stop conditions and recovery checks. Its
+[correlated resource-control response](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/operations/v1/resource-controls.md)
+keeps realtime `degraded` mitigation active through Redis repair, bounded
+rehydration, queue drain, and protection relaxation instead of treating a
+transport `recovered` event as complete application recovery.
+
+Before launch or a scaling-policy change, use the ecosystem's versioned
+[capacity kit v1](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/capacity/v1/README.md).
+Its open-arrival proof records the deployment's realtime traffic mix, exact
+topology and package identities, peak p50/p95/p99 and errors, the first shared
+or per-instance resource to saturate, and recovery under continuing traffic.
+The in-process benchmark suite is not a production capacity claim.
 
 ---
 
 ## Quick start
 
 ```bash
-npx svelte-realtime my-app
+npx svelte-realtime@0.6.0-next.91 my-app --template example
 cd my-app
 npm run dev
 ```
 
-This creates a SvelteKit project with svelte-realtime fully wired: adapter, vite plugins, WebSocket hooks, and a working counter example you can open in your browser right away.
+The non-interactive route installs the audited
+`svelte-adapter-uws@0.6.0-next.91` / `svelte-realtime@0.6.0-next.91` /
+uWebSockets.js v20.69.0 tuple, checks Node, OS, architecture, libc, and the
+native addon, writes one current-`sv` Vite configuration, and completes a
+production build before it prints `Verified`. The example then opens with a
+working counter. The exact owned checkpoints and the one expected scaffold-auth
+warning are pinned in the generated [first-run transcript](./docs/first-run.md).
 
 ---
 
@@ -41,7 +81,8 @@ The three ecosystem packages move together. Bump them as a group:
 | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |
 |---|---|---|---|
 | `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |
-| `^0.5.0` | `^0.5.0` | `^0.5.0` | Current. Node 22+ required. See `MIGRATION.md` if upgrading from 0.4. |
+| `^0.5.8` | `^0.5.0` | `^0.5.0` | Stable. Node 22+ required. |
+| `0.6.0-next.91` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated development candidate. Publish the tuple together before using these exact registry commands. |
 
 Mixed-version installs are rejected at install time with a peer-dep warning.
 
@@ -54,10 +95,14 @@ Starting from a SvelteKit project. If you do not have one yet, run `npx sv creat
 ### Step 1: Install everything
 
 ```bash
-npm install svelte-adapter-uws svelte-realtime
-npm install uNetworking/uWebSockets.js#v20.60.0
+npm install svelte-adapter-uws@0.6.0-next.91 svelte-realtime@0.6.0-next.91
+npm install https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
 npm install -D ws
+npm exec -- svelte-adapter-uws-preflight
 ```
+
+Continue only after the last command prints `preflight OK`. A failure stops at
+the unmet prerequisite and prints the matching install or platform action.
 
 What each package does:
 - `svelte-adapter-uws` (>=0.4.0) - the SvelteKit adapter that runs your app on uWebSockets.js with built-in WebSocket support
@@ -65,39 +110,35 @@ What each package does:
 - `uWebSockets.js` - the native C++ HTTP/WebSocket server (installed from GitHub, not npm)
 - `ws` - dev dependency used by the adapter during `npm run dev` (not needed in production)
 
-### Step 2: Configure the adapter
+### Step 2: Configure the adapter and Vite plugins
 
-Open `svelte.config.js` and replace the default adapter:
+Current `sv` projects pass SvelteKit options directly in `vite.config.ts`.
+Keep the adapter and both realtime plugins in that one file:
 
-```js
-// svelte.config.js
+```ts
+// vite.config.ts
 import adapter from 'svelte-adapter-uws';
-
-export default {
-  kit: {
-    adapter: adapter({ websocket: true })
-  }
-};
-```
-
-### Step 3: Add the Vite plugins
-
-Open `vite.config.js` and add the adapter and realtime plugins:
-
-```js
-// vite.config.js
 import { sveltekit } from '@sveltejs/kit/vite';
 import uws from 'svelte-adapter-uws/vite';
 import realtime from 'svelte-realtime/vite';
+import { defineConfig } from 'vite';
 
-export default {
-  plugins: [sveltekit(), uws(), realtime()]
-};
+export default defineConfig({
+  plugins: [
+    sveltekit({
+      adapter: adapter({ websocket: true })
+    }),
+    uws(),
+    realtime()
+  ]
+});
 ```
 
-All three plugins are required. Order does not matter.
+Do not add a second `svelte.config.js` to a current `sv` project:
+the direct `sveltekit({ ... })` configuration takes precedence, so the
+sidecar adapter can look configured while producing no runnable server.
 
-### Step 4: Create the WebSocket hooks file
+### Step 3: Create the WebSocket hooks file
 
 Create `src/hooks.ws.js` in your project root. This file tells the adapter how to handle WebSocket connections and messages.
 
@@ -118,7 +159,7 @@ export function upgrade({ cookies }) {
 
 > **This file is required.** The Vite plugin will warn at startup if it finds live modules in `src/live/` but no `src/hooks.ws.js` (or `.ts`). Without it, WebSocket messages have nothing on the server side to route them, and all RPC calls will silently time out.
 
-### Step 5: Write a server function
+### Step 4: Write a server function
 
 Create the `src/live/` directory. Every `.js` file in this directory becomes a module of callable server functions.
 
@@ -197,14 +238,18 @@ The `ctx` object passed to every server function contains:
 |---|---|
 | `ctx.user` | Whatever `upgrade()` returned (your user data) |
 | `ctx.ws` | The raw WebSocket connection |
-| `ctx.platform` | The adapter platform API |
+| `ctx.platform` | The adapter platform API, scoped so `platform.requestId` matches this operation |
 | `ctx.publish` | Shorthand for `platform.publish()`. Rejects `__`-prefixed topics with `LiveError('INVALID_TOPIC')` (those are framework-internal channels; use `ctx.platform.publish()` directly if you genuinely need to broadcast on one) |
 | `ctx.cursor` | Cursor from a `loadMore()` call, or `null` |
-| `ctx.requestId` | Correlation id from `platform.requestId` (per WS connection or per HTTP request); honors `X-Request-ID` |
+| `ctx.connectionId` | Stable WebSocket connection id (`undefined` for direct HTTP/SSR work) |
+| `ctx.requestId` | Per-operation correlation id; a bounded RPC envelope id on WebSocket or the per-request adapter id for HTTP/SSR |
 | `ctx.throttle` | `(topic, event, data, ms)` - publish at most once per `ms` ms |
 | `ctx.debounce` | `(topic, event, data, ms)` - publish after `ms` ms of silence |
 | `ctx.signal` | `(userId, event, data)` - point-to-point message (an upload handler's `ctx.signal` is an `AbortSignal` instead - see [Streaming uploads](#streaming-uploads)) |
 | `ctx.batch` | `(messages)` - publish multiple messages in one call via `platform.batch()` |
+
+For stable runtime IDs, exact emitted prefixes, causes, and recovery guidance, see
+the generated [runtime error reference](./docs/errors.md).
 
 Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `remoteAddress`) in addition to whatever your `upgrade()` function returned. These are stripped automatically by the adapter before broadcasting to other clients.
 
@@ -448,7 +493,9 @@ In both cases, single-instance deployments and any topic a local subscriber has 
 `live.forget(userId, opts)` purges every trace of a user across the framework's in-memory state and any wired durable store, scoped to one tenant - the erasure side of GDPR Article 17. It is a SERVER action (not reachable from the wire), so your app owns the "may this user be erased" check at the call site, typically inside an admin RPC after your own authorization.
 
 ```js
-import { live } from 'svelte-realtime/server';
+import { live, PRESSURE_REASONS } from 'svelte-realtime/server';
+
+const ACTIVE_PRESSURE_REASONS = PRESSURE_REASONS.filter((reason) => reason !== 'NONE');
 
 // In an admin handler, after your own authz check:
 const res = await live.forget(targetUserId, {
@@ -1562,8 +1609,51 @@ Call `configure()` once at app startup. The hooks fire on state transitions only
 | `onDisconnect()` | Called when the WebSocket connection closes |
 | `beforeReconnect()` | Called before each reconnection attempt (can be async) |
 | `timeout` | Default RPC timeout in ms (default `30000`). Per-call `.with({ timeout })` overrides. |
+| `protocolVersion` | Baked non-negative integer advertised before queued work on every connection. Pair it with the server range policy below. |
 | `resumeGraceMs` | Stream resume-grace window in ms (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to disable. |
 | `resumeMaxCursorAgeMs` | Max outage in ms a reconnect trusts the retained replay cursor before rehydrating fully (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to always rehydrate on reconnect. |
+
+### Coordinated protocol rollout and rollback
+
+Put the baked client integer in one application-owned constant. The client
+advertises it before resubscribe and queued RPC work:
+
+```js
+// shared/protocol.js
+export const PROTOCOL_VERSION = 3;
+
+// client startup
+configure({ protocolVersion: PROTOCOL_VERSION });
+
+// hooks.ws.js
+export const { open, close, message, init, shutdown } = realtime({
+  protocolVersion: {
+    current: PROTOCOL_VERSION,
+    minimum: 2,
+    onMismatch: 'reject'
+  }
+});
+```
+
+The accepted range is inclusive. A missing/invalid advertisement, a client
+below `minimum`, or a client above `current` after server rollback receives
+the typed `PROTOCOL_MISMATCH` result before RPC, batch, binary, upload, or
+custom JSON application code runs. The client `health` store becomes sticky
+`'incompatible'`. Use `onMismatch: 'notify'` only as a measured expansion
+stage: it sends the same one-connection diagnostic but still allows work.
+
+For a breaking change, first ship policy support everywhere with the old
+version still inside the range. Then expand the server to understand old and
+new clients under `notify`, deploy the new client, verify the mismatch
+population is understood, and only then raise `minimum` with `reject`.
+Rollback restores the complete known-good package/application tuple. Its
+`current` ceiling rejects a newer cached client instead of letting that
+client run against the restored contract. A server predating the range policy
+cannot provide this rollback containment, so the policy-support release must
+be the rollback baseline before the first breaking cutover.
+
+The executable release/rollback matrix and abort criteria live in the adapter
+[coordinated release runbook](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/operations/v1/coordinated-release.md).
 
 ### Pause and resume without re-rehydrating
 
@@ -2101,11 +2191,11 @@ A few surfaces have no per-connection tenant, so the framework cannot scope them
 
 ### Wire-subscribe authorization (why a guessable prefix is still safe)
 
-A tenant-scoped wire topic is `@t/<tenantId>/<topic>`, and the tenant id is a plain slug - so the wire topic is guessable. That is safe because realtime authorizes subscriptions in the **stream RPC** (the guard, the tenant scoping, `enumerable` predicates - all run there, and only then is the socket subscribed), and it arms the adapter so a client's **raw** WebSocket subscribe frame is honored only for a topic the server already authorized for that connection. A client cannot subscribe directly to `@t/<otherTenant>/<topic>` (or a private room's data topic it never joined through a guarded RPC) and receive its fan-out - the raw frame is denied.
+A tenant-scoped wire topic is `@t/<tenantId>/<topic>`, and the tenant id is a plain slug - so the wire topic is guessable. That is safe because realtime authorizes subscriptions in the **stream RPC** (the guard, the tenant scoping, `enumerable` predicates - all run there, and only then is the socket subscribed), and it requires the adapter's **strict** wire policy. A client's raw WebSocket subscribe frame is honored only when the server already granted that exact topic **and** any application `subscribe` / `subscribeBatch` hook allows it. A permissive hybrid hook therefore cannot replace realtime's tenant or room grant. A client cannot subscribe directly to `@t/<otherTenant>/<topic>` (or a private room's data topic it never joined through a guarded RPC) and receive its fan-out - the raw frame is denied.
 
 This is on by default and needs no configuration. realtime's own client never sends a raw subscribe frame for a stream topic (it attaches server-resolved topics without one), so there is no behavior change and no extra wire traffic. The same gate protects **room guards** and any per-topic authorization, not just tenancy.
 
-It requires `svelte-adapter-uws` >= `0.6.0-next.57`; on an older adapter the gate is simply not armed (the framework degrades to the prior behavior). Opt out with `realtime({ authorizeWireSubscribe: false })` **only** if your app deliberately uses raw client-initiated adapter subscriptions (outside realtime's RPC) and authorizes them another way - e.g. its own `subscribe` hook in `hooks.ws.js`.
+Startup fails closed if the installed `svelte-adapter-uws` cannot confirm strict support; this prevents a package mismatch from silently restoring the bypass. Upgrade the adapter, or opt out with `realtime({ authorizeWireSubscribe: false })` **only** if your hybrid app deliberately uses raw client-initiated adapter subscriptions and accepts responsibility for authorizing every one of them itself.
 
 ---
 
@@ -2175,7 +2265,7 @@ import { live } from 'svelte-realtime/server';
 // Register classes once at startup
 live.admission({
   classes: {
-    background: ['PUBLISH_RATE', 'SUBSCRIBERS', 'MEMORY'],   // shed under any pressure
+    background: ACTIVE_PRESSURE_REASONS,                    // shed under any active pressure
     nonCritical: ['MEMORY'],                                  // shed only on memory pressure
     realtime: (snapshot) => snapshot.publishRate > 8000      // custom predicate
   }
@@ -2196,7 +2286,7 @@ export const expensiveSearch = live(async (ctx, query) => {
 });
 ```
 
-`platform.pressure.reason` is a precedence-ordered enum (`MEMORY > PUBLISH_RATE > SUBSCRIBERS > NONE`); class rules using a string-array match if the active reason is in the array. Predicate rules receive the full pressure snapshot. Existing subscribers are unaffected - shedding applies to NEW subscribes and RPC calls only.
+`platform.pressure.reason` is a precedence-ordered enum (`MEMORY > CAPACITY > CPU_QUOTA > PSI > PUBLISH_RATE > SUBSCRIBERS > NONE`); class rules using a string-array match if the active reason is in the array. `PRESSURE_REASONS` is the frozen, least-to-most-severe contract shared by runtime validation and the exported `live.PressureReason` type. Predicate rules receive the full pressure snapshot. Existing subscribers are unaffected - shedding applies to NEW subscribes and RPC calls only.
 
 `live.admission()` validates rules at registration; unknown reasons throw with a `[svelte-realtime]`-prefixed error so typos fail fast at boot. Pass `null` to clear.
 
@@ -2579,7 +2669,7 @@ const snap = introspect();
 
 It is **counts-only by default** - PII-conscious. Opt into the structural detail explicitly: `introspect({ handlers: true })` adds the registered handler `paths` (code structure), and `introspect({ topics: true })` adds the top 20 topics by subscriber count (topic names can embed ids, so they are off by default). The read is pure (no mutation) and cheap (in-memory registry sizes), so it is safe to call on a scrape interval.
 
-The `transport` key is the adapter's transport-layer health (connection count, backpressure posture, protection level, payload cap, invariant counters), composed in automatically when running on `svelte-adapter-uws >= 0.6.0-next.36`. It is itself PII-free (counts and enums only, no topic names), so it is always included with no opt-in. On an older adapter, or before `init({ platform })` has run, `transport` is `null`.
+The `transport` key is the adapter's transport-layer health (connection count, backpressure posture, protection level, payload cap, invariant counters), composed in automatically when running on `svelte-adapter-uws >= 0.6.0-next.36`. It is itself PII-free (counts and enums only, no topic names), so it is always included with no opt-in. Current adapters also include metadata-only `transport.diagnostics.recent` entries: opaque ids and counts, never stream identifiers or sequence evidence. On an older adapter, or before `init({ platform })` has run, `transport` is `null`.
 
 ### The admin route (`/__realtime`)
 
@@ -2603,16 +2693,37 @@ export const GET = ({ request }) => admin(request);
 
 The route is **fail-closed**: with no `admin` configured there is no handler at all, and when configured **every** request runs `requires(request)` before any data is gathered. Only a strict `=== true` admits - a non-true return, a thrown check, or a rejected promise all deny with `403`, and the snapshot is never served on a denial. Responses carry `cache-control: no-store`. The `requires` check is yours: a bearer token, a session cookie, an IP allowlist, whatever your deployment trusts.
 
+When the adapter reports a cross-worker state mismatch, its primary log contains
+only an opaque id. Resolve the bounded evidence at
+`GET <adminPath>/diagnostics/<diagnosticId>`. The auth gate runs before lookup;
+unknown or expired ids return `404`, non-GET methods return `405`, and the
+response is never cached. A record contains per-worker sequence maxima under
+process-lifetime HMAC stream ids. It never contains raw topic names, but it is
+still sensitive operational evidence and belongs only on this admin plane.
+
 ---
 
 ## Production assertions
 
 `svelte-realtime` instruments each internal invariant with `assert(cond, category, context)`. Behavior:
 
-- **In production**, a violation increments an in-memory per-category counter, fires the Prometheus counter `svelte_realtime_assertion_violations_total{category}` (when `live.metrics(...)` is wired), and logs a single `[realtime/assert] {...}` line at `console.error`. The assert does NOT throw - a thrown exception inside a publish hot-path microtask or a subscribe callback could leave a half-applied bookkeeping update or a corrupted index. Counter + log give observability without the corruption risk.
+- **In production**, a violation increments an in-memory per-category counter, fires the Prometheus counter `svelte_realtime_assertion_violations_total{category}` (when `live.metrics(...)` is wired), and logs one `[oss-realtime/diagnostic source=svelte-realtime component=runtime.assertion event=invariant.violated severity=warn]` line at `console.error`. The assert does NOT throw - a thrown exception inside a publish hot-path microtask or a subscribe callback could leave a half-applied bookkeeping update or a corrupted index. Counter + log give observability without the corruption risk.
 - **In test mode** (`process.env.VITEST` or `NODE_ENV === 'test'`) the assert THROWS so vitest surfaces the failure as a normal test error.
 
-There is also a **hard tier**, `fatal(cond, category, context)`, for genuinely unrecoverable server state where continuing risks silent misdelivery. It records the same per-category counter and Prometheus series as `assert` (the severity rides the log as `[realtime/fatal] {..., "severity":"fatal"}`), but in production it schedules a deferred worker termination with exit code 78 once the current callback frame unwinds, so the supervisor restarts the worker from clean state rather than letting it mis-route publishes; in test mode it throws. On the client it degrades to the log + counter only (there is no worker to terminate).
+There is also a **hard tier**, `fatal(cond, category, context)`, for genuinely unrecoverable server state where continuing risks silent misdelivery. It records the same per-category counter and Prometheus series as `assert` (the canonical diagnostic carries `severity=fatal`), but in production it schedules a deferred worker termination with exit code 78 once the current callback frame unwinds, so the supervisor restarts the worker from clean state rather than letting it mis-route publishes; in test mode it throws. On the client it degrades to the log + counter only (there is no worker to terminate).
+
+Collectors should normalize these lines with `parseDiagnostic()` from
+`svelte-adapter-uws/observability`. During the 0.6 compatibility window it
+also recognizes the former `[svelte-realtime]`, `[realtime/assert]`, and
+`[realtime/fatal]` families, allowing mixed-version processes to share one
+collector while current emitters use only the canonical grammar.
+
+Diagnostic `message` text is fixed package-owned English. RPC paths,
+correlation IDs, and error details remain in structured `attributes` under
+stable `event` identities. The physical console line uses visible ASCII
+escapes for controls, bidirectional formatting characters, and non-ASCII text;
+parsing restores the exact attribute values. HTML dashboards must escape each
+decoded value and wrap it in `<bdi dir="auto">` before display.
 
 Categories are stable strings prefixed `realtime/<module>.<invariant>` (so the Prometheus label cardinality is bounded and won't collide with the adapter's `extensions_assertion_violations_total`). Today's categories:
 
@@ -2675,11 +2786,12 @@ If `fallback` is omitted and the circuit is open, the call throws `LiveError('SE
 
 ## Request correlation
 
-Every live function receives `ctx.requestId` - a stable identifier for the originating RPC envelope. The id flows in three directions automatically:
+Every live function receives `ctx.requestId` - a stable identifier for the originating operation. WebSocket handlers also receive `ctx.connectionId`, which stays fixed for the life of the socket while concurrent RPCs each get their own request id. The id flows in three directions automatically:
 
-- **From clients**: WebSocket clients tag every RPC envelope with a generated id; HTTP request handlers honor `X-Request-ID` headers (and generate one if absent). The adapter writes the resolved id to `platform.requestId`, and the realtime layer copies it to `ctx.requestId` for the duration of that handler.
+- **From clients**: WebSocket clients tag every RPC envelope with a generated id. The realtime layer validates it as 1-128 printable ASCII characters, uses a fresh safe id if it is unusable, and exposes it on both `ctx.requestId` and the operation-scoped `ctx.platform.requestId`. HTTP request handlers honor `X-Request-ID` headers (and generate one if absent).
 - **Through your handlers**: pass it to whatever you do downstream so log lines, traces, and persisted rows all share one key.
 - **Into background work**: the `svelte-adapter-uws-extensions` postgres tasks/jobs APIs persist `request_id` on every row. Pass it explicitly or pipe `ctx.platform` and the helpers extract it for you.
+- **Back to clients on failure**: RPC error payloads echo the operation id as `requestId`, including errors inside batch responses.
 
 ```js
 import { live } from 'svelte-realtime/server';
@@ -2718,9 +2830,47 @@ WHERE t.request_id = $1
 ORDER BY task_created;
 ```
 
-The id passes opaquely - no validation, no length cap from the realtime layer. If you generate ids with a structured prefix (`o-` for orders, `a-` for audits), every downstream record carries that prefix too.
+Valid envelope ids pass opaquely after the printable-ASCII and 128-character bound. If you generate ids with a structured prefix (`o-` for orders, `a-` for audits), every downstream record carries that prefix too.
 
 If you also instrument with [Prometheus metrics](#prometheus-metrics), include `requestId` in your log fields rather than as a metric label - it's high-cardinality and would blow up your label space.
+
+### Distributed tracing
+
+When the adapter has an optional
+[tracing provider](https://github.com/lanteanio/svelte-adapter-uws#distributed-tracing-with-platformtrace),
+every live handler also receives `ctx.traceContext` and `ctx.trace`.
+Realtime creates one `realtime.rpc` child span per RPC, including concurrent
+calls on the same WebSocket, and the operation-scoped `ctx.platform` exposes
+that same context:
+
+```js
+export const submitOrder = live(async (ctx, input) => {
+  return ctx.trace.run(
+    "orders.persist",
+    {
+      kind: "internal",
+      parent: ctx.traceContext,
+      attributes: { "order.operation": "create" },
+    },
+    () => db.orders.create(input),
+  );
+});
+```
+
+The trace carrier is W3C `traceparent` plus optional `tracestate`. The
+adapter validates ingress before realtime sees it. Redis/Postgres bus wrappers
+carry it in internal transport fields, Postgres jobs/tasks persist it beside
+the request id for retries and workers, and explicit enqueue/run context takes
+precedence over the current Platform context. Application event payloads do not
+receive trace fields.
+
+Inbound webhook handlers extract the carrier before verification, transform,
+and publish. Outbound deliveries inject the active child context as HTTP
+headers; a failed delivery retains that context in its dead-letter record so a
+later replay can continue the chain. With no configured adapter provider,
+`ctx.traceContext` is `null`, `ctx.trace.enabled` is `false`, and realtime
+takes the existing no-span path. Older custom Platforms without the trace
+surface project both trace fields as `null`.
 
 ---
 
@@ -2731,6 +2881,8 @@ If you also instrument with [Prometheus metrics](#prometheus-metrics), include `
 ```js
 export default live.stream('doc:current', loadDoc, {
   alarm: {
+	// Stable across an RPC/export rename; stage before the first rename.
+	id: 'document-archive',
     // Runs at the scheduled time with a fresh server ctx - even if every client
     // has disconnected. ctx.publish(event, data) targets this room.
     onAlarm: async (ctx) => {
@@ -2763,13 +2915,24 @@ configureAlarm({
 });
 ```
 
-The store is any object implementing the seam contract (`set(topic, at, meta)` / `delete(topic)` returning whether it removed the row / an optional `due(nowMs)` for cross-restart recovery), so you can back it with whatever durable store you already run; `createAlarmStore` from `svelte-adapter-uws-extensions` ships Redis and Postgres implementations. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses). One caveat: the recovery poll re-finds a handler by the stream's RPC path, so renaming an alarm-bearing stream's path across a deploy abandons that stream's in-flight durable alarms (they are dropped, not fired) - keep the path stable, or drain alarms before renaming.
+The store is any object implementing the seam contract (`set(topic, at, meta)` / `delete(topic)` returning whether it removed the row / an optional `due(nowMs)` for cross-restart recovery), so you can back it with whatever durable store you already run; `createAlarmStore` from `svelte-adapter-uws-extensions` ships Redis and Postgres implementations. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses).
+
+Give every durable alarm a stable `alarm.id` before renaming its stream RPC
+path. The id is persisted beside the legacy path, and recovery resolves the id
+first, so an in-flight row survives a forward rename and rollback. Stage the id
+on every worker and keep the pre-rename release deployable until every alarm row
+written without the id has fired, been cancelled, or been explicitly drained.
+There is no framework maximum: a durable store may retain a future alarm
+indefinitely, and a pre-id worker can only understand the old path. An
+unresolved or duplicate id is retained, not claimed and dropped, and emits
+`alarm.recovery.unresolved` for operator disposition.
 
 A durable alarm can fire late - a restart-recovered alarm arbitrarily so. Inside `onAlarm`, `ctx.alarm` says exactly how the fire happened: `{ at, firedAt, lateMs, recovered }` - the scheduled deadline, when the handler actually ran, the difference, and whether the recovery poll (rather than the precise in-memory timer) fired it. For handlers where a late fire would be wrong rather than merely delayed (an auction close, a game round end), declare a misfire threshold and stale fires are skipped declaratively - the alarm is consumed, never run:
 
 ```js
 export default live.stream('auction:current', loadAuction, {
   alarm: {
+	id: 'auction-close',
     onAlarm: async (ctx) => {
       // ctx.alarm.lateMs is available here for finer-grained decisions
       await closeAuction(ctx);
@@ -4759,9 +4922,34 @@ The adapter rejects topic names longer than 256 characters or containing control
 
 ## Error reporting
 
+### Operational event sink
+
+Unexpected RPC, binary RPC, upload, cron, alarm, derived, effect, polling,
+webhook-delivery, and webhook dead-letter failures always emit one structured
+production event. Canonical one-line JSON console diagnostics are the default;
+install a process-wide sink to route records to your logger or collector:
+
+```js
+import { setOperationalEventSink } from 'svelte-realtime/server';
+
+const restore = setOperationalEventSink((record) => {
+  logger[record.severity]({ operationalEvent: record });
+});
+```
+
+The sink is shared with `svelte-adapter-uws` and its extensions in the same
+process. A sink that throws or rejects fails over to console, so it cannot hide
+the root cause. Existing `onError` callbacks remain observer hooks and run
+alongside this framework-owned event.
+The returned disposer unregisters only its own installation: nested
+registrations resume the newest sink that is still active, and disposing an
+older registration out of order can never resurrect it later. A direct
+`.load()` failure that returns its configured fallback emits
+`direct-call.fallback.used` even when no `onError` observer is configured.
+
 ### onError hook
 
-Both `handleRpc` and `createMessage` accept an `onError` callback for non-LiveError exceptions. `LiveError` throws are expected errors sent to the client; everything else is an unexpected failure that should be reported.
+Both `handleRpc` and `createMessage` accept an `onError` callback for non-LiveError exceptions. `LiveError` throws are expected errors sent to the client; everything else is an unexpected failure. The callback is an application observer; the operational sink emits independently.
 
 ```js
 export const message = createMessage({
@@ -4898,27 +5086,46 @@ The Streams tab lists every store currently mounted on the page. For each one it
 
 | Field | Meaning |
 |---|---|
-| topic | The wire topic the store is subscribed to (or `?` while loading). |
+| topic | Omitted with character-count metadata by default; the raw wire topic appears only during explicit unsafe payload capture. |
 | merge | The store's merge strategy (`crud`, `latest`, `set`, `presence`, `cursor`). |
 | subs | Active subscriber count; the entry disappears when this hits zero. |
 | last | Event name of the most recent pub/sub frame and its relative age (`12s ago`). |
-| err | Error code + message if the stream is in the error state; cleared on recovery. |
+| err | Stable error code plus an omitted-message marker by default; cleared on recovery. |
 
-**Click any stream row to expand a per-stream payload preview** - the most recent 20 envelopes, time + event name + JSON data. Toggle Pretty / Raw via the header buttons (Raw shows full JSON up to ~500 chars; Pretty truncates at ~200 with overflow indicator). Pause stops capturing new events without affecting the live `last:` timestamp; Clear events drops every stream's ring buffer in one click. Pretty/Raw + Pause states persist across reloads via `localStorage`.
+**Click any stream row to expand its most recent 20 envelopes.** The safe
+default shows time, event name, and metadata such as value type, field count,
+or array/string length; it does not retain the payload value. Pause stops
+capturing new events without affecting the live `last:` timestamp, and
+Clear events drops every stream ring. Pretty/Raw affects payload rendering only
+when unsafe capture is enabled. Pretty/Raw + Pause persist via `localStorage`.
 
-**Privacy.** Captured payloads are walked once at write time with key-based redaction - **every** captured surface, not just the Streams tab: RPC args and results (pending map and history ring), fire-and-forget / volatile send args, and stream-event payloads all pass through the same redactor before they are stored on `window.__svelte_realtime_devtools`. That matters because RPC args are the canonical credential carrier (`login({ password })`, `refresh({ token })`), and everything captured stays reachable from the page's JS context for the rest of the session. The default redact list covers `password`, `token`, `apiKey` / `api_key`, `secret`, `authorization`, `cookie`, `sessionid` / `session_id`, `csrf` / `csrftoken`. Override or extend at runtime:
+**Privacy.** DevTools is metadata-only by default across every retained
+surface: RPC args/results, pending calls, fire-and-forget args, stream topics,
+stream payloads, and stream error messages. Object property values are not
+read; own property names may be enumerated only to count fields, but the names
+are never retained. Bare strings become type/length metadata. Unreadable or
+revoked proxies degrade to metadata instead of affecting the observed call.
+This closes the credential gap that a key denylist cannot close.
+
+Payload inspection is an explicitly unsafe, development-only opt-in:
 
 ```js
 import { __devtools } from 'svelte-realtime/client';
 if (__devtools) {
+  __devtools.unsafeCapturePayloads = true;
   __devtools.redactKeys.add('paymentMethod');
   __devtools.redactKeys.add('ssn');
 }
 ```
 
-Match is case-insensitive and exact-key (no substring fuzz) - `token` is redacted, `sessionToken` is not, so add the exact keys your payloads use. Redacted values render as `'[REDACTED]'`.
-
-> **Error messages are not redacted.** Redaction blanks a value sitting under a matching *key*; an error message is a bare string with no keys, so it is captured verbatim. If your server echoes user input into error text (`invalid password 'hunter2'`), that text lands in the devtools capture. Keep secrets out of error messages - good practice regardless, since the same text usually reaches your logs. Recursion is capped at depth 5 (deeper structures show `'[depth-cap]'`) and arrays at 50 items so a malformed-large payload doesn't pin a graph in memory.
+The opt-in still applies case-insensitive exact-key redaction, but that is
+defense in depth rather than a secrecy guarantee: `token` matches while
+`sessionToken` does not, and bare strings such as echoed error text have no
+key to redact. Keep it off on shared machines, recorded demos, or pages that
+load untrusted scripts. Setting `unsafeCapturePayloads` back to `false`
+immediately purges payload-bearing history, pending, volatile, topic, error,
+and stream-preview state. Unsafe recursion remains capped at depth 5 and arrays
+at 50 items.
 
 The RPC tab shows pending calls (with elapsed time) and a 50-entry ring buffer of recent results (ok/err, duration). The Connection tab summarizes the same counters.
 
@@ -5033,7 +5240,7 @@ Currently models the `drop-outbound` scenario only - `platform.publish` events t
 
 ### Direct ctx unit tests
 
-`createTestContext({ user })` builds a `ctx`-shaped object suitable for direct unit tests of guards and predicates - helper methods are no-ops, the user / cursor / requestId can be overridden. Use this when the function under test takes `ctx` and synchronously returns a value; reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
+`createTestContext({ user })` builds a `ctx`-shaped object suitable for direct unit tests of guards and predicates - helper methods are no-ops, and the user / cursor / connectionId / requestId / traceContext can be overridden. A supplied Platform's `trace` surface is mirrored onto the context. Use this when the function under test takes `ctx` and synchronously returns a value; reach for `createTestEnv()` only when you need full publish/subscribe round-trips.
 
 ```js
 import { createTestContext } from 'svelte-realtime/testing';
@@ -5045,7 +5252,7 @@ expect(adminOnly(createTestContext({ user: { role: 'viewer' } }))).toBe(false);
 expect(adminOnly(createTestContext())).toBe(false);
 ```
 
-The returned shape mirrors the production `_buildCtx`: `user`, `ws`, `platform`, `publish`, `cursor`, `throttle`, `debounce`, `signal`, `batch`, `shed`, `requestId`. Helpers default to no-op stubs (`publish` returns `true`, `shed` returns `false`, etc.), which is correct for predicates that only read `ctx.user` or `ctx.cursor`. `ctx.batch` mirrors the production semantics in both forms - the list form publishes through `ctx.publish` (observable when your test overrides it), and the collector form buffers/flushes/drops exactly like the server, so handler code that relies on the all-or-nothing guarantee tests truthfully.
+The returned shape mirrors the production `_buildCtx`: `user`, `ws`, `platform`, `publish`, `cursor`, `throttle`, `debounce`, `signal`, `batch`, `shed`, `connectionId`, `requestId`, `traceContext`, and `trace`. Helpers default to no-op stubs (`publish` returns `true`, `shed` returns `false`, etc.), which is correct for predicates that only read `ctx.user` or `ctx.cursor`. `ctx.batch` mirrors the production semantics in both forms - the list form publishes through `ctx.publish` (observable when your test overrides it), and the collector form buffers/flushes/drops exactly like the server, so handler code that relies on the all-or-nothing guarantee tests truthfully.
 
 ### Recorded-response fixtures
 

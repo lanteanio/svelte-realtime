@@ -169,7 +169,32 @@ If you relied on `onJoin` running before `initFn`, restructure: side effects tha
 
 ## Notable defaults and behaviors
 
+### Admission recognizes host and protection pressure
+
+Admission rules now accept all seven reasons emitted by the adapter, including
+`PSI`, `CPU_QUOTA`, and `CAPACITY`. Audit any hand-maintained array intended to
+mean "all pressure": an old four-value rule admits work while one of those
+urgent reasons is active. Import `PRESSURE_REASONS` from
+`svelte-realtime/server` and use
+`PRESSURE_REASONS.filter((reason) => reason !== 'NONE')` for an all-active rule.
+The frozen tuple also owns the exported pressure-reason type, so runtime and
+declarations cannot drift independently.
+
 These change observable runtime behavior. Most apps are unaffected; a few will notice.
+
+### DevTools payload capture is metadata-only by default
+
+**What changed.** The development instrumentation no longer retains RPC or
+volatile arguments, RPC results, stream payload values, raw stream topics, or
+error messages by default. It records type/count/length metadata and timing so
+the overlay remains useful without leaving credentials and personal data
+reachable from the page-global DevTools object.
+
+**How to migrate.** No change is needed for the safe default. If a local-only
+debug session deliberately needs values, set
+`__devtools.unsafeCapturePayloads = true` and extend `redactKeys` for
+your schema. This is an unsafe opt-in: unexpected keys and bare strings can
+still contain secrets. Setting the flag back to false purges retained values.
 
 ### Stream store errors no longer replace the data value (`.error` is a separate Readable)
 

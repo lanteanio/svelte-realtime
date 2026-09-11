@@ -7,6 +7,8 @@ import { state } from './state.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _recordRpcMetrics } from './metrics.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
+import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../error-registry.js';
+import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
 const textDecoder = new TextDecoder();
 
@@ -114,7 +116,10 @@ function _streamIdHex(streamId) {
 
 function _respondUpload(ws, platform, streamId, payload) {
 	_captureUploadMaxFrameSize(platform);
-	let envelope = payload;
+	const requestId = _streamIdHex(streamId);
+	let envelope = payload && payload.ok === false && payload.requestId === undefined
+		? { ...payload, requestId }
+		: payload;
 	let willInform = false;
 	if (_uploadMaxFrameSize > 0 && !_informedAboutUploadCap.has(ws)) {
 		envelope = { ...payload, __cap: _uploadMaxFrameSize };
@@ -126,6 +131,25 @@ function _respondUpload(ws, platform, streamId, payload) {
 	} catch {
 		// Closed connection - same swallow as _respond
 	}
+}
+
+/**
+ * Answer a structurally identifiable upload/control frame with the same typed
+ * protocol rejection used by text and binary RPC. The dispatcher calls this
+ * before upload parsing or allocation, so an incompatible client cannot enter
+ * application code or consume a stream slot, while the upload handle still
+ * settles immediately instead of hanging until its timeout. Frames too short
+ * to carry a stream id remain malformed and are dropped.
+ *
+ * @param {any} ws
+ * @param {ArrayBuffer} data
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @param {{ ok: false, code: string, error: string, protocol: unknown }} rejection
+ */
+export function _rejectUploadForProtocol(ws, data, platform, rejection) {
+	if (!(data instanceof ArrayBuffer) || data.byteLength < 6) return;
+	const streamId = new DataView(data).getUint32(2, false);
+	_respondUpload(ws, platform, streamId, rejection);
 }
 
 /**
@@ -440,7 +464,10 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 	if (upload.phase === 'pending') {
 		// Bound memory while the handler is being resolved.
 		if (upload.bytesReceived > _UPLOAD_PENDING_MAX_SIZE) {
-			upload.fail('PAYLOAD_TOO_LARGE', 'upload exceeds limit during start');
+			upload.fail(
+				realtimeErrorCode(REALTIME_ERROR_IDS.UPLOAD_START_LIMIT),
+				realtimeErrorMessage(REALTIME_ERROR_IDS.UPLOAD_START_LIMIT)
+			);
 			return;
 		}
 		if (upload.pendingChunks.length >= _UPLOAD_PENDING_MAX_CHUNKS) {
@@ -461,7 +488,10 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 
 	// Running phase
 	if (upload.bytesReceived > upload.options.maxSize) {
-		upload.fail('PAYLOAD_TOO_LARGE', 'upload exceeds maxSize');
+		upload.fail(
+			realtimeErrorCode(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
+			realtimeErrorMessage(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE)
+		);
 		return;
 	}
 	if (payloadLen > 0) {
@@ -615,7 +645,10 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		}
 		if (upload.bytesReceived > uploadOptions.maxSize) {
 			_recordRpcMetrics(path, 'PAYLOAD_TOO_LARGE', _metricsStart);
-			upload.fail('PAYLOAD_TOO_LARGE', 'upload exceeds maxSize');
+			upload.fail(
+				realtimeErrorCode(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
+				realtimeErrorMessage(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE)
+			);
 			return;
 		}
 
@@ -642,7 +675,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		}
 
 		const _h = _getCtxHelpers(platform);
-		ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null);
+		ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null, null, _streamIdHex(streamId));
 		ctx.stream = upload.streamWrap.stream;
 		ctx.signal = upload.ctrl.signal;
 		ctx.upload = { id: _streamIdHex(streamId) };
@@ -685,7 +718,15 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				if (options?.onError) {
 					try { options.onError(path, err, ctx); } catch {}
 				}
-				if (_IS_DEV) console.error(`[svelte-realtime] Error in upload '${path}':`, err, '\n  See: https://svti.me/uploads');
+				emitOperationalEvent({
+					source: 'svelte-realtime',
+					component: 'server.upload',
+					event: 'upload.execution.failed',
+					severity: 'error',
+					dataClass: 'application',
+					message: 'An upload handler failed; the client received an internal error.',
+					attributes: { path, error: diagnosticErrorMessage(err), help: 'https://svti.me/uploads' }
+				});
 				_respondUpload(ws, platform, streamId, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
 			}
 		} else {

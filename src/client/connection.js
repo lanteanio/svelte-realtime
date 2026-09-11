@@ -23,12 +23,12 @@ const _deprecationWarned = new Set();
 function _warnDeprecation(dep) {
 	if (!_IS_DEV || !dep || !dep.path || _deprecationWarned.has(dep.path)) return;
 	_deprecationWarned.add(dep.path);
-	let msg = `[svelte-realtime] '${dep.path}' is deprecated`;
+	let msg = `'${dep.path}' is deprecated`;
 	if (dep.since) msg += ` (since ${dep.since})`;
 	if (dep.message) msg += `: ${dep.message}`;
 	if (dep.use) msg += `\n  Use '${dep.use}' instead.`;
 	if (dep.removeBy) msg += `\n  Scheduled for removal in ${dep.removeBy}.`;
-	console.warn(msg);
+	console.warn('[svelte-realtime] ' + msg);
 }
 
 /** @type {boolean} */

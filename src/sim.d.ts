@@ -14,6 +14,12 @@ export interface LiveSimApi {
 	rng(): number;
 	connect(userData?: any): LiveSimClient;
 	publish(topic: string, event: string, data?: any): boolean;
+	/** Register the authoritative state that every subscriber must expose at the end. */
+	authoritative(topic: string, state: any, options?: { key?: string }): void;
+	/** Disable deterministic publish loss before exercising recovery. */
+	clearFaults(): void;
+	/** Publish a full-state `refreshed` recovery boundary. */
+	recover(topic: string, state: any): boolean;
 	/** Drain the microtask queue so async stream-init replies + publishes settle. */
 	flush(): Promise<void>;
 	/** Assert an RPC result; a mismatch is recorded as a `live.rpc-mismatch` violation. */
@@ -27,24 +33,50 @@ export interface LiveSimConfig {
 	events?: number;
 	/** Simulated network loss on the publish path (all-or-nothing per publish). */
 	chaos?: { dropRate: number } | null;
+	/** Clear publish loss and send an authoritative snapshot in the default scenario. @default true */
+	recoverAfterFault?: boolean;
 	/** Override the default live module (echo RPC + `feed` stream). */
 	module?: () => Record<string, any>;
 	/** Override the default connect/echo/subscribe/publish scenario. */
-	scenario?: (api: LiveSimApi, opts: { clients: number; events: number }) => void | Promise<void>;
+	scenario?: (api: LiveSimApi, opts: {
+		clients: number;
+		events: number;
+		chaos: { dropRate: number } | null;
+		recoverAfterFault: boolean;
+	}) => void | Promise<void>;
 	gitCommit?: string;
 }
 
 export interface LiveSimResult {
 	seed: string;
 	gitCommit: string | null;
-	config: { clients: number; events: number; chaos: { dropRate: number } | null };
+	config: {
+		clients: number;
+		events: number;
+		chaos: { dropRate: number } | null;
+		recoverAfterFault: boolean;
+	};
 	invariantViolations: Array<{ category: string; context: any }>;
-	metrics: { clients: number; events: number; rpcChecks: number; chaosDropped: number };
+	metrics: {
+		clients: number;
+		events: number;
+		rpcChecks: number;
+		chaosDropped: number;
+		recoveryPublishes: number;
+		authoritativeChecks: number;
+		completeSubscribers: number;
+	};
 	/** Per-subscriber received event sequences (for inspection + the replay gate). */
 	clientFrames: any[][];
 	finalState: {
 		topics: string[];
-		perTopic: Array<{ topic: string; subscribers: number; events: number }>;
+		perTopic: Array<{
+			topic: string;
+			subscribers: number;
+			events: number;
+			authoritativeItems: number | null;
+			completeSubscribers: number | null;
+		}>;
 		rpcChecks: number;
 	};
 	/** True only on a replayLiveSim result whose violations + state + frames + metrics matched. */

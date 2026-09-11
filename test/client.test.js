@@ -206,6 +206,7 @@ beforeEach(async () => {
 	_resetPushHandlers();
 	__devtools = mod.__devtools;
 	if (__devtools) {
+		__devtools.unsafeCapturePayloads = false;
 		__devtools.streams.clear();
 		__devtools.pending.clear();
 		for (let i = 0; i < __devtools.history.length; i++) __devtools.history[i] = null;
@@ -1717,7 +1718,7 @@ describe('__devtools stream tracking', () => {
 		simulateRpcResponse(sent.id, { ok: false, code: 'FORBIDDEN', error: 'no access' });
 
 		const errored = __devtools.streams.get('dt/err');
-		expect(errored.error).toEqual({ code: 'FORBIDDEN', message: 'no access' });
+		expect(errored.error).toEqual({ code: 'FORBIDDEN', message: '[message omitted]' });
 		unsub();
 	});
 
@@ -1759,8 +1760,14 @@ describe('__devtools stream tracking', () => {
 
 		const entry = __devtools.streams.get('dt/payload');
 		expect(entry.recentEvents).toHaveLength(2);
-		expect(entry.recentEvents[0]).toMatchObject({ event: 'created', data: { id: 'a', name: 'A' } });
-		expect(entry.recentEvents[1]).toMatchObject({ event: 'updated', data: { id: 'a', name: 'A2' } });
+		expect(entry.recentEvents[0]).toMatchObject({
+			event: 'created',
+			data: { dataClass: 'confidential', captured: false, type: 'object', fields: 2 }
+		});
+		expect(entry.recentEvents[1]).toMatchObject({
+			event: 'updated',
+			data: { dataClass: 'confidential', captured: false, type: 'object', fields: 2 }
+		});
 		expect(typeof entry.recentEvents[0].ts).toBe('number');
 		unsub();
 	});
@@ -1776,19 +1783,21 @@ describe('__devtools stream tracking', () => {
 		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'dt-cap', merge: 'crud', key: 'id' });
 
 		for (let i = 0; i < 25; i++) {
-			simulateTopicMessage('dt-cap', { event: 'created', data: { id: i } });
+			simulateTopicMessage('dt-cap', { event: 'created-' + i, data: { id: i } });
 		}
 
 		const entry = __devtools.streams.get('dt/cap');
 		expect(entry.recentEvents).toHaveLength(20);
-		// Oldest five (ids 0-4) dropped; newest is id 24
-		expect(entry.recentEvents[0].data).toEqual({ id: 5 });
-		expect(entry.recentEvents[19].data).toEqual({ id: 24 });
+		// Oldest five dropped; structural event names prove which entries remain
+		// without retaining the payload values just to test FIFO behavior.
+		expect(entry.recentEvents[0].event).toBe('created-5');
+		expect(entry.recentEvents[19].event).toBe('created-24');
 		unsub();
 	});
 
 	it('redacts default sensitive keys (case-insensitive) in captured payloads', async () => {
 		if (!__devtools) return;
+		__devtools.unsafeCapturePayloads = true;
 		__devtools.paused = false;
 		const store = __stream('dt/redact', { merge: 'crud', key: 'id' });
 		const unsub = store.subscribe(() => {});
@@ -1817,6 +1826,7 @@ describe('__devtools stream tracking', () => {
 		expect(captured.profile.token).toBe('[REDACTED]');
 		expect(captured.profile.age).toBe(30);
 		unsub();
+		__devtools.unsafeCapturePayloads = false;
 	});
 
 	it('respects __devtools.paused (no capture while paused)', async () => {
@@ -1840,7 +1850,12 @@ describe('__devtools stream tracking', () => {
 		__devtools.paused = false;
 		simulateTopicMessage('dt-pause', { event: 'updated', data: { id: 1, v: 2 } });
 		expect(entry.recentEvents).toHaveLength(1);
-		expect(entry.recentEvents[0].data).toEqual({ id: 1, v: 2 });
+		expect(entry.recentEvents[0].data).toEqual({
+			dataClass: 'confidential',
+			captured: false,
+			type: 'object',
+			fields: 2
+		});
 		unsub();
 	});
 });
@@ -2035,7 +2050,9 @@ describe('__rpc().fireAndForget()', () => {
 		const entries = __devtools.volatile.filter((e) => e !== null);
 		expect(entries).toHaveLength(1);
 		expect(entries[0].path).toBe('vol/track');
-		expect(entries[0].args).toEqual(['arg']);
+		expect(entries[0].args).toEqual([
+			{ dataClass: 'confidential', captured: false, type: 'string', length: 3 }
+		]);
 	});
 
 	it('drops silently when bufferedAmount exceeds threshold and ticks the dropped counter', () => {
@@ -3070,7 +3087,11 @@ describe('batch() devtools instrumentation', () => {
 		expect(done.map((r) => r.path)).toEqual(expect.arrayContaining(['batch/dt-add', 'batch/dt-mul']));
 		const rec = done.find((r) => r.path === 'batch/dt-add');
 		expect(rec.ok).toBe(true);
-		expect(rec.result).toBe(5);
+		expect(rec.result).toEqual({
+			dataClass: 'confidential',
+			captured: false,
+			type: 'number'
+		});
 	});
 });
 
@@ -7558,8 +7579,15 @@ describe('assert() helper (client)', () => {
 		expect(() => assert(false, 'realtime/test.cat-y', { v: 2 })).toThrow(/realtime\/test\.cat-y/);
 		expect(getAssertionCounters().get('realtime/test.cat-y')).toBe(1);
 		const logged = errSpy.mock.calls[0][0];
-		expect(logged).toContain('[realtime/assert]');
-		expect(logged).toContain('"v":2');
+		expect(logged).toMatch(/^\[oss-realtime\/diagnostic source=svelte-realtime component=runtime\.assertion event=invariant\.violated severity=warn\]/);
+		const record = JSON.parse(logged.slice(logged.indexOf('{')));
+		expect(record).toMatchObject({
+			source: 'svelte-realtime',
+			component: 'runtime.assertion',
+			event: 'invariant.violated',
+			severity: 'warn',
+			attributes: { category: 'realtime/test.cat-y', context: { v: 2 } }
+		});
 	});
 
 	it('counter accumulates across violations per category', () => {

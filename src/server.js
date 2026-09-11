@@ -65,6 +65,7 @@ import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensat
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
 import { _recordRpcMetrics, installMetrics } from './server/metrics.js';
 import { _shouldShed, _resetAdmission, installAdmission } from './server/admission.js';
+export { PRESSURE_REASONS } from './server/admission.js';
 import { _getIdentityKey, _getAuthenticatedId, _isIdentityValue, _resetUnusableIdWarning } from './server/identity.js';
 import { _resetIdempotencyStore, _resetLock, installIdempotency } from './server/idempotency.js';
 import { installPush, pushHooks, _resetPushRegistry, _pushRegistry, _wsToPushUserId, _deregisterPushSession } from './server/push.js';
@@ -78,8 +79,10 @@ import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierF
 import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy, _setAfterLazyResolve } from './server/lazy.js';
 import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError, _ensureCronInterval, _getCronLeader, _cronTimerActive, _stopCronScheduler } from './server/cron-engine.js';
 export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError };
+export { setOperationalEventSink, emitOperationalEvent } from './shared/diagnostic.js';
 import { configureAlarm, _resetAlarms } from './server/alarm.js';
 export { configureAlarm, _resetAlarms };
+import { normalizeProtocolPolicy } from './server/protocol-policy.js';
 import { configureForget, _resetForget, installForget } from './server/forget.js';
 export { configureForget, _resetForget };
 import { onShutdown, _runShutdown, _installLifecycle, _resetLifecycle, _isShuttingDown } from './server/lifecycle.js';
@@ -1217,6 +1220,9 @@ live.stream = function stream(topic, initFn, options) {
 		}
 		if (_a.misfireMs !== undefined && (typeof _a.misfireMs !== 'number' || !Number.isFinite(_a.misfireMs) || _a.misfireMs < 0)) {
 			throw new Error('[svelte-realtime] live.stream alarm.misfireMs must be a non-negative finite number (ms of tolerated lateness before a fire is skipped).');
+		}
+		if (_a.id !== undefined && (typeof _a.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,127}$/.test(_a.id))) {
+			throw new Error('[svelte-realtime] live.stream alarm.id must be a stable 1-128 character identifier using letters, numbers, dot, underscore, colon, or hyphen.');
 		}
 	}
 	let invalidatePatterns = null;
@@ -3914,15 +3920,25 @@ export function realtime(config) {
 		state.authorizeWireSubscribe = authorizeWireSubscribe;
 	}
 
-	// Protocol-compat signal (opt-in): an integer the app bumps only on a BREAKING
-	// wire/contract change. The client advertises its baked version on connect; a
-	// client older than this server is sent a one-shot `protocol-stale` notice. Left
-	// off (no compare, no signal) when unset.
+	// Protocol compatibility. A numeric value preserves the original one-way,
+	// notice-only contract. The range policy contains both rollout directions:
+	// below-minimum clients and above-current clients after rollback. `reject`
+	// returns PROTOCOL_MISMATCH before application code; `notify` is the staged
+	// observation lane.
 	if (protocolVersion !== undefined) {
-		if (typeof protocolVersion !== 'number' || !Number.isInteger(protocolVersion)) {
-			throw new Error('[svelte-realtime] realtime({ protocolVersion }): must be an integer');
+		if (typeof protocolVersion === 'number') {
+			if (!Number.isInteger(protocolVersion)) {
+				throw new Error('[svelte-realtime] realtime({ protocolVersion }): must be an integer');
+			}
+			state.serverProtocolVersion = protocolVersion;
+			state.serverProtocolPolicy = undefined;
+		} else if (protocolVersion && typeof protocolVersion === 'object' && !Array.isArray(protocolVersion)) {
+			const policy = normalizeProtocolPolicy(protocolVersion);
+			state.serverProtocolVersion = policy.current;
+			state.serverProtocolPolicy = policy;
+		} else {
+			throw new Error('[svelte-realtime] realtime({ protocolVersion }): must be an integer or policy object');
 		}
-		state.serverProtocolVersion = protocolVersion;
 	}
 
 	if (bus !== undefined) _setBus(bus);
@@ -3949,6 +3965,33 @@ export function realtime(config) {
 		init(ctx) {
 			if (!ctx || !ctx.platform) {
 				throw new Error('[svelte-realtime] realtime().init: missing platform on hook context (expected adapter init({ platform }) signature)');
+			}
+			if (state.authorizeWireSubscribe) {
+				const arm = /** @type {any} */ (ctx.platform).authorizeWireSubscribe;
+				if (typeof arm !== 'function') {
+					throw new Error(
+						'[svelte-realtime] realtime().init: strict wire-subscribe authorization is unavailable. ' +
+						'Upgrade svelte-adapter-uws to a build that supports platform.authorizeWireSubscribe(\'strict\'), ' +
+						'or explicitly opt out with realtime({ authorizeWireSubscribe: false }).'
+					);
+				}
+				let activePolicy;
+				try {
+					activePolicy = arm.call(ctx.platform, 'strict');
+				} catch (error) {
+					throw new Error(
+						'[svelte-realtime] realtime().init: the adapter refused strict wire-subscribe authorization. ' +
+						'Upgrade svelte-adapter-uws or explicitly opt out with realtime({ authorizeWireSubscribe: false }).',
+						{ cause: error }
+					);
+				}
+				if (activePolicy !== 'strict') {
+					throw new Error(
+						'[svelte-realtime] realtime().init: the adapter did not confirm strict wire-subscribe authorization. ' +
+						'Upgrade svelte-adapter-uws to a build that returns \'strict\', ' +
+						'or explicitly opt out with realtime({ authorizeWireSubscribe: false }).'
+					);
+				}
 			}
 			setCronPlatform(ctx.platform);
 			_activateDerived(ctx.platform);

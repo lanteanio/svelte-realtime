@@ -905,11 +905,16 @@ export const __devtools: {
 	/** Volatile sends dropped since page load, across every drop reason. */
 	volatileDropped: number;
 	/**
-	 * Keys blanked to `[REDACTED]` in captured payloads. Matching is on the whole
-	 * key and case-insensitive, so `add('paymentMethod')` works as written but a
-	 * substring will not match. Two things it cannot reach: a stream error string
-	 * and a rejected RPC's `message`, both bare strings that a key-based redactor
-	 * has no purchase on - keep secrets out of error text.
+	 * Explicitly unsafe payload-retention opt-in. False by default: RPC args and
+	 * results, volatile args, stream payloads, stream topics, and error messages
+	 * retain metadata only. Setting this to true stores redacted payload values;
+	 * setting it back to false purges the payload-bearing rings and maps.
+	 */
+	unsafeCapturePayloads: boolean;
+	/**
+	 * Keys blanked to `[REDACTED]` only while `unsafeCapturePayloads` is true.
+	 * Matching is on the whole key and case-insensitive. This is defense in depth,
+	 * not a guarantee: unexpected keys and bare strings can still carry secrets.
 	 */
 	redactKeys: Set<string>;
 	/**
@@ -1118,7 +1123,7 @@ export const quiescent: Readable<boolean>;
  * {/if}
  * ```
  */
-export const health: Readable<'healthy' | 'degraded' | 'outdated'>;
+export const health: Readable<'healthy' | 'degraded' | 'outdated' | 'incompatible'>;
 
 /** The precomputed client mitigation a degradation policy attached to the `degraded` event. */
 export interface DegradationMitigation {

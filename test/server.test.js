@@ -91,6 +91,7 @@ import { _handleUploadChunkFrame } from '../src/server/upload.js';
 import { installFakeRuntimeClock, releaseRuntimeClock } from './helpers/runtime-clock.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { state } from '../src/server/state.js';
+import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../src/error-registry.js';
 
 const noopRegistry = () => ({
 	counter: () => ({ inc() {} }),
@@ -1665,7 +1666,7 @@ describe('live.upload()', () => {
 		await flushUploadAsync();
 
 		const resp = lastUploadResponse(platform, 8);
-		expect(resp).toEqual({ ok: false, code: 'NOT_FOUND', error: 'Not found' });
+		expect(resp).toEqual({ ok: false, code: 'NOT_FOUND', error: 'Not found', requestId: '00000008' });
 	});
 
 	it('rejects when the path is not a live.upload handler', async () => {
@@ -1696,7 +1697,12 @@ describe('live.upload()', () => {
 		await flushUploadAsync();
 
 		const resp = lastUploadResponse(platform, 10);
-		expect(resp).toEqual({ ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'upload exceeds maxSize' });
+		expect(resp).toEqual({
+			ok: false,
+			code: realtimeErrorCode(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
+			error: realtimeErrorMessage(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
+			requestId: '0000000a'
+		});
 	});
 
 	it('rejects mid-stream when total bytes exceed maxSize', async () => {
@@ -1728,7 +1734,12 @@ describe('live.upload()', () => {
 		await flushUploadAsync();
 
 		const resp = lastUploadResponse(platform, 11);
-		expect(resp).toEqual({ ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'upload exceeds maxSize' });
+		expect(resp).toEqual({
+			ok: false,
+			code: realtimeErrorCode(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
+			error: realtimeErrorMessage(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
+			requestId: '0000000b'
+		});
 		expect(aborted).toBe(true);
 	});
 
@@ -1756,7 +1767,7 @@ describe('live.upload()', () => {
 		await flushUploadAsync();
 
 		const resp = lastUploadResponse(platform, 12);
-		expect(resp).toEqual({ ok: false, code: 'CANCELLED', error: 'upload cancelled by client' });
+		expect(resp).toEqual({ ok: false, code: 'CANCELLED', error: 'upload cancelled by client', requestId: '0000000c' });
 		expect(signalAborted).toBe(true);
 	});
 
@@ -1859,7 +1870,7 @@ describe('live.upload()', () => {
 		await flushUploadAsync();
 
 		const resp = lastUploadResponse(platform, 14);
-		expect(resp).toEqual({ ok: false, code: 'FORBIDDEN', error: 'no thanks' });
+		expect(resp).toEqual({ ok: false, code: 'FORBIDDEN', error: 'no thanks', requestId: '0000000e' });
 	});
 
 	it('hides non-LiveError exceptions behind INTERNAL_ERROR', async () => {
@@ -2021,7 +2032,8 @@ describe('live.upload()', () => {
 			const second = lastUploadResponse(platform, 401);
 			expect(second).toEqual({
 				ok: false, code: 'OVERLOADED',
-				error: 'pending-upload aggregate buffer cap exceeded; retry shortly'
+				error: 'pending-upload aggregate buffer cap exceeded; retry shortly',
+				requestId: '00000191'
 			});
 		} finally {
 			_resetCapsForTest();
@@ -2148,11 +2160,11 @@ describe('handleRpc() batch dev warnings', () => {
 	});
 
 	it('logs dev warning for non-LiveError throws in batch', async () => {
-		const handler = live(async () => { throw new Error('secret'); });
+		const hostile = 'secret ' + String.fromCodePoint(0x85, 0x202e, 0x5e9);
+		const handler = live(async () => { throw new Error(hostile); });
 		__register('bwarn/fail', handler);
 
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 
 		const data = toArrayBuffer({
 			batch: [{ rpc: 'bwarn/fail', id: 'w1', args: [] }]
@@ -2161,11 +2173,14 @@ describe('handleRpc() batch dev warnings', () => {
 
 		await new Promise((r) => setTimeout(r, 20));
 
-		expect(warn).toHaveBeenCalledWith(
-			expect.stringContaining('non-LiveError'),
-			expect.anything(),
-			expect.any(String)
-		);
+		expect(warn).toHaveBeenCalledOnce();
+		const line = warn.mock.calls[0][0];
+		expect(line).toMatch(/^\[oss-realtime\/diagnostic source=svelte-realtime component=server\.rpc event=rpc\.execution\.non-live-error severity=warn\]/);
+		expect(line).not.toMatch(/[\u0000-\u001f\u007f-\uffff]/);
+		expect(JSON.parse(line.slice(line.indexOf('{'))).attributes).toMatchObject({
+			path: 'bwarn/fail',
+			error: { name: 'Error', code: null, message: hostile }
+		});
 
 		const batch = platform.sent[0].data.batch;
 		expect(batch[0].ok).toBe(false);
@@ -2174,7 +2189,28 @@ describe('handleRpc() batch dev warnings', () => {
 		expect(batch[0].error).toBe('Internal server error');
 
 		warn.mockRestore();
-		error.mockRestore();
+	});
+
+	it('keeps the RPC response path alive when a thrown value resists inspection', async () => {
+		const hostile = new Proxy({}, {
+			get() { throw new Error('getter failed'); }
+		});
+		__register('bwarn/hostile', live(async () => { throw hostile; }));
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+		handleRpc(ws, toArrayBuffer({
+			batch: [{ rpc: 'bwarn/hostile', id: 'w2', args: [] }]
+		}), platform);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+
+		expect(warn).toHaveBeenCalledOnce();
+		const record = JSON.parse(warn.mock.calls[0][0].slice(warn.mock.calls[0][0].indexOf('{')));
+		expect(record.attributes.error).toEqual({ name: 'Error', code: null, message: 'Unknown error' });
+		expect(platform.sent[0].data.batch[0]).toMatchObject({
+			id: 'w2', ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error'
+		});
+
+		warn.mockRestore();
 	});
 });
 
@@ -3656,6 +3692,9 @@ describe('realtime() factory', () => {
 		_clearCron();
 		configureCron(null);
 		setBus(null);
+		// realtime() stores this process-wide, just like the adapter hook module.
+		// Keep the default isolated from the explicit opt-out case below.
+		realtime({ authorizeWireSubscribe: true });
 	});
 
 	it('returns the standard hook set (open, close, message, init)', () => {
@@ -3683,6 +3722,34 @@ describe('realtime() factory', () => {
 		const hooks = realtime();
 		const platform = mockPlatform();
 		hooks.init({ platform });
+		expect(getPlatform()).toBe(platform);
+		expect(platform.wireSubscribeModes).toContain('strict');
+	});
+
+	it('init fails closed when the adapter has no strict wire-subscribe capability', () => {
+		const hooks = realtime();
+		const platform = mockPlatform();
+		delete platform.authorizeWireSubscribe;
+
+		expect(() => hooks.init({ platform })).toThrow(/strict wire-subscribe authorization is unavailable/);
+		expect(getPlatform()).not.toBe(platform);
+	});
+
+	it('init rejects an older adapter that ignores the strict request', () => {
+		const hooks = realtime();
+		const platform = mockPlatform();
+		platform.authorizeWireSubscribe = () => undefined;
+
+		expect(() => hooks.init({ platform })).toThrow(/did not confirm strict wire-subscribe authorization/);
+		expect(getPlatform()).not.toBe(platform);
+	});
+
+	it('an explicit authorization opt-out permits a legacy adapter', () => {
+		const hooks = realtime({ authorizeWireSubscribe: false });
+		const platform = mockPlatform();
+		delete platform.authorizeWireSubscribe;
+
+		expect(() => hooks.init({ platform })).not.toThrow();
 		expect(getPlatform()).toBe(platform);
 	});
 
@@ -13905,14 +13972,14 @@ describe('live.stream({ transform })', () => {
 // - ctx.requestId end-to-end correlation -------------------------------------
 
 describe('ctx.requestId', () => {
-	it('flows from platform.requestId to ctx.requestId on RPC handlers', async () => {
+	it('uses the RPC envelope id and keeps platform.requestId as connectionId', async () => {
 		const ws = mockWs({ id: 'u1' });
 		const platform = mockPlatform();
 		platform.requestId = 'rid-abc-123';
 
 		let captured;
 		const handler = live(async (ctx) => {
-			captured = ctx.requestId;
+			captured = { requestId: ctx.requestId, connectionId: ctx.connectionId };
 			return 'ok';
 		});
 		__register('rid/handler', handler);
@@ -13920,7 +13987,7 @@ describe('ctx.requestId', () => {
 		handleRpc(ws, toArrayBuffer({ rpc: 'rid/handler', id: 'r1', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
-		expect(captured).toBe('rid-abc-123');
+		expect(captured).toEqual({ requestId: 'r1', connectionId: 'rid-abc-123' });
 	});
 
 	it('is also available on stream loaders', async () => {
@@ -13938,10 +14005,10 @@ describe('ctx.requestId', () => {
 		handleRpc(ws, toArrayBuffer({ rpc: 'rid/stream', id: 'rs1', args: [], stream: true }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
-		expect(captured).toBe('rid-stream-456');
+		expect(captured).toBe('rs1');
 	});
 
-	it('is undefined when platform does not set it', async () => {
+	it('still uses the envelope id when the platform has no connection id', async () => {
 		const ws = mockWs({ id: 'u1' });
 		const platform = mockPlatform();
 		platform.requestId = undefined;
@@ -13956,7 +14023,7 @@ describe('ctx.requestId', () => {
 		handleRpc(ws, toArrayBuffer({ rpc: 'rid/missing', id: 'rm1', args: [] }), platform);
 		await new Promise((r) => setTimeout(r, 10));
 
-		expect(captured).toBeUndefined();
+		expect(captured).toBe('rm1');
 	});
 });
 
@@ -16824,7 +16891,7 @@ describe('assert() helper', () => {
 		expect(getAssertionCounters().get('realtime/test.cat-b')).toBe(1);
 		expect(errSpy).toHaveBeenCalledTimes(1);
 		const logged = errSpy.mock.calls[0][0];
-		expect(logged).toContain('[realtime/assert]');
+		expect(logged).toMatch(/^\[oss-realtime\/diagnostic source=svelte-realtime component=runtime\.assertion event=invariant\.violated severity=warn\]/);
 		expect(logged).toContain('"category":"realtime/test.cat-b"');
 		expect(logged).toContain('"x":1');
 	});
@@ -17145,7 +17212,7 @@ describe('fatal() hard tier (server)', () => {
 		expect(() => fatal(false, 'realtime/test.fatal-y', { v: 7 })).toThrow(/realtime\/test\.fatal-y/);
 		expect(getAssertionCounters().get('realtime/test.fatal-y')).toBe(1);
 		const logged = errSpy.mock.calls[0][0];
-		expect(logged).toContain('[realtime/fatal]');
+		expect(logged).toMatch(/^\[oss-realtime\/diagnostic source=svelte-realtime component=runtime\.assertion event=invariant\.violated severity=fatal\]/);
 		expect(logged).toContain('"severity":"fatal"');
 		expect(logged).toContain('"v":7');
 	});

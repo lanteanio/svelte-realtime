@@ -1,5 +1,47 @@
 import type { Platform, WebSocket } from 'svelte-adapter-uws';
 
+/** Every pressure reason emitted by the supported adapter, least to most severe. */
+export const PRESSURE_REASONS: readonly [
+	'NONE',
+	'SUBSCRIBERS',
+	'PUBLISH_RATE',
+	'PSI',
+	'CPU_QUOTA',
+	'CAPACITY',
+	'MEMORY'
+];
+
+/** Validated W3C distributed-trace carrier. */
+export interface OperationTraceContext {
+	readonly traceparent: string;
+	readonly tracestate?: string;
+}
+
+/** Minimal span surface exposed to realtime handlers. */
+export interface OperationTraceSpan {
+	setAttribute?(name: string, value: string | number | boolean): void;
+	recordException?(error: unknown): void;
+	end?(): void;
+}
+
+/** Optional adapter-projected, vendor-neutral operation tracing surface. */
+export interface OperationTrace {
+	readonly enabled: boolean;
+	current(): OperationTraceContext | null;
+	extract(carrier: Headers | Record<string, unknown>): OperationTraceContext | null;
+	inject<T extends Headers | Record<string, string>>(carrier: T, context?: OperationTraceContext | null): T;
+	run<T>(
+		name: string,
+		options: {
+			kind?: 'server' | 'consumer' | 'producer' | 'internal';
+			parent?: OperationTraceContext | null;
+			attributes?: Readonly<Record<string, string | number | boolean>>;
+		},
+		fn: (span: OperationTraceSpan | null) => T
+	): T;
+	withContext<T>(context: OperationTraceContext | null, fn: () => T): T;
+}
+
 /** A reseedable deterministic generator: the same seed yields the same draws. */
 export interface SharedRandom {
 	/** Restart the stream from a new seed. */
@@ -62,6 +104,10 @@ export interface CronContext {
 	 * RPC-handler shape.
 	 */
 	requestId: string | undefined;
+	/** Validated W3C context for the active cron operation, when traced. */
+	traceContext: OperationTraceContext | null;
+	/** Vendor-neutral span boundary projected by the adapter, or null on older platforms. */
+	trace: OperationTrace | null;
 }
 
 /**
@@ -92,13 +138,23 @@ export interface TenantHandle {
 	publish(topic: string, event: string, data: any, options?: any): any;
 }
 
+/**
+ * Adapter platform view scoped to one live operation. `requestId` identifies
+ * the current operation; `connectionId` remains stable for the WebSocket.
+ */
+export interface LiveOperationPlatform extends Platform {
+	readonly connectionId?: string;
+	readonly traceContext?: OperationTraceContext | null;
+	readonly trace?: OperationTrace;
+}
+
 export interface LiveContext<UserData = unknown> {
 	/** User data attached during the WebSocket upgrade handshake. */
 	user: UserData;
 	/** The raw WebSocket connection. */
 	ws: WebSocket<UserData>;
 	/** The platform API (publish, send, topic helpers). */
-	platform: Platform;
+	platform: LiveOperationPlatform;
 	/** Shorthand for `platform.publish` - delegates to whatever platform was passed in. */
 	publish: Platform['publish'];
 	/** Cursor value sent by the client for paginated stream requests. `null` if not paginated. */
@@ -219,13 +275,20 @@ export interface LiveContext<UserData = unknown> {
 	 */
 	shed(className: string): boolean;
 	/**
-	 * Correlation id from the adapter platform. The adapter assigns one per
-	 * WebSocket connection (stable across all events on that connection)
-	 * and per HTTP request, honoring an inbound `X-Request-ID` header when
-	 * present. Threaded through the adapter's hooks, the realtime layer's
-	 * `ctx`, and (when used) downstream task-runner work via
+	 * Stable identifier for the WebSocket connection. Every operation on one
+	 * socket shares this value while `requestId` changes per operation. It is
+	 * `undefined` for direct HTTP/SSR and background contexts.
+	 */
+	connectionId: string | undefined;
+	/**
+	 * Correlation id for this operation. For WebSocket RPCs this is the bounded
+	 * printable-ASCII envelope id (maximum 128 characters), or a fresh safe id
+	 * when an internal/malformed call has no usable envelope id. For direct
+	 * HTTP/SSR work it is the adapter's per-request id. Threaded through the
+	 * realtime layer's `ctx`, `ctx.platform.requestId`, and (when used)
+	 * downstream task-runner work via
 	 * `svelte-adapter-uws-extensions/task-runner` - structured-log against
-	 * it to correlate every step of one request without piping the value
+	 * it to correlate every step of one operation without piping the value
 	 * through your handler signatures.
 	 *
 	 * @example
@@ -237,11 +300,15 @@ export interface LiveContext<UserData = unknown> {
 	 * });
 	 * ```
 	 *
-	 * On platforms that don't set `requestId` (some test mocks, custom
-	 * platform shims), this falls through as `undefined`. In production
-	 * against `svelte-adapter-uws@^0.5.0-next.4` it's always a string.
+	 * On custom platforms that don't set `requestId`, direct/background
+	 * contexts may expose `undefined`; WebSocket RPC contexts always receive a
+	 * bounded string.
 	 */
 	requestId: string | undefined;
+	/** Validated W3C context for this RPC/stream operation. */
+	traceContext: OperationTraceContext | null;
+	/** Vendor-neutral span boundary projected by the adapter, or null on older platforms. */
+	trace: OperationTrace | null;
 
 	/**
 	 * Current wall-clock time in epoch milliseconds, read through the
@@ -479,6 +546,14 @@ export interface RoomHistoryConfig {
  * Options for `live.stream()`.
  */
 export interface StreamAlarmConfig {
+	/**
+	 * Stable resolver identity persisted with durable alarms. Keep this value
+	 * unchanged when renaming the stream RPC path so both forward deployment and
+	 * rollback can recover in-flight rows. Stage the id before the first path
+	 * rename and keep the old release deployable until every pre-id row has fired,
+	 * been cancelled, or been explicitly drained.
+	 */
+	id?: string;
 	/**
 	 * Runs when a handler's `ctx.setAlarm(at)` reaches its scheduled time - with a
 	 * fresh server ctx, even if every client has disconnected. `ctx.publish(event,
@@ -2760,10 +2835,10 @@ export namespace live {
 	function poll(fn: () => void | Promise<void>, intervalMs: number): () => void;
 
 	/**
-	 * One of the four pressure reasons emitted by the adapter, in fixed
-	 * precedence order: `MEMORY` > `PUBLISH_RATE` > `SUBSCRIBERS` > `NONE`.
+	 * One of the pressure reasons emitted by the adapter, in fixed precedence
+	 * order: `MEMORY > CAPACITY > CPU_QUOTA > PSI > PUBLISH_RATE > SUBSCRIBERS > NONE`.
 	 */
-	type PressureReason = 'NONE' | 'PUBLISH_RATE' | 'SUBSCRIBERS' | 'MEMORY';
+	type PressureReason = (typeof PRESSURE_REASONS)[number];
 
 	/**
 	 * Snapshot shape returned by `platform.pressure`. Mirrors the
@@ -2798,7 +2873,7 @@ export namespace live {
 	 *   classes: {
 	 *     critical:    [],                                          // never shed
 	 *     interactive: ['MEMORY'],                                  // shed only on memory pressure
-	 *     background:  ['MEMORY', 'PUBLISH_RATE', 'SUBSCRIBERS']    // shed on any pressure
+	 *     background:  ['MEMORY', 'CAPACITY', 'CPU_QUOTA', 'PSI', 'PUBLISH_RATE', 'SUBSCRIBERS'] // shed on any active pressure
 	 *   }
 	 * });
 	 * ```
@@ -4119,6 +4194,8 @@ export function configureCron(
  * an opaque blob.
  */
 export interface AlarmMeta {
+	/** Stable resolver identity. When present, recovery never falls back to `path`. */
+	alarmId?: string;
 	path?: string;
 	tenantId?: string | null;
 }
@@ -4325,6 +4402,46 @@ export function _tickCron(): Promise<void>;
  */
 export function onError(handler: (path: string, error: unknown) => void): void;
 
+export interface OperationalEventRecord {
+	readonly schemaVersion: 1;
+	readonly occurredAt: string | null;
+	readonly source: string;
+	readonly component: string;
+	readonly event: string;
+	readonly severity: 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+	readonly level: 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+	readonly dataClass: 'operational' | 'pseudonymous' | 'application' | 'secret';
+	readonly message: string;
+	readonly attributes: unknown;
+}
+
+/**
+ * Coordinated client/server protocol range. Use `notify` while expanding and
+ * observing the compatible fleet, then `reject` at the cutover. Rejection is
+ * typed as `PROTOCOL_MISMATCH` and runs before application dispatch.
+ */
+export interface ProtocolVersionPolicy {
+	/** Protocol version emitted by this server release. */
+	current: number;
+	/** Oldest client version this server can execute safely. */
+	minimum: number;
+	/** Whether an incompatible or missing advertisement is observed or denied. */
+	onMismatch: 'notify' | 'reject';
+}
+
+export type OperationalEventSink = (record: OperationalEventRecord) => void | Promise<void>;
+export function setOperationalEventSink(sink: OperationalEventSink | null): () => void;
+export function emitOperationalEvent(input: {
+	source: string;
+	component: string;
+	event: string;
+	severity: OperationalEventRecord['severity'];
+	message: string;
+	occurredAt?: string | null;
+	dataClass?: OperationalEventRecord['dataClass'];
+	attributes?: unknown;
+}): OperationalEventRecord;
+
 /** @deprecated Use `onError()` instead. */
 export function onCronError(handler: (path: string, error: unknown) => void): void;
 
@@ -4497,15 +4614,16 @@ export interface RealtimeConfig {
 		breaker?: boolean | import('svelte-adapter-uws/plugins/webhooks').WebhookBreaker | null;
 	} | null;
 	/**
-	 * Opt-in protocol/contract version, an integer the app bumps only on a BREAKING
-	 * wire/contract change. Declare it identically here and in client `configure({
-	 * protocolVersion })` (one shared constant). A connecting client advertises its
-	 * baked version; when this server's version is higher (an older, incompatible
-	 * client bundle running against a freshly-deployed server), that one connection
-	 * receives a `protocol-stale` notice so it can prompt a reload. Unset (default)
-	 * leaves the signal off entirely.
+	 * Protocol compatibility. A number retains the legacy one-way, notice-only
+	 * behavior. A range policy contains both deployment directions: clients below
+	 * `minimum`, clients above `current` after rollback, and clients that omit or
+	 * corrupt their advertisement. With `onMismatch: 'reject'`, every RPC/batch/
+	 * binary/custom dispatch is stopped before application code and normal calls
+	 * receive `PROTOCOL_MISMATCH`; `notify` stages the same signal without denial.
+	 * The browser still declares its baked integer in `configure({ protocolVersion
+	 * })`. Unset leaves compatibility handling off.
 	 */
-	protocolVersion?: number;
+	protocolVersion?: number | ProtocolVersionPolicy;
 	/**
 	 * Enumeration-safe unknown paths (opt-in). When set, a wire RPC to an
 	 * unregistered path is answered exactly as a guard denial would answer the
@@ -4530,17 +4648,19 @@ export interface RealtimeConfig {
 	 */
 	privacySecret?: string;
 	/**
-	 * Wire-subscribe authorization (default `true`). realtime arms the adapter
-	 * so a client's raw WebSocket `subscribe` frame is honored only for a topic
-	 * the server already authorized for that connection through a stream RPC
+	 * Wire-subscribe authorization (default `true`). realtime requires the
+	 * adapter's strict policy, so a client's raw WebSocket `subscribe` frame is
+	 * honored only when the server already authorized that topic for the
+	 * connection through a stream RPC AND an application subscribe hook allows it
 	 * (which runs the guard / access filter / tenant scoping, then subscribes
 	 * the socket). This closes the bypass where a client subscribes directly to
 	 * a topic it was never granted - a private room, another tenant's channel -
 	 * and receives its fan-out. realtime's own client never sends such raw
 	 * frames (it attaches server-managed topics without a wire subscribe), so
-	 * pure-realtime apps see no behavior change. Set `false` only for a hybrid
-	 * app that deliberately uses raw client-initiated adapter subscriptions and
-	 * authorizes them another way (e.g. its own `subscribe` hook). @default true
+	 * pure-realtime apps see no behavior change. Startup fails closed when the
+	 * adapter cannot confirm strict support. Set `false` only for a hybrid app
+	 * that deliberately uses raw client-initiated adapter subscriptions and
+	 * accepts responsibility for authorizing them another way. @default true
 	 */
 	authorizeWireSubscribe?: boolean;
 }
@@ -4563,6 +4683,8 @@ export interface DeadLetterRecord {
 	error: string;
 	/** Wall-clock ms when the delivery gave up. */
 	failedAt: number;
+	/** W3C context captured for a later replay. */
+	traceContext?: OperationTraceContext | null;
 }
 
 /** Storage interface for dead-lettered outbound-webhook events. */
@@ -4764,6 +4886,17 @@ export interface RealtimeIntrospection {
 			memoryMB: number;
 		};
 		assertions: Record<string, number>;
+		diagnostics?: {
+			retained: number;
+			recent: Array<{
+				diagnosticId: string;
+				kind: 'state-divergence';
+				observedAt: number;
+				complete: boolean;
+				affectedStreamCount: number;
+				evidenceTruncated: boolean;
+			}>;
+		};
 	} | null;
 	/** Push registry sizes (unique users / sessions with a live connection). */
 	push: { users: number; sessions: number };
