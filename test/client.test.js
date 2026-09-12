@@ -7505,6 +7505,22 @@ describe('stream .phase and attach()/detach()', () => {
 		store.detach();
 	});
 
+	it('detach() emits exactly attached -> detached, never a transient initialized', async () => {
+		const store = __stream('phase/chain', { merge: 'crud', key: 'id' });
+		const phases = [];
+		store.phase.subscribe((p) => phases.push(p));
+		const attached = store.attach();
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'phase-chain', merge: 'crud', key: 'id' });
+		await attached;
+		expect(phases).toEqual(['initialized', 'attaching', 'attached']);
+		store.detach();
+		await flush();
+		await flush();
+		expect(phases).toEqual(['initialized', 'attaching', 'attached', 'detached']);
+	});
+
 	it('detach() tears down immediately (no resume grace) and rests detached', async () => {
 		const store = __stream('phase/detach', { merge: 'crud', key: 'id' });
 		const phases = [];

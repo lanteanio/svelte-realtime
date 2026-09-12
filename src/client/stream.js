@@ -1538,7 +1538,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_loadingMore = false;
 		_downAt = null;
 		_graceStartAt = null;
-		_setPhase('initialized');
+		// The phase is owned by the lifecycle transitions ('detached' from the
+		// release that precedes every reset, 'attaching' from the next
+		// subscribe); the documented machine has no edge back into
+		// 'initialized', and stamping it here made a detach flash the
+		// not-started state before it settled on 'detached'.
 		_devtoolsStream(path, null, 0, merge);
 	}
 
