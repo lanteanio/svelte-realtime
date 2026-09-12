@@ -125,6 +125,14 @@ export function createReactiveStream(source) {
 let _subscribeBatch = null;
 
 /**
+ * How far behind the held stamp a cursor / presence-field frame may be and
+ * still count as a reordered sample of the same gesture. Relay reordering
+ * spans milliseconds; a gap wider than this is a clock change on the
+ * publisher's side and the frame applies.
+ */
+const _STAMP_REORDER_WINDOW_MS = 1000;
+
+/**
  * Queue a stream subscribe RPC to be sent in a batch within the current microtask.
  * If only one request queues, it's sent as a single frame (no batch overhead).
  * @param {any} request - The subscribe RPC request object
@@ -457,6 +465,15 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	/** @type {number | null} Last known sequence number for replay */
 	let _lastSeq = null;
 
+	/**
+	 * Per-key, per-field publish stamps for presence field updates (`_t` on
+	 * the wire), so a field update reordered behind a newer one for the SAME
+	 * field is ignored while updates to other fields still apply. Cleared on
+	 * join, leave, set, and every snapshot.
+	 * @type {Map<any, Map<string, number>>}
+	 */
+	const _presenceFieldStamps = new Map();
+
 	/** @type {any} Cursor for pagination (server-provided) */
 	let _cursor = null;
 
@@ -665,10 +682,28 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 *     that was passed in (after in-place mutation).
 	 *   - `replaced`: true when `value` was assigned a fresh reference,
 	 *     so the caller does not need to clone before publishing.
-	 *   - `modified`: false only for the `set` strategy when the incoming
-	 *     `data` is reference-identical to the prior value (no-op);
-	 *     true in all other paths.
+	 *   - `modified`: false when the event changed nothing: a `set` whose
+	 *     `data` is reference-identical to the prior value, or a stamped
+	 *     `cursor` / `presence` update older than what is held; true in
+	 *     all other paths.
 	 */
+	/**
+	 * A stamped frame is stale when it is older than the stamp held for the
+	 * same key (or field) by less than the reorder window. Older by MORE than
+	 * the window means the publisher's clock moved (it reconnected to a
+	 * replica whose wall clock is behind): those frames must apply, or the
+	 * peer would freeze for the whole skew. Unstamped frames are never stale.
+	 * @param {any} incoming @param {any} held
+	 */
+	function _isStaleStamp(incoming, held) {
+		return typeof incoming === 'number' && typeof held === 'number' && incoming < held && held - incoming <= _STAMP_REORDER_WINDOW_MS;
+	}
+
+	/** Advance the monotonic resume cursor from an envelope that is not applied. @param {any} envelope */
+	function _advanceSeq(envelope) {
+		if (envelope && envelope.seq !== undefined && (_lastSeq === null || envelope.seq > _lastSeq)) _lastSeq = envelope.seq;
+	}
+
 	function _applyMergeFn(value, index, envelope, optimisticKeys) {
 		const { event } = envelope;
 		// Defense-in-depth: strip prototype-pollution keys (`__proto__`,
@@ -747,6 +782,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		} else if (merge === 'presence') {
 			if (!Array.isArray(value)) { value = []; index.clear(); }
 			if (event === 'join') {
+				_presenceFieldStamps.delete(data.key);
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
 					value[idx] = data;
@@ -755,6 +791,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					value.push(data);
 				}
 			} else if (event === 'leave') {
+				_presenceFieldStamps.delete(data.key);
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
 					index.delete(data.key);
@@ -776,12 +813,32 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// update-before-join order; normal order is join first).
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
-					value[idx] = { ...value[idx], ...data };
+					if (typeof data._t === 'number') {
+						// Stamped delta: apply each field only when this frame is
+						// newer than the last one that set that field, so a
+						// reordered pair (`typing: false` behind `typing: true`)
+						// cannot park a stale flag. The stamp itself stays out of
+						// the entry; the entry carries only the presence fields.
+						let stamps = _presenceFieldStamps.get(data.key);
+						if (!stamps) { stamps = new Map(); _presenceFieldStamps.set(data.key, stamps); }
+						let next = null;
+						for (const field in data) {
+							if (field === 'key' || field === '_t') continue;
+							if (_isStaleStamp(data._t, stamps.get(field))) continue;
+							stamps.set(field, data._t);
+							(next ??= {})[field] = data[field];
+						}
+						if (next === null) return { value, replaced: false, modified: false };
+						value[idx] = { ...value[idx], ...next };
+					} else {
+						value[idx] = { ...value[idx], ...data };
+					}
 				} else {
 					index.set(data.key, value.length);
 					value.push(data);
 				}
 			} else if (event === 'set') {
+				_presenceFieldStamps.clear();
 				value = data;
 				_rebuildIndexFn(value, index);
 				return { value, replaced: true, modified: true };
@@ -792,6 +849,15 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			if (event === 'update') {
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
+					// Frames from one publisher carry its publish instant (`_t`).
+					// A frame older than the one held is a reordered or re-delivered
+					// sample: applying it would roll the cursor back to a stale
+					// point and leave it there. Frames without a stamp (an older
+					// server) keep the unconditional last-write-wins.
+					const held = value[idx];
+					if (_isStaleStamp(data._t, held._t)) {
+						return { value, replaced: false, modified: false };
+					}
 					value[idx] = data;
 				} else {
 					index.set(data.key, value.length);
@@ -856,13 +922,16 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			assert(_serverValue !== null && _serverIndex !== null, 'realtime/optimistic.queue.serverValue-iff-nonempty', { queueLen: _optimisticQueue.length, hasServerValue: _serverValue !== null, hasServerIndex: _serverIndex !== null });
 			const result = _applyMergeFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), envelope, _optimisticKeys);
 			_serverValue = result.value;
-			_dirty = result.modified;
+			// Accumulate across one flush: a later no-op event (an identical
+			// `set`, a stale stamped cursor sample) must not hide an earlier
+			// modification made in place.
+			if (result.modified) _dirty = true;
 			_absorbCheck(envelope);
 			return false;
 		}
 		const result = _applyMergeFn(currentValue, _index, envelope, _optimisticKeys);
 		currentValue = result.value;
-		_dirty = result.modified;
+		if (result.modified) _dirty = true;
 		return result.replaced;
 	}
 
@@ -1007,7 +1076,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_activeBuf = _activeBuf === _bufA ? _bufB : _bufA;
 		if (queue.length === 0) return;
 
-		// RAF dedup: for keyed merge strategies, keep only the last idempotent event per key
+		// RAF dedup: for keyed merge strategies, keep only the last idempotent
+		// event per key. A stamped frame (`_t`, the publisher's instant on cursor
+		// updates) is kept by newest stamp rather than by arrival order, so a
+		// burst that arrived reordered within one frame still lands on its
+		// newest sample; unstamped events keep arrival order.
 		if (queue.length > 1 && merge !== 'set' && merge !== 'latest') {
 			const keyField = mergeKeyField(merge, key);
 			const seen = new Map();
@@ -1015,10 +1088,23 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				if (!_IDEMPOTENT.has(queue[i].event)) continue;
 				const k = queue[i].data?.[keyField];
 				if (k !== undefined) {
-					if (seen.has(k)) {
-						queue[i] = null;
+					const kept = seen.get(k);
+					if (kept === undefined) {
+						seen.set(k, i);
 					} else {
-						seen.set(k, true);
+						const keptT = queue[kept].data?._t;
+						const t = queue[i].data?._t;
+						if (typeof t === 'number' && typeof keptT === 'number' && t > keptT) {
+							// The dropped later arrival may carry the higher replay
+							// seq; keep the resume cursor monotonic regardless of
+							// which envelope is applied.
+							_advanceSeq(queue[kept]);
+							queue[kept] = null;
+							seen.set(k, i);
+						} else {
+							_advanceSeq(queue[i]);
+							queue[i] = null;
+						}
 					}
 				}
 			}
@@ -1113,6 +1199,66 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	}
 
 	/**
+	 * Bind this stream to its server-resolved wire topic: mark it server-managed,
+	 * hold the managed ref, route topic errors and denials here. Idempotent for
+	 * the same topic; a topic switch releases the old one. Shared by the early
+	 * attach frame and the subscribe response so the two can never drift.
+	 * @param {string | null} nextTopic
+	 */
+	function _bindTopic(nextTopic) {
+		if (topic && topic !== nextTopic) _unregisterTopicErrorSetter(topic, _setError);
+		topic = nextTopic || null;
+		if (!topic) return;
+		// The server subscribes this connection to `topic` itself (the stream
+		// RPC runs platform.subscribe after the guard / access filter), so mark
+		// it server-managed: the client attaches its dispatch store WITHOUT
+		// emitting a redundant subscribe frame, and the reconnect
+		// resubscribe-batch skips it. Under wire-subscribe authorization that
+		// is what keeps a legitimate reconnect from racing the server's
+		// re-subscribe. Must precede _subscribeLive().
+		setTopicManaged(topic);
+		// Hold a managed-topic ref so the wire release on the LAST local ref
+		// can send the explicit unsubscribe frame the adapter client suppresses
+		// for managed topics. Idempotent across re-binds of the same topic
+		// (resume, reconnect); a topic switch (the server resolved this stream
+		// to a different wire topic) moves the ref and releases the old topic
+		// on the wire, since nothing else unsubscribes the old server-side
+		// subscription.
+		if (_hasManagedMarking && _managedHeldTopic !== topic) {
+			if (_managedHeldTopic) _sendManagedRelease(_managedHeldTopic);
+			_managedRefAcquire(topic);
+			_managedHeldTopic = topic;
+		}
+		_registerTopicErrorSetter(topic, _setError);
+		ensureDenialsListener();
+	}
+
+	/** @type {boolean} The in-flight subscribe installed the live listener from an attach frame */
+	let _attachInstalledListener = false;
+	/** @type {boolean} The in-flight subscribe acquired the managed ref from an attach frame */
+	let _attachAcquiredRef = false;
+
+	/**
+	 * Undo what an attach frame installed for a subscribe that will never
+	 * resolve (rejected, timed out): the live listener (and the frames it
+	 * buffered) and the managed ref. Anything held before the fetch stays.
+	 */
+	function _abandonAttach() {
+		if (_attachInstalledListener && topicUnsub) {
+			topicUnsub();
+			topicUnsub = null;
+			buffer = [];
+		}
+		if (_attachAcquiredRef && _managedHeldTopic) {
+			const releasedTopic = _managedHeldTopic;
+			_managedHeldTopic = null;
+			_sendManagedRelease(releasedTopic);
+		}
+		_attachInstalledListener = false;
+		_attachAcquiredRef = false;
+	}
+
+	/**
 	 * Fetch initial data and subscribe to live updates.
 	 */
 	function fetchAndSubscribe() {
@@ -1125,6 +1271,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		fetching = true;
 		initialLoaded = false;
 		buffer = [];
+		_attachInstalledListener = false;
+		_attachAcquiredRef = false;
 
 		// Cancel any previous pending request
 		if (pendingId) {
@@ -1145,21 +1293,37 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 		const _startTime = now();
 		const timer = setTimer(() => {
-			if (now() - _startTime > 90000) {
-				pending.delete(id);
-				pendingId = null;
-				fetching = false;
-				_setError(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
-				return;
-			}
 			pending.delete(id);
 			pendingId = null;
 			fetching = false;
+			_abandonAttach();
+			if (now() - _startTime > 90000) {
+				_setError(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
+				return;
+			}
 			_setError(new RpcError('TIMEOUT', `Stream '${path}' timed out after 30s`));
 		}, _getTimeout());
 
 		pending.set(id, {
 			stream: true,
+			/**
+			 * Early attach: the server named the wire topic before subscribing the
+			 * socket. Bind it and install the live listener now, while
+			 * `initialLoaded` is still false, so every frame the subscription
+			 * delivers ahead of the snapshot lands in `buffer` instead of being
+			 * dropped for want of a store. The response then replays the buffer
+			 * over the snapshot as it always has.
+			 * @param {string | null | undefined} attachTopic
+			 */
+			attach(attachTopic) {
+				if (!attachTopic || pendingId !== id) return;
+				const heldBefore = _managedHeldTopic;
+				const listenerBefore = topicUnsub;
+				_bindTopic(attachTopic);
+				_subscribeLive();
+				_attachAcquiredRef = heldBefore !== _managedHeldTopic;
+				_attachInstalledListener = listenerBefore === null && topicUnsub !== null;
+			},
 			resolve(response) {
 				fetching = false;
 				pendingId = null;
@@ -1168,32 +1332,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				_status = 'connected';
 				_statusStore.set('connected');
 				_setPhase('attached');
-				if (topic && topic !== response.topic) _unregisterTopicErrorSetter(topic, _setError);
-				topic = response.topic || null;
-				if (topic) {
-					// The server already subscribed this connection to `topic` (this RPC
-					// ran platform.subscribe after the guard / access filter), so mark it
-					// server-managed: the client attaches its dispatch store WITHOUT
-					// emitting a redundant subscribe frame, and the reconnect
-					// resubscribe-batch skips it. Under wire-subscribe authorization that
-					// is what keeps a legitimate reconnect from racing the server's
-					// re-subscribe. Must precede _subscribeLive() below.
-					setTopicManaged(topic);
-					// Hold a managed-topic ref so the wire release on the LAST local
-					// ref can send the explicit unsubscribe frame the adapter client
-					// suppresses for managed topics. Idempotent across re-resolves of
-					// the same topic (resume, reconnect); a topic switch (the server
-					// resolved this stream to a different wire topic) moves the ref
-					// and releases the old topic on the wire, since nothing else
-					// unsubscribes the old server-side subscription.
-					if (_hasManagedMarking && _managedHeldTopic !== topic) {
-						if (_managedHeldTopic) _sendManagedRelease(_managedHeldTopic);
-						_managedRefAcquire(topic);
-						_managedHeldTopic = topic;
-					}
-					_registerTopicErrorSetter(topic, _setError);
-					ensureDenialsListener();
-				}
+				_bindTopic(response.topic || null);
+				_attachInstalledListener = false;
+				_attachAcquiredRef = false;
 
 				// Track sequence number for replay
 				if (response.seq !== undefined) _lastSeq = response.seq;
@@ -1241,6 +1382,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// return stale data before their sources populate.
 				} else {
 					currentValue = response.data;
+					_presenceFieldStamps.clear();
 				}
 
 				_rebuildIndex();
@@ -1272,13 +1414,18 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			reject(err) {
 				fetching = false;
 				pendingId = null;
+				// A subscribe that attached early and then failed (the server rolled
+				// its subscription back) must not keep the listener or the managed
+				// ref the attach frame acquired; anything held before this fetch
+				// stays, exactly as before.
+				_abandonAttach();
 				_setError(err instanceof RpcError ? err : new RpcError('STREAM_ERROR', err?.message || 'Stream failed'));
 			},
 			timer
 		});
 
 		/** @type {any} */
-		const request = { rpc: path, id, args: dynamicArgs || [], stream: true };
+		const request = { rpc: path, id, args: dynamicArgs || [], stream: true, attach: true };
 		if (_lastSeq !== null) request.seq = _lastSeq;
 		if (_lastVersion !== undefined) request.version = _lastVersion;
 		if (_schemaVersion !== undefined) request.schemaVersion = _schemaVersion;
@@ -1379,6 +1526,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_status = 'loading';
 		_statusStore.set('loading');
 		_index.clear();
+		_presenceFieldStamps.clear();
 		_history = [];
 		_historyIndex = -1;
 		_reconnectAttempts = 0;

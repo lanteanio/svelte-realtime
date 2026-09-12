@@ -5964,6 +5964,268 @@ describe('batched stream subscribe responses', () => {
 	});
 });
 
+// - early attach: the wire topic arrives before the subscribe response --------
+
+describe('__stream() early attach frame', () => {
+	// The server subscribes the socket before its loader runs and answers a
+	// batch only after every sibling resolved. A live frame delivered in that
+	// window reaches a client with no store for the topic yet, and is dropped.
+	// The attach frame names the topic first, so the listener exists and the
+	// frame buffers until the snapshot lands.
+	it('requests attach and applies a frame that arrived between attach and the snapshot', async () => {
+		const store = __stream('board/presence', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		expect(sent.attach).toBe(true);
+
+		// The attach frame: a single __rpc frame on the request id, not a response.
+		simulateRpcResponse(sent.id, { attach: true, topic: 'board:presence' });
+		expect(topicCallbacks.has('board:presence')).toBe(true);
+		// The subscribe is still pending: nothing delivered yet.
+		expect(values[values.length - 1]).toBeUndefined();
+
+		// A peer joins into the window, before the snapshot response.
+		simulateTopicMessage('board:presence', { event: 'join', data: { key: 'bob', data: { name: 'Bob' } } });
+		expect(values[values.length - 1]).toBeUndefined();
+
+		// The snapshot read before the peer joined lands (via the batch path).
+		simulateTopicMessage('__rpc', {
+			event: '__batch',
+			data: { batch: [{ id: sent.id, ok: true, data: [{ key: 'alice', data: { name: 'Alice' } }], topic: 'board:presence', merge: 'presence' }] }
+		});
+		expect(values[values.length - 1].map((p) => p.key).sort()).toEqual(['alice', 'bob']);
+		unsub();
+	});
+
+	it('without the attach frame the same window frame is lost (the drop the attach frame exists for)', async () => {
+		const store = __stream('board/presence', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateTopicMessage('board:presence', { event: 'join', data: { key: 'bob', data: { name: 'Bob' } } });
+		simulateRpcResponse(sent.id, { ok: true, data: [{ key: 'alice', data: { name: 'Alice' } }], topic: 'board:presence', merge: 'presence' });
+		expect(values[values.length - 1].map((p) => p.key)).toEqual(['alice']);
+		unsub();
+	});
+
+	it('a rejected subscribe after the attach frame tears the listener down again', async () => {
+		const store = __stream('board/locked', { merge: 'presence' });
+		const errors = [];
+		const unsub = store.subscribe(() => {});
+		const unsubErr = store.error.subscribe((e) => errors.push(e));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+
+		simulateRpcResponse(sent.id, { attach: true, topic: 'locked:presence' });
+		expect(topicCallbacks.has('locked:presence')).toBe(true);
+		simulateRpcResponse(sent.id, { ok: false, code: 'FORBIDDEN', error: 'Access denied' });
+		expect(topicCallbacks.has('locked:presence')).toBe(false);
+		expect(errors[errors.length - 1]?.code).toBe('FORBIDDEN');
+		unsubErr();
+		unsub();
+	});
+
+	it('a subscribe that times out after the attach frame tears the listener down (no unbounded buffer, no held ref)', async () => {
+		vi.useFakeTimers();
+		try {
+			const store = __stream('board/slow', { merge: 'presence' });
+			const errors = [];
+			const unsub = store.subscribe(() => {});
+			const unsubErr = store.error.subscribe((e) => errors.push(e));
+			await flush();
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, { attach: true, topic: 'slow:presence' });
+			expect(topicCallbacks.has('slow:presence')).toBe(true);
+			simulateTopicMessage('slow:presence', { event: 'join', data: { key: 'bob', data: {} } });
+
+			await vi.advanceTimersByTimeAsync(30_001);
+			expect(errors[errors.length - 1]?.code).toBe('TIMEOUT');
+			expect(topicCallbacks.has('slow:presence')).toBe(false);
+			unsubErr();
+			unsub();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('an attach frame for a request that is no longer pending is ignored', async () => {
+		const store = __stream('board/late', { merge: 'presence' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'late:presence', merge: 'presence' });
+		const before = topicCallbacks.get('late:presence').size;
+		simulateRpcResponse(sent.id, { attach: true, topic: 'late:presence' });
+		expect(topicCallbacks.get('late:presence').size).toBe(before);
+		unsub();
+	});
+});
+
+// - presence field updates: per-field stamps ---------------------------------
+
+describe('__stream() presence field update ordering', () => {
+	async function presenceStream(path, topic) {
+		const store = __stream(path, { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ key: 'u1', data: { name: 'A' } }], topic, merge: 'presence' });
+		return { values, unsub, last: () => values[values.length - 1] };
+	}
+
+	it('an older update for the same field is ignored; an older update for another field still applies', async () => {
+		const { unsub, last } = await presenceStream('room/fields', 'pf-fields');
+		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', typing: true, _t: 200 } });
+		expect(last()[0].typing).toBe(true);
+		expect('_t' in last()[0]).toBe(false);
+		// The reordered older frame for the same field: parked stale flag otherwise.
+		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', typing: false, _t: 150 } });
+		expect(last()[0].typing).toBe(true);
+		// An older frame for a different field is still the newest for that field.
+		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', selection: [1, 2], _t: 150 } });
+		expect(last()[0].selection).toEqual([1, 2]);
+		expect(last()[0].typing).toBe(true);
+		// A newer frame for the field applies.
+		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', typing: false, _t: 250 } });
+		expect(last()[0].typing).toBe(false);
+		unsub();
+	});
+
+	it('a rejoin resets the field stamps and unstamped updates keep the plain merge', async () => {
+		const { unsub, last } = await presenceStream('room/rejoin', 'pf-rejoin');
+		simulateTopicMessage('pf-rejoin', { event: 'update', data: { key: 'u1', typing: true, _t: 500 } });
+		simulateTopicMessage('pf-rejoin', { event: 'leave', data: { key: 'u1' } });
+		simulateTopicMessage('pf-rejoin', { event: 'join', data: { key: 'u1', data: { name: 'A' } } });
+		simulateTopicMessage('pf-rejoin', { event: 'update', data: { key: 'u1', typing: false, _t: 100 } });
+		expect(last()[0].typing).toBe(false);
+		simulateTopicMessage('pf-rejoin', { event: 'update', data: { key: 'u1', typing: true } });
+		expect(last()[0].typing).toBe(true);
+		unsub();
+	});
+});
+
+// - cursor merge ordering: a stamped older frame never rolls a cursor back ----
+
+describe('__stream() cursor merge ordering', () => {
+	async function cursorStream(path, topic) {
+		const store = __stream(path, { merge: 'cursor' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [], topic, merge: 'cursor' });
+		return { values, unsub };
+	}
+
+	it('drops a stamped update older than the one held for the same key', async () => {
+		const { values, unsub } = await cursorStream('doc/order', 'cur-order');
+		simulateTopicMessage('cur-order', { event: 'update', data: { key: 'u1', x: 0.2, y: 0.3, _t: 200 } });
+		simulateTopicMessage('cur-order', { event: 'update', data: { key: 'u1', x: 0.29, y: 0.49, _t: 150 } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 0.2, y: 0.3, _t: 200 }]);
+		simulateTopicMessage('cur-order', { event: 'update', data: { key: 'u1', x: 0.65, y: 0.45, _t: 300 } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 0.65, y: 0.45, _t: 300 }]);
+		unsub();
+	});
+
+	it('a stale sample for one key does not hide a fresh sample for another key in the same frame', async () => {
+		const rafCallbacks = [];
+		const hadWindow = 'window' in globalThis;
+		const origWindow = globalThis.window;
+		const origRaf = globalThis.requestAnimationFrame;
+		const origCancel = globalThis.cancelAnimationFrame;
+		if (!hadWindow) globalThis.window = /** @type {any} */ ({});
+		globalThis.requestAnimationFrame = (cb) => { rafCallbacks.push(cb); return rafCallbacks.length; };
+		globalThis.cancelAnimationFrame = () => {};
+		try {
+			vi.resetModules();
+			const mod = await import('../src/client.js');
+			const store = mod.__stream('doc/multi', { merge: 'cursor' });
+			const values = [];
+			const unsub = store.subscribe((v) => values.push(v));
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [{ key: 'u1', x: 0, _t: 200 }, { key: 'u2', x: 0, _t: 200 }], topic: 'cur-multi', merge: 'cursor' });
+
+			// One frame: a fresh sample for u2, then a stale one for u1. The store
+			// must still emit for the frame (the in-place update alone is invisible
+			// to subscribers).
+			const emitted = values.length;
+			simulateTopicMessage('cur-multi', { event: 'update', data: { key: 'u2', x: 9, _t: 300 } });
+			simulateTopicMessage('cur-multi', { event: 'update', data: { key: 'u1', x: 5, _t: 150 } });
+			rafCallbacks[0]();
+			expect(values.length).toBe(emitted + 1);
+			const last = values[values.length - 1];
+			expect(last.find((c) => c.key === 'u2').x).toBe(9);
+			expect(last.find((c) => c.key === 'u1').x).toBe(0);
+			unsub();
+		} finally {
+			globalThis.requestAnimationFrame = origRaf;
+			globalThis.cancelAnimationFrame = origCancel;
+			if (hadWindow) globalThis.window = origWindow; else delete globalThis.window;
+		}
+	});
+
+	it('a stamp older by more than the reorder window applies (a publisher whose clock moved)', async () => {
+		const { values, unsub } = await cursorStream('doc/skew', 'cur-skew');
+		simulateTopicMessage('cur-skew', { event: 'update', data: { key: 'u1', x: 1, _t: 10_000 } });
+		simulateTopicMessage('cur-skew', { event: 'update', data: { key: 'u1', x: 2, _t: 8_000 } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 2, _t: 8_000 }]);
+		unsub();
+	});
+
+	it('an equal or missing stamp keeps last-write-wins (older servers, same-instant samples)', async () => {
+		const { values, unsub } = await cursorStream('doc/lww', 'cur-lww');
+		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 1, _t: 100 } });
+		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 2, _t: 100 } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 2, _t: 100 }]);
+		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 3 } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 3 }]);
+		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 4, _t: 50 } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 4, _t: 50 }]);
+		unsub();
+	});
+
+	it('a burst that arrives reordered within one animation frame lands on its newest sample', async () => {
+		// The frame-batched path is chosen at module load (a window with
+		// requestAnimationFrame), so load a client under those globals.
+		const rafCallbacks = [];
+		const hadWindow = 'window' in globalThis;
+		const origWindow = globalThis.window;
+		const origRaf = globalThis.requestAnimationFrame;
+		const origCancel = globalThis.cancelAnimationFrame;
+		if (!hadWindow) globalThis.window = /** @type {any} */ ({});
+		globalThis.requestAnimationFrame = (cb) => { rafCallbacks.push(cb); return rafCallbacks.length; };
+		globalThis.cancelAnimationFrame = () => {};
+		try {
+			vi.resetModules();
+			const mod = await import('../src/client.js');
+			const store = mod.__stream('doc/burst', { merge: 'cursor' });
+			const values = [];
+			const unsub = store.subscribe((v) => values.push(v));
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'cur-burst', merge: 'cursor' });
+
+			simulateTopicMessage('cur-burst', { event: 'update', data: { key: 'u1', x: 0.1, _t: 10 } });
+			simulateTopicMessage('cur-burst', { event: 'update', data: { key: 'u1', x: 0.2, _t: 30 } });
+			simulateTopicMessage('cur-burst', { event: 'update', data: { key: 'u1', x: 0.15, _t: 20 } });
+			expect(rafCallbacks).toHaveLength(1);
+			rafCallbacks[0]();
+			expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 0.2, _t: 30 }]);
+			unsub();
+		} finally {
+			globalThis.requestAnimationFrame = origRaf;
+			globalThis.cancelAnimationFrame = origCancel;
+			if (hadWindow) globalThis.window = origWindow; else delete globalThis.window;
+		}
+	});
+});
+
 // - onDerived re-export ------------------------------------------------------
 
 describe('onDerived()', () => {

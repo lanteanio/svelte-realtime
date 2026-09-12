@@ -662,7 +662,7 @@ function _settleClaimBarriers(ws, topic, fn) {
  * @param {Function} fn
  * @param {any} ctx
  * @param {any[]} args
- * @param {{ id: string, seq?: number, schemaVersion?: number, version?: any }} msg
+ * @param {{ id: string, seq?: number, schemaVersion?: number, version?: any, attach?: boolean }} msg
  * @param {{ topic: any, claimTopic?: any }} subscribedRef
  * @returns {Promise<any>}
  */
@@ -721,15 +721,17 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// prefixes the same way, matches. Null tenant -> unchanged (zero cost).
 	if (ctx.tenantId && typeof topic === 'string') topic = _tenantTopic(ctx.tenantId, topic);
 	// First-joiner owner delivery: if this is an owner-room DATA stream, open the
-	// per-socket claim barrier NOW - synchronously, in the batch's sync prefix,
-	// before ANY loader body in this batch can run (the paired :owner stream's
-	// loader among them). The data-join resolves it with the claimed owner; that
-	// loader awaits it. Sequencing the value into the subscribe response is what
-	// closes the race a timer could not (see room-owner.js).
+	// per-(socket, topic) claim barrier now, before this item awaits anything
+	// further. The data-join resolves it with the claimed owner; the paired
+	// :owner loader in the same batch awaits it after its own shared-store
+	// read, which is what orders the two in practice. A paired loader that
+	// runs ahead of this line finds no barrier and serves the store as read
+	// (the barrier is soft), so the worst case is a missing self entry, never
+	// a hang. Sequencing the value into the subscribe response is what closes
+	// the race a timer could not (see room-owner.js).
 	if (typeof topic === 'string' && /** @type {any} */ (fn).__hasOwner) _ownerClaimBegin(ws, topic);
 	// Same sequencing for a presence room's DATA stream: the paired :presence
-	// loader awaits the joiner's own roster entry off the data-join, so the
-	// barrier must be open before any loader body in this batch runs.
+	// loader awaits the joiner's own roster entry off the data-join.
 	if (typeof topic === 'string' && /** @type {any} */ (fn).__hasPresence) _presenceClaimBegin(ws, topic);
 	// Record the topic whose barriers we just opened so the caller's catch settles
 	// them if a throw escapes before the happy-path settle below - the room guard
@@ -795,6 +797,20 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// working: if the method isn't there, we fall back to raw
 	// `ws.subscribe` and only the in-realtime gates (`__streamFilter`,
 	// `live.room({ guard })`) remain the stream-RPC access checks.
+	// Name the wire topic to the client BEFORE the socket is subscribed. The
+	// client only learns the topic from the subscribe response, and that
+	// response leaves after this item's loader (and, in a batch, after every
+	// sibling's). Every frame the subscription delivers in between reaches a
+	// socket whose client has no store for the topic yet, and the adapter
+	// client drops such frames: a peer's presence join published in that
+	// window is in neither the snapshot (read after this point) nor the live
+	// stream, and nothing resends it. With the attach frame ahead of the
+	// subscribe the client's listener exists for every frame the subscription
+	// can deliver, and buffers them until the snapshot lands. Sent only when
+	// the request opts in, so an older client never sees a non-ok frame.
+	if (msg.attach === true && typeof topic === 'string') {
+		_respond(ws, platform, id, { attach: true, topic });
+	}
 	let _subscribeDenial = null;
 	try {
 		if (typeof platform.subscribe === 'function') {

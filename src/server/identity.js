@@ -5,10 +5,13 @@
 // import is the static dev flag, used for a one-shot diagnostic.
 
 import { _IS_DEV } from './env.js';
+import { randomU32 } from '../shared/runtime.js';
 
 /** @type {WeakMap<object, string>} Stable guest ID per connection for anonymous users */
 const _guestIds = new WeakMap();
 let _guestIdCounter = 0;
+/** @type {string | null} Per-process salt for guest ids, drawn on first use */
+let _guestSalt = null;
 
 let _unusableIdWarnFired = false;
 
@@ -167,7 +170,15 @@ export function _getIdentityKey(ctx) {
 	if (!ctx.ws) return 'anon';
 	let guestId = _guestIds.get(ctx.ws);
 	if (!guestId) {
-		guestId = '__guest_' + (++_guestIdCounter).toString(36);
+		// Salted per process (64 random bits, so a fleet cannot collide). The
+		// counter alone restarts at 1 on every replica, so the first anonymous
+		// socket on each instance of a cluster would share one presence key:
+		// each side then filters the other out as itself and neither ever sees
+		// the other. The salt is drawn lazily from the runtime seam, so a
+		// simulation stays deterministic. It is visible to room members in
+		// each other's guest keys and carries nothing but process identity.
+		if (_guestSalt === null) _guestSalt = randomU32().toString(36) + randomU32().toString(36);
+		guestId = '__guest_' + _guestSalt + '_' + (++_guestIdCounter).toString(36);
 		_guestIds.set(ctx.ws, guestId);
 	}
 	return guestId;

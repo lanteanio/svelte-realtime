@@ -576,8 +576,38 @@ export function createTestEnv(options) {
 			const state = { values: [], events: [], topic: null, error: null, hasMore: false, cursor: null };
 			const streamId = 'test-' + (idCounter++).toString(36);
 
+			/** Frames the subscription delivered between the attach frame and the snapshot. @type {any[]} */
+			let attachBuffer = [];
+			let attached = false;
+			const applyEnvelope = (envelope) => {
+				state.events.push(envelope);
+				const current = state.values.length > 0 ? state.values[state.values.length - 1] : undefined;
+				const merged = _applyTestMerge(current, envelope, state._merge, state._key, state._mergeOpts);
+				state.values.push(merged);
+			};
+			// Claim the first unclaimed entry for this topic (FIFO); mirrors the
+			// browser client's listener install.
+			const claimTopic = (topic) => {
+				const entries = ws._topicEntries?.get(topic);
+				const entry = entries && entries.find(e => !e.cb);
+				if (!entry) return;
+				entry.cb = (envelope) => {
+					if (!attached) { attachBuffer.push(envelope); return; }
+					applyEnvelope(envelope);
+				};
+			};
+
 			_sendHandlers.set(streamId, (topic, event, data) => {
 				if (topic !== '__rpc' || event !== streamId) return;
+				// Early attach: the server names the wire topic before it subscribes
+				// the socket; the entry is claimed now so frames delivered ahead of
+				// the snapshot buffer instead of being lost. The handler stays for
+				// the real response.
+				if (data && data.attach === true) {
+					state.topic = data.topic || null;
+					if (state.topic) claimTopic(state.topic);
+					return;
+				}
 				_sendHandlers.delete(streamId);
 
 				if (data && data.ok) {
@@ -591,21 +621,15 @@ export function createTestEnv(options) {
 					state._mergeOpts = { prepend: data.prepend, max: data.max };
 
 					if (state.topic) {
-						// Claim the first unclaimed entry for this topic (FIFO)
 						const entries = ws._topicEntries?.get(state.topic);
-						if (entries) {
-							const entry = entries.find(e => !e.cb);
-							if (entry) {
-								entry.cb = (envelope) => {
-									state.events.push(envelope);
-									const current = state.values.length > 0 ? state.values[state.values.length - 1] : undefined;
-									const merged = _applyTestMerge(current, envelope, state._merge, state._key, state._mergeOpts);
-									state.values.push(merged);
-								};
-							}
-						}
+						const claimed = entries && entries.some(e => e.cb);
+						if (!claimed) claimTopic(state.topic);
 					}
+					attached = true;
+					for (const envelope of attachBuffer) applyEnvelope(envelope);
+					attachBuffer = [];
 				} else if (data) {
+					attachBuffer = [];
 					state.error = new LiveError(data.code || 'UNKNOWN', data.error || 'Unknown error');
 				}
 			});
@@ -615,7 +639,7 @@ export function createTestEnv(options) {
 				if (handler) handler(topic, event, data);
 			};
 
-			const msg = { rpc: path, id: streamId, args, stream: true };
+			const msg = { rpc: path, id: streamId, args, stream: true, attach: true };
 			const buf = textEncoder.encode(JSON.stringify(msg)).buffer;
 			handleRpc(ws, buf, platform);
 

@@ -20,10 +20,10 @@ import { _bindAlarmCtx } from './alarm.js';
 // set (_rollingBack) stay in server.js - the staying stream-subscribe rollback
 // path writes _rollingBack and the room onUnsubscribe reads it. Set at init
 // (mirrors installSmooth).
-let _callTopicFn, _rollingBack;
+let _callTopicFn, _isRollingBack;
 export function installRoom(seams) {
 	_callTopicFn = seams.callTopicFn;
-	_rollingBack = seams.rollingBack;
+	_isRollingBack = seams.isRollingBack;
 }
 
 /**
@@ -540,7 +540,7 @@ export const _roomRegister = function room(config) {
 			// On rollback (failed stream init), skip grace and release
 			// immediately. Cluster release decides whether this was the LAST
 			// subscriber across the cluster - only then do we publish 'leave'.
-			if (ctx.ws && _rollingBack.has(ctx.ws)) {
+			if (ctx.ws && _isRollingBack(ctx.ws, topic)) {
 				if (ref.timer) clearTimer(ref.timer);
 				_presenceRef.delete(refKey);
 				releaseIdentity();
@@ -560,13 +560,14 @@ export const _roomRegister = function room(config) {
 	// momentarily perturb the public rooms list and roster before rollback.
 	// Exposing the guard as the stream filter runs it before any of that; it
 	// stamps the request ctx so the loader skips the duplicate run.
-	if (runRoomGuard) {
-		/** @type {any} */ (dataStream).__streamFilter = async (ctx, ...args) => {
+	const roomGuardFilter = runRoomGuard
+		? async (ctx, ...args) => {
 			await runRoomGuard(ctx, args);
 			/** @type {any} */ (ctx)._roomGuardRan = true;
 			return true;
-		};
-	}
+		}
+		: null;
+	if (roomGuardFilter) /** @type {any} */ (dataStream).__streamFilter = roomGuardFilter;
 
 	/** @type {any} */ (roomExport).__isRoom = true;
 	/** @type {any} */ (roomExport).__dataStream = dataStream;
@@ -681,7 +682,7 @@ export const _roomRegister = function room(config) {
 		/** @type {any} */ (roomExport).__presenceStream = live.stream(
 			(ctx, ...args) => topicFn(ctx, ...args) + ':presence',
 			async (ctx, ...args) => {
-				if (runRoomGuard) await runRoomGuard(ctx, args);
+				if (runRoomGuard && !(/** @type {any} */ (ctx))._roomGuardRan) await runRoomGuard(ctx, args);
 				// The roster is keyed by the WIRE data topic (the data-stream's
 				// onSubscribe acquired it with the tenant-prefixed topic), so the
 				// loader must prefix the same way or a tenant would read an empty /
@@ -720,7 +721,7 @@ export const _roomRegister = function room(config) {
 		/** @type {any} */ (roomExport).__ownerStream = live.stream(
 			(ctx, ...args) => topicFn(ctx, ...args) + ':owner',
 			async (ctx, ...args) => {
-				if (runRoomGuard) await runRoomGuard(ctx, args);
+				if (runRoomGuard && !(/** @type {any} */ (ctx))._roomGuardRan) await runRoomGuard(ctx, args);
 				// The owner store is keyed by the WIRE data topic (the data
 				// stream's onSubscribe joined with the tenant-prefixed topic),
 				// so the loader must prefix the same way. Null tenant -> unchanged.
@@ -752,11 +753,21 @@ export const _roomRegister = function room(config) {
 		/** @type {any} */ (roomExport).__cursorStream = live.stream(
 			(ctx, ...args) => topicFn(ctx, ...args) + ':cursors',
 			async (ctx, ...args) => {
-				if (runRoomGuard) await runRoomGuard(ctx, args);
+				if (runRoomGuard && !(/** @type {any} */ (ctx))._roomGuardRan) await runRoomGuard(ctx, args);
 				return [];
 			},
 			{ merge: 'cursor' }
 		);
+	}
+
+	// The same pre-subscribe guard on every sub-stream: a denied joiner must
+	// not be subscribed at the wire (nor told the wire topic) and rolled back
+	// afterwards; the loaders keep their own run for the paths with no filter.
+	if (roomGuardFilter) {
+		for (const sub of ['__presenceStream', '__ownerStream', '__cursorStream']) {
+			const stream = /** @type {any} */ (roomExport)[sub];
+			if (stream) stream.__streamFilter = roomGuardFilter;
+		}
 	}
 
 	// Room-scoped actions

@@ -748,6 +748,7 @@ board.detach();
 - `attach()` holds an internal retain, so the stream stays attached with no UI subscriber and auto-reattaches across outages; it resolves on the server's confirmation (the loader response - no extra wire frame) and rejects when the attach fails (e.g. a `FORBIDDEN` denial). Idempotent.
 - `detach()` releases the retain and, when no other subscriber remains, tears the subscription down immediately - detach means "done", not "component unmounted, maybe coming back" (that case is the automatic resume-grace window). With live UI subscribers the stream stays attached on their behalf.
 - `attaching` covers every in-flight subscribe (first attach, reconnect, resume); `failed` holds until a retry re-enters `attaching`; the resume-grace release reads as `detached`.
+- While `attaching`, the server names the stream's wire topic in a small attach frame before it subscribes the socket, so the client's listener exists for every live frame the subscription can deliver. Frames that land before the snapshot response are buffered and replayed over it. That is what keeps a peer's presence `join` published while your own subscribe was still loading from being lost: without the attach frame the client learns the topic only from the response, and a frame delivered in between reaches a store that does not exist yet.
 
 For RPC calls, errors are thrown as `RpcError` with a `code` field:
 
@@ -3862,6 +3863,8 @@ Name the current user once with `board.identify(key)` - the same identity you al
 ```
 
 The aggregated view ships from the `svelte-realtime/multiplayer` subpath and is reactive: `others` and `cursors` refresh whenever the underlying presence or cursor stream pushes. Reactivity uses Svelte 5 runes, so `board.room(...)` requires Svelte 5.
+
+Every cursor frame and every presence-field update the server publishes carries `_t`, the publish instant on the server's wall clock (`_t` is reserved: a payload field of that name is overwritten). The cursor merge is last-write-wins per key, the presence merge is last-write-wins per field, and both cross the cross-instance relay with no ordering promise of their own, so the client uses `_t` to ignore a sample older than the one it holds for that key or field (and, within one animation frame, to keep the newest cursor sample rather than the last to arrive). A reordered or re-delivered sample can therefore never roll a peer's cursor back to a mid-gesture point, or park a stale `typing` or lock flag, and leave it there. The guard only bites within a one-second window: a frame older than the held stamp by more than that is a publisher whose clock moved (it reconnected to a replica whose wall clock is behind) and applies, so clock skew across replicas never freezes a peer. Frames without `_t` (an older server) keep plain last-write-wins.
 
 ### Raw sub-streams
 

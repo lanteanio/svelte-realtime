@@ -4,6 +4,7 @@ import { _getIdentityKey } from './identity.js';
 import { _clusterPresenceMerge } from './presence.js';
 import { _tenantTopic } from './tenant.js';
 import { _IS_DEV } from './env.js';
+import { wallEpoch } from '../shared/runtime.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); multiplayer registration reaches it through this,
@@ -150,6 +151,13 @@ export const _multiplayerRegister = function multiplayer(config) {
 		} else if (payload.length > 0) {
 			frame.value = payload.length === 1 ? cur : payload;
 		}
+		// Publish instant, so a receiver can tell a late or re-delivered sample
+		// from a newer one. Cursor frames cross a relay with no ordering
+		// promise of their own (a pipelined bus, a multi-worker fan-out, a
+		// cluster of Redis nodes), and the cursor merge is last-write-wins:
+		// without the stamp an out-of-order sample lands as the newest and the
+		// peer's cursor sits on a mid-gesture point until the next move.
+		frame._t = wallEpoch();
 		ctx.publish(cursorTopic, 'update', frame);
 	};
 
@@ -190,6 +198,10 @@ export const _multiplayerRegister = function multiplayer(config) {
 		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
 			Object.assign(frame, delta);
 		}
+		// Publish instant, per field on the receiving side: the same reorder
+		// hazard as cursor frames, with a stale flag (typing, a lock) as the
+		// visible damage.
+		frame._t = wallEpoch();
 		ctx.publish(presenceTopic, 'update', frame);
 	};
 

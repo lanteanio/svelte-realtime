@@ -91,26 +91,119 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - **Adapter peer range moves to `svelte-adapter-uws@^0.6.0-next.94`.** The
-  operation platform view (`ctx.platform`) now inherits the adapter's
-  `traceContext` and `trace` declarations instead of restating them as
-  optional, matching the shape the adapter ships. `SmoothEntity.shoot`
-  depends on the adapter channel's options argument, which landed in the
-  adapter's next.91.
+  scaffold pin, the README compatibility row, and the generated first-run
+  transcript follow it. The operation platform view (`ctx.platform`) now
+  inherits the adapter's `traceContext` and `trace` declarations instead of
+  restating them as optional, matching the shape the adapter ships.
+  `SmoothEntity.shoot` depends on the adapter channel's options argument,
+  which landed in the adapter's next.91.
+
+- **A stale docs-site onboarding mirror is a notice, not a check failure.**
+  The onboarding generator still verifies this package's own
+  `docs/first-run.md` and still offers `--sync-docs-site`; a sibling docs
+  checkout whose generated mirror is behind now prints a notice instead of
+  failing this repository's check, because the docs site verifies that mirror
+  with its own gate and a check here must stay green on a clone with no
+  sibling at all.
+
+- **Stream subscribes carry an early attach frame.** A stream subscribe
+  request now asks (`attach: true`) for the server to name the wire topic in
+  a small `__rpc` frame before it subscribes the socket, and the client
+  installs its listener on that frame. Every live frame the subscription can
+  deliver ahead of the snapshot response is buffered and replayed over the
+  snapshot; a subscribe that is then rejected or times out tears down exactly
+  what the frame installed. An older client that does not ask never sees the
+  frame. The test harness client (`createTestEnv().connect().subscribe`)
+  speaks the same frame.
+
+- **A room's guard runs before the wire subscribe on every sub-stream.** The
+  presence, owner, and cursor streams of a `live.room` / `live.multiplayer`
+  ran the room guard inside their loaders, after the socket was subscribed
+  (and after the attach frame named the topic); a denied joiner was subscribed
+  and rolled back. The guard is now the pre-subscribe filter on those streams
+  as on the data stream, so a denied joiner is never subscribed and never told
+  the wire topic; the loaders keep their own run for `.load()` and reloads.
+
+- **Cursor frames and presence-field updates carry their publish instant.**
+  `live.multiplayer` cursor updates and presence-field updates (`typing`,
+  `selection`, `lock:*`) gain `_t` (server wall-clock ms at publish;
+  reserved, a payload field of that name is overwritten). The client cursor
+  merge ignores a stamped sample older than the one it holds and keeps the
+  newest stamp within one animation frame; the presence merge does the same
+  per field, so a reordered older update for one field cannot park a stale
+  flag while updates to other fields still apply. The guard only bites within
+  a one-second window: a frame older than that is a publisher whose clock
+  moved (a reconnect to a replica whose wall clock is behind) and applies, so
+  clock skew across replicas never freezes a peer. Frames without the stamp
+  keep last-write-wins. The stamp costs about twenty bytes on each of these
+  frames.
 
 ### Fixed
 
 - **Silent-topic dev warning no longer fires for topics the framework itself
   publishes.** The watchdog only observed `ctx.publish`, so every
   `live.aggregate` window output, single-state aggregate, derived recompute,
-  stale or invalidation reload, throttle trailing edge, replay-routed write,
-  and out-of-band `publish()` left it armed and it warned about silence on a
-  topic publishing at full rate, with remediation text pointing at handlers
-  that do not exist. Every framework-internal publish now passes one choke
-  point that marks the topic live, and a new check gate
+  `live.cron` tick, stale or invalidation reload, throttle trailing edge,
+  replay-routed write, native `ctx.batch` list, out-of-band `publish()`,
+  and every event relayed in from another instance left it armed and it
+  warned about silence on a topic publishing at full rate, with remediation
+  text pointing at handlers that do not exist. Every framework-internal
+  publish now passes one choke point that marks the topic live (the local
+  delivery of a cluster relay included), and a new check gate
   (`scripts/check-publish-routing.js`) fails the build on any bare
-  `platform.publish` outside it. Regression tests hold a windowed aggregate
-  output, a single-state aggregate, a throttled publish, and an out-of-band
-  publish past the threshold and assert no warning.
+  `.publish()` or `.batch()` on a platform receiver outside it, aliases
+  included. Regression tests hold a windowed aggregate output, a single-state
+  aggregate, a cron tick, a throttled publish, a native batch, and an
+  out-of-band publish past the threshold and assert no warning.
+
+- **A peer's presence join published while your own subscribe was still
+  loading is no longer lost.** The server registers the socket for fan-out
+  before a stream's loader runs, and a batch answers only once every item's
+  loader resolved, so a join delivered in that window reached a client with
+  no store for the topic yet and was dropped: with a Redis-backed roster or
+  any app await in the join, a few percent of two-visitor pairings left one
+  side permanently blind to the other, with no resync. The early attach frame
+  (see Changed) closes the window; the roster snapshot is unchanged and the
+  buffered join fills the rest. Tests drive the real dispatch path with one
+  joiner parked on an app await while a peer joins, and pin the wire order
+  and the client-side replay.
+
+- **Anonymous guest identities are salted per process.** The guest key was a
+  bare per-process counter, so the first anonymous socket on each replica of
+  a cluster shared one presence key: the shared roster held a single entry,
+  each side filtered it out as itself, and two visitors on different
+  instances never saw each other in any room. The key now carries a
+  64-bit per-process salt drawn from the runtime seam (a pinned simulation
+  stays reproducible; a fleet cannot collide); a socket keeps its key for its
+  lifetime and an authenticated id still wins. The salt is visible to room
+  members in each other's guest keys and carries nothing but process
+  identity.
+
+- **A no-op event in a frame no longer hides a modification made earlier in
+  the same frame.** The per-frame dirty flag was assigned from the last event
+  rather than accumulated, so a stale stamped sample for one key (or an
+  identical `set`) arriving after a fresh in-place update for another key
+  skipped the store emission for the whole frame; subscribers saw the new
+  value only on the next modifying frame.
+
+- **A failed room subscribe no longer skips the leave grace of another room
+  on the same socket.** The rollback marker was keyed by socket alone, so
+  while one room's failed subscribe rolled back, any other room's ordinary
+  unsubscribe on that socket released its presence immediately instead of
+  through the grace window. The marker is now keyed by socket and topic.
+
+- **A join's claim barrier slot no longer outlives the batch that consumed
+  it.** The dispatch settle that runs after every join recreated a slot the
+  paired loader had already consumed, and the stale slot lived until the
+  membership drained. A null settle now only closes a slot that still exists.
+
+- **A reordered cursor sample no longer parks a peer's cursor mid-gesture.**
+  Cursor frames crossed the cross-instance relay with no ordering of their
+  own and the client merge was unconditional last-write-wins, so a late
+  sample from the first burst landed as the newest and stayed until the next
+  move. See the stamped cursor frames under Changed; tests cover an older
+  stamp arriving after a newer one and a burst reordered within one
+  animation frame.
 
 - **`close()` drains a topic that was unsubscribed and then re-subscribed on
   the same socket.** The per-socket record of already-drained topics was never

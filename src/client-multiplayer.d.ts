@@ -11,6 +11,8 @@ export interface RosterEntry {
 export interface CursorEntry {
 	key: string;
 	color: string;
+	/** Server publish instant (wall-clock ms) of the sample; reserved, set by the server. */
+	_t?: number;
 	[field: string]: any;
 }
 

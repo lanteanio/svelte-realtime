@@ -169,6 +169,15 @@ export function ensureListener() {
 		// Single response
 		const entry = pending.get(correlationId);
 		if (!entry) return;
+		// Early attach for a stream subscribe: the server names the wire topic
+		// before it subscribes the socket, so the stream can install its
+		// listener ahead of the first live frame. The subscribe itself is still
+		// pending (its response follows, possibly inside a batch), so the entry
+		// and its timer stay.
+		if (data && data.attach === true) {
+			if (entry.stream && typeof entry.attach === 'function') entry.attach(data.topic);
+			return;
+		}
 		pending.delete(correlationId);
 		if (entry.timer) clearTimer(entry.timer);
 

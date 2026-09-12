@@ -459,13 +459,13 @@ describe('live.multiplayer()', () => {
 
 		await room.__cursorMove(ctx, 'b1', { x: 10, y: 20 });
 		expect(published).toEqual([
-			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', x: 10, y: 20 } }
+			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', x: 10, y: 20, _t: expect.any(Number) } }
 		]);
 
 		published.length = 0;
 		await room.__cursorReportViewport(ctx, 'b1', { x: 0, y: 0, w: 800, h: 600 });
 		expect(published).toEqual([
-			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', viewport: true, x: 0, y: 0, w: 800, h: 600 } }
+			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', viewport: true, x: 0, y: 0, w: 800, h: 600, _t: expect.any(Number) } }
 		]);
 	});
 
@@ -509,13 +509,13 @@ describe('live.multiplayer()', () => {
 
 		await room.__presenceUpdate(ctx, 'b1', { typing: true });
 		expect(published).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true, _t: expect.any(Number) } }
 		]);
 
 		published.length = 0;
 		await room.__presenceUpdate(ctx, 'b1', { selection: { start: 0, end: 5, nodePath: [0] } });
 		expect(published).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', selection: { start: 0, end: 5, nodePath: [0] } } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', selection: { start: 0, end: 5, nodePath: [0] }, _t: expect.any(Number) } }
 		]);
 	});
 
@@ -536,13 +536,13 @@ describe('live.multiplayer()', () => {
 
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': true });
 		expect(published).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': true } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': true, _t: expect.any(Number) } }
 		]);
 
 		published.length = 0;
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': null });
 		expect(published).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': null } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': null, _t: expect.any(Number) } }
 		]);
 	});
 
@@ -798,7 +798,7 @@ describe('live.multiplayer() sticky presence fields', () => {
 
 		// The forward publish still emits the live update frame.
 		expect(publishedA).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true, _t: expect.any(Number) } }
 		]);
 
 		// But the late snapshot carries no typing field.

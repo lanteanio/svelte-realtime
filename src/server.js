@@ -824,8 +824,20 @@ function _trackStreamSub(ws, topic, fn) {
 	if (state.metricsInstruments) state.metricsInstruments.streamGauge.inc();
 }
 
-/** @type {WeakSet<object>} Sockets currently in rollback (skips grace period in presence) */
-const _rollingBack = new WeakSet();
+/**
+ * (socket, topic) pairs whose failed stream subscribe is being rolled back
+ * (the room's unsubscribe hook skips the leave grace for them). Keyed by
+ * topic as well as socket: a socket may hold several rooms, and another
+ * room's ordinary unsubscribe on the same socket must not be mistaken for a
+ * rollback while this one is in flight.
+ * @type {WeakMap<object, Set<string>>}
+ */
+const _rollingBack = new WeakMap();
+/** @param {object} ws @param {string} topic */
+function _isRollingBack(ws, topic) {
+	const topics = _rollingBack.get(ws);
+	return topics !== undefined && topics.has(topic);
+}
 
 function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 	try { ws.unsubscribe(topic); } catch {}
@@ -879,11 +891,16 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
 		remainingSubscribers = wsSet ? wsSet.size - (wsSet.has(ws) ? 1 : 0) : 0;
 	}
 	if (/** @type {any} */ (fn).__onUnsubscribe && ctx) {
-		_rollingBack.add(ws);
+		let topics = _rollingBack.get(ws);
+		if (!topics) { topics = new Set(); _rollingBack.set(ws, topics); }
+		topics.add(topic);
 		Promise.resolve()
 			.then(() => /** @type {any} */ (fn).__onUnsubscribe(ctx, topic, remainingSubscribers))
 			.catch(() => {})
-			.finally(() => _rollingBack.delete(ws));
+			.finally(() => {
+				const set = _rollingBack.get(ws);
+				if (set) { set.delete(topic); if (set.size === 0) _rollingBack.delete(ws); }
+			});
 	}
 }
 
@@ -2951,7 +2968,7 @@ pipe.join = function pipeJoin(field, resolver, as) {
 	};
 };
 
-installRoom({ callTopicFn: _callTopicFn, rollingBack: _rollingBack });
+installRoom({ callTopicFn: _callTopicFn, isRollingBack: _isRollingBack });
 
 // live.room builds a collaborative room (data stream, presence, cursors, scoped
 // actions); its registration body lives in src/server/room.js. This thin wrapper

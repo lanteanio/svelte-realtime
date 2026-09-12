@@ -64,9 +64,10 @@ const _OWNER_TTL_SEC = 3600;
 // round-trips by a variable amount, so no fixed delay orders after it.
 //
 // The fix SEQUENCES the value into the subscribe response itself: a per-(socket,
-// wire-topic) barrier is opened synchronously when the data-stream subscribe
-// resolves its topic (dispatch, in the batch's synchronous prefix, before any
-// loader body runs), the data-join RESOLVES it with the claimed owner, and the
+// wire-topic) barrier is opened when the data-stream subscribe resolves its
+// topic (dispatch, before that item awaits anything further; the paired
+// loader's own shared-store read runs first, so the barrier is open by the
+// time it looks), the data-join RESOLVES it with the claimed owner, and the
 // `:owner` loader AWAITS it and returns that value as its snapshot. The client
 // registers the store from a response that already carries the owner - there is
 // no racing second frame. A `null` resolution (a late joiner that claimed
@@ -114,7 +115,11 @@ function _claimBeginKey(ws, key) {
 }
 
 function _claimResolveKey(ws, key, value) {
-	const slot = _ownerClaimSlot(ws, key, true);
+	// A real resolution (a value) may create the slot the paired loader will
+	// read; the dispatch settle (null) only closes a slot that still exists,
+	// so a settle running after the loader consumed and deleted the slot does
+	// not recreate one that then lives until the membership drains.
+	const slot = _ownerClaimSlot(ws, key, value != null);
 	if (slot && !slot.settled) {
 		slot.settled = true;
 		slot.resolve(value ?? null);
@@ -132,8 +137,9 @@ async function _claimAwaitKey(ws, key) {
 
 /**
  * Open the claim barrier for a socket's owner-room data-stream subscribe. Called
- * synchronously at dispatch topic-resolution (before the paired `:owner` loader
- * can run this batch), so `expected` is set when that loader checks. Idempotent.
+ * at dispatch topic-resolution, before the paired `:owner` loader's shared-store
+ * read completes, so `expected` is set when that loader checks; a loader that
+ * checks earlier serves the store as read (the barrier is soft). Idempotent.
  * @param {any} ws
  * @param {string} topic wire data topic
  */
@@ -169,9 +175,10 @@ export async function _ownerClaimAwait(ws, topic) {
 
 /**
  * Open the presence self-delivery barrier for a socket's presence-room
- * data-stream subscribe. Called synchronously at dispatch topic-resolution
- * (before the paired `:presence` loader can run this batch), so `expected` is
- * set when that loader checks. Idempotent.
+ * data-stream subscribe. Called at dispatch topic-resolution, before the
+ * paired `:presence` loader's shared-roster read completes, so `expected` is
+ * set when that loader checks; a loader that checks earlier serves the roster
+ * as read (the barrier is soft). Idempotent.
  * @param {any} ws
  * @param {string} topic wire data topic
  */
@@ -225,6 +232,12 @@ export function _claimBarriersClear(ws, topic) {
 	m.delete(topic);
 	m.delete(topic + _PRESENCE_CLAIM_NS);
 	if (m.size === 0) _ownerClaimByWs.delete(ws);
+}
+
+/** Number of claim slots (owner and presence) a socket currently holds (tests only). @internal */
+export function _claimSlotCountForTests(ws) {
+	const m = _ownerClaimByWs.get(ws);
+	return m ? m.size : 0;
 }
 
 /** Reset all in-flight claim barriers (tests only). @internal */
