@@ -102,6 +102,19 @@ export function _recordRpcMetrics(path, code, startTime, ws) {
 }
 
 /**
+ * Duration histogram bounds, in seconds with fractional bucket edges from 1 ms
+ * to 10 s (the same list the adapter registers for its HTTP and upgrade
+ * durations). Registries default to millisecond-shaped buckets starting at 1,
+ * which puts a 5 ms call and a 900 ms call in the same bucket; samples already
+ * recorded in the wrong buckets cannot be repaired afterwards, so every
+ * duration histogram passes this list explicitly.
+ */
+export const DURATION_BUCKETS_SECONDS = Object.freeze([
+	0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
+	0.25, 0.5, 1, 2.5, 5, 10
+]);
+
+/**
  * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
  * subscriptions, and cron executions. Zero overhead if never called.
  *
@@ -109,8 +122,10 @@ export function _recordRpcMetrics(path, code, startTime, ws) {
  *
  * The registry is any object exposing:
  *   counter({ name, help, labelNames }) -> { inc(labels?) }
- *   histogram({ name, help, labelNames }) -> { observe(labels, valueSeconds) }
+ *   histogram({ name, help, labelNames, buckets }) -> { observe(labels, valueSeconds) }
  *   gauge({ name, help }) -> { inc(), dec() }
+ * Durations are seconds; `buckets` carries the fractional-second bounds the
+ * registry must honour (a registry adapter that drops them measures nothing).
  *
  * Options:
  * - `cohort(userData) => string`: stratify the RPC series by client cohort
@@ -144,7 +159,7 @@ const _liveMetrics = function metrics(registry, options = {}) {
 		registry,
 		cohortFn,
 		rpcCount: registry.counter({ name: 'svelte_realtime_rpc_total', help: 'Total RPC calls', labelNames: rpcLabels }),
-		rpcDuration: registry.histogram({ name: 'svelte_realtime_rpc_duration_seconds', help: 'RPC call duration', labelNames: cohortFn ? ['path', 'cohort'] : ['path'] }),
+		rpcDuration: registry.histogram({ name: 'svelte_realtime_rpc_duration_seconds', help: 'RPC call duration', labelNames: cohortFn ? ['path', 'cohort'] : ['path'], buckets: [...DURATION_BUCKETS_SECONDS] }),
 		rpcErrors: registry.counter({ name: 'svelte_realtime_rpc_errors_total', help: 'Total RPC errors', labelNames: cohortFn ? ['path', 'code', 'cohort'] : ['path', 'code'] }),
 		streamGauge: registry.gauge({ name: 'svelte_realtime_stream_subscriptions', help: 'Active stream subscriptions' }),
 		cronCount: registry.counter({ name: 'svelte_realtime_cron_total', help: 'Total cron executions', labelNames: ['path', 'status'] }),
@@ -208,7 +223,7 @@ const _livePerfBudget = function perfBudget(subsystem, budgetMs) {
 	}
 	if (!mi.budgetGauge) {
 		mi.budgetGauge = mi.registry.gauge({ name: 'svelte_realtime_perf_budget_seconds', help: 'Declared per-subsystem performance budget', labelNames: ['subsystem'] });
-		mi.budgetActual = mi.registry.histogram({ name: 'svelte_realtime_perf_actual_seconds', help: 'Observed per-subsystem duration', labelNames: ['subsystem'] });
+		mi.budgetActual = mi.registry.histogram({ name: 'svelte_realtime_perf_actual_seconds', help: 'Observed per-subsystem duration', labelNames: ['subsystem'], buckets: [...DURATION_BUCKETS_SECONDS] });
 		mi.budgetExceeded = mi.registry.counter({ name: 'svelte_realtime_perf_budget_exceeded_total', help: 'Observations over the declared budget', labelNames: ['subsystem'] });
 	}
 	// The budget gauge needs a settable gauge (the extensions registry has

@@ -59,7 +59,7 @@ import { _IS_DEV } from './server/env.js';
 import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge } from './server/presence.js';
 import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
-import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP } from './server/publish-helpers.js';
+import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _platformPublish } from './server/publish-helpers.js';
 import { _gateAggregate, _resetNoiseBlockCache } from './server/differential-privacy.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
@@ -606,7 +606,7 @@ async function _invalidationReload(watcher) {
 			// reload data, so skip the publish entirely.
 			try { finalData = redactor(finalData); } catch { return; }
 		}
-		try { watcher.platform.publish(watcher.topic, 'refreshed', finalData); } catch {}
+		try { _platformPublish(watcher.platform, watcher.topic, 'refreshed', finalData); } catch {}
 	} catch (err) {
 		if (watcher.onError) {
 			try { await watcher.onError(err, watcher.ctx, watcher.topic); } catch {}
@@ -697,7 +697,7 @@ async function _staleReload(topic) {
 			// reload data; skip the publish on a redactor throw.
 			try { finalData = redactor(finalData); } catch { return; }
 		}
-		try { entry.platform.publish(topic, 'refreshed', finalData); } catch {}
+		try { _platformPublish(entry.platform, topic, 'refreshed', finalData); } catch {}
 	} catch (err) {
 		if (entry.onError) {
 			try { await entry.onError(err, entry.ctx, topic); } catch {}
@@ -770,6 +770,13 @@ function _trackStreamSub(ws, topic, fn) {
 	const existing = owners.find(o => o.fn === fn);
 	if (existing) { existing.count++; } else { owners.push({ fn, count: 1 }); }
 	if (isFirstSubForTopic) {
+		// An explicit unsubscribe records the topic so close() does not drain
+		// its hooks a second time. A fresh subscribe makes the topic live again
+		// on this socket, so the record has to go: otherwise close() skips the
+		// drain for the new subscription and a room keeps a ghost member (and a
+		// locked owner) behind a join -> leave -> rejoin -> close sequence.
+		const fired = _firedUnsubscribes.get(ws);
+		if (fired) fired.delete(topic);
 		let wsSet = _topicWsCounts.get(topic);
 		if (!wsSet) {
 			if (_topicWsCounts.size >= state.topicWsCountsWarnThreshold && !_topicWsCountsWarnFired) {
@@ -2709,7 +2716,7 @@ function _publishWindow(entry, win) {
 	if (!gated.publish) return; // below k: hold the last published value
 	const wire = _redactOrDrop(win.outputTopic, gated.value);
 	if (wire === REDACT_DROP) return;
-	platform.publish(win.outputTopic, 'set', wire);
+	_platformPublish(platform, win.outputTopic, 'set', wire);
 }
 
 /**
@@ -3830,7 +3837,7 @@ export function publish(topic, event, data, options) {
 	// the direct path (matching ctx.publish); a topic with no replay registration
 	// falls through to the bare publish untouched.
 	if (!(options && options.jitterMs > 0) && _maybeReplayPublish(platform, topic, event, data)) return true;
-	return platform.publish(topic, event, data, options);
+	return _platformPublish(platform, topic, event, data, options);
 }
 
 // ---------------------------------------------------------------------------

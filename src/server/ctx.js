@@ -10,6 +10,7 @@ import { _shouldShed } from './admission.js';
 import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
 import { _compensateUnavailable } from './history-compensation.js';
 import { _observeSilentTopicPublish, _activatePublishRateWarning } from './dev-warnings.js';
+import { _noteTopicPublish } from './publish-helpers.js';
 import { _resolveTenant, _tenantTopic, _makeTenantScope, _TENANT_TOPIC_NS, _isTenancyEnabled } from './tenant.js';
 import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../error-registry.js';
 
@@ -466,6 +467,10 @@ export function _getCtxHelpers(platform) {
 						}
 						messages = out;
 					}
+					// The native batch bypasses the `publish` closure's watchdog
+					// observation too; a handler that publishes only through
+					// ctx.batch must disarm the silent-topic watchdog like any other.
+					if (_silentTopicWatch.size > 0) for (const m of messages) _noteTopicPublish(m.topic);
 					return platform.batch(messages);
 				},
 			shed: (className) => _shouldShed(platform, className),

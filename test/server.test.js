@@ -102,7 +102,7 @@ const noopRegistry = () => ({
 function adaptExtensionsRegistry(metrics) {
 	return {
 		counter:   ({ name, help, labelNames }) => metrics.counter(name, help, labelNames),
-		histogram: ({ name, help, labelNames }) => metrics.histogram(name, help, labelNames),
+		histogram: ({ name, help, labelNames, buckets }) => metrics.histogram(name, help, { labelNames, buckets }),
 		gauge:     ({ name, help, labelNames }) => metrics.gauge(name, help, labelNames)
 	};
 }
@@ -9321,6 +9321,34 @@ describe('unsubscribe()', () => {
 		await new Promise(r => setTimeout(r, 0));
 		expect(unsubSpy).toHaveBeenCalledTimes(1);
 	});
+
+	// The "already drained" record means "drained AND still gone". A socket that
+	// leaves a topic and comes back to it (join -> leave -> rejoin -> close) has a
+	// live subscription again, and close() must drain it: a room's roster leave
+	// and owner succession ride on this hook, so skipping it leaves a ghost
+	// member and a locked owner behind.
+	it('close() drains a topic that was unsubscribed and then re-subscribed on the same socket', async () => {
+		const unsubSpy = vi.fn();
+		const stream = live.stream('items4', async () => [{ id: 1 }], { onUnsubscribe: unsubSpy });
+		__register('unsub/items4', stream);
+
+		const subscribe = () => {
+			handleRpc(ws, toArrayBuffer({ rpc: 'unsub/items4', id: 'u4', args: [], stream: true }), platform);
+			return new Promise((r) => setTimeout(r, 10));
+		};
+
+		await subscribe();
+		unsubscribe(ws, 'items4', { platform });
+		await new Promise(r => setTimeout(r, 0));
+		expect(unsubSpy).toHaveBeenCalledTimes(1);
+
+		await subscribe();
+		close(ws, { platform, subscriptions: new Set(['items4']) });
+		await new Promise(r => setTimeout(r, 0));
+
+		expect(unsubSpy).toHaveBeenCalledTimes(2);
+		expect(unsubSpy.mock.calls[1][1]).toBe('items4');
+	});
 });
 
 // - 0.4.0: close() with ctx.subscriptions ------------------------------------
@@ -9954,6 +9982,42 @@ describe('live.metrics() <-> svelte-adapter-uws-extensions/prometheus', () => {
 		expect(output).toContain('status="ok"');
 		expect(output).toContain('# TYPE svelte_realtime_rpc_duration_seconds histogram');
 		expect(output).toContain('svelte_realtime_rpc_duration_seconds_count{path="integ/rpc-echo"}');
+	});
+
+	// A duration histogram is only as good as its buckets: the extensions
+	// registry defaults to millisecond-shaped bounds starting at 1, so a 5 ms
+	// call and a 900 ms call both land in le="1" and measure nothing. Realtime
+	// declares fractional-second bounds and the documented shim forwards them.
+	it('separates a 5ms call from a 900ms call in the duration histogram via the documented shim', async () => {
+		const metrics = createMetrics();
+		live.metrics(adaptExtensionsRegistry(metrics));
+		const hist = state.metricsInstruments.rpcDuration;
+		hist.observe({ path: 'integ/fast' }, 0.005);
+		hist.observe({ path: 'integ/slow' }, 0.9);
+
+		const output = metrics.serialize();
+		const line = (path, le) => `svelte_realtime_rpc_duration_seconds_bucket{path="${path}",le="${le}"} `;
+		expect(output).toContain(line('integ/fast', '0.005') + '1');
+		expect(output).toContain(line('integ/slow', '0.005') + '0');
+		expect(output).toContain(line('integ/slow', '0.5') + '0');
+		expect(output).toContain(line('integ/slow', '1') + '1');
+	});
+
+	it('passes seconds-valued buckets to every duration histogram it registers', () => {
+		const registered = {};
+		live.metrics({
+			counter: () => ({ inc() {} }),
+			histogram(opts) { registered[opts.name] = opts.buckets; return { observe() {} }; },
+			gauge: () => ({ inc() {}, dec() {}, set() {} })
+		});
+		live.perfBudget('rpc', 10);
+		for (const name of ['svelte_realtime_rpc_duration_seconds', 'svelte_realtime_perf_actual_seconds']) {
+			const buckets = registered[name];
+			expect(buckets, name).toBeDefined();
+			expect(buckets[0]).toBeLessThan(0.01);
+			expect(buckets).toEqual([...buckets].sort((a, b) => a - b));
+			expect(buckets[buckets.length - 1]).toBeGreaterThanOrEqual(1);
+		}
 	});
 
 	it('increments and serializes the stream subscription gauge via the shim', async () => {
@@ -16760,6 +16824,119 @@ describe('live.silentTopicWarning()', () => {
 		await vi.advanceTimersByTimeAsync(50);
 
 		expect(warnSpy).not.toHaveBeenCalled();
+	});
+
+	// The watchdog's question is "does this topic receive events", not "did a
+	// user handler call ctx.publish". Topics the framework itself feeds have no
+	// handler to add a publish to, so every internal publish path must disarm
+	// the watchdog exactly like a user publish does.
+	describe('framework-internal publish paths disarm the watchdog', () => {
+		afterEach(() => {
+			_resetAggregates();
+		});
+
+		it('a live.aggregate window output published at full rate never warns', async () => {
+			const fn = live.aggregate('events:w', {
+				count: { init: () => 0, reduce: (acc) => acc + 1 }
+			}, {
+				topic: 'events:w:agg',
+				windows: { lifetime: { type: 'lifetime' } }
+			});
+			__registerAggregate('agg/silent/win', fn);
+			const platform = mockPlatform();
+			_activateDerived(platform);
+
+			_armSilentTopicWatch('events:w:agg:lifetime');
+			platform.publish('events:w', 'inc', {});
+			expect(platform.published.some(p => p.topic === 'events:w:agg:lifetime')).toBe(true);
+
+			await vi.advanceTimersByTimeAsync(50);
+			expect(warnSpy).not.toHaveBeenCalled();
+		});
+
+		it('a single-state live.aggregate output never warns', async () => {
+			const fn = live.aggregate('events:s', {
+				count: { init: () => 0, reduce: (acc) => acc + 1 }
+			}, { topic: 'events:s:agg' });
+			__registerAggregate('agg/silent/single', fn);
+			const platform = mockPlatform();
+			_activateDerived(platform);
+
+			_armSilentTopicWatch('events:s:agg');
+			platform.publish('events:s', 'inc', {});
+			expect(platform.published.some(p => p.topic === 'events:s:agg')).toBe(true);
+
+			await vi.advanceTimersByTimeAsync(50);
+			expect(warnSpy).not.toHaveBeenCalled();
+		});
+
+		it('a ctx.publishThrottled publish never warns', async () => {
+			const platform = mockPlatform();
+			_armSilentTopicWatch('chat:throttled');
+			const handler = live(async (ctx) => {
+				ctx.publishThrottled('chat:throttled', 'msg', { x: 1 }, 1000);
+				return { ok: true };
+			});
+			__register('test/silent-throttle', handler);
+			const ws = mockWs({ user_id: 'u-silent-t' });
+			handleRpc(ws, toArrayBuffer({ rpc: 'test/silent-throttle', id: 'st-1', args: [] }), platform);
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(platform.published.some(p => p.topic === 'chat:throttled')).toBe(true);
+
+			await vi.advanceTimersByTimeAsync(50);
+			expect(warnSpy).not.toHaveBeenCalled();
+			// Let the trailing-edge timer fire so the throttle entry self-deletes
+			// instead of outliving this test.
+			await vi.advanceTimersByTimeAsync(1100);
+		});
+
+		it('an out-of-band publish() never warns', async () => {
+			const platform = mockPlatform();
+			_activateDerived(platform);
+			_armSilentTopicWatch('oob:topic');
+			publish('oob:topic', 'set', { v: 1 });
+			expect(platform.published.some(p => p.topic === 'oob:topic')).toBe(true);
+
+			await vi.advanceTimersByTimeAsync(50);
+			expect(warnSpy).not.toHaveBeenCalled();
+		});
+
+		it('a live.cron tick publish never warns', async () => {
+			const platform = mockPlatform();
+			setCronPlatform(platform);
+			try {
+				__registerCron('cron-silent', live.cron('* * * * * *', 'cron:silent', async () => ({ tick: 1 })));
+				_armSilentTopicWatch('cron:silent');
+				await _tickCron();
+				await vi.advanceTimersByTimeAsync(0);
+				expect(platform.published.some(p => p.topic === 'cron:silent')).toBe(true);
+
+				await vi.advanceTimersByTimeAsync(50);
+				expect(warnSpy).not.toHaveBeenCalled();
+			} finally {
+				_clearCron();
+			}
+		});
+
+		it('a ctx.batch([...]) list publish through a native platform.batch never warns', async () => {
+			const platform = mockPlatform();
+			platform.batch = (messages) => { for (const m of messages) platform.publish(m.topic, m.event, m.data); };
+			_armSilentTopicWatch('chat:batched');
+			const handler = live(async (ctx) => {
+				ctx.batch([{ topic: 'chat:batched', event: 'msg', data: { x: 1 } }]);
+				return { ok: true };
+			});
+			__register('test/silent-batch', handler);
+			const ws = mockWs({ user_id: 'u-silent-b' });
+			handleRpc(ws, toArrayBuffer({ rpc: 'test/silent-batch', id: 'sb-1', args: [] }), platform);
+			await vi.advanceTimersByTimeAsync(0);
+			await vi.advanceTimersByTimeAsync(0);
+			expect(platform.published.some(p => p.topic === 'chat:batched')).toBe(true);
+
+			await vi.advanceTimersByTimeAsync(50);
+			expect(warnSpy).not.toHaveBeenCalled();
+		});
 	});
 
 	it('warns at most once per topic per process', async () => {

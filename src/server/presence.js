@@ -4,6 +4,7 @@ import { clearTimer } from '../shared/runtime.js';
 import { _topicInTenant } from './tenant.js';
 import { _ownerOnLeave, _ownerEmit } from './room-owner.js';
 import { _maybeReplayPublish, _registerReplayTopic } from './replay-routing.js';
+import { _platformPublish } from './publish-helpers.js';
 
 /**
  * Direct handle to the in-memory presence-ref map for tests that need to seed
@@ -175,7 +176,7 @@ export function _ownerReplayPublisher(platform) {
 	if (!platform) return null;
 	return (wireTopic, event, data) => {
 		if (platform.replay) _registerReplayTopic(wireTopic);
-		if (!_maybeReplayPublish(platform, wireTopic, event, data)) platform.publish(wireTopic, event, data);
+		if (!_maybeReplayPublish(platform, wireTopic, event, data)) _platformPublish(platform, wireTopic, event, data);
 	};
 }
 

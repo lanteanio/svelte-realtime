@@ -88,7 +88,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Generated runtime error reference.** The package now ships a registry-derived reference for the `INVALID_USER_ID` signal failure, unresolved `$live` modules, and both upload-size failure boundaries. Runtime messages are built from that registry and append a stable ID plus package-local help route; each entry records cause, consequence, automatic recovery, next action, and owning sources. `npm run check` rejects missing sources or generated-page drift.
 
+### Changed
+
+- **Adapter peer range moves to `svelte-adapter-uws@^0.6.0-next.94`.** The
+  operation platform view (`ctx.platform`) now inherits the adapter's
+  `traceContext` and `trace` declarations instead of restating them as
+  optional, matching the shape the adapter ships. `SmoothEntity.shoot`
+  depends on the adapter channel's options argument, which landed in the
+  adapter's next.91.
+
 ### Fixed
+
+- **Silent-topic dev warning no longer fires for topics the framework itself
+  publishes.** The watchdog only observed `ctx.publish`, so every
+  `live.aggregate` window output, single-state aggregate, derived recompute,
+  stale or invalidation reload, throttle trailing edge, replay-routed write,
+  and out-of-band `publish()` left it armed and it warned about silence on a
+  topic publishing at full rate, with remediation text pointing at handlers
+  that do not exist. Every framework-internal publish now passes one choke
+  point that marks the topic live, and a new check gate
+  (`scripts/check-publish-routing.js`) fails the build on any bare
+  `platform.publish` outside it. Regression tests hold a windowed aggregate
+  output, a single-state aggregate, a throttled publish, and an out-of-band
+  publish past the threshold and assert no warning.
+
+- **`close()` drains a topic that was unsubscribed and then re-subscribed on
+  the same socket.** The per-socket record of already-drained topics was never
+  cleared on a fresh subscribe, so a join, leave, rejoin, close sequence
+  skipped the final `onUnsubscribe` and left a ghost roster member and a
+  locked room owner behind. A fresh subscribe now clears the record for that
+  topic; the double-drain protection for a topic that stays unsubscribed is
+  unchanged.
+
+- **`SmoothEntity.shoot(cmd, options)` forwards its options argument.** The
+  facade dropped it, so an app could not supply the capture-time render
+  instant (`options.rt`) and `maxRewindMs` was unreachable from application
+  code at any value. Declared on the type; a test drives the real adapter
+  channel and asserts the supplied instant reaches the transport.
+
+- **Duration histograms declare seconds-valued buckets.**
+  `svelte_realtime_rpc_duration_seconds` and
+  `svelte_realtime_perf_actual_seconds` registered with no buckets, so the
+  extensions registry applied its millisecond-shaped default starting at 1 and
+  a 5 ms call and a 900 ms call landed in the same bucket. Both now pass
+  explicit bounds from 1 ms through 10 s (the list the adapter uses for its
+  own durations); the documented shim and the registry contract forward
+  `buckets`, and a test asserts the two calls separate in the serialized
+  output.
 
 - **Vite plugin: self-sustaining HMR loop through `$types.d.ts` regeneration - full-reload storm for every connected browser (reported in #9, fixed on the 0.5.x line in 0.5.12).** `handleHotUpdate` filtered only on the live directory, so the plugin's own generated `src/live/$types.d.ts` fed back into its own handler, and `_writeTypeDeclarations` rewrote the file unconditionally - a fresh mtime per pass scheduled the next change event. Once anything touched `$types.d.ts` after the watcher was armed (most commonly a second Vite instance on the same checkout, e.g. a Playwright test server next to the dev server, whose `buildStart()` write ignited it), the loop sustained itself forever: a full SSR registry reload per tick and a full reload of every connected client, since the file is not in the module graph and Vite falls back to `full-reload`. `handleHotUpdate` now returns `[]` for `.d.ts` files (handled, no affected modules) and skips test files like the add/unlink watcher, and `_writeTypeDeclarations` compares existing content before writing, so an unchanged regeneration is a no-op - which also removes the cross-process ignition entirely. Regression tests pin the ignored `.d.ts` event, the ignored test-file event, and the mtime-stable idempotent write.
 

@@ -1,6 +1,7 @@
 // @ts-check
 import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, handleRpc, LiveError, _clearCron, _activateDerived, close, unsubscribe } from './server.js';
 import { sanitizeRowData } from './shared/safe-assign.js';
+import { _noteTopicPublish } from './server/publish-helpers.js';
 
 /**
  * Build a `ctx`-shaped object suitable for direct unit tests of guards,
@@ -360,6 +361,11 @@ export function createTestEnv(options) {
 		 * @param {any} [opts]
 		 */
 		publish(topic, event, data, opts) {
+			// The harness platform is its own choke point: every publish a test
+			// drives (env.emit, env.topic(...), simulatePublish, sim recover)
+			// lands here, so the silent-topic dev watchdog sees it like the
+			// production platform's.
+			_noteTopicPublish(topic);
 			if (_shouldChaosDropPublish()) return false;
 			const subs = topicSubscribers.get(topic);
 			if (!subs) return true;

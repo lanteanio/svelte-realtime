@@ -82,7 +82,7 @@
     "protocol.schema.json"
   ],
   "scripts": {
-    "check": "node scripts/generate-error-reference.js --check && node scripts/generate-onboarding-reference.js && node scripts/check-types.js && node scripts/check-diagnostic-attribution.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js && node scripts/check-scaffold-build.js",
+    "check": "node scripts/generate-error-reference.js --check && node scripts/generate-onboarding-reference.js && node scripts/check-types.js && node scripts/check-diagnostic-attribution.js && node scripts/check-publish-routing.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js && node scripts/check-scaffold-build.js",
     "check:errors": "node scripts/generate-error-reference.js --check",
     "generate:errors": "node scripts/generate-error-reference.js --write",
     "generate:onboarding": "node scripts/generate-onboarding-reference.js --write --sync-docs-site",
@@ -103,7 +103,7 @@
   "peerDependencies": {
     "@sveltejs/kit": "^2.0.0",
     "svelte": "^4.0.0 || ^5.0.0",
-    "svelte-adapter-uws": "^0.6.0-next.87"
+    "svelte-adapter-uws": "^0.6.0-next.94"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1",

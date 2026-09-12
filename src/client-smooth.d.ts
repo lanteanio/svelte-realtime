@@ -88,8 +88,16 @@ export class SmoothEntity<State = any, Command = any> {
 	 * against the rewound world (lag compensation on a `hitTest` topic). Unlike
 	 * `command` it never enters the prediction ring - a shot owns no entity state -
 	 * and its outcome arrives as a discrete `onEvent` (a hit), not a reconciliation.
-	 * Inert on a topic declared without `hitTest`. */
-	shoot(cmd: Command): void;
+	 * Inert on a topic declared without `hitTest`.
+	 *
+	 * `options.rt` supplies the render instant the app actually drew the world
+	 * at, on the synced server axis (`view.now() - heldMs` for a deliberately
+	 * delayed send), replacing the stamp computed at call time. It is how an app
+	 * widens the rewind it asks for and exercises the server's `maxRewindMs`
+	 * ceiling; an older instant only asks for more rewind, so a shooter still
+	 * cannot fake a lower latency. Ignored without lag compensation and during
+	 * cold start; a non-finite value falls back to the computed stamp. */
+	shoot(cmd: Command, options?: { rt?: number }): void;
 	/** The estimated server wall-clock time - the stamp for compensated
 	 * action arguments. */
 	now(): number;

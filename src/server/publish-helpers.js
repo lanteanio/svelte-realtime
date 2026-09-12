@@ -2,8 +2,40 @@
 import { now as runtimeNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
-import { _topicRedact, _declaredRedact, _declaredRedactPattern, _declaredStreamTopic } from './state.js';
+import { _topicRedact, _declaredRedact, _declaredRedactPattern, _declaredStreamTopic, _silentTopicWatch } from './state.js';
 import { _stripAnyTenantTopic } from './tenant.js';
+import { _observeSilentTopicPublish } from './dev-warnings.js';
+
+/**
+ * Mark a topic as live for the silent-topic dev watchdog. The watchdog asks
+ * "does this topic receive events", not "did a user handler call
+ * ctx.publish", so every framework publish path that bypasses the ctx helper
+ * (an aggregate window output, a derived recompute, a stale or invalidation
+ * reload, a throttle trailing edge, an out-of-band publish(), a replay-routed
+ * write) reports here. One Map.size check; free while nothing is armed, and
+ * the registry is only ever armed in dev.
+ * @param {string} topic
+ */
+export function _noteTopicPublish(topic) {
+	if (_silentTopicWatch.size > 0) _observeSilentTopicPublish(topic);
+}
+
+/**
+ * The framework-internal publish choke point. Every bare `platform.publish`
+ * outside the ctx publish helper (which observes at its own entry) routes
+ * through here so the dev watchdog sees the traffic; scripts/check-publish-routing.js
+ * pins that no other call site exists.
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @param {string} topic
+ * @param {string} event
+ * @param {any} data
+ * @param {any} [options]
+ * @returns {any}
+ */
+export function _platformPublish(platform, topic, event, data, options) {
+	_noteTopicPublish(topic);
+	return platform.publish(topic, event, data, options);
+}
 
 /**
  * Sentinel returned by `_redactOrDrop` when a topic's piiRedact redactor threw.
@@ -149,15 +181,15 @@ export function _throttlePublish(platform, topic, event, data, ms) {
 		if (_throttles.size >= _THROTTLE_DEBOUNCE_MAX) {
 			// At capacity - publish immediately without a trailing-edge timer
 			// so data is never silently dropped
-			platform.publish(topic, event, data);
+			_platformPublish(platform, topic, event, data);
 			return;
 		}
-		platform.publish(topic, event, data);
+		_platformPublish(platform, topic, event, data);
 		_throttles.set(key, {
 			timer: setTimer(() => {
 				const entry = _throttles.get(key);
 				if (entry && entry.lastData !== undefined) {
-					platform.publish(topic, event, entry.lastData);
+					_platformPublish(platform, topic, event, entry.lastData);
 				}
 				_throttles.delete(key);
 			}, ms),
@@ -196,13 +228,13 @@ export function _debouncePublish(platform, topic, event, data, ms) {
 
 	if (!existing && _debounces.size >= _THROTTLE_DEBOUNCE_MAX) {
 		// At capacity - publish immediately instead of evicting an active timer
-		platform.publish(topic, event, data);
+		_platformPublish(platform, topic, event, data);
 		return;
 	}
 
 	_debounces.set(key, setTimer(() => {
 		_debounces.delete(key);
-		platform.publish(topic, event, data);
+		_platformPublish(platform, topic, event, data);
 	}, ms));
 }
 

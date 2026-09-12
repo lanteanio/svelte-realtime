@@ -1,5 +1,6 @@
 // @ts-check
 import { _IS_DEV } from './env.js';
+import { _noteTopicPublish } from './publish-helpers.js';
 
 /**
  * Topics declared with `live.stream(..., { replay: true })`. Populated at
@@ -121,6 +122,9 @@ export function _maybeReplayPublish(platform, topic, event, data) {
 		return false;
 	}
 	if (/** @type {any} */ (platform)[WRAPPED_FOR_REPLAY]) return false;
+	// The extension broadcasts through platform.publish internally, so this
+	// is the only place the framework can observe the event for the dev watchdog.
+	_noteTopicPublish(topic);
 	try {
 		const ret = replay.publish(platform, topic, event, data);
 		if (ret && typeof ret.then === 'function') {

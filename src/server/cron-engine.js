@@ -7,7 +7,7 @@ import { _cronDateParts, _cronFieldMatch } from './cron.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _ensureWrap } from './reactive.js';
 import { _maybeReplayPublish } from './replay-routing.js';
-import { _redactOrDrop, REDACT_DROP } from './publish-helpers.js';
+import { _redactOrDrop, REDACT_DROP, _platformPublish } from './publish-helpers.js';
 import { _setBus } from './bus.js';
 import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
@@ -471,7 +471,7 @@ export async function _tickCron() {
 						// `platform.replay.publish` so the buffer captures them
 						// and reconnecting clients can replay missed ticks.
 						if (!_maybeReplayPublish(cronPub, entry.topic, 'set', wire)) {
-							cronPub.publish(entry.topic, 'set', wire);
+							_platformPublish(cronPub, entry.topic, 'set', wire);
 						}
 					}
 				}

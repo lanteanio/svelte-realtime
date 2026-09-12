@@ -10,6 +10,7 @@ import { createRttTracker } from './rtt.js';
 import { createMonotonicClock } from './monoclock.js';
 import { _executeVolatileRpc } from './dispatch.js';
 import { _IS_DEV } from './env.js';
+import { _platformPublish } from './publish-helpers.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); smooth registration reaches it through this, set at
@@ -774,7 +775,7 @@ function _smoothPublish(rec, event, data, excludeWs) {
 	} else {
 		// Older platform: no per-subscriber walk, so no exclusion - the
 		// echoed frame is harmless because owners skip their own key.
-		platform.publish(rec.wireTopic, event, data, { compress: false });
+		_platformPublish(platform, rec.wireTopic, event, data, { compress: false });
 	}
 }
 
@@ -884,7 +885,7 @@ function _smoothPublishCell(rec, cellKey, event, data) {
 		}
 		platform.publishWire(topic, event, data, cells.codec);
 	} else if (typeof platform.publish === 'function') {
-		platform.publish(topic, event, data, { compress: false });
+		_platformPublish(platform, topic, event, data, { compress: false });
 	}
 }
 

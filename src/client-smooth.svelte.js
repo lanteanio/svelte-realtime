@@ -223,10 +223,18 @@ export class SmoothEntity {
 	 * enter the prediction ring - a shot owns no entity state to predict - and its
 	 * outcome arrives as a discrete `onEvent` (a hit), not a reconciliation. Inert
 	 * on a topic declared without `hitTest`.
+	 *
+	 * `options.rt` supplies the render instant the app actually drew the world
+	 * at, on the synced server axis (`view.now() - heldMs` for a deliberately
+	 * delayed send), replacing the stamp the channel computes at call time. That
+	 * is the only way an app can widen the rewind it asks for and so exercise
+	 * the server's `maxRewindMs` ceiling; without it a held shot ages the aim
+	 * instead. Forwarded verbatim; the channel owns validation and fallback.
 	 * @param {any} cmd
+	 * @param {{ rt?: number }} [options]
 	 */
-	shoot(cmd) {
-		this.#channel.shoot(cmd);
+	shoot(cmd, options) {
+		this.#channel.shoot(cmd, options);
 	}
 
 	/**

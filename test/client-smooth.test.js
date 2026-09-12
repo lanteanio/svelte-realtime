@@ -68,6 +68,10 @@ function mockChannel() {
 		command: () => 0,
 		now: () => 0,
 		resync() {},
+		shots: [],
+		shoot(cmd, options) {
+			ch.shots.push({ cmd, options });
+		},
 		destroy() {
 			ch.destroyed = true;
 		}
@@ -318,6 +322,83 @@ describe('SmoothEntity state identity (raw state, no deep proxy)', () => {
 		ch.frame(next, new Map());
 		expect(view.local).toBe(next);
 		expect(view.remote.size).toBe(0);
+
+		view.destroy();
+	});
+});
+
+describe('SmoothEntity shoot', () => {
+	afterEach(() => {
+		for (const dir of runeProbeDirs) {
+			if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+		}
+		runeProbeDirs.length = 0;
+		if (existsSync(runeProbeRoot) && readdirSync(runeProbeRoot).length === 0) {
+			rmSync(runeProbeRoot, { recursive: true, force: true });
+		}
+	});
+
+	// The facade is the surface every app calls. The channel below it takes an
+	// options argument carrying the app's capture-time render instant; a facade
+	// that forwards only the command makes that instant vanish one layer down,
+	// which is indistinguishable from the server ignoring it.
+	it('forwards the options argument to the channel by identity', async () => {
+		const SmoothEntity = await loadSmoothEntity();
+		const ch = mockChannel();
+		const view = new SmoothEntity(ch, statusStore);
+
+		const cmd = { angle: 0.5 };
+		const options = { rt: 12345 };
+		view.shoot(cmd, options);
+		view.shoot(cmd);
+
+		expect(ch.shots).toHaveLength(2);
+		expect(ch.shots[0].cmd).toBe(cmd);
+		expect(ch.shots[0].options).toBe(options);
+		expect(ch.shots[1].options).toBeUndefined();
+
+		view.destroy();
+	});
+
+	// End to end through the real adapter channel: the instant supplied at the
+	// facade is the instant the transport sends, so an app can measure the
+	// rewind ceiling from its own side.
+	it('carries an app-supplied render instant through the real channel to the transport', async () => {
+		const { createSmoothChannel } = await import('svelte-adapter-uws/plugins/smooth/client');
+		const SmoothEntity = await loadSmoothEntity();
+
+		const transport = {
+			shots: [],
+			sendCommand() {},
+			sendShoot(payload) {
+				transport.shots.push(payload);
+			},
+			sync: () => Promise.resolve({
+				topic: 'st-facade',
+				t: Date.now(),
+				you: 'me',
+				ack: 0,
+				lc: 1,
+				states: [{ key: 'me', state: { x: 0, y: 0 } }]
+			})
+		};
+		const ch = createSmoothChannel({
+			apply: (state) => state,
+			initial: { x: 0, y: 0 },
+			transport
+		});
+		const view = new SmoothEntity(ch, statusStore);
+		// No live socket in this rig: ask for the sync the connection would trigger.
+		view.resync();
+		await new Promise((r) => setTimeout(r, 20));
+
+		const held = view.now() - 750;
+		view.shoot({ angle: 1 }, { rt: held });
+		view.shoot({ angle: 1 });
+
+		expect(transport.shots).toHaveLength(2);
+		expect(transport.shots[0].rt).toBe(held);
+		expect(transport.shots[1].rt).not.toBe(held);
 
 		view.destroy();
 	});

@@ -144,8 +144,9 @@ export interface TenantHandle {
  */
 export interface LiveOperationPlatform extends Platform {
 	readonly connectionId?: string;
-	readonly traceContext?: OperationTraceContext | null;
-	readonly trace?: OperationTrace;
+	/** The adapter-declared trace surface, spelled the way the adapter spells it. */
+	readonly traceContext: Platform['traceContext'];
+	readonly trace: Platform['trace'];
 }
 
 export interface LiveContext<UserData = unknown> {
@@ -1125,8 +1126,8 @@ export interface CreateMessageOptions {
 /**
  * Shape accepted by `live.metrics()`. Any object matching this contract works
  * (hand-rolled, prom-client adapter, or the `createMetrics()` registry from
- * `svelte-adapter-uws-extensions/prometheus` wrapped to forward options as
- * positional args - see the README "Prometheus metrics" section).
+ * `svelte-adapter-uws-extensions/prometheus` wrapped to forward the options,
+ * `buckets` included - see the README "Prometheus metrics" section).
  */
 export interface MetricsRegistry {
 	counter(opts: { name: string; help: string; labelNames?: string[] }): {
@@ -2770,7 +2771,7 @@ export namespace live {
 	 * const metrics = createMetrics();
 	 * live.metrics({
 	 *   counter:   ({ name, help, labelNames }) => metrics.counter(name, help, labelNames),
-	 *   histogram: ({ name, help, labelNames }) => metrics.histogram(name, help, labelNames),
+	 *   histogram: ({ name, help, labelNames, buckets }) => metrics.histogram(name, help, { labelNames, buckets }),
 	 *   gauge:     ({ name, help, labelNames }) => metrics.gauge(name, help, labelNames)
 	 * });
 	 * ```

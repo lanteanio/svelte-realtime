@@ -1,12 +1,12 @@
 // @ts-check
 import { setTimer, clearTimer } from '../shared/runtime.js';
 import { _IS_DEV } from './env.js';
-import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggregateBySource, _watchedTopics, _dynamicDerivedByFn } from './state.js';
+import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggregateBySource, _watchedTopics, _dynamicDerivedByFn, _silentTopicWatch } from './state.js';
 import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _fireWebhookOut } from './webhook-out.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic } from './tenant.js';
-import { _redactOrDrop, REDACT_DROP } from './publish-helpers.js';
+import { _redactOrDrop, REDACT_DROP, _platformPublish, _noteTopicPublish } from './publish-helpers.js';
 import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
 import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms-gate.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
@@ -328,10 +328,10 @@ function _wrapPlatformPublish(platform) {
 							if (winRef.timer) clearTimer(winRef.timer);
 							winRef.timer = setTimer(() => {
 								winRef.timer = null;
-								platform.publish(winRef.outputTopic, 'set', computed);
+								_platformPublish(platform, winRef.outputTopic, 'set', computed);
 							}, winRef.debounce);
 						} else {
-							platform.publish(winRef.outputTopic, 'set', computed);
+							_platformPublish(platform, winRef.outputTopic, 'set', computed);
 						}
 					}
 					continue;
@@ -358,10 +358,10 @@ function _wrapPlatformPublish(platform) {
 					if (entry.timer) clearTimer(entry.timer);
 					entry.timer = setTimer(() => {
 						entry.timer = null;
-						platform.publish(entry.topic, 'set', computed);
+						_platformPublish(platform, entry.topic, 'set', computed);
 					}, entry.debounce);
 				} else {
-					platform.publish(entry.topic, 'set', computed);
+					_platformPublish(platform, entry.topic, 'set', computed);
 				}
 			}
 		}
@@ -381,6 +381,10 @@ function _wrapPlatformPublish(platform) {
 	// the sockets. Watchers still fire on the raw delta - server-side derived
 	// / effect / aggregate code is trusted; only the wire is per-caller.
 	function derivedPublishLocal(topic, event, data, opts) {
+		// Local delivery is also where a bus relay from another instance lands:
+		// an instance holding only subscribers receives every event this way, so
+		// the silent-topic watchdog must see it here, not only on the publisher.
+		_noteTopicPublish(topic);
 		if (_enumGates.size !== 0 && _enumGateIntercept(platform, topic, event, data)) {
 			fireWatchers(topic, event, data);
 			return true;
@@ -391,6 +395,9 @@ function _wrapPlatformPublish(platform) {
 	}
 
 	function derivedPublishBatchedLocal(batch) {
+		if (_silentTopicWatch.size > 0 && Array.isArray(batch)) {
+			for (const item of batch) if (item && typeof item.topic === 'string') _noteTopicPublish(item.topic);
+		}
 		let rest = batch;
 		if (_enumGates.size !== 0 && Array.isArray(batch)) {
 			// Divert gated enumeration deltas to the per-subscriber walk; only
@@ -452,7 +459,7 @@ async function _recomputeDerived(entry, platform) {
 		// Uniform piiRedact: a derived stream recomputes from sources and may
 		// carry PII; redact if its topic declared piiRedact (no-op otherwise).
 		const wire = _redactOrDrop(entry.topic, result);
-		if (wire !== REDACT_DROP) platform.publish(entry.topic, 'set', wire);
+		if (wire !== REDACT_DROP) _platformPublish(platform, entry.topic, 'set', wire);
 	} catch (err) {
 		if (state.serverErrorHandler) {
 			try { state.serverErrorHandler('derived', err); } catch {}

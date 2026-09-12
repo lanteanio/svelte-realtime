@@ -65,7 +65,7 @@ npm run dev
 ```
 
 The non-interactive route installs the audited
-`svelte-adapter-uws@0.6.0-next.91` / `svelte-realtime@0.6.0-next.91` /
+`svelte-adapter-uws@0.6.0-next.94` / `svelte-realtime@0.6.0-next.91` /
 uWebSockets.js v20.69.0 tuple, checks Node, OS, architecture, libc, and the
 native addon, writes one current-`sv` Vite configuration, and completes a
 production build before it prints `Verified`. The example then opens with a
@@ -82,7 +82,7 @@ The three ecosystem packages move together. Bump them as a group:
 |---|---|---|---|
 | `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |
 | `^0.5.8` | `^0.5.0` | `^0.5.0` | Stable. Node 22+ required. |
-| `0.6.0-next.91` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated development candidate. Publish the tuple together before using these exact registry commands. |
+| `0.6.0-next.94` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated development candidate. Publish the tuple together before using these exact registry commands. |
 
 Mixed-version installs are rejected at install time with a peer-dep warning.
 
@@ -95,7 +95,7 @@ Starting from a SvelteKit project. If you do not have one yet, run `npx sv creat
 ### Step 1: Install everything
 
 ```bash
-npm install svelte-adapter-uws@0.6.0-next.91 svelte-realtime@0.6.0-next.91
+npm install svelte-adapter-uws@0.6.0-next.94 svelte-realtime@0.6.0-next.91
 npm install https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
 npm install -D ws
 npm exec -- svelte-adapter-uws-preflight
@@ -2574,7 +2574,7 @@ const metrics = createMetrics();
 
 live.metrics({
   counter:   ({ name, help, labelNames }) => metrics.counter(name, help, labelNames),
-  histogram: ({ name, help, labelNames }) => metrics.histogram(name, help, labelNames),
+  histogram: ({ name, help, labelNames, buckets }) => metrics.histogram(name, help, { labelNames, buckets }),
   gauge:     ({ name, help, labelNames }) => metrics.gauge(name, help, labelNames)
 });
 
@@ -2587,12 +2587,12 @@ Mount the metrics endpoint on your uWS app (typically in `svelte.config.js` or w
 app.get('/metrics', metrics.handler);
 ```
 
-The six-line shim adapts realtime's options-object call shape to the extensions registry's positional create methods. Once a metric is registered, every increment, observation, and gauge update flows directly to the extensions registry, so the emitted Prometheus output is exactly what `metrics.serialize()` produces.
+The six-line shim adapts realtime's options-object call shape to the extensions registry's create methods. The histogram line forwards `buckets` through the registry's options form: realtime's duration histograms declare seconds-valued bounds from 1 ms to 10 s, and a shim that drops them leaves the registry's own millisecond-shaped default (starting at 1), which puts a 5 ms call and a 900 ms call in the same bucket. Once a metric is registered, every increment, observation, and gauge update flows directly to the extensions registry, so the emitted Prometheus output is exactly what `metrics.serialize()` produces.
 
 ### Registered metrics
 
 - `svelte_realtime_rpc_total` - RPC call count by path and status
-- `svelte_realtime_rpc_duration_seconds` - RPC latency by path
+- `svelte_realtime_rpc_duration_seconds` - RPC latency by path, with explicit fractional-second buckets from 1 ms through 10 s
 - `svelte_realtime_rpc_errors_total` - RPC errors by path and code
 - `svelte_realtime_stream_subscriptions` - active stream subscription gauge
 - `svelte_realtime_cron_total` - cron execution count by path and status
@@ -2756,10 +2756,12 @@ The client-side assert helper is exported from `svelte-realtime/client` with the
 `live.metrics()` accepts any object exposing:
 
 - `counter({ name, help, labelNames }) -> { inc(labels?) }`
-- `histogram({ name, help, labelNames }) -> { observe(labels, valueSeconds) }`
+- `histogram({ name, help, labelNames, buckets }) -> { observe(labels, valueSeconds) }`
 - `gauge({ name, help }) -> { inc(), dec() }`
 
-If you prefer `prom-client`, wire it the same way: `counter: ({ name, help, labelNames }) => new client.Counter({ name, help, labelNames, registers: [register] })`, and likewise for `Histogram` and `Gauge`.
+Durations are seconds with fractional bucket bounds. Realtime passes an explicit `buckets` list (1 ms through 10 s) to every duration histogram; a registry adapter must forward it, because a registry that is not told which buckets to use falls back to its own and samples recorded in the wrong buckets cannot be repaired afterwards.
+
+If you prefer `prom-client`, wire it the same way: `counter: ({ name, help, labelNames }) => new client.Counter({ name, help, labelNames, registers: [register] })`, and likewise for `Histogram` (forwarding `buckets`) and `Gauge`.
 
 ---
 
