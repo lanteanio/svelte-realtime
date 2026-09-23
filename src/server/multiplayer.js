@@ -5,6 +5,7 @@ import { _clusterPresenceMerge } from './presence.js';
 import { _tenantTopic } from './tenant.js';
 import { _IS_DEV } from './env.js';
 import { randomU32 } from '../shared/runtime.js';
+import { safeAssign } from '../shared/safe-assign.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); multiplayer registration reaches it through this,
@@ -197,10 +198,13 @@ export const _multiplayerRegister = function multiplayer(config) {
 		const frame = { key, ...extra };
 		const cur = payload[0];
 		if (cur && typeof cur === 'object' && !Array.isArray(cur)) {
-			Object.assign(frame, cur);
+			safeAssign(frame, cur);
 		} else if (payload.length > 0) {
 			frame.value = payload.length === 1 ? cur : payload;
 		}
+		// The payload is the caller's own sample, never its identity: a `key` in
+		// it would put the frame on another user's entry for every receiver.
+		frame.key = key;
 		// Without the token an out-of-order sample lands as the newest and the
 		// peer's cursor sits on a mid-gesture point until the next move.
 		_stampOrder(frame, ctx);
@@ -242,8 +246,14 @@ export const _multiplayerRegister = function multiplayer(config) {
 		const key = _getIdentityKey(ctx);
 		const frame = { key };
 		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
-			Object.assign(frame, delta);
+			safeAssign(frame, delta);
 		}
+		// A delta names fields on the caller's own entry, never the entry itself:
+		// `key` would move it onto another user's entry, and `data` would replace
+		// the presence payload the server computed for it (the name members
+		// render) on every live client while the roster kept the real one.
+		frame.key = key;
+		delete frame.data;
 		// Ordered per field on the receiving side: the same reorder hazard as
 		// cursor frames, with a stale flag (typing, a lock) as the visible
 		// damage.
@@ -323,8 +333,10 @@ export const _multiplayerRegister = function multiplayer(config) {
 		const frame = { key, token: payload[0] };
 		const at = payload[1];
 		if (at && typeof at === 'object' && !Array.isArray(at)) {
-			Object.assign(frame, at);
+			safeAssign(frame, at);
 		}
+		// The point is the caller's, and so is the reaction (see the cursor path).
+		frame.key = key;
 		ctx.publish(reactionTopic, 'reaction', frame);
 	};
 

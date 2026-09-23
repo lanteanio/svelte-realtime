@@ -306,6 +306,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload previews. Turning it off again purges payload-bearing rings, pending
   entries, stream previews, topics, and messages.
 
+- **A client can no longer publish multiplayer frames under another user's
+  identity, or rename its own entry.** The cursor, presence-field and
+  reaction send paths merged the caller's payload over the frame after
+  stamping it with the caller's identity key, so a payload field named `key`
+  replaced that identity: a client could move another user's cursor, set
+  typing or a lock on their roster entry for every live member, or send a
+  reaction in their name. A presence delta could likewise carry `data` and
+  replace the presence payload the server computed for the caller's own
+  entry, so every live member rendered whatever name it chose. The server
+  roster was never affected, so late joiners and members disagreed as well.
+  The caller's identity key is now set after the payload in all three paths
+  and `data` is dropped from a delta; a test sends a foreign `key` through
+  each path and a `data` through a delta and asserts neither reaches the
+  published frame. The payload is also merged without `__proto__`,
+  `constructor` or `prototype`, so it cannot choose the frame's prototype and
+  hand an inherited `key` or `data` to server-side watchers of the topic.
+
 ## [0.6.0-next.90] - 2026-07-30
 
 ### Breaking Changes

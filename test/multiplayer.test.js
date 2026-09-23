@@ -584,6 +584,63 @@ describe('live.multiplayer()', () => {
 		expect(published).toEqual([{ key: 'alice', x: 4 }]);
 	});
 
+	it('a payload cannot put a cursor, presence or reaction frame on another user\'s entry, or rename its own', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			typing: true,
+			cursors: true,
+			reactions: true,
+			topicArgs: 1
+		});
+
+		const published = [];
+		const ctx = { user: { id: 'mallory' }, ws: {}, publish: (topic, event, data) => published.push({ topic, data }) };
+		await room.__cursorMove(ctx, 'b1', { key: 'bob', x: 1 });
+		await room.__presenceUpdate(ctx, 'b1', { key: 'bob', data: { name: 'Bob' }, typing: true });
+		await room.__reactionEmit(ctx, 'b1', 'wave', { key: 'bob', x: 2 });
+
+		expect(published.map((p) => [p.topic, p.data.key])).toEqual([
+			['board:b1:cursors', 'mallory'],
+			['board:b1:presence', 'mallory'],
+			['board:b1:reactions', 'mallory']
+		]);
+		// The rest of the payload still goes out.
+		expect(published[0].data.x).toBe(1);
+		expect(published[1].data.typing).toBe(true);
+		expect(published[2].data.x).toBe(2);
+		// Nor can a delta replace the presence payload the server computed.
+		expect('data' in published[1].data).toBe(false);
+	});
+
+	it('a payload cannot choose the prototype of a published frame', async () => {
+		// Off the wire `__proto__` is an ordinary own field; merged with plain
+		// assignment it would swap the frame's prototype, and an inherited
+		// `key` or `data` would reach server-side watchers of the topic.
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			typing: true,
+			cursors: true,
+			reactions: true,
+			topicArgs: 1
+		});
+		const published = [];
+		const ctx = { user: { id: 'mallory' }, ws: {}, publish: (topic, event, data) => published.push(data) };
+		const hostile = () => JSON.parse('{"__proto__":{"key":"bob","data":{"name":"Bob"}},"x":1,"typing":true}');
+		await room.__cursorMove(ctx, 'b1', hostile());
+		await room.__presenceUpdate(ctx, 'b1', hostile());
+		await room.__reactionEmit(ctx, 'b1', 'wave', hostile());
+
+		for (const frame of published) {
+			expect(Object.getPrototypeOf(frame)).toBe(Object.prototype);
+			expect(frame.key).toBe('mallory');
+		}
+		expect('data' in published[1]).toBe(false);
+	});
+
 	it('numbers presence frames in publish order, so live clients settle on the value the roster holds', async () => {
 		// Two calls from one socket whose guards settle out of order: the roster
 		// keeps whichever write lands last, so the frame a receiver keeps (the
