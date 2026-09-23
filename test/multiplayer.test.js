@@ -454,18 +454,19 @@ describe('live.multiplayer()', () => {
 		const published = [];
 		const ctx = {
 			user: { id: 'alice' },
+			ws: {},
 			publish: (topic, event, data) => published.push({ topic, event, data })
 		};
 
 		await room.__cursorMove(ctx, 'b1', { x: 10, y: 20 });
 		expect(published).toEqual([
-			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', x: 10, y: 20, _t: expect.any(Number) } }
+			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', x: 10, y: 20, _p: expect.any(String), _n: 1 } }
 		]);
 
 		published.length = 0;
 		await room.__cursorReportViewport(ctx, 'b1', { x: 0, y: 0, w: 800, h: 600 });
 		expect(published).toEqual([
-			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', viewport: true, x: 0, y: 0, w: 800, h: 600, _t: expect.any(Number) } }
+			{ topic: 'board:b1:cursors', event: 'update', data: { key: 'alice', viewport: true, x: 0, y: 0, w: 800, h: 600, _p: expect.any(String), _n: 2 } }
 		]);
 	});
 
@@ -504,18 +505,19 @@ describe('live.multiplayer()', () => {
 		const published = [];
 		const ctx = {
 			user: { id: 'alice' },
+			ws: {},
 			publish: (topic, event, data) => published.push({ topic, event, data })
 		};
 
 		await room.__presenceUpdate(ctx, 'b1', { typing: true });
 		expect(published).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true, _t: expect.any(Number) } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true, _p: expect.any(String), _n: 1 } }
 		]);
 
 		published.length = 0;
 		await room.__presenceUpdate(ctx, 'b1', { selection: { start: 0, end: 5, nodePath: [0] } });
 		expect(published).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', selection: { start: 0, end: 5, nodePath: [0] }, _t: expect.any(Number) } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', selection: { start: 0, end: 5, nodePath: [0] }, _p: expect.any(String), _n: 2 } }
 		]);
 	});
 
@@ -531,19 +533,88 @@ describe('live.multiplayer()', () => {
 		const published = [];
 		const ctx = {
 			user: { id: 'alice' },
+			ws: {},
 			publish: (topic, event, data) => published.push({ topic, event, data })
 		};
 
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': true });
 		expect(published).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': true, _t: expect.any(Number) } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': true, _p: expect.any(String), _n: 1 } }
 		]);
 
 		published.length = 0;
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': null });
 		expect(published).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': null, _t: expect.any(Number) } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': null, _p: expect.any(String), _n: 2 } }
 		]);
+	});
+
+	it('orders cursor and presence frames per connection, never by a payload-supplied token', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			typing: true,
+			cursors: true,
+			topicArgs: 1
+		});
+
+		const published = [];
+		const publish = (topic, event, data) => published.push(data);
+		const first = { user: { id: 'alice' }, ws: {}, publish };
+		const second = { user: { id: 'alice' }, ws: {}, publish };
+
+		await room.__cursorMove(first, 'b1', { x: 1, _p: 'forged', _n: 1e15 });
+		await room.__presenceUpdate(first, 'b1', { typing: true, _n: 1e15 });
+		await room.__cursorMove(second, 'b1', { x: 2 });
+		await room.__cursorMove(first, 'b1', { x: 3 });
+
+		// One sequence per connection, shared by its cursor and presence frames.
+		expect(published.map((d) => d._n)).toEqual([1, 2, 1, 3]);
+		// One id per connection: the same identity on a second socket is a
+		// different publisher.
+		expect(published[0]._p).not.toBe('forged');
+		expect(published[1]._p).toBe(published[0]._p);
+		expect(published[3]._p).toBe(published[0]._p);
+		expect(published[2]._p).not.toBe(published[0]._p);
+
+		// A caller with no connection gets no token, and cannot supply one.
+		published.length = 0;
+		await room.__cursorMove({ user: { id: 'alice' }, publish }, 'b1', { x: 4, _p: 'forged', _n: 7 });
+		expect(published).toEqual([{ key: 'alice', x: 4 }]);
+	});
+
+	it('numbers presence frames in publish order, so live clients settle on the value the roster holds', async () => {
+		// Two calls from one socket whose guards settle out of order: the roster
+		// keeps whichever write lands last, so the frame a receiver keeps (the
+		// highest sequence) must be that same write.
+		const redis = makeFakeRedis();
+		const platform = { redis };
+		let release;
+		const slow = new Promise((r) => { release = r; });
+		let calls = 0;
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: ['title'],
+			topicArgs: 1,
+			guard: async () => { if (++calls === 1) await slow; }
+		});
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+
+		const published = [];
+		const ctx = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform, publish: (topic, event, data) => published.push(data) };
+		const take = room.__presenceUpdate(ctx, 'b1', { 'lock:title': true });
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': null });
+		release();
+		await take;
+
+		const kept = published.reduce((a, b) => (b._n > a._n ? b : a));
+		const roster = await _clusterPresenceList(platform, 'board:b1');
+		const alice = roster.find((e) => e.key === 'alice');
+		expect(kept['lock:title']).toBe(true);
+		expect(alice.data['lock:title']).toBe(true);
 	});
 
 	it('exposes a reaction send handler that publishes an ephemeral event to the reactions sub-topic', async () => {
@@ -563,6 +634,7 @@ describe('live.multiplayer()', () => {
 		const published = [];
 		const ctx = {
 			user: { id: 'alice' },
+			ws: {},
 			publish: (topic, event, data) => published.push({ topic, event, data })
 		};
 
@@ -583,6 +655,7 @@ describe('live.multiplayer()', () => {
 		const published = [];
 		const ctx = {
 			user: { id: 'alice' },
+			ws: {},
 			publish: (topic, event, data) => published.push({ topic, event, data })
 		};
 
@@ -796,9 +869,10 @@ describe('live.multiplayer() sticky presence fields', () => {
 
 		await room.__presenceUpdate(ctxA, 'b1', { typing: true });
 
-		// The forward publish still emits the live update frame.
+		// The forward publish still emits the live update frame (no connection on
+		// this caller, so no ordering token).
 		expect(publishedA).toEqual([
-			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true, _t: expect.any(Number) } }
+			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true } }
 		]);
 
 		// But the late snapshot carries no typing field.

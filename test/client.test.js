@@ -6065,7 +6065,7 @@ describe('__stream() early attach frame', () => {
 	});
 });
 
-// - presence field updates: per-field stamps ---------------------------------
+// - presence field updates: per-field publisher order -------------------------
 
 describe('__stream() presence field update ordering', () => {
 	async function presenceStream(path, topic) {
@@ -6078,30 +6078,82 @@ describe('__stream() presence field update ordering', () => {
 		return { values, unsub, last: () => values[values.length - 1] };
 	}
 
-	it('an older update for the same field is ignored; an older update for another field still applies', async () => {
+	it('an update its publisher already superseded for a field is ignored; one for another field still applies', async () => {
 		const { unsub, last } = await presenceStream('room/fields', 'pf-fields');
-		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', typing: true, _t: 200 } });
+		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', typing: true, _p: 'a', _n: 3 } });
 		expect(last()[0].typing).toBe(true);
-		expect('_t' in last()[0]).toBe(false);
+		expect('_p' in last()[0]).toBe(false);
+		expect('_n' in last()[0]).toBe(false);
 		// The reordered older frame for the same field: parked stale flag otherwise.
-		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', typing: false, _t: 150 } });
+		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', typing: false, _p: 'a', _n: 2 } });
 		expect(last()[0].typing).toBe(true);
 		// An older frame for a different field is still the newest for that field.
-		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', selection: [1, 2], _t: 150 } });
+		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', selection: [1, 2], _p: 'a', _n: 2 } });
 		expect(last()[0].selection).toEqual([1, 2]);
 		expect(last()[0].typing).toBe(true);
 		// A newer frame for the field applies.
-		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', typing: false, _t: 250 } });
+		simulateTopicMessage('pf-fields', { event: 'update', data: { key: 'u1', typing: false, _p: 'a', _n: 4 } });
 		expect(last()[0].typing).toBe(false);
 		unsub();
 	});
 
-	it('a rejoin resets the field stamps and unstamped updates keep the plain merge', async () => {
+	it('a lock released from a new connection releases, whatever its sequence', async () => {
+		// The publisher reconnected (possibly to another replica): its new
+		// connection counts from 1 again, and nothing orders it against the old
+		// one, so the release must apply.
+		const { unsub, last } = await presenceStream('room/relock', 'pf-relock');
+		simulateTopicMessage('pf-relock', { event: 'update', data: { key: 'u1', 'lock:title': true, _p: 'a', _n: 40 } });
+		expect(last()[0]['lock:title']).toBe(true);
+		simulateTopicMessage('pf-relock', { event: 'update', data: { key: 'u1', 'lock:title': null, _p: 'b', _n: 1 } });
+		expect(last()[0]['lock:title']).toBe(null);
+		// A late frame from the old connection is still recognised as superseded.
+		simulateTopicMessage('pf-relock', { event: 'update', data: { key: 'u1', 'lock:title': true, _p: 'a', _n: 39 } });
+		expect(last()[0]['lock:title']).toBe(null);
+		unsub();
+	});
+
+	it('forgets the least recently active publisher of a field first', async () => {
+		const { unsub, last } = await presenceStream('room/evict', 'pf-evict');
+		const send = (p, n, typing) => simulateTopicMessage('pf-evict', { event: 'update', data: { key: 'u1', typing, _p: p, _n: n } });
+		send('a', 10, 1);
+		send('b', 1, 2);
+		send('c', 1, 3);
+		send('d', 1, 4);
+		// A publishes again, so B is now the least recently active.
+		send('a', 11, 5);
+		send('e', 1, 6);
+		// A is remembered: its superseded update is still ignored.
+		send('a', 10, 7);
+		expect(last()[0].typing).toBe(6);
+		// B was forgotten, so nothing can tell its re-delivery apart.
+		send('b', 1, 8);
+		expect(last()[0].typing).toBe(8);
+		unsub();
+	});
+
+	it('an update ahead of its join seeds an entry without the token, and a join keeps the marks', async () => {
+		const { unsub, last } = await presenceStream('room/seed', 'pf-seed');
+		const entry = () => last().find((e) => e.key === 'u2');
+		simulateTopicMessage('pf-seed', { event: 'update', data: { key: 'u2', typing: false, _p: 'a', _n: 6 } });
+		expect(entry()).toEqual({ key: 'u2', typing: false });
+		// A late update the publisher superseded before the entry existed.
+		simulateTopicMessage('pf-seed', { event: 'update', data: { key: 'u2', typing: true, _p: 'a', _n: 5 } });
+		expect(entry().typing).toBe(false);
+		// The join replaces the seeded entry; the publisher's sequence runs on.
+		simulateTopicMessage('pf-seed', { event: 'join', data: { key: 'u2', data: { name: 'B' } } });
+		simulateTopicMessage('pf-seed', { event: 'update', data: { key: 'u2', typing: true, _p: 'a', _n: 4 } });
+		expect(entry().typing).toBeUndefined();
+		simulateTopicMessage('pf-seed', { event: 'update', data: { key: 'u2', typing: true, _p: 'a', _n: 7 } });
+		expect(entry().typing).toBe(true);
+		unsub();
+	});
+
+	it('a rejoin resets the field marks and unordered updates keep the plain merge', async () => {
 		const { unsub, last } = await presenceStream('room/rejoin', 'pf-rejoin');
-		simulateTopicMessage('pf-rejoin', { event: 'update', data: { key: 'u1', typing: true, _t: 500 } });
+		simulateTopicMessage('pf-rejoin', { event: 'update', data: { key: 'u1', typing: true, _p: 'a', _n: 5 } });
 		simulateTopicMessage('pf-rejoin', { event: 'leave', data: { key: 'u1' } });
 		simulateTopicMessage('pf-rejoin', { event: 'join', data: { key: 'u1', data: { name: 'A' } } });
-		simulateTopicMessage('pf-rejoin', { event: 'update', data: { key: 'u1', typing: false, _t: 100 } });
+		simulateTopicMessage('pf-rejoin', { event: 'update', data: { key: 'u1', typing: false, _p: 'a', _n: 1 } });
 		expect(last()[0].typing).toBe(false);
 		simulateTopicMessage('pf-rejoin', { event: 'update', data: { key: 'u1', typing: true } });
 		expect(last()[0].typing).toBe(true);
@@ -6109,7 +6161,7 @@ describe('__stream() presence field update ordering', () => {
 	});
 });
 
-// - cursor merge ordering: a stamped older frame never rolls a cursor back ----
+// - cursor merge ordering: a superseded sample never rolls a cursor back -------
 
 describe('__stream() cursor merge ordering', () => {
 	async function cursorStream(path, topic) {
@@ -6119,20 +6171,15 @@ describe('__stream() cursor merge ordering', () => {
 		await flush();
 		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
 		simulateRpcResponse(sent.id, { ok: true, data: [], topic, merge: 'cursor' });
-		return { values, unsub };
+		return { store, values, unsub, last: () => values[values.length - 1] };
 	}
 
-	it('drops a stamped update older than the one held for the same key', async () => {
-		const { values, unsub } = await cursorStream('doc/order', 'cur-order');
-		simulateTopicMessage('cur-order', { event: 'update', data: { key: 'u1', x: 0.2, y: 0.3, _t: 200 } });
-		simulateTopicMessage('cur-order', { event: 'update', data: { key: 'u1', x: 0.29, y: 0.49, _t: 150 } });
-		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 0.2, y: 0.3, _t: 200 }]);
-		simulateTopicMessage('cur-order', { event: 'update', data: { key: 'u1', x: 0.65, y: 0.45, _t: 300 } });
-		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 0.65, y: 0.45, _t: 300 }]);
-		unsub();
-	});
-
-	it('a stale sample for one key does not hide a fresh sample for another key in the same frame', async () => {
+	/**
+	 * Load a client whose events are batched per animation frame (the path is
+	 * chosen at module load, from a window with requestAnimationFrame) and run
+	 * `body` with a function that flushes the pending frame.
+	 */
+	async function withAnimationFrames(body) {
 		const rafCallbacks = [];
 		const hadWindow = 'window' in globalThis;
 		const origWindow = globalThis.window;
@@ -6144,66 +6191,162 @@ describe('__stream() cursor merge ordering', () => {
 		try {
 			vi.resetModules();
 			const mod = await import('../src/client.js');
-			const store = mod.__stream('doc/multi', { merge: 'cursor' });
-			const values = [];
-			const unsub = store.subscribe((v) => values.push(v));
-			await flush();
-			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
-			simulateRpcResponse(sent.id, { ok: true, data: [{ key: 'u1', x: 0, _t: 200 }, { key: 'u2', x: 0, _t: 200 }], topic: 'cur-multi', merge: 'cursor' });
-
-			// One frame: a fresh sample for u2, then a stale one for u1. The store
-			// must still emit for the frame (the in-place update alone is invisible
-			// to subscribers).
-			const emitted = values.length;
-			simulateTopicMessage('cur-multi', { event: 'update', data: { key: 'u2', x: 9, _t: 300 } });
-			simulateTopicMessage('cur-multi', { event: 'update', data: { key: 'u1', x: 5, _t: 150 } });
-			rafCallbacks[0]();
-			expect(values.length).toBe(emitted + 1);
-			const last = values[values.length - 1];
-			expect(last.find((c) => c.key === 'u2').x).toBe(9);
-			expect(last.find((c) => c.key === 'u1').x).toBe(0);
-			unsub();
+			const frame = () => {
+				const pending = rafCallbacks.splice(0);
+				expect(pending).toHaveLength(1);
+				pending[0]();
+			};
+			await body(mod, frame);
 		} finally {
 			globalThis.requestAnimationFrame = origRaf;
 			globalThis.cancelAnimationFrame = origCancel;
 			if (hadWindow) globalThis.window = origWindow; else delete globalThis.window;
 		}
-	});
+	}
 
-	it('a stamp older by more than the reorder window applies (a publisher whose clock moved)', async () => {
-		const { values, unsub } = await cursorStream('doc/skew', 'cur-skew');
-		simulateTopicMessage('cur-skew', { event: 'update', data: { key: 'u1', x: 1, _t: 10_000 } });
-		simulateTopicMessage('cur-skew', { event: 'update', data: { key: 'u1', x: 2, _t: 8_000 } });
-		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 2, _t: 8_000 }]);
+	it('drops a sample its publisher already superseded', async () => {
+		const { unsub, last } = await cursorStream('doc/order', 'cur-order');
+		simulateTopicMessage('cur-order', { event: 'update', data: { key: 'u1', x: 0.2, y: 0.3, _p: 'a', _n: 2 } });
+		simulateTopicMessage('cur-order', { event: 'update', data: { key: 'u1', x: 0.29, y: 0.49, _p: 'a', _n: 1 } });
+		expect(last()).toEqual([{ key: 'u1', x: 0.2, y: 0.3, _p: 'a', _n: 2 }]);
+		simulateTopicMessage('cur-order', { event: 'update', data: { key: 'u1', x: 0.65, y: 0.45, _p: 'a', _n: 3 } });
+		expect(last()).toEqual([{ key: 'u1', x: 0.65, y: 0.45, _p: 'a', _n: 3 }]);
 		unsub();
 	});
 
-	it('an equal or missing stamp keeps last-write-wins (older servers, same-instant samples)', async () => {
-		const { values, unsub } = await cursorStream('doc/lww', 'cur-lww');
-		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 1, _t: 100 } });
-		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 2, _t: 100 } });
-		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 2, _t: 100 }]);
+	it('a sample from another publisher applies whatever its sequence, and each publisher keeps its own order', async () => {
+		// One identity on two connections: a reconnect, or a second tab.
+		const { unsub, last } = await cursorStream('doc/twopub', 'cur-twopub');
+		simulateTopicMessage('cur-twopub', { event: 'update', data: { key: 'u1', x: 1, _p: 'a', _n: 50 } });
+		simulateTopicMessage('cur-twopub', { event: 'update', data: { key: 'u1', x: 2, _p: 'b', _n: 1 } });
+		expect(last()[0].x).toBe(2);
+		// A's late sample was superseded by A's own newer one, which arrived
+		// before B's: B's position stands.
+		simulateTopicMessage('cur-twopub', { event: 'update', data: { key: 'u1', x: 3, _p: 'a', _n: 49 } });
+		expect(last()[0].x).toBe(2);
+		// A is still live (a second tab) and its next sample applies.
+		simulateTopicMessage('cur-twopub', { event: 'update', data: { key: 'u1', x: 4, _p: 'a', _n: 51 } });
+		expect(last()[0].x).toBe(4);
+		unsub();
+	});
+
+	it('a re-delivered sample is dropped, and a sample without a token keeps last-write-wins', async () => {
+		const { unsub, last } = await cursorStream('doc/lww', 'cur-lww');
+		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 1, _p: 'a', _n: 1 } });
+		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 2, _p: 'a', _n: 1 } });
+		expect(last()).toEqual([{ key: 'u1', x: 1, _p: 'a', _n: 1 }]);
 		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 3 } });
-		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 3 }]);
-		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 4, _t: 50 } });
-		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 4, _t: 50 }]);
+		expect(last()).toEqual([{ key: 'u1', x: 3 }]);
+		simulateTopicMessage('cur-lww', { event: 'update', data: { key: 'u1', x: 4, _p: 'a', _n: 2 } });
+		expect(last()).toEqual([{ key: 'u1', x: 4, _p: 'a', _n: 2 }]);
 		unsub();
+	});
+
+	it('forgets the least recently active publisher first once a key holds the maximum', async () => {
+		const { unsub, last } = await cursorStream('doc/evict', 'cur-evict');
+		const send = (p, n, x) => simulateTopicMessage('cur-evict', { event: 'update', data: { key: 'u1', x, _p: p, _n: n } });
+		send('a', 10, 1);
+		send('b', 1, 2);
+		send('c', 1, 3);
+		send('d', 1, 4);
+		// A publishes again, so B is now the least recently active.
+		send('a', 11, 5);
+		send('e', 1, 6);
+		// A is remembered: its superseded sample is still dropped.
+		send('a', 10, 7);
+		expect(last()[0].x).toBe(6);
+		// B was forgotten, so nothing can tell its re-delivery apart.
+		send('b', 1, 8);
+		expect(last()[0].x).toBe(8);
+		unsub();
+	});
+
+	it('remembers every publisher up to the maximum, including one that took the key back', async () => {
+		const { unsub, last } = await cursorStream('doc/retake', 'cur-retake');
+		const send = (p, n, x) => simulateTopicMessage('cur-retake', { event: 'update', data: { key: 'u1', x, _p: p, _n: n } });
+		send('a', 1, 1);
+		send('b', 1, 2);
+		send('c', 1, 3);
+		// B takes the key back: its mark now lives on the held entry, not twice.
+		send('b', 2, 4);
+		send('d', 1, 5);
+		// Four publishers, all remembered: A's re-delivery is still dropped.
+		send('a', 1, 6);
+		expect(last()[0].x).toBe(5);
+		unsub();
+	});
+
+	it('a remove forgets every publisher of the key, so a rejoined cursor starts a fresh order', async () => {
+		const { unsub, last } = await cursorStream('doc/remove', 'cur-remove');
+		const send = (p, n, x) => simulateTopicMessage('cur-remove', { event: 'update', data: { key: 'u1', x, _p: p, _n: n } });
+		send('a', 9, 1);
+		// A second publisher takes the key, so A's mark is kept aside.
+		send('b', 1, 2);
+		simulateTopicMessage('cur-remove', { event: 'remove', data: { key: 'u1' } });
+		expect(last()).toEqual([]);
+		send('c', 1, 3);
+		send('a', 1, 4);
+		expect(last()).toEqual([{ key: 'u1', x: 4, _p: 'a', _n: 1 }]);
+		unsub();
+	});
+
+	it('an optimistic change neither reads nor moves the publisher marks', async () => {
+		const { store, unsub, last } = await cursorStream('doc/optimistic', 'cur-optimistic');
+		const send = (p, n, x) => simulateTopicMessage('cur-optimistic', { event: 'update', data: { key: 'u1', x, _p: p, _n: n } });
+		send('a', 5, 1);
+		send('b', 1, 2);
+		// A local remove is replayed over the server state while it is pending.
+		let reject;
+		const pending = store.mutate(() => new Promise((_resolve, r) => { reject = r; }), { event: 'remove', data: { key: 'u1' } });
+		expect(last()).toEqual([]);
+		// A's late sample is still recognised as superseded by the server state.
+		send('a', 4, 3);
+		reject(new Error('refused'));
+		await expect(pending).rejects.toThrow('refused');
+		expect(last()).toEqual([{ key: 'u1', x: 2, _p: 'b', _n: 1 }]);
+		unsub();
+	});
+
+	it('a graduated optimistic change keeps the displaced publisher remembered', async () => {
+		const { store, unsub, last } = await cursorStream('doc/graduate', 'cur-graduate');
+		simulateTopicMessage('cur-graduate', { event: 'update', data: { key: 'u1', x: 1, _p: 'a', _n: 5 } });
+		await store.mutate(() => Promise.resolve(), { event: 'update', data: { key: 'u1', x: 9 } });
+		expect(last()).toEqual([{ key: 'u1', x: 9 }]);
+		// The local sample now holds the key; A's late sample is still stale.
+		simulateTopicMessage('cur-graduate', { event: 'update', data: { key: 'u1', x: 2, _p: 'a', _n: 4 } });
+		expect(last()).toEqual([{ key: 'u1', x: 9 }]);
+		unsub();
+	});
+
+	it('a stale sample for one key does not hide a fresh sample for another key in the same frame', async () => {
+		await withAnimationFrames(async (mod, frame) => {
+			const store = mod.__stream('doc/multi', { merge: 'cursor' });
+			const values = [];
+			const unsub = store.subscribe((v) => values.push(v));
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'cur-multi', merge: 'cursor' });
+			simulateTopicMessage('cur-multi', { event: 'update', data: { key: 'u1', x: 0, _p: 'a', _n: 2 } });
+			simulateTopicMessage('cur-multi', { event: 'update', data: { key: 'u2', x: 0, _p: 'b', _n: 2 } });
+			frame();
+
+			// One frame: a fresh sample for u2, then a stale one for u1. The store
+			// must still emit for the frame (the in-place update alone is invisible
+			// to subscribers).
+			const emitted = values.length;
+			simulateTopicMessage('cur-multi', { event: 'update', data: { key: 'u2', x: 9, _p: 'b', _n: 3 } });
+			simulateTopicMessage('cur-multi', { event: 'update', data: { key: 'u1', x: 5, _p: 'a', _n: 1 } });
+			frame();
+			expect(values.length).toBe(emitted + 1);
+			const last = values[values.length - 1];
+			expect(last.find((c) => c.key === 'u2').x).toBe(9);
+			expect(last.find((c) => c.key === 'u1').x).toBe(0);
+			unsub();
+		});
 	});
 
 	it('a burst that arrives reordered within one animation frame lands on its newest sample', async () => {
-		// The frame-batched path is chosen at module load (a window with
-		// requestAnimationFrame), so load a client under those globals.
-		const rafCallbacks = [];
-		const hadWindow = 'window' in globalThis;
-		const origWindow = globalThis.window;
-		const origRaf = globalThis.requestAnimationFrame;
-		const origCancel = globalThis.cancelAnimationFrame;
-		if (!hadWindow) globalThis.window = /** @type {any} */ ({});
-		globalThis.requestAnimationFrame = (cb) => { rafCallbacks.push(cb); return rafCallbacks.length; };
-		globalThis.cancelAnimationFrame = () => {};
-		try {
-			vi.resetModules();
-			const mod = await import('../src/client.js');
+		await withAnimationFrames(async (mod, frame) => {
 			const store = mod.__stream('doc/burst', { merge: 'cursor' });
 			const values = [];
 			const unsub = store.subscribe((v) => values.push(v));
@@ -6211,18 +6354,77 @@ describe('__stream() cursor merge ordering', () => {
 			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
 			simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'cur-burst', merge: 'cursor' });
 
-			simulateTopicMessage('cur-burst', { event: 'update', data: { key: 'u1', x: 0.1, _t: 10 } });
-			simulateTopicMessage('cur-burst', { event: 'update', data: { key: 'u1', x: 0.2, _t: 30 } });
-			simulateTopicMessage('cur-burst', { event: 'update', data: { key: 'u1', x: 0.15, _t: 20 } });
-			expect(rafCallbacks).toHaveLength(1);
-			rafCallbacks[0]();
-			expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 0.2, _t: 30 }]);
+			simulateTopicMessage('cur-burst', { event: 'update', data: { key: 'u1', x: 0.1, _p: 'a', _n: 1 } });
+			simulateTopicMessage('cur-burst', { event: 'update', data: { key: 'u1', x: 0.2, _p: 'a', _n: 3 } });
+			simulateTopicMessage('cur-burst', { event: 'update', data: { key: 'u1', x: 0.15, _p: 'a', _n: 2 } });
+			frame();
+			expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 0.2, _p: 'a', _n: 3 }]);
 			unsub();
-		} finally {
-			globalThis.requestAnimationFrame = origRaf;
-			globalThis.cancelAnimationFrame = origCancel;
-			if (hadWindow) globalThis.window = origWindow; else delete globalThis.window;
-		}
+		});
+	});
+
+	it('two publishers in one animation frame both reach the merge, so a later superseded sample is still recognised', async () => {
+		await withAnimationFrames(async (mod, frame) => {
+			const store = mod.__stream('doc/framepub', { merge: 'cursor' });
+			const values = [];
+			const unsub = store.subscribe((v) => values.push(v));
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'cur-framepub', merge: 'cursor' });
+
+			// Frame dedup would keep only B's later arrival. A's sample must still
+			// reach the merge so A's mark moves to 5...
+			simulateTopicMessage('cur-framepub', { event: 'update', data: { key: 'u1', x: 1, _p: 'a', _n: 5 } });
+			simulateTopicMessage('cur-framepub', { event: 'update', data: { key: 'u1', x: 2, _p: 'b', _n: 1 } });
+			frame();
+			expect(values[values.length - 1][0].x).toBe(2);
+			// ...or A's reordered older sample in the next frame would land as new.
+			simulateTopicMessage('cur-framepub', { event: 'update', data: { key: 'u1', x: 3, _p: 'a', _n: 4 } });
+			frame();
+			expect(values[values.length - 1][0].x).toBe(2);
+			unsub();
+		});
+	});
+
+	it('a re-delivered sample in the same frame keeps its first copy, as one event at a time would', async () => {
+		await withAnimationFrames(async (mod, frame) => {
+			const store = mod.__stream('doc/framedup', { merge: 'cursor' });
+			const values = [];
+			const unsub = store.subscribe((v) => values.push(v));
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'cur-framedup', merge: 'cursor' });
+
+			// A's copy that arrives after B's must not land as the newest.
+			simulateTopicMessage('cur-framedup', { event: 'update', data: { key: 'u1', x: 1, _p: 'a', _n: 5 } });
+			simulateTopicMessage('cur-framedup', { event: 'update', data: { key: 'u1', x: 2, _p: 'b', _n: 1 } });
+			simulateTopicMessage('cur-framedup', { event: 'update', data: { key: 'u1', x: 1, _p: 'a', _n: 5 } });
+			frame();
+			expect(values[values.length - 1][0].x).toBe(2);
+			unsub();
+		});
+	});
+
+	it('an ordered sample followed by an unordered one in a frame still marks its publisher', async () => {
+		await withAnimationFrames(async (mod, frame) => {
+			const store = mod.__stream('doc/framemix', { merge: 'cursor' });
+			const values = [];
+			const unsub = store.subscribe((v) => values.push(v));
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'cur-framemix', merge: 'cursor' });
+
+			// An older server's unordered sample lands beside A's (a rollout).
+			simulateTopicMessage('cur-framemix', { event: 'update', data: { key: 'u1', x: 6, _p: 'a', _n: 6 } });
+			simulateTopicMessage('cur-framemix', { event: 'update', data: { key: 'u1', x: 9 } });
+			frame();
+			expect(values[values.length - 1][0].x).toBe(9);
+			// A6 still reached the merge, so A's late sample is superseded.
+			simulateTopicMessage('cur-framemix', { event: 'update', data: { key: 'u1', x: 5, _p: 'a', _n: 5 } });
+			frame();
+			expect(values[values.length - 1][0].x).toBe(9);
+			unsub();
+		});
 	});
 
 	it('two presence updates for one key in one animation frame keep both their fields', async () => {
@@ -6230,17 +6432,7 @@ describe('__stream() cursor merge ordering', () => {
 		// cursor (the frame IS the sample) and wrong for a presence delta (the
 		// frame carries only what changed): collapsing them drops the fields the
 		// older one carried, a lock release behind a typing flag.
-		const rafCallbacks = [];
-		const hadWindow = 'window' in globalThis;
-		const origWindow = globalThis.window;
-		const origRaf = globalThis.requestAnimationFrame;
-		const origCancel = globalThis.cancelAnimationFrame;
-		if (!hadWindow) globalThis.window = /** @type {any} */ ({});
-		globalThis.requestAnimationFrame = (cb) => { rafCallbacks.push(cb); return rafCallbacks.length; };
-		globalThis.cancelAnimationFrame = () => {};
-		try {
-			vi.resetModules();
-			const mod = await import('../src/client.js');
+		await withAnimationFrames(async (mod, frame) => {
 			const store = mod.__stream('doc/presfields', { merge: 'presence' });
 			const values = [];
 			const unsub = store.subscribe((v) => values.push(v));
@@ -6248,17 +6440,84 @@ describe('__stream() cursor merge ordering', () => {
 			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
 			simulateRpcResponse(sent.id, { ok: true, data: [{ key: 'u1' }], topic: 'pres-fields', merge: 'presence' });
 
-			simulateTopicMessage('pres-fields', { event: 'update', data: { key: 'u1', typing: true, _t: 100 } });
-			simulateTopicMessage('pres-fields', { event: 'update', data: { key: 'u1', locked: true, _t: 110 } });
-			expect(rafCallbacks).toHaveLength(1);
-			rafCallbacks[0]();
+			simulateTopicMessage('pres-fields', { event: 'update', data: { key: 'u1', typing: true, _p: 'a', _n: 1 } });
+			simulateTopicMessage('pres-fields', { event: 'update', data: { key: 'u1', locked: true, _p: 'a', _n: 2 } });
+			frame();
 			expect(values[values.length - 1]).toEqual([{ key: 'u1', typing: true, locked: true }]);
 			unsub();
+		});
+	});
+});
+
+// - ordering token end to end: server send path into the client merge --------
+
+describe('live.multiplayer ordering token, server to client', () => {
+	it('a lock released after the holder reconnects to a replica whose clock runs behind still releases', async () => {
+		const { live } = await import('../src/server.js');
+		const { setRuntimeEnv, resetRuntimeEnv } = await import('../src/shared/runtime.js');
+		const room = live.multiplayer({
+			topic: (ctx, id) => 'board:' + id,
+			init: async () => [],
+			presence: () => ({}),
+			locks: ['title'],
+			topicArgs: 1
+		});
+		const frames = [];
+		const topics = [];
+		const publish = (topic, event, data) => { topics.push(topic); frames.push({ event, data }); };
+		try {
+			// Alice takes the lock through her connection on one replica...
+			setRuntimeEnv({ clock: { wallEpoch: () => 1_000_000 } });
+			await room.__presenceUpdate({ user: { id: 'alice' }, ws: {}, publish }, 'b1', { 'lock:title': true });
+			// ...then reconnects to a replica whose wall clock is 200 ms behind
+			// (the room's grace window keeps her entry, so no leave/join is
+			// published) and releases it.
+			setRuntimeEnv({ clock: { wallEpoch: () => 999_800 } });
+			await room.__presenceUpdate({ user: { id: 'alice' }, ws: {}, publish }, 'b1', { 'lock:title': null });
 		} finally {
-			globalThis.requestAnimationFrame = origRaf;
-			globalThis.cancelAnimationFrame = origCancel;
-			if (hadWindow) globalThis.window = origWindow; else delete globalThis.window;
+			resetRuntimeEnv();
 		}
+		expect(topics).toEqual(['board:b1:presence', 'board:b1:presence']);
+
+		// Bob holds alice's roster entry and receives both frames.
+		const store = __stream('board/presence', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ key: 'alice' }], topic: 'board:b1:presence', merge: 'presence' });
+		simulateTopicMessage('board:b1:presence', frames[0]);
+		expect(values[values.length - 1][0]['lock:title']).toBe(true);
+		simulateTopicMessage('board:b1:presence', frames[1]);
+		expect(values[values.length - 1][0]['lock:title']).toBe(null);
+		unsub();
+	});
+
+	it('a reordered pair from one connection still lands on the newer frame', async () => {
+		const { live } = await import('../src/server.js');
+		const room = live.multiplayer({
+			topic: (ctx, id) => 'board:' + id,
+			init: async () => [],
+			presence: () => ({}),
+			typing: true,
+			topicArgs: 1
+		});
+		const frames = [];
+		const ctx = { user: { id: 'alice' }, ws: {}, publish: (topic, event, data) => frames.push({ event, data }) };
+		await room.__presenceUpdate(ctx, 'b1', { typing: true });
+		await room.__presenceUpdate(ctx, 'b1', { typing: false });
+
+		const store = __stream('board/presence', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ key: 'alice' }], topic: 'board:b1:presence', merge: 'presence' });
+		// The relay delivers them the other way round.
+		simulateTopicMessage('board:b1:presence', frames[1]);
+		simulateTopicMessage('board:b1:presence', frames[0]);
+		expect(values[values.length - 1][0].typing).toBe(false);
+		unsub();
 	});
 });
 

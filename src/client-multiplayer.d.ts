@@ -11,8 +11,10 @@ export interface RosterEntry {
 export interface CursorEntry {
 	key: string;
 	color: string;
-	/** Server publish instant (wall-clock ms) of the sample; reserved, set by the server. */
-	_t?: number;
+	/** Id of the connection that published the sample; reserved, set by the server. */
+	_p?: string;
+	/** That connection's publish sequence number for the sample; reserved, set by the server. */
+	_n?: number;
 	[field: string]: any;
 }
 

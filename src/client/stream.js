@@ -125,12 +125,44 @@ export function createReactiveStream(source) {
 let _subscribeBatch = null;
 
 /**
- * How far behind the held stamp a cursor / presence-field frame may be and
- * still count as a reordered sample of the same gesture. Relay reordering
- * spans milliseconds; a gap wider than this is a clock change on the
- * publisher's side and the frame applies.
+ * Publishers remembered per cursor key, or per presence key and field. Every
+ * reconnect of one identity publishes under a fresh publisher id, so a
+ * long-lived entry accumulates them; only the most recently active can still
+ * have a frame in flight, so the least recently active is forgotten first.
  */
-const _STAMP_REORDER_WINDOW_MS = 1000;
+const _ORDER_MARKS_MAX = 4;
+
+/**
+ * Does a cursor / presence-field frame carry an ordering token? `_p` names the
+ * publishing connection and `_n` counts that connection's publishes.
+ * @param {any} data
+ */
+function _isOrdered(data) {
+	return typeof data._p === 'string' && typeof data._n === 'number';
+}
+
+/**
+ * Admit an ordered frame unless its publisher has already delivered this
+ * sequence or a later one, and record it as that publisher's newest. Frames
+ * from different publishers are never ordered against each other: no clock is
+ * shared between two connections, or between the replicas behind them, that
+ * could decide it, so they apply in arrival order.
+ * @param {Map<string, number>} marks
+ * @param {any} data
+ * @returns {boolean} false when the frame is superseded
+ */
+function _admitOrdered(marks, data) {
+	const p = data._p;
+	const seen = marks.get(p);
+	if (seen !== undefined) {
+		if (data._n <= seen) return false;
+		if (marks.size > 1) marks.delete(p);
+	} else if (marks.size >= _ORDER_MARKS_MAX) {
+		marks.delete(marks.keys().next().value);
+	}
+	marks.set(p, data._n);
+	return true;
+}
 
 /**
  * Queue a stream subscribe RPC to be sent in a batch within the current microtask.
@@ -466,13 +498,58 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	let _lastSeq = null;
 
 	/**
-	 * Per-key, per-field publish stamps for presence field updates (`_t` on
-	 * the wire), so a field update reordered behind a newer one for the SAME
-	 * field is ignored while updates to other fields still apply. Cleared on
-	 * join, leave, set, and every snapshot.
+	 * Per-key, per-field publisher marks for presence field updates, so a field
+	 * update its publisher already superseded for the SAME field is ignored
+	 * while updates to other fields still apply. Cleared on leave, set, and
+	 * every snapshot.
+	 * @type {Map<any, Map<string, Map<string, number>>>}
+	 */
+	const _presenceFieldOrder = new Map();
+
+	/**
+	 * Per-key marks for a cursor key's OTHER publishers. The held entry is its
+	 * own publisher's newest sample, so a key needs marks here only once a
+	 * second connection publishes under it (a reconnect, a second tab).
+	 * Cleared on remove, set, and every snapshot.
 	 * @type {Map<any, Map<string, number>>}
 	 */
-	const _presenceFieldStamps = new Map();
+	const _cursorOrder = new Map();
+
+	/**
+	 * Admit a cursor sample against the entry held for its key, keeping the
+	 * displaced publisher's mark when a different connection takes over.
+	 * With one connection per peer, the common case, this is one comparison
+	 * against the held entry and no map is touched.
+	 * @param {any} held
+	 * @param {any} data
+	 * @returns {boolean} false when the sample is superseded
+	 */
+	function _admitCursor(held, data) {
+		if (_isOrdered(data)) {
+			if (held._p === data._p && typeof held._n === 'number') return data._n > held._n;
+			const marks = _cursorOrder.get(data.key);
+			if (marks !== undefined) {
+				const seen = marks.get(data._p);
+				if (seen !== undefined) {
+					if (data._n <= seen) return false;
+					// It becomes the held entry, which carries its mark.
+					marks.delete(data._p);
+				}
+			}
+		}
+		if (_isOrdered(held) && held._p !== data._p) {
+			let marks = _cursorOrder.get(data.key);
+			if (marks === undefined) {
+				marks = new Map();
+				_cursorOrder.set(data.key, marks);
+			} else if (marks.size >= _ORDER_MARKS_MAX - 1) {
+				// The held entry is one of the remembered publishers.
+				marks.delete(marks.keys().next().value);
+			}
+			marks.set(held._p, held._n);
+		}
+		return true;
+	}
 
 	/** @type {any} Cursor for pagination (server-provided) */
 	let _cursor = null;
@@ -660,6 +737,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	/** @type {boolean} Whether _applyMerge has changed currentValue since last flush */
 	let _dirty = false;
 
+	/** Advance the monotonic resume cursor from an envelope that is not applied. @param {any} envelope */
+	function _advanceSeq(envelope) {
+		if (envelope && envelope.seq !== undefined && (_lastSeq === null || envelope.seq > _lastSeq)) _lastSeq = envelope.seq;
+	}
+
 	/**
 	 * Pure functional core of `_applyMerge`. Mutates the supplied `value`,
 	 * `index`, and `optimisticKeys` in place; closure constants
@@ -676,6 +758,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * @param {Map<any, number>} index
 	 * @param {{ event: string, data: any }} envelope
 	 * @param {Set<any>} optimisticKeys
+	 * @param {boolean} [local] - the change is this client's own optimistic
+	 *   change replayed over a copy of the server state for display, not a
+	 *   server frame: it applies as given and neither reads nor moves the
+	 *   cursor / presence publisher marks, which describe the server state's
+	 *   ordering only.
 	 * @returns {{ value: any, replaced: boolean, modified: boolean }}
 	 *   - `value`: the (possibly new) value reference. May be a fresh
 	 *     reference (e.g. after `data` replacement) or the same reference
@@ -683,28 +770,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 *   - `replaced`: true when `value` was assigned a fresh reference,
 	 *     so the caller does not need to clone before publishing.
 	 *   - `modified`: false when the event changed nothing: a `set` whose
-	 *     `data` is reference-identical to the prior value, or a stamped
-	 *     `cursor` / `presence` update older than what is held; true in
-	 *     all other paths.
+	 *     `data` is reference-identical to the prior value, or an ordered
+	 *     `cursor` / `presence` update its publisher already superseded;
+	 *     true in all other paths.
 	 */
-	/**
-	 * A stamped frame is stale when it is older than the stamp held for the
-	 * same key (or field) by less than the reorder window. Older by MORE than
-	 * the window means the publisher's clock moved (it reconnected to a
-	 * replica whose wall clock is behind): those frames must apply, or the
-	 * peer would freeze for the whole skew. Unstamped frames are never stale.
-	 * @param {any} incoming @param {any} held
-	 */
-	function _isStaleStamp(incoming, held) {
-		return typeof incoming === 'number' && typeof held === 'number' && incoming < held && held - incoming <= _STAMP_REORDER_WINDOW_MS;
-	}
-
-	/** Advance the monotonic resume cursor from an envelope that is not applied. @param {any} envelope */
-	function _advanceSeq(envelope) {
-		if (envelope && envelope.seq !== undefined && (_lastSeq === null || envelope.seq > _lastSeq)) _lastSeq = envelope.seq;
-	}
-
-	function _applyMergeFn(value, index, envelope, optimisticKeys) {
+	function _applyMergeFn(value, index, envelope, optimisticKeys, local = false) {
 		const { event } = envelope;
 		// Defense-in-depth: strip prototype-pollution keys (`__proto__`,
 		// `constructor`, `prototype`) from envelope data at ingress for
@@ -782,7 +852,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		} else if (merge === 'presence') {
 			if (!Array.isArray(value)) { value = []; index.clear(); }
 			if (event === 'join') {
-				_presenceFieldStamps.delete(data.key);
+				// A join keeps the key's publisher marks: a publisher's sequence
+				// runs on across it, so an update that publisher superseded is
+				// still stale once the joined entry has replaced the old one.
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
 					value[idx] = data;
@@ -791,7 +863,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					value.push(data);
 				}
 			} else if (event === 'leave') {
-				_presenceFieldStamps.delete(data.key);
+				if (!local) _presenceFieldOrder.delete(data.key);
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
 					index.delete(data.key);
@@ -812,33 +884,34 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// clears until the next update (acceptable for the rare
 				// update-before-join order; normal order is join first).
 				const idx = index.get(data.key);
-				if (idx !== undefined) {
-					if (typeof data._t === 'number') {
-						// Stamped delta: apply each field only when this frame is
-						// newer than the last one that set that field, so a
-						// reordered pair (`typing: false` behind `typing: true`)
-						// cannot park a stale flag. The stamp itself stays out of
-						// the entry; the entry carries only the presence fields.
-						let stamps = _presenceFieldStamps.get(data.key);
-						if (!stamps) { stamps = new Map(); _presenceFieldStamps.set(data.key, stamps); }
-						let next = null;
-						for (const field in data) {
-							if (field === 'key' || field === '_t') continue;
-							if (_isStaleStamp(data._t, stamps.get(field))) continue;
-							stamps.set(field, data._t);
-							(next ??= {})[field] = data[field];
-						}
-						if (next === null) return { value, replaced: false, modified: false };
-						value[idx] = { ...value[idx], ...next };
-					} else {
-						value[idx] = { ...value[idx], ...data };
+				let fields = data;
+				if (!local && _isOrdered(data)) {
+					// Ordered delta: apply each field only when its publisher
+					// has not already delivered a newer frame for that field, so
+					// a reordered pair (`typing: false` behind `typing: true`)
+					// cannot park a stale flag. The token itself stays out of the
+					// entry, a seeded one included; the entry carries only the
+					// presence fields.
+					let order = _presenceFieldOrder.get(data.key);
+					if (!order) { order = new Map(); _presenceFieldOrder.set(data.key, order); }
+					fields = null;
+					for (const field in data) {
+						if (field === 'key' || field === '_p' || field === '_n') continue;
+						let marks = order.get(field);
+						if (!marks) { marks = new Map(); order.set(field, marks); }
+						if (!_admitOrdered(marks, data)) continue;
+						(fields ??= { key: data.key })[field] = data[field];
 					}
+					if (fields === null) return { value, replaced: false, modified: false };
+				}
+				if (idx !== undefined) {
+					value[idx] = { ...value[idx], ...fields };
 				} else {
 					index.set(data.key, value.length);
-					value.push(data);
+					value.push(fields);
 				}
 			} else if (event === 'set') {
-				_presenceFieldStamps.clear();
+				if (!local) _presenceFieldOrder.clear();
 				value = data;
 				_rebuildIndexFn(value, index);
 				return { value, replaced: true, modified: true };
@@ -849,21 +922,20 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			if (event === 'update') {
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
-					// Frames from one publisher carry its publish instant (`_t`).
-					// A frame older than the one held is a reordered or re-delivered
-					// sample: applying it would roll the cursor back to a stale
-					// point and leave it there. Frames without a stamp (an older
-					// server) keep the unconditional last-write-wins.
-					const held = value[idx];
-					if (_isStaleStamp(data._t, held._t)) {
-						return { value, replaced: false, modified: false };
-					}
+					// Samples carry their publisher's ordering token (`_p`, `_n`).
+					// A sample its publisher already superseded is a reordered
+					// or re-delivered one: applying it would roll the cursor
+					// back to a stale point and leave it there. Frames without
+					// a token (an older server) keep the unconditional
+					// last-write-wins.
+					if (!local && !_admitCursor(value[idx], data)) return { value, replaced: false, modified: false };
 					value[idx] = data;
 				} else {
 					index.set(data.key, value.length);
 					value.push(data);
 				}
 			} else if (event === 'remove') {
+				if (!local) _cursorOrder.delete(data.key);
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
 					index.delete(data.key);
@@ -876,6 +948,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					value.length = last;
 				}
 			} else if (event === 'set') {
+				if (!local) _cursorOrder.clear();
 				value = data;
 				_rebuildIndexFn(value, index);
 				return { value, replaced: true, modified: true };
@@ -923,7 +996,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			const result = _applyMergeFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), envelope, _optimisticKeys);
 			_serverValue = result.value;
 			// Accumulate across one flush: a later no-op event (an identical
-			// `set`, a stale stamped cursor sample) must not hide an earlier
+			// `set`, a superseded cursor sample) must not hide an earlier
 			// modification made in place.
 			if (result.modified) _dirty = true;
 			_absorbCheck(envelope);
@@ -985,9 +1058,12 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * @param {any} value
 	 * @param {Map<any, number>} index
 	 * @param {any} change
+	 * @param {boolean} [local] - replaying over a copy for display: see
+	 *   `_applyMergeFn`. A graduation writes the server state and keeps the
+	 *   publisher marks in step with it, like a server event.
 	 * @returns {any}
 	 */
-	function _applyChange(value, index, change) {
+	function _applyChange(value, index, change, local = false) {
 		if (typeof change === 'function') {
 			const draft = Array.isArray(value)
 				? value.slice()
@@ -997,7 +1073,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			_rebuildIndexFn(next, index);
 			return next;
 		}
-		const r = _applyMergeFn(value, index, change, _optimisticKeys);
+		const r = _applyMergeFn(value, index, change, _optimisticKeys, local);
 		return r.value;
 	}
 
@@ -1013,7 +1089,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		const index = new Map(_serverIndex);
 		for (const entry of _optimisticQueue) {
 			if (entry.serverConfirmed) continue;
-			value = _applyChange(value, index, entry.change);
+			value = _applyChange(value, index, entry.change, true);
 		}
 		return { value, index };
 	}
@@ -1077,10 +1153,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		if (queue.length === 0) return;
 
 		// RAF dedup: for keyed merge strategies, keep only the last idempotent
-		// event per key. A stamped frame (`_t`, the publisher's instant on cursor
-		// updates) is kept by newest stamp rather than by arrival order, so a
-		// burst that arrived reordered within one frame still lands on its
-		// newest sample; unstamped events keep arrival order.
+		// event per key. Two ordered frames from one publisher (cursor updates
+		// carry `_p` / `_n`) keep the newer sequence rather than the later
+		// arrival, so a burst that arrived reordered within one frame still lands
+		// on its newest sample; unordered events keep arrival order.
 		if (queue.length > 1 && merge !== 'set' && merge !== 'latest') {
 			const keyField = mergeKeyField(merge, key);
 			const seen = new Map();
@@ -1090,7 +1166,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// two of them for one key inside a frame are not substitutes:
 				// dropping the older one drops the fields only it carried (a
 				// lock release lost behind a typing flag). They are cheap and
-				// rare next to cursor samples, and the per-field stamp guard in
+				// rare next to cursor samples, and the per-field order guard in
 				// the merge already settles their order.
 				if (merge === 'presence' && queue[i].event === 'update') continue;
 				const k = queue[i].data?.[keyField];
@@ -1099,19 +1175,35 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					if (kept === undefined) {
 						seen.set(k, i);
 					} else {
-						const keptT = queue[kept].data?._t;
-						const t = queue[i].data?._t;
-						if (typeof t === 'number' && typeof keptT === 'number' && t > keptT) {
-							// The dropped later arrival may carry the higher replay
-							// seq; keep the resume cursor monotonic regardless of
-							// which envelope is applied.
-							_advanceSeq(queue[kept]);
-							queue[kept] = null;
-							seen.set(k, i);
-						} else {
-							_advanceSeq(queue[i]);
-							queue[i] = null;
+						const later = queue[kept].data;
+						const earlier = queue[i].data;
+						const laterOrdered = _isOrdered(later);
+						if (_isOrdered(earlier) !== laterOrdered) {
+							// One ordered, one not (an older server during a
+							// rollout): leave both to the merge, which settles
+							// them exactly as it would one event at a time.
+							continue;
 						}
+						if (laterOrdered) {
+							// Two publishers are not ordered against each other:
+							// leave both to the merge, which records each one's
+							// mark, so a reordered sample from either that arrives
+							// afterwards is still recognised as superseded.
+							if (earlier._p !== later._p) continue;
+							// One publisher: keep its newer sample, and on a tie
+							// (a re-delivery) the first copy, as the merge would.
+							if (earlier._n >= later._n) {
+								// The dropped later arrival may carry the higher
+								// replay seq; keep the resume cursor monotonic
+								// regardless of which envelope is applied.
+								_advanceSeq(queue[kept]);
+								queue[kept] = null;
+								seen.set(k, i);
+								continue;
+							}
+						}
+						_advanceSeq(queue[i]);
+						queue[i] = null;
 					}
 				}
 			}
@@ -1389,7 +1481,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// return stale data before their sources populate.
 				} else {
 					currentValue = response.data;
-					_presenceFieldStamps.clear();
+					_presenceFieldOrder.clear();
+					_cursorOrder.clear();
 				}
 
 				_rebuildIndex();
@@ -1533,7 +1626,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_status = 'loading';
 		_statusStore.set('loading');
 		_index.clear();
-		_presenceFieldStamps.clear();
+		_presenceFieldOrder.clear();
+		_cursorOrder.clear();
 		_history = [];
 		_historyIndex = -1;
 		_reconnectAttempts = 0;

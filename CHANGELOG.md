@@ -124,18 +124,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as on the data stream, so a denied joiner is never subscribed and never told
   the wire topic; the loaders keep their own run for `.load()` and reloads.
 
-- **Cursor frames and presence-field updates carry their publish instant.**
+- **Cursor frames and presence-field updates carry an ordering token.**
   `live.multiplayer` cursor updates and presence-field updates (`typing`,
-  `selection`, `lock:*`) gain `_t` (server wall-clock ms at publish;
-  reserved, a payload field of that name is overwritten). The client cursor
-  merge ignores a stamped sample older than the one it holds and keeps the
-  newest stamp within one animation frame; the presence merge does the same
-  per field, so a reordered older update for one field cannot park a stale
-  flag while updates to other fields still apply. The guard only bites within
-  a one-second window: a frame older than that is a publisher whose clock
-  moved (a reconnect to a replica whose wall clock is behind) and applies, so
-  clock skew across replicas never freezes a peer. Frames without the stamp
-  keep last-write-wins. The stamp costs about twenty bytes on each of these
+  `selection`, `lock:*`) published for a client connection gain `_p`, an id
+  for that connection, and `_n`, its publish sequence (both reserved: a
+  payload field of either name is overwritten). The sequence follows the
+  order the server publishes in, which is also the order a delta's sticky
+  fields reach the roster, so live clients and a late joiner loading the
+  roster settle on the same value for every sticky field the roster accepts,
+  however the guards of two concurrent calls settle. The client cursor merge ignores a sample its publisher already
+  superseded and keeps a publisher's newest sample within one animation
+  frame; the presence merge does the same per field, so a reordered older
+  update for one field cannot park a stale flag while updates to other
+  fields still apply. Frames from two connections are never ordered against
+  each other and apply in arrival order. No wall clock is involved, so a
+  peer that reconnects to another replica is never mistaken for its own past
+  whatever that replica's clock reads, and a lock it releases after the
+  reconnect is not dropped as stale. Frames without the token keep
+  last-write-wins. The token costs about twenty-five bytes on each of these
   frames.
 
 ### Fixed
@@ -181,7 +187,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A no-op event in a frame no longer hides a modification made earlier in
   the same frame.** The per-frame dirty flag was assigned from the last event
-  rather than accumulated, so a stale stamped sample for one key (or an
+  rather than accumulated, so a superseded cursor sample for one key (or an
   identical `set`) arriving after a fresh in-place update for another key
   skipped the store emission for the whole frame; subscribers saw the new
   value only on the next modifying frame.
@@ -201,9 +207,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cursor frames crossed the cross-instance relay with no ordering of their
   own and the client merge was unconditional last-write-wins, so a late
   sample from the first burst landed as the newest and stayed until the next
-  move. See the stamped cursor frames under Changed; tests cover an older
-  stamp arriving after a newer one and a burst reordered within one
-  animation frame.
+  move. See the ordered cursor frames under Changed; tests cover an older
+  sample from one connection arriving after a newer one, a burst reordered
+  within one animation frame, and a lock released from a new connection on
+  a replica whose wall clock is behind.
 
 - **`close()` drains a topic that was unsubscribed and then re-subscribed on
   the same socket.** The per-socket record of already-drained topics was never
@@ -277,7 +284,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wrong for a presence delta, which carries just the fields that changed: a
   lock release arriving beside a typing flag was dropped whole, and the
   per-field ordering guard never saw it. Presence updates are exempt from the
-  dedup; their order is already settled per field by their stamps.
+  dedup; their order is already settled per field by their ordering token.
 
 - **The test harness speaks the attach frame instead of only sending it.**
   `createTestEnv().connect().subscribe()` installed its topic listener by

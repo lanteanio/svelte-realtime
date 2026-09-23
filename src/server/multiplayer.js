@@ -4,7 +4,7 @@ import { _getIdentityKey } from './identity.js';
 import { _clusterPresenceMerge } from './presence.js';
 import { _tenantTopic } from './tenant.js';
 import { _IS_DEV } from './env.js';
-import { wallEpoch } from '../shared/runtime.js';
+import { randomU32 } from '../shared/runtime.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); multiplayer registration reaches it through this,
@@ -73,6 +73,56 @@ function _warnStickyDrop(reason, detail) {
 /** Test seam: forget which sticky-drop warnings have fired. */
 export function _resetStickyDropWarnings() {
 	_stickyDropWarned.clear();
+}
+
+// Cursor samples and presence-field deltas cross a relay with no ordering
+// promise of their own (a pipelined bus, a multi-worker fan-out, a cluster of
+// Redis nodes), and both merges are last-write-wins, so each frame carries an
+// ordering token: `_p` names the publishing connection and `_n` counts that
+// connection's publishes. A receiver orders two frames only when they share a
+// publisher. Not a clock on purpose: replicas' wall clocks disagree, and a peer
+// that reconnects to a replica running behind would have every new frame read
+// as older than the ones it sent before, so a lock it releases would stay held
+// on every other client.
+/** @type {WeakMap<object, { p: string, n: number }>} */
+const _publishers = new WeakMap();
+let _publisherCounter = 0;
+/** @type {string | null} Per-process salt for publisher ids, drawn on first use */
+let _publisherSalt = null;
+
+/**
+ * Stamp the calling connection's ordering token onto an outgoing frame. The
+ * sequence is taken here, at publish, after every await in the send path, so
+ * it is the order this process publishes in - and the order a presence delta's
+ * sticky fields reach the roster right after it. A live client and a late
+ * joiner loading the roster therefore settle on the same value however the
+ * guards of two concurrent calls happened to settle. The names are reserved: a
+ * payload field called `_p` or `_n` is overwritten, or removed when the call
+ * has no connection to order by, so a client can never supply its own.
+ * @param {Record<string, any>} frame
+ * @param {any} ctx
+ */
+function _stampOrder(frame, ctx) {
+	const ws = ctx.ws;
+	if (!ws) {
+		delete frame._p;
+		delete frame._n;
+		return;
+	}
+	let pub = _publishers.get(ws);
+	if (!pub) {
+		// Salted per process: the counter alone restarts on every replica, and
+		// a peer that moved from one replica to another could land on the same
+		// id there and have its new frames ordered against its old ones.
+		// Drawn from the runtime seam like the guest-id salt; 32 bits are
+		// enough here, since a collision also needs the same counter value and
+		// the same identity to matter, and every frame carries the id.
+		if (_publisherSalt === null) _publisherSalt = randomU32().toString(36);
+		pub = { p: _publisherSalt + '.' + (++_publisherCounter).toString(36), n: 0 };
+		_publishers.set(ws, pub);
+	}
+	frame._p = pub.p;
+	frame._n = ++pub.n;
 }
 
 export const _multiplayerRegister = function multiplayer(config) {
@@ -151,13 +201,9 @@ export const _multiplayerRegister = function multiplayer(config) {
 		} else if (payload.length > 0) {
 			frame.value = payload.length === 1 ? cur : payload;
 		}
-		// Publish instant, so a receiver can tell a late or re-delivered sample
-		// from a newer one. Cursor frames cross a relay with no ordering
-		// promise of their own (a pipelined bus, a multi-worker fan-out, a
-		// cluster of Redis nodes), and the cursor merge is last-write-wins:
-		// without the stamp an out-of-order sample lands as the newest and the
+		// Without the token an out-of-order sample lands as the newest and the
 		// peer's cursor sits on a mid-gesture point until the next move.
-		frame._t = wallEpoch();
+		_stampOrder(frame, ctx);
 		ctx.publish(cursorTopic, 'update', frame);
 	};
 
@@ -198,10 +244,10 @@ export const _multiplayerRegister = function multiplayer(config) {
 		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
 			Object.assign(frame, delta);
 		}
-		// Publish instant, per field on the receiving side: the same reorder
-		// hazard as cursor frames, with a stale flag (typing, a lock) as the
-		// visible damage.
-		frame._t = wallEpoch();
+		// Ordered per field on the receiving side: the same reorder hazard as
+		// cursor frames, with a stale flag (typing, a lock) as the visible
+		// damage.
+		_stampOrder(frame, ctx);
 		ctx.publish(presenceTopic, 'update', frame);
 	};
 
