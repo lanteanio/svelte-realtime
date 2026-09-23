@@ -9,6 +9,7 @@ import { _generateSsrStubs } from './codegen-ssr.js';
 import { _generateClientStubs } from './codegen-client.js';
 import { _loadRegistryDirect, _hmrReloadRegistry } from './hmr.js';
 import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
+import { _installedSvelteMajor, _runeSubpathError } from './svelte-version.js';
 
 /**
  * Vite plugin for svelte-realtime.
@@ -31,6 +32,8 @@ export default function svelteRealtime(options) {
 	let devtools = options?.devtools !== false;
 	/** @type {boolean} */
 	let isDev = false;
+	/** @type {number | null} */
+	let svelteMajor = null;
 
 	return {
 		name: 'svelte-realtime',
@@ -40,6 +43,7 @@ export default function svelteRealtime(options) {
 			liveDir = resolve(root, dir);
 			isSsr = !!config.build?.ssr;
 			isDev = config.command === 'serve';
+			svelteMajor = _installedSvelteMajor(root);
 			_fileCache.clear();
 				_codeCache.clear();
 				_warnedExports.clear();
@@ -127,6 +131,11 @@ export default function svelteRealtime(options) {
 					code = _generateSsrStubs(filePath, modulePath);
 				} else {
 					code = _generateClientStubs(filePath, modulePath, dir);
+					const runeError = _runeSubpathError(code, modulePath, svelteMajor);
+					if (runeError) {
+						this.error(runeError);
+						return null;
+					}
 				}
 
 				_codeCache.set(cacheKey, { content: source, code });

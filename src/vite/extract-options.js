@@ -494,6 +494,25 @@ export function _extractAggregateWindows(source, name) {
 	return keys.length > 0 ? keys : null;
 }
 
+/**
+ * Is a top-level config flag switched on? A key set to a literal `false`,
+ * `null`, `undefined` or `0` is off: `enumerable: false` or `cursors: false`
+ * spells out the default, not the feature. Any other value (a literal `true`,
+ * an object, an array, a function, an expression the build cannot evaluate)
+ * counts as on.
+ * @param {string} body
+ * @param {Set<string>} keys the body's top-level keys
+ * @param {string} name
+ * @returns {boolean}
+ */
+function _flagOn(body, keys, name) {
+	if (!keys.has(name)) return false;
+	const raw = _extractTopLevelRawValue(body, name);
+	// A comment beside the value is part of the raw text; it is not the value.
+	const value = raw === null ? null : raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '').trim();
+	return !(value === 'false' || value === 'null' || value === 'undefined' || value === '0');
+}
+
 export function _extractRoomInfo(source, name) {
 	/** @type {{ dataOpts: any, hasPresence: boolean, hasCursors: boolean, actions: string[], isEnumerable: boolean, hasOwner: boolean }} */
 	const info = { dataOpts: { merge: 'crud' }, hasPresence: false, hasCursors: false, actions: [], isEnumerable: false, hasOwner: false };
@@ -511,11 +530,11 @@ export function _extractRoomInfo(source, name) {
 
 	const configKeys = new Set(_extractTopLevelKeys(body));
 	info.hasPresence = configKeys.has('presence');
-	info.hasCursors = configKeys.has('cursors');
+	info.hasCursors = _flagOn(body, configKeys, 'cursors');
 	// Room enumeration is opt-in via `enumerable: true` or a `meta` function.
-	info.isEnumerable = configKeys.has('enumerable') || configKeys.has('meta');
+	info.isEnumerable = _flagOn(body, configKeys, 'enumerable') || configKeys.has('meta');
 	// Room ownership is opt-in via `owner: true`.
-	info.hasOwner = configKeys.has('owner');
+	info.hasOwner = _flagOn(body, configKeys, 'owner');
 
 	const mergeVal = _extractTopLevelStringProp(body, 'merge');
 	if (mergeVal) info.dataOpts.merge = mergeVal;
@@ -568,12 +587,12 @@ export function _extractMultiplayerInfo(source, name) {
 
 	const configKeys = new Set(_extractTopLevelKeys(body));
 	info.hasPresence = configKeys.has('presence');
-	info.hasCursors = configKeys.has('cursors');
-	info.typing = configKeys.has('typing');
-	info.hasLocks = configKeys.has('locks');
-	info.reactions = configKeys.has('reactions');
+	info.hasCursors = _flagOn(body, configKeys, 'cursors');
+	info.typing = _flagOn(body, configKeys, 'typing');
+	info.hasLocks = _flagOn(body, configKeys, 'locks');
+	info.reactions = _flagOn(body, configKeys, 'reactions');
 	info.selections = _extractTopLevelStringProp(body, 'selections') || null;
-	info.hasOwner = configKeys.has('owner');
+	info.hasOwner = _flagOn(body, configKeys, 'owner');
 
 	const mergeVal = _extractTopLevelStringProp(body, 'merge');
 	if (mergeVal) info.dataOpts.merge = mergeVal;

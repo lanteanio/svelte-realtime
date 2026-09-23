@@ -159,6 +159,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A Svelte 4 project that uses a rune feature gets a build error naming
+  it.** `live.doc`, `live.smooth`, a `live.multiplayer` export with
+  presence, cursors, an owner or a field surface, and an enumerable
+  `live.room` ship Svelte 5 rune modules, so on Svelte 4 they failed inside
+  the package (the lobby view once `rooms()` ran), on a Svelte error that
+  named none of that. The Vite plugin now reads the
+  Svelte major the project installs and, when a `$live` module needs one of
+  those modules, stops with an error naming the module and the feature. The
+  peer range keeps Svelte 4, which the rest of the package supports. A
+  room or multiplayer flag spelled out as `false` (`enumerable: false`,
+  `cursors: false`, `typing: false`) no longer generates the surface it
+  switches off, which pulled in the rune module and, for a presence field,
+  failed the build asking for a presence function. Tests generate each rune
+  feature against a fixture-installed Svelte 4 and Svelte 5, and a plain
+  stream module, the switched-off flags and an unreadable Svelte install
+  against Svelte 4.
+
 - **A late joiner now sees the locks and selections members already hold.**
   The roster persists them inside the member's presence payload, so the
   snapshot a joining client loads carried them under `data`, while the room

@@ -3024,3 +3024,103 @@ export const myRoom = live.room({
 		expect(code).toContain('__register("rooms/myRoom/__cursors"');
 	});
 });
+
+// - rune features under Svelte 4 ---------------------------------------------
+
+describe('rune features on a Svelte 4 project', () => {
+	afterEach(() => teardown());
+
+	const SOURCES = {
+		multiplayer: `import { live } from 'svelte-realtime/server';
+export const board = live.multiplayer({ topic: (ctx, id) => 'board:' + id, topicArgs: 1, init: async () => [], presence: (ctx) => ({ name: ctx.user.name }), cursors: true });
+`,
+		doc: `import { live } from 'svelte-realtime/server';
+export const notes = live.doc({ topic: (ctx, id) => 'notes:' + id, topicArgs: 1 });
+`,
+		smooth: `import { live } from 'svelte-realtime/server';
+import { apply } from './shape.shared.js';
+export const shape = live.smooth({ topic: (ctx, id) => 'shape:' + id, apply, initial: { x: 0, y: 0 }, topicArgs: 1 });
+`,
+		rooms: `import { live } from 'svelte-realtime/server';
+export const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], enumerable: true });
+`
+	};
+	const FEATURE = {
+		multiplayer: 'uses live.multiplayer with presence, cursors, an owner or a field surface',
+		doc: 'uses live.doc',
+		smooth: 'uses live.smooth',
+		rooms: 'uses an enumerable live.room'
+	};
+
+	/** Install a Svelte in the fixture root, where it shadows the repo's own. */
+	function installSvelte(pkgJson) {
+		mkdirSync(resolve(testRoot, 'node_modules/svelte'), { recursive: true });
+		writeFileSync(resolve(testRoot, 'node_modules/svelte/package.json'), pkgJson);
+	}
+	/** Load $live/<name> as the client graph does, collecting build errors. */
+	function loadClient(name) {
+		const errors = [];
+		const code = createPlugin().load.call({ error: (m) => errors.push(m) }, '\0live:' + name, { ssr: false });
+		return { code, errors };
+	}
+
+	for (const kind of Object.keys(SOURCES)) {
+		it('stops with an error naming the module and the feature: ' + kind, () => {
+			setup({ [kind + '.js']: SOURCES[kind] });
+			installSvelte(JSON.stringify({ name: 'svelte', version: '4.2.19' }));
+			const { code, errors } = loadClient(kind);
+			expect(code).toBe(null);
+			expect(errors).toHaveLength(1);
+			expect(errors[0]).toContain('$live/' + kind + ' ' + FEATURE[kind]);
+			expect(errors[0]).toContain('installs Svelte 4');
+		});
+
+		it('generates it on Svelte 5: ' + kind, () => {
+			setup({ [kind + '.js']: SOURCES[kind] });
+			installSvelte(JSON.stringify({ name: 'svelte', version: '5.20.0' }));
+			const { code, errors } = loadClient(kind);
+			expect(errors).toEqual([]);
+			expect(code).toContain("from 'svelte-realtime/" + kind + "'");
+		});
+	}
+
+	it('generates a module that needs no rune feature as before', () => {
+		setup({ 'chat.js': "import { live } from 'svelte-realtime/server';\nexport const messages = live.stream('chat', async () => []);\n" });
+		installSvelte(JSON.stringify({ name: 'svelte', version: '4.2.19' }));
+		const { code, errors } = loadClient('chat');
+		expect(errors).toEqual([]);
+		expect(code).toContain('__stream');
+	});
+
+	it('stays out of the way when the installed Svelte cannot be read', () => {
+		setup({ 'multiplayer.js': SOURCES.multiplayer });
+		installSvelte('not json');
+		const { code, errors } = loadClient('multiplayer');
+		expect(errors).toEqual([]);
+		expect(code).toContain("from 'svelte-realtime/multiplayer'");
+	});
+
+	it('a flag spelled out as false generates nothing, so Svelte 4 builds it', () => {
+		setup({
+			'game.js': `import { live } from 'svelte-realtime/server';
+export const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, init: async () => [], cursors: null, owner: false, enumerable: false // no lobby
+});
+`,
+			'board.js': `import { live } from 'svelte-realtime/server';
+export const board = live.multiplayer({ topic: (ctx, id) => 'board:' + id, topicArgs: 1, init: async () => [], typing: false, locks: 0, reactions: undefined, cursors: /* off */ false, owner: false });
+`
+		});
+		installSvelte(JSON.stringify({ name: 'svelte', version: '4.2.19' }));
+		const game = loadClient('game');
+		expect(game.errors).toEqual([]);
+		expect(game.code).not.toContain('svelte-realtime/rooms');
+		expect(game.code).not.toContain('__cursors');
+		expect(game.code).not.toContain('__owner');
+		// A presence field spelled out as off is not a presence field: no
+		// presence function is required and no field wiring is generated.
+		const board = loadClient('board');
+		expect(board.errors).toEqual([]);
+		expect(board.code).not.toContain('svelte-realtime/multiplayer');
+		expect(board.code).not.toContain('_setField');
+	});
+});

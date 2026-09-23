@@ -86,6 +86,8 @@ The three ecosystem packages move together. Bump them as a group:
 
 Mixed-version installs are rejected at install time with a peer-dep warning.
 
+Svelte 4 and 5 are both supported. Four features ship Svelte 5 rune modules and need Svelte 5: `live.doc`, `live.smooth`, a `live.multiplayer` export with presence, cursors, an owner or a field surface, and an enumerable `live.room` (its `rooms()` lobby view). On a Svelte 4 project the Vite plugin stops the build with an error naming the `$live` module and the feature. `store.rune()` needs Svelte 5 too and throws a descriptive error when called on Svelte 4.
+
 ---
 
 ## Manual setup
@@ -3862,7 +3864,7 @@ Name the current user once with `board.identify(key)` - the same identity you al
 <button onclick={() => board.addCard(boardId, 'New card')}>Add</button>
 ```
 
-The aggregated view ships from the `svelte-realtime/multiplayer` subpath and is reactive: `others` and `cursors` refresh whenever the underlying presence or cursor stream pushes. Reactivity uses Svelte 5 runes, so `board.room(...)` requires Svelte 5.
+The aggregated view ships from the `svelte-realtime/multiplayer` subpath and is reactive: `others` and `cursors` refresh whenever the underlying presence or cursor stream pushes. Reactivity uses Svelte 5 runes, and the generated namespace is built on them, so a multiplayer export with presence, cursors, an owner or a field surface requires Svelte 5.
 
 Every cursor frame and every presence-field update the server publishes for a client connection carries an ordering token: `_p` identifies the connection and `_n` counts its publishes, in the order the server publishes them - the same order a delta's sticky fields (`selection`, locks) reach the roster, so live clients and a late joiner that loads the roster settle on the same value for every sticky field the roster accepts (both names are reserved: a payload field of either name is overwritten). The cursor merge is last-write-wins per key, the presence merge is last-write-wins per field, and both cross the cross-instance relay with no ordering promise of their own, so the client uses the token to ignore a sample its publisher has already superseded for that key or field (and, within one animation frame, to keep a publisher's newest cursor sample rather than the last to arrive). A reordered or re-delivered sample can therefore never roll a peer's cursor back to a mid-gesture point, or park a stale `typing` or lock flag, and leave it there. Samples from two connections are never ordered against each other and apply in arrival order. No clock is involved, so a peer that reconnects to a replica whose wall clock disagrees with the last one is never mistaken for its own past, and a lock it releases after the reconnect is not dropped as stale. Frames without the token (an older server) keep plain last-write-wins.
 
