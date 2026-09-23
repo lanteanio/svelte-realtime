@@ -12,7 +12,8 @@ import {
 	_clusterPresenceMerge,
 	_presenceRefForTest
 } from '../src/server.js';
-import { _PRESENCE_MERGE_SCRIPT } from '../src/server/presence.js';
+import { _PRESENCE_MERGE_SCRIPT, _clusterPresenceRelease } from '../src/server/presence.js';
+import { _presenceClaimBegin, _presenceClaimResolve } from '../src/server/room-owner.js';
 import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId } from '../src/server/rooms-cluster.js';
 import { _clearEnumGatesForTests } from '../src/server/rooms-gate.js';
 import { _ensureWrap } from '../src/server/reactive.js';
@@ -796,6 +797,12 @@ function makeFakeRedis() {
 			m.set(field, String(value));
 			return isNew;
 		},
+		async hsetnx(h, field, value) {
+			const m = get(h);
+			if (m.has(field)) return 0;
+			m.set(field, String(value));
+			return 1;
+		},
 		async hgetall(h) {
 			const m = hashes.get(h);
 			if (!m) return {};
@@ -1015,6 +1022,124 @@ describe('live.multiplayer() sticky presence fields', () => {
 		expect(alice).toBeDefined();
 		expect('lock:title' in alice.data).toBe(false);
 		expect('selection' in alice.data).toBe(false);
+	});
+
+	it('a second replica acquiring the same member keeps its sticky fields, and the last release drops them', async () => {
+		const redis = makeFakeRedis();
+		const platformA = { redis };
+		const platformB = { redis };
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: ['title'],
+			topicArgs: 1
+		});
+		const aliceOn = async (platform) => (await _clusterPresenceList(platform, 'board:b1')).find((e) => e.key === 'alice');
+
+		await _clusterPresenceAcquire(platformA, 'board:b1', 'alice', { name: 'Alice' });
+		await room.__presenceUpdate({ user: { id: 'alice', name: 'Alice' }, platform: platformA, publish: () => {} }, 'b1', { 'lock:title': true });
+		// A second tab lands on replica B. It must not rewrite the row the lock
+		// is merged into; the first acquirer's payload stands while she stays.
+		await _clusterPresenceAcquire(platformB, 'board:b1', 'alice', { name: 'Alice (tab 2)' });
+		expect((await aliceOn(platformA)).data).toEqual({ name: 'Alice', 'lock:title': true });
+
+		// One tab closing keeps the lock; the last one takes it with the row.
+		await _clusterPresenceRelease(platformB, 'board:b1', 'alice');
+		expect((await aliceOn(platformA)).data['lock:title']).toBe(true);
+		await _clusterPresenceRelease(platformA, 'board:b1', 'alice');
+		expect(await aliceOn(platformA)).toBeUndefined();
+		await _clusterPresenceAcquire(platformA, 'board:b1', 'alice', { name: 'Alice' });
+		expect((await aliceOn(platformA)).data).toEqual({ name: 'Alice' });
+	});
+
+	it('a fresh join replaces a row left over from an earlier membership, sticky fields and all', async () => {
+		const redis = makeFakeRedis();
+		const platform = { redis };
+		// A release whose delete failed: the count is gone, the row is not.
+		await redis.hset('__live-presence:board:b1', 'd:alice', JSON.stringify({ name: 'Old', 'lock:title': true }));
+		const { isFirst } = await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+		expect(isFirst).toBe(true);
+		const alice = (await _clusterPresenceList(platform, 'board:b1')).find((e) => e.key === 'alice');
+		expect(alice).toEqual({ key: 'alice', data: { name: 'Alice' } });
+	});
+
+	it('serves a multiplayer room\'s declared sticky fields beside the payload, and leaves every other payload alone', async () => {
+		const platform = { redis: makeFakeRedis() };
+		const board = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name, 'lock:body': 'app data' }),
+			locks: ['title'],
+			selections: 'offset',
+			topicArgs: 1
+		});
+		const plain = live.room({
+			topic: (ctx, roomId) => 'lobby:' + roomId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name, selection: 'team-a' }),
+			topicArgs: 1
+		});
+		const alice = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform, publish: () => {} };
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice', 'lock:body': 'app data' });
+		await board.__presenceUpdate(alice, 'b1', { 'lock:title': true, selection: { start: 0, end: 5 } });
+		await _clusterPresenceAcquire(platform, 'lobby:l1', 'alice', { name: 'Alice', selection: 'team-a' });
+
+		// Declared fields only: lock:body was never declared, so it stays payload.
+		expect(await board.__presenceStream({ ...alice, ws: {} }, 'b1')).toEqual([
+			{ key: 'alice', 'lock:title': true, selection: { start: 0, end: 5 }, data: { name: 'Alice', 'lock:body': 'app data' } }
+		]);
+		// A plain room persists nothing into payloads, so nothing is lifted.
+		expect(await plain.__presenceStream({ ...alice, ws: {} }, 'l1')).toEqual([
+			{ key: 'alice', data: { name: 'Alice', selection: 'team-a' } }
+		]);
+	});
+
+	it('shapes a live join like a snapshot entry, in multiplayer rooms only', async () => {
+		const refMap = _presenceRefForTest();
+		const board = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name, selection: { start: 1, end: 2 } }),
+			selections: 'offset',
+			topicArgs: 1
+		});
+		const plain = live.room({
+			topic: (ctx, roomId) => 'lobby:' + roomId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name, selection: 'team-a' }),
+			topicArgs: 1
+		});
+		const published = [];
+		const ctx = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform: {}, publish: () => {}, _publishWire: (topic, event, data) => published.push({ topic, event, data }) };
+		try {
+			await board.__dataStream.__onSubscribe(ctx, 'board:j1', ['j1']);
+			await plain.__dataStream.__onSubscribe({ ...ctx, ws: {} }, 'lobby:j1', ['j1']);
+			expect(published.filter((p) => p.event === 'join')).toEqual([
+				{ topic: 'board:j1:presence', event: 'join', data: { key: 'alice', selection: { start: 1, end: 2 }, data: { name: 'Alice' } } },
+				{ topic: 'lobby:j1:presence', event: 'join', data: { key: 'alice', data: { name: 'Alice', selection: 'team-a' } } }
+			]);
+		} finally {
+			refMap.delete('board:j1\0alice');
+			refMap.delete('lobby:j1\0alice');
+		}
+	});
+
+	it('the joiner\'s own entry sequenced into its presence snapshot is shaped like the rest', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: ['title'],
+			topicArgs: 1
+		});
+		// A reconnect resolves the barrier with the ref's payload, which carries
+		// the member's sticky fields; the shared roster read has not caught up.
+		const ws = {};
+		_presenceClaimBegin(ws, 'board:s1');
+		_presenceClaimResolve(ws, 'board:s1', { key: 'alice', data: { name: 'Alice', 'lock:title': true } });
+		const roster = await room.__presenceStream({ user: { id: 'alice' }, ws, platform: {} }, 's1');
+		expect(roster).toEqual([{ key: 'alice', 'lock:title': true, data: { name: 'Alice' } }]);
 	});
 
 	it('merge is a no-op when no roster entry exists yet (no live presence)', async () => {
@@ -1798,6 +1923,39 @@ describe('MultiplayerRoom roster aggregation', () => {
 			['board-1', 10, 20],
 			['board-1', 0, 0, 800, 600]
 		]);
+		r.destroy();
+	});
+
+	it('a late joiner sees held locks and selections from the real roster snapshot', async () => {
+		await loadShippedRuneModule();
+		const platform = { redis: makeFakeRedis() };
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: ['title'],
+			selections: 'offset',
+			topicArgs: 1
+		});
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+		const alice = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform, publish: () => {} };
+		await room.__presenceUpdate(alice, 'b1', { 'lock:title': true });
+		await room.__presenceUpdate(alice, 'b1', { selection: { start: 0, end: 5 } });
+
+		// Bob arrives afterwards: his presence stream loads the roster snapshot,
+		// and his room view is built from exactly what that loader returned.
+		const bob = { user: { id: 'bob', name: 'Bob' }, ws: {}, platform, publish: () => {} };
+		const roster = await room.__presenceStream(bob, 'b1');
+		const r = new MultiplayerRoom({
+			me: 'bob',
+			presence: fakeStore(roster),
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			move: () => {}
+		});
+		expect(r.locks).toEqual({ title: 'alice' });
+		expect(r.selections).toEqual({ alice: { start: 0, end: 5 } });
+		expect(r.others.find((p) => p.key === 'alice').data).toEqual({ name: 'Alice' });
 		r.destroy();
 	});
 

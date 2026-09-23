@@ -3253,6 +3253,8 @@ export interface MultiplayerExport extends RoomExport {
 	__reactionStream?: any;
 	/** Reaction send handler: publishes an ephemeral reaction onto the room reactions topic. */
 	__reactionEmit?: any;
+	/** Which presence fields persist on the roster; the presence snapshot serves exactly these beside the payload. Set when selections or locks are declared. */
+	__isStickyKey?: (field: string) => boolean;
 	__fields: {
 		typing: boolean;
 		locks: string[] | null;

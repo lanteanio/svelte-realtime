@@ -173,6 +173,21 @@ export const _multiplayerRegister = function multiplayer(config) {
 
 	/** @type {any} */ (roomExport).__isMultiplayer = true;
 
+	// The fields a presence delta persists on the roster: `selection` when
+	// selections are enabled, a `lock:<k>` key when locks are enabled (an array
+	// declaration is the allowlist of lockable keys, so undeclared keys can never
+	// accumulate on the roster entry). They are stored inside the member's
+	// payload, and the room's presence snapshot lifts exactly these back out
+	// beside it, so what persists and what is served cannot disagree. A room
+	// with neither keeps its payloads untouched.
+	/** @param {string} k */
+	const _isStickyKey = (k) => {
+		if (k === 'selection') return !!config.selections;
+		if (k.slice(0, 5) !== 'lock:' || !config.locks) return false;
+		return !Array.isArray(config.locks) || config.locks.includes(k.slice(5));
+	};
+	if (config.selections || config.locks) /** @type {any} */ (roomExport).__isStickyKey = _isStickyKey;
+
 	// Cursor send path. The client `move` / `reportViewport` methods are
 	// volatile RPCs (fire-and-forget, lossy under disconnect is the contract)
 	// that publish an `update` frame keyed by the caller's identity onto the
@@ -278,31 +293,19 @@ export const _multiplayerRegister = function multiplayer(config) {
 					_warnStickyDrop('more than ' + _STICKY_MAX_KEYS + ' sticky keys in one delta', 'key ' + k);
 					break;
 				}
-				if (k === 'selection') {
-					if (!config.selections) continue;
-					if (!_stickyValueFits(delta[k])) {
-						_warnStickyDrop('value exceeds ' + _STICKY_VALUE_MAX_BYTES + ' bytes serialized', 'selection');
-						continue;
-					}
-					sticky[k] = delta[k];
-					stickyCount++;
-				} else if (k.slice(0, 5) === 'lock:') {
-					// Locks persist only when declared: an array declaration is
-					// the allowlist of lockable keys (`locks: ['title']` allows
-					// `lock:title` and nothing else), so undeclared keys can
-					// never accumulate on the roster entry.
-					if (!config.locks) continue;
-					if (Array.isArray(config.locks) && !config.locks.includes(k.slice(5))) {
+				if (!_isStickyKey(k)) {
+					// `locks: ['title']` allows `lock:title` and nothing else.
+					if (Array.isArray(config.locks) && k.slice(0, 5) === 'lock:') {
 						_warnStickyDrop('lock key is not in the declared locks allowlist', k);
-						continue;
 					}
-					if (!_stickyValueFits(delta[k])) {
-						_warnStickyDrop('value exceeds ' + _STICKY_VALUE_MAX_BYTES + ' bytes serialized', k);
-						continue;
-					}
-					sticky[k] = delta[k];
-					stickyCount++;
+					continue;
 				}
+				if (!_stickyValueFits(delta[k])) {
+					_warnStickyDrop('value exceeds ' + _STICKY_VALUE_MAX_BYTES + ' bytes serialized', k);
+					continue;
+				}
+				sticky[k] = delta[k];
+				stickyCount++;
 			}
 			if (Object.keys(sticky).length > 0) {
 				// The roster store is keyed by the WIRE data topic (the data-stream's

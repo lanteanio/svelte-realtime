@@ -90,6 +90,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A multiplayer room reserves its sticky field names on the presence
+  payload, and a cluster roster keeps the first acquirer's payload.** In a
+  `live.multiplayer` room that declares them, `selection` (with selections
+  on) and the declared `lock:*` keys (with locks on) are served beside
+  `data` rather than inside it, from the roster snapshot and a live `join`
+  alike; a plain `live.room` payload is served as the presence function
+  returned it. And in every room with `platform.redis`, a replica acquiring
+  a member who is already present no longer rewrites the member's roster
+  row: the first acquirer's payload stands while the member stays, as it
+  already did for a second tab on one instance. A replica that dies holding
+  the member leaves its count behind, so the row then stands until the room
+  goes idle long enough for the roster to expire.
+
 - **Adapter peer range moves to `svelte-adapter-uws@^0.6.0-next.94`.** The
   scaffold pin, the README compatibility row, and the generated first-run
   transcript follow it. The operation platform view (`ctx.platform`) now
@@ -145,6 +158,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frames.
 
 ### Fixed
+
+- **A late joiner now sees the locks and selections members already hold.**
+  The roster persists them inside the member's presence payload, so the
+  snapshot a joining client loads carried them under `data`, while the room
+  view reads them where a live update puts them, beside `data`: a joiner's
+  `room.locks` and `room.selections` stayed empty until the holder changed
+  something. A multiplayer room's snapshot now lifts the fields it declares
+  out of the payload onto the entry, and a live `join` is shaped the same
+  way; rows already stored work as they are. A replica acquiring a member
+  who is already present - a second tab landing on another instance - also
+  no longer rewrites the member's row, which erased a held lock from the
+  roster; a fresh join still replaces a row left over from an earlier
+  membership. Tests build the room view from what the real presence loader
+  returns after a lock and a selection, and pin the scoping, a live join, a
+  second replica's acquire, a leftover row and the joiner's own sequenced
+  entry against the shared roster.
 
 - **Silent-topic dev warning no longer fires for topics the framework itself
   publishes.** The watchdog only observed `ctx.publish`, so every

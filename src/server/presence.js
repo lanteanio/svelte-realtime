@@ -5,6 +5,7 @@ import { _topicInTenant } from './tenant.js';
 import { _ownerOnLeave, _ownerEmit } from './room-owner.js';
 import { _maybeReplayPublish, _registerReplayTopic } from './replay-routing.js';
 import { _platformPublish } from './publish-helpers.js';
+import { safeAssign } from '../shared/safe-assign.js';
 
 /**
  * Direct handle to the in-memory presence-ref map for tests that need to seed
@@ -110,9 +111,22 @@ export async function _clusterPresenceAcquire(platform, topic, key, data) {
 		// data field and return an empty roster, missing the user's own
 		// entry. Writing data first guarantees the loader sees the entry
 		// as soon as the count is visible.
-		await redis.hset(hKey, dataField, serialized);
+		//
+		// Never over a live member's row, though: the sticky fields (selection,
+		// locks) are merged into it, and a second tab landing on another
+		// replica would erase them. The first acquirer's payload stands while
+		// the member stays, as it does for a second tab on one replica (and a
+		// replica that dies holding the member leaves its count behind, so the
+		// row then stands until the room goes idle long enough for the roster to
+		// expire).
+		const wrote = typeof redis.hsetnx === 'function'
+			? await redis.hsetnx(hKey, dataField, serialized)
+			: (await redis.hset(hKey, dataField, serialized), 1);
 		const count = await redis.hincrby(hKey, countField, 1);
 		if (count === 1) {
+			// A fresh member. A row this acquire did not write is left from an
+			// earlier membership whose delete failed, sticky fields and all.
+			if (!wrote) await redis.hset(hKey, dataField, serialized);
 			await redis.expire(hKey, _PRESENCE_TTL_SEC);
 			return { isFirst: true };
 		}
@@ -239,9 +253,40 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 }
 
 /**
- * Return the cluster-wide presence roster for a topic as `[{key, data}, ...]`.
- * Falls through to the local _presenceRef iteration when platform.redis is
- * missing.
+ * A roster entry as a subscriber sees it. A room's sticky fields (a
+ * multiplayer room's declared selection and locks) are persisted inside the
+ * stored payload, but a live field update puts them on the entry beside
+ * `data`, which is where the room view reads them, so an entry served from
+ * the roster lifts them out to the same place. `isSticky` is the room's own
+ * test; a room without one gets `{ key, data }` untouched. Allocates only
+ * when the payload carries a sticky field.
+ * @param {string} key
+ * @param {any} data
+ * @param {((field: string) => boolean) | null | undefined} isSticky
+ * @returns {Record<string, any>}
+ */
+export function _presenceRosterEntry(key, data, isSticky) {
+	if (!isSticky || data === null || typeof data !== 'object' || Array.isArray(data)) return { key, data };
+	/** @type {Record<string, any> | null} */
+	let entry = null;
+	/** @type {Record<string, any> | null} */
+	let payload = null;
+	for (const k of Object.keys(data)) {
+		if (!isSticky(k)) continue;
+		if (entry === null) { entry = {}; payload = safeAssign({}, data); }
+		entry[k] = data[k];
+		delete /** @type {Record<string, any>} */ (payload)[k];
+	}
+	if (entry === null) return { key, data };
+	entry.key = key;
+	entry.data = payload;
+	return entry;
+}
+
+/**
+ * Return the cluster-wide presence roster for a topic as `[{key, data}, ...]`,
+ * the payloads as stored. Falls through to the local _presenceRef iteration
+ * when platform.redis is missing.
  */
 export async function _clusterPresenceList(platform, topic) {
 	const redis = platform && platform.redis;

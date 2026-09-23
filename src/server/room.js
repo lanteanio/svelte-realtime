@@ -6,7 +6,7 @@ import { LiveError } from './live-error.js';
 import { _validSegmentRe } from './validate.js';
 import { _IS_DEV } from './env.js';
 import { state, _presenceRef } from './state.js';
-import { _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList } from './presence.js';
+import { _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _presenceRosterEntry } from './presence.js';
 import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId, _ENUM_TOPIC_PREFIX } from './rooms-cluster.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot } from './history-compensation.js';
 import { _getIdentityKey } from './identity.js';
@@ -494,7 +494,9 @@ export const _roomRegister = function room(config) {
 				const { isFirst } = await _clusterPresenceAcquire(ctx.platform, topic, userId, presenceData);
 				if (isFirst) {
 					// `topic` is the wire data topic; publish raw (no second prefix).
-					ctx._publishWire(topic + ':presence', 'join', { key: userId, data: presenceData });
+					// Shaped like a snapshot entry, so a member reads a joiner's
+					// fields in the same place whichever way the entry arrived.
+					ctx._publishWire(topic + ':presence', 'join', _presenceRosterEntry(userId, presenceData, /** @type {any} */ (roomExport).__isStickyKey));
 				}
 			}
 		} : undefined,
@@ -693,7 +695,11 @@ export const _roomRegister = function room(config) {
 				// loader reconstructs the roster even when this user's join
 				// was published before they subscribed to :presence (the live
 				// merge takes over from here).
-				const roster = await _clusterPresenceList(ctx.platform, dataTopic);
+				// A multiplayer room's sticky fields are stored inside each payload;
+				// serve them beside it, where a live field update puts them.
+				const isSticky = /** @type {any} */ (roomExport).__isStickyKey;
+				const stored = await _clusterPresenceList(ctx.platform, dataTopic);
+				const roster = isSticky ? stored.map((e) => _presenceRosterEntry(e.key, e.data, isSticky)) : stored;
 				// First-joiner self delivery: if this socket's paired data-join is
 				// acquiring presence in this same batch, sequence its own entry into
 				// this snapshot - the shared-roster read above can run before that
@@ -702,7 +708,9 @@ export const _roomRegister = function room(config) {
 				// (no paired data-join) resolves undefined and is never injected.
 				const self = await _presenceClaimAwait(ctx.ws, dataTopic);
 				if (self && self.data != null && !roster.some((e) => e.key === self.key)) {
-					roster.push({ key: self.key, data: self.data });
+					// Shaped like every other entry (a reconnect's payload can carry
+					// sticky fields).
+					roster.push(_presenceRosterEntry(self.key, self.data, isSticky));
 				}
 				return roster;
 			},
