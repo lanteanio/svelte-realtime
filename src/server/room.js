@@ -768,6 +768,10 @@ export const _roomRegister = function room(config) {
 			const stream = /** @type {any} */ (roomExport)[sub];
 			if (stream) stream.__streamFilter = roomGuardFilter;
 		}
+		// Sub-streams built on top of this export after it returns (the
+		// multiplayer reactions ring) need the same filter, and cannot be
+		// reached from here.
+		/** @type {any} */ (roomExport).__subStreamFilter = roomGuardFilter;
 	}
 
 	// Room-scoped actions

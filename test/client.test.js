@@ -6224,6 +6224,42 @@ describe('__stream() cursor merge ordering', () => {
 			if (hadWindow) globalThis.window = origWindow; else delete globalThis.window;
 		}
 	});
+
+	it('two presence updates for one key in one animation frame keep both their fields', async () => {
+		// Frame dedup keeps the newest sample per key, which is right for a
+		// cursor (the frame IS the sample) and wrong for a presence delta (the
+		// frame carries only what changed): collapsing them drops the fields the
+		// older one carried, a lock release behind a typing flag.
+		const rafCallbacks = [];
+		const hadWindow = 'window' in globalThis;
+		const origWindow = globalThis.window;
+		const origRaf = globalThis.requestAnimationFrame;
+		const origCancel = globalThis.cancelAnimationFrame;
+		if (!hadWindow) globalThis.window = /** @type {any} */ ({});
+		globalThis.requestAnimationFrame = (cb) => { rafCallbacks.push(cb); return rafCallbacks.length; };
+		globalThis.cancelAnimationFrame = () => {};
+		try {
+			vi.resetModules();
+			const mod = await import('../src/client.js');
+			const store = mod.__stream('doc/presfields', { merge: 'presence' });
+			const values = [];
+			const unsub = store.subscribe((v) => values.push(v));
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [{ key: 'u1' }], topic: 'pres-fields', merge: 'presence' });
+
+			simulateTopicMessage('pres-fields', { event: 'update', data: { key: 'u1', typing: true, _t: 100 } });
+			simulateTopicMessage('pres-fields', { event: 'update', data: { key: 'u1', locked: true, _t: 110 } });
+			expect(rafCallbacks).toHaveLength(1);
+			rafCallbacks[0]();
+			expect(values[values.length - 1]).toEqual([{ key: 'u1', typing: true, locked: true }]);
+			unsub();
+		} finally {
+			globalThis.requestAnimationFrame = origRaf;
+			globalThis.cancelAnimationFrame = origCancel;
+			if (hadWindow) globalThis.window = origWindow; else delete globalThis.window;
+		}
+	});
 });
 
 // - onDerived re-export ------------------------------------------------------
@@ -7546,6 +7582,69 @@ describe('stream .phase and attach()/detach()', () => {
 		simulateRpcResponse(sent2.id, { ok: true, data: [], topic: 'phase-detach', merge: 'crud', key: 'id' });
 		await expect(p2).resolves.toBeUndefined();
 		store.detach();
+	});
+
+	it('the resume-grace expiry rests detached and never re-emits initialized', async () => {
+		vi.useFakeTimers();
+		try {
+			configure({ resumeGraceMs: 5_000 });
+			const store = __stream('phase/gracerest', { merge: 'crud', key: 'id' });
+			const phases = [];
+			const phaseUnsub = store.phase.subscribe((p) => phases.push(p));
+			const unsub = store.subscribe(() => {});
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'phase-gracerest', merge: 'crud', key: 'id' });
+			await flush();
+
+			unsub();
+			await flush();
+			await vi.advanceTimersByTimeAsync(6_000);
+
+			// The store instance is cached and outlives its own session reset,
+			// so a cold-started store rests on the release value.
+			expect(phases).toEqual(['initialized', 'attaching', 'attached', 'detached']);
+			phaseUnsub();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('a denial inside the resume-grace window does not leave the phase failed once the reset clears the error', async () => {
+		vi.useFakeTimers();
+		try {
+			configure({ resumeGraceMs: 5_000 });
+			const store = __stream('phase/gracefail', { merge: 'crud', key: 'id' });
+			const phases = [];
+			const phaseUnsub = store.phase.subscribe((p) => phases.push(p));
+			const errors = [];
+			const errorUnsub = store.error.subscribe((v) => errors.push(v));
+			const unsub = store.subscribe(() => {});
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'phase-gracefail', merge: 'crud', key: 'id' });
+			await flush();
+
+			// Releasing into the grace window keeps the topic's error setter
+			// registered, so a denial for the topic still lands here.
+			unsub();
+			await flush();
+			expect(phases[phases.length - 1]).toBe('detached');
+
+			simulateDenial({ topic: 'phase-gracefail', reason: 'FORBIDDEN', ref: 1 });
+			expect(phases[phases.length - 1]).toBe('failed');
+			expect(errors[errors.length - 1]).toBeInstanceOf(RpcError);
+
+			// Grace expires: the error is cleared, so the phase that tracks it
+			// cannot outlive it.
+			await vi.advanceTimersByTimeAsync(6_000);
+			expect(errors[errors.length - 1]).toBeNull();
+			expect(phases[phases.length - 1]).toBe('detached');
+			phaseUnsub();
+			errorUnsub();
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('detach() with live UI subscribers only drops the retain (stream stays attached)', async () => {

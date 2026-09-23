@@ -434,6 +434,7 @@ export function createTestEnv(options) {
 				if (fn.__presenceStream) __register(path + '/__presence', fn.__presenceStream);
 				if (fn.__ownerStream) __register(path + '/__owner', fn.__ownerStream);
 				if (fn.__cursorStream) __register(path + '/__cursors', fn.__cursorStream);
+				if (fn.__reactionStream) __register(path + '/__reactions', fn.__reactionStream);
 				if (fn.__roomsStream) __register(path + '/__rooms', fn.__roomsStream);
 				if (fn.__roomsSync) __register(path + '/__roomsSync', fn.__roomsSync);
 				if (typeof fn.__setEnumId === 'function') fn.__setEnumId(path);
@@ -493,6 +494,14 @@ export function createTestEnv(options) {
 				// Store entries as an array per topic to support multiple subscriptions
 				if (!ws._topicEntries.has(topic)) ws._topicEntries.set(topic, []);
 				ws._topicEntries.get(topic).push(entry);
+				// A listener parked by an attach frame binds here: the server names
+				// the wire topic before it subscribes the socket, so the stream that
+				// is about to own this entry asked for it before the entry existed.
+				const parked = ws._pendingTopicCbs.get(topic);
+				if (parked && parked.length > 0) {
+					entry.cb = parked.shift();
+					if (parked.length === 0) ws._pendingTopicCbs.delete(topic);
+				}
 				return true;
 			},
 			unsubscribe: (topic) => {
@@ -515,6 +524,8 @@ export function createTestEnv(options) {
 			getTopics: () => [...subscribedTopics],
 			_topics: subscribedTopics,
 			_topicEntries: new Map(),
+			/** @type {Map<string, Array<(envelope: any) => void>>} Listeners parked by an attach frame, bound by the next subscribe */
+			_pendingTopicCbs: new Map(),
 			_onSend: null,
 			_sendHandlers
 		};
@@ -586,15 +597,39 @@ export function createTestEnv(options) {
 				state.values.push(merged);
 			};
 			// Claim the first unclaimed entry for this topic (FIFO); mirrors the
-			// browser client's listener install.
+			// browser client's listener install. At attach time the entry does
+			// not exist yet - the server names the topic before it subscribes
+			// the socket - so the listener parks until the subscribe binds it.
+			let _claimIssued = false;
+			/** @type {((envelope: any) => void) | null} */
+			let _parkedCb = null;
 			const claimTopic = (topic) => {
-				const entries = ws._topicEntries?.get(topic);
-				const entry = entries && entries.find(e => !e.cb);
-				if (!entry) return;
-				entry.cb = (envelope) => {
+				if (_claimIssued) return;
+				const cb = (envelope) => {
 					if (!attached) { attachBuffer.push(envelope); return; }
 					applyEnvelope(envelope);
 				};
+				const entries = ws._topicEntries?.get(topic);
+				const entry = entries && entries.find(e => !e.cb);
+				_claimIssued = true;
+				if (entry) {
+					entry.cb = cb;
+					return;
+				}
+				_parkedCb = cb;
+				if (!ws._pendingTopicCbs.has(topic)) ws._pendingTopicCbs.set(topic, []);
+				/** @type {any[]} */ (ws._pendingTopicCbs.get(topic)).push(cb);
+			};
+			/** Drop a listener that parked for a subscribe that never happened. @param {string | null} topic */
+			const unparkTopic = (topic) => {
+				if (!_parkedCb || !topic) return;
+				const parked = ws._pendingTopicCbs.get(topic);
+				if (parked) {
+					const at = parked.indexOf(_parkedCb);
+					if (at >= 0) parked.splice(at, 1);
+					if (parked.length === 0) ws._pendingTopicCbs.delete(topic);
+				}
+				_parkedCb = null;
 			};
 
 			_sendHandlers.set(streamId, (topic, event, data) => {
@@ -620,15 +655,16 @@ export function createTestEnv(options) {
 					state._key = data.key || 'id';
 					state._mergeOpts = { prepend: data.prepend, max: data.max };
 
-					if (state.topic) {
-						const entries = ws._topicEntries?.get(state.topic);
-						const claimed = entries && entries.some(e => e.cb);
-						if (!claimed) claimTopic(state.topic);
-					}
+					// An attach frame already issued this stream's listener; a
+					// client that did not get one (or a server that sent none)
+					// claims here instead.
+					if (state.topic) claimTopic(state.topic);
+					_parkedCb = null;
 					attached = true;
 					for (const envelope of attachBuffer) applyEnvelope(envelope);
 					attachBuffer = [];
 				} else if (data) {
+					unparkTopic(state.topic);
 					attachBuffer = [];
 					state.error = new LiveError(data.code || 'UNKNOWN', data.error || 'Unknown error');
 				}

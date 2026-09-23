@@ -1086,6 +1086,13 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			const seen = new Map();
 			for (let i = queue.length - 1; i >= 0; i--) {
 				if (!_IDEMPOTENT.has(queue[i].event)) continue;
+				// A presence `update` carries only the fields that changed, so
+				// two of them for one key inside a frame are not substitutes:
+				// dropping the older one drops the fields only it carried (a
+				// lock release lost behind a typing flag). They are cheap and
+				// rare next to cursor samples, and the per-field stamp guard in
+				// the merge already settles their order.
+				if (merge === 'presence' && queue[i].event === 'update') continue;
 				const k = queue[i].data?.[keyField];
 				if (k !== undefined) {
 					const kept = seen.get(k);
@@ -1542,7 +1549,13 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		// release that precedes every reset, 'attaching' from the next
 		// subscribe); the documented machine has no edge back into
 		// 'initialized', and stamping it here made a detach flash the
-		// not-started state before it settled on 'detached'.
+		// not-started state before it settled on 'detached'. 'failed' is the
+		// one value this has to clear: it tracks the error state, the release
+		// keeps the topic's error setter registered so a denial can still
+		// stamp it inside the grace window, and the error itself is cleared
+		// just above - a phase reporting a failure with no error to show
+		// would outlive it for as long as the store is cached.
+		if (_phase === 'failed') _setPhase('detached');
 		_devtoolsStream(path, null, 0, merge);
 	}
 

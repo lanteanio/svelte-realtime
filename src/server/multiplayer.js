@@ -292,14 +292,21 @@ export const _multiplayerRegister = function multiplayer(config) {
 	// event, never replayed from a roster), and the client GCs rendered taps so
 	// a burst never grows unbounded.
 	if (config.reactions) {
-		/** @type {any} */ (roomExport).__reactionStream = live.stream(
+		const reactionStream = live.stream(
 			(ctx, ...args) => topicFn(ctx, ...args) + ':reactions',
 			async (ctx, ...args) => {
-				if (_cursorGuard) await _cursorGuard(ctx, ...args);
+				if (/** @type {any} */ (ctx)._roomGuardRan !== true && _cursorGuard) await _cursorGuard(ctx, ...args);
 				return [];
 			},
 			{ merge: 'latest' }
 		);
+		// The guard has to run before the wire subscribe, like every other
+		// sub-stream: a loader-only guard leaves a denied joiner subscribed to
+		// the reactions topic (and told its resolved name) for as long as the
+		// guard awaits, and every reaction published in that window reaches it.
+		const subFilter = /** @type {any} */ (roomExport).__subStreamFilter;
+		if (subFilter) /** @type {any} */ (reactionStream).__streamFilter = subFilter;
+		/** @type {any} */ (roomExport).__reactionStream = reactionStream;
 	}
 
 	// Record the declared field surfaces so the generated namespace knows which

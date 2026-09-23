@@ -251,6 +251,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document itself, and the server build, whose compiled effect root never
   runs its callback.
 
+- **`store.phase` no longer flashes `initialized` on the way to `detached`,
+  nor rests on `failed` with no error to show.** The session reset stamped
+  the phase back to the not-started state before a detach had settled, an
+  edge the documented machine does not have; the phase now belongs to the
+  lifecycle transitions alone, and a cold-started store rests on `detached`.
+  Because a release keeps the topic's error setter registered, a subscribe
+  denial can still mark the phase `failed` inside the resume-grace window -
+  the reset clears the error, so it now clears that phase with it rather than
+  leaving a stream reporting a failure it no longer holds.
+
+- **A guarded room no longer subscribes a denied joiner to its reactions
+  topic.** Every other sub-stream runs the room guard before the socket is
+  subscribed at the wire; the reactions ring is built on top of the room
+  export after it exists, so it was reachable only through its loader - which
+  dispatch runs after the attach frame and after the subscribe. For as long
+  as an async guard awaited (a membership lookup), a rejected joiner held a
+  real subscription and received every reaction published in that window
+  before being rolled back. It now carries the same pre-subscribe filter, and
+  the loader skips the guard the filter already ran.
+
+- **Two presence updates for one key inside one animation frame no longer
+  lose the fields only one of them carried.** Frame dedup keeps the newest
+  sample per key, which is right for a cursor - the frame is the sample - and
+  wrong for a presence delta, which carries just the fields that changed: a
+  lock release arriving beside a typing flag was dropped whole, and the
+  per-field ordering guard never saw it. Presence updates are exempt from the
+  dedup; their order is already settled per field by their stamps.
+
+- **The test harness speaks the attach frame instead of only sending it.**
+  `createTestEnv().connect().subscribe()` installed its topic listener by
+  claiming a subscription entry that, at attach time, the server has not
+  created yet - so the claim silently did nothing, the buffer was always
+  empty, and the harness reproduced the pre-attach behaviour: an app test for
+  the join window could not fail on a regression. The listener now parks and
+  the subscribe binds it. A second subscription to one topic on one
+  connection also gets its own listener again, and `register()` wires a
+  room's reactions stream so `__reactions` is reachable in tests at all.
+
 ### Security
 
 - **DevTools retains metadata only unless payload capture is explicitly
