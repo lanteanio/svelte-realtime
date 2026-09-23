@@ -496,6 +496,7 @@ describe('live.multiplayer()', () => {
 			init: async () => [],
 			presence: (ctx) => ({ name: ctx.user?.name }),
 			typing: true,
+			selections: 'offset',
 			topicArgs: 1
 		});
 
@@ -991,13 +992,13 @@ describe('live.multiplayer() sticky presence fields', () => {
 		}
 	});
 
-	it('does not persist when the field is gated off by config (lock without locks, selection without selections)', async () => {
+	it('neither persists nor broadcasts a field gated off by config (lock without locks, selection without selections)', async () => {
 		const redis = makeFakeRedis();
 		const platform = { redis };
 
 		// typing enabled (so the runtime guard is satisfied via presence), but
-		// locks and selections are NOT declared: a lock or selection delta must
-		// publish forward yet never persist to the roster.
+		// locks and selections are NOT declared: a lock or selection delta is
+		// neither persisted nor sent to live members.
 		const room = live.multiplayer({
 			topic: (ctx, boardId) => 'board:' + boardId,
 			init: async () => [],
@@ -1008,10 +1009,11 @@ describe('live.multiplayer() sticky presence fields', () => {
 
 		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
 
+		const published = [];
 		const ctxA = {
 			user: { id: 'alice', name: 'Alice' },
 			platform,
-			publish: () => {}
+			publish: (topic, event, data) => published.push(data)
 		};
 
 		await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': true });
@@ -1022,6 +1024,76 @@ describe('live.multiplayer() sticky presence fields', () => {
 		expect(alice).toBeDefined();
 		expect('lock:title' in alice.data).toBe(false);
 		expect('selection' in alice.data).toBe(false);
+		expect(published).toEqual([]);
+	});
+
+	it('forwards and persists any lock key when locks are declared without an allowlist', async () => {
+		const platform = { redis: makeFakeRedis() };
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: true,
+			topicArgs: 1
+		});
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+		const published = [];
+		const ctx = { user: { id: 'alice', name: 'Alice' }, platform, publish: (topic, event, data) => published.push(data) };
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:anything': true });
+		expect(published).toEqual([{ key: 'alice', 'lock:anything': true }]);
+		const alice = (await _clusterPresenceList(platform, 'board:b1')).find((e) => e.key === 'alice');
+		expect(alice.data['lock:anything']).toBe(true);
+	});
+
+	it('still sends the release of a lock the room no longer declares', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: ['title'],
+			topicArgs: 1
+		});
+		const published = [];
+		const ctx = { user: { id: 'alice' }, publish: (topic, event, data) => published.push(data) };
+		// A release can only clear a field; one that a wider declaration set on
+		// live clients before a redeploy must still be clearable.
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:body': null });
+		expect(published).toEqual([{ key: 'alice', 'lock:body': null }]);
+		// An empty delta is still published.
+		published.length = 0;
+		await room.__presenceUpdate(ctx, 'b1', {});
+		expect(published).toEqual([{ key: 'alice' }]);
+	});
+
+	it('sends exactly the lock keys the roster keeps from one delta, and releases them all at once', async () => {
+		const platform = { redis: makeFakeRedis() };
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			locks: true,
+			topicArgs: 1
+		});
+		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
+		const published = [];
+		const ctx = { user: { id: 'alice', name: 'Alice' }, platform, publish: (topic, event, data) => published.push(data) };
+		const locks = (o) => Object.keys(o).filter((k) => k.startsWith('lock:')).sort();
+		const kept = Array.from({ length: 64 }, (_, i) => 'lock:k' + i).sort();
+
+		const take = {};
+		for (let i = 0; i < 70; i++) take['lock:k' + i] = true;
+		await room.__presenceUpdate(ctx, 'b1', take);
+		const alice = (await _clusterPresenceList(platform, 'board:b1')).find((e) => e.key === 'alice');
+		expect(locks(published[0])).toEqual(kept);
+		expect(locks(alice.data)).toEqual(kept);
+
+		// A release stamps nothing, so the per-delta limit never holds one back.
+		const release = {};
+		for (let i = 0; i < 70; i++) release['lock:k' + i] = null;
+		await room.__presenceUpdate(ctx, 'b1', release);
+		expect(locks(published[1])).toHaveLength(70);
+		const after = (await _clusterPresenceList(platform, 'board:b1')).find((e) => e.key === 'alice');
+		expect(locks(after.data)).toEqual([]);
 	});
 
 	it('a second replica acquiring the same member keeps its sticky fields, and the last release drops them', async () => {
@@ -1187,12 +1259,36 @@ describe('live.multiplayer() sticky lock bounds', () => {
 		publish: (topic, event, data) => published && published.push({ topic, event, data })
 	});
 
+	it('broadcasts only the field surfaces the room declares', async () => {
+		const room = live.multiplayer({
+			topic: (ctx, boardId) => 'board:' + boardId,
+			init: async () => [],
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			typing: true,
+			locks: ['title'],
+			topicArgs: 1
+		});
+		const published = [];
+		const ctx = { user: { id: 'alice' }, publish: (topic, event, data) => published.push(data) };
+
+		// Nothing declared survives: no frame at all.
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:body': true });
+		await room.__presenceUpdate(ctx, 'b1', { selection: { start: 0, end: 2 } });
+		expect(published).toEqual([]);
+
+		// The declared fields go out; typing and app fields are ephemeral and
+		// always forwarded.
+		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': true, 'lock:body': true, selection: { start: 0, end: 2 }, typing: true, mood: 'busy' });
+		expect(published).toEqual([{ key: 'alice', 'lock:title': true, typing: true, mood: 'busy' }]);
+	});
+
 	it('drops undeclared lock keys - only the declared locks allowlist persists', async () => {
 		const redis = makeFakeRedis();
 		const platform = { redis };
 		const room = makeRoom();
 		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
-		const ctx = makeCtx(platform, []);
+		const published = [];
+		const ctx = makeCtx(platform, published);
 
 		// Declared: lock:title persists. Undeclared: dropped even though the
 		// locks surface is enabled.
@@ -1203,8 +1299,9 @@ describe('live.multiplayer() sticky lock bounds', () => {
 		expect('lock:cell:0' in alice.data).toBe(false);
 		expect('lock:evil' in alice.data).toBe(false);
 
-		// The forward publish is unaffected: subscribers still see the raw
-		// delta live; only the persisted sticky subset is filtered.
+		// Nor are they broadcast: a lock no late joiner will ever see must not
+		// show on live members either.
+		expect(published.map((p) => p.data)).toEqual([{ key: 'alice', 'lock:title': true }]);
 	});
 
 	it('replays the accumulation PoC: many frames of undeclared keys leave the roster entry untouched', async () => {
@@ -1238,7 +1335,8 @@ describe('live.multiplayer() sticky lock bounds', () => {
 		const platform = { redis };
 		const room = makeRoom();
 		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
-		const ctx = makeCtx(platform);
+		const published = [];
+		const ctx = makeCtx(platform, published);
 
 		// A legit lock value persists; an oversized one (> 1 KB serialized)
 		// is dropped; an oversized selection is dropped too.
@@ -1249,6 +1347,8 @@ describe('live.multiplayer() sticky lock bounds', () => {
 		let alice = roster.find((e) => e.key === 'alice');
 		expect(alice.data['lock:title']).toBe(true);
 		expect('selection' in alice.data).toBe(false);
+		// What the roster refused was not sent either.
+		expect(published.map((p) => p.data)).toEqual([{ key: 'alice', 'lock:title': true }]);
 
 		// Release always applies (null is never size-capped).
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': null });

@@ -159,6 +159,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A lock or selection the roster will not keep is no longer shown to live
+  members.** The presence send path forwarded every field of a delta while
+  the roster kept only the room's declared surfaces within their bounds, so
+  a lock key outside a `locks` allowlist, a selection in a room without
+  `selections`, a value over the 1 KB bound, or keys past the 64-per-delta
+  limit showed in every live member's `room.locks` / `room.selections`
+  while no late joiner ever saw them. The roster's per-field decision now
+  governs the live frame too, and a delta left with nothing to send is not
+  published. A release (`null`) always goes out, since it can only clear a
+  field. Typing and app fields are unaffected. Tests assert the frame and
+  the roster together for each case.
+
 - **A Svelte 4 project that uses a rune feature gets a build error naming
   it.** `live.doc`, `live.smooth`, a `live.multiplayer` export with
   presence, cursors, an owner or a field surface, and an enumerable

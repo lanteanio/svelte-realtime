@@ -66,7 +66,7 @@ function _warnStickyDrop(reason, detail) {
 	_stickyDropWarned.add(reason);
 	console.warn(
 		'[svelte-realtime] live.multiplayer(): dropping a sticky presence field - ' + reason + ' (' + _logSafe(String(detail)) + ').\n' +
-		'  The field will not persist on the roster entry. This warning fires once per reason per process.\n' +
+		'  The field is neither persisted on the roster entry nor broadcast. This warning fires once per reason per process.\n' +
 		'  See: https://svti.me/multiplayer'
 	);
 }
@@ -253,8 +253,10 @@ export const _multiplayerRegister = function multiplayer(config) {
 	/**
 	 * @param {any} ctx
 	 * @param {any[]} args
+	 * @param {Set<string> | null} withheld selection / lock fields the roster
+	 *   refused; they are not sent either (see `__presenceUpdate`)
 	 */
-	const _publishPresenceField = (ctx, args) => {
+	const _publishPresenceField = (ctx, args, withheld) => {
 		const roomArgs = args.slice(0, _cursorArgCount);
 		const delta = args[_cursorArgCount];
 		const presenceTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':presence';
@@ -269,6 +271,12 @@ export const _multiplayerRegister = function multiplayer(config) {
 		// render) on every live client while the roster kept the real one.
 		frame.key = key;
 		delete frame.data;
+		if (withheld !== null) {
+			for (const k of withheld) delete frame[k];
+			let fields = 0;
+			for (const k in frame) if (k !== 'key' && k !== '_p' && k !== '_n') fields++;
+			if (fields === 0) return;
+		}
 		// Ordered per field on the receiving side: the same reorder hazard as
 		// cursor frames, with a stale flag (typing, a lock) as the visible
 		// damage.
@@ -278,44 +286,68 @@ export const _multiplayerRegister = function multiplayer(config) {
 
 	/** @type {any} */ (roomExport).__presenceUpdate = live.volatile(async (ctx, ...args) => {
 		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
-		_publishPresenceField(ctx, args);
-		// Persist the sticky subset onto the roster after the forward publish so a
-		// late joiner who loads the roster still sees it. selection (when
-		// selections are enabled) and declared lock:<k> keys (when locks are
-		// enabled) are sticky; typing and everything else stay ephemeral.
-		// Reactions ride a separate path.
+		// Decide once per field what the roster keeps. selection (when selections
+		// are enabled) and declared lock:<k> keys (when locks are enabled) are
+		// sticky; typing and everything else stay ephemeral and always go out. A
+		// selection or lock the roster refuses - undeclared, over the value bound,
+		// past the per-delta key limit - is not sent either, or live members would
+		// show a lock or range no late joiner ever sees. A release (null) always
+		// goes out, since it can only clear a field (an undeclared one may be left
+		// behind on live clients by a narrower declaration), and a declared one is
+		// always merged. Reactions ride a separate path.
 		const delta = args[_cursorArgCount];
+		/** @type {Record<string, any>} */
+		const sticky = {};
+		let persist = false;
+		let stickyCount = 0;
+		/** @type {Set<string> | null} */
+		let withheld = null;
 		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
-			const sticky = {};
-			let stickyCount = 0;
 			for (const k of Object.keys(delta)) {
-				if (stickyCount >= _STICKY_MAX_KEYS) {
-					_warnStickyDrop('more than ' + _STICKY_MAX_KEYS + ' sticky keys in one delta', 'key ' + k);
-					break;
-				}
+				if (k !== 'selection' && k.slice(0, 5) !== 'lock:') continue;
+				const release = delta[k] === null;
 				if (!_isStickyKey(k)) {
+					if (release) continue;
 					// `locks: ['title']` allows `lock:title` and nothing else.
 					if (Array.isArray(config.locks) && k.slice(0, 5) === 'lock:') {
 						_warnStickyDrop('lock key is not in the declared locks allowlist', k);
 					}
+					(withheld ??= new Set()).add(k);
+					continue;
+				}
+				// A release stamps nothing, so the per-delta limit (which bounds
+				// what a delta adds to the entry) never holds one back.
+				if (release) {
+					sticky[k] = null;
+					persist = true;
+					continue;
+				}
+				if (stickyCount >= _STICKY_MAX_KEYS) {
+					_warnStickyDrop('more than ' + _STICKY_MAX_KEYS + ' sticky keys in one delta', 'key ' + k);
+					(withheld ??= new Set()).add(k);
 					continue;
 				}
 				if (!_stickyValueFits(delta[k])) {
 					_warnStickyDrop('value exceeds ' + _STICKY_VALUE_MAX_BYTES + ' bytes serialized', k);
+					(withheld ??= new Set()).add(k);
 					continue;
 				}
 				sticky[k] = delta[k];
 				stickyCount++;
+				persist = true;
 			}
-			if (Object.keys(sticky).length > 0) {
-				// The roster store is keyed by the WIRE data topic (the data-stream's
-				// onSubscribe acquired it tenant-prefixed); prefix here too so the sticky
-				// field lands on the same entry. The forward `:presence` publish above
-				// uses ctx.publish (logical -> the scoped wrapper prefixes it once), so
-				// only the roster key needs the explicit prefix. Null tenant -> unchanged.
-				const dataTopic = _tenantTopic(ctx.tenantId, _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount)));
-				await _clusterPresenceMerge(ctx.platform, dataTopic, _getIdentityKey(ctx), sticky);
-			}
+		}
+		// Persist after the forward publish, so the live frame and the roster
+		// write keep the order the ordering token gives them.
+		_publishPresenceField(ctx, args, withheld);
+		if (persist) {
+			// The roster store is keyed by the WIRE data topic (the data-stream's
+			// onSubscribe acquired it tenant-prefixed); prefix here too so the sticky
+			// field lands on the same entry. The forward `:presence` publish above
+			// uses ctx.publish (logical -> the scoped wrapper prefixes it once), so
+			// only the roster key needs the explicit prefix. Null tenant -> unchanged.
+			const dataTopic = _tenantTopic(ctx.tenantId, _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount)));
+			await _clusterPresenceMerge(ctx.platform, dataTopic, _getIdentityKey(ctx), sticky);
 		}
 	});
 
