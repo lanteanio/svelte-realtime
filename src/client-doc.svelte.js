@@ -27,6 +27,41 @@ import { SvelteMap } from 'svelte/reactivity';
 import { _setCrdtDegraded } from './client.js';
 
 /**
+ * Build a rune holder outside the reaction that asked for it. A `$state`
+ * created while an effect runs belongs to that effect: reads of it in the
+ * same run are deliberately not tracked (Svelte's rule for state created
+ * inside a reaction), so an effect that first touches a lazily created
+ * mirror during component init reads the seed value and never re-runs. A
+ * short-lived effect root gives the holder its own owner; the root is torn
+ * down at once (sources outlive it), and the caller's reaction then tracks
+ * the holder like any other state. Fill the holder with its initial content
+ * inside `create` as well: once the source is tracked, seeding it afterwards
+ * writes to it from the caller's own run, which costs an effect a redundant
+ * second run and throws outright when the caller is a `$derived`.
+ *
+ * The server target compiles `$effect.root` down to a no-op whose callback is
+ * dropped, so `create` runs directly there. Nothing tracks under that build -
+ * runes are plain values - and the generated SSR namespace is inert and never
+ * loads this module; what must not happen is handing back an undefined holder
+ * to anything that does load it there.
+ * @template T
+ * @param {() => T} create
+ * @returns {T}
+ */
+function _createOutsideReaction(create) {
+	/** @type {T} */
+	let created;
+	let ran = false;
+	const teardown = $effect.root(() => {
+		ran = true;
+		created = create();
+	});
+	teardown();
+	if (!ran) created = create();
+	return /** @type {T} */ (created);
+}
+
+/**
  * The shared per-document state one or more mounted views attach to: the
  * channel, the rune-backed lifecycle fields, and the per-container mirrors.
  */
@@ -79,8 +114,11 @@ class SharedDoc {
 		if (entry) return entry;
 		if (kind === 'map') {
 			const facet = this.channel.map(name);
-			const holder = new MapMirror();
-			for (const [k, v] of Object.entries(facet.toJSON())) holder.value.set(k, v);
+			const holder = _createOutsideReaction(() => {
+				const h = new MapMirror();
+				for (const [k, v] of Object.entries(facet.toJSON())) h.value.set(k, v);
+				return h;
+			});
 			const off = facet.onChange((changedKeys) => {
 				for (const k of changedKeys) {
 					if (facet.has(k)) holder.value.set(k, facet.get(k));
@@ -90,8 +128,11 @@ class SharedDoc {
 			entry = { facet, holder, off };
 		} else if (kind === 'array') {
 			const facet = this.channel.array(name);
-			const holder = new ListMirror();
-			holder.value.push(...facet.toArray());
+			const holder = _createOutsideReaction(() => {
+				const h = new ListMirror();
+				h.value.push(...facet.toArray());
+				return h;
+			});
 			const off = facet.onChange((delta) => {
 				const arr = holder.value;
 				let i = 0;
@@ -108,8 +149,11 @@ class SharedDoc {
 			entry = { facet, holder, off };
 		} else {
 			const facet = this.channel.text(name);
-			const holder = new TextMirror();
-			holder.value = facet.toString();
+			const holder = _createOutsideReaction(() => {
+				const h = new TextMirror();
+				h.value = facet.toString();
+				return h;
+			});
 			const off = facet.onChange(() => {
 				holder.value = facet.toString();
 			});
@@ -452,7 +496,11 @@ export function _acquireDoc(cacheKey, kind, makeChannel, status) {
 	let entry = _docCache.get(cacheKey);
 	if (!entry) {
 		const channel = makeChannel();
-		entry = { shared: new SharedDoc(channel, status), refs: 0 };
+		// The shared document's own rune fields (synced, degraded, access,
+		// status) get the same treatment: the first mount may well happen
+		// inside an effect.
+		const shared = _createOutsideReaction(() => new SharedDoc(channel, status));
+		entry = { shared, refs: 0 };
 		_docCache.set(cacheKey, entry);
 	}
 	entry.refs++;

@@ -5,7 +5,7 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-next.91] - 2026-08-02
+## [0.6.0-next.91] - 2026-09-12
 
 ### Added
 
@@ -230,6 +230,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output.
 
 - **Vite plugin: self-sustaining HMR loop through `$types.d.ts` regeneration - full-reload storm for every connected browser (reported in #9, fixed on the 0.5.x line in 0.5.12).** `handleHotUpdate` filtered only on the live directory, so the plugin's own generated `src/live/$types.d.ts` fed back into its own handler, and `_writeTypeDeclarations` rewrote the file unconditionally - a fresh mtime per pass scheduled the next change event. Once anything touched `$types.d.ts` after the watcher was armed (most commonly a second Vite instance on the same checkout, e.g. a Playwright test server next to the dev server, whose `buildStart()` write ignited it), the loop sustained itself forever: a full SSR registry reload per tick and a full reload of every connected client, since the file is not in the module graph and Vite falls back to `full-reload`. `handleHotUpdate` now returns `[]` for `.d.ts` files (handled, no affected modules) and skips test files like the add/unlink watcher, and `_writeTypeDeclarations` compares existing content before writing, so an unchanged regeneration is a no-op - which also removes the cross-process ignition entirely. Regression tests pin the ignored `.d.ts` event, the ignored test-file event, and the mtime-stable idempotent write.
+
+- **A `$derived` or `$effect` that is the first to touch a `live.doc`
+  container no longer sticks at the value it read.** Container mirrors and a
+  document's lifecycle runes (`synced`, `degraded`, `access`, `status`) are
+  built on first access, and Svelte deliberately does not track a `$state`
+  created inside the reaction that reads it. So whichever reaction happened
+  to build the mirror read the seeded content once and never re-ran, while
+  every reader that arrived afterwards tracked normally: a text binding or a
+  `$derived` over a map stayed frozen at the snapshot it started from, and
+  the same component worked as soon as anything else had touched the
+  document first. Mirrors and the shared document are now constructed and
+  seeded inside a short-lived effect root of their own, so the reading
+  reaction tracks them like any other state. The seeding belongs in that root
+  too: filling a mirror that has already escaped it writes to tracked state
+  from the caller's own run, which costs an effect a redundant second run and
+  makes a `$derived` throw. Regression tests compile the shipped rune module
+  and drive it through an effect and a `$derived` that each build the text,
+  map, and array mirrors by reading them, a reaction that acquires the
+  document itself, and the server build, whose compiled effect root never
+  runs its callback.
 
 ### Security
 
