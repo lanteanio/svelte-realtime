@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`board.watch(...)` shows a multiplayer room without joining it.** It
+  returns the reactive view `board.room(...)` returns - `others`, `cursors`,
+  `typing`, `selections`, `locks`, `reactions`, `owner` - but never holds the
+  room's data stream and has no send path, so the viewer is on nobody's
+  roster, cannot become the owner, and does not run the room's `init` or
+  `onJoin`: a lobby preview or a moderator's view. It is typed as the new
+  `MultiplayerView` from `svelte-realtime/multiplayer`, which
+  `MultiplayerRoom` extends with the send methods; on the view those
+  methods are missing from the type, and at runtime they send nothing and
+  say so once in the console. Its streams follow the same lifetime as a
+  `room(...)`, and it takes a getter for its args the same way.
+
+- **`board.room(() => id)` and `board.watch(() => id)` follow a getter for
+  the room args.** One view per component moves from room to room as the
+  getter changes: it leaves the old room's streams, joins the new room, and
+  its views switch with it. A room with several
+  args returns them as an array, and a getter that returns `null` or
+  `undefined` names no room: the view leaves, empties and sends nothing
+  until the getter names a room again, so a layout can hold one across
+  routes without the param. The prop is read inside a closure, so the
+  `state_referenced_locally` warning Svelte gives for `board.room(boardId)`
+  with a prop goes away. A send method called in an effect ties the effect
+  to the room: when the room changes (not merely the object the getter
+  reads), the effect re-runs and sends to the new room. Any other send goes
+  to the room the view is in at that moment. The new `room.here()` returns
+  the send methods bound to the room the view names now (typed
+  `MultiplayerSend`), so an effect's cleanup can undo what the effect did
+  (`here.releaseLock(key)`, `here.setTyping(false)`) in the room it did it
+  in, whenever Svelte runs that cleanup: on the re-run, on unmount, or
+  after a page transition's outro, when the view may already be in the next
+  room.
+
+- **`board.identify(() => key)` takes a getter.** It is read wherever `me`
+  is, so a key that comes from props stays current, and Svelte does not
+  warn that the prop is read only once. A plain key works as before.
+
 - **Production-shaped capacity evidence now has one ecosystem launch gate.**
   The README routes workload owners to the adapter's versioned peak/SLO/topology
   worksheet, open-arrival runner, and machine-readable result. Realtime traffic
@@ -89,6 +125,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Generated runtime error reference.** The package now ships a registry-derived reference for the `INVALID_USER_ID` signal failure, unresolved `$live` modules, and both upload-size failure boundaries. Runtime messages are built from that registry and append a stable ID plus package-local help route; each entry records cause, consequence, automatic recovery, next action, and owning sources. `npm run check` rejects missing sources or generated-page drift.
 
 ### Changed
+
+- **`board.room(...)` joins the room, and leaves when nothing holds it.**
+  Membership (a roster entry others see, a claim on ownership, the room's
+  `onJoin`) comes from a room's data stream, and the generated `room(...)`
+  never subscribed it, so two clients using only `room(...)` - the pattern
+  the README shows - saw no `others`, and a field update reached peers as a
+  roster entry without a presence payload. When the export has `presence` or
+  `owner`, the view now holds the data stream along with its other streams.
+  A room created in a component's script stays joined until the component
+  unmounts, rendered or not; one created with a getter for its args follows
+  the getter from room to room; one created outside Svelte's reactivity
+  stays joined until `room.destroy()`. Any room is also held while markup
+  or an effect reads one of its views. `destroy()` releases the view's
+  streams at once and stops its send methods; the user leaves once nothing
+  else on the page holds the room's data stream, and drops off the other
+  rosters after the presence grace window. A room subscribes only through something that also releases
+  it, so a room Svelte builds and throws away inside a derived never joins,
+  and one built in a cleanup (including the cleanups Svelte runs after an
+  outro or on `unmount()`) only sends. Creating a room in a `$derived` is
+  not recommended: it is only guaranteed to be joined, and in the right
+  room, while something reads it. In a component written in Svelte 4
+  syntax, create the room at the top of the script with a getter: a `$:`
+  statement does not end what it created, so a room built in one stays
+  joined until the component unmounts. A component that also renders
+  `board.data(...)` for the room shares that subscription and its load. Two
+  consequences: the room's `init` and `onJoin` run for a connection that
+  only renders `room(...)`, and the roster's first paint waits for `init`,
+  because both subscribes go out in one batch that is answered as a whole.
+  The `svelte-realtime/multiplayer` subpath now needs Svelte 5.7 or later
+  (`createSubscriber`).
+
+- **A `live.multiplayer()` action can no longer take the name of a
+  generated namespace member.** `data`, `presence`, `cursors`, `owner`,
+  `status`, `move`, `reportViewport`, `identify`, `room`, `watch`, the field
+  views and their send methods, and the internal `_setField` and
+  `_emitReaction` sit on the client namespace beside the actions, so an
+  action with one of those names silently replaced the member or was
+  replaced by it, on the client only. `live.multiplayer()` now throws at
+  declaration, naming the action, whether or not the export declares that
+  surface; an export with such an action fails at startup until it is
+  renamed.
 
 - **A multiplayer room reserves its sticky field names on the presence
   payload, and a cluster roster keeps the first acquirer's payload.** In a
@@ -171,22 +248,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field. Typing and app fields are unaffected. Tests assert the frame and
   the roster together for each case.
 
-- **A Svelte 4 project that uses a rune feature gets a build error naming
-  it.** `live.doc`, `live.smooth`, a `live.multiplayer` export with
-  presence, cursors, an owner or a field surface, and an enumerable
-  `live.room` ship Svelte 5 rune modules, so on Svelte 4 they failed inside
-  the package (the lobby view once `rooms()` ran), on a Svelte error that
-  named none of that. The Vite plugin now reads the
-  Svelte major the project installs and, when a `$live` module needs one of
-  those modules, stops with an error naming the module and the feature. The
-  peer range keeps Svelte 4, which the rest of the package supports. A
+- **A Svelte too old for a rune feature gets a build error naming it.**
+  `live.doc`, `live.smooth`, a `live.multiplayer` export with presence,
+  cursors, an owner or a field surface, and an enumerable `live.room` ship
+  Svelte 5 rune modules, so on Svelte 4 they failed inside the package (the
+  lobby view once `rooms()` ran), on a Svelte error that named none of
+  that. The Vite plugin now reads the Svelte version the project installs
+  and, when a `$live` module needs one of those modules, stops with an
+  error naming the module, the feature and the Svelte it needs: Svelte 5,
+  and 5.7 or later for the multiplayer view (a module that imports several
+  of them is held to the newest floor). The peer range keeps Svelte
+  4, which the rest of the package supports. A
   room or multiplayer flag spelled out as `false` (`enumerable: false`,
   `cursors: false`, `typing: false`) no longer generates the surface it
   switches off, which pulled in the rune module and, for a presence field,
   failed the build asking for a presence function. Tests generate each rune
-  feature against a fixture-installed Svelte 4 and Svelte 5, and a plain
-  stream module, the switched-off flags and an unreadable Svelte install
-  against Svelte 4.
+  feature against a fixture-installed Svelte 4 and Svelte 5, the
+  multiplayer view against 5.6 and 5.7, and a plain stream module, the
+  switched-off flags and an unreadable Svelte install against Svelte 4.
 
 - **A late joiner now sees the locks and selections members already hold.**
   The roster persists them inside the member's presence payload, so the

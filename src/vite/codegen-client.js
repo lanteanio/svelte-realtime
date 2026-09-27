@@ -303,10 +303,12 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			}
 			if (hasRoster) {
 				// identify(key) names the local user once; me + self-exclusion
-				// light up. room(...args) builds the aggregated reactive view
-				// over the per-room presence / cursor sub-streams and forwards
-				// the room args to each. The object is fully assigned before
-				// room() can be called, so self-referencing ${name} is safe.
+				// light up. room(...args) joins the room and builds the
+				// aggregated reactive view over the per-room presence / cursor
+				// sub-streams, forwarding the room args to each; watch(...args)
+				// builds the same view without joining or sending. The object is
+				// fully assigned before either can be called, so self-referencing
+				// ${name} is safe.
 				// A roster surface may declare presence without cursors (or the
 				// reverse); the missing sub-stream falls back to a store that
 				// pushes an empty list once, so the room always has both stores
@@ -314,44 +316,62 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 				const emptyStore = `{ subscribe: (fn) => { fn([]); return () => {}; } }`;
 				const presenceArg = mpInfo.hasPresence ? `${name}.presence(...args)` : emptyStore;
 				const cursorsArg = mpInfo.hasCursors ? `${name}.cursors(...args)` : emptyStore;
-				// The room composes the live field surfaces over the same presence
-				// roster. Each send dep binds the room args, then the room layers in
-				// the field-specific shape. typing / lock acquire / release are
-				// awaitable (the ack surfaces an error); the selection drag is
-				// fire-and-forget so a high-frequency drag drops under backpressure
-				// rather than queueing. Reactions ride their own stream and emit.
-				const roomDeps = [
+				// Static deps hold for every room of the export. The rest depend on
+				// the room args, so they are built by `bind`, which the room calls
+				// again when an args getter (room(() => id)) names another room.
+				const staticDeps = [
 					`me: _${name}_me`,
+					`status: status`
+				];
+				// The view deps are what both room() and watch() read: the roster,
+				// the cursors, the field projections and the owner.
+				const viewDeps = [
 					`presence: ${presenceArg}`,
-					`cursors: ${cursorsArg}`,
-					`status: status`,
+					`cursors: ${cursorsArg}`
+				];
+				// The send deps publish as the caller, so only room() gets them.
+				// Each binds the room args, then the room layers in the field-
+				// specific shape. typing / lock acquire / release are awaitable
+				// (the ack surfaces an error); the selection drag is fire-and-
+				// forget so a high-frequency drag drops under backpressure rather
+				// than queueing. Reactions ride their own stream and emit.
+				const sendDeps = [
 					`move: (...a) => ${name}.move(...args, ...a)`,
 					`reportViewport: (...a) => ${name}.reportViewport(...args, ...a)`
 				];
-				if (hasPresenceField) {
-					if (mpInfo.typing) {
-						roomDeps.push(`setTyping: (...a) => ${name}._setField(...args, ...a)`);
-					}
-					if (mpInfo.selections) {
-						roomDeps.push(`setSelection: (...a) => ${name}._setField.fireAndForget(...args, ...a)`);
-						// The mode ('offset' | 'crdt') tells the room whether to send/resolve
-						// selections as raw offsets or as live.doc-anchored positions.
-						roomDeps.push(`selections: ${JSON.stringify(mpInfo.selections)}`);
-					}
-					if (mpInfo.hasLocks) {
-						roomDeps.push(`acquireLock: (...a) => ${name}._setField(...args, ...a)`);
-						roomDeps.push(`releaseLock: (...a) => ${name}._setField(...args, ...a)`);
-					}
+				if (mpInfo.typing) {
+					sendDeps.push(`setTyping: (...a) => ${name}._setField(...args, ...a)`);
+				}
+				if (mpInfo.selections) {
+					sendDeps.push(`setSelection: (...a) => ${name}._setField.fireAndForget(...args, ...a)`);
+					// The mode ('offset' | 'crdt') tells the room whether to send/resolve
+					// selections as raw offsets or as live.doc-anchored positions.
+					staticDeps.push(`selections: ${JSON.stringify(mpInfo.selections)}`);
+				}
+				if (mpInfo.hasLocks) {
+					sendDeps.push(`acquireLock: (...a) => ${name}._setField(...args, ...a)`);
+					sendDeps.push(`releaseLock: (...a) => ${name}._setField(...args, ...a)`);
 				}
 				if (mpInfo.reactions) {
-					roomDeps.push(`reactions: ${name}.reactions(...args)`);
-					roomDeps.push(`react: (...a) => ${name}._emitReaction.fireAndForget(...args, ...a)`);
+					viewDeps.push(`reactions: ${name}.reactions(...args)`);
+					sendDeps.push(`react: (...a) => ${name}._emitReaction.fireAndForget(...args, ...a)`);
 				}
 				if (mpInfo.hasOwner) {
-					roomDeps.push(`owner: ${name}.owner(...args)`);
+					viewDeps.push(`owner: ${name}.owner(...args)`);
 				}
+				// Holding the room's data stream is what joins the room: membership
+				// (a roster entry others see, a claim on ownership) is acquired by
+				// that subscription alone, and the presence stream only observes.
+				// An app that also renders ${name}.data(...args) shares the cached
+				// store, so it stays one subscription and one load. watch() never
+				// holds it: an observer is on nobody's roster.
+				const joinDeps = (mpInfo.hasPresence || mpInfo.hasOwner)
+					? [`membership: ${name}.data(...args)`]
+					: [];
+				const build = (bound) => `new MultiplayerRoom({ ${staticDeps.join(', ')}, args, bind: (args) => ({ ${bound.join(', ')} }) })`;
 				mpLines.push(`  identify(key) { _${name}_me.set(key); },`);
-				mpLines.push(`  room(...args) { return new MultiplayerRoom({ ${roomDeps.join(', ')} }); },`);
+				mpLines.push(`  room(...args) { return ${build([...viewDeps, ...joinDeps, ...sendDeps])}; },`);
+				mpLines.push(`  watch(...args) { return ${build(viewDeps)}; },`);
 			}
 			mpLines.push(`};`);
 			lines.push(mpLines.join('\n'));

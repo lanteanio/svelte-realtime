@@ -341,7 +341,7 @@ export function _generateTypeDeclarations(liveDir, dir) {
 				// whenever they are generated.
 				const mpHasField = mpInfo.typing || mpInfo.hasLocks || mpInfo.selections || mpInfo.reactions;
 				const rosterMembers = (mpInfo.hasPresence || mpInfo.hasCursors || mpHasField || mpInfo.hasOwner)
-					? `, identify: (key: string) => void, room: (...args: any[]) => import('svelte-realtime/multiplayer').MultiplayerRoom`
+					? `, identify: (key: import('svelte-realtime/multiplayer').LocalKey) => void, room: (...args: any[]) => import('svelte-realtime/multiplayer').MultiplayerRoom, watch: (...args: any[]) => import('svelte-realtime/multiplayer').MultiplayerView`
 					: '';
 				exports.push(`  export const ${name}: { data: (...args: any[]) => StreamStore<any>, presence?: (...args: any[]) => StreamStore<any>, cursors?: (...args: any[]) => StreamStore<any>, owner?: (...args: any[]) => StreamStore<any>, status: import('svelte/store').Readable<string>, move: (...args: any[]) => void, reportViewport: (...args: any[]) => void${rosterMembers}, [action: string]: any };`);
 			}

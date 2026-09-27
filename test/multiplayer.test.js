@@ -1,10 +1,11 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync, readdirSync } from 'fs';
 import { resolve } from 'path';
 import { pathToFileURL } from 'url';
 import { flushSync } from 'svelte';
 import { compileModule } from 'svelte/compiler';
 import svelteRealtime from '../src/vite.js';
+import { _generateTypeDeclarations } from '../src/vite/codegen-types.js';
 import { live } from '../src/server.js';
 import {
 	_clusterPresenceAcquire,
@@ -64,6 +65,52 @@ export const room = live.multiplayer({
   }
 });
 `;
+
+// An export with every surface the namespace can carry, and no actions.
+const FULL_SURFACE_SOURCE = `
+import { live } from 'svelte-realtime/server';
+export const board = live.multiplayer({
+  topic: (ctx, id) => 'board:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  presence: (ctx) => ({ name: ctx.user.name }),
+  cursors: true,
+  typing: true,
+  selections: 'crdt',
+  locks: true,
+  reactions: true,
+  owner: true
+});
+`;
+
+/**
+ * Run a generated room() / watch() factory against a stand-in namespace and
+ * return the deps it hands MultiplayerRoom. A substring check over the whole
+ * stub cannot tell the two factories apart; this sees exactly what each wires.
+ * Each stand-in stream returns a tagged store recording the args it got, and
+ * each stand-in send returns what it was called with.
+ */
+function factoryDeps(code, name, factory, ...args) {
+	const line = code.split('\n').find((l) => l.startsWith(`  ${factory}(...args) { return new MultiplayerRoom(`));
+	if (!line) throw new Error(`no ${factory}() in the generated stub`);
+	const stream = (tag) => (...a) => ({ tag, args: a, subscribe: () => () => {} });
+	const send = (tag) => Object.assign((...a) => [tag, ...a], { fireAndForget: (...a) => [tag + '.fireAndForget', ...a] });
+	const ns = {
+		data: stream('data'), presence: stream('presence'), cursors: stream('cursors'),
+		owner: stream('owner'), reactions: stream('reactions'),
+		move: send('move'), reportViewport: send('reportViewport'),
+		_setField: send('_setField'), _emitReaction: send('_emitReaction')
+	};
+	let captured;
+	class MultiplayerRoom { constructor(deps) { captured = deps; } }
+	const members = new Function('MultiplayerRoom', `_${name}_me`, name, 'status', `return { ${line.trim().replace(/,$/, '')} };`);
+	members(MultiplayerRoom, { me: true }, ns, { status: true })[factory](...args);
+	// The factory hands over its call args and a `bind` that turns room args
+	// into the per-room deps; resolve it the way the room does.
+	const { args: passed, bind, ...fixed } = captured;
+	expect(passed).toEqual(args);
+	return { ...fixed, ...bind(passed) };
+}
 
 describe('live.multiplayer() vite integration', () => {
 	afterEach(teardown);
@@ -178,6 +225,44 @@ export const game = live.room({
 		expect(code).toContain('me: _room_me');
 		expect(code).toContain('presence: room.presence(...args)');
 		expect(code).toContain('cursors: room.cursors(...args)');
+		// The room holds the data stream: that subscription is what joins it.
+		expect(code).toContain('membership: room.data(...args)');
+		expect(code).toContain('watch(...args) { return new MultiplayerRoom({');
+	});
+
+	it('room() joins through the data stream and sends; watch() only reads', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+		const code = createPlugin().load('\0live:collab', {});
+
+		const room = factoryDeps(code, 'room', 'room', 'b1');
+		expect(Object.keys(room).sort()).toEqual(['cursors', 'me', 'membership', 'move', 'presence', 'reportViewport', 'status']);
+		expect(room.membership).toMatchObject({ tag: 'data', args: ['b1'] });
+		expect(room.presence).toMatchObject({ tag: 'presence', args: ['b1'] });
+		expect(room.move({ x: 1 })).toEqual(['move', 'b1', { x: 1 }]);
+
+		const view = factoryDeps(code, 'room', 'watch', 'b1');
+		expect(Object.keys(view).sort()).toEqual(['cursors', 'me', 'presence', 'status']);
+		expect(view.presence).toMatchObject({ tag: 'presence', args: ['b1'] });
+	});
+
+	it('watch() gets every view surface and no send path or membership', () => {
+		setup({ 'collab.js': FULL_SURFACE_SOURCE });
+		const code = createPlugin().load('\0live:collab', {});
+
+		const view = factoryDeps(code, 'board', 'watch', 'b1');
+		expect(Object.keys(view).sort()).toEqual(['cursors', 'me', 'owner', 'presence', 'reactions', 'selections', 'status']);
+		expect(view.selections).toBe('crdt');
+		expect(view.owner).toMatchObject({ tag: 'owner', args: ['b1'] });
+		expect(view.reactions).toMatchObject({ tag: 'reactions', args: ['b1'] });
+
+		const room = factoryDeps(code, 'board', 'room', 'b1');
+		expect(Object.keys(room).sort()).toEqual([
+			'acquireLock', 'cursors', 'me', 'membership', 'move', 'owner', 'presence', 'react',
+			'reactions', 'releaseLock', 'reportViewport', 'selections', 'setSelection', 'setTyping', 'status'
+		]);
+		expect(room.setTyping({ typing: true })).toEqual(['_setField', 'b1', { typing: true }]);
+		expect(room.setSelection({ selection: null })).toEqual(['_setField.fireAndForget', 'b1', { selection: null }]);
+		expect(room.react('heart')).toEqual(['_emitReaction.fireAndForget', 'b1', 'heart']);
 	});
 
 	it('binds cursors to an inline empty store when the export declares presence without cursors', () => {
@@ -228,6 +313,123 @@ export const room = live.multiplayer({
 		expect(code).toContain('cursors: room.cursors(...args)');
 		expect(code).toContain('presence: { subscribe: (fn) => { fn([]); return () => {}; } }');
 		expect(code).not.toContain('presence: room.presence(...args)');
+		// No roster entry and no owner to hold: the room does not join.
+		expect(code).not.toContain('membership:');
+	});
+
+	it('joins an owner-only room through its data stream; watching it does not', () => {
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, id) => 'board:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  owner: true
+});
+`
+		});
+		const code = createPlugin().load('\0live:collab', {});
+		expect(factoryDeps(code, 'room', 'room', 'b1').membership).toMatchObject({ tag: 'data', args: ['b1'] });
+		expect(factoryDeps(code, 'room', 'watch', 'b1')).not.toHaveProperty('membership');
+	});
+
+	it('does not join a reactions-only room, which has no roster entry or owner to hold', () => {
+		setup({
+			'collab.js': `
+import { live } from 'svelte-realtime/server';
+export const room = live.multiplayer({
+  topic: (ctx, id) => 'board:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  reactions: true
+});
+`
+		});
+		const code = createPlugin().load('\0live:collab', {});
+		expect(code).not.toContain('membership:');
+		expect(factoryDeps(code, 'room', 'room', 'b1')).toHaveProperty('react');
+		expect(factoryDeps(code, 'room', 'watch', 'b1')).not.toHaveProperty('react');
+	});
+
+	it('types watch() as the read-only view next to room()', () => {
+		setup({ 'collab.js': MULTIPLAYER_SOURCE });
+		const dts = _generateTypeDeclarations(liveDir, 'src/live');
+		expect(dts).toContain("room: (...args: any[]) => import('svelte-realtime/multiplayer').MultiplayerRoom");
+		expect(dts).toContain("watch: (...args: any[]) => import('svelte-realtime/multiplayer').MultiplayerView");
+		expect(dts).toContain("identify: (key: import('svelte-realtime/multiplayer').LocalKey) => void");
+	});
+
+	it('types a watch() view without the send path, and a room as a view', async () => {
+		// Every @ts-expect-error must fire and every other line must compile,
+		// so a view type that gains a send method, or a room that stops being
+		// assignable to a view, fails here.
+		const ts = (await import('typescript')).default;
+		mkdirSync(testRoot, { recursive: true });
+		const probe = resolve(testRoot, 'view-types.ts');
+		const decl = resolve(import.meta.dirname, '..', 'src', 'client-multiplayer').replace(/\\/g, '/');
+		writeFileSync(probe, [
+			`import type { MultiplayerRoom, MultiplayerView, MultiplayerSend, RosterEntry, LocalKey } from '${decl}';`,
+			'const keys: LocalKey[] = ["u1", null, undefined, () => "u1", () => undefined];',
+			'void keys;',
+			'declare const room: MultiplayerRoom;',
+			'declare const view: MultiplayerView;',
+			'const roomOthers: RosterEntry[] = room.others;',
+			'room.move({ x: 1 });',
+			'room.bindDoc({ text: () => null }).setTyping(true);',
+			'const here: MultiplayerSend = room.here();',
+			'here.acquireLock("title");',
+			'// @ts-expect-error a view has no send path',
+			'view.here();',
+			'// @ts-expect-error here() carries only the send methods',
+			'here.others;',
+			'const viewOthers: RosterEntry[] = view.others;',
+			'view.bindDoc({ text: () => null }).destroy();',
+			'const asView: MultiplayerView = room;',
+			'// @ts-expect-error a view has no send path',
+			'view.setTyping(true);',
+			'// @ts-expect-error a view has no send path',
+			'view.move({ x: 1 });',
+			'// @ts-expect-error a view has no send path',
+			'view.acquireLock("title");',
+			'// @ts-expect-error views are read-only',
+			'view.others = [];',
+			'void roomOthers; void viewOthers; void asView;',
+			''
+		].join('\n'));
+		const program = ts.createProgram([probe], {
+			noEmit: true,
+			strict: true,
+			skipLibCheck: true,
+			target: ts.ScriptTarget.ES2022,
+			module: ts.ModuleKind.ESNext,
+			moduleResolution: ts.ModuleResolutionKind.Bundler
+		});
+		const diagnostics = ts.getPreEmitDiagnostics(program).map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '));
+		expect(diagnostics).toEqual([]);
+	});
+
+	it('rejects an action named like any member the generated namespace carries', () => {
+		// The member list comes from the stub itself, so a member the codegen
+		// adds later is covered without touching this test.
+		setup({ 'collab.js': FULL_SURFACE_SOURCE });
+		const code = createPlugin().load('\0live:collab', {});
+		const body = code.slice(code.indexOf('export const board = {'));
+		const members = new Set([...body.slice(0, body.indexOf('\n};')).matchAll(/^ {2}(\w+)(?::|\()/gm)].map((m) => m[1]));
+		for (const k of Object.keys(__mpFields())) members.add(k);
+		expect(members).toContain('watch');
+		expect(members).toContain('data');
+
+		const declare = (actions) => live.multiplayer({
+			topic: (ctx, id) => 'board:' + id,
+			topicArgs: 1,
+			presence: (ctx) => ({ name: ctx.user?.name }),
+			actions
+		});
+		for (const name of members) {
+			expect(() => declare({ [name]: async () => null }), name).toThrow(`action '${name}'`);
+		}
+		expect(() => declare({ addCard: async () => null })).not.toThrow();
 	});
 
 	it("wires the selection mode into the room when an export declares selections: 'crdt'", () => {
@@ -1580,7 +1782,8 @@ const runeProbeDirs = [];
 // root so the compiled probe exercises the same source an app ships with.
 const SHIPPED_RUNE_PATH = resolve(import.meta.dirname, '..', 'src', 'client-multiplayer.svelte.js');
 const SHIPPED_COLOR_PATH = resolve(import.meta.dirname, '..', 'src', 'shared', 'color.js');
-
+const SVELTE_CLIENT_REACTIVITY = pathToFileURL(resolve(import.meta.dirname, '..', 'node_modules', 'svelte', 'src', 'reactivity', 'index-client.js')).href;
+const SVELTE_CLIENT_INDEX = pathToFileURL(resolve(import.meta.dirname, '..', 'node_modules', 'svelte', 'src', 'index-client.js')).href;
 // Monotonic cache-buster for the dynamic import URL. Date.now() has only
 // millisecond resolution, so two loads in the same millisecond would resolve to
 // the same module URL and the second would receive the first's cached (already
@@ -1602,6 +1805,20 @@ function fakeStore(initial) {
 			for (const fn of subs) fn(value);
 		}
 	};
+}
+
+/** A store that pushes one value and counts its subscribes and releases. */
+function countingStore(value) {
+	const s = {
+		subscribed: 0,
+		released: 0,
+		subscribe(fn) {
+			s.subscribed++;
+			fn(value);
+			return () => { s.released++; };
+		}
+	};
+	return s;
 }
 
 let MultiplayerRoom;
@@ -1637,11 +1854,300 @@ async function loadShippedRuneModule() {
 		generate: 'client'
 	});
 	const runeOut = resolve(probeDir, 'client-multiplayer.js');
-	writeFileSync(runeOut, js.code);
+	// Under Node the bare 'svelte' and 'svelte/reactivity' imports resolve to
+	// the server build, where untrack and createSubscriber do nothing; a
+	// browser bundle gets the client ones.
+	writeFileSync(runeOut, js.code
+		.replace(/(['"])svelte\/reactivity\1/g, JSON.stringify(SVELTE_CLIENT_REACTIVITY))
+		.replace(/from (['"])svelte\1/g, 'from ' + JSON.stringify(SVELTE_CLIENT_INDEX)));
 
 	const mod = await import(pathToFileURL(runeOut).href + '?t=' + ++runeProbeCounter);
 	MultiplayerRoom = mod.MultiplayerRoom;
 	localKeySource = mod.localKeySource;
+	return probeDir;
+}
+
+// Rooms built under the owners a Svelte app gives them. An effect root stands
+// in for component setup: both run with an active effect and no active
+// reaction, the state a component's script runs in. The derived is declared
+// inside the root, as a component's is inside its branch. `flush` is the
+// client runtime's flushSync, re-exported from a plain module beside the
+// probe: a bare 'svelte' import resolves to the server build under Node,
+// where it is a no-op, and the compiler refuses svelte/internal imports.
+// Releases run a microtask after the last reader goes; flush() drains that
+// queue too, so every step below settles before it returns.
+const OWNER_PROBE_SOURCE = `
+import { flush } from './flush.js';
+import { MultiplayerRoom } from './client-multiplayer.js';
+
+// const room = board.room(id) in a component's script.
+export function inRoot(deps) {
+	let room;
+	const stop = $effect.root(() => {
+		room = new MultiplayerRoom(deps);
+	});
+	flush();
+	return { room, stop() { stop(); flush(); } };
+}
+
+// Reads a view from an effect of its own, for as long as it lives.
+export function read(room) {
+	const stop = $effect.root(() => {
+		$effect.pre(() => { room.others; });
+	});
+	flush();
+	return () => { stop(); flush(); };
+}
+
+// const room = $derived(board.room(id)) in a component, read by markup that an
+// {#if open} can close. With cleanupReads a second effect also reads the room
+// in its cleanup, as $effect(() => { room.acquireLock(k); return () => room.releaseLock(k); })
+// does; Svelte runs that cleanup after the markup has moved to the new room.
+export function inDerived(makeDeps, first, { cleanupReads = false } = {}) {
+	let id = $state(first);
+	let open = $state(true);
+	let current = null;
+	const stop = $effect.root(() => {
+		const room = $derived(new MultiplayerRoom(makeDeps(id)));
+		$effect.pre(() => {
+			if (!open) return;
+			current = room;
+			room.others;
+		});
+		if (cleanupReads) {
+			$effect.pre(() => {
+				id;
+				return () => { room.others; };
+			});
+		}
+	});
+	flush();
+	return {
+		get room() { return current; },
+		setId(next) { id = next; flush(); },
+		setOpen(next) { open = next; flush(); },
+		stop() { stop(); flush(); }
+	};
+}
+
+// const room = board.room(() => id) in a component's script. With
+// cleanupsRead, two effects send through room.here() and undo in their
+// cleanups, with no view read anywhere. With readsId false they do not read
+// the id themselves either, so only here() can make them re-run.
+export function following(deps, first, { cleanupsRead = false, readsId = true } = {}) {
+	let id = $state(first);
+	let reads = 0;
+	let room;
+	const stop = $effect.root(() => {
+		room = new MultiplayerRoom({ ...deps, args: [() => { reads++; return id; }] });
+		if (cleanupsRead) {
+			for (let i = 0; i < 2; i++) {
+				$effect.pre(() => {
+					if (readsId) id;
+					const here = room.here();
+					here.setTyping(true);
+					return () => { here.setTyping(false); };
+				});
+			}
+		}
+	});
+	flush();
+	return {
+		room,
+		get reads() { return reads; },
+		setId(next) { id = next; flush(); },
+		// Several sets before one flush, as a goto inside a navigation does.
+		setIds(...next) { for (const n of next) id = n; flush(); },
+		// A set whose flush has not run yet, as inside an event handler.
+		setIdPending(next) { id = next; },
+		flush() { flush(); },
+		stop() { stop(); flush(); }
+	};
+}
+
+// board.room(() => params.board) where params is replaced by an equal object
+// on every navigation, as SvelteKit's page.params is. One effect only sends.
+export function followingParams(deps, first) {
+	let params = $state({ board: first });
+	let room;
+	const stop = $effect.root(() => {
+		room = new MultiplayerRoom({ ...deps, args: [() => params.board] });
+		$effect.pre(() => {
+			const here = room.here();
+			here.setTyping(true);
+			return () => { here.setTyping(false); };
+		});
+	});
+	flush();
+	return { room, navigate(board) { params = { board }; flush(); }, stop() { stop(); flush(); } };
+}
+
+// {#if editing}<Editor {room} />{/if} with an effect that stops editing
+// when the board changes: the editor's lock effect re-runs in the new room,
+// then, later in the same flush, the block destroys the editor.
+export function eagerBlock(deps, first) {
+	let id = $state(first);
+	let editing = $state(true);
+	let room;
+	const stop = $effect.root(() => {
+		room = new MultiplayerRoom({ ...deps, args: [() => id] });
+		$effect.pre(() => {
+			if (!editing) return;
+			// Created before the editor, so it ends first; it sends through the
+			// room itself, not through here().
+			$effect.pre(() => () => { room.setTyping(false); });
+			$effect.pre(() => {
+				const here = room.here();
+				here.acquireLock('title');
+				return () => { here.releaseLock('title'); };
+			});
+		});
+		$effect.pre(() => {
+			const now = id;
+			if (now !== first) editing = false;
+		});
+	});
+	flush();
+	return { setId(next) { id = next; flush(); }, stop() { stop(); flush(); } };
+}
+
+// An effect whose body only moves the cursor and whose cleanup clears typing.
+export function movingThenTyping(deps, first) {
+	let id = $state(first);
+	const stop = $effect.root(() => {
+		const room = new MultiplayerRoom({ ...deps, args: [() => id] });
+		$effect.pre(() => {
+			room.move({ x: 1 });
+			return () => { room.setTyping(false); };
+		});
+	});
+	flush();
+	return { setId(next) { id = next; flush(); }, stop() { stop(); flush(); } };
+}
+
+// An effect created before the room: on an id change it runs before the
+// room's follower, so its send names a room the view has not moved to yet.
+export function effectBeforeFollower(deps, first) {
+	let id = $state(first);
+	let room = null;
+	const stop = $effect.root(() => {
+		$effect.pre(() => {
+			id;
+			if (room) room.setTyping(true);
+		});
+		room = new MultiplayerRoom({ ...deps, args: [() => id] });
+	});
+	flush();
+	return { setId(next) { id = next; flush(); }, stop() { stop(); flush(); } };
+}
+
+// An effect elsewhere that sends through a room it did not build.
+export function sendsInEffect(room) {
+	const stop = $effect.root(() => {
+		$effect.pre(() => { room.setTyping(true); });
+	});
+	flush();
+	return () => { stop(); flush(); };
+}
+
+// An effect elsewhere whose cleanup sends through a room it did not build.
+export function cleanupSends(room) {
+	const stop = $effect.root(() => {
+		$effect.pre(() => () => { room.setTyping(false); });
+	});
+	flush();
+	return () => { stop(); flush(); };
+}
+
+// A room built in a cleanup Svelte runs with no effect active: an outro's
+// end, unmount(), or an effect root stopped from plain code, as here.
+export function inBareCleanup(deps) {
+	let built = null;
+	const stop = $effect.root(() => {
+		$effect.pre(() => () => { built = new MultiplayerRoom(deps); });
+	});
+	flush();
+	stop();
+	flush();
+	return { get built() { return built; } };
+}
+
+// The same, built outside Svelte's reactivity: it follows until destroy().
+export function followingPinned(deps, first) {
+	let id = $state(first);
+	let reads = 0;
+	const room = new MultiplayerRoom({ ...deps, args: [() => { reads++; return id; }] });
+	flush();
+	return { room, get reads() { return reads; }, get id() { return id; }, setId(next) { id = next; flush(); } };
+}
+
+// A parent effect that re-runs when the id changes and does not recreate its
+// child, whose body sent through the room: the child ends after the room
+// moved, as a page under a layout-held room does after its fade.
+export function parentDropsSender(room, readId) {
+	let made = false;
+	const stop = $effect.root(() => {
+		$effect.pre(() => {
+			readId();
+			if (made) return;
+			made = true;
+			$effect.pre(() => {
+				const here = room.here();
+				here.setTyping(true);
+				return () => { here.setTyping(false); };
+			});
+		});
+	});
+	flush();
+	return () => { stop(); flush(); };
+}
+
+// A room built in a cleanup that runs while its parent effect re-runs, as an
+// onDestroy(() => board.room(id).setTyping(false)) does on navigation.
+export function inCleanup(deps) {
+	let show = $state(true);
+	let built = null;
+	const stop = $effect.root(() => {
+		$effect.pre(() => {
+			if (show) $effect.pre(() => () => { built = new MultiplayerRoom(deps); });
+		});
+	});
+	flush();
+	show = false;
+	flush();
+	return { get built() { return built; }, stop() { stop(); flush(); } };
+}
+
+// The same $derived at module scope: no effect owns it, only readers do.
+export function unowned(makeDeps, first) {
+	let id = $state(first);
+	const room = $derived(new MultiplayerRoom(makeDeps(id)));
+	let current = null;
+	const stop = $effect.root(() => {
+		$effect.pre(() => {
+			current = room;
+			room.others;
+		});
+	});
+	flush();
+	return {
+		get room() { return current; },
+		setId(next) { id = next; flush(); },
+		stop() { stop(); flush(); }
+	};
+}
+`;
+
+async function loadOwnerProbe() {
+	const probeDir = await loadShippedRuneModule();
+	const { js } = compileModule(OWNER_PROBE_SOURCE, {
+		filename: 'owner-probe.svelte.js',
+		generate: 'client'
+	});
+	writeFileSync(resolve(probeDir, 'flush.js'), "export { flush } from 'svelte/internal/client';\n");
+	const out = resolve(probeDir, 'owner-probe.js');
+	writeFileSync(out, js.code);
+	return import(pathToFileURL(out).href + '?t=' + ++runeProbeCounter);
 }
 
 // The shipped reactive doc layer (client-doc.svelte.js), compiled the same way, so the
@@ -2057,6 +2563,556 @@ describe('MultiplayerRoom roster aggregation', () => {
 		expect(r.selections).toEqual({ alice: { start: 0, end: 5 } });
 		expect(r.others.find((p) => p.key === 'alice').data).toEqual({ name: 'Alice' });
 		r.destroy();
+	});
+
+	it('holds the membership stream for its lifetime without reading its value', async () => {
+		await loadShippedRuneModule();
+		// The room's data (here a list that looks like a roster) must never
+		// reach a view: only the presence stream feeds others.
+		const membership = countingStore([{ key: 'card-1', title: 'not a person' }]);
+		const r = new MultiplayerRoom({
+			me: 'me',
+			presence: fakeStore([{ key: 'alice' }]),
+			cursors: fakeStore([]),
+			status: fakeStore('connected'),
+			membership,
+			move: () => {}
+		});
+		expect([membership.subscribed, membership.released]).toEqual([1, 0]);
+		expect(r.others.map((o) => o.key)).toEqual(['alice']);
+		expect(r.cursors).toEqual([]);
+		r.destroy();
+		expect([membership.subscribed, membership.released]).toEqual([1, 1]);
+		// Built outside any component, derived or effect, the room lives until
+		// destroy(); a second call releases nothing twice.
+		r.destroy();
+		expect(membership.released).toBe(1);
+	});
+
+	it('joins at component setup and leaves with the component, read or not', async () => {
+		const probe = await loadOwnerProbe();
+		const membership = countingStore([]);
+		const presence = countingStore([]);
+		const { stop } = probe.inRoot({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('connected'), membership });
+		expect([membership.subscribed, membership.released]).toEqual([1, 0]);
+		stop();
+		expect([membership.subscribed, membership.released]).toEqual([1, 1]);
+		expect(presence.released).toBe(1);
+	});
+
+	it('a reader coming and going does not make a component room rejoin', async () => {
+		const probe = await loadOwnerProbe();
+		const membership = countingStore([]);
+		const { room, stop } = probe.inRoot({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), membership });
+		const unread = probe.read(room);
+		unread();
+		expect([membership.subscribed, membership.released]).toEqual([1, 0]);
+		stop();
+		expect([membership.subscribed, membership.released]).toEqual([1, 1]);
+	});
+
+	it('destroy() leaves at once, stays left for later readers, and stops sending', async () => {
+		const probe = await loadOwnerProbe();
+		const membership = countingStore([]);
+		const sent = [];
+		const { room, stop } = probe.inRoot({
+			me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), membership,
+			setTyping: (d) => sent.push(d), move: (p) => sent.push(p)
+		});
+		room.destroy();
+		expect([membership.subscribed, membership.released]).toEqual([1, 1]);
+		const unread = probe.read(room);
+		room.setTyping(true);
+		room.move({ x: 1 });
+		unread();
+		stop();
+		expect([membership.subscribed, membership.released]).toEqual([1, 1]);
+		expect(sent).toEqual([]);
+	});
+
+	it('a room built outside Svelte reactivity stays joined across readers until destroy()', async () => {
+		const probe = await loadOwnerProbe();
+		const membership = countingStore([]);
+		const presence = countingStore([{ key: 'alice' }]);
+		const room = new MultiplayerRoom({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('connected'), membership });
+		const unread = probe.read(room);
+		expect(room.others.map((o) => o.key)).toEqual(['alice']);
+		unread();
+		expect([membership.subscribed, membership.released]).toEqual([1, 0]);
+		expect([presence.subscribed, presence.released]).toEqual([1, 0]);
+		room.destroy();
+		expect([membership.subscribed, membership.released]).toEqual([1, 1]);
+		// Nothing holds it now, so a new reader would start it again; a
+		// destroyed room stays left.
+		probe.read(room)();
+		expect([membership.subscribed, membership.released]).toEqual([1, 1]);
+	});
+
+	it('a send on a view with no send path says so once; a destroyed room stays quiet', async () => {
+		await loadShippedRuneModule();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const view = new MultiplayerRoom({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected') });
+			expect(view.setTyping(true)).toBeUndefined();
+			view.setTyping(false);
+			const notes = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('setTyping() sends nothing'));
+			expect(notes).toHaveLength(1);
+			expect(notes[0]).toContain('watch()');
+
+			const room = new MultiplayerRoom({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), react: () => 'sent' });
+			room.destroy();
+			warn.mockClear();
+			expect(room.react('heart')).toBeUndefined();
+			expect(warn).not.toHaveBeenCalled();
+			view.destroy();
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	/** Deps with a `bind` per room id, recording each room's membership and sends. */
+	function boundRooms() {
+		const members = new Map();
+		const sent = [];
+		const binds = [];
+		const bind = ([id]) => {
+			binds.push(id);
+			const membership = countingStore([]);
+			if (!members.has(id)) members.set(id, []);
+			members.get(id).push(membership);
+			const record = (d) => { sent.push([id, d]); };
+			return { presence: fakeStore([{ key: 'in-' + id }]), cursors: fakeStore([]), membership, setTyping: record, move: record, acquireLock: record, releaseLock: record };
+		};
+		const counts = (id) => (members.get(id) || []).reduce((a, m) => [a[0] + m.subscribed, a[1] + m.released], [0, 0]);
+		return { deps: { me: 'me', status: fakeStore('connected'), bind }, counts, sent, binds };
+	}
+
+	it('a room following an args getter moves to the room it names', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, counts, sent } = boundRooms();
+		const view = probe.following(deps, 'a');
+		expect(counts('a')).toEqual([1, 0]);
+		expect(view.room.others.map((o) => o.key)).toEqual(['in-a']);
+
+		view.setId('b');
+		expect(counts('a')).toEqual([1, 1]);
+		expect(counts('b')).toEqual([1, 0]);
+		expect(view.room.others.map((o) => o.key)).toEqual(['in-b']);
+		view.room.move({ x: 1 });
+		expect(sent.at(-1)).toEqual(['b', { x: 1 }]);
+
+		view.stop();
+		expect(counts('b')).toEqual([1, 1]);
+	});
+
+	it('a getter room stays joined through cleanups that send, and each cleanup undoes through here() in its own room', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, counts, sent } = boundRooms();
+		const view = probe.following(deps, 'a', { cleanupsRead: true });
+		sent.length = 0;
+
+		view.setId('b');
+		expect(counts('a')).toEqual([1, 1]);
+		expect(counts('b')).toEqual([1, 0]);
+		// Both cleanups reached the room they were undoing, both bodies the new one.
+		expect(sent).toEqual([
+			['a', { typing: false }], ['b', { typing: true }],
+			['a', { typing: false }], ['b', { typing: true }]
+		]);
+
+		view.stop();
+		expect(counts('b')).toEqual([1, 1]);
+	});
+
+	it('an effect that only sends through here() follows the room: its cleanup undoes in the old room and its body sends to the new one', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, counts, sent } = boundRooms();
+		const view = probe.following(deps, 'a', { cleanupsRead: true, readsId: false });
+		expect(sent).toEqual([['a', { typing: true }], ['a', { typing: true }]]);
+		sent.length = 0;
+
+		view.setId('b');
+		expect(sent).toEqual([
+			['a', { typing: false }], ['b', { typing: true }],
+			['a', { typing: false }], ['b', { typing: true }]
+		]);
+
+		sent.length = 0;
+		view.stop();
+		expect(sent).toEqual([['b', { typing: false }], ['b', { typing: false }]]);
+		expect(counts('a')).toEqual([1, 1]);
+		expect(counts('b')).toEqual([1, 1]);
+	});
+
+	it('a getter for a room with several args returns them as an array', async () => {
+		await loadShippedRuneModule();
+		const bound = [];
+		const room = new MultiplayerRoom({
+			me: 'me',
+			status: fakeStore('connected'),
+			args: [() => ['org-1', 'b1']],
+			bind: (args) => {
+				bound.push(args);
+				return { presence: fakeStore([]), cursors: fakeStore([]), move: (...a) => ['move', ...args, ...a] };
+			}
+		});
+		expect(bound).toEqual([['org-1', 'b1']]);
+		expect(room.move({ x: 1 })).toEqual(['move', 'org-1', 'b1', { x: 1 }]);
+		room.destroy();
+	});
+
+	it('a cleanup undoes in the room its effect ran in when the id changes twice before a flush', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, counts, sent } = boundRooms();
+		const view = probe.following(deps, 'a', { cleanupsRead: true, readsId: false });
+		sent.length = 0;
+
+		view.setIds('b', 'c');
+		expect(sent).toEqual([
+			['a', { typing: false }], ['c', { typing: true }],
+			['a', { typing: false }], ['c', { typing: true }]
+		]);
+		expect(counts('a')).toEqual([1, 1]);
+		expect(counts('b')).toEqual([0, 0]);
+		expect(counts('c')).toEqual([1, 0]);
+		view.stop();
+	});
+
+	it('an effect that sends re-runs when the room changes, not when the getter reads a new but equal value', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent } = boundRooms();
+		const view = probe.followingParams(deps, 'a');
+		expect(sent).toEqual([['a', { typing: true }]]);
+		sent.length = 0;
+
+		view.navigate('a');
+		expect(sent).toEqual([]);
+		view.navigate('b');
+		expect(sent).toEqual([['a', { typing: false }], ['b', { typing: true }]]);
+		view.stop();
+	});
+
+	it('a getter that returns null or undefined names no room: the view leaves, empties and stops sending', async () => {
+		const probe = await loadOwnerProbe();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const { deps, counts, sent, binds } = boundRooms();
+			const view = probe.following(deps, 'a');
+			expect(view.room.others.map((o) => o.key)).toEqual(['in-a']);
+
+			view.setId(undefined);
+			expect(counts('a')).toEqual([1, 1]);
+			expect(binds).toEqual(['a']);
+			expect(view.room.others).toEqual([]);
+			// The connection status is still subscribed with no room.
+			deps.status.set('reconnecting');
+			expect(view.room.status).toBe('reconnecting');
+			sent.length = 0;
+			expect(view.room.move({ x: 1 })).toBeUndefined();
+			expect(sent).toEqual([]);
+			expect(warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('names no room'))).toHaveLength(1);
+
+			view.setId(null);
+			expect(binds).toEqual(['a']);
+			view.setId('b');
+			expect(counts('b')).toEqual([1, 0]);
+			expect(view.room.others.map((o) => o.key)).toEqual(['in-b']);
+			view.stop();
+			expect(counts('b')).toEqual([1, 1]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('a cleanup that runs later in the switching flush undoes in the room its body last sent to', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent } = boundRooms();
+		const view = probe.eagerBlock(deps, 'a');
+		expect(sent).toEqual([['a', { 'lock:title': true }]]);
+		sent.length = 0;
+
+		view.setId('b');
+		expect(sent).toEqual([
+			['a', { 'lock:title': null }],
+			['b', { 'lock:title': true }],
+			// The block then ends both: the effect that never sent undoes in the
+			// room the view is in, the editor in the room its body sent to.
+			['b', { typing: false }],
+			['b', { 'lock:title': null }]
+		]);
+		view.stop();
+	});
+
+	it('an effect dropped by its parent after the room moved undoes in the room its body sent to', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent } = boundRooms();
+		const view = probe.followingPinned(deps, 'a');
+		probe.parentDropsSender(view.room, () => view.id);
+		const stopCleanup = probe.cleanupSends(view.room);
+		expect(sent).toEqual([['a', { typing: true }]]);
+		sent.length = 0;
+
+		view.setId('b');
+		expect(sent).toEqual([['a', { typing: false }]]);
+
+		// Sends through the room itself go to the room the view is in, from
+		// plain code and from a cleanup alike.
+		sent.length = 0;
+		view.room.move({ x: 1 });
+		stopCleanup();
+		expect(sent).toEqual([['b', { x: 1 }], ['b', { typing: false }]]);
+		view.room.destroy();
+	});
+
+	it('a cleanup whose body sent while the getter named no room sends nothing and says so', async () => {
+		const probe = await loadOwnerProbe();
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const { deps, sent } = boundRooms();
+			const view = probe.following(deps, null, { cleanupsRead: true, readsId: false });
+			expect(sent).toEqual([]);
+			view.setId('b');
+			expect(sent).toEqual([['b', { typing: true }], ['b', { typing: true }]]);
+			const notes = warn.mock.calls.map((c) => String(c[0]));
+			expect(notes.some((m) => m.includes('names no room'))).toBe(true);
+			expect(notes.some((m) => m.includes('watch()'))).toBe(false);
+			view.stop();
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('a cleanup that sends through the room itself sends to the room the view is in', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent } = boundRooms();
+		const view = probe.movingThenTyping(deps, 'a');
+		expect(sent).toEqual([['a', { x: 1 }]]);
+		sent.length = 0;
+		view.setId('b');
+		// The effect re-runs because its body sent; without here() its
+		// cleanup has no room of its own and reaches the one the view is in.
+		expect(sent).toEqual([['b', { typing: false }], ['b', { x: 1 }]]);
+		view.stop();
+	});
+
+	it('here() keeps the room it was taken in, and a destroyed room sends nothing through it', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent } = boundRooms();
+		const view = probe.followingPinned(deps, 'a');
+		const here = view.room.here();
+		view.setId('b');
+		here.acquireLock('title');
+		view.room.acquireLock('title');
+		expect(sent).toEqual([['a', { 'lock:title': true }], ['b', { 'lock:title': true }]]);
+		view.room.destroy();
+		sent.length = 0;
+		here.releaseLock('title');
+		view.room.here().move({ x: 1 });
+		expect(sent).toEqual([]);
+	});
+
+	it('an effect that runs before the follower sends to the room the getter names', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent, binds, counts } = boundRooms();
+		const view = probe.effectBeforeFollower(deps, 'a');
+		expect(sent).toEqual([]);
+		view.setId('b');
+		expect(sent).toEqual([['b', { typing: true }]]);
+		// The send bound 'b' ahead of the follower, which then bound it again;
+		// only the follower's binding subscribes.
+		expect(binds).toEqual(['a', 'b', 'b']);
+		expect(counts('b')).toEqual([1, 0]);
+		view.stop();
+	});
+
+	it('a destroyed room ties nothing to its getter', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent, binds } = boundRooms();
+		const view = probe.followingPinned(deps, 'a');
+		view.room.destroy();
+		const stopSender = probe.sendsInEffect(view.room);
+		const reads = view.reads;
+		const bound = binds.length;
+		view.setId('b');
+		expect(view.reads).toBe(reads);
+		expect(binds.length).toBe(bound);
+		expect(sent).toEqual([]);
+		stopSender();
+
+		// A room its component holds keeps its follower until unmount; once
+		// destroyed, it lets go of the getter after at most one more check.
+		const held = boundRooms();
+		const inComponent = probe.following(held.deps, 'a');
+		inComponent.room.destroy();
+		inComponent.setId('b');
+		const after = inComponent.reads;
+		inComponent.setId('c');
+		inComponent.setId('d');
+		expect(inComponent.reads).toBe(after);
+		expect(held.binds).toEqual(['a']);
+		inComponent.stop();
+	});
+
+	it('a send outside an effect goes to the room the view is in, even with a move pending', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent } = boundRooms();
+		const view = probe.following(deps, 'a');
+		view.setIdPending('b');
+		view.room.move({ x: 1 });
+		expect(sent).toEqual([['a', { x: 1 }]]);
+		view.flush();
+		view.room.move({ x: 2 });
+		expect(sent.at(-1)).toEqual(['b', { x: 2 }]);
+		view.stop();
+	});
+
+	it('a room built in a cleanup Svelte runs with no effect active does not join, and still sends', async () => {
+		const probe = await loadOwnerProbe();
+		const membership = countingStore([]);
+		const sent = [];
+		const view = probe.inBareCleanup({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), membership, setTyping: (d) => sent.push(d) });
+		expect(view.built).not.toBeNull();
+		expect([membership.subscribed, membership.released]).toEqual([0, 0]);
+		view.built.setTyping(false);
+		expect(sent).toEqual([{ typing: false }]);
+
+		// With a getter for its args it neither joins nor throws.
+		const rooms = boundRooms();
+		const withGetter = probe.inBareCleanup({ ...rooms.deps, args: [() => 'a'] });
+		expect(withGetter.built).not.toBeNull();
+		expect(rooms.counts('a')).toEqual([0, 0]);
+		withGetter.built.setTyping(false);
+		expect(rooms.sent).toEqual([['a', { typing: false }]]);
+	});
+
+	it('a room built outside Svelte reactivity follows its getter until destroy()', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, counts } = boundRooms();
+		const view = probe.followingPinned(deps, 'a');
+		expect(counts('a')).toEqual([1, 0]);
+		view.setId('b');
+		expect(counts('a')).toEqual([1, 1]);
+		expect(counts('b')).toEqual([1, 0]);
+		view.room.destroy();
+		expect(counts('b')).toEqual([1, 1]);
+		// destroy() stopped the follower itself, so nothing reads the getter again.
+		const reads = view.reads;
+		view.setId('c');
+		expect(view.reads).toBe(reads);
+		expect(counts('c')).toEqual([0, 0]);
+	});
+
+	it('a room built in a cleanup subscribes nothing, and its sends still go out', async () => {
+		const probe = await loadOwnerProbe();
+		const membership = countingStore([]);
+		const sent = [];
+		const view = probe.inCleanup({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), membership, setTyping: (d) => sent.push(d) });
+		expect(view.built).not.toBeNull();
+		expect([membership.subscribed, membership.released]).toEqual([0, 0]);
+		view.built.setTyping(false);
+		expect(sent).toEqual([{ typing: false }]);
+		view.stop();
+		expect([membership.subscribed, membership.released]).toEqual([0, 0]);
+	});
+
+	it('a store that throws while the room subscribes releases the ones before it and surfaces the error', async () => {
+		const probe = await loadOwnerProbe();
+		const presence = countingStore([]);
+		const cursors = { subscribe() { throw new Error('cursor store broke'); } };
+		expect(() => probe.inRoot({ me: 'me', presence, cursors, status: fakeStore('connected'), membership: countingStore([]) })).toThrow('cursor store broke');
+		expect([presence.subscribed, presence.released]).toEqual([1, 1]);
+	});
+
+	it('identify() takes a getter, read wherever me is', async () => {
+		await loadShippedRuneModule();
+		const source = localKeySource();
+		let userId = 'u1';
+		source.set(() => userId);
+		const room = new MultiplayerRoom({ me: source, presence: fakeStore([{ key: 'u1' }, { key: 'u2' }]), cursors: fakeStore([]), status: fakeStore('connected') });
+		expect(room.me).toBe('u1');
+		expect(room.others.map((o) => o.key)).toEqual(['u2']);
+		userId = 'u2';
+		expect(room.me).toBe('u2');
+		source.set(() => undefined);
+		expect(room.me).toBeNull();
+		room.destroy();
+	});
+
+	/** Deps for a room per id, recording each room's membership store. */
+	function roomsById() {
+		const byId = new Map();
+		const makeDeps = (id) => {
+			const membership = countingStore([]);
+			if (!byId.has(id)) byId.set(id, []);
+			byId.get(id).push(membership);
+			return { me: 'me', presence: fakeStore([{ key: 'in-' + id }]), cursors: fakeStore([]), status: fakeStore('connected'), membership };
+		};
+		// [subscribed, released] summed over every room built for the id.
+		const counts = (id) => (byId.get(id) || []).reduce((a, m) => [a[0] + m.subscribed, a[1] + m.released], [0, 0]);
+		return { makeDeps, counts };
+	}
+
+	it('a $derived room leaves the old room when its id changes', async () => {
+		const probe = await loadOwnerProbe();
+		const { makeDeps, counts } = roomsById();
+		const view = probe.inDerived(makeDeps, 'a');
+		expect(view.room.others.map((o) => o.key)).toEqual(['in-a']);
+		expect(counts('a')).toEqual([1, 0]);
+
+		view.setId('b');
+		expect(view.room.others.map((o) => o.key)).toEqual(['in-b']);
+		expect(counts('a')).toEqual([1, 1]);
+		expect(counts('b')).toEqual([1, 0]);
+
+		view.stop();
+		expect(counts('b')).toEqual([1, 1]);
+	});
+
+	it('a $derived room stays joined while the markup reading it is closed, and is live when it reopens', async () => {
+		const probe = await loadOwnerProbe();
+		const { makeDeps, counts } = roomsById();
+		const view = probe.inDerived(makeDeps, 'a');
+		const first = view.room;
+
+		view.setOpen(false);
+		expect(counts('a')).toEqual([1, 0]);
+		view.setOpen(true);
+		expect(view.room).toBe(first);
+		expect(counts('a')).toEqual([1, 0]);
+		expect(view.room.others.map((o) => o.key)).toEqual(['in-a']);
+
+		view.stop();
+		expect(counts('a')).toEqual([1, 1]);
+	});
+
+	it('a cleanup that reads a $derived room while it switches ids leaves nothing joined', async () => {
+		// Svelte re-runs the derived with the old id for the cleanup and throws
+		// that room away; it must never subscribe, and the old room must go.
+		const probe = await loadOwnerProbe();
+		const { makeDeps, counts } = roomsById();
+		const view = probe.inDerived(makeDeps, 'a', { cleanupReads: true });
+		expect(counts('a')).toEqual([1, 0]);
+
+		view.setId('b');
+		expect(counts('a')).toEqual([1, 1]);
+		expect(counts('b')).toEqual([1, 0]);
+		expect(view.room.others.map((o) => o.key)).toEqual(['in-b']);
+
+		view.stop();
+		expect(counts('a')).toEqual([1, 1]);
+		expect(counts('b')).toEqual([1, 1]);
+	});
+
+	it('a $derived room no effect owns is joined only while read', async () => {
+		const probe = await loadOwnerProbe();
+		const { makeDeps, counts } = roomsById();
+		const view = probe.unowned(makeDeps, 'a');
+		expect(counts('a')).toEqual([1, 0]);
+		view.setId('b');
+		expect(counts('a')).toEqual([1, 1]);
+		expect(counts('b')).toEqual([1, 0]);
+		view.stop();
+		expect(counts('b')).toEqual([1, 1]);
 	});
 
 	it('degrades to empty field surfaces and no-op methods when no field deps are injected', async () => {
@@ -2572,12 +3628,15 @@ describe('live.multiplayer() SSR stub', () => {
 		const plugin = createSsrPlugin();
 		const code = plugin.load('\0live:collab', { ssr: true });
 
-		// The server stub stays rune-free: identify is a no-op and room()
-		// returns a plain empty-state object (named, so bindDoc can chain
-		// back to it like the client's return-this) so SSR does not crash.
+		// The server stub stays rune-free: identify is a no-op and room() and
+		// watch() return a plain empty-state object (named, so bindDoc can
+		// chain back to it like the client's return-this) so SSR does not crash.
 		expect(code).toContain('identify: () => {}');
-		expect(code).toContain('room: () => { const _v = {');
+		expect(code).toContain('const _room_view = () => { const _v = {');
+		expect(code).toContain('room: _room_view');
+		expect(code).toContain('watch: _room_view');
 		expect(code).toContain('bindDoc: () => _v');
+		expect(code).toContain('here: () => _v');
 		expect(code).toContain('others: []');
 		expect(code).toContain('me: null');
 		expect(code).not.toContain('MultiplayerRoom');
@@ -2592,7 +3651,8 @@ describe('live.multiplayer() SSR stub', () => {
 		const plugin = createSsrPlugin();
 		const code = plugin.load('\0live:collab', { ssr: true });
 
-		expect(code).toContain('room: () => { const _v = {');
+		expect(code).toContain('room: _room_view');
+		expect(code).toContain('watch: _room_view');
 		expect(code).not.toContain('MultiplayerRoom');
 	});
 });

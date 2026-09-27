@@ -86,7 +86,7 @@ The three ecosystem packages move together. Bump them as a group:
 
 Mixed-version installs are rejected at install time with a peer-dep warning.
 
-Svelte 4 and 5 are both supported. Four features ship Svelte 5 rune modules and need Svelte 5: `live.doc`, `live.smooth`, a `live.multiplayer` export with presence, cursors, an owner or a field surface, and an enumerable `live.room` (its `rooms()` lobby view). On a Svelte 4 project the Vite plugin stops the build with an error naming the `$live` module and the feature. `store.rune()` needs Svelte 5 too and throws a descriptive error when called on Svelte 4.
+Svelte 4 and 5 are both supported. Four features ship Svelte 5 rune modules and need Svelte 5: `live.doc`, `live.smooth`, a `live.multiplayer` export with presence, cursors, an owner or a field surface (Svelte 5.7 or later), and an enumerable `live.room` (its `rooms()` lobby view). On an older Svelte the Vite plugin stops the build with an error naming the `$live` module, the feature and the Svelte it needs. `store.rune()` needs Svelte 5 too and throws a descriptive error when called on Svelte 4.
 
 ---
 
@@ -3795,7 +3795,7 @@ How it behaves:
 
 ## Multiplayer
 
-`live.multiplayer()` bundles the collaborative surfaces - live cursors and presence - into a single declaration. It reuses the same data, presence, and cursor machinery a room uses, so the data stream, presence auto-join, scoped actions, and the `history` / `ctx.compensate()` lag-compensation surface behave exactly like `live.room()`. The difference is on the client: the generated export carries a connection-aware surface alongside the sub-streams - a `status` connection store, the `move` / `reportViewport` cursor methods, `identify(key)`, and a `room(...)` factory that returns the aggregated roster view.
+`live.multiplayer()` bundles the collaborative surfaces - live cursors and presence - into a single declaration. It reuses the same data, presence, and cursor machinery a room uses, so the data stream, presence auto-join, scoped actions, and the `history` / `ctx.compensate()` lag-compensation surface behave exactly like `live.room()`. The difference is on the client: the generated export carries a connection-aware surface alongside the sub-streams - a `status` connection store, the `move` / `reportViewport` cursor methods, `identify(key)`, a `room(...)` factory that joins the room and returns the aggregated roster view, and `watch(...)`, the same view for someone who only looks on.
 
 ```js
 // src/live/collab.js
@@ -3827,17 +3827,42 @@ export const board = live.multiplayer({
 - `status` - the connection-status passthrough.
 - `move(...)` / `reportViewport(...)` - forward to the cursor send path.
 - `typing` / `selections` / `locks` / `reactions` and their send methods, when the matching field surfaces are declared (see [Field surfaces](#field-surfaces-typing-selections-locks-reactions)).
+- `here()` - the send methods bound to the room the view names now, for a cleanup that undoes what its effect did (below).
 
-Name the current user once with `board.identify(key)` - the same identity you already supply for presence, available from the SvelteKit page load. Calling `identify(key)` after `board.room(...)` still lights up `me` and self-exclusion. If you never call it the surface degrades gracefully: `others` is the full deduped roster and `me` reads `null`, never a crash.
+Name the current user once with `board.identify(() => data.userId)` - the same identity you already supply for presence, available from the SvelteKit page load. The getter keeps the key current when it comes from props, and keeps Svelte from warning that a prop is read only once; a plain key (`board.identify(userId)`) works too. Calling `identify(...)` after `board.room(...)` still lights up `me` and self-exclusion. If you never call it the surface degrades gracefully: `others` is the full deduped roster and `me` reads `null`, never a crash.
+
+`board.room(...)` joins the room. The view holds the export's data stream, which is where membership comes from: the local user appears in everyone else's `others`, can hold the owner role, and the room's `init` and `onJoin` run for it as they do for `board.data(...)` (a component that renders both shares one subscription). How long it stays joined follows where you create it:
+
+- **In a component's script** (`const room = board.room(() => boardId)`): until the component unmounts, whether or not anything renders it. A room created in an `$effect` stays until the effect re-runs or ends.
+- **With a getter for its args**, as above: the view follows the getter. When the getter names another room, the view leaves the old room and joins the new one, and its views switch with it. One component keeps one view, and the prop is read inside a closure, so Svelte does not warn. A room with several args returns them as an array: `board.room(() => [orgId, boardId])`. A getter that returns `null` or `undefined` names no room: the view leaves, its views empty, and its send methods do nothing until the getter names a room again, so a layout can hold `board.room(() => page.params.board)` across routes that have no board. With plain args (`board.room(boardId)`) the view stays in that one room. In a component written in Svelte 4 syntax, create the room the same way, at the top of the script: a `$:` statement does not end what it created when it runs again, so a room built in one stays joined until the component unmounts.
+- **Outside Svelte's reactivity** (module code, an event handler): from creation until `room.destroy()`, following its getter until then.
+- **In a cleanup** (an effect's teardown, `onDestroy`, including the ones Svelte runs after an outro or on `unmount()`): never joined. Such a room only sends.
+
+A room is also held while markup or an effect reads one of its views. `room.destroy()` releases the view's streams at once, whoever holds the view; the user leaves the room when nothing else on the page holds its data stream (another view of the same room, or a rendered `board.data(...)`), and drops off the other rosters after the presence grace window. Creating a room in a `$derived` (`$derived(board.room(boardId))`) is not recommended: Svelte drops and re-runs a derived on its own schedule, so such a room is only guaranteed to be joined, and in the right room, while something reads it. A getter does the same job with one room per component.
+
+A send method called in an effect ties the effect to the room: when the getter names another room, the effect re-runs and sends to the new room. Any other send - an event handler, a cleanup - goes to the room the view is in at that moment. A cleanup that undoes what its effect did (typing, a selection, a lock) must reach the room the effect did it in, and after a room switch or a page transition's outro that is no longer the room the view is in. `room.here()` returns the send methods bound to the room the view names now; take them in the effect and undo through them in its cleanup:
+
+```js
+$effect(() => {
+  const here = room.here();                // this run's room; the effect re-runs when it changes
+  here.acquireLock('title');
+  return () => here.releaseLock('title');  // released in that room, whenever Svelte runs this
+});
+```
+
+Written as `room.releaseLock('title')`, the cleanup reaches the room the view is in when it runs, which after a switch is usually already the new room: the old room keeps showing the lock until the user's presence there ends, and after a page transition's outro the release can clear the lock the next page has just taken. Taken outside an effect - an event handler, `onMount`, `untrack` - `here()` is bound to the room the view is in at that moment, and nothing follows the getter.
+
+To show a room without entering it - a lobby preview, a moderator's view - use `board.watch(...)`, which takes plain args or a getter the same way (`board.watch(() => boardId)`). It returns the same reactive view, typed as `MultiplayerView`, without the data stream and without the send methods: the viewer is on nobody's roster and cannot become the owner.
 
 ```svelte
 <script>
   import { board } from '$live/collab';
 
-  let { data, boardId } = $props();   // data.userId from the SvelteKit load
-  board.identify(data.userId);        // names self; me + self-exclusion light up
+  let { data, boardId } = $props();    // data.userId from the SvelteKit load
+  board.identify(() => data.userId);   // names self; me + self-exclusion light up
 
-  const room = board.room(boardId);
+  // Follows boardId: navigating to another board leaves this one and joins the next.
+  const room = board.room(() => boardId);
 
   function onPointerMove(e) {
     // move() is volatile (fire-and-forget) - lossy under disconnect is the contract.
@@ -3864,7 +3889,7 @@ Name the current user once with `board.identify(key)` - the same identity you al
 <button onclick={() => board.addCard(boardId, 'New card')}>Add</button>
 ```
 
-The aggregated view ships from the `svelte-realtime/multiplayer` subpath and is reactive: `others` and `cursors` refresh whenever the underlying presence or cursor stream pushes. Reactivity uses Svelte 5 runes, and the generated namespace is built on them, so a multiplayer export with presence, cursors, an owner or a field surface requires Svelte 5.
+The aggregated view ships from the `svelte-realtime/multiplayer` subpath and is reactive: `others` and `cursors` refresh whenever the underlying presence or cursor stream pushes. Reactivity uses Svelte 5 runes, and the generated namespace is built on them, so a multiplayer export with presence, cursors, an owner or a field surface requires Svelte 5.7 or later.
 
 Every cursor frame and every presence-field update the server publishes for a client connection carries an ordering token: `_p` identifies the connection and `_n` counts its publishes, in the order the server publishes them - the same order a delta's sticky fields (`selection`, locks) reach the roster, so live clients and a late joiner that loads the roster settle on the same value for every sticky field the roster accepts (both names are reserved: a payload field of either name is overwritten). The cursor merge is last-write-wins per key, the presence merge is last-write-wins per field, and both cross the cross-instance relay with no ordering promise of their own, so the client uses the token to ignore a sample its publisher has already superseded for that key or field (and, within one animation frame, to keep a publisher's newest cursor sample rather than the last to arrive). A reordered or re-delivered sample can therefore never roll a peer's cursor back to a mid-gesture point, or park a stale `typing` or lock flag, and leave it there. Samples from two connections are never ordered against each other and apply in arrival order. No clock is involved, so a peer that reconnects to a replica whose wall clock disagrees with the last one is never mistaken for its own past, and a lock it releases after the reconnect is not dropped as stale. Frames without the token (an older server) keep plain last-write-wins.
 
@@ -3905,14 +3930,21 @@ export const board = live.multiplayer({
 });
 ```
 
-- **Typing** - `room.typing` is the list of remote collaborators' user keys currently flagged as typing (self excluded). Toggle the local flag with `room.setTyping(true)` / `room.setTyping(false)`. Typing is a transient flag and is never persisted on the roster.
+- **Typing** - `room.typing` is the list of remote collaborators' user keys currently flagged as typing (self excluded). Toggle the local flag with `room.setTyping(true)` / `room.setTyping(false)`. Typing is a transient flag and is never persisted on the roster. An effect that sets the flag and clears it in its cleanup sends both through `room.here()` (see [The roster view](#the-roster-view)).
 - **Selections** - `room.selections` is a `{ userKey: range }` map of remote selection ranges (self excluded). In the default `selections: 'offset'` mode you publish a raw range with `room.setSelection({ start, end, nodePath })` (pass `null` to clear); a selection is stamped on the caller's roster entry, so a late joiner loads the current selections from the roster snapshot. Raw offsets are correct only while the document does not change underneath them - the moment another user inserts before a selection, the offsets point at the wrong text. For collaborative editors, declare `selections: 'crdt'` and bind the room to the document the selections index into:
 
   ```svelte
   <script>
-    const room = board.room(boardId);
-    const doc  = board.doc?.(boardId) ?? editorDoc;  // the live.doc for this document
-    room.bindDoc(doc);                                // once, client-side
+    import { board, notes } from '$live/collab';  // notes: the live.doc the selections index into
+    let { boardId } = $props();
+
+    const room = board.room(() => boardId);
+    // Bind this board's document, and the next board's when the room moves.
+    $effect.pre(() => {
+      const doc = notes.doc(boardId);
+      room.bindDoc(doc);
+      return () => doc.destroy();
+    });
 
     // publish a selection against a named text container - still plain offsets
     function onSelect(range) {
@@ -3926,7 +3958,7 @@ export const board = live.multiplayer({
   ```
 
   In `'crdt'` mode `setSelection` encodes the range into a position anchor bound to the document, and `room.selections` resolves every collaborator's anchor back to current `{ field, start, end }` offsets - reactively, so a rendered highlight re-resolves onto the right characters as the document is edited. An edit exactly at a selection edge stays outside it, one strictly inside extends it, and a selection whose text is deleted collapses to a caret. The value on the wire stays opaque (the server never interprets it), and an anchor that cannot resolve is dropped rather than rendered wrong. Requires `svelte-adapter-uws >= 0.6.0-next.45`; a crdt selection without `bindDoc` is dropped with a dev warning.
-- **Locks** - `room.locks` is a `{ lockKey: holderUserKey }` map. `room.acquireLock('title')` announces an advisory claim on a key and `room.releaseLock('title')` clears it. A holder disconnecting drops its claims on the next roster push. These are soft, collaborative-awareness locks (they tell collaborators who is editing what), not distributed mutual exclusion - a second caller is not blocked. A held lock is stamped on the caller's roster entry, so a late joiner sees who holds what from the roster snapshot.
+- **Locks** - `room.locks` is a `{ lockKey: holderUserKey }` map. `room.acquireLock('title')` announces an advisory claim on a key and `room.releaseLock('title')` clears it; an effect that releases in its cleanup takes the lock through `room.here()` (see [The roster view](#the-roster-view)). A holder disconnecting drops its claims on the next roster push. These are soft, collaborative-awareness locks (they tell collaborators who is editing what), not distributed mutual exclusion - a second caller is not blocked. A held lock is stamped on the caller's roster entry, so a late joiner sees who holds what from the roster snapshot.
 - **Reactions** - `room.reactions` is a bounded ring of recent ephemeral emotes; `room.react('heart', { x, y })` emits one. Reactions are never coalesced, so a burst of taps all arrive, and old entries fall off the ring.
 
 Selections and locks persist on the roster both single-instance and across a cluster (wire `platform.redis`); typing stays ephemeral. On an entry in `room.others` they sit beside `data`, whether the entry came from the roster snapshot, a join or a live update, which is why `selection` (with selections on) and the declared `lock:*` keys (with locks on) are reserved names on that room's presence payload. A lock key the room does not declare (outside a `locks` allowlist, or in a room without `locks`), a selection in a room without `selections`, a value over the size bound, or keys past the per-delta limit are neither persisted nor broadcast; a release (`null`) always goes out. Every field a caller sends lands on its own roster entry: `key` and `data` in a delta are ignored (the entry is always the caller's, and `data` is the payload your `presence` function computed), as is a `key` in a cursor sample or reaction. Because a field is stamped on a roster entry that only exists once presence is set, declaring `typing`, `selections`, or `locks` requires a `presence` function - the Vite plugin and `live.multiplayer()` both reject a presence field with no presence. `reactions` are exempt: they ride their own ephemeral stream and need no presence.
@@ -3935,7 +3967,7 @@ Selections and locks persist on the roster both single-instance and across a clu
 <script>
   import { board } from '$live/collab';
   let { boardId } = $props();
-  const room = board.room(boardId);
+  const room = board.room(() => boardId);
 </script>
 
 <input
@@ -3949,7 +3981,9 @@ Selections and locks persist on the roster both single-instance and across a clu
 <button onclick={() => room.react('heart', { x: 100, y: 40 })}>React</button>
 ```
 
-A multiplayer export that declares no field surface is unchanged, and calling a field method on the namespace (rather than a `room(...)` instance) is a safe no-op that points you at `room(...)`.
+A multiplayer export that declares no field surface is unchanged, and calling a field method on the namespace (rather than a `room(...)` instance) is a safe no-op that points you at `room(...)`. On a `watch(...)` view the send methods are no-ops too, and absent from its type.
+
+The client namespace carries these members beside your actions, so an action may not share a name with one of them (`data`, `presence`, `cursors`, `owner`, `status`, `move`, `reportViewport`, `identify`, `room`, `watch`, the field views and their send methods, and the internal `_setField` and `_emitReaction`), whether or not the export declares that surface: `live.multiplayer()` throws at declaration if it does, and renaming the action is the fix.
 
 ### Deterministic user colors
 
@@ -5325,7 +5359,7 @@ Import from `svelte-realtime/server`.
 | `live.effect(sources, fn, options?)` | Server-side reactive side effect |
 | `live.aggregate(source, reducers, options)` | Real-time incremental aggregation |
 | `live.room(config)` | Collaborative room (data + presence + cursors + actions) |
-| `live.multiplayer(config)` | Collaborative surface: room sub-streams plus an aggregated roster view (`room(...)` -> `others` / `cursors` / `me`, colored and deduped), live cursors (move / reportViewport), field surfaces (typing / selections / advisory locks / reactions), connection status, and `identify(key)` |
+| `live.multiplayer(config)` | Collaborative surface: room sub-streams plus an aggregated roster view (`room(...)` joins and returns `others` / `cursors` / `me`, colored and deduped, following a getter for its args; `watch(...)` returns the same view without joining), live cursors (move / reportViewport), field surfaces (typing / selections / advisory locks / reactions), connection status, and `identify(key)` |
 | `live.webhook(topic, config)` | HTTP webhook-to-stream bridge |
 | `live.gate(predicate, fn)` | Conditional stream activation |
 | `live.rateLimit(config, fn)` | Per-function sliding window rate limiter |

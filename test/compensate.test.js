@@ -431,7 +431,8 @@ describe('live.multiplayer history pass-through', () => {
 			topicArgs: 1,
 			history: { capture: () => ({ ...world }) },
 			actions: {
-				move: async (ctx, roomId, x) => {
+				// Not `move`: the multiplayer client namespace already has one.
+				walk: async (ctx, roomId, x) => {
 					world.x = x;
 					return x;
 				},
@@ -446,9 +447,9 @@ describe('live.multiplayer history pass-through', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(1000);
 		try {
-			await callAction(ws, platform, 'mph/room/__action/move', ['r1', 1]);
+			await callAction(ws, platform, 'mph/room/__action/walk', ['r1', 1]);
 			vi.setSystemTime(1500);
-			await callAction(ws, platform, 'mph/room/__action/move', ['r1', 2]);
+			await callAction(ws, platform, 'mph/room/__action/walk', ['r1', 2]);
 			vi.setSystemTime(2000);
 			const res = await callAction(ws, platform, 'mph/room/__action/shoot', ['r1', 1200]);
 			expect(res.ok).toBe(true);

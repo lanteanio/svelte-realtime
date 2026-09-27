@@ -24,6 +24,17 @@ export function installMultiplayer(seams) {
 const _STICKY_MAX_KEYS = 64;
 const _STICKY_VALUE_MAX_BYTES = 1024;
 
+// Every member the Vite plugin can generate on a multiplayer client namespace
+// (src/vite/codegen-client.js and the __mpFields fallbacks), whatever the
+// export declares. An action may not take one of these names.
+const _NAMESPACE_MEMBERS = new Set([
+	'data', 'presence', 'cursors', 'owner', 'status', 'move', 'reportViewport',
+	'identify', 'room', 'watch',
+	'typing', 'locks', 'selections', 'reactions',
+	'setTyping', 'acquireLock', 'releaseLock', 'setSelection', 'react',
+	'_setField', '_emitReaction'
+]);
+
 /**
  * A sticky value persists only when its serialized form fits the bound; null
  * (the release path) always fits. Unserializable values are dropped.
@@ -144,6 +155,20 @@ export const _multiplayerRegister = function multiplayer(config) {
 		throw new Error(
 			`[svelte-realtime] live.multiplayer() declares the '${declared}' presence field but has no presence function. Presence fields are stamped on a roster entry that only exists when presence is set, so add a presence function. Reactions do not require presence.\n  See: https://svti.me/multiplayer`
 		);
+	}
+
+	// The generated client namespace puts the actions beside its own members,
+	// so an action named like one of them shadows it or is shadowed by it -
+	// silently, and only on the client (an action called `data` would even
+	// replace the stream room() joins through). Refuse it where it is written.
+	if (config.actions && typeof config.actions === 'object') {
+		for (const action of Object.keys(config.actions)) {
+			if (_NAMESPACE_MEMBERS.has(action)) {
+				throw new Error(
+					`[svelte-realtime] live.multiplayer() action '${action}' has the name of a member the generated client namespace already provides. Rename the action.\n  See: https://svti.me/multiplayer`
+				);
+			}
+		}
 	}
 
 	// A multiplayer export is a room export with a marker stamped on top. It

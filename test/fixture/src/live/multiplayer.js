@@ -17,6 +17,10 @@
 //                             room.reportViewport methods publish a keyed
 //                             update onto this sub-topic via the built-in
 //                             cursor handlers, so a move shows up here.
+//   room.room(() => b)     -> the joined view; its acquireLock('title') /
+//                             releaseLock('title') stamp the one declared
+//                             advisory lock on the caller's roster entry,
+//                             and setTyping(on) the typing flag.
 //   room.addCard(b, t)     -> publishes `created` on the main topic.
 //   moveCursor(b, x, y)    -> a separate standalone live() action kept here
 //                             to show the raw 3-arg ctx.publish(topic, event,
@@ -43,6 +47,8 @@ export const room = live.multiplayer({
 	init: async (ctx, boardId) => _cardsFor(boardId).slice(),
 	presence: (ctx) => ({ name: ctx.user.id }),
 	cursors: true,
+	typing: true,
+	locks: ['title'],
 	actions: {
 		addCard: async (ctx, boardId, title) => {
 			const id = 'c' + (++_cardCounter);

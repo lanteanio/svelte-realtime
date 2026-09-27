@@ -249,8 +249,12 @@ export function _generateSsrStubs(filePath, modulePath) {
 			// The view is named so bindDoc can return it - the client
 			// MultiplayerRoom.bindDoc(doc) returns `this` for chaining, and a
 			// page calling room(id).bindDoc(doc) at component top level must
-			// get the same shape back during SSR.
-			mpFactories.push(`room: () => { const _v = { others: [], cursors: [], me: null, status: 'connecting', typing: [], locks: {}, selections: {}, reactions: [], owner: null, isOwner: false, move: () => {}, reportViewport: () => {}, setTyping: () => {}, acquireLock: () => {}, releaseLock: () => {}, setSelection: () => {}, react: () => {}, bindDoc: () => _v, destroy: () => {} }; return _v; }`);
+			// get the same shape back during SSR; here() returns it too, since
+			// its send methods are the view's no-ops. watch() renders the same
+			// empty state: joining only ever happens on the client.
+			lines.push(`const _${name}_view = () => { const _v = { others: [], cursors: [], me: null, status: 'connecting', typing: [], locks: {}, selections: {}, reactions: [], owner: null, isOwner: false, move: () => {}, reportViewport: () => {}, setTyping: () => {}, acquireLock: () => {}, releaseLock: () => {}, setSelection: () => {}, react: () => {}, here: () => _v, bindDoc: () => _v, destroy: () => {} }; return _v; };`);
+			mpFactories.push(`room: _${name}_view`);
+			mpFactories.push(`watch: _${name}_view`);
 		}
 		for (const action of info.actions) {
 			mpFactories.push(`${action}: () => Promise.resolve(undefined)`);

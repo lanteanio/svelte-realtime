@@ -51,9 +51,9 @@ function _roomsMap(entries) {
  * and lose their last (the room closes), so the view always reflects the open
  * rooms and their current player counts.
  *
- * Mirrors `MultiplayerRoom`: subscribe in the constructor into `$state`, expose
- * a `$derived` view, collect unsubscribes for `destroy()`. Requires Svelte 5
- * (the view is a rune class).
+ * Subscribes in the constructor into `$state`, exposes a `$derived` view, and
+ * collects unsubscribes for `destroy()`. Requires Svelte 5 (the view is a rune
+ * class).
  */
 export class RoomsList {
 	#entries = $state([]);

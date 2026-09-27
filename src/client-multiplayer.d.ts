@@ -18,6 +18,9 @@ export interface CursorEntry {
 	[field: string]: any;
 }
 
+/** A user key, or a getter for one (read wherever `me` is, so it can come from props). */
+export type LocalKey = string | null | undefined | (() => string | null | undefined);
+
 /**
  * A reactive holder for the local user's key. The generated `live.multiplayer()`
  * namespace owns one; the app sets it once via `namespace.identify(key)` and the
@@ -25,25 +28,39 @@ export interface CursorEntry {
  */
 export interface LocalKeySource {
 	readonly value: string | null;
-	set(next: string | null | undefined): void;
+	set(next: LocalKey): void;
 }
 
 /**
  * Create a reactive local-key holder. The generated namespace constructs one
  * per multiplayer export; an app rarely calls this directly.
  */
-export function localKeySource(initial?: string | null): LocalKeySource;
+export function localKeySource(initial?: LocalKey): LocalKeySource;
 
 /** Dependencies the generated namespace injects when it constructs a room. */
 export interface MultiplayerRoomDeps {
 	/** The local user's key, a reactive holder, or null/undefined when unknown. */
 	me?: string | LocalKeySource | null;
-	/** Presence sub-stream (the per-room factory store). */
-	presence: Readable<any[]>;
-	/** Cursor sub-stream (the per-room factory store). */
-	cursors: Readable<any[]>;
+	/**
+	 * The room args the view was created with, used with `bind`. A single
+	 * function is a getter the room follows: when it names another room, the
+	 * room leaves the old one and joins the new one. It returns one arg, an
+	 * array of args, or null / undefined for no room.
+	 */
+	args?: any[];
+	/**
+	 * Build the per-room deps (streams and send callbacks) for a list of room
+	 * args. When given, it supplies the deps below that depend on the room.
+	 */
+	bind?: (args: any[]) => Partial<MultiplayerRoomDeps>;
+	/** Presence sub-stream (the per-room factory store). Required unless `bind` supplies it. */
+	presence?: Readable<any[]>;
+	/** Cursor sub-stream (the per-room factory store). Required unless `bind` supplies it. */
+	cursors?: Readable<any[]>;
 	/** Connection-status store. */
 	status: Readable<string>;
+	/** The room's data stream. The room holds it for its lifetime, which is what makes the local user a member others see (and a candidate for ownership); its value is not read. Omitted for a view that only observes. */
+	membership?: Readable<any>;
 	/** Reactions sub-stream (the bounded ring of recent emotes), when enabled. */
 	reactions?: Readable<any[]>;
 	/** Owner sub-stream (the room's `{ key, reason }` owner value), when enabled. */
@@ -67,10 +84,9 @@ export interface MultiplayerRoomDeps {
 }
 
 /**
- * Live roster aggregation for a `live.multiplayer()` room. Composes the
- * generated presence / cursor / status stores into the public surface an app
- * renders. The aggregated views are reactive: they refresh when the underlying
- * stores push.
+ * The read surface of a `live.multiplayer()` room: what `namespace.watch(...)`
+ * returns, and what `namespace.room(...)` extends with the send methods. The
+ * views are reactive: they refresh when the underlying stores push.
  *
  * - `others`: the presence roster, deduped by user key (latest wins), each
  *   entry stamped with a deterministic color, excluding the local user when
@@ -81,23 +97,21 @@ export interface MultiplayerRoomDeps {
  * - `status`: the connection-status passthrough.
  *
  * The `typing` / `locks` / `selections` views are reactive projections of the
- * presence roster, driven by the field-send methods; `reactions` is the bounded
- * ring of recent ephemeral emotes.
+ * presence roster; `reactions` is the bounded ring of recent ephemeral emotes.
  */
-export class MultiplayerRoom {
-	constructor(deps: MultiplayerRoomDeps);
+export interface MultiplayerView {
 	/** The presence roster: deduped, colored, self-excluded when `me` is known. */
-	get others(): RosterEntry[];
+	readonly others: RosterEntry[];
 	/** The cursor roster: deduped and colored (self not excluded). */
-	get cursors(): CursorEntry[];
+	readonly cursors: CursorEntry[];
 	/** The local user's key, or `null` when unknown. */
-	get me(): string | null;
+	readonly me: string | null;
 	/** The connection status. */
-	get status(): string;
+	readonly status: string;
 	/** The user keys of remote collaborators currently flagged as typing. */
-	get typing(): string[];
+	readonly typing: string[];
 	/** Advisory lock holders keyed by lock key: `{ lockKey: holderUserKey }`. */
-	get locks(): Record<string, any>;
+	readonly locks: Record<string, any>;
 	/**
 	 * Remote selection ranges keyed by user (self excluded). In `offset` mode each
 	 * value is the raw payload the holder sent. In `crdt` mode each value is resolved
@@ -105,13 +119,66 @@ export class MultiplayerRoom {
 	 * resolves reactively as the document is edited; an entry that cannot resolve is
 	 * omitted.
 	 */
-	get selections(): Record<string, any>;
+	readonly selections: Record<string, any>;
 	/** The bounded ring of recent reactions. */
-	get reactions(): any[];
+	readonly reactions: any[];
 	/** The room's current owner key, or `null` while unclaimed / vacated / not yet loaded. */
-	get owner(): string | null;
+	readonly owner: string | null;
 	/** Whether the local user holds the owner role. Needs `identify(key)`; reads `false` when `me` is unknown. */
-	get isOwner(): boolean;
+	readonly isOwner: boolean;
+	/**
+	 * Bind this room's live.doc so `selections: 'crdt'` selections anchor to and
+	 * resolve against the shared document (they survive concurrent edits). Call it
+	 * with the `DocHandle` for the document the selections index into, and again with
+	 * the next document when a room that follows a getter moves. A no-op for an
+	 * offset-mode room. Returns `this` for chaining.
+	 */
+	bindDoc(doc: { text(name?: string): any }): this;
+	/**
+	 * Release the room's subscriptions now and keep it released: no later
+	 * reader subscribes it again, and the send methods stop sending. The user
+	 * leaves a joined room once nothing else on the page holds its data stream
+	 * (others see it after the presence grace window). Not needed for a
+	 * room built in a component's script, which is released when the component
+	 * unmounts; call it for a room built outside Svelte's reactivity. Safe to
+	 * call twice.
+	 */
+	destroy(): void;
+}
+
+export interface MultiplayerRoom extends MultiplayerView {}
+
+/**
+ * The send methods of a `MultiplayerRoom`, bound to one room: what
+ * `room.here()` returns.
+ */
+export type MultiplayerSend = Pick<MultiplayerRoom, 'move' | 'reportViewport' | 'react' | 'setTyping' | 'acquireLock' | 'releaseLock' | 'setSelection'>;
+
+/**
+ * A joined `live.multiplayer()` room: the `MultiplayerView` surface plus the
+ * methods that publish as the local user. Built with a `membership` dep, it
+ * holds the room's data stream along with its other streams, which puts the
+ * local user on everyone else's roster: for the life of the component or
+ * `$effect` that built it, while anything reactive reads a view, or, when
+ * built outside Svelte's reactivity, until `destroy()`. Built with an args
+ * getter, it follows the getter from room to room, and is in no room while
+ * the getter returns null or undefined.
+ *
+ * A send made in an effect goes to the room the getter names and ties the
+ * effect to the room (it re-runs when the room changes); any other send goes
+ * to the room the view is in at that moment.
+ */
+export class MultiplayerRoom {
+	constructor(deps: MultiplayerRoomDeps);
+	/**
+	 * The send methods bound to the room the view names now. Take them in an
+	 * effect and use them in its cleanup, which then reaches that room whenever
+	 * Svelte runs it (on a re-run, on unmount, after an outro), even when the
+	 * view has moved on. Taking them in an effect ties the effect to the room;
+	 * taken outside one (an event handler, `onMount`, `untrack`) they are bound
+	 * to the room the view is in at that moment, and nothing follows the getter.
+	 */
+	here(): MultiplayerSend;
 	/** Forward a cursor move to the injected send callback. */
 	move(...args: any[]): any;
 	/** Forward a viewport report to the injected send callback. */
@@ -125,13 +192,6 @@ export class MultiplayerRoom {
 	/** Release an advisory lock on a key. */
 	releaseLock(lockKey: string): any;
 	/**
-	 * Bind this room's live.doc so `selections: 'crdt'` selections anchor to and
-	 * resolve against the shared document (they survive concurrent edits). Call once
-	 * with the `DocHandle` for the same document the selections index into. A no-op for
-	 * an offset-mode room. Returns `this` for chaining.
-	 */
-	bindDoc(doc: { text(name?: string): any }): this;
-	/**
 	 * Publish the local selection range; pass `null` to clear it. In `offset` mode the
 	 * value is sent verbatim (e.g. `{ start, end, nodePath }`). In `crdt` mode pass
 	 * `{ field, start, end }` against a bound live.doc text container; the range is
@@ -139,6 +199,4 @@ export class MultiplayerRoom {
 	 * or a `field`, a crdt send is dropped with a one-shot dev warning.
 	 */
 	setSelection(selection: any): any;
-	/** Unsubscribe from the injected stores. Call when the room unmounts. */
-	destroy(): void;
 }

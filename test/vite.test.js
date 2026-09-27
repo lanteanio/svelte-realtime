@@ -365,7 +365,9 @@ export const editor = live.multiplayer({
 		// A page calling editor.room(id).bindDoc(doc) at component top level
 		// must not crash during SSR; bindDoc chains back to the same view.
 		expect(code).toContain('bindDoc: () => _v');
-		expect(code).toMatch(/room: \(\) => \{ const _v = \{/);
+		expect(code).toContain('const _editor_view = () => { const _v = {');
+		expect(code).toContain('room: _editor_view');
+		expect(code).toContain('watch: _editor_view');
 	});
 });
 
@@ -3025,9 +3027,9 @@ export const myRoom = live.room({
 	});
 });
 
-// - rune features under Svelte 4 ---------------------------------------------
+// - rune features under an older Svelte ---------------------------------------
 
-describe('rune features on a Svelte 4 project', () => {
+describe('rune features on a Svelte too old for them', () => {
 	afterEach(() => teardown());
 
 	const SOURCES = {
@@ -3072,7 +3074,8 @@ export const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, 
 			expect(code).toBe(null);
 			expect(errors).toHaveLength(1);
 			expect(errors[0]).toContain('$live/' + kind + ' ' + FEATURE[kind]);
-			expect(errors[0]).toContain('installs Svelte 4');
+			expect(errors[0]).toContain('installs Svelte 4.\n');
+			expect(errors[0]).toContain('Streams, RPCs and the $store syntax work on Svelte 4 as they are.');
 		});
 
 		it('generates it on Svelte 5: ' + kind, () => {
@@ -3083,6 +3086,45 @@ export const game = live.room({ topic: (ctx, id) => 'game:' + id, topicArgs: 1, 
 			expect(code).toContain("from 'svelte-realtime/" + kind + "'");
 		});
 	}
+
+	it('stops a Svelte 5 older than 5.7 on the multiplayer room view, naming the version it needs', () => {
+		setup({ 'multiplayer.js': SOURCES.multiplayer });
+		installSvelte(JSON.stringify({ name: 'svelte', version: '5.6.2' }));
+		const { code, errors } = loadClient('multiplayer');
+		expect(code).toBe(null);
+		expect(errors).toHaveLength(1);
+		expect(errors[0]).toContain('$live/multiplayer ' + FEATURE.multiplayer);
+		expect(errors[0]).toContain('needs Svelte 5.7 or later, and this project installs Svelte 5.6.2');
+	});
+
+	it('checks every rune feature a module uses, not just the first one it imports', () => {
+		setup({ 'collab.js': SOURCES.doc + SOURCES.multiplayer.replace("import { live } from 'svelte-realtime/server';\n", '') });
+		installSvelte(JSON.stringify({ name: 'svelte', version: '5.6.2' }));
+		const old = loadClient('collab');
+		expect(old.code).toBe(null);
+		expect(old.errors).toHaveLength(1);
+		expect(old.errors[0]).toContain('$live/collab ' + FEATURE.multiplayer);
+		expect(old.errors[0]).toContain('needs Svelte 5.7 or later');
+
+		teardown();
+		setup({ 'collab.js': SOURCES.doc + SOURCES.multiplayer.replace("import { live } from 'svelte-realtime/server';\n", '') });
+		installSvelte(JSON.stringify({ name: 'svelte', version: '5.7.0' }));
+		const current = loadClient('collab');
+		expect(current.errors).toEqual([]);
+		expect(current.code).toContain("from 'svelte-realtime/doc'");
+		expect(current.code).toContain("from 'svelte-realtime/multiplayer'");
+	});
+
+	it('generates the multiplayer room view from Svelte 5.7, and the other rune features from 5.0', () => {
+		for (const [kind, version] of [['multiplayer', '5.7.0'], ['doc', '5.0.0'], ['smooth', '5.0.0'], ['rooms', '5.0.0-next.1']]) {
+			teardown();
+			setup({ [kind + '.js']: SOURCES[kind] });
+			installSvelte(JSON.stringify({ name: 'svelte', version }));
+			const { code, errors } = loadClient(kind);
+			expect(errors, kind + ' on ' + version).toEqual([]);
+			expect(code).toContain("from 'svelte-realtime/" + kind + "'");
+		}
+	});
 
 	it('generates a module that needs no rune feature as before', () => {
 		setup({ 'chat.js': "import { live } from 'svelte-realtime/server';\nexport const messages = live.stream('chat', async () => []);\n" });
