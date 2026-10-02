@@ -2268,7 +2268,7 @@ describe('__stream() presence merge', () => {
 		unsub();
 	});
 
-	it('update before its join seeds the entry so the field is not lost', async () => {
+	it('update before its join seeds the entry, and the join keeps the field', async () => {
 		const store = __stream('room/race', { merge: 'presence' });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
@@ -2286,9 +2286,54 @@ describe('__stream() presence merge', () => {
 		simulateTopicMessage('pres-race', { event: 'update', data: { key: 'u9', typing: true } });
 		expect(values[values.length - 1]).toEqual([{ key: 'u9', typing: true }]);
 
-		// The later join updates the same entry in place (no duplicate).
+		// The later join lands on the same entry (no duplicate), and the field
+		// that overtook it stays.
 		simulateTopicMessage('pres-race', { event: 'join', data: { key: 'u9', name: 'Late' } });
-		expect(values[values.length - 1]).toEqual([{ key: 'u9', name: 'Late' }]);
+		expect(values[values.length - 1]).toEqual([{ key: 'u9', name: 'Late', typing: true }]);
+
+		// Only the entry the update seeded: a repeated join replaces a joined one.
+		simulateTopicMessage('pres-race', { event: 'join', data: { key: 'u9', name: 'Again' } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u9', name: 'Again' }]);
+
+		// A field that overtook the join is newer than the join's own value.
+		simulateTopicMessage('pres-race', { event: 'update', data: { key: 'u8', 'lock:title': null } });
+		simulateTopicMessage('pres-race', { event: 'join', data: { key: 'u8', name: 'Held', 'lock:title': true } });
+		expect(values[values.length - 1][1]).toEqual({ key: 'u8', name: 'Held', 'lock:title': null });
+
+		unsub();
+	});
+
+	it('a join replaces an entry the snapshot or an earlier join put there, whatever its shape', async () => {
+		// A plain presence stream publishes joins in its own shape (no `data`),
+		// and documents a join as replacing the key's entry.
+		const store = __stream('room/rejoin-shape', { merge: 'presence' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, {
+			ok: true,
+			data: [{ key: 'u1', name: 'Ann', status: 'away' }],
+			topic: 'pres-shape',
+			merge: 'presence'
+		});
+		simulateTopicMessage('pres-shape', { event: 'join', data: { key: 'u1', name: 'Ann' } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', name: 'Ann' }]);
+
+		// A refresh replaces the whole roster, marks included.
+		simulateTopicMessage('pres-shape', { event: 'update', data: { key: 'u3', typing: true } });
+		simulateTopicMessage('pres-shape', { event: 'refreshed', data: [{ key: 'u1', name: 'Ann' }, { key: 'u3', name: 'Cy', status: 'away' }] });
+		simulateTopicMessage('pres-shape', { event: 'join', data: { key: 'u3', name: 'Cy' } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', name: 'Ann' }, { key: 'u3', name: 'Cy' }]);
+		simulateTopicMessage('pres-shape', { event: 'leave', data: { key: 'u3' } });
+
+		// A seeded key that left starts clean on its next join.
+		simulateTopicMessage('pres-shape', { event: 'update', data: { key: 'u2', typing: true } });
+		simulateTopicMessage('pres-shape', { event: 'leave', data: { key: 'u2' } });
+		simulateTopicMessage('pres-shape', { event: 'join', data: { key: 'u2', name: 'Bo' } });
+		simulateTopicMessage('pres-shape', { event: 'join', data: { key: 'u2', name: 'Bo2' } });
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', name: 'Ann' }, { key: 'u2', name: 'Bo2' }]);
 
 		unsub();
 	});
@@ -6139,10 +6184,12 @@ describe('__stream() presence field update ordering', () => {
 		// A late update the publisher superseded before the entry existed.
 		simulateTopicMessage('pf-seed', { event: 'update', data: { key: 'u2', typing: true, _p: 'a', _n: 5 } });
 		expect(entry().typing).toBe(false);
-		// The join replaces the seeded entry; the publisher's sequence runs on.
+		// The join lands on the seeded entry, keeping its field; the publisher's
+		// sequence runs on across it.
 		simulateTopicMessage('pf-seed', { event: 'join', data: { key: 'u2', data: { name: 'B' } } });
+		expect(entry()).toEqual({ key: 'u2', typing: false, data: { name: 'B' } });
 		simulateTopicMessage('pf-seed', { event: 'update', data: { key: 'u2', typing: true, _p: 'a', _n: 4 } });
-		expect(entry().typing).toBeUndefined();
+		expect(entry().typing).toBe(false);
 		simulateTopicMessage('pf-seed', { event: 'update', data: { key: 'u2', typing: true, _p: 'a', _n: 7 } });
 		expect(entry().typing).toBe(true);
 		unsub();
@@ -6447,13 +6494,45 @@ describe('__stream() cursor merge ordering', () => {
 			unsub();
 		});
 	});
+
+	it('two joins for one key in one animation frame end where they would one at a time', async () => {
+		// The first join lands on fields an update seeded and the second replaces
+		// that entry; keeping only the second would keep the seeded fields.
+		await withAnimationFrames(async (mod, frame) => {
+			const store = mod.__stream('doc/presjoins', { merge: 'presence' });
+			const values = [];
+			const unsub = store.subscribe((v) => values.push(v));
+			await flush();
+			const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [], topic: 'pres-joins', merge: 'presence' });
+
+			simulateTopicMessage('pres-joins', { event: 'update', data: { key: 'u1', typing: true } });
+			simulateTopicMessage('pres-joins', { event: 'join', data: { key: 'u1', data: { name: 'A' } } });
+			simulateTopicMessage('pres-joins', { event: 'join', data: { key: 'u1', data: { name: 'B' } } });
+			frame();
+			expect(values[values.length - 1]).toEqual([{ key: 'u1', data: { name: 'B' } }]);
+			unsub();
+		});
+	});
 });
 
 // - ordering token end to end: server send path into the client merge --------
 
 describe('live.multiplayer ordering token, server to client', () => {
+	// The send path publishes only for a member: seed alice's membership the
+	// way her data-stream subscribe would on this instance.
+	afterEach(async () => {
+		const { _presenceRefForTest } = await import('../src/server.js');
+		_presenceRefForTest().delete('board:b1\0alice');
+	});
+	const joinAlice = async () => {
+		const { _presenceRefForTest } = await import('../src/server.js');
+		_presenceRefForTest().set('board:b1\0alice', { count: 1, timer: null, data: {} });
+	};
+
 	it('a lock released after the holder reconnects to a replica whose clock runs behind still releases', async () => {
 		const { live } = await import('../src/server.js');
+		await joinAlice();
 		const { setRuntimeEnv, resetRuntimeEnv } = await import('../src/shared/runtime.js');
 		const room = live.multiplayer({
 			topic: (ctx, id) => 'board:' + id,
@@ -6495,6 +6574,7 @@ describe('live.multiplayer ordering token, server to client', () => {
 
 	it('a reordered pair from one connection still lands on the newer frame', async () => {
 		const { live } = await import('../src/server.js');
+		await joinAlice();
 		const room = live.multiplayer({
 			topic: (ctx, id) => 'board:' + id,
 			init: async () => [],

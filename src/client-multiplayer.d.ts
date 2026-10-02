@@ -4,6 +4,8 @@ import type { Readable } from 'svelte/store';
 export interface RosterEntry {
 	key: string;
 	color: string;
+	/** The payload the room's `presence` function computed. The roster views hold joined members only, so it is always there. */
+	data: any;
 	[field: string]: any;
 }
 
@@ -53,13 +55,13 @@ export interface MultiplayerRoomDeps {
 	 * args. When given, it supplies the deps below that depend on the room.
 	 */
 	bind?: (args: any[]) => Partial<MultiplayerRoomDeps>;
-	/** Presence sub-stream (the per-room factory store). Required unless `bind` supplies it. */
+	/** Presence sub-stream (the per-room factory store). Required unless `bind` supplies it. The roster views count only entries that carry `data`, the shape a multiplayer room's roster has. */
 	presence?: Readable<any[]>;
 	/** Cursor sub-stream (the per-room factory store). Required unless `bind` supplies it. */
 	cursors?: Readable<any[]>;
 	/** Connection-status store. */
 	status: Readable<string>;
-	/** The room's data stream. The room holds it for its lifetime, which is what makes the local user a member others see (and a candidate for ownership); its value is not read. Omitted for a view that only observes. */
+	/** The room's data stream. The room holds it for its lifetime, which is what makes the local user a member others see (and a candidate for ownership); its value is not read. While its `phase` reads `'attaching'`, the room holds its sends until the join is answered, as it does for a send to the room an effect names just before the view moves there. Omitted for a view that only observes. */
 	membership?: Readable<any>;
 	/** Reactions sub-stream (the bounded ring of recent emotes), when enabled. */
 	reactions?: Readable<any[]>;

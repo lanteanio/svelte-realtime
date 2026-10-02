@@ -102,24 +102,22 @@ test('a lock taken in an effect moves with the board', async ({ browser }, testI
 	const second = freshBoard();
 	const b = await open(browser, baseURL, 'bob', `/mp/${first}?me=bob`);
 	const c = await open(browser, baseURL, 'carol', `/mp/${second}?me=carol`);
-	const a = await open(browser, baseURL, 'alice', `/mp/${first}?me=alice`);
-	const setLock = (on) => a.page.evaluate((v) => window.__mp.lock(v), on);
+	// The effect takes the lock as the page mounts, while its join is in flight.
+	const a = await open(browser, baseURL, 'alice', `/mp/${first}?me=alice&lock=on`);
 	try {
-		await expect(members(b.page)).toHaveText('alice');
-		await setLock(true);
 		await expect(locks(b.page)).toHaveText('title=alice');
+		await expect(members(b.page)).toHaveText('alice');
 
-		await navigateInApp(a.page, `/mp/${second}?me=alice`);
+		await navigateInApp(a.page, `/mp/${second}?me=alice&lock=on`);
 		// Alice is still on bob's roster for the presence grace window, so the
 		// lock can only have cleared because the cleanup released it there.
 		await expect(locks(b.page)).toHaveText('');
 		await expect(others(b.page)).toHaveText('alice');
 
-		// Once alice has joined the second board, the effect's sends go there.
-		await expect(members(c.page)).toHaveText('alice');
-		await setLock(false);
-		await setLock(true);
+		// The effect took the lock on the second board as the view moved there,
+		// ahead of that join, with nothing done since.
 		await expect(locks(c.page)).toHaveText('title=alice');
+		await expect(members(c.page)).toHaveText('alice');
 		await expect(locks(b.page)).toHaveText('');
 		await expect(others(b.page)).toHaveText('', { timeout: LEAVE_TIMEOUT });
 	} finally {

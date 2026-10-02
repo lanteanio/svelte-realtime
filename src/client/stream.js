@@ -507,6 +507,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	const _presenceFieldOrder = new Map();
 
 	/**
+	 * Presence keys whose entry a field update created before any join for
+	 * the key arrived. The join lands on such an entry instead of replacing
+	 * it. Cleared on leave, set, refreshed, and every snapshot.
+	 * @type {Set<any>}
+	 */
+	const _presenceSeeded = new Set();
+
+	/**
 	 * Per-key marks for a cursor key's OTHER publishers. The held entry is its
 	 * own publisher's newest sample, so a key needs marks here only once a
 	 * second connection publishes under it (a reconnect, a second tab).
@@ -790,6 +798,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		if (event === 'refreshed') {
 			value = data;
 			optimisticKeys.clear();
+			if (!local) _presenceSeeded.clear();
 			if (merge === 'crud' || merge === 'presence' || merge === 'cursor') {
 				_rebuildIndexFn(value, index);
 			}
@@ -857,13 +866,26 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// still stale once the joined entry has replaced the old one.
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
-					value[idx] = data;
+					if (_presenceSeeded.has(data.key)) {
+						// Field updates overtook this join on the way here (the
+						// server publishes a member's updates only after its join,
+						// but a relay between instances may reorder them) and
+						// seeded the entry. Their fields are newer than the join,
+						// so they stay on the joined entry.
+						value[idx] = { ...data, ...value[idx] };
+						if (!local) _presenceSeeded.delete(data.key);
+					} else {
+						value[idx] = data;
+					}
 				} else {
 					index.set(data.key, value.length);
 					value.push(data);
 				}
 			} else if (event === 'leave') {
-				if (!local) _presenceFieldOrder.delete(data.key);
+				if (!local) {
+					_presenceFieldOrder.delete(data.key);
+					_presenceSeeded.delete(data.key);
+				}
 				const idx = index.get(data.key);
 				if (idx !== undefined) {
 					index.delete(data.key);
@@ -878,11 +900,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			} else if (event === 'update') {
 				// Field-level delta: shallow-merge the changed fields into the
 				// roster entry, preserving the key and the rest of the payload.
-				// A delta that races ahead of its join (no entry yet) seeds a
-				// transient entry; the authoritative join that follows replaces it
-				// with its snapshot, so a raced-ahead field shows briefly and then
-				// clears until the next update (acceptable for the rare
-				// update-before-join order; normal order is join first).
+				// A delta that overtook its join (no entry yet) seeds an entry
+				// without `data`, which the join lands on (see above) and which
+				// the multiplayer room views leave out until then.
 				const idx = index.get(data.key);
 				let fields = data;
 				if (!local && _isOrdered(data)) {
@@ -909,9 +929,13 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				} else {
 					index.set(data.key, value.length);
 					value.push(fields);
+					if (!local) _presenceSeeded.add(data.key);
 				}
 			} else if (event === 'set') {
-				if (!local) _presenceFieldOrder.clear();
+				if (!local) {
+					_presenceFieldOrder.clear();
+					_presenceSeeded.clear();
+				}
 				value = data;
 				_rebuildIndexFn(value, index);
 				return { value, replaced: true, modified: true };
@@ -1167,8 +1191,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// dropping the older one drops the fields only it carried (a
 				// lock release lost behind a typing flag). They are cheap and
 				// rare next to cursor samples, and the per-field order guard in
-				// the merge already settles their order.
-				if (merge === 'presence' && queue[i].event === 'update') continue;
+				// the merge already settles their order. Nor are two joins: the
+				// first lands on fields an update seeded and the second replaces
+				// that entry, so keeping only the second would keep the fields.
+				if (merge === 'presence' && (queue[i].event === 'update' || queue[i].event === 'join')) continue;
 				const k = queue[i].data?.[keyField];
 				if (k !== undefined) {
 					const kept = seen.get(k);
@@ -1482,6 +1508,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				} else {
 					currentValue = response.data;
 					_presenceFieldOrder.clear();
+					_presenceSeeded.clear();
 					_cursorOrder.clear();
 				}
 
@@ -1627,6 +1654,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_statusStore.set('loading');
 		_index.clear();
 		_presenceFieldOrder.clear();
+		_presenceSeeded.clear();
 		_cursorOrder.clear();
 		_history = [];
 		_historyIndex = -1;

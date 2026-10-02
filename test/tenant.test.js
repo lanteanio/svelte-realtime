@@ -10,7 +10,7 @@ import {
 	_stripTenantTopic
 } from '../src/server/tenant.js';
 import { _clusterRoomsList } from '../src/server/rooms-cluster.js';
-import { live, __register, __registerDerived, handleRpc } from '../src/server.js';
+import { live, __register, __registerDerived, handleRpc, _presenceRefForTest } from '../src/server.js';
 import { state, _derivedBySource } from '../src/server/state.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
@@ -296,9 +296,24 @@ describe('live.tenant: multiplayer cursor is scoped per tenant', () => {
 		_setTenantResolver((u) => u.org);
 		const board = live.multiplayer({ topic: (ctx, id) => 'board:' + id, topicArgs: 1, cursors: true, presence: () => ({}) });
 		const p = mockPlatform();
-		await board.__cursorMove(ctxFor(p, { org: 'a', id: 'ua' }), '1', { x: 1, y: 2 });
-		await board.__cursorMove(ctxFor(p, { org: 'b', id: 'ub' }), '1', { x: 3, y: 4 });
-		expect(p.published.map((m) => m.topic)).toEqual(['@t/a/board:1:cursors', '@t/b/board:1:cursors']);
+		const a = ctxFor(p, { org: 'a', id: 'ua' });
+		const b = ctxFor(p, { org: 'b', id: 'ub' });
+		try {
+			// Each joins on its own tenant's wire topic, where membership is held.
+			await board.__dataStream.__onSubscribe(a, _tenantTopic('a', 'board:1'), ['1']);
+			await board.__dataStream.__onSubscribe(b, _tenantTopic('b', 'board:1'), ['1']);
+			p.published.length = 0;
+			await board.__cursorMove(a, '1', { x: 1, y: 2 });
+			await board.__cursorMove(b, '1', { x: 3, y: 4 });
+			expect(p.published.map((m) => m.topic)).toEqual(['@t/a/board:1:cursors', '@t/b/board:1:cursors']);
+			// Membership in one tenant's room is not membership in the same room
+			// id of another tenant, whatever the user id.
+			await board.__cursorMove(ctxFor(p, { org: 'b', id: 'ua' }), '1', { x: 5, y: 6 });
+			expect(p.published).toHaveLength(2);
+		} finally {
+			_presenceRefForTest().delete(_tenantTopic('a', 'board:1') + '\0ua');
+			_presenceRefForTest().delete(_tenantTopic('b', 'board:1') + '\0ub');
+		}
 	});
 });
 

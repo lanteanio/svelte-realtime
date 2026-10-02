@@ -15,6 +15,8 @@ import {
 } from '../src/server.js';
 import { _PRESENCE_MERGE_SCRIPT, _clusterPresenceRelease } from '../src/server/presence.js';
 import { _presenceClaimBegin, _presenceClaimResolve } from '../src/server/room-owner.js';
+import { _resetStickyDropWarnings } from '../src/server/multiplayer.js';
+import { _getIdentityKey } from '../src/server/identity.js';
 import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId } from '../src/server/rooms-cluster.js';
 import { _clearEnumGatesForTests } from '../src/server/rooms-gate.js';
 import { _ensureWrap } from '../src/server/reactive.js';
@@ -111,6 +113,21 @@ function factoryDeps(code, name, factory, ...args) {
 	expect(passed).toEqual(args);
 	return { ...fixed, ...bind(passed) };
 }
+
+// The cursor, field and reaction send paths publish only for a member of the
+// room. A test that drives a handler directly seeds the membership the caller's
+// data-stream subscribe would have acquired on this instance.
+const _joined = new Set();
+function joinAs(topic, key) {
+	const refKey = topic + '\0' + key;
+	if (_presenceRefForTest().has(refKey)) return;
+	_presenceRefForTest().set(refKey, { count: 1, timer: null, data: { name: key } });
+	_joined.add(refKey);
+}
+afterEach(() => {
+	for (const refKey of _joined) _presenceRefForTest().delete(refKey);
+	_joined.clear();
+});
 
 describe('live.multiplayer() vite integration', () => {
 	afterEach(teardown);
@@ -713,6 +730,7 @@ describe('live.multiplayer()', () => {
 			publish: (topic, event, data) => published.push({ topic, event, data })
 		};
 
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctx, 'b1', { typing: true });
 		expect(published).toEqual([
 			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', typing: true, _p: expect.any(String), _n: 1 } }
@@ -741,6 +759,7 @@ describe('live.multiplayer()', () => {
 			publish: (topic, event, data) => published.push({ topic, event, data })
 		};
 
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': true });
 		expect(published).toEqual([
 			{ topic: 'board:b1:presence', event: 'update', data: { key: 'alice', 'lock:title': true, _p: expect.any(String), _n: 1 } }
@@ -768,6 +787,7 @@ describe('live.multiplayer()', () => {
 		const first = { user: { id: 'alice' }, ws: {}, publish };
 		const second = { user: { id: 'alice' }, ws: {}, publish };
 
+		joinAs('board:b1', 'alice');
 		await room.__cursorMove(first, 'b1', { x: 1, _p: 'forged', _n: 1e15 });
 		await room.__presenceUpdate(first, 'b1', { typing: true, _n: 1e15 });
 		await room.__cursorMove(second, 'b1', { x: 2 });
@@ -801,6 +821,7 @@ describe('live.multiplayer()', () => {
 
 		const published = [];
 		const ctx = { user: { id: 'mallory' }, ws: {}, publish: (topic, event, data) => published.push({ topic, data }) };
+		joinAs('board:b1', 'mallory');
 		await room.__cursorMove(ctx, 'b1', { key: 'bob', x: 1 });
 		await room.__presenceUpdate(ctx, 'b1', { key: 'bob', data: { name: 'Bob' }, typing: true });
 		await room.__reactionEmit(ctx, 'b1', 'wave', { key: 'bob', x: 2 });
@@ -834,6 +855,7 @@ describe('live.multiplayer()', () => {
 		const published = [];
 		const ctx = { user: { id: 'mallory' }, ws: {}, publish: (topic, event, data) => published.push(data) };
 		const hostile = () => JSON.parse('{"__proto__":{"key":"bob","data":{"name":"Bob"}},"x":1,"typing":true}');
+		joinAs('board:b1', 'mallory');
 		await room.__cursorMove(ctx, 'b1', hostile());
 		await room.__presenceUpdate(ctx, 'b1', hostile());
 		await room.__reactionEmit(ctx, 'b1', 'wave', hostile());
@@ -866,6 +888,7 @@ describe('live.multiplayer()', () => {
 
 		const published = [];
 		const ctx = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform, publish: (topic, event, data) => published.push(data) };
+		joinAs('board:b1', 'alice');
 		const take = room.__presenceUpdate(ctx, 'b1', { 'lock:title': true });
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': null });
 		release();
@@ -958,6 +981,7 @@ describe('live.multiplayer()', () => {
 
 		const published = [];
 		const ctx = { user: { id: 'bob' }, publish: (t, e, d) => published.push({ t, e, d }) };
+		joinAs('board:b2', 'bob');
 		await room.__presenceUpdate(ctx, 'b2', { typing: true });
 		await room.__reactionEmit(ctx, 'b2', 'wave', { x: 0, y: 0 });
 		expect(seen).toEqual(['b2', 'b2']);
@@ -1058,6 +1082,254 @@ function makeFakeRedis() {
 	};
 }
 
+// ---------------------------------------------------------------------------
+// A cursor sample, a field update or a reaction is published under the
+// caller's roster key, so in a room that tracks membership only a member may
+// send one: anyone else's frame would leave a key on every client that no
+// leave removes. Membership is what the data-stream subscribe acquired on this
+// instance, through the presence grace window after the last view let go.
+// ---------------------------------------------------------------------------
+
+describe('live.multiplayer() sends from members only', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		_resetStickyDropWarnings();
+	});
+
+	const makeBoard = (extra = {}) => live.multiplayer({
+		topic: (ctx, boardId) => 'board:' + boardId,
+		init: async () => [],
+		presence: (ctx) => ({ name: ctx.user?.name }),
+		cursors: true,
+		typing: true,
+		locks: ['title'],
+		reactions: true,
+		topicArgs: 1,
+		...extra
+	});
+	const sendAll = async (room, ctx, id) => {
+		await room.__cursorMove(ctx, id, { x: 1, y: 2 });
+		await room.__cursorReportViewport(ctx, id, { x: 0, y: 0, w: 10, h: 10 });
+		await room.__presenceUpdate(ctx, id, { typing: true, 'lock:title': true });
+		await room.__reactionEmit(ctx, id, 'wave', { x: 3, y: 4 });
+	};
+
+	it('drops every send from a connection that never joined, with one dev warning, and publishes a member\'s', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const room = makeBoard();
+		const published = [];
+		const publish = (topic, event, data) => published.push({ topic, event, key: data.key });
+		const mallory = { user: { id: 'mallory' }, ws: {}, publish };
+
+		await sendAll(room, mallory, 'm1');
+		await sendAll(room, mallory, 'm1');
+		expect(published).toEqual([]);
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(warn.mock.calls[0][0]).toContain('not a member of the room');
+		// Nothing reached the roster either.
+		expect(_presenceRefForTest().has('board:m1\0mallory')).toBe(false);
+
+		joinAs('board:m1', 'alice');
+		const alice = { user: { id: 'alice' }, ws: {}, publish };
+		await sendAll(room, alice, 'm1');
+		expect(published.map((p) => [p.topic, p.key])).toEqual([
+			['board:m1:cursors', 'alice'],
+			['board:m1:cursors', 'alice'],
+			['board:m1:presence', 'alice'],
+			['board:m1:reactions', 'alice']
+		]);
+		// Membership is per room: from the same connection, alice is no member
+		// of the next one.
+		await sendAll(room, alice, 'm2');
+		expect(published).toHaveLength(4);
+		await sendAll(room, alice, 'm1');
+		expect(published).toHaveLength(8);
+	});
+
+	it('a send racing the sender\'s own join goes out after the join, not before or instead of it', async () => {
+		// The join awaits the shared roster; hold that write open.
+		const redis = makeFakeRedis();
+		let open;
+		const gate = new Promise((r) => { open = r; });
+		const hincrby = redis.hincrby;
+		redis.hincrby = async (...a) => { await gate; return hincrby(...a); };
+		const platform = { redis };
+		const room = makeBoard();
+		const order = [];
+		const ctx = {
+			user: { id: 'alice', name: 'Alice' }, ws: {}, platform,
+			publish: (topic, event, data) => order.push(event + ':' + Object.keys(data).filter((k) => k !== '_p' && k !== '_n').join(',')),
+			_publishWire: (topic, event) => order.push(event)
+		};
+		try {
+			const joining = room.__dataStream.__onSubscribe(ctx, 'board:r1', ['r1']);
+			const typing = room.__presenceUpdate(ctx, 'r1', { 'lock:title': true });
+			await Promise.resolve();
+			expect(order).toEqual([]);
+			open();
+			await Promise.all([joining, typing]);
+			expect(order).toEqual(['join', 'update:key,lock:title']);
+			// And the field reached the roster entry the join created.
+			const roster = await _clusterPresenceList(platform, 'board:r1');
+			expect(roster).toEqual([{ key: 'alice', data: { name: 'Alice', 'lock:title': true } }]);
+		} finally {
+			_presenceRefForTest().delete('board:r1\0alice');
+		}
+	});
+
+	it('a send waiting on a join that never completed is dropped', async () => {
+		const room = makeBoard();
+		const published = [];
+		const ctx = { user: { id: 'alice' }, ws: {}, publish: (t, e, d) => published.push(e), _publishWire: () => {} };
+		// The membership is taken and given back before its join finished (a
+		// failed init rolls the subscribe back).
+		let open;
+		const gate = new Promise((r) => { open = r; });
+		const joined = room.__dataStream.__onSubscribe({ ...ctx, platform: { redis: { ...makeFakeRedis(), hincrby: async () => { await gate; return 1; } } } }, 'board:r2', ['r2']);
+		const move = room.__cursorMove(ctx, 'r2', { x: 1 });
+		_presenceRefForTest().delete('board:r2\0alice');
+		open();
+		await Promise.all([joined, move]);
+		expect(published).toEqual([]);
+	});
+
+	it('a send waiting on a join whose entry was replaced waits for the newer join', async () => {
+		const gated = () => {
+			let open;
+			const gate = new Promise((r) => { open = r; });
+			const redis = makeFakeRedis();
+			const hincrby = redis.hincrby;
+			redis.hincrby = async (...a) => { await gate; return hincrby(...a); };
+			return { platform: { redis }, open };
+		};
+		const room = makeBoard();
+		const order = [];
+		const ctxOn = (platform) => ({
+			user: { id: 'alice', name: 'Alice' }, ws: {}, platform,
+			publish: (topic, event) => order.push(event),
+			_publishWire: (topic, event) => order.push(event)
+		});
+		const first = gated();
+		const second = gated();
+		try {
+			const joinFirst = room.__dataStream.__onSubscribe(ctxOn(first.platform), 'board:r3', ['r3']);
+			const typing = room.__presenceUpdate(ctxOn(first.platform), 'r3', { typing: true });
+			// The entry goes (a forget, an eviction) and a new subscribe joins anew.
+			_presenceRefForTest().delete('board:r3\0alice');
+			const joinSecond = room.__dataStream.__onSubscribe(ctxOn(second.platform), 'board:r3', ['r3']);
+			first.open();
+			await joinFirst;
+			await new Promise((r) => setTimeout(r, 0));
+			expect(order).toEqual(['join']);
+			second.open();
+			await Promise.all([joinSecond, typing]);
+			expect(order).toEqual(['join', 'join', 'update']);
+		} finally {
+			_presenceRefForTest().delete('board:r3\0alice');
+		}
+	});
+
+	it('an entry replaced in the map no longer answers for a connection that sent before', async () => {
+		const room = makeBoard();
+		const published = [];
+		const ctx = { user: { id: 'alice' }, ws: {}, publish: (t, e, d) => published.push(e) };
+		try {
+			_presenceRefForTest().set('board:r4\0alice', { count: 1, timer: null, data: {} });
+			await room.__cursorMove(ctx, 'r4', { x: 1 });
+			expect(published).toEqual(['update']);
+			// A newer entry whose join is still out takes its place.
+			let joined;
+			const joining = new Promise((r) => { joined = r; });
+			const newer = { count: 1, timer: null, data: {}, joining };
+			_presenceRefForTest().set('board:r4\0alice', newer);
+			const move = room.__cursorMove(ctx, 'r4', { x: 2 });
+			await new Promise((r) => setTimeout(r, 0));
+			expect(published).toEqual(['update']);
+			newer.joining = null;
+			joined();
+			await move;
+			expect(published).toEqual(['update', 'update']);
+		} finally {
+			_presenceRefForTest().delete('board:r4\0alice');
+		}
+	});
+
+	it('a member keeps sending through the grace window after its last view let go, and not after', async () => {
+		vi.useFakeTimers();
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const room = makeBoard();
+		const published = [];
+		const ctx = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform: {}, publish: (t, e, d) => published.push(d.key), _publishWire: () => {} };
+		await room.__dataStream.__onSubscribe(ctx, 'board:g1', ['g1']);
+		await room.__dataStream.__onUnsubscribe(ctx, 'board:g1', 0);
+		// Inside the window the member is still on the roster.
+		await room.__presenceUpdate(ctx, 'g1', { typing: false });
+		expect(published).toEqual(['alice']);
+		// Back within the window (a reconnect, a quick return): still a member.
+		await room.__dataStream.__onSubscribe(ctx, 'board:g1', ['g1']);
+		await room.__presenceUpdate(ctx, 'g1', { typing: true });
+		expect(published).toEqual(['alice', 'alice']);
+		await room.__dataStream.__onUnsubscribe(ctx, 'board:g1', 0);
+		await vi.advanceTimersByTimeAsync(5001);
+		// The leave went out: a late send (a timer, a cleanup) reaches no one.
+		await room.__presenceUpdate(ctx, 'g1', { typing: false });
+		await room.__cursorMove(ctx, 'g1', { x: 1 });
+		expect(published).toEqual(['alice', 'alice']);
+	});
+
+	it('a connection\'s remembered membership answers only for its identity, and not once the entry is gone', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const room = makeBoard();
+		const published = [];
+		const publish = (t, e, d) => published.push(d.key);
+		// The connection joined as a guest, then signed in: the guest's
+		// membership is not the user's.
+		const ws = {};
+		const asGuest = { ws, publish };
+		const guest = _getIdentityKey(asGuest);
+		joinAs('board:c1', guest);
+		await room.__cursorMove(asGuest, 'c1', { x: 1 });
+		await room.__cursorMove({ user: { id: 'alice' }, ws, publish }, 'c1', { x: 2 });
+		expect(published).toEqual([guest]);
+		// Nor for the same room id in another tenant.
+		joinAs('@t/a/board:c2', 'tia');
+		const scoped = (tenantId) => ({ user: { id: 'tia' }, tenantId, ws, publish });
+		await room.__cursorMove(scoped('a'), 'c2', { x: 4 });
+		await room.__cursorMove(scoped('b'), 'c2', { x: 5 });
+		expect(published).toEqual([guest, 'tia']);
+		// The map is emptied by a path that is not a leave: the remembered yes
+		// goes with it.
+		published.length = 0;
+		await room.__cursorMove(asGuest, 'c1', { x: 3 });
+		expect(published).toEqual([guest]);
+		_presenceRefForTest().clear();
+		await room.__cursorMove(asGuest, 'c1', { x: 3 });
+		expect(published).toEqual([guest]);
+	});
+
+	it('an owner-only room gates cursors on membership too; a room that tracks none does not', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const owned = live.multiplayer({ topic: (ctx, id) => 'game:' + id, init: async () => [], cursors: true, owner: true, topicArgs: 1 });
+		const open = live.multiplayer({ topic: (ctx, id) => 'pad:' + id, init: async () => [], cursors: true, topicArgs: 1 });
+		const published = [];
+		const ctx = { user: { id: 'alice' }, ws: {}, platform: {}, publish: (t) => published.push(t), _publishWire: () => {} };
+		expect(owned.__isMember).toBeTypeOf('function');
+		expect(open.__isMember).toBeUndefined();
+
+		await owned.__cursorMove(ctx, 'o1', { x: 1 });
+		await open.__cursorMove(ctx, 'o1', { x: 1 });
+		expect(published).toEqual(['pad:o1:cursors']);
+		try {
+			await owned.__dataStream.__onSubscribe(ctx, 'game:o1', ['o1']);
+			await owned.__cursorMove(ctx, 'o1', { x: 2 });
+			expect(published).toEqual(['pad:o1:cursors', 'game:o1:cursors']);
+		} finally {
+			_presenceRefForTest().delete('game:o1\0alice');
+		}
+	});
+});
+
 describe('live.multiplayer() sticky presence fields', () => {
 	it('carries a lock and a selection across instances for a late joiner, and clears on release', async () => {
 		const redis = makeFakeRedis();
@@ -1084,6 +1356,7 @@ describe('live.multiplayer() sticky presence fields', () => {
 			publish: (topic, event, data) => publishedA.push({ topic, event, data })
 		};
 
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': true });
 		await room.__presenceUpdate(ctxA, 'b1', { selection: { start: 0, end: 5 } });
 
@@ -1134,6 +1407,7 @@ describe('live.multiplayer() sticky presence fields', () => {
 			publish: (topic, event, data) => publishedA.push({ topic, event, data })
 		};
 
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctxA, 'b1', { typing: true });
 
 		// The forward publish still emits the live update frame (no connection on
@@ -1218,6 +1492,7 @@ describe('live.multiplayer() sticky presence fields', () => {
 			publish: (topic, event, data) => published.push(data)
 		};
 
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': true });
 		await room.__presenceUpdate(ctxA, 'b1', { selection: { start: 0, end: 1 } });
 
@@ -1241,6 +1516,7 @@ describe('live.multiplayer() sticky presence fields', () => {
 		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
 		const published = [];
 		const ctx = { user: { id: 'alice', name: 'Alice' }, platform, publish: (topic, event, data) => published.push(data) };
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:anything': true });
 		expect(published).toEqual([{ key: 'alice', 'lock:anything': true }]);
 		const alice = (await _clusterPresenceList(platform, 'board:b1')).find((e) => e.key === 'alice');
@@ -1259,6 +1535,7 @@ describe('live.multiplayer() sticky presence fields', () => {
 		const ctx = { user: { id: 'alice' }, publish: (topic, event, data) => published.push(data) };
 		// A release can only clear a field; one that a wider declaration set on
 		// live clients before a redeploy must still be clearable.
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:body': null });
 		expect(published).toEqual([{ key: 'alice', 'lock:body': null }]);
 		// An empty delta is still published.
@@ -1284,6 +1561,7 @@ describe('live.multiplayer() sticky presence fields', () => {
 
 		const take = {};
 		for (let i = 0; i < 70; i++) take['lock:k' + i] = true;
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctx, 'b1', take);
 		const alice = (await _clusterPresenceList(platform, 'board:b1')).find((e) => e.key === 'alice');
 		expect(locks(published[0])).toEqual(kept);
@@ -1312,6 +1590,7 @@ describe('live.multiplayer() sticky presence fields', () => {
 		const aliceOn = async (platform) => (await _clusterPresenceList(platform, 'board:b1')).find((e) => e.key === 'alice');
 
 		await _clusterPresenceAcquire(platformA, 'board:b1', 'alice', { name: 'Alice' });
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate({ user: { id: 'alice', name: 'Alice' }, platform: platformA, publish: () => {} }, 'b1', { 'lock:title': true });
 		// A second tab lands on replica B. It must not rewrite the row the lock
 		// is merged into; the first acquirer's payload stands while she stays.
@@ -1356,6 +1635,7 @@ describe('live.multiplayer() sticky presence fields', () => {
 		});
 		const alice = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform, publish: () => {} };
 		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice', 'lock:body': 'app data' });
+		joinAs('board:b1', 'alice');
 		await board.__presenceUpdate(alice, 'b1', { 'lock:title': true, selection: { start: 0, end: 5 } });
 		await _clusterPresenceAcquire(platform, 'lobby:l1', 'alice', { name: 'Alice', selection: 'team-a' });
 
@@ -1474,6 +1754,7 @@ describe('live.multiplayer() sticky lock bounds', () => {
 		const ctx = { user: { id: 'alice' }, publish: (topic, event, data) => published.push(data) };
 
 		// Nothing declared survives: no frame at all.
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:body': true });
 		await room.__presenceUpdate(ctx, 'b1', { selection: { start: 0, end: 2 } });
 		expect(published).toEqual([]);
@@ -1494,6 +1775,7 @@ describe('live.multiplayer() sticky lock bounds', () => {
 
 		// Declared: lock:title persists. Undeclared: dropped even though the
 		// locks surface is enabled.
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': true, 'lock:cell:0': true, 'lock:evil': true });
 		const roster = await _clusterPresenceList(platform, 'board:b1');
 		const alice = roster.find((e) => e.key === 'alice');
@@ -1518,6 +1800,7 @@ describe('live.multiplayer() sticky lock bounds', () => {
 		await _clusterPresenceAcquire(platform, 'doc:room1', 'attacker-1', { name: 'attacker' });
 		const ctx = { user: { id: 'attacker-1' }, tenantId: null, platform, publish: () => {} };
 
+		joinAs('doc:room1', 'attacker-1');
 		let seq = 0;
 		for (let r = 0; r < 40; r++) {
 			const delta = {};
@@ -1542,6 +1825,7 @@ describe('live.multiplayer() sticky lock bounds', () => {
 
 		// A legit lock value persists; an oversized one (> 1 KB serialized)
 		// is dropped; an oversized selection is dropped too.
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': true });
 		await room.__presenceUpdate(ctx, 'b1', { 'lock:title': 'x'.repeat(4096) });
 		await room.__presenceUpdate(ctx, 'b1', { selection: { start: 0, end: 5, pad: 'x'.repeat(4096) } });
@@ -1573,6 +1857,7 @@ describe('live.multiplayer() sticky lock bounds', () => {
 		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
 		const ctx = makeCtx(platform);
 
+		joinAs('board:b1', 'alice');
 		for (let r = 0; r < 40; r++) {
 			const delta = {};
 			for (let i = 0; i < 64; i++) delta['lock:k' + r + ':' + i] = 'v'.repeat(32);
@@ -1965,6 +2250,23 @@ export function following(deps, first, { cleanupsRead = false, readsId = true } 
 	};
 }
 
+// The README's lock pattern on board.room(() => id): an effect takes the lock
+// through here() and releases it in its cleanup.
+export function lockEffect(deps, first) {
+	let id = $state(first);
+	let room;
+	const stop = $effect.root(() => {
+		room = new MultiplayerRoom({ ...deps, args: [() => id] });
+		$effect(() => {
+			const here = room.here();
+			here.acquireLock('title');
+			return () => { here.releaseLock('title'); };
+		});
+	});
+	flush();
+	return { room, setId(next) { id = next; flush(); }, stop() { stop(); flush(); } };
+}
+
 // board.room(() => params.board) where params is replaced by an equal object
 // on every navigation, as SvelteKit's page.params is. One effect only sends.
 export function followingParams(deps, first) {
@@ -2036,6 +2338,24 @@ export function effectBeforeFollower(deps, first) {
 			if (room) room.setTyping(true);
 		});
 		room = new MultiplayerRoom({ ...deps, args: [() => id] });
+	});
+	flush();
+	return { setId(next) { id = next; flush(); }, stop() { stop(); flush(); } };
+}
+
+// board.room(() => id) built in a cleanup, so nothing follows its getter and
+// nothing subscribes its streams; an effect elsewhere sends through it.
+export function cleanupBuiltRoom(deps, first) {
+	let id = $state(first);
+	let room = null;
+	const builder = $effect.root(() => {
+		$effect.pre(() => () => { room = new MultiplayerRoom({ ...deps, args: [() => id] }); });
+	});
+	flush();
+	builder();
+	flush();
+	const stop = $effect.root(() => {
+		$effect.pre(() => { id; room.setTyping(true); });
 	});
 	flush();
 	return { setId(next) { id = next; flush(); }, stop() { stop(); flush(); } };
@@ -2193,7 +2513,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 
 	it('derives others from the presence store and refreshes on a store push', async () => {
 		await loadShippedRuneModule();
-		const presence = fakeStore([{ key: 'alice', name: 'Alice' }]);
+		const presence = fakeStore([{ key: 'alice', data: { name: 'Alice' } }]);
 		const cursors = fakeStore([]);
 		const status = fakeStore('connected');
 		const r = new MultiplayerRoom({ me: 'me', presence, cursors, status, move: () => {} });
@@ -2201,8 +2521,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 		expect(r.others.map((o) => o.key)).toEqual(['alice']);
 
 		presence.set([
-			{ key: 'alice', name: 'Alice' },
-			{ key: 'bob', name: 'Bob' }
+			{ key: 'alice', data: { name: 'Alice' } },
+			{ key: 'bob', data: { name: 'Bob' } }
 		]);
 		flushSync();
 
@@ -2273,8 +2593,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 	it('excludes the local user from others when me is known', async () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([
-			{ key: 'me', name: 'Me' },
-			{ key: 'alice', name: 'Alice' }
+			{ key: 'me', data: { name: 'Me' } },
+			{ key: 'alice', data: { name: 'Alice' } }
 		]);
 		const r = new MultiplayerRoom({
 			me: 'me',
@@ -2293,8 +2613,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 		// The server stamps presence/cursor keys as String(id); an app that names
 		// the local user with a numeric id must still self-exclude.
 		const presence = fakeStore([
-			{ key: '42', name: 'Me' },
-			{ key: 'alice', name: 'Alice' }
+			{ key: '42', data: { name: 'Me' } },
+			{ key: 'alice', data: { name: 'Alice' } }
 		]);
 		const r = new MultiplayerRoom({
 			me: 42,
@@ -2315,8 +2635,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 		// while me reports null so the app can branch on it.
 		await loadShippedRuneModule();
 		const presence = fakeStore([
-			{ key: 'alice', name: 'Alice' },
-			{ key: 'bob', name: 'Bob' }
+			{ key: 'alice', data: { name: 'Alice' } },
+			{ key: 'bob', data: { name: 'Bob' } }
 		]);
 		const r = new MultiplayerRoom({
 			me: undefined,
@@ -2330,9 +2650,9 @@ describe('MultiplayerRoom roster aggregation', () => {
 		expect(r.others.map((o) => o.key).sort()).toEqual(['alice', 'bob']);
 		// A later push still flows through without a self-exclusion crash.
 		presence.set([
-			{ key: 'alice', name: 'Alice' },
-			{ key: 'bob', name: 'Bob' },
-			{ key: 'carol', name: 'Carol' }
+			{ key: 'alice', data: { name: 'Alice' } },
+			{ key: 'bob', data: { name: 'Bob' } },
+			{ key: 'carol', data: { name: 'Carol' } }
 		]);
 		flushSync();
 		expect(r.others.map((o) => o.key).sort()).toEqual(['alice', 'bob', 'carol']);
@@ -2342,8 +2662,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 	it('dedups others and cursors by user key, keeping the latest entry', async () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([
-			{ key: 'alice', name: 'Old' },
-			{ key: 'alice', name: 'New' }
+			{ key: 'alice', data: { name: 'Old' } },
+			{ key: 'alice', data: { name: 'New' } }
 		]);
 		const cursors = fakeStore([
 			{ key: 'alice', x: 1, y: 1 },
@@ -2358,7 +2678,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		});
 
 		expect(r.others).toHaveLength(1);
-		expect(r.others[0].name).toBe('New');
+		expect(r.others[0].data.name).toBe('New');
 		expect(r.cursors).toHaveLength(1);
 		expect(r.cursors[0].x).toBe(2);
 		r.destroy();
@@ -2373,7 +2693,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		// presence, empty-store cursors.
 		await loadShippedRuneModule();
 		const emptyStore = { subscribe: (fn) => { fn([]); return () => {}; } };
-		const presence = fakeStore([{ key: 'alice', name: 'Alice' }]);
+		const presence = fakeStore([{ key: 'alice', data: { name: 'Alice' } }]);
 		const r = new MultiplayerRoom({
 			me: 'me',
 			presence,
@@ -2386,8 +2706,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 		expect(r.others.map((o) => o.key)).toEqual(['alice']);
 		// A push on the real presence store still flows through the survivor.
 		presence.set([
-			{ key: 'alice', name: 'Alice' },
-			{ key: 'bob', name: 'Bob' }
+			{ key: 'alice', data: { name: 'Alice' } },
+			{ key: 'bob', data: { name: 'Bob' } }
 		]);
 		flushSync();
 		expect(r.others.map((o) => o.key).sort()).toEqual(['alice', 'bob']);
@@ -2397,7 +2717,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 
 	it('stamps a deterministic color on others, matching the shipped colorForKey', async () => {
 		await loadShippedRuneModule();
-		const presence = fakeStore([{ key: 'alice' }, { key: 'bob' }]);
+		const presence = fakeStore([{ key: 'alice', data: {} }, { key: 'bob', data: {} }]);
 		const r = new MultiplayerRoom({
 			me: 'me',
 			presence,
@@ -2449,8 +2769,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 		await loadShippedRuneModule();
 		const meSource = localKeySource();
 		const presence = fakeStore([
-			{ key: 'me', name: 'Me' },
-			{ key: 'alice', name: 'Alice' }
+			{ key: 'me', data: { name: 'Me' } },
+			{ key: 'alice', data: { name: 'Alice' } }
 		]);
 		const r = new MultiplayerRoom({
 			me: meSource,
@@ -2545,6 +2865,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		});
 		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
 		const alice = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform, publish: () => {} };
+		joinAs('board:b1', 'alice');
 		await room.__presenceUpdate(alice, 'b1', { 'lock:title': true });
 		await room.__presenceUpdate(alice, 'b1', { selection: { start: 0, end: 5 } });
 
@@ -2572,7 +2893,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const membership = countingStore([{ key: 'card-1', title: 'not a person' }]);
 		const r = new MultiplayerRoom({
 			me: 'me',
-			presence: fakeStore([{ key: 'alice' }]),
+			presence: fakeStore([{ key: 'alice', data: {} }]),
 			cursors: fakeStore([]),
 			status: fakeStore('connected'),
 			membership,
@@ -2633,7 +2954,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 	it('a room built outside Svelte reactivity stays joined across readers until destroy()', async () => {
 		const probe = await loadOwnerProbe();
 		const membership = countingStore([]);
-		const presence = countingStore([{ key: 'alice' }]);
+		const presence = countingStore([{ key: 'alice', data: {} }]);
 		const room = new MultiplayerRoom({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('connected'), membership });
 		const unread = probe.read(room);
 		expect(room.others.map((o) => o.key)).toEqual(['alice']);
@@ -2681,7 +3002,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			if (!members.has(id)) members.set(id, []);
 			members.get(id).push(membership);
 			const record = (d) => { sent.push([id, d]); };
-			return { presence: fakeStore([{ key: 'in-' + id }]), cursors: fakeStore([]), membership, setTyping: record, move: record, acquireLock: record, releaseLock: record };
+			return { presence: fakeStore([{ key: 'in-' + id, data: {} }]), cursors: fakeStore([]), membership, setTyping: record, move: record, acquireLock: record, releaseLock: record };
 		};
 		const counts = (id) => (members.get(id) || []).reduce((a, m) => [a[0] + m.subscribed, a[1] + m.released], [0, 0]);
 		return { deps: { me: 'me', status: fakeStore('connected'), bind }, counts, sent, binds };
@@ -2742,6 +3063,315 @@ describe('MultiplayerRoom roster aggregation', () => {
 		expect(sent).toEqual([['b', { typing: false }], ['b', { typing: false }]]);
 		expect(counts('a')).toEqual([1, 1]);
 		expect(counts('b')).toEqual([1, 1]);
+	});
+
+	/**
+	 * Per-room deps whose data store joins the way a stream store does: the
+	 * first subscribe puts its phase in 'attaching' until the test answers it,
+	 * and the last release detaches it. Every send is recorded with its room
+	 * and method, and returns an ack.
+	 */
+	function joiningRooms() {
+		const stores = new Map();
+		const sent = [];
+		const storeFor = (id) => {
+			let s = stores.get(id);
+			if (!s) {
+				const phase = fakeStore('initialized');
+				let subs = 0;
+				let leaving = false;
+				s = {
+					phase,
+					subscribe(fn) {
+						// A resubscribe in the same microtask keeps the subscription.
+						if (subs++ === 0) {
+							if (leaving) leaving = false;
+							else phase.set('attaching');
+						}
+						fn([]);
+						// The release lands a microtask after the last unsubscribe.
+						return () => {
+							if (--subs !== 0) return;
+							leaving = true;
+							Promise.resolve().then(() => { if (leaving) { leaving = false; phase.set('detached'); } });
+						};
+					}
+				};
+				stores.set(id, s);
+			}
+			return s;
+		};
+		const roomDeps = (id) => {
+			const record = (name) => (...a) => { sent.push([id, name, ...a]); return name + '-ack'; };
+			return {
+				presence: fakeStore([]), cursors: fakeStore([]), membership: storeFor(id),
+				setTyping: record('setTyping'), acquireLock: record('acquireLock'), releaseLock: record('releaseLock'),
+				setSelection: record('setSelection'), move: record('move'), reportViewport: record('reportViewport'), react: record('react')
+			};
+		};
+		const answer = (id, phase = 'attached') => storeFor(id).phase.set(phase);
+		const fixed = { me: 'me', status: fakeStore('connected') };
+		return { deps: { ...fixed, bind: ([id]) => roomDeps(id) }, room: (id) => ({ ...fixed, ...roomDeps(id) }), sent, answer };
+	}
+
+	it('the README lock effect: the lock it takes on mount and after a switch waits for each join', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent, answer } = joiningRooms();
+		const view = probe.lockEffect(deps, 'a');
+		// Sent now, the lock would reach the server ahead of the join and be dropped.
+		expect(sent).toEqual([]);
+		answer('a');
+		expect(sent).toEqual([['a', 'acquireLock', { 'lock:title': true }]]);
+
+		sent.length = 0;
+		view.setId('b');
+		// The release reaches the room the lock was taken in at once; the lock in
+		// the next room waits for that room's join.
+		expect(sent).toEqual([['a', 'releaseLock', { 'lock:title': null }]]);
+		answer('b');
+		expect(sent).toEqual([['a', 'releaseLock', { 'lock:title': null }], ['b', 'acquireLock', { 'lock:title': true }]]);
+
+		sent.length = 0;
+		view.stop();
+		expect(sent).toEqual([['b', 'releaseLock', { 'lock:title': null }]]);
+	});
+
+	it('sends held for a join go out once each, the fields through the method that wrote them last, the newest cursor sample and viewport, and every reaction', async () => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const r = new MultiplayerRoom(room('a'));
+		const take = r.acquireLock('title');
+		r.setTyping(true);
+		r.setSelection({ start: 0, end: 1 });
+		const release = r.releaseLock('title');
+		r.setTyping(false);
+		r.move({ x: 1 });
+		const moved = r.move({ x: 2 });
+		r.reportViewport({ w: 1 });
+		r.react('heart');
+		r.react('wave', { x: 1 });
+		expect(sent).toEqual([]);
+
+		answer('a');
+		// Last write wins per field: the lock went out as its release, the
+		// typing flag as its last value.
+		expect(sent).toEqual([
+			['a', 'releaseLock', { 'lock:title': null }],
+			['a', 'setTyping', { typing: false }],
+			['a', 'setSelection', { selection: { start: 0, end: 1 } }],
+			['a', 'move', { x: 2 }],
+			['a', 'reportViewport', { w: 1 }],
+			['a', 'react', 'heart'],
+			['a', 'react', 'wave', { x: 1 }]
+		]);
+		// The take was overtaken before anything was sent for it.
+		await expect(take).resolves.toBe(undefined);
+		await expect(release).resolves.toBe('releaseLock-ack');
+		await expect(moved).resolves.toBe('move-ack');
+
+		// Answered, the room sends straight away.
+		sent.length = 0;
+		expect(r.setTyping(true)).toBe('setTyping-ack');
+		expect(sent).toEqual([['a', 'setTyping', { typing: true }]]);
+		r.destroy();
+	});
+
+	it('held sends go out however the join settles, and the server decides', async () => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const r = new MultiplayerRoom(room('a'));
+		r.setSelection({ start: 1, end: 2 });
+		const typed = r.setTyping(true);
+		answer('a', 'failed');
+		expect(sent).toEqual([['a', 'setSelection', { selection: { start: 1, end: 2 } }], ['a', 'setTyping', { typing: true }]]);
+		await expect(typed).resolves.toBe('setTyping-ack');
+		r.destroy();
+
+		sent.length = 0;
+		const s = new MultiplayerRoom(room('b'));
+		s.acquireLock('title');
+		answer('b', 'detached');
+		expect(sent).toEqual([['b', 'acquireLock', { 'lock:title': true }]]);
+		s.destroy();
+	});
+
+	it('a room built by hand keeps each field on its own method, and a held fire-and-forget failure is handled', async () => {
+		await loadShippedRuneModule();
+		const { room, answer } = joiningRooms();
+		const calls = [];
+		const unhandled = [];
+		const onUnhandled = (e) => unhandled.push(e);
+		process.on('unhandledRejection', onUnhandled);
+		try {
+			const r = new MultiplayerRoom({
+				...room('h'),
+				setTyping: (d) => { calls.push(['typing', d]); return Promise.resolve('t'); },
+				acquireLock: (d) => { calls.push(['lock', d]); return Promise.resolve('l'); },
+				setSelection: (d) => { calls.push(['selection', d]); return Promise.reject(new Error('offline')); },
+				react: (token) => { calls.push(['react', token]); if (token === 'boom') throw new Error('gone'); return Promise.reject(new Error('offline')); }
+			});
+			const typed = r.setTyping(true);
+			const locked = r.acquireLock('title');
+			r.setSelection({ start: 0, end: 1 });
+			r.react('heart');
+			r.react('boom');
+			r.react('wave');
+			expect(calls).toEqual([]);
+			answer('h');
+			// A reaction that fails, by throwing or rejecting, stops none of the rest.
+			expect(calls).toEqual([
+				['typing', { typing: true }],
+				['lock', { 'lock:title': true }],
+				['selection', { selection: { start: 0, end: 1 } }],
+				['react', 'heart'],
+				['react', 'boom'],
+				['react', 'wave']
+			]);
+			await expect(typed).resolves.toBe('t');
+			await expect(locked).resolves.toBe('l');
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(unhandled).toEqual([]);
+			r.destroy();
+		} finally {
+			process.off('unhandledRejection', onUnhandled);
+		}
+	});
+
+	it('views of one room wait together and keep their order; a view destroyed meanwhile still sends what it held', async () => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const layout = new MultiplayerRoom(room('a'));
+		const page = new MultiplayerRoom(room('a'));
+		const modal = new MultiplayerRoom(room('a'));
+		page.acquireLock('title');
+		layout.releaseLock('title');
+		// Sent while the modal lived (a release on close, say), so it still goes
+		// out; destroy() only stops what is sent after it.
+		modal.setTyping(false);
+		modal.react('heart');
+		modal.move({ x: 9 });
+		modal.destroy();
+		modal.setTyping(true);
+		answer('a');
+		expect(sent).toEqual([
+			['a', 'releaseLock', { 'lock:title': null }],
+			['a', 'setTyping', { typing: false }],
+			['a', 'move', { x: 9 }],
+			['a', 'react', 'heart']
+		]);
+		layout.destroy();
+		page.destroy();
+	});
+
+	it('a switch while the first join is in flight: the cleanup\'s release joins the held lock and goes out when that subscribe ends', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent, answer } = joiningRooms();
+		const view = probe.lockEffect(deps, 'a');
+		view.setId('b');
+		expect(sent).toEqual([]);
+		// The view let go of 'a' before its join was answered; the release lands
+		// a microtask later and the held lock and release go out as one release.
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(sent).toEqual([['a', 'releaseLock', { 'lock:title': null }]]);
+		answer('b');
+		expect(sent).toEqual([['a', 'releaseLock', { 'lock:title': null }], ['b', 'acquireLock', { 'lock:title': true }]]);
+		view.stop();
+	});
+
+	it('a send to the room an effect names before the view has moved there waits for that join, and goes out once', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent, answer } = joiningRooms();
+		const view = probe.effectBeforeFollower(deps, 'a');
+		answer('a');
+		view.setId('b');
+		// The follower's subscribe is in flight; nothing goes out ahead of it.
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(sent).toEqual([]);
+		answer('b');
+		expect(sent).toEqual([['b', 'setTyping', { typing: true }]]);
+
+		// Answered in the same task as the switch: still exactly one send.
+		sent.length = 0;
+		view.setId('c');
+		answer('c');
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(sent).toEqual([['c', 'setTyping', { typing: true }]]);
+		view.stop();
+	});
+
+	it('a send to the room an effect names ahead of the view goes out a microtask later when another view already holds that room', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, room, sent, answer } = joiningRooms();
+		const layout = new MultiplayerRoom(room('b'));
+		answer('b');
+		const view = probe.effectBeforeFollower(deps, 'a');
+		answer('a');
+		view.setId('b');
+		expect(sent).toEqual([]);
+		await Promise.resolve();
+		expect(sent).toEqual([['b', 'setTyping', { typing: true }]]);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(sent).toHaveLength(1);
+		view.stop();
+		layout.destroy();
+	});
+
+	it('a send to a room nothing ever subscribes still goes out', async () => {
+		const probe = await loadOwnerProbe();
+		const { deps, sent } = joiningRooms();
+		const view = probe.cleanupBuiltRoom(deps, 'a');
+		expect(sent).toEqual([['a', 'setTyping', { typing: true }]]);
+		sent.length = 0;
+		view.setId('b');
+		expect(sent).toEqual([]);
+		await Promise.resolve();
+		expect(sent).toEqual([['b', 'setTyping', { typing: true }]]);
+		view.stop();
+	});
+
+	it('held fields go out in deltas the server keeps whole, and cursor samples in the order last written', async () => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const r = new MultiplayerRoom(room('a'));
+		let last;
+		for (let i = 0; i < 70; i++) last = r.acquireLock('k' + i);
+		r.move({ x: 1 });
+		r.reportViewport({ w: 800 });
+		r.move({ x: 5 });
+		answer('a');
+		const deltas = sent.filter((s) => s[1] === 'acquireLock').map((s) => Object.keys(s[2]).length);
+		expect(deltas).toEqual([64, 6]);
+		expect(sent.filter((s) => s[1] !== 'acquireLock')).toEqual([['a', 'reportViewport', { w: 800 }], ['a', 'move', { x: 5 }]]);
+		await expect(last).resolves.toBe('acquireLock-ack');
+		r.destroy();
+	});
+
+	it('counts only joined members: an entry without a payload reaches no view until its join lands', async () => {
+		await loadShippedRuneModule();
+		// What the presence merge holds when a member's field update overtakes its
+		// join between instances: an entry with fields and no `data`.
+		const early = { key: 'bob', typing: true, 'lock:title': true, selection: { start: 0, end: 3 } };
+		const presence = fakeStore([{ key: 'alice', data: { name: 'Alice' } }, early]);
+		const r = new MultiplayerRoom({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('connected'), move: () => {} });
+		expect(r.others.map((p) => p.key)).toEqual(['alice']);
+		expect(r.typing).toEqual([]);
+		expect(r.locks).toEqual({});
+		expect(r.selections).toEqual({});
+		// The documented roster template renders every entry.
+		expect(r.others.map((p) => p.data.name)).toEqual(['Alice']);
+
+		// The join lands on the same entry, keeping the fields it already had.
+		presence.set([{ key: 'alice', data: { name: 'Alice' } }, { ...early, data: { name: 'Bob' } }]);
+		flushSync();
+		expect(r.others.map((p) => p.data.name)).toEqual(['Alice', 'Bob']);
+		expect(r.typing).toEqual(['bob']);
+		expect(r.locks).toEqual({ title: 'bob' });
+		expect(r.selections).toEqual({ bob: { start: 0, end: 3 } });
+		r.destroy();
 	});
 
 	it('a getter for a room with several args returns them as an array', async () => {
@@ -3028,7 +3658,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const source = localKeySource();
 		let userId = 'u1';
 		source.set(() => userId);
-		const room = new MultiplayerRoom({ me: source, presence: fakeStore([{ key: 'u1' }, { key: 'u2' }]), cursors: fakeStore([]), status: fakeStore('connected') });
+		const room = new MultiplayerRoom({ me: source, presence: fakeStore([{ key: 'u1', data: {} }, { key: 'u2', data: {} }]), cursors: fakeStore([]), status: fakeStore('connected') });
 		expect(room.me).toBe('u1');
 		expect(room.others.map((o) => o.key)).toEqual(['u2']);
 		userId = 'u2';
@@ -3045,7 +3675,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			const membership = countingStore([]);
 			if (!byId.has(id)) byId.set(id, []);
 			byId.get(id).push(membership);
-			return { me: 'me', presence: fakeStore([{ key: 'in-' + id }]), cursors: fakeStore([]), status: fakeStore('connected'), membership };
+			return { me: 'me', presence: fakeStore([{ key: 'in-' + id, data: {} }]), cursors: fakeStore([]), status: fakeStore('connected'), membership };
 		};
 		// [subscribed, released] summed over every room built for the id.
 		const counts = (id) => (byId.get(id) || []).reduce((a, m) => [a[0] + m.subscribed, a[1] + m.released], [0, 0]);
@@ -3143,9 +3773,9 @@ describe('MultiplayerRoom roster aggregation', () => {
 	it('projects typing from the presence roster, excluding self and clearing on toggle off', async () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([
-			{ key: 'me', name: 'Me', typing: true },
-			{ key: 'alice', name: 'Alice', typing: true },
-			{ key: 'bob', name: 'Bob' }
+			{ key: 'me', data: { name: 'Me' }, typing: true },
+			{ key: 'alice', data: { name: 'Alice' }, typing: true },
+			{ key: 'bob', data: { name: 'Bob' } }
 		]);
 		const r = new MultiplayerRoom({
 			me: 'me',
@@ -3159,9 +3789,9 @@ describe('MultiplayerRoom roster aggregation', () => {
 		expect(r.typing).toEqual(['alice']);
 
 		presence.set([
-			{ key: 'me', name: 'Me', typing: true },
-			{ key: 'alice', name: 'Alice', typing: false },
-			{ key: 'bob', name: 'Bob', typing: true }
+			{ key: 'me', data: { name: 'Me' }, typing: true },
+			{ key: 'alice', data: { name: 'Alice' }, typing: false },
+			{ key: 'bob', data: { name: 'Bob' }, typing: true }
 		]);
 		flushSync();
 		expect(r.typing).toEqual(['bob']);
@@ -3171,8 +3801,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 	it('projects remote selections keyed by user, excluding self', async () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([
-			{ key: 'me', selection: { start: 0, end: 1 } },
-			{ key: 'alice', selection: { start: 2, end: 5, nodePath: [0] } }
+			{ key: 'me', data: {}, selection: { start: 0, end: 1 } },
+			{ key: 'alice', data: {}, selection: { start: 2, end: 5, nodePath: [0] } }
 		]);
 		const r = new MultiplayerRoom({
 			me: 'me',
@@ -3185,8 +3815,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 		expect(r.selections).toEqual({ alice: { start: 2, end: 5, nodePath: [0] } });
 
 		presence.set([
-			{ key: 'me', selection: { start: 0, end: 1 } },
-			{ key: 'alice', selection: null }
+			{ key: 'me', data: {}, selection: { start: 0, end: 1 } },
+			{ key: 'alice', data: {}, selection: null }
 		]);
 		flushSync();
 		// A cleared selection drops out of the map.
@@ -3240,9 +3870,9 @@ describe('MultiplayerRoom roster aggregation', () => {
 	it('crdt mode: selections resolves remote anchors via the bound doc, dropping unresolvable ones', async () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([
-			{ key: 'me', selection: { field: 'body', a: [0, 1] } },
-			{ key: 'alice', selection: { field: 'body', a: [2, 5] } },
-			{ key: 'bob', selection: { field: 'body', a: [9, 9] } }
+			{ key: 'me', data: {}, selection: { field: 'body', a: [0, 1] } },
+			{ key: 'alice', data: {}, selection: { field: 'body', a: [2, 5] } },
+			{ key: 'bob', data: {}, selection: { field: 'body', a: [9, 9] } }
 		]);
 		// resolveRange maps alice's anchor to offsets but fails bob's (stale / deleted).
 		const doc = {
@@ -3270,8 +3900,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 	it('crdt mode: one corrupt peer anchor drops only that peer, never the whole map', async () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([
-			{ key: 'alice', selection: { field: 'body', a: [2] } },
-			{ key: 'bob', selection: { field: 'body', a: [9] } } // bob's anchor makes resolveRange throw
+			{ key: 'alice', data: {}, selection: { field: 'body', a: [2] } },
+			{ key: 'bob', data: {}, selection: { field: 'body', a: [9] } } // bob's anchor makes resolveRange throw
 		]);
 		const doc = {
 			text: () => ({
@@ -3319,8 +3949,8 @@ describe('MultiplayerRoom roster aggregation', () => {
 	it('derives advisory lock holders from the roster and clears them when a holder leaves', async () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([
-			{ key: 'alice', 'lock:title': true },
-			{ key: 'bob', 'lock:body': true }
+			{ key: 'alice', data: {}, 'lock:title': true },
+			{ key: 'bob', data: {}, 'lock:body': true }
 		]);
 		const r = new MultiplayerRoom({
 			me: 'me',
@@ -3335,14 +3965,14 @@ describe('MultiplayerRoom roster aggregation', () => {
 
 		// Alice releases (field cleared): her lock drops.
 		presence.set([
-			{ key: 'alice', 'lock:title': null },
-			{ key: 'bob', 'lock:body': true }
+			{ key: 'alice', data: {}, 'lock:title': null },
+			{ key: 'bob', data: {}, 'lock:body': true }
 		]);
 		flushSync();
 		expect(r.locks).toEqual({ body: 'bob' });
 
 		// Bob leaves entirely (entry gone): his lock recomputes to absent.
-		presence.set([{ key: 'alice', 'lock:title': null }]);
+		presence.set([{ key: 'alice', data: {}, 'lock:title': null }]);
 		flushSync();
 		expect(r.locks).toEqual({});
 		r.destroy();

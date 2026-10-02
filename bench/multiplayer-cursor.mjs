@@ -11,7 +11,7 @@
 // end-to-end per-call cost so the per-publish path is covered by a number, not
 // an assertion.
 
-import { live, handleRpc, __register } from '../src/server.js';
+import { live, handleRpc, __register, _presenceRefForTest } from '../src/server.js';
 
 const textEncoder = new TextEncoder();
 
@@ -69,6 +69,9 @@ const mp = live.multiplayer({
 	topicArgs: 1
 });
 __register('bench/cursor', /** @type {any} */ (mp).__cursorMove);
+// The sender is a member of the room, as the data-stream subscribe makes it:
+// a room with presence publishes cursor samples from members only.
+_presenceRefForTest().set('room:room1\0u1', { count: 1, timer: null, data: { name: 'u' } });
 
 async function benchCursorMove() {
 	const ws = createMockWs({ id: 'u1' });

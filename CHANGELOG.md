@@ -156,6 +156,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The `svelte-realtime/multiplayer` subpath now needs Svelte 5.7 or later
   (`createSubscriber`).
 
+- **A multiplayer room publishes cursor samples, presence fields and
+  reactions from its members only.** In a `live.multiplayer` room with a
+  `presence` function or `owner: true`, the server now drops a cursor
+  sample, a typing flag, a lock, a selection or a reaction from a
+  connection whose user is not a member of that room on the instance: a
+  `board.watch(...)` view, a namespace `board.move(id, ...)` with nothing
+  holding the room, a view whose user left more than the presence grace
+  window ago. Such a frame reached every client as a roster entry with no
+  presence payload that no leave ever removed, or as a cursor nobody owned,
+  and the `{person.data.name}` roster template threw on the entry.
+  Development builds warn once per process when a send is dropped. A send
+  from a member whose join is still being published waits for the join
+  and goes out after it. A room with neither presence nor an owner has no
+  members and publishes every send. The test harness (`createTestEnv`)
+  registers a multiplayer export's cursor, presence-field and reaction send
+  paths at the paths the generated registry gives them, under the module's
+  `_guard` as there, and its test client now merges a presence `update`
+  frame into the roster the way the browser client does (it ignored them
+  before, so a test reading a presence stream's value sees the fields).
+
+- **A room view's sends wait for its join, and its views count joined
+  members.** A cursor sample, field or reaction sent while the view's join
+  is in flight (including a send to the room an effect names just before
+  the view moves there) would reach the server first and be dropped; the
+  view now holds it and sends it the moment the join is answered: the
+  fields merged (the latest value of each), the newest cursor sample and
+  viewport, and the reactions in order (the latest 64). The lock the
+  README's effect takes with `room.here()` as the page mounts, and again
+  right after a board switch, is no longer lost. Views of one room hold
+  their sends together, and a send held for a view that is destroyed
+  before the join lands still goes out. A member's field update can still
+  overtake its join on the way between instances: the presence merge keeps
+  such fields on an entry of their own, the `join` lands on it instead of
+  replacing it, and `room.others`, `typing`, `locks` and `selections` leave
+  the entry out until then, so every entry they show carries `data`; a
+  `MultiplayerRoom` built by hand over a presence store whose entries have
+  no `data` field shows none of them. A `join` for an entry that has joined
+  still replaces it.
+
 - **A `live.multiplayer()` action can no longer take the name of a
   generated namespace member.** `data`, `presence`, `cursors`, `owner`,
   `status`, `move`, `reportViewport`, `identify`, `room`, `watch`, the field

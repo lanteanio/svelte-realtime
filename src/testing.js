@@ -202,6 +202,13 @@ export async function expectGuardRejects(promise, expectedCode = 'FORBIDDEN') {
 const textEncoder = new TextEncoder();
 
 /**
+ * Presence entries a field update created before the key's join arrived (the
+ * client keeps the same mark per stream).
+ * @type {WeakSet<object>}
+ */
+const _seededEntries = new WeakSet();
+
+/**
  * Apply a single merge event to a value (mirrors client.js _applyMerge).
  * @param {any} current
  * @param {{ event: string, data: any }} envelope
@@ -251,10 +258,28 @@ function _applyTestMerge(current, envelope, merge, key, opts) {
 		const arr = Array.isArray(current) ? [...current] : [];
 		if (event === 'join') {
 			const idx = arr.findIndex(item => item.key === data.key);
-			if (idx >= 0) arr[idx] = data; else arr.push(data);
+			// A join lands on an entry field updates seeded ahead of it, and
+			// replaces any other.
+			if (idx >= 0) arr[idx] = _seededEntries.has(arr[idx]) ? { ...data, ...arr[idx] } : data;
+			else arr.push(data);
 		} else if (event === 'leave') {
 			const idx = arr.findIndex(item => item.key === data.key);
 			if (idx >= 0) arr.splice(idx, 1);
+		} else if (event === 'update') {
+			// A field delta: the changed fields onto the key's entry, the
+			// ordering token left out, or a new entry when the key has none.
+			/** @type {Record<string, any>} */
+			const fields = {};
+			for (const k in data) if (k !== '_p' && k !== '_n') fields[k] = data[k];
+			const idx = arr.findIndex(item => item.key === data.key);
+			if (idx >= 0) {
+				const next = { ...arr[idx], ...fields };
+				if (_seededEntries.has(arr[idx])) _seededEntries.add(next);
+				arr[idx] = next;
+			} else {
+				_seededEntries.add(fields);
+				arr.push(fields);
+			}
 		} else if (event === 'set') return data;
 		return arr;
 	}
@@ -435,6 +460,12 @@ export function createTestEnv(options) {
 				if (fn.__ownerStream) __register(path + '/__owner', fn.__ownerStream);
 				if (fn.__cursorStream) __register(path + '/__cursors', fn.__cursorStream);
 				if (fn.__reactionStream) __register(path + '/__reactions', fn.__reactionStream);
+				// A multiplayer export's send paths, at the paths the generated
+				// registry gives them.
+				if (fn.__cursorMove) __register(path + '/__cursor/move', fn.__cursorMove, moduleName);
+				if (fn.__cursorReportViewport) __register(path + '/__cursor/reportViewport', fn.__cursorReportViewport, moduleName);
+				if (fn.__presenceUpdate) __register(path + '/__presence/update', fn.__presenceUpdate, moduleName);
+				if (fn.__reactionEmit) __register(path + '/__reaction/emit', fn.__reactionEmit, moduleName);
 				if (fn.__roomsStream) __register(path + '/__rooms', fn.__roomsStream);
 				if (fn.__roomsSync) __register(path + '/__roomsSync', fn.__roomsSync);
 				if (typeof fn.__setEnumId === 'function') fn.__setEnumId(path);

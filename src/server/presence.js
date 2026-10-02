@@ -12,7 +12,7 @@ import { safeAssign } from '../shared/safe-assign.js';
  * or inspect a roster entry without driving a full socket subscribe. Not part
  * of the public surface.
  * @internal
- * @returns {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any }>}
+ * @returns {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any, joining?: Promise<void> | null }>}
  */
 export function _presenceRefForTest() {
 	return _presenceRef;

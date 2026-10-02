@@ -86,6 +86,178 @@ function dedupeByUser(list) {
 }
 
 /**
+ * The joined members of a presence roster, deduped by user key. An entry
+ * without `data` has not joined yet: a member's field update can overtake its
+ * join between server instances, and the presence merge holds the fields on an
+ * entry of their own until the join lands on it. Such an entry has no payload
+ * to render, so the roster views count only members with one.
+ *
+ * @param {Array<{ key?: string, data?: any }> | null | undefined} list
+ * @returns {Array<any>}
+ */
+function joinedMembers(list) {
+	const seen = new Map();
+	for (const item of list || []) {
+		if (item && item.key != null && item.data != null) seen.set(item.key, item);
+	}
+	return [...seen.values()];
+}
+
+// A send waits for its room's join. The server publishes a cursor sample, a
+// field or a reaction only from a member, and joining is the room's data
+// stream subscribe, so a send made while that subscribe is in flight (a lock
+// an effect takes on mount or after a room switch, a keystroke before the
+// room has loaded) would reach the server ahead of the join and be dropped.
+// Held sends go out the moment the subscribe settles, whichever way it
+// settles: the fields merged (they are last-write-wins), each through the
+// method that wrote it last, in deltas no larger than the server keeps from
+// one; the newest cursor sample and the newest
+// viewport report, in the order of their last write; and the reactions in
+// order. A held send is one the app made while its room lived, so it goes out
+// even if the room is destroyed meanwhile (a release still clears what was
+// taken), and the server refuses it if its user is no member by then. State is
+// kept per data store, which every view of one room shares, so their sends
+// wait together and keep their order.
+
+const _HELD_REACTIONS_MAX = 64;
+// The most sticky fields the server keeps from one delta.
+const _HELD_DELTA_KEYS = 64;
+
+/**
+ * Per data store: its attach phase, kept current by one subscription that
+ * lives as long as the store, and the sends waiting for its join.
+ * @type {WeakMap<object, { phase: string | null, hold: JoinHold | null }>}
+ */
+const _joins = new WeakMap();
+
+/** @param {any} store */
+function _joinOf(store) {
+	let j = _joins.get(store);
+	if (j === undefined) {
+		const state = { phase: /** @type {string | null} */ (null), hold: /** @type {JoinHold | null} */ (null) };
+		j = state;
+		_joins.set(store, j);
+		const phase = store.phase;
+		if (phase && typeof phase.subscribe === 'function') {
+			phase.subscribe((/** @type {string} */ p) => {
+				state.phase = p;
+				if (p === 'attaching' || state.hold === null) return;
+				const hold = state.hold;
+				state.hold = null;
+				hold.flush();
+			});
+		}
+	}
+	return j;
+}
+
+/**
+ * Run a held send and settle its callers' promises with what it returns. A
+ * fire-and-forget caller got nothing back to catch a failure with, so a
+ * rejection with no one waiting is handled here.
+ * @param {Array<{ resolve: (v: any) => void, reject: (e: any) => void }>} waiters
+ * @param {() => any} run
+ */
+function _settle(waiters, run) {
+	let result;
+	try {
+		result = run();
+	} catch (e) {
+		for (const w of waiters) w.reject(e);
+		return;
+	}
+	if (waiters.length === 0) {
+		if (result && typeof result.then === 'function') result.then(undefined, () => {});
+		return;
+	}
+	for (const w of waiters) Promise.resolve(result).then(w.resolve, w.reject);
+}
+
+class JoinHold {
+	/** @type {Map<string, { value: any, send: Function }> | null} */
+	fields = null;
+	/** Callers of awaitable field sends, by the method they called. @type {Map<Function, Array<{ resolve: (v: any) => void, reject: (e: any) => void }>>} */
+	fieldWaiters = new Map();
+	/** @type {Map<string, { send: Function, args: any[], waiters: any[] }>} */
+	cursor = new Map();
+	/** @type {Array<{ send: Function, args: any[] }>} */
+	reactions = [];
+
+	/**
+	 * @param {string} name the send method
+	 * @param {Function} send
+	 * @param {any[]} args
+	 */
+	add(name, send, args) {
+		if (name === 'move' || name === 'reportViewport') {
+			const prev = this.cursor.get(name);
+			const waiters = prev ? prev.waiters : [];
+			// Moved to the end: a pointer sample and a viewport report land on
+			// the same cursor entry, so the one written last goes out last.
+			this.cursor.delete(name);
+			this.cursor.set(name, { send, args, waiters });
+			return new Promise((resolve, reject) => { waiters.push({ resolve, reject }); });
+		}
+		if (name === 'react') {
+			if (this.reactions.length >= _HELD_REACTIONS_MAX) this.reactions.shift();
+			this.reactions.push({ send, args });
+			return undefined;
+		}
+		const delta = args[0];
+		const fields = (this.fields ??= new Map());
+		for (const k of Object.keys(delta)) fields.set(k, { value: delta[k], send });
+		// A selection drag is fire-and-forget; the other fields answer their
+		// caller once their method has sent.
+		if (name === 'setSelection') return undefined;
+		let waiters = this.fieldWaiters.get(send);
+		if (!waiters) this.fieldWaiters.set(send, (waiters = []));
+		return new Promise((resolve, reject) => { /** @type {any[]} */ (waiters).push({ resolve, reject }); });
+	}
+
+	flush() {
+		const fields = this.fields;
+		if (fields !== null) {
+			// Each key goes out once, through the method that wrote it last: a
+			// generated room sends every field to one place, a room built by hand
+			// may give each its own.
+			/** @type {Map<Function, string[]>} */
+			const byMethod = new Map();
+			for (const [k, f] of fields) {
+				const method = f.send;
+				const keys = byMethod.get(method);
+				if (keys) keys.push(k);
+				else byMethod.set(method, [k]);
+			}
+			for (const [send, keys] of byMethod) {
+				_settle(this.fieldWaiters.get(send) || [], () => {
+					/** @type {any[]} */
+					const results = [];
+					for (let i = 0; i < keys.length; i += _HELD_DELTA_KEYS) {
+						/** @type {Record<string, any>} */
+						const delta = {};
+						for (const k of keys.slice(i, i + _HELD_DELTA_KEYS)) delta[k] = /** @type {any} */ (fields.get(k)).value;
+						try {
+							results.push(send(delta));
+						} catch (e) {
+							// The callers get this error; what already went out is
+							// answered to no one.
+							for (const r of results) if (r && typeof r.then === 'function') r.then(undefined, () => {});
+							throw e;
+						}
+					}
+					return results.length === 1 ? results[0] : Promise.all(results).then((r) => r[r.length - 1]);
+				});
+				this.fieldWaiters.delete(send);
+			}
+			// A caller whose every key a later write through another method took over.
+			for (const waiters of this.fieldWaiters.values()) _settle(waiters, () => undefined);
+		}
+		for (const c of this.cursor.values()) _settle(c.waiters, () => c.send(...c.args));
+		for (const r of this.reactions) _settle([], () => r.send(...r.args));
+	}
+}
+
+/**
  * Live roster aggregation for a `live.multiplayer()` room. Composes the
  * generated presence / cursor / status stores into the public surface an app
  * renders: `others` (the presence roster, deduped by user key, each entry
@@ -334,8 +506,11 @@ export class MultiplayerRoom {
 		return me != null && this.#owner != null && me === this.#owner;
 	}
 
+	// Every roster view reads the joined members only (see joinedMembers).
+	#members = $derived(joinedMembers(this.#presence));
+
 	#othersDerived = $derived(
-		dedupeByUser(this.#presence)
+		this.#members
 			.filter((p) => this.me == null || p.key !== this.me)
 			.map((p) => ({ ...p, color: colorForKey(p.key) }))
 	);
@@ -354,7 +529,7 @@ export class MultiplayerRoom {
 
 	// The keys of remote collaborators currently flagged as typing.
 	#typingDerived = $derived(
-		dedupeByUser(this.#presence)
+		this.#members
 			.filter((p) => p.typing === true && (this.me == null || p.key !== this.me))
 			.map((p) => p.key)
 	);
@@ -365,7 +540,7 @@ export class MultiplayerRoom {
 	// entry's own user key. This collapses the roster into a { lockKey: holder }
 	// map. A holder leaving drops its entry, so its locks recompute to absent on
 	// the next push - no stale grant survives.
-	#locksDerived = $derived(this.#deriveLocks(this.#presence));
+	#locksDerived = $derived(this.#deriveLocks(this.#members));
 	get locks() { if (!this.#held) this.#track(); return this.#locksDerived; }
 
 	// Remote selections, keyed by user. Self is excluded so an app renders only
@@ -375,12 +550,12 @@ export class MultiplayerRoom {
 	// reactively, so a selection re-resolves onto the right characters as the document
 	// is edited. A crdt entry that cannot resolve (no bound doc, deleted container,
 	// stale anchor) is dropped rather than rendered wrong.
-	#selectionsDerived = $derived(this.#deriveSelections(this.#presence));
+	#selectionsDerived = $derived(this.#deriveSelections(this.#members));
 	get selections() { if (!this.#held) this.#track(); return this.#selectionsDerived; }
 
-	/** @param {Array<Record<string, any>>} roster */
-	#deriveSelections(roster) {
-		const entries = dedupeByUser(roster).filter(
+	/** @param {Array<Record<string, any>>} members */
+	#deriveSelections(members) {
+		const entries = members.filter(
 			(p) => p.selection != null && (this.me == null || p.key !== this.me)
 		);
 		if (this.#selectionMode !== 'crdt') {
@@ -411,10 +586,10 @@ export class MultiplayerRoom {
 	// taps, so an app renders the current window and lets entries fall off.
 	get reactions() { if (!this.#held) this.#track(); return this.#reactions; }
 
-	/** @param {Array<Record<string, any>>} roster */
-	#deriveLocks(roster) {
+	/** @param {Array<Record<string, any>>} members */
+	#deriveLocks(members) {
 		const out = /** @type {Record<string, any>} */ ({});
-		for (const entry of dedupeByUser(roster)) {
+		for (const entry of members) {
 			for (const field in entry) {
 				if (field.startsWith('lock:') && entry[field] != null && entry[field] !== false) {
 					out[field.slice(5)] = entry.key;
@@ -468,23 +643,51 @@ export class MultiplayerRoom {
 		return name === 'reportViewport' ? (b.reportViewport || b.move) : b[name];
 	}
 
+	// Send now, or, while the binding's join is in flight, once it settles
+	// (see JoinHold). A binding with no data stream has no join to wait for.
+	/** @param {any} b @param {string} name @param {Function} send @param {any[]} args */
+	#out(b, name, send, args) {
+		const m = b.membership;
+		if (!m) return send(...args);
+		const join = _joinOf(m);
+		if (join.hold === null) {
+			if (join.phase !== 'attaching') {
+				// The room an effect names before the view has moved there: the view
+				// subscribes its data stream later in this same flush, so the send
+				// waits for that join as well. Should nothing subscribe it, what was
+				// held goes out a microtask later.
+				if (join.phase === null || this.#ahead === null || b !== this.#ahead.bound) return send(...args);
+				const hold = new JoinHold();
+				Promise.resolve().then(() => {
+					if (join.hold !== hold || join.phase === 'attaching') return;
+					join.hold = null;
+					hold.flush();
+				});
+				join.hold = hold;
+			} else {
+				join.hold = new JoinHold();
+			}
+		}
+		return join.hold.add(name, send, args);
+	}
+
 	/** @param {any} b @param {'move' | 'reportViewport'} name @param {any[]} args */
 	#cursor(b, name, args) {
 		const send = this.#path(b, name);
-		return send ? send(...args) : this.#noSend(name);
+		return send ? this.#out(b, name, send, args) : this.#noSend(name);
 	}
 
 	/** @param {any} b @param {any} on */
 	#typing(b, on) {
 		const send = this.#path(b, 'setTyping');
-		return send ? send({ typing: !!on }) : this.#noSend('setTyping');
+		return send ? this.#out(b, 'setTyping', send, [{ typing: !!on }]) : this.#noSend('setTyping');
 	}
 
 	/** @param {any} b @param {any} selection */
 	#selection(b, selection) {
 		const send = this.#path(b, 'setSelection');
 		if (!send) return this.#noSend('setSelection');
-		if (selection == null) return send({ selection: null });
+		if (selection == null) return this.#out(b, 'setSelection', send, [{ selection: null }]);
 		if (this.#selectionMode === 'crdt') {
 			const doc = this.#boundDoc;
 			const field = selection.field;
@@ -498,9 +701,9 @@ export class MultiplayerRoom {
 				return undefined;
 			}
 			const bytes = t.anchorRange(selection.start, selection.end);
-			return send({ selection: { field, a: Array.from(bytes) } });
+			return this.#out(b, 'setSelection', send, [{ selection: { field, a: Array.from(bytes) } }]);
 		}
-		return send({ selection });
+		return this.#out(b, 'setSelection', send, [{ selection }]);
 	}
 
 	/** @param {any} b @param {'acquireLock' | 'releaseLock'} name @param {any} lockKey */
@@ -508,14 +711,14 @@ export class MultiplayerRoom {
 		const send = this.#path(b, name);
 		if (!send) return this.#noSend(name);
 		if (lockKey == null) return undefined;
-		return send({ ['lock:' + lockKey]: name === 'acquireLock' ? true : null });
+		return this.#out(b, name, send, [{ ['lock:' + lockKey]: name === 'acquireLock' ? true : null }]);
 	}
 
 	/** @param {any} b @param {any} token @param {any} at */
 	#reaction(b, token, at) {
 		const send = this.#path(b, 'react');
 		if (!send) return this.#noSend('react');
-		return at !== undefined ? send(token, at) : send(token);
+		return this.#out(b, 'react', send, at !== undefined ? [token, at] : [token]);
 	}
 
 	// The send methods bound to the room the view names now. Take them in an
@@ -575,7 +778,8 @@ export class MultiplayerRoom {
 
 	// Release this view's streams now, whoever else holds the view, and stay
 	// inert: no later reader subscribes again and the send methods become
-	// no-ops, so a destroyed room never publishes onto a roster it has left.
+	// no-ops. A send made before, still waiting for the join, goes out when the
+	// join settles, and the server drops it if the user is no member by then.
 	destroy() {
 		this.#destroyed = true;
 		this.#pinned = false;

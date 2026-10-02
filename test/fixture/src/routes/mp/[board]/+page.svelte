@@ -7,7 +7,8 @@
 	// the view can exclude self.
 	board.identify(() => page.url.searchParams.get('me'));
 	const watching = page.url.searchParams.get('mode') === 'watch';
-	let locking = $state(false);
+	// ?lock=on takes the lock as the page mounts, before its join is answered.
+	let locking = $state(page.url.searchParams.get('lock') === 'on');
 
 	// One view for the page, following the board in the URL: navigating to
 	// another board leaves this one and joins the next.
@@ -24,7 +25,6 @@
 
 	// An effect that only sends: on a board switch its cleanup releases the
 	// lock on the board being left, and its body takes it on the next one.
-	// The spec turns it on once the page has joined.
 	$effect(() => {
 		if (!locking) return;
 		// @ts-ignore -- only a room(...) view sends

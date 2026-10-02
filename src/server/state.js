@@ -275,9 +275,30 @@ export const _lazyQueue = [];
  *    dev path). Production wires a cluster-aware `platform.presence` and
  *    bypasses this fallback. Memory: bounded by `MAX_PRESENCE_REF`; entries
  *    are dropped on the grace-timer expiry or under cap eviction.
- * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any }>}
+ *  - `joining`: while the member's join is being published, a promise that
+ *    settles once it is out; null after.
+ *  - `gone`: set when the entry leaves the map, by whichever path removes it,
+ *    so a cached membership answer (room.js) knows it is stale without a
+ *    lookup. Re-inserting the same entry clears it.
+ * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any, joining?: Promise<void> | null, gone?: boolean }>}
  */
-export const _presenceRef = new Map();
+export const _presenceRef = new (class PresenceRefs extends Map {
+	set(key, ref) {
+		const prev = super.get(key);
+		if (prev && prev !== ref) prev.gone = true;
+		if (ref) ref.gone = false;
+		return super.set(key, ref);
+	}
+	delete(key) {
+		const ref = super.get(key);
+		if (ref) ref.gone = true;
+		return super.delete(key);
+	}
+	clear() {
+		for (const ref of super.values()) if (ref) ref.gone = true;
+		super.clear();
+	}
+})();
 
 /** @type {Map<Function, object>} O(1) lookup from fn reference to dynamic derived registry entry */
 export const _dynamicDerivedByFn = new Map();

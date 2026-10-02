@@ -82,9 +82,22 @@ function _warnStickyDrop(reason, detail) {
 	);
 }
 
-/** Test seam: forget which sticky-drop warnings have fired. */
+/** Test seam: forget which sticky-drop and non-member warnings have fired. */
 export function _resetStickyDropWarnings() {
 	_stickyDropWarned.clear();
+	_notMemberWarned = false;
+}
+
+let _notMemberWarned = false;
+
+function _warnNotMember() {
+	if (!_IS_DEV || _notMemberWarned) return;
+	_notMemberWarned = true;
+	console.warn(
+		'[svelte-realtime] live.multiplayer(): dropping a cursor sample, presence field or reaction from a connection that is not a member of the room.\n' +
+		'  A connection joins by holding the room data stream: board.room(...) does, board.watch(...) does not, and a member is gone once the presence grace window after its last view has passed. This warning fires once per process.\n' +
+		'  See: https://svti.me/multiplayer'
+	);
 }
 
 // Cursor samples and presence-field deltas cross a relay with no ordering
@@ -227,14 +240,14 @@ export const _multiplayerRegister = function multiplayer(config) {
 
 	/**
 	 * @param {any} ctx
+	 * @param {string} topic the room's topic
+	 * @param {string} key the caller's identity key
 	 * @param {any[]} args
 	 * @param {Record<string, any>} extra
 	 */
-	const _publishCursor = (ctx, args, extra) => {
-		const roomArgs = args.slice(0, _cursorArgCount);
+	const _publishCursor = (ctx, topic, key, args, extra) => {
 		const payload = args.slice(_cursorArgCount);
-		const cursorTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':cursors';
-		const key = _getIdentityKey(ctx);
+		const cursorTopic = topic + ':cursors';
 		const frame = { key, ...extra };
 		const cur = payload[0];
 		if (cur && typeof cur === 'object' && !Array.isArray(cur)) {
@@ -251,14 +264,44 @@ export const _multiplayerRegister = function multiplayer(config) {
 		ctx.publish(cursorTopic, 'update', frame);
 	};
 
+	// A cursor sample, a field update or a reaction is published under the
+	// caller's roster key, so in a room that tracks membership (a presence
+	// function or an owner) only a member may send one. Anyone else's frame -
+	// from a connection that never joined, a watch() view, a view sending
+	// after its user left - would put a key on every client that no leave ever
+	// removes. Dropped silently, like a refused sticky field. Sync unless the
+	// caller's own join is still being published.
+	const _isMember = /** @type {any} */ (roomExport).__isMember || null;
+	/**
+	 * @param {any} ctx
+	 * @param {string} topic the room's topic
+	 * @param {string} key the caller's identity key
+	 * @returns {boolean | Promise<boolean>}
+	 */
+	const _mayPublish = (ctx, topic, key) => {
+		if (_isMember === null) return true;
+		const member = _isMember(ctx.tenantId ?? null, topic, key, ctx.ws);
+		if (member === true) return true;
+		if (member === false) { _warnNotMember(); return false; }
+		return member.then((ok) => { if (!ok) _warnNotMember(); return ok; });
+	};
+
 	const _cursorGuard = config.guard;
 	/** @type {any} */ (roomExport).__cursorMove = live.volatile(async (ctx, ...args) => {
 		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
-		_publishCursor(ctx, args, {});
+		const topic = _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount));
+		const key = _getIdentityKey(ctx);
+		const ok = _mayPublish(ctx, topic, key);
+		if (ok !== true && !(await ok)) return;
+		_publishCursor(ctx, topic, key, args, {});
 	});
 	/** @type {any} */ (roomExport).__cursorReportViewport = live.volatile(async (ctx, ...args) => {
 		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
-		_publishCursor(ctx, args, { viewport: true });
+		const topic = _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount));
+		const key = _getIdentityKey(ctx);
+		const ok = _mayPublish(ctx, topic, key);
+		if (ok !== true && !(await ok)) return;
+		_publishCursor(ctx, topic, key, args, { viewport: true });
 	});
 
 	// Presence-field send path. The typing / selection / lock surfaces are
@@ -277,15 +320,15 @@ export const _multiplayerRegister = function multiplayer(config) {
 	// derived holders recompute. This is awareness, not mutual exclusion.
 	/**
 	 * @param {any} ctx
+	 * @param {string} topic the room's topic
+	 * @param {string} key the caller's identity key
 	 * @param {any[]} args
 	 * @param {Set<string> | null} withheld selection / lock fields the roster
 	 *   refused; they are not sent either (see `__presenceUpdate`)
 	 */
-	const _publishPresenceField = (ctx, args, withheld) => {
-		const roomArgs = args.slice(0, _cursorArgCount);
+	const _publishPresenceField = (ctx, topic, key, args, withheld) => {
 		const delta = args[_cursorArgCount];
-		const presenceTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':presence';
-		const key = _getIdentityKey(ctx);
+		const presenceTopic = topic + ':presence';
 		const frame = { key };
 		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
 			safeAssign(frame, delta);
@@ -311,6 +354,10 @@ export const _multiplayerRegister = function multiplayer(config) {
 
 	/** @type {any} */ (roomExport).__presenceUpdate = live.volatile(async (ctx, ...args) => {
 		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
+		const topic = _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount));
+		const key = _getIdentityKey(ctx);
+		const ok = _mayPublish(ctx, topic, key);
+		if (ok !== true && !(await ok)) return;
 		// Decide once per field what the roster keeps. selection (when selections
 		// are enabled) and declared lock:<k> keys (when locks are enabled) are
 		// sticky; typing and everything else stay ephemeral and always go out. A
@@ -364,15 +411,15 @@ export const _multiplayerRegister = function multiplayer(config) {
 		}
 		// Persist after the forward publish, so the live frame and the roster
 		// write keep the order the ordering token gives them.
-		_publishPresenceField(ctx, args, withheld);
+		_publishPresenceField(ctx, topic, key, args, withheld);
 		if (persist) {
 			// The roster store is keyed by the WIRE data topic (the data-stream's
 			// onSubscribe acquired it tenant-prefixed); prefix here too so the sticky
 			// field lands on the same entry. The forward `:presence` publish above
 			// uses ctx.publish (logical -> the scoped wrapper prefixes it once), so
 			// only the roster key needs the explicit prefix. Null tenant -> unchanged.
-			const dataTopic = _tenantTopic(ctx.tenantId, _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount)));
-			await _clusterPresenceMerge(ctx.platform, dataTopic, _getIdentityKey(ctx), sticky);
+			const dataTopic = _tenantTopic(ctx.tenantId, topic);
+			await _clusterPresenceMerge(ctx.platform, dataTopic, key, sticky);
 		}
 	});
 
@@ -383,13 +430,13 @@ export const _multiplayerRegister = function multiplayer(config) {
 	// roster. ctx.publish never coalesces, so a burst of taps all arrive.
 	/**
 	 * @param {any} ctx
+	 * @param {string} topic the room's topic
+	 * @param {string} key the caller's identity key
 	 * @param {any[]} args
 	 */
-	const _publishReaction = (ctx, args) => {
-		const roomArgs = args.slice(0, _cursorArgCount);
+	const _publishReaction = (ctx, topic, key, args) => {
 		const payload = args.slice(_cursorArgCount);
-		const reactionTopic = _callTopicFn(topicFn, ctx, roomArgs) + ':reactions';
-		const key = _getIdentityKey(ctx);
+		const reactionTopic = topic + ':reactions';
 		const frame = { key, token: payload[0] };
 		const at = payload[1];
 		if (at && typeof at === 'object' && !Array.isArray(at)) {
@@ -402,7 +449,11 @@ export const _multiplayerRegister = function multiplayer(config) {
 
 	/** @type {any} */ (roomExport).__reactionEmit = live.volatile(async (ctx, ...args) => {
 		if (_cursorGuard) await _cursorGuard(ctx, ...args.slice(0, _cursorArgCount));
-		_publishReaction(ctx, args);
+		const topic = _callTopicFn(topicFn, ctx, args.slice(0, _cursorArgCount));
+		const key = _getIdentityKey(ctx);
+		const ok = _mayPublish(ctx, topic, key);
+		if (ok !== true && !(await ok)) return;
+		_publishReaction(ctx, topic, key, args);
 	});
 
 	// Reactions sub-stream: a bounded append-only ring (merge 'latest') on the

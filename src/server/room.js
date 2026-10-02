@@ -430,7 +430,7 @@ export const _roomRegister = function room(config) {
 						state.presenceRefWarnFired = true;
 						console.warn(
 							"[svelte-realtime] presence-ref map reached MAX_PRESENCE_REF=" + state.maxPresenceRef +
-							"; new joiners will not appear in any subscriber's roster until existing entries clear.\n" +
+							"; new joiners will not appear in any subscriber's roster, and their cursor samples, presence fields and reactions are not published, until existing entries clear.\n" +
 							"  For multi-instance deploys, wire `platform.redis` (raw ioredis client) so the cluster-shared Redis presence is bypasses the in-memory cap.\n" +
 							"  See: https://svti.me/presence"
 						);
@@ -446,58 +446,68 @@ export const _roomRegister = function room(config) {
 			// the entry drives membership transitions but never appears in a
 			// roster (the presence list skips null data).
 			const presenceData = presenceFn ? presenceFn(ctx) : null;
-			_presenceRef.set(refKey, { count: 1, timer: null, data: presenceData });
-			// Sequence the joiner's OWN roster entry into the paired :presence
-			// subscribe response (see room-owner.js): the batch runs its items in
-			// parallel, so the :presence loader's shared-roster read can beat the
-			// cluster acquire below (an owner room delays it further behind the
-			// owner join's round-trips), and the acquire's live 'join' can hit the
-			// socket before the client registers the :presence store - dropped,
-			// and the joiner never sees itself. Resolved BEFORE the owner join so
-			// the loader never waits on those round-trips.
-			if (presenceData) _presenceClaimResolve(ctx.ws, topic, { key: userId, data: presenceData });
-			// Ownership join runs at the same identity 0->1 transition presence
-			// acquires on, and is independently best-effort: an owner failure
-			// must never suppress the presence join below (and vice versa).
-			if (ownerEnabled) {
-				let ownerValue = null;
-				try {
-					const change = await _ownerOnJoin(ctx.platform, topic, userId, onOwnerChange);
-					if (change) {
-						// Seed the owner replay buffer before the emit so a racing first-joiner
-						// subscribe reads the just-claimed owner from the buffer. Registering the
-						// wire :owner topic here (not only at owner-stream subscribe) closes the
-						// window where the emit would run before that subscribe registered it.
-						// Only when the replay extension is wired; single-process needs neither.
-						if (ctx.platform && ctx.platform.replay) _registerReplayTopic(topic + ':owner');
-						// Fan the change out to EXISTING subscribers (and across the cluster)
-						// via the :owner topic. The FIRST-JOINER's own store, however, is
-						// seeded by the claim barrier below - sequenced into that socket's
-						// :owner subscribe RESPONSE - so it never depends on this emit winning
-						// the race against its own subscribe-ack (an earlier deferred-unicast
-						// attempt did, and lost). A redundant same-value 'set' reaching the
-						// first joiner later is an idempotent merge:'set' no-op.
-						_ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
-						if (change.owner) ownerValue = { key: change.owner, reason: change.reason };
-					}
-				} catch { /* owner is best-effort */ }
-				// Sequence the claimed owner into the paired :owner subscribe response
-				// (see room-owner.js): the loader awaits this. A null value (no claim on
-				// this join, a reconnect, or a throw) makes the loader read the shared
-				// store, so a non-first subscriber still sees the current owner.
-				_ownerClaimResolve(ctx.ws, topic, ownerValue);
-			}
-			// Cluster transition: bump shared count; only the first replica to
-			// reach 1 publishes 'join'. With no platform.redis the helper
-			// returns isFirst=true unconditionally, matching the in-memory path.
-			if (presenceData) {
-				const { isFirst } = await _clusterPresenceAcquire(ctx.platform, topic, userId, presenceData);
-				if (isFirst) {
-					// `topic` is the wire data topic; publish raw (no second prefix).
-					// Shaped like a snapshot entry, so a member reads a joiner's
-					// fields in the same place whichever way the entry arrived.
-					ctx._publishWire(topic + ':presence', 'join', _presenceRosterEntry(userId, presenceData, /** @type {any} */ (roomExport).__isStickyKey));
+			// The member's sends wait on `joining` until the join below is
+			// published (see __isMember): a field update published ahead of it
+			// reaches every client before the entry it belongs to.
+			let joined;
+			const member = { count: 1, timer: null, data: presenceData, joining: /** @type {Promise<void> | null} */ (new Promise((r) => { joined = r; })), gone: false };
+			_presenceRef.set(refKey, member);
+			try {
+				// Sequence the joiner's OWN roster entry into the paired :presence
+				// subscribe response (see room-owner.js): the batch runs its items in
+				// parallel, so the :presence loader's shared-roster read can beat the
+				// cluster acquire below (an owner room delays it further behind the
+				// owner join's round-trips), and the acquire's live 'join' can hit the
+				// socket before the client registers the :presence store - dropped,
+				// and the joiner never sees itself. Resolved BEFORE the owner join so
+				// the loader never waits on those round-trips.
+				if (presenceData) _presenceClaimResolve(ctx.ws, topic, { key: userId, data: presenceData });
+				// Ownership join runs at the same identity 0->1 transition presence
+				// acquires on, and is independently best-effort: an owner failure
+				// must never suppress the presence join below (and vice versa).
+				if (ownerEnabled) {
+					let ownerValue = null;
+					try {
+						const change = await _ownerOnJoin(ctx.platform, topic, userId, onOwnerChange);
+						if (change) {
+							// Seed the owner replay buffer before the emit so a racing first-joiner
+							// subscribe reads the just-claimed owner from the buffer. Registering the
+							// wire :owner topic here (not only at owner-stream subscribe) closes the
+							// window where the emit would run before that subscribe registered it.
+							// Only when the replay extension is wired; single-process needs neither.
+							if (ctx.platform && ctx.platform.replay) _registerReplayTopic(topic + ':owner');
+							// Fan the change out to EXISTING subscribers (and across the cluster)
+							// via the :owner topic. The FIRST-JOINER's own store, however, is
+							// seeded by the claim barrier below - sequenced into that socket's
+							// :owner subscribe RESPONSE - so it never depends on this emit winning
+							// the race against its own subscribe-ack (an earlier deferred-unicast
+							// attempt did, and lost). A redundant same-value 'set' reaching the
+							// first joiner later is an idempotent merge:'set' no-op.
+							_ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
+							if (change.owner) ownerValue = { key: change.owner, reason: change.reason };
+						}
+					} catch { /* owner is best-effort */ }
+					// Sequence the claimed owner into the paired :owner subscribe response
+					// (see room-owner.js): the loader awaits this. A null value (no claim on
+					// this join, a reconnect, or a throw) makes the loader read the shared
+					// store, so a non-first subscriber still sees the current owner.
+					_ownerClaimResolve(ctx.ws, topic, ownerValue);
 				}
+				// Cluster transition: bump shared count; only the first replica to
+				// reach 1 publishes 'join'. With no platform.redis the helper
+				// returns isFirst=true unconditionally, matching the in-memory path.
+				if (presenceData) {
+					const { isFirst } = await _clusterPresenceAcquire(ctx.platform, topic, userId, presenceData);
+					if (isFirst) {
+						// `topic` is the wire data topic; publish raw (no second prefix).
+						// Shaped like a snapshot entry, so a member reads a joiner's
+						// fields in the same place whichever way the entry arrived.
+						ctx._publishWire(topic + ':presence', 'join', _presenceRosterEntry(userId, presenceData, /** @type {any} */ (roomExport).__isStickyKey));
+					}
+				}
+			} finally {
+				member.joining = null;
+				joined();
 			}
 		} : undefined,
 		onUnsubscribe: (presenceFn || isEnumerable || ownerEnabled) ? async (ctx, topic, remainingSubscribers) => {
@@ -570,6 +580,35 @@ export const _roomRegister = function room(config) {
 		}
 		: null;
 	if (roomGuardFilter) /** @type {any} */ (dataStream).__streamFilter = roomGuardFilter;
+
+	// Whether the identity `key` is a member of the room at `topic` (logical,
+	// in `tenantId`'s scope) on this instance: it holds the membership a
+	// data-stream subscribe acquired, or is still inside the presence grace
+	// window after the last one let go. A member whose join is still being
+	// published gets the answer once the join is out, asked again then, since
+	// the entry may have been replaced by a newer one whose own join is
+	// pending. Returns a plain boolean whenever it can, so a send path that
+	// runs per cursor sample pays no await, and remembers a connection's last
+	// yes until its entry leaves the map, so a stream of samples from one
+	// member pays the roster lookup (and the wire key it needs) once. Only a
+	// room that tracks membership has it.
+	if (presenceFn || ownerEnabled) {
+		/** @type {WeakMap<object, { tenantId: string | null, topic: string, key: string, ref: any }>} */
+		const lastYes = new WeakMap();
+		/** @returns {boolean | Promise<boolean>} */
+		const isMember = (/** @type {string | null} */ tenantId, /** @type {string} */ topic, /** @type {string} */ key, /** @type {any} */ ws) => {
+			const hit = ws ? lastYes.get(ws) : undefined;
+			if (hit !== undefined && !hit.ref.gone && hit.topic === topic && hit.tenantId === tenantId && hit.key === key) return true;
+			const ref = _presenceRef.get(_tenantTopic(tenantId, topic) + '\0' + key);
+			if (ref === undefined) return false;
+			if (!ref.joining) {
+				if (ws) lastYes.set(ws, { tenantId, topic, key, ref });
+				return true;
+			}
+			return ref.joining.then(() => isMember(tenantId, topic, key, ws));
+		};
+		/** @type {any} */ (roomExport).__isMember = isMember;
+	}
 
 	/** @type {any} */ (roomExport).__isRoom = true;
 	/** @type {any} */ (roomExport).__dataStream = dataStream;
