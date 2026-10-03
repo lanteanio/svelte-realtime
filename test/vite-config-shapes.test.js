@@ -688,6 +688,7 @@ async function b() {}
 const withDefaults = (config) => config;
 const withAudit = (actions) => actions;
 const save = async (ctx, id) => null;
+async function publish(ctx, id) { return null; }
 export const board = live.room(withDefaults({
   topic: (ctx, id) => 'board:' + id,
   topicArgs: 1,
@@ -696,11 +697,19 @@ export const board = live.room(withDefaults({
   cursors: true,
   actions: withAudit({ save, archive: async (ctx, id) => null })
 }));
+export const posts = live.room({
+  topic: (ctx, id) => 'posts:' + id,
+  topicArgs: 1,
+  init: async () => [],
+  actions: withAudit({ publish, save })
+});
 `);
 		const s = expectAgreement(stub, mod, 'board', runtime.board);
 		expect(s.presence).toBe(true);
 		expect(s.cursors).toBe(true);
 		expect(s.actions).toEqual(['save', 'archive']);
+		// A shorthand naming a function declaration counts as well as a const one.
+		expect(expectAgreement(stub, mod, 'posts', runtime.posts).actions).toEqual(['publish', 'save']);
 	});
 
 	it('reads a regex written on the line after a comment', async () => {
@@ -997,8 +1006,8 @@ export const board = live.room(withCache(cacheOpts));
 		expect(() => { stub = createPlugin().load('\0live:lenient', {}); }).not.toThrow();
 		// The key stays the default; the readable merge mode is still read.
 		expect(stub).toContain('data: __stream("lenient/board/__data", {"merge":"set"}');
-		// An object written in the call - which the plugin always read - one that
-		// declares a topic, in any form, or one that holds a part the build cannot
+		// An object written in the call, one that declares a topic, in any form,
+		// or one that holds a part the build cannot
 		// read may be the config: its template still fails the build.
 		for (const config of [
 			'withCache({ key: `${ENTITY}:x`, merge: \'set\' }, opts)',
@@ -1075,11 +1084,11 @@ export const written = live.room(withRateLimit({ actions: { slow: 1 } }));
 		for (const name of ['board', 'single', 'cast', 'parens', 'spread', 'frozen']) {
 			expect(surface(stub, 'budgets', name).actions).toEqual([]);
 		}
-		// An object written there is read as it always was.
+		// An object written there is read for its `name:` members.
 		expect(surface(stub, 'budgets', 'written').actions).toEqual(['slow']);
 	});
 
-	it('reads actions written in a guessed config the way the plugin always did', async () => {
+	it('reads actions in a guessed config from the object written for them', async () => {
 		const { mod, stub, runtime } = await generate(`
 const withTopic = (p, o) => ({ topic: (ctx, id) => p + ':' + id, topicArgs: 1, ...o });
 const withAudit = (a) => a;
@@ -1128,7 +1137,7 @@ export const stats = live.aggregate('events', { count: { init: () => 0, reduce: 
 `
 		});
 		const stub = createPlugin().load('\0live:deps', {});
-		// \`data: db\` is written out, so it is read as before; the shorthand dependencies are not.
+		// \`data: db\` is written out as a member, so it is read; the shorthand dependencies are not.
 		expect(surface(stub, 'deps', 'cards').actions).toEqual(['data']);
 		expect(stub).not.toContain('__window/');
 	});

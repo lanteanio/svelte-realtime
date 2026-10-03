@@ -956,9 +956,9 @@ function _exactObjectOf(source, resolved, depth, wrappers) {
  * The object a config, its `actions` or its `windows` is set to. What
  * `_exactObject` cannot read - a call with several arguments, a curried or
  * chained call, a conditional, a function's result - is taken as the first
- * object literal written in the expression, the reading such expressions have
- * always had, and marked `guessed`: only its `name: value` and `name()`
- * members count, so a destructuring pattern names no key.
+ * object literal written in the expression and marked `guessed`: only its
+ * `name: value` and `name()` members count, so a destructuring pattern names
+ * no key.
  * @param {string} source
  * @param {string} text
  * @returns {ObjectRead | null}
@@ -988,12 +988,15 @@ function _firstWrittenBody(text) {
 }
 
 /**
- * Does `name` name a module-level const holding a function?
+ * Does `name` name a function at module level: a function declaration, or a
+ * const holding a function?
  * @param {string} source
  * @param {string} name
  * @returns {boolean}
  */
 function _namesFunction(source, name) {
+	const id = name.replace(/\$/g, '\\$');
+	if (new RegExp(`(?:^|[;}\\n])[ \\t]*(?:export[ \\t]+)?(?:async[ \\t]+)?function[ \\t]*\\*?[ \\t]*${id}[ \\t]*[(<]`).test(_codeOnly(source))) return true;
 	const init = _moduleBinding(source, name);
 	if (init === null) return false;
 	const v = _bareValue(init);
@@ -1083,7 +1086,7 @@ function _readConfig(source, body, depth, opts = {}) {
  * `topic` the build can see may be the wrapper's options rather than the
  * config: `options`, so only an `actions` written in it counts, and nothing it
  * names is followed. When such an object is also fully visible and reached
- * through a binding - one the plugin never read before - it is `lenient`: a
+ * through a binding rather than written in the call, it is `lenient`: a
  * template value in it is unknown rather than a build error.
  * @param {string} source
  * @param {string} afterOpen - the source from just after the call's `(`
@@ -1151,10 +1154,10 @@ function _stringValue(view, name) {
  * The keys of the object a config key is set to (`actions`, `windows`), as far
  * as the build can see them. An object it holds exactly - a literal, a const,
  * `Object.freeze` / `Object.assign` - gives all its keys. Anything else, a call
- * among them, is read from the first object written in it, as the plugin always
- * read it: its `name:` and `name()` members, and a shorthand naming a const
- * function (`withAudit({ save })`) - a call's argument may as well be its
- * dependencies (`crudActions({ db, table })`). In what may be a wrapper's
+ * among them, is read from the first object written in it: its `name:` and
+ * `name()` members, and a shorthand naming a function in the module
+ * (`withAudit({ save })`) - a call's argument may as well be its dependencies
+ * (`crudActions({ db, table })`). In what may be a wrapper's
  * options (`view.options`), only a value written in the object itself counts,
  * and only that way: nothing it names is followed.
  * @param {string} source

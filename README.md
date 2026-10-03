@@ -3623,6 +3623,8 @@ The client object is generated at build time from the module's source, so the Vi
 
 The keys that shape the client - `presence`, `cursors`, `owner`, `typing`, `locks`, `reactions`, `selections`, `actions`, `merge`, `key`, `enumerable` and `meta` - need to be readable in that file. Spreading an imported object is fine for server-only keys such as `guard`, `init`, `onJoin` or `history`; a client-shaping key that only arrives through it gives the client no member for it. When part of the config cannot be read and could supply `presence` or `owner`, a `board.room(...)` the client does have still joins the room, so its sends are not dropped.
 
+`actions` (and an aggregate's `windows`) set to an object literal, a `const` object, `Object.freeze(...)` or `Object.assign(...)` give all their keys. Set to anything else - a wrapper call such as `withAudit({ ... })` among them - they give the `name: value` and `name()` members of the first object written there, and a shorthand that names a function in the file; in an object that may be a wrapper's options rather than the config (no `topic` the build can see), only an `actions` object written there is read. A `merge`, `key` or `selections` value written as a template literal with `${...}` cannot be read at build time and fails the build, whether written in the call or reached through a spread or a const - except in a wrapper's options reached through a const that declares no `topic`, where it is left unknown.
+
 ### Room hooks shortcut
 
 Rooms expose a `.hooks` property for one-liner wiring in `hooks.ws.js`:
