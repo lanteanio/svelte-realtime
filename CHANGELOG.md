@@ -285,12 +285,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact clock. A timer that wakes early, as it does after the wall clock is
   stepped back, waits for the boundary. From 50 ms before a boundary each
   event checks the clock, so an event or a window load that arrives after
-  the boundary while the timer is running late, or after the wall clock
-  jumped past it, starts the new window first, and an app that names the
-  current window from `Date.now()` agrees with the aggregate about which
-  window an event is in. A window's closing state, folded by an aggregate
-  that sources it, still counts toward the downstream window that is
-  ending.
+  the boundary while the timer is running late starts the new window first
+  (unless the event loop was blocked through those 50 ms), as does one that
+  arrives about a second or more after the wall clock jumped past it. An
+  app that names the current window from `Date.now()` agrees with the
+  aggregate about which window an event is in. When an aggregate sources
+  another aggregate's tumbling window, at a shared boundary the upstream
+  window closes first, whichever timer fires first, so its closing state
+  counts toward the downstream window that is ending.
 
 - **A tumbling window with a `tz` no longer closes over and over around a
   daylight saving change.** The local boundary was turned into an instant
@@ -309,17 +311,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reset on every tick until less than 24.8 days were left. Long waits now
   run in capped steps.
 
-- **A tumbling `anchor` that is a `Date` or a string is refused when the
-  aggregate is defined.** It turned the boundary arithmetic into string
-  concatenation, and the window closed at the wrong times or on every timer
-  tick. `live.aggregate` now throws and says to pass `date.getTime()`. A
-  falsy `anchor` still means 0.
+- **A tumbling `anchor` that is a `Date`, a string or outside the `Date`
+  range, and a tumbling `durationMs` under 1, are refused when the
+  aggregate is defined.** A `Date` or a string turned the boundary
+  arithmetic into string concatenation, and the others round the boundary
+  onto the current time; either way the window closed at the wrong times
+  or on every timer tick. `live.aggregate` now throws and says to pass
+  `date.getTime()`. A falsy `anchor` still means 0.
 
 - **A reducer `init()` that throws as a tumbling window starts a new period
-  is reported instead of thrown.** The window keeps its previous state until
-  the next boundary, and the error, logged once per boundary, no longer
-  escapes the boundary timer or the publish or subscribe that closed the
-  window.
+  is reported instead of thrown.** The window keeps its previous state, and
+  with it its k-anonymity cohort and noise, until the next boundary, and
+  the error, logged once per boundary, no longer escapes the boundary timer
+  or the publish or subscribe that closed the window.
 
 - **A sliding window with `privacy` draws new noise on every slide.** The
   per-slide noise seed came from the cached clock, so slides shorter than a

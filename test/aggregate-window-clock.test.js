@@ -291,28 +291,59 @@ describe('tumbling windows close on the exact clock', () => {
 		expect(cron.published.length).toBe(0);
 	});
 
-	it('a downstream window folds the closing state of an upstream window before it closes', () => {
+	for (const order of ['upstream first', 'downstream first']) {
+		it(`a downstream window folds the closing state of an upstream window before it closes (${order})`, () => {
+			vi.useFakeTimers({ now: B0 - 2000 });
+			installExactNow();
+			const name = order === 'upstream first' ? 'tchainu' : 'tchaind';
+			const upstream = live.aggregate(`${name}:src`, counter(), { topic: `${name}:up`, windows: { m: { type: 'tumbling', period: 'minute' } } });
+			const downstream = live.aggregate(`${name}:up:m`, counter(), { topic: `${name}:down`, windows: { m: { type: 'tumbling', period: 'minute' } } });
+			if (order === 'upstream first') {
+				__registerAggregate(`agg/${name}-up`, upstream);
+				__registerAggregate(`agg/${name}-down`, downstream);
+			} else {
+				__registerAggregate(`agg/${name}-down`, downstream);
+				__registerAggregate(`agg/${name}-up`, upstream);
+			}
+			const platform = timedPlatform();
+			_activateDerived(platform);
+			setCronPlatform(platform);
+			const down = () => platform.published.filter((p) => p.topic === `${name}:down:m`);
+
+			platform.publish(`${name}:src`, 'inc', {});
+			platform.publish(`${name}:src`, 'inc', {});
+			vi.advanceTimersByTime(2000);
+
+			// Two in-window publishes plus the closing one all belong to the minute
+			// that ended: the downstream folds the third (3) and then closes with it.
+			const atBoundary = down().filter((p) => p.at === B0);
+			expect(atBoundary.map((p) => p.data.count)).toEqual([3, 3]);
+			platform.publish(`${name}:src`, 'inc', {});
+			expect(down().slice(-1)[0].data.count).toBe(1);
+		});
+	}
+
+	it('a timer that wakes after the clock stepped back stops the exact-clock checks', () => {
 		vi.useFakeTimers({ now: B0 - 2000 });
+		let exactReads = 0;
+		setRuntimeEnv({ clock: { now: () => Date.now(), wallEpoch: () => { exactReads++; return Date.now(); } } });
+		const { platform } = registerTumbling('tback', { type: 'tumbling', period: 'minute' });
+
+		vi.advanceTimersByTime(1960);
+		vi.setSystemTime(B0 - 10_040);
+		vi.advanceTimersByTime(40);
+		exactReads = 0;
+		for (let i = 0; i < 10; i++) platform.publish('tback:src', 'inc', {});
+		expect(exactReads).toBe(0);
+	});
+
+	it('a falsy anchor anchors fixed-duration windows at 0', () => {
+		vi.useFakeTimers({ now: 1500 });
 		installExactNow();
-		const upstream = live.aggregate('tchain:src', counter(), { topic: 'tchain:up', windows: { m: { type: 'tumbling', period: 'minute' } } });
-		const downstream = live.aggregate('tchain:up:m', counter(), { topic: 'tchain:down', windows: { m: { type: 'tumbling', period: 'minute' } } });
-		__registerAggregate('agg/tchain-up', upstream);
-		__registerAggregate('agg/tchain-down', downstream);
-		const platform = timedPlatform();
-		_activateDerived(platform);
-		setCronPlatform(platform);
-		const down = () => platform.published.filter((p) => p.topic === 'tchain:down:m');
+		const { out } = registerTumbling('tfalsy', { type: 'tumbling', durationMs: 1000, anchor: '' });
 
-		platform.publish('tchain:src', 'inc', {});
-		platform.publish('tchain:src', 'inc', {});
-		vi.advanceTimersByTime(2000);
-
-		// Two in-window publishes plus the closing one all belong to the minute
-		// that ended: the downstream folds the third (3) and then closes with it.
-		const atBoundary = down().filter((p) => p.at === B0);
-		expect(atBoundary.map((p) => p.data.count)).toEqual([3, 3]);
-		platform.publish('tchain:src', 'inc', {});
-		expect(down().slice(-1)[0].data.count).toBe(1);
+		vi.advanceTimersByTime(500);
+		expect(out().map((p) => p.at)).toEqual([2000]);
 	});
 
 	it('a window loaded after the boundary serves the new window', async () => {
@@ -384,6 +415,12 @@ describe('tumbling periods across DST changes', () => {
 			.toEqual(['2026-03-29T00:00', '2026-03-29T01:00', '2026-03-29T02:00']);
 	});
 
+	it('Chatham hours when the clocks go back across an hour start a window at the change', () => {
+		// 03:45 +13:45 becomes 02:45 +12:45 at 14:00Z.
+		expect(closes('dchh', { type: 'tumbling', period: 'hour', tz: 'Pacific/Chatham' }, '2026-04-04T13:25:00Z', '2026-04-04T15:30:00Z'))
+			.toEqual(['2026-04-04T14:00', '2026-04-04T14:15', '2026-04-04T15:15']);
+	});
+
 	it('Berlin minutes when the clocks go forward still close every minute', () => {
 		expect(closes('dbem', { type: 'tumbling', period: 'minute', tz: 'Europe/Berlin' }, '2026-03-29T00:57:30Z', '2026-03-29T01:02:30Z'))
 			.toEqual(['2026-03-29T00:58', '2026-03-29T00:59', '2026-03-29T01:00', '2026-03-29T01:01', '2026-03-29T01:02']);
@@ -424,6 +461,39 @@ describe('privacy across a tumbling boundary', () => {
 			expect(Math.abs((w1 - 1) - (v1 - 1))).toBeGreaterThan(1e-6);
 		});
 	}
+
+	it('a window whose init() throws keeps its noise along with its state', () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			realtime({ privacySecret: SECRET });
+			let failing = false;
+			const fn = live.aggregate('pinit:src', {
+				count: { init: () => { if (failing) throw new Error('init failed'); return 0; }, reduce: (a) => a + 1 }
+			}, {
+				topic: 'pinit:agg',
+				privacy: { strategy: 'perturb', epsilon: 1, sensitivity: 1 },
+				windows: { w: { type: 'tumbling', period: 'minute' } }
+			});
+			__registerAggregate('agg/pinit', fn);
+			const platform = timedPlatform();
+			_activateDerived(platform);
+			setCronPlatform(platform);
+			const out = () => platform.published.filter((p) => p.topic === 'pinit:agg:w');
+
+			platform.publish('pinit:src', 'inc', {});
+			failing = true;
+			vi.advanceTimersByTime(2000 + 3 * 60_000);
+			// Same state at every boundary: the same value, never fresh noise to
+			// average over.
+			const values = out().map((p) => p.data.count);
+			expect(values.length).toBe(5);
+			expect(new Set(values).size).toBe(1);
+		} finally {
+			errors.mockRestore();
+		}
+	});
 
 	it('a new window counts its k-anonymity cohort from zero', () => {
 		vi.useFakeTimers({ now: B0 - 2000 });
@@ -490,6 +560,32 @@ describe('tumbling windows longer than the timer limit', () => {
 		vi.advanceTimersByTime(1);
 		expect(out().length).toBe(2);
 		expect(out()[1].at).toBe(duration);
+	});
+});
+
+describe('tumbling window specs that would close on every tick', () => {
+	it('a fixed-duration boundary that rounds onto the current time moves past it', () => {
+		// With this anchor and duration, float rounding puts the next boundary
+		// exactly on `now`. The clock throws on a spin so the test fails fast.
+		const now = 1_790_000_000_072;
+		vi.useFakeTimers({ now });
+		let reads = 0;
+		setRuntimeEnv({ clock: { now: () => Date.now(), wallEpoch: () => { if (++reads > 10_000) throw new Error('spin'); return Date.now(); } } });
+		const { out } = registerTumbling('tround', { type: 'tumbling', durationMs: 7.7, anchor: -8.64e15 });
+
+		vi.advanceTimersByTime(77);
+		expect(out().length).toBeGreaterThanOrEqual(9);
+		expect(out().length).toBeLessThanOrEqual(11);
+		for (let i = 1; i < out().length; i++) expect(out()[i].at).toBeGreaterThan(out()[i - 1].at);
+	});
+
+	it('refuses an anchor outside the Date range and a duration under 1 ms', () => {
+		const define = (spec) => () => live.aggregate('vspec:src', counter(), { topic: 'vspec:agg', windows: { w: { type: 'tumbling', ...spec } } });
+		expect(define({ durationMs: 1000, anchor: 1.8e18 })).toThrow(/within the Date range/);
+		expect(define({ durationMs: 1000, anchor: -8.64e15 - 1 })).toThrow(/within the Date range/);
+		expect(define({ durationMs: 0.5 })).toThrow(/at least 1/);
+		expect(define({ durationMs: 1000, anchor: 8.64e15 })).not.toThrow();
+		expect(define({ durationMs: 1 })).not.toThrow();
 	});
 });
 

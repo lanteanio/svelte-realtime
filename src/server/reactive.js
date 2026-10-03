@@ -1,7 +1,7 @@
 // @ts-check
 import { now as runtimeNow, wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { _IS_DEV } from './env.js';
-import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggregateBySource, _watchedTopics, _dynamicDerivedByFn, _silentTopicWatch } from './state.js';
+import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggregateBySource, _aggregateByTopic, _watchedTopics, _dynamicDerivedByFn, _silentTopicWatch } from './state.js';
 import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _fireWebhookOut } from './webhook-out.js';
@@ -149,6 +149,11 @@ export function _rollTumblingWindow(entry, win, wall, platform) {
 		win.boundaryTimer = null;
 		_scheduleBoundary(entry, win);
 	}
+	// When this aggregate sources another aggregate's tumbling window that is
+	// due at the same boundary, that window closes first, whichever timer fires
+	// first: its closing state belongs to the period that is ending here.
+	const upstream = _tumblingWindowPublishing(entry.source);
+	if (upstream) _rollTumblingWindow(upstream.entry, upstream.win, wall, platform);
 	// A pending debounced publish carries the closing window's state; the final
 	// publish below supersedes it rather than letting it land in the new window.
 	if (win.timer) {
@@ -169,18 +174,40 @@ export function _rollTumblingWindow(entry, win, wall, platform) {
 	}
 	// An init() that throws keeps the window's previous state rather than
 	// failing the publish or subscribe that happened to close the window.
+	let reset = false;
 	try {
 		const fresh = {};
 		for (const [field, r] of entry._reducerEntries) {
 			if (r.init) fresh[field] = r.init();
 		}
 		win.state = fresh;
+		reset = true;
 	} catch (err) {
 		_warnAggregateWindowFailure(entry, err, 'init');
 	}
-	// A new window is a new k-anonymity cohort and a fresh noise seed.
-	if (win.cohort) win.cohort = new Set();
-	if (win.privacy) win._windowStart = win.nextBoundary;
+	// A new window is a new k-anonymity cohort and a fresh noise seed. A window
+	// that kept its state keeps both: fresh noise over the same state at every
+	// boundary would let an observer average the noise away.
+	if (reset) {
+		if (win.cohort) win.cohort = new Set();
+		if (win.privacy) win._windowStart = win.nextBoundary;
+	}
+}
+
+/**
+ * The tumbling window whose output topic is `topic` (`<aggregate topic>:<window
+ * name>`), or null.
+ *
+ * @param {unknown} topic
+ * @returns {{ entry: any, win: any } | null}
+ */
+function _tumblingWindowPublishing(topic) {
+	if (typeof topic !== 'string') return null;
+	const i = topic.lastIndexOf(':');
+	if (i <= 0) return null;
+	const entry = _aggregateByTopic.get(topic.slice(0, i));
+	const win = entry && entry.windowStates ? entry.windowStates.get(topic.slice(i + 1)) : undefined;
+	return win && win.type === 'tumbling' ? { entry, win } : null;
 }
 
 /**

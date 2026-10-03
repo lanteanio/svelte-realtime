@@ -2222,10 +2222,15 @@ function _validateWindowSpec(name, spec, reducers) {
 			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling period '${spec.period}' is not supported (expected 'minute' | 'hour' | 'daily' | 'monthly')`);
 		}
 		// A Date or a string here turns the boundary arithmetic into string
-		// concatenation, and the window would close at the wrong times or on
-		// every timer tick. A falsy anchor means 0.
-		if (hasDuration && spec.anchor && !Number.isFinite(spec.anchor)) {
-			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling 'anchor' must be a finite number of epoch milliseconds (for a Date, pass date.getTime())`);
+		// concatenation, and an anchor outside the Date range, or a duration
+		// under 1 ms, rounds the boundary onto the current time: either way the
+		// window would close at the wrong times or on every timer tick. A falsy
+		// anchor means 0.
+		if (hasDuration && spec.anchor && !(Number.isFinite(spec.anchor) && Math.abs(spec.anchor) <= 8.64e15)) {
+			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling 'anchor' must be a finite number of epoch milliseconds within the Date range (for a Date, pass date.getTime())`);
+		}
+		if (hasDuration && spec.durationMs < 1) {
+			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling 'durationMs' must be at least 1`);
 		}
 	}
 	if (type === 'sliding') {
@@ -2278,18 +2283,20 @@ function _nextBoundaryForPeriod(now, period, tz = 'UTC') {
 			: period === 'daily' ? Date.UTC(y, mo, day + 1)
 				: Date.UTC(y, mo + 1, 1);
 	let next = _zonedInstantAfter(nextLocal, tz, now);
-	if (_tzOffsetAt(next, tz) !== _tzOffsetAt(now, tz)) {
-		// The offset changes before `next`. Setting the clocks back can end the
-		// current period sooner (a minute window at 01:59 when 02:00 becomes
-		// 01:00 again), so find the first whole minute in a different period.
-		const current = _periodIndex(local, period);
+	const offset = _tzOffsetAt(now, tz);
+	if (_tzOffsetAt(next, tz) !== offset) {
+		// The clocks change before `next`. Setting them back can start a new
+		// period at the change itself (a minute window at 01:59 when 02:00
+		// becomes 01:00 again, or an hour window when 03:45 becomes 02:45), so
+		// find the minute of the change and compare its period with now's.
 		let lo = Math.floor(now / 60_000), hi = Math.ceil(next / 60_000);
 		while (hi - lo > 1) {
 			const mid = Math.floor((lo + hi) / 2);
-			if (_periodIndex(_wallClockUtcInTz(mid * 60_000, tz), period) === current) lo = mid;
+			if (_tzOffsetAt(mid * 60_000, tz) === offset) lo = mid;
 			else hi = mid;
 		}
-		next = Math.min(next, hi * 60_000);
+		const change = hi * 60_000;
+		if (change < next && _periodIndex(_wallClockUtcInTz(change, tz), period) !== _periodIndex(local, period)) next = change;
 	}
 	// Never hand back a boundary that has passed: the window would close on
 	// every timer tick.
@@ -2392,7 +2399,9 @@ function _wallClockUtcInTz(ms, tz) {
 function _nextBoundaryForDuration(now, durationMs, anchor = 0) {
 	const elapsed = now - anchor;
 	const periods = Math.floor(elapsed / durationMs) + 1;
-	return anchor + periods * durationMs;
+	const next = anchor + periods * durationMs;
+	// Float rounding can put a boundary on `now` itself; it must come after.
+	return next > now ? next : next + durationMs;
 }
 
 /**
@@ -2675,7 +2684,7 @@ function _scheduleNextBoundary(entry, win) {
 		win.boundaryTimer = null;
 		try {
 			const wall = wallEpoch();
-			if (win.nextBoundary - wall <= _TUMBLE_LEAD_MS) win.near = true;
+			win.near = win.nextBoundary - wall <= _TUMBLE_LEAD_MS;
 			_rollTumblingWindow(entry, win, wall);
 		} finally {
 			// Always re-arm: an uncaught throw above (an app init()) would otherwise

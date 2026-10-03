@@ -8230,7 +8230,7 @@ describe('live.aggregate() windowed - validation', () => {
 				topic: 't', windows: { w: { type: 'tumbling', durationMs: 1000, anchor } }
 			})).toThrow(/'anchor' must be a finite number/);
 		}
-		// Falsy values meant 0 before the check existed and still do.
+		// A falsy anchor means 0.
 		for (const anchor of [undefined, null, 0, '', false, 1_000_000]) {
 			expect(() => live.aggregate('src', { c: { init: () => 0 } }, {
 				topic: 't', windows: { w: { type: 'tumbling', durationMs: 1000, anchor } }
