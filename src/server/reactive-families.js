@@ -1,6 +1,7 @@
 // @ts-check
 import { live, getPlatform, publish } from '../server.js';
-import { _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState } from './reactive.js';
+import { _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState, _rollTumblingWindow } from './reactive.js';
+import { wallEpoch } from '../shared/runtime.js';
 import { _aggregateByTopic } from './state.js';
 import { _normalizeAggregatePrivacy } from './differential-privacy.js';
 import { _registerReplayTopic } from './replay-routing.js';
@@ -336,6 +337,9 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 				if (entry._hydrationPromise) await entry._hydrationPromise;
 				const winState = entry.windowStates.get(wn);
 				if (!winState) return _computeAggregateState(initState, reducers);
+				// A load after the boundary, before the boundary timer has run,
+				// closes the ended window first, as the timer would have.
+				if (winState.type === 'tumbling') _rollTumblingWindow(entry, winState, wallEpoch());
 				// With privacy, serve the last gated window value (see aggregateInit).
 				if (winState.privacy) return winState._lastWire;
 				return _computeWindowState(winState, reducers);

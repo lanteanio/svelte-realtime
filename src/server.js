@@ -2,7 +2,6 @@
 import { assert, fatal, wireAssertionMetrics } from './shared/assert.js';
 import { safeAssign as _safeAssignSnapshot } from './shared/safe-assign.js';
 import {
-	now as runtimeNow,
 	monotonicNow,
 	wallEpoch,
 	randomFloat,
@@ -60,7 +59,7 @@ import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, 
 import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
 import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _platformPublish } from './server/publish-helpers.js';
-import { _gateAggregate, _resetNoiseBlockCache } from './server/differential-privacy.js';
+import { _resetNoiseBlockCache } from './server/differential-privacy.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
 import { _recordRpcMetrics, installMetrics } from './server/metrics.js';
@@ -73,7 +72,7 @@ import { installRateLimit, _consumeRateLimitBucket, _resolveRegistryRateLimit, _
 export { _resetRateLimits } from './server/rate-limit.js';
 import { _setBus, _getBus } from './server/bus.js';
 import { _getCtxHelpers, _buildCtx, installCtx } from './server/ctx.js';
-import { _ensureWrap, _maybeLateActivate, _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState, installReactive } from './server/reactive.js';
+import { _ensureWrap, _maybeLateActivate, _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState, _publishWindow, _warnAggregateWindowFailure, _rollTumblingWindow, _TUMBLE_LEAD_MS, installReactive } from './server/reactive.js';
 import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, installCrdt } from './server/crdt.js';
 import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
 import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy, _setAfterLazyResolve } from './server/lazy.js';
@@ -2192,6 +2191,7 @@ export let MAX_AGGREGATE_BUCKETS = 1000;
  *  - unknown `type`
  *  - tumbling without either `period` or `durationMs`
  *  - tumbling `period` outside the supported set
+ *  - tumbling `anchor` that is not a finite number
  *  - sliding without `durationMs` / `slideMs`, or with `slideMs > durationMs`
  *  - sliding bucket count exceeding `MAX_AGGREGATE_BUCKETS`
  *  - sliding without a `combine` field on every reducer that has `reduce`
@@ -2220,6 +2220,12 @@ function _validateWindowSpec(name, spec, reducers) {
 		}
 		if (hasPeriod && !['minute', 'hour', 'daily', 'monthly'].includes(spec.period)) {
 			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling period '${spec.period}' is not supported (expected 'minute' | 'hour' | 'daily' | 'monthly')`);
+		}
+		// A Date or a string here turns the boundary arithmetic into string
+		// concatenation, and the window would close at the wrong times or on
+		// every timer tick. A falsy anchor means 0.
+		if (hasDuration && spec.anchor && !Number.isFinite(spec.anchor)) {
+			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling 'anchor' must be a finite number of epoch milliseconds (for a Date, pass date.getTime())`);
 		}
 	}
 	if (type === 'sliding') {
@@ -2252,46 +2258,99 @@ function _validateWindowSpec(name, spec, reducers) {
  * `Intl.DateTimeFormat` for zone-correct, DST-correct, leap-day-correct
  * arithmetic without a third-party dependency.
  *
+ * A period follows the local calendar in `tz`: the boundary is the first
+ * instant after `now` at which the local minute / hour / day / month
+ * changes. Across a DST change a day lasts 23 or 25 hours, an hour the
+ * clocks skip has no window, an hour the clocks repeat is one window, and
+ * a minute window still closes every minute.
+ *
  * @param {number} now - epoch ms reference
  * @param {'minute' | 'hour' | 'daily' | 'monthly'} period
  * @param {string} tz
  * @returns {number} epoch ms of the next boundary > now
  */
 function _nextBoundaryForPeriod(now, period, tz = 'UTC') {
-	const fmt = new Intl.DateTimeFormat('en-US', {
-		timeZone: tz,
-		year: 'numeric', month: 'numeric', day: 'numeric',
-		hour: 'numeric', minute: 'numeric', second: 'numeric',
-		hour12: false
-	});
-	// Intl.DateTimeFormat.formatToParts accepts a numeric epoch-ms directly, so
-	// the already-numeric reference is formatted in the target time zone without
-	// constructing an intermediate Date.
-	const parts = fmt.formatToParts(now);
-	const get = (k) => Number(parts.find(p => p.type === k)?.value);
-	let y = get('year'), mo = get('month'), d = get('day');
-	let h = get('hour'), mi = get('minute');
-	if (h === 24) h = 0; // some Intl impls render midnight as 24
-	// Compute the wall-clock of the next boundary in the target tz.
-	let nextY = y, nextMo = mo, nextD = d, nextH = h, nextMi = mi;
-	if (period === 'minute') {
-		nextMi = mi + 1;
-	} else if (period === 'hour') {
-		nextH = h + 1; nextMi = 0;
-	} else if (period === 'daily') {
-		nextD = d + 1; nextH = 0; nextMi = 0;
-	} else { // monthly
-		nextMo = mo + 1; nextD = 1; nextH = 0; nextMi = 0;
+	const local = _wallClockUtcInTz(now, tz);
+	const d = new Date(local); // determinism-allow: splits a given instant into UTC fields, not a clock read
+	const y = d.getUTCFullYear(), mo = d.getUTCMonth(), day = d.getUTCDate(), h = d.getUTCHours();
+	const nextLocal = period === 'minute' ? Date.UTC(y, mo, day, h, d.getUTCMinutes() + 1)
+		: period === 'hour' ? Date.UTC(y, mo, day, h + 1)
+			: period === 'daily' ? Date.UTC(y, mo, day + 1)
+				: Date.UTC(y, mo + 1, 1);
+	let next = _zonedInstantAfter(nextLocal, tz, now);
+	if (_tzOffsetAt(next, tz) !== _tzOffsetAt(now, tz)) {
+		// The offset changes before `next`. Setting the clocks back can end the
+		// current period sooner (a minute window at 01:59 when 02:00 becomes
+		// 01:00 again), so find the first whole minute in a different period.
+		const current = _periodIndex(local, period);
+		let lo = Math.floor(now / 60_000), hi = Math.ceil(next / 60_000);
+		while (hi - lo > 1) {
+			const mid = Math.floor((lo + hi) / 2);
+			if (_periodIndex(_wallClockUtcInTz(mid * 60_000, tz), period) === current) lo = mid;
+			else hi = mid;
+		}
+		next = Math.min(next, hi * 60_000);
 	}
-	// Resolve the wall-clock back to an epoch ms in the target tz by
-	// constructing a UTC Date with the wall-clock fields, asking Intl
-	// for what tz it would render that as, computing the offset, and
-	// subtracting. Two-pass for DST-fall-back correctness (an offset
-	// that changes between iso-construction and now).
-	const isoMs = Date.UTC(nextY, nextMo - 1, nextD, nextH, nextMi, 0, 0);
-	const tzOffsetMs = isoMs - _wallClockUtcInTz(isoMs, tz);
-	return isoMs + tzOffsetMs;
+	// Never hand back a boundary that has passed: the window would close on
+	// every timer tick.
+	return next > now ? next : (Math.floor(now / 60_000) + 1) * 60_000;
 }
+
+/**
+ * The first instant after `after` at which the wall clock in `tz` reads
+ * `local` (wall-clock fields encoded as UTC ms). A wall time the clocks
+ * repeat has two such instants and the earlier one after `after` wins. A
+ * wall time the clocks skip has none; its period starts when the skip
+ * happens, which is what the offset in effect before the change gives.
+ *
+ * @param {number} local
+ * @param {string} tz
+ * @param {number} after
+ * @returns {number}
+ */
+function _zonedInstantAfter(local, tz, after) {
+	// The instant is within 14 hours of `local`, so the offsets a day either
+	// side are the ones in effect before and after any change near it.
+	const early = local - _tzOffsetAt(local - 86_400_000, tz);
+	const late = local - _tzOffsetAt(local + 86_400_000, tz);
+	let best = Infinity;
+	for (const t of [early, late]) {
+		if (t > after && t < best && _wallClockUtcInTz(t, tz) === local) best = t;
+	}
+	return best !== Infinity ? best : early;
+}
+
+/**
+ * The offset of `tz` from UTC at instant `ms`, in ms (local minus UTC).
+ *
+ * @param {number} ms
+ * @param {string} tz
+ * @returns {number}
+ */
+function _tzOffsetAt(ms, tz) {
+	const whole = ms - (((ms % 1000) + 1000) % 1000);
+	return _wallClockUtcInTz(whole, tz) - whole;
+}
+
+/**
+ * Number the local period a wall-clock reading (UTC-encoded, from
+ * `_wallClockUtcInTz`) falls in: equal numbers name the same minute, hour,
+ * day or month.
+ *
+ * @param {number} local
+ * @param {'minute' | 'hour' | 'daily' | 'monthly'} period
+ * @returns {number}
+ */
+function _periodIndex(local, period) {
+	if (period === 'minute') return Math.floor(local / 60_000);
+	if (period === 'hour') return Math.floor(local / 3_600_000);
+	if (period === 'daily') return Math.floor(local / 86_400_000);
+	const d = new Date(local); // determinism-allow: splits a given instant into UTC fields, not a clock read
+	return d.getUTCFullYear() * 12 + d.getUTCMonth();
+}
+
+/** One formatter per zone: building an `Intl.DateTimeFormat` costs far more than using it. */
+const _tzFormatters = new Map();
 
 /**
  * Reverse of the formatter: given a UTC ms reference, what is the same
@@ -2304,16 +2363,20 @@ function _nextBoundaryForPeriod(now, period, tz = 'UTC') {
  * @returns {number}
  */
 function _wallClockUtcInTz(ms, tz) {
-	const fmt = new Intl.DateTimeFormat('en-US', {
-		timeZone: tz,
-		year: 'numeric', month: 'numeric', day: 'numeric',
-		hour: 'numeric', minute: 'numeric', second: 'numeric',
-		hour12: false
-	});
+	let fmt = _tzFormatters.get(tz);
+	if (!fmt) {
+		fmt = new Intl.DateTimeFormat('en-US', {
+			timeZone: tz,
+			year: 'numeric', month: 'numeric', day: 'numeric',
+			hour: 'numeric', minute: 'numeric', second: 'numeric',
+			hour12: false
+		});
+		_tzFormatters.set(tz, fmt);
+	}
 	// formatToParts takes the numeric epoch-ms directly; no intermediate Date.
 	const parts = fmt.formatToParts(ms);
 	const get = (k) => Number(parts.find(p => p.type === k)?.value);
-	let h = get('hour'); if (h === 24) h = 0;
+	let h = get('hour'); if (h === 24) h = 0; // some Intl impls render midnight as 24
 	return Date.UTC(get('year'), get('month') - 1, get('day'), h, get('minute'), get('second'), 0);
 }
 
@@ -2468,10 +2531,15 @@ function _registerWindowedAggregate(path, fn) {
 		debounce,
 		_hydrationPromise: null,
 		windowed: true,
+		// The event fold checks for a passed boundary only when a window tumbles.
+		_tumbling: Object.values(windowsSpec).some((spec) => spec.type === 'tumbling'),
 		privacy
 	};
 
-	const now = runtimeNow();
+	// Boundaries and seeds come from the exact clock, not the 1 Hz-cached
+	// `now()`: a window must close at its boundary, and an app naming the
+	// current window from Date.now() must agree with it about which one that is.
+	const wall = wallEpoch();
 	for (const [wn, spec] of Object.entries(windowsSpec)) {
 		const outputTopic = `${baseTopic}:${wn}`;
 		const winDebounce = (typeof spec.debounce === 'number' && spec.debounce >= 0) ? spec.debounce : debounce;
@@ -2482,14 +2550,18 @@ function _registerWindowedAggregate(path, fn) {
 				debounce: winDebounce, timer: null
 			});
 		} else if (spec.type === 'tumbling') {
+			const boundaryAfter = spec.period
+				? (/** @type {number} */ t) => _nextBoundaryForPeriod(t, spec.period, spec.tz || 'UTC')
+				: (/** @type {number} */ t) => _nextBoundaryForDuration(t, spec.durationMs, spec.anchor || 0);
+			const nextBoundary = boundaryAfter(wall);
 			windowStates.set(wn, {
 				type: 'tumbling', spec, name: wn, outputTopic,
 				state: { ...initState },
 				debounce: winDebounce, timer: null,
 				boundaryTimer: null,
-				nextBoundary: spec.period
-					? _nextBoundaryForPeriod(now, spec.period, spec.tz || 'UTC')
-					: _nextBoundaryForDuration(now, spec.durationMs, spec.anchor || 0)
+				boundaryAfter,
+				nextBoundary,
+				near: nextBoundary - wall <= _TUMBLE_LEAD_MS
 			});
 		} else if (spec.type === 'sliding') {
 			const bucketCount = Math.ceil(spec.durationMs / spec.slideMs);
@@ -2534,7 +2606,7 @@ function _registerWindowedAggregate(path, fn) {
 			// continual-observation limit is documented).
 			win._windowStart = win.type === 'tumbling'
 				? win.nextBoundary
-				: (win.type === 'sliding' ? Math.floor(now / win.spec.slideMs) : 0);
+				: (win.type === 'sliding' ? Math.floor(wall / win.spec.slideMs) : 0);
 			win._lastWire = _computeWindowState(win, reducers);
 		}
 	}
@@ -2577,86 +2649,42 @@ function _registerWindowedAggregate(path, fn) {
 }
 
 /**
- * Arm the boundary timer for a tumbling window. On fire: publish the
- * closing-window final state, reset the per-reducer state via init(),
- * recompute the next boundary, and re-arm. Self-rearming so a window
- * keeps tumbling for the lifetime of the process.
+ * `setTimeout` stores its delay in a 32-bit int: anything longer (~24.85 days)
+ * is clamped to 1 ms and fires almost at once. A monthly window armed early in
+ * a 31-day month waits longer than that, so a long wait is chased in hops.
+ */
+const _MAX_TIMER_DELAY_MS = 2147483647;
+
+/**
+ * Arm the boundary timer for a tumbling window. It wakes `_TUMBLE_LEAD_MS`
+ * ahead of the boundary to mark the window `near` (the event fold then checks
+ * the exact clock), and again at the boundary, where it closes the window if
+ * the exact clock has reached it (`_rollTumblingWindow`) and re-arms toward
+ * the next one. A wake before the boundary - the lead, a capped hop on a long
+ * wait, or a wall clock stepped back while waiting - only re-arms, so the
+ * window never closes early and never closes the same boundary twice.
+ * Self-rearming so a window keeps tumbling for the lifetime of the process.
  *
  * @param {any} entry
  * @param {any} win
  */
-/**
- * Report a window publish that threw. Deliberately loud and repeated (once per
- * window, not deduped): the usual cause is a misconfiguration - a `perturb` /
- * `hybrid` aggregate with no `realtime({ privacySecret })` - and a silenced
- * one-shot warning is how that ships to production unnoticed.
- *
- * @param {any} entry
- * @param {unknown} err
- */
-function _warnAggregateWindowFailure(entry, err) {
-	console.error(
-		"[svelte-realtime] live.aggregate '" + ((entry && (entry.baseTopic || entry.topic)) || 'unknown') + "': window publish failed; " +
-		'the window keeps tumbling and will retry on the next boundary.\n  ' +
-		((err && /** @type {any} */ (err).message) || String(err))
-	);
-}
-
 function _scheduleNextBoundary(entry, win) {
-	// Forward progress is not optional. The callback advances `nextBoundary`
-	// inside its try block, so anything that throws first (an app `init()`, say)
-	// leaves it at the boundary that just fired - and the `finally` re-arm would
-	// then schedule at delay 0, spinning a hot loop that throws every macrotask.
-	// Advance a stale boundary here instead, so a repeatedly-failing window
-	// degrades to one failure per period rather than a pinned core.
-	const nowMs = runtimeNow();
-	if (!(win.nextBoundary > nowMs)) {
-		win.nextBoundary = win.spec.period
-			? _nextBoundaryForPeriod(nowMs, win.spec.period, win.spec.tz || 'UTC')
-			: _nextBoundaryForDuration(nowMs, win.spec.durationMs, win.spec.anchor || 0);
-	}
-	const delay = Math.max(0, win.nextBoundary - runtimeNow());
+	const remaining = win.nextBoundary - wallEpoch();
+	const wait = remaining > _TUMBLE_LEAD_MS ? remaining - _TUMBLE_LEAD_MS : remaining;
 	win.boundaryTimer = setTimer(() => {
 		win.boundaryTimer = null;
 		try {
-			// Final publish of the closing window so subscribers see the
-			// pre-reset state before the new window starts. If a debounce is
-			// pending, flush it inline rather than letting the new state
-			// race the published value.
-			if (win.timer) {
-				clearTimer(win.timer);
-				win.timer = null;
-			}
-			// A publish that throws (the privacy gate refusing to emit without an
-			// operator secret, a redactor blowing up) must not take the schedule
-			// with it - report and carry on.
-			try {
-				_publishWindow(entry, win);
-			} catch (err) {
-				_warnAggregateWindowFailure(entry, err);
-			}
-			// Reset state to init() for the new window.
-			const fresh = {};
-			for (const [field, r] of entry._reducerEntries) {
-				if (r.init) fresh[field] = r.init();
-			}
-			win.state = fresh;
-			// Compute the next boundary off the fired-at time, not the current
-			// clock, so a slow/blocked event loop does not drift the schedule.
-			const now = runtimeNow();
-			win.nextBoundary = win.spec.period
-				? _nextBoundaryForPeriod(now, win.spec.period, win.spec.tz || 'UTC')
-				: _nextBoundaryForDuration(now, win.spec.durationMs, win.spec.anchor || 0);
-			// A new window is a new k-anonymity cohort and a fresh noise seed.
-			if (win.cohort) win.cohort = new Set();
-			if (win.privacy) win._windowStart = win.nextBoundary;
+			const wall = wallEpoch();
+			if (win.nextBoundary - wall <= _TUMBLE_LEAD_MS) win.near = true;
+			_rollTumblingWindow(entry, win, wall);
 		} finally {
-			// Always re-arm: an uncaught throw above would otherwise leave the
-			// window permanently un-scheduled, dead for the process lifetime even
-			// after the operator fixes the configuration.
+			// Always re-arm: an uncaught throw above (an app init()) would otherwise
+			// leave the window permanently un-scheduled. The roll advances the
+			// boundary before it runs app code, so this never re-arms at a boundary
+			// that has passed and spins.
 			_scheduleNextBoundary(entry, win);
 		}
-	}, delay);
+	}, Math.min(Math.max(0, wait), _MAX_TIMER_DELAY_MS));
 	// Don't keep the event loop alive solely for cron-like tumbling --
 	// matches the cron interval's implicit ref behavior; tests / clean
 	// shutdown can still kill the timer via `_clearAggregateTimers`.
@@ -2686,9 +2714,12 @@ function _scheduleNextSlide(entry, win) {
 			win.buckets[win.bucketIndex] = fresh;
 			// The evicted bucket's contributors leave the k-anonymity cohort too.
 			if (win.bucketCohorts) win.bucketCohorts[win.bucketIndex] = new Set();
-			// Refresh the noise seed each slide (wall-clock epoch, replica-aligned) so
-			// the DP offset does not stay constant for the whole process lifetime.
-			if (win.privacy) win._windowStart = Math.floor(runtimeNow() / win.spec.slideMs);
+			// Refresh the noise seed each slide from the exact wall-clock slide
+			// epoch (replicas sliding in the same epoch share it), so the DP offset
+			// does not stay constant. It moves forward on every slide: a clock
+			// stepped back, or a slide that fires a hair early, would otherwise
+			// repeat an earlier seed and with it that slide's noise.
+			if (win.privacy) win._windowStart = Math.max(win._windowStart + 1, Math.floor(wallEpoch() / win.spec.slideMs));
 			// Publish the post-slide combined state so a subscriber sees
 			// values dropping out of the window even when no fresh events
 			// are arriving.
@@ -2707,33 +2738,6 @@ function _scheduleNextSlide(entry, win) {
 		}
 	}, win.spec.slideMs);
 	if (typeof win.slideTimer.unref === 'function') win.slideTimer.unref();
-}
-
-/**
- * Compute and publish a window's current state to its output topic.
- * Honors `state.cronPlatform` first (the captured publish path used by cron
- * and by anything that runs outside an active connection), so boundary
- * and slide timers can publish without an active publish wrapping them.
- *
- * Plain reduce-on-event publishes go through the wrapped
- * `platform.publish` from the source-event handler - that path
- * captures `platform` directly and does not need this fallback.
- *
- * @param {any} entry
- * @param {any} win
- */
-function _publishWindow(entry, win) {
-	const platform = state.cronPlatform;
-	if (!platform) return;
-	const computed = _computeWindowState(win, entry.reducers);
-	// Privacy gate (k-anon suppress / DP noise) then piiRedact, mirroring the
-	// reduce-loop publish in reactive.js so the timer-driven boundary / slide
-	// publishes are gated identically.
-	const gated = _gateAggregate(win, computed, win.outputTopic);
-	if (!gated.publish) return; // below k: hold the last published value
-	const wire = _redactOrDrop(win.outputTopic, gated.value);
-	if (wire === REDACT_DROP) return;
-	_platformPublish(platform, win.outputTopic, 'set', wire);
 }
 
 /**
@@ -3190,7 +3194,7 @@ export function __registerDerived(path, fn) {
  * triggered externally when the platform fires publish.
  * @param {import('svelte-adapter-uws').Platform} platform
  */
-installReactive({ cronLeader: _getCronLeader });
+installReactive({ cronLeader: _getCronLeader, scheduleBoundary: _scheduleNextBoundary });
 
 export function _activateDerived(platform) {
 	state.derivedPlatform = platform;

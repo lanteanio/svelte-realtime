@@ -8224,6 +8224,20 @@ describe('live.aggregate() windowed - validation', () => {
 		})).toThrow(/period 'fortnight'/);
 	});
 
+	it('rejects a tumbling anchor that is not a finite number', () => {
+		for (const anchor of [new Date(0), '1000', Infinity, -Infinity]) {
+			expect(() => live.aggregate('src', { c: { init: () => 0 } }, {
+				topic: 't', windows: { w: { type: 'tumbling', durationMs: 1000, anchor } }
+			})).toThrow(/'anchor' must be a finite number/);
+		}
+		// Falsy values meant 0 before the check existed and still do.
+		for (const anchor of [undefined, null, 0, '', false, 1_000_000]) {
+			expect(() => live.aggregate('src', { c: { init: () => 0 } }, {
+				topic: 't', windows: { w: { type: 'tumbling', durationMs: 1000, anchor } }
+			})).not.toThrow();
+		}
+	});
+
 	it('rejects sliding without slideMs', () => {
 		expect(() => live.aggregate('src', { c: { init: () => 0, reduce: (a) => a, combine: combineSum } }, {
 			topic: 't', windows: { w: { type: 'sliding', durationMs: 1000 } }

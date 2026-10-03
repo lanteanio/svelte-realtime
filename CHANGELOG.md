@@ -275,6 +275,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A `live.aggregate` tumbling window closes at its boundary, and once.**
+  Boundaries and timer delays came from the runtime's cached clock, which is
+  refreshed once a second, so a window closed up to a second late and took
+  in events that belonged to the next one. When the cached clock still read
+  before the boundary as the timer fired, the window closed a second time up
+  to a second into the new period, publishing the new window's first events
+  as a closing state and then discarding them. Boundaries now come from the
+  exact clock. A timer that wakes early, as it does after the wall clock is
+  stepped back, waits for the boundary. From 50 ms before a boundary each
+  event checks the clock, so an event or a window load that arrives after
+  the boundary while the timer is running late, or after the wall clock
+  jumped past it, starts the new window first, and an app that names the
+  current window from `Date.now()` agrees with the aggregate about which
+  window an event is in. A window's closing state, folded by an aggregate
+  that sources it, still counts toward the downstream window that is
+  ending.
+
+- **A tumbling window with a `tz` no longer closes over and over around a
+  daylight saving change.** The local boundary was turned into an instant
+  with the offset of the wrong side of the change, so a minute or hour
+  window got a boundary at or before the current time and closed on every
+  timer tick, for up to five hours (New York when the clocks go back,
+  Berlin when they go forward). A period now follows the local calendar in
+  `tz`: a day lasts 23 or 25 hours across a change, an hour the clocks skip
+  has no window, an hour they repeat is one window, and a minute window
+  closes every minute.
+
+- **A monthly window no longer closes every millisecond for the first days
+  of the month.** `setTimeout` turns any delay over about 24.8 days into
+  1 ms, and every month is longer than that, so a `period: 'monthly'`
+  window, or a `durationMs` window longer than 24.8 days, published and
+  reset on every tick until less than 24.8 days were left. Long waits now
+  run in capped steps.
+
+- **A tumbling `anchor` that is a `Date` or a string is refused when the
+  aggregate is defined.** It turned the boundary arithmetic into string
+  concatenation, and the window closed at the wrong times or on every timer
+  tick. `live.aggregate` now throws and says to pass `date.getTime()`. A
+  falsy `anchor` still means 0.
+
+- **A reducer `init()` that throws as a tumbling window starts a new period
+  is reported instead of thrown.** The window keeps its previous state until
+  the next boundary, and the error, logged once per boundary, no longer
+  escapes the boundary timer or the publish or subscribe that closed the
+  window.
+
+- **A sliding window with `privacy` draws new noise on every slide.** The
+  per-slide noise seed came from the cached clock, so slides shorter than a
+  second shared a seed, and with it the noise offset, for several slides in
+  a row, and a wall clock stepped back could bring back an earlier slide's
+  seed. The seed now comes from the exact clock and moves forward on every
+  slide.
+
 - **A stream released before the server answered its subscribe no longer
   keeps the subscription.** The release reached the server only for a topic
   the client had already been told, so a stream let go within a round-trip

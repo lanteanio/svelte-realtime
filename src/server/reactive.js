@@ -1,5 +1,5 @@
 // @ts-check
-import { setTimer, clearTimer } from '../shared/runtime.js';
+import { now as runtimeNow, wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { _IS_DEV } from './env.js';
 import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggregateBySource, _watchedTopics, _dynamicDerivedByFn, _silentTopicWatch } from './state.js';
 import { _getBus } from './bus.js';
@@ -14,8 +14,12 @@ import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnost
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
 let _cronLeaderGet = () => null;
+// Seam: the tumbling boundary scheduler lives in server.js with the rest of the
+// window registration; a window closed outside its timer re-arms through this.
+let _scheduleBoundary = (/** @type {any} */ entry, /** @type {any} */ win) => {};
 export function installReactive(seams) {
 	_cronLeaderGet = seams.cronLeader;
+	_scheduleBoundary = seams.scheduleBoundary;
 }
 
 /**
@@ -58,6 +62,125 @@ export function _computeAggregateState(state, reducers) {
 		}
 	}
 	return result;
+}
+
+/**
+ * How long before a tumbling boundary the event fold starts reading the exact
+ * clock. The boundary timer wakes this far ahead and marks the window `near`;
+ * from then until the window closes each event checks the exact clock, so an
+ * event that arrives after the boundary starts the new window even when the
+ * boundary timer runs a little late. The rest of the period an event costs a
+ * flag check.
+ */
+export const _TUMBLE_LEAD_MS = 50;
+
+/** Closing publishes in progress; while one runs, downstream windows do not close. */
+let _closingDepth = 0;
+
+/**
+ * Report a window publish, or a reducer `init()` starting a new window, that
+ * threw. Deliberately loud and repeated (once per window, not deduped): the
+ * usual cause of a failed publish is a misconfiguration - a `perturb` /
+ * `hybrid` aggregate with no `realtime({ privacySecret })` - and a silenced
+ * one-shot warning is how that ships to production unnoticed.
+ *
+ * @param {any} entry
+ * @param {unknown} err
+ * @param {'publish' | 'init'} [what]
+ */
+export function _warnAggregateWindowFailure(entry, err, what = 'publish') {
+	console.error(
+		"[svelte-realtime] live.aggregate '" + ((entry && (entry.baseTopic || entry.topic)) || 'unknown') + "': " +
+		(what === 'init'
+			? "a reducer's init() threw as a new window started; the window keeps its previous state until the next boundary.\n  "
+			: 'window publish failed; the window keeps tumbling and will retry on the next boundary.\n  ') +
+		((err && /** @type {any} */ (err).message) || String(err))
+	);
+}
+
+/**
+ * Compute and publish a window's current state to its output topic. Defaults
+ * to `state.cronPlatform` (the captured publish path used by cron and by
+ * anything that runs outside an active connection), so boundary and slide
+ * timers can publish without an active publish wrapping them. The event fold
+ * passes the platform it is publishing through.
+ *
+ * @param {any} entry
+ * @param {any} win
+ * @param {any} [platform]
+ */
+export function _publishWindow(entry, win, platform = state.cronPlatform) {
+	if (!platform) return;
+	const computed = _computeWindowState(win, entry.reducers);
+	// Privacy gate (k-anon suppress / DP noise) then piiRedact, mirroring the
+	// event-fold publish in fireWatchers so the timer-driven boundary / slide
+	// publishes are gated identically.
+	const gated = _gateAggregate(win, computed, win.outputTopic);
+	if (!gated.publish) return; // below k: hold the last published value
+	const wire = _redactOrDrop(win.outputTopic, gated.value);
+	if (wire === REDACT_DROP) return;
+	_platformPublish(platform, win.outputTopic, 'set', wire);
+}
+
+/**
+ * Close a tumbling window once the exact clock `wall` has reached its boundary:
+ * publish the closing state, reset to init(), start a fresh k-anonymity cohort
+ * and noise seed, and move `nextBoundary` to the first boundary after `wall`.
+ * Before the boundary it does nothing, so the boundary timer, the event fold
+ * and the window loader can all call it and the window closes once, by
+ * whichever runs first.
+ *
+ * @param {any} entry
+ * @param {any} win
+ * @param {number} wall - exact wall clock (`wallEpoch()`)
+ * @param {any} [platform] - publish path for the closing state
+ */
+export function _rollTumblingWindow(entry, win, wall, platform) {
+	if (wall < win.nextBoundary) return;
+	// Advance before any app code runs, so nothing that throws below can leave
+	// the window on a boundary that has already passed.
+	win.nextBoundary = win.boundaryAfter(wall);
+	win.near = win.nextBoundary - wall <= _TUMBLE_LEAD_MS;
+	// Closed by an event or a load while the boundary timer still waits for the
+	// old boundary, which after a wall clock jump can be further off than the
+	// new one: arm it for the new boundary instead.
+	if (win.boundaryTimer) {
+		clearTimer(win.boundaryTimer);
+		win.boundaryTimer = null;
+		_scheduleBoundary(entry, win);
+	}
+	// A pending debounced publish carries the closing window's state; the final
+	// publish below supersedes it rather than letting it land in the new window.
+	if (win.timer) {
+		clearTimer(win.timer);
+		win.timer = null;
+	}
+	// A publish that throws (the privacy gate refusing to emit without an
+	// operator secret, a redactor blowing up) must not take the window with it.
+	// The closing state belongs to the window that just ended, so an aggregate
+	// downstream of this one folds it before closing its own window.
+	_closingDepth++;
+	try {
+		_publishWindow(entry, win, platform);
+	} catch (err) {
+		_warnAggregateWindowFailure(entry, err);
+	} finally {
+		_closingDepth--;
+	}
+	// An init() that throws keeps the window's previous state rather than
+	// failing the publish or subscribe that happened to close the window.
+	try {
+		const fresh = {};
+		for (const [field, r] of entry._reducerEntries) {
+			if (r.init) fresh[field] = r.init();
+		}
+		win.state = fresh;
+	} catch (err) {
+		_warnAggregateWindowFailure(entry, err, 'init');
+	}
+	// A new window is a new k-anonymity cohort and a fresh noise seed.
+	if (win.cohort) win.cohort = new Set();
+	if (win.privacy) win._windowStart = win.nextBoundary;
 }
 
 /**
@@ -292,7 +415,19 @@ function _wrapPlatformPublish(platform) {
 					// (or hop-bucket array for sliding) and publishes to its
 					// own output topic. Per-window debounce overrides the
 					// aggregate-level default.
+					// A tumbling window whose boundary has passed closes before the
+					// event folds in, so the event lands in the window the wall
+					// clock puts it in even when the boundary timer has not run yet.
+					// Near a boundary the exact clock decides; the cached clock
+					// already past it catches a wall clock that jumped forward while
+					// the timer waits. Either way the roll itself checks the exact
+					// clock. An upstream window's closing state does not close a
+					// window: it belongs to the period that is ending.
+					const cached = entry._tumbling ? runtimeNow() : 0;
 					for (const win of entry.windowStates.values()) {
+						if (win.type === 'tumbling' && _closingDepth === 0 && (win.near || cached >= win.nextBoundary)) {
+							_rollTumblingWindow(entry, win, wallEpoch(), platform);
+						}
 						if (win.type === 'sliding') {
 							const bucket = win.buckets[win.bucketIndex];
 							for (const [field, reducer] of entry._reducerEntries) {
