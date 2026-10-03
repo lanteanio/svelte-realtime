@@ -74,8 +74,13 @@ export function _computeAggregateState(state, reducers) {
  */
 export const _TUMBLE_LEAD_MS = 50;
 
-/** Closing publishes in progress; while one runs, downstream windows do not close. */
-let _closingDepth = 0;
+/**
+ * The boundary of the closing publish in progress (Infinity when none). A
+ * closing state belongs to the period that ends at this boundary, so while it
+ * is published a downstream window closes first only if its own boundary is
+ * earlier.
+ */
+let _closingBoundary = Infinity;
 
 /**
  * Report a window publish, or a reducer `init()` starting a new window, that
@@ -162,15 +167,16 @@ export function _rollTumblingWindow(entry, win, wall, platform) {
 	}
 	// A publish that throws (the privacy gate refusing to emit without an
 	// operator secret, a redactor blowing up) must not take the window with it.
-	// The closing state belongs to the window that just ended, so an aggregate
-	// downstream of this one folds it before closing its own window.
-	_closingDepth++;
+	// The closing state belongs to the period ending at `closing`; a downstream
+	// window folds it into the window that holds that boundary.
+	const outerClosing = _closingBoundary;
+	_closingBoundary = closing;
 	try {
 		_publishWindow(entry, win, platform);
 	} catch (err) {
 		_warnAggregateWindowFailure(entry, err);
 	} finally {
-		_closingDepth--;
+		_closingBoundary = outerClosing;
 	}
 	// An init() that throws keeps the window's previous state rather than
 	// failing the publish or subscribe that happened to close the window.
@@ -195,14 +201,14 @@ export function _rollTumblingWindow(entry, win, wall, platform) {
 }
 
 /**
- * Walk up from `topic` through the aggregates that publish it and close the
- * first due tumbling window on the way whose boundary is at or before
- * `boundary` (closing it closes what feeds it in turn). A window that is not
- * due, or not tumbling, or a single-state aggregate, is walked through. The
- * depth bound ends a cycle of aggregates feeding each other.
+ * Walk up from `topic` through the aggregates that publish it and close every
+ * tumbling window on the way whose boundary is at or before `boundary` (the
+ * boundary the downstream window is closing at, which has passed). Other
+ * windows and single-state aggregates are walked through. The depth bound
+ * ends a cycle of aggregates feeding each other.
  *
  * @param {unknown} topic
- * @param {number} boundary - the boundary the downstream window is closing at
+ * @param {number} boundary
  * @param {number} wall
  * @param {any} platform
  * @param {number} depth
@@ -212,11 +218,8 @@ function _closeUpstream(topic, boundary, wall, platform, depth) {
 	const up = _aggregatePublishing(topic);
 	if (!up) return;
 	const win = up.win;
-	if (win && win.type === 'tumbling' && win.nextBoundary <= boundary && win.nextBoundary <= wall) {
-		_rollTumblingWindow(up.entry, win, wall, platform);
-	} else {
-		_closeUpstream(up.entry.source, boundary, wall, platform, depth + 1);
-	}
+	if (win && win.type === 'tumbling' && win.nextBoundary <= boundary) _rollTumblingWindow(up.entry, win, wall, platform);
+	_closeUpstream(up.entry.source, boundary, wall, platform, depth + 1);
 }
 
 /**
@@ -477,11 +480,11 @@ function _wrapPlatformPublish(platform) {
 					// Near a boundary the exact clock decides; the cached clock
 					// already past it catches a wall clock that jumped forward while
 					// the timer waits. Either way the roll itself checks the exact
-					// clock. An upstream window's closing state does not close a
-					// window: it belongs to the period that is ending.
+					// clock. An upstream window's closing state closes only a window
+					// whose boundary comes before the one that state belongs to.
 					const cached = entry._tumbling ? runtimeNow() : 0;
 					for (const win of entry.windowStates.values()) {
-						if (win.type === 'tumbling' && _closingDepth === 0 && (win.near || cached >= win.nextBoundary)) {
+						if (win.type === 'tumbling' && win.nextBoundary < _closingBoundary && (win.near || cached >= win.nextBoundary)) {
 							_rollTumblingWindow(entry, win, wallEpoch(), platform);
 						}
 						if (win.type === 'sliding') {

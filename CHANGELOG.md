@@ -291,9 +291,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the boundary always does. An app that names the current window from
   `Date.now()` agrees with the aggregate about which window an event is
   in. When an aggregate is fed by another aggregate's tumbling window,
-  directly or through other aggregates, the upstream window closes first
-  at a boundary they share, whichever timer fires first, so its closing
-  state counts toward the downstream window that is ending.
+  directly or through other aggregates, a closing state counts toward the
+  downstream window that holds its boundary: the upstream window closes
+  first at a boundary they share, whichever timer fires first.
 
 - **A tumbling window with a `tz` no longer closes over and over around a
   daylight saving change.** The local boundary was turned into an instant

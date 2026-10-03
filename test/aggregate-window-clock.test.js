@@ -331,37 +331,110 @@ describe('tumbling windows close on the exact clock', () => {
 	}
 	const minute = { type: 'tumbling', period: 'minute' };
 
-	it('a window fed through an aggregate that is not closing gets the upstream closing state first', () => {
+	// The chain cases below close the downstream window with a load after the
+	// boundary, before any timer runs, so the upstream window is still open and
+	// only the walk can close it first.
+
+	it('a window fed through an aggregate that is not closing gets the upstream closing state first', async () => {
 		const B1 = B0 + 60_000;
 		vi.useFakeTimers({ now: B1 - 2000 });
 		installExactNow();
-		// u (minute) -> d (hour, not due at B1) -> e (minute), e registered first.
-		__registerAggregate('agg/tind-e', live.aggregate('tind:d:h', counter(), { topic: 'tind:e', windows: { m: minute } }));
+		// u (minute) -> d (hour, not due at B1) -> e (minute).
+		const e = live.aggregate('tind:d:h', counter(), { topic: 'tind:e', windows: { m: minute } });
+		__registerAggregate('agg/tind-e', e);
 		__registerAggregate('agg/tind-d', live.aggregate('tind:u:m', counter(), { topic: 'tind:d', windows: { h: { type: 'tumbling', period: 'hour' } } }));
 		__registerAggregate('agg/tind-u', live.aggregate('tind:src', counter(), { topic: 'tind:u', windows: { m: minute } }));
 		const platform = activate();
-		const e = () => platform.published.filter((p) => p.topic === 'tind:e:m');
 
 		platform.publish('tind:src', 'inc', {});
 		platform.publish('tind:src', 'inc', {});
-		vi.advanceTimersByTime(2000);
+		vi.setSystemTime(B1 + 5);
+		await e.__windowStreams.m();
 
-		expect(e().filter((p) => p.at === B1).map((p) => p.data.count)).toEqual([3, 3]);
+		expect(platform.published.filter((p) => p.topic === 'tind:e:m' && p.at === B1 + 5).map((p) => p.data.count)).toEqual([3, 3]);
 	});
 
-	it('a window fed through a single-state aggregate gets the upstream closing state first', () => {
+	it('a window fed through a single-state aggregate gets the upstream closing state first', async () => {
 		vi.useFakeTimers({ now: B0 - 2000 });
 		installExactNow();
-		__registerAggregate('agg/tss-e', live.aggregate('tss:s', counter(), { topic: 'tss:e', windows: { m: minute } }));
+		const e = live.aggregate('tss:s', counter(), { topic: 'tss:e', windows: { m: minute } });
+		__registerAggregate('agg/tss-e', e);
 		__registerAggregate('agg/tss-s', live.aggregate('tss:u:m', counter(), { topic: 'tss:s' }));
 		__registerAggregate('agg/tss-u', live.aggregate('tss:src', counter(), { topic: 'tss:u', windows: { m: minute } }));
 		const platform = activate();
 
 		platform.publish('tss:src', 'inc', {});
 		platform.publish('tss:src', 'inc', {});
-		vi.advanceTimersByTime(2000);
+		vi.setSystemTime(B0 + 5);
+		await e.__windowStreams.m();
 
-		expect(platform.published.filter((p) => p.topic === 'tss:e:m' && p.at === B0).map((p) => p.data.count)).toEqual([3, 3]);
+		expect(platform.published.filter((p) => p.topic === 'tss:e:m' && p.at === B0 + 5).map((p) => p.data.count)).toEqual([3, 3]);
+	});
+
+	it('every upstream window closing at or before the boundary closes first, through a chain', async () => {
+		vi.useFakeTimers({ now: B0 - 20_000 });
+		installExactNow();
+		// a (minute) -> b (30 s, closing 15 s before the minute) -> c (minute).
+		// After a stall both a and b are due when c closes; c must count b's
+		// closing state and, through b's new window, a's.
+		const c = live.aggregate('tf1:b:w', counter(), { topic: 'tf1:c', windows: { m: minute } });
+		__registerAggregate('agg/tf1-c', c);
+		__registerAggregate('agg/tf1-b', live.aggregate('tf1:a:m', counter(), { topic: 'tf1:b', windows: { w: { type: 'tumbling', durationMs: 30_000, anchor: 15_000 } } }));
+		__registerAggregate('agg/tf1-a', live.aggregate('tf1:src', counter(), { topic: 'tf1:a', windows: { m: minute } }));
+		const platform = activate();
+
+		platform.publish('tf1:src', 'inc', {});
+		platform.publish('tf1:src', 'inc', {});
+		vi.setSystemTime(B0 + 1000);
+		await c.__windowStreams.m();
+
+		expect(platform.published.filter((p) => p.topic === 'tf1:c:m').slice(-1)[0].data.count).toBe(4);
+	});
+
+	it('an upstream closing state lets a downstream window with an earlier boundary close first', () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		// u closes at :05 past each 10 s; d closes on the hour. After a stall, an
+		// event closes u first: d's hour ended before u's window did.
+		__registerAggregate('agg/tph2-d', live.aggregate('tph2:u:w', counter(), { topic: 'tph2:d', windows: { h: { type: 'tumbling', period: 'hour' } } }));
+		__registerAggregate('agg/tph2-u', live.aggregate('tph2:src', counter(), { topic: 'tph2:u', windows: { w: { type: 'tumbling', durationMs: 10_000, anchor: 5000 } } }));
+		const platform = activate();
+
+		platform.publish('tph2:src', 'inc', {});
+		platform.publish('tph2:src', 'inc', {});
+		vi.setSystemTime(B0 + 6000);
+		platform.publish('tph2:src', 'inc', {});
+
+		// d closes its hour with 2, then counts u's closing state and the new
+		// event's publish in the next hour.
+		expect(platform.published.filter((p) => p.topic === 'tph2:d:h').map((p) => p.data.count)).toEqual([1, 2, 2, 1, 2]);
+	});
+
+	it('an aggregate that feeds itself still closes its window', async () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		const self = live.aggregate('tself:agg:m', counter(), { topic: 'tself:agg', windows: { m: minute } });
+		__registerAggregate('agg/tself', self);
+		const platform = activate();
+
+		vi.setSystemTime(B0 + 5);
+		await self.__windowStreams.m();
+		expect(platform.published.filter((p) => p.topic === 'tself:agg:m').length).toBeGreaterThan(0);
+	});
+
+	it('a debounced downstream window does not publish its ended state after closing', () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		__registerAggregate('agg/tdb-d', live.aggregate('tdb:up:m', counter(), { topic: 'tdb:down', debounce: 50, windows: { m: minute } }));
+		__registerAggregate('agg/tdb-u', live.aggregate('tdb:src', counter(), { topic: 'tdb:up', windows: { m: minute } }));
+		const platform = activate();
+		const down = () => platform.published.filter((p) => p.topic === 'tdb:down:m');
+
+		platform.publish('tdb:src', 'inc', {});
+		platform.publish('tdb:src', 'inc', {});
+		vi.advanceTimersByTime(2000 + 200);
+
+		expect(down().map((p) => [p.at - B0, p.data.count])).toEqual([[-1950, 2], [0, 3]]);
 	});
 
 	it('an upstream window whose boundary comes after the closing one is left to close on its own', async () => {
@@ -383,18 +456,20 @@ describe('tumbling windows close on the exact clock', () => {
 		expect(d().map((p) => p.data.count)).toEqual([1, 2, 2]);
 	});
 
-	it('an upstream window whose name holds a colon still closes first', () => {
+	it('an upstream window whose name holds a colon still closes first', async () => {
 		vi.useFakeTimers({ now: B0 - 2000 });
 		installExactNow();
-		__registerAggregate('agg/tcol-d', live.aggregate('tcol:up:per:min', counter(), { topic: 'tcol:down', windows: { m: minute } }));
+		const down = live.aggregate('tcol:up:per:min', counter(), { topic: 'tcol:down', windows: { m: minute } });
+		__registerAggregate('agg/tcol-d', down);
 		__registerAggregate('agg/tcol-u', live.aggregate('tcol:src', counter(), { topic: 'tcol:up', windows: { 'per:min': minute } }));
 		const platform = activate();
 
 		platform.publish('tcol:src', 'inc', {});
 		platform.publish('tcol:src', 'inc', {});
-		vi.advanceTimersByTime(2000);
+		vi.setSystemTime(B0 + 5);
+		await down.__windowStreams.m();
 
-		expect(platform.published.filter((p) => p.topic === 'tcol:down:m' && p.at === B0).map((p) => p.data.count)).toEqual([3, 3]);
+		expect(platform.published.filter((p) => p.topic === 'tcol:down:m' && p.at === B0 + 5).map((p) => p.data.count)).toEqual([3, 3]);
 	});
 
 	it('a downstream window closed by a load gets the upstream closing state first', async () => {
