@@ -293,7 +293,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in. When an aggregate is fed by another aggregate's tumbling window,
   directly or through other aggregates, a closing state counts toward the
   downstream window that holds its boundary: the upstream window closes
-  first at a boundary they share, whichever timer fires first.
+  first at a boundary they share, whichever timer fires first. An
+  aggregate in between that has a `debounce` passes the state on after
+  that delay.
 
 - **A tumbling window with a `tz` no longer closes over and over around a
   daylight saving change.** The local boundary was turned into an instant

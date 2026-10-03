@@ -481,10 +481,11 @@ function _wrapPlatformPublish(platform) {
 					// already past it catches a wall clock that jumped forward while
 					// the timer waits. Either way the roll itself checks the exact
 					// clock. An upstream window's closing state closes only a window
-					// whose boundary comes before the one that state belongs to.
+					// whose boundary comes before the one that state belongs to, and
+					// such a window is due: that boundary has passed.
 					const cached = entry._tumbling ? runtimeNow() : 0;
 					for (const win of entry.windowStates.values()) {
-						if (win.type === 'tumbling' && win.nextBoundary < _closingBoundary && (win.near || cached >= win.nextBoundary)) {
+						if (win.type === 'tumbling' && win.nextBoundary < _closingBoundary && (win.near || cached >= win.nextBoundary || _closingBoundary !== Infinity)) {
 							_rollTumblingWindow(entry, win, wallEpoch(), platform);
 						}
 						if (win.type === 'sliding') {

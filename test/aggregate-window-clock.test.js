@@ -410,6 +410,25 @@ describe('tumbling windows close on the exact clock', () => {
 		expect(platform.published.filter((p) => p.topic === 'tph2:d:h').map((p) => p.data.count)).toEqual([1, 2, 2, 1, 2]);
 	});
 
+	it('a downstream window closes before an upstream closing state with a later boundary, while the cached clock lags', async () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installCachedClock(700);
+		// u closes 500 ms after the hour, d on the hour. After a stall a load
+		// closes u at B0+600, when the cached clock still reads before B0 and no
+		// lead wake has marked d near.
+		__registerAggregate('agg/tlag-d', live.aggregate('tlag:u:w', counter(), { topic: 'tlag:d', windows: { h: { type: 'tumbling', period: 'hour' } } }));
+		const up = live.aggregate('tlag:src', counter(), { topic: 'tlag:u', windows: { w: { type: 'tumbling', durationMs: 10_000, anchor: 500 } } });
+		__registerAggregate('agg/tlag-u', up);
+		const platform = activate();
+
+		platform.publish('tlag:src', 'inc', {});
+		platform.publish('tlag:src', 'inc', {});
+		vi.setSystemTime(B0 + 600);
+		await up.__windowStreams.w();
+
+		expect(platform.published.filter((p) => p.topic === 'tlag:d:h').map((p) => p.data.count)).toEqual([1, 2, 2, 1]);
+	});
+
 	it('an aggregate that feeds itself still closes its window', async () => {
 		vi.useFakeTimers({ now: B0 - 2000 });
 		installExactNow();
