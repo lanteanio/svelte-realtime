@@ -364,8 +364,11 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 				// that subscription alone, and the presence stream only observes.
 				// An app that also renders ${name}.data(...args) shares the cached
 				// store, so it stays one subscription and one load. watch() never
-				// holds it: an observer is on nobody's roster.
-				const joinDeps = (mpInfo.hasPresence || mpInfo.hasOwner)
+				// holds it: an observer is on nobody's roster. A config whose
+				// presence or owner the build cannot rule out joins too: a
+				// needless join costs one data load, a missed one drops every
+				// send from the room.
+				const joinDeps = mpInfo.joins
 					? [`membership: ${name}.data(...args)`]
 					: [];
 				const build = (bound) => `new MultiplayerRoom({ ${staticDeps.join(', ')}, args, bind: (args) => ({ ${bound.join(', ')} }) })`;

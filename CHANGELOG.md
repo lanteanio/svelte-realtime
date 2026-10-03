@@ -312,6 +312,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   50 calls, so every one of them timed out. They now go out in frames of at
   most 50.
 
+- **A room or multiplayer config written with shorthand keys, spreads or a
+  named object generates the client it declares.** The Vite plugin read only
+  the `name: value` and `name()` members written in the call, so
+  `{ topic, presence }`, `{ ...shared, cursors: true }` and
+  `live.multiplayer(config)` lost every other key: `board.room(...)` never
+  held the data stream, so the user never joined, never appeared in
+  `others`, could not hold the owner role, and had every cursor sample,
+  presence field and reaction dropped; shorthand `presence` beside `typing`,
+  `locks` or `selections` failed the build with "has no presence function".
+  The plugin now reads the config the way JavaScript evaluates it, through
+  the `const` declarations in the same file and through a wrapper given a
+  single object such as `withDefaults({ ... })`; an expression it cannot
+  read that way is read from the first object written in it, as before, and
+  `room(...)` joins when a part it cannot read may supply `presence` or
+  `owner`. A `merge`, `key` or `selections` value it reaches through a spread
+  or a const meets the rule for one written in the call: a template literal
+  with `${...}` fails the build, instead of the client quietly using the
+  default. The same reading applies to `actions` and to a `live.aggregate()`
+  `windows` option.
+  A call inside an action's value (`rename: withAudit(fn)`) no longer
+  generates an extra action, an `actions` identifier the plugin cannot read
+  no longer picks up the keys of a later object, and `presence: null` counts
+  as no presence, as it does on the server. A presence field whose value the
+  plugin cannot evaluate no longer fails the build; the server's check when
+  the module loads decides. The plugin's source scanner also stops taking a
+  division after a name, a number or a closing bracket
+  (`total / 4, // per quarter`) for the start of a regex, and stops ending a
+  regex at a `/` inside a character class; either could hide the code after
+  it from every generated stub. See "How the config is read" in the README.
+
 - **A lock or selection the roster will not keep is no longer shown to live
   members.** The presence send path forwarded every field of a delta while
   the roster kept only the room's declared surfaces within their bounds, so

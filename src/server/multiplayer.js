@@ -6,6 +6,7 @@ import { _tenantTopic } from './tenant.js';
 import { _IS_DEV } from './env.js';
 import { randomU32 } from '../shared/runtime.js';
 import { safeAssign } from '../shared/safe-assign.js';
+import { _MULTIPLAYER_NAMESPACE_MEMBERS as _NAMESPACE_MEMBERS } from '../shared/multiplayer-members.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); multiplayer registration reaches it through this,
@@ -23,17 +24,6 @@ export function installMultiplayer(seams) {
 // (_clusterPresenceMerge) additionally caps the accumulated entry size.
 const _STICKY_MAX_KEYS = 64;
 const _STICKY_VALUE_MAX_BYTES = 1024;
-
-// Every member the Vite plugin can generate on a multiplayer client namespace
-// (src/vite/codegen-client.js and the __mpFields fallbacks), whatever the
-// export declares. An action may not take one of these names.
-const _NAMESPACE_MEMBERS = new Set([
-	'data', 'presence', 'cursors', 'owner', 'status', 'move', 'reportViewport',
-	'identify', 'room', 'watch',
-	'typing', 'locks', 'selections', 'reactions',
-	'setTyping', 'acquireLock', 'releaseLock', 'setSelection', 'react',
-	'_setField', '_emitReaction'
-]);
 
 /**
  * A sticky value persists only when its serialized form fits the bound; null

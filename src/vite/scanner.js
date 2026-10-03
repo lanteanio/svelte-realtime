@@ -166,19 +166,79 @@ export function _skipNonCode(s, i) {
 		return end === -1 ? s.length - 1 : end + 1;
 	}
 
-	// Regex literals: / not preceded by an identifier char, ) or ]
-	if (ch === '/' && s[i + 1] !== '/' && s[i + 1] !== '*') {
-		const prev = i > 0 ? s[i - 1] : '\n';
-		if (prev !== ')' && prev !== ']' && !/\w/.test(prev)) {
-			for (let j = i + 1; j < s.length; j++) {
-				if (s[j] === '\\') { j++; continue; }
-				if (s[j] === '/') return j;
-				if (s[j] === '\n') break; // malformed - give up
-			}
+	// Regex literals. A `/` where an expression can start opens one; after a
+	// value it divides. A `/` inside a character class does not close it.
+	if (ch === '/' && s[i + 1] !== '/' && s[i + 1] !== '*' && _regexCanStart(s, i)) {
+		let inClass = false;
+		for (let j = i + 1; j < s.length; j++) {
+			const c = s[j];
+			if (c === '\\') { j++; continue; }
+			if (c === '\n') break; // malformed - give up
+			if (inClass) { if (c === ']') inClass = false; continue; }
+			if (c === '[') inClass = true;
+			else if (c === '/') return j;
 		}
 	}
 
 	return -1;
+}
+
+/** Keywords after which an expression, and so a regex literal, can start. */
+const _REGEX_AFTER_WORDS = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await', 'default']);
+
+/** Characters that end a value a `/` can divide. */
+const _VALUE_END = /[\w$)\]]/;
+
+/**
+ * Can a regex literal start at the `/` at `i`? The token before it on the same
+ * line decides. After a value - a name, a number, `)` or `]`, a postfix `++` /
+ * `--` or a TypeScript `!` - the `/` divides (`total / 4`), except after the
+ * `)` of an `if` / `while` / `for` head or after a keyword such as `return`;
+ * after an operator, an opening bracket or a comma it opens a regex. A `/` that
+ * starts its line opens one too: a division is written at the end of the line
+ * before, and that line may end in a comment rather than an operand.
+ * @param {string} s
+ * @param {number} i
+ * @returns {boolean}
+ */
+function _regexCanStart(s, i) {
+	let k = i - 1;
+	while (k >= 0 && (s[k] === ' ' || s[k] === '\t')) k--;
+	if (k < 0 || s[k] === '\n' || s[k] === '\r') return true;
+	const prev = s[k];
+	if (prev === ']') return false;
+	if (prev === ')') return _closesStatementHead(s, k);
+	if (prev === '!') return !(k > 0 && _VALUE_END.test(s[k - 1]));
+	if ((prev === '+' || prev === '-') && s[k - 1] === prev) return !(k > 1 && _VALUE_END.test(s[k - 2]));
+	if (!/[\w$]/.test(prev)) return true;
+	let start = k;
+	while (start > 0 && /[\w$]/.test(s[start - 1])) start--;
+	// `stats.in / total`: a property named like a keyword is a value.
+	if (start > 0 && s[start - 1] === '.') return false;
+	return _REGEX_AFTER_WORDS.has(s.slice(start, k + 1));
+}
+
+/**
+ * Does the `)` at `k` close the head of an `if`, `while`, `for` or `with`
+ * statement, after which a new statement (and so a regex) can start?
+ * @param {string} s
+ * @param {number} k
+ * @returns {boolean}
+ */
+function _closesStatementHead(s, k) {
+	let depth = 0;
+	for (let j = k; j >= 0; j--) {
+		if (s[j] === ')') depth++;
+		else if (s[j] === '(' && --depth === 0) {
+			let w = j - 1;
+			while (w >= 0 && /\s/.test(s[w])) w--;
+			let b = w;
+			while (b >= 0 && /[\w$]/.test(s[b])) b--;
+			const word = s.slice(b + 1, w + 1);
+			return (word === 'if' || word === 'while' || word === 'for' || word === 'with') && (b < 0 || s[b] !== '.');
+		}
+	}
+	return false;
 }
 
 /**
