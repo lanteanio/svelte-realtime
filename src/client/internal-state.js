@@ -14,6 +14,8 @@ import { randomFloat } from '../client-runtime.js';
  *   terminated: boolean,
  *   config: any,
  *   isOffline: boolean,
+ *   socketUp: boolean,
+ *   socketFailed: boolean,
  *   maxOptimisticQueueDepth: number
  * }}
  */
@@ -22,6 +24,11 @@ export const clientState = {
 	terminated: false,
 	config: {},
 	isOffline: false,
+	// The adapter socket is open (or open behind a hidden tab), and whether it
+	// last reported 'failed' (closed for good), as its status store said. Kept
+	// by connection.js.
+	socketUp: false,
+	socketFailed: false,
 	maxOptimisticQueueDepth: 1_000
 };
 

@@ -275,6 +275,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A stream released before the server answered its subscribe no longer
+  keeps the subscription.** The release reached the server only for a topic
+  the client had already been told, so a stream let go within a round-trip
+  of subscribing (a quick switch between boards, an `{#if}` that closes at
+  once, a preload that is thrown away) left the socket subscribed until the
+  tab closed; on a room's data stream that kept the user on the roster, and
+  in the owner role, for the rest of the session. A subscribe and an
+  unsubscribe in the same tick, as `get(store)` does, now send nothing. A
+  request already sent is still answered, and the client then releases what
+  the server subscribed, unless another stream on the page holds that topic.
+  The same goes for an answer that arrives after the stream timed out, after
+  a newer subscribe replaced it, or after the socket dropped with the
+  request still in the send queue, and for a `loadMore()` page, which the
+  server also subscribes for. A release frame also waits while a subscribe
+  that a stream on the page is waiting for has not had its topic named by
+  the server yet, for at most the RPC timeout, so it no longer reaches the
+  server ahead of that subscribe to undo or cut it; when one tick releases
+  a stream and subscribes another, as a room switch does, the release goes
+  out first unless another subscribe is still in flight. Tests run the
+  client stream against the server's dispatch with every frame held until
+  the test delivers it.
+
+- **A stream whose first subscribe never got through subscribes again when
+  the socket opens.** A stream takes the first open it sees as its baseline
+  rather than a reconnect, so one whose queued subscribe a failed connect
+  attempt rejected, or that timed out while the socket was still
+  connecting, kept the error and never loaded (while the request still
+  reached the server), and one that loaded over a socket opened behind a
+  hidden tab, which dropped and came back while the tab stayed hidden,
+  never had its subscription restored. Such a resubscribe ages the replay
+  cursor across the outage like any reconnect.
+
+- **More than 50 streams subscribing in one tick no longer all fail.** The
+  client sent them as one batch frame, which the server refuses whole above
+  50 calls, so every one of them timed out. They now go out in frames of at
+  most 50.
+
 - **A lock or selection the roster will not keep is no longer shown to live
   members.** The presence send path forwarded every field of a delta while
   the roster kept only the room's declared surfaces within their bounds, so

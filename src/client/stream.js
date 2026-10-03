@@ -25,8 +25,30 @@ const _hasManagedMarking = typeof _adapterClient.setTopicManaged === 'function';
 // second unsubscribe for a gone topic is a no-op that re-runs an idempotent
 // drain. No-op wherever the adapter lacks managed marking (older adapters
 // send the frame themselves via their own topic refcount).
+//
+// A release frame must never overtake a subscribe the server is still
+// handling. The server names a request's wire topic (its attach frame) before
+// it subscribes the socket, so an unsubscribe for that topic processed in
+// between would either leave the subscription with nothing left to release it
+// or cut the subscription of a stream about to bind the topic. Until a sent
+// subscribe is named it could be for any topic, so releases wait while one a
+// stream still waits for is outstanding, each for at most one RPC timeout;
+// once named, the stream that sent it holds a ref on the topic, which keeps
+// any other release for it off the wire. A request no stream waits for any
+// more is not waited on: its orphan record releases what it subscribed after
+// its answer. A page request (`loadMore`) subscribes the socket again too,
+// and holds the stream's topic until it is answered.
 /** @type {Map<string, number>} wire topic -> live managed stream refs */
 const _managedTopicRefs = new Map();
+
+/** @type {number} Live stream subscribes on the wire whose topic the server has not named yet */
+let _unnamedSubscribes = 0;
+
+/** @type {Array<{ topic: string, at: number }>} releases waiting for `_unnamedSubscribes` to drain, oldest first */
+const _waitingReleases = [];
+
+/** @type {ReturnType<typeof setTimeout> | null} Sends the oldest waiting release once it has waited a full timeout */
+let _waitingTimer = null;
 
 function _managedRefAcquire(t) {
 	_managedTopicRefs.set(t, (_managedTopicRefs.get(t) || 0) + 1);
@@ -53,17 +75,178 @@ function _managedRefRelease(t) {
 // to decide: subscribing to it routes through ensureConnection and re-creates
 // (and reconnects) a connection the app explicitly closed, so a `terminated`
 // client skips the socket entirely - a closed connection has no server-side
-// subscription to release anyway. Known residual: if another stream instance's
-// subscribe RPC for the SAME topic is in flight (server already ran
-// platform.subscribe, response not yet resolved - possible only when two
-// instances share one wire topic, e.g. under stream-cache overflow), that
-// instance holds no ref yet and this frame drops its fresh subscription; the
-// window is a single RPC round-trip and the pre-fix alternative leaked EVERY
-// released subscription until socket close.
+// subscription to release anyway. While a live subscribe is still unnamed the
+// release waits (see `_waitingReleases`), still holding its ref.
 function _sendManagedRelease(releasedTopic) {
+	if (_unnamedSubscribes > 0) {
+		// Whichever of those subscribes ends first re-checks the wait and arms
+		// the deadline (each ends within a timeout of being sent).
+		_waitingReleases.push({ topic: releasedTopic, at: monotonicNow() });
+		return;
+	}
+	_releaseManagedRef(releasedTopic);
+}
+
+function _releaseManagedRef(releasedTopic) {
 	if (!_managedRefRelease(releasedTopic)) return;
 	if (clientState.terminated) return;
 	try { _connect().send({ type: 'unsubscribe', topic: releasedTopic }); } catch { /* best-effort; the close/idle drain covers it */ }
+}
+
+function _armWaitingTimer() {
+	const wait = _waitingReleases[0].at + _getTimeout() - monotonicNow();
+	_waitingTimer = setTimer(() => {
+		_waitingTimer = null;
+		_releaseWaiting();
+	}, wait > 0 ? wait : 0);
+}
+
+/**
+ * Send the waiting releases once no live subscribe is unnamed, and any that
+ * has waited a full timeout regardless: subscribes that keep overlapping
+ * must not hold a release back for good. A release sent at its deadline can
+ * still reach the server ahead of a subscribe to its topic sent in the last
+ * round-trip before it; that is what bounding the wait costs.
+ */
+function _releaseWaiting() {
+	if (_waitingReleases.length === 0) return;
+	let due = _waitingReleases.length;
+	if (_unnamedSubscribes > 0) {
+		const since = monotonicNow() - _getTimeout();
+		due = 0;
+		while (due < _waitingReleases.length && _waitingReleases[due].at <= since) due++;
+	}
+	const out = _waitingReleases.splice(0, due);
+	if (_waitingTimer !== null && (out.length > 0 || _waitingReleases.length === 0)) {
+		clearTimer(_waitingTimer);
+		_waitingTimer = null;
+	}
+	if (_waitingReleases.length > 0 && _waitingTimer === null) _armWaitingTimer();
+	for (const w of out) _releaseManagedRef(w.topic);
+}
+
+/**
+ * A stream subscribe request from the moment it is queued until nobody waits
+ * for its answer. `state` is 'queued' (in the microtask batch), 'sent', or
+ * 'done' (answered, failed, withdrawn before the batch went out, or handed to
+ * an orphan record); `topic` is the wire topic once the server names it.
+ * @typedef {{ request: any, state: 'queued' | 'sent' | 'done', topic: string | null }} SubscribeTicket
+ */
+
+/**
+ * The server named a sent request's wire topic.
+ * @param {SubscribeTicket} ticket
+ * @param {string} namedTopic
+ */
+function _subscribeNamed(ticket, namedTopic) {
+	if (ticket.topic !== null) return;
+	ticket.topic = namedTopic;
+	if (ticket.state === 'sent') {
+		_unnamedSubscribes--;
+		_releaseWaiting();
+	}
+}
+
+/**
+ * Its stream no longer waits for the request: answered, failed, or handed to
+ * an orphan record.
+ * @param {SubscribeTicket} ticket
+ */
+function _subscribeDone(ticket) {
+	const unnamed = ticket.state === 'sent' && ticket.topic === null;
+	ticket.state = 'done';
+	if (unnamed) {
+		_unnamedSubscribes--;
+		_releaseWaiting();
+	}
+}
+
+/**
+ * Keep answering a subscribe (or a `loadMore` page, which subscribes too)
+ * whose stream stopped waiting for it: released, timed out, or superseded by
+ * a newer subscribe. The server may still subscribe the socket, and nothing
+ * else would release that before the socket closes. When the answer arrives,
+ * the topic it names is released, and so is the ref the stream handed over
+ * with the request; while another local stream holds the topic the release
+ * stays off the wire. Without an answer the record gives up one timeout
+ * after the socket is up, releasing the topic the attach frame named, if any.
+ *
+ * A request never named when the socket drops may still be in the adapter's
+ * send queue, which goes out on the next open, so on a disconnect such a
+ * record lets go of the handed-over ref (a subscription of the dropped
+ * socket) and parks until the socket is back. `parked` creates it that way,
+ * for a request the disconnect itself rejected. On a connection closed for
+ * good ('failed') nothing is kept.
+ * @param {string} id
+ * @param {SubscribeTicket} ticket
+ * @param {string | null} heldTopic - managed ref taken over from the stream
+ * @param {boolean} [parked]
+ */
+function _orphanSubscribe(id, ticket, heldTopic, parked) {
+	_subscribeDone(ticket);
+	const prev = pending.get(id);
+	if (prev && prev.timer) clearTimer(prev.timer);
+	/** @param {any} answeredTopic */
+	const release = (answeredTopic) => {
+		if (_hasManagedMarking && typeof answeredTopic === 'string') {
+			_managedRefAcquire(answeredTopic);
+			_sendManagedRelease(answeredTopic);
+		}
+		if (heldTopic) _sendManagedRelease(heldTopic);
+	};
+	const record = {
+		stream: true,
+		/** @type {any} */
+		timer: null,
+		/** @param {string | null | undefined} namedTopic */
+		attach(namedTopic) {
+			if (namedTopic && ticket.topic === null) ticket.topic = namedTopic;
+		},
+		/** @param {any} response */
+		resolve(response) {
+			release(response && response.topic);
+		},
+		/** @param {any} err */
+		reject(err) {
+			if (err && err.code === 'DISCONNECTED' && ticket.topic === null) park();
+			else release(null);
+		},
+		/** The socket came back up: start waiting for the answer. */
+		wake() {
+			if (record.timer === null && pending.get(id) === record) arm();
+		}
+	};
+	const arm = () => {
+		record.timer = setTimer(() => {
+			record.timer = null;
+			if (pending.get(id) === record) pending.delete(id);
+			release(ticket.topic);
+		}, _getTimeout());
+	};
+	const park = () => {
+		record.timer = null;
+		// The handed-over ref named a subscription of the dropped socket; only
+		// the answer to a request still queued can subscribe again.
+		if (heldTopic) _sendManagedRelease(heldTopic);
+		heldTopic = null;
+		// The disconnect loop deleted the entry before rejecting it; re-adding
+		// it while that loop runs would have it rejected again. A connection
+		// closed for good sends nothing more and answers nothing.
+		microtask(() => {
+			if (!clientState.socketFailed) pending.set(id, record);
+		});
+	};
+	if (parked) {
+		park();
+		return;
+	}
+	if (clientState.socketFailed) {
+		pending.delete(id);
+		release(null);
+		return;
+	}
+	pending.set(id, record);
+	if (clientState.socketUp) arm();
 }
 import { writable } from 'svelte/store';
 // Namespace import lets .rune() access fromStore (Svelte 5 only) without
@@ -73,7 +256,7 @@ import * as _svelteStore from 'svelte/store';
 import { assert } from '../shared/assert.js';
 import { mergeKeyField, rebuildIndex } from '../shared/merge.js';
 import { sanitizeRowData } from '../shared/safe-assign.js';
-import { now, randomFloat, setTimer, clearTimer, microtask } from '../client-runtime.js';
+import { now, monotonicNow, randomFloat, setTimer, clearTimer, microtask } from '../client-runtime.js';
 import { createJitterDispatch } from './jitter-dispatch.js';
 import { _devtoolsStream, _devtoolsStreamEvent, _devtoolsStreamError } from './devtools-instrument.js';
 import { clientState, RpcError, _IS_DEV, _useRAF, _nextId, pending } from './internal-state.js';
@@ -167,24 +350,59 @@ function _admitOrdered(marks, data) {
 /**
  * Queue a stream subscribe RPC to be sent in a batch within the current microtask.
  * If only one request queues, it's sent as a single frame (no batch overhead).
- * @param {any} request - The subscribe RPC request object
+ * @param {SubscribeTicket} ticket
  */
-function _batchedSubscribe(request) {
+function _batchedSubscribe(ticket) {
 	if (!_subscribeBatch) {
 		_subscribeBatch = [];
-		microtask(() => {
-			const batch = _subscribeBatch;
-			_subscribeBatch = null;
-			if (!batch || batch.length === 0) return;
-			const conn = _connect();
-			if (batch.length === 1) {
-				conn.sendQueued(batch[0]);
-			} else {
-				conn.sendQueued({ batch });
-			}
-		});
+		microtask(_flushSubscribeBatch);
 	}
-	_subscribeBatch.push(request);
+	_subscribeBatch.push(ticket);
+}
+
+/** The server refuses a batch frame of more than this many calls, all of them. */
+const _SUBSCRIBE_BATCH_MAX = 50;
+
+/** @type {number} Streams whose last subscriber left and whose cleanup microtask has not run yet */
+let _cleanupsPending = 0;
+
+/** @param {boolean} [deferred] */
+function _flushSubscribeBatch(deferred) {
+	// A stream released in the same tick cleans up in a microtask queued
+	// before this one ran: one more hop lets its release frame go out ahead
+	// of these subscribes (a room switch leaves the old room before it joins
+	// the new one).
+	if (_cleanupsPending > 0 && !deferred) {
+		microtask(() => _flushSubscribeBatch(true));
+		return;
+	}
+	const queued = _subscribeBatch;
+	_subscribeBatch = null;
+	if (!queued) return;
+	/** @type {any[]} */
+	const requests = [];
+	for (const ticket of queued) {
+		// Settled before the batch went out: its stream let go of it (a
+		// subscribe and unsubscribe in one tick, as `get(store)` does), or a
+		// disconnect rejected it. The server never sees it.
+		if (ticket.state !== 'queued') continue;
+		ticket.state = 'sent';
+		_unnamedSubscribes++;
+		requests.push(ticket.request);
+	}
+	if (requests.length === 0) return;
+	const conn = _connect();
+	if (requests.length === 1) {
+		conn.sendQueued(requests[0]);
+		return;
+	}
+	// A split can land between a room's data stream and its :owner or
+	// :presence subscribe, which the server pairs within one frame; that
+	// pairing is soft, and the joiner's own join corrects its view.
+	for (let i = 0; i < requests.length; i += _SUBSCRIBE_BATCH_MAX) {
+		const chunk = requests.length <= _SUBSCRIBE_BATCH_MAX ? requests : requests.slice(i, i + _SUBSCRIBE_BATCH_MAX);
+		conn.sendQueued(chunk.length === 1 ? chunk[0] : { batch: chunk });
+	}
 }
 
 /** @type {Map<string, { store: any, refCount: number }>} */
@@ -475,15 +693,23 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 	let subCount = 0;
 	let pendingId = null;
+	/** @type {SubscribeTicket | null} The in-flight subscribe request `pendingId` names */
+	let _ticket = null;
 
 	/**
-	 * @type {number | null} Wall-clock ms when a live (already-opened) stream
-	 * first lost its connection, or null while connected. Reset each time the
-	 * lifecycle listeners re-establish a baseline. Lets a reconnect measure how
-	 * long the retained replay cursor has been stale and rehydrate fully past
-	 * the trust bound instead of gap-filling from an outdated seq.
+	 * @type {number | null} Wall-clock ms since which the retained replay
+	 * cursor may be stale, or null while it is current. Stamped when the
+	 * subscription stops delivering (a socket drop the lifecycle listener sees,
+	 * before or after its first open) or carried in from a grace release on a
+	 * resume; cleared when the cursor is refreshed (an answer, or a reconnect
+	 * about to refetch). Lets a reconnect measure how long the cursor has been
+	 * stale and rehydrate fully past the trust bound instead of gap-filling
+	 * from an outdated seq.
 	 */
 	let _downAt = null;
+
+	/** @type {boolean} The lifecycle listener has seen an open and the socket is not open now (a hidden tab, an outage) */
+	let _listenerDown = false;
 
 	/**
 	 * @type {number | null} Wall-clock ms when the WS subscription was released
@@ -1367,20 +1593,47 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * Undo what an attach frame installed for a subscribe that will never
 	 * resolve (rejected, timed out): the live listener (and the frames it
 	 * buffered) and the managed ref. Anything held before the fetch stays.
+	 * @param {boolean} [keepRef] - hand the ref to the caller instead of releasing it
+	 * @returns {string | null} the topic of the ref handed over
 	 */
-	function _abandonAttach() {
+	function _abandonAttach(keepRef) {
 		if (_attachInstalledListener && topicUnsub) {
 			topicUnsub();
 			topicUnsub = null;
 			buffer = [];
 		}
+		let kept = null;
 		if (_attachAcquiredRef && _managedHeldTopic) {
 			const releasedTopic = _managedHeldTopic;
 			_managedHeldTopic = null;
-			_sendManagedRelease(releasedTopic);
+			if (keepRef) kept = releasedTopic;
+			else _sendManagedRelease(releasedTopic);
 		}
 		_attachInstalledListener = false;
 		_attachAcquiredRef = false;
+		return kept;
+	}
+
+	/**
+	 * Stop waiting for the in-flight subscribe. A request the batch has not
+	 * sent is withdrawn; one already sent is returned for the caller to hand to
+	 * an orphan record, since the server may still subscribe the socket.
+	 * @returns {{ id: string, ticket: SubscribeTicket } | null}
+	 */
+	function _dropRequest() {
+		const id = pendingId;
+		const ticket = _ticket;
+		pendingId = null;
+		_ticket = null;
+		if (!id) return null;
+		if (ticket && ticket.state === 'sent') return { id, ticket };
+		if (ticket) ticket.state = 'done';
+		const entry = pending.get(id);
+		if (entry) {
+			pending.delete(id);
+			if (entry.timer) clearTimer(entry.timer);
+		}
+		return null;
 	}
 
 	/**
@@ -1399,14 +1652,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_attachInstalledListener = false;
 		_attachAcquiredRef = false;
 
-		// Cancel any previous pending request
+		// This request supersedes one still in flight (a reconnect or a
+		// refetch that did not wait for it).
 		if (pendingId) {
-			const prev = pending.get(pendingId);
-			if (prev) {
-				pending.delete(pendingId);
-				if (prev.timer) clearTimer(prev.timer);
-			}
-			pendingId = null;
+			const prev = _dropRequest();
+			if (prev) _orphanSubscribe(prev.id, prev.ticket, null);
 		}
 
 		ensureListener();
@@ -1416,12 +1666,30 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		pendingId = id;
 		const conn = _connect();
 
+		/** @type {any} */
+		const request = { rpc: path, id, args: dynamicArgs || [], stream: true, attach: true };
+		if (_lastSeq !== null) request.seq = _lastSeq;
+		if (_lastVersion !== undefined) request.version = _lastVersion;
+		if (_schemaVersion !== undefined) request.schemaVersion = _schemaVersion;
+		/** @type {SubscribeTicket} */
+		const ticket = { request, state: 'queued', topic: null };
+		_ticket = ticket;
+
 		const _startTime = now();
 		const timer = setTimer(() => {
-			pending.delete(id);
 			pendingId = null;
+			_ticket = null;
 			fetching = false;
-			_abandonAttach();
+			// The server may still answer and subscribe the socket: an orphan
+			// record releases that, along with the ref an attach frame took.
+			const handedRef = _abandonAttach(true);
+			if (ticket.state === 'sent') {
+				_orphanSubscribe(id, ticket, handedRef);
+			} else {
+				ticket.state = 'done';
+				pending.delete(id);
+				if (handedRef) _sendManagedRelease(handedRef);
+			}
 			if (now() - _startTime > 90000) {
 				_setError(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
 				return;
@@ -1445,6 +1713,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				const heldBefore = _managedHeldTopic;
 				const listenerBefore = topicUnsub;
 				_bindTopic(attachTopic);
+				_subscribeNamed(ticket, attachTopic);
 				_subscribeLive();
 				_attachAcquiredRef = heldBefore !== _managedHeldTopic;
 				_attachInstalledListener = listenerBefore === null && topicUnsub !== null;
@@ -1452,12 +1721,19 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			resolve(response) {
 				fetching = false;
 				pendingId = null;
+				_ticket = null;
+				// Bound and settled before any store update runs app code.
+				_bindTopic(response.topic || null);
+				_subscribeDone(ticket);
+				// The answer is the cursor's new baseline: an outage before it no
+				// longer ages the cursor. Over a socket the listener counts as down
+				// (an answer landing in a hidden tab) staleness runs from here.
+				_downAt = _listenerDown ? now() : null;
 				_reconnectAttempts = 0;
 				_clearError();
 				_status = 'connected';
 				_statusStore.set('connected');
 				_setPhase('attached');
-				_bindTopic(response.topic || null);
 				_attachInstalledListener = false;
 				_attachAcquiredRef = false;
 
@@ -1541,22 +1817,26 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			reject(err) {
 				fetching = false;
 				pendingId = null;
+				_ticket = null;
 				// A subscribe that attached early and then failed (the server rolled
 				// its subscription back) must not keep the listener or the managed
 				// ref the attach frame acquired; anything held before this fetch
 				// stays, exactly as before.
 				_abandonAttach();
+				// A disconnect rejects a request that may never have left the
+				// adapter's send queue; it goes out on the next open, after this
+				// stream has moved on to a fresh subscribe.
+				if (err && err.code === 'DISCONNECTED' && ticket.state === 'sent' && ticket.topic === null) {
+					_orphanSubscribe(id, ticket, null, true);
+				} else {
+					_subscribeDone(ticket);
+				}
 				_setError(err instanceof RpcError ? err : new RpcError('STREAM_ERROR', err?.message || 'Stream failed'));
 			},
 			timer
 		});
 
-		/** @type {any} */
-		const request = { rpc: path, id, args: dynamicArgs || [], stream: true, attach: true };
-		if (_lastSeq !== null) request.seq = _lastSeq;
-		if (_lastVersion !== undefined) request.version = _lastVersion;
-		if (_schemaVersion !== undefined) request.schemaVersion = _schemaVersion;
-		_batchedSubscribe(request);
+		_batchedSubscribe(ticket);
 	}
 
 	/**
@@ -1570,13 +1850,15 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * a truncated -> full rehydrate fallback) instead of cold-starting.
 	 */
 	function _releaseSubscription() {
-		if (pendingId) {
-			const entry = pending.get(pendingId);
-			if (entry) {
-				pending.delete(pendingId);
-				if (entry.timer) clearTimer(entry.timer);
-			}
-			pendingId = null;
+		// A subscribe already sent goes to an orphan record together with the
+		// managed ref, which it releases once the server has answered: a frame
+		// sent now could reach the server ahead of the subscribe and be undone
+		// by it.
+		const inFlight = _dropRequest();
+		if (inFlight) {
+			const handedRef = _managedHeldTopic;
+			_managedHeldTopic = null;
+			_orphanSubscribe(inFlight.id, inFlight.ticket, handedRef);
 		}
 		if (topicUnsub) {
 			topicUnsub();
@@ -1707,11 +1989,16 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * (registers the stream with the global in-flight counter) and the
 	 * reconnect-on-open watcher. Shared between first-subscribe and
 	 * resume-from-grace so both paths get the same listener setup.
+	 * @param {number | null} [agingSince] - when the retained cursor started
+	 *   aging: a grace resume carries it until its answer or a reconnect
 	 */
-	function _attachLifecycleListeners() {
+	function _attachLifecycleListeners(agingSince) {
 		// Fresh baseline: any outage clock from a prior listener generation is
-		// stale (that reconnect either completed or the stream released).
-		_downAt = null;
+		// stale (that reconnect either completed or the stream released). A
+		// grace resume carries its cursor's age instead, so a reconnect before
+		// its answer ages the cursor from there.
+		_downAt = agingSince ?? null;
+		_listenerDown = false;
 		_quiescenceUnsub = _statusStore.subscribe((s) => {
 			const inFlight = s === 'loading' || s === 'reconnecting';
 			if (inFlight && !_countedInFlight) {
@@ -1729,6 +2016,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		// first and track whether we've ever seen one, so the FIRST 'open' is
 		// the lifetime baseline rather than treating it as a reconnect bounce.
 		let hasOpenedOnce = false;
+		let droppedBeforeOpen = false;
+		/** True while `status.subscribe` reports the value current at attach. */
+		let attaching = true;
 		statusUnsub = status.subscribe((s) => {
 			if (s !== 'open') {
 				// First step away from a live connection: record when the outage
@@ -1736,11 +2026,25 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// cursor is. Only after we have opened at least once - the initial
 				// pre-open 'connecting' is not an outage.
 				if (hasOpenedOnce && _downAt === null) _downAt = now();
+				_listenerDown = hasOpenedOnce;
+				if (!hasOpenedOnce && (s === 'disconnected' || s === 'failed')) {
+					droppedBeforeOpen = true;
+					// Ages the retained cursor for the resubscribe below.
+					if (_downAt === null) _downAt = now();
+				}
 				return;
 			}
+			_listenerDown = false;
 			if (!hasOpenedOnce) {
 				hasOpenedOnce = true;
-				return;
+				// The first open is the baseline when it is the value reported at
+				// attach, or while this stream's subscribe is still on its way.
+				// Opening later with nothing in flight, the stream subscribes again
+				// as it would after a reconnect if it never loaded (a failed connect
+				// rejected its queued request, or it timed out waiting for the
+				// socket) or the socket dropped since (it loaded over a socket that
+				// opened behind a hidden tab and lost that subscription).
+				if (attaching || fetching || (initialLoaded && !droppedBeforeOpen)) return;
 			}
 			if (subCount > 0) {
 				_status = 'reconnecting';
@@ -1782,6 +2086,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				}, delay);
 			}
 		});
+		attaching = false;
 
 		// Surface terminal close as an error on the stream (adapter 0.4.0)
 		try {
@@ -1876,6 +2181,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// Rapid sync resub (same microtask) - cancel the pending cleanup,
 					// WS subscription is still attached.
 					_pendingCleanup = false;
+					_cleanupsPending--;
 				} else if (_inGracePeriod) {
 					// Resume during the grace window: WS handles were released but
 					// session state (currentValue, _lastSeq, _lastVersion, _cursor)
@@ -1892,8 +2198,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// retained cursor may be older than the trust bound - the grace
 					// idle plus any outage that began before the unsubscribe. Age it
 					// from the earlier of the socket drop and the grace release
-					// (read _downAt before _attachLifecycleListeners nulls it), and
-					// rehydrate fully past the bound instead of gap-filling stale.
+					// (_attachLifecycleListeners carries it into the new listener
+					// generation), and rehydrate fully past the bound instead of
+					// gap-filling stale.
 					const _agingSince = _downAt !== null ? _downAt : _graceStartAt;
 					if (_agingSince !== null && now() - _agingSince > _getResumeMaxCursorAgeMs()) {
 						_dropResumeCursors();
@@ -1904,7 +2211,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// outstanding (it fires synchronously with the current value).
 					_status = 'loading';
 					_statusStore.set('loading');
-					_attachLifecycleListeners();
+					_attachLifecycleListeners(_agingSince);
 					fetchAndSubscribe();
 					_devtoolsStream(path, topic, subCount, merge);
 				} else {
@@ -1921,9 +2228,12 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				unsub();
 				if (--subCount === 0) {
 					_pendingCleanup = true;
+					_cleanupsPending++;
 					microtask(() => {
-						if (_pendingCleanup && subCount === 0) {
-							_pendingCleanup = false;
+						if (!_pendingCleanup) return;
+						_pendingCleanup = false;
+						_cleanupsPending--;
+						if (subCount === 0) {
 							if (_detachRequested) {
 								// Explicit detach(): tear down NOW - the caller said "done",
 								// not "component unmounted, maybe coming back" - and rest in
@@ -1945,8 +2255,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 								_releaseSubscription();
 								_inGracePeriod = true;
 								// Start (or keep) the cursor-aging clock: a socket that
-								// already dropped set _downAt earlier and wins; otherwise
-								// aging begins now, at the release.
+								// dropped since the last answer, or a resume that was never
+								// answered, set _downAt earlier and wins; otherwise aging
+								// begins now, at the release.
 								_graceStartAt = now();
 								_resumeGraceTimer = setTimer(() => {
 									_resumeGraceTimer = null;
@@ -2157,22 +2468,36 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			const conn = _connect();
 
 			return new Promise((resolve, reject) => {
+				// The server subscribes the socket again for a page (the request
+				// takes the stream path), so the page holds the stream's topic
+				// until it is answered: a release in between stays off the wire.
+				// A page the stream stops waiting for goes to an orphan record.
+				const heldTopic = _hasManagedMarking ? _managedHeldTopic : null;
+				if (heldTopic) _managedRefAcquire(heldTopic);
+				/** @type {SubscribeTicket} */
+				const ticket = { request: null, state: 'done', topic: null };
 				const _startTime = now();
 				const timer = setTimer(() => {
+					_orphanSubscribe(id, ticket, heldTopic);
+					_loadingMore = false;
 					if (now() - _startTime > 90000) {
-						pending.delete(id);
-						_loadingMore = false;
 						reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
 						return;
 					}
-					pending.delete(id);
-					_loadingMore = false;
 					reject(new RpcError('TIMEOUT', `loadMore '${path}' timed out after 30s`));
 				}, _getTimeout());
 
 				pending.set(id, {
 					stream: true,
 					resolve(response) {
+						// The topic the page subscribed: released unless a stream
+						// still holds it (a page asked for after the stream let go
+						// of its topic would otherwise keep the socket subscribed).
+						if (_hasManagedMarking && typeof response.topic === 'string') {
+							_managedRefAcquire(response.topic);
+							_sendManagedRelease(response.topic);
+						}
+						if (heldTopic) _sendManagedRelease(heldTopic);
 						_loadingMore = false;
 						if (response.hasMore !== undefined) _hasMore = response.hasMore;
 						if (response.cursor !== undefined) _cursor = response.cursor;
@@ -2211,6 +2536,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 						resolve(_hasMore);
 					},
 					reject(err) {
+						// A disconnect may have left the request in the adapter's
+						// send queue, which goes out on the next open.
+						if (err && err.code === 'DISCONNECTED') _orphanSubscribe(id, ticket, heldTopic, true);
+						else if (heldTopic) _sendManagedRelease(heldTopic);
 						_loadingMore = false;
 						reject(err instanceof RpcError ? err : new RpcError('LOAD_MORE_ERROR', err?.message || 'Load more failed'));
 					},

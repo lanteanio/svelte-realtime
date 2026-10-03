@@ -207,6 +207,9 @@ export function ensureDisconnectListener() {
 	let cfTunnelWarned = false;
 
 	status.subscribe((s) => {
+		// 'failed' is terminal: an explicit close, a terminal close code, an
+		// auth preflight failure or exhausted retries.
+		if (s === 'failed') clientState.socketFailed = true;
 		if (s === 'disconnected' || s === 'failed') {
 			for (const [id, entry] of pending) {
 				pending.delete(id);
@@ -240,6 +243,20 @@ export function ensureDisconnectListener() {
 		if (s === 'open') {
 			clientState.terminated = false;
 			lastOpenAt = now();
+		}
+		// A backgrounded tab's socket ('suspended') is still up and carries frames.
+		const up = s === 'open' || s === 'suspended';
+		if (up && !clientState.socketUp) {
+			clientState.socketUp = true;
+			clientState.socketFailed = false;
+			// Entries parked while the socket was down (a stream subscribe whose
+			// stream moved on, its request possibly still in the adapter's send
+			// queue) start waiting for their answer now.
+			for (const entry of pending.values()) {
+				if (typeof entry.wake === 'function') entry.wake();
+			}
+		} else if (!up) {
+			clientState.socketUp = false;
 		}
 	});
 
