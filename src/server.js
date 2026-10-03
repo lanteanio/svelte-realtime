@@ -2191,7 +2191,8 @@ export let MAX_AGGREGATE_BUCKETS = 1000;
  *  - unknown `type`
  *  - tumbling without either `period` or `durationMs`
  *  - tumbling `period` outside the supported set
- *  - tumbling `anchor` that is not a finite number
+ *  - tumbling `anchor` that is truthy and not a finite number within the
+ *    Date range, or a tumbling `durationMs` under 1
  *  - sliding without `durationMs` / `slideMs`, or with `slideMs > durationMs`
  *  - sliding bucket count exceeding `MAX_AGGREGATE_BUCKETS`
  *  - sliding without a `combine` field on every reducer that has `reduce`
@@ -2222,10 +2223,9 @@ function _validateWindowSpec(name, spec, reducers) {
 			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling period '${spec.period}' is not supported (expected 'minute' | 'hour' | 'daily' | 'monthly')`);
 		}
 		// A Date or a string here turns the boundary arithmetic into string
-		// concatenation, and an anchor outside the Date range, or a duration
-		// under 1 ms, rounds the boundary onto the current time: either way the
-		// window would close at the wrong times or on every timer tick. A falsy
-		// anchor means 0.
+		// concatenation, an anchor outside the Date range loses the precision
+		// that keeps a boundary after the current time, and a duration under
+		// 1 ms closes the window on every timer tick. A falsy anchor means 0.
 		if (hasDuration && spec.anchor && !(Number.isFinite(spec.anchor) && Math.abs(spec.anchor) <= 8.64e15)) {
 			throw new Error(`[svelte-realtime] live.aggregate window '${name}': tumbling 'anchor' must be a finite number of epoch milliseconds within the Date range (for a Date, pass date.getTime())`);
 		}

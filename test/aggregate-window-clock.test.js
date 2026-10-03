@@ -323,6 +323,96 @@ describe('tumbling windows close on the exact clock', () => {
 		});
 	}
 
+	function activate() {
+		const platform = timedPlatform();
+		_activateDerived(platform);
+		setCronPlatform(platform);
+		return platform;
+	}
+	const minute = { type: 'tumbling', period: 'minute' };
+
+	it('a window fed through an aggregate that is not closing gets the upstream closing state first', () => {
+		const B1 = B0 + 60_000;
+		vi.useFakeTimers({ now: B1 - 2000 });
+		installExactNow();
+		// u (minute) -> d (hour, not due at B1) -> e (minute), e registered first.
+		__registerAggregate('agg/tind-e', live.aggregate('tind:d:h', counter(), { topic: 'tind:e', windows: { m: minute } }));
+		__registerAggregate('agg/tind-d', live.aggregate('tind:u:m', counter(), { topic: 'tind:d', windows: { h: { type: 'tumbling', period: 'hour' } } }));
+		__registerAggregate('agg/tind-u', live.aggregate('tind:src', counter(), { topic: 'tind:u', windows: { m: minute } }));
+		const platform = activate();
+		const e = () => platform.published.filter((p) => p.topic === 'tind:e:m');
+
+		platform.publish('tind:src', 'inc', {});
+		platform.publish('tind:src', 'inc', {});
+		vi.advanceTimersByTime(2000);
+
+		expect(e().filter((p) => p.at === B1).map((p) => p.data.count)).toEqual([3, 3]);
+	});
+
+	it('a window fed through a single-state aggregate gets the upstream closing state first', () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		__registerAggregate('agg/tss-e', live.aggregate('tss:s', counter(), { topic: 'tss:e', windows: { m: minute } }));
+		__registerAggregate('agg/tss-s', live.aggregate('tss:u:m', counter(), { topic: 'tss:s' }));
+		__registerAggregate('agg/tss-u', live.aggregate('tss:src', counter(), { topic: 'tss:u', windows: { m: minute } }));
+		const platform = activate();
+
+		platform.publish('tss:src', 'inc', {});
+		platform.publish('tss:src', 'inc', {});
+		vi.advanceTimersByTime(2000);
+
+		expect(platform.published.filter((p) => p.topic === 'tss:e:m' && p.at === B0).map((p) => p.data.count)).toEqual([3, 3]);
+	});
+
+	it('an upstream window whose boundary comes after the closing one is left to close on its own', async () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		// u closes at :05 past each 10 s; d closes on the hour.
+		const down = live.aggregate('tph:u:w', counter(), { topic: 'tph:d', windows: { h: { type: 'tumbling', period: 'hour' } } });
+		__registerAggregate('agg/tph-d', down);
+		__registerAggregate('agg/tph-u', live.aggregate('tph:src', counter(), { topic: 'tph:u', windows: { w: { type: 'tumbling', durationMs: 10_000, anchor: 5000 } } }));
+		const platform = activate();
+		const d = () => platform.published.filter((p) => p.topic === 'tph:d:h');
+
+		platform.publish('tph:src', 'inc', {});
+		platform.publish('tph:src', 'inc', {});
+		// The event loop was stuck past both boundaries; the hour closes first.
+		vi.setSystemTime(B0 + 6000);
+		await down.__windowStreams.h();
+
+		expect(d().map((p) => p.data.count)).toEqual([1, 2, 2]);
+	});
+
+	it('an upstream window whose name holds a colon still closes first', () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		__registerAggregate('agg/tcol-d', live.aggregate('tcol:up:per:min', counter(), { topic: 'tcol:down', windows: { m: minute } }));
+		__registerAggregate('agg/tcol-u', live.aggregate('tcol:src', counter(), { topic: 'tcol:up', windows: { 'per:min': minute } }));
+		const platform = activate();
+
+		platform.publish('tcol:src', 'inc', {});
+		platform.publish('tcol:src', 'inc', {});
+		vi.advanceTimersByTime(2000);
+
+		expect(platform.published.filter((p) => p.topic === 'tcol:down:m' && p.at === B0).map((p) => p.data.count)).toEqual([3, 3]);
+	});
+
+	it('a downstream window closed by a load gets the upstream closing state first', async () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		const down = live.aggregate('tlu:up:m', counter(), { topic: 'tlu:down', windows: { m: minute } });
+		__registerAggregate('agg/tlu-d', down);
+		__registerAggregate('agg/tlu-u', live.aggregate('tlu:src', counter(), { topic: 'tlu:up', windows: { m: minute } }));
+		const platform = activate();
+
+		platform.publish('tlu:src', 'inc', {});
+		platform.publish('tlu:src', 'inc', {});
+		vi.setSystemTime(B0 + 5);
+		await down.__windowStreams.m();
+
+		expect(platform.published.filter((p) => p.topic === 'tlu:down:m' && p.at === B0 + 5).map((p) => p.data.count)).toEqual([3, 3]);
+	});
+
 	it('a timer that wakes after the clock stepped back stops the exact-clock checks', () => {
 		vi.useFakeTimers({ now: B0 - 2000 });
 		let exactReads = 0;
@@ -490,6 +580,37 @@ describe('privacy across a tumbling boundary', () => {
 			const values = out().map((p) => p.data.count);
 			expect(values.length).toBe(5);
 			expect(new Set(values).size).toBe(1);
+		} finally {
+			errors.mockRestore();
+		}
+	});
+
+	it('a window whose init() throws keeps its k-anonymity cohort along with its state', () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			let failing = false;
+			const fn = live.aggregate('pkeep:src', {
+				count: { init: () => { if (failing) throw new Error('init failed'); return 0; }, reduce: (a) => a + 1 }
+			}, {
+				topic: 'pkeep:agg',
+				privacy: { strategy: 'suppress', k: 2, contributor: (d) => d.u },
+				windows: { w: { type: 'tumbling', period: 'minute' } }
+			});
+			__registerAggregate('agg/pkeep', fn);
+			const platform = timedPlatform();
+			_activateDerived(platform);
+			setCronPlatform(platform);
+			const out = () => platform.published.filter((p) => p.topic === 'pkeep:agg:w');
+
+			platform.publish('pkeep:src', 'inc', { u: 'a' });
+			platform.publish('pkeep:src', 'inc', { u: 'b' });
+			failing = true;
+			vi.advanceTimersByTime(2000);
+			// One contributor after the boundary still clears k: the cohort was kept.
+			platform.publish('pkeep:src', 'inc', { u: 'a' });
+			expect(out().map((p) => p.data.count)).toEqual([2, 2, 3]);
 		} finally {
 			errors.mockRestore();
 		}

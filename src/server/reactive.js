@@ -137,6 +137,7 @@ export function _publishWindow(entry, win, platform = state.cronPlatform) {
  */
 export function _rollTumblingWindow(entry, win, wall, platform) {
 	if (wall < win.nextBoundary) return;
+	const closing = win.nextBoundary;
 	// Advance before any app code runs, so nothing that throws below can leave
 	// the window on a boundary that has already passed.
 	win.nextBoundary = win.boundaryAfter(wall);
@@ -149,11 +150,10 @@ export function _rollTumblingWindow(entry, win, wall, platform) {
 		win.boundaryTimer = null;
 		_scheduleBoundary(entry, win);
 	}
-	// When this aggregate sources another aggregate's tumbling window that is
-	// due at the same boundary, that window closes first, whichever timer fires
-	// first: its closing state belongs to the period that is ending here.
-	const upstream = _tumblingWindowPublishing(entry.source);
-	if (upstream) _rollTumblingWindow(upstream.entry, upstream.win, wall, platform);
+	// A tumbling window that feeds this aggregate and closes at or before this
+	// boundary closes first, whichever timer fires first: its closing state
+	// belongs to the period that is ending here.
+	_closeUpstream(entry.source, closing, wall, platform, 0);
 	// A pending debounced publish carries the closing window's state; the final
 	// publish below supersedes it rather than letting it land in the new window.
 	if (win.timer) {
@@ -195,19 +195,48 @@ export function _rollTumblingWindow(entry, win, wall, platform) {
 }
 
 /**
- * The tumbling window whose output topic is `topic` (`<aggregate topic>:<window
- * name>`), or null.
+ * Walk up from `topic` through the aggregates that publish it and close the
+ * first due tumbling window on the way whose boundary is at or before
+ * `boundary` (closing it closes what feeds it in turn). A window that is not
+ * due, or not tumbling, or a single-state aggregate, is walked through. The
+ * depth bound ends a cycle of aggregates feeding each other.
+ *
+ * @param {unknown} topic
+ * @param {number} boundary - the boundary the downstream window is closing at
+ * @param {number} wall
+ * @param {any} platform
+ * @param {number} depth
+ */
+function _closeUpstream(topic, boundary, wall, platform, depth) {
+	if (depth > 16) return;
+	const up = _aggregatePublishing(topic);
+	if (!up) return;
+	const win = up.win;
+	if (win && win.type === 'tumbling' && win.nextBoundary <= boundary && win.nextBoundary <= wall) {
+		_rollTumblingWindow(up.entry, win, wall, platform);
+	} else {
+		_closeUpstream(up.entry.source, boundary, wall, platform, depth + 1);
+	}
+}
+
+/**
+ * The aggregate that publishes `topic`, with the window when `topic` is a
+ * window's output (`<aggregate topic>:<window name>`, where either part may
+ * hold ':'), or null.
  *
  * @param {unknown} topic
  * @returns {{ entry: any, win: any } | null}
  */
-function _tumblingWindowPublishing(topic) {
+function _aggregatePublishing(topic) {
 	if (typeof topic !== 'string') return null;
-	const i = topic.lastIndexOf(':');
-	if (i <= 0) return null;
-	const entry = _aggregateByTopic.get(topic.slice(0, i));
-	const win = entry && entry.windowStates ? entry.windowStates.get(topic.slice(i + 1)) : undefined;
-	return win && win.type === 'tumbling' ? { entry, win } : null;
+	const single = _aggregateByTopic.get(topic);
+	if (single && !single.windowStates) return { entry: single, win: null };
+	for (let i = topic.lastIndexOf(':'); i > 0; i = topic.lastIndexOf(':', i - 1)) {
+		const entry = _aggregateByTopic.get(topic.slice(0, i));
+		const win = entry && entry.windowStates ? entry.windowStates.get(topic.slice(i + 1)) : undefined;
+		if (win) return { entry, win };
+	}
+	return null;
 }
 
 /**
