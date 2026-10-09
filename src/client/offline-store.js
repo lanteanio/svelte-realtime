@@ -112,23 +112,27 @@ export function createIndexedDbStore() {
 	}
 
 	/**
-	 * Run one operation on the object store; resolves `fallback` on any failure.
-	 * @param {IDBTransactionMode} mode
-	 * @param {(store: IDBObjectStore) => IDBRequest} fn
-	 * @param {any} fallback
+	 * One read-write transaction. Resolves once it commits and rejects when
+	 * the database cannot open or the transaction aborts: a request can
+	 * succeed and its transaction still abort after it (a full quota does).
+	 * @param {(store: IDBObjectStore) => void} fn
+	 * @returns {Promise<void>}
 	 */
-	async function run(mode, fn, fallback) {
+	async function commit(fn) {
 		const db = await open();
-		if (!db) return fallback;
-		return new Promise((resolve) => {
+		if (!db) throw new Error('[svelte-realtime] offline persistence unavailable');
+		await new Promise((resolve, reject) => {
 			try {
-				const tx = db.transaction(STORE_NAME, mode);
-				const req = fn(tx.objectStore(STORE_NAME));
-				req.onsuccess = () => resolve(req.result);
-				req.onerror = () => { _warnStorage(req.error); resolve(fallback); };
+				const tx = db.transaction(STORE_NAME, 'readwrite');
+				fn(tx.objectStore(STORE_NAME));
+				tx.oncomplete = () => resolve(undefined);
+				tx.onabort = () => {
+					_warnStorage(tx.error);
+					reject(tx.error || new Error('[svelte-realtime] offline store write aborted'));
+				};
 			} catch (err) {
 				_warnStorage(err);
-				resolve(fallback);
+				reject(err);
 			}
 		});
 	}
@@ -163,43 +167,14 @@ export function createIndexedDbStore() {
 			});
 		},
 		async put(key, value) {
-			// Stored only once the transaction commits: a full quota aborts the
-			// transaction after the request itself succeeded.
-			const db = await open();
-			if (!db) throw new Error('[svelte-realtime] offline persistence unavailable');
-			await new Promise((resolve, reject) => {
-				try {
-					const tx = db.transaction(STORE_NAME, 'readwrite');
-					tx.objectStore(STORE_NAME).put(value, key);
-					tx.oncomplete = () => resolve(undefined);
-					tx.onabort = () => {
-						_warnStorage(tx.error);
-						reject(tx.error || new Error('[svelte-realtime] offline store write aborted'));
-					};
-				} catch (err) {
-					_warnStorage(err);
-					reject(err);
-				}
-			});
+			await commit((store) => { store.put(value, key); });
 		},
 		async delete(key) {
-			await run('readwrite', (store) => store.delete(key), undefined);
+			// Settled once committed or failed; a failure is swallowed.
+			await commit((store) => { store.delete(key); }).catch(() => {});
 		},
 		async clear(prefix) {
-			const db = await open();
-			if (!db) return;
-			await new Promise((resolve) => {
-				try {
-					const tx = db.transaction(STORE_NAME, 'readwrite');
-					const store = tx.objectStore(STORE_NAME);
-					const req = store.delete(IDBKeyRange.bound(prefix, prefix + '\uffff'));
-					req.onsuccess = () => resolve(undefined);
-					req.onerror = () => { _warnStorage(req.error); resolve(undefined); };
-				} catch (err) {
-					_warnStorage(err);
-					resolve(undefined);
-				}
-			});
+			await commit((store) => { store.delete(IDBKeyRange.bound(prefix, prefix + '\uffff')); }).catch(() => {});
 		}
 	};
 }

@@ -767,9 +767,10 @@ export interface OfflineStore {
 }
 
 /**
- * The IndexedDB `OfflineStore` (database `svelte-realtime`, lazy open). A
- * write resolves once its transaction commits and rejects when the database
- * cannot open or the transaction aborts.
+ * The IndexedDB `OfflineStore` (database `svelte-realtime`, lazy open). `put`
+ * resolves once its transaction commits and rejects when the database cannot
+ * open or the transaction aborts; `delete` and `clear` also settle only once
+ * their transaction has committed or failed, and swallow a failure.
  */
 export function createIndexedDbStore(): OfflineStore;
 /**

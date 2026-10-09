@@ -179,10 +179,11 @@ const watch = (p) => {
  * first open and opens a database whose writes commit or abort. Values are
  * cloned in and out the way IndexedDB clones them, so `put` throws for a
  * value it cannot clone. An aborted write still reports its request as a
- * success first, the way a full quota ends a transaction. The rows outlive
- * the client that wrote them, so a test can reload against them.
+ * success first, the way a full quota ends a transaction; a delete, too,
+ * reports its request before its transaction commits or aborts. The rows
+ * outlive the client that wrote them, so a test can reload against them.
  */
-function fakeIndexedDb({ openFails = false, abortWrites = false } = {}) {
+function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false } = {}) {
 	const map = new Map();
 	const stores = new Set();
 	const later = (fn) => setTimeout(fn, 0);
@@ -212,10 +213,24 @@ function fakeIndexedDb({ openFails = false, abortWrites = false } = {}) {
 					});
 					return req;
 				},
-				delete(key) {
+				delete(keyOrRange) {
+					const keys = typeof keyOrRange === 'string'
+						? [keyOrRange]
+						: [...map.keys()].filter((k) => k >= keyOrRange.lower && k <= keyOrRange.upper);
 					/** @type {any} */
 					const req = {};
-					later(() => { map.delete(key); req.onsuccess?.(); });
+					later(() => {
+						req.onsuccess?.();
+						later(() => {
+							if (abortDeletes) {
+								tx.error = new Error('AbortError');
+								tx.onabort?.();
+							} else {
+								for (const k of keys) map.delete(k);
+								tx.oncomplete?.();
+							}
+						});
+					});
 					return req;
 				},
 				openCursor(range) {
@@ -1088,6 +1103,60 @@ describe('offline queue - a drop during the drain', () => {
 		expect(onReplayError).toHaveBeenCalledTimes(1);
 		expect(storedKeys(store)).toEqual([]);
 		expect(sentCalls()).toHaveLength(1);
+	});
+});
+
+describe('the IndexedDB store', () => {
+	/** @type {any} */
+	let warn;
+	beforeEach(() => {
+		warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+	});
+	afterEach(() => {
+		warn.mockRestore();
+		vi.unstubAllGlobals();
+	});
+
+	it('delete settles once its transaction has committed', async () => {
+		const idb = fakeIndexedDb();
+		vi.stubGlobal('indexedDB', idb);
+		const store = mod.createIndexedDbStore();
+		await store.put('q:a', { v: 1 });
+		let presentWhenSettled;
+		await store.delete('q:a').then(() => { presentWhenSettled = idb.map.has('q:a'); });
+		expect(presentWhenSettled).toBe(false);
+	});
+
+	it('clear settles once its transaction has committed', async () => {
+		const idb = fakeIndexedDb();
+		vi.stubGlobal('indexedDB', idb);
+		const store = mod.createIndexedDbStore();
+		await store.put('q:a', { v: 1 });
+		await store.put('q:b', { v: 2 });
+		await store.put('c:x', { v: 3 });
+		/** @type {string[]} */
+		let keysWhenSettled = [];
+		await store.clear('q:').then(() => { keysWhenSettled = [...idb.map.keys()]; });
+		expect(keysWhenSettled).toEqual(['c:x']);
+	});
+
+	it('a delete whose transaction aborts settles after the abort, without rejecting', async () => {
+		const idb = fakeIndexedDb({ abortDeletes: true });
+		vi.stubGlobal('indexedDB', idb);
+		const store = mod.createIndexedDbStore();
+		await store.put('q:a', { v: 1 });
+		let warnedWhenSettled;
+		await expect(store.delete('q:a').then(() => { warnedWhenSettled = warn.mock.calls.length > 0; })).resolves.toBeUndefined();
+		expect(warnedWhenSettled).toBe(true);
+		expect(idb.map.has('q:a')).toBe(true);
+	});
+
+	it('a delete when the database cannot open settles without rejecting', async () => {
+		vi.stubGlobal('indexedDB', fakeIndexedDb({ openFails: true }));
+		const store = mod.createIndexedDbStore();
+		await expect(store.delete('q:a')).resolves.toBeUndefined();
+		await expect(store.clear('q:')).resolves.toBeUndefined();
 	});
 });
 

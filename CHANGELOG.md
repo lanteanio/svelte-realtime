@@ -149,7 +149,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction commits and rejects when the database cannot open or the
   transaction aborts (code that calls `createIndexedDbStore().put` directly
   now sees that rejection). A queued mutation whose write rejected is not
-  kept for a later page load when the connection closes for good.
+  kept for a later page load when the connection closes for good. The
+  built-in store's `delete` and `clear` likewise settle only once their
+  transaction has committed or aborted; they still swallow a failure.
 
 - **`board.room(...)` joins the room, and leaves when nothing holds it.**
   Membership (a roster entry others see, a claim on ownership, the room's
