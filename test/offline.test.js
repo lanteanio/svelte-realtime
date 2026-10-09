@@ -1612,6 +1612,42 @@ describe('offline queue - a drop during the drain', () => {
 		}
 	});
 
+	it('a pendingMutations or uploading subscriber that throws breaks neither the queue nor the drain', async () => {
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		onTestFinished(() => error.mockRestore());
+		const throwing = () => {
+			let first = true;
+			return () => {
+				if (first) { first = false; return; }
+				throw new Error('subscriber bug');
+			};
+		};
+		mod.pendingMutations.subscribe(throwing());
+		mod.uploading.subscribe(throwing());
+		// Subscribed after the throwing ones: still told every change.
+		const pendingSeen = [];
+		mod.pendingMutations.subscribe((n) => pendingSeen.push(n));
+		const [p] = await goOfflineAndQueue({}, [['todos/add', [{ t: 1 }]]]);
+		const w = watch(p);
+		await flush(1);
+		expect(w.settled).toBe(false);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(w.value).toBe('ok');
+		expect(error.mock.calls.some(([m]) => String(m).includes('subscriber threw'))).toBe(true);
+		expect(pendingSeen).toEqual([0, 1, 0]);
+
+		// The next drain still runs.
+		simulateStatus('disconnected');
+		const second = watch(mod.__rpc('todos/add')({ t: 2 }));
+		await flush(1);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(second.value).toBe('ok');
+	});
+
 	it('a server answer with the code DISCONNECTED is a replay failure', async () => {
 		const store = fakeStore();
 		const onReplayError = vi.fn();

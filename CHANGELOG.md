@@ -426,6 +426,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trims what it puts back, which deleted stored copies the close would have
   kept.
 
+- **A `pendingMutations` or `uploading` subscriber that throws no longer
+  stops the offline queue.** Both were svelte/store writables, so a
+  subscriber that threw broke off the queue logic that had set them: the
+  replay could stop for the rest of the page, or a call made offline
+  rejected with the subscriber's error though it was queued, and the throw
+  left svelte/store's shared notification queue stuck. Both stores now call
+  each subscriber on its own and report an error one throws (with
+  `reportError`, else `console.error`) without keeping the other
+  subscribers or the queue from running.
+
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and
   `diagnosticReason` is declared, with `reason` as its deprecated alias.

@@ -420,8 +420,10 @@ async function _drainOfflineQueue() {
 			_endBatch();
 		}
 	} finally {
-		_bumpPending();
+		// First, so nothing that runs app code below can leave every later
+		// drain a no-op.
 		_replayingQueue = false;
+		_bumpPending();
 		// Draining again keeps `uploading` up: what was put back still waits to
 		// go out, and that drain clears it when it ends.
 		if (again) void _drainOfflineQueue();

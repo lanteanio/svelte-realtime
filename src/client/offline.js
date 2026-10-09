@@ -9,7 +9,6 @@
 // and always an upgrade: every storage call is fire-and-forget best-effort,
 // so a broken store degrades to exactly the in-memory behavior.
 
-import { writable } from 'svelte/store';
 import { randomUuid } from '../client-runtime.js';
 import { _offlineQueue, RpcError, _IS_DEV, clientState } from './internal-state.js';
 import { resolveOfflineStore, _isDurableStore } from './offline-store.js';
@@ -42,8 +41,45 @@ let _batch = { failedSeq: Infinity, clean: true };
 /** A full queue dropped a call queued during the restore, before it had a seq. */
 let _droppedUnnumbered = false;
 
-const _pendingStore = writable(0);
-const _uploadingStore = writable(false);
+/**
+ * A readable value for the consumer stores, set only by the queue logic. Not
+ * a svelte/store writable: a subscriber that throws inside its dispatch
+ * leaves svelte/store's shared notification queue stuck, which would stop
+ * every store in the app. Here each subscriber is called on its own, and one
+ * that throws is reported without keeping the others, or the queue logic that
+ * set the value, from running.
+ * @template T
+ * @param {T} initial
+ */
+function _consumerStore(initial) {
+	let value = initial;
+	/** @type {Set<(v: T) => void>} */
+	const subscribers = new Set();
+	return {
+		/** @param {(v: T) => void} fn */
+		subscribe(fn) {
+			subscribers.add(fn);
+			fn(value);
+			return () => { subscribers.delete(fn); };
+		},
+		/** @param {T} next */
+		set(next) {
+			if (next === value) return;
+			value = next;
+			for (const fn of [...subscribers]) {
+				try {
+					fn(next);
+				} catch (err) {
+					if (typeof globalThis.reportError === 'function') globalThis.reportError(err);
+					else console.error('[svelte-realtime] a pendingMutations or uploading subscriber threw:', err);
+				}
+			}
+		}
+	};
+}
+
+const _pendingStore = _consumerStore(0);
+const _uploadingStore = _consumerStore(false);
 
 /**
  * Live count of queued offline mutations (enqueue, settle, and restore all
