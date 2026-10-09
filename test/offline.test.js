@@ -7,7 +7,7 @@
 // mutations rejected with CONFLICT, what a connection closed for good leaves
 // queued, and what a queued call stores (a hand-rolled IndexedDB stands in
 // for the default store, and a compiled `$state` for component state).
-import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll, onTestFinished } from 'vitest';
 import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { pathToFileURL } from 'url';
@@ -1347,6 +1347,59 @@ describe('offline queue - a drop during the drain', () => {
 		expect(sentCalls().map((e) => e.idempotencyKey)).toEqual(['off-a', 'off-a', 'off-b']);
 	});
 
+	it('a restored call a full queue drops is reported to onReplayError', async () => {
+		const store = fakeStore(Object.fromEntries([seedEntry('default', 1, 'todos/add', [{ t: 'restored' }], 'off-r')]));
+		const onReplayError = vi.fn();
+		mod.configure({ offline: { queue: true, maxQueue: 1, persist: store, onReplayError } });
+		await flush(1);
+		simulateStatus('disconnected');
+		const fresh = watch(mod.__rpc('todos/add')({ t: 'fresh' }));
+		await flush(1);
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+		expect(onReplayError.mock.calls[0][0]).toMatchObject({ path: 'todos/add', args: [{ t: 'restored' }] });
+		expect(onReplayError.mock.calls[0][1]).toMatchObject({ code: 'QUEUE_FULL' });
+		expect(storedKeys(store)).toEqual(['q:default:000000000002']);
+		expect(fresh.settled).toBe(false);
+	});
+
+	it('a maxQueue that is not a whole number keeps the call a cut puts back', async () => {
+		const [p] = await goOfflineAndQueue({ maxQueue: 0.5 }, [['todos/add', [{ t: 1 }]]]);
+		const w = watch(p);
+		simulateStatus('open');
+		await flush();
+		simulateStatus('disconnected');
+		await flush();
+		expect(w.settled).toBe(false);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(w.value).toBe('ok');
+	});
+
+	it('the close for good puts back what it cut without trimming, so stored copies stay', async () => {
+		const store = fakeStore();
+		const save = mod.__rpc('todos/add');
+		let draftOnDrop = false;
+		mod.configure({
+			offline: { queue: true, maxQueue: 1, persist: store },
+			onDisconnect: () => {
+				if (draftOnDrop) save({ t: 'draft' }).catch(() => {});
+			}
+		});
+		simulateStatus('disconnected');
+		const w1 = watch(save({ t: 1 }));
+		await flush(1);
+		simulateStatus('open');
+		await flush();
+		draftOnDrop = true;
+		// The drop that uses up the last reconnect attempt: 'failed' follows at once.
+		simulateStatus('disconnected');
+		simulateStatus('failed');
+		await flush();
+		expect(w1.settled).toBe(false);
+		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
+	});
+
 	it('a maxQueue below one keeps only the newest call', async () => {
 		const [first, second] = await goOfflineAndQueue({ maxQueue: -1 }, [
 			['todos/add', [{ t: 1 }]],
@@ -1498,7 +1551,9 @@ describe('offline queue - a drop during the drain', () => {
 		expect(w2.value).toBe('ok');
 	});
 
-	it('an onReplayError that throws does not stop the drain', async () => {
+	it('an onReplayError that throws does not stop the drain, and is warned about', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		onTestFinished(() => warn.mockRestore());
 		const store = fakeStore();
 		const [p1, p2] = await goOfflineAndQueue({
 			persist: store,
@@ -1515,6 +1570,7 @@ describe('offline queue - a drop during the drain', () => {
 		expect(w1.error).toMatchObject({ code: 'VALIDATION' });
 		expect(w2.value).toBe('ok');
 		expect(storedKeys(store)).toEqual([]);
+		expect(warn.mock.calls.some(([m]) => String(m).includes('onReplayError threw'))).toBe(true);
 	});
 
 	it('a beforeReplay that throws keeps the call', async () => {

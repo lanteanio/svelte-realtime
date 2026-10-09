@@ -11,7 +11,7 @@
 
 import { writable } from 'svelte/store';
 import { randomUuid } from '../client-runtime.js';
-import { _offlineQueue, RpcError, _IS_DEV } from './internal-state.js';
+import { _offlineQueue, RpcError, _IS_DEV, clientState } from './internal-state.js';
 import { resolveOfflineStore, _isDurableStore } from './offline-store.js';
 
 /** @type {import('./offline-store.js').OfflineStore | null} */
@@ -322,6 +322,34 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 }
 
 /**
+ * @internal The queue's size limit from `offline.maxQueue`: 100 when unset,
+ * otherwise a whole number of at least one.
+ * @param {any} offlineOpts
+ * @returns {number}
+ */
+export function _queueLimit(offlineOpts) {
+	const max = offlineOpts?.maxQueue;
+	if (!max) return 100;
+	return Math.max(1, Math.floor(max));
+}
+
+/**
+ * @internal Tell `offline.onReplayError` about a queued call that will not
+ * be applied. An observer: an error it throws is ignored.
+ * @param {{ path: string, args: any[], queuedAt: number }} call
+ * @param {any} err
+ */
+export function _notifyReplayError(call, err) {
+	const hook = clientState.config.offline?.onReplayError;
+	if (typeof hook !== 'function') return;
+	try {
+		hook(call, err);
+	} catch (hookErr) {
+		if (_IS_DEV) console.warn('[svelte-realtime] offline.onReplayError threw; the error is ignored. Cause: ' + (hookErr && /** @type {any} */ (hookErr).message ? /** @type {any} */ (hookErr).message : String(hookErr)));
+	}
+}
+
+/**
  * @internal Drop the oldest queued entries until at most `max` are left, each
  * rejected with QUEUE_FULL and its stored copy deleted. The caller refreshes
  * the pending count.
@@ -332,8 +360,11 @@ export function _trimQueue(max) {
 	while (_offlineQueue.length > Math.max(max, 0)) {
 		const entry = _offlineQueue.shift();
 		dropped = true;
-		entry.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped'));
+		const err = new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped');
 		_settlePersist(entry, false);
+		// A restored call has no promise anyone holds: this is its only report.
+		_notifyReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
+		entry.reject(err);
 		// What is queued after it goes up later: holes in the batch's order.
 		if (typeof entry.seq === 'number') {
 			if (entry.seq < _batch.failedSeq) _batch.failedSeq = entry.seq;

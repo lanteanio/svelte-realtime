@@ -698,7 +698,7 @@ export function configure(config: {
 	offline?: {
 		/** Enable queuing RPCs when disconnected. */
 		queue?: boolean;
-		/** Maximum queue size before oldest entries are dropped. @default 100 */
+		/** Maximum queue size before oldest entries are dropped (a whole number, at least 1). @default 100 */
 		maxQueue?: number;
 		/** Drop queued mutations older than this (ms) at replay time. @default 0 (no age limit) */
 		maxAge?: number;
@@ -706,7 +706,7 @@ export function configure(config: {
 		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]);
 		/** Filter function called before replaying each queued call. Return false to drop. A filter that throws keeps the call. `call.args` is the JSON copy taken when the call was queued (a `Date` arrives as its ISO string), here and in `onReplayError` and `onConflict`. */
 		beforeReplay?(call: { path: string; args: any[]; queuedAt: number }): boolean;
-		/** Called when a replayed call fails. An observer: an error it throws is ignored. */
+		/** Called for a queued call that will not be applied: a replay that failed, or a call dropped as STALE or QUEUE_FULL. An observer: an error it throws is ignored. */
 		onReplayError?(call: { path: string; args: any[]; queuedAt: number }, error: any): void;
 		/**
 		 * Durable persistence: queued mutations survive a page reload. `true`

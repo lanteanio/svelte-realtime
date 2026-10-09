@@ -415,6 +415,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returns no array leaves the queue to replay as it is, with a warning in
   development. The README now documents `replay`.
 
+- **A call the full offline queue drops is reported to `onReplayError`.** A
+  call restored after a reload and dropped to make room had no promise
+  anyone held and no other report, so it vanished silently. Every call the
+  queue drops now goes to `onReplayError` with `QUEUE_FULL`, like a `STALE`
+  drop. `maxQueue` counts whole calls, at least one, the same when a call is
+  queued and when a cut replay is put back, and a close for good no longer
+  trims what it puts back, which deleted stored copies the close would have
+  kept.
+
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and
   `diagnosticReason` is declared, with `reason` as its deprecated alias.

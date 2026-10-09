@@ -5,7 +5,7 @@ import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _carryBatch, _endBatch } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _carryBatch, _endBatch, _queueLimit, _notifyReplayError } from './offline.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, restored?: boolean }} OfflineEntry
@@ -172,7 +172,6 @@ async function _drainOfflineQueue() {
 
 		const offlineOpts = clientState.config.offline;
 		const beforeReplay = offlineOpts?.beforeReplay;
-		const onReplayError = offlineOpts?.onReplayError;
 		const onConflict = offlineOpts?.onConflict;
 		const conflictResolution = offlineOpts?.conflictResolution || 'server-win';
 		const maxAge = offlineOpts?.maxAge || 0;
@@ -211,10 +210,8 @@ async function _drainOfflineQueue() {
 			clean = false;
 			lowestFailedSeq = Math.min(lowestFailedSeq, entry.seq ?? 0);
 			_settlePersist(entry, false);
-			if (onReplayError) {
-				const over = overrides.get(entry);
-				try { onReplayError({ path: over ? over.path : entry.path, args: over ? over.args : entry.args, queuedAt: entry.queuedAt }, err); } catch { /* observer only */ }
-			}
+			const over = overrides.get(entry);
+			_notifyReplayError({ path: over ? over.path : entry.path, args: over ? over.args : entry.args, queuedAt: entry.queuedAt }, err);
 			entry.reject(err);
 		}
 
@@ -392,7 +389,9 @@ async function _drainOfflineQueue() {
 			// failed here still leaves a hole when it goes up then.
 			_carryBatch(lowestFailedSeq);
 			_offlineQueue.unshift(...rest);
-			_trimQueue(offlineOpts?.maxQueue || 100);
+			// After the close for good the queue is kept as it is for a later page
+			// load: trimming it would delete stored copies the close keeps.
+			if (!clientState.terminated) _trimQueue(_queueLimit(offlineOpts));
 			if (clientState.terminated) {
 				// Handled as the queue was at the close: kept with a stored copy,
 				// rejected without one.

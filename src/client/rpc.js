@@ -3,7 +3,7 @@ import { now, microtask, setTimer, clearTimer } from '../client-runtime.js';
 import { __devtools, _devtoolsStart, _devtoolsEnd, _devtoolsVolatileSent } from './devtools-instrument.js';
 import { _conn, ensureListener, ensureDisconnectListener, _getTimeout, _connectionClosedError } from './connection.js';
 import { clientState, RpcError, _connectionLost, pending, _nextId, _dedupMap, _dedupCoalesceWarned, _isDev, _IS_DEV, _textEncoder, _getBinaryFrame, _offlineQueue, _publishRateHintWarned, _publishRateWindows, _PUBLISH_RATE_HINT_THRESHOLD, _PUBLISH_RATE_HINT_WINDOW_MS, _PUBLISH_RATE_HINT_DEDUP_MAX } from './internal-state.js';
-import { _enqueuePersist, _trimQueue } from './offline.js';
+import { _enqueuePersist, _trimQueue, _queueLimit } from './offline.js';
 
 /**
  * Dev-only: warn once per RPC path when the microtask dedup map
@@ -441,7 +441,7 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 		} catch (err) {
 			return Promise.reject(err);
 		}
-		const maxQueue = clientState.config.offline.maxQueue || 100;
+		const maxQueue = _queueLimit(clientState.config.offline);
 		return new Promise((resolve, reject) => {
 			// Room for this one: the oldest go.
 			_trimQueue(maxQueue - 1);
