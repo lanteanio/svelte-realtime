@@ -108,6 +108,34 @@ export class RpcError extends Error {
 	}
 }
 
+/**
+ * Errors the client raises itself when a call's connection goes away under
+ * it (a drop, a device sleep, the close for good), as opposed to a server
+ * answer that carries the same code. Such a call may never have reached the
+ * server, so the offline drain keeps a replay that ends this way queued.
+ * @type {WeakSet<object>}
+ */
+const _connectionLossErrors = new WeakSet();
+
+/**
+ * @param {string} code
+ * @param {string} message
+ * @returns {RpcError}
+ */
+export function _connectionLost(code, message) {
+	const err = new RpcError(code, message);
+	_connectionLossErrors.add(err);
+	return err;
+}
+
+/**
+ * @param {unknown} err
+ * @returns {boolean}
+ */
+export function _isConnectionLoss(err) {
+	return typeof err === 'object' && err !== null && _connectionLossErrors.has(err);
+}
+
 // Incrementing counter for short correlation IDs, prefixed to avoid cross-tab
 // collision. The seeded RNG is the right primitive: this prefix is
 // response-routing bookkeeping, not a session token or any value that crosses a

@@ -318,6 +318,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rejects with `CONNECTION_CLOSED`. `configure({ url, auth })` after a close
   for good is ignored, with a warning in development.
 
+- **A drop while the offline queue replays no longer costs the call it cut
+  off.** The call being replayed when the connection dropped was rejected
+  with `DISCONNECTED`, reported to `onReplayError` and its stored copy
+  deleted, though it may never have reached the server. The calls behind it
+  were queued again as new entries that the replay then waited on, so it
+  never finished: `uploading` stayed `true` and nothing replayed again
+  before a reload, which then sent those calls twice. Now the replay stops
+  at the drop, and the call it cut off and every call behind it stay queued
+  as they were (same stored copy and idempotency key, promise pending) and
+  replay in order on the next reconnect. A call the device slept through is
+  sent again at once when the socket has not reported a drop. An answer from
+  the server is a replay failure whatever its code, also when the close
+  lands in the same tick.
+
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and
   `diagnosticReason` is declared, with `reason` as its deprecated alias.

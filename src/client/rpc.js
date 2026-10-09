@@ -1,8 +1,8 @@
 // @ts-check
 import { now, microtask, setTimer, clearTimer } from '../client-runtime.js';
 import { __devtools, _devtoolsStart, _devtoolsEnd, _devtoolsVolatileSent } from './devtools-instrument.js';
-import { _conn, ensureListener, ensureDisconnectListener, _getTimeout } from './connection.js';
-import { clientState, RpcError, pending, _nextId, _dedupMap, _dedupCoalesceWarned, _isDev, _IS_DEV, _textEncoder, _getBinaryFrame, _offlineQueue, _publishRateHintWarned, _publishRateWindows, _PUBLISH_RATE_HINT_THRESHOLD, _PUBLISH_RATE_HINT_WINDOW_MS, _PUBLISH_RATE_HINT_DEDUP_MAX } from './internal-state.js';
+import { _conn, ensureListener, ensureDisconnectListener, _getTimeout, _connectionClosedError } from './connection.js';
+import { clientState, RpcError, _connectionLost, pending, _nextId, _dedupMap, _dedupCoalesceWarned, _isDev, _IS_DEV, _textEncoder, _getBinaryFrame, _offlineQueue, _publishRateHintWarned, _publishRateWindows, _PUBLISH_RATE_HINT_THRESHOLD, _PUBLISH_RATE_HINT_WINDOW_MS, _PUBLISH_RATE_HINT_DEDUP_MAX } from './internal-state.js';
 import { _enqueuePersist, _settlePersist } from './offline.js';
 
 /**
@@ -417,7 +417,7 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
 
 	// Fast-fail if connection is permanently dead
 	if (clientState.terminated) {
-		return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
+		return Promise.reject(_connectionClosedError());
 	}
 
 	if (typeof process === 'undefined' || (typeof import.meta !== 'undefined' && import.meta.env?.DEV)) {
@@ -487,7 +487,7 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
 				// forever - the disconnect listener or reconnect will handle the actual error.
 				pending.delete(id);
 				_devtoolsEnd(id, false, 'SLEEP_TIMEOUT');
-				reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
+				reject(_connectionLost('DISCONNECTED', 'Connection interrupted (device sleep)'));
 				return;
 			}
 			pending.delete(id);

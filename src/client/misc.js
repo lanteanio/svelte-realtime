@@ -1,9 +1,9 @@
 // @ts-check
 import { connect as _connect } from 'svelte-adapter-uws/client';
 import { now } from '../client-runtime.js';
-import { clientState, RpcError, _offlineQueue, _IS_DEV } from './internal-state.js';
+import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from './internal-state.js';
 import { _sendRpc } from './rpc.js';
-import { _conn, _closedForGoodNow } from './connection.js';
+import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
 import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean } from './offline.js';
 
@@ -153,13 +153,18 @@ export function configure(config) {
  * half-loaded queue), holds the `uploading` backpressure signal while
  * replaying, settles each entry's durability (persisted copy dropped,
  * checkpoint advanced on success), and routes CONFLICT rejections through
- * the configured resolution instead of the plain error path.
+ * the configured resolution instead of the plain error path. When the
+ * connection goes away during the drain, it stops and puts what it has not
+ * settled back in the queue for the next reconnect.
  */
 async function _drainOfflineQueue() {
 	if (_replayingQueue) return;
 	_replayingQueue = true;
+	let again = false;
 	try {
 		await _offlineReady();
+		// Gone again while the restore was read: the next reconnect drains.
+		if (clientState.isOffline || clientState.terminated) return;
 		if (_offlineQueue.length === 0) return;
 		_setUploading(true);
 
@@ -174,15 +179,21 @@ async function _drainOfflineQueue() {
 		// Track whether any earlier-seq entry failed in THIS drain: a later
 		// success then leaves a hole in the upload order (gapDetected).
 		let anyFailure = false;
+		// The connection went away during the drain: nothing more is sent.
+		let cut = false;
+		/** @type {Set<OfflineEntry>} */
+		const settled = new Set();
 
 		/** @param {OfflineEntry} entry @param {any} result */
 		function settleOk(entry, result) {
+			settled.add(entry);
 			_settlePersist(entry, true, anyFailure);
 			entry.resolve(result);
 		}
 
 		/** @param {OfflineEntry} entry @param {any} err */
 		function settleFail(entry, err) {
+			settled.add(entry);
 			anyFailure = true;
 			_settlePersist(entry, false);
 			if (onReplayError) {
@@ -203,21 +214,23 @@ async function _drainOfflineQueue() {
 			let args = entry.args;
 			let retried = false;
 			for (;;) {
+				// Nothing is sent once the drain was cut, nor while the connection
+				// is down: `_sendRpc` would queue the call again as a new entry, and
+				// this drain would wait on that.
+				if (cut || clientState.isOffline || clientState.terminated) {
+					cut = true;
+					return;
+				}
 				try {
 					const result = await _sendRpc(entry.path, args, entry.idempotencyKey, entry.timeout);
 					settleOk(entry, result);
 					return;
 				} catch (err) {
-					// Cut off by the close for good (or by the drop that used up the
-					// last reconnect attempt), the entry goes back to the queue and is
-					// handled as the queue is at the close: one with a stored copy
-					// waits there for a later page load with its call still pending,
-					// one without rejects, and neither is a replay failure. It may not
-					// have been applied, so the drain is not clean.
-					if (clientState.terminated && err && (err.code === 'CONNECTION_CLOSED' || err.code === 'DISCONNECTED')) {
-						anyFailure = true;
-						_offlineQueue.push(entry);
-						_keepIfStored(entry, () => new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
+					// The connection went away under the replay (a drop, a device
+					// sleep, the close for good) and it may never have reached the
+					// server: not a replay failure.
+					if (_isConnectionLoss(err)) {
+						cut = true;
 						return;
 					}
 					if (err && err.code === 'CONFLICT' && !retried) {
@@ -291,6 +304,25 @@ async function _drainOfflineQueue() {
 			}
 		}
 
+		if (cut) {
+			// What the drain did not settle goes back to the front of the queue
+			// as it was (same seq, idempotency key and stored copy, call still
+			// pending), ahead of anything queued since. A replay that was cut off
+			// may have been applied, so the drain is not clean.
+			anyFailure = true;
+			const rest = queue.filter((entry) => !settled.has(entry));
+			_offlineQueue.unshift(...rest);
+			if (clientState.terminated) {
+				// Handled as the queue was at the close: kept with a stored copy,
+				// rejected without one.
+				for (const entry of rest) _keepIfStored(entry, _connectionClosedError);
+			} else if (!clientState.isOffline) {
+				// Up again already (its reconnect found this drain still running),
+				// or the drop was never reported, as after a device sleep.
+				again = true;
+			}
+		}
+
 		// A fully-clean drain (no failure, nothing left queued) closes any
 		// upload-order hole a PREVIOUS drain left; a drain that itself failed
 		// must leave the gap visible for the app to act on.
@@ -299,6 +331,7 @@ async function _drainOfflineQueue() {
 		_bumpPending();
 		_setUploading(false);
 		_replayingQueue = false;
+		if (again) void _drainOfflineQueue();
 	}
 }
 

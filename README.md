@@ -1531,6 +1531,8 @@ configure({
 
 When offline queuing is enabled, RPC calls made while disconnected return promises that resolve when the call is replayed after reconnection. If the queue overflows, the oldest entry is dropped and its promise rejects with `QUEUE_FULL`. If `maxAge` is set, queued calls older than that threshold are rejected with `STALE` at replay time.
 
+If the connection drops again while the queue is replaying, the replay stops there: the call it cut off and every call behind it stay queued as they were and replay in order on the next reconnect, their promises still pending, and `onReplayError` is not called for them. A call cut off this way may already have reached the server. Every queued call carries an idempotency key, so a handler wrapped in `live.idempotent` answers the repeat with its first result instead of applying it twice.
+
 ### Durable persistence (survive a reload)
 
 By default the queue lives in memory and dies with the tab. Turn on `persist` and queued mutations survive reloads and browser restarts - stored in IndexedDB, restored on the next load, and replayed on reconnect:

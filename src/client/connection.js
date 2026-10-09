@@ -2,7 +2,7 @@
 import { derived } from 'svelte/store';
 import { connect as _connect, status as _adapterStatus } from 'svelte-adapter-uws/client';
 import { now, clearTimer } from '../client-runtime.js';
-import { clientState, RpcError, pending, pendingUploads, _IS_DEV } from './internal-state.js';
+import { clientState, RpcError, pending, pendingUploads, _IS_DEV, _connectionLost } from './internal-state.js';
 import { _closeOfflineQueue } from './offline.js';
 
 /**
@@ -253,7 +253,7 @@ export function ensureDisconnectListener() {
 			for (const [id, entry] of pending) {
 				pending.delete(id);
 				if (entry.timer) clearTimer(entry.timer);
-				entry.reject(new RpcError('DISCONNECTED', 'WebSocket connection lost'));
+				entry.reject(_connectionLost('DISCONNECTED', 'WebSocket connection lost'));
 			}
 			_drainPendingUploadsOnDisconnect();
 		}
@@ -314,8 +314,8 @@ export function _closedForGoodNow() {
 }
 
 /** @returns {RpcError} */
-function _connectionClosedError() {
-	return new RpcError('CONNECTION_CLOSED', 'Connection permanently closed');
+export function _connectionClosedError() {
+	return _connectionLost('CONNECTION_CLOSED', 'Connection permanently closed');
 }
 
 /**
