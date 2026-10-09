@@ -545,9 +545,10 @@ function _reportDrop(entry, err) {
 
 /**
  * @internal The upload batch the queue is in: the lowest seq that failed in
- * it (Infinity for none) and whether it is still clean. A drain the
- * connection cut off hands it to the next one, so the two count as one
- * batch; a full queue dropping its oldest marks it too.
+ * it (Infinity for none) and whether it is still clean. A drain a lost
+ * connection or a closed page cut off hands it to the next one, also on the
+ * next page, so the two count as one batch; a full queue dropping its oldest
+ * marks it too.
  * @returns {{ failedSeq: number, clean: boolean }}
  */
 export function _batchState() {

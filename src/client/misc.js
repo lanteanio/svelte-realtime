@@ -180,8 +180,8 @@ async function _drainOfflineQueue() {
 		// Whether the batch went up in order with nothing failing (a clean
 		// drain closes the gap), and the lowest seq that failed in it: a
 		// success above it leaves a hole in the upload order (gapDetected). A
-		// drain that carries on one the connection cut off starts from where
-		// that one stopped.
+		// drain that carries on one a lost connection or a closed page cut off
+		// starts from where that one stopped.
 		const batch = _batchState();
 		let clean = batch.clean;
 		let lowestFailedSeq = batch.failedSeq;
@@ -350,25 +350,37 @@ async function _drainOfflineQueue() {
 		if (typeof offlineOpts?.replay === 'function') {
 			/** @type {ReturnType<typeof _readReplayAnswer>} */
 			let answer;
-			/** @type {OfflineEntry[] | null} */
-			let given = null;
-			try {
-				given = queue.map((entry) => ({ ...entry, args: _jsonCopy(entry.args) }));
-			} catch {
-				// Args a custom store restored that are not JSON.
-				answer = 'was not called: the args of a queued call are not JSON';
-			}
-			if (given) {
+			/** @type {OfflineEntry[]} */
+			const given = [];
+			/** @type {OfflineEntry[]} */
+			const sendable = [];
+			for (const entry of queue) {
+				let args;
 				try {
-					const picked = offlineOpts.replay(given);
-					try {
-						answer = _readReplayAnswer(picked, queue);
-					} catch {
-						answer = 'returned an answer that could not be read';
-					}
-				} catch (err) {
-					answer = 'threw' + _causeOf(err);
+					args = _jsonCopy(entry.args);
+				} catch (error) {
+					// Stored args that are not JSON (a custom store, or a call an
+					// earlier version stored with a BigInt or a cycle in it) can never
+					// be sent: the call is dropped before the function sees the rest.
+					/** @type {any} */
+					const stale = new RpcError('STALE', 'Offline mutation dropped: its stored args cannot be sent');
+					stale.cause = error;
+					settleFail(entry, stale);
+					continue;
 				}
+				sendable.push(entry);
+				given.push({ ...entry, args });
+			}
+			queue = sendable;
+			try {
+				const picked = offlineOpts.replay(given);
+				try {
+					answer = _readReplayAnswer(picked, queue);
+				} catch {
+					answer = 'returned an answer that could not be read';
+				}
+			} catch (err) {
+				answer = 'threw' + _causeOf(err);
 			}
 			if (typeof answer === 'string') {
 				if (_IS_DEV) console.warn('[svelte-realtime] offline.replay ' + answer + ', so the queue replays as it is.');
@@ -513,7 +525,8 @@ function _readReplayAnswer(picked, queue) {
 			foreign++;
 			continue;
 		}
-		if (keptSet.has(original) || unsendable.has(original)) continue;
+		// A sendable copy of a call wins over an unsendable one before it.
+		if (keptSet.has(original)) continue;
 		if (item !== original) {
 			const path = item.path;
 			const args = item.args;

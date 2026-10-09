@@ -684,6 +684,15 @@ describe('offline queue - a replay function', () => {
 			expect(storedKeys(store)).toEqual([]);
 			expect(warn.mock.calls.some(([m]) => String(m).includes('offline.replay'))).toBe(false);
 
+			// A sendable copy of a call wins over a spoiled one before it.
+			mod = await loadClient();
+			const both = (await goOfflineAndQueue({ replay: (queue) => [{ ...queue[0], args: [10n] }, queue[0], queue[1], queue[2]] }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(sentCalls().map((e) => e.args[0].t)).toEqual([1, 2, 3]);
+			expect(both.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+
 			// Its only copy spoiled: still an answer, so what it left out goes too.
 			mod = await loadClient();
 			const only = (await goOfflineAndQueue({ replay: (queue) => [{ ...queue[0], args: [10n] }] }, three)).map(watch);
@@ -696,13 +705,16 @@ describe('offline queue - a replay function', () => {
 		}
 	});
 
-	it('a queued call whose stored args are not JSON keeps the function from being called, without blaming it', async () => {
+	it('a queued call whose stored args are not JSON is dropped before the function decides on the rest', async () => {
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		try {
-			// A custom store that hands back what it was given, BigInt and all.
+			// A store that hands back what it was given, BigInt and all, as
+			// IndexedDB does for a call stored before args were kept as JSON.
 			const store = fakeStore(Object.fromEntries([seedEntry('default', 1, 'todos/add', [10n], 'off-big')]));
-			const replay = vi.fn((queue) => queue);
-			mod.configure({ offline: { queue: true, persist: store, replay } });
+			const onReplayError = vi.fn();
+			// Moves every call it gets to a renamed RPC.
+			const replay = vi.fn((queue) => queue.map((c) => ({ ...c, path: 'tasks/add' })));
+			mod.configure({ offline: { queue: true, persist: store, replay, onReplayError } });
 			await flush(1);
 			simulateStatus('disconnected');
 			const fresh = watch(mod.__rpc('todos/add')({ t: 'new' }));
@@ -710,11 +722,15 @@ describe('offline queue - a replay function', () => {
 			simulateStatus('open');
 			await flush();
 			await respondAll(() => ({ ok: true, data: 'ok' }));
-			expect(replay).not.toHaveBeenCalled();
+			expect(replay).toHaveBeenCalledTimes(1);
+			expect(replay.mock.calls[0][0].map((c) => c.args[0].t)).toEqual(['new']);
+			expect(sentCalls().map((e) => e.rpc + ':' + e.args[0].t)).toEqual(['tasks/add:new']);
 			expect(fresh.value).toBe('ok');
-			const warned = warn.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('offline.replay'));
-			expect(warned).toHaveLength(1);
-			expect(warned[0]).toContain('was not called');
+			expect(onReplayError).toHaveBeenCalledTimes(1);
+			expect(onReplayError.mock.calls[0][1]).toMatchObject({ code: 'STALE' });
+			expect(onReplayError.mock.calls[0][1].cause).toBeInstanceOf(TypeError);
+			expect(storedKeys(store)).toEqual([]);
+			expect(warn.mock.calls.some(([m]) => String(m).includes('offline.replay'))).toBe(false);
 		} finally {
 			warn.mockRestore();
 		}

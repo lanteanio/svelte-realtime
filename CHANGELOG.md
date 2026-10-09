@@ -449,7 +449,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anything else it returns is ignored with a warning in development; and a
   function that throws, returns a promise, returns no array or returns
   items none of which is a queued call leaves the queue to replay as it is,
-  with a warning in development. The function gets copies of the queued
+  with a warning in development. A queued call whose stored args cannot be
+  serialized (stored by an earlier version with a `BigInt` or a cycle in it)
+  is dropped as `STALE` before the function sees the rest. The function gets copies of the queued
   calls, so changing one no longer changes the call itself, its
   idempotency key or which stored copy its settle deletes. The README now
   documents `replay`.
