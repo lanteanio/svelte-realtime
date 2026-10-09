@@ -138,10 +138,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An `offline.beforeReplay` that throws or returns a promise drops the
   call it is asked about.** A filter that threw stopped the replay before
-  it began: every queued call stayed queued and went through the filter
-  again at a later reconnect. An async filter returned a promise, which is
-  truthy, so every call went through a filter that had not answered yet. Either way the call is now dropped as `STALE` and
-  reported to `onReplayError`, with a warning in development; after a
+  it began: every queued call stayed queued, also one it had already
+  refused and reported, and went through the filter again at a later
+  reconnect. An async filter returned a promise, which is truthy, so every
+  call went through a filter that had not answered yet. Either way the
+  call is now dropped as `STALE` and reported to `onReplayError`, with a warning in development; after a
   throw the error is the rejection's `cause`, after a promise its message
   says so. A filter that cannot decide yet, say for want of a signed-in
   user, now loses the calls it is asked about: make it synchronous, have
@@ -319,10 +320,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The scaffolder sets up a working project again.** It ran the latest
   `sv`, and since `sv` 1.0 (released 2026-10-01) that creates a SvelteKit 3
   project, which `svelte-adapter-uws` and `svelte-realtime` do not support:
-  installing them failed (npm stopped with `ERESOLVE`), leaving a bare
-  SvelteKit project. The scaffolder now runs
-  `sv@0.17.1`, the last release that creates a SvelteKit 2 project, and the
-  README's manual setup says to do the same.
+  with npm, installing them stopped with `ERESOLVE`, leaving a bare
+  SvelteKit project. The scaffolder now runs `sv@0.17.1`, the last release
+  that creates a SvelteKit 2 project, and the README's manual setup says to
+  do the same.
 
 - **A connection closed for good stays closed, and every call says so.**
   The client listened for a terminal close through a `ready()` member the
@@ -450,7 +451,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `path` and `args` are replayed under that call's idempotency key;
   anything else it returns is ignored with a warning in development; and a
   function that throws, returns a promise, returns no array or returns
-  items none of which is a queued call leaves the queue to replay as it is,
+  items other than `null` none of which is a queued call leaves the queue
+  to replay as it is,
   with a warning in development. A queued call whose stored args cannot be
   serialized (stored by an earlier version with a `BigInt` or a cycle in it)
   is dropped as `STALE` before the function sees the rest. The function gets copies of the queued

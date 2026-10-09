@@ -359,7 +359,7 @@ async function _drainOfflineQueue() {
 				try {
 					args = _jsonCopy(entry.args);
 				} catch (error) {
-					// Stored args that are not JSON (a custom store, or a call an
+					// Stored args that cannot be serialized (a custom store, or a call an
 					// earlier version stored with a BigInt or a cycle in it) can never
 					// be sent: the call is dropped before the function sees the rest.
 					/** @type {any} */
