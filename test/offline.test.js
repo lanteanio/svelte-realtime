@@ -1676,43 +1676,25 @@ describe('offline queue - a drop during the drain', () => {
 		expect(warn.mock.calls.some(([m]) => String(m).includes('onReplayError threw'))).toBe(true);
 	});
 
-	it('a beforeReplay that throws holds the call back, unsent, until a replay where it answers', async () => {
-		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-		try {
-			// A gap an earlier batch left, which a clean batch closes.
-			const store = fakeStore({ 'c:default': { lastUploadedSeq: 0, gapDetected: true } });
-			let currentUser = null;
-			const beforeReplay = () => currentUser.id === 'u1';
-			const [held, other] = await goOfflineAndQueue({ persist: store, beforeReplay }, [
-				['todos/add', [{ t: 1 }]],
-				['todos/add', [{ t: 2 }]]
-			]);
-			const w1 = watch(held);
-			const w2 = watch(other);
-			let pendingSeen;
-			mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
-			simulateStatus('open');
-			await flush();
-			expect(sentCalls()).toEqual([]);
-			expect(w1.settled).toBe(false);
-			expect(w2.settled).toBe(false);
-			expect(pendingSeen).toBe(2);
-			expect(storedKeys(store)).toHaveLength(2);
-			expect(warn.mock.calls.some(([m]) => String(m).includes('stays queued without being sent'))).toBe(true);
-
-			currentUser = { id: 'u1' };
-			simulateStatus('disconnected');
-			simulateStatus('open');
-			await flush();
-			await respondAll(() => ({ ok: true, data: 'ok' }));
-			expect(sentCalls().map((e) => e.args[0].t)).toEqual([1, 2]);
-			expect(w1.value).toBe('ok');
-			expect(w2.value).toBe('ok');
-			// Holding calls back is no failure: the batch went up clean.
-			expect(mod.offlineCheckpoint().gapDetected).toBe(false);
-		} finally {
-			warn.mockRestore();
-		}
+	it('a beforeReplay that throws drops the call as STALE and reports it, never sending it', async () => {
+		const store = fakeStore();
+		const onReplayError = vi.fn();
+		let currentUser = null;
+		const beforeReplay = (call) => call.args[0].owner === currentUser.id;
+		const [p1, p2] = await goOfflineAndQueue({ persist: store, beforeReplay, onReplayError }, [
+			['todos/add', [{ t: 1, owner: 'u1' }]],
+			['todos/add', [{ t: 2, owner: 'u1' }]]
+		]);
+		const w1 = watch(p1);
+		const w2 = watch(p2);
+		simulateStatus('open');
+		await flush();
+		expect(sentCalls()).toEqual([]);
+		expect(w1.error).toMatchObject({ code: 'STALE' });
+		expect(w1.error.cause).toBeInstanceOf(TypeError);
+		expect(w2.error).toMatchObject({ code: 'STALE' });
+		expect(onReplayError).toHaveBeenCalledTimes(2);
+		expect(storedKeys(store)).toEqual([]);
 	});
 
 	it('a pendingMutations or uploading subscriber that throws breaks neither the queue nor the drain', async () => {

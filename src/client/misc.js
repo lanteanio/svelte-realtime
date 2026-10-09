@@ -281,11 +281,6 @@ async function _drainOfflineQueue() {
 		// Filter the queue
 		/** @type {OfflineEntry[]} */
 		let queue = [];
-		/**
-		 * Calls a throwing beforeReplay held back: neither sent nor dropped.
-		 * @type {OfflineEntry[]}
-		 */
-		const held = [];
 		for (const entry of _offlineQueue) {
 			if (maxAge > 0 && nowMs - entry.queuedAt > maxAge) {
 				settleFail(entry, new RpcError('STALE', 'Offline mutation expired'));
@@ -296,11 +291,13 @@ async function _drainOfflineQueue() {
 				try {
 					keep = beforeReplay({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt });
 				} catch (err) {
-					// The filter's own error decides nothing. Sending could pass a
-					// call a guard would refuse, dropping would lose it: it stays
-					// queued, and the filter runs again at the next replay.
-					if (_IS_DEV) console.warn('[svelte-realtime] offline.beforeReplay threw, so the call stays queued without being sent. Cause: ' + (err && /** @type {any} */ (err).message ? /** @type {any} */ (err).message : String(err)));
-					held.push(entry);
+					// The filter's own error counts as a refusal: the call is dropped
+					// and reported, never sent past a guard that could not decide.
+					// Holding it back instead would send it later, after calls
+					// queued behind it and calls made since.
+					const stale = new RpcError('STALE', 'Offline mutation dropped: beforeReplay threw');
+					/** @type {any} */ (stale).cause = err;
+					settleFail(entry, stale);
 					continue;
 				}
 				if (!keep) {
@@ -387,17 +384,15 @@ async function _drainOfflineQueue() {
 
 		// A replay that was cut off may have been applied: the drain is not clean.
 		if (cut) clean = false;
-		if (cut || held.length > 0) {
-			// What the drain did not settle, and what beforeReplay held back, go
-			// back to the front of the queue as they were queued (same seq,
-			// idempotency key and stored copy, call still pending), in seq order
-			// and ahead of anything queued since, so a custom `replay` function
-			// sees them as before at the next drain.
-			const back = [...held, ...(cut ? queue.filter((entry) => !settled.has(entry)) : [])]
-				.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+		if (cut) {
+			// What the drain did not settle goes back to the front of the queue
+			// as it was queued (same seq, idempotency key and stored copy, call
+			// still pending), in seq order and ahead of anything queued since, so
+			// a custom `replay` function sees it as before at the next drain.
+			const back = queue.filter((entry) => !settled.has(entry)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 			// The next drain carries on this batch: a call queued after one that
 			// failed here still leaves a hole when it goes up then.
-			_carryBatch(lowestFailedSeq, clean);
+			_carryBatch(lowestFailedSeq);
 			_offlineQueue.unshift(...back);
 			// After the close for good the queue is kept as it is for a later page
 			// load: trimming it would delete stored copies the close keeps.
@@ -406,7 +401,7 @@ async function _drainOfflineQueue() {
 				// Handled as the queue was at the close: kept with a stored copy,
 				// rejected without one.
 				for (const entry of back) _keepIfStored(entry, _connectionClosedError);
-			} else if (cut && !clientState.isOffline) {
+			} else if (!clientState.isOffline) {
 				// Up again already (its reconnect found this drain still running),
 				// or the drop was never reported, as after a device sleep.
 				again = true;

@@ -477,14 +477,13 @@ export function _batchState() {
 }
 
 /**
- * @internal A drain left calls queued (cut off, or held back): the next one
- * carries on its batch.
+ * @internal A drain was cut off: the next one carries on its batch, which is
+ * not clean (a replay that was cut off may have been applied).
  * @param {number} failedSeq
- * @param {boolean} clean
  */
-export function _carryBatch(failedSeq, clean) {
+export function _carryBatch(failedSeq) {
 	// A full queue may have dropped a call while the drain ran.
-	_batch = { failedSeq: Math.min(_batch.failedSeq, failedSeq), clean: _batch.clean && clean };
+	_batch = { failedSeq: Math.min(_batch.failedSeq, failedSeq), clean: false };
 	_putCheckpoint();
 }
 
