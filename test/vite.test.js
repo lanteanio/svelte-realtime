@@ -957,7 +957,7 @@ export function upgrade() { return {}; }
 	});
 });
 
-// - resolveId: /@svelte-realtime-registry (Finding 2) ------------------------
+// - resolveId: /@svelte-realtime-registry ------------------------------------
 
 describe('resolveId (registry URL)', () => {
 	it('resolves /@svelte-realtime-registry to the registry virtual module for the server graph only', () => {
@@ -1037,7 +1037,7 @@ describe('registry co-location transform', () => {
 	});
 });
 
-// - config hook (Finding 2) --------------------------------------------------
+// - config hook --------------------------------------------------------------
 
 describe('config hook', () => {
 	it('injects registry when input is an object', () => {
@@ -1337,7 +1337,7 @@ export const inbox = live.stream(
 	});
 });
 
-// - path traversal (Finding 6) -----------------------------------------------
+// - path traversal -----------------------------------------------------------
 
 describe('path traversal prevention', () => {
 	afterEach(teardown);

@@ -224,7 +224,7 @@ beforeEach(async () => {
 	if (_resetClientPublishRateWarning) _resetClientPublishRateWarning();
 });
 
-// - __rpc (Finding 1 regression) ---------------------------------------------
+// - __rpc --------------------------------------------------------------------
 
 describe('__rpc()', () => {
 	it('resolves with unwrapped data.data for regular RPC', async () => {
@@ -307,7 +307,7 @@ describe('__stream()', () => {
 		unsub();
 	});
 
-	it('uses server-provided options over build-time defaults (Finding 5)', async () => {
+	it('uses server-provided options over build-time defaults', async () => {
 		// Build-time says merge:'crud' key:'id', server overrides with key:'uid'
 		const store = __stream('users/list', { merge: 'crud', key: 'id' });
 		const values = [];
@@ -335,7 +335,7 @@ describe('__stream()', () => {
 		unsub();
 	});
 
-	it('latest merge pushes raw data, not envelopes (Finding 4)', async () => {
+	it('latest merge pushes raw data, not envelopes', async () => {
 		const store = __stream('activity/feed', { merge: 'latest', max: 10 });
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
@@ -365,7 +365,7 @@ describe('__stream()', () => {
 		unsub();
 	});
 
-	it('cleanup removes pending entry from shared map (Finding 3)', async () => {
+	it('cleanup removes pending entry from shared map', async () => {
 		const store = __stream('temp/data', { merge: 'set' });
 		const unsub = store.subscribe(() => {});
 
@@ -389,7 +389,7 @@ describe('__stream()', () => {
 		expect(topicCallbacks.has('temp')).toBe(false);
 	});
 
-	it('reconnects after disconnect during initial load (Finding 3)', async () => {
+	it('reconnects after disconnect during initial load', async () => {
 		const store = __stream('recover/data', { merge: 'set' });
 		const values = [];
 		const errors = [];
