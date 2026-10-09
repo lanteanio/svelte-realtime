@@ -288,6 +288,7 @@ async function _drainOfflineQueue() {
 		/** @type {OfflineEntry[]} */
 		let queue = [];
 		let asyncFilterWarned = false;
+		let throwingFilterWarned = false;
 		for (const entry of _offlineQueue) {
 			if (maxAge > 0 && nowMs - entry.queuedAt > maxAge) {
 				settleFail(entry, new RpcError('STALE', 'Offline mutation expired'));
@@ -295,25 +296,34 @@ async function _drainOfflineQueue() {
 			}
 			if (beforeReplay) {
 				let keep;
+				/** @type {any} */
+				let refused = null;
 				try {
 					keep = beforeReplay({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt });
 					// A promise is truthy, but it is no answer yet.
 					if (keep !== null && typeof keep === 'object' && typeof keep.then === 'function') {
 						Promise.resolve(keep).catch(() => {});
+						refused = new RpcError('STALE', 'Offline mutation dropped: beforeReplay returned a promise');
 						if (_IS_DEV && !asyncFilterWarned) {
 							asyncFilterWarned = true;
 							console.warn('[svelte-realtime] offline.beforeReplay returned a promise; it must answer synchronously, so the call is dropped as STALE.');
 						}
-						throw new Error('beforeReplay returned a promise');
 					}
 				} catch (err) {
 					// The filter's own error counts as a refusal: the call is dropped
 					// and reported, never sent past a guard that could not decide.
 					// Holding it back instead would send it later, after calls
-					// queued behind it and calls made since.
-					const stale = new RpcError('STALE', 'Offline mutation dropped: beforeReplay threw');
-					/** @type {any} */ (stale).cause = err;
-					settleFail(entry, stale);
+					// queued behind it and calls made since. A restored call has no
+					// promise to report it, hence the warning.
+					refused = new RpcError('STALE', 'Offline mutation dropped: beforeReplay threw');
+					refused.cause = err;
+					if (_IS_DEV && !throwingFilterWarned) {
+						throwingFilterWarned = true;
+						console.warn('[svelte-realtime] offline.beforeReplay threw, so the call is dropped as STALE, with the error as the cause of its rejection.' + _causeOf(err));
+					}
+				}
+				if (refused) {
+					settleFail(entry, refused);
 					continue;
 				}
 				if (!keep) {

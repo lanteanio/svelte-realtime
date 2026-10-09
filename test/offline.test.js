@@ -2063,24 +2063,33 @@ describe('offline queue - a drop during the drain', () => {
 	});
 
 	it('a beforeReplay that throws drops the call as STALE and reports it, never sending it', async () => {
-		const store = fakeStore();
-		const onReplayError = vi.fn();
-		let currentUser = null;
-		const beforeReplay = (call) => call.args[0].owner === currentUser.id;
-		const [p1, p2] = await goOfflineAndQueue({ persist: store, beforeReplay, onReplayError }, [
-			['todos/add', [{ t: 1, owner: 'u1' }]],
-			['todos/add', [{ t: 2, owner: 'u1' }]]
-		]);
-		const w1 = watch(p1);
-		const w2 = watch(p2);
-		simulateStatus('open');
-		await flush();
-		expect(sentCalls()).toEqual([]);
-		expect(w1.error).toMatchObject({ code: 'STALE' });
-		expect(w1.error.cause).toBeInstanceOf(TypeError);
-		expect(w2.error).toMatchObject({ code: 'STALE' });
-		expect(onReplayError).toHaveBeenCalledTimes(2);
-		expect(storedKeys(store)).toEqual([]);
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const store = fakeStore();
+			const onReplayError = vi.fn();
+			let currentUser = null;
+			const beforeReplay = (call) => call.args[0].owner === currentUser.id;
+			const [p1, p2] = await goOfflineAndQueue({ persist: store, beforeReplay, onReplayError }, [
+				['todos/add', [{ t: 1, owner: 'u1' }]],
+				['todos/add', [{ t: 2, owner: 'u1' }]]
+			]);
+			const w1 = watch(p1);
+			const w2 = watch(p2);
+			simulateStatus('open');
+			await flush();
+			expect(sentCalls()).toEqual([]);
+			expect(w1.error).toMatchObject({ code: 'STALE' });
+			expect(w1.error.cause).toBeInstanceOf(TypeError);
+			expect(w2.error).toMatchObject({ code: 'STALE' });
+			expect(onReplayError).toHaveBeenCalledTimes(2);
+			expect(storedKeys(store)).toEqual([]);
+			// Once per replay, naming the cause.
+			const warned = warn.mock.calls.filter(([m]) => String(m).includes('beforeReplay threw'));
+			expect(warned).toHaveLength(1);
+			expect(String(warned[0][0])).toContain(w1.error.cause.message);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it('a beforeReplay that returns a promise drops the call as STALE, never sending it', async () => {
@@ -2103,7 +2112,8 @@ describe('offline queue - a drop during the drain', () => {
 			expect(unhandled).not.toHaveBeenCalled();
 			expect(sentCalls()).toEqual([]);
 			expect(watched.map((w) => w.error?.code)).toEqual(['STALE', 'STALE']);
-			expect(watched[0].error.cause).toBeInstanceOf(Error);
+			expect(watched[0].error.message).toMatch(/returned a promise/);
+			expect(watched[0].error.cause).toBeUndefined();
 			expect(onReplayError).toHaveBeenCalledTimes(2);
 			expect(storedKeys(store)).toEqual([]);
 			expect(warn.mock.calls.filter(([m]) => String(m).includes('must answer synchronously'))).toHaveLength(1);

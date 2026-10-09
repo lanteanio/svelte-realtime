@@ -136,6 +136,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `onConflict` returns are taken as JSON the same way; args it returns
   that cannot be serialized drop the call with its `CONFLICT` error.
 
+- **An async `offline.beforeReplay` drops the calls it is asked about.**
+  The filter must answer synchronously. The promise an async filter
+  returns is truthy, so every call went through a filter that had not
+  answered yet. Such a call is now dropped as `STALE` (its rejection says
+  the filter returned a promise) and reported to `onReplayError`, with a
+  warning in development. An app with an async filter loses its queued
+  calls on the first replay after upgrading: make the filter synchronous.
+
 - **A test that mocks `svelte-adapter-uws/client` must return a whole
   connection from `connect()`.** The client now reads the topic factory,
   stores and request hook from the connection object it is bound to, as the
@@ -398,10 +406,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now an observer whose errors are ignored (with a warning in development),
   like `onConflict`. A call whose `beforeReplay` throws is dropped as
   `STALE` and reported, with the filter's error as the rejection's
-  `cause`, so a guard that fails, say for want of a signed-in user, never
-  lets a call through. An async `beforeReplay` let every call through,
-  since the promise it returns is truthy; such a call is now dropped the
-  same way, with a warning in development.
+  `cause` and a warning in development, so a guard that fails, say for
+  want of a signed-in user, never lets a call through.
 
 - **`offlineCheckpoint().gapDetected` follows the order mutations were
   queued in.** A failure counted against any mutation that succeeded after
