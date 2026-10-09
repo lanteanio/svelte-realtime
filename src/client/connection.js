@@ -225,6 +225,14 @@ export function ensureListener() {
  *   an auth preflight failure or exhausted retries; the adapter reports
  *   nothing else for that connection afterwards). The client is `terminated`
  *   from then on and settles what it still holds with CONNECTION_CLOSED.
+ * - 'connecting' while a socket was up means the adapter replaced it with no
+ *   'disconnected' in between. Offline replays sent on the old socket are
+ *   rejected with DISCONNECTED, cut as by a drop; other requests keep
+ *   waiting (one the adapter held in its send queue goes out on the new
+ *   socket).
+ *
+ * `clientState.socketUp` follows whether a socket is up ('open' or
+ * 'suspended'); the offline drain starts only while one is.
  *
  * Also detects the Cloudflare-Tunnel "Set-Cookie on 101" symptom: repeated
  * fast open->close cycles with no time spent in the open state.

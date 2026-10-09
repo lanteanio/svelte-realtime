@@ -205,9 +205,11 @@ function _storeCall(call) {
 /**
  * The current upload checkpoint for the configured queue:
  * `lastUploadedSeq` is the highest enqueue seq that replayed successfully;
- * `gapDetected` is true when a mutation went up while one queued before it
- * failed (a hole in the upload order - the app may want a refetch), clearing
- * on the next fully-clean drain.
+ * `gapDetected` is true when the upload order got a hole (the app may want a
+ * refetch): a mutation went up while one queued before it failed or was
+ * dropped in the same upload batch (see `_batchState`), or a mutation failed
+ * below one that had already gone up. It clears when a later drain goes up
+ * in full with nothing failing and nothing left queued.
  * @returns {{ lastUploadedSeq: number, gapDetected: boolean }}
  */
 export function offlineCheckpoint() {

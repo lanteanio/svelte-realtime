@@ -1519,7 +1519,7 @@ configure({
     maxQueue: 100,      // drop oldest if queue exceeds this (default: 100)
     maxAge: 60000,      // auto-reject queued calls older than this (ms)
     beforeReplay(call) {
-      // Return false to drop stale mutations
+      // Return a falsy value (or nothing) to drop the call
       return Date.now() - call.queuedAt < 60000; // drop if older than 1 minute
     },
     onReplayError(call, error) {
@@ -1529,7 +1529,7 @@ configure({
 });
 ```
 
-When offline queuing is enabled, RPC calls made while disconnected return promises that resolve when the call is replayed after reconnection. If the queue overflows, the oldest entry is dropped: its promise rejects with `QUEUE_FULL` and `onReplayError` is called, which is the only report a call restored after a reload gets. If `maxAge` is set, queued calls older than that threshold are rejected with `STALE` at replay time. A call `beforeReplay` returns a falsy value for is dropped the same way, and so is a call whose `beforeReplay` throws, with the filter's error as the rejection's `cause`: a guard that cannot decide never lets a call through.
+When offline queuing is enabled, RPC calls made while disconnected return promises that resolve when the call is replayed after reconnection. If the queue overflows, the oldest entry is dropped: its promise rejects with `QUEUE_FULL` and `onReplayError` is called, which is the only report a call restored after a reload gets (a drop that a call made inside `onReplayError` causes only rejects, so the hook cannot keep the queue evicting). `onReplayError` is not called for a call rejected because the connection [closed for good](#connection-closed-for-good); its promise reports that. If `maxAge` is set, queued calls older than that threshold are rejected with `STALE` at replay time. A call `beforeReplay` returns a falsy value for is dropped the same way, and so is a call whose `beforeReplay` throws, with the filter's error as the rejection's `cause`: a guard that cannot decide never lets a call through.
 
 `replay` sets how the queue goes out on reconnect: `'sequential'` (the default, one call at a time, in order), `'concurrent'` (ten at a time; `'batch'` is an alias), or a function that gets the queued calls, oldest first, and returns the ones to replay in the order to replay them. It can return the entries it got or copies of them: a copy that keeps the entry's `resolve`, or a JSON copy of the entry (`JSON.parse(JSON.stringify(queue))` works). A copy's `path` and `args` are what is sent, under the queued call's idempotency key, so a function can move calls to a renamed RPC. A call the function leaves out is dropped like a `beforeReplay` drop: its promise rejects with `STALE` and `onReplayError` is called, so `() => []` drops every call. The function must answer synchronously; one that throws, returns a promise, returns something other than an array, or returns items none of which is a queued call (copies that lost what identifies them) decides nothing, and the queue replays as it is (with a warning in development).
 
@@ -1554,7 +1554,7 @@ configure({
 - **Server-side dedup is guaranteed.** Every persisted mutation carries an idempotency key (synthesized when the call did not supply one), so a replay after reload always dedups: a mutation that reached the server before the crash answers with its original result instead of applying twice. Pair the handlers with `live.idempotent` server-side.
 - **`persistKey` prevents cross-user replay.** One browser profile, two logins: without a per-user key, user B's session would replay user A's stored mutations. Pass your user id (or any stable scope).
 - **Restored mutations have no promise holders** (the page reloaded); their outcomes surface through `onReplayError` / `onConflict` only.
-- **Storage failures degrade, never break.** A blocked or broken IndexedDB (private windows, storage pressure) falls back to in-memory with one dev warning: a mutation whose write failed still replays on reconnect, but it does not survive a reload, and a [connection closed for good](#connection-closed-for-good) rejects it. A stored queue that cannot be read at load turns persistence off for the rest of that page, so nothing new can overwrite the mutations it could not read. A custom store implementing `{ getAll, put, delete, clear }` (see `OfflineStore`) can replace IndexedDB entirely; its `put` resolves once the value is stored and rejects when it could not be, and its `getAll` rejects when it could not read.
+- **Storage failures degrade, never break.** A blocked or broken IndexedDB (private windows, storage pressure) falls back to in-memory, with a warning in development: a mutation whose write failed still replays on reconnect, but it does not survive a reload, and a [connection closed for good](#connection-closed-for-good) rejects it. A stored queue that cannot be read at load turns persistence off for the rest of that page, so the page writes nothing that could replace a mutation it could not read; the next load reads the stored queue again. A custom store implementing `{ getAll, put, delete, clear }` (see `OfflineStore`) can replace IndexedDB entirely; its `put` resolves once the value is stored and rejects when it could not be, and its `getAll` rejects when it could not read (an answer that is not an array counts as a failed read).
 
 ### Upload checkpoint and consumer stores
 
@@ -1564,7 +1564,7 @@ import { pendingMutations, uploading, offlineCheckpoint } from 'svelte-realtime/
 
 - `pendingMutations` - readable store with the live queued-mutation count; the data source for a "3 pending edits" indicator.
 - `uploading` - readable store, `true` while a reconnect drain is replaying: the UI backpressure signal ("pause local writes while the upload pipe is busy").
-- `offlineCheckpoint()` - `{ lastUploadedSeq, gapDetected }`: the highest enqueue seq that replayed successfully, and whether a mutation went up while one queued before it failed (a hole in the upload order - consider refetching affected data), whichever of the two settled first and whichever replay each was in. Persisted alongside the queue; `gapDetected` clears on the next fully-clean drain.
+- `offlineCheckpoint()` - `{ lastUploadedSeq, gapDetected }`: the highest enqueue seq that replayed successfully, and whether the upload order got a hole (consider refetching affected data). The gap opens when a mutation goes up while one queued before it failed or was dropped in the same upload batch, whichever of the two settled first, or when a mutation fails below one that already went up. An upload batch is one reconnect's replay together with the replays that carry on one a drop cut off, also across a reload. Persisted alongside the queue; `gapDetected` clears when a later replay goes up in full with nothing failing and nothing left queued.
 
 ### Conflict resolution (replayed mutations)
 

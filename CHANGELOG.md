@@ -344,9 +344,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open socket, so a replay sent as the socket closes no longer waits in the
   send queue and goes out a second time after the reconnect, and a socket
   the adapter replaces without reporting a drop cuts the replays on it like
-  a drop does. An answer from
-  the server is a replay failure whatever its code, also when the close
-  lands in the same tick.
+  a drop does. An answer from the server is a replay failure whatever its
+  code, also when the close lands in the same tick.
 
 - **A queued offline call stores and replays the arguments it was made
   with.** The queue kept the caller's own objects and serialized them only
@@ -375,10 +374,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   could read; the queue goes on in memory, with a warning in development.
   When only its checkpoint cannot be read, the checkpoint is left alone for
   the page and the queue is stored as usual. Nothing writes the checkpoint
-  while the restore runs. The built-in store's `getAll` now rejects when a read fails
-  (it found nothing before, which read as an empty queue), and a custom
-  store's `getAll` should too. A restored row takes its seq from its key,
-  the key its settle deletes, and a corrupt checkpoint is ignored.
+  while the restore runs. The built-in store's `getAll` now rejects when a
+  read fails (it found nothing before, which read as an empty queue), and a
+  custom store's `getAll` should too; an answer that is not an array counts
+  as a failed read. A restored row takes its seq from its key, the key its
+  settle deletes, and a corrupt checkpoint is ignored.
 
 - **A `persistKey` that another one extends with `:` no longer restores
   the other's queue.** The restore took every stored row whose key began

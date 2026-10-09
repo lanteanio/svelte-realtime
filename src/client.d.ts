@@ -704,9 +704,9 @@ export function configure(config: {
 		maxAge?: number;
 		/** Replay strategy on reconnect: 'sequential' (default), 'concurrent' (10-at-a-time), or a synchronous function that gets the queued calls (oldest first) and returns the ones to replay, in order: the entries it got, or copies of them (one that keeps the entry's `resolve`, or a JSON copy of the entry), whose `path` and `args` are replayed under the queued call's idempotency key. A call it leaves out rejects with STALE (`onReplayError` is called); a function that throws, returns a promise, returns no array, or returns items none of which is a queued call decides nothing, and the queue replays as it is. 'batch' is accepted as an alias for 'concurrent'. Like the other offline hooks, a function sees each call's arguments as the JSON copy taken when it was queued. */
 		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]);
-		/** Filter function called before replaying each queued call. Return a falsy value to drop. A filter that throws drops the call too (STALE, with its error as the cause). `call.args` is the JSON copy taken when the call was queued (a `Date` arrives as its ISO string), here and in `onReplayError` and `onConflict`. */
+		/** Filter function called before replaying each queued call. Return a falsy value to drop it (a filter that returns nothing drops every call). A filter that throws drops the call too (STALE, with its error as the cause). `call.args` is the JSON copy taken when the call was queued (a `Date` arrives as its ISO string), here and in `onReplayError` and `onConflict`. */
 		beforeReplay?(call: { path: string; args: any[]; queuedAt: number }): boolean;
-		/** Called for a queued call that will not be applied: a replay that failed, or a call dropped as STALE or QUEUE_FULL. An observer: an error it throws is ignored. */
+		/** Called for a queued call the queue gives up on: a replay that failed (also one a CONFLICT resolution drops), or a call dropped as STALE or QUEUE_FULL. Not called for a call a drop cut off (it stays queued), one rejected because the connection closed for good (its promise reports that), or a QUEUE_FULL drop that a call made inside this hook causes. An observer: an error it throws is ignored. */
 		onReplayError?(call: { path: string; args: any[]; queuedAt: number }, error: any): void;
 		/**
 		 * Durable persistence: queued mutations survive a page reload. `true`
@@ -716,8 +716,8 @@ export function configure(config: {
 		 * supplied none), so a replay after reload dedups server-side: a
 		 * mutation that reached the server before the crash answers with its
 		 * original result instead of applying twice. Persistence failures
-		 * degrade to in-memory with one dev warning - the queue never breaks
-		 * because storage did.
+		 * degrade to in-memory, with a warning in development: the queue never
+		 * breaks because storage did.
 		 * @default false
 		 */
 		persist?: boolean | OfflineStore;
@@ -757,8 +757,9 @@ export interface OfflineStore {
 	/**
 	 * Every entry whose key starts with `prefix`, key-sorted. Rejects when the
 	 * entries could not be read: the queue then stores nothing for the rest of
-	 * the page rather than write over rows it could not see. Entries under a
-	 * key the queue did not write are ignored.
+	 * the page rather than write over rows it could not see; an answer that is
+	 * not an array counts as such a read. Entries under a key the queue did not
+	 * write are ignored.
 	 */
 	getAll(prefix: string): Promise<Array<{ key: string; value: any }>>;
 	/**
@@ -801,9 +802,13 @@ export const uploading: Readable<boolean>;
 /**
  * The current upload checkpoint for the configured queue: `lastUploadedSeq`
  * is the highest enqueue seq that replayed successfully; `gapDetected` is
- * true when a later mutation succeeded while an earlier one failed (a hole in
- * the upload order - consider refetching affected streams), clearing on the
- * next fully-clean drain. Persisted alongside the queue when `persist` is on.
+ * true when the upload order got a hole (consider refetching affected
+ * streams): a mutation went up while one queued before it failed or was
+ * dropped in the same upload batch (one reconnect's replay, together with
+ * the replays that carry on one a drop cut off, also across a reload), or a
+ * mutation failed below one that had already gone up. It clears when a later
+ * replay goes up in full with nothing failing and nothing left queued.
+ * Persisted alongside the queue when `persist` is on.
  */
 export function offlineCheckpoint(): { lastUploadedSeq: number; gapDetected: boolean };
 
