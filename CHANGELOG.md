@@ -397,7 +397,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like `onConflict`. A call whose `beforeReplay` throws is dropped as
   `STALE` and reported, with the filter's error as the rejection's
   `cause`, so a guard that fails, say for want of a signed-in user, never
-  lets a call through.
+  lets a call through. An async `beforeReplay` let every call through,
+  since the promise it returns is truthy; such a call is now dropped the
+  same way, with a warning in development.
 
 - **`offlineCheckpoint().gapDetected` follows the order mutations were
   queued in.** A failure counted against any mutation that succeeded after

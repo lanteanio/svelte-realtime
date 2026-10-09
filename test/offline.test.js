@@ -1965,6 +1965,35 @@ describe('offline queue - a drop during the drain', () => {
 		expect(storedKeys(store)).toEqual([]);
 	});
 
+	it('a beforeReplay that returns a promise drops the call as STALE, never sending it', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const unhandled = vi.fn();
+			process.on('unhandledRejection', unhandled);
+			onTestFinished(() => { process.off('unhandledRejection', unhandled); });
+			const store = fakeStore();
+			const onReplayError = vi.fn();
+			// Would refuse every call, once it settles.
+			const beforeReplay = async () => { throw new Error('refused later'); };
+			const watched = (await goOfflineAndQueue({ persist: store, beforeReplay, onReplayError }, [
+				['todos/add', [{ t: 1 }]],
+				['todos/add', [{ t: 2 }]]
+			])).map(watch);
+			simulateStatus('open');
+			await flush();
+			await flush();
+			expect(unhandled).not.toHaveBeenCalled();
+			expect(sentCalls()).toEqual([]);
+			expect(watched.map((w) => w.error?.code)).toEqual(['STALE', 'STALE']);
+			expect(watched[0].error.cause).toBeInstanceOf(Error);
+			expect(onReplayError).toHaveBeenCalledTimes(2);
+			expect(storedKeys(store)).toEqual([]);
+			expect(warn.mock.calls.filter(([m]) => String(m).includes('must answer synchronously'))).toHaveLength(1);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it('a pendingMutations or uploading subscriber that throws breaks neither the queue nor the drain', async () => {
 		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
 		onTestFinished(() => error.mockRestore());

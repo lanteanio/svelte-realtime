@@ -281,6 +281,7 @@ async function _drainOfflineQueue() {
 		// Filter the queue
 		/** @type {OfflineEntry[]} */
 		let queue = [];
+		let asyncFilterWarned = false;
 		for (const entry of _offlineQueue) {
 			if (maxAge > 0 && nowMs - entry.queuedAt > maxAge) {
 				settleFail(entry, new RpcError('STALE', 'Offline mutation expired'));
@@ -290,6 +291,15 @@ async function _drainOfflineQueue() {
 				let keep;
 				try {
 					keep = beforeReplay({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt });
+					// A promise is truthy, but it is no answer yet.
+					if (keep !== null && typeof keep === 'object' && typeof keep.then === 'function') {
+						Promise.resolve(keep).catch(() => {});
+						if (_IS_DEV && !asyncFilterWarned) {
+							asyncFilterWarned = true;
+							console.warn('[svelte-realtime] offline.beforeReplay returned a promise; it must answer synchronously, so the call is dropped as STALE.');
+						}
+						throw new Error('beforeReplay returned a promise');
+					}
 				} catch (err) {
 					// The filter's own error counts as a refusal: the call is dropped
 					// and reported, never sent past a guard that could not decide.
