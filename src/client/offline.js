@@ -57,51 +57,55 @@ let _checkpointUnknown = false;
  * its own (the same function subscribed twice gets two), `invalidate` runs
  * for all of them before any is called with the value (what keeps a
  * `derived` over it from computing with half-updated inputs), and a value
- * set from inside a subscriber is delivered once the current delivery ends,
- * never in the middle of it. A value replaced before it reached a subscriber
- * is not delivered to it; the newer one is.
+ * either consumer store sets from inside a subscriber of either is delivered
+ * once the current delivery ends, never in the middle of it. A subscriber not
+ * yet called with a value that is then replaced gets only the newer one.
  * @template T
  * @param {T} initial
  */
 function _consumerStore(initial) {
-	let value = initial;
-	/** @type {Set<{ run: (v: T) => void, invalidate: () => void }>} */
-	const subscriptions = new Set();
-	/** Subscription and value pairs waiting to be delivered, in order. @type {any[]} */
-	const queue = [];
+	/** @type {{ value: T, subscriptions: Set<any> }} */
+	const state = { value: initial, subscriptions: new Set() };
 	return {
 		/**
 		 * @param {(v: T) => void} run
 		 * @param {() => void} [invalidate]
 		 */
 		subscribe(run, invalidate) {
-			const subscription = { run, invalidate: typeof invalidate === 'function' ? invalidate : () => {} };
-			subscriptions.add(subscription);
-			run(value);
-			return () => { subscriptions.delete(subscription); };
+			const subscription = { run, invalidate: typeof invalidate === 'function' ? invalidate : () => {}, state };
+			state.subscriptions.add(subscription);
+			run(state.value);
+			return () => { state.subscriptions.delete(subscription); };
 		},
 		/** @param {T} next */
 		set(next) {
-			if (next === value) return;
-			value = next;
-			const deliver = queue.length === 0;
-			for (const subscription of subscriptions) {
+			if (next === state.value) return;
+			state.value = next;
+			const deliver = _deliveries.length === 0;
+			for (const subscription of state.subscriptions) {
 				_callSubscriber(subscription.invalidate, undefined);
-				queue.push(subscription, next);
+				_deliveries.push(subscription, next);
 			}
 			if (!deliver) return;
 			try {
-				for (let i = 0; i < queue.length; i += 2) {
-					const subscription = queue[i];
-					const v = queue[i + 1];
-					if (v === value && subscriptions.has(subscription)) _callSubscriber(subscription.run, v);
+				for (let i = 0; i < _deliveries.length; i += 2) {
+					const subscription = _deliveries[i];
+					const v = _deliveries[i + 1];
+					if (v === subscription.state.value && subscription.state.subscriptions.has(subscription)) _callSubscriber(subscription.run, v);
 				}
 			} finally {
-				queue.length = 0;
+				_deliveries.length = 0;
 			}
 		}
 	};
 }
+
+/**
+ * Subscription and value pairs the consumer stores have yet to deliver, in
+ * order. One queue for both, as svelte/store has one for all its stores.
+ * @type {any[]}
+ */
+const _deliveries = [];
 
 /**
  * Call a consumer store subscriber, reporting an error it throws.

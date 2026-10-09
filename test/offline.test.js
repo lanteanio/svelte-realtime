@@ -1349,6 +1349,29 @@ describe('offline queue - checkpoint and consumer stores', () => {
 		expect(later).toEqual([0, 2]);
 	});
 
+	it('a count set from inside an uploading subscriber waits until uploading has reached all of its own', async () => {
+		const save = mod.__rpc('todos/add');
+		await goOfflineAndQueue({}, [['todos/add', [{ t: 1 }]]]);
+		let saveDraft = false;
+		// Saves a draft when an upload stops, as the connection is down.
+		mod.uploading.subscribe((v) => {
+			if (!v && saveDraft) {
+				saveDraft = false;
+				save({ t: 'draft' }).catch(() => {});
+			}
+		});
+		const events = [];
+		mod.uploading.subscribe((v) => events.push('uploading ' + v));
+		mod.pendingMutations.subscribe((n) => events.push('pending ' + n));
+		simulateStatus('open');
+		await flush();
+		saveDraft = true;
+		events.length = 0;
+		simulateStatus('disconnected');
+		await flush();
+		expect(events).toEqual(['pending 1', 'uploading false', 'pending 2']);
+	});
+
 	it('a subscription ended while a value is delivered is not called with it', async () => {
 		const later = [];
 		/** @type {() => void} */
