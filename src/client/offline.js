@@ -11,7 +11,7 @@
 
 import { writable } from 'svelte/store';
 import { randomUuid } from '../client-runtime.js';
-import { _offlineQueue, RpcError } from './internal-state.js';
+import { _offlineQueue, RpcError, _IS_DEV } from './internal-state.js';
 import { resolveOfflineStore, _isDurableStore } from './offline-store.js';
 
 /** @type {import('./offline-store.js').OfflineStore | null} */
@@ -24,13 +24,15 @@ let _seq = 0;
 let _checkpoint = { lastUploadedSeq: 0, gapDetected: false };
 /** @type {Promise<void> | null} Resolves when the one-shot rehydrate finished (null = persistence off). */
 let _rehydratePromise = null;
-/** True while the rehydrate has not yet moved `_seq` past the stored rows. */
+/** True while the restore runs (the queue scan, then the checkpoint read). */
 let _restoring = false;
 /**
  * Entries queued while the restore runs, waiting for a seq.
- * @type {Array<{ entry: any, resolve: (stored: boolean | Promise<boolean>) => void }>}
+ * @type {Array<{ entry: any, resolve: (stored: boolean | Promise<boolean> | undefined) => void }>}
  */
 let _unstamped = [];
+/** The stored queue could not be read, so the store is not used again in this page. */
+let _scanFailed = false;
 
 const _pendingStore = writable(0);
 const _uploadingStore = writable(false);
@@ -104,7 +106,9 @@ export function _configureOfflinePersistence(offlineOpts) {
 		throw new Error('[svelte-realtime] offline.persistKey must be a non-empty string');
 	}
 	if (!offlineOpts.persist) return;
-	_store = resolveOfflineStore(offlineOpts.persist);
+	const store = resolveOfflineStore(offlineOpts.persist);
+	if (_scanFailed) return;
+	_store = store;
 	_persistKey = offlineOpts.persistKey ?? 'default';
 	if (!_rehydratePromise) {
 		_restoring = true;
@@ -121,10 +125,12 @@ export function _configureOfflinePersistence(offlineOpts) {
  * past the stored rows, before the promise a drain awaits resolves.
  */
 async function _rehydrate() {
+	let scanned = false;
 	try {
 		if (!_store) return;
 		const stored = Promise.resolve(_isDurableStore(_store));
 		const rows = await _store.getAll('q:' + _persistKey + ':');
+		scanned = true;
 		/** @type {any[]} */
 		const restored = [];
 		for (const { value } of rows) {
@@ -154,11 +160,21 @@ async function _rehydrate() {
 				_checkpoint = { lastUploadedSeq: value.lastUploadedSeq, gapDetected: !!value.gapDetected };
 			}
 		}
+		// No new seq at or below one that already went up, also once its row
+		// is gone: a failure there would read as a hole in the upload order.
+		if (_checkpoint.lastUploadedSeq > _seq) _seq = _checkpoint.lastUploadedSeq;
 	} finally {
+		if (_store && !scanned) {
+			// What is stored could not be read, so any seq could be a stored
+			// row's: writing, deleting or checkpointing under it could destroy a
+			// mutation nobody has seen. The queue goes on in memory only.
+			_scanFailed = true;
+			_store = null;
+			if (_IS_DEV) console.warn('[svelte-realtime] offline persistence unavailable: the stored queue could not be read, so queued mutations stay in memory for this page (they will not survive a reload).');
+		}
 		// The entries queued during the restore get their seq and their write,
 		// in the order they were queued; one settled meanwhile (dropped by a
-		// full queue) is never written. A restore that failed knows no stored
-		// seq, so they go ahead from the counter as it stands.
+		// full queue) is never written.
 		_restoring = false;
 		const waiting = _unstamped;
 		_unstamped = [];
@@ -333,6 +349,7 @@ export function _resetOffline() {
 	_rehydratePromise = null;
 	_restoring = false;
 	_unstamped = [];
+	_scanFailed = false;
 	_pendingStore.set(0);
 	_uploadingStore.set(false);
 }

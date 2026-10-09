@@ -367,7 +367,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stored mutation before the restore read it, or the restored mutation's
   replay deleted the new call's copy, leaving a call that a reload would
   not replay. A call queued during the restore now gets its number, and its
-  write, once the restore has read the stored queue.
+  write, once the restore has read the stored queue. When the stored queue
+  cannot be read at all, nothing is written, deleted or checkpointed for the
+  rest of the page, so no call can take the place of a mutation nobody could
+  read; the queue goes on in memory, with a warning in development.
 
 - **An `onReplayError` or `beforeReplay` that throws no longer stops the
   offline replay.** A throwing `onReplayError` ended the replay where it
@@ -386,7 +389,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back after an earlier one failed. The gap now opens when a mutation goes
   up while one queued before it failed, whichever settled first and in
   whichever replay, and a replay that opened it does not close it again
-  when it ends.
+  when it ends. After a reload, new mutations are numbered past
+  `lastUploadedSeq` even when no stored mutation is left.
 
 - **A call a custom `offline.replay` function leaves out is dropped, not
   forgotten.** The function picks the calls to replay, but a call it left

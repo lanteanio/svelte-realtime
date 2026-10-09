@@ -45,6 +45,10 @@ function flush(n = 3) {
 	for (let i = 0; i < n; i++) p = p.then(() => new Promise((r) => setTimeout(r, 0)));
 	return p;
 }
+/** Turn the event loop until `cond()` holds (or give up after `rounds` turns). */
+async function until(cond, rounds = 50) {
+	for (let i = 0; i < rounds && !cond(); i++) await flush(1);
+}
 
 /** In-test OfflineStore fake recording every operation. */
 function fakeStore(seed = {}) {
@@ -448,14 +452,16 @@ describe('offline queue - a replay function', () => {
 });
 
 describe('offline queue - a call queued while the restore runs', () => {
-	/** A store seeded with one restored row whose scan waits for `release()`. */
-	function gatedStore({ fail = false } = {}) {
+	const row = (seq) => 'q:default:' + String(seq).padStart(12, '0');
+	/** A store seeded with one restored row (seq 7) whose scan waits for `release()`. */
+	function gatedStore({ fail = false, extra = {} } = {}) {
 		/** @type {(v?: any) => void} */
 		let release = () => {};
 		const gate = new Promise((r) => { release = r; });
-		const store = fakeStore(Object.fromEntries([
-			seedEntry('default', 1, 'todos/add', [{ t: 'restored' }], 'off-restored')
-		]));
+		const store = fakeStore({
+			...Object.fromEntries([seedEntry('default', 7, 'todos/add', [{ t: 'restored' }], 'off-restored')]),
+			...extra
+		});
 		const getAll = store.getAll;
 		store.getAll = async (prefix) => {
 			await gate;
@@ -465,37 +471,54 @@ describe('offline queue - a call queued while the restore runs', () => {
 		return { store, release: () => release() };
 	}
 
-	it('takes a seq past the stored rows, and each settle deletes only its own copy', async () => {
+	it('takes seqs past the stored rows, in the order queued, and each settle deletes only its own copy', async () => {
+		const { store, release } = gatedStore();
+		mod.configure({ offline: { queue: true, persist: store } });
+		simulateStatus('disconnected');
+		const first = watch(mod.__rpc('todos/add')({ t: 'first' }));
+		const second = watch(mod.__rpc('todos/add')({ t: 'second' }));
+		await flush(1);
+		expect(storedKeys(store)).toEqual([row(7)]);
+		expect(store.map.get(row(7)).args).toEqual([{ t: 'restored' }]);
+
+		release();
+		await flush();
+		expect(storedKeys(store)).toEqual([row(7), row(8), row(9)]);
+		expect(store.map.get(row(8)).args).toEqual([{ t: 'first' }]);
+		expect(store.map.get(row(9)).args).toEqual([{ t: 'second' }]);
+		const firstKey = store.map.get(row(8)).idempotencyKey;
+		expect(firstKey).not.toBe('off-restored');
+
+		simulateStatus('open');
+		await flush();
+		simulateRpcResponse(sentCalls()[0].id, { ok: true, data: 'ok' });
+		await flush();
+		expect(storedKeys(store)).toEqual([row(8), row(9)]);
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(first.value).toBe('ok');
+		expect(second.value).toBe('ok');
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual(['restored', 'first', 'second']);
+		expect(sentCalls()[1].idempotencyKey).toBe(firstKey);
+		expect(storedKeys(store)).toEqual([]);
+		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(9);
+	});
+
+	it('a reconnect during the restore replays the restored calls, then the ones queued meanwhile', async () => {
 		const { store, release } = gatedStore();
 		mod.configure({ offline: { queue: true, persist: store } });
 		simulateStatus('disconnected');
 		const fresh = watch(mod.__rpc('todos/add')({ t: 'fresh' }));
 		await flush(1);
-		expect(storedKeys(store)).toEqual(['q:default:000000000001']);
-		expect(store.map.get('q:default:000000000001').args).toEqual([{ t: 'restored' }]);
+		simulateStatus('open');
+		await flush();
+		expect(sentCalls()).toEqual([]);
 
 		release();
 		await flush();
-		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
-		expect(store.map.get('q:default:000000000002').args).toEqual([{ t: 'fresh' }]);
-		const freshKey = store.map.get('q:default:000000000002').idempotencyKey;
-		expect(freshKey).not.toBe('off-restored');
-
-		simulateStatus('open');
-		await flush();
-		const [first] = sentCalls();
-		expect(first.args).toEqual([{ t: 'restored' }]);
-		simulateRpcResponse(first.id, { ok: true, data: 'ok' });
-		await flush();
-		expect(storedKeys(store)).toEqual(['q:default:000000000002']);
 		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual(['restored', 'fresh']);
 		expect(fresh.value).toBe('ok');
-		const [restored, queued] = sentCalls();
-		expect(restored.idempotencyKey).toBe('off-restored');
-		expect(queued.args).toEqual([{ t: 'fresh' }]);
-		expect(queued.idempotencyKey).toBe(freshKey);
 		expect(storedKeys(store)).toEqual([]);
-		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(2);
 	});
 
 	it('a call the full queue drops before the restore ends is never written', async () => {
@@ -509,9 +532,9 @@ describe('offline queue - a call queued while the restore runs', () => {
 
 		release();
 		await flush();
-		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
-		expect(store.map.get('q:default:000000000001').args).toEqual([{ t: 'restored' }]);
-		expect(store.map.get('q:default:000000000002').args).toEqual([{ t: 'kept' }]);
+		expect(storedKeys(store)).toEqual([row(7), row(8)]);
+		expect(store.map.get(row(7)).args).toEqual([{ t: 'restored' }]);
+		expect(store.map.get(row(8)).args).toEqual([{ t: 'kept' }]);
 		expect(kept.settled).toBe(false);
 	});
 
@@ -528,25 +551,75 @@ describe('offline queue - a call queued while the restore runs', () => {
 		release();
 		await flush();
 		expect(fresh.settled).toBe(false);
-		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
+		expect(storedKeys(store)).toEqual([row(7), row(8)]);
 		let pendingSeen;
 		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
 		expect(pendingSeen).toBe(2);
 	});
 
-	it('a restore that fails still writes the call queued while it ran', async () => {
-		const { store, release } = gatedStore({ fail: true });
+	it('a close during the restore rejects the call when its write then fails', async () => {
+		const { store, release } = gatedStore();
+		const put = store.put;
+		store.put = async (key, value) => {
+			if (value.args?.[0]?.t === 'fresh') throw new Error('quota exceeded');
+			return put(key, value);
+		};
 		mod.configure({ offline: { queue: true, persist: store } });
 		simulateStatus('disconnected');
 		const fresh = watch(mod.__rpc('todos/add')({ t: 'fresh' }));
 		await flush(1);
-		release();
-		await flush();
-		expect(store.ops.filter(([op]) => op === 'put')).toHaveLength(1);
-
 		simulateStatus('failed');
 		await flush();
 		expect(fresh.settled).toBe(false);
+
+		release();
+		await flush();
+		expect(fresh.error).toMatchObject({ code: 'CONNECTION_CLOSED' });
+		expect(storedKeys(store)).toEqual([row(7)]);
+	});
+
+	it('a restore that cannot read the stored queue stores nothing for the rest of the page', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const { store, release } = gatedStore({ fail: true });
+			mod.configure({ offline: { queue: true, persist: store } });
+			simulateStatus('disconnected');
+			const during = watch(mod.__rpc('todos/add')({ t: 'during' }));
+			await flush(1);
+			release();
+			await flush();
+			expect(warn.mock.calls.some(([m]) => String(m).includes('could not be read'))).toBe(true);
+
+			mod.configure({ offline: { queue: true, persist: store } });
+			const after = watch(mod.__rpc('todos/add')({ t: 'after' }));
+			await flush(1);
+			expect(store.ops).toEqual([]);
+			expect(store.map.get(row(7)).args).toEqual([{ t: 'restored' }]);
+
+			simulateStatus('failed');
+			await flush();
+			expect(during.error).toMatchObject({ code: 'CONNECTION_CLOSED' });
+			expect(after.error).toMatchObject({ code: 'CONNECTION_CLOSED' });
+			expect(store.ops).toEqual([]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('new seqs continue past the last upload once its rows are gone', async () => {
+		const store = fakeStore({ 'c:default': { lastUploadedSeq: 5, gapDetected: false } });
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		const call = watch(mod.__rpc('todos/add')({ t: 'new' }));
+		await flush(1);
+		expect(storedKeys(store)).toEqual([row(6)]);
+
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: false, code: 'VALIDATION', error: 'bad' }));
+		expect(call.error).toMatchObject({ code: 'VALIDATION' });
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 5, gapDetected: false });
 	});
 });
 
@@ -1248,7 +1321,7 @@ describe('offline queue - what a queued call stores', () => {
 		const p = mod.__rpc('todos/save')(form);
 		const w = watch(p);
 		// The write waits for the restore's scan, then commits.
-		await flush(8);
+		await until(() => queuedRows(idb).length > 0);
 		const rows = queuedRows(idb);
 		expect(rows).toHaveLength(1);
 		expect(rows[0][1].args).toEqual([{ title: 'draft', tags: ['a'] }]);
