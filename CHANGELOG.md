@@ -433,15 +433,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A call the full offline queue drops is reported to `onReplayError`.** A
   call restored after a reload and dropped to make room had no promise
-  anyone held and no other report, so it vanished silently. Every call the
+  anyone held and no other report, so it vanished silently. A call the
   queue drops now goes to `onReplayError` with `QUEUE_FULL`, like a `STALE`
-  drop, once the call that pushed it out is queued; a call the hook itself
-  makes while the queue is full can push out one more, which is rejected
-  without a report, so a hook that queues a call cannot keep the queue
-  evicting. `maxQueue` counts whole calls, at least one (anything that is
-  not a number counts as unset), the same when a call is queued and when a
-  cut replay is put back, and a close for good no longer trims what it puts
-  back, which deleted stored copies the close would have kept.
+  drop, once the call that pushed it out is queued (or the replays a lost
+  connection cut off are put back). While the hook reports such a drop, a
+  call it makes can push out another queued call: a restored one is
+  reported next, and one whose caller holds its promise is only rejected,
+  so a hook that queues a call cannot keep the queue evicting. `maxQueue`
+  is rounded down to a whole number of at least one; a falsy value, or one
+  that is not a number, counts as unset (100).
 
 - **A `pendingMutations` or `uploading` subscriber that throws no longer
   stops the offline queue.** Both were svelte/store writables, so a

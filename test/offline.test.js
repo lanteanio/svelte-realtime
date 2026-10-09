@@ -1764,6 +1764,30 @@ describe('offline queue - a drop during the drain', () => {
 		expect(w3.settled).toBe(false);
 	});
 
+	it('a restored call a call made inside onReplayError pushes out is still reported', async () => {
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('default', 1, 'todos/add', [{ t: 'r1' }], 'off-r1'),
+			seedEntry('default', 2, 'todos/add', [{ t: 'r2' }], 'off-r2'),
+			seedEntry('default', 3, 'todos/add', [{ t: 'r3' }], 'off-r3')
+		]));
+		const log = mod.__rpc('log/drop');
+		const reported = [];
+		const onReplayError = vi.fn((call) => {
+			reported.push(call.args[0].t ?? 'log');
+			log.fresh({}).catch(() => {});
+		});
+		mod.configure({ offline: { queue: true, maxQueue: 3, persist: store, onReplayError } });
+		await flush(1);
+		simulateStatus('disconnected');
+		const fresh = watch(mod.__rpc('todos/add')({ t: 'new' }));
+		await flush(1);
+		// The new call pushes out r1; the hook's calls push out r2, r3, and then
+		// the new call, whose promise reports it.
+		expect(reported).toEqual(['r1', 'r2', 'r3']);
+		expect(fresh.error).toMatchObject({ code: 'QUEUE_FULL' });
+		expect(storedKeys(store).map((k) => store.map.get(k).path)).toEqual(['log/drop', 'log/drop', 'log/drop']);
+	});
+
 	it('a maxQueue that is not a number counts as unset', async () => {
 		const calls = Array.from({ length: 101 }, (_, i) => ['todos/add', [{ t: i }]]);
 		const [first, second] = await goOfflineAndQueue({ maxQueue: 'lots' }, calls);

@@ -432,8 +432,9 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 }
 
 /**
- * @internal The queue's size limit from `offline.maxQueue`: 100 when unset,
- * otherwise a whole number of at least one.
+ * @internal The queue's size limit from `offline.maxQueue`: 100 for a falsy
+ * value or one that is not a number (`maxQueue || 100`, as before), otherwise
+ * rounded down to a whole number of at least one.
  * @param {any} offlineOpts
  * @returns {number}
  */
@@ -462,10 +463,12 @@ export function _notifyReplayError(call, err) {
 }
 
 /**
- * @internal Drop the oldest queued entries until at most `max` are left, each
- * rejected with QUEUE_FULL and its stored copy deleted. The caller refreshes
- * the pending count.
+ * @internal Drop the oldest queued entries until at most `max` are left,
+ * deleting their stored copies, and return them. The caller rejects and
+ * reports them with `_settleDropped` once its own queue work is done, and
+ * refreshes the pending count.
  * @param {number} max
+ * @returns {any[]}
  */
 export function _trimQueue(max) {
 	/** @type {any[]} */
@@ -489,13 +492,20 @@ export function _trimQueue(max) {
 
 /** True while a full-queue drop is being reported to onReplayError. */
 let _reportingDrops = false;
+/**
+ * Restored calls dropped while a drop was being reported, reported next.
+ * @type {Array<{ entry: any, err: any }>}
+ */
+let _dropsToReport = [];
 
 /**
  * @internal Reject what `_trimQueue` dropped with QUEUE_FULL and report it to
- * onReplayError (a restored call has no promise anyone holds: this is its
- * only report). Called once the caller's own queue work is done. A call the
- * hook makes can push out another entry: that one is rejected but not
- * reported, so a hook that queues a call cannot keep the queue evicting.
+ * onReplayError. Called once the caller's own queue work is done. A call the
+ * hook makes can push out another entry. One whose caller holds its promise
+ * is only rejected, so a hook that queues a call cannot keep the queue
+ * evicting; a restored one has no promise anyone holds, so it is reported
+ * once the current report returns. That ends: each such report takes one
+ * restored call out of the queue, and nothing adds restored calls to it.
  * @param {any[]} dropped
  */
 export function _settleDropped(dropped) {
@@ -504,13 +514,25 @@ export function _settleDropped(dropped) {
 		if (!_reportingDrops) {
 			_reportingDrops = true;
 			try {
-				_notifyReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
+				_reportDrop(entry, err);
+				for (let i = 0; i < _dropsToReport.length; i++) _reportDrop(_dropsToReport[i].entry, _dropsToReport[i].err);
 			} finally {
 				_reportingDrops = false;
+				_dropsToReport = [];
 			}
+		} else if (entry.restored) {
+			_dropsToReport.push({ entry, err });
 		}
 		entry.reject(err);
 	}
+}
+
+/**
+ * @param {any} entry
+ * @param {any} err
+ */
+function _reportDrop(entry, err) {
+	_notifyReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
 }
 
 /**
@@ -627,6 +649,7 @@ export function _resetOffline() {
 	_batch = { failedSeq: Infinity, clean: true };
 	_droppedUnnumbered = false;
 	_reportingDrops = false;
+	_dropsToReport = [];
 	_checkpointDirty = false;
 	_checkpointUnknown = false;
 	_pendingStore.set(0);

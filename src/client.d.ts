@@ -698,7 +698,7 @@ export function configure(config: {
 	offline?: {
 		/** Enable queuing RPCs when disconnected. */
 		queue?: boolean;
-		/** Maximum queue size before oldest entries are dropped (a whole number, at least 1). @default 100 */
+		/** Maximum queue size before oldest entries are dropped, rounded down to a whole number of at least 1; a falsy value, or one that is not a number, counts as unset. @default 100 */
 		maxQueue?: number;
 		/** Drop queued mutations older than this (ms) at replay time. @default 0 (no age limit) */
 		maxAge?: number;
@@ -706,7 +706,7 @@ export function configure(config: {
 		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]);
 		/** Filter function called before replaying each queued call. Return a falsy value to drop it (a filter that returns nothing drops every call). A filter that throws drops the call too (STALE, with its error as the cause), and so does one that returns a promise: it must answer synchronously. `call.args` is the JSON copy taken when the call was queued (a `Date` arrives as its ISO string), here and in `onReplayError` and `onConflict`. */
 		beforeReplay?(call: { path: string; args: any[]; queuedAt: number }): boolean;
-		/** Called for a queued call the queue gives up on: a replay that failed (also one a CONFLICT resolution drops), or a call dropped as STALE or QUEUE_FULL. Not called for a call a drop cut off (it stays queued), one rejected because the connection closed for good (its promise reports that), or a QUEUE_FULL drop that a call made inside this hook causes. An observer: an error it throws is ignored. */
+		/** Called for a queued call the queue gives up on: a replay that failed (also one a CONFLICT resolution drops), or a call dropped as STALE or QUEUE_FULL. Not called for a call a lost connection cut off (it stays queued), or one rejected because the connection closed for good (its promise reports that). While this hook reports a QUEUE_FULL drop, a call it makes that pushes out a call whose caller holds its promise only rejects that one, so the hook cannot keep the queue evicting; a restored call it pushes out is reported next. An observer: an error it throws is ignored. */
 		onReplayError?(call: { path: string; args: any[]; queuedAt: number }, error: any): void;
 		/**
 		 * Durable persistence: queued mutations survive a page reload. `true`
