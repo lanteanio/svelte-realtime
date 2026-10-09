@@ -760,10 +760,11 @@ export function configure(config: {
 export interface OfflineStore {
 	/**
 	 * Every entry whose key starts with `prefix`, key-sorted. Rejects when the
-	 * entries could not be read: the queue then stores nothing for the rest of
-	 * the page rather than write over rows it could not see; an answer that is
-	 * not an array counts as such a read. Entries under a key the queue did not
-	 * write are ignored.
+	 * entries could not be read (an answer that is not an array counts the
+	 * same). When the queue itself cannot be read, the queue stores nothing for
+	 * the rest of the page rather than write over rows it could not see; when
+	 * only the upload checkpoint cannot be read, the checkpoint is left alone
+	 * for the page. Entries under a key the queue did not write are ignored.
 	 */
 	getAll(prefix: string): Promise<Array<{ key: string; value: any }>>;
 	/**
@@ -808,11 +809,13 @@ export const uploading: Readable<boolean>;
  * is the highest enqueue seq that replayed successfully; `gapDetected` is
  * true when the upload order got a hole (consider refetching affected
  * streams): a mutation went up while one queued before it failed or was
- * dropped in the same upload batch (one reconnect's replay, together with
- * the replays that carry on one a drop cut off, also across a reload), or a
- * mutation failed below one that had already gone up. It clears when a later
- * replay goes up in full with nothing failing and nothing left queued.
- * Persisted alongside the queue when `persist` is on.
+ * dropped in the same upload batch, or a mutation failed below one that had
+ * already gone up. An upload batch is the calls one reconnect replays,
+ * together with the replays that carry on one a lost connection cut off
+ * (also across a reload); a call the full queue drops counts in the batch
+ * that replays next. The gap clears when a later batch goes up in full,
+ * with nothing failing, nothing cut off and nothing left queued. Persisted
+ * alongside the queue when `persist` is on.
  */
 export function offlineCheckpoint(): { lastUploadedSeq: number; gapDetected: boolean };
 
