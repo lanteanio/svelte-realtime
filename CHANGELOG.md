@@ -370,9 +370,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replay deleted the new call's copy, leaving a call that a reload would
   not replay. A call queued during the restore now gets its number, and its
   write, once the restore has read the stored queue. When the stored queue
-  cannot be read at all, nothing is written, deleted or checkpointed for the
-  rest of the page, so no call can take the place of a mutation nobody could
-  read; the queue goes on in memory, with a warning in development.
+  or its checkpoint cannot be read in full, nothing is written, deleted or
+  checkpointed for the rest of the page, so no call can take the place of a
+  mutation nobody could read; the queue goes on in memory, with a warning in
+  development. The built-in store's `getAll` now rejects when a read fails
+  (it found nothing before, which read as an empty queue), and a custom
+  store's `getAll` should too. A stored row whose seq is missing or corrupt
+  takes it from its key, and a corrupt checkpoint is ignored.
 
 - **An `onReplayError` or `beforeReplay` that throws no longer stops the
   offline replay.** A throwing `onReplayError` ended the replay where it

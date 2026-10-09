@@ -72,6 +72,37 @@ function _checkpointKey() {
 }
 
 /**
+ * A seq the queue could have written: a positive integer that fits the
+ * 12-digit key. Anything else in a stored row or checkpoint is corrupt.
+ * @param {unknown} seq
+ * @returns {seq is number}
+ */
+function _validSeq(seq) {
+	return Number.isInteger(seq) && /** @type {number} */ (seq) > 0 && /** @type {number} */ (seq) < 1e12;
+}
+
+/**
+ * What a store's `getAll` answered, as rows; anything but an array counts as
+ * a read that failed.
+ * @param {unknown} rows
+ * @returns {any[]}
+ */
+function _rowsOf(rows) {
+	if (!Array.isArray(rows)) throw new Error('[svelte-realtime] offline store getAll did not return an array');
+	return rows;
+}
+
+/**
+ * The seq a row key was written under (`q:<persistKey>:<12 digits>`), or 0.
+ * @param {unknown} key
+ * @returns {number}
+ */
+function _seqFromKey(key) {
+	const m = /:(\d{12})$/.exec(String(key));
+	return m ? Number(m[1]) : 0;
+}
+
+/**
  * One call to the store. A custom store that throws instead of returning a
  * rejected promise is treated the same, so a storage failure never escapes
  * into the queue logic around it.
@@ -85,7 +116,7 @@ function _storeCall(call) {
 /**
  * The current upload checkpoint for the configured queue:
  * `lastUploadedSeq` is the highest enqueue seq that replayed successfully;
- * `gapDetected` is true when a later mutation succeeded while an earlier one
+ * `gapDetected` is true when a mutation went up while one queued before it
  * failed (a hole in the upload order - the app may want a refetch), clearing
  * on the next fully-clean drain.
  * @returns {{ lastUploadedSeq: number, gapDetected: boolean }}
@@ -96,8 +127,9 @@ export function offlineCheckpoint() {
 
 /**
  * @internal Configure persistence from `configure({ offline })`. Called by
- * misc.js. Re-running configure with a different persistKey re-targets the
- * scan prefix; entries already in memory keep replaying regardless.
+ * misc.js. The restore runs once, for the scope configured first; a later
+ * persistKey or store applies to writes from then on, with nothing restored
+ * for it, and entries already in memory keep replaying regardless.
  * @param {any} offlineOpts
  */
 export function _configureOfflinePersistence(offlineOpts) {
@@ -125,16 +157,18 @@ export function _configureOfflinePersistence(offlineOpts) {
  * past the stored rows, before the promise a drain awaits resolves.
  */
 async function _rehydrate() {
-	let scanned = false;
+	let read = false;
 	try {
 		if (!_store) return;
 		const stored = Promise.resolve(_isDurableStore(_store));
-		const rows = await _store.getAll('q:' + _persistKey + ':');
-		scanned = true;
+		const rows = _rowsOf(await _store.getAll('q:' + _persistKey + ':'));
 		/** @type {any[]} */
 		const restored = [];
-		for (const { value } of rows) {
+		for (const row of rows) {
+			const value = row && row.value;
 			if (!value || typeof value.path !== 'string' || !Array.isArray(value.args)) continue;
+			// The row key carries the seq the row was written under.
+			const seq = _validSeq(value.seq) ? value.seq : _seqFromKey(row.key);
 			restored.push({
 				path: value.path,
 				args: value.args,
@@ -143,31 +177,34 @@ async function _rehydrate() {
 				reject: () => {},
 				idempotencyKey: typeof value.idempotencyKey === 'string' ? value.idempotencyKey : undefined,
 				timeout: typeof value.timeout === 'number' ? value.timeout : undefined,
-				seq: typeof value.seq === 'number' ? value.seq : 0,
+				seq,
 				restored: true,
 				stored
 			});
-			if (typeof value.seq === 'number' && value.seq > _seq) _seq = value.seq;
+			if (seq > _seq) _seq = seq;
 		}
 		if (restored.length > 0) {
 			restored.sort((a, b) => a.seq - b.seq);
 			_offlineQueue.unshift(...restored);
 			_bumpPending();
 		}
-		const cp = await _store.getAll(_checkpointKey());
-		for (const { key, value } of cp) {
-			if (key === _checkpointKey() && value && typeof value.lastUploadedSeq === 'number') {
+		const cp = _rowsOf(await _store.getAll(_checkpointKey()));
+		for (const row of cp) {
+			const value = row && row.value;
+			if (row && row.key === _checkpointKey() && value && (value.lastUploadedSeq === 0 || _validSeq(value.lastUploadedSeq))) {
 				_checkpoint = { lastUploadedSeq: value.lastUploadedSeq, gapDetected: !!value.gapDetected };
 			}
 		}
 		// No new seq at or below one that already went up, also once its row
 		// is gone: a failure there would read as a hole in the upload order.
 		if (_checkpoint.lastUploadedSeq > _seq) _seq = _checkpoint.lastUploadedSeq;
+		read = true;
 	} finally {
-		if (_store && !scanned) {
-			// What is stored could not be read, so any seq could be a stored
-			// row's: writing, deleting or checkpointing under it could destroy a
-			// mutation nobody has seen. The queue goes on in memory only.
+		if (_store && !read) {
+			// What is stored could not be read in full, so any seq could be a
+			// stored row's and the stored checkpoint is unknown: writing,
+			// deleting or checkpointing could destroy what nobody has seen. The
+			// queue goes on in memory only.
 			_scanFailed = true;
 			_store = null;
 			if (_IS_DEV) console.warn('[svelte-realtime] offline persistence unavailable: the stored queue could not be read, so queued mutations stay in memory for this page (they will not survive a reload).');

@@ -9,9 +9,10 @@
 // Failure posture: persistence is an UPGRADE to the in-memory queue, never a
 // dependency. A broken/blocked IndexedDB (private windows, storage pressure,
 // corrupted profiles) degrades to exactly the pre-persistence behavior after
-// a one-time dev warn instead of breaking the queue: reads and deletes
-// swallow storage errors, and `put` rejects when nothing was stored, so the
-// queue knows which mutations exist only in memory.
+// a one-time dev warn instead of breaking the queue: deletes swallow storage
+// errors, `put` rejects when nothing was stored, so the queue knows which
+// mutations exist only in memory, and `getAll` rejects when it could not
+// read, so the queue never writes over rows it has not seen.
 
 import { _IS_DEV } from './internal-state.js';
 
@@ -31,7 +32,7 @@ function _warnStorage(err) {
 
 /**
  * @typedef {Object} OfflineStore
- * @property {(prefix: string) => Promise<Array<{ key: string, value: any }>>} getAll - Every entry whose key starts with `prefix`, key-sorted.
+ * @property {(prefix: string) => Promise<Array<{ key: string, value: any }>>} getAll - Every entry whose key starts with `prefix`, key-sorted. Rejects when the entries could not be read.
  * @property {(key: string, value: any) => Promise<void>} put - Resolves once the value is stored, rejects when it could not be.
  * @property {(key: string) => Promise<void>} delete
  * @property {(prefix: string) => Promise<void>} clear - Delete every entry whose key starts with `prefix`.
@@ -84,7 +85,8 @@ export function createMemoryStore() {
 /**
  * IndexedDB store. Opens the database lazily on first use (never at module
  * load - SSR imports this file). Failures degrade to no-ops after the
- * one-time dev warn, except that `put` rejects when nothing was stored.
+ * one-time dev warn, except that `put` rejects when nothing was stored and
+ * `getAll` rejects when a read failed.
  * @returns {OfflineStore}
  */
 export function createIndexedDbStore() {
@@ -141,9 +143,17 @@ export function createIndexedDbStore() {
 		async getAll(prefix) {
 			// Key-range scan over the prefix: [prefix, prefix + U+FFFF]. Keys are
 			// ASCII-constructed by the queue, so the sentinel upper bound is safe.
+			// A database that cannot open holds nothing this page can reach (a
+			// write fails the same way); a read that fails rejects, since rows it
+			// could not see may still be stored.
 			const db = await open();
 			if (!db) return [];
-			return new Promise((resolve) => {
+			return new Promise((resolve, reject) => {
+				/** @param {any} err */
+				const fail = (err) => {
+					_warnStorage(err);
+					reject(err || new Error('[svelte-realtime] offline store read failed'));
+				};
 				try {
 					const tx = db.transaction(STORE_NAME, 'readonly');
 					const store = tx.objectStore(STORE_NAME);
@@ -159,10 +169,10 @@ export function createIndexedDbStore() {
 							resolve(out);
 						}
 					};
-					req.onerror = () => { _warnStorage(req.error); resolve([]); };
+					req.onerror = () => fail(req.error);
+					tx.onabort = () => fail(tx.error);
 				} catch (err) {
-					_warnStorage(err);
-					resolve([]);
+					fail(err);
 				}
 			});
 		},

@@ -187,7 +187,7 @@ const watch = (p) => {
  * reports its request before its transaction commits or aborts. The rows
  * outlive the client that wrote them, so a test can reload against them.
  */
-function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false } = {}) {
+function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false, readFails = false, abortReads = false } = {}) {
 	const map = new Map();
 	const stores = new Set();
 	const later = (fn) => setTimeout(fn, 0);
@@ -243,6 +243,16 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 					const req = { result: null };
 					let i = 0;
 					const step = () => later(() => {
+						if (readFails) {
+							req.error = new Error('Failed to read large IndexedDB value');
+							req.onerror?.();
+							return;
+						}
+						if (abortReads) {
+							tx.error = new Error('AbortError');
+							tx.onabort?.();
+							return;
+						}
 						const key = keys[i++];
 						req.result = key === undefined ? null : { key, value: structuredClone(map.get(key)), continue: step };
 						req.onsuccess?.();
@@ -604,6 +614,77 @@ describe('offline queue - a call queued while the restore runs', () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	it('a store whose getAll returns no array counts as unreadable', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const store = fakeStore();
+			// Iterable, so only the array check can tell it from zero rows.
+			store.getAll = async () => 'not rows';
+			mod.configure({ offline: { queue: true, persist: store } });
+			await flush(1);
+			simulateStatus('disconnected');
+			mod.__rpc('todos/add')({ t: 'new' }).catch(() => {});
+			await flush(1);
+			expect(store.ops).toEqual([]);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('a checkpoint that cannot be read turns persistence off too', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const store = fakeStore({ 'c:default': { lastUploadedSeq: 5, gapDetected: true } });
+			const getAll = store.getAll;
+			store.getAll = async (prefix) => {
+				if (prefix.startsWith('c:')) throw new Error('read failed');
+				return getAll(prefix);
+			};
+			mod.configure({ offline: { queue: true, persist: store } });
+			await flush(1);
+			simulateStatus('disconnected');
+			const w = watch(mod.__rpc('todos/add')({ t: 'new' }));
+			await flush(1);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(w.value).toBe('ok');
+			expect(store.ops).toEqual([]);
+			expect(store.map.get('c:default')).toEqual({ lastUploadedSeq: 5, gapDetected: true });
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('restored rows without a valid seq take it from their key, and their copy goes when they settle', async () => {
+		const store = fakeStore({
+			'q:default:000000000003': { path: 'todos/add', args: [{ t: 'no-seq' }], queuedAt: 1, idempotencyKey: 'off-3' },
+			'q:default:000000000004': { seq: Infinity, path: 'todos/add', args: [{ t: 'bad-seq' }], queuedAt: 1, idempotencyKey: 'off-4' }
+		});
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		mod.__rpc('todos/add')({ t: 'new' }).catch(() => {});
+		await flush(1);
+		expect(storedKeys(store)).toEqual([row(3), row(4), row(5)]);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.idempotencyKey).slice(0, 2)).toEqual(['off-3', 'off-4']);
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('a corrupt checkpoint does not stall the numbering', async () => {
+		const store = fakeStore({ 'c:default': { lastUploadedSeq: 1e20, gapDetected: false } });
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		mod.__rpc('todos/add')({ t: 'a' }).catch(() => {});
+		mod.__rpc('todos/add')({ t: 'b' }).catch(() => {});
+		await flush(1);
+		expect(storedKeys(store)).toEqual([row(1), row(2)]);
 	});
 
 	it('new seqs continue past the last upload once its rows are gone', async () => {
@@ -1357,6 +1438,43 @@ describe('the IndexedDB store', () => {
 		await expect(store.delete('q:a').then(() => { warnedWhenSettled = warn.mock.calls.length > 0; })).resolves.toBeUndefined();
 		expect(warnedWhenSettled).toBe(true);
 		expect(idb.map.has('q:a')).toBe(true);
+	});
+
+	it('a read that fails rejects', async () => {
+		vi.stubGlobal('indexedDB', fakeIndexedDb({ readFails: true }));
+		const store = mod.createIndexedDbStore();
+		await expect(store.getAll('q:')).rejects.toThrow(/Failed to read/);
+		expect(warn).toHaveBeenCalled();
+	});
+
+	it('a read whose transaction aborts rejects', async () => {
+		vi.stubGlobal('indexedDB', fakeIndexedDb({ abortReads: true }));
+		await expect(mod.createIndexedDbStore().getAll('q:')).rejects.toThrow(/AbortError/);
+	});
+
+	it('a read when the database cannot open finds nothing', async () => {
+		vi.stubGlobal('indexedDB', fakeIndexedDb({ openFails: true }));
+		await expect(mod.createIndexedDbStore().getAll('q:')).resolves.toEqual([]);
+	});
+
+	it('a restore whose read fails stores nothing for the rest of the page', async () => {
+		const idb = fakeIndexedDb();
+		vi.stubGlobal('indexedDB', idb);
+		await mod.createIndexedDbStore().put('q:default:000000000006', { seq: 6, path: 'todos/add', args: [{ t: 'stored' }], queuedAt: 1, idempotencyKey: 'off-6' });
+		const unreadable = fakeIndexedDb({ readFails: true });
+		for (const [k, v] of idb.map) unreadable.map.set(k, v);
+		vi.stubGlobal('indexedDB', unreadable);
+
+		mod = await loadClient();
+		mod.configure({ offline: { queue: true, persist: true } });
+		simulateStatus('disconnected');
+		const w = watch(mod.__rpc('todos/add')({ t: 'new' }));
+		await flush(6);
+		expect([...unreadable.map.keys()]).toEqual(['q:default:000000000006']);
+		simulateStatus('failed');
+		await flush();
+		expect(w.error).toMatchObject({ code: 'CONNECTION_CLOSED' });
+		expect(unreadable.map.get('q:default:000000000006').args).toEqual([{ t: 'stored' }]);
 	});
 
 	it('a delete when the database cannot open settles without rejecting', async () => {

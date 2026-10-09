@@ -754,6 +754,11 @@ export function configure(config: {
  * `createMemoryStore()` implement it, and tests inject fakes through it.
  */
 export interface OfflineStore {
+	/**
+	 * Every entry whose key starts with `prefix`, key-sorted. Rejects when the
+	 * entries could not be read: the queue then stores nothing for the rest of
+	 * the page rather than write over rows it could not see.
+	 */
 	getAll(prefix: string): Promise<Array<{ key: string; value: any }>>;
 	/**
 	 * Resolves once the value is stored and rejects when it could not be. A
@@ -770,7 +775,8 @@ export interface OfflineStore {
  * The IndexedDB `OfflineStore` (database `svelte-realtime`, lazy open). `put`
  * resolves once its transaction commits and rejects when the database cannot
  * open or the transaction aborts; `delete` and `clear` also settle only once
- * their transaction has committed or failed, and swallow a failure.
+ * their transaction has committed or failed, and swallow a failure; `getAll`
+ * rejects when a read fails (and finds nothing when the database cannot open).
  */
 export function createIndexedDbStore(): OfflineStore;
 /**
