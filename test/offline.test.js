@@ -1108,6 +1108,8 @@ describe('offline queue - what a queued call stores', () => {
 		const idb = fakeIndexedDb();
 		vi.stubGlobal('indexedDB', idb);
 		const form = await stateOf({ title: 'draft', tags: ['a'] });
+		// A proxy, which IndexedDB cannot clone: what the test is about.
+		expect(() => structuredClone(form)).toThrow();
 		mod.configure({ offline: { queue: true, persist: true } });
 		simulateStatus('disconnected');
 		const p = mod.__rpc('todos/save')(form);
@@ -1169,6 +1171,19 @@ describe('offline queue - what a queued call stores', () => {
 		expect(loop.error).toBeInstanceOf(TypeError);
 		expect(pendingSeen).toBe(0);
 		expect(store.ops).toEqual([]);
+	});
+
+	it('a call that cannot be queued does not push the oldest out of a full queue', async () => {
+		mod.configure({ offline: { queue: true, maxQueue: 1 } });
+		simulateStatus('disconnected');
+		const kept = watch(mod.__rpc('todos/save')({ t: 'kept' }));
+		const big = watch(mod.__rpc('todos/save').fresh({ count: 1n }));
+		await flush(1);
+		expect(big.error).toBeInstanceOf(TypeError);
+		expect(kept.settled).toBe(false);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+		expect(pendingSeen).toBe(1);
 	});
 });
 

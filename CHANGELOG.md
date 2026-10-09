@@ -126,6 +126,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Offline hooks see a queued call's arguments as JSON values.**
+  `beforeReplay`, `onReplayError`, `onConflict` and a custom `replay`
+  function get the copy a queued call now keeps of its arguments, in the
+  form the wire carries them: a `Date` arrives as its ISO string, a `Map` or
+  `Set` as `{}`, a class instance as a plain object, and the objects are
+  not the ones the call was made with. Before, they got the caller's own
+  objects, or after a reload IndexedDB's clone of them.
+
 - **A test that mocks `svelte-adapter-uws/client` must return a whole
   connection from `connect()`.** The client now reads the topic factory,
   stores and request hook from the connection object it is bound to, as the
@@ -344,9 +352,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   did not survive a reload, and a connection closed for good rejected it. A
   queued call now keeps a JSON copy of its arguments, the form the wire
   carries, taken when the call is made; that copy is what replays, what is
-  stored, and what `beforeReplay`, `onReplayError` and `onConflict` see.
-  Arguments that cannot be serialized (a `BigInt`, a cycle) fail the call
-  at once instead of being queued.
+  stored, and what the offline hooks see. A call made through `.fresh()` or
+  `.with()` whose arguments cannot be serialized (a `BigInt`, a cycle) is
+  rejected at once instead of being queued.
 
 - **A call queued while the stored offline queue is restored no longer
   takes a stored mutation's place.** Each stored mutation is kept under its

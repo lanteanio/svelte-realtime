@@ -11,3 +11,4 @@ playwright-report
 .svelte-kit
 test/fixture/src/live/$types.d.ts
 .chaos-ctx.json
+test/__*_rune__

@@ -702,9 +702,9 @@ export function configure(config: {
 		maxQueue?: number;
 		/** Drop queued mutations older than this (ms) at replay time. @default 0 (no age limit) */
 		maxAge?: number;
-		/** Replay strategy on reconnect: 'sequential' (default), 'concurrent' (10-at-a-time), or a custom filter function. 'batch' is accepted as an alias for 'concurrent'. */
+		/** Replay strategy on reconnect: 'sequential' (default), 'concurrent' (10-at-a-time), or a custom filter function. 'batch' is accepted as an alias for 'concurrent'. Like the other offline hooks, a function sees each call's arguments as the JSON copy taken when it was queued. */
 		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]);
-		/** Filter function called before replaying each queued call. Return false to drop. A filter that throws keeps the call. */
+		/** Filter function called before replaying each queued call. Return false to drop. A filter that throws keeps the call. `call.args` is the JSON copy taken when the call was queued (a `Date` arrives as its ISO string), here and in `onReplayError` and `onConflict`. */
 		beforeReplay?(call: { path: string; args: any[]; queuedAt: number }): boolean;
 		/** Called when a replayed call fails. An observer: an error it throws is ignored. */
 		onReplayError?(call: { path: string; args: any[]; queuedAt: number }, error: any): void;
