@@ -389,11 +389,13 @@ export function _batchState() {
 }
 
 /**
- * @internal A drain was cut off: the next one carries on its batch.
+ * @internal A drain left calls queued (cut off, or held back): the next one
+ * carries on its batch.
  * @param {number} failedSeq
+ * @param {boolean} clean
  */
-export function _carryBatch(failedSeq) {
-	_batch = { failedSeq, clean: false };
+export function _carryBatch(failedSeq, clean) {
+	_batch = { failedSeq, clean };
 	_putCheckpoint();
 }
 

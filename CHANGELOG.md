@@ -383,9 +383,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   was: the failed call's promise never settled, and the calls behind it
   stayed pending without being sent until a reload. A throwing
   `beforeReplay` stopped every replay before it began. `onReplayError` is
-  now an observer whose errors are ignored, like `onConflict`, and a call
-  whose `beforeReplay` throws is replayed (with a warning in development)
-  rather than dropped on the filter's own error.
+  now an observer whose errors are ignored (with a warning in development),
+  like `onConflict`. A call whose `beforeReplay` throws is held back: it
+  stays queued without being sent or dropped, and the filter runs again at
+  the next replay, so a guard that fails, say for want of a signed-in user,
+  never lets a call through.
 
 - **`offlineCheckpoint().gapDetected` follows the order mutations were
   queued in.** A failure counted against any mutation that succeeded after
