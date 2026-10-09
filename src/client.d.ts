@@ -704,9 +704,9 @@ export function configure(config: {
 		maxAge?: number;
 		/** Replay strategy on reconnect: 'sequential' (default), 'concurrent' (10-at-a-time), or a custom filter function. 'batch' is accepted as an alias for 'concurrent'. */
 		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]);
-		/** Filter function called before replaying each queued call. Return false to drop. */
+		/** Filter function called before replaying each queued call. Return false to drop. A filter that throws keeps the call. */
 		beforeReplay?(call: { path: string; args: any[]; queuedAt: number }): boolean;
-		/** Called when a replayed call fails. */
+		/** Called when a replayed call fails. An observer: an error it throws is ignored. */
 		onReplayError?(call: { path: string; args: any[]; queuedAt: number }, error: any): void;
 		/**
 		 * Durable persistence: queued mutations survive a page reload. `true`

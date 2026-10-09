@@ -359,6 +359,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not replay. A call queued during the restore now gets its number, and its
   write, once the restore has read the stored queue.
 
+- **An `onReplayError` or `beforeReplay` that throws no longer stops the
+  offline replay.** A throwing `onReplayError` ended the replay where it
+  was: the failed call's promise never settled, and the calls behind it
+  stayed pending without being sent until a reload. A throwing
+  `beforeReplay` stopped every replay before it began. `onReplayError` is
+  now an observer whose errors are ignored, like `onConflict`, and a call
+  whose `beforeReplay` throws is replayed (with a warning in development)
+  rather than dropped on the filter's own error.
+
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and
   `diagnosticReason` is declared, with `reason` as its deprecated alias.

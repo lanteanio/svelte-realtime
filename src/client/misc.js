@@ -197,7 +197,7 @@ async function _drainOfflineQueue() {
 			anyFailure = true;
 			_settlePersist(entry, false);
 			if (onReplayError) {
-				onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
+				try { onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err); } catch { /* observer only */ }
 			}
 			entry.reject(err);
 		}
@@ -272,7 +272,13 @@ async function _drainOfflineQueue() {
 				continue;
 			}
 			if (beforeReplay) {
-				const keep = beforeReplay({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt });
+				let keep = true;
+				try {
+					keep = beforeReplay({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt });
+				} catch (err) {
+					// Dropping the call on a filter's own error would lose it.
+					if (_IS_DEV) console.warn('[svelte-realtime] offline.beforeReplay threw, so the call is replayed. Cause: ' + (err && /** @type {any} */ (err).message ? /** @type {any} */ (err).message : String(err)));
+				}
 				if (!keep) {
 					settleFail(entry, new RpcError('STALE', 'Offline mutation dropped by beforeReplay filter'));
 					continue;

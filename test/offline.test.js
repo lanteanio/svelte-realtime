@@ -981,6 +981,40 @@ describe('offline queue - a drop during the drain', () => {
 		expect(w2.value).toBe('ok');
 	});
 
+	it('an onReplayError that throws does not stop the drain', async () => {
+		const store = fakeStore();
+		const [p1, p2] = await goOfflineAndQueue({
+			persist: store,
+			onReplayError: () => { throw new Error('app bug'); }
+		}, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]]
+		]);
+		const w1 = watch(p1);
+		const w2 = watch(p2);
+		simulateStatus('open');
+		await flush();
+		await respondAll((env) => (env.args[0].t === 1 ? { ok: false, code: 'VALIDATION', error: 'bad' } : { ok: true, data: 'ok' }));
+		expect(w1.error).toMatchObject({ code: 'VALIDATION' });
+		expect(w2.value).toBe('ok');
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('a beforeReplay that throws keeps the call', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const [p] = await goOfflineAndQueue({ beforeReplay: () => { throw new Error('app bug'); } }, [['todos/add', [{ t: 1 }]]]);
+			const w = watch(p);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(w.value).toBe('ok');
+			expect(warn.mock.calls.some(([m]) => String(m).includes('beforeReplay threw'))).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it('a server answer with the code DISCONNECTED is a replay failure', async () => {
 		const store = fakeStore();
 		const onReplayError = vi.fn();
