@@ -176,9 +176,11 @@ async function _drainOfflineQueue() {
 		const maxAge = offlineOpts?.maxAge || 0;
 		const nowMs = now();
 
-		// Track whether any earlier-seq entry failed in THIS drain: a later
-		// success then leaves a hole in the upload order (gapDetected).
-		let anyFailure = false;
+		// Whether THIS drain went up in order with nothing failing (a clean
+		// drain closes the gap), and the lowest seq that failed: a success
+		// above it leaves a hole in the upload order (gapDetected).
+		let clean = true;
+		let lowestFailedSeq = Infinity;
 		// The connection went away during the drain: nothing more is sent.
 		let cut = false;
 		/** @type {Set<OfflineEntry>} */
@@ -187,14 +189,17 @@ async function _drainOfflineQueue() {
 		/** @param {OfflineEntry} entry @param {any} result */
 		function settleOk(entry, result) {
 			settled.add(entry);
-			_settlePersist(entry, true, anyFailure);
+			const hole = !!entry.afterFailure || lowestFailedSeq < (entry.seq ?? 0);
+			if (hole) clean = false;
+			_settlePersist(entry, true, hole);
 			entry.resolve(result);
 		}
 
 		/** @param {OfflineEntry} entry @param {any} err */
 		function settleFail(entry, err) {
 			settled.add(entry);
-			anyFailure = true;
+			clean = false;
+			lowestFailedSeq = Math.min(lowestFailedSeq, entry.seq ?? 0);
 			_settlePersist(entry, false);
 			if (onReplayError) {
 				try { onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err); } catch { /* observer only */ }
@@ -323,9 +328,12 @@ async function _drainOfflineQueue() {
 			// a custom `replay` function sees it as before at the next drain. A
 			// replay that was cut off may have been applied, so the drain is not
 			// clean.
-			anyFailure = true;
+			clean = false;
 			const rest = [...new Set(queue.filter((entry) => !settled.has(entry)).map(asQueued))]
 				.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+			// One queued after a call that failed here still leaves a hole when it
+			// goes up in a later drain.
+			for (const entry of rest) if ((entry.seq ?? 0) > lowestFailedSeq) entry.afterFailure = true;
 			_offlineQueue.unshift(...rest);
 			_trimQueue(offlineOpts?.maxQueue || 100);
 			if (clientState.terminated) {
@@ -339,10 +347,10 @@ async function _drainOfflineQueue() {
 			}
 		}
 
-		// A fully-clean drain (no failure, nothing left queued) closes any
-		// upload-order hole a PREVIOUS drain left; a drain that itself failed
-		// must leave the gap visible for the app to act on.
-		if (!anyFailure) _clearGapIfClean();
+		// A fully-clean drain (no failure, no hole, nothing left queued) closes
+		// any upload-order hole a PREVIOUS drain left; a drain that itself
+		// failed or left a hole must keep the gap visible for the app to act on.
+		if (clean) _clearGapIfClean();
 	} finally {
 		_bumpPending();
 		_replayingQueue = false;

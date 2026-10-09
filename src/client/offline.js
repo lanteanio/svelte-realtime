@@ -226,8 +226,10 @@ function _stamp(entry) {
 
 /**
  * @internal Settle one entry's durability: drop the persisted copy and, on a
- * successful replay, advance (and persist) the checkpoint. `hadEarlierFailure`
- * flags the gap condition - a success landing after an earlier seq failed.
+ * successful replay, advance (and persist) the checkpoint. The gap opens
+ * when the upload order gets a hole: a success with `hadEarlierFailure` (an
+ * entry queued before it failed), or a failure below a seq that already
+ * went up.
  * @param {any} entry
  * @param {boolean} success
  * @param {boolean} [hadEarlierFailure]
@@ -238,9 +240,13 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 		const store = _store;
 		void _storeCall(() => store.delete(_entryKey(entry.seq))).catch(() => {});
 	}
-	if (success && typeof entry.seq === 'number') {
+	if (typeof entry.seq !== 'number') return;
+	if (success) {
 		if (entry.seq > _checkpoint.lastUploadedSeq) _checkpoint.lastUploadedSeq = entry.seq;
 		if (hadEarlierFailure) _checkpoint.gapDetected = true;
+		_putCheckpoint();
+	} else if (entry.seq < _checkpoint.lastUploadedSeq && !_checkpoint.gapDetected) {
+		_checkpoint.gapDetected = true;
 		_putCheckpoint();
 	}
 }

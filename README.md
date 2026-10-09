@@ -1562,7 +1562,7 @@ import { pendingMutations, uploading, offlineCheckpoint } from 'svelte-realtime/
 
 - `pendingMutations` - readable store with the live queued-mutation count; the data source for a "3 pending edits" indicator.
 - `uploading` - readable store, `true` while a reconnect drain is replaying: the UI backpressure signal ("pause local writes while the upload pipe is busy").
-- `offlineCheckpoint()` - `{ lastUploadedSeq, gapDetected }`: the highest enqueue seq that replayed successfully, and whether a later mutation succeeded while an earlier one failed (a hole in the upload order - consider refetching affected data). Persisted alongside the queue; `gapDetected` clears on the next fully-clean drain.
+- `offlineCheckpoint()` - `{ lastUploadedSeq, gapDetected }`: the highest enqueue seq that replayed successfully, and whether a mutation went up while one queued before it failed (a hole in the upload order - consider refetching affected data), whichever of the two settled first and whichever replay each was in. Persisted alongside the queue; `gapDetected` clears on the next fully-clean drain.
 
 ### Conflict resolution (replayed mutations)
 

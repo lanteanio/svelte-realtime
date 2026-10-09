@@ -368,6 +368,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whose `beforeReplay` throws is replayed (with a warning in development)
   rather than dropped on the filter's own error.
 
+- **`offlineCheckpoint().gapDetected` follows the order mutations were
+  queued in.** A failure counted against any mutation that succeeded after
+  it in the same replay, so a concurrent replay reported a gap when a later
+  mutation failed before an earlier one succeeded, and a failure never
+  counted against a success in another replay, as when a drop put a call
+  back after an earlier one failed. The gap now opens when a mutation goes
+  up while one queued before it failed, whichever settled first and in
+  whichever replay, and a replay that opened it does not close it again
+  when it ends.
+
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and
   `diagnosticReason` is declared, with `reason` as its deprecated alias.

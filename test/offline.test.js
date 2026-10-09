@@ -500,6 +500,68 @@ describe('offline queue - checkpoint and consumer stores', () => {
 		expect(mod.offlineCheckpoint().gapDetected).toBe(false);
 	});
 
+	it('a call a drop put back after an earlier call failed opens the gap when it goes up later', async () => {
+		const [p1, p2] = await goOfflineAndQueue({}, [
+			['todos/add', [{ t: 'fails' }]],
+			['todos/add', [{ t: 'cut' }]]
+		]);
+		const w1 = watch(p1);
+		const w2 = watch(p2);
+		simulateStatus('open');
+		await flush();
+		simulateRpcResponse(sentCalls()[0].id, { ok: false, code: 'VALIDATION', error: 'bad' });
+		await flush();
+		expect(w1.error).toMatchObject({ code: 'VALIDATION' });
+		simulateStatus('disconnected');
+		await flush();
+		expect(mod.offlineCheckpoint().gapDetected).toBe(false);
+
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(w2.value).toBe('ok');
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 2, gapDetected: true });
+	});
+
+	it('a failure below a call that already went up opens the gap', async () => {
+		const [p1, p2] = await goOfflineAndQueue({ replay: 'concurrent' }, [
+			['todos/add', [{ t: 'cut' }]],
+			['todos/add', [{ t: 'up' }]]
+		]);
+		const w1 = watch(p1);
+		simulateStatus('open');
+		await flush();
+		simulateRpcResponse(sentCalls()[1].id, { ok: true, data: 'ok' });
+		await flush();
+		await expect(p2).resolves.toBe('ok');
+		simulateStatus('disconnected');
+		await flush();
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 2, gapDetected: false });
+
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: false, code: 'VALIDATION', error: 'bad' }));
+		expect(w1.error).toMatchObject({ code: 'VALIDATION' });
+		expect(mod.offlineCheckpoint().gapDetected).toBe(true);
+	});
+
+	it('a later call failing first does not open a gap below it', async () => {
+		const [p1, p2] = await goOfflineAndQueue({ replay: 'concurrent' }, [
+			['todos/add', [{ t: 'up' }]],
+			['todos/add', [{ t: 'fails' }]]
+		]);
+		const w2 = watch(p2);
+		simulateStatus('open');
+		await flush();
+		simulateRpcResponse(sentCalls()[1].id, { ok: false, code: 'VALIDATION', error: 'bad' });
+		await flush();
+		simulateRpcResponse(sentCalls()[0].id, { ok: true, data: 'ok' });
+		await flush();
+		await expect(p1).resolves.toBe('ok');
+		expect(w2.error).toMatchObject({ code: 'VALIDATION' });
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 1, gapDetected: false });
+	});
+
 	it('uploading is true during a drain and false after; pendingMutations tracks the queue', async () => {
 		const uploadingSeen = [];
 		mod.uploading.subscribe((v) => uploadingSeen.push(v));
