@@ -293,6 +293,18 @@ export function ensureDisconnectListener() {
 				if (typeof entry.wake === 'function') entry.wake();
 			}
 		} else if (!up) {
+			if (clientState.socketUp && s === 'connecting') {
+				// The adapter replaced a socket it was closing, with no
+				// 'disconnected' in between. A replay went out on the old socket
+				// with a send that does not queue, so nothing answers it or sends
+				// it again: it is cut, as by a drop.
+				for (const [id, entry] of pending) {
+					if (!entry.replay) continue;
+					pending.delete(id);
+					if (entry.timer) clearTimer(entry.timer);
+					entry.reject(_connectionLost('DISCONNECTED', 'WebSocket connection replaced'));
+				}
+			}
 			clientState.socketUp = false;
 		}
 	});

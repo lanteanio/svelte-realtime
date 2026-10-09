@@ -1006,6 +1006,76 @@ describe('offline queue - a drop during the drain', () => {
 		expect(storedKeys(store)).toEqual([]);
 	});
 
+	it('a socket the adapter replaces with no drop in between cuts the replay on it', async () => {
+		const store = fakeStore();
+		const [p1, p2] = await goOfflineAndQueue({ persist: store }, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]]
+		]);
+		const w1 = watch(p1);
+		const w2 = watch(p2);
+		simulateStatus('open');
+		await flush();
+		expect(sentCalls()).toHaveLength(1);
+
+		// The adapter closes the socket itself, then a new one replaces it before
+		// the old one's close lands, so 'disconnected' never comes.
+		simulateClosing();
+		simulateStatus('connecting');
+		await flush();
+		expect(w1.settled).toBe(false);
+		expect(sentCalls()).toHaveLength(1);
+		expect(storedKeys(store)).toHaveLength(2);
+
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual([1, 1, 2]);
+		expect(w1.value).toBe('ok');
+		expect(w2.value).toBe('ok');
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('a socket replaced while the restore is read sends nothing until the new one opens', async () => {
+		/** @type {(v?: any) => void} */
+		let release = () => {};
+		const gate = new Promise((r) => { release = r; });
+		const store = fakeStore(Object.fromEntries([seedEntry('default', 1, 'todos/add', [{ t: 'a' }], 'off-a')]));
+		const getAll = store.getAll;
+		store.getAll = async (prefix) => { await gate; return getAll(prefix); };
+		mod.configure({ offline: { queue: true, persist: store } });
+		const uploadingSeen = [];
+		mod.uploading.subscribe((v) => uploadingSeen.push(v));
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush(1);
+		simulateClosing();
+		simulateStatus('connecting');
+		release();
+		await flush();
+		expect(sentCalls()).toEqual([]);
+		expect(uploadingSeen).toEqual([false]);
+
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.idempotencyKey)).toEqual(['off-a']);
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('a regular call the adapter queued as the socket closed still settles on the new socket', async () => {
+		mod.configure({ offline: { queue: true } });
+		simulateClosing();
+		const w = watch(mod.__rpc('todos/add')({ t: 'live' }));
+		await flush(1);
+		expect(sentCalls()).toEqual([]);
+		simulateStatus('connecting');
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(w.value).toBe('ok');
+	});
+
 	it('a cut puts calls back in the order they were queued, as they were queued', async () => {
 		// Newest first, and each replay marks the copy it sends.
 		const replay = (queue) => [...queue].reverse().map((e) => ({ ...e, args: [{ ...e.args[0], hops: (e.args[0].hops ?? 0) + 1 }] }));

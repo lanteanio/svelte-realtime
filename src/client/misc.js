@@ -163,8 +163,10 @@ async function _drainOfflineQueue() {
 	let again = false;
 	try {
 		await _offlineReady();
-		// Gone again while the restore was read: the next reconnect drains.
-		if (clientState.isOffline || clientState.terminated) return;
+		// Gone again while the restore was read, or the socket is being
+		// replaced (a replay is sent only on an open socket): the next open
+		// drains.
+		if (clientState.isOffline || clientState.terminated || !clientState.socketUp) return;
 		if (_offlineQueue.length === 0) return;
 		_setUploading(true);
 

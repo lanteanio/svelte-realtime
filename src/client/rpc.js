@@ -507,7 +507,8 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 		pending.set(id, {
 			resolve(v) { _devtoolsEnd(id, true, v); resolve(v); },
 			reject(e) { _devtoolsEnd(id, false, e); reject(e); },
-			timer
+			timer,
+			replay: replay === true
 		});
 		const envelope = idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args };
 		if (replay) conn.send(envelope);
