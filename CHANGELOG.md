@@ -417,9 +417,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back after an earlier one failed. A call a full queue dropped never
   counted at all. The gap now opens when a mutation goes up while one
   queued before it failed or was dropped by a full queue, whichever settled
-  first. A replay a lost connection cut off and the one that carries it on
-  count as one upload batch, also across a reload; a cut batch closes no
-  gap, and neither does a batch that opened one. The gap closes when a
+  first. A replay a lost connection or a page that closed cut off and the
+  one that carries it on count as one upload batch, also across a reload;
+  a cut batch closes no gap, and neither does a batch that opened one. The gap closes when a
   later batch goes up in full, with nothing failing, nothing cut off and
   nothing left queued. After a reload, new mutations are numbered past
   `lastUploadedSeq` even when no stored mutation is left.

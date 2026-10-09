@@ -5,7 +5,7 @@ import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped } from './offline.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, restored?: boolean }} OfflineEntry
@@ -185,6 +185,7 @@ async function _drainOfflineQueue() {
 		const batch = _batchState();
 		let clean = batch.clean;
 		let lowestFailedSeq = batch.failedSeq;
+		_beginBatch();
 		// The connection went away during the drain: nothing more is sent.
 		let cut = false;
 		/** @type {Set<OfflineEntry>} */
@@ -209,6 +210,7 @@ async function _drainOfflineQueue() {
 			settled.add(entry);
 			clean = false;
 			lowestFailedSeq = Math.min(lowestFailedSeq, entry.seq ?? 0);
+			if (typeof entry.seq === 'number') _noteBatchFailure(entry.seq);
 			_settlePersist(entry, false);
 			const over = overrides.get(entry);
 			_notifyReplayError({ path: over ? over.path : entry.path, args: over ? over.args : entry.args, queuedAt: entry.queuedAt }, err);

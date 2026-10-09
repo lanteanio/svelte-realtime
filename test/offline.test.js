@@ -1351,6 +1351,64 @@ describe('offline queue - checkpoint and consumer stores', () => {
 		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 2, gapDetected: true });
 	});
 
+	it('a page closed while a replay is in flight carries the failure before it to the next page', async () => {
+		const store = fakeStore();
+		const [p1] = await goOfflineAndQueue({ persist: store }, [
+			['todos/add', [{ t: 'fails' }]],
+			['todos/add', [{ t: 'in flight' }]]
+		]);
+		watch(p1);
+		simulateStatus('open');
+		await flush();
+		simulateRpcResponse(sentCalls()[0].id, { ok: false, code: 'VALIDATION', error: 'bad' });
+		await flush();
+		expect(sentCalls()).toHaveLength(2);
+
+		// The page goes away with the second replay unanswered.
+		mod = await loadClient();
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual(['in flight']);
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 2, gapDetected: true });
+	});
+
+	it('a page closed mid-replay leaves a batch that closes no gap, and the batch after it can', async () => {
+		const store = fakeStore({
+			'c:default': { lastUploadedSeq: 5, gapDetected: true, batchFailedSeq: null, batchClean: true },
+			...Object.fromEntries([
+				seedEntry('default', 6, 'todos/add', [{ t: 6 }], 'off-6'),
+				seedEntry('default', 7, 'todos/add', [{ t: 7 }], 'off-7')
+			])
+		});
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		expect(sentCalls()).toHaveLength(1);
+
+		mod = await loadClient();
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 7, gapDetected: true });
+
+		simulateStatus('disconnected');
+		mod.__rpc('todos/add')({ t: 8 }).catch(() => {});
+		await flush(1);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 8, gapDetected: false });
+	});
+
 	it('a later call failing first does not open a gap below it', async () => {
 		const [p1, p2] = await goOfflineAndQueue({ replay: 'concurrent' }, [
 			['todos/add', [{ t: 'up' }]],

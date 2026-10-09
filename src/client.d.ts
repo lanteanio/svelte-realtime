@@ -811,9 +811,9 @@ export const uploading: Readable<boolean>;
  * streams): a mutation went up while one queued before it failed or was
  * dropped in the same upload batch, or a mutation failed below one that had
  * already gone up. An upload batch is the calls one reconnect replays,
- * together with the replays that carry on one a lost connection cut off
- * (also across a reload); a call the full queue drops counts in the batch
- * that replays next. The gap clears when a later batch goes up in full,
+ * together with the replays that carry on one a lost connection or a page
+ * that closed cut off; a call the full queue drops counts in the batch that
+ * replays next. The gap clears when a later batch goes up in full,
  * with nothing failing, nothing cut off and nothing left queued. Persisted
  * alongside the queue when `persist` is on.
  */

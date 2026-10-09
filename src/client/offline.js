@@ -552,6 +552,29 @@ export function _batchState() {
 }
 
 /**
+ * @internal A drain starts replaying its batch. Until it ends, the stored
+ * batch reads as cut off, so a page that closes during the replay leaves the
+ * next page a batch to carry on, as a lost connection would (a replay in
+ * flight may have been applied).
+ */
+export function _beginBatch() {
+	if (!_batch.clean) return;
+	_batch = { failedSeq: _batch.failedSeq, clean: false };
+	_putCheckpoint();
+}
+
+/**
+ * @internal A call in the drain failed or was dropped. Stored at once, so a
+ * page that closes before the drain ends still counts it.
+ * @param {number} seq
+ */
+export function _noteBatchFailure(seq) {
+	if (seq >= _batch.failedSeq) return;
+	_batch = { failedSeq: seq, clean: _batch.clean };
+	_putCheckpoint();
+}
+
+/**
  * @internal A drain was cut off: the next one carries on its batch, which is
  * not clean (a replay that was cut off may have been applied).
  * @param {number} failedSeq
