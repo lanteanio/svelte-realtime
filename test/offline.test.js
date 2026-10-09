@@ -1708,6 +1708,24 @@ describe('offline queue - a drop during the drain', () => {
 		expect(storedKeys(store)).toEqual([]);
 	});
 
+	it('a socket replaced between two replays stops the drain before the next send', async () => {
+		const [p1, p2] = await goOfflineAndQueue({}, [['todos/add', [{ t: 1 }]], ['todos/add', [{ t: 2 }]]]);
+		// App code the first settle runs replaces the socket.
+		p1.then(() => simulateStatus('connecting'));
+		const w2 = watch(p2);
+		simulateStatus('open');
+		await flush();
+		simulateRpcResponse(sentCalls()[0].id, { ok: true, data: 'ok' });
+		await flush();
+		expect(sentCalls()).toHaveLength(1);
+		expect(w2.settled).toBe(false);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual([1, 2]);
+		expect(w2.value).toBe('ok');
+	});
+
 	it('a socket replaced while the restore is read sends nothing until the new one opens', async () => {
 		/** @type {(v?: any) => void} */
 		let release = () => {};

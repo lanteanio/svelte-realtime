@@ -354,8 +354,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open socket, so a replay sent as the socket closes no longer waits in the
   send queue and goes out a second time after the reconnect, and a socket
   the adapter replaces without reporting a drop cuts the replays on it like
-  a drop does. An answer from the server is a replay failure whatever its
-  code, also when the close lands in the same tick.
+  a drop does, also when the replacement starts between two replays. An
+  answer from the server is a replay failure whatever its code, also when
+  the close lands in the same tick.
 
 - **A queued offline call stores and replays the arguments it was made
   with.** The queue kept the caller's own objects and serialized them only

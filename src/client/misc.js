@@ -231,8 +231,11 @@ async function _drainOfflineQueue() {
 			for (;;) {
 				// Nothing is sent once the drain was cut, nor while the connection
 				// is down: `_sendRpc` would queue the call again as a new entry, and
-				// this drain would wait on that.
-				if (cut || clientState.isOffline || clientState.terminated) {
+				// this drain would wait on that. Nor while the socket is being
+				// replaced (app code run by the last settle can start that): a
+				// replay is sent only on an open socket, and on the closing one it
+				// would go nowhere and wait for its timeout.
+				if (cut || clientState.isOffline || clientState.terminated || !clientState.socketUp) {
 					cut = true;
 					return;
 				}
