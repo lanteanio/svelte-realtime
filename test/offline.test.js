@@ -4,9 +4,14 @@
 // idempotency key, the upload checkpoint (advance + gap detection + clean
 // clear), the pendingMutations/uploading consumer stores, the
 // conflict-resolution stance (server-win / lww / custom) for replayed
-// mutations rejected with CONFLICT, and what a connection closed for good
-// leaves queued (a hand-rolled IndexedDB stands in for the default store).
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+// mutations rejected with CONFLICT, what a connection closed for good leaves
+// queued, and what a queued call stores (a hand-rolled IndexedDB stands in
+// for the default store, and a compiled `$state` for component state).
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest';
+import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
+import { resolve } from 'path';
+import { pathToFileURL } from 'url';
+import { compileModule } from 'svelte/compiler';
 
 let statusCallbacks;
 let statusInitialValue;
@@ -55,6 +60,14 @@ function seedEntry(persistKey, seq, path, args, idempotencyKey) {
 let mod;
 
 beforeEach(async () => {
+	mod = await loadClient();
+});
+
+/**
+ * A fresh client module graph over a fresh adapter mock: what a page load
+ * gets. Calling it again inside a test is a reload.
+ */
+async function loadClient() {
 	vi.resetModules();
 	statusCallbacks = new Set();
 	statusInitialValue = 'open';
@@ -96,9 +109,10 @@ beforeEach(async () => {
 	};
 	vi.doMock('svelte-adapter-uws/client', () => adapterMock);
 
-	mod = await import('../src/client.js');
-	mod._resetOffline();
-});
+	const client = await import('../src/client.js');
+	client._resetOffline();
+	return client;
+}
 
 /** Configure with an offline queue, go offline, enqueue N calls. */
 async function goOfflineAndQueue(offline, calls) {
@@ -142,6 +156,105 @@ const watch = (p) => {
 	p.then((value) => { state.settled = true; state.value = value; }, (error) => { state.settled = true; state.error = error; });
 	return state;
 };
+
+/**
+ * A minimal IndexedDB: `open` fails, or creates the object store on the
+ * first open and opens a database whose writes commit or abort. Values are
+ * cloned in and out the way IndexedDB clones them, so `put` throws for a
+ * value it cannot clone. An aborted write still reports its request as a
+ * success first, the way a full quota ends a transaction. The rows outlive
+ * the client that wrote them, so a test can reload against them.
+ */
+function fakeIndexedDb({ openFails = false, abortWrites = false } = {}) {
+	const map = new Map();
+	const stores = new Set();
+	const later = (fn) => setTimeout(fn, 0);
+	const db = {
+		objectStoreNames: { contains: (name) => stores.has(name) },
+		createObjectStore: (name) => { stores.add(name); },
+		transaction() {
+			/** @type {any} */
+			const tx = { error: null };
+			tx.objectStore = () => ({
+				put(value, key) {
+					const copy = structuredClone(value);
+					/** @type {any} */
+					const req = {};
+					later(() => {
+						req.result = key;
+						req.onsuccess?.();
+						later(() => {
+							if (abortWrites) {
+								tx.error = new Error('QuotaExceededError');
+								tx.onabort?.();
+							} else {
+								map.set(key, copy);
+								tx.oncomplete?.();
+							}
+						});
+					});
+					return req;
+				},
+				delete(key) {
+					/** @type {any} */
+					const req = {};
+					later(() => { map.delete(key); req.onsuccess?.(); });
+					return req;
+				},
+				openCursor(range) {
+					const keys = [...map.keys()].filter((k) => k >= range.lower && k <= range.upper).sort();
+					/** @type {any} */
+					const req = { result: null };
+					let i = 0;
+					const step = () => later(() => {
+						const key = keys[i++];
+						req.result = key === undefined ? null : { key, value: structuredClone(map.get(key)), continue: step };
+						req.onsuccess?.();
+					});
+					step();
+					return req;
+				}
+			});
+			return tx;
+		}
+	};
+	return {
+		map,
+		open() {
+			/** @type {any} */
+			const req = { error: null };
+			later(() => {
+				if (openFails) {
+					req.error = new Error('denied');
+					req.onerror?.();
+					return;
+				}
+				req.result = db;
+				if (stores.size === 0) req.onupgradeneeded?.();
+				req.onsuccess?.();
+			});
+			return req;
+		}
+	};
+}
+
+const runeProbeRoot = resolve(import.meta.dirname, '__offline_rune__');
+afterAll(() => rmSync(runeProbeRoot, { recursive: true, force: true }));
+
+/**
+ * `$state(value)` compiled from a `.svelte.js` module: the deep proxy a
+ * component's form state is.
+ * @param {any} value
+ */
+async function stateOf(value) {
+	mkdirSync(runeProbeRoot, { recursive: true });
+	const dir = mkdtempSync(resolve(runeProbeRoot, 'probe-'));
+	const { js } = compileModule('export function make(v) {\n\tconst s = $state(v);\n\treturn s;\n}\n', { filename: 'probe.svelte.js', generate: 'client' });
+	const out = resolve(dir, 'probe.js');
+	writeFileSync(out, js.code);
+	const { make } = await import(pathToFileURL(out).href);
+	return make(value);
+}
 
 describe('offline queue - durability', () => {
 	it('write-through on enqueue, delete on settle, synthesized idempotency key', async () => {
@@ -653,6 +766,86 @@ describe('offline queue - a drop during the drain', () => {
 	});
 });
 
+describe('offline queue - what a queued call stores', () => {
+	const queuedRows = (idb) => [...idb.map.entries()].filter(([k]) => k.startsWith('q:'));
+	/** @type {any} */
+	let warn;
+	beforeEach(() => {
+		warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+	});
+	afterEach(() => {
+		warn.mockRestore();
+		vi.unstubAllGlobals();
+	});
+
+	it('a call queued with $state args is stored in IndexedDB and replays the same values after a reload', async () => {
+		const idb = fakeIndexedDb();
+		vi.stubGlobal('indexedDB', idb);
+		const form = await stateOf({ title: 'draft', tags: ['a'] });
+		mod.configure({ offline: { queue: true, persist: true } });
+		simulateStatus('disconnected');
+		const p = mod.__rpc('todos/save')(form);
+		const w = watch(p);
+		await flush();
+		const rows = queuedRows(idb);
+		expect(rows).toHaveLength(1);
+		expect(rows[0][1].args).toEqual([{ title: 'draft', tags: ['a'] }]);
+		expect(warn).not.toHaveBeenCalled();
+		simulateStatus('failed');
+		await flush();
+		expect(w.settled).toBe(false);
+
+		mod = await loadClient();
+		mod.configure({ offline: { queue: true, persist: true } });
+		await flush();
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		const [sent] = sentCalls();
+		expect(sent.rpc).toBe('todos/save');
+		expect(sent.args).toEqual([{ title: 'draft', tags: ['a'] }]);
+		expect(sent.idempotencyKey).toBe(rows[0][1].idempotencyKey);
+		await flush();
+		expect(queuedRows(idb)).toEqual([]);
+	});
+
+	it('a queued call sends the args it was made with', async () => {
+		const form = await stateOf({ title: 'draft' });
+		const beforeReplay = vi.fn(() => true);
+		mod.configure({ offline: { queue: true, beforeReplay } });
+		simulateStatus('disconnected');
+		const w = watch(mod.__rpc('todos/save')(form));
+		await flush(1);
+		form.title = 'edited later';
+
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(w.value).toBe('ok');
+		expect(sentCalls()[0].args).toEqual([{ title: 'draft' }]);
+		expect(beforeReplay.mock.calls[0][0].args).toEqual([{ title: 'draft' }]);
+	});
+
+	it('args that cannot be serialized fail the call at once and queue nothing', async () => {
+		const store = fakeStore();
+		mod.configure({ offline: { queue: true, persist: store } });
+		simulateStatus('disconnected');
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+		const cyclic = { title: 'x' };
+		cyclic.self = cyclic;
+		const big = watch(mod.__rpc('todos/save').fresh({ count: 1n }));
+		const loop = watch(mod.__rpc('todos/save').fresh(cyclic));
+		await flush(1);
+		expect(big.error).toBeInstanceOf(TypeError);
+		expect(loop.error).toBeInstanceOf(TypeError);
+		expect(pendingSeen).toBe(0);
+		expect(store.ops).toEqual([]);
+	});
+});
+
 describe('offline queue - connection closed for good', () => {
 	it('stored mutations stay queued, their calls pending, for a later page load', async () => {
 		const store = fakeStore();
@@ -957,83 +1150,12 @@ describe('offline queue - connection closed for good', () => {
 		let warn;
 		beforeEach(() => {
 			warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-			vi.stubGlobal('IDBKeyRange', { bound: () => null });
+			vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
 		});
 		afterEach(() => {
 			warn.mockRestore();
 			vi.unstubAllGlobals();
 		});
-
-		/**
-		 * A minimal IndexedDB: `open` fails, or creates the object store on the
-		 * first open and opens a database whose writes commit or abort. An
-		 * aborted write still reports its request as a success first, the way a
-		 * full quota ends a transaction.
-		 */
-		function fakeIndexedDb({ openFails = false, abortWrites = false } = {}) {
-			const map = new Map();
-			const stores = new Set();
-			const later = (fn) => setTimeout(fn, 0);
-			const db = {
-				objectStoreNames: { contains: (name) => stores.has(name) },
-				createObjectStore: (name) => { stores.add(name); },
-				transaction() {
-					/** @type {any} */
-					const tx = { error: null };
-					tx.objectStore = () => ({
-						put(value, key) {
-							/** @type {any} */
-							const req = {};
-							later(() => {
-								req.result = key;
-								req.onsuccess?.();
-								later(() => {
-									if (abortWrites) {
-										tx.error = new Error('QuotaExceededError');
-										tx.onabort?.();
-									} else {
-										map.set(key, value);
-										tx.oncomplete?.();
-									}
-								});
-							});
-							return req;
-						},
-						delete(key) {
-							/** @type {any} */
-							const req = {};
-							later(() => { map.delete(key); req.onsuccess?.(); });
-							return req;
-						},
-						openCursor() {
-							/** @type {any} */
-							const req = { result: null };
-							later(() => req.onsuccess?.());
-							return req;
-						}
-					});
-					return tx;
-				}
-			};
-			return {
-				map,
-				open() {
-					/** @type {any} */
-					const req = { error: null };
-					later(() => {
-						if (openFails) {
-							req.error = new Error('denied');
-							req.onerror?.();
-							return;
-						}
-						req.result = db;
-						if (stores.size === 0) req.onupgradeneeded?.();
-						req.onsuccess?.();
-					});
-					return req;
-				}
-			};
-		}
 
 		/** @param {{ openFails?: boolean, abortWrites?: boolean }} options */
 		async function queueOneAndClose(options) {

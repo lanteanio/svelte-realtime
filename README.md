@@ -1533,6 +1533,8 @@ When offline queuing is enabled, RPC calls made while disconnected return promis
 
 If the connection drops again while the queue is replaying, the replay stops there: the call it cut off and every call behind it stay queued as they were and replay in order on the next reconnect, their promises still pending, and `onReplayError` is not called for them. A call cut off this way may already have reached the server. Every queued call carries an idempotency key, so a handler wrapped in `live.idempotent` answers the repeat with its first result instead of applying it twice.
 
+A queued call keeps a copy of its arguments in the form the wire carries them (JSON), taken when the call is made. That copy is what replays, what is stored, and what `beforeReplay`, `onReplayError` and `onConflict` see, so `save(form)` with a `$state` form replays the values it was called with even if the form changes before the reconnect. Arguments that cannot be serialized (a `BigInt`, a cycle) fail the call at once instead of being queued.
+
 ### Durable persistence (survive a reload)
 
 By default the queue lives in memory and dies with the tab. Turn on `persist` and queued mutations survive reloads and browser restarts - stored in IndexedDB, restored on the next load, and replayed on reconnect:

@@ -332,6 +332,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the server is a replay failure whatever its code, also when the close
   lands in the same tick.
 
+- **A queued offline call stores and replays the arguments it was made
+  with.** The queue kept the caller's own objects and serialized them only
+  at replay, so a `$state` object edited after an offline `save(form)`
+  replayed the edited values. IndexedDB cannot store a Svelte 5 `$state`
+  proxy either, so with `persist: true` such a call was never written: it
+  did not survive a reload, and a connection closed for good rejected it. A
+  queued call now keeps a JSON copy of its arguments, the form the wire
+  carries, taken when the call is made; that copy is what replays, what is
+  stored, and what `beforeReplay`, `onReplayError` and `onConflict` see.
+  Arguments that cannot be serialized (a `BigInt`, a cycle) fail the call
+  at once instead of being queued.
+
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and
   `diagnosticReason` is declared, with `reason` as its deprecated alias.

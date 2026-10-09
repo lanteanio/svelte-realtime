@@ -426,6 +426,17 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
 
 	// Offline queue: if disconnected and queue is enabled, defer the call
 	if (clientState.isOffline && clientState.config.offline?.queue && !clientState.batchCollector) {
+		// Copied now, as the wire carries it (JSON): the call replays the args
+		// it was made with, not what an object it was passed (a `$state` proxy,
+		// say) holds by then, and IndexedDB can store the copy. Args that
+		// cannot be serialized fail the call here, as they do when it is sent.
+		/** @type {any[]} */
+		let queuedArgs;
+		try {
+			queuedArgs = JSON.parse(JSON.stringify(args));
+		} catch (err) {
+			return Promise.reject(err);
+		}
 		const maxQueue = clientState.config.offline.maxQueue || 100;
 		return new Promise((resolve, reject) => {
 			if (_offlineQueue.length >= maxQueue) {
@@ -436,7 +447,7 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
 					_settlePersist(dropped, false);
 				}
 			}
-			const entry = { path, args, queuedAt: now(), resolve, reject, idempotencyKey, timeout };
+			const entry = { path, args: queuedArgs, queuedAt: now(), resolve, reject, idempotencyKey, timeout };
 			_offlineQueue.push(entry);
 			// Durability write-through: stamps the monotone seq, synthesizes an
 			// idempotency key when absent (replay-after-reload dedups
