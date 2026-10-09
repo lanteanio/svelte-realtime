@@ -1643,7 +1643,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		if (fetching) return;
 		ensureListener();
 		ensureDisconnectListener();
-		if (clientState.terminated) {
+		// Also while a close() made inside another store's update is still on
+		// its way to the client's status listener.
+		if (_closedForGoodNow()) {
 			_closedForGood();
 			return;
 		}

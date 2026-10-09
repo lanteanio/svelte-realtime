@@ -7535,6 +7535,28 @@ describe('stream .error and .status', () => {
 		unsub();
 	});
 
+	it('a stream resumed from its grace window during an outage waits to load, without an error', async () => {
+		const store = __stream('grace/outage-resume', { merge: 'crud', key: 'id' });
+		let unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 'graceoutage', merge: 'crud', key: 'id' });
+		unsub();
+		await flush();
+
+		simulateStatus('disconnected');
+		simulateStatus('connecting');
+		const statuses = [];
+		const errors = [];
+		store.status.subscribe((v) => statuses.push(v));
+		store.error.subscribe((v) => errors.push(v));
+		unsub = store.subscribe(() => {});
+		await flush();
+		expect(errors.filter(Boolean)).toEqual([]);
+		expect(statuses[statuses.length - 1]).toBe('loading');
+		unsub();
+	});
+
 	it('a stream detached after showing the close shows it again when attached again', async () => {
 		const store = __stream('err/detach-closed', { merge: 'crud', key: 'id' });
 		const errors = [];

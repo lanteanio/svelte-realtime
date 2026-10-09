@@ -326,6 +326,7 @@ describe('connection closed for good (real adapter client)', () => {
 
 	it('a stream resumed from its grace window while a close() inside a store update is still being delivered never counts as in flight', async () => {
 		const ws = await openWithRpc();
+		const { clientState } = await import('../src/client/internal-state.js');
 		const { store, errors, unsub } = await loadedStream(ws, 'board/grace', 'board');
 		unsub();
 		await tick();
@@ -335,16 +336,55 @@ describe('connection closed for good (real adapter client)', () => {
 		const session = writable(/** @type {string | null} */ ('alice'));
 		/** @type {(() => void) | null} */
 		let resumed = null;
+		/** @type {boolean | null} */
+		let terminatedThen = null;
 		session.subscribe((user) => { if (user === null) adapter.connect().close(); });
 		// Runs in the same notification pass, before 'failed' reaches the client.
-		session.subscribe((user) => { if (user === null) resumed = store.subscribe(() => {}); });
+		session.subscribe((user) => {
+			if (user !== null) return;
+			terminatedThen = clientState.terminated;
+			resumed = store.subscribe(() => {});
+		});
 
 		session.set(null);
 		await tick();
+		expect(terminatedThen).toBe(false);
 		expect(settledSeen).not.toContain(false);
 		expect(errors.filter(Boolean).map((e) => e.code)).toEqual(['CONNECTION_CLOSED']);
 		expect(sockets()).toHaveLength(1);
 		resumed?.();
+	});
+
+	it('a stream mounted while a close() inside a store update is still being delivered never counts as in flight', async () => {
+		await openWithRpc();
+		const { clientState } = await import('../src/client/internal-state.js');
+		/** @type {boolean[]} */
+		const settledSeen = [];
+		client.quiescent.subscribe((v) => settledSeen.push(v));
+		const session = writable(/** @type {string | null} */ ('alice'));
+		/** @type {any[]} */
+		const errors = [];
+		/** @type {(() => void) | null} */
+		let unsub = null;
+		/** @type {boolean | null} */
+		let terminatedThen = null;
+		session.subscribe((user) => { if (user === null) adapter.connect().close(); });
+		// Runs in the same notification pass, before 'failed' reaches the client.
+		session.subscribe((user) => {
+			if (user !== null) return;
+			terminatedThen = clientState.terminated;
+			const store = client.__stream('board/late', { merge: 'crud', key: 'id' });
+			store.error.subscribe((e) => errors.push(e));
+			unsub = store.subscribe(() => {});
+		});
+
+		session.set(null);
+		await tick();
+		expect(terminatedThen).toBe(false);
+		expect(settledSeen).not.toContain(false);
+		expect(errors.filter(Boolean).map((e) => e.code)).toEqual(['CONNECTION_CLOSED']);
+		expect(sockets()).toHaveLength(1);
+		unsub?.();
 	});
 
 	it('an auth preflight the server refuses ends the client without opening a socket', async () => {
