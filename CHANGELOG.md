@@ -325,10 +325,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were queued again as new entries that the replay then waited on, so it
   never finished: `uploading` stayed `true` and nothing replayed again
   before a reload, which then sent those calls twice. Now the replay stops
-  at the drop, and the call it cut off and every call behind it stay queued
-  as they were (same stored copy and idempotency key, promise pending) and
-  replay in order on the next reconnect. A call the device slept through is
-  sent again at once when the socket has not reported a drop. An answer from
+  at the drop, and the calls it cut off and the ones it had not sent yet
+  stay queued as they were (same stored copy and idempotency key, promise
+  pending) and replay in order on the next reconnect, through `maxAge` and
+  `beforeReplay` again; past `maxQueue`, the oldest are dropped with
+  `QUEUE_FULL` as usual. A call the device slept through is sent again at
+  once when the socket has not reported a drop. A replay is sent only on an
+  open socket, so a replay sent as the socket closes no longer waits in the
+  send queue and goes out a second time after the reconnect. An answer from
   the server is a replay failure whatever its code, also when the close
   lands in the same tick.
 

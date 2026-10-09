@@ -109,10 +109,12 @@ export class RpcError extends Error {
 }
 
 /**
- * Errors the client raises itself when a call's connection goes away under
- * it (a drop, a device sleep, the close for good), as opposed to a server
- * answer that carries the same code. Such a call may never have reached the
- * server, so the offline drain keeps a replay that ends this way queued.
+ * The errors an RPC from `_sendRpc` is rejected with when its connection
+ * goes away under it (a drop, a device sleep, the close for good), as
+ * opposed to a server answer that carries the same code. Such a call may
+ * never have reached the server, so the offline drain keeps a replay that
+ * ends this way queued. Only the drain reads the mark; the client's other
+ * paths raise these codes unmarked.
  * @type {WeakSet<object>}
  */
 const _connectionLossErrors = new WeakSet();

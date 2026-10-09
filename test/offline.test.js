@@ -16,12 +16,25 @@ import { compileModule } from 'svelte/compiler';
 let statusCallbacks;
 let statusInitialValue;
 let topicCallbacks;
+/** Every frame that reached the socket, in order. */
+let wire;
+/** Frames `sendQueued` held while the socket was not open, like the adapter's send queue. */
+let adapterQueue;
+let socketOpen;
 let sendQueuedFn;
+let sendFn;
 
 function simulateStatus(s) {
 	// Like the adapter's status store, a later subscriber gets the last value.
 	statusInitialValue = s;
+	socketOpen = s === 'open' || s === 'suspended';
 	for (const cb of [...statusCallbacks]) cb(s);
+	// Like the adapter, the send queue is flushed once the open status is out.
+	if (socketOpen) wire.push(...adapterQueue.splice(0));
+}
+/** The socket is closing: frames no longer reach it, and the status says so only once the close lands. */
+function simulateClosing() {
+	socketOpen = false;
 }
 function simulateRpcResponse(correlationId, payload) {
 	const fns = topicCallbacks.get('__rpc');
@@ -72,12 +85,17 @@ async function loadClient() {
 	statusCallbacks = new Set();
 	statusInitialValue = 'open';
 	topicCallbacks = new Map();
-	sendQueuedFn = vi.fn();
+	wire = [];
+	adapterQueue = [];
+	socketOpen = true;
+	sendQueuedFn = vi.fn((frame) => { if (socketOpen) wire.push(frame); else adapterQueue.push(frame); });
+	sendFn = vi.fn((frame) => { if (socketOpen) wire.push(frame); });
 
 	// Like the adapter's, the connection object carries the module's topic
 	// factory, stores and request hook.
 	const adapterMock = {
 		connect: vi.fn(() => ({
+			send: sendFn,
 			sendQueued: sendQueuedFn,
 			bufferedAmount: 0,
 			on: adapterMock.on,
@@ -131,10 +149,9 @@ async function goOfflineAndQueue(offline, calls) {
 /** Respond OK (or a rejection payload) to every outstanding sent envelope, in order. */
 async function respondAll(payloadFor) {
 	for (let round = 0; round < 20; round++) {
-		const calls = sendQueuedFn.mock.calls;
 		let progressed = false;
-		for (let i = 0; i < calls.length; i++) {
-			const env = calls[i][0];
+		for (let i = 0; i < wire.length; i++) {
+			const env = wire[i];
 			if (!env || env.__answered || env.id === undefined || env.type) continue;
 			env.__answered = true;
 			simulateRpcResponse(env.id, payloadFor(env, i));
@@ -146,9 +163,9 @@ async function respondAll(payloadFor) {
 }
 
 const storedKeys = (store) => [...store.map.keys()].filter((k) => k.startsWith('q:')).sort();
-const replayedPaths = () => sendQueuedFn.mock.calls.map((c) => c[0]).filter((e) => e && e.rpc).map((e) => e.rpc);
+const replayedPaths = () => wire.filter((e) => e && e.rpc).map((e) => e.rpc);
 /** Every RPC envelope sent so far, in send order. */
-const sentCalls = () => sendQueuedFn.mock.calls.map((c) => c[0]).filter((e) => e && e.rpc);
+const sentCalls = () => wire.filter((e) => e && e.rpc);
 /** @param {Promise<any>} p */
 const watch = (p) => {
 	/** @type {{ settled: boolean, value?: any, error?: any }} */
@@ -273,7 +290,7 @@ describe('offline queue - durability', () => {
 
 		await expect(p1).resolves.toBe('done');
 		// The replayed envelope carried the synthesized key (server dedup).
-		const replayed = sendQueuedFn.mock.calls.map((c) => c[0]).find((e) => e.rpc === 'todos/add');
+		const replayed = wire.find((e) => e.rpc === 'todos/add');
 		expect(replayed.idempotencyKey).toMatch(/^off-/);
 		// Settle dropped the persisted copy and advanced the checkpoint.
 		expect([...store.map.keys()].filter((k) => k.startsWith('q:'))).toEqual([]);
@@ -308,7 +325,7 @@ describe('offline queue - durability', () => {
 		await flush();
 		await respondAll(() => ({ ok: true, data: 'ok' }));
 
-		const replayed = sendQueuedFn.mock.calls.map((c) => c[0]).filter((e) => e.rpc === 'todos/add');
+		const replayed = wire.filter((e) => e.rpc === 'todos/add');
 		expect(replayed.map((e) => e.args[0].t)).toEqual(['first', 'second']);
 		expect(replayed.map((e) => e.idempotencyKey)).toEqual(['off-a', 'off-b']);
 		expect(pendingSeen).toBe(0);
@@ -519,7 +536,7 @@ describe('offline queue - conflict resolution', () => {
 
 		await expect(p).rejects.toMatchObject({ code: 'CONFLICT' });
 		expect(conflicts).toEqual([['docs/save', 'CONFLICT']]);
-		expect(sendQueuedFn.mock.calls.map((c) => c[0]).filter((e) => e.rpc === 'docs/save')).toHaveLength(1);
+		expect(wire.filter((e) => e.rpc === 'docs/save')).toHaveLength(1);
 	});
 
 	it('lww: re-issues the same call once; a second CONFLICT drops', async () => {
@@ -527,7 +544,7 @@ describe('offline queue - conflict resolution', () => {
 		await respondAll(() => ({ ok: false, code: 'CONFLICT', error: 'moved' }));
 
 		await expect(p).rejects.toMatchObject({ code: 'CONFLICT' });
-		const attempts = sendQueuedFn.mock.calls.map((c) => c[0]).filter((e) => e.rpc === 'docs/save');
+		const attempts = wire.filter((e) => e.rpc === 'docs/save');
 		expect(attempts).toHaveLength(2);
 		expect(attempts[1].args).toEqual(attempts[0].args);
 	});
@@ -553,7 +570,7 @@ describe('offline queue - conflict resolution', () => {
 			return { ok: true, data: 'applied' };
 		});
 		await expect(p).resolves.toBe('applied');
-		const attempts = sendQueuedFn.mock.calls.map((c) => c[0]).filter((e) => e.rpc === 'docs/save');
+		const attempts = wire.filter((e) => e.rpc === 'docs/save');
 		expect(attempts[1].args).toEqual([{ v: 'merged' }]);
 	});
 
@@ -564,7 +581,7 @@ describe('offline queue - conflict resolution', () => {
 		});
 		await respondAll(() => ({ ok: false, code: 'CONFLICT', error: 'moved' }));
 		await expect(p).rejects.toMatchObject({ code: 'CONFLICT' });
-		expect(sendQueuedFn.mock.calls.map((c) => c[0]).filter((e) => e.rpc === 'docs/save')).toHaveLength(1);
+		expect(wire.filter((e) => e.rpc === 'docs/save')).toHaveLength(1);
 	});
 
 	it('a non-CONFLICT rejection takes the plain onReplayError path (no conflict machinery)', async () => {
@@ -737,6 +754,8 @@ describe('offline queue - a drop during the drain', () => {
 	it('a reconnect that lands before the drain sees the drop drains again', async () => {
 		const [p] = await goOfflineAndQueue({}, [['todos/add', [{ t: 1 }]]]);
 		const w = watch(p);
+		const uploadingSeen = [];
+		mod.uploading.subscribe((v) => uploadingSeen.push(v));
 		simulateStatus('open');
 		await flush();
 		simulateStatus('disconnected');
@@ -745,6 +764,113 @@ describe('offline queue - a drop during the drain', () => {
 		expect(sentCalls()).toHaveLength(2);
 		await respondAll(() => ({ ok: true, data: 'ok' }));
 		expect(w.value).toBe('ok');
+		expect(uploadingSeen).toEqual([false, true, false]);
+	});
+
+	it('a replay sent while the socket closes goes out once, after the reconnect', async () => {
+		const store = fakeStore();
+		const [p1, p2] = await goOfflineAndQueue({ persist: store }, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]]
+		]);
+		const w2 = watch(p2);
+		simulateStatus('open');
+		await flush();
+		simulateClosing();
+		simulateRpcResponse(sentCalls()[0].id, { ok: true, data: 'one' });
+		await flush();
+		await expect(p1).resolves.toBe('one');
+
+		simulateStatus('disconnected');
+		await flush();
+		expect(w2.settled).toBe(false);
+		simulateStatus('open');
+		await flush();
+		expect(sentCalls().filter((e) => e.args[0].t === 2)).toHaveLength(1);
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(w2.value).toBe('ok');
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('a cut puts calls back in the order they were queued, as they were queued', async () => {
+		// Newest first, and each replay marks the copy it sends.
+		const replay = (queue) => [...queue].reverse().map((e) => ({ ...e, args: [{ ...e.args[0], hops: (e.args[0].hops ?? 0) + 1 }] }));
+		const promises = await goOfflineAndQueue({ replay }, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]],
+			['todos/add', [{ t: 3 }]]
+		]);
+		const watched = promises.map(watch);
+		simulateStatus('open');
+		await flush();
+		simulateStatus('disconnected');
+		await flush();
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => [e.args[0].t, e.args[0].hops])).toEqual([[3, 1], [3, 1], [2, 1], [1, 1]]);
+		expect(watched.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+	});
+
+	it('a cut puts back every restored entry, also ones stored without a seq', async () => {
+		const store = fakeStore({
+			'q:default:000000000001': { path: 'todos/add', args: [{ t: 'a' }], queuedAt: 1, idempotencyKey: 'off-a' },
+			'q:default:000000000002': { path: 'todos/add', args: [{ t: 'b' }], queuedAt: 1, idempotencyKey: 'off-b' }
+		});
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		simulateStatus('disconnected');
+		await flush();
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.idempotencyKey)).toEqual(['off-a', 'off-a', 'off-b']);
+	});
+
+	it('a maxQueue below one keeps only the newest call', async () => {
+		const [first, second] = await goOfflineAndQueue({ maxQueue: -1 }, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]]
+		]);
+		await expect(first).rejects.toMatchObject({ code: 'QUEUE_FULL' });
+		const w = watch(second);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(w.value).toBe('ok');
+	});
+
+	it('calls put back past maxQueue drop the oldest', async () => {
+		const store = fakeStore();
+		const save = mod.__rpc('todos/add');
+		let draftsOnDrop = false;
+		mod.configure({
+			offline: { queue: true, maxQueue: 2, persist: store },
+			onDisconnect: () => {
+				if (!draftsOnDrop) return;
+				save({ t: 'd1' }).catch(() => {});
+				save({ t: 'd2' }).catch(() => {});
+			}
+		});
+		simulateStatus('disconnected');
+		const w1 = watch(save({ t: 1 }));
+		const w2 = watch(save({ t: 2 }));
+		await flush(1);
+		simulateStatus('open');
+		await flush();
+
+		draftsOnDrop = true;
+		simulateStatus('disconnected');
+		await flush();
+		expect(w1.error).toMatchObject({ code: 'QUEUE_FULL' });
+		expect(w2.error).toMatchObject({ code: 'QUEUE_FULL' });
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+		expect(pendingSeen).toBe(2);
+		expect(storedKeys(store)).toEqual(['q:default:000000000003', 'q:default:000000000004']);
 	});
 
 	it('a replay cut off by a device sleep is sent again at once', async () => {
@@ -1081,7 +1207,7 @@ describe('offline queue - connection closed for good', () => {
 		simulateStatus('disconnected');
 		simulateStatus('open');
 		await flush();
-		const sent = sendQueuedFn.mock.calls.map((c) => c[0]).find((e) => e.rpc === 'todos/add');
+		const sent = wire.find((e) => e.rpc === 'todos/add');
 
 		simulateRpcResponse(sent.id, { ok: false, code, error: 'bad' });
 		simulateStatus('failed');

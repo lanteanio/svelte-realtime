@@ -11,7 +11,7 @@
 
 import { writable } from 'svelte/store';
 import { randomUuid } from '../client-runtime.js';
-import { _offlineQueue } from './internal-state.js';
+import { _offlineQueue, RpcError } from './internal-state.js';
 import { resolveOfflineStore, _isDurableStore } from './offline-store.js';
 
 /** @type {import('./offline-store.js').OfflineStore | null} */
@@ -242,6 +242,20 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 		if (entry.seq > _checkpoint.lastUploadedSeq) _checkpoint.lastUploadedSeq = entry.seq;
 		if (hadEarlierFailure) _checkpoint.gapDetected = true;
 		_putCheckpoint();
+	}
+}
+
+/**
+ * @internal Drop the oldest queued entries until at most `max` are left, each
+ * rejected with QUEUE_FULL and its stored copy deleted. The caller refreshes
+ * the pending count.
+ * @param {number} max
+ */
+export function _trimQueue(max) {
+	while (_offlineQueue.length > Math.max(max, 0)) {
+		const dropped = _offlineQueue.shift();
+		dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped'));
+		_settlePersist(dropped, false);
 	}
 }
 

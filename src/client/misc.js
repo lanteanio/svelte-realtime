@@ -5,7 +5,7 @@ import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue } from './offline.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, restored?: boolean }} OfflineEntry
@@ -222,7 +222,7 @@ async function _drainOfflineQueue() {
 					return;
 				}
 				try {
-					const result = await _sendRpc(entry.path, args, entry.idempotencyKey, entry.timeout);
+					const result = await _sendRpc(entry.path, args, entry.idempotencyKey, entry.timeout, true);
 					settleOk(entry, result);
 					return;
 				} catch (err) {
@@ -282,6 +282,12 @@ async function _drainOfflineQueue() {
 		}
 		_offlineQueue.length = 0;
 		_bumpPending();
+		// The entries as they were queued, for a cut to put back: a custom
+		// `replay` function may return copies of them.
+		const queued = new Set(queue);
+		const queuedBySeq = new Map(queue.map((entry) => [entry.seq, entry]));
+		/** @param {OfflineEntry} entry */
+		const asQueued = (entry) => (queued.has(entry) ? entry : queuedBySeq.get(entry.seq) ?? entry);
 
 		// Apply custom filter function
 		if (typeof offlineOpts?.replay === 'function') {
@@ -306,12 +312,16 @@ async function _drainOfflineQueue() {
 
 		if (cut) {
 			// What the drain did not settle goes back to the front of the queue
-			// as it was (same seq, idempotency key and stored copy, call still
-			// pending), ahead of anything queued since. A replay that was cut off
-			// may have been applied, so the drain is not clean.
+			// as it was queued (same seq, idempotency key and stored copy, call
+			// still pending), in seq order and ahead of anything queued since, so
+			// a custom `replay` function sees it as before at the next drain. A
+			// replay that was cut off may have been applied, so the drain is not
+			// clean.
 			anyFailure = true;
-			const rest = queue.filter((entry) => !settled.has(entry));
+			const rest = [...new Set(queue.filter((entry) => !settled.has(entry)).map(asQueued))]
+				.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 			_offlineQueue.unshift(...rest);
+			_trimQueue(offlineOpts?.maxQueue || 100);
 			if (clientState.terminated) {
 				// Handled as the queue was at the close: kept with a stored copy,
 				// rejected without one.
@@ -329,9 +339,11 @@ async function _drainOfflineQueue() {
 		if (!anyFailure) _clearGapIfClean();
 	} finally {
 		_bumpPending();
-		_setUploading(false);
 		_replayingQueue = false;
+		// Draining again keeps `uploading` up: what was put back still waits to
+		// go out, and that drain clears it when it ends.
 		if (again) void _drainOfflineQueue();
+		else _setUploading(false);
 	}
 }
 

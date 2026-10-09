@@ -3,7 +3,7 @@ import { now, microtask, setTimer, clearTimer } from '../client-runtime.js';
 import { __devtools, _devtoolsStart, _devtoolsEnd, _devtoolsVolatileSent } from './devtools-instrument.js';
 import { _conn, ensureListener, ensureDisconnectListener, _getTimeout, _connectionClosedError } from './connection.js';
 import { clientState, RpcError, _connectionLost, pending, _nextId, _dedupMap, _dedupCoalesceWarned, _isDev, _IS_DEV, _textEncoder, _getBinaryFrame, _offlineQueue, _publishRateHintWarned, _publishRateWindows, _PUBLISH_RATE_HINT_THRESHOLD, _PUBLISH_RATE_HINT_WINDOW_MS, _PUBLISH_RATE_HINT_DEDUP_MAX } from './internal-state.js';
-import { _enqueuePersist, _settlePersist } from './offline.js';
+import { _enqueuePersist, _trimQueue } from './offline.js';
 
 /**
  * Dev-only: warn once per RPC path when the microtask dedup map
@@ -409,9 +409,13 @@ export function __mpFields() {
  *   `live.idempotent` wrapper uses it to dedup against its store.
  * @param {number} [timeout] Per-RPC timeout override in ms. Falls back to
  *   `configure({ timeout })` then to the 30s default.
+ * @param {boolean} [replay] A replay from the offline drain, sent only while
+ *   the socket is open: the drain keeps a call the connection cuts off, and a
+ *   frame left in the adapter's send queue would go out again after the
+ *   reconnect, next to the drain's own resend.
  * @returns {Promise<any>}
  */
-export function _sendRpc(path, args, idempotencyKey, timeout) {
+export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 	ensureListener();
 	ensureDisconnectListener();
 
@@ -439,14 +443,8 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
 		}
 		const maxQueue = clientState.config.offline.maxQueue || 100;
 		return new Promise((resolve, reject) => {
-			if (_offlineQueue.length >= maxQueue) {
-				// Drop oldest
-				const dropped = _offlineQueue.shift();
-				if (dropped) {
-					dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped'));
-					_settlePersist(dropped, false);
-				}
-			}
+			// Room for this one: the oldest go.
+			_trimQueue(maxQueue - 1);
 			const entry = { path, args: queuedArgs, queuedAt: now(), resolve, reject, idempotencyKey, timeout };
 			_offlineQueue.push(entry);
 			// Durability write-through: stamps the monotone seq, synthesizes an
@@ -511,7 +509,9 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
 			reject(e) { _devtoolsEnd(id, false, e); reject(e); },
 			timer
 		});
-		conn.sendQueued(idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args });
+		const envelope = idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args };
+		if (replay) conn.send(envelope);
+		else conn.sendQueued(envelope);
 	});
 }
 
