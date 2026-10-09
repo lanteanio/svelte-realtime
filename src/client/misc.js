@@ -67,7 +67,7 @@ let _replayingQueue = false;
  * - return an args array to re-issue once with merged args, anything else to
  * drop. The `'batch'` replay strategy is an alias of `'concurrent'`.
  *
- * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => OfflineEntry[]), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void, persist?: boolean | import('./offline-store.js').OfflineStore, persistKey?: string, conflictResolution?: 'lww' | 'server-win' | 'custom', onConflict?: (call: { path: string, args: any[], queuedAt: number }, error: any) => any } }} config
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => Array<OfflineEntry | null>), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void, persist?: boolean | import('./offline-store.js').OfflineStore, persistKey?: string, conflictResolution?: 'lww' | 'server-win' | 'custom', onConflict?: (call: { path: string, args: any[], queuedAt: number }, error: any) => any } }} config
  */
 export function configure(config) {
 	clientState.config = config;
@@ -348,15 +348,25 @@ async function _drainOfflineQueue() {
 		if (typeof offlineOpts?.replay === 'function') {
 			/** @type {ReturnType<typeof _readReplayAnswer>} */
 			let answer;
+			/** @type {OfflineEntry[] | null} */
+			let given = null;
 			try {
-				const picked = offlineOpts.replay(queue.map((entry) => ({ ...entry, args: _jsonCopy(entry.args) })));
+				given = queue.map((entry) => ({ ...entry, args: _jsonCopy(entry.args) }));
+			} catch {
+				// Args a custom store restored that are not JSON.
+				answer = 'was not called: the args of a queued call are not JSON';
+			}
+			if (given) {
 				try {
-					answer = _readReplayAnswer(picked, queue);
-				} catch {
-					answer = 'returned an answer that could not be read';
+					const picked = offlineOpts.replay(given);
+					try {
+						answer = _readReplayAnswer(picked, queue);
+					} catch {
+						answer = 'returned an answer that could not be read';
+					}
+				} catch (err) {
+					answer = 'threw' + _causeOf(err);
 				}
-			} catch (err) {
-				answer = 'threw' + _causeOf(err);
 			}
 			if (typeof answer === 'string') {
 				if (_IS_DEV) console.warn('[svelte-realtime] offline.replay ' + answer + ', so the queue replays as it is.');
@@ -367,7 +377,16 @@ async function _drainOfflineQueue() {
 				for (const [entry, over] of answer.overrides) overrides.set(entry, over);
 				const keptSet = new Set(answer.kept);
 				for (const entry of queue) {
-					if (!keptSet.has(entry)) settleFail(entry, new RpcError('STALE', 'Offline mutation dropped by the replay function'));
+					if (keptSet.has(entry)) continue;
+					const unsendable = answer.unsendable.get(entry);
+					if (unsendable === undefined) {
+						settleFail(entry, new RpcError('STALE', 'Offline mutation dropped by the replay function'));
+					} else {
+						/** @type {any} */
+						const stale = new RpcError('STALE', 'Offline mutation dropped: the replay function gave it args that cannot be sent');
+						stale.cause = unsendable.error;
+						settleFail(entry, stale);
+					}
 				}
 				queue = answer.kept;
 			}
@@ -440,15 +459,18 @@ async function _drainOfflineQueue() {
  * with in place of its own (never the call's idempotency key or stored copy).
  * A copy is matched to its call by `resolve`, unique per call; one without a
  * `resolve` function, as a JSON copy is, by its `seq` and `idempotencyKey`.
- * A call returned twice replays once, and a `null` or `undefined` item is a
- * call left out. A copy's args are taken as the JSON the wire would carry,
- * here, so what is sent cannot change or fail to serialize later. The answer
- * decides nothing (a reason string is returned) when it is a promise, not an
- * array, or holds items but not a single queued call, which reads as copies
- * that lost what identifies them, not as a choice to drop every call.
+ * A call returned twice replays once, and a `null` item is a call left out
+ * (`undefined` is not: it reads as a forgotten `return`, so it counts as an
+ * item that is not a queued call). A copy's args are taken as the JSON the
+ * wire would carry, here, so what is sent cannot change or fail to serialize
+ * later; a copy whose args cannot be taken that way is in `unsendable`, its
+ * call dropped. The answer decides nothing (a reason string is returned)
+ * when it is a promise, not an array, or holds items but not a single queued
+ * call, which reads as copies that lost what identifies them (or a map
+ * callback without `return`), not as a choice to drop every call.
  * @param {any} picked
  * @param {OfflineEntry[]} queue
- * @returns {{ kept: OfflineEntry[], overrides: Map<OfflineEntry, { path: string, args: any[] }>, foreign: number } | string}
+ * @returns {{ kept: OfflineEntry[], overrides: Map<OfflineEntry, { path: string, args: any[] }>, unsendable: Map<OfflineEntry, { error: unknown }>, foreign: number } | string}
  */
 function _readReplayAnswer(picked, queue) {
 	if (picked !== null && typeof picked === 'object' && typeof picked.then === 'function') {
@@ -466,12 +488,14 @@ function _readReplayAnswer(picked, queue) {
 	const keptSet = new Set();
 	/** @type {Map<OfflineEntry, { path: string, args: any[] }>} */
 	const overrides = new Map();
+	/** @type {Map<OfflineEntry, { error: unknown }>} */
+	const unsendable = new Map();
 	let foreign = 0;
 	let items = 0;
 	const n = picked.length;
 	for (let i = 0; i < n; i++) {
 		const item = picked[i];
-		if (item === null || item === undefined) continue;
+		if (item === null) continue;
 		items++;
 		let original;
 		if (typeof item === 'object') {
@@ -487,22 +511,28 @@ function _readReplayAnswer(picked, queue) {
 			foreign++;
 			continue;
 		}
-		if (keptSet.has(original)) continue;
-		keptSet.add(original);
-		kept.push(original);
+		if (keptSet.has(original) || unsendable.has(original)) continue;
 		if (item !== original) {
 			const path = item.path;
 			const args = item.args;
 			if (path !== original.path || args !== original.args) {
-				overrides.set(original, {
-					path: typeof path === 'string' ? path : original.path,
-					args: Array.isArray(args) ? _jsonCopy(args) : original.args
-				});
+				let sendArgs = original.args;
+				if (Array.isArray(args)) {
+					try {
+						sendArgs = _jsonCopy(args);
+					} catch (error) {
+						unsendable.set(original, { error });
+						continue;
+					}
+				}
+				overrides.set(original, { path: typeof path === 'string' ? path : original.path, args: sendArgs });
 			}
 		}
+		keptSet.add(original);
+		kept.push(original);
 	}
-	if (items > 0 && kept.length === 0) return 'returned ' + items + ' item(s) and none of them is a queued call';
-	return { kept, overrides, foreign };
+	if (items > 0 && kept.length === 0 && unsendable.size === 0) return 'returned ' + items + ' item(s) and none of them is a queued call';
+	return { kept, overrides, unsendable, foreign };
 }
 
 /**

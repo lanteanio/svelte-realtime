@@ -431,8 +431,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A function that threw lost the whole queue until a reload. A call the
   function leaves out now rejects with `STALE` (with `onReplayError`, its
   stored copy deleted) and counts toward `gapDetected` like any dropped
-  call, and so is one it answers with `null` or `undefined` for; a call it
-  returns twice replays once; a returned copy is matched to its call by
+  call, and so does one it answers with `null` for (`undefined` reads as a
+  forgotten `return`, not as an answer); a call it returns twice replays
+  once; a copy whose args cannot be serialized drops its call, with the
+  error as the cause; a returned copy is matched to its call by
   `resolve`, or when it has none, as a JSON copy of the queue does, by its
   `seq` and `idempotencyKey` (now on the `OfflineEntry` type), and its
   `path` and `args` are replayed under that call's idempotency key;

@@ -601,7 +601,7 @@ describe('offline queue - a replay function', () => {
 		expect(storedKeys(store)).toEqual([]);
 	});
 
-	it('a null or undefined item leaves a call out, also when every item is one', async () => {
+	it('a null item leaves a call out, also when every item is one', async () => {
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		try {
 			const some = (await goOfflineAndQueue({ replay: (queue) => queue.map((c) => (c.args[0].t === 2 ? c : null)) }, three)).map(watch);
@@ -612,7 +612,7 @@ describe('offline queue - a replay function', () => {
 			expect(some.map((w) => w.error?.code ?? w.value)).toEqual(['STALE', 'ok', 'STALE']);
 
 			mod = await loadClient();
-			const none = (await goOfflineAndQueue({ replay: (queue) => queue.map(() => undefined) }, three)).map(watch);
+			const none = (await goOfflineAndQueue({ replay: (queue) => queue.map(() => null) }, three)).map(watch);
 			simulateStatus('open');
 			await flush();
 			expect(sentCalls()).toEqual([]);
@@ -623,7 +623,34 @@ describe('offline queue - a replay function', () => {
 		}
 	});
 
-	it("a copy's args are taken when the function answers, and args that cannot be sent decide nothing", async () => {
+	it('undefined items read as a forgotten return: all of them decide nothing, some of them are warned about', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const store = fakeStore();
+			// A block body without `return`.
+			const none = (await goOfflineAndQueue({ persist: store, replay: (queue) => queue.map((c) => { c.path = 'tasks/add'; }) }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(sentCalls().map((e) => e.rpc + ':' + e.args[0].t)).toEqual(['todos/add:1', 'todos/add:2', 'todos/add:3']);
+			expect(none.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+			expect(warn.mock.calls.some(([m]) => String(m).includes('none of them is a queued call'))).toBe(true);
+
+			warn.mockClear();
+			mod = await loadClient();
+			const some = (await goOfflineAndQueue({ replay: (queue) => queue.map((c) => { if (c.args[0].t === 2) return c; }) }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(sentCalls().map((e) => e.args[0].t)).toEqual([2]);
+			expect(some.map((w) => w.error?.code ?? w.value)).toEqual(['STALE', 'ok', 'STALE']);
+			expect(warn.mock.calls.some(([m]) => String(m).includes('2 item(s) that are not queued calls'))).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("a copy's args are taken when the function answers, and a copy whose args cannot be sent drops only its call", async () => {
 		const later = (await goOfflineAndQueue({
 			replay: (queue) => {
 				const out = queue.map((c) => ({ ...c, args: [{ t: c.args[0].t * 10 }] }));
@@ -640,13 +667,54 @@ describe('offline queue - a replay function', () => {
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		try {
 			mod = await loadClient();
-			const watched = (await goOfflineAndQueue({ replay: (queue) => [{ ...queue[0], args: [10n] }, queue[1], queue[2]] }, three)).map(watch);
+			const store = fakeStore();
+			const onReplayError = vi.fn();
+			// The third call is left out on purpose; the first gets args a BigInt spoils.
+			const watched = (await goOfflineAndQueue({ persist: store, onReplayError, replay: (queue) => [{ ...queue[0], args: [10n] }, queue[1]] }, three)).map(watch);
 			simulateStatus('open');
 			await flush();
 			await respondAll(() => ({ ok: true, data: 'ok' }));
-			expect(sentCalls().map((e) => e.args[0].t)).toEqual([1, 2, 3]);
-			expect(watched.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
-			expect(warn.mock.calls.some(([m]) => String(m).includes('could not be read'))).toBe(true);
+			expect(sentCalls().map((e) => e.args[0].t)).toEqual([2]);
+			expect(watched[0].error).toMatchObject({ code: 'STALE' });
+			expect(watched[0].error.cause).toBeInstanceOf(TypeError);
+			expect(watched[1].value).toBe('ok');
+			expect(watched[2].error).toMatchObject({ code: 'STALE' });
+			expect(watched[2].error.cause).toBeUndefined();
+			expect(onReplayError).toHaveBeenCalledTimes(2);
+			expect(storedKeys(store)).toEqual([]);
+			expect(warn.mock.calls.some(([m]) => String(m).includes('offline.replay'))).toBe(false);
+
+			// Its only copy spoiled: still an answer, so what it left out goes too.
+			mod = await loadClient();
+			const only = (await goOfflineAndQueue({ replay: (queue) => [{ ...queue[0], args: [10n] }] }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			expect(sentCalls()).toEqual([]);
+			expect(only.map((w) => w.error?.code)).toEqual(['STALE', 'STALE', 'STALE']);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('a queued call whose stored args are not JSON keeps the function from being called, without blaming it', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			// A custom store that hands back what it was given, BigInt and all.
+			const store = fakeStore(Object.fromEntries([seedEntry('default', 1, 'todos/add', [10n], 'off-big')]));
+			const replay = vi.fn((queue) => queue);
+			mod.configure({ offline: { queue: true, persist: store, replay } });
+			await flush(1);
+			simulateStatus('disconnected');
+			const fresh = watch(mod.__rpc('todos/add')({ t: 'new' }));
+			await flush(1);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(replay).not.toHaveBeenCalled();
+			expect(fresh.value).toBe('ok');
+			const warned = warn.mock.calls.map(([m]) => String(m)).filter((m) => m.includes('offline.replay'));
+			expect(warned).toHaveLength(1);
+			expect(warned[0]).toContain('was not called');
 		} finally {
 			warn.mockRestore();
 		}
