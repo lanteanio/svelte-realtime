@@ -404,10 +404,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stopped counting it, and its stored copy replayed after the next reload.
   A function that threw lost the whole queue until a reload. A call the
   function leaves out now rejects with `STALE` (with `onReplayError`, its
-  stored copy deleted), a call it returns twice replays once, an entry that
-  was not queued is ignored, and a function that throws or returns no array
-  leaves the queue to replay as it is, with a warning in development. The
-  README now documents `replay`.
+  stored copy deleted) and counts toward `gapDetected` like any dropped
+  call; a call it returns twice replays once; a returned copy is matched to
+  its call by `resolve`, and its `path` and `args` are replayed under that
+  call's idempotency key; anything else it returns is ignored with a
+  warning in development; and a function that throws, returns a promise or
+  returns no array leaves the queue to replay as it is, with a warning in
+  development. The README now documents `replay`.
 
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and

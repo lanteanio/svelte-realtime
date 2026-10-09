@@ -187,6 +187,11 @@ async function _drainOfflineQueue() {
 		let cut = false;
 		/** @type {Set<OfflineEntry>} */
 		const settled = new Set();
+		/**
+		 * The path and args a replay function gave a call in place of its own.
+		 * @type {Map<OfflineEntry, { path: string, args: any[] }>}
+		 */
+		const overrides = new Map();
 
 		/** @param {OfflineEntry} entry @param {any} result */
 		function settleOk(entry, result) {
@@ -204,7 +209,8 @@ async function _drainOfflineQueue() {
 			lowestFailedSeq = Math.min(lowestFailedSeq, entry.seq ?? 0);
 			_settlePersist(entry, false);
 			if (onReplayError) {
-				try { onReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err); } catch { /* observer only */ }
+				const over = overrides.get(entry);
+				try { onReplayError({ path: over ? over.path : entry.path, args: over ? over.args : entry.args, queuedAt: entry.queuedAt }, err); } catch { /* observer only */ }
 			}
 			entry.reject(err);
 		}
@@ -218,7 +224,9 @@ async function _drainOfflineQueue() {
 		 * @param {OfflineEntry} entry
 		 */
 		async function replayOne(entry) {
-			let args = entry.args;
+			const over = overrides.get(entry);
+			const path = over ? over.path : entry.path;
+			let args = over ? over.args : entry.args;
 			let retried = false;
 			for (;;) {
 				// Nothing is sent once the drain was cut, nor while the connection
@@ -229,7 +237,7 @@ async function _drainOfflineQueue() {
 					return;
 				}
 				try {
-					const result = await _sendRpc(entry.path, args, entry.idempotencyKey, entry.timeout, true);
+					const result = await _sendRpc(path, args, entry.idempotencyKey, entry.timeout, true);
 					settleOk(entry, result);
 					return;
 				} catch (err) {
@@ -241,7 +249,7 @@ async function _drainOfflineQueue() {
 						return;
 					}
 					if (err && err.code === 'CONFLICT' && !retried) {
-						const call = { path: entry.path, args, queuedAt: entry.queuedAt };
+						const call = { path, args, queuedAt: entry.queuedAt };
 						if (conflictResolution === 'lww') {
 							retried = true;
 							continue;
@@ -295,38 +303,60 @@ async function _drainOfflineQueue() {
 		}
 		_offlineQueue.length = 0;
 		_bumpPending();
-		// The entries as they were queued, for a cut to put back: a custom
-		// `replay` function may return copies of them.
-		const queued = new Set(queue);
-		const queuedBySeq = new Map(queue.map((entry) => [entry.seq, entry]));
-		/** @param {OfflineEntry} entry */
-		const asQueued = (entry) => (queued.has(entry) ? entry : queuedBySeq.get(entry.seq) ?? entry);
 
 		// A custom replay function picks the calls to replay and their order.
-		// One it leaves out is dropped like a beforeReplay drop; one that throws
-		// or returns no array decides nothing, and the queue replays as it is.
+		// It may return the entries it was given or copies of them (matched by
+		// `resolve`, unique per call); a copy can change the path and args it
+		// replays with, never the call's idempotency key or stored copy. One it
+		// leaves out is dropped like a beforeReplay drop; one that throws or
+		// does not return an array decides nothing, and the queue replays as it
+		// is.
 		if (typeof offlineOpts?.replay === 'function') {
 			/** @type {any} */
 			let picked;
+			let threw = false;
 			try {
 				picked = offlineOpts.replay(queue.slice());
 			} catch (err) {
+				threw = true;
 				picked = err;
 			}
-			if (Array.isArray(picked)) {
-				const kept = new Set();
-				picked = picked.filter((entry) => {
-					const original = entry && asQueued(entry);
-					if (!queued.has(original) || kept.has(original)) return false;
-					kept.add(original);
-					return true;
-				});
-				for (const entry of queue) {
-					if (!kept.has(entry)) settleFail(entry, new RpcError('STALE', 'Offline mutation dropped by the replay function'));
+			const thenable = !threw && picked !== null && typeof picked === 'object' && typeof picked.then === 'function';
+			// Its rejection is not the drain's to report.
+			if (thenable) Promise.resolve(picked).catch(() => {});
+			if (!threw && Array.isArray(picked)) {
+				const byResolve = new Map(queue.map((entry) => [entry.resolve, entry]));
+				/** @type {OfflineEntry[]} */
+				const kept = [];
+				const keptSet = new Set();
+				let foreign = 0;
+				for (const item of picked) {
+					const original = item ? byResolve.get(item.resolve) : undefined;
+					if (!original) {
+						foreign++;
+						continue;
+					}
+					if (keptSet.has(original)) continue;
+					keptSet.add(original);
+					kept.push(original);
+					if (item !== original && (item.path !== original.path || item.args !== original.args)) {
+						overrides.set(original, {
+							path: typeof item.path === 'string' ? item.path : original.path,
+							args: Array.isArray(item.args) ? item.args : original.args
+						});
+					}
 				}
-				queue = picked;
+				if (foreign > 0 && _IS_DEV) {
+					console.warn('[svelte-realtime] offline.replay returned ' + foreign + ' item(s) that are not queued calls, so they are ignored. Return the entries it was given, or copies of them.');
+				}
+				for (const entry of queue) {
+					if (!keptSet.has(entry)) settleFail(entry, new RpcError('STALE', 'Offline mutation dropped by the replay function'));
+				}
+				queue = kept;
 			} else if (_IS_DEV) {
-				console.warn('[svelte-realtime] offline.replay did not return an array of queued calls, so the queue replays as it is.' + (picked instanceof Error ? ' Cause: ' + picked.message : ''));
+				console.warn('[svelte-realtime] offline.replay ' + (thenable
+					? 'returned a promise; it must return the calls to replay synchronously, so the queue replays as it is.'
+					: 'did not return an array of queued calls, so the queue replays as it is.' + (threw && picked instanceof Error ? ' Cause: ' + picked.message : '')));
 			}
 		}
 
@@ -354,8 +384,7 @@ async function _drainOfflineQueue() {
 			// replay that was cut off may have been applied, so the drain is not
 			// clean.
 			clean = false;
-			const rest = [...new Set(queue.filter((entry) => !settled.has(entry)).map(asQueued))]
-				.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+			const rest = queue.filter((entry) => !settled.has(entry)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
 			// One queued after a call that failed here still leaves a hole when it
 			// goes up in a later drain.
 			for (const entry of rest) if ((entry.seq ?? 0) > lowestFailedSeq) entry.afterFailure = true;

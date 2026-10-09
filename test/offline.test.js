@@ -451,13 +451,71 @@ describe('offline queue - a replay function', () => {
 	});
 
 	it('a call it returns twice replays once, and anything not from the queue is ignored', async () => {
-		const replay = (queue) => [queue[0], queue[0], { path: 'admin/wipe', args: [], queuedAt: 0, resolve() {}, reject() {}, seq: 99 }, queue[1]];
-		const watched = (await goOfflineAndQueue({ replay }, three)).map(watch);
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			// The foreign item even carries a queued call's seq.
+			const replay = (queue) => [queue[0], queue[0], { path: 'admin/wipe', args: [], queuedAt: 0, resolve() {}, reject() {}, seq: queue[2].seq, idempotencyKey: queue[2].idempotencyKey }, queue[1]];
+			const watched = (await goOfflineAndQueue({ replay }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(sentCalls().map((e) => e.rpc + ':' + e.args[0]?.t)).toEqual(['todos/add:1', 'todos/add:2']);
+			expect(watched[2].error).toMatchObject({ code: 'STALE' });
+			expect(warn.mock.calls.some(([m]) => String(m).includes('not queued calls'))).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('a copy built from the declared fields replays with its own path and args, under the call it copies', async () => {
+		const store = fakeStore();
+		const replay = (queue) => queue.map(({ path, args, queuedAt, resolve, reject }) => ({
+			path: path.replace('todos/', 'tasks/'),
+			args: [{ ...args[0], migrated: true }],
+			queuedAt,
+			resolve,
+			reject
+		}));
+		const watched = (await goOfflineAndQueue({ persist: store, replay }, three.slice(0, 2))).map(watch);
+		const keys = [...store.map.values()].map((v) => v.idempotencyKey);
 		simulateStatus('open');
 		await flush();
 		await respondAll(() => ({ ok: true, data: 'ok' }));
-		expect(sentCalls().map((e) => e.rpc + ':' + e.args[0]?.t)).toEqual(['todos/add:1', 'todos/add:2']);
-		expect(watched[2].error).toMatchObject({ code: 'STALE' });
+		expect(sentCalls().map((e) => [e.rpc, e.args[0].migrated, e.idempotencyKey])).toEqual([
+			['tasks/add', true, keys[0]],
+			['tasks/add', true, keys[1]]
+		]);
+		expect(watched.map((w) => w.value)).toEqual(['ok', 'ok']);
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('one that returns a promise replays the queue as it is', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const replay = async () => { throw new Error('rejected later'); };
+			const watched = (await goOfflineAndQueue({ replay }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(watched.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+			expect(warn.mock.calls.some(([m]) => String(m).includes('synchronously'))).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('an array it throws is not taken for its answer', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const replay = () => { throw []; };
+			const watched = (await goOfflineAndQueue({ replay }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(watched.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });
 
