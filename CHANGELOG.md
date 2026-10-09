@@ -377,8 +377,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the page and the queue is stored as usual. Nothing writes the checkpoint
   while the restore runs. The built-in store's `getAll` now rejects when a read fails
   (it found nothing before, which read as an empty queue), and a custom
-  store's `getAll` should too. A stored row whose seq is missing or corrupt
-  takes it from its key, and a corrupt checkpoint is ignored.
+  store's `getAll` should too. A restored row takes its seq from its key,
+  the key its settle deletes, and a corrupt checkpoint is ignored.
+
+- **A `persistKey` that another one extends with `:` no longer restores
+  the other's queue.** The restore took every stored row whose key began
+  with its own, so with the keys `a` and `a:b`, a page under `a` restored
+  `a:b`'s mutations and replayed them in `a`'s session, and never deleted
+  them, so they replayed again on every load. The restore now takes only
+  rows whose key is exactly its own persistKey and a sequence number, and
+  ignores anything else a custom store returns.
 
 - **An `onReplayError` or `beforeReplay` that throws no longer stops the
   offline replay.** A throwing `onReplayError` ended the replay where it

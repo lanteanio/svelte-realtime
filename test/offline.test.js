@@ -895,6 +895,111 @@ describe('offline queue - a call queued while the restore runs', () => {
 		expect(storedKeys(store)).toEqual([]);
 	});
 
+	it('a restored row takes its seq from its key, also when its stored seq differs, so its settle deletes it', async () => {
+		const store = fakeStore({
+			'q:default:000000000005': { seq: 9, path: 'todos/add', args: [{ t: 'moved' }], queuedAt: 1, idempotencyKey: 'off-5' }
+		});
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		mod.__rpc('todos/add')({ t: 'new' }).catch(() => {});
+		await flush(1);
+		expect(storedKeys(store)).toEqual([row(5), row(6)]);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.idempotencyKey)[0]).toBe('off-5');
+		expect(storedKeys(store)).toEqual([]);
+		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(6);
+	});
+
+	it('a persistKey that another key extends with ":" restores only its own rows', async () => {
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('a', 1, 'todos/add', [{ t: 'mine' }], 'off-mine'),
+			seedEntry('a:b', 1, 'todos/add', [{ t: 'theirs-1' }], 'off-theirs-1'),
+			seedEntry('a:b', 7, 'todos/add', [{ t: 'theirs-7' }], 'off-theirs-7')
+		]));
+		mod.configure({ offline: { queue: true, persist: store, persistKey: 'a' } });
+		await flush(1);
+		let pending;
+		mod.pendingMutations.subscribe((n) => { pending = n; });
+		expect(pending).toBe(1);
+		simulateStatus('disconnected');
+		mod.__rpc('todos/add')({ t: 'new' }).catch(() => {});
+		await flush(1);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual(['mine', 'new']);
+		expect(storedKeys(store)).toEqual(['q:a:b:000000000001', 'q:a:b:000000000007']);
+		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(2);
+	});
+
+	it('only rows of exactly the queue key shape are restored, and an unrestorable one still holds its seq', async () => {
+		const store = fakeStore({
+			'q:default:12': { path: 'todos/add', args: [{ t: 'short' }], queuedAt: 1, idempotencyKey: 'off-short' },
+			'q:default:0000000000013': { path: 'todos/add', args: [{ t: 'long' }], queuedAt: 1, idempotencyKey: 'off-long' },
+			'q:default:00000000001x': { path: 'todos/add', args: [{ t: 'letter' }], queuedAt: 1, idempotencyKey: 'off-letter' },
+			'q:default:000000000000': { path: 'todos/add', args: [{ t: 'zero' }], queuedAt: 1, idempotencyKey: 'off-zero' },
+			'q:default:000000000004': { path: 42, args: 'not a call' },
+			'q:default:000000000002': { path: 'todos/add', args: [{ t: 'real' }], queuedAt: 1, idempotencyKey: 'off-real' }
+		});
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		mod.__rpc('todos/add')({ t: 'new' }).catch(() => {});
+		await flush(1);
+		// Past the unrestorable row 4, so its row is not written over.
+		expect(store.map.get(row(4))).toEqual({ path: 42, args: 'not a call' });
+		expect(store.map.get(row(5)).args).toEqual([{ t: 'new' }]);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual(['real', 'new']);
+	});
+
+	it('rows a custom store returns outside the scanned prefix are not restored', async () => {
+		const store = fakeStore({
+			// A persistKey as long as 'default': only the prefix tells the rows apart.
+			...Object.fromEntries([seedEntry('another', 1, 'todos/add', [{ t: 'other' }], 'off-other')]),
+			...Object.fromEntries([seedEntry('default', 3, 'todos/add', [{ t: 'mine' }], 'off-mine')])
+		});
+		const getAll = store.getAll;
+		// Ignores the prefix it is given, and returns odd rows too.
+		store.getAll = async () => [null, { key: 7, value: { path: 'todos/add', args: [{ t: 'number key' }] } }, ...await getAll('')];
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual(['mine']);
+		expect(storedKeys(store)).toEqual(['q:another:000000000001']);
+	});
+
+	it('a row that throws while the restore reads it counts as an unreadable queue', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const store = fakeStore(Object.fromEntries([seedEntry('default', 1, 'todos/add', [{ t: 'a' }], 'off-a')]));
+			const getAll = store.getAll;
+			store.getAll = async (prefix) => {
+				const rows = await getAll(prefix);
+				if (prefix.startsWith('q:')) rows.push({ key: 'q:default:000000000002', get value() { throw new Error('unreadable'); } });
+				return rows;
+			};
+			mod.configure({ offline: { queue: true, persist: store } });
+			await flush(1);
+			simulateStatus('disconnected');
+			mod.__rpc('todos/add')({ t: 'new' }).catch(() => {});
+			await flush(1);
+			// Nothing is written: the queue goes on in memory.
+			expect(storedKeys(store)).toEqual([row(1)]);
+			expect(warn.mock.calls.some(([m]) => String(m).includes('the stored queue could not be read'))).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it('a corrupt checkpoint does not stall the numbering', async () => {
 		const store = fakeStore({ 'c:default': { lastUploadedSeq: 1e20, gapDetected: false } });
 		mod.configure({ offline: { queue: true, persist: store } });

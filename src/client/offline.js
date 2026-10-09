@@ -141,13 +141,19 @@ function _rowsOf(rows) {
 }
 
 /**
- * The seq a row key was written under (`q:<persistKey>:<12 digits>`), or 0.
+ * The seq of a row this queue wrote, from its key, or 0 for a row it did not
+ * write: anything but exactly `<prefix><12 digits>`. A row of another
+ * persistKey can share the prefix (key `a:b` under the scan for `a`), and a
+ * custom store may return rows outside it. The key is what a settle deletes,
+ * so the seq comes from it, not from the stored value.
  * @param {unknown} key
+ * @param {string} prefix
  * @returns {number}
  */
-function _seqFromKey(key) {
-	const m = /:(\d{12})$/.exec(String(key));
-	return m ? Number(m[1]) : 0;
+function _seqOfRowKey(key, prefix) {
+	if (typeof key !== 'string' || !key.startsWith(prefix)) return 0;
+	const digits = key.slice(prefix.length);
+	return /^\d{12}$/.test(digits) ? Number(digits) : 0;
 }
 
 /**
@@ -210,15 +216,19 @@ async function _rehydrate() {
 	try {
 		if (!_store) return;
 		const stored = Promise.resolve(_isDurableStore(_store));
-		const rows = _rowsOf(await _store.getAll('q:' + _persistKey + ':'));
-		rowsRead = true;
+		const prefix = 'q:' + _persistKey + ':';
+		const rows = _rowsOf(await _store.getAll(prefix));
 		/** @type {any[]} */
 		const restored = [];
+		let maxSeq = 0;
 		for (const row of rows) {
-			const value = row && row.value;
+			const seq = _seqOfRowKey(row && row.key, prefix);
+			if (seq === 0) continue;
+			// Held also by a row that cannot be restored: nothing new is written
+			// over it.
+			if (seq > maxSeq) maxSeq = seq;
+			const value = row.value;
 			if (!value || typeof value.path !== 'string' || !Array.isArray(value.args)) continue;
-			// The row key carries the seq the row was written under.
-			const seq = _validSeq(value.seq) ? value.seq : _seqFromKey(row.key);
 			restored.push({
 				path: value.path,
 				args: value.args,
@@ -231,8 +241,9 @@ async function _rehydrate() {
 				restored: true,
 				stored
 			});
-			if (seq > _seq) _seq = seq;
 		}
+		rowsRead = true;
+		if (maxSeq > _seq) _seq = maxSeq;
 		if (restored.length > 0) {
 			restored.sort((a, b) => a.seq - b.seq);
 			_offlineQueue.unshift(...restored);

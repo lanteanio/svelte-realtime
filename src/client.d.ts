@@ -757,7 +757,8 @@ export interface OfflineStore {
 	/**
 	 * Every entry whose key starts with `prefix`, key-sorted. Rejects when the
 	 * entries could not be read: the queue then stores nothing for the rest of
-	 * the page rather than write over rows it could not see.
+	 * the page rather than write over rows it could not see. Entries under a
+	 * key the queue did not write are ignored.
 	 */
 	getAll(prefix: string): Promise<Array<{ key: string; value: any }>>;
 	/**
