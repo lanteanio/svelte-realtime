@@ -1246,6 +1246,69 @@ describe('offline queue - checkpoint and consumer stores', () => {
 		expect(uploadingSeen[uploadingSeen.length - 1]).toBe(false);
 		expect(pendingSeen[pendingSeen.length - 1]).toBe(0);
 	});
+
+	it('the same function subscribed twice is two subscriptions', async () => {
+		const seen = [];
+		const fn = (n) => seen.push(n);
+		const first = mod.pendingMutations.subscribe(fn);
+		const second = mod.pendingMutations.subscribe(fn);
+		first();
+		await goOfflineAndQueue({}, [['todos/add', [{ t: 1 }]]]);
+		expect(seen).toEqual([0, 0, 1]);
+		second();
+	});
+
+	it('a count set from inside a subscriber reaches the others after it, never under it', async () => {
+		mod.configure({ offline: { queue: true } });
+		simulateStatus('disconnected');
+		const events = [];
+		let inside = false;
+		mod.pendingMutations.subscribe((n) => {
+			if (inside) events.push('re-entered');
+			inside = true;
+			// Queues a second call while the first one's count is delivered.
+			if (n === 1) mod.__rpc('todos/add')({ t: 2 }).catch(() => {});
+			inside = false;
+		});
+		const later = [];
+		mod.pendingMutations.subscribe((n) => later.push(n));
+		mod.__rpc('todos/add')({ t: 1 }).catch(() => {});
+		await flush(1);
+		expect(events).toEqual([]);
+		expect(later).toEqual([0, 2]);
+	});
+
+	it('a subscription ended while a value is delivered is not called with it', async () => {
+		const later = [];
+		/** @type {() => void} */
+		let offLater = () => {};
+		mod.pendingMutations.subscribe((n) => { if (n === 1) offLater(); });
+		offLater = mod.pendingMutations.subscribe((n) => later.push(n));
+		await goOfflineAndQueue({}, [['todos/add', [{ t: 1 }]]]);
+		expect(later).toEqual([0]);
+	});
+
+	it('invalidate runs for every subscription before any is called with the value', async () => {
+		const order = [];
+		mod.pendingMutations.subscribe(() => order.push('run a'), () => order.push('invalidate a'));
+		mod.pendingMutations.subscribe(() => order.push('run b'), () => order.push('invalidate b'));
+		order.length = 0;
+		await goOfflineAndQueue({}, [['todos/add', [{ t: 1 }]]]);
+		expect(order).toEqual(['invalidate a', 'invalidate b', 'run a', 'run b']);
+	});
+
+	it('a svelte derived over pendingMutations and a store derived from it never sees the two out of step', async () => {
+		const { derived } = await import('svelte/store');
+		const doubled = derived(mod.pendingMutations, (n) => n * 2);
+		const offDoubled = doubled.subscribe(() => {});
+		const drift = derived([mod.pendingMutations, doubled], ([n, d]) => d - 2 * n);
+		const seen = [];
+		const offDrift = drift.subscribe((v) => seen.push(v));
+		await goOfflineAndQueue({}, [['todos/add', [{ t: 1 }]], ['todos/add', [{ t: 2 }]]]);
+		expect(seen).toEqual([0]);
+		offDrift();
+		offDoubled();
+	});
 });
 
 describe('offline queue - conflict resolution', () => {

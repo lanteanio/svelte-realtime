@@ -52,34 +52,69 @@ let _checkpointUnknown = false;
  * every store in the app. Here each subscriber is called on its own, and one
  * that throws is reported without keeping the others, or the queue logic that
  * set the value, from running.
+ *
+ * Otherwise it notifies like a svelte/store writable: every subscription is
+ * its own (the same function subscribed twice gets two), `invalidate` runs
+ * for all of them before any is called with the value (what keeps a
+ * `derived` over it from computing with half-updated inputs), and a value
+ * set from inside a subscriber is delivered once the current delivery ends,
+ * never in the middle of it. A value replaced before it reached a subscriber
+ * is not delivered to it; the newer one is.
  * @template T
  * @param {T} initial
  */
 function _consumerStore(initial) {
 	let value = initial;
-	/** @type {Set<(v: T) => void>} */
-	const subscribers = new Set();
+	/** @type {Set<{ run: (v: T) => void, invalidate: () => void }>} */
+	const subscriptions = new Set();
+	/** Subscription and value pairs waiting to be delivered, in order. @type {any[]} */
+	const queue = [];
 	return {
-		/** @param {(v: T) => void} fn */
-		subscribe(fn) {
-			subscribers.add(fn);
-			fn(value);
-			return () => { subscribers.delete(fn); };
+		/**
+		 * @param {(v: T) => void} run
+		 * @param {() => void} [invalidate]
+		 */
+		subscribe(run, invalidate) {
+			const subscription = { run, invalidate: typeof invalidate === 'function' ? invalidate : () => {} };
+			subscriptions.add(subscription);
+			run(value);
+			return () => { subscriptions.delete(subscription); };
 		},
 		/** @param {T} next */
 		set(next) {
 			if (next === value) return;
 			value = next;
-			for (const fn of [...subscribers]) {
-				try {
-					fn(next);
-				} catch (err) {
-					if (typeof globalThis.reportError === 'function') globalThis.reportError(err);
-					else console.error('[svelte-realtime] a pendingMutations or uploading subscriber threw:', err);
+			const deliver = queue.length === 0;
+			for (const subscription of subscriptions) {
+				_callSubscriber(subscription.invalidate, undefined);
+				queue.push(subscription, next);
+			}
+			if (!deliver) return;
+			try {
+				for (let i = 0; i < queue.length; i += 2) {
+					const subscription = queue[i];
+					const v = queue[i + 1];
+					if (v === value && subscriptions.has(subscription)) _callSubscriber(subscription.run, v);
 				}
+			} finally {
+				queue.length = 0;
 			}
 		}
 	};
+}
+
+/**
+ * Call a consumer store subscriber, reporting an error it throws.
+ * @param {(v: any) => void} fn
+ * @param {any} v
+ */
+function _callSubscriber(fn, v) {
+	try {
+		fn(v);
+	} catch (err) {
+		if (typeof globalThis.reportError === 'function') globalThis.reportError(err);
+		else console.error('[svelte-realtime] a pendingMutations or uploading subscriber threw:', err);
+	}
 }
 
 const _pendingStore = _consumerStore(0);
@@ -88,14 +123,14 @@ const _uploadingStore = _consumerStore(false);
 /**
  * Live count of queued offline mutations (enqueue, settle, and restore all
  * move it). The consumer surface for "N pending edits" indicators.
- * @type {{ subscribe: (fn: (n: number) => void) => () => void }}
+ * @type {{ subscribe: (run: (n: number) => void, invalidate?: () => void) => () => void }}
  */
 export const pendingMutations = { subscribe: _pendingStore.subscribe };
 
 /**
  * True while a reconnect drain is replaying the queue - the UI backpressure
  * signal ("pause local writes while the upload pipe is busy").
- * @type {{ subscribe: (fn: (v: boolean) => void) => () => void }}
+ * @type {{ subscribe: (run: (v: boolean) => void, invalidate?: () => void) => () => void }}
  */
 export const uploading = { subscribe: _uploadingStore.subscribe };
 

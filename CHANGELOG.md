@@ -449,7 +449,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   left svelte/store's shared notification queue stuck. Both stores now call
   each subscriber on its own and report an error one throws (with
   `reportError`, else `console.error`) without keeping the other
-  subscribers or the queue from running.
+  subscribers or the queue from running. They otherwise notify as a
+  svelte/store writable does (`invalidate` first, a value set from inside
+  a subscriber delivered once the current delivery ends), except that a
+  value replaced before it reached a subscriber is not delivered to it, and
+  a subscription ended during a delivery is not called.
 
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and
