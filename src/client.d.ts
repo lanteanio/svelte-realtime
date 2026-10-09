@@ -717,12 +717,10 @@ export function configure(config: {
 		 * uses IndexedDB in a browser (an in-memory fallback under SSR/node);
 		 * pass a custom `OfflineStore` to own the storage. Every persisted
 		 * mutation is guaranteed an idempotency key (synthesized when the call
-		 * supplied none), so a handler wrapped in `live.idempotent` answers a
-		 * replay after reload with its original result instead of applying the
-		 * mutation twice, as long as its store still holds that result and the
-		 * replay lands in the same slot (same path and key, and for a key the
-		 * client sent, the same user; a handler with its own `keyFrom` ignores
-		 * the call's key). Persistence failures
+		 * supplied none), so a handler wrapped in `live.idempotent` can answer
+		 * a replay after reload with its original result instead of applying
+		 * the mutation twice (see `live.idempotent` for when a replay finds
+		 * that result). Persistence failures
 		 * degrade to in-memory, with a warning in development: the queue never
 		 * breaks because storage did.
 		 * @default false
@@ -799,7 +797,7 @@ export function createMemoryStore(): OfflineStore;
 /**
  * Live count of queued offline mutations waiting to be sent - the consumer
  * surface for "N pending edits" indicators. Enqueue, drops and the restore
- * move it; a replay takes its calls out of the count when it starts
+ * move it; a replay takes its calls out of the count before it sends them
  * (`uploading` is true meanwhile), and puts back the ones a lost connection
  * stopped it from settling.
  */

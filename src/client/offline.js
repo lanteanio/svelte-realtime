@@ -126,7 +126,7 @@ const _uploadingStore = _consumerStore(false);
 
 /**
  * Live count of queued offline mutations waiting to be sent: enqueue, drops
- * and the restore move it, a replay takes its calls out of it when it starts
+ * and the restore move it, a replay takes its calls out of it before sending
  * and puts back the ones a lost connection stopped it from settling. The
  * consumer surface for "N pending edits" indicators.
  * @type {{ subscribe: (run: (n: number) => void, invalidate?: () => void) => () => void }}
