@@ -351,6 +351,109 @@ describe('offline queue - durability', () => {
 	});
 });
 
+describe('offline queue - a call queued while the restore runs', () => {
+	/** A store seeded with one restored row whose scan waits for `release()`. */
+	function gatedStore({ fail = false } = {}) {
+		/** @type {(v?: any) => void} */
+		let release = () => {};
+		const gate = new Promise((r) => { release = r; });
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('default', 1, 'todos/add', [{ t: 'restored' }], 'off-restored')
+		]));
+		const getAll = store.getAll;
+		store.getAll = async (prefix) => {
+			await gate;
+			if (fail) throw new Error('scan failed');
+			return getAll(prefix);
+		};
+		return { store, release: () => release() };
+	}
+
+	it('takes a seq past the stored rows, and each settle deletes only its own copy', async () => {
+		const { store, release } = gatedStore();
+		mod.configure({ offline: { queue: true, persist: store } });
+		simulateStatus('disconnected');
+		const fresh = watch(mod.__rpc('todos/add')({ t: 'fresh' }));
+		await flush(1);
+		expect(storedKeys(store)).toEqual(['q:default:000000000001']);
+		expect(store.map.get('q:default:000000000001').args).toEqual([{ t: 'restored' }]);
+
+		release();
+		await flush();
+		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
+		expect(store.map.get('q:default:000000000002').args).toEqual([{ t: 'fresh' }]);
+		const freshKey = store.map.get('q:default:000000000002').idempotencyKey;
+		expect(freshKey).not.toBe('off-restored');
+
+		simulateStatus('open');
+		await flush();
+		const [first] = sentCalls();
+		expect(first.args).toEqual([{ t: 'restored' }]);
+		simulateRpcResponse(first.id, { ok: true, data: 'ok' });
+		await flush();
+		expect(storedKeys(store)).toEqual(['q:default:000000000002']);
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(fresh.value).toBe('ok');
+		const [restored, queued] = sentCalls();
+		expect(restored.idempotencyKey).toBe('off-restored');
+		expect(queued.args).toEqual([{ t: 'fresh' }]);
+		expect(queued.idempotencyKey).toBe(freshKey);
+		expect(storedKeys(store)).toEqual([]);
+		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(2);
+	});
+
+	it('a call the full queue drops before the restore ends is never written', async () => {
+		const { store, release } = gatedStore();
+		mod.configure({ offline: { queue: true, maxQueue: 1, persist: store } });
+		simulateStatus('disconnected');
+		const dropped = watch(mod.__rpc('todos/add')({ t: 'dropped' }));
+		const kept = watch(mod.__rpc('todos/add')({ t: 'kept' }));
+		await flush(1);
+		expect(dropped.error).toMatchObject({ code: 'QUEUE_FULL' });
+
+		release();
+		await flush();
+		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
+		expect(store.map.get('q:default:000000000001').args).toEqual([{ t: 'restored' }]);
+		expect(store.map.get('q:default:000000000002').args).toEqual([{ t: 'kept' }]);
+		expect(kept.settled).toBe(false);
+	});
+
+	it('a close during the restore keeps the call once its own copy is written', async () => {
+		const { store, release } = gatedStore();
+		mod.configure({ offline: { queue: true, persist: store } });
+		simulateStatus('disconnected');
+		const fresh = watch(mod.__rpc('todos/add')({ t: 'fresh' }));
+		await flush(1);
+		simulateStatus('failed');
+		await flush();
+		expect(fresh.settled).toBe(false);
+
+		release();
+		await flush();
+		expect(fresh.settled).toBe(false);
+		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+		expect(pendingSeen).toBe(2);
+	});
+
+	it('a restore that fails still writes the call queued while it ran', async () => {
+		const { store, release } = gatedStore({ fail: true });
+		mod.configure({ offline: { queue: true, persist: store } });
+		simulateStatus('disconnected');
+		const fresh = watch(mod.__rpc('todos/add')({ t: 'fresh' }));
+		await flush(1);
+		release();
+		await flush();
+		expect(store.ops.filter(([op]) => op === 'put')).toHaveLength(1);
+
+		simulateStatus('failed');
+		await flush();
+		expect(fresh.settled).toBe(false);
+	});
+});
+
 describe('offline queue - checkpoint and consumer stores', () => {
 	it('gapDetected flips when a later mutation succeeds after an earlier failure, and clears on a clean drain', async () => {
 		const store = fakeStore(Object.fromEntries([
@@ -787,7 +890,8 @@ describe('offline queue - what a queued call stores', () => {
 		simulateStatus('disconnected');
 		const p = mod.__rpc('todos/save')(form);
 		const w = watch(p);
-		await flush();
+		// The write waits for the restore's scan, then commits.
+		await flush(8);
 		const rows = queuedRows(idb);
 		expect(rows).toHaveLength(1);
 		expect(rows[0][1].args).toEqual([{ title: 'draft', tags: ['a'] }]);

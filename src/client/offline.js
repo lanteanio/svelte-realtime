@@ -24,6 +24,13 @@ let _seq = 0;
 let _checkpoint = { lastUploadedSeq: 0, gapDetected: false };
 /** @type {Promise<void> | null} Resolves when the one-shot rehydrate finished (null = persistence off). */
 let _rehydratePromise = null;
+/** True while the rehydrate has not yet moved `_seq` past the stored rows. */
+let _restoring = false;
+/**
+ * Entries queued while the restore runs, waiting for a seq.
+ * @type {Array<{ entry: any, resolve: (stored: boolean | Promise<boolean>) => void }>}
+ */
+let _unstamped = [];
 
 const _pendingStore = writable(0);
 const _uploadingStore = writable(false);
@@ -100,6 +107,7 @@ export function _configureOfflinePersistence(offlineOpts) {
 	_store = resolveOfflineStore(offlineOpts.persist);
 	_persistKey = offlineOpts.persistKey ?? 'default';
 	if (!_rehydratePromise) {
+		_restoring = true;
 		_rehydratePromise = _rehydrate().catch(() => {});
 	}
 }
@@ -109,38 +117,53 @@ export function _configureOfflinePersistence(offlineOpts) {
  * in-memory queue in seq order, restore the seq counter past their max, and
  * load the checkpoint. Restored entries have no promise holders (the page
  * reloaded), so their settle surfaces only through onReplayError/onConflict.
+ * Entries queued meanwhile get their seq and their write once the counter is
+ * past the stored rows, before the promise a drain awaits resolves.
  */
 async function _rehydrate() {
-	if (!_store) return;
-	const stored = Promise.resolve(_isDurableStore(_store));
-	const rows = await _store.getAll('q:' + _persistKey + ':');
-	/** @type {any[]} */
-	const restored = [];
-	for (const { value } of rows) {
-		if (!value || typeof value.path !== 'string' || !Array.isArray(value.args)) continue;
-		restored.push({
-			path: value.path,
-			args: value.args,
-			queuedAt: typeof value.queuedAt === 'number' ? value.queuedAt : 0,
-			resolve: () => {},
-			reject: () => {},
-			idempotencyKey: typeof value.idempotencyKey === 'string' ? value.idempotencyKey : undefined,
-			timeout: typeof value.timeout === 'number' ? value.timeout : undefined,
-			seq: typeof value.seq === 'number' ? value.seq : 0,
-			restored: true,
-			stored
-		});
-		if (typeof value.seq === 'number' && value.seq > _seq) _seq = value.seq;
-	}
-	if (restored.length > 0) {
-		restored.sort((a, b) => a.seq - b.seq);
-		_offlineQueue.unshift(...restored);
-		_bumpPending();
-	}
-	const cp = await _store.getAll(_checkpointKey());
-	for (const { key, value } of cp) {
-		if (key === _checkpointKey() && value && typeof value.lastUploadedSeq === 'number') {
-			_checkpoint = { lastUploadedSeq: value.lastUploadedSeq, gapDetected: !!value.gapDetected };
+	try {
+		if (!_store) return;
+		const stored = Promise.resolve(_isDurableStore(_store));
+		const rows = await _store.getAll('q:' + _persistKey + ':');
+		/** @type {any[]} */
+		const restored = [];
+		for (const { value } of rows) {
+			if (!value || typeof value.path !== 'string' || !Array.isArray(value.args)) continue;
+			restored.push({
+				path: value.path,
+				args: value.args,
+				queuedAt: typeof value.queuedAt === 'number' ? value.queuedAt : 0,
+				resolve: () => {},
+				reject: () => {},
+				idempotencyKey: typeof value.idempotencyKey === 'string' ? value.idempotencyKey : undefined,
+				timeout: typeof value.timeout === 'number' ? value.timeout : undefined,
+				seq: typeof value.seq === 'number' ? value.seq : 0,
+				restored: true,
+				stored
+			});
+			if (typeof value.seq === 'number' && value.seq > _seq) _seq = value.seq;
+		}
+		if (restored.length > 0) {
+			restored.sort((a, b) => a.seq - b.seq);
+			_offlineQueue.unshift(...restored);
+			_bumpPending();
+		}
+		const cp = await _store.getAll(_checkpointKey());
+		for (const { key, value } of cp) {
+			if (key === _checkpointKey() && value && typeof value.lastUploadedSeq === 'number') {
+				_checkpoint = { lastUploadedSeq: value.lastUploadedSeq, gapDetected: !!value.gapDetected };
+			}
+		}
+	} finally {
+		// The entries queued during the restore get their seq and their write,
+		// in the order they were queued; one settled meanwhile (dropped by a
+		// full queue) is never written. A restore that failed knows no stored
+		// seq, so they go ahead from the counter as it stands.
+		_restoring = false;
+		const waiting = _unstamped;
+		_unstamped = [];
+		for (const { entry, resolve } of waiting) {
+			resolve(entry.settled ? false : _stamp(entry));
 		}
 	}
 }
@@ -160,29 +183,45 @@ export function _offlineReady() {
  * a mutation that reached the server before the crash answers with its
  * original result instead of applying twice), and the persisted copy.
  * Called by rpc.js right after the queue push. `entry.stored` settles to
- * whether the write left a copy that outlives the page.
+ * whether the write left a copy that outlives the page. While the restore
+ * runs, the seq and the write wait for it: the next free seq is not known
+ * until the stored rows are read, and a seq one of them holds would make the
+ * write overwrite it.
  * @param {any} entry
  */
 export function _enqueuePersist(entry) {
-	entry.seq = ++_seq;
 	if (entry.idempotencyKey === undefined || entry.idempotencyKey === null) {
 		entry.idempotencyKey = 'off-' + randomUuid();
 	}
-	if (_store) {
-		const store = _store;
-		const durable = _isDurableStore(store);
-		const value = {
-			seq: entry.seq,
-			path: entry.path,
-			args: entry.args,
-			queuedAt: entry.queuedAt,
-			idempotencyKey: entry.idempotencyKey,
-			timeout: entry.timeout
-		};
-		entry.stored = _storeCall(() => store.put(_entryKey(entry.seq), value))
-			.then(() => durable, () => false);
+	if (_restoring) {
+		entry.stored = new Promise((resolve) => { _unstamped.push({ entry, resolve }); });
+	} else {
+		const stored = _stamp(entry);
+		if (stored) entry.stored = stored;
 	}
 	_bumpPending();
+}
+
+/**
+ * Stamp the entry's seq and write it through when persistence is on.
+ * @param {any} entry
+ * @returns {Promise<boolean> | undefined} Whether the write left a copy that outlives the page.
+ */
+function _stamp(entry) {
+	entry.seq = ++_seq;
+	if (!_store) return undefined;
+	const store = _store;
+	const durable = _isDurableStore(store);
+	const value = {
+		seq: entry.seq,
+		path: entry.path,
+		args: entry.args,
+		queuedAt: entry.queuedAt,
+		idempotencyKey: entry.idempotencyKey,
+		timeout: entry.timeout
+	};
+	return _storeCall(() => store.put(_entryKey(entry.seq), value))
+		.then(() => durable, () => false);
 }
 
 /**
@@ -194,6 +233,7 @@ export function _enqueuePersist(entry) {
  * @param {boolean} [hadEarlierFailure]
  */
 export function _settlePersist(entry, success, hadEarlierFailure) {
+	entry.settled = true;
 	if (_store && typeof entry.seq === 'number' && entry.seq > 0) {
 		const store = _store;
 		void _storeCall(() => store.delete(_entryKey(entry.seq))).catch(() => {});
@@ -271,6 +311,8 @@ export function _resetOffline() {
 	_seq = 0;
 	_checkpoint = { lastUploadedSeq: 0, gapDetected: false };
 	_rehydratePromise = null;
+	_restoring = false;
+	_unstamped = [];
 	_pendingStore.set(0);
 	_uploadingStore.set(false);
 }

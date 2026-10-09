@@ -344,6 +344,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Arguments that cannot be serialized (a `BigInt`, a cycle) fail the call
   at once instead of being queued.
 
+- **A call queued while the stored offline queue is restored no longer
+  takes a stored mutation's place.** Each stored mutation is kept under its
+  sequence number, and the counter moved past the stored ones only once the
+  restore had read them. A call queued in that window (offline right after
+  `configure({ offline: { persist } })`) took a number a stored mutation
+  already had, and one of the two was lost: either its write replaced the
+  stored mutation before the restore read it, or the restored mutation's
+  replay deleted the new call's copy, leaving a call that a reload would
+  not replay. A call queued during the restore now gets its number, and its
+  write, once the restore has read the stored queue.
+
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and
   `diagnosticReason` is declared, with `reason` as its deprecated alias.
