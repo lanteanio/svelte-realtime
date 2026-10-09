@@ -606,6 +606,24 @@ describe('offline queue - a call queued while the restore runs', () => {
 		expect(kept.settled).toBe(false);
 	});
 
+	it('a call the full queue drops during the restore is a hole below the calls queued after it', async () => {
+		const { store, release } = gatedStore();
+		mod.configure({ offline: { queue: true, maxQueue: 1, persist: store } });
+		simulateStatus('disconnected');
+		const dropped = watch(mod.__rpc('todos/add')({ t: 'dropped' }));
+		const kept = watch(mod.__rpc('todos/add')({ t: 'kept' }));
+		await flush(1);
+		expect(dropped.error).toMatchObject({ code: 'QUEUE_FULL' });
+		release();
+		await flush();
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(kept.value).toBe('ok');
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual(['restored', 'kept']);
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 8, gapDetected: true });
+	});
+
 	it('a close during the restore keeps the call once its own copy is written', async () => {
 		const { store, release } = gatedStore();
 		mod.configure({ offline: { queue: true, persist: store } });
@@ -834,6 +852,82 @@ describe('offline queue - checkpoint and consumer stores', () => {
 		await respondAll(() => ({ ok: false, code: 'VALIDATION', error: 'bad' }));
 		expect(w1.error).toMatchObject({ code: 'VALIDATION' });
 		expect(mod.offlineCheckpoint().gapDetected).toBe(true);
+	});
+
+	it('the drain that carries on a cut one does not close the gap the cut one opened', async () => {
+		const [p1, p2, p3] = await goOfflineAndQueue({ replay: 'concurrent' }, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]],
+			['todos/add', [{ t: 3 }]]
+		]);
+		const w1 = watch(p1);
+		watch(p2);
+		watch(p3);
+		simulateStatus('open');
+		await flush();
+		const [, s2, s3] = sentCalls();
+		simulateRpcResponse(s3.id, { ok: true, data: 'ok' });
+		simulateRpcResponse(s2.id, { ok: false, code: 'VALIDATION', error: 'bad' });
+		await flush();
+		expect(mod.offlineCheckpoint().gapDetected).toBe(true);
+		simulateStatus('disconnected');
+		await flush();
+
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(w1.value).toBe('ok');
+		expect(mod.offlineCheckpoint().gapDetected).toBe(true);
+
+		// A batch after it that goes up clean closes the gap.
+		simulateStatus('disconnected');
+		mod.__rpc('todos/add')({ t: 4 }).catch(() => {});
+		await flush(1);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(mod.offlineCheckpoint().gapDetected).toBe(false);
+	});
+
+	it('calls that go up after a full queue dropped an older one open the gap', async () => {
+		const [dropped, p2, p3] = await goOfflineAndQueue({ maxQueue: 2 }, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]],
+			['todos/add', [{ t: 3 }]]
+		]);
+		await expect(dropped).rejects.toMatchObject({ code: 'QUEUE_FULL' });
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		await expect(p2).resolves.toBe('ok');
+		await expect(p3).resolves.toBe('ok');
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 3, gapDetected: true });
+	});
+
+	it('a batch the close cut off carries its failure across a reload', async () => {
+		const store = fakeStore();
+		const [p1] = await goOfflineAndQueue({ persist: store }, [
+			['todos/add', [{ t: 'fails' }]],
+			['todos/add', [{ t: 'cut' }]]
+		]);
+		watch(p1);
+		simulateStatus('open');
+		await flush();
+		simulateRpcResponse(sentCalls()[0].id, { ok: false, code: 'VALIDATION', error: 'bad' });
+		await flush();
+		simulateStatus('failed');
+		await flush();
+		expect(storedKeys(store)).toEqual(['q:default:000000000002']);
+
+		mod = await loadClient();
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual(['cut']);
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 2, gapDetected: true });
 	});
 
 	it('a later call failing first does not open a gap below it', async () => {

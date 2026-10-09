@@ -33,6 +33,14 @@ let _restoring = false;
 let _unstamped = [];
 /** The stored queue could not be read, so the store is not used again in this page. */
 let _scanFailed = false;
+/**
+ * The upload batch in progress (see `_batchState`). Stored with the
+ * checkpoint, outside what `offlineCheckpoint()` returns.
+ * @type {{ failedSeq: number, clean: boolean }}
+ */
+let _batch = { failedSeq: Infinity, clean: true };
+/** A full queue dropped a call queued during the restore, before it had a seq. */
+let _droppedUnnumbered = false;
 
 const _pendingStore = writable(0);
 const _uploadingStore = writable(false);
@@ -193,6 +201,10 @@ async function _rehydrate() {
 			const value = row && row.value;
 			if (row && row.key === _checkpointKey() && value && (value.lastUploadedSeq === 0 || _validSeq(value.lastUploadedSeq))) {
 				_checkpoint = { lastUploadedSeq: value.lastUploadedSeq, gapDetected: !!value.gapDetected };
+				_batch = {
+					failedSeq: value.batchFailedSeq === 0 || _validSeq(value.batchFailedSeq) ? value.batchFailedSeq : Infinity,
+					clean: value.batchClean !== false
+				};
 			}
 		}
 		// No new seq at or below one that already went up, also once its row
@@ -211,7 +223,12 @@ async function _rehydrate() {
 		}
 		// The entries queued during the restore get their seq and their write,
 		// in the order they were queued; one settled meanwhile (dropped by a
-		// full queue) is never written.
+		// full queue) is never written, and counts as failing just above the
+		// restored calls.
+		if (_droppedUnnumbered) {
+			_droppedUnnumbered = false;
+			if (_seq < _batch.failedSeq) _batch.failedSeq = _seq;
+		}
 		_restoring = false;
 		const waiting = _unstamped;
 		_unstamped = [];
@@ -311,11 +328,49 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
  * @param {number} max
  */
 export function _trimQueue(max) {
+	let dropped = false;
 	while (_offlineQueue.length > Math.max(max, 0)) {
-		const dropped = _offlineQueue.shift();
-		dropped.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped'));
-		_settlePersist(dropped, false);
+		const entry = _offlineQueue.shift();
+		dropped = true;
+		entry.reject(new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped'));
+		_settlePersist(entry, false);
+		// What is queued after it goes up later: holes in the batch's order.
+		if (typeof entry.seq === 'number') {
+			if (entry.seq < _batch.failedSeq) _batch.failedSeq = entry.seq;
+		} else {
+			// Queued during the restore: numbered, it would have come right
+			// after the restored calls and below every call queued after it.
+			_droppedUnnumbered = true;
+		}
 	}
+	if (dropped) _putCheckpoint();
+}
+
+/**
+ * @internal The upload batch the queue is in: the lowest seq that failed in
+ * it (Infinity for none) and whether it is still clean. A drain the
+ * connection cut off hands it to the next one, so the two count as one
+ * batch; a full queue dropping its oldest marks it too.
+ * @returns {{ failedSeq: number, clean: boolean }}
+ */
+export function _batchState() {
+	return { ..._batch };
+}
+
+/**
+ * @internal A drain was cut off: the next one carries on its batch.
+ * @param {number} failedSeq
+ */
+export function _carryBatch(failedSeq) {
+	_batch = { failedSeq, clean: false };
+	_putCheckpoint();
+}
+
+/** @internal A drain replayed its whole batch: the next one starts afresh. */
+export function _endBatch() {
+	if (_batch.failedSeq === Infinity && _batch.clean) return;
+	_batch = { failedSeq: Infinity, clean: true };
+	_putCheckpoint();
 }
 
 /**
@@ -371,7 +426,13 @@ export function _clearGapIfClean() {
 
 function _putCheckpoint() {
 	const store = _store;
-	if (store) void _storeCall(() => store.put(_checkpointKey(), { ..._checkpoint })).catch(() => {});
+	if (!store) return;
+	const value = {
+		..._checkpoint,
+		batchFailedSeq: _batch.failedSeq === Infinity ? null : _batch.failedSeq,
+		batchClean: _batch.clean
+	};
+	void _storeCall(() => store.put(_checkpointKey(), value)).catch(() => {});
 }
 
 /**
@@ -387,6 +448,8 @@ export function _resetOffline() {
 	_restoring = false;
 	_unstamped = [];
 	_scanFailed = false;
+	_batch = { failedSeq: Infinity, clean: true };
+	_droppedUnnumbered = false;
 	_pendingStore.set(0);
 	_uploadingStore.set(false);
 }

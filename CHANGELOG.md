@@ -392,10 +392,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it in the same replay, so a concurrent replay reported a gap when a later
   mutation failed before an earlier one succeeded, and a failure never
   counted against a success in another replay, as when a drop put a call
-  back after an earlier one failed. The gap now opens when a mutation goes
-  up while one queued before it failed, whichever settled first and in
-  whichever replay, and a replay that opened it does not close it again
-  when it ends. After a reload, new mutations are numbered past
+  back after an earlier one failed. A call a full queue dropped never
+  counted at all. The gap now opens when a mutation goes up while one
+  queued before it failed or was dropped by a full queue, whichever settled
+  first. A replay the connection cut off and the one that carries it on
+  count as one batch, also across a reload, so the second cannot close a
+  gap the first opened; a replay that opened the gap does not close it
+  again when it ends. After a reload, new mutations are numbered past
   `lastUploadedSeq` even when no stored mutation is left.
 
 - **A call a custom `offline.replay` function leaves out is dropped, not

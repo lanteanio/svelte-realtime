@@ -5,7 +5,7 @@ import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _carryBatch, _endBatch } from './offline.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, restored?: boolean }} OfflineEntry
@@ -178,11 +178,14 @@ async function _drainOfflineQueue() {
 		const maxAge = offlineOpts?.maxAge || 0;
 		const nowMs = now();
 
-		// Whether THIS drain went up in order with nothing failing (a clean
-		// drain closes the gap), and the lowest seq that failed: a success
-		// above it leaves a hole in the upload order (gapDetected).
-		let clean = true;
-		let lowestFailedSeq = Infinity;
+		// Whether the batch went up in order with nothing failing (a clean
+		// drain closes the gap), and the lowest seq that failed in it: a
+		// success above it leaves a hole in the upload order (gapDetected). A
+		// drain that carries on one the connection cut off starts from where
+		// that one stopped.
+		const batch = _batchState();
+		let clean = batch.clean;
+		let lowestFailedSeq = batch.failedSeq;
 		// The connection went away during the drain: nothing more is sent.
 		let cut = false;
 		/** @type {Set<OfflineEntry>} */
@@ -196,7 +199,7 @@ async function _drainOfflineQueue() {
 		/** @param {OfflineEntry} entry @param {any} result */
 		function settleOk(entry, result) {
 			settled.add(entry);
-			const hole = !!entry.afterFailure || lowestFailedSeq < (entry.seq ?? 0);
+			const hole = lowestFailedSeq < (entry.seq ?? 0);
 			if (hole) clean = false;
 			_settlePersist(entry, true, hole);
 			entry.resolve(result);
@@ -385,9 +388,9 @@ async function _drainOfflineQueue() {
 			// clean.
 			clean = false;
 			const rest = queue.filter((entry) => !settled.has(entry)).sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
-			// One queued after a call that failed here still leaves a hole when it
-			// goes up in a later drain.
-			for (const entry of rest) if ((entry.seq ?? 0) > lowestFailedSeq) entry.afterFailure = true;
+			// The next drain carries on this batch: a call queued after one that
+			// failed here still leaves a hole when it goes up then.
+			_carryBatch(lowestFailedSeq);
 			_offlineQueue.unshift(...rest);
 			_trimQueue(offlineOpts?.maxQueue || 100);
 			if (clientState.terminated) {
@@ -401,10 +404,14 @@ async function _drainOfflineQueue() {
 			}
 		}
 
-		// A fully-clean drain (no failure, no hole, nothing left queued) closes
-		// any upload-order hole a PREVIOUS drain left; a drain that itself
-		// failed or left a hole must keep the gap visible for the app to act on.
-		if (clean) _clearGapIfClean();
+		if (!cut) {
+			// The batch went up in full. A clean one (no failure, no hole,
+			// nothing left queued) closes any upload-order hole an EARLIER batch
+			// left; one that failed or left a hole keeps the gap visible for the
+			// app to act on. The next drain starts a new batch.
+			if (clean) _clearGapIfClean();
+			_endBatch();
+		}
 	} finally {
 		_bumpPending();
 		_replayingQueue = false;
