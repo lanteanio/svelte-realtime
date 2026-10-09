@@ -40,6 +40,10 @@ let _scanFailed = false;
 let _batch = { failedSeq: Infinity, clean: true };
 /** A full queue dropped a call queued during the restore, before it had a seq. */
 let _droppedUnnumbered = false;
+/** The checkpoint changed while the restore ran; the restore writes it once done. */
+let _checkpointDirty = false;
+/** The stored queue was read but its checkpoint could not be: it is left alone for the page. */
+let _checkpointUnknown = false;
 
 /**
  * A readable value for the consumer stores, set only by the queue logic. Not
@@ -202,10 +206,12 @@ export function _configureOfflinePersistence(offlineOpts) {
  */
 async function _rehydrate() {
 	let read = false;
+	let rowsRead = false;
 	try {
 		if (!_store) return;
 		const stored = Promise.resolve(_isDurableStore(_store));
 		const rows = _rowsOf(await _store.getAll('q:' + _persistKey + ':'));
+		rowsRead = true;
 		/** @type {any[]} */
 		const restored = [];
 		for (const row of rows) {
@@ -237,22 +243,35 @@ async function _rehydrate() {
 			const value = row && row.value;
 			if (row && row.key === _checkpointKey() && value && (value.lastUploadedSeq === 0 || _validSeq(value.lastUploadedSeq))) {
 				_checkpoint = { lastUploadedSeq: value.lastUploadedSeq, gapDetected: !!value.gapDetected };
+				// Merged with what a full queue dropped while the restore ran.
+				const storedFailedSeq = value.batchFailedSeq === 0 || _validSeq(value.batchFailedSeq) ? value.batchFailedSeq : Infinity;
 				_batch = {
-					failedSeq: value.batchFailedSeq === 0 || _validSeq(value.batchFailedSeq) ? value.batchFailedSeq : Infinity,
-					clean: value.batchClean !== false
+					failedSeq: Math.min(storedFailedSeq, _batch.failedSeq),
+					clean: value.batchClean !== false && _batch.clean
 				};
 			}
 		}
 		// No new seq at or below one that already went up, also once its row
 		// is gone: a failure there would read as a hole in the upload order.
 		if (_checkpoint.lastUploadedSeq > _seq) _seq = _checkpoint.lastUploadedSeq;
+		// A restored call a full queue dropped meanwhile, below one that went
+		// up before the reload, is a hole.
+		if (_batch.failedSeq < _checkpoint.lastUploadedSeq && !_checkpoint.gapDetected) {
+			_checkpoint.gapDetected = true;
+			_checkpointDirty = true;
+		}
 		read = true;
 	} finally {
-		if (_store && !read) {
+		if (_store && !read && rowsRead) {
+			// The queue was read, so new seqs go past every stored row; only the
+			// checkpoint is unknown, and writing it would replace one nobody
+			// has seen. It is left alone for the page.
+			_checkpointUnknown = true;
+			if (_IS_DEV) console.warn('[svelte-realtime] the stored offline upload checkpoint could not be read, so it is not updated for this page; the queue itself is stored as usual.');
+		} else if (_store && !read) {
 			// What is stored could not be read in full, so any seq could be a
-			// stored row's and the stored checkpoint is unknown: writing,
-			// deleting or checkpointing could destroy what nobody has seen. The
-			// queue goes on in memory only.
+			// stored row's: writing, deleting or checkpointing could destroy a
+			// mutation nobody has seen. The queue goes on in memory only.
 			_scanFailed = true;
 			_store = null;
 			if (_IS_DEV) console.warn('[svelte-realtime] offline persistence unavailable: the stored queue could not be read, so queued mutations stay in memory for this page (they will not survive a reload).');
@@ -263,13 +282,20 @@ async function _rehydrate() {
 		// restored calls.
 		if (_droppedUnnumbered) {
 			_droppedUnnumbered = false;
-			if (_seq < _batch.failedSeq) _batch.failedSeq = _seq;
+			if (_seq < _batch.failedSeq) {
+				_batch.failedSeq = _seq;
+				_checkpointDirty = true;
+			}
 		}
 		_restoring = false;
 		const waiting = _unstamped;
 		_unstamped = [];
 		for (const { entry, resolve } of waiting) {
 			resolve(entry.settled ? false : _stamp(entry));
+		}
+		if (_checkpointDirty) {
+			_checkpointDirty = false;
+			_putCheckpoint();
 		}
 	}
 }
@@ -431,7 +457,8 @@ export function _batchState() {
  * @param {boolean} clean
  */
 export function _carryBatch(failedSeq, clean) {
-	_batch = { failedSeq, clean };
+	// A full queue may have dropped a call while the drain ran.
+	_batch = { failedSeq: Math.min(_batch.failedSeq, failedSeq), clean: _batch.clean && clean };
 	_putCheckpoint();
 }
 
@@ -495,7 +522,14 @@ export function _clearGapIfClean() {
 
 function _putCheckpoint() {
 	const store = _store;
-	if (!store) return;
+	if (!store || _checkpointUnknown) return;
+	// The stored checkpoint is not read yet while the restore runs: writing
+	// now would replace it with this page's empty one. The restore writes
+	// once it has merged the two.
+	if (_restoring) {
+		_checkpointDirty = true;
+		return;
+	}
 	const value = {
 		..._checkpoint,
 		batchFailedSeq: _batch.failedSeq === Infinity ? null : _batch.failedSeq,
@@ -519,6 +553,8 @@ export function _resetOffline() {
 	_scanFailed = false;
 	_batch = { failedSeq: Infinity, clean: true };
 	_droppedUnnumbered = false;
+	_checkpointDirty = false;
+	_checkpointUnknown = false;
 	_pendingStore.set(0);
 	_uploadingStore.set(false);
 }

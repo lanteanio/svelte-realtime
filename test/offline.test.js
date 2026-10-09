@@ -709,10 +709,13 @@ describe('offline queue - a call queued while the restore runs', () => {
 		}
 	});
 
-	it('a checkpoint that cannot be read turns persistence off too', async () => {
+	it('a checkpoint that cannot be read is left alone, and the queue it came with stays stored', async () => {
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		try {
-			const store = fakeStore({ 'c:default': { lastUploadedSeq: 5, gapDetected: true } });
+			const store = fakeStore({
+				...Object.fromEntries([seedEntry('default', 3, 'todos/add', [{ t: 'restored' }], 'off-3')]),
+				'c:default': { lastUploadedSeq: 5, gapDetected: true }
+			});
 			const getAll = store.getAll;
 			store.getAll = async (prefix) => {
 				if (prefix.startsWith('c:')) throw new Error('read failed');
@@ -723,15 +726,55 @@ describe('offline queue - a call queued while the restore runs', () => {
 			simulateStatus('disconnected');
 			const w = watch(mod.__rpc('todos/add')({ t: 'new' }));
 			await flush(1);
+			expect(storedKeys(store)).toEqual([row(3), row(4)]);
 			simulateStatus('open');
 			await flush();
 			await respondAll(() => ({ ok: true, data: 'ok' }));
 			expect(w.value).toBe('ok');
-			expect(store.ops).toEqual([]);
+			expect(storedKeys(store)).toEqual([]);
 			expect(store.map.get('c:default')).toEqual({ lastUploadedSeq: 5, gapDetected: true });
+			expect(store.ops.filter(([op, k]) => op === 'put' && k.startsWith('c:'))).toEqual([]);
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	it('a full-queue drop during the restore leaves the stored checkpoint to the restore', async () => {
+		const { store, release } = gatedStore({ extra: { 'c:default': { lastUploadedSeq: 9, gapDetected: true } } });
+		mod.configure({ offline: { queue: true, maxQueue: 1, persist: store } });
+		simulateStatus('disconnected');
+		watch(mod.__rpc('todos/add')({ t: 'dropped' }));
+		watch(mod.__rpc('todos/add')({ t: 'kept' }));
+		await flush(1);
+		release();
+		await flush();
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 9, gapDetected: true });
+		expect(store.map.get('c:default')).toMatchObject({ lastUploadedSeq: 9, gapDetected: true, batchFailedSeq: 9 });
+		expect(storedKeys(store)).toEqual([row(7), row(10)]);
+	});
+
+	it('a restored call a full queue drops while the checkpoint is read counts once it is', async () => {
+		/** @type {(v?: any) => void} */
+		let release = () => {};
+		const gate = new Promise((r) => { release = r; });
+		const store = fakeStore({
+			...Object.fromEntries([seedEntry('default', 7, 'todos/add', [{ t: 'restored' }], 'off-7')]),
+			'c:default': { lastUploadedSeq: 9, gapDetected: false }
+		});
+		const getAll = store.getAll;
+		store.getAll = async (prefix) => {
+			if (prefix.startsWith('c:')) await gate;
+			return getAll(prefix);
+		};
+		mod.configure({ offline: { queue: true, maxQueue: 1, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		mod.__rpc('todos/add')({ t: 'new' }).catch(() => {});
+		await flush(1);
+		expect(storedKeys(store)).toEqual([]);
+		release();
+		await flush();
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 9, gapDetected: true });
 	});
 
 	it('restored rows without a valid seq take it from their key, and their copy goes when they settle', async () => {
@@ -902,6 +945,40 @@ describe('offline queue - checkpoint and consumer stores', () => {
 		await expect(p2).resolves.toBe('ok');
 		await expect(p3).resolves.toBe('ok');
 		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 3, gapDetected: true });
+	});
+
+	it('a full-queue drop while a drain runs still counts when the close cuts that drain', async () => {
+		const store = fakeStore();
+		const save = mod.__rpc('todos/add');
+		let draftsOnDrop = false;
+		mod.configure({
+			offline: { queue: true, maxQueue: 1, persist: store },
+			onDisconnect: () => {
+				if (!draftsOnDrop) return;
+				save({ t: 'd1' }).catch(() => {});
+				save({ t: 'd2' }).catch(() => {});
+			}
+		});
+		simulateStatus('disconnected');
+		save({ t: 'a' }).catch(() => {});
+		await flush(1);
+		simulateStatus('open');
+		await flush();
+		draftsOnDrop = true;
+		// The drop that uses up the last reconnect attempt: 'failed' follows at once.
+		simulateStatus('disconnected');
+		simulateStatus('failed');
+		await flush();
+
+		mod = await loadClient();
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual(['a', 'd2']);
+		expect(mod.offlineCheckpoint().gapDetected).toBe(true);
 	});
 
 	it('a batch the close cut off carries its failure across a reload', async () => {
