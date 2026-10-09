@@ -311,58 +311,34 @@ async function _drainOfflineQueue() {
 		_bumpPending();
 
 		// A custom replay function picks the calls to replay and their order.
-		// It may return the entries it was given or copies of them (matched by
-		// `resolve`, unique per call); a copy can change the path and args it
-		// replays with, never the call's idempotency key or stored copy. One it
-		// leaves out is dropped like a beforeReplay drop; one that throws or
-		// does not return an array decides nothing, and the queue replays as it
-		// is.
+		// One it leaves out is dropped like a beforeReplay drop; an answer that
+		// decides nothing (see `_readReplayAnswer`) replays the queue as it is.
+		// The queue was emptied above, so nothing here may throw.
 		if (typeof offlineOpts?.replay === 'function') {
-			/** @type {any} */
-			let picked;
-			let threw = false;
+			/** @type {ReturnType<typeof _readReplayAnswer>} */
+			let answer;
 			try {
-				picked = offlineOpts.replay(queue.slice());
+				const picked = offlineOpts.replay(queue.slice());
+				try {
+					answer = _readReplayAnswer(picked, queue);
+				} catch {
+					answer = 'returned an answer that could not be read';
+				}
 			} catch (err) {
-				threw = true;
-				picked = err;
+				answer = 'threw' + _causeOf(err);
 			}
-			const thenable = !threw && picked !== null && typeof picked === 'object' && typeof picked.then === 'function';
-			// Its rejection is not the drain's to report.
-			if (thenable) Promise.resolve(picked).catch(() => {});
-			if (!threw && Array.isArray(picked)) {
-				const byResolve = new Map(queue.map((entry) => [entry.resolve, entry]));
-				/** @type {OfflineEntry[]} */
-				const kept = [];
-				const keptSet = new Set();
-				let foreign = 0;
-				for (const item of picked) {
-					const original = item ? byResolve.get(item.resolve) : undefined;
-					if (!original) {
-						foreign++;
-						continue;
-					}
-					if (keptSet.has(original)) continue;
-					keptSet.add(original);
-					kept.push(original);
-					if (item !== original && (item.path !== original.path || item.args !== original.args)) {
-						overrides.set(original, {
-							path: typeof item.path === 'string' ? item.path : original.path,
-							args: Array.isArray(item.args) ? item.args : original.args
-						});
-					}
+			if (typeof answer === 'string') {
+				if (_IS_DEV) console.warn('[svelte-realtime] offline.replay ' + answer + ', so the queue replays as it is.');
+			} else {
+				if (answer.foreign > 0 && _IS_DEV) {
+					console.warn('[svelte-realtime] offline.replay returned ' + answer.foreign + ' item(s) that are not queued calls, so they are ignored. Return the entries it was given, or copies of them.');
 				}
-				if (foreign > 0 && _IS_DEV) {
-					console.warn('[svelte-realtime] offline.replay returned ' + foreign + ' item(s) that are not queued calls, so they are ignored. Return the entries it was given, or copies of them.');
-				}
+				for (const [entry, over] of answer.overrides) overrides.set(entry, over);
+				const keptSet = new Set(answer.kept);
 				for (const entry of queue) {
 					if (!keptSet.has(entry)) settleFail(entry, new RpcError('STALE', 'Offline mutation dropped by the replay function'));
 				}
-				queue = kept;
-			} else if (_IS_DEV) {
-				console.warn('[svelte-realtime] offline.replay ' + (thenable
-					? 'returned a promise; it must return the calls to replay synchronously, so the queue replays as it is.'
-					: 'did not return an array of queued calls, so the queue replays as it is.' + (threw && picked instanceof Error ? ' Cause: ' + picked.message : '')));
+				queue = answer.kept;
 			}
 		}
 
@@ -424,6 +400,85 @@ async function _drainOfflineQueue() {
 		// go out, and that drain clears it when it ends.
 		if (again) void _drainOfflineQueue();
 		else _setUploading(false);
+	}
+}
+
+/**
+ * What a custom `replay` function answered, read as untrusted: the queued
+ * calls it picked, in its order, and the path and args a copy replays a call
+ * with in place of its own (never the call's idempotency key or stored copy).
+ * A copy is matched to its call by `resolve`, unique per call; one without a
+ * `resolve` function, as a JSON copy is, by its `seq` and `idempotencyKey`.
+ * A call returned twice replays once. The answer decides nothing (a reason
+ * string is returned) when it is a promise, not an array, or a non-empty
+ * array without a single queued call in it, which reads as copies that lost
+ * what identifies them, not as a choice to drop every call.
+ * @param {any} picked
+ * @param {OfflineEntry[]} queue
+ * @returns {{ kept: OfflineEntry[], overrides: Map<OfflineEntry, { path: string, args: any[] }>, foreign: number } | string}
+ */
+function _readReplayAnswer(picked, queue) {
+	if (picked !== null && typeof picked === 'object' && typeof picked.then === 'function') {
+		// Its rejection is not the drain's to report.
+		Promise.resolve(picked).catch(() => {});
+		return 'returned a promise; it must return the calls to replay synchronously';
+	}
+	if (!Array.isArray(picked)) return 'did not return an array of queued calls';
+	const byResolve = new Map(queue.map((entry) => [entry.resolve, entry]));
+	/** @type {Map<number, OfflineEntry>} */
+	const bySeq = new Map();
+	for (const entry of queue) if (typeof entry.seq === 'number' && entry.seq > 0) bySeq.set(entry.seq, entry);
+	/** @type {OfflineEntry[]} */
+	const kept = [];
+	const keptSet = new Set();
+	/** @type {Map<OfflineEntry, { path: string, args: any[] }>} */
+	const overrides = new Map();
+	let foreign = 0;
+	const n = picked.length;
+	for (let i = 0; i < n; i++) {
+		const item = picked[i];
+		let original;
+		if (item !== null && typeof item === 'object') {
+			const resolve = item.resolve;
+			if (typeof resolve === 'function') {
+				original = byResolve.get(resolve);
+			} else {
+				const copied = bySeq.get(item.seq);
+				if (copied && copied.idempotencyKey === item.idempotencyKey) original = copied;
+			}
+		}
+		if (!original) {
+			foreign++;
+			continue;
+		}
+		if (keptSet.has(original)) continue;
+		keptSet.add(original);
+		kept.push(original);
+		if (item !== original) {
+			const path = item.path;
+			const args = item.args;
+			if (path !== original.path || args !== original.args) {
+				overrides.set(original, {
+					path: typeof path === 'string' ? path : original.path,
+					args: Array.isArray(args) ? args : original.args
+				});
+			}
+		}
+	}
+	if (n > 0 && kept.length === 0) return 'returned ' + n + ' item(s) and none of them is a queued call';
+	return { kept, overrides, foreign };
+}
+
+/**
+ * The message of a thrown error for a dev warning, read without trusting it.
+ * @param {unknown} err
+ * @returns {string}
+ */
+function _causeOf(err) {
+	try {
+		return err instanceof Error ? ' Cause: ' + err.message : '';
+	} catch {
+		return '';
 	}
 }
 

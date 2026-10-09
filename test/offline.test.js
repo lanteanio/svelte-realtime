@@ -517,6 +517,106 @@ describe('offline queue - a replay function', () => {
 			warn.mockRestore();
 		}
 	});
+
+	it('JSON copies of the calls pick, order and rename like the entries, under each call\'s idempotency key', async () => {
+		const store = fakeStore();
+		const onReplayError = vi.fn();
+		const replay = (queue) => JSON.parse(JSON.stringify(queue))
+			.filter((call) => call.args[0].t !== 2)
+			.map((call) => ({ ...call, path: call.path.replace('todos/', 'tasks/') }))
+			.reverse();
+		const watched = (await goOfflineAndQueue({ persist: store, replay, onReplayError }, three)).map(watch);
+		const keys = [...store.map.values()].map((v) => v.idempotencyKey);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => [e.rpc, e.args[0].t, e.idempotencyKey])).toEqual([
+			['tasks/add', 3, keys[2]],
+			['tasks/add', 1, keys[0]]
+		]);
+		expect(watched[0].value).toBe('ok');
+		expect(watched[1].error).toMatchObject({ code: 'STALE' });
+		expect(watched[2].value).toBe('ok');
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('a copy without a resolve function is a call\'s only when both its seq and its idempotency key are that call\'s', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const replay = (queue) => [
+				{ path: 'admin/wipe', args: [], queuedAt: 0, seq: queue[0].seq, idempotencyKey: 'forged' },
+				queue[1]
+			];
+			const watched = (await goOfflineAndQueue({ replay }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(sentCalls().map((e) => e.rpc + ':' + e.args[0]?.t)).toEqual(['todos/add:2']);
+			expect(watched[0].error).toMatchObject({ code: 'STALE' });
+			expect(watched[2].error).toMatchObject({ code: 'STALE' });
+			expect(warn.mock.calls.some(([m]) => String(m).includes('not queued calls'))).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('an answer with items but no queued call in it decides nothing', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const store = fakeStore();
+			const onReplayError = vi.fn();
+			// Copies stripped of what identifies them.
+			const replay = (queue) => queue.map(({ path, args }) => ({ path, args }));
+			const watched = (await goOfflineAndQueue({ persist: store, replay, onReplayError }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(sentCalls().map((e) => e.args[0].t)).toEqual([1, 2, 3]);
+			expect(watched.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+			expect(onReplayError).not.toHaveBeenCalled();
+			expect(warn.mock.calls.some(([m]) => String(m).includes('none of them is a queued call'))).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('an empty answer drops every call', async () => {
+		const store = fakeStore();
+		const onReplayError = vi.fn();
+		const watched = (await goOfflineAndQueue({ persist: store, replay: () => [], onReplayError }, three)).map(watch);
+		simulateStatus('open');
+		await flush();
+		expect(sentCalls()).toEqual([]);
+		expect(watched.map((w) => w.error?.code)).toEqual(['STALE', 'STALE', 'STALE']);
+		expect(onReplayError).toHaveBeenCalledTimes(3);
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('an answer that throws while it is read decides nothing and loses no call', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const answers = [
+				(queue) => [queue[0], { get resolve() { throw new Error('getter'); } }],
+				() => new Proxy([], { get() { throw new Error('trap'); } }),
+				(queue) => [{ ...queue[0], get path() { throw new Error('getter'); } }]
+			];
+			for (const replay of answers) {
+				mod = await loadClient();
+				const store = fakeStore();
+				const watched = (await goOfflineAndQueue({ persist: store, replay }, three)).map(watch);
+				simulateStatus('open');
+				await flush();
+				await respondAll(() => ({ ok: true, data: 'ok' }));
+				expect(sentCalls().map((e) => e.args[0].t)).toEqual([1, 2, 3]);
+				expect(watched.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+				expect(storedKeys(store)).toEqual([]);
+			}
+			expect(warn.mock.calls.filter(([m]) => String(m).includes('could not be read'))).toHaveLength(3);
+		} finally {
+			warn.mockRestore();
+		}
+	});
 });
 
 describe('offline queue - a call queued while the restore runs', () => {
