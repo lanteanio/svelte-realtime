@@ -136,13 +136,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `onConflict` returns are taken as JSON the same way; args it returns
   that cannot be serialized drop the call with its `CONFLICT` error.
 
-- **An async `offline.beforeReplay` drops the calls it is asked about.**
-  The filter must answer synchronously. The promise an async filter
-  returns is truthy, so every call went through a filter that had not
-  answered yet. Such a call is now dropped as `STALE` (its rejection says
-  the filter returned a promise) and reported to `onReplayError`, with a
-  warning in development. An app with an async filter loses its queued
-  calls on the first replay after upgrading: make the filter synchronous.
+- **An `offline.beforeReplay` that throws or returns a promise drops the
+  call it is asked about.** A filter that threw stopped the replay before
+  it began: every queued call stayed queued and went out once the filter
+  stopped throwing, at a later reconnect. An async filter returned a
+  promise, which is truthy, so every call went through a filter that had
+  not answered yet. Either way the call is now dropped as `STALE` and
+  reported to `onReplayError`, with a warning in development; after a
+  throw the error is the rejection's `cause`, after a promise its message
+  says so. A filter that cannot decide yet, say for want of a signed-in
+  user, now loses the calls it is asked about: make it synchronous, have
+  it return a boolean, and have what it needs ready before the connection
+  opens.
 
 - **A test that mocks `svelte-adapter-uws/client` must return a whole
   connection from `connect()`.** The client now reads the topic factory,
@@ -398,16 +403,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rows whose key is exactly its own persistKey and a sequence number, and
   ignores anything else a custom store returns.
 
-- **An `onReplayError` or `beforeReplay` that throws no longer stops the
-  offline replay.** A throwing `onReplayError` ended the replay where it
-  was: the failed call's promise never settled, and the calls behind it
-  stayed pending without being sent until a reload. A throwing
-  `beforeReplay` stopped every replay before it began. `onReplayError` is
-  now an observer whose errors are ignored (with a warning in development),
-  like `onConflict`. A call whose `beforeReplay` throws is dropped as
-  `STALE` and reported, with the filter's error as the rejection's
-  `cause` and a warning in development, so a guard that fails, say for
-  want of a signed-in user, never lets a call through.
+- **An `onReplayError` that throws no longer stops the offline replay.** It
+  ended the replay where it was: the failed call's promise never settled,
+  and the calls behind it stayed pending without being sent until a
+  reload. `onReplayError` is now an observer whose errors are ignored
+  (with a warning in development), like `onConflict`.
 
 - **`offlineCheckpoint().gapDetected` follows the order mutations were
   queued in.** A failure counted against any mutation that succeeded after
@@ -451,12 +451,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   anyone held and no other report, so it vanished silently. A call the
   queue drops now goes to `onReplayError` with `QUEUE_FULL`, like a `STALE`
   drop, once the call that pushed it out is queued (or the replays a lost
-  connection cut off are put back). While the hook reports such a drop, a
-  call it makes can push out another queued call: a restored one is
-  reported next, and one whose caller holds its promise is only rejected,
-  so a hook that queues a call cannot keep the queue evicting. `maxQueue`
-  is rounded down to a whole number of at least one; a falsy value, or one
-  that is not a number, counts as unset (100).
+  connection cut off are put back). While the hook reports such a drop,
+  each call it makes can push out another queued call: a restored one is
+  reported in turn (so a hook that queues a call on every report can work
+  through every restored call), and one whose caller holds its promise is
+  only rejected, so a hook that queues a call cannot keep the queue
+  evicting. `maxQueue` is rounded down, to at least one; a falsy value, or
+  one that does not convert to a number, counts as unset (100).
 
 - **A `pendingMutations` or `uploading` subscriber that throws no longer
   stops the offline queue.** Both were svelte/store writables, so a

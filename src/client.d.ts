@@ -605,7 +605,7 @@ export interface OfflineEntry {
 	queuedAt: number;
 	resolve: Function;
 	reject: Function;
-	/** The call's place in the queue, unique per call. A copy without `resolve` (a JSON copy) is matched to its call by this and `idempotencyKey` together. */
+	/** The call's place in the queue, unique per call. A copy whose `resolve` is not a function (a JSON copy has none) is matched to its call by this and `idempotencyKey` together. */
 	readonly seq?: number;
 	/** The idempotency key the call replays under. */
 	readonly idempotencyKey?: string;
@@ -702,7 +702,7 @@ export function configure(config: {
 	offline?: {
 		/** Enable queuing RPCs when disconnected. */
 		queue?: boolean;
-		/** Maximum queue size before oldest entries are dropped, rounded down to a whole number of at least 1; a falsy value, or one that is not a number, counts as unset. @default 100 */
+		/** Maximum queue size before oldest entries are dropped, rounded down, to at least 1; a falsy value, or one that does not convert to a number, counts as unset. @default 100 */
 		maxQueue?: number;
 		/** Drop queued mutations older than this (ms) at replay time. @default 0 (no age limit) */
 		maxAge?: number;
@@ -710,7 +710,7 @@ export function configure(config: {
 		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => Array<OfflineEntry | null>);
 		/** Filter function called before replaying each queued call. Return a falsy value to drop it (a filter that returns nothing drops every call). A filter that throws drops the call too (STALE, with its error as the cause), and so does one that returns a promise: it must answer synchronously. Both warn in development. `call.args` is the JSON copy taken when the call was queued (a `Date` arrives as its ISO string), here and in `onReplayError` and `onConflict`. */
 		beforeReplay?(call: { path: string; args: any[]; queuedAt: number }): boolean;
-		/** Called for a queued call the queue gives up on: a replay that failed (also one a CONFLICT resolution drops), or a call dropped as STALE or QUEUE_FULL. Not called for a call a lost connection cut off (it stays queued), or one rejected because the connection closed for good (its promise reports that). While this hook reports a QUEUE_FULL drop, a call it makes that pushes out a call whose caller holds its promise only rejects that one, so the hook cannot keep the queue evicting; a restored call it pushes out is reported next. An observer: an error it throws is ignored. */
+		/** Called for a queued call the queue gives up on: a replay that failed (also one a CONFLICT resolution drops), or a call dropped as STALE or QUEUE_FULL. Not called for a call a lost connection cut off (it stays queued), or one rejected because the connection closed for good (its promise reports that). While this hook reports a QUEUE_FULL drop, each call it makes can push out another queued call: a restored one is reported in turn (one report per restored call at most), and one whose caller holds its promise is only rejected, so the hook cannot keep the queue evicting. An observer: an error it throws is ignored. */
 		onReplayError?(call: { path: string; args: any[]; queuedAt: number }, error: any): void;
 		/**
 		 * Durable persistence: queued mutations survive a page reload. `true`
@@ -744,7 +744,8 @@ export function configure(config: {
 		conflictResolution?: 'lww' | 'server-win' | 'custom';
 		/**
 		 * Conflict hook. Under `'custom'`: return an args array to re-issue
-		 * the call once with merged args, anything else to drop. Under
+		 * the call once with merged args (taken as JSON; an array that cannot
+		 * be serialized drops the call), anything else to drop. Under
 		 * `'server-win'`: a pure notification (return value ignored).
 		 * Required when `conflictResolution` is `'custom'`.
 		 */

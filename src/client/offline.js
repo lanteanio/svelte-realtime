@@ -439,7 +439,7 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 /**
  * @internal The queue's size limit from `offline.maxQueue`: 100 for a falsy
  * value or one that is not a number (`maxQueue || 100`, as before), otherwise
- * rounded down to a whole number of at least one.
+ * rounded down, to at least one.
  * @param {any} offlineOpts
  * @returns {number}
  */
