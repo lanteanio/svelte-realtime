@@ -1903,6 +1903,15 @@ export namespace live {
 	 * `rpc.with({ idempotencyKey })`). When neither is present the call runs
 	 * as if the wrapper were absent.
 	 *
+	 * The cache slot is isolated by RPC path and by the connection's tenant, so
+	 * the same key across different RPCs or tenants never collides. When the
+	 * key comes from the client envelope (no `keyFrom`), it is also isolated by
+	 * the caller's authenticated identity, so one user can never receive another
+	 * user's cached result by sending the same key. The `keyFrom` path is
+	 * app-owned: encode `ctx.user` into the returned key yourself for per-user
+	 * idempotency, or omit it for a deliberately shared slot. Anonymous callers
+	 * are not identity-scoped (the key is used as-is).
+	 *
 	 * Only successful results are cached. A throwing handler aborts the slot
 	 * so the next caller re-runs. Reusing the same key with a DIFFERENT request
 	 * payload throws `LiveError('IDEMPOTENCY_KEY_REUSED')` instead of returning
