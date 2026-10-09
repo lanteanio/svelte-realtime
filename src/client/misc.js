@@ -5,7 +5,7 @@ import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _carryBatch, _endBatch, _queueLimit, _notifyReplayError } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped } from './offline.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, restored?: boolean }} OfflineEntry
@@ -401,7 +401,7 @@ async function _drainOfflineQueue() {
 			_offlineQueue.unshift(...back);
 			// After the close for good the queue is kept as it is for a later page
 			// load: trimming it would delete stored copies the close keeps.
-			if (!clientState.terminated) _trimQueue(_queueLimit(offlineOpts));
+			const dropped = clientState.terminated ? [] : _trimQueue(_queueLimit(offlineOpts));
 			if (clientState.terminated) {
 				// Handled as the queue was at the close: kept with a stored copy,
 				// rejected without one.
@@ -411,6 +411,7 @@ async function _drainOfflineQueue() {
 				// or the drop was never reported, as after a device sleep.
 				again = true;
 			}
+			_settleDropped(dropped);
 		} else {
 			// The batch went up in full. A clean one (no failure, no hole,
 			// nothing left queued) closes any upload-order hole an EARLIER batch

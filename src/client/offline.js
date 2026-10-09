@@ -392,7 +392,9 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 export function _queueLimit(offlineOpts) {
 	const max = offlineOpts?.maxQueue;
 	if (!max) return 100;
-	return Math.max(1, Math.floor(max));
+	const n = Math.floor(Number(max));
+	if (Number.isNaN(n)) return 100;
+	return Math.max(1, n);
 }
 
 /**
@@ -418,15 +420,12 @@ export function _notifyReplayError(call, err) {
  * @param {number} max
  */
 export function _trimQueue(max) {
-	let dropped = false;
+	/** @type {any[]} */
+	const dropped = [];
 	while (_offlineQueue.length > Math.max(max, 0)) {
 		const entry = _offlineQueue.shift();
-		dropped = true;
-		const err = new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped');
+		dropped.push(entry);
 		_settlePersist(entry, false);
-		// A restored call has no promise anyone holds: this is its only report.
-		_notifyReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
-		entry.reject(err);
 		// What is queued after it goes up later: holes in the batch's order.
 		if (typeof entry.seq === 'number') {
 			if (entry.seq < _batch.failedSeq) _batch.failedSeq = entry.seq;
@@ -436,7 +435,34 @@ export function _trimQueue(max) {
 			_droppedUnnumbered = true;
 		}
 	}
-	if (dropped) _putCheckpoint();
+	if (dropped.length > 0) _putCheckpoint();
+	return dropped;
+}
+
+/** True while a full-queue drop is being reported to onReplayError. */
+let _reportingDrops = false;
+
+/**
+ * @internal Reject what `_trimQueue` dropped with QUEUE_FULL and report it to
+ * onReplayError (a restored call has no promise anyone holds: this is its
+ * only report). Called once the caller's own queue work is done. A call the
+ * hook makes can push out another entry: that one is rejected but not
+ * reported, so a hook that queues a call cannot keep the queue evicting.
+ * @param {any[]} dropped
+ */
+export function _settleDropped(dropped) {
+	for (const entry of dropped) {
+		const err = new RpcError('QUEUE_FULL', 'Offline queue overflow - oldest mutation dropped');
+		if (!_reportingDrops) {
+			_reportingDrops = true;
+			try {
+				_notifyReplayError({ path: entry.path, args: entry.args, queuedAt: entry.queuedAt }, err);
+			} finally {
+				_reportingDrops = false;
+			}
+		}
+		entry.reject(err);
+	}
 }
 
 /**
@@ -553,6 +579,7 @@ export function _resetOffline() {
 	_scanFailed = false;
 	_batch = { failedSeq: Infinity, clean: true };
 	_droppedUnnumbered = false;
+	_reportingDrops = false;
 	_checkpointDirty = false;
 	_checkpointUnknown = false;
 	_pendingStore.set(0);

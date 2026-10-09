@@ -1477,6 +1477,32 @@ describe('offline queue - a drop during the drain', () => {
 		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
 	});
 
+	it('an onReplayError that queues a call while the queue is full reports once and evicts once', async () => {
+		let n = 0;
+		const log = mod.__rpc('log/drop');
+		const onReplayError = vi.fn(() => { log.fresh({ n: n++ }).catch(() => {}); });
+		const [first, second, third] = await goOfflineAndQueue({ maxQueue: 2, onReplayError }, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]],
+			['todos/add', [{ t: 3 }]]
+		]);
+		await expect(first).rejects.toMatchObject({ code: 'QUEUE_FULL' });
+		await expect(second).rejects.toMatchObject({ code: 'QUEUE_FULL' });
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+		const w3 = watch(third);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((v) => { pendingSeen = v; });
+		expect(pendingSeen).toBe(2);
+		expect(w3.settled).toBe(false);
+	});
+
+	it('a maxQueue that is not a number counts as unset', async () => {
+		const calls = Array.from({ length: 101 }, (_, i) => ['todos/add', [{ t: i }]]);
+		const [first, second] = await goOfflineAndQueue({ maxQueue: 'lots' }, calls);
+		await expect(first).rejects.toMatchObject({ code: 'QUEUE_FULL' });
+		expect(watch(second).settled).toBe(false);
+	});
+
 	it('a maxQueue below one keeps only the newest call', async () => {
 		const [first, second] = await goOfflineAndQueue({ maxQueue: -1 }, [
 			['todos/add', [{ t: 1 }]],
