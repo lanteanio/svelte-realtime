@@ -92,7 +92,7 @@ Svelte 4 and 5 are both supported. Four features ship Svelte 5 rune modules and 
 
 ## Manual setup
 
-Starting from a SvelteKit project. If you do not have one yet, run `npx sv create my-app && cd my-app && npm install` first.
+Starting from a SvelteKit 2 project. If you do not have one yet, run `npx sv@0.17.1 create my-app && cd my-app && npm install` first. svelte-realtime and svelte-adapter-uws do not support SvelteKit 3 yet, and `sv` 1.0 and later create SvelteKit 3 projects.
 
 ### Step 1: Install everything
 

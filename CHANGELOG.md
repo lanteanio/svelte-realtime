@@ -317,6 +317,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The scaffolder creates a project again.** It ran the latest `sv`, and since
+  `sv` 1.0 (released 2026-10-01) that creates a SvelteKit 3 project, which
+  `svelte-adapter-uws` and `svelte-realtime` do not support: the install
+  stopped with `ERESOLVE` and no project was created. The scaffolder now runs
+  `sv@0.17.1`, the last release that creates a SvelteKit 2 project, and the
+  README's manual setup says to do the same.
+
 - **A connection closed for good stays closed, and every call says so.**
   The client listened for a terminal close through a `ready()` member the
   adapter's connection object does not have, so it never noticed one and

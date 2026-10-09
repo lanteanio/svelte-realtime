@@ -14,6 +14,7 @@ import {
 	SCAFFOLD_ADAPTER_SPEC,
 	SCAFFOLD_EXTENSIONS_SPEC,
 	SCAFFOLD_REALTIME_SPEC,
+	SCAFFOLD_SV_SPEC,
 	SCAFFOLD_UWS_SPEC
 } from '../src/cli-utils.js';
 
@@ -354,7 +355,13 @@ describe('run() helper', () => {
 		// not concatenated into a single shell-style string. If a future
 		// edit re-introduces template-string interpolation here, the regex
 		// for the array-shape call will stop matching.
-		expect(_cliSrc).toMatch(/run\(\s*bin\('npx'\)\s*,\s*\[\s*'-y'\s*,\s*'sv'\s*,\s*'create'\s*,\s*name\s*,/);
+		expect(_cliSrc).toMatch(/run\(\s*bin\('npx'\)\s*,\s*\[\s*'-y'\s*,\s*SCAFFOLD_SV_SPEC\s*,\s*'create'\s*,\s*name\s*,/);
+	});
+
+	it('sv create runs a pinned sv that creates a SvelteKit 2 project', () => {
+		// An unpinned sv follows its latest release; sv 1 creates SvelteKit 3
+		// projects, whose @sveltejs/kit ^3 the adapter's peer range refuses.
+		expect(SCAFFOLD_SV_SPEC).toBe('sv@0.17.1');
 	});
 
 	it('bin() helper is defined and resolves package-manager binaries to .cmd on Windows', () => {

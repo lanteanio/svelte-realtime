@@ -11,6 +11,10 @@ export const SCAFFOLD_REALTIME_SPEC = 'svelte-realtime@0.6.0-next.91';
 export const SCAFFOLD_EXTENSIONS_SPEC = 'svelte-adapter-uws-extensions@0.6.0-next.64';
 export const SCAFFOLD_UWS_SPEC =
 	'https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz';
+// The last sv that creates a SvelteKit 2 project. sv 1 creates SvelteKit 3
+// projects, which the adapter and realtime do not support: their peer range
+// stops the install, and the adapter uses builder APIs SvelteKit 3 removed.
+export const SCAFFOLD_SV_SPEC = 'sv@0.17.1';
 
 // Owned once and embedded into the generated hooks file. Documentation and
 // transcript generation consume these fields instead of maintaining a second

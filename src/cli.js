@@ -12,6 +12,7 @@ import {
 	runScaffoldVerification,
 	SCAFFOLD_ADAPTER_SPEC,
 	SCAFFOLD_REALTIME_SPEC,
+	SCAFFOLD_SV_SPEC,
 	SCAFFOLD_UWS_SPEC,
 	VALID_NAME_RE
 } from './cli-utils.js';
@@ -159,7 +160,7 @@ if (template === 'demo') {
 
 if (template !== 'demo') {
 	p.log.step('Creating SvelteKit project');
-	run(bin('npx'), ['-y', 'sv', 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
+	run(bin('npx'), ['-y', SCAFFOLD_SV_SPEC, 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
 
 	p.log.step('Installing dependencies');
 	run(bin(agent), [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);
