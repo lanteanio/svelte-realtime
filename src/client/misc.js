@@ -256,7 +256,13 @@ async function _drainOfflineQueue() {
 						}
 						if (conflictResolution === 'custom') {
 							let merged;
-							try { merged = onConflict ? onConflict(call, err) : undefined; } catch { merged = undefined; }
+							// Taken as JSON now: args that cannot be sent drop the call.
+							try {
+								merged = onConflict ? onConflict(call, err) : undefined;
+								if (Array.isArray(merged)) merged = _jsonCopy(merged);
+							} catch {
+								merged = undefined;
+							}
 							if (Array.isArray(merged)) {
 								retried = true;
 								args = merged;
@@ -321,14 +327,16 @@ async function _drainOfflineQueue() {
 		_bumpPending();
 
 		// A custom replay function picks the calls to replay and their order.
-		// One it leaves out is dropped like a beforeReplay drop; an answer that
-		// decides nothing (see `_readReplayAnswer`) replays the queue as it is.
-		// The queue was emptied above, so nothing here may throw.
+		// It gets copies, so changing one changes no queued call (its seq or
+		// idempotency key least of all). One it leaves out is dropped like a
+		// beforeReplay drop; an answer that decides nothing (see
+		// `_readReplayAnswer`) replays the queue as it is. The queue was emptied
+		// above, so nothing here may throw.
 		if (typeof offlineOpts?.replay === 'function') {
 			/** @type {ReturnType<typeof _readReplayAnswer>} */
 			let answer;
 			try {
-				const picked = offlineOpts.replay(queue.slice());
+				const picked = offlineOpts.replay(queue.map((entry) => ({ ...entry, args: _jsonCopy(entry.args) })));
 				try {
 					answer = _readReplayAnswer(picked, queue);
 				} catch {
@@ -419,10 +427,12 @@ async function _drainOfflineQueue() {
  * with in place of its own (never the call's idempotency key or stored copy).
  * A copy is matched to its call by `resolve`, unique per call; one without a
  * `resolve` function, as a JSON copy is, by its `seq` and `idempotencyKey`.
- * A call returned twice replays once. The answer decides nothing (a reason
- * string is returned) when it is a promise, not an array, or a non-empty
- * array without a single queued call in it, which reads as copies that lost
- * what identifies them, not as a choice to drop every call.
+ * A call returned twice replays once, and a `null` or `undefined` item is a
+ * call left out. A copy's args are taken as the JSON the wire would carry,
+ * here, so what is sent cannot change or fail to serialize later. The answer
+ * decides nothing (a reason string is returned) when it is a promise, not an
+ * array, or holds items but not a single queued call, which reads as copies
+ * that lost what identifies them, not as a choice to drop every call.
  * @param {any} picked
  * @param {OfflineEntry[]} queue
  * @returns {{ kept: OfflineEntry[], overrides: Map<OfflineEntry, { path: string, args: any[] }>, foreign: number } | string}
@@ -444,11 +454,14 @@ function _readReplayAnswer(picked, queue) {
 	/** @type {Map<OfflineEntry, { path: string, args: any[] }>} */
 	const overrides = new Map();
 	let foreign = 0;
+	let items = 0;
 	const n = picked.length;
 	for (let i = 0; i < n; i++) {
 		const item = picked[i];
+		if (item === null || item === undefined) continue;
+		items++;
 		let original;
-		if (item !== null && typeof item === 'object') {
+		if (typeof item === 'object') {
 			const resolve = item.resolve;
 			if (typeof resolve === 'function') {
 				original = byResolve.get(resolve);
@@ -470,13 +483,22 @@ function _readReplayAnswer(picked, queue) {
 			if (path !== original.path || args !== original.args) {
 				overrides.set(original, {
 					path: typeof path === 'string' ? path : original.path,
-					args: Array.isArray(args) ? args : original.args
+					args: Array.isArray(args) ? _jsonCopy(args) : original.args
 				});
 			}
 		}
 	}
-	if (n > 0 && kept.length === 0) return 'returned ' + n + ' item(s) and none of them is a queued call';
+	if (items > 0 && kept.length === 0) return 'returned ' + items + ' item(s) and none of them is a queued call';
 	return { kept, overrides, foreign };
+}
+
+/**
+ * A copy of call args in the form the wire carries them.
+ * @param {any[]} args
+ * @returns {any[]}
+ */
+function _jsonCopy(args) {
+	return JSON.parse(JSON.stringify(args));
 }
 
 /**

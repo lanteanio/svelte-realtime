@@ -132,7 +132,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   form the wire carries them: a `Date` arrives as its ISO string, a `Map` or
   `Set` as `{}`, a class instance as a plain object, and the objects are
   not the ones the call was made with. Before, they got the caller's own
-  objects, or after a reload IndexedDB's clone of them.
+  objects, or after a reload IndexedDB's clone of them. The args an
+  `onConflict` returns are taken as JSON the same way; args it returns
+  that cannot be serialized drop the call with its `CONFLICT` error.
 
 - **A test that mocks `svelte-adapter-uws/client` must return a whole
   connection from `connect()`.** The client now reads the topic factory,
@@ -422,14 +424,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A function that threw lost the whole queue until a reload. A call the
   function leaves out now rejects with `STALE` (with `onReplayError`, its
   stored copy deleted) and counts toward `gapDetected` like any dropped
-  call; a call it returns twice replays once; a returned copy is matched to
-  its call by `resolve`, or when it has none, as a JSON copy of the queue
-  does, by the queue fields it kept, and its `path` and `args` are replayed
-  under that call's idempotency key; anything else it returns is ignored
-  with a warning in development; and a function that throws, returns a
-  promise, returns no array or returns items none of which is a queued
-  call leaves the queue to replay as it is, with a warning in development.
-  The README now documents `replay`.
+  call, and so is one it answers with `null` or `undefined` for; a call it
+  returns twice replays once; a returned copy is matched to its call by
+  `resolve`, or when it has none, as a JSON copy of the queue does, by its
+  `seq` and `idempotencyKey` (now on the `OfflineEntry` type), and its
+  `path` and `args` are replayed under that call's idempotency key;
+  anything else it returns is ignored with a warning in development; and a
+  function that throws, returns a promise, returns no array or returns
+  items none of which is a queued call leaves the queue to replay as it is,
+  with a warning in development. The function gets copies of the queued
+  calls, so changing one no longer changes the call itself, its
+  idempotency key or which stored copy its settle deletes. The README now
+  documents `replay`.
 
 - **A call the full offline queue drops is reported to `onReplayError`.** A
   call restored after a reload and dropped to make room had no promise

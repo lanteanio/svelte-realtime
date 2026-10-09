@@ -581,6 +581,77 @@ describe('offline queue - a replay function', () => {
 		}
 	});
 
+	it('changing the entries it gets changes no queued call', async () => {
+		const store = fakeStore();
+		const onReplayError = vi.fn();
+		const replay = (queue) => {
+			queue[0].idempotencyKey = 'forged';
+			queue[0].seq = queue[2].seq;
+			queue[1].args[0].t = 'edited';
+			return [queue[0]];
+		};
+		const watched = (await goOfflineAndQueue({ persist: store, replay, onReplayError }, three)).map(watch);
+		const keys = [...store.map.values()].map((v) => v.idempotencyKey);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => [e.args[0].t, e.idempotencyKey])).toEqual([[1, keys[0]]]);
+		expect(watched[0].value).toBe('ok');
+		expect(onReplayError.mock.calls.map(([call]) => call.args[0].t)).toEqual([2, 3]);
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('a null or undefined item leaves a call out, also when every item is one', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const some = (await goOfflineAndQueue({ replay: (queue) => queue.map((c) => (c.args[0].t === 2 ? c : null)) }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(sentCalls().map((e) => e.args[0].t)).toEqual([2]);
+			expect(some.map((w) => w.error?.code ?? w.value)).toEqual(['STALE', 'ok', 'STALE']);
+
+			mod = await loadClient();
+			const none = (await goOfflineAndQueue({ replay: (queue) => queue.map(() => undefined) }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			expect(sentCalls()).toEqual([]);
+			expect(none.map((w) => w.error?.code)).toEqual(['STALE', 'STALE', 'STALE']);
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it("a copy's args are taken when the function answers, and args that cannot be sent decide nothing", async () => {
+		const later = (await goOfflineAndQueue({
+			replay: (queue) => {
+				const out = queue.map((c) => ({ ...c, args: [{ t: c.args[0].t * 10 }] }));
+				queueMicrotask(() => { out[1].args[0].t = 'changed later'; });
+				return out;
+			}
+		}, three.slice(0, 2))).map(watch);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual([10, 20]);
+		expect(later.map((w) => w.value)).toEqual(['ok', 'ok']);
+
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			mod = await loadClient();
+			const watched = (await goOfflineAndQueue({ replay: (queue) => [{ ...queue[0], args: [10n] }, queue[1], queue[2]] }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(sentCalls().map((e) => e.args[0].t)).toEqual([1, 2, 3]);
+			expect(watched.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+			expect(warn.mock.calls.some(([m]) => String(m).includes('could not be read'))).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it('an empty answer drops every call', async () => {
 		const store = fakeStore();
 		const onReplayError = vi.fn();
@@ -1365,6 +1436,29 @@ describe('offline queue - conflict resolution', () => {
 		const attempts = wire.filter((e) => e.rpc === 'docs/save');
 		expect(attempts[1].args).toEqual([{ v: 'merged' }]);
 	});
+
+	it('custom: merged args that cannot be sent drop the call with the conflict, and the replay goes on', async () => {
+		const onReplayError = vi.fn();
+		// Reading it throws something whose code cannot be read either.
+		const unreadable = new Proxy([], { get() { throw { get code() { throw new Error('no code'); } }; } });
+		const [p1, p2] = await goOfflineAndQueue({ conflictResolution: 'custom', onConflict: () => unreadable, onReplayError }, [
+			['docs/save', [{ v: 1 }]],
+			['docs/save', [{ v: 2 }]]
+		]);
+		const w1 = watch(p1);
+		const w2 = watch(p2);
+		simulateStatus('open');
+		await flush();
+		let first = true;
+		await respondAll(() => {
+			if (first) { first = false; return { ok: false, code: 'CONFLICT', error: 'moved' }; }
+			return { ok: true, data: 'applied' };
+		});
+		expect(w1.error).toMatchObject({ code: 'CONFLICT' });
+		expect(w2.value).toBe('applied');
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+	});
+
 
 	it('custom: a non-array from onConflict drops the mutation', async () => {
 		const { p } = await conflictSetup({
