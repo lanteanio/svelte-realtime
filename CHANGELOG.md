@@ -138,8 +138,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An `offline.beforeReplay` that throws or returns a promise drops the
   call it is asked about.** A filter that threw stopped the replay before
-  it began: every queued call stayed queued and went out once the filter
-  stopped throwing, at a later reconnect. An async filter returned a
+  it began: the calls it had not refused stayed queued and went out once
+  the filter stopped throwing, at a later reconnect. An async filter returned a
   promise, which is truthy, so every call went through a filter that had
   not answered yet. Either way the call is now dropped as `STALE` and
   reported to `onReplayError`, with a warning in development; after a
@@ -405,8 +405,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An `onReplayError` that throws no longer stops the offline replay.** It
   ended the replay where it was: the failed call's promise never settled,
-  and the calls behind it stayed pending without being sent until a
-  reload. `onReplayError` is now an observer whose errors are ignored
+  and the calls behind it were never sent (with persistence they came back
+  after a reload). `onReplayError` is now an observer whose errors are ignored
   (with a warning in development), like `onConflict`.
 
 - **`offlineCheckpoint().gapDetected` follows the order mutations were
@@ -417,11 +417,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back after an earlier one failed. A call a full queue dropped never
   counted at all. The gap now opens when a mutation goes up while one
   queued before it failed or was dropped by a full queue, whichever settled
-  first. A replay a lost connection or a page that closed cut off and the
-  one that carries it on count as one upload batch, also across a reload;
-  a cut batch closes no gap, and neither does a batch that opened one. The gap closes when a
-  later batch goes up in full, with nothing failing, nothing cut off and
-  nothing left queued. After a reload, new mutations are numbered past
+  first. When a lost connection or a page that closes cuts a replay off,
+  the replay that carries it on, also after a reload, belongs to the same
+  upload batch; a cut batch closes no gap, and neither does a batch that
+  opened one. The gap closes when a later batch goes up in full, with
+  nothing failing, nothing cut off and nothing left queued. After a reload, new mutations are numbered past
   `lastUploadedSeq` even when no stored mutation is left.
 
 - **A call a custom `offline.replay` function leaves out is dropped, not
@@ -431,12 +431,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   A function that threw lost the whole queue until a reload. A call the
   function leaves out now rejects with `STALE` (with `onReplayError`, its
   stored copy deleted) and counts toward `gapDetected` like any dropped
-  call, and so does one it answers with `null` for (`undefined` reads as a
-  forgotten `return`, not as an answer); a call it returns twice replays
-  once; a copy whose args cannot be serialized drops its call, with the
-  error as the cause; a returned copy is matched to its call by
-  `resolve`, or when it has none, as a JSON copy of the queue does, by its
-  `seq` and `idempotencyKey` (now on the `OfflineEntry` type), and its
+  call, and so does one it answers with `null` for (an `undefined` item
+  reads as a forgotten `return`: it is warned about, and an answer with no
+  queued call in it decides nothing); a call it returns twice replays
+  once; a copy whose args cannot be serialized drops its call as `STALE`,
+  with the error as the cause; a returned copy is matched to its call by
+  `resolve`, or, when its `resolve` is not a function (a JSON copy of the
+  queue has none), by its `seq` and `idempotencyKey` (now on the `OfflineEntry` type), and its
   `path` and `args` are replayed under that call's idempotency key;
   anything else it returns is ignored with a warning in development; and a
   function that throws, returns a promise, returns no array or returns

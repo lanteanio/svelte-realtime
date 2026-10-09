@@ -706,7 +706,7 @@ export function configure(config: {
 		maxQueue?: number;
 		/** Drop queued mutations older than this (ms) at replay time. @default 0 (no age limit) */
 		maxAge?: number;
-		/** Replay strategy on reconnect: 'sequential' (default), 'concurrent' (10-at-a-time), or a synchronous function that gets copies of the queued calls (oldest first; changing one changes no queued call) and returns the ones to replay, in order: the entries it got, or copies of them (one that keeps the entry's `resolve`, or a JSON copy, matched by `seq` and `idempotencyKey`), whose `path` and `args` (taken as JSON when it returns; a copy whose args cannot be drops its call) are replayed under the queued call's idempotency key. A call it leaves out, or answers with `null` for, rejects with STALE (`onReplayError` is called); `undefined` reads as a forgotten `return`, not as an answer. A function that throws, returns a promise, returns no array, or returns items none of which is a queued call decides nothing, and the queue replays as it is. To refuse calls, use `beforeReplay`. 'batch' is accepted as an alias for 'concurrent'. Like the other offline hooks, a function sees each call's arguments as the JSON copy taken when it was queued. */
+		/** Replay strategy on reconnect: 'sequential' (default), 'concurrent' (10-at-a-time), or a synchronous function that gets copies of the queued calls (oldest first; changing one changes no queued call) and returns the ones to replay, in order: the entries it got, or copies of them (one that keeps the entry's `resolve`, or a JSON copy, matched by `seq` and `idempotencyKey`), whose `path` and `args` (taken as JSON when it returns; a copy whose args cannot be taken as JSON drops its call, STALE with the error as the cause) are replayed under the queued call's idempotency key. A call it leaves out, or answers with `null` for, rejects with STALE (`onReplayError` is called); an `undefined` item reads as a forgotten `return` and is warned about, its call left out like any other. A function that throws, returns a promise, returns no array, or returns items none of which is a queued call decides nothing, and the queue replays as it is; so does a queued call whose stored args are not JSON (a custom store), and the function is not called. To refuse calls, use `beforeReplay`. 'batch' is accepted as an alias for 'concurrent'. Like the other offline hooks, a function sees each call's arguments as the JSON copy taken when it was queued. */
 		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => Array<OfflineEntry | null>);
 		/** Filter function called before replaying each queued call. Return a falsy value to drop it (a filter that returns nothing drops every call). A filter that throws drops the call too (STALE, with its error as the cause), and so does one that returns a promise: it must answer synchronously. Both warn in development. `call.args` is the JSON copy taken when the call was queued (a `Date` arrives as its ISO string), here and in `onReplayError` and `onConflict`. */
 		beforeReplay?(call: { path: string; args: any[]; queuedAt: number }): boolean;
@@ -717,9 +717,9 @@ export function configure(config: {
 		 * uses IndexedDB in a browser (an in-memory fallback under SSR/node);
 		 * pass a custom `OfflineStore` to own the storage. Every persisted
 		 * mutation is guaranteed an idempotency key (synthesized when the call
-		 * supplied none), so a replay after reload dedups server-side: a
-		 * mutation that reached the server before the crash answers with its
-		 * original result instead of applying twice. Persistence failures
+		 * supplied none), so a handler wrapped in `live.idempotent` answers a
+		 * replay after reload with its original result instead of applying the
+		 * mutation twice, as long as its idempotency store still holds it. Persistence failures
 		 * degrade to in-memory, with a warning in development: the queue never
 		 * breaks because storage did.
 		 * @default false
@@ -794,8 +794,10 @@ export function createIndexedDbStore(): OfflineStore;
 export function createMemoryStore(): OfflineStore;
 
 /**
- * Live count of queued offline mutations (enqueue, settle, and restore all
- * move it) - the consumer surface for "N pending edits" indicators.
+ * Live count of queued offline mutations waiting to be sent - the consumer
+ * surface for "N pending edits" indicators. Enqueue, drops and the restore
+ * move it; a replay takes the calls it sends out of the count (`uploading`
+ * is true meanwhile), and puts back the ones a lost connection cut off.
  */
 export const pendingMutations: Readable<number>;
 

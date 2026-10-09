@@ -438,8 +438,8 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 
 /**
  * @internal The queue's size limit from `offline.maxQueue`: 100 for a falsy
- * value or one that is not a number (`maxQueue || 100`, as before), otherwise
- * rounded down, to at least one.
+ * value or one that does not convert to a number, otherwise rounded down, to
+ * at least one.
  * @param {any} offlineOpts
  * @returns {number}
  */
@@ -555,7 +555,8 @@ export function _batchState() {
  * @internal A drain starts replaying its batch. Until it ends, the stored
  * batch reads as cut off, so a page that closes during the replay leaves the
  * next page a batch to carry on, as a lost connection would (a replay in
- * flight may have been applied).
+ * flight may have been applied). The mark is a store write like any other:
+ * a page that closes before it lands leaves the stored batch as it was.
  */
 export function _beginBatch() {
 	if (!_batch.clean) return;
