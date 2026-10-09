@@ -525,8 +525,8 @@ export interface UploadProgress {
  * Promise-shaped: `await handle` resolves with the server's return value
  * or rejects with `RpcError`. Codes seen at this layer:
  *   - `CANCELLED`            - caller cancelled (or AbortSignal aborted)
- *   - `DISCONNECTED`         - WS closed mid-upload
- *   - `CONNECTION_CLOSED`    - WS terminated before start
+ *   - `DISCONNECTED`         - the connection dropped mid-upload
+ *   - `CONNECTION_CLOSED`    - the connection closed for good, before or during the upload
  *   - `SOURCE_ERROR`         - the source iterator threw
  *   - any code from the server (`PAYLOAD_TOO_LARGE`, `NOT_FOUND`, ...)
  */
@@ -611,7 +611,8 @@ export function configure(config: {
 	/**
 	 * Full WebSocket URL to connect to. Enables cross-origin and native app usage
 	 * (Svelte Native, React Native, standalone clients). When set, the default
-	 * same-origin URL is bypassed entirely.
+	 * same-origin URL is bypassed entirely. Ignored, with a warning in
+	 * development, once the connection has closed for good.
 	 * @example 'wss://my-app.com/ws'
 	 */
 	url?: string;
@@ -625,7 +626,8 @@ export function configure(config: {
 	 * (must match the adapter's `websocket.authPath` option).
 	 *
 	 * Requires `svelte-adapter-uws` >= 0.4.12 and an `authenticate` export in
-	 * `src/hooks.ws.{js,ts}`.
+	 * `src/hooks.ws.{js,ts}`. Ignored, with a warning in development, once the
+	 * connection has closed for good.
 	 *
 	 * @default false
 	 * @example configure({ auth: true })
@@ -753,14 +755,27 @@ export function configure(config: {
  */
 export interface OfflineStore {
 	getAll(prefix: string): Promise<Array<{ key: string; value: any }>>;
+	/**
+	 * Resolves once the value is stored and rejects when it could not be. A
+	 * queued mutation whose write rejected exists only in memory, so a
+	 * connection closed for good rejects it instead of keeping it for a later
+	 * page load.
+	 */
 	put(key: string, value: any): Promise<void>;
 	delete(key: string): Promise<void>;
 	clear(prefix: string): Promise<void>;
 }
 
-/** The IndexedDB `OfflineStore` (database `svelte-realtime`, lazy open). */
+/**
+ * The IndexedDB `OfflineStore` (database `svelte-realtime`, lazy open). A
+ * write resolves once its transaction commits and rejects when the database
+ * cannot open or the transaction aborts.
+ */
 export function createIndexedDbStore(): OfflineStore;
-/** The in-memory `OfflineStore` (SSR / node / test fallback). */
+/**
+ * The in-memory `OfflineStore` (SSR / node / test fallback). Nothing it holds
+ * outlives the page, so mutations queued with it count as not stored.
+ */
 export function createMemoryStore(): OfflineStore;
 
 /**
@@ -929,7 +944,8 @@ export const __devtools: {
 
 /**
  * Reactive derived topic subscription that auto-switches when a source store changes.
- * Re-exported from `svelte-adapter-uws/client`.
+ * The adapter's `onDerived`, with its topic stores on the connection this client
+ * is bound to, so after a close for good it opens no new connection.
  *
  * @param topicFn - Function that computes the topic from the store value
  * @param store - Readable store whose value drives the topic
@@ -952,29 +968,33 @@ export function onDerived<T = unknown>(
  * connection-status transition. The `kind` field tells you whether the
  * failure came from a WebSocket close frame (`'ws-close'`, with a numeric
  * `code`) or from the HTTP auth preflight (`'auth-preflight'`, with an
- * HTTP `status`). Re-exported from `svelte-adapter-uws/client`.
+ * HTTP `status`). The same shape as the adapter's `Failure`.
  *
  * - `TERMINAL` - server permanently rejected the client (1008 / 4401 / 4403). Retry loop stopped.
  * - `EXHAUSTED` - `maxReconnectAttempts` hit; the network never recovered.
  * - `THROTTLE` - server signalled rate-limiting (4429). Reconnect still scheduled, jumped ahead in the backoff curve.
  * - `RETRY` - normal transient drop (1006 abnormal, network blip, server restart). Reconnect in progress.
+ * - `DRAIN` - the server asked the client to reconnect before it closed (a drain or restart). Reconnect follows the server's dispersed schedule.
  * - `AUTH` - auth preflight (`{ auth: true }`) failed before the WebSocket was opened. 4xx is terminal; 5xx and network errors retry.
+ *
+ * `diagnosticReason` is the close reason or HTTP status text, for telemetry
+ * and debugging; `reason` is a deprecated alias of it.
  */
 export type Failure =
-	| { kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY'; code: number; reason: string }
-	| { kind: 'auth-preflight'; class: 'AUTH'; status: number; reason: string };
+	| { kind: 'ws-close'; class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'DRAIN'; code: number; diagnosticReason: string; /** @deprecated Use `diagnosticReason`. */ reason: string }
+	| { kind: 'auth-preflight'; class: 'AUTH'; status: number; diagnosticReason: string; /** @deprecated Use `diagnosticReason`. */ reason: string };
 
 /**
- * The `class` field of a `Failure`. Re-exported from
- * `svelte-adapter-uws/client` for apps that need to type a switch over
+ * The `class` field of a `Failure`, for apps that need to type a switch over
  * the failure class without importing the full union.
  */
-export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AUTH';
+export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AUTH' | 'DRAIN';
 
 /**
  * Cause of the most recent non-open status transition. `null` while
  * connected, or before any failure has occurred. Set on TERMINAL /
- * THROTTLE / RETRY close codes, on the reconnect cap being exhausted
+ * THROTTLE / RETRY close codes, on a close the server announced with a
+ * drain advisory (`'DRAIN'`), on the reconnect cap being exhausted
  * (`'EXHAUSTED'`), and on auth-preflight failures (`'AUTH'`). Cleared
  * on the next successful `'open'`. NOT set on an intentional `close()`
  * call - `failure === null` paired with the underlying status of
@@ -984,13 +1004,14 @@ export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AU
  * cause: "Session expired" for `class: 'TERMINAL'`, "Server is busy"
  * for `'THROTTLE'`, generic "Reconnecting" for `'RETRY'`, etc.
  *
- * Re-exported from `svelte-adapter-uws/client`.
+ * The adapter's failure store, read from the connection this client is bound
+ * to: after a close for good it keeps reporting that connection instead of
+ * opening a new one.
  *
  * @example
  * ```svelte
  * <script>
- *   import { failure } from 'svelte-realtime/client';
- *   import { status } from 'svelte-adapter-uws/client';
+ *   import { failure, status } from 'svelte-realtime/client';
  * </script>
  *
  * {#if $failure?.class === 'TERMINAL'}
@@ -1009,9 +1030,12 @@ export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AU
 export const failure: Readable<Failure | null>;
 
 /**
- * Reactive store holding the connection status. Re-exported from
- * `svelte-adapter-uws/client`. The generated `live.multiplayer()` namespace
- * exposes this as its `status` view.
+ * Reactive store holding the connection status: the adapter's status store,
+ * read from the connection this client is bound to. After a close for good it
+ * keeps reporting `'failed'` instead of opening a new connection, and the
+ * client settles its pending requests on each status before these
+ * subscribers run. The
+ * generated `live.multiplayer()` namespace exposes this as its `status` view.
  */
 export const status: Readable<string>;
 
@@ -1074,8 +1098,7 @@ export function hueForKey(key: string): number;
  * @example
  * ```js
  * // Detect "we just caught up after a reconnect"
- * import { quiescent } from 'svelte-realtime/client';
- * import { status } from 'svelte-adapter-uws/client';
+ * import { quiescent, status } from 'svelte-realtime/client';
  *
  * let prev = true;
  * let sawDisconnect = false;

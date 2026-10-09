@@ -2,13 +2,14 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/client-runtime.js';
 
 // Minimal mock of the adapter client: capture the `__realtime` subscriber so the test
-// can deliver degraded/recovered frames; `connect` returns null (no flow-control input).
+// can deliver degraded/recovered frames; the connection has no flow-control input.
 const H = vi.hoisted(() => ({ cb: null }));
-vi.mock('svelte-adapter-uws/client', () => ({
-	on: (topic) => ({ subscribe: (fn) => { if (topic === '__realtime') H.cb = fn; return () => { H.cb = null; }; } }),
-	connect: () => null,
-	setTopicManaged: () => {}
-}));
+vi.mock('svelte-adapter-uws/client', () => {
+	const on = (topic) => ({ subscribe: (fn) => { if (topic === '__realtime') H.cb = fn; return () => { H.cb = null; }; } });
+	const status = { subscribe: (fn) => { fn('open'); return () => {}; } };
+	const conn = { on, status };
+	return { on, status, connect: () => conn, setTopicManaged: () => {} };
+});
 
 import { health, degradation, _resetHealth } from '../src/client/health.js';
 

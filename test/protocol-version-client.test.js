@@ -1,15 +1,15 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 // Mock the adapter client like degradation-client.test.js: capture the `__realtime`
-// subscriber so the test can deliver a `protocol-stale` frame; connect() returns a
-// stub with no flow-control input.
+// subscriber so the test can deliver a `protocol-stale` frame; the connection has
+// no flow-control input.
 const H = vi.hoisted(() => ({ cb: null, statusCb: null, sent: [] }));
-vi.mock('svelte-adapter-uws/client', () => ({
-	on: (topic) => ({ subscribe: (fn) => { if (topic === '__realtime') H.cb = fn; return () => { H.cb = null; }; } }),
-	connect: () => ({ sendQueued: (value) => H.sent.push(value) }),
-	status: { subscribe: (fn) => { H.statusCb = fn; fn('disconnected'); return () => {}; } },
-	setTopicManaged: () => {}
-}));
+vi.mock('svelte-adapter-uws/client', () => {
+	const on = (topic) => ({ subscribe: (fn) => { if (topic === '__realtime') H.cb = fn; return () => { H.cb = null; }; } });
+	const status = { subscribe: (fn) => { H.statusCb = fn; fn('disconnected'); return () => {}; } };
+	const conn = { sendQueued: (value) => H.sent.push(value), on, status };
+	return { on, status, connect: () => conn, setTopicManaged: () => {} };
+});
 
 import { health, _resetHealth, _ensureHealthSubscription } from '../src/client/health.js';
 import { configure } from '../src/client/misc.js';

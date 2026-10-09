@@ -126,6 +126,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A test that mocks `svelte-adapter-uws/client` must return a whole
+  connection from `connect()`.** The client now reads the topic factory,
+  stores and request hook from the connection object it is bound to, as the
+  adapter's `connect()` returns them: give the mocked connection `on`,
+  `status`, `failure`, `denials` and `onRequest` alongside `send` and
+  `sendQueued`. The mocked module needs `connect` and `status` exports as
+  well, since binding subscribes to `status` once before calling
+  `connect()`.
+
+- **`OfflineStore.put` reports whether the value was stored.** A custom
+  store's `put` should resolve once the value is stored and reject when it
+  could not be; the built-in IndexedDB store now resolves when its
+  transaction commits and rejects when the database cannot open or the
+  transaction aborts (code that calls `createIndexedDbStore().put` directly
+  now sees that rejection). A queued mutation whose write rejected is not
+  kept for a later page load when the connection closes for good.
+
 - **`board.room(...)` joins the room, and leaves when nothing holds it.**
   Membership (a roster entry others see, a claim on ownership, the room's
   `onJoin`) comes from a room's data stream, and the generated `room(...)`
@@ -274,6 +291,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frames.
 
 ### Fixed
+
+- **A connection closed for good stays closed, and every call says so.**
+  The client listened for a terminal close through a `ready()` member the
+  adapter's connection object does not have, so it never noticed one and
+  nothing reported `CONNECTION_CLOSED`. After a terminal close code, a
+  rejected auth preflight or exhausted retries, a call queued on the dead
+  connection and timed out after 30 s. After `connect().close()` it was
+  worse: the adapter builds a new connection for anything that reaches it
+  once the old one is gone, so an RPC, a stream mounting or unmounting, or
+  a store such as `status` opened a new socket, while the client kept
+  listening to the closed one and every call still timed out. The client
+  now takes status `'failed'` as the signal and does everything through the
+  connection it is bound to: RPCs, `loadMore()` pages and uploads still
+  pending reject with `CONNECTION_CLOSED` instead of `DISCONNECTED` (the
+  drop that uses up the last reconnect attempt still rejects them with
+  `DISCONNECTED`), streams with subscribers show it on `.error` once and
+  keep their data (a stream subscribed again later shows the same error),
+  later calls reject at once, and once the client has seen the close no
+  call, stream, upload or listener of `svelte-realtime/client` opens a
+  socket; `status`, `failure` and `onDerived` read the closed connection
+  instead of opening a new one. A queued offline mutation with a stored copy
+  stays queued, its call pending, and replays on a later page load, since a
+  closed connection can just mean the session expired while offline; one
+  without a stored copy (persistence off, no IndexedDB, a write that failed)
+  rejects with `CONNECTION_CLOSED`. `configure({ url, auth })` after a close
+  for good is ignored, with a warning in development.
+
+- **The `Failure` type matches what `failure` reports.** `class` can be
+  `'DRAIN'` (a close the server announced with a drain advisory), and
+  `diagnosticReason` is declared, with `reason` as its deprecated alias.
 
 - **A `live.aggregate` tumbling window closes at its boundary, and once.**
   Boundaries and timer delays came from the runtime's cached clock, which is

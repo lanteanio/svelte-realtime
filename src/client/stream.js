@@ -1,5 +1,4 @@
 // @ts-check
-import { connect as _connect, on, status } from 'svelte-adapter-uws/client';
 import * as _adapterClient from 'svelte-adapter-uws/client';
 // Server-managed subscription marking. Older adapters (before the wire-subscribe
 // authorization surface) lack it; degrade to a no-op, which leaves the prior
@@ -71,12 +70,10 @@ function _managedRefRelease(t) {
 // on an open OR backgrounded ('suspended') socket - the latter is still a live
 // wire that carries frames, just a tab that flipped document.hidden - and
 // silently no-ops on any other state, where the server's own close/idle drain
-// releases the subscription instead. We do NOT read the adapter `status` store
-// to decide: subscribing to it routes through ensureConnection and re-creates
-// (and reconnects) a connection the app explicitly closed, so a `terminated`
-// client skips the socket entirely - a closed connection has no server-side
-// subscription to release anyway. While a live subscribe is still unnamed the
-// release waits (see `_waitingReleases`), still holding its ref.
+// releases the subscription instead. A `terminated` client skips the frame: a
+// connection closed for good has no server-side subscription to release.
+// While a live subscribe is still unnamed the release waits (see
+// `_waitingReleases`), still holding its ref.
 function _sendManagedRelease(releasedTopic) {
 	if (_unnamedSubscribes > 0) {
 		// Whichever of those subscribes ends first re-checks the wait and arms
@@ -90,7 +87,7 @@ function _sendManagedRelease(releasedTopic) {
 function _releaseManagedRef(releasedTopic) {
 	if (!_managedRefRelease(releasedTopic)) return;
 	if (clientState.terminated) return;
-	try { _connect().send({ type: 'unsubscribe', topic: releasedTopic }); } catch { /* best-effort; the close/idle drain covers it */ }
+	try { _conn().send({ type: 'unsubscribe', topic: releasedTopic }); } catch { /* best-effort; the close/idle drain covers it */ }
 }
 
 function _armWaitingTimer() {
@@ -233,14 +230,14 @@ function _orphanSubscribe(id, ticket, heldTopic, parked) {
 		// it while that loop runs would have it rejected again. A connection
 		// closed for good sends nothing more and answers nothing.
 		microtask(() => {
-			if (!clientState.socketFailed) pending.set(id, record);
+			if (!clientState.terminated) pending.set(id, record);
 		});
 	};
 	if (parked) {
 		park();
 		return;
 	}
-	if (clientState.socketFailed) {
+	if (clientState.terminated) {
 		pending.delete(id);
 		release(null);
 		return;
@@ -261,7 +258,7 @@ import { createJitterDispatch } from './jitter-dispatch.js';
 import { _devtoolsStream, _devtoolsStreamEvent, _devtoolsStreamError } from './devtools-instrument.js';
 import { clientState, RpcError, _IS_DEV, _useRAF, _nextId, pending } from './internal-state.js';
 import { _addInFlight, _removeInFlight } from './health.js';
-import { ensureListener, ensureDisconnectListener, ensureDenialsListener, _getTimeout, _getResumeGraceMs, _getResumeMaxCursorAgeMs, _registerTopicErrorSetter, _unregisterTopicErrorSetter } from './connection.js';
+import { _conn, _closedForGoodNow, ensureListener, ensureDisconnectListener, ensureDenialsListener, _getTimeout, _getResumeGraceMs, _getResumeMaxCursorAgeMs, _registerTopicErrorSetter, _unregisterTopicErrorSetter } from './connection.js';
 import { _maybeHintPublishRate } from './rpc.js';
 
 /**
@@ -391,7 +388,7 @@ function _flushSubscribeBatch(deferred) {
 		requests.push(ticket.request);
 	}
 	if (requests.length === 0) return;
-	const conn = _connect();
+	const conn = _conn();
 	if (requests.length === 1) {
 		conn.sendQueued(requests[0]);
 		return;
@@ -852,6 +849,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 	/** @type {ReturnType<typeof setTimeout> | null} Reconnect debounce timer */
 	let _reconnectTimer = null;
+
+	/** @type {RpcError | null} The error this stream showed for the close for good */
+	let _closedError = null;
 
 	/** @type {number} Consecutive reconnect attempts (reset on successful fetch) */
 	let _reconnectAttempts = 0;
@@ -1541,7 +1541,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 */
 	function _subscribeLive() {
 		if (!topic || topicUnsub) return;
-		const topicStore = on(topic);
+		const topicStore = _conn().on(topic);
 		topicUnsub = topicStore.subscribe((envelope) => {
 			if (!envelope) return;
 			if (!initialLoaded) buffer.push(envelope);
@@ -1641,8 +1641,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 */
 	function fetchAndSubscribe() {
 		if (fetching) return;
+		ensureListener();
+		ensureDisconnectListener();
 		if (clientState.terminated) {
-			_setError(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
+			_closedForGood();
 			return;
 		}
 		_setPhase('attaching');
@@ -1659,12 +1661,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			if (prev) _orphanSubscribe(prev.id, prev.ticket, null);
 		}
 
-		ensureListener();
-		ensureDisconnectListener();
-
 		const id = _nextId();
 		pendingId = id;
-		const conn = _connect();
+		const conn = _conn();
 
 		/** @type {any} */
 		const request = { rpc: path, id, args: dynamicArgs || [], stream: true, attach: true };
@@ -1831,7 +1830,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				} else {
 					_subscribeDone(ticket);
 				}
-				_setError(err instanceof RpcError ? err : new RpcError('STREAM_ERROR', err?.message || 'Stream failed'));
+				// The stream's own status listener may have shown the close already.
+				// A server can answer a subscribe with CONNECTION_CLOSED too, on a
+				// socket that stays open.
+				if (clientState.terminated && err && err.code === 'CONNECTION_CLOSED') _closedForGood();
+				else _setError(err instanceof RpcError ? err : new RpcError('STREAM_ERROR', err?.message || 'Stream failed'));
 			},
 			timer
 		});
@@ -2012,14 +2015,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 		// `status.subscribe` fires synchronously with the current value, which
 		// for a stream subscribing during page hydration is usually 'connecting'
-		// (since `_connect()` is lazy on the first subscriber). Filter on 'open'
+		// (since `_conn()` is lazy on the first subscriber). Filter on 'open'
 		// first and track whether we've ever seen one, so the FIRST 'open' is
 		// the lifetime baseline rather than treating it as a reconnect bounce.
 		let hasOpenedOnce = false;
 		let droppedBeforeOpen = false;
 		/** True while `status.subscribe` reports the value current at attach. */
 		let attaching = true;
-		statusUnsub = status.subscribe((s) => {
+		statusUnsub = _conn().status.subscribe((s) => {
 			if (s !== 'open') {
 				// First step away from a live connection: record when the outage
 				// began (once) so the reconnect can measure how stale the retained
@@ -2032,6 +2035,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// Ages the retained cursor for the resubscribe below.
 					if (_downAt === null) _downAt = now();
 				}
+				if (s === 'failed') _closedForGood();
 				return;
 			}
 			_listenerDown = false;
@@ -2087,18 +2091,29 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			}
 		});
 		attaching = false;
+	}
 
-		// Surface terminal close as an error on the stream (adapter 0.4.0)
-		try {
-			const conn = _connect();
-			if (conn && typeof conn.ready === 'function') {
-				conn.ready().catch((/** @type {any} */ err) => {
-					if (subCount > 0) {
-						_setError(new RpcError(err?.code || 'CONNECTION_CLOSED', err?.message || 'Connection permanently closed'));
-					}
-				});
-			}
-		} catch {}
+	/**
+	 * The connection closed for good: nothing reloads this stream, so a pending
+	 * reconnect is dropped and the stream shows why. Its data stays. `.error`
+	 * reports it once; a stream that still shows it (subscribed again from its
+	 * grace window) only returns to the failed state.
+	 */
+	function _closedForGood() {
+		if (_reconnectTimer) {
+			clearTimer(_reconnectTimer);
+			_reconnectTimer = null;
+		}
+		if (_closedError === null || _error !== _closedError) {
+			_closedError = new RpcError('CONNECTION_CLOSED', 'Connection permanently closed');
+			_setError(_closedError);
+			return;
+		}
+		_status = 'error';
+		_statusStore.set('error');
+		_setPhase('failed');
+		// A first subscribe shows the close before its devtools entry exists.
+		_devtoolsStreamError(path, _error);
 	}
 
 	return {
@@ -2209,8 +2224,13 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// Flip status back to 'loading' so the newly-attached quiescence
 					// subscriber sees us as in-flight while the resume envelope is
 					// outstanding (it fires synchronously with the current value).
-					_status = 'loading';
-					_statusStore.set('loading');
+					// Closed for good, nothing loads: show the close first, so the
+					// quiescence subscriber never counts the stream as in flight.
+					if (_closedForGoodNow()) _closedForGood();
+					else {
+						_status = 'loading';
+						_statusStore.set('loading');
+					}
 					_attachLifecycleListeners(_agingSince);
 					fetchAndSubscribe();
 					_devtoolsStream(path, topic, subCount, merge);
@@ -2465,7 +2485,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 			ensureListener();
 			const id = _nextId();
-			const conn = _connect();
+			const conn = _conn();
 
 			return new Promise((resolve, reject) => {
 				// The server subscribes the socket again for a page (the request

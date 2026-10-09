@@ -35,7 +35,7 @@ let ws;
  * sendQueued() while the socket is down. A fresh object per test: a previous
  * test's client modules keep running timers, and they must not reach this
  * test's wire.
- * @type {{ toServer: any[], toClient: any[], adapterQueue: any[], status: string, statusSubs: Set<Function>, clientTopics: Map<string, Set<Function>>, serverTopics: Set<string>, published: any[] }}
+ * @type {{ toServer: any[], toClient: any[], adapterQueue: any[], status: string, statusSubs: Set<Function>, clientTopics: Map<string, Set<Function>>, serverTopics: Set<string>, published: any[], connects: number }}
  */
 let net;
 
@@ -56,17 +56,17 @@ beforeEach(async () => {
 		statusSubs: new Set(),
 		clientTopics: new Map(),
 		serverTopics: new Set(),
-		published: []
+		published: [],
+		connects: 0
 	};
 	const isUp = () => n.status === 'open' || n.status === 'suspended';
 	const conn = {
 		send: (frame) => { if (isUp()) n.toServer.push(frame); },
 		sendQueued: (frame) => { if (isUp()) n.toServer.push(frame); else n.adapterQueue.push(frame); },
-		ready: () => new Promise(() => {}),
 		get bufferedAmount() { return 0; }
 	};
-	vi.doMock('svelte-adapter-uws/client', () => ({
-		connect: () => conn,
+	const adapterMock = {
+		connect: () => { n.connects++; return conn; },
 		setTopicManaged: () => {},
 		on: (topic) => ({
 			subscribe: (fn) => {
@@ -81,7 +81,17 @@ beforeEach(async () => {
 		failure: { subscribe: (fn) => { fn(null); return () => {}; } },
 		denials: { subscribe: (fn) => { fn(null); return () => {}; } },
 		onRequest: () => () => {}
-	}));
+	};
+	// Like the adapter's, the connection object carries the module's topic
+	// factory, stores and request hook.
+	Object.assign(conn, {
+		on: adapterMock.on,
+		status: adapterMock.status,
+		failure: adapterMock.failure,
+		denials: adapterMock.denials,
+		onRequest: adapterMock.onRequest
+	});
+	vi.doMock('svelte-adapter-uws/client', () => adapterMock);
 	__stream = (await import('../src/client.js')).__stream;
 	({ clientState, pending } = await import('../src/client/internal-state.js'));
 	deny = false;
@@ -737,25 +747,26 @@ describe('a stream released before its subscribe is answered', () => {
 		off1();
 		await ticks();
 		expect(pending.has(first)).toBe(true);
+		const connectsAtClose = net.connects;
 		setStatus('failed');
 		await ticks();
 		expect(pending.has(first)).toBe(false);
-		// A subscribe after that never leaves the adapter queue; its timeout keeps nothing either.
-		const off2 = roomData('r25').subscribe(() => {});
+		// A subscribe after that is never made: nothing queued, nothing waiting.
+		const store = roomData('r25');
+		let error = null;
+		const offError = store.error.subscribe((e) => { error = e; });
+		const off2 = store.subscribe(() => {});
 		await ticks();
-		const second = net.adapterQueue[0].id;
-		vi.advanceTimersByTime(30_000);
-		expect(pending.has(second)).toBe(false);
+		expect(error?.code).toBe('CONNECTION_CLOSED');
+		expect(net.adapterQueue).toHaveLength(0);
+		expect(pending.size).toBe(0);
 		off2();
-		// A socket that comes up again is no longer closed for good.
-		setStatus('connecting');
-		setStatus('open');
-		const off3 = roomData('r31').subscribe(() => {});
+		offError();
+		vi.advanceTimersByTime(30_000);
 		await ticks();
-		const third = subscribeFrames().at(-1).id;
-		off3();
-		await ticks();
-		expect(pending.has(third)).toBe(true);
+		expect(net.connects).toBe(connectsAtClose);
+		expect(net.adapterQueue).toHaveLength(0);
+		expect(pending.size).toBe(0);
 	});
 
 	it('a release waits for subscribes that keep overlapping for at most one timeout', async () => {

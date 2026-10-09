@@ -36,7 +36,6 @@ beforeEach(async () => {
 
 	const conn = {
 		sendQueued: vi.fn(),
-		ready: () => Promise.resolve(),
 		get bufferedAmount() { return 0; },
 		// The genuine production accessor: the realtime layer subscribes to the
 		// connection's internal flow-control health and folds the boolean into
@@ -49,7 +48,7 @@ beforeEach(async () => {
 		}
 	};
 
-	vi.doMock('svelte-adapter-uws/client', () => ({
+	const adapterMock = {
 		connect: vi.fn(() => conn),
 		setTopicManaged: () => {},
 		on: (topic) => ({
@@ -62,8 +61,13 @@ beforeEach(async () => {
 					if (fns.size === 0) topicCallbacks.delete(topic);
 				};
 			}
-		})
-	}));
+		}),
+		status: { subscribe: (fn) => { fn('open'); return () => {}; } }
+	};
+	// Like the adapter's, the connection object carries the module's topic
+	// factory and status store.
+	Object.assign(conn, { on: adapterMock.on, status: adapterMock.status });
+	vi.doMock('svelte-adapter-uws/client', () => adapterMock);
 
 	const mod = await import('../src/client.js');
 	health = mod.health;
@@ -131,8 +135,8 @@ describe('realtime health folds the connection flow-control signal', () => {
 		// simply never contributes.
 		vi.resetModules();
 		topicCallbacks = new Map();
-		const legacyConn = { sendQueued: vi.fn(), ready: () => Promise.resolve(), get bufferedAmount() { return 0; } };
-		vi.doMock('svelte-adapter-uws/client', () => ({
+		const legacyConn = { sendQueued: vi.fn(), get bufferedAmount() { return 0; } };
+		const adapterMock = {
 			connect: vi.fn(() => legacyConn),
 			setTopicManaged: () => {},
 			on: (topic) => ({
@@ -142,8 +146,11 @@ describe('realtime health folds the connection flow-control signal', () => {
 					fns.add(fn);
 					return () => { fns.delete(fn); if (fns.size === 0) topicCallbacks.delete(topic); };
 				}
-			})
-		}));
+			}),
+			status: { subscribe: (fn) => { fn('open'); return () => {}; } }
+		};
+		Object.assign(legacyConn, { on: adapterMock.on, status: adapterMock.status });
+		vi.doMock('svelte-adapter-uws/client', () => adapterMock);
 		const mod = await import('../src/client.js');
 		mod._resetHealth();
 		const values = [];

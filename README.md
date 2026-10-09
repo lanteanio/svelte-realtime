@@ -544,17 +544,17 @@ The named documents' loaded server replicas are destroyed WITHOUT persisting (an
 
 When the WebSocket reconnects, streams automatically refetch initial data and resubscribe. The store keeps showing stale data during the refetch - it does not reset to `undefined`.
 
-**Mid-flight RPCs reject with `DISCONNECTED`.** If the WS drops while an RPC or `mutate` is awaiting a response, the corresponding promise rejects with `RpcError('DISCONNECTED')`. Callers that wrap the call in `mutate(asyncOp, change)` get auto-rollback for free: the optimistic-queue entry settles as failed, removing the placeholder from the displayed state. Concurrent in-flight mutates each roll back independently - if A and B are both pending when the WS drops, both promises reject and both placeholders are removed in one display recompute.
+**Mid-flight RPCs reject with `DISCONNECTED`.** If the WS drops while an RPC or `mutate` is awaiting a response, the corresponding promise rejects with `RpcError('DISCONNECTED')`. Callers that wrap the call in `mutate(asyncOp, change)` get auto-rollback for free: the optimistic-queue entry settles as failed, removing the placeholder from the displayed state. Concurrent in-flight mutates each roll back independently - if A and B are both pending when the WS drops, both promises reject and both placeholders are removed in one display recompute. A connection that closes for good rejects them with `CONNECTION_CLOSED` instead (see [Connection closed for good](#connection-closed-for-good)).
 
 **Catch-up via initial fetch on resubscribe.** Once the WS reconnects, every active stream re-runs its loader and broadcasts the result through the same merge strategy used on first subscribe. Pub/sub events that fired during the disconnect window arrive as part of the fresh fetch (they're materialized in the loader's data source). For tighter "no-frame-loss" guarantees use the `delta` configuration (see [Delta sync and replay](#delta-sync-and-replay)), which fills small gaps via the per-topic seq-numbered replay buffer and falls back to delta sync for larger gaps.
 
-**Triggering reconnect.** The next RPC call after the WS drops triggers the adapter's reconnect logic. Most apps don't need to do anything special - the user clicks something, the RPC fires, the adapter reconnects, the call lands. If you want to display a reconnecting banner, watch the `status` store from `svelte-adapter-uws/client` for the `'reconnecting'` -> `'open'` transition.
+**Reconnecting.** The adapter reconnects on its own: on a backoff schedule, and at once when the tab becomes visible again or the browser comes back online. A call made while the socket is down is queued by the adapter and sent once the socket opens. If a reconnect attempt fails first, or the call's timeout runs out, it rejects with `DISCONNECTED` or `TIMEOUT`, but its frame stays queued and still reaches the server at the next open, so retry such a call only with an idempotency key (`.with({ idempotencyKey })`). With the [offline queue](#offline-queue) enabled, calls made while the socket is down are held and replayed instead. To display a reconnecting banner, watch the `status` store from `svelte-realtime/client`: once it has been `'open'`, `'disconnected'` and `'connecting'` (each attempt passes through it) mean a reconnect is under way, while `'failed'` means the connection [closed for good](#connection-closed-for-good) and will not come back.
 
 ---
 
 ## Connection state stores
 
-Four reactive stores re-export from `svelte-realtime/client` for rendering connection state without app-side WebSocket plumbing.
+Reactive stores from `svelte-realtime/client` render connection state without app-side WebSocket plumbing. `status` and `failure` are the adapter's stores, read from the connection the client is bound to, so after a [close for good](#connection-closed-for-good) they keep reporting it instead of opening a new connection.
 
 ```svelte
 <script>
@@ -578,8 +578,8 @@ Four reactive stores re-export from `svelte-realtime/client` for rendering conne
 
 | Store | Type | Behavior |
 |---|---|---|
-| `status` | `'connecting' \| 'open' \| 'suspended' \| 'disconnected' \| 'failed'` | Connection state machine. `suspended` = tab in background; `failed` = terminal (auth denied or `close()` called) |
-| `failure` | `{ kind, class, code, reason } \| null` | Cause of the most recent non-open transition. `class` is `TERMINAL` (auth) / `EXHAUSTED` (max retries) / `THROTTLE` (4429) / `RETRY` / `AUTH` (HTTP preflight). Cleared on next `'open'`. Not set on intentional `close()` |
+| `status` | `'connecting' \| 'open' \| 'suspended' \| 'disconnected' \| 'failed'` | Connection state machine. `suspended` = tab in background; `failed` = [closed for good](#connection-closed-for-good) (`close()`, a terminal close code, a rejected auth preflight or exhausted retries) |
+| `failure` | `{ kind, class, code, diagnosticReason } \| null` | Cause of the most recent non-open transition. `class` is `TERMINAL` (auth) / `EXHAUSTED` (max retries) / `THROTTLE` (4429) / `RETRY` / `DRAIN` (server restart advisory) / `AUTH` (HTTP preflight). Cleared on next `'open'`. Not set on intentional `close()` |
 | `quiescent` | `Readable<boolean>` | `true` when every active stream has settled (initial load + all reconnects). Continuous signal - a `false -> true` transition after a reconnect cycle marks "everything caught up" |
 | `health` | `'healthy' \| 'degraded'` | System-wide health, sourced from `degraded` / `recovered` events on the `__realtime` topic. Stays `'healthy'` until something publishes - typically the extensions package's pub/sub bus circuit breaker |
 | `degradation` | `Readable<{ active, mitigation, recovery }>` | The server-pushed degradation detail. `mitigation` carries the precomputed client action (`bannerCopy`, `retryAfterMs`, unavailable `streams` / `rpcs`) a degradation policy attached, so you render a notice + schedule a retry with zero per-failure code. Additive companion to `health` |
@@ -768,15 +768,19 @@ try {
 }
 ```
 
-### Terminal close codes
+### Connection closed for good
 
-When the adapter's `ready()` promise rejects (terminal close codes 1008, 4401, 4403, exhausted retries, or explicit `close()`), svelte-realtime:
+When the connection status turns `'failed'` (an explicit `connect().close()`, a terminal close code 1008, 4401 or 4403, an auth preflight rejected with a 4xx, or exhausted reconnect attempts), the adapter does not reconnect, and svelte-realtime treats the connection as closed for good:
 
-- Rejects all pending RPCs immediately with `RpcError('CONNECTION_CLOSED', ...)`
-- Sets `.error` on all active stream stores (the data value is preserved)
-- Drains the offline queue with errors
+- RPCs, `loadMore()` pages and uploads still pending reject with `RpcError('CONNECTION_CLOSED', ...)`. A drop (`'disconnected'`) rejects them with `DISCONNECTED` instead; the adapter then reconnects, unless that drop used up the last reconnect attempt, in which case `'failed'` follows at once.
+- Every stream store with subscribers shows `CONNECTION_CLOSED` on `.error` and keeps its data; a stream subscribed again later shows the same error.
+- Queued offline mutations depend on [persistence](#durable-persistence-survive-a-reload). A mutation with a stored copy stays queued: its call stays pending, `pendingMutations` keeps counting it, and it replays on a later page load, since a closed connection may only mean the session expired while offline. A mutation without one (persistence off, no IndexedDB, storage blocked or full) can never be sent, so it rejects with `CONNECTION_CLOSED`.
+- Later RPCs, batches, stream subscriptions and uploads reject with `CONNECTION_CLOSED` at once, and `.fireAndForget()` / `.send()` drop. `configure({ url, auth })` is ignored, with a warning in development.
+- Once the client has seen the close, no call, stream, upload or listener of `svelte-realtime/client` opens a socket: they all reach the closed connection, and `status` reports `'failed'`. The adapter's own functions are not part of this: after `close()`, `connect()`, `on()` and the stores imported from `svelte-adapter-uws/client` build a new connection, and so do the channels of `live.smooth()` and `live.doc()` views, which reach the adapter through its plugins.
 
-RPCs called after a terminal close reject immediately without sending.
+The client stays closed for the rest of the page; a later `connect()` does not bring it back. To start over, load the page anew once the user can connect again, for example after signing in: send the user on with a full page load (`location.assign(next)`) rather than a client-side `goto()`.
+
+The client's state lives in its module: in the browser for as long as the page, during server rendering for as long as the server process. Call `close()` from browser-only code, such as `onMount` or an event handler, and not from `onDestroy`, which also runs on the server.
 
 ### Reusable error boundary component
 
@@ -1544,7 +1548,7 @@ configure({
 - **Server-side dedup is guaranteed.** Every persisted mutation carries an idempotency key (synthesized when the call did not supply one), so a replay after reload always dedups: a mutation that reached the server before the crash answers with its original result instead of applying twice. Pair the handlers with `live.idempotent` server-side.
 - **`persistKey` prevents cross-user replay.** One browser profile, two logins: without a per-user key, user B's session would replay user A's stored mutations. Pass your user id (or any stable scope).
 - **Restored mutations have no promise holders** (the page reloaded); their outcomes surface through `onReplayError` / `onConflict` only.
-- **Storage failures degrade, never break.** A blocked or broken IndexedDB (private windows, storage pressure) falls back to in-memory with one dev warning. A custom store implementing `{ getAll, put, delete, clear }` (see `OfflineStore`) can replace IndexedDB entirely.
+- **Storage failures degrade, never break.** A blocked or broken IndexedDB (private windows, storage pressure) falls back to in-memory with one dev warning: a mutation whose write failed still replays on reconnect, but it does not survive a reload, and a [connection closed for good](#connection-closed-for-good) rejects it. A custom store implementing `{ getAll, put, delete, clear }` (see `OfflineStore`) can replace IndexedDB entirely; its `put` resolves once the value is stored and rejects when it could not be.
 
 ### Upload checkpoint and consumer stores
 
@@ -5415,7 +5419,7 @@ Import from `svelte-realtime/client`.
 | `configure(config)` | Connection hooks, offline queue, upload frame size, `volatileBackpressureBytes` |
 | `combine(...stores, fn)` | Multi-store composition |
 | `onSignal(userId, callback)` | Listen for point-to-point signals |
-| `onDerived` | Re-exported from adapter: reactive derived topic subscription |
+| `onDerived` | Reactive derived topic subscription (the adapter's, on the bound connection) |
 
 **Stream store methods** (on `$live/` stream imports):
 

@@ -7,10 +7,11 @@
 // clock/timer/random usage (ids and stamps come from the caller).
 //
 // Failure posture: persistence is an UPGRADE to the in-memory queue, never a
-// dependency. Every method swallows storage errors after a one-time dev warn
-// - a broken/blocked IndexedDB (private windows, storage pressure, corrupted
-// profiles) must degrade to exactly the pre-persistence behavior, not break
-// the queue.
+// dependency. A broken/blocked IndexedDB (private windows, storage pressure,
+// corrupted profiles) degrades to exactly the pre-persistence behavior after
+// a one-time dev warn instead of breaking the queue: reads and deletes
+// swallow storage errors, and `put` rejects when nothing was stored, so the
+// queue knows which mutations exist only in memory.
 
 import { _IS_DEV } from './internal-state.js';
 
@@ -31,10 +32,22 @@ function _warnStorage(err) {
 /**
  * @typedef {Object} OfflineStore
  * @property {(prefix: string) => Promise<Array<{ key: string, value: any }>>} getAll - Every entry whose key starts with `prefix`, key-sorted.
- * @property {(key: string, value: any) => Promise<void>} put
+ * @property {(key: string, value: any) => Promise<void>} put - Resolves once the value is stored, rejects when it could not be.
  * @property {(key: string) => Promise<void>} delete
  * @property {(prefix: string) => Promise<void>} clear - Delete every entry whose key starts with `prefix`.
  */
+
+/** Stores that keep nothing past the page: a write to one stores nothing durable. */
+const _memoryStores = new WeakSet();
+
+/**
+ * @internal Whether a successful write to `store` outlives the page.
+ * @param {OfflineStore} store
+ * @returns {boolean}
+ */
+export function _isDurableStore(store) {
+	return !_memoryStores.has(store);
+}
 
 /**
  * In-memory store: the SSR / node / fallback implementation. Same contract,
@@ -43,7 +56,7 @@ function _warnStorage(err) {
  */
 export function createMemoryStore() {
 	const map = new Map();
-	return {
+	const store = {
 		async getAll(prefix) {
 			const out = [];
 			for (const [key, value] of map) {
@@ -64,12 +77,14 @@ export function createMemoryStore() {
 			}
 		}
 	};
+	_memoryStores.add(store);
+	return store;
 }
 
 /**
  * IndexedDB store. Opens the database lazily on first use (never at module
- * load - SSR imports this file). All failures degrade to no-ops after the
- * one-time dev warn.
+ * load - SSR imports this file). Failures degrade to no-ops after the
+ * one-time dev warn, except that `put` rejects when nothing was stored.
  * @returns {OfflineStore}
  */
 export function createIndexedDbStore() {
@@ -148,7 +163,24 @@ export function createIndexedDbStore() {
 			});
 		},
 		async put(key, value) {
-			await run('readwrite', (store) => store.put(value, key), undefined);
+			// Stored only once the transaction commits: a full quota aborts the
+			// transaction after the request itself succeeded.
+			const db = await open();
+			if (!db) throw new Error('[svelte-realtime] offline persistence unavailable');
+			await new Promise((resolve, reject) => {
+				try {
+					const tx = db.transaction(STORE_NAME, 'readwrite');
+					tx.objectStore(STORE_NAME).put(value, key);
+					tx.oncomplete = () => resolve(undefined);
+					tx.onabort = () => {
+						_warnStorage(tx.error);
+						reject(tx.error || new Error('[svelte-realtime] offline store write aborted'));
+					};
+				} catch (err) {
+					_warnStorage(err);
+					reject(err);
+				}
+			});
 		},
 		async delete(key) {
 			await run('readwrite', (store) => store.delete(key), undefined);

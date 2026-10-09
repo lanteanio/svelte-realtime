@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fc from 'fast-check';
+// The real derived(), taken before any test mocks svelte/store.
+import { derived as realDerived } from 'svelte/store';
 
 let __rpc, __stream, __binaryRpc, __upload, _resetUploadAutoDiscovery, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters, _resetDedupCoalesceWarned, _resetClientPublishRateWarning;
 let topicCallbacks;
@@ -10,8 +12,9 @@ let failureValue;
 let denialsCallbacks;
 let denialsValue;
 let sendQueuedFn;
-let readyReject;
 let connectFn;
+/** The members the mocked connection object shares with the module mock. */
+let connShape;
 let mockBufferedAmount;
 /** @type {((event: string, data: any) => any | Promise<any>) | null} */
 let onRequestHandler;
@@ -54,7 +57,9 @@ function simulateTopicMessage(topic, envelope) {
  * Simulate a connection status change.
  */
 function simulateStatus(s) {
-	for (const cb of statusCallbacks) cb(s);
+	// Like the adapter's status store, a later subscriber gets the last value.
+	statusInitialValue = s;
+	for (const cb of [...statusCallbacks]) cb(s);
 }
 
 /**
@@ -82,11 +87,11 @@ beforeEach(async () => {
 
 	connectFn = vi.fn(() => ({
 		sendQueued: sendQueuedFn,
-		ready: () => new Promise((_resolve, reject) => { readyReject = reject; }),
-		get bufferedAmount() { return mockBufferedAmount; }
+		get bufferedAmount() { return mockBufferedAmount; },
+		...connShape
 	}));
 
-	vi.doMock('svelte-adapter-uws/client', () => ({
+	const adapterMock = {
 		connect: connectFn,
 		setTopicManaged: () => {},
 		on: (topic) => ({
@@ -100,28 +105,6 @@ beforeEach(async () => {
 				};
 			}
 		}),
-		onDerived: (topicFn, store) => {
-			let currentTopic = null;
-			let unsub = null;
-			const subs = new Set();
-			const derivedStore = {
-				subscribe(fn) {
-					subs.add(fn);
-					fn(null);
-					if (!unsub) {
-						unsub = store.subscribe((val) => {
-							currentTopic = topicFn(val);
-						});
-					}
-					return () => {
-						subs.delete(fn);
-						if (subs.size === 0 && unsub) { unsub(); unsub = null; }
-					};
-				},
-				_getCurrentTopic() { return currentTopic; }
-			};
-			return derivedStore;
-		},
 		status: {
 			subscribe: (fn) => {
 				statusCallbacks.add(fn);
@@ -152,9 +135,21 @@ beforeEach(async () => {
 			onRequestUnsubs.add(unsub);
 			return unsub;
 		}
-	}));
+	};
+	// The adapter's connection object carries the same topic factory, stores
+	// and request hook as its module exports; the client reads them from the
+	// connection it is bound to.
+	connShape = {
+		on: adapterMock.on,
+		status: adapterMock.status,
+		failure: adapterMock.failure,
+		denials: adapterMock.denials,
+		onRequest: adapterMock.onRequest
+	};
+	vi.doMock('svelte-adapter-uws/client', () => adapterMock);
 
 	vi.doMock('svelte/store', () => ({
+		derived: realDerived,
 		writable: (initial) => {
 			let value = initial;
 			const subs = new Set();
@@ -1719,6 +1714,18 @@ describe('__devtools stream tracking', () => {
 
 		const errored = __devtools.streams.get('dt/err');
 		expect(errored.error).toEqual({ code: 'FORBIDDEN', message: '[message omitted]' });
+		unsub();
+	});
+
+	it('records CONNECTION_CLOSED for a stream mounted after the connection failed', async () => {
+		if (!__devtools) return;
+		__rpc('warmup/dt-closed')('x').catch(() => {});
+		await flush();
+		simulateStatus('failed');
+
+		const store = __stream('dt/closed', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		expect(__devtools.streams.get('dt/closed').error).toEqual({ code: 'CONNECTION_CLOSED', message: '[message omitted]' });
 		unsub();
 	});
 
@@ -3762,6 +3769,30 @@ describe('__upload()', () => {
 		await expect(handle).rejects.toMatchObject({ code: 'DISCONNECTED' });
 	});
 
+	it('rejects in-flight uploads with CONNECTION_CLOSED when the connection fails', async () => {
+		const avatar = __upload('uploads/failed');
+		const handle = avatar(new Uint8Array([1, 2, 3]).buffer);
+		await flushUpload();
+
+		simulateStatus('failed');
+		await expect(handle).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+	});
+
+	it('cancelling an upload after the connection failed sends no cancel frame', async () => {
+		__rpc('warmup/upload-cancel')('x').catch(() => {});
+		await flushUpload();
+		simulateStatus('failed');
+		const connects = connectFn.mock.calls.length;
+		const sends = sendQueuedFn.mock.calls.length;
+
+		const handle = __upload('uploads/late-cancel')(new Uint8Array([1, 2, 3]).buffer);
+		handle.cancel('gone');
+		await expect(handle).rejects.toMatchObject({ code: 'CANCELLED' });
+		await flushUpload();
+		expect(connectFn.mock.calls.length).toBe(connects);
+		expect(sendQueuedFn.mock.calls.length).toBe(sends);
+	});
+
 	it('emits progress events with sent/total/percent/chunks', async () => {
 		configure({ upload: { frameSize: frameSizeForPayload('uploads/progress', [], 4) } });
 		const avatar = __upload('uploads/progress');
@@ -3981,8 +4012,8 @@ describe('__upload()', () => {
 		// Override the connect mock to omit bufferedAmount entirely
 		connectFn.mockImplementation(() => ({
 			sendQueued: sendQueuedFn,
-			ready: () => new Promise((_resolve, reject) => { readyReject = reject; })
 			// no bufferedAmount
+			...connShape
 		}));
 		configure({ upload: { frameSize: frameSizeForPayload('uploads/no-bp', [], 4), highWaterMark: 100, lowWaterMark: 30 } });
 		const avatar = __upload('uploads/no-bp');
@@ -4308,9 +4339,9 @@ describe('configure()', () => {
 		connectFn.mockClear();
 		configure({ auth: true });
 
-		expect(connectFn).toHaveBeenCalledTimes(1);
-		const arg = connectFn.mock.calls[0][0];
-		expect(Object.prototype.hasOwnProperty.call(arg, 'url')).toBe(false);
+		const withOptions = connectFn.mock.calls.filter((c) => c[0] && Object.keys(c[0]).length > 0);
+		expect(withOptions).toHaveLength(1);
+		expect(Object.prototype.hasOwnProperty.call(withOptions[0][0], 'url')).toBe(false);
 	});
 
 	it('does not forward auth when not provided', () => {
@@ -4321,11 +4352,11 @@ describe('configure()', () => {
 		expect(Object.prototype.hasOwnProperty.call(arg, 'auth')).toBe(false);
 	});
 
-	it('does not call connect() at all when neither url nor auth is set', () => {
+	it('passes no connection options when neither url nor auth is set', () => {
 		connectFn.mockClear();
 		configure({ onConnect() {} });
 
-		expect(connectFn).not.toHaveBeenCalled();
+		expect(connectFn.mock.calls.every((c) => c[0] === undefined || Object.keys(c[0]).length === 0)).toBe(true);
 	});
 
 	it('forwards auth: false explicitly when the user opts out', () => {
@@ -5842,19 +5873,25 @@ describe('binary RPC oversized header', () => {
 		expect([...__devtools.pending.values()].some((e) => e.path === 'upload/detached')).toBe(false);
 	});
 
-	// `_connect()` can throw - it is not callable under SSR, which is why
-	// connection.js wraps its own call in try/catch. Registering with devtools
-	// BEFORE it stranded a pending entry, with its captured args, that nothing
-	// could ever sweep: no timer is armed until afterwards. This is an ordering
-	// guarantee, not error handling - the throw still propagates to the caller,
-	// it just must not leave a ghost entry behind.
+	it('binds the connection on a later call after a connect() that threw', async () => {
+		connectFn.mockImplementationOnce(() => { throw new Error('not ready'); });
+		expect(() => __rpc('bind/retry')('a')).toThrow('not ready');
+
+		const call = __rpc('bind/retry')('b');
+		await flush();
+		const sent = sendQueuedFn.mock.calls.map((c) => c[0]).find((f) => f.rpc === 'bind/retry');
+		simulateRpcResponse(sent.id, { ok: true, data: 'bound' });
+		await expect(call).resolves.toBe('bound');
+	});
+
+	// A connection that cannot be bound (a connect() that throws) must not
+	// leave a devtools pending entry, with its captured args, that nothing
+	// could ever sweep. The throw still reaches the caller; it just must not
+	// leave a ghost entry behind.
 	it('does not strand a devtools pending entry when _connect() throws', async () => {
 		expect(__devtools).not.toBeNull();
 		const before = __devtools.pending.size;
-		// Persistent, not `...Once`: something ahead of `_sendRpc` consumes a
-		// one-shot implementation, which silently let the real call succeed and made
-		// this assertion meaningless. `connectFn` is rebuilt in beforeEach, so
-		// clobbering it here cannot leak into another test.
+		// `connectFn` is rebuilt in beforeEach, so this cannot leak into another test.
 		connectFn.mockImplementation(() => { throw new Error('not callable yet (SSR)'); });
 		const fn = __rpc('probe/connect-throws');
 		try {
@@ -5873,38 +5910,69 @@ describe('binary RPC oversized header', () => {
 // - Terminated preflight on binary/batch/stream ------------------------------
 
 describe('terminated preflight', () => {
-	it('binary RPC rejects immediately when terminated', async () => {
-		// Trigger an RPC first to ensure the disconnect listener is attached
-		const warmup = __rpc('warmup/path');
-		const warmupPromise = warmup('test').catch(() => {});
+	it('a failed connection rejects the RPC in flight with CONNECTION_CLOSED', async () => {
+		const warmup = __rpc('warmup/inflight');
+		const inFlight = warmup('test');
 		await flush();
 
-		// Terminate the connection via ready() rejection
-		readyReject(new Error('Connection permanently closed'));
-		await new Promise((r) => setTimeout(r, 10));
-
-		const binaryCall = __binaryRpc('upload/file');
-		await expect(binaryCall(new ArrayBuffer(4))).rejects.toMatchObject({
-			code: 'CONNECTION_CLOSED'
-		});
+		simulateStatus('failed');
+		await expect(inFlight).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
 	});
 
-	it('batch rejects immediately when terminated', async () => {
-		// Trigger an RPC first to ensure the disconnect listener is attached
-		const warmup = __rpc('warmup/batch');
-		const warmupPromise = warmup('test').catch(() => {});
+	it('a disconnect still rejects the RPC in flight with DISCONNECTED', async () => {
+		const warmup = __rpc('warmup/dropped');
+		const inFlight = warmup('test');
 		await flush();
 
-		// Terminate the connection via ready() rejection
-		readyReject(new Error('Connection permanently closed'));
-		await new Promise((r) => setTimeout(r, 10));
+		simulateStatus('disconnected');
+		await expect(inFlight).rejects.toMatchObject({ code: 'DISCONNECTED' });
+	});
+
+	it('every call after a failed connection rejects or drops without reaching the adapter', async () => {
+		const warmup = __rpc('warmup/path');
+		warmup('test').catch(() => {});
+		await flush();
+		simulateStatus('failed');
+		const connects = connectFn.mock.calls.length;
+		const sends = sendQueuedFn.mock.calls.length;
+		const dropped = __devtools.volatileDropped || 0;
 
 		const rpc = __rpc('test/fn');
-		await expect(
-			batch(() => [rpc('a')])
-		).rejects.toMatchObject({
-			code: 'CONNECTION_CLOSED'
-		});
+		await expect(rpc('a')).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		await expect(__binaryRpc('upload/file')(new ArrayBuffer(4))).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		await expect(batch(() => [rpc('b')])).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		rpc.fireAndForget('c');
+		rpc.send('d');
+
+		expect(connectFn.mock.calls.length).toBe(connects);
+		expect(sendQueuedFn.mock.calls.length).toBe(sends);
+		// A dropped volatile send is counted like any other drop.
+		expect(__devtools.volatileDropped).toBe(dropped + 1);
+	});
+
+	// Each entry point as the client's very first call, on a connection that
+	// failed before the client looked at it.
+	it.each([
+		['an RPC', () => expect(__rpc('first/rpc')('a')).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' })],
+		['a binary RPC', () => expect(__binaryRpc('first/bin')(new ArrayBuffer(4))).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' })],
+		['a batch', () => expect(batch(() => [__rpc('first/batch')('a')])).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' })],
+		['a volatile send', async () => { __rpc('first/volatile').fireAndForget('a'); }],
+		['a reliable one-way send', async () => { __rpc('first/oneway').send('a'); }],
+		['an upload', () => expect(__upload('first/upload')(new ArrayBuffer(4))).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' })],
+		['a stream', async () => {
+			const store = __stream('first/stream', { merge: 'crud', key: 'id' });
+			let error = null;
+			store.error.subscribe((e) => { error = e; });
+			const unsub = store.subscribe(() => {});
+			await flush();
+			expect(error?.code).toBe('CONNECTION_CLOSED');
+			unsub();
+		}]
+	])('%s as the first call on a connection that already failed sends nothing', async (_name, call) => {
+		statusInitialValue = 'failed';
+		await call();
+		await flush();
+		expect(sendQueuedFn).not.toHaveBeenCalled();
 	});
 });
 
@@ -6601,47 +6669,52 @@ describe('live.multiplayer ordering token, server to client', () => {
 	});
 });
 
-// - onDerived re-export ------------------------------------------------------
+// - onDerived ----------------------------------------------------------------
 
 describe('onDerived()', () => {
-	it('is re-exported from the adapter client', () => {
-		expect(typeof onDerived).toBe('function');
-	});
-
-	it('returns a subscribable store that tracks the source store topic', () => {
+	it('delivers the topic the source store names and follows it when it changes', () => {
 		const sourceSubs = new Set();
+		let current = 'a';
 		const sourceStore = {
-			subscribe(fn) { sourceSubs.add(fn); fn('room-42'); return () => sourceSubs.delete(fn); }
+			subscribe(fn) { sourceSubs.add(fn); fn(current); return () => sourceSubs.delete(fn); }
 		};
 
-		const derived = onDerived((id) => `chat:${id}`, sourceStore);
-		expect(typeof derived.subscribe).toBe('function');
-
 		const values = [];
-		const unsub = derived.subscribe((v) => values.push(v));
-		expect(values).toContain(null);
-		expect(derived._getCurrentTopic()).toBe('chat:room-42');
+		const unsub = onDerived((id) => `room:${id}`, sourceStore).subscribe((v) => values.push(v));
+		expect(topicCallbacks.has('room:a')).toBe(true);
+		simulateTopicMessage('room:a', { topic: 'room:a', event: 'created', data: 1 });
+		expect(values.at(-1)).toEqual({ topic: 'room:a', event: 'created', data: 1 });
+
+		current = 'b';
+		for (const fn of sourceSubs) fn('b');
+		expect(topicCallbacks.has('room:a')).toBe(false);
+		expect(topicCallbacks.has('room:b')).toBe(true);
+		unsub();
+		expect(topicCallbacks.has('room:b')).toBe(false);
+	});
+
+	it('names no topic while the source value is null', () => {
+		const sourceStore = { subscribe(fn) { fn(null); return () => {}; } };
+		const values = [];
+		const unsub = onDerived((id) => `room:${id}`, sourceStore).subscribe((v) => values.push(v));
+		expect(values).toEqual([null]);
+		expect([...topicCallbacks.keys()].some((t) => t.startsWith('room:'))).toBe(false);
 		unsub();
 	});
 
-	it('switches topic when source store value changes', () => {
+	it('drops the topic and reports null when the source value turns null', () => {
 		const sourceSubs = new Set();
-		let currentVal = 'a';
 		const sourceStore = {
-			subscribe(fn) {
-				sourceSubs.add(fn);
-				fn(currentVal);
-				return () => sourceSubs.delete(fn);
-			}
+			subscribe(fn) { sourceSubs.add(fn); fn('a'); return () => sourceSubs.delete(fn); }
 		};
+		const values = [];
+		const unsub = onDerived((id) => `room:${id}`, sourceStore).subscribe((v) => values.push(v));
+		simulateTopicMessage('room:a', { topic: 'room:a', event: 'created', data: 1 });
+		expect(values.at(-1)).toEqual({ topic: 'room:a', event: 'created', data: 1 });
 
-		const derived = onDerived((id) => `room:${id}`, sourceStore);
-		const unsub = derived.subscribe(() => {});
-		expect(derived._getCurrentTopic()).toBe('room:a');
-
-		currentVal = 'b';
-		for (const fn of sourceSubs) fn('b');
-		expect(derived._getCurrentTopic()).toBe('room:b');
+		for (const fn of sourceSubs) fn(null);
+		expect(topicCallbacks.has('room:a')).toBe(false);
+		expect(values.at(-1)).toBe(null);
 		unsub();
 	});
 });
@@ -6953,12 +7026,13 @@ describe('quiescent store', () => {
 	});
 });
 
-// - failure re-export --------------------------------------------------------
+// - failure -----------------------------------------------------------------
 
 describe('failure store', () => {
-	it('is re-exported from the adapter client', () => {
-		expect(failure).toBeDefined();
-		expect(typeof failure.subscribe).toBe('function');
+	it('binds the connection on subscribe', () => {
+		expect(connectFn).not.toHaveBeenCalled();
+		failure.subscribe(() => {})();
+		expect(connectFn).toHaveBeenCalled();
 	});
 
 	it('subscribers receive the current value (null while connected)', () => {
@@ -6973,7 +7047,7 @@ describe('failure store', () => {
 		const unsub = failure.subscribe((v) => values.push(v));
 		expect(values).toEqual([null]);
 
-		const f = { kind: 'ws-close', class: 'TERMINAL', code: 4401, reason: 'unauthorized' };
+		const f = { kind: 'ws-close', class: 'TERMINAL', code: 4401, diagnosticReason: 'unauthorized', reason: 'unauthorized' };
 		simulateFailure(f);
 		expect(values[1]).toBe(f);
 		unsub();
@@ -6984,23 +7058,25 @@ describe('failure store', () => {
 		const unsub = failure.subscribe((v) => values.push(v));
 		expect(values).toEqual([null]);
 
-		const f = { kind: 'auth-preflight', class: 'AUTH', status: 401, reason: 'invalid token' };
+		const f = { kind: 'auth-preflight', class: 'AUTH', status: 401, diagnosticReason: 'invalid token', reason: 'invalid token' };
 		simulateFailure(f);
 		expect(values[1]).toBe(f);
 		unsub();
 	});
 
-	it('surfaces THROTTLE / EXHAUSTED / RETRY classes', () => {
+	it('surfaces THROTTLE / EXHAUSTED / RETRY / DRAIN classes', () => {
 		const values = [];
 		const unsub = failure.subscribe((v) => values.push(v));
 
 		simulateFailure({ kind: 'ws-close', class: 'THROTTLE', code: 4429, reason: 'rate limited' });
 		simulateFailure({ kind: 'ws-close', class: 'EXHAUSTED', code: 1006, reason: 'max retries' });
 		simulateFailure({ kind: 'ws-close', class: 'RETRY', code: 1006, reason: 'transient' });
+		simulateFailure({ kind: 'ws-close', class: 'DRAIN', code: 1012, reason: 'restarting' });
 
 		expect(values[1]?.class).toBe('THROTTLE');
 		expect(values[2]?.class).toBe('EXHAUSTED');
 		expect(values[3]?.class).toBe('RETRY');
+		expect(values[4]?.class).toBe('DRAIN');
 		unsub();
 	});
 
@@ -7316,12 +7392,252 @@ describe('stream .error and .status', () => {
 
 		expect(values[values.length - 1]).toEqual([{ id: 1 }]);
 
-		readyReject({ code: 'CONNECTION_CLOSED', message: 'gone' });
-		await new Promise((r) => setTimeout(r, 10));
+		simulateStatus('failed');
 
 		expect(values[values.length - 1]).toEqual([{ id: 1 }]);
-		expect(errors[errors.length - 1]).not.toBe(null);
-		expect(errors[errors.length - 1].code).toBe('CONNECTION_CLOSED');
+		expect(errors.filter(Boolean).map((e) => e.code)).toEqual(['CONNECTION_CLOSED']);
+	});
+
+	it('a stream loading when the connection fails shows CONNECTION_CLOSED once', async () => {
+		const store = __stream('err/terminal-loading', { merge: 'crud', key: 'id' });
+		const errors = [];
+		store.error.subscribe((v) => errors.push(v));
+		const unsub = store.subscribe(() => {});
+		await flush();
+		expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+
+		simulateStatus('failed');
+		expect(errors.filter(Boolean).map((e) => e.code)).toEqual(['CONNECTION_CLOSED']);
+		unsub();
+	});
+
+	it('a reconnect scheduled before the connection fails never runs', async () => {
+		vi.useFakeTimers();
+		try {
+			const store = __stream('err/terminal-reconnect', { merge: 'crud', key: 'id' });
+			const errors = [];
+			store.error.subscribe((v) => errors.push(v));
+			const unsub = store.subscribe(() => {});
+			await flush();
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 'errtermrc', merge: 'crud', key: 'id' });
+			const timers = vi.getTimerCount();
+
+			// A bounce arms the resubscribe; the close lands before it fires
+			// and drops it.
+			simulateStatus('disconnected');
+			simulateStatus('open');
+			expect(vi.getTimerCount()).toBe(timers + 1);
+			simulateStatus('failed');
+			expect(vi.getTimerCount()).toBe(timers);
+			await vi.advanceTimersByTimeAsync(5_000);
+
+			expect(sendQueuedFn).toHaveBeenCalledTimes(1);
+			expect(errors.filter(Boolean).map((e) => e.code)).toEqual(['CONNECTION_CLOSED']);
+			unsub();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('a stream mounted after the connection failed sends nothing', async () => {
+		__rpc('warmup/terminal')('x').catch(() => {});
+		await flush();
+		simulateStatus('failed');
+		const sends = sendQueuedFn.mock.calls.length;
+
+		const store = __stream('err/terminal-late', { merge: 'crud', key: 'id' });
+		let error = null;
+		store.error.subscribe((v) => { error = v; });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		expect(error?.code).toBe('CONNECTION_CLOSED');
+		expect(sendQueuedFn.mock.calls.length).toBe(sends);
+		unsub();
+		await flush();
+		expect(sendQueuedFn.mock.calls.length).toBe(sends);
+	});
+
+	it('a stream resumed from its grace window after the connection failed shows CONNECTION_CLOSED once', async () => {
+		const store = __stream('err/grace-closed', { merge: 'crud', key: 'id' });
+		const errors = [];
+		store.error.subscribe((v) => errors.push(v));
+		let unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 'errgrace', merge: 'crud', key: 'id' });
+		unsub();
+		await flush();
+
+		simulateStatus('failed');
+		unsub = store.subscribe(() => {});
+		await flush();
+		expect(errors.filter(Boolean).map((e) => e.code)).toEqual(['CONNECTION_CLOSED']);
+		unsub();
+	});
+
+	it('a stream subscribed again from its grace window after showing the close stays failed', async () => {
+		const store = __stream('err/grace-failed-state', { merge: 'crud', key: 'id' });
+		const errors = [];
+		store.error.subscribe((v) => errors.push(v));
+		let unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 'errgracestate', merge: 'crud', key: 'id' });
+		simulateStatus('failed');
+		unsub();
+		await flush();
+
+		const sends = sendQueuedFn.mock.calls.length;
+		const statuses = [];
+		const settledSeen = [];
+		let phase;
+		store.status.subscribe((v) => statuses.push(v));
+		quiescent.subscribe((v) => settledSeen.push(v));
+		unsub = store.subscribe(() => {});
+		store.phase.subscribe((v) => { phase = v; });
+		// The store mock repeats equal values; what matters is that nothing flips.
+		expect(new Set(statuses)).toEqual(new Set(['error']));
+		expect(phase).toBe('failed');
+		expect(new Set(settledSeen)).toEqual(new Set([true]));
+		await expect(store.attach()).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		expect(errors.filter(Boolean).map((e) => e.code)).toEqual(['CONNECTION_CLOSED']);
+		expect(sendQueuedFn.mock.calls.length).toBe(sends);
+		unsub();
+	});
+
+	it('a stream resumed from its grace window while the connection is open loads again', async () => {
+		const store = __stream('grace/normal-resume', { merge: 'crud', key: 'id' });
+		let unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 'gracenormal', merge: 'crud', key: 'id' });
+		unsub();
+		await flush();
+
+		const statuses = [];
+		const settledSeen = [];
+		const errors = [];
+		store.status.subscribe((v) => statuses.push(v));
+		quiescent.subscribe((v) => settledSeen.push(v));
+		store.error.subscribe((v) => errors.push(v));
+		unsub = store.subscribe(() => {});
+		await flush();
+		expect(statuses).toContain('loading');
+		expect(settledSeen).toContain(false);
+
+		const resume = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(resume.id, { ok: true, data: [{ id: 1 }], topic: 'gracenormal', merge: 'crud', key: 'id' });
+		expect(statuses[statuses.length - 1]).toBe('connected');
+		expect(settledSeen[settledSeen.length - 1]).toBe(true);
+		expect(errors.filter(Boolean)).toEqual([]);
+		unsub();
+	});
+
+	it('a stream detached after showing the close shows it again when attached again', async () => {
+		const store = __stream('err/detach-closed', { merge: 'crud', key: 'id' });
+		const errors = [];
+		store.error.subscribe((v) => errors.push(v));
+		store.attach().catch(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 'errdetachclosed', merge: 'crud', key: 'id' });
+		simulateStatus('failed');
+		store.detach();
+		await flush();
+		// The detach reset the session, error included.
+		expect(errors[errors.length - 1]).toBe(null);
+
+		const unsub = store.subscribe(() => {});
+		expect(errors[errors.length - 1]?.code).toBe('CONNECTION_CLOSED');
+		await expect(store.attach()).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		unsub();
+	});
+
+	it('a stream released while loading and resumed after the close is never counted as in flight', async () => {
+		const store = __stream('err/grace-loading', { merge: 'crud', key: 'id' });
+		let unsub = store.subscribe(() => {});
+		await flush();
+		unsub();
+		await flush();
+		simulateStatus('failed');
+
+		const settledSeen = [];
+		quiescent.subscribe((v) => settledSeen.push(v));
+		const errors = [];
+		store.error.subscribe((v) => errors.push(v));
+		unsub = store.subscribe(() => {});
+		expect(new Set(settledSeen)).toEqual(new Set([true]));
+		expect(errors.filter(Boolean).map((e) => e.code)).toEqual(['CONNECTION_CLOSED']);
+		unsub();
+	});
+
+	it('a stream mounted by a status subscriber that runs before the client shows CONNECTION_CLOSED once', async () => {
+		const adapter = await import('svelte-adapter-uws/client');
+		/** @type {any} */
+		let store = null;
+		const errors = [];
+		adapter.status.subscribe((s) => {
+			if (s !== 'failed' || store) return;
+			store = __stream('err/mounted-on-failed', { merge: 'crud', key: 'id' });
+			store.error.subscribe((v) => errors.push(v));
+			store.subscribe(() => {});
+		});
+		__rpc('warmup/order')('x').catch(() => {});
+		await flush();
+
+		simulateStatus('failed');
+		await flush();
+		await flush();
+		expect(store).not.toBeNull();
+		expect(errors.filter(Boolean).map((e) => e.code)).toEqual(['CONNECTION_CLOSED']);
+	});
+
+	it('a subscribe the server answers with CONNECTION_CLOSED on a live socket shows that error, and a later close shows its own', async () => {
+		const store = __stream('err/server-closed', { merge: 'crud', key: 'id' });
+		const errors = [];
+		store.error.subscribe((v) => errors.push(v));
+		const unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' });
+		expect(errors.filter(Boolean).map((e) => e.message)).toEqual(['WebSocket closed']);
+
+		simulateStatus('failed');
+		expect(errors.filter(Boolean).map((e) => e.message)).toEqual(['WebSocket closed', 'Connection permanently closed']);
+		unsub();
+	});
+
+	it('code reacting to the error of a stream that was loading already sees the connection closed', async () => {
+		const store = __stream('err/terminal-react', { merge: 'crud', key: 'id' });
+		/** @type {Promise<any>[]} */
+		const calls = [];
+		store.error.subscribe((e) => { if (e) calls.push(__rpc('log/error')(e.code)); });
+		const unsub = store.subscribe(() => {});
+		await flush();
+
+		simulateStatus('failed');
+		expect(calls).toHaveLength(1);
+		await expect(calls[0]).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		expect(sendQueuedFn.mock.calls.map((c) => c[0]).filter((f) => f.rpc === 'log/error')).toEqual([]);
+		unsub();
+	});
+
+	it('loadMore after the connection failed rejects with CONNECTION_CLOSED and sends nothing', async () => {
+		const store = __stream('pag/closed', { merge: 'crud', key: 'id' });
+		const unsub = store.subscribe(() => {});
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, {
+			ok: true, data: [{ id: 1 }], topic: 'pag-closed', merge: 'crud', key: 'id', hasMore: true, cursor: 'c1'
+		});
+
+		simulateStatus('failed');
+		const sends = sendQueuedFn.mock.calls.length;
+		await expect(store.loadMore()).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		expect(sendQueuedFn.mock.calls.length).toBe(sends);
+		unsub();
 	});
 
 	it('resets error and status once the resume-grace window expires', async () => {

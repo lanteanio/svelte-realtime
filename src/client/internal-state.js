@@ -15,20 +15,19 @@ import { randomFloat } from '../client-runtime.js';
  *   config: any,
  *   isOffline: boolean,
  *   socketUp: boolean,
- *   socketFailed: boolean,
  *   maxOptimisticQueueDepth: number
  * }}
  */
 export const clientState = {
 	batchCollector: null,
+	// The connection reported 'failed': closed for good. Requests fail at once
+	// with CONNECTION_CLOSED and one-way sends drop. Kept by connection.js.
 	terminated: false,
 	config: {},
 	isOffline: false,
-	// The adapter socket is open (or open behind a hidden tab), and whether it
-	// last reported 'failed' (closed for good), as its status store said. Kept
-	// by connection.js.
+	// The adapter socket is open (or open behind a hidden tab), as its status
+	// store said. Kept by connection.js.
 	socketUp: false,
-	socketFailed: false,
 	maxOptimisticQueueDepth: 1_000
 };
 

@@ -1,8 +1,7 @@
 // @ts-check
-import { connect as _connect, on } from 'svelte-adapter-uws/client';
 import { now, setTimer, microtask } from '../client-runtime.js';
 import { clientState, RpcError, _textEncoder, _isDev, pendingUploads } from './internal-state.js';
-import { ensureDisconnectListener } from './connection.js';
+import { _conn, ensureDisconnectListener } from './connection.js';
 
 // - Streaming uploads (live.upload) -----------------------------------------
 //
@@ -352,9 +351,8 @@ async function* _chunkReadableStream(stream, chunkSize) {
  */
 function ensureUploadListener() {
 	if (uploadListenerAttached) return;
+	const store = _conn().on('__upload');
 	uploadListenerAttached = true;
-
-	const store = on('__upload');
 	store.subscribe((envelope) => {
 		if (!envelope) return;
 		// Always update the auto-discovered cap, even for envelopes that
@@ -380,7 +378,7 @@ function ensureUploadListener() {
  */
 async function _pumpUpload(handle) {
 	const argsJson = handle._argsJson;
-	const conn = _connect();
+	const conn = _conn();
 
 	const iter = _chunkUploadSource(handle._source, handle._chunkSize)[Symbol.asyncIterator]();
 
@@ -465,8 +463,8 @@ function _sendUploadChunk(conn, handle, seq, isLast, hasArgs, argsJson, payload)
  * Promise-shaped: `await handle` resolves with the server's return value
  * or rejects with `RpcError`. Codes seen at this layer:
  *   - `CANCELLED`            - caller cancelled (or AbortSignal aborted)
- *   - `DISCONNECTED`         - WS closed mid-upload
- *   - `CONNECTION_CLOSED`    - WS terminated before start
+ *   - `DISCONNECTED`         - the connection dropped mid-upload
+ *   - `CONNECTION_CLOSED`    - the connection closed for good, before or during the upload
  *   - `SOURCE_ERROR`         - the source iterator threw (filesystem, etc.)
  *   - any code from the server (`PAYLOAD_TOO_LARGE`, `NOT_FOUND`, ...)
  *
@@ -571,10 +569,13 @@ class UploadHandle {
 		if (this._settled) return;
 		this._cancelled = true;
 		this._cancelReason = reason;
-		try {
-			const conn = _connect();
-			conn.sendQueued(_encodeUploadCancelFrame(this._streamId));
-		} catch { /* connection may be closed; server will discard the upload */ }
+		// A connection closed for good has no upload to cancel.
+		if (!clientState.terminated) {
+			try {
+				const conn = _conn();
+				conn.sendQueued(_encodeUploadCancelFrame(this._streamId));
+			} catch { /* connection may be closed; server will discard the upload */ }
+		}
 		this._settle(false, new RpcError('CANCELLED', typeof reason === 'string' ? reason : 'upload cancelled'));
 	}
 
@@ -654,13 +655,13 @@ class UploadHandle {
 
 	async _start() {
 		if (this._settled) return;
+		ensureDisconnectListener();
 		if (clientState.terminated) {
 			this._settle(false, new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 			return;
 		}
 
 		ensureUploadListener();
-		ensureDisconnectListener();
 
 		try {
 			await _pumpUpload(this);
@@ -671,7 +672,7 @@ class UploadHandle {
 			// server doesn't keep waiting for chunks that won't arrive.
 			if (!this._cancelled) {
 				try {
-					const conn = _connect();
+					const conn = _conn();
 					conn.sendQueued(_encodeUploadCancelFrame(this._streamId));
 				} catch { /* closed; server cleans up via close hook */ }
 			}

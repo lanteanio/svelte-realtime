@@ -2,10 +2,11 @@
 // OfflineStore fake - the house "mock the module boundary, run in node"
 // pattern, no jsdom/fake-indexeddb), rehydrate-on-configure, the synthesized
 // idempotency key, the upload checkpoint (advance + gap detection + clean
-// clear), the pendingMutations/uploading consumer stores, and the
+// clear), the pendingMutations/uploading consumer stores, the
 // conflict-resolution stance (server-win / lww / custom) for replayed
-// mutations rejected with CONFLICT.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+// mutations rejected with CONFLICT, and what a connection closed for good
+// leaves queued (a hand-rolled IndexedDB stands in for the default store).
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 let statusCallbacks;
 let statusInitialValue;
@@ -13,7 +14,9 @@ let topicCallbacks;
 let sendQueuedFn;
 
 function simulateStatus(s) {
-	for (const cb of statusCallbacks) cb(s);
+	// Like the adapter's status store, a later subscriber gets the last value.
+	statusInitialValue = s;
+	for (const cb of [...statusCallbacks]) cb(s);
 }
 function simulateRpcResponse(correlationId, payload) {
 	const fns = topicCallbacks.get('__rpc');
@@ -58,11 +61,17 @@ beforeEach(async () => {
 	topicCallbacks = new Map();
 	sendQueuedFn = vi.fn();
 
-	vi.doMock('svelte-adapter-uws/client', () => ({
+	// Like the adapter's, the connection object carries the module's topic
+	// factory, stores and request hook.
+	const adapterMock = {
 		connect: vi.fn(() => ({
 			sendQueued: sendQueuedFn,
-			ready: () => new Promise(() => {}),
-			bufferedAmount: 0
+			bufferedAmount: 0,
+			on: adapterMock.on,
+			status: adapterMock.status,
+			failure: adapterMock.failure,
+			denials: adapterMock.denials,
+			onRequest: adapterMock.onRequest
 		})),
 		setTopicManaged: () => {},
 		on: (topic) => ({
@@ -84,7 +93,8 @@ beforeEach(async () => {
 		failure: { subscribe: (fn) => { fn(null); return () => {}; } },
 		denials: { subscribe: (fn) => { fn(null); return () => {}; } },
 		onRequest: () => () => {}
-	}));
+	};
+	vi.doMock('svelte-adapter-uws/client', () => adapterMock);
 
 	mod = await import('../src/client.js');
 	mod._resetOffline();
@@ -143,6 +153,17 @@ describe('offline queue - durability', () => {
 		// Settle dropped the persisted copy and advanced the checkpoint.
 		expect([...store.map.keys()].filter((k) => k.startsWith('q:'))).toEqual([]);
 		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(1);
+	});
+
+	it('a store that throws instead of rejecting does not fail a replay the server applied', async () => {
+		const store = fakeStore();
+		store.put = () => { throw new Error('storage broke'); };
+		store.delete = () => { throw new Error('storage broke'); };
+		const [p] = await goOfflineAndQueue({ persist: store }, [['todos/add', [{ t: 1 }]]]);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'done' }));
+		await expect(p).resolves.toBe('done');
 	});
 
 	it('rehydrates persisted entries on configure and replays them in seq order', async () => {
@@ -333,5 +354,428 @@ describe('offline queue - conflict resolution', () => {
 		await expect(p).rejects.toMatchObject({ code: 'INTERNAL' });
 		expect(errors).toEqual(['INTERNAL']);
 		expect(conflicts).toEqual([]);
+	});
+});
+
+describe('offline queue - connection closed for good', () => {
+	const storedKeys = (store) => [...store.map.keys()].filter((k) => k.startsWith('q:')).sort();
+	const replayedPaths = () => sendQueuedFn.mock.calls.map((c) => c[0]).filter((e) => e && e.rpc).map((e) => e.rpc);
+	/** @param {Promise<any>} p */
+	const watch = (p) => {
+		const state = { settled: false };
+		p.then(() => { state.settled = true; }, () => { state.settled = true; });
+		return state;
+	};
+
+	it('stored mutations stay queued, their calls pending, for a later page load', async () => {
+		const store = fakeStore();
+		const onReplayError = vi.fn();
+		const [p1, p2] = await goOfflineAndQueue({ persist: store, onReplayError }, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]]
+		]);
+		const w1 = watch(p1);
+		const w2 = watch(p2);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+		expect(pendingSeen).toBe(2);
+
+		simulateStatus('failed');
+		await flush();
+		expect(w1.settled).toBe(false);
+		expect(w2.settled).toBe(false);
+		expect(pendingSeen).toBe(2);
+		expect(storedKeys(store)).toHaveLength(2);
+		expect(onReplayError).not.toHaveBeenCalled();
+		expect(replayedPaths()).toEqual([]);
+	});
+
+	it('without persistence queued calls reject with CONNECTION_CLOSED', async () => {
+		const [p1, p2] = await goOfflineAndQueue({}, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]]
+		]);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+		expect(pendingSeen).toBe(2);
+
+		simulateStatus('failed');
+		await expect(p1).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		await expect(p2).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		await flush(1);
+		expect(pendingSeen).toBe(0);
+	});
+
+	it('restored entries stay queued and stored', async () => {
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('default', 1, 'todos/add', [{ t: 'a' }], 'off-a'),
+			seedEntry('default', 2, 'todos/add', [{ t: 'b' }], 'off-b')
+		]));
+		const onReplayError = vi.fn();
+		mod.configure({ offline: { queue: true, persist: store, onReplayError } });
+		await flush(1);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+		expect(pendingSeen).toBe(2);
+
+		simulateStatus('failed');
+		await flush(1);
+		expect(pendingSeen).toBe(2);
+		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
+		expect(onReplayError).not.toHaveBeenCalled();
+		expect(replayedPaths()).toEqual([]);
+	});
+
+	it('a close during the drain puts stored entries back in the queue', async () => {
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('default', 1, 'todos/add', [{ t: 'restored' }], 'off-r')
+		]));
+		const onReplayError = vi.fn();
+		mod.configure({ offline: { queue: true, persist: store, onReplayError } });
+		await flush(1);
+		simulateStatus('disconnected');
+		const live = mod.__rpc('todos/add')({ t: 'live' });
+		const w = watch(live);
+		await flush(1);
+		expect(storedKeys(store)).toHaveLength(2);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+
+		simulateStatus('open');
+		await flush();
+		// The restored entry is on the wire; the live one waits behind it.
+		expect(replayedPaths()).toEqual(['todos/add']);
+
+		simulateStatus('failed');
+		await flush();
+		expect(w.settled).toBe(false);
+		expect(pendingSeen).toBe(2);
+		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002']);
+		expect(onReplayError).not.toHaveBeenCalled();
+		expect(replayedPaths()).toEqual(['todos/add']);
+	});
+
+	it('without persistence a replay the close cuts off rejects with CONNECTION_CLOSED, also on the last-attempt drop', async () => {
+		const onReplayError = vi.fn();
+		const [p] = await goOfflineAndQueue({ onReplayError }, [['todos/add', [{ t: 'live' }]]]);
+		simulateStatus('open');
+		await flush();
+		expect(replayedPaths()).toEqual(['todos/add']);
+
+		// What the adapter reports when the drop exhausts its retries: the
+		// in-flight replay is rejected with DISCONNECTED, then 'failed' follows.
+		simulateStatus('disconnected');
+		simulateStatus('failed');
+		await expect(p).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		expect(onReplayError).not.toHaveBeenCalled();
+	});
+
+	it('the drop that uses up the last reconnect keeps a restored entry it cut off', async () => {
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('default', 1, 'todos/add', [{ t: 'restored' }], 'off-r')
+		]));
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		expect(replayedPaths()).toEqual(['todos/add']);
+
+		simulateStatus('disconnected');
+		simulateStatus('failed');
+		await flush();
+		expect(storedKeys(store)).toEqual(['q:default:000000000001']);
+	});
+
+	it('a replay the server rejects stays a failure when the close lands in the same tick', async () => {
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('default', 1, 'todos/add', [{ t: 'restored' }], 'off-r')
+		]));
+		const onReplayError = vi.fn();
+		mod.configure({ offline: { queue: true, persist: store, onReplayError } });
+		await flush(1);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		const sent = sendQueuedFn.mock.calls.map((c) => c[0]).find((e) => e.rpc === 'todos/add');
+
+		simulateRpcResponse(sent.id, { ok: false, code: 'VALIDATION', error: 'bad' });
+		simulateStatus('failed');
+		await flush();
+		expect(storedKeys(store)).toEqual([]);
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+		expect(onReplayError.mock.calls[0][1].code).toBe('VALIDATION');
+	});
+
+	it('entries restored after the close count as pending and stay stored', async () => {
+		/** @type {(v?: any) => void} */
+		let release = () => {};
+		const gate = new Promise((r) => { release = r; });
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('default', 1, 'todos/add', [{ t: 'a' }], 'off-a')
+		]));
+		const getAll = store.getAll;
+		store.getAll = async (prefix) => { await gate; return getAll(prefix); };
+		mod.configure({ offline: { queue: true, persist: store } });
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+
+		simulateStatus('failed');
+		release();
+		await flush();
+		expect(pendingSeen).toBe(1);
+		expect(storedKeys(store)).toEqual(['q:default:000000000001']);
+		expect(replayedPaths()).toEqual([]);
+	});
+
+	it('a drain cut short by the close keeps its stored entry queued and the gap open', async () => {
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('default', 1, 'todos/add', [{ t: 'restored' }], 'off-r'),
+			['c:default', { lastUploadedSeq: 0, gapDetected: true }]
+		]));
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		expect(mod.offlineCheckpoint().gapDetected).toBe(true);
+
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await flush();
+		expect(replayedPaths()).toEqual(['todos/add']);
+
+		simulateStatus('failed');
+		await flush();
+		expect(storedKeys(store)).toEqual(['q:default:000000000001']);
+		expect(mod.offlineCheckpoint().gapDetected).toBe(true);
+	});
+
+	it('without persistence a drain cut short by the close does not count as clean', async () => {
+		// A first drain leaves a gap: the earlier mutation fails, the later one applies.
+		const [p1, p2] = await goOfflineAndQueue({}, [
+			['todos/add', [{ t: 'fails' }]],
+			['todos/add', [{ t: 'succeeds' }]]
+		]);
+		simulateStatus('open');
+		await flush();
+		await respondAll((env) =>
+			env.args[0].t === 'fails' ? { ok: false, code: 'INTERNAL', error: 'boom' } : { ok: true, data: 'ok' }
+		);
+		await expect(p1).rejects.toMatchObject({ code: 'INTERNAL' });
+		await expect(p2).resolves.toBe('ok');
+		expect(mod.offlineCheckpoint().gapDetected).toBe(true);
+
+		simulateStatus('disconnected');
+		const p3 = mod.__rpc('todos/add')({ t: 'cut' });
+		p3.catch(() => {});
+		await flush(1);
+		simulateStatus('open');
+		await flush();
+		expect(replayedPaths()).toHaveLength(3);
+
+		simulateStatus('failed');
+		await expect(p3).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		await flush();
+		expect(mod.offlineCheckpoint().gapDetected).toBe(true);
+	});
+
+	it('persist: true without IndexedDB keeps nothing past the page, so queued calls reject', async () => {
+		const [p] = await goOfflineAndQueue({ persist: true }, [['todos/add', [{ t: 1 }]]]);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+		await flush(1);
+
+		simulateStatus('failed');
+		await expect(p).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		expect(pendingSeen).toBe(0);
+	});
+
+	it('a replay the close cuts off rejects when its store keeps nothing past the page', async () => {
+		const [p] = await goOfflineAndQueue({ persist: mod.createMemoryStore() }, [['todos/add', [{ t: 1 }]]]);
+		simulateStatus('open');
+		await flush();
+		expect(replayedPaths()).toEqual(['todos/add']);
+
+		simulateStatus('failed');
+		await expect(p).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+	});
+
+	it('entries restored from a store that keeps nothing past the page leave the queue at the close', async () => {
+		const store = mod.createMemoryStore();
+		const [key, value] = seedEntry('default', 1, 'todos/add', [{ t: 'a' }], 'off-a');
+		await store.put(key, value);
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+		expect(pendingSeen).toBe(1);
+
+		simulateStatus('failed');
+		await flush();
+		expect(pendingSeen).toBe(0);
+		expect(replayedPaths()).toEqual([]);
+	});
+
+	it('a mutation whose write failed rejects, one that was stored stays queued', async () => {
+		const store = fakeStore();
+		const put = store.put;
+		store.put = async (key, value) => {
+			if (value.args?.[0]?.t === 'lost') throw new Error('quota exceeded');
+			return put(key, value);
+		};
+		const [kept, lost] = await goOfflineAndQueue({ persist: store }, [
+			['todos/add', [{ t: 'kept' }]],
+			['todos/add', [{ t: 'lost' }]]
+		]);
+		const w = watch(kept);
+		let pendingSeen;
+		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
+
+		simulateStatus('failed');
+		await expect(lost).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		await flush();
+		expect(w.settled).toBe(false);
+		expect(pendingSeen).toBe(1);
+		expect(storedKeys(store)).toEqual(['q:default:000000000001']);
+	});
+
+	it('a write still running at the close decides when it ends', async () => {
+		const store = fakeStore();
+		const put = store.put;
+		/** @type {Array<{ ok: () => void, fail: () => void }>} */
+		const writes = [];
+		store.put = (key, value) => new Promise((resolve, reject) => {
+			writes.push({ ok: () => resolve(put(key, value)), fail: () => reject(new Error('quota exceeded')) });
+		});
+		const [p1, p2] = await goOfflineAndQueue({ persist: store }, [
+			['todos/add', [{ t: 1 }]],
+			['todos/add', [{ t: 2 }]]
+		]);
+		const w1 = watch(p1);
+		const w2 = watch(p2);
+
+		simulateStatus('failed');
+		await flush();
+		expect(w1.settled).toBe(false);
+		expect(w2.settled).toBe(false);
+
+		writes[0].ok();
+		writes[1].fail();
+		await expect(p2).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		await flush();
+		expect(w1.settled).toBe(false);
+		expect(storedKeys(store)).toEqual(['q:default:000000000001']);
+	});
+
+	describe('with IndexedDB', () => {
+		/** @type {any} */
+		let warn;
+		beforeEach(() => {
+			warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			vi.stubGlobal('IDBKeyRange', { bound: () => null });
+		});
+		afterEach(() => {
+			warn.mockRestore();
+			vi.unstubAllGlobals();
+		});
+
+		/**
+		 * A minimal IndexedDB: `open` fails, or creates the object store on the
+		 * first open and opens a database whose writes commit or abort. An
+		 * aborted write still reports its request as a success first, the way a
+		 * full quota ends a transaction.
+		 */
+		function fakeIndexedDb({ openFails = false, abortWrites = false } = {}) {
+			const map = new Map();
+			const stores = new Set();
+			const later = (fn) => setTimeout(fn, 0);
+			const db = {
+				objectStoreNames: { contains: (name) => stores.has(name) },
+				createObjectStore: (name) => { stores.add(name); },
+				transaction() {
+					/** @type {any} */
+					const tx = { error: null };
+					tx.objectStore = () => ({
+						put(value, key) {
+							/** @type {any} */
+							const req = {};
+							later(() => {
+								req.result = key;
+								req.onsuccess?.();
+								later(() => {
+									if (abortWrites) {
+										tx.error = new Error('QuotaExceededError');
+										tx.onabort?.();
+									} else {
+										map.set(key, value);
+										tx.oncomplete?.();
+									}
+								});
+							});
+							return req;
+						},
+						delete(key) {
+							/** @type {any} */
+							const req = {};
+							later(() => { map.delete(key); req.onsuccess?.(); });
+							return req;
+						},
+						openCursor() {
+							/** @type {any} */
+							const req = { result: null };
+							later(() => req.onsuccess?.());
+							return req;
+						}
+					});
+					return tx;
+				}
+			};
+			return {
+				map,
+				open() {
+					/** @type {any} */
+					const req = { error: null };
+					later(() => {
+						if (openFails) {
+							req.error = new Error('denied');
+							req.onerror?.();
+							return;
+						}
+						req.result = db;
+						if (stores.size === 0) req.onupgradeneeded?.();
+						req.onsuccess?.();
+					});
+					return req;
+				}
+			};
+		}
+
+		/** @param {{ openFails?: boolean, abortWrites?: boolean }} options */
+		async function queueOneAndClose(options) {
+			const idb = fakeIndexedDb(options);
+			vi.stubGlobal('indexedDB', idb);
+			const [p] = await goOfflineAndQueue({ persist: true }, [['todos/add', [{ t: 1 }]]]);
+			const w = watch(p);
+			await flush();
+			simulateStatus('failed');
+			await flush();
+			return { p, w, idb };
+		}
+
+		it('a committed write keeps the call queued', async () => {
+			const { w, idb } = await queueOneAndClose({});
+			await flush();
+			expect(w.settled).toBe(false);
+			expect([...idb.map.keys()]).toEqual(['q:default:000000000001']);
+		});
+
+		it('a database that cannot open stores nothing, so the call rejects', async () => {
+			const { p } = await queueOneAndClose({ openFails: true });
+			await expect(p).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		});
+
+		it('an aborted write stores nothing, so the call rejects', async () => {
+			const { p, idb } = await queueOneAndClose({ abortWrites: true });
+			await expect(p).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+			expect(idb.map.size).toBe(0);
+		});
 	});
 });

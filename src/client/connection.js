@@ -1,7 +1,31 @@
 // @ts-check
-import { connect as _connect, on, status, denials } from 'svelte-adapter-uws/client';
+import { derived } from 'svelte/store';
+import { connect as _connect, status as _adapterStatus } from 'svelte-adapter-uws/client';
 import { now, clearTimer } from '../client-runtime.js';
-import { clientState, RpcError, pending, pendingUploads, _offlineQueue, _IS_DEV } from './internal-state.js';
+import { clientState, RpcError, pending, pendingUploads, _IS_DEV } from './internal-state.js';
+import { _closeOfflineQueue } from './offline.js';
+
+/**
+ * The adapter connection this client is bound to. Everything the client does
+ * with the adapter goes through it: sends, topic stores, the status store,
+ * the request handler. The adapter's own `connect()`, `on()` and `status`
+ * build a new connection, and a new socket, whenever none exists, which is
+ * the case once `close()` has run. Through the bound connection a call made
+ * after a close for good only reaches the closed connection, whose stores
+ * report 'failed' and whose sends go nowhere.
+ * @type {any}
+ */
+let _bound = null;
+
+/**
+ * The bound connection, binding it (and attaching the status listener, so a
+ * close for good is seen) on first use.
+ * @returns {any}
+ */
+export function _conn() {
+	if (_bound === null) ensureDisconnectListener();
+	return _bound;
+}
 
 /** @type {boolean} */
 let listenerAttached = false;
@@ -71,6 +95,7 @@ export function _unregisterTopicErrorSetter(topic, setError) {
  */
 export function ensureDenialsListener() {
 	if (denialsListenerAttached) return;
+	const denials = _conn().denials;
 	denialsListenerAttached = true;
 	denials.subscribe((denial) => {
 		if (!denial) return;
@@ -83,9 +108,6 @@ export function ensureDenialsListener() {
 		for (const setError of setters) setError(new RpcError(code, message));
 	});
 }
-
-/** Terminal close codes that indicate a permanently-dead connection (no retry) */
-const _TERMINAL_CODES = new Set([1008, 4401, 4403]);
 
 const _DEFAULT_TIMEOUT = 30000;
 
@@ -142,9 +164,8 @@ export function _getResumeMaxCursorAgeMs() {
  */
 export function ensureListener() {
 	if (listenerAttached) return;
+	const store = _conn().on('__rpc');
 	listenerAttached = true;
-
-	const store = on('__rpc');
 	store.subscribe((envelope) => {
 		if (!envelope) return;
 		const { event: correlationId, data } = envelope;
@@ -193,30 +214,50 @@ export function ensureListener() {
 }
 
 /**
- * Attach a disconnect listener once.
- * Rejects all in-flight RPCs (already sent) with DISCONNECTED.
+ * Attach the connection status listener once, binding the connection if
+ * nothing has yet. It is the first realtime listener on the status store, so
+ * it sees 'failed' before the others.
+ *
+ * - 'disconnected' rejects every in-flight request with DISCONNECTED and
+ *   drains uploads. The adapter reconnects, unless that drop used up the
+ *   last reconnect attempt, in which case 'failed' follows at once.
+ * - 'failed' means closed for good (an explicit close, a terminal close code,
+ *   an auth preflight failure or exhausted retries; the adapter reports
+ *   nothing else for that connection afterwards). The client is `terminated`
+ *   from then on and settles what it still holds with CONNECTION_CLOSED.
+ *
  * Also detects the Cloudflare-Tunnel "Set-Cookie on 101" symptom: repeated
  * fast open->close cycles with no time spent in the open state.
  */
 export function ensureDisconnectListener() {
 	if (disconnectListenerAttached) return;
+	// Bind the connection. If none exists yet it is created the way the
+	// adapter's own stores create one, implicitly, so the adapter still warns
+	// when options passed to a later connect() cannot apply; connect() without
+	// options then returns it. Marked attached only once bound, so a throw here
+	// is retried by the next call.
+	_adapterStatus.subscribe(() => {})();
+	_bound = _connect();
 	disconnectListenerAttached = true;
 
 	let lastOpenAt = 0;
 	let fastCloseCount = 0;
 	let cfTunnelWarned = false;
 
-	status.subscribe((s) => {
-		// 'failed' is terminal: an explicit close, a terminal close code, an
-		// auth preflight failure or exhausted retries.
-		if (s === 'failed') clientState.socketFailed = true;
-		if (s === 'disconnected' || s === 'failed') {
+	_bound.status.subscribe((s) => {
+		if (s === 'failed') {
+			// Before anything that can run app code: a call it makes must see it.
+			clientState.terminated = true;
+			_settleClosedForGood();
+		} else if (s === 'disconnected') {
 			for (const [id, entry] of pending) {
 				pending.delete(id);
 				if (entry.timer) clearTimer(entry.timer);
 				entry.reject(new RpcError('DISCONNECTED', 'WebSocket connection lost'));
 			}
 			_drainPendingUploadsOnDisconnect();
+		}
+		if (s === 'disconnected' || s === 'failed') {
 
 			if (lastOpenAt > 0) {
 				const openDuration = now() - lastOpenAt;
@@ -240,15 +281,11 @@ export function ensureDisconnectListener() {
 				}
 			}
 		}
-		if (s === 'open') {
-			clientState.terminated = false;
-			lastOpenAt = now();
-		}
+		if (s === 'open') lastOpenAt = now();
 		// A backgrounded tab's socket ('suspended') is still up and carries frames.
 		const up = s === 'open' || s === 'suspended';
 		if (up && !clientState.socketUp) {
 			clientState.socketUp = true;
-			clientState.socketFailed = false;
 			// Entries parked while the socket was down (a stream subscribe whose
 			// stream moved on, its request possibly still in the adapter's send
 			// queue) start waiting for their answer now.
@@ -259,38 +296,44 @@ export function ensureDisconnectListener() {
 			clientState.socketUp = false;
 		}
 	});
+}
 
-	// Listen for terminal close via ready() rejection (adapter 0.4.0)
-	if (typeof _connect === 'function') {
-		try {
-			const conn = _connect();
-			if (conn && typeof conn.ready === 'function') {
-				conn.ready().catch((/** @type {any} */ err) => {
-					clientState.terminated = true;
-					const errCode = err?.code || 'CONNECTION_CLOSED';
-					const errMsg = err?.message || 'Connection permanently closed';
-					// Reject all pending RPCs
-					for (const [id, entry] of pending) {
-						pending.delete(id);
-						if (entry.timer) clearTimer(entry.timer);
-						entry.reject(new RpcError(errCode, errMsg));
-					}
-					// Reject in-flight uploads (terminal close mirrors disconnect)
-					if (pendingUploads.size > 0) {
-						const snapshot = [...pendingUploads.values()];
-						for (const h of snapshot) h._settle(false, new RpcError(errCode, errMsg));
-					}
-					// Drain offline queue with errors
-					for (const entry of _offlineQueue) {
-						entry.reject(new RpcError(errCode, errMsg));
-					}
-					_offlineQueue.length = 0;
-				});
-			}
-		} catch {
-			// _connect may not be callable yet (SSR) - that's fine
-		}
+/**
+ * Whether the bound connection has closed for good, reading its status store
+ * now. Unlike `clientState.terminated` this already holds while the store is
+ * still to deliver 'failed' (a close() made inside another store's update
+ * defers that delivery). For cold paths only.
+ * @returns {boolean}
+ */
+export function _closedForGoodNow() {
+	if (clientState.terminated) return true;
+	if (_bound === null) return false;
+	let s;
+	_bound.status.subscribe((/** @type {string} */ v) => { s = v; })();
+	return s === 'failed';
+}
+
+/** @returns {RpcError} */
+function _connectionClosedError() {
+	return new RpcError('CONNECTION_CLOSED', 'Connection permanently closed');
+}
+
+/**
+ * The connection closed for good: settle every request and upload with
+ * CONNECTION_CLOSED, and the offline queue as `_closeOfflineQueue` says. A
+ * stream subscribe rejected here releases what it held without sending, so
+ * nothing is left waiting for an answer that cannot come.
+ */
+function _settleClosedForGood() {
+	for (const [id, entry] of pending) {
+		pending.delete(id);
+		if (entry.timer) clearTimer(entry.timer);
+		entry.reject(_connectionClosedError());
 	}
+	if (pendingUploads.size > 0) {
+		for (const handle of [...pendingUploads.values()]) handle._settle(false, _connectionClosedError());
+	}
+	_closeOfflineQueue(_connectionClosedError);
 }
 
 /**
@@ -300,4 +343,45 @@ function _drainPendingUploadsOnDisconnect() {
 	if (pendingUploads.size === 0) return;
 	const snapshot = [...pendingUploads.values()];
 	for (const handle of snapshot) handle._onDisconnect();
+}
+
+/**
+ * The status store of the bound connection. Subscribing binds first, so the
+ * client's own status listener runs before any subscriber made here (a call
+ * made on 'failed' already fails fast), and subscribing after a close for good
+ * reports 'failed' instead of building a new connection.
+ * @type {import('svelte/store').Readable<'connecting' | 'open' | 'suspended' | 'disconnected' | 'failed'>}
+ */
+export const status = {
+	subscribe(fn) {
+		return _conn().status.subscribe(fn);
+	}
+};
+
+/**
+ * The failure store of the bound connection (see `status`).
+ * @type {import('svelte/store').Readable<any>}
+ */
+export const failure = {
+	subscribe(fn) {
+		return _conn().failure.subscribe(fn);
+	}
+};
+
+/**
+ * The adapter's `onDerived`, with its topic stores on the bound connection
+ * (see `status`).
+ * @template T
+ * @param {(value: T) => string} topicFn
+ * @param {import('svelte/store').Readable<T>} store
+ * @returns {import('svelte/store').Readable<any>}
+ */
+export function onDerived(topicFn, store) {
+	return derived(store, ($value, set) => {
+		if ($value == null) {
+			set(null);
+			return;
+		}
+		return _conn().on(topicFn($value)).subscribe(set);
+	}, null);
 }

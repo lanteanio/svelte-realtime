@@ -35,13 +35,19 @@ beforeEach(async () => {
 	statusCallbacks = new Set();
 	sendQueuedFn = vi.fn();
 
+	// Like the adapter's, the connection object carries the module's topic
+	// factory, stores and request hook.
 	connectFn = vi.fn(() => ({
 		sendQueued: sendQueuedFn,
-		ready: () => new Promise(() => {}),
-		get bufferedAmount() { return 0; }
+		get bufferedAmount() { return 0; },
+		on: adapterMock.on,
+		status: adapterMock.status,
+		failure: adapterMock.failure,
+		denials: adapterMock.denials,
+		onRequest: adapterMock.onRequest
 	}));
 
-	vi.doMock('svelte-adapter-uws/client', () => ({
+	const adapterMock = {
 		connect: connectFn,
 		setTopicManaged: () => {},
 		on: (topic) => ({
@@ -66,7 +72,8 @@ beforeEach(async () => {
 		failure: { subscribe: (fn) => { fn(null); return () => {}; } },
 		denials: { subscribe: (fn) => { fn(null); return () => {}; } },
 		onRequest: () => () => {}
-	}));
+	};
+	vi.doMock('svelte-adapter-uws/client', () => adapterMock);
 
 	vi.doMock('svelte/store', () => ({
 		writable: (initial) => {

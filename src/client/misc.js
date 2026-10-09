@@ -1,10 +1,11 @@
 // @ts-check
-import { connect as _connect, on, status, onRequest as _adapterOnRequest } from 'svelte-adapter-uws/client';
+import { connect as _connect } from 'svelte-adapter-uws/client';
 import { now } from '../client-runtime.js';
-import { clientState, RpcError, _offlineQueue } from './internal-state.js';
+import { clientState, RpcError, _offlineQueue, _IS_DEV } from './internal-state.js';
 import { _sendRpc } from './rpc.js';
+import { _conn, _closedForGoodNow } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean } from './offline.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, restored?: boolean }} OfflineEntry
@@ -93,33 +94,45 @@ export function configure(config) {
 	}
 
 	if (config.url !== undefined || config.auth !== undefined) {
-		/** @type {{ url?: string, auth?: boolean | string }} */
-		const connectArgs = {};
-		if (config.url !== undefined) connectArgs.url = config.url;
-		if (config.auth !== undefined) connectArgs.auth = config.auth;
-		_connect(connectArgs);
+		if (_closedForGoodNow()) {
+			// A client whose connection closed for good stays closed; building a
+			// connection here would only open a socket nothing listens on.
+			if (_IS_DEV) {
+				console.warn('[svelte-realtime] configure({ url, auth }) is ignored once the connection has closed for good; reload the page to connect again.');
+			}
+		} else {
+			/** @type {{ url?: string, auth?: boolean | string }} */
+			const connectArgs = {};
+			if (config.url !== undefined) connectArgs.url = config.url;
+			if (config.auth !== undefined) connectArgs.auth = config.auth;
+			_connect(connectArgs);
+		}
 	}
 
 	// Protocol-compat signal opt-in: ensure the __realtime listener is active so a
 	// server `protocol-stale` notice is observed (health -> 'outdated' + dev warn)
 	// even if the app never reads the `health` store directly. Idempotent. MUST run
 	// AFTER the url/auth `_connect(connectArgs)` above: _ensureHealthSubscription
-	// calls `_connect()` with no args, and the FIRST _connect call fixes the
-	// endpoint - so creating the listener's connection before the configured one
-	// would pin the default same-origin URL and make the adapter ignore url/auth.
+	// binds the connection, creating it if none exists yet, and whichever call
+	// creates it fixes the endpoint - so creating the listener's connection before
+	// the configured one would pin the default same-origin URL and make the
+	// adapter ignore url/auth.
 	if (config.protocolVersion !== undefined) _ensureHealthSubscription();
 
 	if (!_configListenerAttached) {
+		// Binding the connection attaches its own status listener first, so the
+		// onDisconnect callback below already sees a close for good as terminated.
+		const conn = _conn();
 		_configListenerAttached = true;
 		let isFirst = true;
-		status.subscribe((s) => {
+		conn.status.subscribe((s) => {
 			if (isFirst) { isFirst = false; return; }
 			// The adapter reports a socket that opens while document.hidden as
 			// `suspended`, then continues its onopen path synchronously. Advertise at
 			// both connection-ready states so hello/resubscribe/queued work can never
 			// outrun strict protocol admission. App reconnect work remains open-only.
 			if ((s === 'open' || s === 'suspended') && clientState.config.protocolVersion !== undefined) {
-				try { _connect().sendQueued({ type: 'proto', v: clientState.config.protocolVersion }); } catch { /* no connection handle yet */ }
+				try { _conn().sendQueued({ type: 'proto', v: clientState.config.protocolVersion }); } catch { /* no connection handle yet */ }
 			}
 			if (s === 'open') {
 				clientState.isOffline = false;
@@ -195,6 +208,18 @@ async function _drainOfflineQueue() {
 					settleOk(entry, result);
 					return;
 				} catch (err) {
+					// Cut off by the close for good (or by the drop that used up the
+					// last reconnect attempt), the entry goes back to the queue and is
+					// handled as the queue is at the close: one with a stored copy
+					// waits there for a later page load with its call still pending,
+					// one without rejects, and neither is a replay failure. It may not
+					// have been applied, so the drain is not clean.
+					if (clientState.terminated && err && (err.code === 'CONNECTION_CLOSED' || err.code === 'DISCONNECTED')) {
+						anyFailure = true;
+						_offlineQueue.push(entry);
+						_keepIfStored(entry, () => new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
+						return;
+					}
 					if (err && err.code === 'CONFLICT' && !retried) {
 						const call = { path: entry.path, args, queuedAt: entry.queuedAt };
 						if (conflictResolution === 'lww') {
@@ -367,7 +392,7 @@ export function onSignal(userId, callback) {
 		userId = '';
 	}
 	const topic = userId ? ('__signal:' + userId) : '__signal';
-	const store = on(topic);
+	const store = _conn().on(topic);
 	return store.subscribe((envelope) => {
 		if (!envelope) return;
 		callback(envelope.event, envelope.data);
@@ -388,7 +413,7 @@ let _pushDispatcherUnsub = null;
 
 function _ensurePushDispatcher() {
 	if (_pushDispatcherUnsub) return;
-	_pushDispatcherUnsub = _adapterOnRequest(async (event, data) => {
+	_pushDispatcherUnsub = _conn().onRequest(async (event, data) => {
 		const handler = _pushHandlers.get(event);
 		if (!handler) {
 			throw new Error("[svelte-realtime] no push handler registered for event '" + event + "'");

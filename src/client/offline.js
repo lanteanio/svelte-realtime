@@ -12,7 +12,7 @@
 import { writable } from 'svelte/store';
 import { randomUuid } from '../client-runtime.js';
 import { _offlineQueue } from './internal-state.js';
-import { resolveOfflineStore } from './offline-store.js';
+import { resolveOfflineStore, _isDurableStore } from './offline-store.js';
 
 /** @type {import('./offline-store.js').OfflineStore | null} */
 let _store = null;
@@ -63,6 +63,17 @@ function _checkpointKey() {
 }
 
 /**
+ * One call to the store. A custom store that throws instead of returning a
+ * rejected promise is treated the same, so a storage failure never escapes
+ * into the queue logic around it.
+ * @param {() => any} call
+ * @returns {Promise<any>}
+ */
+function _storeCall(call) {
+	return new Promise((resolve) => resolve(call()));
+}
+
+/**
  * The current upload checkpoint for the configured queue:
  * `lastUploadedSeq` is the highest enqueue seq that replayed successfully;
  * `gapDetected` is true when a later mutation succeeded while an earlier one
@@ -101,6 +112,7 @@ export function _configureOfflinePersistence(offlineOpts) {
  */
 async function _rehydrate() {
 	if (!_store) return;
+	const stored = Promise.resolve(_isDurableStore(_store));
 	const rows = await _store.getAll('q:' + _persistKey + ':');
 	/** @type {any[]} */
 	const restored = [];
@@ -115,7 +127,8 @@ async function _rehydrate() {
 			idempotencyKey: typeof value.idempotencyKey === 'string' ? value.idempotencyKey : undefined,
 			timeout: typeof value.timeout === 'number' ? value.timeout : undefined,
 			seq: typeof value.seq === 'number' ? value.seq : 0,
-			restored: true
+			restored: true,
+			stored
 		});
 		if (typeof value.seq === 'number' && value.seq > _seq) _seq = value.seq;
 	}
@@ -146,7 +159,8 @@ export function _offlineReady() {
  * caller supplied none (so a replay after reload ALWAYS dedups server-side -
  * a mutation that reached the server before the crash answers with its
  * original result instead of applying twice), and the persisted copy.
- * Called by rpc.js right after the queue push.
+ * Called by rpc.js right after the queue push. `entry.stored` settles to
+ * whether the write left a copy that outlives the page.
  * @param {any} entry
  */
 export function _enqueuePersist(entry) {
@@ -155,14 +169,18 @@ export function _enqueuePersist(entry) {
 		entry.idempotencyKey = 'off-' + randomUuid();
 	}
 	if (_store) {
-		void _store.put(_entryKey(entry.seq), {
+		const store = _store;
+		const durable = _isDurableStore(store);
+		const value = {
 			seq: entry.seq,
 			path: entry.path,
 			args: entry.args,
 			queuedAt: entry.queuedAt,
 			idempotencyKey: entry.idempotencyKey,
 			timeout: entry.timeout
-		}).catch(() => {});
+		};
+		entry.stored = _storeCall(() => store.put(_entryKey(entry.seq), value))
+			.then(() => durable, () => false);
 	}
 	_bumpPending();
 }
@@ -177,13 +195,54 @@ export function _enqueuePersist(entry) {
  */
 export function _settlePersist(entry, success, hadEarlierFailure) {
 	if (_store && typeof entry.seq === 'number' && entry.seq > 0) {
-		void _store.delete(_entryKey(entry.seq)).catch(() => {});
+		const store = _store;
+		void _storeCall(() => store.delete(_entryKey(entry.seq))).catch(() => {});
 	}
 	if (success && typeof entry.seq === 'number') {
 		if (entry.seq > _checkpoint.lastUploadedSeq) _checkpoint.lastUploadedSeq = entry.seq;
 		if (hadEarlierFailure) _checkpoint.gapDetected = true;
-		if (_store) void _store.put(_checkpointKey(), { ..._checkpoint }).catch(() => {});
+		_putCheckpoint();
 	}
+}
+
+/**
+ * @internal The connection closed for good, which says nothing about whether
+ * a queued mutation should apply: a session that expired while offline closes
+ * it too. A mutation with a stored copy stays queued, its call pending, and
+ * the copy replays on a later page load. One without (persistence off, an
+ * in-memory store, a write that failed) can never be sent, so it rejects with
+ * `makeError()`; one whose write is still running is decided when it ends.
+ * @param {() => Error} makeError
+ */
+export function _closeOfflineQueue(makeError) {
+	for (const entry of [..._offlineQueue]) _keepIfStored(entry, makeError);
+}
+
+/**
+ * @internal `_closeOfflineQueue` for one queued entry.
+ * @param {any} entry
+ * @param {() => Error} makeError
+ */
+export function _keepIfStored(entry, makeError) {
+	if (entry.stored === undefined) {
+		_dropClosed(entry, makeError);
+		return;
+	}
+	entry.stored.then((/** @type {boolean} */ stored) => {
+		if (!stored) _dropClosed(entry, makeError);
+	});
+}
+
+/**
+ * @param {any} entry
+ * @param {() => Error} makeError
+ */
+function _dropClosed(entry, makeError) {
+	const i = _offlineQueue.indexOf(entry);
+	if (i === -1) return;
+	_offlineQueue.splice(i, 1);
+	_bumpPending();
+	entry.reject(makeError());
 }
 
 /**
@@ -193,8 +252,13 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 export function _clearGapIfClean() {
 	if (_checkpoint.gapDetected && _offlineQueue.length === 0) {
 		_checkpoint.gapDetected = false;
-		if (_store) void _store.put(_checkpointKey(), { ..._checkpoint }).catch(() => {});
+		_putCheckpoint();
 	}
+}
+
+function _putCheckpoint() {
+	const store = _store;
+	if (store) void _storeCall(() => store.put(_checkpointKey(), { ..._checkpoint })).catch(() => {});
 }
 
 /**

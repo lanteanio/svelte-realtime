@@ -1,6 +1,6 @@
 // @ts-check
 import { writable } from 'svelte/store';
-import { connect as _connect, on } from 'svelte-adapter-uws/client';
+import { _conn } from './connection.js';
 import { createJitterDispatch } from './jitter-dispatch.js';
 import { _IS_DEV } from './internal-state.js';
 
@@ -214,18 +214,16 @@ export function _ensureHealthSubscription() {
 	// server pushed with a jitter window staggers this client's reaction instead of
 	// firing at t+0. A non-jittered event dispatches immediately (unchanged).
 	const jitter = createJitterDispatch(_applyHealthEvent);
-	const offTopic = on(_HEALTH_TOPIC).subscribe((envelope) => { if (envelope) jitter.dispatch(envelope); });
+	const conn = _conn();
+	const offTopic = conn.on(_HEALTH_TOPIC).subscribe((envelope) => { if (envelope) jitter.dispatch(envelope); });
 	// Fold the connection's internal flow-control health in as a second,
 	// OR-ed input. A boolean is the only thing that crosses this accessor;
 	// no internal accounting value surfaces. Older adapter connections that
 	// predate the accessor simply do not contribute this input.
 	let offFlow = () => {};
-	try {
-		const conn = _connect();
-		if (conn && typeof conn._onLeaseDegraded === 'function') {
-			offFlow = conn._onLeaseDegraded((d) => { _healthFlowDegraded = !!d; _recomputeHealth(); });
-		}
-	} catch { /* connection not configured yet; flow health stays clear */ }
+	if (typeof conn._onLeaseDegraded === 'function') {
+		offFlow = conn._onLeaseDegraded((d) => { _healthFlowDegraded = !!d; _recomputeHealth(); });
+	}
 	_healthUnsub = () => { offTopic(); jitter.clear(); offFlow(); };
 }
 

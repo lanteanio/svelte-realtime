@@ -12,33 +12,28 @@ export { createIndexedDbStore, createMemoryStore } from './client/offline-store.
 export { __stream, _createStreamAtSchemaVersion, createReactiveStream } from './client/stream.js';
 
 /**
- * Re-export `onDerived` from the adapter client.
- * Provides a reactive derived topic subscription that auto-switches when a
- * source store changes. More lightweight than dynamic streams for cases where
- * you just want raw topic events keyed to a store value.
- */
-export { onDerived } from 'svelte-adapter-uws/client';
-
-/**
- * Re-export `failure` from the adapter client.
- * Reactive store carrying the cause of the most recent non-open status
- * transition: `{ kind: 'ws-close', class: 'TERMINAL' | 'EXHAUSTED' |
- * 'THROTTLE' | 'RETRY', code, reason }` for WebSocket closes, or
- * `{ kind: 'auth-preflight', class: 'AUTH', status, reason }` for
+ * The adapter client's `onDerived`, `failure` and `status`, read from the
+ * connection this client is bound to, so that after a close for good they
+ * report the closed connection instead of opening a new one.
+ *
+ * `onDerived` is a reactive derived topic subscription that auto-switches
+ * when a source store changes. More lightweight than dynamic streams for
+ * cases where you just want raw topic events keyed to a store value.
+ *
+ * `failure` carries the cause of the most recent non-open status transition:
+ * `{ kind: 'ws-close', class: 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' |
+ * 'RETRY' | 'DRAIN', code, diagnosticReason }` for WebSocket closes, or
+ * `{ kind: 'auth-preflight', class: 'AUTH', status, diagnosticReason }` for
  * auth-preflight failures. `null` while connected. Cleared on the next
  * successful `'open'`. Not set on intentional `close()`.
+ *
+ * `status` holds the connection status: 'connecting', 'open', 'suspended'
+ * (WebSocket open but the tab is backgrounded), 'disconnected' (will retry),
+ * or 'failed' (terminal). The generated multiplayer namespace exposes this as
+ * its `status` view so a collaborative surface can react to connectivity
+ * without a separate adapter import.
  */
-export { failure } from 'svelte-adapter-uws/client';
-
-/**
- * Re-export `status` from the adapter client.
- * Reactive store holding the connection status: 'connecting', 'open',
- * 'suspended' (WebSocket open but the tab is backgrounded), 'disconnected'
- * (will retry), or 'failed' (terminal). The generated multiplayer namespace
- * exposes this as its `status` view so a collaborative surface can react to
- * connectivity without a separate adapter import.
- */
-export { status } from 'svelte-adapter-uws/client';
+export { onDerived, failure, status } from './client/connection.js';
 
 /**
  * Re-export `createSharedRandom` from the adapter's smooth plugin. The deterministic

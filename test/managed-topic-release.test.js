@@ -48,11 +48,10 @@ beforeEach(async () => {
 	const conn = {
 		send: (f) => { sentFrames.push(f); },
 		sendQueued: (f) => { queuedFrames.push(f); },
-		ready: () => new Promise(() => {}),
 		get bufferedAmount() { return 0; }
 	};
 
-	vi.doMock('svelte-adapter-uws/client', () => ({
+	const adapterMock = {
 		connect: () => conn,
 		// Presence of this export flips `_hasManagedMarking` true, so the stream
 		// takes a managed ref at topic resolution (the code path under test).
@@ -70,7 +69,17 @@ beforeEach(async () => {
 		failure: { subscribe: (fn) => { fn(null); return () => {}; } },
 		denials: { subscribe: (fn) => { fn(null); return () => {}; } },
 		onRequest: () => () => {}
-	}));
+	};
+	// Like the adapter's, the connection object carries the module's topic
+	// factory, stores and request hook.
+	Object.assign(conn, {
+		on: adapterMock.on,
+		status: adapterMock.status,
+		failure: adapterMock.failure,
+		denials: adapterMock.denials,
+		onRequest: adapterMock.onRequest
+	});
+	vi.doMock('svelte-adapter-uws/client', () => adapterMock);
 
 	const clientMod = await import('../src/client.js');
 	__stream = clientMod.__stream;

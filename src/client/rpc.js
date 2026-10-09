@@ -1,8 +1,7 @@
 // @ts-check
-import { connect as _connect } from 'svelte-adapter-uws/client';
 import { now, microtask, setTimer, clearTimer } from '../client-runtime.js';
 import { __devtools, _devtoolsStart, _devtoolsEnd, _devtoolsVolatileSent } from './devtools-instrument.js';
-import { ensureListener, ensureDisconnectListener, _getTimeout } from './connection.js';
+import { _conn, ensureListener, ensureDisconnectListener, _getTimeout } from './connection.js';
 import { clientState, RpcError, pending, _nextId, _dedupMap, _dedupCoalesceWarned, _isDev, _IS_DEV, _textEncoder, _getBinaryFrame, _offlineQueue, _publishRateHintWarned, _publishRateWindows, _PUBLISH_RATE_HINT_THRESHOLD, _PUBLISH_RATE_HINT_WINDOW_MS, _PUBLISH_RATE_HINT_DEDUP_MAX } from './internal-state.js';
 import { _enqueuePersist, _settlePersist } from './offline.js';
 
@@ -193,13 +192,13 @@ export function __rpc(path) {
 	 * ```
 	 */
 	rpcCall.fireAndForget = function fireAndForget(...args) {
-		if (clientState.terminated) return;
+		ensureDisconnectListener();
 		// Mirror to devtools here too, not only on the backpressure branch below.
 		// The panel assigns the WHOLE counter rather than incrementing, so an offline
 		// drop that bumped `_volatileDropped` silently was invisible until the next
 		// backpressure drop, at which point the field jumped by every offline drop
 		// accumulated since. The counter covers all drop reasons; so must the mirror.
-		if (clientState.isOffline) {
+		if (clientState.terminated || clientState.isOffline) {
 			_volatileDropped++;
 			if (__devtools) __devtools.volatileDropped = _volatileDropped;
 			return;
@@ -213,8 +212,7 @@ export function __rpc(path) {
 			return;
 		}
 		ensureListener();
-		ensureDisconnectListener();
-		const conn = _connect();
+		const conn = _conn();
 		const cap = clientState.config.volatileBackpressureBytes || _DEFAULT_VOLATILE_BACKPRESSURE_BYTES;
 		if (typeof conn.bufferedAmount === 'number' && conn.bufferedAmount > cap) {
 			_volatileDropped++;
@@ -251,6 +249,7 @@ export function __rpc(path) {
 	 * @returns {void}
 	 */
 	rpcCall.send = function sendReliable(...args) {
+		ensureDisconnectListener();
 		if (clientState.terminated) return;
 		if (clientState.batchCollector) {
 			if (_IS_DEV) {
@@ -261,9 +260,8 @@ export function __rpc(path) {
 			return;
 		}
 		ensureListener();
-		ensureDisconnectListener();
 		_devtoolsVolatileSent(path, args);
-		_connect().sendQueued({ rpc: path, args });
+		_conn().sendQueued({ rpc: path, args });
 	};
 
 	/**
@@ -469,11 +467,11 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
 		});
 	}
 
-	// `_connect()` runs FIRST. It can throw - `connection.js` wraps its own call in
-	// a try/catch for exactly that (not callable yet under SSR) - and registering
-	// with devtools beforehand would strand a pending entry, with its captured
-	// args, that nothing can ever sweep: no timer is armed until below.
-	const conn = _connect();
+	// Registered with devtools after everything that can throw (binding the
+	// connection, the argument check): an entry registered earlier would strand
+	// its captured args with nothing to sweep them, since no timer is armed
+	// until below.
+	const conn = _conn();
 	_devtoolsStart(path, id, args);
 	const effectiveTimeout = timeout || _getTimeout();
 	// Sleep-detect threshold scales with the effective timeout so longer
@@ -515,17 +513,16 @@ export function _sendRpc(path, args, idempotencyKey, timeout) {
  */
 export function __binaryRpc(path) {
 	return function binaryRpcCall(buffer, ...args) {
+		ensureListener();
+		ensureDisconnectListener();
 		if (clientState.terminated) {
 			return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 		}
-		ensureListener();
-		ensureDisconnectListener();
 
 		const id = _nextId();
 
-		// `_connect()` first - see the note in `_sendRpc`. A throw here before the
-		// devtools registration would strand an unsweepable pending entry.
-		const conn = _connect();
+		// Devtools registers after binding, as in `_sendRpc`.
+		const conn = _conn();
 		_devtoolsStart(path, id, args);
 
 		return new Promise((resolve, reject) => {
@@ -624,11 +621,11 @@ let _volatileBackpressureWarned = false;
  * @returns {Promise<any[]>}
  */
 export function batch(fn, options) {
+	ensureListener();
+	ensureDisconnectListener();
 	if (clientState.terminated) {
 		return Promise.reject(new RpcError('CONNECTION_CLOSED', 'Connection permanently closed'));
 	}
-	ensureListener();
-	ensureDisconnectListener();
 
 	// Collect RPC calls during fn() execution
 	clientState.batchCollector = [];
@@ -668,7 +665,7 @@ export function batch(fn, options) {
 		return Promise.reject(new RpcError('INVALID_REQUEST', 'Batch exceeds maximum of 50 calls'));
 	}
 
-	const conn = _connect();
+	const conn = _conn();
 	const effectiveTimeout = _getTimeout();
 
 	// Batch-of-1: send the bare RPC frame instead of wrapping in a batch
