@@ -383,6 +383,70 @@ describe('offline queue - durability', () => {
 	});
 });
 
+describe('offline queue - a replay function', () => {
+	const three = [
+		['todos/add', [{ t: 1 }]],
+		['todos/add', [{ t: 2 }]],
+		['todos/add', [{ t: 3 }]]
+	];
+
+	it('replays what it returns, in its order, and drops what it leaves out as STALE', async () => {
+		const store = fakeStore();
+		const onReplayError = vi.fn();
+		const replay = (queue) => [queue[2], queue[0]];
+		const watched = (await goOfflineAndQueue({ persist: store, replay, onReplayError }, three)).map(watch);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.args[0].t)).toEqual([3, 1]);
+		expect(watched[0].value).toBe('ok');
+		expect(watched[1].error).toMatchObject({ code: 'STALE' });
+		expect(watched[2].value).toBe('ok');
+		expect(onReplayError).toHaveBeenCalledTimes(1);
+		expect(onReplayError.mock.calls[0][0].args).toEqual([{ t: 2 }]);
+		expect(storedKeys(store)).toEqual([]);
+	});
+
+	it('one that throws replays the queue as it is', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const replay = () => { throw new Error('app bug'); };
+			const watched = (await goOfflineAndQueue({ replay }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(sentCalls().map((e) => e.args[0].t)).toEqual([1, 2, 3]);
+			expect(watched.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+			expect(warn.mock.calls.some(([m]) => String(m).includes('offline.replay'))).toBe(true);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('one that returns no array replays the queue as it is', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const watched = (await goOfflineAndQueue({ replay: () => undefined }, three)).map(watch);
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'ok' }));
+			expect(watched.map((w) => w.value)).toEqual(['ok', 'ok', 'ok']);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
+	it('a call it returns twice replays once, and anything not from the queue is ignored', async () => {
+		const replay = (queue) => [queue[0], queue[0], { path: 'admin/wipe', args: [], queuedAt: 0, resolve() {}, reject() {}, seq: 99 }, queue[1]];
+		const watched = (await goOfflineAndQueue({ replay }, three)).map(watch);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(sentCalls().map((e) => e.rpc + ':' + e.args[0]?.t)).toEqual(['todos/add:1', 'todos/add:2']);
+		expect(watched[2].error).toMatchObject({ code: 'STALE' });
+	});
+});
+
 describe('offline queue - a call queued while the restore runs', () => {
 	/** A store seeded with one restored row whose scan waits for `release()`. */
 	function gatedStore({ fail = false } = {}) {

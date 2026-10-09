@@ -300,9 +300,32 @@ async function _drainOfflineQueue() {
 		/** @param {OfflineEntry} entry */
 		const asQueued = (entry) => (queued.has(entry) ? entry : queuedBySeq.get(entry.seq) ?? entry);
 
-		// Apply custom filter function
+		// A custom replay function picks the calls to replay and their order.
+		// One it leaves out is dropped like a beforeReplay drop; one that throws
+		// or returns no array decides nothing, and the queue replays as it is.
 		if (typeof offlineOpts?.replay === 'function') {
-			queue = offlineOpts.replay(queue);
+			/** @type {any} */
+			let picked;
+			try {
+				picked = offlineOpts.replay(queue.slice());
+			} catch (err) {
+				picked = err;
+			}
+			if (Array.isArray(picked)) {
+				const kept = new Set();
+				picked = picked.filter((entry) => {
+					const original = entry && asQueued(entry);
+					if (!queued.has(original) || kept.has(original)) return false;
+					kept.add(original);
+					return true;
+				});
+				for (const entry of queue) {
+					if (!kept.has(entry)) settleFail(entry, new RpcError('STALE', 'Offline mutation dropped by the replay function'));
+				}
+				queue = picked;
+			} else if (_IS_DEV) {
+				console.warn('[svelte-realtime] offline.replay did not return an array of queued calls, so the queue replays as it is.' + (picked instanceof Error ? ' Cause: ' + picked.message : ''));
+			}
 		}
 
 		// Replay using the configured strategy

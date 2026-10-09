@@ -388,6 +388,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whichever replay, and a replay that opened it does not close it again
   when it ends.
 
+- **A call a custom `offline.replay` function leaves out is dropped, not
+  forgotten.** The function picks the calls to replay, but a call it left
+  out was never settled: its promise stayed pending, `pendingMutations`
+  stopped counting it, and its stored copy replayed after the next reload.
+  A function that threw lost the whole queue until a reload. A call the
+  function leaves out now rejects with `STALE` (with `onReplayError`, its
+  stored copy deleted), a call it returns twice replays once, an entry that
+  was not queued is ignored, and a function that throws or returns no array
+  leaves the queue to replay as it is, with a warning in development. The
+  README now documents `replay`.
+
 - **The `Failure` type matches what `failure` reports.** `class` can be
   `'DRAIN'` (a close the server announced with a drain advisory), and
   `diagnosticReason` is declared, with `reason` as its deprecated alias.
