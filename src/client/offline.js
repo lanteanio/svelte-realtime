@@ -307,6 +307,9 @@ async function _rehydrate() {
 		// No new seq at or below one that already went up, also once its row
 		// is gone: a failure there would read as a hole in the upload order.
 		if (_checkpoint.lastUploadedSeq > _seq) _seq = _checkpoint.lastUploadedSeq;
+		// Nor at the seq a carried batch failed at: a call queued now comes
+		// after it, so its success is a hole.
+		if (_batch.failedSeq !== Infinity && _batch.failedSeq > _seq) _seq = _batch.failedSeq;
 		// A restored call a full queue dropped meanwhile, below one that went
 		// up before the reload, is a hole.
 		if (_batch.failedSeq < _checkpoint.lastUploadedSeq && !_checkpoint.gapDetected) {

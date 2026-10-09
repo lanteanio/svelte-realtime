@@ -1376,6 +1376,26 @@ describe('offline queue - checkpoint and consumer stores', () => {
 		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 2, gapDetected: true });
 	});
 
+	it('a call queued after a reload is numbered past the seq a carried batch failed at', async () => {
+		const store = fakeStore({
+			'c:default': { lastUploadedSeq: 0, gapDetected: false, batchFailedSeq: 3, batchClean: false },
+			...Object.fromEntries([
+				seedEntry('default', 1, 'todos/add', [{ t: 1 }], 'off-1'),
+				seedEntry('default', 2, 'todos/add', [{ t: 2 }], 'off-2')
+			])
+		});
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush(1);
+		simulateStatus('disconnected');
+		mod.__rpc('todos/add')({ t: 'new' }).catch(() => {});
+		await flush(1);
+		expect(storedKeys(store)).toEqual(['q:default:000000000001', 'q:default:000000000002', 'q:default:000000000004']);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 4, gapDetected: true });
+	});
+
 	it('a page closed mid-replay leaves a batch that closes no gap, and the batch after it can', async () => {
 		const store = fakeStore({
 			'c:default': { lastUploadedSeq: 5, gapDetected: true, batchFailedSeq: null, batchClean: true },
