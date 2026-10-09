@@ -567,8 +567,8 @@ Reactive stores from `svelte-realtime/client` render connection state without ap
   <Banner severity="error">Session expired. <a href="/login">Sign in again</a></Banner>
 {:else if $failure?.class === 'THROTTLE'}
   <Banner severity="warn">Server is busy. Reconnecting more slowly...</Banner>
-{:else if $status === 'disconnected'}
-  <Banner severity="info">Reconnecting...</Banner>
+{:else if $status === 'disconnected' || $status === 'connecting'}
+  <Banner severity="info">Connecting...</Banner>
 {/if}
 
 {#if !$quiescent}
@@ -579,7 +579,7 @@ Reactive stores from `svelte-realtime/client` render connection state without ap
 | Store | Type | Behavior |
 |---|---|---|
 | `status` | `'connecting' \| 'open' \| 'suspended' \| 'disconnected' \| 'failed'` | Connection state machine. `suspended` = tab in background; `failed` = [closed for good](#connection-closed-for-good) (`close()`, a terminal close code, a rejected auth preflight or exhausted retries) |
-| `failure` | `{ kind, class, code, diagnosticReason } \| null` | Cause of the most recent non-open transition. `class` is `TERMINAL` (auth) / `EXHAUSTED` (max retries) / `THROTTLE` (4429) / `RETRY` / `DRAIN` (server restart advisory) / `AUTH` (HTTP preflight). Cleared on next `'open'`. Not set on intentional `close()` |
+| `failure` | `{ kind, class, code, diagnosticReason } \| null` | Cause of the most recent non-open transition. `class` is `TERMINAL` (auth) / `EXHAUSTED` (max retries) / `THROTTLE` (4429) / `RETRY` / `DRAIN` (server restart advisory) / `AUTH` (HTTP preflight; carries `status` instead of `code`). Cleared on next `'open'`. Not set on intentional `close()` |
 | `quiescent` | `Readable<boolean>` | `true` when every active stream has settled (initial load + all reconnects). Continuous signal - a `false -> true` transition after a reconnect cycle marks "everything caught up" |
 | `health` | `'healthy' \| 'degraded'` | System-wide health, sourced from `degraded` / `recovered` events on the `__realtime` topic. Stays `'healthy'` until something publishes - typically the extensions package's pub/sub bus circuit breaker |
 | `degradation` | `Readable<{ active, mitigation, recovery }>` | The server-pushed degradation detail. `mitigation` carries the precomputed client action (`bannerCopy`, `retryAfterMs`, unavailable `streams` / `rpcs`) a degradation policy attached, so you render a notice + schedule a retry with zero per-failure code. Additive companion to `health` |

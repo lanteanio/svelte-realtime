@@ -1022,8 +1022,8 @@ export type FailureClass = 'TERMINAL' | 'EXHAUSTED' | 'THROTTLE' | 'RETRY' | 'AU
  *   <p class="warn">Server is busy, retrying shortly...</p>
  * {:else if $failure?.class === 'AUTH'}
  *   <p class="error">Could not authenticate (HTTP {$failure.status})</p>
- * {:else if $status === 'disconnected'}
- *   <span>Reconnecting...</span>
+ * {:else if $status === 'disconnected' || $status === 'connecting'}
+ *   <span>Connecting...</span>
  * {/if}
  * ```
  */
