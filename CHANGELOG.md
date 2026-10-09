@@ -138,10 +138,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **An `offline.beforeReplay` that throws or returns a promise drops the
   call it is asked about.** A filter that threw stopped the replay before
-  it began: the calls it had not refused stayed queued and went out once
-  the filter stopped throwing, at a later reconnect. An async filter returned a
-  promise, which is truthy, so every call went through a filter that had
-  not answered yet. Either way the call is now dropped as `STALE` and
+  it began: every queued call stayed queued and went through the filter
+  again at a later reconnect. An async filter returned a promise, which is
+  truthy, so every call went through a filter that had not answered yet. Either way the call is now dropped as `STALE` and
   reported to `onReplayError`, with a warning in development; after a
   throw the error is the rejection's `cause`, after a promise its message
   says so. A filter that cannot decide yet, say for want of a signed-in
@@ -317,10 +316,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **The scaffolder creates a project again.** It ran the latest `sv`, and since
-  `sv` 1.0 (released 2026-10-01) that creates a SvelteKit 3 project, which
-  `svelte-adapter-uws` and `svelte-realtime` do not support: the install
-  stopped with `ERESOLVE` and no project was created. The scaffolder now runs
+- **The scaffolder sets up a working project again.** It ran the latest
+  `sv`, and since `sv` 1.0 (released 2026-10-01) that creates a SvelteKit 3
+  project, which `svelte-adapter-uws` and `svelte-realtime` do not support:
+  installing them failed (npm stopped with `ERESOLVE`), leaving a bare
+  SvelteKit project. The scaffolder now runs
   `sv@0.17.1`, the last release that creates a SvelteKit 2 project, and the
   README's manual setup says to do the same.
 
@@ -428,8 +428,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the replay that carries it on, also after a reload, belongs to the same
   upload batch; a cut batch closes no gap, and neither does a batch that
   opened one. The gap closes when a later batch goes up in full, with
-  nothing failing, nothing cut off and nothing left queued. After a reload, new mutations are numbered past
-  `lastUploadedSeq` even when no stored mutation is left.
+  nothing failing, nothing cut off and nothing left queued. After a reload,
+  new mutations are numbered past `lastUploadedSeq` and past the seq a
+  carried batch failed at, even when no stored mutation is left.
 
 - **A call a custom `offline.replay` function leaves out is dropped, not
   forgotten.** The function picks the calls to replay, but a call it left
@@ -439,9 +440,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   function leaves out now rejects with `STALE` (with `onReplayError`, its
   stored copy deleted) and counts toward `gapDetected` like any dropped
   call, and so does one it answers with `null` for (an `undefined` item
-  reads as a forgotten `return`: it is warned about, and an answer with no
-  queued call in it decides nothing); a call it returns twice replays
-  once; a copy whose args cannot be serialized drops its call as `STALE`,
+  reads as a forgotten `return`: it is warned about, and an answer made
+  only of such items decides nothing); a call it returns twice replays
+  once; a copy whose args cannot be serialized drops its call as `STALE`
+  (unless the answer also holds a sendable copy of it),
   with the error as the cause; a returned copy is matched to its call by
   `resolve`, or, when its `resolve` is not a function (a JSON copy of the
   queue has none), by its `seq` and `idempotencyKey` (now on the `OfflineEntry` type), and its

@@ -125,8 +125,10 @@ const _pendingStore = _consumerStore(0);
 const _uploadingStore = _consumerStore(false);
 
 /**
- * Live count of queued offline mutations (enqueue, settle, and restore all
- * move it). The consumer surface for "N pending edits" indicators.
+ * Live count of queued offline mutations waiting to be sent: enqueue, drops
+ * and the restore move it, a replay takes the calls it sends out of it and
+ * puts back the ones a lost connection cut off. The consumer surface for
+ * "N pending edits" indicators.
  * @type {{ subscribe: (run: (n: number) => void, invalidate?: () => void) => () => void }}
  */
 export const pendingMutations = { subscribe: _pendingStore.subscribe };
@@ -367,9 +369,9 @@ export function _offlineReady() {
 /**
  * @internal Stamp durability fields onto a freshly-enqueued entry and
  * write it through: a monotone seq, a synthesized idempotency key when the
- * caller supplied none (so a replay after reload ALWAYS dedups server-side -
- * a mutation that reached the server before the crash answers with its
- * original result instead of applying twice), and the persisted copy.
+ * caller supplied none (so a handler wrapped in live.idempotent answers a
+ * replay after reload with the original result instead of applying it
+ * twice, while its store keeps that result), and the persisted copy.
  * Called by rpc.js right after the queue push. `entry.stored` settles to
  * whether the write left a copy that outlives the page. While the restore
  * runs, the seq and the write wait for it: the next free seq is not known

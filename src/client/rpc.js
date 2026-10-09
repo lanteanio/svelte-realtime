@@ -448,8 +448,9 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 			const entry = { path, args: queuedArgs, queuedAt: now(), resolve, reject, idempotencyKey, timeout };
 			_offlineQueue.push(entry);
 			// Durability write-through: stamps the monotone seq, synthesizes an
-			// idempotency key when absent (replay-after-reload dedups
-			// server-side), and persists when configured.
+			// idempotency key when absent (a live.idempotent handler answers a
+			// replay after reload with its first result), and persists when
+			// configured.
 			_enqueuePersist(entry);
 			_settleDropped(dropped);
 		});
