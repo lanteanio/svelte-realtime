@@ -1749,8 +1749,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// Drain anything buffered between listener attach and now
 					if (buffer.length > 0) {
 						for (const evt of buffer) _applyMerge(evt);
-						if (Array.isArray(currentValue)) currentValue = currentValue.slice();
-						store.set(currentValue);
+						if (_optimisticQueue.length > 0) _recomputeDisplay();
+						else {
+							if (Array.isArray(currentValue)) currentValue = currentValue.slice();
+							store.set(currentValue);
+						}
 						buffer = [];
 					}
 					return;
@@ -1777,7 +1780,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					if (_optimisticQueue.length > 0) {
 						_serverValue = response.data;
 						_rebuildIndexFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex));
-						currentValue = _replayQueue().value;
 					} else {
 						currentValue = response.data;
 					}
@@ -1786,6 +1788,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					_cursorOrder.clear();
 				}
 
+				if (_optimisticQueue.length > 0) currentValue = _replayQueue().value;
 				_rebuildIndex();
 
 				if (response.hasMore !== undefined) _hasMore = response.hasMore;
@@ -1806,9 +1809,12 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					for (const evt of buffer) {
 						_applyMerge(evt);
 					}
-					if (Array.isArray(currentValue)) currentValue = currentValue.slice();
-					store.set(currentValue);
-					_recordHistory();
+					if (_optimisticQueue.length > 0) _recomputeDisplay();
+					else {
+						if (Array.isArray(currentValue)) currentValue = currentValue.slice();
+						store.set(currentValue);
+						_recordHistory();
+					}
 				}
 				buffer = [];
 			},

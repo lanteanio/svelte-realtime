@@ -8669,6 +8669,35 @@ describe('assert() helper (client)', () => {
 
 
 describe('stream snapshots during optimistic mutation', () => {
+	it.each(['full', 'delta', 'replay', 'unchanged'])('replays attach-window events over a %s response while a mutation is pending', async (mode) => {
+		const store = __stream('snapshots/buffer/' + mode, { merge: 'crud', key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((value) => values.push(value));
+		await flush();
+		const first = sendQueuedFn.mock.calls.at(-1)[0];
+		const topic = 'snapshots-buffer-' + mode;
+		simulateRpcResponse(first.id, { ok: true, data: [{ id: 1 }], topic, merge: 'crud', key: 'id' });
+		let settle;
+		const pending = store.mutate(() => new Promise((resolve) => { settle = resolve; }), { event: 'created', data: { id: 3 } });
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		const reconnect = sendQueuedFn.mock.calls.at(-1)[0];
+		simulateRpcResponse(reconnect.id, { attach: true, topic });
+		simulateTopicMessage(topic, { event: 'created', data: { id: 4 } });
+		const response = { ok: true, topic, merge: 'crud', key: 'id', data: [{ id: 2 }] };
+		if (mode === 'delta') response.delta = true;
+		if (mode === 'replay') { response.replay = true; response.data = [{ event: 'created', data: { id: 2 } }]; }
+		if (mode === 'unchanged') response.unchanged = true;
+		simulateRpcResponse(reconnect.id, response);
+		const expected = mode === 'full' ? [2, 4, 3] : mode === 'unchanged' ? [1, 4, 3] : [1, 2, 4, 3];
+		expect(values.at(-1).map((row) => row.id)).toEqual(expected);
+		settle();
+		await pending;
+		expect(values.at(-1).map((row) => row.id)).toEqual(expected);
+		unsub();
+	});
+
 	it.each(['crud', 'set'])('reconnect preserves the snapshot after a %s mutation settles', async (merge) => {
 		const initial = merge === 'crud' ? [{ id: 1, name: 'Old' }] : { count: 1 };
 		const fresh = merge === 'crud' ? [{ id: 2, name: 'Fresh' }] : { count: 10 };
