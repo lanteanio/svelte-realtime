@@ -1,7 +1,6 @@
 services:
   redis:
     image: redis:7-alpine
-    container_name: svelte-realtime-chaos-redis
     # global-setup reserves an OS-free host port and supplies it for the whole
     # run. An anonymous "0:6379" binding is not stable across `compose stop`
     # / `compose start` on Docker Desktop, which strands reconnecting clients

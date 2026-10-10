@@ -105,6 +105,9 @@
     "test:chaos": [
       "playwright test --config test/chaos/playwright.config.js"
     ],
+    "test:chaos:parallel": [
+      "node scripts/check-chaos-isolation.js"
+    ],
     "test:devtools": [
       "vitest run --config vitest.devtools.config.js"
     ],
@@ -257,6 +260,14 @@
       "step": "Verify Docker daemon",
       "commands": [
         "docker info"
+      ]
+    },
+    {
+      "workflow": "chaos-recovery.yml",
+      "job": "recovery-chaos",
+      "step": "Verify concurrent chaos isolation",
+      "commands": [
+        "node scripts/check-chaos-isolation.js"
       ]
     },
     {

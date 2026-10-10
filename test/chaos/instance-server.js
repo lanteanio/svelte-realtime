@@ -1,6 +1,6 @@
 // Spawn one realtime instance for the chaos harness. Reads PORT and
-// REDIS_URL from argv / env, builds the fixture once if a build/ tree
-// is missing, then loads `build/index.js`. Mirrors the existing
+// REDIS_URL from argv / env and loads its private prebuilt fixture.
+// Mirrors the existing
 // prod-server.js shape so the chaos suite uses the same uWS + adapter
 // + svelte-realtime artifact path the production e2e suite uses.
 //
@@ -12,14 +12,12 @@
 // argv[5] = CLEANUP_PORT (localhost-only authenticated shutdown endpoint)
 // argv[6] = CLEANUP_TOKEN (proves PID ownership before persisted cleanup)
 
-import { execSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import path from 'node:path';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const fixtureDir = path.resolve(__dirname, '../fixture');
+const fixtureDir = process.env.REALTIME_CHAOS_FIXTURE;
+if (!fixtureDir || !path.isAbsolute(fixtureDir)) throw new Error('Chaos instance requires its isolated fixture path');
 
 const port = process.argv[2] || process.env.PORT;
 const redisUrl = process.argv[3] || process.env.REDIS_URL;
@@ -52,8 +50,7 @@ await new Promise((resolve, reject) => {
 
 const buildIndex = path.join(fixtureDir, 'build', 'index.js');
 if (!existsSync(buildIndex)) {
-	console.error('[chaos/' + instanceId + '] building fixture...');
-	execSync('npx vite build', { cwd: fixtureDir, stdio: 'inherit' });
+	throw new Error('Chaos fixture must be built before starting an instance');
 }
 
 process.env.PORT = String(port);

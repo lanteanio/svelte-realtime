@@ -145,6 +145,15 @@ first dependency and browser downloads take longer. CI uses the same scripts.
 DevTools and scaffold browser checks. `verify:full` adds application E2E and all chaos tests.
 Install fixture dependencies and Chromium as above before browser or full lanes.
 Chaos additionally needs a working Docker daemon (`docker info`) for Redis.
+Each invocation owns a UUID context and fixture under the OS temporary directory,
+a separate Compose project and Redis container, and results under
+`test/chaos/test-results/<uuid>`. Install fixture dependencies before launching
+concurrent runs; each run copies source and builds independently while sharing
+installed dependencies. `npm run test:chaos:parallel` starts two invocations,
+requires both private fixtures to serve simultaneously, exercises cross-instance
+publication in both, and verifies cleanup and unchanged tracked files. CI runs
+this check before recovery. Failed cleanup retains its temporary ownership record
+for diagnosis; do not remove a run directory until its recorded resources stop.
 Do not claim the full lane passed when a required service or native runtime was
 unavailable: record the failed prerequisite and exact omitted command in the PR.
 Maintainers must accept the limitation or require another environment before merge.
@@ -153,7 +162,7 @@ Maintainers must accept the limitation or require another environment before mer
 scripts including npm pre/post hooks and every root-package workflow command.
 `notFullyHosted` explicitly lists checks whose full command set is not in CI;
 the application E2E lane and the complete chaos lane need contributor evidence
-(the recovery CI job runs only its named recovery spec). The inventory excludes
+(the recovery CI job runs its named recovery spec and the parallel isolation check). The inventory excludes
 steps targeting another working directory or npm prefix. Any script or workflow
 change must run `npm run generate:verification` and include the reviewed diff;
 `npm run check:verification` fails when the inventory no longer matches reality.

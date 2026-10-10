@@ -6,6 +6,7 @@ import { createServer } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { terminateOwnedProcess } from './process-lifecycle.js';
+import { chaosRun, composeArgs, readContext } from './run-context.js';
 
 // Fault-clear acceptance pass. The happy-path suite proves ordinary relay;
 // these tests prove that loss does not masquerade as resilience: traffic flows
@@ -13,15 +14,16 @@ import { terminateOwnedProcess } from './process-lifecycle.js';
 // and a post-recovery event must leave both replicas with the exact same state.
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const fixtureDir = path.resolve(__dirname, '../fixture');
-const ctxFile = path.join(__dirname, '.chaos-ctx.json');
-const _ctx = JSON.parse(readFileSync(ctxFile, 'utf-8'));
+const run = chaosRun();
+const fixtureDir = run.fixture;
+const ctxFile = run.context;
+const _ctx = readContext(run);
 
 function urlA() { return 'http://127.0.0.1:' + _ctx.portA; }
 function urlB() { return 'http://127.0.0.1:' + _ctx.portB; }
 
 function compose(...args) {
-	return execFileSync('docker', ['compose', ...args], {
+	return execFileSync('docker', composeArgs(run, args), {
 		cwd: __dirname,
 		stdio: 'pipe',
 		encoding: 'utf-8',
@@ -167,7 +169,7 @@ async function startInstanceB() {
 		// instance-server keeps its lifecycle tied to stdin. A null stdin emits
 		// EOF immediately, so retain a pipe exactly as global-setup does.
 		stdio: ['pipe', 'inherit', 'inherit'],
-		env: { ...process.env }
+		env: { ...process.env, REALTIME_CHAOS_FIXTURE: fixtureDir }
 	});
 	replacement.unref();
 	replacement.stdin?.unref?.();

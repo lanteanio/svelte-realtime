@@ -3,21 +3,24 @@
 // records, then proves docker-compose is empty before deleting the evidence.
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { terminateChild, terminateOwnedProcess } from './process-lifecycle.js';
+import { chaosRun, composeArgs, readContext, removeRun } from './run-context.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ctxFile = path.join(__dirname, '.chaos-ctx.json');
+const run = chaosRun();
+const ctxFile = run.context;
 
 export default async function globalTeardown() {
+	if (!existsSync(run.marker)) return;
 	const ctx = globalThis.__chaosCtx;
 	let persisted = null;
 	const errors = [];
 	if (existsSync(ctxFile)) {
 		try {
-			persisted = JSON.parse(readFileSync(ctxFile, 'utf-8'));
+			persisted = readContext(run);
 		} catch (error) {
 			errors.push(new Error('could not parse chaos cleanup context', { cause: error }));
 		}
@@ -38,12 +41,12 @@ export default async function globalTeardown() {
 			...process.env,
 			CHAOS_REDIS_PORT: String(persisted?.redisPort || ctx?.redisPort || 0)
 		};
-		execFileSync('docker', ['compose', 'down', '-v', '--remove-orphans'], {
+		execFileSync('docker', composeArgs(run, ['down', '-v', '--remove-orphans']), {
 			cwd: __dirname,
 			stdio: 'pipe',
 			env
 		});
-		const remaining = execFileSync('docker', ['compose', 'ps', '-q'], {
+		const remaining = execFileSync('docker', composeArgs(run, ['ps', '-q']), {
 			cwd: __dirname,
 			stdio: 'pipe',
 			encoding: 'utf-8',
@@ -56,6 +59,6 @@ export default async function globalTeardown() {
 	if (errors.length > 0) {
 		throw new AggregateError(errors, 'chaos teardown could not prove all resources exited');
 	}
-	try { unlinkSync(ctxFile); } catch {}
+	removeRun(run);
 	delete globalThis.__chaosCtx;
 }

@@ -5,6 +5,7 @@ on:
     paths:
       - 'src/**'
       - 'test/chaos/**'
+      - 'scripts/check-chaos-isolation.js'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/chaos-recovery.yml'
@@ -44,6 +45,8 @@ jobs:
         run: npm exec -- playwright install --with-deps chromium
       - name: Verify Docker daemon
         run: docker info
+      - name: Verify concurrent chaos isolation
+        run: npm run test:chaos:parallel
       - name: Run Redis and instance recovery at the event revision
         env:
           PLAYWRIGHT_JUNIT_OUTPUT_NAME: test/chaos/test-results/recovery-junit.xml

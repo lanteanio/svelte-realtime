@@ -1,7 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readContext } from './run-context.js';
 
 // Multi-instance chaos: two svelte-realtime instances connected to a shared
 // Redis pubsub bus. Each browser context picks one of the two host
@@ -10,8 +8,7 @@ import { fileURLToPath } from 'node:url';
 // subscriber on instance A still receives events that originated on
 // instance B's RPC handler.
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const _ctx = JSON.parse(readFileSync(path.join(__dirname, '.chaos-ctx.json'), 'utf-8'));
+const _ctx = readContext();
 
 function urlA() { return 'http://127.0.0.1:' + _ctx.portA; }
 function urlB() { return 'http://127.0.0.1:' + _ctx.portB; }

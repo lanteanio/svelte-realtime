@@ -4,26 +4,27 @@
 //    reserve-and-bind retry gives stop/start one stable host port without
 //    turning an ordinary bind race into a flaky recovery failure.
 // 2. Verifies the bound host port via `docker compose port redis 6379`.
-// 3. Builds the fixture once (vite build).
+// 3. Copies and builds a private fixture for this invocation (vite build).
 // 4. Spawns two svelte-realtime instances on OS-assigned host ports, both
 //    connected to the same Redis URL. Each instance loads
 //    `test/fixture/src/hooks.ws.js`, which wires the extensions pubsub
 //    bus when REDIS_URL is set so publishes fan out across instances.
-// 5. Stashes the per-instance ports + the redis port on globalThis so
-//    the spec and global-teardown can read them.
+// 5. Writes the owned ports and cleanup records to its private context file.
 
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
-import { existsSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { retryPortBind, terminateChild } from './process-lifecycle.js';
+import { chaosRun, composeArgs, initializeRun, prepareFixture, removeRun, awaitStartGate } from './run-context.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const fixtureDir = path.resolve(__dirname, '../fixture');
+const run = chaosRun();
+const fixtureDir = run.fixture;
 const composeDir = __dirname;
-const ctxFile = path.join(__dirname, '.chaos-ctx.json');
+const ctxFile = run.context;
 let redisHostPort = 0;
 
 function pickPort() {
@@ -39,7 +40,7 @@ function pickPort() {
 }
 
 function compose(...args) {
-	return execFileSync('docker', ['compose', ...args], {
+	return execFileSync('docker', composeArgs(run, args), {
 		cwd: composeDir,
 		stdio: 'pipe',
 		encoding: 'utf-8',
@@ -75,7 +76,7 @@ function startInstance(port, redisUrl, label, cleanupPort, cleanupToken, onSpawn
 		], {
 			cwd: fixtureDir,
 			stdio: ['pipe', 'pipe', 'pipe'],
-			env: { ...process.env }
+			env: { ...process.env, REALTIME_CHAOS_FIXTURE: fixtureDir }
 		});
 		onSpawn(proc);
 
@@ -111,9 +112,7 @@ function startInstance(port, redisUrl, label, cleanupPort, cleanupToken, onSpawn
 }
 
 export default async function globalSetup() {
-	if (existsSync(ctxFile)) {
-		throw new Error('chaos: stale context exists at ' + ctxFile + '; refusing to overwrite cleanup evidence');
-	}
+	initializeRun(run);
 	const instances = [];
 	let persisted = null;
 	try {
@@ -122,6 +121,7 @@ export default async function globalSetup() {
 		const redisPort = await startRedis();
 		const redisUrl = 'redis://127.0.0.1:' + redisPort;
 		persisted = {
+			runId: run.id,
 			redisPort,
 			redisUrl,
 			portA: null,
@@ -131,12 +131,11 @@ export default async function globalSetup() {
 		writeFileSync(ctxFile, JSON.stringify(persisted));
 		globalThis.__chaosCtx = { redisPort, redisUrl, portA: null, portB: null, instances };
 
-		// Force a clean fixture rebuild so latest source changes are picked up.
-		const buildDir = path.join(fixtureDir, 'build');
-		if (existsSync(buildDir)) rmSync(buildDir, { recursive: true, force: true });
+		prepareFixture(run);
 		execFileSync(process.execPath, [path.join(fixtureDir, 'node_modules/vite/bin/vite.js'), 'build'], {
 			cwd: fixtureDir,
-			stdio: 'inherit'
+			stdio: 'inherit',
+			env: { ...process.env, REALTIME_CHAOS_FIXTURE: fixtureDir }
 		});
 
 		const portA = await pickPort();
@@ -160,6 +159,9 @@ export default async function globalSetup() {
 		const cleanupTokenB = randomUUID();
 		await startInstance(portB, redisUrl, 'B', cleanupPortB, cleanupTokenB,
 			(proc) => recordInstance(proc, cleanupPortB, cleanupTokenB, 'B'));
+		persisted.ready = true;
+		writeFileSync(ctxFile, JSON.stringify(persisted));
+		await awaitStartGate(run);
 	} catch (setupError) {
 		const cleanupErrors = [];
 		await Promise.all(instances.map((proc) => terminateChild(proc).catch((error) => cleanupErrors.push(error))));
@@ -171,7 +173,7 @@ export default async function globalSetup() {
 			cleanupErrors.push(error);
 		}
 		if (cleanupErrors.length === 0) {
-			try { unlinkSync(ctxFile); } catch {}
+			try { removeRun(run); } catch (error) { cleanupErrors.push(error); }
 		}
 		delete globalThis.__chaosCtx;
 		if (cleanupErrors.length > 0) {

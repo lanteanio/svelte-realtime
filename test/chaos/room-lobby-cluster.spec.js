@@ -1,7 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { readContext } from './run-context.js';
 
 // Cluster coordination for an enumerable owner room (the demo-lobbies shape):
 // two members join one table from DIFFERENT instances on a shared Redis.
@@ -18,8 +16,7 @@ import { fileURLToPath } from 'node:url';
 //    and, after the presence grace window, removes the member from the
 //    remaining viewer's roster.
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const _ctx = JSON.parse(readFileSync(path.join(__dirname, '.chaos-ctx.json'), 'utf-8'));
+const _ctx = readContext();
 
 async function openLobby(browser, port, identity) {
 	const baseURL = 'http://127.0.0.1:' + port;

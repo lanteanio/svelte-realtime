@@ -116,7 +116,8 @@
     "check:documentation": "node scripts/check-documentation-contract.js",
     "generate:documentation": "node scripts/check-documentation-contract.js --write",
     "test:scaffold": "vitest run --config vitest.scaffold.config.js",
-    "verify:scaffold": "npm run test:scaffold"
+    "verify:scaffold": "npm run test:scaffold",
+    "test:chaos:parallel": "node scripts/check-chaos-isolation.js"
   },
   "engines": {
     "node": ">=22.0.0"
