@@ -512,8 +512,8 @@ const _liveIdempotent = function idempotent(config, fn) {
 	if (cfg.store !== undefined && (cfg.store === null || typeof cfg.store.acquire !== 'function')) {
 		throw new Error('[svelte-realtime] live.idempotent: store must implement acquire(key, ttlSec)');
 	}
-	if (cfg.ttl !== undefined && (typeof cfg.ttl !== 'number' || cfg.ttl < 0)) {
-		throw new Error('[svelte-realtime] live.idempotent: ttl must be a non-negative number of seconds');
+	if (cfg.ttl !== undefined && (!Number.isInteger(cfg.ttl) || cfg.ttl < 0)) {
+		throw new Error('[svelte-realtime] live.idempotent: ttl must be a non-negative integer number of seconds');
 	}
 	const ttlSec = typeof cfg.ttl === 'number' ? cfg.ttl : 172800;
 	const keyFrom = cfg.keyFrom || null;

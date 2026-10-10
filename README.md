@@ -1499,7 +1499,7 @@ The cache slot is automatically isolated by RPC path and by tenant, so the same 
 |---|---|---|
 | `keyFrom` | - | `(ctx, ...args) => string \| null \| undefined`. A `null`/`undefined` result runs the handler without the cache; the envelope key is used only when `keyFrom` is not set |
 | `store` | in-process | Any object exposing `acquire(key, ttlSec)` matching the extensions store contract |
-| `ttl` | `172800` (48h) | TTL in seconds. `0` skips the cache write (concurrent waiters re-run after the first finishes) |
+| `ttl` | `172800` (48h) | Non-negative integer TTL in seconds. `0` skips the cache write (concurrent waiters re-run after the first finishes) |
 
 `__rpc().with({ ... })` composes options on the same surface:
 

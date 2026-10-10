@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Idempotency TTLs reject fractions, NaN, and infinity during registration so in-memory and durable stores share the same non-negative integer seconds contract. Zero still skips cache writes.
+
 - Upload cleanup checks entry ownership so a canceled request cannot remove a newer upload reusing its stream ID or release its capacity.
 
 - Unknown RPC paths now use generic authorization denials by default across text, batches, binary calls, and uploads. Binary and upload guards run before handler type and limit checks. **Action required:** set `maskNotFound: false` only if clients require explicit missing-path replies; this permits path enumeration.

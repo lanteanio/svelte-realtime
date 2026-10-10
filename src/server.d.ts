@@ -1952,7 +1952,7 @@ export namespace live {
 			keyFrom?(ctx: LiveContext<any>, ...args: any[]): string | null | undefined;
 			/** Idempotency store. Defaults to a bounded in-process map. */
 			store?: IdempotencyStore;
-			/** Cache TTL in seconds. Defaults to 172800 (48 hours). */
+			/** Cache TTL in non-negative integer seconds. Defaults to 172800 (48 hours); 0 skips cache writes. */
 			ttl?: number;
 		},
 		fn: T
