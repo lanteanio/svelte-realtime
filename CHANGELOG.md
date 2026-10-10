@@ -73,6 +73,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools stream capture starts paused; disconnect and Clear captured data purge retained payloads and undo state and disable unsafe capture.
 
+- Managed streams retain adapter subscription ownership across pending requests and let the adapter send the final unsubscribe once, including when another consumer shares the topic.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

@@ -1,25 +1,6 @@
-// Regression for the client-side explicit wire-release of server-managed topics
-// (stream.js `_sendManagedRelease`). The adapter client suppresses the
-// unsubscribe frame for a managed topic, so the realtime client sends its own
-// on the LAST local ref release - that frame is what runs the server's
-// unsubscribe hook chain (room enumeration release, presence leave, owner
-// succession) instead of leaking the subscription until socket close.
-//
-// Two defects fixed here, both from the old `_socketIsOpen()` status probe:
-//   1. it returned false for the adapter's 'suspended' state (a backgrounded
-//      tab whose socket is STILL open and still carries frames), so the release
-//      was dropped on a live wire - re-leaking the very subscription it exists
-//      to free, on the common "unmount live views when the tab hides" pattern;
-//   2. reading the adapter `status` store routes through ensureConnection, which
-//      re-creates (and reconnects) a connection the app had explicitly close()d.
-//
-// The fix drops the probe: the frame is handed to the adapter's send() (which
-// gates on readyState === OPEN, so it delivers on an open OR 'suspended' socket
-// and no-ops otherwise), and is skipped only when the realtime client is
-// `terminated` - an explicit close, where there is no server subscription to
-// release and resurrecting the socket would be wrong. These tests drive a REAL
-// stream through subscribe -> topic-resolve -> teardown and assert the exact
-// wire frame the mock connection received.
+// Managed stream ownership uses adapter subscriptions, including while a
+// subscribe is still waiting for its answer. The adapter sends the wire
+// unsubscribe on its final ref; realtime does not send a second frame.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
@@ -61,7 +42,7 @@ beforeEach(async () => {
 				let fns = topicCallbacks.get(topic);
 				if (!fns) { fns = new Set(); topicCallbacks.set(topic, fns); }
 				fns.add(fn);
-				return () => { fns.delete(fn); if (fns.size === 0) topicCallbacks.delete(topic); };
+				return () => { fns.delete(fn); if (fns.size === 0) { topicCallbacks.delete(topic); if (!topic.startsWith('__') && !clientState?.terminated) sentFrames.push({ type: 'unsubscribe', topic }); } };
 			}
 		}),
 		onDerived: () => ({ subscribe: () => () => {} }),

@@ -73,7 +73,7 @@ beforeEach(async () => {
 				let fns = n.clientTopics.get(topic);
 				if (!fns) { fns = new Set(); n.clientTopics.set(topic, fns); }
 				fns.add(fn);
-				return () => { fns.delete(fn); if (fns.size === 0) n.clientTopics.delete(topic); };
+				return () => { fns.delete(fn); if (fns.size === 0) { n.clientTopics.delete(topic); if (isUp() && !topic.startsWith('__')) n.toServer.push({ type: 'unsubscribe', topic }); } };
 			}
 		}),
 		onDerived: () => ({ subscribe: () => () => {} }),

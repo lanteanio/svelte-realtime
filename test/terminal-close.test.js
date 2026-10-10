@@ -424,3 +424,33 @@ describe('connection closed for good (real adapter client)', () => {
 		}
 	});
 });
+
+
+describe('managed stream release through the real adapter', () => {
+	it('sends exactly one unsubscribe after the final stream and external consumer release', async () => {
+		const ws = await openWithRpc();
+		const stream = await loadedStream(ws, 'owned/items', 'owned:items');
+		const stopExternal = adapter.on('owned:items').subscribe(() => {});
+		stream.unsub();
+		await tick();
+		expect(ws.frames().filter((frame) => frame.type === 'unsubscribe' && frame.topic === 'owned:items')).toEqual([]);
+		stopExternal();
+		await tick();
+		expect(ws.frames().filter((frame) => frame.type === 'unsubscribe' && frame.topic === 'owned:items')).toEqual([{ type: 'unsubscribe', topic: 'owned:items' }]);
+	});
+
+	it('keeps an attached request owned until its late answer can be released', async () => {
+		const ws = await openWithRpc();
+		const store = client.__stream('owned/late', { merge: 'set' });
+		const stop = store.subscribe(() => {});
+		await tick();
+		const request = rpcFrames(ws).find((frame) => frame.rpc === 'owned/late');
+		answer(ws, request, { attach: true, topic: 'owned:late' });
+		stop();
+		await tick();
+		expect(ws.frames().filter((frame) => frame.type === 'unsubscribe' && frame.topic === 'owned:late')).toEqual([]);
+		answer(ws, request, { ok: true, topic: 'owned:late', data: 1 });
+		await tick();
+		expect(ws.frames().filter((frame) => frame.type === 'unsubscribe' && frame.topic === 'owned:late')).toEqual([{ type: 'unsubscribe', topic: 'owned:late' }]);
+	});
+});
