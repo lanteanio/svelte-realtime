@@ -14,7 +14,7 @@ beforeAll(() => {
 	consumer = join(temp, 'consumer');
 	installed = join(consumer, 'node_modules/svelte-realtime');
 	mkdirSync(installed, { recursive: true });
-	execFileSync('tar', ['-xzf', join(temp, packed[0].filename), '-C', installed, '--strip-components=1'], { timeout: 120000 });
+	execFileSync('tar', ['-xzf', packed[0].filename, '-C', 'consumer/node_modules/svelte-realtime', '--strip-components=1'], { cwd: temp, timeout: 120000 });
 	writeFileSync(join(consumer, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
 	for (const entry of readdirSync(join(root, 'node_modules'))) {
 		if (entry.startsWith('.') || entry === 'svelte-realtime') continue;
