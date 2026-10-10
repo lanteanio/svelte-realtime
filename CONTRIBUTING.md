@@ -267,6 +267,21 @@ flag. Fix runnable examples instead of weakening their classification. Browser
 or service-dependent examples may use a `doc-code: no-run` marker with the exact
 reason prefix `requires-browser`, `external-service`, or `app-context`.
 
+## Package identity
+
+`svelte-realtime` is the application-facing entry point for realtime RPC,
+reactive subscriptions and collaborative features. `svelte-adapter-uws` is the
+HTTP/WebSocket runtime; `svelte-adapter-uws-extensions` supplies optional Redis
+and Postgres infrastructure. Use the exact package names when identifying an
+API or dependency so this visual hierarchy does not obscure ownership.
+
+The centered realtime README wordmark is intentional; infrastructure packages
+can retain plain package-name headings. Its [owned image](docs/assets/svelte-realtime.png)
+is versioned and packaged here, preserving the README's alt text, linked
+homepage and display width. It snapshots the image previously served at
+`https://svelte-realtime.dev/svelte_orange.png`. Review replacements as local
+asset changes so a remote update cannot silently change a released README.
+
 ## README entry ownership and size
 
 [docs/documentation.v1.json](docs/documentation.v1.json) owns the eight ordered

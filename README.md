@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://svelte-realtime.dev">
-    <img src="https://svelte-realtime.dev/svelte_orange.png" alt="svelte-realtime" width="240" />
+    <img src="./docs/assets/svelte-realtime.png" alt="svelte-realtime" width="240" />
   </a>
 </p>
 
