@@ -115,6 +115,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - External documentation checks identify the realtime package in their HTTP user agent.
 
+- Formatting checks retain Git line-ending metadata for Unicode and space-containing paths.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

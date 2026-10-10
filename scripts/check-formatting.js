@@ -116,11 +116,11 @@ function trackedFiles(directory) {
  */
 export function indexEol(directory = root) {
 	const map = new Map();
-	const output = execFileSync('git', ['ls-files', '--eol'], { cwd: directory, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
-	for (const line of output.split('\n')) {
+	const output = execFileSync('git', ['ls-files', '--eol', '-z'], { cwd: directory, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+	for (const line of output.split('\0')) {
 		if (!line.trim()) continue;
 		// Attributes may contain spaces; the tab separates them from the path.
-		const match = /^i\/(\S+)\s+w\/(\S+)\s+attr\/([^\t]*?)\s*\t(.*)$/.exec(line);
+		const match = /^i\/(\S+)\s+w\/(\S+)\s+attr\/([^\t]*?)\s*\t(.*)$/s.exec(line);
 		if (match) map.set(match[4], match[1]);
 	}
 	return map;

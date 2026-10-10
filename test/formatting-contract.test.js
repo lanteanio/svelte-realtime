@@ -42,6 +42,14 @@ describe('formatting contract', () => {
 		writeFileSync(join(dir, 'sample.json'), Buffer.from([0xff, 0x0a]));
 		expect(findOffenses(dir).offenses.join('\n')).toContain('invalid UTF-8');
 	});
+	it('reads index metadata for Unicode and space-containing file names', () => {
+		const dir = fixture('{}\n');
+		const name = 'caf\u00e9 settings.json';
+		writeFileSync(join(dir, name), '{}\n');
+		execFileSync('git', ['add', '--', name], { cwd: dir, stdio: 'pipe' });
+		expect(indexEol(dir).get(name)).toBe('lf');
+		expect(findOffenses(dir).offenses).toEqual([]);
+	});
 	it('checks text without any newline rather than treating it as binary', () => {
 		const dir = fixture('{}');
 		expect(findOffenses(dir).offenses.join('\n')).toContain('no final newline');
