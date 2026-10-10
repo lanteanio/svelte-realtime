@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Vite registry updates stay inside the configured live directory, serialize with startup, and contain asynchronous reload failures. Nested worktree hooks no longer inherit the parent registry.
+
 - Idempotency TTLs reject fractions, NaN, and infinity during registration so in-memory and durable stores share the same non-negative integer seconds contract. Zero still skips cache writes.
 
 - Upload cleanup checks entry ownership so a canceled request cannot remove a newer upload reusing its stream ID or release its capacity.

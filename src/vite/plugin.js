@@ -1,6 +1,6 @@
 // @ts-check
 import { existsSync } from 'fs';
-import { resolve, relative, sep } from 'path';
+import { resolve, relative, sep, isAbsolute } from 'path';
 import { VIRTUAL_PREFIX, REGISTRY_ID } from './constants.js';
 import { _fileCache, _codeCache, _warnedExports, _readCached } from './source-cache.js';
 import { _writeTypeDeclarations } from './codegen-types.js';
@@ -37,6 +37,25 @@ export default function svelteRealtime(options) {
 	let isDev = false;
 	/** @type {{ major: number, minor: number, version: string } | null} */
 	let svelteVersion = null;
+	/** @type {Promise<unknown>} */
+	let registryWork = Promise.resolve();
+	let registryStarting = false;
+	/** @template T @param {() => Promise<T>} run */
+	const enqueueRegistry = (run) => {
+		const work = registryWork.then(run);
+		registryWork = work.catch(() => {});
+		return work;
+	};
+	/** @param {string} file */
+	const ownedLiveFile = (file) => {
+		const absolute = resolve(root, file);
+		const rel = relative(liveDir, absolute);
+		return rel && rel !== '..' && !rel.startsWith('..' + sep) && !isAbsolute(rel) ? absolute : null;
+	};
+	/** @param {unknown} error */
+	const reportRegistryFailure = (error) => {
+		console.error('[svelte-realtime] Registry reload failed:', error instanceof Error ? error.message : String(error));
+	};
 
 	return {
 		name: 'svelte-realtime',
@@ -174,9 +193,8 @@ export default function svelteRealtime(options) {
 			// Scope to THIS project's src/hooks.ws.{js,ts,mjs} (root-anchored so a
 			// sibling package's hooks file in a monorepo is never rewritten with
 			// our registry). Mirrors the .js/.ts/.mjs set the adapter discovers.
-			const rootNorm = root.split(sep).join('/');
-			if (!clean.startsWith(rootNorm + '/')) return null;
-			if (!/\/src\/hooks\.ws\.(?:js|ts|mjs)$/.test(clean)) return null;
+			const hooksPath = relative(root, clean).split(sep).join('/');
+			if (!/^src\/hooks\.ws\.(?:js|ts|mjs)$/.test(hooksPath)) return null;
 			if (code.includes('/@svelte-realtime-registry')) return null;
 			return { code: `import '/@svelte-realtime-registry';\n` + code, map: null };
 		},
@@ -216,6 +234,7 @@ export default function svelteRealtime(options) {
 		},
 
 		configureServer(server) {
+			registryStarting = !!server.httpServer;
 			// Inject devtools script into HTML responses (works with SvelteKit + traditional Vite)
 			if (devtools) {
 				const devtoolsScript = `<script type="module">
@@ -248,60 +267,58 @@ import('svelte-realtime/devtools');
 			// On first transform, load the registry to populate server-side state
 			let registryLoaded = false;
 
-			server.httpServer?.once('listening', async () => {
+			server.httpServer?.once('listening', () => {
 				if (registryLoaded) return;
 				registryLoaded = true;
+				registryStarting = false;
+				return enqueueRegistry(async () => {
+					if (!existsSync(liveDir)) return;
+					_fileCache.clear();
+					_codeCache.clear();
+					_warnedExports.clear();
+					if (typedImports) _writeTypeDeclarations(liveDir, dir);
+					try {
+						_generateRegistry(liveDir, dir);
+						const tempId = '/@svelte-realtime-registry';
+						await server.moduleGraph.ensureEntryFromUrl(tempId);
+						await server.ssrLoadModule(tempId);
+					} catch {
+						await _loadRegistryDirect(server, liveDir, dir);
+					}
 
-				if (!existsSync(liveDir)) return;
-
-				try {
-					const code = _generateRegistry(liveDir, dir);
-					// Use a temporary virtual module to load the registry
-					const tempId = '/@svelte-realtime-registry';
-					server.moduleGraph.ensureEntryFromUrl(tempId);
-					await server.ssrLoadModule(tempId).catch(() => {
-						// Fallback: try to load modules individually
-						_loadRegistryDirect(server, liveDir, dir);
-					});
-				} catch {
-					_loadRegistryDirect(server, liveDir, dir);
-				}
-
-				// Pre-warm virtual modules to eliminate cold-start waterfall
-				try {
-					const files = _findLiveFiles(liveDir);
-					for (const file of files) {
+					// Pre-warm virtual modules to eliminate cold-start waterfall.
+					for (const file of _findLiveFiles(liveDir)) {
 						const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
 						server.warmupRequest(VIRTUAL_PREFIX + rel).catch(() => {});
 					}
-				} catch {}
+				}).catch(reportRegistryFailure);
 			});
 
 			// Watch for new or deleted files in src/live/ - these don't trigger
 			// handleHotUpdate since they're not in the module graph yet (add) or
 			// have already been removed (unlink).
 			for (const event of ['add', 'unlink']) {
-				server.watcher.on(event, async (file) => {
-					file = file.split(sep).join('/');
-					if (!file.includes('/' + dir + '/') && !file.startsWith(dir + '/')) return;
+				server.watcher.on(event, (file) => {
+					file = ownedLiveFile(file);
+					if (!file) return;
 					if (!/\.[jt]s$/.test(file) || file.endsWith('.d.ts') || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
-
-					_fileCache.clear();
-				_codeCache.clear();
-				_warnedExports.clear();
-
-					if (typedImports) {
-						_writeTypeDeclarations(liveDir, dir);
-					}
-
-					const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-					await _hmrReloadRegistry(server, liveDir, dir, rel);
+					// Startup enumeration sees additions made before the listener runs.
+					if (registryStarting) return;
+					return enqueueRegistry(async () => {
+						_fileCache.clear();
+						_codeCache.clear();
+						_warnedExports.clear();
+						if (typedImports) _writeTypeDeclarations(liveDir, dir);
+						const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
+						await _hmrReloadRegistry(server, liveDir, dir, rel);
+					}).catch(reportRegistryFailure);
 				});
 			}
 		},
 
 		async handleHotUpdate({ file, server }) {
-			if (!file.startsWith(liveDir)) return;
+			file = ownedLiveFile(file);
+			if (!file) return;
 			// The generated $types.d.ts must never re-enter this handler: the
 			// rewrite below would bump its mtime, produce the next change event
 			// and loop forever, full-reloading every connected client each time.
@@ -310,34 +327,37 @@ import('svelte-realtime/devtools');
 			if (file.endsWith('.d.ts')) return [];
 			// Same non-module filter as the add/unlink watcher.
 			if (!/\.[jt]s$/.test(file) || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
-			_fileCache.delete(file);
-			_codeCache.delete('client:' + file);
-			_codeCache.delete('ssr:' + file);
+			if (registryStarting) return [];
+			return enqueueRegistry(async () => {
+				_fileCache.delete(file);
+				_codeCache.delete('client:' + file);
+				_codeCache.delete('ssr:' + file);
 
-			// Regenerate type declarations on file change
-			if (typedImports) {
-				_writeTypeDeclarations(liveDir, dir);
-			}
+				// Regenerate type declarations on file change
+				if (typedImports) {
+					_writeTypeDeclarations(liveDir, dir);
+				}
 
-			const rel = relative(liveDir, file)
-				.replace(/\\/g, '/')
-				.replace(/\.[jt]s$/, '');
+				const rel = relative(liveDir, file)
+					.replace(/\\/g, '/')
+					.replace(/\.[jt]s$/, '');
 
-			// Server-side HMR: invalidate the changed module so Vite re-executes it
-			const ssrMods = server.moduleGraph.getModulesByFile(file);
-			if (ssrMods) {
-				for (const m of ssrMods) server.moduleGraph.invalidateModule(m);
-			}
+				// Server-side HMR: invalidate the changed module so Vite re-executes it
+				const ssrMods = server.moduleGraph.getModulesByFile(file);
+				if (ssrMods) {
+					for (const m of ssrMods) server.moduleGraph.invalidateModule(m);
+				}
 
-			// Re-register all server handlers
-			await _hmrReloadRegistry(server, liveDir, dir, rel);
+				// Re-register all server handlers
+				await _hmrReloadRegistry(server, liveDir, dir, rel);
 
-			// Client-side: invalidate the virtual module so the browser picks up new stubs
-			const mod = server.moduleGraph.getModuleById(VIRTUAL_PREFIX + rel);
-			if (mod) {
-				server.moduleGraph.invalidateModule(mod);
-				return [mod];
-			}
+				// Client-side: invalidate the virtual module so the browser picks up new stubs
+				const mod = server.moduleGraph.getModuleById(VIRTUAL_PREFIX + rel);
+				if (mod) {
+					server.moduleGraph.invalidateModule(mod);
+					return [mod];
+				}
+			});
 		},
 
 		transformIndexHtml() {

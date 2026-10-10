@@ -29,7 +29,13 @@ export async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 	}
 
 	// Snapshot current state, then clear everything
-	const snap = serverMod._prepareHmr();
+	let snap;
+	try {
+		snap = serverMod._prepareHmr();
+	} catch (error) {
+		console.error('[svelte-realtime] HMR preparation failed:', error instanceof Error ? error.message : String(error));
+		return;
+	}
 
 	try {
 		await server.ssrLoadModule('/@svelte-realtime-registry');
