@@ -492,9 +492,12 @@ export function __stream(path, options, isDynamic) {
 				const overflowEntry = _streamOverflow.get(cacheKey);
 				if (overflowEntry && overflowEntry.store === store) overflowEntry.refCount++;
 
-				const unsub = rawSubscribe(fn);
+				let unsub = rawSubscribe(fn);
 				return () => {
-					unsub();
+					if (!unsub) return;
+					const release = unsub;
+					unsub = null;
+					release();
 					const mainEntry = _streamCache.get(cacheKey);
 					if (mainEntry && mainEntry.store === store && --mainEntry.refCount <= 0) {
 						_evictable.add(cacheKey);
@@ -687,8 +690,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * cursor may be stale, or null while it is current. Stamped when the
 	 * subscription stops delivering (a socket drop the lifecycle listener sees,
 	 * before or after its first open) or carried in from a grace release on a
-	 * resume; cleared when the cursor is refreshed (an answer, or a reconnect
-	 * about to refetch). Lets a reconnect measure how long the cursor has been
+	 * resume; refreshed by an answer, never by merely queuing another request.
+	 * Lets a reconnect measure how long the cursor has been
 	 * stale and rehydrate fully past the trust bound instead of gap-filling
 	 * from an outdated seq.
 	 */
@@ -2075,6 +2078,18 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				return;
 			}
 			_listenerDown = false;
+			// A subscribe queued behind a closed socket may age past the trust
+			// bound before its first open. Supersede it before accepting any
+			// response; the adapter may already own its serialized old frame.
+			if (fetching && _ticket && (_ticket.request.seq !== undefined || _ticket.request.version !== undefined)
+				&& _downAt !== null && now() - _downAt > _getResumeMaxCursorAgeMs()) {
+				hasOpenedOnce = true;
+				if (_reconnectTimer) { clearTimer(_reconnectTimer); _reconnectTimer = null; }
+				_dropResumeCursors();
+				fetching = false;
+				fetchAndSubscribe();
+				return;
+			}
 			if (!hasOpenedOnce) {
 				hasOpenedOnce = true;
 				// The first open is the baseline when it is the value reported at
@@ -2121,7 +2136,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					if (_downAt !== null && now() - _downAt > _getResumeMaxCursorAgeMs()) {
 						_dropResumeCursors();
 					}
-					_downAt = null;
+					// Only an answer refreshes the cursor; queuing while down does not.
 					fetchAndSubscribe();
 				}, delay);
 			}
@@ -2233,6 +2248,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// WS subscription is still attached.
 					_pendingCleanup = false;
 					_cleanupsPending--;
+					_detachRequested = false;
 				} else if (_inGracePeriod) {
 					// Resume during the grace window: WS handles were released but
 					// session state (currentValue, _lastSeq, _lastVersion, _cursor)
@@ -2278,10 +2294,13 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				}
 			}
 
-			const unsub = store.subscribe(fn);
+			let unsub = store.subscribe(fn);
 
 			return () => {
-				unsub();
+				if (!unsub) return;
+				const release = unsub;
+				unsub = null;
+				release();
 				if (--subCount === 0) {
 					_pendingCleanup = true;
 					_cleanupsPending++;

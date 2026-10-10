@@ -1392,3 +1392,140 @@ describe('retained pagination cursor', () => {
   expect(stream.hasMore).toBe(false);
  });
 });
+
+
+describe('stream lifecycle ownership edges', () => {
+	it.each([false, true])('repeated cleanup preserves another consumer and later reactivation (dynamic: %s)', async dynamic => {
+		env.register('lifetime', { feed: live.stream('lifetime:feed', async () => [{ id: 1 }]) });
+		const factory = __stream('lifetime/feed', { merge: 'crud', key: 'id' }, dynamic);
+		const stream = dynamic ? factory('same') : factory;
+		const first = stream.subscribe(() => {});
+		const values = [];
+		const second = stream.subscribe(value => values.push(value));
+		await ticks(); await deliverToServer(); await deliverToClient();
+		first(); first(); await ticks();
+		expect(unsubscribeFrames('lifetime:feed')).toHaveLength(0);
+		for (const fn of [...net.clientTopics.get('lifetime:feed')]) fn({ event: 'created', data: { id: 2 } });
+		expect(values.at(-1)).toEqual([{ id: 1 }, { id: 2 }]);
+		second(); second(); await ticks();
+		expect(unsubscribeFrames('lifetime:feed')).toHaveLength(1);
+		await deliverToServer();
+		const again = stream.subscribe(() => {});
+		await ticks(); expect(subscribeFrames()).toHaveLength(1);
+		await deliverToServer(); await deliverToClient(); again();
+	});
+
+	it('repeated cleanup cannot make a still-owned dynamic store evictable', async () => {
+		const factory = __stream('cache/lifetime', { merge: 'crud', key: 'id' }, true);
+		const stream = factory('held');
+		const first = stream.subscribe(() => {}), second = stream.subscribe(() => {});
+		first(); first();
+		for (let i = 0; i < 1001; i++) factory('other-' + i);
+		expect(factory('held')).toBe(stream);
+		second(); await ticks();
+	});
+
+	it('a synchronous subscribe after detach receives normal grace on its later release', async () => {
+		const stream = roomData('lifecycle-detach');
+		const attached = stream.attach();
+		await ticks(); await deliverToServer(); await deliverToClient(); await attached;
+		for (const fn of [...net.clientTopics.get('board:lifecycle-detach')]) fn({ event: 'created', data: { id: 7 }, seq: 7 });
+		stream.detach();
+		const off = stream.subscribe(() => {});
+		await ticks(); expect(unsubscribeFrames('board:lifecycle-detach')).toHaveLength(0);
+		off(); await ticks(); await deliverToServer();
+		const values = [];
+		const resumed = stream.subscribe(value => values.push(value));
+		expect(values[0]).toEqual([{ id: 7 }]);
+		await ticks(); expect(subscribeFrames().at(-1).seq).toBe(7);
+		resumed();
+	});
+
+	async function retainedCursor(room, cursorKind = 'seq') {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+		const stream = roomData(room);
+		const values = [];
+		const off = stream.subscribe(value => values.push(value));
+		await ticks(); await deliverToServer();
+		if (cursorKind !== 'seq') for (const frame of net.toClient) if (frame.data?.ok) frame.data.version = 9;
+		await deliverToClient();
+		for (const fn of [...net.clientTopics.get('board:' + room)]) fn({ event: 'created', data: { id: 7 }, ...(cursorKind === 'version' ? {} : { seq: 7 }) });
+		return { stream, values, off };
+	}
+
+	it.each([[55_000, 'seq'], [61_000, 'seq'], [61_000, 'version'], [61_000, 'both']])('checks a queued grace cursor at actual open (age: %s, kind: %s)', async (age, kind) => {
+		const { stream, off } = await retainedCursor('queued-age-' + age, kind);
+		off(); await ticks(); await deliverToServer();
+		setStatus('disconnected'); setStatus('connecting');
+		vi.advanceTimersByTime(50_000);
+		const values = [], resumed = stream.subscribe(value => values.push(value));
+		await ticks();
+		const queued = net.adapterQueue.at(-1);
+		expect(queued.seq).toBe(kind === 'version' ? undefined : 7);
+		if (kind !== 'seq') expect(queued.version).toBe(9);
+		vi.advanceTimersByTime(age - 50_000);
+		setStatus('open'); await ticks();
+		const frames = subscribeFrames();
+		if (age <= 60_000) {
+			expect(frames).toHaveLength(1); expect(frames[0].seq).toBe(7);
+		} else {
+			expect(frames).toHaveLength(2); expect(frames.at(-1).seq).toBeUndefined(); expect(frames.at(-1).version).toBeUndefined();
+			// The adapter already serialized the old queued frame. Its response
+			// must only settle its orphan, never become this stream's baseline.
+			for (const fn of [...net.clientTopics.get('__rpc')]) fn({ event: queued.id, data: { ok: true, topic: 'board:queued-age-' + age, data: [{ id: 'stale' }], seq: 7 } });
+			expect(values.at(-1)).toEqual([{ id: 7 }]);
+			net.toServer.splice(net.toServer.indexOf(queued), 1);
+		}
+		await deliverToServer(); await deliverToClient();
+		expect(pending.size).toBe(0);
+		expect(get(stream.status)).toBe('connected');
+		expect(unsubscribeFrames('board:queued-age-' + age)).toHaveLength(0);
+		resumed();
+	});
+
+	it('withdraws a stale resume before its batching microtask has sent it', async () => {
+		const { stream, off } = await retainedCursor('unsent-age');
+		off(); await ticks(); await deliverToServer();
+		setStatus('disconnected'); setStatus('connecting'); vi.advanceTimersByTime(50_000);
+		const resumed = stream.subscribe(() => {});
+		vi.advanceTimersByTime(11_000); setStatus('open'); await ticks();
+		expect(subscribeFrames()).toHaveLength(1);
+		expect(subscribeFrames()[0].seq).toBeUndefined();
+		expect(pending.size).toBe(1);
+		await deliverToServer(); await deliverToClient();
+		expect(pending.size).toBe(0); resumed();
+	});
+
+	it('a stale queued answer after the replacement cannot overwrite or release it', async () => {
+		const { stream, off } = await retainedCursor('late-old-age');
+		off(); await ticks(); await deliverToServer();
+		setStatus('disconnected'); setStatus('connecting'); vi.advanceTimersByTime(50_000);
+		const values = [], resumed = stream.subscribe(value => values.push(value));
+		await ticks(); const queued = net.adapterQueue.at(-1);
+		vi.advanceTimersByTime(11_000); setStatus('open'); await ticks();
+		expect(subscribeFrames()).toHaveLength(2);
+		net.toServer.splice(net.toServer.indexOf(queued), 1);
+		await deliverToServer(); await deliverToClient();
+		const current = values.at(-1);
+		for (const fn of [...net.clientTopics.get('__rpc')]) fn({ event: queued.id, data: { ok: true, topic: 'board:late-old-age', data: [{ id: 'stale' }], seq: 7 } });
+		expect(values.at(-1)).toEqual(current);
+		expect(unsubscribeFrames('board:late-old-age')).toHaveLength(0);
+		expect(pending.size).toBe(0); resumed();
+	});
+
+	it('a reconnect timer firing while down cannot restart the retained cursor age', async () => {
+		const { stream, off } = await retainedCursor('timer-age');
+		clientState.config.resumeMaxCursorAgeMs = 1000;
+		setStatus('disconnected');
+		vi.advanceTimersByTime(500);
+		setStatus('connecting'); setStatus('open'); setStatus('connecting');
+		vi.advanceTimersByTime(200); await ticks();
+		expect(net.adapterQueue.at(-1).seq).toBe(7);
+		vi.advanceTimersByTime(500);
+		setStatus('open'); vi.advanceTimersByTime(200); await ticks();
+		expect(subscribeFrames().at(-1).seq).toBeUndefined();
+		await deliverToServer(); await deliverToClient();
+		expect(get(stream.status)).toBe('connected');
+		off();
+	});
+});

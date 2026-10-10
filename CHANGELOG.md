@@ -183,6 +183,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Verification rejects unsupported diagnostic severity literals and checks delivery of real breaker warnings to the shared event sink.
 
+- Stream cleanup is idempotent, canceled detaches preserve later resume grace, and queued reconnects discard replay cursors that age past their trust bound before the socket opens.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
