@@ -21,6 +21,12 @@ function bin(name) {
 
 const DEMO_REPO = 'https://github.com/lanteanio/svelte-realtime-demo.git';
 
+// The last sv that creates a SvelteKit 2 project. sv 1 creates SvelteKit 3
+// projects, which svelte-adapter-uws and svelte-realtime do not support:
+// their peer range stops the install, and the adapter uses builder APIs
+// SvelteKit 3 removed.
+const SV_SPEC = 'sv@0.17.1';
+
 // The scaffolded upgrade() hook is intentionally permissive so the first
 // `npm run dev` works without any identity wiring: every connection gets a
 // fresh UUID and accepts. The hook also fires a console.warn on every
@@ -153,7 +159,7 @@ if (template === 'demo') {
 }
 
 p.log.step('Creating SvelteKit project');
-run(bin('npx'), ['-y', 'sv', 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
+run(bin('npx'), ['-y', SV_SPEC, 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
 
 p.log.step('Installing dependencies');
 const add = agent === 'npm' ? 'install' : 'add';

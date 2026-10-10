@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.13] - 2026-10-10
+
+### Fixed
+
+- **`npx svelte-realtime my-app` works again.** The scaffolder ran the latest `sv`, which since `sv` 1.0 (2026-10-01) creates SvelteKit 3 projects. `svelte-adapter-uws` and `svelte-realtime` require SvelteKit 2, so installing them failed with `ERESOLVE` under npm and left a bare SvelteKit project. The scaffolder now pins `sv@0.17.1`, the last release that creates SvelteKit 2 projects, and the README's manual setup does the same. SvelteKit 3 is not supported yet.
+
 ## [0.5.12] - 2026-08-29
 
 ### Fixed
