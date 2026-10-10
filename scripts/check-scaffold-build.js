@@ -1,3 +1,4 @@
+import { isScriptEntry } from './script-entry.js';
 import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -71,7 +72,7 @@ export function checkScaffoldBuild({ fixture = defaultFixture, run = spawnSync, 
 	}
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isScriptEntry(import.meta.url)) {
 	try { checkScaffoldBuild(); }
 	catch (error) {
 		console.error('check-scaffold-build FAILED:', error.message);

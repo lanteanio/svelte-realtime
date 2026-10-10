@@ -1,3 +1,4 @@
+import { isScriptEntry } from './script-entry.js';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -335,7 +336,7 @@ function main() {
 	console.log('check-release-workflow: tag-only trusted OIDC publication path is structurally closed');
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isScriptEntry(import.meta.url)) {
 	try {
 		main();
 	} catch (error) {

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Generate and validate the README entry routes and compatibility commands.
+import { isScriptEntry } from './script-entry.js';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -146,6 +147,6 @@ function main() {
 	if (failures.length) throw new Error(failures.join('\n'));
 	console.log(`documentation contract: eight owned paths; README ${readme.split('\n').length}/${manifest.readmeMaxLines} lines`);
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isScriptEntry(import.meta.url)) {
 	try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

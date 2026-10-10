@@ -1,4 +1,5 @@
 // @ts-check
+import { isScriptEntry } from './script-entry.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -96,8 +97,7 @@ export function checkErrorReference() {
 	}
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-if (isMain) {
+if (isScriptEntry(import.meta.url)) {
 	const mode = process.argv[2];
 	if (mode === '--write') {
 		mkdirSync(dirname(OUTPUT), { recursive: true });

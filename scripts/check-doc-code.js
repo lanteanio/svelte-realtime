@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Classify, compile, API-check and inventory README examples by content.
+import { isScriptEntry } from './script-entry.js';
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { builtinModules } from 'node:module';
@@ -1023,8 +1024,4 @@ function main() {
 	);
 }
 
-const invoked = process.argv[1] ? resolve(process.argv[1]) : null;
-const current = fileURLToPath(import.meta.url);
-if (invoked !== null && (process.platform === 'win32'
-	? invoked.toLowerCase() === current.toLowerCase()
-	: invoked === current)) main();
+if (isScriptEntry(import.meta.url)) main();

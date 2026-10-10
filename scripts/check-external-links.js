@@ -7,6 +7,7 @@
  * itself so a stale non-canonical URL is visible, and detects both HTTP errors
  * and common HTML soft-404 pages.
  */
+import { isScriptEntry } from './script-entry.js';
 import { readFileSync } from 'node:fs';
 import { isIP } from 'node:net';
 import path from 'node:path';
@@ -282,7 +283,7 @@ async function main() {
 	console.log('  OK - every external documentation target resolves directly without a soft 404.');
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()) {
+if (isScriptEntry(import.meta.url)) {
 	main().catch((error) => {
 		console.error(`check-external-links FAILED: ${error.message}`);
 		process.exitCode = 1;

@@ -2,6 +2,7 @@
  * Fail closed unless the release job is running from the package's exact,
  * annotated version tag and a clean checkout of the commit that tag names.
  */
+import { isScriptEntry } from './script-entry.js';
 import { readFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
@@ -89,7 +90,7 @@ function main() {
 	console.log('release identity: ' + pkg.name + '@' + pkg.version + ' at ' + details.head);
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isScriptEntry(import.meta.url)) {
 	try {
 		main();
 	} catch (error) {

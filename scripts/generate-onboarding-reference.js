@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { isScriptEntry } from './script-entry.js';
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -130,8 +131,7 @@ export function main(args = process.argv.slice(2)) {
 }
 
 if (
-  process.argv[1] &&
-  resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  isScriptEntry(import.meta.url)
 ) {
   main();
 }

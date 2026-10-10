@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Validate documentation links against local anchors and tracked source routes.
+import { isScriptEntry } from './script-entry.js';
 import { readFileSync, writeFileSync, existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, resolve, join, posix, relative as pathRelative, sep, isAbsolute } from 'node:path';
@@ -533,7 +534,7 @@ function main() {
 }
 
 // Importable for its own test suite; only the CLI invocation reads the docs.
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isScriptEntry(import.meta.url)) {
 	if (process.argv.includes('--write-main-tree')) writeMainTree();
 	else main();
 }

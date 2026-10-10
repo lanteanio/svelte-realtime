@@ -1,4 +1,5 @@
 // Reconcile recorded npm identities without contacting the registry.
+import { isScriptEntry } from './script-entry.js';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -138,6 +139,6 @@ function main() {
 	if (errors.length) throw new Error(errors.join('\n'));
 	console.log(`release ledger: ${parseManifest(manifest)['Published releases'].length} published identities match changelog headings; history agrees with ${baselineRef}`);
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isScriptEntry(import.meta.url)) {
 	try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

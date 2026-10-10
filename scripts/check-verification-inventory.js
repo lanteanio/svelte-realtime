@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // Derive review evidence from package scripts and root-package CI steps.
+import { isScriptEntry } from './script-entry.js';
 import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -59,6 +60,6 @@ function main() {
 	if (readFileSync(target, 'utf8').replace(/\r\n/g, '\n') !== output) throw new Error('Verification inventory is stale: run npm run generate:verification and review the changed CI coverage.');
 	console.log(`verification inventory: ${Object.keys(pkg.scripts).length} scripts and ${Object.keys(workflows).length} workflows agree`);
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (isScriptEntry(import.meta.url)) {
 	try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }
