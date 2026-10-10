@@ -23,7 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Clarified that tenant prefixes and logical topics share the transport topic-length budget.
 
-- Errors from connection hooks are reported without stopping offline replay or other Svelte store subscribers.
+- Errors from connection hooks are reported without stopping offline replay or other Svelte store subscribers, while retaining the config object as the callback receiver.
 
 - Reconnect snapshots and non-array pagination responses update the authoritative stream state during optimistic mutations, so settling a mutation cannot restore stale data.
 

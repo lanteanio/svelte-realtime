@@ -3000,6 +3000,32 @@ describe('offline queue - connection closed for good', () => {
 
 
 describe('connection observer failures', () => {
+	it('rejected async hooks preserve their config receiver and allow replay', async () => {
+		mod = await loadClient(true);
+		const report = vi.fn();
+		vi.stubGlobal('reportError', report);
+		const error = new Error('async observer failed');
+		const receivers = [];
+		const config = {
+			offline: { queue: true },
+			async onConnect() { receivers.push(this); throw error; },
+			async onDisconnect() { receivers.push(this); throw error; }
+		};
+		try {
+			mod.configure(config);
+			simulateStatus('disconnected');
+			const pending = mod.__rpc('todos/add')('queued');
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'saved' }));
+			await expect(pending).resolves.toBe('saved');
+			expect(receivers).toEqual([config, config]);
+			expect(report.mock.calls).toEqual([[error], [error]]);
+		} finally {
+			vi.unstubAllGlobals();
+		}
+	});
+
 	it('throwing hooks preserve offline replay and the shared Svelte notification queue', async () => {
 		mod = await loadClient(true);
 		const log = vi.spyOn(console, 'error').mockImplementation(() => {});

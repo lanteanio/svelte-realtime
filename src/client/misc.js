@@ -156,7 +156,7 @@ function _callConnectionHook(name) {
 		else console.error('[svelte-realtime] ' + name + ' threw:', err);
 	};
 	try {
-		const result = hook();
+		const result = hook.call(clientState.config);
 		if (result && typeof result.then === 'function') Promise.resolve(result).catch(report);
 	} catch (err) {
 		report(err);
