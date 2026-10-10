@@ -49,7 +49,7 @@ live.public(42);
 publicHandler({} as import('../src/server.js').LiveContext, 42, 'bad');
 const config: SmoothConfig = {
   topic: 'positions', apply: (state) => state, initial: {},
-  snapshot: true, snapshotDebounceMs: 250
+  snapshot: true, snapshotDebounceMs: 250, maxCommandsPerTick: 2
 };
 live.smooth(config);
 live.smooth({
@@ -71,6 +71,9 @@ live.smooth({ topic: 'positions', apply: (state) => state, initial: {}, snapshot
 const invalidSnapshot: SmoothConfig = { ...config, snapshot: 'true' };
 // @ts-expect-error the cadence is numeric
 const invalidCadence: SmoothConfig = { ...config, snapshotDebounceMs: '250' };
+// @ts-expect-error command budgets are numeric
+const invalidCommandBudget: SmoothConfig = { ...config, maxCommandsPerTick: '2' };
+void invalidCommandBudget;
 void invalidSnapshot; void invalidCadence;
 configureForget({ hashKey: 'a'.repeat(32) });
 configureForget({ hashKey: new Uint8Array(32) });

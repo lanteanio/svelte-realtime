@@ -22,6 +22,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - DevTools formats telemetry with Intl, supports locale and direction configuration, and isolates runtime identifiers.
 
+- Smooth topics accept an optional per-entity command budget, retain ordered command tails, and acknowledge only applied work. Older adapters reject an explicit budget with an upgrade error; the default still drains all queued commands.
+
 - Added an exact locked Svelte 4 compatibility fixture with generated version/setup documentation and CI checks for production builds, declarations, stores and two browser tabs. Action: use the linked Svelte 4 profile when reproducing support on that major version.
 
 - Smooth hit callbacks expose the server-applied rewind duration as `info.rewindMs`, including zero for current-state fallback.

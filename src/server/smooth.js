@@ -440,16 +440,42 @@ export function _resetSmooth() {
 	_smoothTopics.clear();
 }
 
+// Older adapters silently ignore unknown authority options. Check the requested
+// behavior once per factory before accepting an explicit command budget.
+const _smoothBudgetSupport = new WeakMap();
+function _requireSmoothBudget(rt) {
+	const factory = rt.createSmoothAuthority;
+	let supported = _smoothBudgetSupport.get(factory);
+	if (supported === undefined) {
+		supported = false;
+		try {
+			const probe = factory({ apply: (state, command) => state + command, maxCommandsPerTick: 1 });
+			probe.ensure('budget', {}, 0);
+			probe.enqueue('budget', [{ id: 1, cmd: 1 }, { id: 2, cmd: 1 }]);
+			const first = probe.drain().acks;
+			const firstApplied = first.length === 1 && first[0].id === 1 && first[0].state === 1;
+			const second = probe.drain().acks;
+			supported = firstApplied && second.length === 1 && second[0].id === 2 && second[0].state === 2;
+		} catch { /* unsupported authority contract */ }
+		_smoothBudgetSupport.set(factory, supported);
+	}
+	if (!supported) {
+		throw new LiveError('INTERNAL', 'live.smooth() maxCommandsPerTick requires an adapter with command drain limits; upgrade svelte-adapter-uws before enabling this option');
+	}
+}
+
 export function _smoothRecord(name, cfg, platform, rt) {
 	let rec = _smoothTopics.get(name);
 	if (rec === undefined) {
+		if (cfg.maxCommandsPerTick !== undefined) _requireSmoothBudget(rt);
 		rec = {
 			name,
 			wireTopic: rt.SMOOTH_TOPIC_PREFIX + name,
 			authority: rt.createSmoothAuthority({
 				apply: cfg.apply,
 				onMissing: cfg.onMissing,
-				queueCap: cfg.queueCap
+				queueCap: cfg.queueCap,
+				maxCommandsPerTick: cfg.maxCommandsPerTick
 			}),
 			codec: rt.createSmoothWireCodec(),
 			platform,
@@ -2928,7 +2954,7 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
  * module, like `apply`; requires svelte-adapter-uws >= 0.6.0-next.49 for the
  * client-side unpack). Default off, byte-identical wire).
  *
- * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, broadcastHz?: number, noEcho?: boolean, queueCap?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number, interest?: { radius: number, position: (state: any) => ({ x: number, y: number } | null), lod?: Array<{ within: number, rate: number }>, cell?: number, budget?: number }, wire?: { state?: { pack: (state: any) => any, unpack: (packed: any) => any }, command?: { pack: (cmd: any) => any, unpack: (packed: any) => any } } }} config
+ * @param {{ topic: string | Function, apply: Function, initial: any, guard?: Function, onMissing?: Function, tickMs?: number, broadcastHz?: number, noEcho?: boolean, queueCap?: number, maxCommandsPerTick?: number, snapshot?: boolean, snapshotDebounceMs?: number, topicArgs?: number, interest?: { radius: number, position: (state: any) => ({ x: number, y: number } | null), lod?: Array<{ within: number, rate: number }>, cell?: number, budget?: number }, wire?: { state?: { pack: (state: any) => any, unpack: (packed: any) => any }, command?: { pack: (cmd: any) => any, unpack: (packed: any) => any } } }} config
  */
 export const _smoothRegister = function smooth(config) {
 	if (!config || typeof config !== 'object') {
@@ -2957,6 +2983,9 @@ export const _smoothRegister = function smooth(config) {
 	if (config.queueCap !== undefined && !(typeof config.queueCap === 'number' && Number.isInteger(config.queueCap) && config.queueCap >= 1)) {
 		throw new Error('[svelte-realtime] live.smooth() queueCap must be an integer of at least 1');
 	}
+	if (config.maxCommandsPerTick !== undefined && (!Number.isInteger(config.maxCommandsPerTick) || config.maxCommandsPerTick < 1)) {
+		throw new Error('[svelte-realtime] live.smooth() maxCommandsPerTick must be an integer of at least 1');
+	}
 	if (config.snapshot !== undefined && typeof config.snapshot !== 'boolean') {
 		throw new Error('[svelte-realtime] live.smooth() snapshot must be a boolean');
 	}
@@ -2975,6 +3004,7 @@ export const _smoothRegister = function smooth(config) {
 		initial: config.initial,
 		onMissing: config.onMissing,
 		queueCap: config.queueCap,
+		maxCommandsPerTick: config.maxCommandsPerTick,
 		tickMs,
 		broadcastHz: config.broadcastHz,
 		noEcho: config.noEcho !== false,

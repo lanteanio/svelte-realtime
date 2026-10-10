@@ -3426,6 +3426,14 @@ export interface SmoothConfig {
 	/** Per-entity command queue bound (an integer of at least 1). @default 1024 */
 	queueCap?: number;
 	/**
+	 * Optional positive integer limit on client commands applied per entity per
+	 * tick. Ordered tails stay queued and acknowledgements cover only applied
+	 * commands. Omitted drains all; trusted server injections remain unpaced.
+	 * Requires an adapter with command drain limits; unsupported adapters reject
+	 * an explicit budget instead of silently ignoring it.
+	 */
+	maxCommandsPerTick?: number;
+	/**
 	 * Persist entity state for cluster owner handoff. Requires
 	 * svelte-adapter-uws-extensions >= 0.6.0-next.20. @default false
 	 */
