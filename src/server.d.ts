@@ -434,6 +434,7 @@ export interface LiveContext<UserData = unknown> {
 	 * process) otherwise. Await the returned promise: it resolves after durable
 	 * commit and timer installation, and rejects on storage failure or when another
 	 * instance reserved a newer schedule for the same room before this one committed.
+	 * Capacity refusal rejects with `LiveError('ALARM_CAPACITY')` on both paths.
 	 * Same-process writes to a room execute in invocation order.
 	 *
 	 * @example

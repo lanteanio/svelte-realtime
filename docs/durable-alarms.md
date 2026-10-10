@@ -26,6 +26,8 @@ Both precise timers and recovery pass the generation of the row they observed. T
 
 ## Migration
 
+Always await `ctx.setAlarm(at)` and `ctx.deleteAlarm()`, or return their promises from the handler. Handle failures with `try`/`catch` or a promise rejection handler: old fire-and-forget calls can now produce an unhandled rejection when storage or capacity refuses a mutation. The default in-memory capacity limit also rejects with `ALARM_CAPACITY`; a fulfilled schedule acknowledges timer installation.
+
 Upgrade every durable store implementation to the complete contract, including the generation fields returned by `get` and `due`. Assign existing scheduled rows valid generations and retain their resolver metadata. Keep allocation and committed watermarks at least as high as the assigned values. Legacy topic-only workers can delete arbitrary replacements, so do not run them concurrently with generation-aware workers against the same alarm namespace.
 
 The Redis and PostgreSQL stores belong to `svelte-adapter-uws-extensions`. Deploy a compatible store release with the realtime release; `configureAlarm` rejects a store missing `nextGeneration` or `get` rather than guessing whether its deletes are conditional.

@@ -176,7 +176,7 @@ export function _bindAlarmCtx(ctx, binding) {
 function _reserveTopic(wireTopic) {
 	if (_pending.has(wireTopic) || _reservedTopics.has(wireTopic)) return;
 	if (_pending.size + _reservedTopics.size >= _MAX_ALARMS) {
-		throw new Error('[svelte-realtime] alarm registry reached its pending alarm limit');
+		throw new LiveError('ALARM_CAPACITY', '[svelte-realtime] alarm registry reached its pending alarm limit');
 	}
 	_reservedTopics.add(wireTopic);
 }
@@ -187,7 +187,8 @@ function _releaseTopic(wireTopic) {
 }
 
 function _queueMutation(wireTopic, work) {
-	_reserveTopic(wireTopic);
+	try { _reserveTopic(wireTopic); }
+	catch (error) { return Promise.reject(error); }
 	const previous = _mutations.get(wireTopic);
 	const result = (previous || Promise.resolve()).then(work);
 	const cleanup = () => {
@@ -207,7 +208,7 @@ function _armAlarm(wireTopic, at, onAlarm, meta, misfireMs, store, generation) {
 	const existing = _pending.get(wireTopic);
 	if (existing) clearTimer(existing.timer);
 	else if (_pending.size + _reservedTopics.size >= _MAX_ALARMS && !_reservedTopics.has(wireTopic)) {
-		throw new Error('[svelte-realtime] alarm registry reached its pending alarm limit');
+		throw new LiveError('ALARM_CAPACITY', '[svelte-realtime] alarm registry reached its pending alarm limit');
 	}
 	if (_reservedTopics.size) _reservedTopics.delete(wireTopic);
 	const entry = store
@@ -223,7 +224,8 @@ function _setAlarm(wireTopic, at, onAlarm, meta = null, misfireMs = undefined) {
 	}
 	const store = _alarmStore;
 	if (!store) {
-		_armAlarm(wireTopic, at, onAlarm, meta, misfireMs, null, null);
+		try { _armAlarm(wireTopic, at, onAlarm, meta, misfireMs, null, null); }
+		catch (error) { return Promise.reject(error); }
 		return _alarmAcknowledged;
 	}
 	const epoch = _alarmEpoch;

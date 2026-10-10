@@ -41,6 +41,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Expose `generateTypes({ root, dir })` from `svelte-realtime/vite` so typecheck scripts can refresh `$live` declarations without a production build.
 
+### Changed
+
+- **Breaking:** Alarm scheduling and cancellation now return promises that must be awaited. Durable stores require the ordered-generation and retained-execution contract; `configureAlarm` rejects legacy topic-only stores. Upgrade the store and migrate existing rows with the runtime. Unhandled rejected mutations are no longer silent fire-and-forget writes. Reaching in-memory capacity now rejects with `ALARM_CAPACITY` instead of warning and dropping the schedule.
+
 ### Fixed
 
 - Packed-package tests and manual setup extract archives using portable paths on Windows and Unix.
@@ -75,6 +79,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Clarify that stream subscriptions also pass through adapter authorization and connection limits before loading data or joining a room.
 
 - Room subscriptions release only the membership references they acquired, preserving other connections after capacity refusal, presence errors, or failed initialization.
+- Alarm capacity refusals reject with structured `ALARM_CAPACITY` errors through the returned promise in memory and durable modes, preserving acknowledged schedules.
+
 - Durable idempotency duplicates wait for their original result; bounded retryable responses preserve offline mutations and retry with backoff instead of entering conflict handling.
 
 - The in-process idempotency store refuses new keyed work at capacity before its handler runs, preserving cached results across tenant churn and reserving space for running handlers.
@@ -82,8 +88,6 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Idempotency erasure remains effective for long-running handlers and duplicate waiters after the recent-tombstone sweep, while fresh calls outside the grace window cache normally.
 
 - Durable alarm claims retain their execution until successful completion. Failed and interrupted executions stay inspectable for explicit retry, preserving their generation and effect idempotency key without overwriting newer schedules.
-
-- Alarm scheduling and cancellation return awaited promises. Durable stores reserve ordered generations and condition writes and claims on those generations, preventing stale timers, recovery snapshots and deletes from consuming replacements. Legacy topic-only stores require a coordinated store upgrade.
 
 - Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.
 
