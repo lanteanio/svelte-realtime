@@ -2,7 +2,7 @@
 // DevTools overlay for svelte-realtime (dev-mode only)
 // Injected by the Vite plugin via transformIndexHtml
 
-import { now, setIntervalTimer, clearIntervalTimer } from './client-runtime.js';
+import { now, setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from './client-runtime.js';
 
 /** @type {Intl.LocalesArgument | undefined} */
 let locale;
@@ -43,7 +43,7 @@ export function configureDevtools(options = {}) {
    const key = /** @type {HTMLElement} */ (el).dataset.label;
    el.textContent = message(key);
   }
-  for (const el of document.querySelectorAll('[data-aria-label]')) el.setAttribute('aria-label', message(/** @type {HTMLElement} */ (el).dataset.ariaLabel));
+  for (const el of [...panel.querySelectorAll('[data-aria-label]'), ...(launcher ? [launcher] : [])]) el.setAttribute('aria-label', message(/** @type {HTMLElement} */ (el).dataset.ariaLabel));
   _forceRerender();
  }
 }
@@ -61,10 +61,17 @@ let statusMessage = null;
 let lastConnection = '';
 let lastErrors = '';
 let lastRpcFailure = 0;
+let announcementTimer = null;
 
 /** @param {string} text */
 function announce(text) {
- if (statusMessage && statusMessage.textContent !== text) statusMessage.textContent = text;
+ if (!statusMessage) return;
+ if (announcementTimer !== null) clearTimer(announcementTimer);
+ announcementTimer = null;
+ if (statusMessage.textContent === text) {
+  statusMessage.textContent = '';
+  announcementTimer = setTimer(() => { statusMessage.textContent = text; announcementTimer = null; }, 50);
+ } else statusMessage.textContent = text;
 }
 
 
@@ -549,15 +556,16 @@ function _renderPayload(value, raw) {
 	let str;
 	try { str = JSON.stringify(value) ?? String(value); } catch { str = String(value); }
 	const cap = raw ? 500 : 200;
-	if (str.length > cap) {
+	if (str.length > cap && payloadSegmenter) {
 		let end = 0, count = 0;
-		const segments = payloadSegmenter ? payloadSegmenter.segment(str) : str;
+		const segments = payloadSegmenter.segment(str);
 		for (const item of segments) {
 			if (count++ === cap) break;
-			end += typeof item === 'string' ? item.length : item.segment.length;
+			end += item.segment.length;
 		}
 		if (end < str.length) str = str.slice(0, end) + '... [+' + (str.length - end) + ' code units]';
 	}
+	// Without segmentation, preserve the whole string instead of breaking a grapheme.
 	return str;
 }
 

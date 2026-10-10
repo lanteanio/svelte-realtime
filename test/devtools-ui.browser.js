@@ -354,3 +354,40 @@ it('starts stream capture paused and synchronously purges visible and undo paylo
  expect(await page.getByRole('button', { name: 'Pause event capture' }).getAttribute('aria-pressed')).toBe('true');
  expect(await page.evaluate(() => window.realDevtools.undoClearCount)).toBe(0);
 });
+
+it('keeps application labels unchanged when configuring overlay translations', async () => {
+ await page.evaluate(() => {
+  const host = document.getElementById('host');
+  host.dataset.ariaLabel = 'Close DevTools';
+  host.setAttribute('aria-label', 'Application action');
+  window.configureDevtools({ messages: { 'Close DevTools': 'Close translated' } });
+ });
+ expect(await page.locator('#host').getAttribute('aria-label')).toBe('Application action');
+ await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).click();
+ expect(await page.getByRole('button', { name: 'Close translated' }).count()).toBe(1);
+});
+it('preserves complete payload text when grapheme segmentation is unavailable', async () => {
+ await page.addInitScript(() => { Intl.Segmenter = undefined; });
+ await page.reload();
+ await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).waitFor();
+ await streamsFixture();
+ const payload = 'a'.repeat(198) + 'e\u0301\u{1f469}\u200d\u{1f4bb}' + 'tail';
+ await page.evaluate(data => { window.realDevtools.streams.get('chat').recentEvents = [{ event: 'update', data, ts: Date.now() }]; }, payload);
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ await page.locator('[data-action="toggle-stream"]').click();
+ expect(await page.locator('#svr-dt-content').textContent()).toContain(payload);
+});
+it('announces later distinct RPC failures even when their summary text matches', async () => {
+ await streamsFixture();
+ await page.evaluate(() => {
+  window.failureAnnouncements = [];
+  new MutationObserver(() => window.failureAnnouncements.push(document.querySelector('[role="status"]').textContent)).observe(document.querySelector('[role="status"]'), { childList: true, subtree: true });
+  window.realDevtools.history = [{ seq: 1, ok: false, path: 'one', duration: 1 }];
+  document.getElementById('svr-dt-tab-rpcs').click();
+ });
+ await page.evaluate(() => {
+  window.realDevtools.history.push({ seq: 2, ok: false, path: 'two', duration: 1 });
+  document.getElementById('svr-dt-tab-rpcs').click();
+ });
+ await page.waitForFunction(() => window.failureAnnouncements.filter(text => text === 'An RPC failed. Open RPCs to inspect the result.').length === 2);
+});
