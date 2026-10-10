@@ -1529,3 +1529,91 @@ describe('stream lifecycle ownership edges', () => {
 		off();
 	});
 });
+
+
+describe('attach-window replay inclusion', () => {
+ function emit(topic, envelope) {
+  expect(net.clientTopics.has(topic)).toBe(true);
+  for (const fn of [...net.clientTopics.get(topic)]) fn({ topic, ...envelope });
+ }
+
+ async function resumeReplay(merge, replayed, buffered, responseSeq = 10) {
+  clientState.config.resumeGraceMs = 30000;
+  const gate = deferred();
+  let resuming = false;
+  let replayRead = false;
+  const topic = 'inclusion:' + merge;
+  env.platform.replay = {
+   since: async () => { replayRead = true; await gate.promise; return replayed; },
+   seq: async () => resuming ? responseSeq : 1
+  };
+  env.register('inclusion', { feed: live.stream(topic, async () => merge === 'set' ? { owner: 'initial' } : [], { merge, replay: true, max: 50 }) });
+  const stream = __stream('inclusion/feed', { merge, max: 50 });
+  let off = stream.subscribe(() => {});
+  await ticks(); await deliverToServer(); await deliverToClient();
+  off(); await ticks(); await deliverToServer();
+  resuming = true;
+  off = stream.subscribe(() => {});
+  await ticks();
+  expect(subscribeFrames().at(-1).seq).toBe(1);
+  await deliverToServer(1, 'attach'); await deliverToClient();
+  await until(() => replayRead);
+  for (const envelope of buffered) emit(topic, envelope);
+  gate.resolve();
+  await until(() => net.toClient.some(frame => frame.data?.replay === true));
+  const response = net.toClient.find(frame => frame.data?.replay === true).data;
+  expect(response.seq).toBe(responseSeq);
+  await deliverToClient();
+  const result = get(stream);
+  off(); await ticks(); await deliverToServer();
+  return result;
+ }
+
+ it('deduplicates only exact replay members and keeps intervening and later live sequences', async () => {
+  const event = seq => ({ event: 'push', data: { id: seq }, seq });
+  const result = await resumeReplay('latest', [event(7), event(9)], [event(7), event(8), event(9), event(10)]);
+  expect(result).toEqual([{ id: 7 }, { id: 9 }, { id: 8 }, { id: 10 }]);
+ });
+
+ it('does not roll a replayed set value back to an older included live frame', async () => {
+  const old = { event: 'set', data: { owner: 'bob' }, seq: 7 };
+  const latest = { event: 'set', data: { owner: 'carol' }, seq: 8 };
+  expect(await resumeReplay('set', [old, latest], [old])).toEqual({ owner: 'carol' });
+ });
+
+ it('keeps a live set published between the replay read and response watermark', async () => {
+  const old = { event: 'set', data: { owner: 'bob' }, seq: 7 };
+  const latest = { event: 'set', data: { owner: 'carol' }, seq: 8 };
+  expect(await resumeReplay('set', [old], [old, latest], 8)).toEqual({ owner: 'carol' });
+ });
+
+ it.each([undefined, null, -1, 1.5])('retains unidentifiable replay/live events with sequence %s', async seq => {
+  const row = { event: 'push', data: { id: 'same' }, ...(seq === undefined ? {} : { seq }) };
+  expect(await resumeReplay('latest', [row], [row])).toEqual([{ id: 'same' }, { id: 'same' }]);
+ });
+
+ it.each(['latest', 'set', 'crud'])('keeps loader-window live frames for %s even below the response watermark', async merge => {
+  const gate = deferred();
+  const topic = 'loader-window:' + merge;
+  const snapshot = merge === 'set' ? { owner: 'bob' } : [{ id: 7 }];
+  let read = false;
+  env.platform.replay = { seq: async () => 8 };
+  env.register('inclusion', { feed: live.stream(topic, async () => { read = true; await gate.promise; return snapshot; }, { merge, replay: true, max: 50 }) });
+  const stream = __stream('inclusion/feed', { merge, key: 'id', max: 50 });
+  const off = stream.subscribe(() => {});
+  await ticks(); await deliverToServer(1, 'attach'); await deliverToClient();
+  await until(() => read);
+  if (merge === 'latest') {
+   emit(topic, { event: 'push', data: { id: 7 }, seq: 7 });
+   emit(topic, { event: 'push', data: { id: 8 }, seq: 8 });
+  } else if (merge === 'set') emit(topic, { event: 'set', data: { owner: 'carol' }, seq: 8 });
+  else emit(topic, { event: 'deleted', data: { id: 7 }, seq: 8 });
+  gate.resolve();
+  await until(() => net.toClient.some(frame => frame.data?.ok && !frame.data.attach));
+  await deliverToClient();
+  // A loader read and replay watermark are not an atomic snapshot. Keeping
+  // every frame preserves live changes; an unkeyed ring can repeat a row.
+  expect(get(stream)).toEqual(merge === 'latest' ? [{ id: 7 }, { id: 7 }, { id: 8 }] : merge === 'set' ? { owner: 'carol' } : []);
+  off(); await ticks(); await deliverToServer();
+ });
+});

@@ -191,6 +191,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Verify benchmark rejection fixtures and RPC outcomes, report execution context, and describe measured in-process scope.
 
+- Skip attach-window frames already included in explicit latest/set replay responses while preserving live changes beyond the replay read.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

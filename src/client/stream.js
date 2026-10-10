@@ -1843,10 +1843,19 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				store.set(currentValue);
 				_recordHistory();
 
-				// Replay buffered messages in batch
+				// Replay buffered messages in batch. Only explicit replay members
+				// prove inclusion: response.seq is read after the snapshot/replay
+				// read, so using it as a cutoff would discard intervening live data.
 				if (buffer.length > 0) {
+					let included = null;
+					if ((merge === 'latest' || merge === 'set') && response.replay === true && Array.isArray(response.data)) {
+						included = new Set();
+						for (const evt of response.data) {
+							if (Number.isSafeInteger(evt.seq) && evt.seq >= 0) included.add(evt.seq);
+						}
+					}
 					for (const evt of buffer) {
-						_applyMerge(evt);
+						if (!included?.has(evt.seq)) _applyMerge(evt);
 					}
 					if (_optimisticQueue.length > 0) _recomputeDisplay();
 					else {
