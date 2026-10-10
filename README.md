@@ -4791,7 +4791,7 @@ onShutdown(async () => {
 }, { drainMs: 3000 });         // wait up to 3s for in-flight work before teardown
 ```
 
-`onShutdown(handler, { drainMs })` returns an unregister function; a throwing handler is logged and never aborts the rest. `drainMs` (default 5000) is the in-flight drain budget - keep it well under the adapter's `SHUTDOWN_TIMEOUT` (default 30s), the hard cap. If you destructure only `{ open, close, message, init }`, the `shutdown` hook is never wired and the drain does not run - add `shutdown`.
+The `shutdown` hook resolves with `{ drained, timedOut, remaining, elapsedMs }`; each teardown handler receives that immutable result as `ctx.drain`. It also emits `shutdown.drain.completed` or `shutdown.drain.timed-out` before teardown. The snapshot covers tracked RPC, SSR, upload, cron, alarm and erasure handlers; a timeout does not cancel them or confirm their side effects. Ordinary RPC/SSR work and upload buffers are not made durable by draining; clients may receive no result. Persisted cron/alarm work follows its store and retry policy, and erasure must be retried until confirmed. Applications own cancellation, idempotency, durable storage and cleanup for unfinished work. `onShutdown(handler, { drainMs })` returns an unregister function; a throwing handler is logged and never aborts the rest. `drainMs` (default 5000) is the in-flight drain budget - keep it well under the adapter's `SHUTDOWN_TIMEOUT` (default 30s), the hard cap. If you destructure only `{ open, close, message, init }`, the `shutdown` hook is never wired and the drain does not run - add `shutdown`.
 
 ### Layer 1: manual wiring (experts)
 

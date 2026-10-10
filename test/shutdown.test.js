@@ -81,7 +81,7 @@ describe('graceful shutdown - onShutdown + in-flight drain + reject-new', () => 
 		let secondRan = false;
 		onShutdown(() => { throw new Error('boom'); });
 		onShutdown(() => { secondRan = true; });
-		await expect(_runShutdown({ platform: mockPlatform() })).resolves.toBeUndefined();
+		await expect(_runShutdown({ platform: mockPlatform() })).resolves.toMatchObject({ drained: true, timedOut: false, remaining: 0 });
 		expect(secondRan).toBe(true);
 		expect(errSpy).toHaveBeenCalled();
 	});

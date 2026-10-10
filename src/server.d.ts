@@ -4781,6 +4781,15 @@ export function replayDeadLetter(opts?: { topic?: string; ids?: string[]; dryRun
 	results: Array<{ id: string; ok: boolean; status: string; error?: string }>;
 }>;
 
+/** Immutable outcome captured after waiting for tracked work and before teardown. */
+export interface ShutdownDrainResult {
+	readonly drained: boolean;
+	readonly timedOut: boolean;
+	readonly remaining: number;
+	/** Time spent waiting for tracked work, excluding teardown handlers. */
+	readonly elapsedMs: number;
+}
+
 /**
  * Shape returned by `realtime()`. Spread into `hooks.ws.js` exports.
  * `upgrade` is present only when the caller passed one in the config.
@@ -4795,9 +4804,10 @@ export interface RealtimeHooks {
 	 * closes the listen socket and flushes the open WebSockets. Drains
 	 * in-flight RPC / SSR / cron work (rejecting new calls with `UNAVAILABLE`)
 	 * up to the `onShutdown` drain budget, then runs registered `onShutdown`
-	 * handlers in order. Idempotent; zero-config (drains even with no handler).
+	 * handlers in order. Returns the immutable pre-teardown drain outcome.
+	 * Idempotent; zero-config (drains even with no handler).
 	 */
-	shutdown(ctx: { platform: Platform }): Promise<void>;
+	shutdown(ctx: { platform: Platform }): Promise<ShutdownDrainResult>;
 	upgrade?: (...args: any[]) => any;
 	/**
 	 * Admin / observability request handler (a Web `Request` -> `Response` router
@@ -4841,8 +4851,8 @@ export function realtime(config?: RealtimeConfig): RealtimeHooks;
 
 /**
  * Register a teardown handler run during graceful shutdown, after in-flight
- * work has drained. Handlers run in registration order and receive the same
- * `{ platform }` the adapter passes the `shutdown` hook. A throwing handler is
+ * work has drained or exhausted its budget. Handlers run in registration order
+ * and receive `{ platform, drain }`, with the immutable pre-teardown outcome. A throwing handler is
  * logged and ignored so one failure cannot abort the rest. Use this for
  * app-level teardown that the framework owns the timing of - releasing a
  * leader lease, deactivating a cluster bus, flushing a buffer:
@@ -4861,7 +4871,7 @@ export function realtime(config?: RealtimeConfig): RealtimeHooks;
  * @returns an unregister function.
  */
 export function onShutdown(
-	handler: (ctx: { platform: Platform }) => void | Promise<void>,
+	handler: (ctx: { platform: Platform; drain: ShutdownDrainResult }) => void | Promise<void>,
 	options?: { drainMs?: number }
 ): () => void;
 

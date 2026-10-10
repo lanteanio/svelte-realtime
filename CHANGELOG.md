@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Shutdown reports whether tracked work drained or timed out, with remaining work and elapsed time available before teardown and in the hook result.
+
 - Aggregate privacy controls are documented as cohort suppression and keyed statistical noise, without a differential privacy guarantee or enforced privacy budget.
 
 - The wire fuzz gate resolves runtime primitives from the installed adapter source layout.

@@ -27,6 +27,9 @@
 // runs, so an app gets a graceful in-flight drain for free.
 
 import { monotonicNow, setTimer } from '../shared/runtime.js';
+import { emitOperationalEvent } from '../shared/diagnostic.js';
+
+/** @typedef {import('../server.js').ShutdownDrainResult} ShutdownDrainResult */
 
 /** Default in-flight drain budget (ms) when no registration specifies one. */
 const _DEFAULT_DRAIN_MS = 5000;
@@ -35,11 +38,11 @@ const _DRAIN_POLL_MS = 25;
 
 let _shuttingDown = false;
 let _inFlight = 0;
-/** @type {Array<{ handler: (ctx: { platform: any }) => any, drainMs: number | undefined }>} */
+/** @type {Array<{ handler: (ctx: { platform: any, drain: ShutdownDrainResult }) => any, drainMs: number | undefined }>} */
 let _handlers = [];
 /** @type {(() => void) | null} cron scheduler stop, wired once at init (no import cycle). */
 let _stopScheduler = null;
-/** @type {Promise<void> | null} latched so concurrent shutdown calls share one run. */
+/** @type {Promise<ShutdownDrainResult> | null} latched so concurrent shutdown calls share one run. */
 let _shutdownPromise = null;
 
 /**
@@ -74,15 +77,15 @@ export function _exitInFlight() {
 
 /**
  * Register a teardown handler run during graceful shutdown, after in-flight
- * work has drained. Handlers run in registration order and receive the same
- * `{ platform }` context the adapter passes the shutdown hook. A throwing
+ * work has drained or exhausted its budget. Handlers run in registration order
+ * and receive `{ platform, drain }`, with the immutable pre-teardown outcome. A throwing
  * handler is logged and ignored so one failure cannot abort the rest.
  *
  * `drainMs` sets the in-flight drain budget (the largest across all
  * registrations wins; default 5000ms when none specify one). Keep it well
  * under the adapter's `SHUTDOWN_TIMEOUT` (default 30s), which is the hard cap.
  *
- * @param {(ctx: { platform: any }) => void | Promise<void>} handler
+ * @param {(ctx: { platform: any, drain: ShutdownDrainResult }) => void | Promise<void>} handler
  * @param {{ drainMs?: number }} [options]
  * @returns {() => void} unregister fn
  */
@@ -114,7 +117,7 @@ export function onShutdown(handler, options) {
  * Wired as the `realtime()` `shutdown` hook the adapter invokes on SIGTERM.
  *
  * @param {{ platform?: any }} [ctx]
- * @returns {Promise<void>}
+ * @returns {Promise<ShutdownDrainResult>}
  */
 export function _runShutdown(ctx) {
 	if (_shutdownPromise) return _shutdownPromise;
@@ -124,7 +127,7 @@ export function _runShutdown(ctx) {
 
 /**
  * @param {{ platform?: any }} ctx
- * @returns {Promise<void>}
+ * @returns {Promise<ShutdownDrainResult>}
  */
 async function _doShutdown(ctx) {
 	_shuttingDown = true; // gate up: new RPC / SSR / cron work is now rejected
@@ -137,14 +140,24 @@ async function _doShutdown(ctx) {
 	}
 	const specified = /** @type {number[]} */ (_handlers.map((h) => h.drainMs).filter((ms) => ms !== undefined));
 	const budget = specified.length ? Math.max(...specified) : _DEFAULT_DRAIN_MS;
-	await _drainInFlight(budget);
+	const drain = await _drainInFlight(budget);
+	try {
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.lifecycle',
+			event: drain.timedOut ? 'shutdown.drain.timed-out' : 'shutdown.drain.completed',
+			severity: drain.timedOut ? 'warn' : 'info', dataClass: 'operational',
+			message: drain.timedOut ? 'Shutdown drain budget expired with tracked handlers still active.' : 'Shutdown tracked handlers drained before teardown.',
+			attributes: { ...drain }
+		});
+	} catch { /* Telemetry must not prevent teardown. */ }
 	for (const { handler } of _handlers) {
 		try {
-			await handler(/** @type {any} */ (ctx));
+			await handler(/** @type {any} */ ({ ...ctx, drain }));
 		} catch (err) {
 			console.error('[svelte-realtime] onShutdown handler threw (ignored):', err);
 		}
 	}
+	return drain;
 }
 
 /**
@@ -152,20 +165,25 @@ async function _doShutdown(ctx) {
  * whichever comes first. Polls via the runtime-seam timer so a seeded sim
  * harness drives it deterministically.
  * @param {number} budgetMs
- * @returns {Promise<void>}
+ * @returns {Promise<ShutdownDrainResult>}
  */
 function _drainInFlight(budgetMs) {
-	if (_inFlight === 0 || budgetMs <= 0) return Promise.resolve();
 	const start = monotonicNow();
+	const outcome = () => Object.freeze({
+		drained: _inFlight === 0, timedOut: _inFlight !== 0,
+		remaining: _inFlight, elapsedMs: Math.max(0, monotonicNow() - start)
+	});
+	if (_inFlight === 0 || budgetMs <= 0) return Promise.resolve(outcome());
 	return new Promise((resolve) => {
 		const tick = () => {
-			if (_inFlight === 0 || monotonicNow() - start >= budgetMs) {
-				resolve();
+			const remainingMs = budgetMs - (monotonicNow() - start);
+			if (_inFlight === 0 || remainingMs <= 0) {
+				resolve(outcome());
 				return;
 			}
-			setTimer(tick, _DRAIN_POLL_MS);
+			setTimer(tick, Math.min(_DRAIN_POLL_MS, remainingMs));
 		};
-		setTimer(tick, _DRAIN_POLL_MS);
+		setTimer(tick, Math.min(_DRAIN_POLL_MS, budgetMs));
 	});
 }
 
