@@ -452,7 +452,7 @@ describe('live.smooth commands and the authoritative tick', () => {
 		expect(platform.wirePublished[0].topic).toBe('__smooth:shape:r1');
 		expect(platform.wirePublished[0].event).toBe('update');
 		expect(platform.wirePublished[0].data).toEqual({ key: 'u1', data: { x: 5, y: 0 } });
-		expect(platform.wirePublished[0].options).toEqual({ excludeWs: ws });
+		expect(platform.wirePublished[0].options).toEqual({ excludeWs: ws, seq: false });
 		expect(platform.wireSent).toHaveLength(1);
 		expect(platform.wireSent[0].event).toBe('ack');
 		expect(platform.wireSent[0].data.id).toBe(3);
@@ -467,7 +467,7 @@ describe('live.smooth commands and the authoritative tick', () => {
 		rt.queueDrain({ updates: [{ key: 'u1', state: { x: 1, y: 0 }, ws, commanded: true }], acks: [], idle: true });
 		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 1 } }]]);
 		await vi.advanceTimersByTimeAsync(20);
-		expect(platform.wirePublished[0].options).toBeUndefined();
+		expect(platform.wirePublished[0].options?.excludeWs).toBeUndefined();
 	});
 
 	it('excludes only commanded updates - onMissing motion reaches its owner', async () => {
@@ -488,10 +488,10 @@ describe('live.smooth commands and the authoritative tick', () => {
 		expect(platform.wirePublished).toHaveLength(2);
 		// Commanded: the acknowledgement is the owner's copy, so the owner is excluded.
 		expect(platform.wirePublished[0].data).toEqual({ key: 'u1', data: { x: 5, y: 0 } });
-		expect(platform.wirePublished[0].options).toEqual({ excludeWs: owner });
+		expect(platform.wirePublished[0].options).toEqual({ excludeWs: owner, seq: false });
 		// onMissing motion produced no acknowledgement, so the owner must hear the broadcast.
 		expect(platform.wirePublished[1].data).toEqual({ key: 'u2', data: { x: 7, y: 0 } });
-		expect(platform.wirePublished[1].options).toBeUndefined();
+		expect(platform.wirePublished[1].options?.excludeWs).toBeUndefined();
 	});
 
 	it('broadcastHz gates updates to every Nth tick, coalescing skipped motion into the current state', async () => {
@@ -529,7 +529,7 @@ describe('live.smooth commands and the authoritative tick', () => {
 		let ups = platform.wirePublished.filter((p) => p.event === 'update');
 		expect(ups).toHaveLength(1);
 		expect(ups[0].data).toEqual({ key: 'u1', data: { x: 2, y: 0 } });
-		expect(ups[0].options).toEqual({ excludeWs: ws });
+		expect(ups[0].options).toEqual({ excludeWs: ws, seq: false });
 		expect(platform.wireSent).toHaveLength(2);
 
 		// Tick 3 (off-cadence but idle): motion stopped, so the final rest state
@@ -597,7 +597,7 @@ describe('live.smooth commands and the authoritative tick', () => {
 		const ups = platform.wirePublished.filter((p) => p.event === 'update');
 		expect(ups).toHaveLength(1);
 		expect(ups[0].data).toEqual({ key: 'u1', data: { x: 1, y: 5 } });
-		expect(ups[0].options).toBeUndefined();
+		expect(ups[0].options?.excludeWs).toBeUndefined();
 	});
 
 	it('a mover removed before the flush is skipped - its departure already broadcast', async () => {
@@ -693,11 +693,11 @@ describe('live.smooth commands and the authoritative tick', () => {
 		expect(evs).toHaveLength(3);
 		// The wire data carries only {type,key,data,id} - never ws/commanded/opts.
 		expect(evs[0].data).toEqual({ type: 'shot', key: '3:0', data: { dir: 'N' }, id: 3 });
-		expect(evs[0].options).toEqual({ excludeWs: owner }); // normal: author-excluded
+		expect(evs[0].options).toEqual({ excludeWs: owner, seq: false }); // normal: author-excluded
 		expect(evs[1].data).toEqual({ type: 'hit', key: '3:1', data: { dmg: 10 }, id: 3 });
-		expect(evs[1].options).toBeUndefined(); // toAuthor: reaches the author
+		expect(evs[1].options?.excludeWs).toBeUndefined(); // toAuthor: reaches the author
 		expect(evs[2].data).toEqual({ type: 'kill', key: '3:2', data: { who: 'u2' }, id: 3 });
-		expect(evs[2].options).toBeUndefined(); // global: reaches the author
+		expect(evs[2].options?.excludeWs).toBeUndefined(); // global: reaches the author
 	});
 
 	it('does not author-exclude events when noEcho is off', async () => {
@@ -713,7 +713,7 @@ describe('live.smooth commands and the authoritative tick', () => {
 		await call(owner, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { fire: true } }]]);
 		await vi.advanceTimersByTimeAsync(20);
 		const ev = platform.wirePublished.find((p) => p.event === 'event');
-		expect(ev.options).toBeUndefined();
+		expect(ev.options?.excludeWs).toBeUndefined();
 	});
 
 	it('falls back to plain publish/send on a platform without the wire methods, and warns once', async () => {
@@ -733,7 +733,7 @@ describe('live.smooth commands and the authoritative tick', () => {
 			await vi.advanceTimersByTimeAsync(20);
 			const update = platform.published.find((p) => p.event === 'update');
 			expect(update).toBeDefined();
-			expect(update.options).toEqual({ compress: false });
+			expect(update.options).toEqual({ compress: false, seq: false });
 			const ack = platform.sent.slice(sentBefore).find((s) => s.event === 'ack');
 			expect(ack).toBeDefined();
 			// The wire-less platform trips the one-shot dev warning.
@@ -1279,7 +1279,7 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		await vi.advanceTimersByTimeAsync(20);
 		// Local emit: the owner's own client is excluded from its own update/event.
 		const localUpdate = platform.wirePublished.find((p) => p.event === 'update');
-		expect(localUpdate.options).toEqual({ excludeWs: ws });
+		expect(localUpdate.options).toEqual({ excludeWs: ws, seq: false });
 		// Relay: update then event, each with the next seq; a native author needs
 		// no cross-instance exclude (it is on no other instance).
 		expect(sc.calls.relayBroadcast.map((r) => [r[1], r[3], r[4]])).toEqual([
@@ -1334,8 +1334,8 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		sc.emit.broadcast(WT, 'update', { key: 'b', data: { x: 2 } }, 'elsewhere', 1, 'A');
 		const ups = platform.wirePublished.filter((p) => p.event === 'update');
 		expect(ups).toHaveLength(2);
-		expect(ups[0].options).toEqual({ excludeWs: sub });
-		expect(ups[1].options).toBeUndefined();
+		expect(ups[0].options).toEqual({ excludeWs: sub, seq: false });
+		expect(ups[1].options?.excludeWs).toBeUndefined();
 	});
 
 	it('non-owner culls a relayed update outside a local subscriber AoI and delivers one inside it', async () => {
@@ -2243,7 +2243,7 @@ describe('live.smooth onTick (the server world hook)', () => {
 		const sent = platform.wirePublished.filter((p) => p.event === 'update' && p.data.key === 'u2');
 		expect(sent).toHaveLength(1);
 		expect(sent[0].data.data).toEqual({ x: 9, y: 9 });
-		expect(sent[0].options).toBeUndefined(); // non-commanded: the owner receives it
+		expect(sent[0].options?.excludeWs).toBeUndefined(); // non-commanded: the owner receives it
 		expect(rt.entities.get('u2').state).toEqual({ x: 9, y: 9 });
 	});
 

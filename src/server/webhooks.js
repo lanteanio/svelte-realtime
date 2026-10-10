@@ -4,7 +4,7 @@ import { createRetryBudget, createWebhookBreaker } from 'svelte-adapter-uws/plug
 import { _redactUrl, _replayWebhookOut } from './webhook-out.js';
 import { state, _webhookOutById } from './state.js';
 import { createDeadLetterStore } from './dead-letter.js';
-import { _platformPublish } from './publish-helpers.js';
+import { _platformPublish, UNSEQUENCED } from './publish-helpers.js';
 
 async function _handleInboundWebhook(req, config, topic) {
 	let event;
@@ -18,7 +18,7 @@ async function _handleInboundWebhook(req, config, topic) {
 	if (!mapped) return { status: 200, body: 'Ignored' };
 
 	if (req.platform) {
-		_platformPublish(req.platform, topic, mapped.event, mapped.data);
+		_platformPublish(req.platform, topic, mapped.event, mapped.data, UNSEQUENCED);
 	}
 	return { status: 200, body: 'OK' };
 }

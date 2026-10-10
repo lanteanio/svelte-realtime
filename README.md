@@ -4511,7 +4511,7 @@ Replay re-runs the **complete** delivery path, so the SSRF gate is re-applied at
 
 ## Signals
 
-Point-to-point ephemeral messaging. Send a signal to a specific user without broadcasting to a topic.
+Point-to-point ephemeral messaging. Send a signal to a specific user without broadcasting to a topic. Signals use `seq: false` so they work across adapter workers without allocating a per-worker replay sequence.
 
 ```js
 // Server: send a signal

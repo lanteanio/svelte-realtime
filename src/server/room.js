@@ -1,4 +1,5 @@
 // @ts-check
+import { UNSEQUENCED } from './publish-helpers.js';
 import { live, close, unsubscribe, handleRpc } from '../server.js';
 import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { _runGuard } from './dispatch.js';
@@ -313,7 +314,7 @@ export const _roomRegister = function room(config) {
 		if (_clusterRedis(ctx)) {
 			const res = await _clusterRoomsAcquire(ctx.platform, rosterId, dataTopic, safeArgs, () => _roomMeta(safeArgs));
 			if (!res) return;
-			ctx._publishWire(channel, res.isFirst ? 'created' : 'updated', { topic: dataTopic, args: res.args, count: res.count, meta: res.meta });
+			ctx._publishWire(channel, res.isFirst ? 'created' : 'updated', { topic: dataTopic, args: res.args, count: res.count, meta: res.meta }, UNSEQUENCED);
 			return;
 		}
 		const idx = _roomsIndexFor(ctx.tenantId);
@@ -323,10 +324,10 @@ export const _roomRegister = function room(config) {
 			idx.set(dataTopic, entry);
 			// Publish a snapshot copy, not the live entry - the registry mutates
 			// `count` in place, so a delta must capture its value at this moment.
-			ctx._publishWire(channel, 'created', { ...entry });
+			ctx._publishWire(channel, 'created', { ...entry }, UNSEQUENCED);
 		} else {
 			entry.count++;
-			ctx._publishWire(channel, 'updated', { ...entry });
+			ctx._publishWire(channel, 'updated', { ...entry }, UNSEQUENCED);
 		}
 	};
 	// The last subscriber to leave closes the room (deleted); otherwise the count
@@ -347,8 +348,8 @@ export const _roomRegister = function room(config) {
 		if (_clusterRedis(ctx)) {
 			const res = await _clusterRoomsRelease(ctx.platform, rosterId, dataTopic);
 			if (!res) return;
-			if (res.isLast) ctx._publishWire(channel, 'deleted', { topic: dataTopic });
-			else ctx._publishWire(channel, 'updated', { topic: dataTopic, args: res.args, count: res.count, meta: res.meta });
+			if (res.isLast) ctx._publishWire(channel, 'deleted', { topic: dataTopic }, UNSEQUENCED);
+			else ctx._publishWire(channel, 'updated', { topic: dataTopic, args: res.args, count: res.count, meta: res.meta }, UNSEQUENCED);
 			return;
 		}
 		const idx = _roomsIndexFor(ctx.tenantId);
@@ -356,10 +357,10 @@ export const _roomRegister = function room(config) {
 		if (entry === undefined) return;
 		if (remainingSubscribers <= 0) {
 			idx.delete(dataTopic);
-			ctx._publishWire(channel, 'deleted', { topic: dataTopic });
+			ctx._publishWire(channel, 'deleted', { topic: dataTopic }, UNSEQUENCED);
 		} else {
 			entry.count = remainingSubscribers;
-			ctx._publishWire(channel, 'updated', { ...entry });
+			ctx._publishWire(channel, 'updated', { ...entry }, UNSEQUENCED);
 		}
 	};
 
@@ -423,7 +424,7 @@ export const _roomRegister = function room(config) {
 					await _retirePresenceRef(k, r, () => {
 						const pending = [];
 						if (hadPresence) pending.push(_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
-							if (res.isLast) ctx._publishWire(t + ':presence', 'leave', { key: u });
+							if (res.isLast) ctx._publishWire(t + ':presence', 'leave', { key: u }, UNSEQUENCED);
 						}).catch(() => {}));
 						pending.push(_ownerOnLeave(ctx.platform, t, u).then((change) => {
 							if (change) _ownerEmit(t, ctx.tenantId, change, ctx._publishWire);
@@ -511,7 +512,7 @@ export const _roomRegister = function room(config) {
 						// `topic` is the wire data topic; publish raw (no second prefix).
 						// Shaped like a snapshot entry, so a member reads a joiner's
 						// fields in the same place whichever way the entry arrived.
-						ctx._publishWire(topic + ':presence', 'join', _presenceRosterEntry(userId, presenceData, /** @type {any} */ (roomExport).__isStickyKey));
+						ctx._publishWire(topic + ':presence', 'join', _presenceRosterEntry(userId, presenceData, /** @type {any} */ (roomExport).__isStickyKey), UNSEQUENCED);
 					}
 				}
 			} finally {
@@ -556,7 +557,7 @@ export const _roomRegister = function room(config) {
 				if (presenceFn) {
 					pending.push(_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
 						if (res.isLast) {
-							ctx._publishWire(topic + ':presence', 'leave', { key: userId });
+							ctx._publishWire(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED);
 						}
 					}).catch(() => {}));
 				}
@@ -885,7 +886,7 @@ export const _roomRegister = function room(config) {
 					}
 				}
 				const originalPublish = ctx.publish;
-				ctx.publish = (event, data) => originalPublish(roomTopic, event, data);
+				ctx.publish = (event, data) => originalPublish(roomTopic, event, data, UNSEQUENCED);
 				const originalOwner = ctx.owner;
 				const originalIsOwner = ctx.isOwner;
 				const originalTransferOwner = ctx.transferOwner;

@@ -58,7 +58,7 @@ import { _IS_DEV } from './server/env.js';
 import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge } from './server/presence.js';
 import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
-import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _platformPublish } from './server/publish-helpers.js';
+import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _platformPublish, UNSEQUENCED } from './server/publish-helpers.js';
 import { _resetNoiseBlockCache } from './server/differential-privacy.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
@@ -606,7 +606,7 @@ async function _invalidationReload(watcher) {
 			// reload data, so skip the publish entirely.
 			try { finalData = redactor(finalData); } catch { return; }
 		}
-		try { _platformPublish(watcher.platform, watcher.topic, 'refreshed', finalData); } catch {}
+		try { _platformPublish(watcher.platform, watcher.topic, 'refreshed', finalData, UNSEQUENCED); } catch {}
 	} catch (err) {
 		if (watcher.onError) {
 			try { await watcher.onError(err, watcher.ctx, watcher.topic); } catch {}
@@ -697,7 +697,7 @@ async function _staleReload(topic) {
 			// reload data; skip the publish on a redactor throw.
 			try { finalData = redactor(finalData); } catch { return; }
 		}
-		try { _platformPublish(entry.platform, topic, 'refreshed', finalData); } catch {}
+		try { _platformPublish(entry.platform, topic, 'refreshed', finalData, UNSEQUENCED); } catch {}
 	} catch (err) {
 		if (entry.onError) {
 			try { await entry.onError(err, entry.ctx, topic); } catch {}

@@ -155,7 +155,7 @@ describe('batched update egress (broadcast path)', () => {
 		const ups = platform.wirePublished.filter((w) => w.event === 'update');
 		expect(ups).toHaveLength(1);
 		expect(ups[0].data).toEqual({ key: 'u1', data: { x: 1, y: 0 } });
-		expect(ups[0].options).toEqual({ excludeWs: owner });
+		expect(ups[0].options).toEqual({ excludeWs: owner, seq: false });
 	});
 
 	it('an older platform without the batch surface takes the per-entity path unchanged', async () => {
@@ -175,8 +175,8 @@ describe('batched update egress (broadcast path)', () => {
 		await vi.advanceTimersByTimeAsync(20);
 		const ups = platform.wirePublished.filter((w) => w.event === 'update');
 		expect(ups).toHaveLength(2);
-		expect(ups[0].options).toEqual({ excludeWs: owner });
-		expect(ups[1].options).toBeUndefined();
+		expect(ups[0].options).toEqual({ excludeWs: owner, seq: false });
+		expect(ups[1].options).toEqual({ seq: false });
 	});
 });
 

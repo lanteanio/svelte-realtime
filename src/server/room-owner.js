@@ -597,10 +597,10 @@ export async function _ownerGet(platform, topic) {
  * @param {string} topic wire data topic
  * @param {string | null | undefined} tenantId
  * @param {{ owner: string | null, previous: string | null, reason: string, _hook: Function | null }} change
- * @param {(topic: string, event: string, data: any) => void} publishFn raw wire publish
+ * @param {(topic: string, event: string, data: any, options?: any) => void} publishFn raw wire publish
  */
 export function _ownerEmit(topic, tenantId, change, publishFn) {
-	try { publishFn(topic + ':owner', 'set', { key: change.owner, reason: change.reason }); } catch { /* publish best-effort */ }
+	try { publishFn(topic + ':owner', 'set', { key: change.owner, reason: change.reason }, { seq: false }); } catch { /* publish best-effort */ }
 	const hook = change._hook;
 	if (typeof hook === 'function') {
 		const logical = _stripTenantTopic(tenantId, topic);

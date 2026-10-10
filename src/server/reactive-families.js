@@ -6,6 +6,7 @@ import { _derivedScope, _derivedTopic } from './derived-topic.js';
 import { _aggregateByTopic } from './state.js';
 import { _normalizeAggregatePrivacy } from './differential-privacy.js';
 import { _registerReplayTopic } from './replay-routing.js';
+import { UNSEQUENCED } from './publish-helpers.js';
 
 // Seam: the flag cell/watcher and the window-spec validator stay in server.js
 // (shared with the staying __register* shims); the reactive families reach them
@@ -156,7 +157,7 @@ export const _flagRegister = function flag(topic, initialValue, options) {
 	/** Publish a new flag value to every subscriber. */
 	/** @type {any} */ (stream).set = function set(value) {
 		cell.value = value;
-		return publish(topic, 'set', value);
+		return publish(topic, 'set', value, UNSEQUENCED);
 	};
 	// Ensure the per-topic refresh watcher is installed. This is idempotent
 	// with the eager `__registerFlag` install the registry module emits, and

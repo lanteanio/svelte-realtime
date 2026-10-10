@@ -5,7 +5,7 @@ import { LiveError } from './live-error.js';
 import { _tenantTopic } from './tenant.js';
 import { _getAuthenticatedId } from './identity.js';
 import { _IS_DEV } from './env.js';
-import { _platformPublish } from './publish-helpers.js';
+import { _platformPublish, UNSEQUENCED } from './publish-helpers.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); crdt registration reaches it through this, set at init.
@@ -223,12 +223,12 @@ function _publishUpdate(rec, name, bytes, excludeWs) {
 	const wireTopic = rec.prefix + name;
 	const data = { op: 'update', bytes: Array.from(bytes) };
 	if (rec.codec && platform && typeof platform.publishWire === 'function') {
-		platform.publishWire(wireTopic, 'crdt', data, rec.codec, excludeWs !== undefined ? { excludeWs } : undefined);
+		platform.publishWire(wireTopic, 'crdt', data, rec.codec, excludeWs !== undefined ? { excludeWs, seq: false } : UNSEQUENCED);
 	} else if (platform) {
 		// Older platform: JSON envelope for everyone; the channel's JSON tap
 		// applies it identically. No exclusion walk - the idempotent merge
 		// makes the echoed frame a no-op for its sender.
-		_platformPublish(platform, wireTopic, 'crdt', data, { compress: false });
+		_platformPublish(platform, wireTopic, 'crdt', data, { compress: false, seq: false });
 	}
 }
 

@@ -4,7 +4,7 @@ import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
 import { _ctxHelpersCache, _topicVolatile, _topicStaleWatch, _silentTopicWatch, _topicInvalidationWatch, _topicCoalesce, _topicTransform, _topicRedact, _declaredRedact, _declaredRedactPattern } from './state.js';
 import { _maybeReplayPublish } from './replay-routing.js';
-import { _checkPublishHelperArgs, _throttlePublish, _debouncePublish, _skipGate, _redactOrDrop, REDACT_DROP, _resolveRedactor } from './publish-helpers.js';
+import { _checkPublishHelperArgs, _throttlePublish, _debouncePublish, _skipGate, _redactOrDrop, REDACT_DROP, _resolveRedactor, UNSEQUENCED } from './publish-helpers.js';
 import { _validUserIdReason } from './validate.js';
 import { _shouldShed } from './admission.js';
 import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
@@ -456,7 +456,7 @@ export function _getCtxHelpers(platform) {
 						realtimeErrorMessage(REALTIME_ERROR_IDS.INVALID_USER_ID, ' ' + reason)
 					);
 				}
-				return platform.publish('__signal:' + userId, event, data);
+				return platform.publish('__signal:' + userId, event, data, UNSEQUENCED);
 			},
 			batch: (messages) => {
 					// No native batch: fall back to the redacting `publish` closure

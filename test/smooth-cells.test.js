@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { live, handleRpc, __register, _setSmoothRuntime, _resetSmooth } from '../src/server.js';
+import { enforceClusterPublishPolicy } from './helpers/cluster-publish-policy.js';
 // Namespace import: the cell-codec exports are new in the adapter, so a stale
 // installed adapter (predating the cell codec) must not fail this module's load -
 // a namespace access yields undefined and the suite skips (the publish-order
@@ -114,6 +115,7 @@ describeUWS('live.smooth cell-topic interest against a real adapter', () => {
 				}
 			}
 		});
+		enforceClusterPublishPolicy(server.platform);
 	});
 
 	afterEach(async () => {

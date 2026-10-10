@@ -6,6 +6,9 @@ import { _topicRedact, _declaredRedact, _declaredRedactPattern, _declaredStreamT
 import { _stripAnyTenantTopic } from './tenant.js';
 import { _observeSilentTopicPublish } from './dev-warnings.js';
 
+/** Framework frames do not use an adapter worker's local sequence counter. */
+export const UNSEQUENCED = Object.freeze({ seq: false });
+
 /**
  * Mark a topic as live for the silent-topic dev watchdog. The watchdog asks
  * "does this topic receive events", not "did a user handler call
@@ -181,15 +184,15 @@ export function _throttlePublish(platform, topic, event, data, ms) {
 		if (_throttles.size >= _THROTTLE_DEBOUNCE_MAX) {
 			// At capacity - publish immediately without a trailing-edge timer
 			// so data is never silently dropped
-			_platformPublish(platform, topic, event, data);
+			_platformPublish(platform, topic, event, data, UNSEQUENCED);
 			return;
 		}
-		_platformPublish(platform, topic, event, data);
+		_platformPublish(platform, topic, event, data, UNSEQUENCED);
 		_throttles.set(key, {
 			timer: setTimer(() => {
 				const entry = _throttles.get(key);
 				if (entry && entry.lastData !== undefined) {
-					_platformPublish(platform, topic, event, entry.lastData);
+					_platformPublish(platform, topic, event, entry.lastData, UNSEQUENCED);
 				}
 				_throttles.delete(key);
 			}, ms),
@@ -228,13 +231,13 @@ export function _debouncePublish(platform, topic, event, data, ms) {
 
 	if (!existing && _debounces.size >= _THROTTLE_DEBOUNCE_MAX) {
 		// At capacity - publish immediately instead of evicting an active timer
-		_platformPublish(platform, topic, event, data);
+		_platformPublish(platform, topic, event, data, UNSEQUENCED);
 		return;
 	}
 
 	_debounces.set(key, setTimer(() => {
 		_debounces.delete(key);
-		_platformPublish(platform, topic, event, data);
+		_platformPublish(platform, topic, event, data, UNSEQUENCED);
 	}, ms));
 }
 

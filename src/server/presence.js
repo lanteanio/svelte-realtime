@@ -4,7 +4,7 @@ import { clearTimer } from '../shared/runtime.js';
 import { _topicInTenant } from './tenant.js';
 import { _ownerPurge, _ownerEmit } from './room-owner.js';
 import { _maybeReplayPublish, _registerReplayTopic } from './replay-routing.js';
-import { _platformPublish } from './publish-helpers.js';
+import { _platformPublish, UNSEQUENCED } from './publish-helpers.js';
 import { safeAssign } from '../shared/safe-assign.js';
 
 /**
@@ -190,7 +190,7 @@ export function _ownerReplayPublisher(platform) {
 	if (!platform) return null;
 	return (wireTopic, event, data) => {
 		if (platform.replay) _registerReplayTopic(wireTopic);
-		if (!_maybeReplayPublish(platform, wireTopic, event, data)) _platformPublish(platform, wireTopic, event, data);
+		if (!_maybeReplayPublish(platform, wireTopic, event, data)) _platformPublish(platform, wireTopic, event, data, UNSEQUENCED);
 	};
 }
 
@@ -224,7 +224,7 @@ export function _retirePresenceRef(refKey, ref, release) {
  * @param {any} platform
  * @param {string | null} tenantId
  * @param {string} userId
- * @param {((wireTopic: string, event: string, data: any) => void) | null} [publishLeave]
+ * @param {((wireTopic: string, event: string, data: any, options?: any) => void) | null} [publishLeave]
  * @returns {Promise<number>} refs whose cleanup was confirmed
  */
 export async function _purgePresenceUser(platform, tenantId, userId, publishLeave) {
@@ -264,7 +264,7 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 							if (!Number.isSafeInteger(count) || count < 0) throw new Error('Presence erasure was not confirmed');
 						}
 						progress.presenceDone = true;
-						if (publishLeave) { try { publishLeave(topic + ':presence', 'leave', { key: userId }); } catch { /* best-effort */ } }
+						if (publishLeave) { try { publishLeave(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED); } catch { /* best-effort */ } }
 					} catch { incomplete = true; }
 				}
 				if (!progress.ownerDone) {

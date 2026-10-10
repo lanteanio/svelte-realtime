@@ -4,6 +4,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { live, handleRpc, __register, _setSmoothRuntime, _resetSmooth } from '../src/server.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
+import { enforceClusterPublishPolicy } from './helpers/cluster-publish-policy.js';
 
 // The matrix runner changes only the adapter under test, without replacing
 // this checkout's dependencies. Missing native support fails instead of skipping.
@@ -56,6 +57,7 @@ beforeEach(async () => {
 			if (!ctx.isBinary && ctx.msg === undefined) handleRpc(ws, ctx.data, server.platform);
 		}
 	} });
+	enforceClusterPublishPolicy(server.platform);
 });
 afterEach(async () => {
 	_resetSmooth();

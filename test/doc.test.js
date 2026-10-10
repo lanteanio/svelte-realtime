@@ -23,6 +23,7 @@ import {
 } from '../src/server.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
+import { enforceClusterPublishPolicy } from './helpers/cluster-publish-policy.js';
 import svelteRealtime from '../src/vite.js';
 
 const textEncoder = new TextEncoder();
@@ -144,6 +145,7 @@ function wirePlatform() {
 	p.unsubscribe = (ws, topic) => {
 		p.unsubscribed.push(topic);
 	};
+	enforceClusterPublishPolicy(p);
 	return p;
 }
 
@@ -375,6 +377,7 @@ describe('live.doc update path', () => {
 		const { name, topic } = declareBoard();
 		const ws = mockWs({ id: 'u1' });
 		const platform = mockPlatform(); // no publishWire
+		enforceClusterPublishPolicy(platform);
 		await call(ws, platform, name + '/board/__doc/sync', ['r1', []]);
 		await fire(ws, platform, name + '/board/__doc/update', ['r1', [5]]);
 		const pub = platform.published.find((p) => p.topic === '__crdt:' + topic('r1'));
@@ -606,7 +609,7 @@ describe('live.doc cluster wiring (platform.crdt)', () => {
 		expect(rt.calls.apply[beforeApply]).toEqual({ topic, bytes: [8, 9] });
 		// Fanned out locally with no excludeWs (the originator is on a peer).
 		expect(platform.wirePublished).toHaveLength(beforePub + 1);
-		expect(platform.wirePublished[beforePub].options).toBeUndefined();
+		expect(platform.wirePublished[beforePub].options).toEqual({ seq: false });
 	});
 
 	it('ignores a peer-relayed update for a document this instance does not hold', async () => {

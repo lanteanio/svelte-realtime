@@ -34,6 +34,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.
 
+- Framework signals, room membership and multiplayer events, smooth and document updates, and automatic stream publishes declare an unsequenced delivery policy so multi-worker adapters accept them. Application publish options and replay-assigned sequences retain their existing meaning.
+
 - Apply module guards to every room stream, room-list RPC and room action in `createTestEnv`, matching the generated registry. Tests with guarded room modules now enforce those guards.
 
 - Server introspection declares the adapter version tuple; packed-consumer checks preserve startup version resolution and external runtime imports in SSR builds.

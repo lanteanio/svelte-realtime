@@ -10,7 +10,7 @@ import { createRttTracker } from './rtt.js';
 import { createMonotonicClock } from './monoclock.js';
 import { _executeVolatileRpc } from './dispatch.js';
 import { _IS_DEV } from './env.js';
-import { _platformPublish } from './publish-helpers.js';
+import { _platformPublish, UNSEQUENCED } from './publish-helpers.js';
 
 // Seam: the shared topic-fn resolver (_callTopicFn) stays in server.js (used by
 // several live.* families); smooth registration reaches it through this, set at
@@ -771,11 +771,11 @@ function _smoothPublish(rec, event, data, excludeWs) {
 	const platform = rec.platform;
 	data = _smoothWireFrame(rec, event, data);
 	if (rec.codec && typeof platform.publishWire === 'function') {
-		platform.publishWire(rec.wireTopic, event, data, rec.codec, excludeWs !== undefined ? { excludeWs } : undefined);
+		platform.publishWire(rec.wireTopic, event, data, rec.codec, excludeWs !== undefined ? { excludeWs, seq: false } : UNSEQUENCED);
 	} else {
 		// Older platform: no per-subscriber walk, so no exclusion - the
 		// echoed frame is harmless because owners skip their own key.
-		_platformPublish(platform, rec.wireTopic, event, data, { compress: false });
+		_platformPublish(platform, rec.wireTopic, event, data, { compress: false, seq: false });
 	}
 }
 
@@ -807,7 +807,7 @@ function _smoothPublishUpdates(rec, list) {
 				excludeWs: list[i].excludeWs
 			};
 		}
-		platform.publishWireBatch(rec.wireTopic, 'update', entries, rec.codec);
+		platform.publishWireBatch(rec.wireTopic, 'update', entries, rec.codec, UNSEQUENCED);
 		return;
 	}
 	for (let i = 0; i < list.length; i++) {
@@ -883,9 +883,9 @@ function _smoothPublishCell(rec, cellKey, event, data) {
 			platform.registerWireCodec(cells.codec);
 			cells.registered = true;
 		}
-		platform.publishWire(topic, event, data, cells.codec);
+		platform.publishWire(topic, event, data, cells.codec, UNSEQUENCED);
 	} else if (typeof platform.publish === 'function') {
-		_platformPublish(platform, topic, event, data, { compress: false });
+		_platformPublish(platform, topic, event, data, { compress: false, seq: false });
 	}
 }
 

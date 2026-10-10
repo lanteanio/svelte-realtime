@@ -1,4 +1,5 @@
 // @ts-check
+import { UNSEQUENCED } from './publish-helpers.js';
 import { live } from '../server.js';
 import { _getIdentityKey } from './identity.js';
 import { _clusterPresenceMerge } from './presence.js';
@@ -251,7 +252,7 @@ export const _multiplayerRegister = function multiplayer(config) {
 		// Without the token an out-of-order sample lands as the newest and the
 		// peer's cursor sits on a mid-gesture point until the next move.
 		_stampOrder(frame, ctx);
-		ctx.publish(cursorTopic, 'update', frame);
+		ctx.publish(cursorTopic, 'update', frame, UNSEQUENCED);
 	};
 
 	// A cursor sample, a field update or a reaction is published under the
@@ -339,7 +340,7 @@ export const _multiplayerRegister = function multiplayer(config) {
 		// cursor frames, with a stale flag (typing, a lock) as the visible
 		// damage.
 		_stampOrder(frame, ctx);
-		ctx.publish(presenceTopic, 'update', frame);
+		ctx.publish(presenceTopic, 'update', frame, UNSEQUENCED);
 	};
 
 	/** @type {any} */ (roomExport).__presenceUpdate = live.volatile(async (ctx, ...args) => {
@@ -434,7 +435,7 @@ export const _multiplayerRegister = function multiplayer(config) {
 		}
 		// The point is the caller's, and so is the reaction (see the cursor path).
 		frame.key = key;
-		ctx.publish(reactionTopic, 'reaction', frame);
+		ctx.publish(reactionTopic, 'reaction', frame, UNSEQUENCED);
 	};
 
 	/** @type {any} */ (roomExport).__reactionEmit = live.volatile(async (ctx, ...args) => {

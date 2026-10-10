@@ -7,7 +7,7 @@ import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _fireWebhookOut } from './webhook-out.js';
 import { _resolveTenant, _tenantTopic, _stripTenantTopic, _isTenancyEnabled } from './tenant.js';
-import { _redactOrDrop, REDACT_DROP, _platformPublish, _noteTopicPublish } from './publish-helpers.js';
+import { _redactOrDrop, REDACT_DROP, _platformPublish, _noteTopicPublish, UNSEQUENCED } from './publish-helpers.js';
 import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
 import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms-gate.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
@@ -145,7 +145,7 @@ export function _publishWindow(entry, win, platform = state.cronPlatform) {
 	if (!gated.publish) return; // below k: hold the last published value
 	const wire = _redactOrDrop(win.outputTopic, gated.value);
 	if (wire === REDACT_DROP) return;
-	_platformPublish(platform, win.outputTopic, 'set', wire);
+	_platformPublish(platform, win.outputTopic, 'set', wire, UNSEQUENCED);
 }
 
 /**
@@ -542,10 +542,10 @@ function _wrapPlatformPublish(platform) {
 							if (winRef.timer) clearTimer(winRef.timer);
 							winRef.timer = setTimer(() => {
 								winRef.timer = null;
-								_platformPublish(platform, winRef.outputTopic, 'set', computed);
+								_platformPublish(platform, winRef.outputTopic, 'set', computed, UNSEQUENCED);
 							}, winRef.debounce);
 						} else {
-							_platformPublish(platform, winRef.outputTopic, 'set', computed);
+							_platformPublish(platform, winRef.outputTopic, 'set', computed, UNSEQUENCED);
 						}
 					}
 					continue;
@@ -572,10 +572,10 @@ function _wrapPlatformPublish(platform) {
 					if (entry.timer) clearTimer(entry.timer);
 					entry.timer = setTimer(() => {
 						entry.timer = null;
-						_platformPublish(platform, entry.topic, 'set', computed);
+						_platformPublish(platform, entry.topic, 'set', computed, UNSEQUENCED);
 					}, entry.debounce);
 				} else {
-					_platformPublish(platform, entry.topic, 'set', computed);
+					_platformPublish(platform, entry.topic, 'set', computed, UNSEQUENCED);
 				}
 			}
 		}
@@ -733,7 +733,7 @@ async function _recomputeDerived(entry, platform) {
 		// Uniform piiRedact: a derived stream recomputes from sources and may
 		// carry PII; redact if its topic declared piiRedact (no-op otherwise).
 		const wire = _redactOrDrop(entry.topic, result);
-		if (wire !== REDACT_DROP) _platformPublish(platform, entry.topic, 'set', wire);
+		if (wire !== REDACT_DROP) _platformPublish(platform, entry.topic, 'set', wire, UNSEQUENCED);
 	} catch (err) {
 		if (state.serverErrorHandler) {
 			try { state.serverErrorHandler('derived', err); } catch {}
@@ -810,7 +810,7 @@ export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatf
 				// discard the previously held value containing erased input.
 				const wire = _redactOrDrop(topic, clean);
 				if (wire === REDACT_DROP) throw new Error('Aggregate erasure reset was dropped by redaction');
-				if (platform) _platformPublish(platform, topic, 'set', wire);
+				if (platform) _platformPublish(platform, topic, 'set', wire, UNSEQUENCED);
 				count++;
 			} catch (error) { failures.push(error); }
 		}
