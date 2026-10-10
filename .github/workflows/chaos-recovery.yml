@@ -6,6 +6,9 @@ on:
       - 'src/**'
       - 'test/chaos/**'
       - 'scripts/check-chaos-isolation.js'
+      - 'scripts/check-production-lifecycle.js'
+      - 'test/fixture/**'
+      - 'test/e2e/prod-server.js'
       - 'package.json'
       - 'package-lock.json'
       - '.github/workflows/chaos-recovery.yml'
@@ -45,6 +48,8 @@ jobs:
         run: npm exec -- playwright install --with-deps chromium
       - name: Verify Docker daemon
         run: docker info
+      - name: Verify packed production shutdown
+        run: npm run test:lifecycle
       - name: Verify concurrent chaos isolation
         run: npm run test:chaos:parallel
       - name: Run Redis and instance recovery at the event revision

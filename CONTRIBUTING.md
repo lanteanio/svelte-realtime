@@ -138,6 +138,7 @@ first dependency and browser downloads take longer. CI uses the same scripts.
 | Client or DevTools DOM | unit lane and `npm run verify:devtools` | 2-10 minutes |
 | CLI example UI | unit lane and `npm run verify:scaffold` | 1-3 minutes |
 | Browser transport, reconnect, Svelte integration | `npm run verify:browser` | 5-15 minutes |
+| Production lifecycle or shutdown hooks | `npm run test:lifecycle` | 1-3 minutes |
 | Cluster recovery or Redis routing | `npm run verify:chaos` | 5-20 minutes |
 | Broad refactor or release candidate | `npm run verify:full` | 10-30 minutes |
 
@@ -166,6 +167,16 @@ the application E2E lane and the complete chaos lane need contributor evidence
 steps targeting another working directory or npm prefix. Any script or workflow
 change must run `npm run generate:verification` and include the reviewed diff;
 `npm run check:verification` fails when the inventory no longer matches reality.
+
+`npm run test:lifecycle` packs the current checkout, installs that tarball into
+an isolated fixture, and builds production. Docker runs the built server under
+Linux Node24 and delivers real SIGTERM signals. The check requires initialization,
+refuses new RPC work during drain, verifies a completed call is flushed before
+teardown, and verifies an unfinished call exits within its drain budget. Both
+cases require clean process exit and a graceful WebSocket close. It uses the
+pinned `node:24.13.1-trixie-slim` image (pulled when absent); the optional
+`REALTIME_LIFECYCLE_NODE_IMAGE` override must provide a compatible Linux native
+runtime. The chaos CI job runs this packed artifact check before browser tests.
 
 ## First-success checkpoint
 

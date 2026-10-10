@@ -120,6 +120,9 @@
     "test:fuzz": [
       "node test/fuzz-wire.mjs"
     ],
+    "test:lifecycle": [
+      "node scripts/check-production-lifecycle.js"
+    ],
     "test:scaffold": [
       "vitest run --config vitest.scaffold.config.js"
     ],
@@ -260,6 +263,14 @@
       "step": "Verify Docker daemon",
       "commands": [
         "docker info"
+      ]
+    },
+    {
+      "workflow": "chaos-recovery.yml",
+      "job": "recovery-chaos",
+      "step": "Verify packed production shutdown",
+      "commands": [
+        "node scripts/check-production-lifecycle.js"
       ]
     },
     {

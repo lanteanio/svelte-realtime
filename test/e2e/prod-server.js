@@ -1,5 +1,5 @@
 // Build the fixture once and start the production server. The built
-// server reads PORT/HOST from env. Exits cleanly when stdin closes
+// server reads PORT/HOST from env. Requests adapter shutdown when stdin closes
 // (Playwright teardown). Port arrives as argv[2] from global-setup.
 
 import { execSync } from 'node:child_process';
@@ -23,5 +23,5 @@ await import('file:///' + path.join(fixtureDir, 'build', 'index.js').replace(/\\
 
 process.stdin.resume();
 process.stdin.on('end', () => {
-	process.exit(0);
+	process.emit('SIGTERM');
 });

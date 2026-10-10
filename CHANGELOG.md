@@ -149,6 +149,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Active offline retention checks expiry atomically before deleting, preserving fresh rows from another tab. Shared custom stores can implement `deleteExpired` for the same guarantee; rows without timestamps remain available for explicit erasure.
 
+- Production browser fixtures wire realtime initialization and shutdown, drain through the adapter on teardown, and verify the packed build with real Linux SIGTERM signals for completed and timed-out RPC work.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
