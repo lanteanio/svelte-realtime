@@ -1291,3 +1291,104 @@ describe('mapped stream lifecycle', () => {
   expect(net.serverTopics.has('mapped:chain')).toBe(false);
  });
 });
+
+
+describe('retained pagination cursor', () => {
+ it('exposes opaque server cursors without deriving them from live rows and clears omitted next cursors', async () => {
+  const cursors = [{ offset: 2, token: 'opaque' }, 'next-page'];
+  let page = 0;
+  env.register('cursor', { feed: live.stream('cursor:feed', async ctx => {
+   if (page) expect(ctx.cursor).toEqual(cursors[page - 1]);
+   return { data: [{ id: ++page }], hasMore: page < 3, ...(page < 3 ? { cursor: cursors[page - 1] } : {}) };
+  }) });
+  const stream = __stream('cursor/feed', { merge: 'crud', key: 'id' });
+  expect(stream.cursor).toBeNull();
+  expect(Object.getOwnPropertyDescriptor(stream, 'cursor').set).toBeUndefined();
+  const seen = []; const off = stream.subscribe(value => seen.push({ value, cursor: stream.cursor }));
+  await ticks(); await deliverToServer(); await deliverToClient();
+  expect(stream.cursor).toEqual(cursors[0]);
+  expect(seen.at(-1).cursor).toEqual(cursors[0]);
+  for (const fn of [...net.clientTopics.get('cursor:feed')]) fn({ event: 'created', data: { id: 99 } });
+  expect(stream.cursor).toEqual(cursors[0]);
+  let loaded = stream.loadMore();
+  await deliverToServer(); await deliverToClient(); await loaded;
+  expect(stream.cursor).toBe(cursors[1]);
+  loaded = stream.loadMore();
+  await deliverToServer(); await deliverToClient(); await loaded;
+  expect(stream.hasMore).toBe(false);
+  expect(stream.cursor).toBeNull();
+  expect(seen.at(-1).cursor).toBeNull();
+  off();
+ });
+
+ it('clears retained pagination when a resumed full snapshot is no longer paginated', async () => {
+  clientState.config.resumeGraceMs = 30000;
+  let paginated = true;
+  env.register('cursor', { feed: live.stream('cursor:resume', async () => paginated ? { data: [{ id: 1 }], hasMore: true, cursor: 'old-page' } : [{ id: 2 }]) });
+  const stream = __stream('cursor/feed', { merge: 'crud', key: 'id' });
+  let off = stream.subscribe(() => {});
+  await ticks(); await deliverToServer(); await deliverToClient();
+  expect(stream.cursor).toBe('old-page');
+  off(); await ticks(); await deliverToServer();
+  expect(stream.cursor).toBe('old-page');
+  paginated = false;
+  off = stream.subscribe(() => {});
+  await ticks(); await deliverToServer(); await deliverToClient();
+  expect(stream.hasMore).toBe(false);
+  expect(stream.cursor).toBeNull();
+  off();
+ });
+
+ it.each(['delta', 'replay', 'unchanged'])('preserves the cursor across a %s-only reconnect', async mode => {
+  clientState.config.resumeGraceMs = 30000;
+  env.register('cursor', { feed: live.stream('cursor:partial', async () => ({ data: [{ id: 1 }], hasMore: true, cursor: 'keep-page' })) });
+  const stream = __stream('cursor/feed', { merge: 'crud', key: 'id' });
+  let off = stream.subscribe(() => {});
+  await ticks(); await deliverToServer(); await deliverToClient();
+  off(); await ticks(); await deliverToServer();
+  off = stream.subscribe(() => {});
+  await ticks(); await deliverToServer();
+  // Gap-fill envelopes carry changes, without pagination metadata.
+  for (const frame of net.toClient) if (frame.topic === '__rpc' && frame.data.ok === true && !frame.data.attach) {
+   delete frame.data.hasMore; delete frame.data.cursor;
+   frame.data[mode] = true; frame.data.data = [];
+  }
+  await deliverToClient();
+  expect(stream.cursor).toBe('keep-page');
+  expect(stream.hasMore).toBe(true);
+  off();
+ });
+
+ it('clears the retained cursor when the session is reset after final cleanup', async () => {
+  clientState.config.resumeGraceMs = 0;
+  env.register('cursor', { feed: live.stream('cursor:reset', async () => ({ data: [{ id: 1 }], hasMore: true, cursor: { offset: 1 } })) });
+  const stream = __stream('cursor/feed', { merge: 'crud', key: 'id' });
+  const off = stream.subscribe(() => {});
+  await ticks(); await deliverToServer(); await deliverToClient();
+  expect(stream.cursor).toEqual({ offset: 1 });
+  off(); await ticks();
+  expect(stream.cursor).toBeNull();
+  expect(stream.hasMore).toBe(false);
+ });
+
+ it.each([0, ''])('retains a falsy opaque cursor (%j) until cleanup and sends it verbatim', async cursor => {
+  clientState.config.resumeGraceMs = 0;
+  let first = true;
+  env.register('cursor', { feed: live.stream('cursor:falsy', async ctx => {
+   if (first) { first = false; return { data: [{ id: 1 }], hasMore: true, cursor }; }
+   expect(ctx.cursor).toBe(cursor);
+   return { data: [{ id: 2 }], hasMore: false, cursor: null };
+  }) });
+  const stream = __stream('cursor/feed', { merge: 'crud', key: 'id' });
+  const off = stream.subscribe(() => {});
+  await ticks(); await deliverToServer(); await deliverToClient();
+  expect(stream.cursor).toBe(cursor);
+  const loaded = stream.loadMore();
+  expect(net.toServer.at(-1)?.cursor).toBe(cursor);
+  await deliverToServer(); await deliverToClient(); await loaded;
+  expect(stream.cursor).toBeNull();
+  off(); await ticks();
+  expect(stream.cursor).toBeNull();
+  expect(stream.hasMore).toBe(false);
+ });
+});

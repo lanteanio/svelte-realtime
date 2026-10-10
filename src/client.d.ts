@@ -323,6 +323,8 @@ export interface StreamStore<T = any> extends Readable<T> {
 	loadMore(...extraArgs: any[]): Promise<boolean>;
 	/** Whether more pages are available for loading. */
 	readonly hasMore: boolean;
+	/** Opaque server cursor for the next page, or null when none was supplied. */
+	readonly cursor: any;
 	/** Enable history tracking for undo/redo. */
 	enableHistory(maxSize?: number): void;
 	/** Undo the last change. */

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Stream stores expose the retained server pagination cursor. Exhaustion and full refreshes clear absent cursors, while opaque falsy values remain usable for the next page.
+
 - Vite's `crdt.reconcileIntervalMs` configures background reconciliation for
   generated document, map, and array channels, including `0` to disable it.
 

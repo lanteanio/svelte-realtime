@@ -1408,7 +1408,7 @@ export const posts = live.stream('posts', async (ctx) => {
 {/if}
 ```
 
-The server detects the `{ data, hasMore }` shape automatically. `ctx.cursor` contains the cursor value sent by the client on subsequent `loadMore()` calls (`null` on the first request).
+The server detects the `{ data, hasMore }` shape automatically. `ctx.cursor` contains the cursor value sent by the client on subsequent `loadMore()` calls (`null` on the first request). The read-only `posts.cursor` getter exposes that retained opaque value without reconstructing it from rows; live events leave it unchanged. A page or full snapshot without a cursor clears it to `null`, as does session reset; replay-only reconnects retain it.
 
 ---
 
@@ -5514,6 +5514,7 @@ Import from `svelte-realtime/client`.
 | `hydrate(initialData)` | Pre-populate with SSR data |
 | `loadMore(...extraArgs)` | Load next page (cursor-based) |
 | `hasMore` | Whether more pages are available |
+| `cursor` | Retained opaque server cursor for the next page, or `null` |
 | `enableHistory(maxSize?)` | Start tracking for undo/redo |
 | `undo()` / `redo()` | Navigate history |
 | `canUndo` / `canRedo` | Whether undo/redo is available |

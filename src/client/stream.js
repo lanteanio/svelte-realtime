@@ -1818,8 +1818,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				if (_optimisticQueue.length > 0) currentValue = _replayQueue().value;
 				_rebuildIndex();
 
-				if (response.hasMore !== undefined) _hasMore = response.hasMore;
-				if (response.cursor !== undefined) _cursor = response.cursor;
+				if (response.delta === true || response.replay === true) {
+					// A gap-fill does not replace the retained pagination position.
+					if (response.hasMore !== undefined) _hasMore = response.hasMore;
+					if (response.cursor !== undefined || response.hasMore !== undefined) _cursor = response.cursor ?? null;
+				} else {
+					_hasMore = response.hasMore ?? false;
+					_cursor = response.cursor ?? null;
+				}
 				if (response.schemaVersion !== undefined) _schemaVersion = response.schemaVersion;
 
 				// Attach topic listener BEFORE flipping initialLoaded, so events
@@ -2493,7 +2499,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		 * @returns {Promise<boolean>} Whether more pages are available after this load
 		 */
 		async loadMore(...extraArgs) {
-			if (_loadingMore || !_hasMore || !_cursor) return false;
+			if (_loadingMore || !_hasMore || _cursor == null) return false;
 			if (clientState.terminated) {
 				throw new RpcError('CONNECTION_CLOSED', 'Connection permanently closed');
 			}
@@ -2535,8 +2541,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 						}
 						if (heldTopic) _sendManagedRelease(heldTopic);
 						_loadingMore = false;
-						if (response.hasMore !== undefined) _hasMore = response.hasMore;
-						if (response.cursor !== undefined) _cursor = response.cursor;
+						_hasMore = response.hasMore ?? false;
+						_cursor = response.cursor ?? null;
 
 						// Queue mode: currentValue is a display overlay recomputed
 						// from _serverValue on every queue transition, so a page
@@ -2603,6 +2609,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		 */
 		get hasMore() {
 			return _hasMore;
+		},
+
+		/** The opaque cursor supplied for the next page, or null if none was supplied. */
+		get cursor() {
+			return _cursor;
 		},
 
 		/**
