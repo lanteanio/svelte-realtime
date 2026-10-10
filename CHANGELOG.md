@@ -44,6 +44,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Packed-package tests and manual setup extract archives using portable paths on Windows and Unix.
 
 - Browser test discovery includes new spec files in both development and production lanes.
+- Failed smooth initialization releases a newly added wire subscription and empty topic record, while preserving live members, accepted resyncs, and concurrent joins.
 
 - Room departure, eviction, and user erasure remove cursor samples from connected peers. Cursor-only publishers are tracked through socket disconnect without requiring a room subscription; other tabs and cluster members retain their shared cursor until the identity leaves.
 - DevTools instrumentation requires an explicit development build signal, so production clients from bundlers without import.meta.env retain no DevTools histories.

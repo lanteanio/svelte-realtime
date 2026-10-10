@@ -479,6 +479,8 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			// owner; `owned` is whether this instance currently holds the tick lease.
 			cfg,
 			registry: new Map(),
+			// In-flight joins share a wire reservation until every attempt settles.
+			syncJoins: new Map(),
 			surrogates: new Map(),
 			pendingSync: new Map(),
 			eventSeq: 0,
@@ -1665,6 +1667,17 @@ export function _drainSmoothOnClose(ws) {
 	if (_smoothTopics.size === 0) return;
 	for (const [name, rec] of _smoothTopics) {
 		const cluster = rec.platform && rec.platform.smooth;
+		// Pending non-owner joins are not committed registry members yet, but
+		// their remote surrogate must leave and their waiter must settle on close.
+		for (const [corr, pending] of rec.pendingSync) {
+			if (pending.ws !== ws) continue;
+			rec.pendingSync.delete(corr);
+			if (pending.timer !== null) clearTimer(pending.timer);
+			pending.resolve(null);
+			if (cluster && !rec.registry.has(pending.identity) && typeof cluster.relayLeave === 'function') {
+				cluster.relayLeave(rec.wireTopic, pending.identity, cluster.instanceId);
+			}
+		}
 		if (cluster) {
 			// Unregister this socket as a local subscriber and, when this instance
 			// does not own the topic, tell the owner the client left so it drops
@@ -1721,10 +1734,7 @@ export function _drainSmoothOnClose(ws) {
 			if (rec.cells) _smoothCellRemove(rec, removed[i]);
 			else _smoothPublish(rec, 'remove', { key: removed[i] }, undefined);
 		}
-		if (rec.authority.size === 0) {
-			if (rec.timer !== null) clearTimer(rec.timer);
-			_smoothTopics.delete(name);
-		}
+		if (rec.authority.size === 0) _smoothForget(rec);
 	}
 }
 
@@ -1758,6 +1768,9 @@ function _smoothSurrogate(rec, originInstance, identity) {
  */
 function _smoothForget(rec) {
 	if (rec.timer !== null) { clearTimer(rec.timer); rec.timer = null; }
+	// A parked join still owns this record. Its finalizer reclaims an empty
+	// record after all concurrent joins have settled.
+	if (rec.syncJoins.size > 0) return;
 	// Settle every suspended sync so its awaiting handler resumes (and hits its
 	// CONNECTION_CLOSED liveness re-check) rather than hanging forever.
 	for (const p of rec.pendingSync.values()) {
@@ -1798,17 +1811,19 @@ function _smoothRelayRemove(rec, key) {
  * Ask the topic's owner for the catalog and resolve with its reply, or with
  * null if the owner does not answer within the timeout (the caller then returns
  * a local-empty basis and reconciles from incoming broadcasts).
- * @param {any} rec @param {any} cluster @param {string} identity @param {string} corr
+ * @param {any} rec @param {any} cluster @param {string} identity @param {string} corr @param {any} ws
  * @returns {Promise<any>}
  */
-function _smoothRequestSync(rec, cluster, identity, corr) {
-	return new Promise((resolve) => {
+function _smoothRequestSync(rec, cluster, identity, corr, ws) {
+	return new Promise((resolve, reject) => {
 		const timer = setTimer(() => {
 			rec.pendingSync.delete(corr);
 			resolve(null);
 		}, _SMOOTH_SYNC_TIMEOUT_MS);
-		rec.pendingSync.set(corr, { resolve, timer });
-		cluster.requestSync(rec.wireTopic, identity, cluster.instanceId, corr);
+		rec.pendingSync.set(corr, { resolve, timer, ws, identity });
+		try { cluster.requestSync(rec.wireTopic, identity, cluster.instanceId, corr); } catch (error) {
+			clearTimer(timer); rec.pendingSync.delete(corr); reject(error);
+		}
 	});
 }
 
@@ -2935,198 +2950,224 @@ export const _smoothRegister = function smooth(config) {
 		const name = resolveName(ctx, roomArgs);
 		const rt = await _loadSmoothRuntime();
 		const rec = _smoothRecord(name, cfg, ctx.platform, rt);
-		// Walk-visible membership for the reserved wire topic: the platform
-		// subscribe updates the adapter's per-connection subscription state,
-		// which is what the broadcast walk delivers by. Reserved-prefix
-		// topics never ride the client's own subscribe frames.
-		if (ctx.ws && ctx.platform && typeof ctx.platform.subscribe === 'function') {
-			const denial = await ctx.platform.subscribe(ctx.ws, rec.wireTopic);
-			if (denial) {
-				throw new LiveError(
-					denial === 'UNAUTHENTICATED' ? 'UNAUTHENTICATED' : 'FORBIDDEN',
-					'smooth topic subscribe denied: ' + denial
-				);
-			}
-		} else if (ctx.ws && typeof ctx.ws.subscribe === 'function') {
-			try {
-				ctx.ws.subscribe(rec.wireTopic);
-			} catch {}
-		}
-		// Re-sync flood cutoff, AFTER admission (a denied subscribe must not be
-		// able to consume anyone's allowance) and before any O(catalog) work. The
-		// reply carries the whole roster, so an unthrottled stream of ~60-byte
-		// sync frames is a large work-per-byte asymmetry against a populated
-		// topic; a real client syncs on join and on reconnect, never in a stream.
-		// Liveness re-check FIRST: if the socket closed while the guard / runtime
-		// load / subscribe was pending, the close drain has already run, and
-		// ensuring now would create a ghost entity bound to a freed handle (or
-		// steal ownership from a live tab). It also has to precede the allowance
-		// bookkeeping below - the drain for this socket is already done, so an
-		// entry minted after it would be orphaned in `rec.syncRate` forever, one
-		// per attacker socket, keyed by a guest id nothing can re-derive.
+		const key = _getIdentityKey(ctx);
 		if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
-			if (rec.authority.size === 0 && rec.timer === null) _smoothForget(rec);
+			if (rec.authority.size === 0 && rec.registry.size === 0) _smoothForget(rec);
 			throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
 		}
-		if (!_smoothSyncAdmit(rec, _getIdentityKey(ctx))) {
-			throw new LiveError(
-				'RATE_LIMITED',
-				'smooth re-sync rate exceeded (max ' + _SMOOTH_SYNC_MAX_PER_WINDOW + ' per ' +
-				_SMOOTH_RESYNC_WINDOW_MS + 'ms per identity); back off and retry'
-			);
+		let join = rec.syncJoins.get(ctx.ws);
+		if (!join) {
+			const retained = !!(ctx.ws && typeof ctx.ws.isSubscribed === 'function' && ctx.ws.isSubscribed(rec.wireTopic));
+			join = { pending: 0, retained };
+			rec.syncJoins.set(ctx.ws, join);
 		}
-		const key = _getIdentityKey(ctx);
-		const cluster = ctx.platform && ctx.platform.smooth;
-		if (cluster) {
-			// Register this socket as the topic's local subscriber for `key` (the
-			// ack-routing and author-exclusion paths read this), wire the relay
-			// handlers once, then race the ownership lease against the subscribe
-			// above.
-			if (ctx.ws) rec.registry.set(key, ctx.ws);
-			_ensureSmoothCluster(cluster);
-			// On a Redis failure, degrade to a local authority (owned=true) so the
-			// client keeps a working entity rather than a frozen one. Deliberate
-			// availability tradeoff: during a sustained outage the coordinator's
-			// breaker opens and outbound relays no-op, so each instance runs
-			// isolated (no cross-instance traffic, no cross-owner event double-fire);
-			// only the brief pre-breaker window can relay from two pseudo-owners,
-			// which the per-owner seq dedup does not cover - an outage-only artifact.
-			const wasOwned = rec.owned;
-			let owned = true;
-			try {
-				owned = await cluster.acquireOwner(rec.wireTopic);
-			} catch {
-				owned = true;
-			}
-			// A demotion observed on this path (we held the tick, the lease is gone)
-			// drops this tenure's warm-handoff state so a later re-acquire reads the
-			// snapshot fresh rather than reusing a stale pending set. (A rare Redis
-			// lease flap landing between two concurrent same-instance syncs could let
-			// this clear wipe the other sync's just-loaded pending; the only effect is
-			// that topic's entities fall back to `initial` - the snapshot-off default -
-			// for that one handoff, never an incorrect state, a leak, or a hang.)
-			if (wasOwned && !owned) _smoothClearSnapshotState(rec);
-			if (owned && rec.cfg.snapshot) {
-				// Warm handoff (opt-in): a fresh owner LOADS the snapshot the previous
-				// owner persisted BEFORE it publishes ownership, so neither a concurrent
-				// sync nor a relay handler (both gated on `rec.owned`) can seed an entity
-				// from `initial` while the read is still in flight. Loaded once per
-				// tenure into `pendingSnapshot` behind a shared barrier promise; each
-				// entity is then seeded the moment its real client re-binds
-				// (`_smoothSeed`), so a client that never returns never enters the
-				// authority. Its recovered state waits in `pendingSnapshot`, re-persisted
-				// on write (a second failover still recovers it) and grace-dropped on
-				// the tick (the cache stays bounded).
-				await _smoothLoadSnapshot(rec, cluster);
-			}
-			// Publish ownership AFTER the snapshot is ready (so the relay seed sites
-			// see a populated `pendingSnapshot`) but BEFORE the liveness re-check, so a
-			// socket that closed during either await releases the lease via
-			// _smoothForget rather than leaking it until the TTL.
-			rec.owned = owned;
-			// Became the ticking owner: the authoritative catalog supersedes any
-			// receive-side shadow built while this instance was a non-owner, so drop it
-			// (a later demotion rebuilds it from inbound relays). No-op when this
-			// instance was already the owner or interest is off (the maps stay empty).
-			if (owned && (rec.shadow.size > 0 || rec.pendingRelay.size > 0)) {
-				rec.shadow.clear();
-				rec.pendingRelay.clear();
-				rec.shadowDirty = false;
-			}
-			if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
-				rec.registry.delete(key);
-				if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
-				throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
-			}
-			if (owned) {
-				// This instance ticks the topic: ensure the entity against the real
-				// socket (seeded from the snapshot when one was recovered, else the
-				// declared initial - identical to single-instance when snapshot is off).
-				const ensured = rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
-				// Cells mode: place the joiner's cell block now (from its just-ensured
-				// entity, or a retained reported center) - without this an owner-local
-				// joiner received nothing until its entity first moved.
-				if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
-				// A server-driven topic (onTick) exists only because the tick runs, so a
-				// client that subscribes and watches without sending a command first must
-				// still start the tick - otherwise it sees zero server entities. Idempotent
-				// (a pending timer is a no-op) and gated on an onTick world so non-onTick
-				// topics stay byte-identical (they legitimately arm on the first command).
-				if (rec.world !== null) _armSmoothTick(rec);
-				return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothSyncRoster(rec, key), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
-			}
-			// Non-owner: ask the owner for the catalog. On a timeout, return a
-			// local-empty basis - incoming broadcasts reconcile the client.
-			const corr = cluster.instanceId + ':' + (++_smoothCorrSeq);
-			const reply = await _smoothRequestSync(rec, cluster, key, corr);
-			if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
-				rec.registry.delete(key);
-				if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
-				throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
-			}
-			// Seed the receive-side shadow catalog from the owner's snapshot so the cull
-			// can deliver a stationary in-range remote entity on first sight (an entity
-			// that has not moved since this client joined sends no relay frame, so without
-			// the seed it would be invisible - an under-delivery). The full snapshot is
-			// still returned to the joining client below (a safe over-deliver on join);
-			// only the ongoing relayed deltas are culled.
-			if (rec.interest !== null && reply && Array.isArray(reply.states)) {
-				for (let i = 0; i < reply.states.length; i++) rec.shadow.set(reply.states[i].key, reply.states[i].state);
-			}
-			// Cells mode on a non-owner: the local authority is empty, so place the
-			// joiner's cell block from its own entry in the owner's reply (recorded
-			// into lastPos by the follow), and scope the client-facing roster to its
-			// cell block - the owner's reply is deliberately the FULL catalog (it is
-			// also the own-position source here), but the client gets O(block).
-			let states = reply && Array.isArray(reply.states) ? reply.states : [];
-			if (rec.cells) {
-				if (ctx.ws) {
-					const ownEntry = states.find((s) => s && s.key === key);
-					if (ownEntry !== undefined) _smoothCellFollow(rec, key, ctx.ws, ownEntry.state);
-					else _placeCellSubscriber(rec, key, ctx.ws); // a reported center / lastPos fallback
+		join.pending++;
+		try {
+			// Walk-visible membership for the reserved wire topic: the platform
+			// subscribe updates the adapter's per-connection subscription state,
+			// which is what the broadcast walk delivers by. Reserved-prefix
+			// topics never ride the client's own subscribe frames.
+			if (ctx.ws && ctx.platform && typeof ctx.platform.subscribe === 'function') {
+				const denial = await ctx.platform.subscribe(ctx.ws, rec.wireTopic);
+				if (denial) {
+					throw new LiveError(
+						denial === 'UNAUTHENTICATED' ? 'UNAUTHENTICATED' : 'FORBIDDEN',
+						'smooth topic subscribe denied: ' + denial
+					);
 				}
-				states = _smoothCellSnapshot(rec, key, states);
+			} else if (ctx.ws && typeof ctx.ws.subscribe === 'function') {
+				try {
+					ctx.ws.subscribe(rec.wireTopic);
+				} catch {}
 			}
+			// Re-sync flood cutoff, AFTER admission (a denied subscribe must not be
+			// able to consume anyone's allowance) and before any O(catalog) work. The
+			// reply carries the whole roster, so an unthrottled stream of ~60-byte
+			// sync frames is a large work-per-byte asymmetry against a populated
+			// topic; a real client syncs on join and on reconnect, never in a stream.
+			// Liveness re-check FIRST: if the socket closed while the guard / runtime
+			// load / subscribe was pending, the close drain has already run, and
+			// ensuring now would create a ghost entity bound to a freed handle (or
+			// steal ownership from a live tab). It also has to precede the allowance
+			// bookkeeping below - the drain for this socket is already done, so an
+			// entry minted after it would be orphaned in `rec.syncRate` forever, one
+			// per attacker socket, keyed by a guest id nothing can re-derive.
+			if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
+				if (rec.authority.size === 0 && rec.timer === null) _smoothForget(rec);
+				throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
+			}
+			if (!_smoothSyncAdmit(rec, _getIdentityKey(ctx))) {
+				throw new LiveError(
+					'RATE_LIMITED',
+					'smooth re-sync rate exceeded (max ' + _SMOOTH_SYNC_MAX_PER_WINDOW + ' per ' +
+					_SMOOTH_RESYNC_WINDOW_MS + 'ms per identity); back off and retry'
+				);
+			}
+			const cluster = ctx.platform && ctx.platform.smooth;
+			if (cluster) {
+				// Bind the registry only after initialization succeeds, so a failed
+				// replacement cannot displace a live socket with the same identity.
+				_ensureSmoothCluster(cluster);
+				// On a Redis failure, degrade to a local authority (owned=true) so the
+				// client keeps a working entity rather than a frozen one. Deliberate
+				// availability tradeoff: during a sustained outage the coordinator's
+				// breaker opens and outbound relays no-op, so each instance runs
+				// isolated (no cross-instance traffic, no cross-owner event double-fire);
+				// only the brief pre-breaker window can relay from two pseudo-owners,
+				// which the per-owner seq dedup does not cover - an outage-only artifact.
+				const wasOwned = rec.owned;
+				let owned = true;
+				try {
+					owned = await cluster.acquireOwner(rec.wireTopic);
+				} catch {
+					owned = true;
+				}
+				// A demotion observed on this path (we held the tick, the lease is gone)
+				// drops this tenure's warm-handoff state so a later re-acquire reads the
+				// snapshot fresh rather than reusing a stale pending set. (A rare Redis
+				// lease flap landing between two concurrent same-instance syncs could let
+				// this clear wipe the other sync's just-loaded pending; the only effect is
+				// that topic's entities fall back to `initial` - the snapshot-off default -
+				// for that one handoff, never an incorrect state, a leak, or a hang.)
+				if (wasOwned && !owned) _smoothClearSnapshotState(rec);
+				if (owned && rec.cfg.snapshot) {
+					// Warm handoff (opt-in): a fresh owner LOADS the snapshot the previous
+					// owner persisted BEFORE it publishes ownership, so neither a concurrent
+					// sync nor a relay handler (both gated on `rec.owned`) can seed an entity
+					// from `initial` while the read is still in flight. Loaded once per
+					// tenure into `pendingSnapshot` behind a shared barrier promise; each
+					// entity is then seeded the moment its real client re-binds
+					// (`_smoothSeed`), so a client that never returns never enters the
+					// authority. Its recovered state waits in `pendingSnapshot`, re-persisted
+					// on write (a second failover still recovers it) and grace-dropped on
+					// the tick (the cache stays bounded).
+					await _smoothLoadSnapshot(rec, cluster);
+				}
+				// Publish ownership AFTER the snapshot is ready (so the relay seed sites
+				// see a populated `pendingSnapshot`) but BEFORE the liveness re-check, so a
+				// socket that closed during either await releases the lease via
+				// _smoothForget rather than leaking it until the TTL.
+				rec.owned = owned;
+				// Became the ticking owner: the authoritative catalog supersedes any
+				// receive-side shadow built while this instance was a non-owner, so drop it
+				// (a later demotion rebuilds it from inbound relays). No-op when this
+				// instance was already the owner or interest is off (the maps stay empty).
+				if (owned && (rec.shadow.size > 0 || rec.pendingRelay.size > 0)) {
+					rec.shadow.clear();
+					rec.pendingRelay.clear();
+					rec.shadowDirty = false;
+				}
+				if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
+					if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
+					throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
+				}
+				if (owned) {
+					// This instance ticks the topic: ensure the entity against the real
+					// socket (seeded from the snapshot when one was recovered, else the
+					// declared initial - identical to single-instance when snapshot is off).
+					const ensured = rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
+					if (ctx.ws) rec.registry.set(key, ctx.ws);
+					// Cells mode: place the joiner's cell block now (from its just-ensured
+					// entity, or a retained reported center) - without this an owner-local
+					// joiner received nothing until its entity first moved.
+					if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
+					// A server-driven topic (onTick) exists only because the tick runs, so a
+					// client that subscribes and watches without sending a command first must
+					// still start the tick - otherwise it sees zero server entities. Idempotent
+					// (a pending timer is a no-op) and gated on an onTick world so non-onTick
+					// topics stay byte-identical (they legitimately arm on the first command).
+					if (rec.world !== null) _armSmoothTick(rec);
+					join.retained = true;
+					return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothSyncRoster(rec, key), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
+				}
+				// Non-owner: ask the owner for the catalog. On a timeout, return a
+				// local-empty basis - incoming broadcasts reconcile the client.
+				const corr = cluster.instanceId + ':' + (++_smoothCorrSeq);
+				const reply = await _smoothRequestSync(rec, cluster, key, corr, ctx.ws);
+				if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
+					if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
+					throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
+				}
+				if (ctx.ws) rec.registry.set(key, ctx.ws);
+				// Seed the receive-side shadow catalog from the owner's snapshot so the cull
+				// can deliver a stationary in-range remote entity on first sight (an entity
+				// that has not moved since this client joined sends no relay frame, so without
+				// the seed it would be invisible - an under-delivery). The full snapshot is
+				// still returned to the joining client below (a safe over-deliver on join);
+				// only the ongoing relayed deltas are culled.
+				if (rec.interest !== null && reply && Array.isArray(reply.states)) {
+					for (let i = 0; i < reply.states.length; i++) rec.shadow.set(reply.states[i].key, reply.states[i].state);
+				}
+				// Cells mode on a non-owner: the local authority is empty, so place the
+				// joiner's cell block from its own entry in the owner's reply (recorded
+				// into lastPos by the follow), and scope the client-facing roster to its
+				// cell block - the owner's reply is deliberately the FULL catalog (it is
+				// also the own-position source here), but the client gets O(block).
+				let states = reply && Array.isArray(reply.states) ? reply.states : [];
+				if (rec.cells) {
+					if (ctx.ws) {
+						const ownEntry = states.find((s) => s && s.key === key);
+						if (ownEntry !== undefined) _smoothCellFollow(rec, key, ctx.ws, ownEntry.state);
+						else _placeCellSubscriber(rec, key, ctx.ws); // a reported center / lastPos fallback
+					}
+					states = _smoothCellSnapshot(rec, key, states);
+				}
+				join.retained = true;
+				return {
+					topic: name,
+					t: wallEpoch(),
+					you: key,
+					ack: reply ? reply.ack : 0,
+					states: _smoothWireStates(rec, states),
+					...(rec.lagComp !== null && { lc: 1 }),
+					...(rec.cells && { cells: 1 })
+				};
+			}
+			const ensured = rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
+			// Interest topics need the identity -> socket map even single-instance (the
+			// cluster path keeps it for ack routing; interest reuses it as the
+			// per-subscriber relevancy and delivery set; cells mode reuses it to follow a
+			// subscriber's own entity for its cell block). No awaits follow, so the
+			// liveness re-check above still holds.
+			if ((rec.interest || rec.cells) && ctx.ws) rec.registry.set(key, ctx.ws);
+			// Cells mode: place the joiner's cell subscription block from its own entity's
+			// initial position now, so it starts receiving nearby cells immediately (the
+			// full catalog below is the safe over-deliver on join; ongoing deltas are
+			// cell-scoped).
+			if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
+			// A server-driven topic (onTick) exists only because the tick runs, so a
+			// client that subscribes and watches without sending a command first must
+			// still start the tick - otherwise it sees zero server entities. Idempotent
+			// (a pending timer is a no-op) and gated on an onTick world so non-onTick
+			// topics stay byte-identical (they legitimately arm on the first command).
+			if (rec.world !== null) _armSmoothTick(rec);
+			join.retained = true;
 			return {
 				topic: name,
 				t: wallEpoch(),
 				you: key,
-				ack: reply ? reply.ack : 0,
-				states: _smoothWireStates(rec, states),
+				ack: ensured.lastAckedId,
+				// Interest on (either mode): scope the join snapshot to the joiner's
+				// area of interest (the roster fanout is O(n^2) if every joiner gets
+				// the whole board). Broadcast path: the full catalog, unchanged.
+				states: _smoothSyncRoster(rec, key),
 				...(rec.lagComp !== null && { lc: 1 }),
 				...(rec.cells && { cells: 1 })
 			};
+		} finally {
+			if (--join.pending === 0) {
+				// A sibling sync on this socket can have succeeded while this one
+				// awaited admission. Only roll back a wholly unaccepted reservation.
+				if (!join.retained && ctx.ws && !_smoothClosedWs.has(ctx.ws)) {
+					if (typeof ctx.platform?.unsubscribe === 'function') ctx.platform.unsubscribe(ctx.ws, rec.wireTopic);
+					else if (typeof ctx.ws.unsubscribe === 'function') ctx.ws.unsubscribe(rec.wireTopic);
+				}
+				rec.syncJoins.delete(ctx.ws);
+			}
+			if (!rec.authority.get(key) && !rec.registry.has(key)) rec.syncRate.delete(key);
+			const cluster = rec.platform && rec.platform.smooth;
+			if (rec.syncJoins.size === 0 && rec.registry.size === 0 && (!rec.owned && cluster || rec.authority.size === 0)) _smoothForget(rec);
 		}
-		const ensured = rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
-		// Interest topics need the identity -> socket map even single-instance (the
-		// cluster path keeps it for ack routing; interest reuses it as the
-		// per-subscriber relevancy and delivery set; cells mode reuses it to follow a
-		// subscriber's own entity for its cell block). No awaits follow, so the
-		// liveness re-check above still holds.
-		if ((rec.interest || rec.cells) && ctx.ws) rec.registry.set(key, ctx.ws);
-		// Cells mode: place the joiner's cell subscription block from its own entity's
-		// initial position now, so it starts receiving nearby cells immediately (the
-		// full catalog below is the safe over-deliver on join; ongoing deltas are
-		// cell-scoped).
-		if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
-		// A server-driven topic (onTick) exists only because the tick runs, so a
-		// client that subscribes and watches without sending a command first must
-		// still start the tick - otherwise it sees zero server entities. Idempotent
-		// (a pending timer is a no-op) and gated on an onTick world so non-onTick
-		// topics stay byte-identical (they legitimately arm on the first command).
-		if (rec.world !== null) _armSmoothTick(rec);
-		return {
-			topic: name,
-			t: wallEpoch(),
-			you: key,
-			ack: ensured.lastAckedId,
-			// Interest on (either mode): scope the join snapshot to the joiner's
-			// area of interest (the roster fanout is O(n^2) if every joiner gets
-			// the whole board). Broadcast path: the full catalog, unchanged.
-			states: _smoothSyncRoster(rec, key),
-			...(rec.lagComp !== null && { lc: 1 }),
-			...(rec.cells && { cells: 1 })
-		};
 	});
 
 	smoothExport.__smoothCommand = live.volatile(async (ctx, ...args) => {
