@@ -43,14 +43,7 @@ The shared [translation contract](https://github.com/lanteanio/svelte-adapter-uw
 
 The canonical [privacy integration contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/PRIVACY-INTEGRATION.md) maps browser, in-process, Redis/Postgres, durable-work, telemetry, and application-owned data across all three packages. Its generated [host worksheet](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/privacy/v1/ropa-dpa-transfer-checklist.md) must be completed for the deployment; `live.forget` is one erasure leg and does not clear browsers, observability backends, backups, or unregistered stores.
 
-During an incident, start from the ecosystem's versioned
-[operations pack v1](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/operations/v1/README.md).
-It routes process, Redis, durable-work and state-delivery failures to cold
-runbooks with explicit stop conditions and recovery checks. Its
-[correlated resource-control response](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/operations/v1/resource-controls.md)
-keeps realtime `degraded` mitigation active through Redis repair, bounded
-rehydration, queue drain, and protection relaxation instead of treating a
-transport `recovered` event as complete application recovery.
+During an incident, start from the ecosystem's versioned [operations pack v1](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/operations/v1/README.md). It routes process, Redis, durable-work and state-delivery failures to cold runbooks with explicit stop conditions and recovery checks. Its [correlated resource-control response](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/operations/v1/resource-controls.md) keeps realtime `degraded` mitigation active through Redis repair, bounded rehydration, queue drain, and protection relaxation instead of treating a transport `recovered` event as complete application recovery.
 
 Before launch or a scaling-policy change, use the ecosystem's versioned [capacity kit v1](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/capacity/v1/README.md). Its open-arrival proof records the deployment's realtime traffic mix, exact topology and package identities, peak p50/p95/p99 and errors, the first shared or per-instance resource to saturate, and recovery under continuing traffic. The in-process benchmark suite is not a production capacity claim.
 
