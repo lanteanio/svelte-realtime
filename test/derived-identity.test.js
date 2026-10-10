@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { live, unsubscribe, _prepareHmr } from '../src/server.js';
 import { createTestEnv } from '../src/testing.js';
+import { _topicWsCounts, state } from '../src/server/state.js';
+import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.js';
 
 let env;
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
-afterEach(() => { env?.cleanup(); env = null; _prepareHmr(); });
+afterEach(() => { _resetTenantResolver(); env?.cleanup(); env = null; _prepareHmr(); });
 
 function setup(fn, options, wrap = (value) => value) {
 	env = createTestEnv();
@@ -145,6 +147,80 @@ describe('dynamic derived identity', () => {
 		}
 		await flush();
 		expect(() => live.derived(['source'], () => 1, { scopeKey: () => 'scope' })).toThrow('dynamic sources');
+	});
+
+	it('rejects a scope change while the initial snapshot is loading', async () => {
+		let finish;
+		const user = { id: 'admin' };
+		setup(() => new Promise(resolve => { finish = resolve; }));
+		const stream = env.connect(user).subscribe('stats/derived');
+		await flush();
+		user.id = 'member'; finish('ADMIN_ONLY'); await flush();
+		expect(stream.value).toBeUndefined();
+		expect(stream.error?.code).toBe('FORBIDDEN');
+	});
+
+	it('rejects a scope change during asynchronous subscribe admission', async () => {
+		let admit;
+		let computed = false;
+		setup(() => { computed = true; return 'ADMIN_ONLY'; });
+		env.platform.subscribe = (ws, topic) => new Promise(resolve => { admit = () => { ws.subscribe(topic); resolve(null); }; });
+		const user = { id: 'admin' };
+		const stream = env.connect(user).subscribe('stats/derived');
+		await flush();
+		user.id = 'member'; admit(); await flush();
+		expect(computed).toBe(false);
+		expect(stream.value).toBeUndefined();
+		expect(stream.error?.code).toBe('FORBIDDEN');
+	});
+
+	it('revokes subscribers when their custom scope callback begins throwing', async () => {
+		let authorized = true;
+		const { publish } = setup(() => 'ADMIN_ONLY', { scopeKey: () => {
+			if (!authorized) throw new Error('Access withdrawn');
+			return 'authorized';
+		} });
+		const { stream } = await join({ id: 'one' });
+		authorized = false; publish(); await flush();
+		authorized = true; publish(); await flush();
+		expect(stream.events).toEqual([]);
+	});
+
+	it.each(['session', 'tenant'])('cleans ownership when %s lookup throws during revocation', async (failure) => {
+		let invalid = false;
+		let socket;
+		_setTenantResolver(() => { if (invalid && failure === 'tenant') throw new Error('tenant unavailable'); return 'a'; });
+		setup((ctx) => { socket = ctx.ws; return 'data'; });
+		const { stream } = await join({ id: 'one' });
+		const getUserData = socket.getUserData;
+		socket.getUserData = () => { if (invalid && failure === 'session') throw new Error('session unavailable'); return getUserData(); };
+		try {
+			invalid = true;
+			env.platform.publish('@t/a/source', 'set', null); await flush();
+			expect(socket.isSubscribed(stream.topic)).toBe(false);
+			expect(_topicWsCounts.has(stream.topic)).toBe(false);
+		} finally { invalid = false; socket.getUserData = getUserData; }
+	});
+
+	it('does not double-release a pending snapshot after scope revocation', async () => {
+		let finish;
+		const { publish } = setup(() => new Promise(resolve => { finish = resolve; }));
+		const previousMetrics = state.metricsInstruments;
+		let subscriptions = 0;
+		state.metricsInstruments = {
+			streamGauge: { inc: () => subscriptions++, dec: () => subscriptions-- },
+			rpcCount: { inc() {} }, rpcErrors: { inc() {} }, rpcDuration: { observe() {} }
+		};
+		try {
+			const user = { id: 'admin' };
+			const stream = env.connect(user).subscribe('stats/derived');
+			await flush(); expect(subscriptions).toBe(1);
+			user.id = 'member'; publish(); await flush();
+			expect(subscriptions).toBe(0);
+			finish('ADMIN_ONLY'); await flush();
+			expect(stream.error?.code).toBe('FORBIDDEN');
+			expect(subscriptions).toBe(0);
+		} finally { state.metricsInstruments = previousMetrics; }
 	});
 
 });

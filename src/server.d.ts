@@ -2620,7 +2620,10 @@ export namespace live {
 		options?: {
 			merge?: string;
 			debounce?: number;
-			/** Defines which callers share one output. Defaults to authenticated identity; guests are per connection. */
+			/**
+			 * Defines which callers share one output. Defaults to authenticated identity; guests are per connection.
+			 * Include permissions in this key when sessions of the same identity can have different authorized views.
+			 */
 			scopeKey?: (ctx: LiveContext<any>, ...args: any[]) => string | number;
 		}
 	): T;

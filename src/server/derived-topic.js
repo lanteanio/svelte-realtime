@@ -21,3 +21,15 @@ export function _derivedScope(ctx, args, scopeKey) {
 export function _derivedTopic(base, scope, args) {
 	return base + '~' + createHash('sha256').update(JSON.stringify([scope, args])).digest('hex');
 }
+
+/** Compare an existing scope without allocating a tuple on the default hot path. */
+export function _matchesDerivedScope(ctx, args, scopeKey, scope) {
+	if (scopeKey) {
+		const current = _derivedScope(ctx, args, scopeKey);
+		return current[0] === scope[0] && current[1] === scope[1];
+	}
+	const authenticated = _getAuthenticatedId(ctx);
+	return authenticated === null
+		? scope[0] === 'guest' && _getIdentityKey(ctx) === scope[1]
+		: scope[0] === 'user' && authenticated === scope[1];
+}

@@ -89,6 +89,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reconnect snapshots and non-array pagination responses update the authoritative stream state during optimistic mutations, so settling a mutation cannot restore stale data.
 
+- Dynamic derived subscriptions recheck scope after asynchronous admission and initial responses, and drain ownership even when session or tenant lookup fails.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

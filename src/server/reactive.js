@@ -10,7 +10,7 @@ import { _redactOrDrop, REDACT_DROP, _platformPublish, _noteTopicPublish } from 
 import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
 import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms-gate.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
-import { _derivedScope } from './derived-topic.js';
+import { _derivedScope, _matchesDerivedScope } from './derived-topic.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -19,7 +19,7 @@ let _cronLeaderGet = () => null;
 // window registration; a window closed outside its timer re-arms through this.
 let _scheduleBoundary = (/** @type {any} */ entry, /** @type {any} */ win) => {};
 // Drain framework ownership when a derived subscriber no longer belongs to its scope.
-let _releaseStream = (ws, topic, platform, fn) => {};
+let _releaseStream = (ws, topic, platform, fn, tenantId) => {};
 export function installReactive(seams) {
 	_cronLeaderGet = seams.cronLeader;
 	_scheduleBoundary = seams.scheduleBoundary;
@@ -643,7 +643,6 @@ function _wrapPlatformPublish(platform) {
 
 /** Resolve a live context and revoke sockets whose identity/tenant scope changed. */
 function _currentDerivedContext(entry, platform, select = true) {
-	let selected;
 	const scopeKey = entry.fn.__derivedScopeKey;
 	for (const subscriber of entry.subscribers.values()) {
 		const ws = subscriber.ctx.ws || null;
@@ -654,12 +653,13 @@ function _currentDerivedContext(entry, platform, select = true) {
 				// Default identity checks need only user/ws. Build the full public
 				// context only for a custom scope callback or the selected compute.
 				ctx = scopeKey ? _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null) : { user, ws };
-				const scope = _derivedScope(ctx, entry.args, scopeKey);
-				valid = scope[0] === entry.scope[0] && scope[1] === entry.scope[1];
+				valid = _matchesDerivedScope(ctx, entry.args, scopeKey, entry.scope);
 			}
 		} catch { valid = false; }
 		if (valid) {
-			if (select && !selected) selected = scopeKey ? ctx : _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null);
+			// Before compute only select one valid context. The mandatory scan
+			// after compute checks every recipient before any output is delivered.
+			if (select) return scopeKey ? ctx : _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null);
 			continue;
 		}
 		// Remove transport membership before another member of this scope can
@@ -667,7 +667,7 @@ function _currentDerivedContext(entry, platform, select = true) {
 		const count = subscriber.count;
 		try {
 			if (ws) {
-				try { _releaseStream(ws, entry.topic, platform, entry.fn); }
+				try { _releaseStream(ws, entry.topic, platform, entry.fn, entry.tenantId); }
 				finally {
 					// The adapter may synchronously invoke the public unsubscribe
 					// hook; ownership has already been drained with our lifetime mark.
@@ -679,7 +679,7 @@ function _currentDerivedContext(entry, platform, select = true) {
 			for (let i = 0; i < count; i++) _deactivateDynamicDerived(entry.fn, entry.topic, subscriber.ctx);
 		}
 	}
-	return selected;
+	return null;
 }
 
 /**

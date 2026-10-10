@@ -840,9 +840,12 @@ function _isRollingBack(ws, topic) {
 }
 
 function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
+	const topicMap = _wsStreamOwners.get(ws);
+	// A scope revoke can drain this pending subscription while its loader is
+	// awaiting. Its eventual failure must not unsubscribe or decrement twice.
+	if (!topicMap?.get(topic)?.some((owner) => owner.fn === fn && owner.count > 0)) return;
 	try { ws.unsubscribe(topic); } catch {}
 	if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
-	const topicMap = _wsStreamOwners.get(ws);
 	let removedFromTopic = false;
 	if (topicMap) {
 		const owners = topicMap.get(topic);
@@ -3192,7 +3195,7 @@ export function __registerDerived(path, fn) {
  * triggered externally when the platform fires publish.
  * @param {import('svelte-adapter-uws').Platform} platform
  */
-installReactive({ cronLeader: _getCronLeader, scheduleBoundary: _scheduleNextBoundary, releaseStream: (ws, topic, platform, fn) => _unsubscribeStream(ws, topic, platform, fn) });
+installReactive({ cronLeader: _getCronLeader, scheduleBoundary: _scheduleNextBoundary, releaseStream: (ws, topic, platform, fn, tenantId) => _unsubscribeStream(ws, topic, platform, fn, tenantId) });
 
 export function _activateDerived(platform) {
 	state.derivedPlatform = platform;
@@ -3534,13 +3537,22 @@ export function unsubscribe(ws, topic, { platform }) {
 	_unsubscribeStream(ws, topic, platform);
 }
 
-function _unsubscribeStream(ws, topic, platform, releasedDerived) {
+function _unsubscribeStream(ws, topic, platform, releasedDerived, releasedTenant) {
 	const topicMap = _wsStreamOwners.get(ws);
 	if (!topicMap) return;
 	const owners = topicMap.get(topic);
 	if (!owners || owners.length === 0) return;
 
-	const user = ws.getUserData();
+	let user, tenantId;
+	if (releasedDerived) {
+		// Scope revocation must drain ownership even when session/tenant lookup
+		// was the failure that revoked access in the first place.
+		try { user = ws.getUserData(); } catch { user = null; }
+		tenantId = releasedTenant;
+	} else {
+		user = ws.getUserData();
+		tenantId = _resolveTenant(user);
+	}
 	// The drain ctx carries the connection's server-trusted tenant so tenant-scoped
 	// unsubscribe drains (the room-enumeration roster release + its delta channel)
 	// target the right tenant; `_publishWire` is the raw, non-prefixing publish that
@@ -3548,7 +3560,7 @@ function _unsubscribeStream(ws, topic, platform, releasedDerived) {
 	// helper (the hook topics here are already wire topics). Both reduce to the
 	// originals with no tenant resolver configured (tenantId null, _publishWire === publish).
 	const _helpers = _getCtxHelpers(platform);
-	const unsubCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId: _resolveTenant(user), _publishWire: _helpers.publish, _releasedDerived: releasedDerived };
+	const unsubCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId, _publishWire: _helpers.publish, _releasedDerived: releasedDerived };
 
 	// Compute remaining subscribers AFTER this ws fully drops the topic. The
 	// hook fires N times (one per logical sub on this ws) and every firing

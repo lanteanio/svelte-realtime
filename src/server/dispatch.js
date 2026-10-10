@@ -20,7 +20,8 @@ import { _shouldShed } from './admission.js';
 import { _getIdentityKey, _getAuthenticatedId } from './identity.js';
 import { _bindAlarmCtx } from './alarm.js';
 import { _registerReplayTopic } from './replay-routing.js';
-import { _tenantTopic, _tenantKey } from './tenant.js';
+import { _tenantTopic, _tenantKey, _resolveTenant } from './tenant.js';
+import { _derivedScope } from './derived-topic.js';
 import { _ownerClaimBegin, _ownerClaimResolve, _presenceClaimBegin, _presenceClaimResolve } from './room-owner.js';
 import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame, _rejectUploadForProtocol } from './upload.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
@@ -663,7 +664,7 @@ function _settleClaimBarriers(ws, topic, fn) {
  * @param {any} ctx
  * @param {any[]} args
  * @param {{ id: string, seq?: number, schemaVersion?: number, version?: any, attach?: boolean }} msg
- * @param {{ topic: any, claimTopic?: any }} subscribedRef
+ * @param {{ topic: any, claimTopic?: any, validate?: () => void }} subscribedRef
  * @returns {Promise<any>}
  */
 async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
@@ -720,6 +721,19 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// `topic`) are all keyed by the tenant-scoped string - and a publish, which
 	// prefixes the same way, matches. Null tenant -> unchanged (zero cost).
 	if (ctx.tenantId && typeof topic === 'string') topic = _tenantTopic(ctx.tenantId, topic);
+	if (/** @type {any} */ (fn).__derivedDynamic) {
+		const scopeKey = /** @type {any} */ (fn).__derivedScopeKey;
+		const admittedScope = _derivedScope(ctx, streamArgs, scopeKey);
+		subscribedRef.validate = () => {
+			try {
+				const user = ws.getUserData();
+				const current = _buildCtx(user, ws, platform, _getCtxHelpers(platform), ctx.cursor);
+				const scope = _derivedScope(current, streamArgs, scopeKey);
+				if (_resolveTenant(user) === ctx.tenantId && scope[0] === admittedScope[0] && scope[1] === admittedScope[1]) return;
+			} catch {}
+			throw new LiveError('FORBIDDEN', 'Derived scope changed; resubscribe to receive the current view');
+		};
+	}
 	// First-joiner owner delivery: if this is an owner-room DATA stream, open the
 	// per-(socket, topic) claim barrier now, before this item awaits anything
 	// further. The data-join resolves it with the claimed owner; the paired
@@ -888,6 +902,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// (a later loader throw would otherwise recreate a slot the paired loader has
 	// already consumed).
 	subscribedRef.claimTopic = null;
+	subscribedRef.validate?.();
 
 	if (/** @type {any} */ (fn).__isDerived && !state.activateDerivedCalled && !state.warnedActivateDerived) {
 		if (_IS_DEV) {
@@ -1158,6 +1173,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 
 	const _h = _getCtxHelpers(platform);
 	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId);
+	/** @type {{ topic: any, claimTopic: any, validate?: () => void }} */
 	const _subscribedRef = { topic: null, claimTopic: null };
 
 	try {
@@ -1195,6 +1211,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 			return { id, ok: true, data: result };
 		}
 		}); // end _runWithMiddleware
+		if (_subscribedRef.topic && _result?.ok !== false) _subscribedRef.validate?.();
 		// Deprecation signal (live.deprecate): one-shot per (ws, path), attached to
 		// the first ok response so the client warns once. Covers text/batch/
 		// stream-subscribe (all flow through here); binary RPC attaches its own.
