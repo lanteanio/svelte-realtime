@@ -1361,7 +1361,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "69ec7e8a9b8ba48888b53e4ce8a21fda5f939ecee47a522cb07f801f0294f3b1",
+			"fingerprint": "16bb7d7296f902537ac26ba19c44e9bf7f339e335b787ed93b1b7db634375767",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Circuit breaker",

@@ -84,14 +84,8 @@ npm run dev
 
 For interactive prompts, run `npx svelte-realtime@0.6.0-next.91 my-app` in a terminal. Piped input and CI require both a project name and `--template minimal|example|demo`; missing values produce an immediate error with an example command.
 
-The non-interactive route installs the audited
-`svelte-adapter-uws@0.6.0-next.95` / `svelte-realtime@0.6.0-next.91` /
-uWebSockets.js tuple in [Version compatibility](#version-compatibility), checks
-Node, OS, architecture, libc, and the
-native addon, writes one current-`sv` Vite configuration, and completes a
-production build before it prints `Verified`. The example then opens with a
-working counter. The exact owned checkpoints and the one expected scaffold-auth
-warning are pinned in the generated [first-run transcript](./docs/first-run.md).
+The scaffold validates Node and native-platform compatibility, installs the tuple from [Version compatibility](#version-compatibility), writes the current `sv` Vite configuration, and completes a production build before printing `Verified`.
+The example opens with a working counter. The [first-run transcript](./docs/first-run.md) records the checkpoints and expected scaffold-auth warning.
 
 ---
 
@@ -2845,7 +2839,6 @@ export const items = live.stream('items',
 ```
 
 The wrapper calls the breaker's `guard()` before each operation, including recovery probes, and records successful or failed operations. Legacy breakers exposing `isOpen()` are also supported. Without a fallback, an open breaker returns `SERVICE_UNAVAILABLE` with a retry message. The optional `name` identifies the breaker in operator events (trimmed to 120 characters); it is never sent in that error response. One `breaker.open` operational event is emitted on the first refusal after registration or an admitted operation. Its `openObservedAt` is the epoch time when this wrapper observed a refusal, not the breaker's original trip time.
-
 
 If `fallback` is omitted and the circuit is open, the call throws `LiveError('SERVICE_UNAVAILABLE', ...)`.
 
