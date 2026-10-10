@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Erasure audit hooks support optional HMAC keys configured once or per call, validated before cleanup; default pseudonymous identifiers remain unchanged.
+
 - Stream stores expose the retained server pagination cursor. Exhaustion and full refreshes clear absent cursors, while opaque falsy values remain usable for the next page.
 
 - Vite's `crdt.reconcileIntervalMs` configures background reconciliation for

@@ -24,7 +24,7 @@ import { _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _validTenantId, _tenantKey } from './tenant.js';
 import { _validIdReason, _MAX_USER_ID_LENGTH } from './validate.js';
 import { LiveError } from './live-error.js';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, createSecretKey } from 'node:crypto';
 import { _purgePushUser } from './push.js';
 import { _purgePresenceUser, _ownerReplayPublisher } from './presence.js';
 import { _purgeRateLimitUser } from './rate-limit.js';
@@ -62,41 +62,57 @@ let _forgetStore = null;
  */
 let _forgetPlatform = null;
 
-/**
- * Configure the forget subsystem. `store` plugs a durable cluster store into the
- * erasure cascade; `platform` supplies the Redis handle the presence purge needs
- * to decrement the cluster roster. Both optional; `null` clears both.
- *
- * @param {{ store?: { purgeUser: Function } | null, platform?: any } | null} config
- */
-export function configureForget(config) {
-	if (config === null) { _forgetStore = null; _forgetPlatform = null; return; }
-	if (typeof config !== 'object') {
-		throw new Error('[svelte-realtime] configureForget: config must be an object or null');
+/** @type {import('node:crypto').KeyObject | null} */
+let _forgetHashKey = null;
+
+/** @param {unknown} key @returns {import('node:crypto').KeyObject | null} */
+function _readHashKey(key) {
+	if (key === null) return null;
+	if ((typeof key !== 'string' && !(key instanceof Uint8Array)) ||
+		(typeof key === 'string' ? Buffer.byteLength(key, 'utf8') : key.byteLength) < 32) {
+		throw new Error('hashKey must be a string or Uint8Array containing at least 32 bytes, or null');
 	}
-	if (config.store === undefined && config.platform === undefined) {
-		throw new Error('[svelte-realtime] configureForget: config must include at least one of store or platform');
-	}
-	if (config.store !== undefined) {
-		if (config.store !== null && (typeof config.store !== 'object' || typeof config.store.purgeUser !== 'function')) {
-			throw new Error('[svelte-realtime] configureForget: store must implement purgeUser(tenantId, userId, cascade)');
-		}
-		_forgetStore = config.store;
-	}
-	if (config.platform !== undefined) {
-		_forgetPlatform = config.platform;
-	}
+	// KeyObject owns its bytes, so caller mutation cannot rotate a configured key.
+	return createSecretKey(key);
 }
 
 /**
- * Stable pseudonymous fingerprint for the optional erasure hook. The raw id
- * is omitted, but an unkeyed hash remains linkable and enumerable for guessable
- * ids. Matches the idempotency identity fingerprint (sha256, 32 hex chars).
+ * Configure the forget subsystem. `store` plugs in durable erasure; `platform`
+ * supplies the cluster Redis handle. `hashKey` opts audit records into HMAC.
+ * Omitted settings are retained; `null` clears all three.
+ *
+ * @param {{ store?: { purgeUser: Function } | null, platform?: any, hashKey?: string | Uint8Array | null } | null} config
+ */
+export function configureForget(config) {
+	if (config === null) { _resetForget(); return; }
+	if (typeof config !== 'object') {
+		throw new Error('[svelte-realtime] configureForget: config must be an object or null');
+	}
+	const { store, platform, hashKey } = config;
+	if (store === undefined && platform === undefined && hashKey === undefined) {
+		throw new Error('[svelte-realtime] configureForget: config must include at least one of store, platform or hashKey');
+	}
+	if (store !== undefined && store !== null && (typeof store !== 'object' || typeof store.purgeUser !== 'function')) {
+		throw new Error('[svelte-realtime] configureForget: store must implement purgeUser(tenantId, userId, cascade)');
+	}
+	// Validate everything before applying any configuration change.
+	const nextHashKey = hashKey === undefined ? _forgetHashKey : _readHashKey(hashKey);
+	if (store !== undefined) _forgetStore = store;
+	if (platform !== undefined) _forgetPlatform = platform;
+	_forgetHashKey = nextHashKey;
+}
+
+/**
+ * Stable pseudonymous audit fingerprint. Without a key this keeps the original
+ * enumerable idempotency fingerprint; HMAC prevents candidate matching without
+ * the key. Either mode remains linkable and uses the same 32-hex record shape.
  * @param {string} userId
+ * @param {import('node:crypto').KeyObject | null} key
  * @returns {string}
  */
-function _hashUserId(userId) {
-	return createHash('sha256').update(String(userId)).digest('hex').slice(0, 32);
+function _hashUserId(userId, key) {
+	return (key === null ? createHash('sha256') : createHmac('sha256', key))
+		.update(userId).digest('hex').slice(0, 32);
 }
 
 /**
@@ -239,9 +255,18 @@ const _liveForget = async function forget(userId, opts) {
 	} else if (typeof cascade !== 'boolean') {
 		throw new LiveError('INVALID_REQUEST', 'live.forget: cascade must be a boolean or an object ({ crdt?: string[] })');
 	}
-	if (o.onForget !== undefined && typeof o.onForget !== 'function') {
+	const onForget = o.onForget;
+	if (onForget !== undefined && typeof onForget !== 'function') {
 		throw new LiveError('INVALID_REQUEST', 'live.forget: onForget must be a function');
 	}
+	let hashKey = _forgetHashKey;
+	if (o.hashKey !== undefined) {
+		try { hashKey = _readHashKey(o.hashKey); }
+		catch { throw new LiveError('INVALID_REQUEST', 'live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null'); }
+	}
+	// Capture before any purge or await; a concurrent key rotation cannot change
+	// the audit identifier of an erasure that has already started.
+	const userIdHash = onForget ? _hashUserId(userId, hashKey) : null;
 
 	// Participate in graceful drain so a shutdown waits for an in-progress
 	// erasure rather than tearing it down half-applied (same contract as a cron
@@ -363,12 +388,11 @@ const _liveForget = async function forget(userId, opts) {
 		// Optional erasure hook: receives a stable pseudonymous hash of the
 		// userId, the tenant, the cascade flag, and the counts.
 		// Caught-and-recorded: a throwing hook never aborts a completed erasure.
-		const onForget = o.onForget;
 		if (onForget) {
 			try {
 				// Shallow-copy surfaces so a hook that mutates the record cannot
 				// alter the value returned to the caller (the same object).
-				onForget({ userIdHash: _hashUserId(userId), tenantId, cascade, rowsAffected, surfaces: { ...surfaces }, at });
+				onForget({ userIdHash, tenantId, cascade, rowsAffected, surfaces: { ...surfaces }, at });
 			} catch (err) {
 				if (_IS_DEV) console.error('[svelte-realtime] live.forget onForget hook threw (erasure already completed):', err);
 			}
@@ -389,10 +413,11 @@ export function installForget(live) {
 }
 
 /**
- * Reset forget configuration. Tests only.
+ * Reset forget configuration, including the audit key.
  * @internal
  */
 export function _resetForget() {
 	_forgetStore = null;
 	_forgetPlatform = null;
+	_forgetHashKey = null;
 }

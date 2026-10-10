@@ -34,8 +34,7 @@
 
 ---
 
-After the scaffold's native preflight and production build pass, write server functions, import them in components, and call them over WebSocket.
-The runtime handles pub/sub and protocol wiring; platform, native-addon, authentication, and build prerequisites still apply.
+After the scaffold's native preflight and production build pass, write server functions, import them in components, and call them over WebSocket. The runtime handles pub/sub and protocol wiring; platform, native-addon, authentication, and build prerequisites still apply.
 
 **Upgrading from 0.4.x?** See the [migration guide](./MIGRATION.md) for every breaking change between 0.4.x and 0.5.x.
 
@@ -61,8 +60,7 @@ npm run dev
 
 For interactive prompts, run `npx svelte-realtime@0.6.0-next.91 my-app` in a terminal. Piped input and CI require both a project name and `--template minimal|example|demo`; missing values produce an immediate error with an example command.
 
-The scaffold validates Node and native-platform compatibility, installs the tuple from [Version compatibility](#version-compatibility), writes the current `sv` Vite configuration, and completes a production build before printing `Verified`.
-The example opens with a working counter. The [first-run transcript](./docs/first-run.md) records the checkpoints and expected scaffold-auth warning.
+The scaffold validates Node and native-platform compatibility, installs the tuple from [Version compatibility](#version-compatibility), writes the current `sv` Vite configuration, and completes a production build before printing `Verified`. The example opens with a working counter. The [first-run transcript](./docs/first-run.md) records the checkpoints and expected scaffold-auth warning.
 
 ---
 
@@ -510,7 +508,9 @@ const res = await live.forget(targetUserId, {
 
 It cascades over the framework's in-memory user state - the push registry AND every push session the user holds across sockets, presence rosters (clearing grace timers and deleting the identity from each locally known cluster room; a held room-owner role releases too), rate-limit buckets, idempotency cached results via a per-user reverse index, the smooth/game state the user leaves behind (subscriber registry entry with its RTT tracker, cross-instance surrogates, interest state including the reported center - a literal user location - and the lag-comp movement ring when the entity key is the identity), the webhook dead-letter queue (see the extractor note below), and live aggregates with `forget: 'reset'` (all users' reducer state, windows, buckets, contributor sets and held output are reset) - then awaits the durable store's `purgeUser` and resolves ONLY after the durable delete confirms. A durable failure rejects with `LiveError('FORGET_STORE_FAILED')` so an incomplete erasure can be retried. In-memory failures, including an enabled dead-letter store without `purgeUser` or a document authority without `drop`, reject with `FORGET_INCOMPLETE` after attempting the other surfaces and durable store. The `forget.incomplete` operator event lists failed surfaces without user IDs or exception payloads. The completion-only `onForget` hook does not run for an incomplete cascade; resolve the failed cleanup and retry. Presence and owner cleanup retain scrubbed retry targets within the existing presence-ref limit and block rejoining those rooms until cleanup confirms. Retries delete identity fields idempotently, including after a lost Redis reply; remote-only rooms still require the durable store, and your application must revoke the user's access before erasure to prevent new activity.
 
-The optional `onForget` hook receives `userIdHash`, the first 32 hexadecimal characters of an unkeyed SHA-256 hash of the user ID. The raw ID is omitted, but the stable hash is a pseudonymous identifier: records can be linked and predictable IDs can be recovered by hashing candidate values. Protect access to these records and set a finite retention period for the audit log. The result is constant-shape, so if you ever re-expose `forget` to untrusted clients, map it to a fixed shape first - a `0`-vs-`N` `rowsAffected` would otherwise reveal whether a user exists.
+The optional `onForget` hook receives `userIdHash`, the first 32 hexadecimal characters of SHA-256 over the user ID by default. This unchanged unkeyed identifier matches the idempotency identity fingerprint. It is pseudonymous: records are linkable and predictable IDs can be recovered by hashing candidates. To prevent matching without a secret, set `configureForget({ hashKey: auditKey })` once or pass `hashKey` to `live.forget`; the identifier becomes the first 32 hex characters of HMAC-SHA-256 over the same ID. Use a cryptographically random secret of at least 32 bytes, supplied as a UTF-8 string or `Uint8Array` (including `Buffer`); strings are used literally, without hex/base64 decoding. Invalid keys fail before any erasure, even without a hook. A per-call key overrides the configured key; omission inherits it, and explicit `null` chooses the unkeyed hash. `configureForget({ hashKey: null })` clears only the key; `configureForget(null)` clears all forget settings.
+
+Keep the key separate from audit logs, in server-side secret storage, and share it only across processes that need matching identifiers. A key is copied at configuration, and each erasure captures its identifier before cleanup starts. Rotation changes future identifiers; record a non-secret key version in your own audit envelope if you need to distinguish periods. Keyed identifiers remain stable and linkable for the same ID and key (also across tenants), and no longer match unkeyed idempotency fingerprints. Protect access to the records and set a finite audit retention period in either mode. If you re-expose the result to untrusted clients, map it to a fixed shape first: a `0`-vs-`N` `rowsAffected` would otherwise reveal whether a user exists.
 
 Single-instance apps get complete erasure with no extra wiring. For a cluster, wire the durable layer once - `createForgetStore` composes the backend stores you already use:
 

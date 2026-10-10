@@ -2211,8 +2211,14 @@ export namespace live {
 		opts?: {
 			tenantId?: string | null;
 			cascade?: boolean | { crdt?: string[] };
+			/**
+			 * Audit HMAC key: UTF-8 string or bytes, at least 32 bytes. Overrides
+			 * configureForget for this call; null selects the legacy unkeyed hash.
+			 * Omission inherits the configured key. Validated before any erasure.
+			 */
+			hashKey?: string | Uint8Array | null;
 			onForget?: (record: {
-				/** Stable unkeyed SHA-256 prefix (32 hex characters); linkable and enumerable, not anonymous. */
+				/** 32 hex characters: HMAC-SHA-256 with hashKey, otherwise unkeyed SHA-256. Stable per key, pseudonymous and linkable; unkeyed values are enumerable. */
 				userIdHash: string;
 				tenantId: string | null;
 				cascade: boolean | { crdt?: string[] };
@@ -4339,15 +4345,20 @@ export interface ForgetStore {
  * Configure `live.forget`. `store` plugs a durable cluster store into the
  * erasure cascade (its `purgeUser` runs after the in-memory surfaces and the
  * promise waits for it); `platform` supplies the Redis handle the presence purge
- * needs to decrement the cluster roster. Both optional. Pass `null` to clear
- * both. With neither, `live.forget` purges in-memory state only - correct for a
- * single instance.
+ * needs to decrement the cluster roster. `hashKey` selects HMAC-SHA-256 audit
+ * identifiers. Omitted settings are retained; null clears all settings. Without
+ * a store or platform, erasure stays in-memory, including when a key is set.
+ * Keys need at least 32 bytes of random secret material. Keep them outside audit
+ * logs; rotation changes future identifiers, so record your key version separately.
+ * Keys are copied at configuration; active erasures retain their starting key.
  */
 export function configureForget(
 	config:
 		| {
 			store?: ForgetStore | null;
 			platform?: any;
+			/** UTF-8 string or bytes, at least 32 bytes; null restores unkeyed audit identifiers. */
+			hashKey?: string | Uint8Array | null;
 		}
 		| null
 ): void;
