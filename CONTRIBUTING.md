@@ -50,6 +50,12 @@ Add user-visible changes under `CHANGELOG.md` Unreleased. Describe compatibility
 impact using semver: fixes preserve the contract, additions preserve existing
 calls, and breaking changes require migration guidance. Maintainers choose the
 release version and prerelease tag; do not bump the version merely to open a PR.
+Keep each new release item to one sentence describing user impact, followed by
+an explicit **Action required:** line stating the migration or "None" and linking
+to maintained usage or migration detail. Put implementation rationale and test
+inventories in review evidence, not release prose. Update the
+[0.6 capability index](docs/0.6-upgrade.md) when its upgrade guidance changes.
+Preserve published release bodies and artifact identities.
 Record published artifact identities and routing events as described in
 [releasing](docs/releasing.md); `npm run check:release` verifies the local ledger.
 Keep dependency changes and their root or fixture lockfiles together. Use npm to

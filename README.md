@@ -36,7 +36,7 @@
 
 After the scaffold's native preflight and production build pass, write server functions, import them in components, and call them over WebSocket. The runtime handles pub/sub and protocol wiring; platform, native-addon, authentication, and build prerequisites still apply.
 
-**Upgrading?** Read the [release scope](./docs/releasing.md#realtime-package-scope), [release history](./CHANGELOG.md), [migration guide](./MIGRATION.md), and [companion adapter migration guide](https://github.com/lanteanio/svelte-adapter-uws/blob/main/MIGRATION.md).
+**Upgrading?** Read the [0.6 upgrade actions](./docs/0.6-upgrade.md), [release scope](./docs/releasing.md#realtime-package-scope), [release history](./CHANGELOG.md), [migration guide](./MIGRATION.md), and [companion adapter migration guide](https://github.com/lanteanio/svelte-adapter-uws/blob/main/MIGRATION.md).
 
 The shared [translation contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/TRANSLATING.md) defines the English source locale, application-owned catalogs, stable machine fields, placeholders, and bidirectional text across all three ecosystem packages.
 

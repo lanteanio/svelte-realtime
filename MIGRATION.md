@@ -8,7 +8,7 @@ This guide is organized by **tier**. Most apps only need to read the first two s
 - **[Recommended new patterns](#recommended-new-patterns)** - not required, but better.
 - **[Cosmetic](#cosmetic)** - type-only, deprecations, dead code removed.
 
-`svelte-realtime` 0.5 raises its peerDep on `svelte-adapter-uws` to `^0.5.0`. See the [adapter migration guide](https://github.com/lanteanio/svelte-adapter-uws/blob/main/MIGRATION.md) for its breaking changes, the [extensions documentation](https://github.com/lanteanio/svelte-adapter-uws-extensions#readme) for infrastructure integrations, and the [realtime release history](./CHANGELOG.md) for changes after this migration.
+`svelte-realtime` 0.5 raises its peerDep on `svelte-adapter-uws` to `^0.5.0`. See the [adapter migration guide](https://github.com/lanteanio/svelte-adapter-uws/blob/main/MIGRATION.md) for its breaking changes, the [extensions documentation](https://github.com/lanteanio/svelte-adapter-uws-extensions#readme) for infrastructure integrations, and the [0.6 capability and required-action guide](./docs/0.6-upgrade.md) for the next prerelease line.
 
 If you have a small app and want the 5-minute version, see the [docs site upgrade quickstart](https://svelte-realtime.dev/docs/upgrade-quickstart).
 

@@ -4,11 +4,16 @@ All notable changes to `svelte-realtime` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+**Upgrading through 0.6?** Start with the [capability and required-action index](docs/0.6-upgrade.md).
+
 Published artifact identities are recorded in the [release manifest](docs/release-manifest.md).
 
 ## [Unreleased]
 
 ### Added
+
+- The 0.6 consumer guide indexes capabilities, compatibility changes and required upgrade actions.
+  **Action required:** review the [0.6 guide](docs/0.6-upgrade.md) for the features your application uses.
 
 - Release guidance states the realtime package scope, application-owned responsibilities and concrete evidence required before stable promotion.
 
