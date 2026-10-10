@@ -341,6 +341,9 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 					`move: (...a) => ${name}.move(...args, ...a)`,
 					`reportViewport: (...a) => ${name}.reportViewport(...args, ...a)`
 				];
+				if (mpInfo.typing || mpInfo.selections || mpInfo.hasLocks) {
+					sendDeps.push(`restorePresence: (...a) => ${name}._setField(...args, ...a)`);
+				}
 				if (mpInfo.typing) {
 					sendDeps.push(`setTyping: (...a) => ${name}._setField(...args, ...a)`);
 				}

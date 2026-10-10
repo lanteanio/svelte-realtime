@@ -122,6 +122,9 @@ function joinedMembers(list) {
 const _HELD_REACTIONS_MAX = 64;
 // The most sticky fields the server keeps from one delta.
 const _HELD_DELTA_KEYS = 64;
+const _RETAINED_VALUE_BYTES = 1024;
+const _RETAINED_ENTRY_BYTES = 16 * 1024;
+const _fieldEncoder = new TextEncoder();
 
 /**
  * Per data store: its attach phase, kept current by one subscription that
@@ -136,7 +139,8 @@ function _joinOf(store) {
 	if (j === undefined) {
 		const state = {
 			phase: /** @type {string | null} */ (null), hold: /** @type {JoinHold | null} */ (null),
-			fields: new Map(), refs: 0, offline: false, waiting: false, attached: false
+			fields: new Map(), bytes: 2, fieldSend: null,
+			refs: 0, offline: false, waiting: false, attached: false
 		};
 		j = state;
 		_joins.set(store, j);
@@ -171,7 +175,25 @@ function _restoreJoin(state) {
 	if (state.refs === 0 || state.fields.size === 0) return;
 	const hold = state.hold ??= new JoinHold();
 	const fields = hold.fields ??= new Map();
-	for (const [key, value] of state.fields) if (!fields.has(key)) fields.set(key, value);
+	for (const [key, value] of state.fields) if (!fields.has(key)) fields.set(key, { ...value, restored: true });
+}
+
+/** Retain only bounded wire values; a refused replacement keeps the previous value. */
+function _rememberField(state, key, value, send) {
+	const previous = state.fields.get(key);
+	if (value == null || value === false) {
+		if (previous) { state.bytes -= previous.bytes; state.fields.delete(key); }
+		return;
+	}
+	try {
+		const encoded = JSON.stringify(value);
+		if (encoded === undefined || _fieldEncoder.encode(encoded).byteLength > _RETAINED_VALUE_BYTES) return;
+		const bytes = _fieldEncoder.encode(JSON.stringify(key) + ':' + encoded + ',').byteLength;
+		const total = state.bytes - (previous?.bytes || 0) + bytes;
+		if (total > _RETAINED_ENTRY_BYTES) return;
+		state.fields.set(key, { value: JSON.parse(encoded), send, bytes });
+		state.bytes = total;
+	} catch { /* A value that cannot reach the wire cannot be restored. */ }
 }
 
 /**
@@ -197,7 +219,7 @@ function _settle(waiters, run) {
 }
 
 class JoinHold {
-	/** @type {Map<string, { value: any, send: Function }> | null} */
+	/** @type {Map<string, { value: any, send: Function, restored?: boolean }> | null} */
 	fields = null;
 	/** Callers of awaitable field sends, by the method they called. @type {Map<Function, Array<{ resolve: (v: any) => void, reject: (e: any) => void }>>} */
 	fieldWaiters = new Map();
@@ -474,7 +496,18 @@ export class MultiplayerRoom {
 			const join = deps.membership ? _joinOf(deps.membership) : null;
 			if (join) {
 				join.refs++;
-				this.#unsubs.push(() => { if (--join.refs === 0) join.fields.clear(); });
+				join.fieldSend ??= deps.restorePresence || null;
+				this.#unsubs.push(() => {
+					if (--join.refs !== 0) return;
+					join.fields.clear();
+					join.bytes = 2;
+					join.fieldSend = null;
+					// Keep explicit app sends, including a cleanup's release, but
+					// a future view must not reacquire automatically retained fields.
+					if (join.hold?.fields) for (const [key, field] of join.hold.fields) {
+						if (field.restored) join.hold.fields.delete(key);
+					}
+				});
 			}
 			// No room (a getter that names none) has no roster or cursor streams.
 			if (deps.presence) this.#unsubs.push(deps.presence.subscribe((v) => { this.#presence = v || []; }));
@@ -686,11 +719,7 @@ export class MultiplayerRoom {
 		const join = _joinOf(m);
 		if (name === 'setTyping' || name === 'setSelection' || name === 'acquireLock' || name === 'releaseLock') {
 			for (const [key, value] of Object.entries(args[0])) {
-				if (value == null || value === false) join.fields.delete(key);
-				else {
-					try { join.fields.set(key, { value: JSON.parse(JSON.stringify(value)), send }); }
-					catch { /* A value that cannot reach the wire cannot be restored. */ }
-				}
+				_rememberField(join, key, value, join.fieldSend || send);
 			}
 		}
 		if (join.hold === null) {
@@ -711,7 +740,8 @@ export class MultiplayerRoom {
 				join.hold = new JoinHold();
 			}
 		}
-		return join.hold.add(name, send, args);
+		const field = name === 'setTyping' || name === 'setSelection' || name === 'acquireLock' || name === 'releaseLock';
+		return join.hold.add(name, field && join.fieldSend ? join.fieldSend : send, args);
 	}
 
 	/** @param {any} b @param {'move' | 'reportViewport'} name @param {any[]} args */

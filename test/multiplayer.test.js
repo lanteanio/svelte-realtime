@@ -275,7 +275,7 @@ export const game = live.room({
 		const room = factoryDeps(code, 'board', 'room', 'b1');
 		expect(Object.keys(room).sort()).toEqual([
 			'acquireLock', 'cursors', 'me', 'membership', 'move', 'owner', 'presence', 'react',
-			'reactions', 'releaseLock', 'reportViewport', 'selections', 'setSelection', 'setTyping', 'status'
+			'reactions', 'releaseLock', 'reportViewport', 'restorePresence', 'selections', 'setSelection', 'setTyping', 'status'
 		]);
 		expect(room.setTyping({ typing: true })).toEqual(['_setField', 'b1', { typing: true }]);
 		expect(room.setSelection({ selection: null })).toEqual(['_setField.fireAndForget', 'b1', { selection: null }]);
@@ -3178,6 +3178,50 @@ describe('MultiplayerRoom roster aggregation', () => {
 		answer('a');
 		expect(sent).toEqual([]);
 		fresh.destroy();
+	});
+
+	it('drops automatic restoration when the final view leaves during an outage, but keeps an explicit release', async () => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const deps = room('a');
+		const r = new MultiplayerRoom(deps);
+		answer('a');
+		r.acquireLock('title');
+		r.acquireLock('body');
+		sent.length = 0;
+		deps.status.set('disconnected');
+		const release = r.releaseLock('title');
+		r.destroy();
+		await Promise.resolve();
+		const fresh = new MultiplayerRoom(room('a'));
+		deps.status.set('open');
+		answer('a');
+		expect(sent).toEqual([['a', 'releaseLock', { 'lock:title': null }]]);
+		await expect(release).resolves.toBe('releaseLock-ack');
+		fresh.destroy();
+	});
+
+	it('bounds retained fields without evicting earlier locks and rejects oversized replacements', async () => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const deps = room('a');
+		const r = new MultiplayerRoom(deps);
+		answer('a');
+		r.acquireLock('first');
+		r.setSelection({ start: 1, end: 2 });
+		for (let i = 0; i < 4000; i++) r.acquireLock('key-' + i);
+		r.setSelection({ value: 'x'.repeat(1025) });
+		sent.length = 0;
+		deps.status.set('disconnected');
+		deps.status.set('open');
+		answer('a', 'attaching');
+		answer('a');
+		const restored = Object.assign({}, ...sent.map(s => s[2]));
+		expect(restored['lock:first']).toBe(true);
+		expect(restored.selection).toEqual({ start: 1, end: 2 });
+		expect(Object.keys(restored).length).toBeLessThan(1000);
+		expect(new TextEncoder().encode(JSON.stringify(restored)).byteLength).toBeLessThanOrEqual(16384);
+		r.destroy();
 	});
 
 	it('the README lock effect: the lock it takes on mount and after a switch waits for each join', async () => {

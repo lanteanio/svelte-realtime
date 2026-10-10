@@ -51,7 +51,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
-- Multiplayer room views restore their latest selection, locks and typing after rejoining, and hold sends throughout connection outages. Offline releases override retained claims, and the final view leaving clears retained state.
+- Multiplayer room views restore their latest selection, locks and typing after rejoining, and hold sends throughout connection outages. Generated rooms combine restoration into one delta within the server's field limits. Retention is byte-bounded, offline releases override retained claims, and the final view leaving clears automatic restoration even during an outage.
 
 - Cron browser fixtures acknowledge subscriptions before reset, serialize requested ticks, and confirm empty server and client state.
 
