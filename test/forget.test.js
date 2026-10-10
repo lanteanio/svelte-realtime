@@ -586,6 +586,7 @@ describe('live.forget - shape + descriptors', () => {
 			'smooth.js': 'smooth',
 			'lagcomp.js': 'smooth', // purged through the smooth descriptor (rec.lagComp.remove)
 			'room-owner.js': 'presence', // the owner role releases inside the presence purge
+			'room.js': 'presence', // socket slots share refs whose data/count the presence purge scrubs in place
 			'rate-limit.js': 'rateLimit',
 			'idempotency.js': 'idempotency',
 			'dead-letter.js': 'webhookDeadLetter',

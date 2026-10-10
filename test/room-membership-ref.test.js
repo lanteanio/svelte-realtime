@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { live, handleRpc, unsubscribe, close } from '../src/server.js';
+import { live, handleRpc, unsubscribe, close, configureForget, _resetForget } from '../src/server.js';
 import { _presenceRef, state } from '../src/server/state.js';
 import { _ownerGet } from '../src/server/room-owner.js';
 import { createTestEnv } from '../src/testing.js';
@@ -30,6 +30,7 @@ describe('room subscriptions release only acquired membership refs', () => {
 		env.cleanup();
 		state.maxPresenceRef = originalCap;
 		state.presenceRefWarnFired = false;
+		_resetForget();
 		vi.restoreAllMocks();
 		vi.useRealTimers();
 	});
@@ -58,6 +59,25 @@ describe('room subscriptions release only acquired membership refs', () => {
 		await vi.advanceTimersByTimeAsync(0);
 		expect(_presenceRef.get('refs:one\0alice').count).toBe(2);
 		await leave(ws, 'close');
+		expect(_presenceRef.has('refs:one\0alice')).toBe(false);
+	});
+
+	it('scrubs a forgotten socket ref in place and preserves a later membership when it closes', async () => {
+		const oldSocket = await join('alice');
+		const oldRef = _presenceRef.get('refs:one\0alice');
+		expect(oldRef.data).toEqual({ name: 'alice' });
+		configureForget({ platform: env.platform, store: { purgeUser: async () => 0 } });
+		await live.forget('alice');
+		expect(oldRef).toMatchObject({ data: null, count: 0, gone: true });
+		expect(_presenceRef.has('refs:one\0alice')).toBe(false);
+		const newSocket = await join('alice');
+		const newRef = _presenceRef.get('refs:one\0alice');
+		expect(newRef).not.toBe(oldRef);
+		await leave(oldSocket, 'close');
+		expect(_presenceRef.get('refs:one\0alice')).toBe(newRef);
+		expect(newRef.count).toBe(1);
+		expect(await _ownerGet(env.platform, 'refs:one')).toBe('alice');
+		await leave(newSocket, 'close');
 		expect(_presenceRef.has('refs:one\0alice')).toBe(false);
 	});
 
