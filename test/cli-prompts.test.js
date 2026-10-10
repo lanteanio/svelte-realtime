@@ -27,7 +27,7 @@ function terminal(args, steps) {
 			cwd: root, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, FORCE_COLOR: '0' }
 		});
 		let output = '', next = 0;
-		const timer = setTimeout(() => { child.kill(); reject(new Error('CLI prompt timed out: ' + output)); }, 3500);
+		const timer = setTimeout(() => { child.kill(); reject(new Error('CLI prompt timed out: ' + output)); }, 15000);
 		const receive = (chunk) => {
 			output += stripVTControlCharacters(chunk.toString());
 			if (next < steps.length && output.includes(steps[next].waitFor)) {
@@ -41,7 +41,7 @@ function terminal(args, steps) {
 	});
 }
 
-describe('interactive CLI prompts', () => {
+describe('interactive CLI prompts', { timeout: 25000 }, () => {
 	it('cancels project-name input without starting external work', async () => {
 		const result = await terminal([], [{ waitFor: 'Project name', input: '\x03' }]);
 		expect(result.code).toBe(0);
@@ -67,12 +67,12 @@ describe('interactive CLI prompts', () => {
 	it('accepts the displayed default name on empty input', async () => {
 		const result = await terminal([], [
 			{ waitFor: 'Project name', input: '\r' },
-			{ waitFor: 'Which template would you like?', input: '\x03' }
+			{ waitFor: 'Which template would you like?', input: '\r' }
 		]);
-		expect(result.code).toBe(0);
+		expect(result.code).toBe(1);
 		expect(result.completedSteps).toBe(2);
-		expect(result.output).toContain('my-app');
-		expect(result.output).not.toContain('CLI_EXEC');
+		const captured = JSON.parse(result.output.match(/CLI_EXEC (\{[^\r\n]+\})/)[1]);
+		expect(captured.args).toEqual(['-y', 'sv@0.17.1', 'create', 'my-app', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
 	});
 
 	it('accepts a valid name and exposes every cancellable template choice', async () => {

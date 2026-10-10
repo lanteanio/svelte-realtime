@@ -64,6 +64,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Signal subscription setup safely ignores a native socket that closes during asynchronous connection initialization.
 
 - Stream unsubscribe and disconnect cleanup wait for pending subscribe hooks, preventing room presence, ownership, and enumeration from surviving a departed socket.
+- CLI prompt regression checks the actual default project name passed to scaffolding after empty input.
+
 - `live.public` preserves typed handler signatures and appears in generated `$live` declarations for JavaScript and TypeScript modules.
   **Action required:** none; see [public RPC intent and module guards](README.md#per-module-auth).
 
