@@ -3476,15 +3476,16 @@ export const avatar = live.upload(async (ctx, name, mime) => {
 });
 ```
 
-The handler signature is `(ctx, ...args)` like a regular RPC. `ctx` carries the usual fields plus three streaming extras:
+The handler signature is `(ctx, ...args)` like a regular RPC. `ctx` carries the usual fields plus these upload fields:
 
 - `ctx.stream` - `AsyncIterable<Uint8Array>` yielding chunks in arrival order.
-- `ctx.signal` - `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, or `maxBufferedChunks` overflow. Wire any cleanup you need to it. **Note this replaces the point-to-point `ctx.signal(userId, event, data)` method** for the duration of an upload handler - the upload runtime assigns the `AbortSignal` onto the context, so the method is not reachable here. To send a point-to-point signal from an upload handler, publish to the topic directly with `ctx.publish('__signal:' + userId, event, data)`, or do it from a regular `live()` handler.
+- `ctx.abortSignal` - `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, `maxBufferedChunks` overflow, or a `reauthEvery` rejection. Wire cleanup and cancellable work to it.
+- `ctx.signal` - deprecated alias for `ctx.abortSignal`, retained during 0.x. It replaces the point-to-point `ctx.signal(userId, event, data)` method inside upload handlers. To send a point-to-point event from an upload handler, use `ctx.publish('__signal:' + userId, event, data)`, or send it from a regular `live()` handler.
 - `ctx.upload` - `{ id }` for log correlation.
 
 Guards and global middleware run once before the first chunk is consumed. An unauthorised client never gets to send bytes.
 
-For long uploads where the user's session can be revoked mid-stream (token expiry, explicit logout, role downgrade), pass `reauthEvery: <bytes>`. The module guard is re-run against the live `ctx` every N bytes received past the last re-auth; on rejection the upload aborts with the error code (`UNAUTHENTICATED` / `FORBIDDEN`) and the consumer observes `ctx.signal.aborted`. Default is unset (legacy single-check behavior at chunk-0). Reauth runs as a fire-and-forget task off the chunk-receive path so the receive loop stays sync; concurrent reauths on the same upload are coalesced.
+For long uploads where the user's session can be revoked mid-stream (token expiry, explicit logout, role downgrade), pass `reauthEvery: <bytes>`. The module guard is re-run against the live `ctx` every N bytes received past the last re-auth; on rejection the upload aborts with the error code (`UNAUTHENTICATED` / `FORBIDDEN`) and the consumer observes `ctx.abortSignal.aborted`. Default is unset (legacy single-check behavior at chunk-0). Reauth runs as a fire-and-forget task off the chunk-receive path so the receive loop stays sync; concurrent reauths on the same upload are coalesced.
 
 ### Client
 

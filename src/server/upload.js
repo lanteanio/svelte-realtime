@@ -677,7 +677,8 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		const _h = _getCtxHelpers(platform);
 		ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null, null, _streamIdHex(streamId));
 		ctx.stream = upload.streamWrap.stream;
-		ctx.signal = upload.ctrl.signal;
+		ctx.abortSignal = upload.ctrl.signal;
+		ctx.signal = ctx.abortSignal;
 		ctx.upload = { id: _streamIdHex(streamId) };
 
 		await _runWithMiddleware(ctx, async () => {

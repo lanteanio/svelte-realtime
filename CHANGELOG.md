@@ -7,10 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Upload handlers receive `ctx.abortSignal` for cancellation. `ctx.signal`
+  remains a deprecated alias during 0.x.
+
 ### Fixed
 
 - Removed unused optimistic-key bookkeeping from client stream merges; optimistic confirmation continues to use mutation queue entries.
-
 - Offline persistence orders writes and deletes for each stored key, so a delayed write cannot restore a settled mutation or replace a newer upload checkpoint.
 
 ## [0.6.0-next.91] - 2026-10-10

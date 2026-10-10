@@ -1475,22 +1475,9 @@ export interface UploadOptions {
 }
 
 /**
- * Context passed to `live.upload()` handlers. Extends `LiveContext` with three
- * streaming-only fields, and REPLACES one member.
- *
- * `signal` is an `AbortSignal` here, not `LiveContext`'s point-to-point
- * `signal(userId, event, data)` method. That is not a typing convenience: the
- * upload runtime assigns `ctx.signal = <AbortController>.signal` on the
- * per-upload context, so the method is genuinely unreachable inside a
- * `live.upload()` handler. The base member is therefore `Omit`ted rather than
- * redeclared - redeclaring it with an incompatible type made this interface fail
- * to compile against its own base (TS2430), which only stayed invisible because
- * `skipLibCheck: true` is the SvelteKit/TS default. Consumers who typecheck
- * library types saw the whole upload surface as broken.
- *
- * To send a point-to-point signal from an upload handler, publish to the signal
- * topic directly - `ctx.publish('__signal:' + userId, event, data)` - or do it
- * from a regular `live()` handler.
+ * Context passed to `live.upload()` handlers. Provides an upload stream and
+ * cancellation signal. The deprecated `signal` alias replaces the point-to-point
+ * method on `LiveContext`; use `ctx.publish()` to send events from uploads.
  */
 export interface UploadContext<UserData = unknown> extends Omit<LiveContext<UserData>, 'signal'> {
 	/** Async iterable yielding `Uint8Array` chunks in arrival order. */
@@ -1499,6 +1486,8 @@ export interface UploadContext<UserData = unknown> extends Omit<LiveContext<User
 	 * Aborts on client cancel, WS disconnect, `maxSize` exceeded,
 	 * `maxBufferedChunks` overflow, or a `reauthEvery` rejection.
 	 */
+	abortSignal: AbortSignal;
+	/** @deprecated Use `abortSignal`. Retained as an alias during 0.x. */
 	signal: AbortSignal;
 	/** 8-char hex id matching the client-side `UploadHandle.streamIdHex`. */
 	upload: { id: string };

@@ -1746,7 +1746,9 @@ describe('live.upload()', () => {
 	it('cancels via control frame and aborts the handler signal', async () => {
 		let signalAborted = false;
 		const fn = live.upload(async (ctx) => {
-			ctx.signal.addEventListener('abort', () => { signalAborted = true; });
+			expect(ctx.abortSignal).toBeInstanceOf(AbortSignal);
+			expect(ctx.signal).toBe(ctx.abortSignal);
+			ctx.abortSignal.addEventListener('abort', () => { signalAborted = true; });
 			try {
 				for await (const _ of ctx.stream) {}
 			} catch (err) {
@@ -1774,7 +1776,9 @@ describe('live.upload()', () => {
 	it('aborts in-flight uploads on connection close', async () => {
 		let signalAborted = false;
 		const fn = live.upload(async (ctx) => {
-			ctx.signal.addEventListener('abort', () => { signalAborted = true; });
+			expect(ctx.abortSignal).toBeInstanceOf(AbortSignal);
+			expect(ctx.signal).toBe(ctx.abortSignal);
+			ctx.abortSignal.addEventListener('abort', () => { signalAborted = true; });
 			for await (const _ of ctx.stream) {}
 			return 'unreached';
 		});
