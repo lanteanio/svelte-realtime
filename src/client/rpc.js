@@ -406,17 +406,10 @@ export function __mpFields() {
  * frame when its promise settles, so only the non-queuing send is used here.
  * @param {any} conn
  * @param {any} frame
- * @param {string[]} ids
+ * @param {string | string[]} requestIds
  */
-function _sendPendingFrame(conn, frame, ids) {
-	if (clientState.socketUp) {
-		for (const id of ids) {
-			const entry = pending.get(id);
-			if (entry) entry.rpcSent = true;
-		}
-		conn.send(frame);
-		return;
-	}
+function _parkPendingFrame(conn, frame, requestIds) {
+	const ids = typeof requestIds === 'string' ? [requestIds] : requestIds;
 	const wake = () => {
 		if (!clientState.socketUp) return;
 		const active = ids.filter(id => pending.has(id));
@@ -424,7 +417,6 @@ function _sendPendingFrame(conn, frame, ids) {
 		for (const id of active) {
 			const entry = pending.get(id);
 			entry.rpcWaiting = false;
-			entry.rpcSent = true;
 			delete entry.wake;
 		}
 		// A settled call must never ride along in an otherwise live batch.
@@ -552,8 +544,8 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 			replay: replay === true
 		});
 		const envelope = idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args };
-		if (replay) conn.send(envelope);
-		else _sendPendingFrame(conn, envelope, [id]);
+		if (replay || clientState.socketUp) conn.send(envelope);
+		else _parkPendingFrame(conn, envelope, id);
 	});
 }
 
@@ -643,7 +635,9 @@ export function __binaryRpc(path) {
 			frame.set(bufBytes, 3 + headerBytes.length);
 
 			// Send a view of exactly the right size (frame may be oversized from reuse)
-			_sendPendingFrame(conn, frame.buffer.slice(0, size), [id]);
+			const payload = frame.buffer.slice(0, size);
+			if (clientState.socketUp) conn.send(payload);
+			else _parkPendingFrame(conn, payload, id);
 		});
 	};
 }
@@ -743,7 +737,8 @@ export function batch(fn, options) {
 		}, effectiveTimeout);
 		const existing = pending.get(call.id);
 		if (existing) existing.timer = timer;
-		_sendPendingFrame(conn, call, [call.id]);
+		if (clientState.socketUp) conn.send(call);
+		else _parkPendingFrame(conn, call, call.id);
 		return Promise.all(promises);
 	}
 
@@ -772,7 +767,8 @@ export function batch(fn, options) {
 	// Send all calls as one frame
 	const payload = { batch: collected };
 	if (options?.sequential) payload.sequential = true;
-	_sendPendingFrame(conn, payload, collected.map(call => call.id));
+	if (clientState.socketUp) conn.send(payload);
+	else _parkPendingFrame(conn, payload, collected.map(call => call.id));
 
 	// Return promise that resolves when all individual promises resolve
 	return Promise.all(promises).finally(() => clearTimer(batchTimer));

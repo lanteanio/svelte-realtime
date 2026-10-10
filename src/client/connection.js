@@ -313,7 +313,7 @@ export function ensureDisconnectListener() {
 				// 'disconnected' in between. Calls already sent on that socket
 				// cannot receive an answer; unsent calls still own their frames.
 				for (const [id, entry] of pending) {
-					if (!entry.replay && !entry.rpcSent) continue;
+					if (entry.stream || entry.rpcWaiting) continue;
 					pending.delete(id);
 					if (entry.timer) clearTimer(entry.timer);
 					entry.reject(_connectionLost('DISCONNECTED', 'WebSocket connection replaced'));
