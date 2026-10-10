@@ -328,10 +328,9 @@ function _releasePendingUploadBytes(upload) {
  * Remove an upload from the registry and decrement the global counter.
  * Idempotent.
  */
-function _cleanupUpload(ws, perWs, streamId) {
-	if (!perWs) return;
-	const upload = perWs.get(streamId);
-	if (!upload) return;
+function _cleanupUpload(ws, perWs, streamId, upload) {
+	// A cancelled start may settle after this ID was reused by another upload.
+	if (!perWs || perWs.get(streamId) !== upload) return;
 	_releasePendingUploadBytes(upload);
 	perWs.delete(streamId);
 	if (perWs.size === 0) _wsUploads.delete(ws);
@@ -374,7 +373,7 @@ function _createUploadEntry(ws, perWs, streamId, platform) {
 				try { upload.ctrl.abort(new LiveError(code, error)); } catch {}
 			}
 			_respondUpload(ws, platform, streamId, { ok: false, code, error });
-			_cleanupUpload(ws, perWs, streamId);
+			_cleanupUpload(ws, perWs, streamId, upload);
 		}
 	};
 	return upload;
@@ -716,7 +715,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		}
 	} finally {
 		_exitInFlight();
-		_cleanupUpload(ws, perWs, streamId);
+		_cleanupUpload(ws, perWs, streamId, upload);
 	}
 }
 
@@ -736,7 +735,7 @@ export function _drainUploadsOnClose(ws) {
 			try { upload.ctrl.abort(new LiveError('DISCONNECTED', 'connection closed')); } catch {}
 		}
 		upload.pendingChunks = null;
-		_cleanupUpload(ws, perWs, streamId);
+		_cleanupUpload(ws, perWs, streamId, upload);
 	}
 	_wsUploads.delete(ws);
 }
