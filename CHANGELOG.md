@@ -125,6 +125,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Hook validation checks JavaScript and TypeScript runtime exports, avoiding false warnings for handler aliases and missing warnings for comments or type-only exports. Scaffolds use a direct message re-export.
 
+- Generated counter examples announce connection, count and error changes, offer a connection retry, and handle failed increments with labelled keyboard controls.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

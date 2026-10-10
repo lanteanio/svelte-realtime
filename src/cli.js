@@ -203,17 +203,48 @@ export const counter = live.stream('count', () => {
 			join(dest, 'src', 'routes', '+page.svelte'),
 			`<script lang="ts">
 \timport { increment, counter } from '$live/counter';
+
+\tconst counterStatus = counter.status;
+\tconst counterError = counter.error;
+\tlet incrementing = false;
+\tlet mutationError = '';
+
+\tasync function increaseCount() {
+\t\tif (incrementing || $counterStatus !== 'connected') return;
+\t\tincrementing = true;
+\t\tmutationError = '';
+\t\ttry {
+\t\t\tawait increment();
+\t\t} catch (error) {
+\t\t\tmutationError = error instanceof Error && error.message ? error.message : 'Please try again.';
+\t\t} finally {
+\t\t\tincrementing = false;
+\t\t}
+\t}
 </script>
 
 <h1>svelte-realtime</h1>
 
-{#if $counter === undefined}
-\t<p>Connecting...</p>
-{:else}
-\t<p>Count: {$counter}</p>
-{/if}
+<p role="status" aria-live="polite" aria-atomic="true">
+\t{#if $counterError || $counterStatus === 'error'}
+\t\tCounter unavailable: {$counterError?.message ?? 'Connection failed.'}
+\t{:else if $counterStatus === 'reconnecting'}
+\t\tReconnecting... {#if $counter !== undefined}Last count: {$counter}.{/if}
+\t{:else if $counter === undefined || $counterStatus === 'loading'}
+\t\tConnecting...
+\t{:else if mutationError}
+\t\tCould not increase count: {mutationError} Try Increase count by one again.
+\t{:else}
+\t\tCount: {$counter}{#if incrementing}. Updating...{/if}
+\t{/if}
+</p>
 
-<button onclick={() => increment()}>+1</button>
+<button onclick={increaseCount} disabled={$counterStatus !== 'connected'} aria-disabled={incrementing || $counterStatus !== 'connected'}>
+\tIncrease count by one
+</button>
+{#if $counterError || $counterStatus === 'error'}
+\t<button onclick={() => window.location.reload()}>Retry connection</button>
+{/if}
 `
 		);
 	}

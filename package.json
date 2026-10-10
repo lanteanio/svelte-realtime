@@ -114,7 +114,8 @@
     "generate:examples": "node scripts/check-doc-code.js --write",
     "test:examples": "vitest run test/documentation-code.test.js test/packed-readme-examples.test.js",
     "check:documentation": "node scripts/check-documentation-contract.js",
-    "generate:documentation": "node scripts/check-documentation-contract.js --write"
+    "generate:documentation": "node scripts/check-documentation-contract.js --write",
+    "test:scaffold": "vitest run --config vitest.scaffold.config.js"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -140,7 +141,8 @@
     "svelte-adapter-uws-extensions": "^0.6.0-next.63",
     "typescript": "^6.0.3",
     "vitest": "^4.0.18",
-    "yaml": "^2.9.0"
+    "yaml": "^2.9.0",
+    "@axe-core/playwright": "^4.13.0"
   },
   "overrides": {
     "cookie": "^0.7.2"
