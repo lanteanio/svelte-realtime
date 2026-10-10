@@ -189,6 +189,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Shared-topic subscription regressions now cover a refused attach overlapping an unnamed, attached, or resolved sibling, including exactly one final wire release.
 
+- Verify benchmark rejection fixtures and RPC outcomes, report execution context, and describe measured in-process scope.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

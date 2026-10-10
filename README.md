@@ -5547,9 +5547,9 @@ The plugin resolves `$live/chat` to `src/live/chat.js`, generates client stubs, 
 
 ## Benchmarks
 
-The benchmark suite measures the full-stack overhead added by svelte-realtime on top of raw WebSocket messaging: JSON serialization, RPC path resolution, registry lookup, context construction, handler execution, and response encoding. These run in-process with mock objects and isolate the framework cost from network latency.
+The benchmark reports in-process RPC dispatch, copied merge kernels and non-RPC rejection. Requests are encoded before timing; response delivery is mocked and validates correlation, success and returned data. Network, request serialization and response encoding are excluded. Output records the package version, Node runtime, platform, execution mode and success/error counts. Set `NODE_ENV=production` in your environment for production-mode results; other values use development mode.
 
-Run with:
+Run with (add `--check` for a short correctness check without throughput timings):
 
 ```bash
 node bench/rpc.mjs
@@ -5557,10 +5557,10 @@ node bench/rpc.mjs
 
 What gets measured:
 - **RPC dispatch overhead**: time for `handleRpc` to parse, look up the registry, build ctx, execute, and respond - compared to calling the function directly
-- **Stream merge throughput**: operations per second for each merge strategy (`crud`, `latest`, `set`, `presence`, `cursor`) applying events to arrays of varying sizes
+- **Stream merge throughput**: copied `crud`, `latest`, `set`, `presence` and `cursor` kernels over varying array sizes; excludes the live client store, subscribers and optimistic queue
 - **Fast-path rejection**: how quickly non-RPC messages are identified and skipped
 
-Merge strategies use an internal `Map<key, index>` for O(1) lookups instead of linear scans. Updates and upserts on keyed strategies (crud, presence, cursor) are constant-time regardless of array size. Deletes and prepends require an index rebuild (linear), which matches the cost of the delete itself.
+These kernel examples use `Map<key, index>` lookups and array copies; the CRUD and presence examples use swap-remove deletion. Their numbers describe these kernels, not end-to-end client delivery. Every rejection fixture is checked against the real dispatcher before timing, and an invalid RPC outcome fails the run instead of being counted as successful throughput.
 
 ### Event batching (browser)
 

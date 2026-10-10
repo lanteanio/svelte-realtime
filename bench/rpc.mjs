@@ -1,7 +1,7 @@
 // @ts-check
 //
 // Benchmarks for svelte-realtime overhead.
-// Run with: node bench/rpc.js
+// Run with: node bench/rpc.mjs
 //
 // Measures:
 // 1. RPC dispatch overhead (handleRpc parse + registry + ctx + execute + respond)
@@ -9,9 +9,12 @@
 // 2. Stream merge throughput (ops/sec for each merge strategy at various array sizes)
 //
 
-import { live, LiveError, handleRpc, __register } from '../src/server.js';
+import { readFileSync } from 'node:fs';
+import { live, handleRpc, __register } from '../src/server.js';
 
 const textEncoder = new TextEncoder();
+const checkOnly = process.argv.includes('--check');
+const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,16 +75,41 @@ async function benchRpcDispatch() {
 	const ws = createMockWs({ id: 'user1' });
 	const platform = createMockPlatform();
 
-	// Warm up
-	for (let i = 0; i < 1000; i++) {
-		const buf = encodeRpc('bench/echo', String(i), ['hello']);
-		handleRpc(ws, buf, platform);
+	let pending = null;
+	let successes = 0, errors = 0;
+	let unexpectedResponse = false;
+	platform.send = (_socket, topic, id, payload) => {
+		const waiting = pending;
+		pending = null;
+		if (!waiting) { unexpectedResponse = true; return 1; }
+		if (topic !== '__rpc' || id !== waiting.id || payload?.ok !== true || payload.data !== 'hello') {
+			errors++;
+			waiting.reject(new Error(`Invalid RPC outcome: topic=${topic}, id=${id}, code=${payload?.code ?? 'none'}`));
+		} else {
+			successes++;
+			waiting.resolve();
+		}
+		return 1;
+	};
+	function dispatch(buffer, id) {
+		return new Promise((resolve, reject) => {
+			pending = { id, resolve, reject };
+			if (handleRpc(ws, buffer, platform) !== true) {
+				pending = null;
+				reject(new Error(`RPC ${id} was not handled`));
+			}
+		});
 	}
-	// Wait for all warmup handlers to settle
-	await new Promise(r => setTimeout(r, 50));
+
+	// Each warmup completes before measurement; no sleep-based settlement.
+	for (let i = 0; i < (checkOnly ? 16 : 1000); i++) {
+		const id = 'warmup-' + i;
+		await dispatch(encodeRpc('bench/echo', id, ['hello']), id);
+	}
+	successes = 0;
 
 	// Measure direct function call
-	const directIterations = 500_000;
+	const directIterations = checkOnly ? 128 : 500_000;
 	const ctx = {
 		user: ws.getUserData(),
 		ws,
@@ -103,7 +131,7 @@ async function benchRpcDispatch() {
 
 	// Measure handleRpc dispatch sequentially (same concurrency as direct calls).
 	// Each iteration sends one RPC and waits for the response before sending the next.
-	const dispatchIterations = 100_000;
+	const dispatchIterations = checkOnly ? 128 : 100_000;
 	const bufs = [];
 	for (let i = 0; i < dispatchIterations; i++) {
 		bufs.push(encodeRpc('bench/echo', String(i), ['hello']));
@@ -111,15 +139,14 @@ async function benchRpcDispatch() {
 
 	const dispatchStart = performance.now();
 	for (let i = 0; i < dispatchIterations; i++) {
-		await new Promise(resolve => {
-			platform.send = () => { resolve(); return 1; };
-			handleRpc(ws, bufs[i], platform);
-		});
+		await dispatch(bufs[i], String(i));
 	}
-	platform.send = () => 1;
 	const dispatchMs = performance.now() - dispatchStart;
 	const dispatchNsPerOp = (dispatchMs * 1e6) / dispatchIterations;
 
+	if (unexpectedResponse || successes !== dispatchIterations || errors) throw new Error('RPC outcome accounting failed');
+	console.log(`RPC outcomes: ${successes} successes, ${errors} errors`);
+	if (checkOnly) return;
 	console.log('--- RPC dispatch overhead ---');
 	console.log(`Direct function call:     ${formatNs(directNsPerOp)}/op  (${formatOps(directIterations / (directMs / 1000))})`);
 	console.log(`handleRpc dispatch:       ${formatNs(dispatchNsPerOp)}/op  (${formatOps(dispatchIterations / (dispatchMs / 1000))})`);
@@ -132,8 +159,8 @@ async function benchRpcDispatch() {
 // 2. Stream merge throughput
 // ---------------------------------------------------------------------------
 
-// Simulate the merge logic from client.js without store/subscriber overhead.
-// This isolates the merge algorithm performance.
+// These copied merge kernels omit store, subscriber and optimistic-queue work.
+// Their timings do not measure the current client implementation.
 
 function benchCrudMerge(arraySize) {
 	const key = 'id';
@@ -351,9 +378,21 @@ async function benchFastReject() {
 	const nonRpc = [
 		textEncoder.encode('plain text message').buffer,
 		textEncoder.encode('{"type":"custom","data":123}').buffer,
-		new Uint8Array([0x01, 0x02, 0x03, 0x04]).buffer,
+		new Uint8Array([0xff, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d]).buffer,
 		textEncoder.encode('{"some":"json","not":"rpc"}').buffer,
 	];
+
+	let responses = 0;
+	platform.send = () => { responses++; return 1; };
+	let rejected = 0;
+	for (const payload of nonRpc) {
+		if (handleRpc(ws, payload, platform) !== false) throw new Error('Non-RPC fixture was handled by the RPC protocol');
+		rejected++;
+	}
+	await Promise.resolve();
+	if (responses) throw new Error('Non-RPC fixture produced a response');
+	console.log(`Non-RPC fixtures: ${rejected} rejected, 0 handled, ${responses} responses`);
+	if (checkOnly) return;
 
 	const iterations = 500_000;
 	const start = performance.now();
@@ -374,12 +413,21 @@ async function benchFastReject() {
 // Run
 // ---------------------------------------------------------------------------
 
-console.log('svelte-realtime benchmarks');
+console.log(`svelte-realtime ${version} benchmarks`);
+console.log(`Mode: ${process.env.NODE_ENV === 'production' ? 'production' : 'development'} (NODE_ENV=${process.env.NODE_ENV ?? 'unset'})`);
+console.log(`Runtime: Node ${process.version}, ${process.platform}/${process.arch}`);
+console.log('Scope: preencoded requests, mock response delivery with outcome validation; no network or response encoding.');
 console.log('='.repeat(50));
 console.log();
 
 await benchFastReject();
-await benchRpcDispatch();
-await benchMergeStrategies();
+let deadline;
+try {
+	await Promise.race([
+		benchRpcDispatch(),
+		new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('RPC benchmark did not complete within 30 seconds')), 30_000); })
+	]);
+} finally { clearTimeout(deadline); }
+if (!checkOnly) await benchMergeStrategies();
 
-console.log('Done.');
+console.log(checkOnly ? 'Check passed.' : 'Done.');
