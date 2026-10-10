@@ -185,6 +185,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Stream cleanup is idempotent, canceled detaches preserve later resume grace, and queued reconnects discard replay cursors that age past their trust bound before the socket opens.
 
+- Shared-topic subscription regressions now cover a refused attach overlapping an unnamed, attached, or resolved sibling, including exactly one final wire release.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

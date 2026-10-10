@@ -86,7 +86,7 @@ const releaseFrames = (topic) =>
 	sentFrames.filter((f) => f && f.type === 'unsubscribe' && f.topic === topic);
 
 describe('managed-topic wire release', () => {
-	it('sends an explicit unsubscribe frame when the last local ref is dropped on an open socket', async () => {
+	it('lets the adapter send one unsubscribe frame when the last local ref is dropped on an open socket', async () => {
 		const off = await joinResolved('demo/counter', 'demo:counter');
 		expect(releaseFrames('demo:counter')).toHaveLength(0); // nothing yet
 
@@ -131,5 +131,30 @@ describe('managed-topic wire release', () => {
 		offB();
 		await flush();
 		expect(releaseFrames('shared:t')).toEqual([{ type: 'unsubscribe', topic: 'shared:t' }]);
+	});
+});
+
+
+describe('overlapping subscribes on one managed topic', () => {
+	it.each(['unnamed', 'named', 'resolved'])('a refused attach keeps its sibling alive (%s sibling)', async phase => {
+		const first = __stream('overlap/first', { merge: 'crud', key: 'id' });
+		const second = __stream('overlap/second', { merge: 'crud', key: 'id' });
+		const offFirst = first.subscribe(() => {});
+		await flush(); const requestA = queuedFrames.at(-1);
+		simulateRpcResponse(requestA.id, { attach: true, topic: 'overlap:shared' });
+		const values = [], offSecond = second.subscribe(value => values.push(value));
+		await flush(); const requestB = queuedFrames.at(-1);
+		if (phase !== 'unnamed') simulateRpcResponse(requestB.id, { attach: true, topic: 'overlap:shared' });
+		if (phase === 'resolved') simulateRpcResponse(requestB.id, { ok: true, topic: 'overlap:shared', data: [], merge: 'crud', key: 'id' });
+		simulateRpcResponse(requestA.id, { ok: false, code: 'FORBIDDEN', error: 'refused' });
+		expect(releaseFrames('overlap:shared')).toHaveLength(0);
+		if (phase === 'unnamed') simulateRpcResponse(requestB.id, { attach: true, topic: 'overlap:shared' });
+		if (phase !== 'resolved') simulateRpcResponse(requestB.id, { ok: true, topic: 'overlap:shared', data: [], merge: 'crud', key: 'id' });
+		for (const receive of [...topicCallbacks.get('overlap:shared')]) receive({ event: 'created', data: { id: 1 } });
+		expect(values.at(-1)).toEqual([{ id: 1 }]);
+		offFirst(); await flush();
+		expect(releaseFrames('overlap:shared')).toHaveLength(0);
+		offSecond(); await flush();
+		expect(releaseFrames('overlap:shared')).toEqual([{ type: 'unsubscribe', topic: 'overlap:shared' }]);
 	});
 });
