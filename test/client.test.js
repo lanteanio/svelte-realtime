@@ -6158,12 +6158,13 @@ describe('__stream() early attach frame', () => {
 		unsub();
 	});
 
-	it('a subscribe that times out after the attach frame tears the listener down (no unbounded buffer, no held ref)', async () => {
+	it('a timed-out attach drops its data listener and bounds its orphan ownership ref', async () => {
 		vi.useFakeTimers();
 		try {
 			const store = __stream('board/slow', { merge: 'presence' });
 			const errors = [];
-			const unsub = store.subscribe(() => {});
+			const values = [];
+			const unsub = store.subscribe((value) => values.push(value));
 			const unsubErr = store.error.subscribe((e) => errors.push(e));
 			await flush();
 			const sent = sendQueuedFn.mock.calls[0][0];
@@ -6173,6 +6174,13 @@ describe('__stream() early attach frame', () => {
 
 			await vi.advanceTimersByTimeAsync(30_001);
 			expect(errors[errors.length - 1]?.code).toBe('TIMEOUT');
+			// The data listener is gone. One adapter ownership ref remains only
+			// while a late subscribe answer could still acquire server membership.
+			expect(topicCallbacks.get('slow:presence')?.size).toBe(1);
+			const before = values.length;
+			for (let i = 0; i < 100; i++) simulateTopicMessage('slow:presence', { event: 'join', data: { key: i } });
+			expect(values).toHaveLength(before);
+			await vi.advanceTimersByTimeAsync(30_000);
 			expect(topicCallbacks.has('slow:presence')).toBe(false);
 			unsubErr();
 			unsub();
