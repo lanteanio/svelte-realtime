@@ -292,7 +292,7 @@ function render(el) {
 		devtools = window.__svelte_realtime_devtools;
 	} catch { return; }
 	if (!devtools) {
-		el.textContent = 'No devtools data available';
+		el.textContent = 'Use a realtime client on this page to begin inspecting requests.';
 		return;
 	}
 
@@ -373,7 +373,7 @@ function renderRpcs(el, dt) {
 		const color = h.ok ? 'var(--svr-dt-success, #79db8f)' : 'var(--svr-dt-error, #ff9595)';
 		html += `<div data-key="rpc:${h.seq}" data-rpc-history style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(String(h.duration))}ms</span></div>`;
 	}
-	if (entries.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">No RPC calls yet</div>';
+	if (entries.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">Call a realtime function to see its result and duration here.</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
@@ -459,7 +459,7 @@ function renderStreams(el, dt) {
 		html += `<div id="${esc(eventsId)}"${expanded ? '' : ' hidden'}>`;
 		if (expanded) {
 			if (recentCount === 0) {
-				html += `<div style="padding:4px 0 4px 24px;color:var(--svr-dt-muted, #b3b8cc);font-style:italic">No events captured yet${streamsPaused ? ' (paused)' : ''}</div>`;
+				html += `<div style="padding:4px 0 4px 24px;color:var(--svr-dt-muted, #b3b8cc);font-style:italic">${streamsPaused ? 'Resume capture, then trigger a stream update.' : 'Trigger a stream update to capture an event.'}</div>`;
 			} else {
 				const recent = /** @type {Array<{event: string, data: any, ts: number}>} */ (s.recentEvents);
 				html += `<div style="padding:2px 0 4px 24px">`;
@@ -484,7 +484,7 @@ function renderStreams(el, dt) {
 
 		html += `</div></div>`;
 	}
-	if (streams.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">No active streams</div>';
+	if (streams.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">Subscribe to a live stream to inspect its events here.</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
@@ -515,7 +515,7 @@ function renderSmooth(el, dt) {
 		const topic = esc(s.topic || '(connecting)');
 		const self = s.self ? esc(s.self) : '-';
 		const status = s.overflowed
-			? `<span style="color:var(--svr-dt-error, #ff9595)">prediction KILLED (overflow)</span>`
+			? `<span style="color:var(--svr-dt-warning, #ffe18a)">Prediction paused - waiting for resync (Command window full)</span>`
 			: `<span style="color:var(--svr-dt-success, #79db8f)">predicting</span>`;
 		const unacked = Number(s.unacked) || 0;
 		const cap = Number(s.windowCap) || 0;
@@ -533,7 +533,7 @@ function renderSmooth(el, dt) {
 			`<div style="padding:1px 0 1px 12px;color:var(--svr-dt-muted, #b3b8cc)">interp delay:${esc((Number(s.interpDelayMs) || 0).toFixed(0))}ms</div>` +
 			`</div>`;
 	}
-	if (shown === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">No smoothed channels active</div>';
+	if (shown === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">Create a live.smooth view to inspect prediction and interpolation.</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;

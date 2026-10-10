@@ -196,3 +196,16 @@ it('shows every retained RPC record from empty history through the full ring', a
  expect(await page.locator('[data-rpc-history]').first().textContent()).toContain('call/49');
  expect(await page.locator('[data-rpc-history]').last().textContent()).toContain('call/0');
 });
+
+it('explains how to populate empty views and describes prediction recovery', async () => {
+ await streamsFixture();
+ expect(await page.locator('#svr-dt-content').textContent()).toContain('Call a realtime function');
+ await page.evaluate(() => { window.__svelte_realtime_devtools.streams.clear(); });
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ expect(await page.locator('#svr-dt-content').textContent()).toContain('Subscribe to a live stream');
+ await page.getByRole('tab', { name: 'smooth', exact: true }).click();
+ expect(await page.locator('#svr-dt-content').textContent()).toContain('Create a live.smooth view');
+ await page.evaluate(() => { window.__svelte_realtime_devtools.smooth = new Set([() => ({ overflowed: true })]); });
+ await page.getByRole('tab', { name: 'smooth', exact: true }).click();
+ expect(await page.locator('#svr-dt-content').textContent()).toContain('Prediction paused - waiting for resync (Command window full)');
+});

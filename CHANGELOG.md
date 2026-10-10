@@ -59,6 +59,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools renders every retained RPC history entry, including the oldest entries in its 50-record ring.
 
+- DevTools explains prediction recovery and gives actionable instructions in empty views.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
