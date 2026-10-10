@@ -1733,15 +1733,14 @@ live.access = {
 };
 
 /**
- * Declarative per-function rate limiting.
  * Marker wrapper that declares an RPC is intentionally public (no
  * `_guard` required). Returns the inner handler unchanged at runtime;
  * the vite codegen detects `live.public(...)` in source and
  * suppresses the build-time "no _guard" warning for that module.
  *
- * Use per-export to flag handlers that genuinely accept any
- * authenticated client (e.g. server-time, public health probes,
- * unauthenticated read-only endpoints). For module-wide public RPCs,
+ * Use per-export to flag intentionally open handlers (e.g. server-time or
+ * public health probes). Existing guards and transport authorization still
+ * apply. For module-wide public RPCs,
  * the `// realtime-allow-public` source comment is the lighter
  * alternative.
  *
@@ -1750,8 +1749,8 @@ live.access = {
  *
  * @example
  * ```js
- * // src/lib/realtime/health.js
- * import { live } from 'svelte-realtime';
+ * // src/live/health.js
+ * import { live } from 'svelte-realtime/server';
  *
  * export const serverTime = live.public(async () => ({ now: Date.now() }));
  * ```

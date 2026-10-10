@@ -1507,6 +1507,13 @@ export interface UploadContext<UserData = unknown> extends Omit<LiveContext<User
 
 export namespace live {
 	/**
+	 * Mark an RPC as intentionally public while preserving its handler type.
+	 * Suppresses the module's missing-guard build warning; existing module
+	 * guards, middleware and transport authorization still run.
+	 */
+	function public<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(fn: T): T;
+
+	/**
 	 * Mark a function as a stream provider with a static topic.
 	 *
 	 * @param topic - Pub/sub topic name

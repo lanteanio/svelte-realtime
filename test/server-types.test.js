@@ -6,6 +6,18 @@ it('accepts typed server options and rejects invalid values', () => {
 	const file = resolve(import.meta.dirname, 'smooth-config-consumer.ts').replaceAll('\\', '/');
 	const source = `
 import { configureForget, introspect, live, type SmoothConfig } from '../src/server.js';
+const publicHandler = live.public((ctx, label: string, count: number): string => {
+  ctx.signal('reader', 'status', { label });
+  return label.repeat(count);
+});
+const publicTyped: (ctx: import('../src/server.js').LiveContext, label: string, count: number) => string = publicHandler;
+const publicAsync = live.public(async (_ctx, count: number): Promise<number> => count);
+const publicAsyncTyped: (ctx: import('../src/server.js').LiveContext, count: number) => Promise<number> = publicAsync;
+void publicTyped; void publicAsyncTyped;
+// @ts-expect-error a public RPC marker requires a handler function
+live.public(42);
+// @ts-expect-error the marker preserves the required handler arguments
+publicHandler({} as import('../src/server.js').LiveContext, 42, 'bad');
 const config: SmoothConfig = {
   topic: 'positions', apply: (state) => state, initial: {},
   snapshot: true, snapshotDebounceMs: 250

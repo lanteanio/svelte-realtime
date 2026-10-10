@@ -86,6 +86,17 @@ export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached
 			}
 		}
 
+		// Public markers produce the same client RPC shape as live().
+		PUBLIC_EXPORT_RE.lastIndex = 0;
+		while ((match = PUBLIC_EXPORT_RE.exec(source)) !== null) {
+			const name = match[1];
+			handledNames.add(name);
+			const sig = isTS
+				? _extractFunctionSignatureFor(source, name, 'live\\.public', 0)
+				: '(...args: any[]) => Promise<any>';
+			exports.push(`  export const ${name}: ${sig};`);
+		}
+
 		// Detect live.validated() exports - extract real types for TS
 		VALIDATED_EXPORT_RE.lastIndex = 0;
 		while ((match = VALIDATED_EXPORT_RE.exec(source)) !== null) {

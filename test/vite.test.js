@@ -616,10 +616,9 @@ export const send = live(async () => {});
 			expect(w).toContain('https://svti.me/guard');
 		});
 
-		it('mixed-shape module: one live() + one live.public() still warns the live()-only handler', () => {
-			// With ANY live.public() in the module, we suppress per-module.
-			// The audit's design intent: live.public() is module-level intent
-			// signal; per-handler discipline is the dev's call.
+		it('one public marker suppresses the missing-guard warning for a mixed module', () => {
+			// A public marker suppresses the module-level warning, including
+			// ordinary live() handlers in the same module.
 			setup({
 				'mixed.js': `
 import { live } from 'svelte-realtime/server';
@@ -1478,6 +1477,22 @@ describe('path traversal prevention', () => {
 
 describe('type declarations', () => {
 	afterEach(teardown);
+
+	it.each(['js', 'ts'])('includes public RPC exports in generated %s declarations', extension => {
+		const handler = extension === 'ts'
+			? 'async (ctx: LiveContext, text: string, count: number): Promise<string> => text.repeat(count)'
+			: 'async (ctx, text, count) => text.repeat(count)';
+		setup({ ['open.' + extension]: `import { live } from 'svelte-realtime/server';
+export const repeat = live.public(${handler});` });
+		const plugin = createPlugin();
+		plugin.buildStart();
+		const content = readFileSync(resolve(liveDir, '$types.d.ts'), 'utf-8');
+		expect(content).toContain('declare module "$live/open"');
+		expect(content).toContain(extension === 'ts'
+			? 'export const repeat: (text: string, count: number) => Promise<string>;'
+			: 'export const repeat: (...args: any[]) => Promise<any>;');
+		expect(content).not.toContain('ctx:');
+	});
 
 	it('generates $types.d.ts on buildStart for JS files with any types', () => {
 		setup({
