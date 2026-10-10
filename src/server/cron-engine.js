@@ -1,7 +1,7 @@
 // @ts-check
 import { state, cronRegistry, _lazyQueue } from './state.js';
 import { _IS_DEV } from './env.js';
-import { now as runtimeNow, effectiveTimeZone, setTimer, setIntervalTimer, clearTimer, clearIntervalTimer } from '../shared/runtime.js';
+import { now as runtimeNow, wallEpoch, effectiveTimeZone, setTimer, clearTimer } from '../shared/runtime.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _cronDateParts, _cronFieldMatch } from './cron.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
@@ -12,13 +12,17 @@ import { _setBus } from './bus.js';
 import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
-/** @type {ReturnType<typeof setInterval> | null} */
+/** @type {ReturnType<typeof setTimeout> | null} */
 let _cronInterval = null;
+let _cronEpoch = 0;
+let _cronStopped = false;
+/** Last evaluated absolute slot for each registration; clock rollback never repeats it. */
+let _cronSlots = new WeakMap();
 
 /**
  * Sticky-once-set: flips to true when a 6-field schedule (sub-minute
  * resolution) gets registered. Causes `_ensureCronInterval` to use a
- * 1-second tick instead of 60s. Never flips back inside a process
+ * second boundary instead of a minute boundary. Never flips back inside a process
  * lifetime; cleared by `_clearCron` (HMR + tests).
  */
 let _cronAt1Hz = false;
@@ -260,27 +264,40 @@ export function configureCron(config) {
 /** @type {ReturnType<typeof setTimeout> | null} */
 let _cronStartupTimer = null;
 
-export function _ensureCronInterval() {
-	if (_cronInterval) return;
-	// Set sentinel immediately to prevent duplicate timers from concurrent calls
-	_cronInterval = /** @type {any} */ (-1);
-	_cronInterval = setIntervalTimer(_tickCron, _cronAt1Hz ? 1000 : 60000);
-	// Run an initial tick after a short delay to catch jobs on startup
-	_cronStartupTimer = setTimer(_tickCron, 1000);
+function _armCronTimer() {
+	const resolution = _cronAt1Hz ? 1000 : 60000;
+	const epoch = _cronEpoch;
+	const now = wallEpoch();
+	const timer = setTimer(() => {
+		if (_cronEpoch !== epoch || _cronInterval !== timer) return;
+		_cronInterval = null;
+		_armCronTimer();
+		return _tickCron(undefined, epoch);
+	}, (Math.floor(now / resolution) + 1) * resolution - now);
+	_cronInterval = timer;
 }
 
-/**
- * Switch the cron interval to 1 Hz (called when the first sub-minute
- * job is registered). Sticky: subsequent calls are no-ops, and the
- * tick stays at 1 Hz for the rest of the process lifetime even if all
- * 6-field jobs are torn down. Cleared by `_clearCron` for HMR.
- */
+export function _ensureCronInterval() {
+	if (_cronStopped || _cronInterval !== null) return;
+	_armCronTimer();
+	// Catch the current minute on startup; the slot ledger prevents a second
+	// fire when startup and the next boundary land in the same wall-clock slot.
+	const epoch = _cronEpoch;
+	const timer = setTimer(() => {
+		if (_cronEpoch !== epoch || _cronStartupTimer !== timer) return;
+		_cronStartupTimer = null;
+		return _tickCron(undefined, epoch);
+	}, 1000);
+	_cronStartupTimer = timer;
+}
+
+/** Upgrade once to second boundaries; the already evaluated slots survive. */
 function _upgradeCronTo1Hz() {
 	if (_cronAt1Hz) return;
 	_cronAt1Hz = true;
-	if (_cronInterval && _cronInterval !== /** @type {any} */ (-1)) {
-		clearIntervalTimer(_cronInterval);
-		_cronInterval = setIntervalTimer(_tickCron, 1000);
+	if (_cronInterval !== null) {
+		_cancelCronTimers();
+		_armCronTimer();
 	}
 }
 
@@ -308,14 +325,9 @@ export function _cronIntrospect() {
 }
 
 export function _clearCron() {
-	if (_cronInterval) {
-		clearIntervalTimer(_cronInterval);
-		_cronInterval = null;
-	}
-	if (_cronStartupTimer) {
-		clearTimer(_cronStartupTimer);
-		_cronStartupTimer = null;
-	}
+	_stopCronScheduler();
+	_cronStopped = false;
+	_cronSlots = new WeakMap();
 	cronRegistry.clear();
 	_cronAt1Hz = false;
 	_cronRunning.clear();
@@ -331,25 +343,37 @@ export function _clearCron() {
  * lifecycle in-flight counter, so the drain waits for them.
  */
 export function _stopCronScheduler() {
-	if (_cronInterval) {
-		clearIntervalTimer(_cronInterval);
+	_cronStopped = true;
+	_cancelCronTimers();
+}
+
+function _cancelCronTimers() {
+	_cronEpoch++;
+	if (_cronInterval !== null) {
+		clearTimer(_cronInterval);
 		_cronInterval = null;
 	}
-	if (_cronStartupTimer) {
+	if (_cronStartupTimer !== null) {
 		clearTimer(_cronStartupTimer);
 		_cronStartupTimer = null;
 	}
 }
 
-export async function _tickCron() {
+/**
+ * Automatic ticks evaluate only the latest slot after a pause, without replaying
+ * missed slots. An explicit no-argument call remains a forceable test trigger.
+ * @param {unknown} [_at] - Reserved for the historical manual trigger argument.
+ * @param {number} [epoch]
+ */
+export async function _tickCron(_at, epoch) {
 	// Graceful shutdown: stop firing new cron jobs so the in-flight drain can
 	// finish. The scheduler interval is also cleared in `_stopCronScheduler`;
 	// this guards any tick already queued when the drain began.
-	if (_isShuttingDown()) return;
+	if (_isShuttingDown() || (epoch !== undefined && epoch !== _cronEpoch)) return;
 	if (!_isLazyResolved()) await _resolveAllLazy();
 	// Re-check after the (possibly awaited) lazy-resolve: a drain may have begun
 	// during that await on the very first uninitialized tick.
-	if (_isShuttingDown()) return;
+	if (_isShuttingDown() || (epoch !== undefined && epoch !== _cronEpoch)) return;
 
 	// Cluster-mode leader gate. Default (no leader configured) is "every
 	// worker fires" - correct for single-process and dev. With a leader
@@ -387,8 +411,10 @@ export async function _tickCron() {
 	// simulation harness pins it (e.g. 'UTC') so the same epoch-ms always
 	// yields the same parts. The schedule math below is unchanged - only the
 	// parts extraction is now Intl + time-zone based.
+	const scheduled = epoch !== undefined;
+	const evaluatedAt = scheduled ? wallEpoch() : runtimeNow();
 	const { second, minute, hour, day, month, weekday } = _cronDateParts(
-		runtimeNow(),
+		evaluatedAt,
 		effectiveTimeZone() || undefined
 	);
 
@@ -396,11 +422,12 @@ export async function _tickCron() {
 		const schedule = entry.schedule;
 		const isSixField = schedule.length === 6;
 
-		// 5-field schedules at 1 Hz tick: only fire at second :00 of the
-		// matching minute, otherwise they would re-fire 60 times during
-		// any matching minute. At the 60s tick this branch is skipped --
-		// the tick spacing already enforces once-per-minute granularity.
-		if (!isSixField && _cronAt1Hz && second !== 0) continue;
+		if (scheduled) {
+			const slot = Math.floor(evaluatedAt / (isSixField ? 1000 : 60000));
+			const previous = _cronSlots.get(entry);
+			if (previous !== undefined && slot <= previous) continue;
+			_cronSlots.set(entry, slot);
+		} else if (!isSixField && _cronAt1Hz && second !== 0) continue;
 
 		let sf, mf, hf, df, monthf, wf;
 		if (isSixField) {

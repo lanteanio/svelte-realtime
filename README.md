@@ -2988,7 +2988,7 @@ export const cleanup = live.cron('0 * * * *', 'boards', async (ctx) => {
 
 If the function returns a value, it is published as a `set` event (same as before). If it returns `undefined`, no automatic publish happens - this lets you use `ctx.publish` exclusively without an unwanted `set` event overwriting your crud updates.
 
-Cron expressions use 5 fields: `minute hour day month weekday`. Supported syntax: `*`, single values, ranges (`9-17`), lists (`0,15,30`), and steps (`*/5`).
+Cron expressions use 5 fields (`minute hour day month weekday`) or 6 with a leading `second`. Supported syntax: `*`, values, ranges (`9-17`), lists (`0,15,30`), and steps (`*/5`). Automatic ticks align to wall-clock minute/second boundaries and evaluate each absolute slot at most once per registration. After a pause, only the current minute and second are evaluated; missed slots are not replayed. A backward clock adjustment does not repeat already evaluated slots. Jobs already running are skipped, and cluster leadership still requires the configuration below.
 
 ### Wiring the platform
 

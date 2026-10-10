@@ -97,6 +97,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Clarify that stream subscriptions also pass through adapter authorization and connection limits before loading data or joining a room.
 
 - Room subscriptions release only the membership references they acquired, preserving other connections after capacity refusal, presence errors, or failed initialization.
+
+- Cron ticks align to wall-clock boundaries, avoid duplicate minutes and seconds under timer drift or clock rollback, and coalesce missed slots after a pause.
+
 - Alarm capacity and invalid-deadline refusals reject with structured `ALARM_CAPACITY` and `VALIDATION` errors through the returned promise in memory and durable modes, preserving acknowledged schedules.
 
 - Durable idempotency duplicates wait for their original result; bounded retryable responses preserve offline mutations and retry with backoff instead of entering conflict handling.
