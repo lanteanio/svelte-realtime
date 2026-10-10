@@ -9,7 +9,10 @@ form. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md
 
 Use Node 22 or newer and npm. Clone the repository, run `npm ci`, and run
 `npm run check`. The package ships source directly; there is no root build step.
-`npm test` runs the checks first, then the unit suite. For one test while editing,
+`npm test` runs the checks first, then the unit suite.
+`npm run check:publish` packs the package and checks every public export with
+publint and Are The Types Wrong in ESM-only mode. CommonJS and legacy Node 10
+resolution are outside this ESM package contract; ESM and bundler findings fail. For one test while editing,
 use `npx vitest run test/<name>.test.js`; the focused command does not replace
 `npm test` before review. On Windows PowerShell use `npm.cmd` and `npx.cmd` if
 execution policy blocks the PowerShell shims.

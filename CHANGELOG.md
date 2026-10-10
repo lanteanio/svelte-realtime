@@ -101,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Contribution guidance defines task readiness, review evidence, ownership, blocked work and risk-based backlog ordering.
 
+- The pretest checks validate packed npm exports and declarations with publint and Are The Types Wrong.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
