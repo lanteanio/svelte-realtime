@@ -582,24 +582,16 @@ function _collectBatch(ctx, fn) {
 	return result;
 }
 
-export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, operationRequestId, persistedTenantId = undefined) {
-	// Server-trusted tenant id for this connection (null when no resolver is
-	// configured -> single-tenant, zero-cost path). When set, ctx.publish prefixes
-	// every topic to the tenant's wire namespace; ctx._publishWire stays the raw
-	// helper for framework code that already holds a wire topic (no double-prefix).
-	// With no resolver configured no connection can ever be scoped, so `@t/`
-	// carries no meaning and the tenant prefix work is pure overhead. The
-	// reserved-prefix guard still has to run though: handing back the bare
-	// helpers here is what previously left `ctx.publishThrottled('__signal:victim',
-	// ...)` wide open on every single-tenant app, which is almost all of them.
-	// `_getScopedHelpers(helpers, null)` keeps the guard and skips the prefixing,
-	// and is memoized per platform so the default path still allocates one wrapper
-	// set, not one per RPC.
-	const tenancy = persistedTenantId !== undefined || _isTenancyEnabled();
-	// Background work restores its recorded scope without resolving a missing user.
-	const tenantId = persistedTenantId !== undefined
-		? (persistedTenantId === null ? null : _validTenantId(persistedTenantId))
-		: (tenancy ? _resolveTenant(user) : null);
+/** Build background work without resolving a missing user's tenant. */
+export function _buildPersistedCtx(platform, helpers, tenantId) {
+	return _buildCtx(null, null, platform, helpers, null, undefined, undefined, tenantId === null ? null : _validTenantId(tenantId));
+}
+
+export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, operationRequestId, persistedTenantId) {
+	let tenancy = _isTenancyEnabled();
+	let tenantId;
+	if (persistedTenantId === undefined) tenantId = tenancy ? _resolveTenant(user) : null;
+	else { tenancy = true; tenantId = persistedTenantId; }
 	const scopedHelpers = _getScopedHelpers(helpers, tenantId);
 	const connectionId = ws && platform ? (platform.connectionId ?? platform.requestId) : undefined;
 	const requestId = operationRequestId ?? platform?.requestId;

@@ -15,7 +15,7 @@ import { _IS_DEV } from './env.js';
 import { wallEpoch, setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from '../shared/runtime.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
-import { _getCtxHelpers, _buildCtx } from './ctx.js';
+import { _getCtxHelpers, _buildPersistedCtx } from './ctx.js';
 import { LiveError } from './live-error.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 import { _validTenantId, _topicInTenant } from './tenant.js';
@@ -348,7 +348,7 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 	try {
 		const _h = _getCtxHelpers(platform);
 		// Fresh ws-less server ctx (the room may be empty), exactly like a cron tick.
-		const ctx = _buildCtx(null, null, platform, _h, null, undefined, undefined, _alarmTenant(wireTopic, meta));
+		const ctx = _buildPersistedCtx(platform, _h, _alarmTenant(wireTopic, meta));
 		// Room-scope ctx.publish to the firing room's WIRE topic (already
 		// tenant-scoped), so onAlarm publishes to its own room with `ctx.publish(event,
 		// data)` - the same room-action ergonomic. Route through `_publishWire` (the
