@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Described owner-succession replay behavior directly in its regression test.
+
 - Clarified that tenant prefixes and logical topics share the transport topic-length budget.
 
 - Errors from connection hooks are reported without stopping offline replay or other Svelte store subscribers.

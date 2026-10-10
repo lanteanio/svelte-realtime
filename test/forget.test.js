@@ -361,7 +361,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 	});
 
 	it('routes a store-reported succession through the :owner replay buffer so a resumer gap-fills the successor', async () => {
-		// Mirrors the F3 fix: the forgetting instance need not hold a local :owner
+		// The forgetting instance need not hold a local :owner
 		// subscriber, so the topic is registered replay-eligible and the emit lands
 		// in the shared buffer, not only on the live bus.
 		const buffered = [];
