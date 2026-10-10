@@ -797,9 +797,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	/** @type {any} Last known version for delta sync */
 	let _lastVersion = undefined;
 
-	/** @type {Set<any>} Keys of optimistic entries pending server confirmation */
-	const _optimisticKeys = new Set();
-
 	/** @type {Map<any, number>} Key-to-index lookup for keyed merge strategies */
 	const _index = new Map();
 
@@ -914,7 +911,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					fresh.push(item);
 					continue;
 				}
-				_optimisticKeys.delete(kv);
 				const existing = index.get(kv);
 				if (existing !== undefined) {
 					// Copy before the first in-place write: `value` may be an
@@ -978,7 +974,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 	/**
 	 * Pure functional core of `_applyMerge`. Mutates the supplied `value`,
-	 * `index`, and `optimisticKeys` in place; closure constants
+	 * `index` in place; closure constants
 	 * (`merge`, `key`, `prepend`, `max`) are captured from the enclosing
 	 * stream scope. Does not touch `currentValue`, `_index`, `_lastSeq`,
 	 * `_dirty`, the store, or history - the closure wrapper is
@@ -991,7 +987,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * @param {any} value
 	 * @param {Map<any, number>} index
 	 * @param {{ event: string, data: any }} envelope
-	 * @param {Set<any>} optimisticKeys
 	 * @param {boolean} [local] - the change is this client's own optimistic
 	 *   change replayed over a copy of the server state for display, not a
 	 *   server frame: it applies as given and neither reads nor moves the
@@ -1008,7 +1003,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 *     `cursor` / `presence` update its publisher already superseded;
 	 *     true in all other paths.
 	 */
-	function _applyMergeFn(value, index, envelope, optimisticKeys, local = false) {
+	function _applyMergeFn(value, index, envelope, local = false) {
 		const { event } = envelope;
 		// Defense-in-depth: strip prototype-pollution keys (`__proto__`,
 		// `constructor`, `prototype`) from envelope data at ingress for
@@ -1023,7 +1018,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 		if (event === 'refreshed') {
 			value = data;
-			optimisticKeys.clear();
 			if (!local) _presenceSeeded.clear();
 			if (merge === 'crud' || merge === 'presence' || merge === 'cursor') {
 				_rebuildIndexFn(value, index);
@@ -1033,10 +1027,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 		if (merge === 'crud') {
 			if (!Array.isArray(value)) { value = []; index.clear(); }
-
-			if (data && data[key] !== undefined) {
-				optimisticKeys.delete(data[key]);
-			}
 
 			if (event === 'created') {
 				const idx = index.get(data[key]);
@@ -1214,8 +1204,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 	/**
 	 * Apply a merge event to the stream's authoritative state. In the
-	 * steady-state hot path (queue empty), mutates currentValue / _index /
-	 * _optimisticKeys directly. In queue mode (a `mutate(asyncOp, change)`
+	 * steady-state hot path (queue empty), mutates currentValue / _index
+	 * directly. In queue mode (a `mutate(asyncOp, change)`
 	 * is in flight), routes to `_serverValue` / `_serverIndex` and runs
 	 * the optimistic-absorption check so a server event matching a
 	 * queue entry's key is recognised and the entry is graduated. Tracks
@@ -1243,7 +1233,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			// server state pair (_serverValue, _serverIndex) must be set. Both
 			// are paired across mutate-push and _drainQueue.
 			assert(_serverValue !== null && _serverIndex !== null, 'realtime/optimistic.queue.serverValue-iff-nonempty', { queueLen: _optimisticQueue.length, hasServerValue: _serverValue !== null, hasServerIndex: _serverIndex !== null });
-			const result = _applyMergeFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), envelope, _optimisticKeys);
+			const result = _applyMergeFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), envelope);
 			_serverValue = result.value;
 			// Accumulate across one flush: a later no-op event (an identical
 			// `set`, a superseded cursor sample) must not hide an earlier
@@ -1252,7 +1242,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			_absorbCheck(envelope);
 			return false;
 		}
-		const result = _applyMergeFn(currentValue, _index, envelope, _optimisticKeys);
+		const result = _applyMergeFn(currentValue, _index, envelope);
 		currentValue = result.value;
 		if (result.modified) _dirty = true;
 		return result.replaced;
@@ -1323,7 +1313,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			_rebuildIndexFn(next, index);
 			return next;
 		}
-		const r = _applyMergeFn(value, index, change, _optimisticKeys, local);
+		const r = _applyMergeFn(value, index, change, local);
 		return r.value;
 	}
 
@@ -2306,18 +2296,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		optimistic(event, data) {
 			const snapshot = Array.isArray(currentValue) ? currentValue.slice() : currentValue;
 
-			if (merge === 'crud') {
-				if (data && data[key] !== undefined) {
-					_optimisticKeys.add(data[key]);
-				}
-			}
-
 			applyEvent({ event, data });
 
 			return function rollback() {
-				if (merge === 'crud' && data && data[key] !== undefined) {
-					_optimisticKeys.delete(data[key]);
-				}
 				currentValue = snapshot;
 				_rebuildIndex();
 				store.set(currentValue);
@@ -2398,7 +2379,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				const k = mergeKeyField(merge, key);
 				if (k && optimisticChange.data && optimisticChange.data[k] !== undefined) {
 					optimisticKey = optimisticChange.data[k];
-					if (merge === 'crud') _optimisticKeys.add(optimisticKey);
 				}
 			}
 
@@ -2429,7 +2409,6 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				assert(entry.change != null && typeof entry.serverConfirmed === 'boolean', 'realtime/optimistic.queue.entry.shape', { hasChange: entry.change != null, serverConfirmedType: typeof entry.serverConfirmed });
 				const idx = _optimisticQueue.indexOf(entry);
 				if (idx >= 0) _optimisticQueue.splice(idx, 1);
-				if (entry.optimisticKey !== null) _optimisticKeys.delete(entry.optimisticKey);
 				if (success && !entry.serverConfirmed) {
 					_serverValue = _applyChange(
 						_serverValue,
