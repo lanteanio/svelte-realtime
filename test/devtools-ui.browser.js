@@ -265,3 +265,23 @@ it('keeps focus on reordered stream controls and falls back when the stream leav
  });
  expect(await page.getByRole('tabpanel').evaluate(el => el === document.activeElement)).toBe(true);
 });
+
+it('reclamps a moved panel when telemetry grows and when reopened after a resize', async () => {
+ await page.setViewportSize({ width: 600, height: 600 });
+ await streamsFixture();
+ await page.getByRole('button', { name: 'Move DevTools' }).focus();
+ await page.keyboard.press('End');
+ await page.evaluate(() => {
+  window.__svelte_realtime_devtools.history = Array.from({ length: 50 }, (_, seq) => ({ seq, path: 'call/' + seq, ok: true, duration: 1 }));
+  document.getElementById('svr-dt-tab-rpcs').click();
+ });
+ const panel = page.getByRole('region', { name: 'svelte-realtime DevTools' });
+ let rect = await panel.boundingBox();
+ expect(rect.y + rect.height).toBeLessThanOrEqual(600);
+ await page.getByRole('button', { name: 'Close DevTools' }).click();
+ await page.setViewportSize({ width: 320, height: 240 });
+ await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).click();
+ rect = await panel.boundingBox();
+ expect(rect.x + rect.width).toBeLessThanOrEqual(320);
+ expect(rect.y + rect.height).toBeLessThanOrEqual(240);
+});

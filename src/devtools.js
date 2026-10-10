@@ -344,6 +344,7 @@ function render(el) {
 	} catch { return; }
 	if (!devtools) {
 		el.textContent = message('Use a realtime client on this page to begin inspecting requests.');
+		constrainPanel();
 		return;
 	}
 
@@ -356,6 +357,14 @@ function render(el) {
 	} else if (activeTab === 'connection') {
 		renderConnection(el, devtools);
 	}
+	constrainPanel();
+}
+
+function constrainPanel() {
+ if (!panel || !visible || !panel.style.top) return;
+ const rect = panel.getBoundingClientRect();
+ panel.style.left = Math.max(10, Math.min(rect.left, window.innerWidth - rect.width - 10)) + 'px';
+ panel.style.top = Math.max(10, Math.min(rect.top, window.innerHeight - rect.height - 10)) + 'px';
 }
 
 /**
