@@ -11830,7 +11830,7 @@ describe('live.idempotent()', () => {
 		expect(() => live.idempotent({ store: { foo: 'bar' } }, async () => 'ok'))
 			.toThrow(/store must implement acquire/);
 		expect(() => live.idempotent({ ttl: -1 }, async () => 'ok'))
-			.toThrow(/ttl must be a non-negative number/);
+			.toThrow(/ttl must be a non-negative integer number of seconds/);
 		expect(() => live.idempotent({}, 'not a function'))
 			.toThrow(/requires a handler function/);
 	});
