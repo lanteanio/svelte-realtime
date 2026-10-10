@@ -136,7 +136,7 @@ export function detectAgent(ua) {
  * Parses in one pass so that flag values (e.g. --template minimal) are consumed
  * and not mistaken for positional args.
  * @param {string[]} argv - arguments (without node/script prefix)
- * @param {{ dirExists?: (name: string) => boolean }} [opts]
+ * @param {{ dirExists?: (name: string) => boolean, interactive?: boolean }} [opts]
  * @returns {{ help: true } | { error: string } | { name?: string, template?: string }}
  */
 export function parseArgs(argv, opts) {
@@ -187,6 +187,10 @@ export function parseArgs(argv, opts) {
 		if (opts?.dirExists?.(name)) {
 			return { error: `Directory "${name}" already exists.` };
 		}
+	}
+
+	if (opts?.interactive === false && (!name || !template)) {
+		return { error: 'Non-interactive input requires a project name and --template minimal|example|demo. Example: npx svelte-realtime my-app --template example' };
 	}
 
 	return { name, template };

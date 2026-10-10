@@ -40,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - IndexedDB persistence reopens closed connections and bounds database opens and restore scans to five seconds, allowing offline replay to continue when browser storage hangs. Storage warnings distinguish failed writes from failed deletions.
 
+- The scaffold exits with an actionable error when piped input omits a project
+  name or template, instead of starting an unusable prompt and exiting 13.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

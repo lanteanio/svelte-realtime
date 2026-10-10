@@ -75,7 +75,8 @@ export function upgrade() {
 `;
 
 const parsed = parseArgs(process.argv.slice(2), {
-	dirExists: (name) => existsSync(resolve(process.cwd(), name))
+	dirExists: (name) => existsSync(resolve(process.cwd(), name)),
+	interactive: process.stdin.isTTY === true
 });
 
 if ('help' in parsed) {

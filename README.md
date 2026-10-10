@@ -64,6 +64,8 @@ cd my-app
 npm run dev
 ```
 
+For interactive prompts, run `npx svelte-realtime@0.6.0-next.91 my-app` in a terminal. Piped input and CI require both a project name and `--template minimal|example|demo`; missing values produce an immediate error with an example command.
+
 The non-interactive route installs the audited
 `svelte-adapter-uws@0.6.0-next.95` / `svelte-realtime@0.6.0-next.91` /
 uWebSockets.js v20.69.0 tuple, checks Node, OS, architecture, libc, and the
