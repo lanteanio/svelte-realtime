@@ -9,9 +9,7 @@ import { now, setTimer, clearTimer } from '../client-runtime.js';
  * against the ENTIRE key (substring match would over-redact). Apps can
  * override or extend via `__devtools.redactKeys = new Set([...])`; entries are
  * normalized to lowercase at the top of each redaction walk, so a mixed-case
- * entry like `'paymentMethod'` matches. (This used to claim normalization
- * happened in `_devtoolsStreamEvent`, which never did any - so only the payload
- * key was lowercased and a mixed-case entry silently never matched.)
+ * entry like `'paymentMethod'` matches.
  */
 const _DEFAULT_REDACT_KEYS = new Set([
 	'password', 'token', 'apikey', 'api_key', 'secret', 'authorization',
@@ -52,7 +50,7 @@ function _forgetClearedEvents() {
  *   smooth: Set<() => any>
  * } | null}
  */
-export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.env?.PROD)
+export const __devtools = (import.meta.env?.DEV === true && !import.meta.env?.PROD)
 	? {
 		clear: _clearCaptures,
 		clearEvents: _clearEvents,

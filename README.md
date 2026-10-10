@@ -5166,7 +5166,7 @@ This applies to all handler types - `live()`, `live.stream()`, `live.cron()`, `l
 
 ## DevTools
 
-In dev mode, the Vite plugin injects an in-browser overlay that shows active streams, RPC history, and connection status. Open it with the DevTools button or `Ctrl+Shift+L`. Close or Escape restores focus to the opening control; the panel does not trap focus.
+Instrumentation requires `import.meta.env.DEV === true` and a falsy `import.meta.env.PROD`; without a bundler environment, `__devtools` is null. In Vite dev mode, the plugin injects an overlay showing active streams, RPC history, and connection status. Open it with the DevTools button or `Ctrl+Shift+L`. Close or Escape restores focus to the opening control; the panel does not trap focus.
 
 The overlay uses a fixed dark theme for diagnostic contrast, plus system colors in forced-color mode. Hosts can override the CSS variables `--svr-dt-surface`, `--svr-dt-raised`, `--svr-dt-border`, `--svr-dt-text`, `--svr-dt-muted`, `--svr-dt-accent`, `--svr-dt-success`, `--svr-dt-warning`, `--svr-dt-error`, and `--svr-dt-focus` on the document root. Keep text and focus contrast when overriding them.
 
