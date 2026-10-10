@@ -1872,7 +1872,8 @@ export namespace live {
 
 	/**
 	 * Three-state idempotency store contract. Compatible with `createIdempotencyStore`
-	 * from `svelte-adapter-uws-extensions` (Redis + Postgres backends).
+	 * from `svelte-adapter-uws-extensions/redis/idempotency` or
+	 * `svelte-adapter-uws-extensions/postgres/idempotency`.
 	 */
 	interface IdempotencyStore {
 		acquire(key: string, ttlSec: number): Promise<
@@ -4509,7 +4510,7 @@ export function close(
 
 /**
  * Cluster bus contract. Any object exposing `wrap(platform)` matches.
- * The canonical implementation is `redisBus()` from
+ * The canonical implementation is `createPubSubBus(redis)` from
  * `svelte-adapter-uws-extensions/redis/pubsub`; sharded-pubsub and
  * test buses conform to the same shape.
  */
@@ -4557,14 +4558,14 @@ export function publish(topic: string, event: string, data?: unknown, options?: 
  */
 export interface RealtimeConfig {
 	/**
-	 * Cluster bus. Pass `redisBus()` or any object exposing
+	 * Cluster bus. Pass `createPubSubBus(redis)` or any object exposing
 	 * `wrap(platform)` to enable cluster fan-out. Omit (or pass `null`)
 	 * for single-replica.
 	 */
 	bus?: ClusterBus | null;
 	/**
 	 * Cluster leader gate for cron's "exactly once across the cluster"
-	 * semantics. Pass `redisLeader().isLeader` (or any function returning
+	 * semantics. Pass `createLeader(redis).isLeader` (or any function returning
 	 * the current leader status). Omit for single-replica or for the
 	 * "every worker fires" default.
 	 */
@@ -4807,10 +4808,13 @@ export interface RealtimeHooks {
  * Cluster:
  * ```js
  * import { realtime } from 'svelte-realtime/server';
- * import { redisBus, redisLeader } from 'svelte-adapter-uws-extensions/redis';
+ * import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
+ * import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
+ * import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
+ * const redis = createRedisClient();
  * export const { open, close, message, init, shutdown } = realtime({
- *   bus: redisBus(),
- *   leader: redisLeader().isLeader,
+ *   bus: createPubSubBus(redis),
+ *   leader: createLeader(redis).isLeader,
  * });
  * export function upgrade({ cookies }) { ... }
  * ```

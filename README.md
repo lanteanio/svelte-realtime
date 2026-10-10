@@ -1478,7 +1478,7 @@ const intentId = crypto.randomUUID();
 const order = await createOrder.with({ idempotencyKey: intentId })(payload);
 ```
 
-Resolution: `keyFrom(ctx, ...args)` if defined, otherwise the client envelope's `idempotencyKey`, otherwise the wrapper is a no-op. Only successful results cache; a handler that throws BEFORE commit aborts the slot so the next caller re-runs. A failure DURING commit is different: the handler already ran its effect, so the slot is left intact and the call returns `LiveError('IDEMPOTENCY_COMMIT_UNKNOWN')` rather than aborting - aborting would delete a record the durable store may have applied (a lost ack) and let a retry re-run the handler and double-apply the effect, so the caller should reconcile instead of blindly retrying. Reusing a key with a **different request payload** throws `LiveError('IDEMPOTENCY_KEY_REUSED')` instead of returning the first call's result - a genuine idempotent retry must carry the same body, so the framework fingerprints the request args (canonical, key-order-insensitive) and rejects a mismatch rather than silently answering with the wrong cached value. Default store is in-process and bounded; for multi-instance deployments pass `store: createIdempotencyStore(redis)` from `svelte-adapter-uws-extensions`.
+Resolution: `keyFrom(ctx, ...args)` if defined, otherwise the client envelope's `idempotencyKey`, otherwise the wrapper is a no-op. Only successful results cache; a handler that throws BEFORE commit aborts the slot so the next caller re-runs. A failure DURING commit is different: the handler already ran its effect, so the slot is left intact and the call returns `LiveError('IDEMPOTENCY_COMMIT_UNKNOWN')` rather than aborting - aborting would delete a record the durable store may have applied (a lost ack) and let a retry re-run the handler and double-apply the effect, so the caller should reconcile instead of blindly retrying. Reusing a key with a **different request payload** throws `LiveError('IDEMPOTENCY_KEY_REUSED')` instead of returning the first call's result - a genuine idempotent retry must carry the same body, so the framework fingerprints the request args (canonical, key-order-insensitive) and rejects a mismatch rather than silently answering with the wrong cached value. Default store is in-process and bounded; for multi-instance deployments pass `store: createIdempotencyStore(redis)` from `svelte-adapter-uws-extensions/redis/idempotency`, or the Postgres implementation from `svelte-adapter-uws-extensions/postgres/idempotency`.
 
 The cache slot is automatically isolated by RPC path and by tenant, so the same key under different RPCs or tenants never collides. When the key comes from the **client envelope** (no `keyFrom`), it is additionally isolated by the caller's authenticated identity - so one user can never receive another user's cached result by sending the same key, even though the client controls the envelope value. A `keyFrom` key is app-owned: include `ctx.user` in the returned string for per-user idempotency, or omit it for a deliberately shared slot (e.g. an org-wide daily job). Anonymous callers are not identity-scoped, so use a client-random key (a UUID per intent, as above) for them.
 
@@ -2258,9 +2258,10 @@ Use the `beforeExecute` hook with the rate limit extension for global per-connec
 
 ```js
 import { createMessage, LiveError } from 'svelte-realtime/server';
-import { createRedis, createRateLimit } from 'svelte-adapter-uws-extensions/redis';
+import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
+import { createRateLimit } from 'svelte-adapter-uws-extensions/redis/ratelimit';
 
-const redis = createRedis();
+const redis = createRedisClient();
 const limiter = createRateLimit(redis, { points: 30, interval: 10000 });
 
 export const message = createMessage({
@@ -2790,9 +2791,9 @@ Wrap a stream or RPC init function with a circuit breaker from `svelte-adapter-u
 
 ```js
 import { live } from 'svelte-realtime/server';
-import { createBreaker } from 'svelte-adapter-uws-extensions/breaker';
+import { createCircuitBreaker } from 'svelte-adapter-uws-extensions/breaker';
 
-const dbBreaker = createBreaker({ threshold: 5, resetMs: 30000 });
+const dbBreaker = createCircuitBreaker({ failureThreshold: 5, resetTimeout: 30000 });
 
 export const items = live.stream('items',
   live.breaker({ breaker: dbBreaker, fallback: [] }, async (ctx) => {
@@ -2816,15 +2817,17 @@ Every live function receives `ctx.requestId` - a stable identifier for the origi
 
 ```js
 import { live } from 'svelte-realtime/server';
-import { createTasks } from 'svelte-adapter-uws-extensions/postgres/tasks';
-import { createJobs } from 'svelte-adapter-uws-extensions/postgres/jobs';
+import { createTaskRunner } from 'svelte-adapter-uws-extensions/postgres/tasks';
+import { createJobQueue } from 'svelte-adapter-uws-extensions/postgres/jobs';
 
-const tasks = createTasks({ client: pgClient });
-const jobs = createJobs({ client: pgClient });
+const tasks = createTaskRunner(pgClient);
+const jobs = createJobQueue(pgClient);
+tasks.register('processOrder', ({ input }) => processOrder(input));
 
 export const submitOrder = live(async (ctx, input) => {
   // Option A: explicit - works anywhere ctx.requestId is in scope
-  const order = await tasks.run('processOrder', input, {
+  const order = await tasks.run('processOrder', {
+    input,
     requestId: ctx.requestId
   });
 
@@ -2845,8 +2848,8 @@ SELECT
   t.svti_tasks_id, t.name AS task_name, t.status, t.created_at AS task_created,
   j.svti_jobs_id,  j.queue,             j.attempts,
   t.request_id
-FROM ws_tasks t
-LEFT JOIN ws_jobs j ON j.request_id = t.request_id
+FROM svti_tasks t
+LEFT JOIN svti_jobs j ON j.request_id = t.request_id
 WHERE t.request_id = $1
 ORDER BY task_created;
 ```
@@ -4700,9 +4703,11 @@ One declaration of cluster intent reaches every framework publish surface. `real
 ```js
 // src/hooks.ws.js
 import { realtime } from 'svelte-realtime/server';
-import { createRedis, createPubSubBus, createLeader } from 'svelte-adapter-uws-extensions/redis';
+import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
+import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
+import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
 
-const redis = createRedis();
+const redis = createRedisClient();
 const bus = createPubSubBus(redis);
 const leader = createLeader(redis);
 
@@ -4751,9 +4756,11 @@ onShutdown(async () => {
 ```js
 // src/hooks.ws.js (manual primitives)
 import { setBus, setCronPlatform, _activateDerived, configureCron, pushHooks, message } from 'svelte-realtime/server';
-import { createRedis, createPubSubBus, createLeader } from 'svelte-adapter-uws-extensions/redis';
+import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
+import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
+import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
 
-const redis = createRedis();
+const redis = createRedisClient();
 const bus = createPubSubBus(redis);
 const leader = createLeader(redis);
 
@@ -4795,9 +4802,12 @@ When you add the Redis extensions from [svelte-adapter-uws-extensions](https://g
 
 ```js
 import { realtime, createMessage, setBus, LiveError } from 'svelte-realtime/server';
-import { createRedis, createPubSubBus, createLeader, createRateLimit } from 'svelte-adapter-uws-extensions/redis';
+import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
+import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
+import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
+import { createRateLimit } from 'svelte-adapter-uws-extensions/redis/ratelimit';
 
-const redis = createRedis();
+const redis = createRedisClient();
 const bus = createPubSubBus(redis);
 const leader = createLeader(redis);
 const limiter = createRateLimit(redis, { points: 30, interval: 10000 });
@@ -4827,7 +4837,8 @@ Combine live.stream with the Postgres NOTIFY bridge for zero-code reactivity. A 
 ```js
 // src/hooks.ws.js
 export { message } from 'svelte-realtime/server';
-import { createPgClient, createNotifyBridge } from 'svelte-adapter-uws-extensions/postgres';
+import { createPgClient } from 'svelte-adapter-uws-extensions/postgres';
+import { createNotifyBridge } from 'svelte-adapter-uws-extensions/postgres/notify';
 
 const pg = createPgClient({ connectionString: process.env.DATABASE_URL });
 const notify = createNotifyBridge(pg, {

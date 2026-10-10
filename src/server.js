@@ -3733,7 +3733,7 @@ export function _resetManualPlatformCallbackWarn() {
  * `live.webhook`), and the top-level `publish()` helper. One
  * declaration of cluster intent covers all of them.
  *
- * Pass a bus exposing `.wrap(platform)` (e.g. `redisBus()` from
+ * Pass a bus exposing `.wrap(platform)` (e.g. `createPubSubBus(redis)` from
  * `svelte-adapter-uws-extensions/redis/pubsub`) to enable cluster
  * fan-out. Pass `null` to clear and revert to single-replica behaviour.
  *
@@ -3748,11 +3748,14 @@ export function _resetManualPlatformCallbackWarn() {
  * ```js
  * // hooks.ws.js (Layer 1 / expert wiring)
  * import { setBus, setCronPlatform, _activateDerived, configureCron, message } from 'svelte-realtime/server';
- * import { redisBus, redisLeader } from 'svelte-adapter-uws-extensions/redis';
+ * import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
+ * import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
+ * import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
  *
- * const bus = redisBus();
+ * const redis = createRedisClient();
+ * const bus = createPubSubBus(redis);
  * setBus(bus);
- * configureCron({ leader: redisLeader() });
+ * configureCron({ leader: createLeader(redis).isLeader });
  *
  * export { message };
  * export function init({ platform }) {
@@ -3897,11 +3900,14 @@ export function publish(topic, event, data, options) {
  * ```js
  * // src/hooks.ws.js (cluster)
  * import { realtime } from 'svelte-realtime/server';
- * import { redisBus, redisLeader } from 'svelte-adapter-uws-extensions/redis';
+ * import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
+ * import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
+ * import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
  *
+ * const redis = createRedisClient();
  * export const { upgrade, open, close, message, init } = realtime({
- *   bus: redisBus(),
- *   leader: redisLeader().isLeader,
+ *   bus: createPubSubBus(redis),
+ *   leader: createLeader(redis).isLeader,
  *   upgrade: ({ cookies }) => validate(cookies),
  * });
  * ```
