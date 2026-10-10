@@ -156,3 +156,21 @@ the application E2E lane and the complete chaos lane need contributor evidence
 steps targeting another working directory or npm prefix. Any script or workflow
 change must run `npm run generate:verification` and include the reviewed diff;
 `npm run check:verification` fails when the inventory no longer matches reality.
+
+## First-success checkpoint
+
+After root `npm ci`, run `npm run smoke`. The command prints Node, npm, OS,
+architecture and actual fixture package versions, installs the locked fixture
+dependencies and Chromium, starts development and production servers on free
+ports, and opens two independent browser contexts against each server. An RPC
+from one client must update the other client's subscribed data. Production is
+built before starting its server. The command exits nonzero on install, build,
+startup or assertion failure and stops started servers even if the second server
+fails to start. It owns no Redis or other external service.
+
+A warm run usually takes 30-90 seconds; first downloads take longer and need
+network access. On Linux install browser OS dependencies first with
+`npx playwright install --with-deps chromium` (CI does this). A missing native
+addon is a failed prerequisite, never a skipped success. The smoke job runs the
+same `npm run smoke` command on pull requests. This checkpoint complements the
+full browser and chaos suites; it does not replace them.

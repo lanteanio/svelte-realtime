@@ -106,7 +106,8 @@
     "verify:browser": "npm run test:e2e",
     "verify:chaos": "npm run test:chaos",
     "verify:pr": "npm run verify:unit && npm run verify:sim && npm run verify:devtools",
-    "verify:full": "npm run verify:pr && npm run verify:browser && npm run verify:chaos"
+    "verify:full": "npm run verify:pr && npm run verify:browser && npm run verify:chaos",
+    "smoke": "node scripts/smoke.js"
   },
   "engines": {
     "node": ">=22.0.0"

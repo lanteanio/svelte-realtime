@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEV_PORT, PROD_PORT } from './ports.js';
+import teardown from './global-teardown.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixtureDir = path.resolve(__dirname, '../fixture');
@@ -60,7 +61,12 @@ function startServer(script, port) {
 }
 
 export default async function globalSetup() {
-	const devProc = await startServer('dev-server.js', DEV_PORT);
-	const prodProc = await startServer('prod-server.js', PROD_PORT);
-	globalThis.__e2eServers = [devProc, prodProc];
+	globalThis.__e2eServers = [];
+	try {
+		globalThis.__e2eServers.push(await startServer('dev-server.js', DEV_PORT));
+		globalThis.__e2eServers.push(await startServer('prod-server.js', PROD_PORT));
+	} catch (error) {
+		await teardown();
+		throw error;
+	}
 }

@@ -105,6 +105,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Verification lanes and a generated CI inventory make required checks and non-hosted coverage explicit for contributors.
 
+- A self-contained smoke command verifies two-client pubsub in development and built production and cleans up partial server startup.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

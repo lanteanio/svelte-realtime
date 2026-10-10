@@ -56,6 +56,9 @@
     "sim:golden": [
       "node scripts/sim-golden.js"
     ],
+    "smoke": [
+      "node scripts/smoke.js"
+    ],
     "test": [
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -272,6 +275,30 @@
         "node scripts/sim-golden.js",
         "node test/fuzz-wire.mjs",
         "vitest run --config vitest.devtools.config.js"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "job": "smoke",
+      "step": "3",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "job": "smoke",
+      "step": "4",
+      "commands": [
+        "npx playwright install --with-deps chromium"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "job": "smoke",
+      "step": "5",
+      "commands": [
+        "node scripts/smoke.js"
       ]
     }
   ],
