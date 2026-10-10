@@ -10,6 +10,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- Release guidance now defines frozen source identities, coordinated stable promotion, stable hotfix merge-back and verified dist-tag rollback.
+
 - A tag-only release workflow verifies source identity and the complete test contract before passing one hashed tarball to protected npm trusted publication. Local publication runs the check chain first.
 
 - Generated README topic and package-export indexes cover every public section and import. Release history ships with the package, and source-link fragments are checked against the matching Git tree.
