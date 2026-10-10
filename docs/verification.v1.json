@@ -15,10 +15,14 @@
       "publint",
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
-      "node scripts/check-links.js"
+      "node scripts/check-links.js",
+      "node scripts/check-doc-code.js"
     ],
     "check:errors": [
       "node scripts/generate-error-reference.js --check"
+    ],
+    "check:examples": [
+      "node scripts/check-doc-code.js"
     ],
     "check:format": [
       "node scripts/check-formatting.js"
@@ -38,6 +42,9 @@
     ],
     "generate:errors": [
       "node scripts/generate-error-reference.js --write"
+    ],
+    "generate:examples": [
+      "node scripts/check-doc-code.js --write"
     ],
     "generate:onboarding": [
       "node scripts/generate-onboarding-reference.js --write --sync-docs-site"
@@ -59,7 +66,8 @@
       "publint",
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
-      "node scripts/check-links.js"
+      "node scripts/check-links.js",
+      "node scripts/check-doc-code.js"
     ],
     "sim:golden": [
       "node scripts/sim-golden.js"
@@ -82,6 +90,7 @@
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
+      "node scripts/check-doc-code.js",
       "vitest run"
     ],
     "test:chaos": [
@@ -92,6 +101,9 @@
     ],
     "test:e2e": [
       "playwright test --config test/e2e/playwright.config.js"
+    ],
+    "test:examples": [
+      "vitest run test/documentation-code.test.js test/packed-readme-examples.test.js"
     ],
     "test:fuzz": [
       "node test/fuzz-wire.mjs"
@@ -112,7 +124,9 @@
       "node scripts/check-formatting.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
-      "node scripts/check-links.js"
+      "node scripts/check-links.js",
+      "node scripts/check-doc-code.js",
+      "vitest run test/documentation-code.test.js test/packed-readme-examples.test.js"
     ],
     "verify:fast": [
       "node scripts/generate-error-reference.js --check",
@@ -128,7 +142,8 @@
       "publint",
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
-      "node scripts/check-links.js"
+      "node scripts/check-links.js",
+      "node scripts/check-doc-code.js"
     ],
     "verify:full": [
       "node scripts/generate-error-reference.js --check",
@@ -145,6 +160,7 @@
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
+      "node scripts/check-doc-code.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -167,6 +183,7 @@
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
+      "node scripts/check-doc-code.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -191,6 +208,7 @@
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
+      "node scripts/check-doc-code.js",
       "vitest run"
     ]
   },
@@ -302,6 +320,7 @@
         "attw --pack . --profile esm-only",
         "node scripts/check-verification-inventory.js",
         "node scripts/check-links.js",
+        "node scripts/check-doc-code.js",
         "vitest run",
         "node scripts/sim-golden.js",
         "node test/fuzz-wire.mjs",
@@ -337,9 +356,11 @@
     "check:links:external",
     "test:chaos",
     "test:e2e",
+    "test:examples",
     "test:watch",
     "verify:browser",
     "verify:chaos",
+    "verify:docs",
     "verify:full"
   ]
 }

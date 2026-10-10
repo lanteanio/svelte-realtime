@@ -704,6 +704,10 @@ The data store value never changes shape. It is always your data type or `undefi
 Handle loading in your template:
 
 ```svelte
+<script>
+  import { messages } from '$live/chat';
+</script>
+
 {#if $messages === undefined}
   <p>Loading...</p>
 {:else}
@@ -846,6 +850,11 @@ Use it to wrap any stream:
 With default slots, the minimal version is just:
 
 ```svelte
+<script>
+  import StreamView from '$lib/StreamView.svelte';
+  import { messages } from '$live/chat';
+</script>
+
 <StreamView store={messages}>
   {#each $messages as msg (msg.id)}
     <p>{msg.text}</p>
@@ -1701,6 +1710,7 @@ The grace only affects local data retention. The server's replay buffer and `del
 
 When using svelte-realtime from a client that runs on a different origin (Svelte Native, React Native, or any standalone app), pass the `url` option to point at your SvelteKit backend:
 
+<!-- doc-code: no-run reason="requires-browser: connects to the application's WebSocket endpoint." -->
 ```js
 import { configure, __rpc, __stream } from 'svelte-realtime/client';
 
@@ -2092,6 +2102,7 @@ access: live.access.org({ orgField: 'organizationId' })
 
 > **A non-null `ctx.user` is not enough.** `svelte-adapter-uws` always upgrades a socket with a userData object, so an anonymous connection arrives as `ctx.user = { remoteAddress: '...' }`. The gate keys off the id, not off `ctx.user` being present. If your `upgrade()` hook returns a session shape with no id field (for example Auth.js `session.user` = `{ name, email, image }`, or an OIDC payload keyed on `sub`), map it to an `id` or those calls will be rejected:
 >
+> <!-- doc-code: fragment reason="Upgrade hook body; session is supplied by application authentication." -->
 > ```js
 > // svelte.config.js - upgrade hook
 > return session ? { id: session.user.sub, ...session.user } : null;
@@ -2103,8 +2114,13 @@ import { guard } from 'svelte-realtime/server';
 
 // Bare authenticated check
 export const _guard = guard({ authenticated: true });
+```
 
-// Compose with custom predicates
+Alternatively, compose the authenticated check with a custom predicate:
+
+```js
+import { guard } from 'svelte-realtime/server';
+
 export const _guard = guard({ authenticated: true }, (ctx) => ctx.user.role === 'admin');
 ```
 
@@ -2493,13 +2509,13 @@ export const dm = live(async (ctx, msg) => {
 The exploit shape is one line of client code: `dm.invoke({ to: 'admin-1', text: 'fake admin notification' })`. The fix is a tiny ownership check at the handler boundary - keep it generic and reuse it everywhere the handler routes to a `userId` from the wire:
 
 ```js
-import { live, RpcError } from 'svelte-realtime/server';
+import { live, LiveError } from 'svelte-realtime/server';
 
 function mustOwnUser(ctx, targetUserId) {
   if (ctx.user?.id === targetUserId) return;        // self-targeted (allowed)
   if (ctx.user?.role === 'admin') return;           // admins can address anyone
   if (sameTenant(ctx.user, targetUserId)) return;   // tenant peers
-  throw new RpcError('FORBIDDEN', 'You cannot push to that user');
+  throw new LiveError('FORBIDDEN', 'You cannot push to that user');
 }
 
 export const dm = live(async (ctx, msg) => {
@@ -2764,11 +2780,12 @@ Read the live counter map programmatically:
 ```js
 import { getAssertionCounters } from 'svelte-realtime/server';
 
-setInterval(() => {
+const assertionTimer = setInterval(() => {
   for (const [category, count] of getAssertionCounters()) {
     if (count > 0) console.warn(`assertion ${category}: ${count} violations`);
   }
 }, 60_000);
+assertionTimer.unref(); // monitoring alone does not keep the Node process alive
 ```
 
 The client-side assert helper is exported from `svelte-realtime/client` with the same shape (sans Prometheus wiring - the browser has no metrics registry; use the in-memory counter or log shipping instead).
@@ -3016,9 +3033,10 @@ Cron registers at module load but the tick can only publish once a `platform` re
 
 ```js
 // src/hooks.ws.js
-import { setCronPlatform, pushHooks, message, upgrade } from 'svelte-realtime/server';
+import { setCronPlatform, pushHooks, message } from 'svelte-realtime/server';
 
-export { upgrade, message };
+// Keep the application's authenticated upgrade hook alongside these exports.
+export { message };
 export const open = pushHooks.open;
 export const close = pushHooks.close;
 
@@ -3041,7 +3059,8 @@ import { setCronPlatform, configureCron } from 'svelte-realtime/server';
 import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
 import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
 
-const redis = ...; // your shared Redis client
+import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
+const redis = createRedisClient();
 
 const leader = createLeader(redis); // instanceId defaults to a random hex; override for diagnostics
 const bus = createPubSubBus(redis);
@@ -3345,14 +3364,14 @@ Hand-roll your own `combine(...buckets)` for non-trivial reducers (top-K, percen
 The single `snapshot` option only restores the single-state form. For windowed aggregates, pass `snapshots` keyed by window name - each restores one window's state on registration in parallel:
 
 ```js
-{
+const aggregateOptions = {
   topic: 'events:view:topk',
   snapshots: {
     today:    () => db.query('select counts_json from topk_daily where day = today()').then(r => r[0]?.counts_json ?? {}),
     lifetime: () => db.query('select counts_json from topk_lifetime').then(r => r[0]?.counts_json ?? {})
   },
   windows: { /* ... */ }
-}
+};
 ```
 
 Sliding windows are not snapshot-restorable - their bucket boundaries are tied to wall-clock time and would not survive a restart coherently. Pass tumbling and lifetime here.

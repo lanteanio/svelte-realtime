@@ -1,0 +1,2467 @@
+{
+	"schemaVersion": 2,
+	"documents": [
+		"README.md"
+	],
+	"fragmentCeiling": 1,
+	"summary": {
+		"total": 244,
+		"classifications": {
+			"command": 4,
+			"tutorial": 74,
+			"syntax": 128,
+			"output": 6,
+			"executed": 30,
+			"fragment": 1,
+			"config": 1
+		},
+		"channels": {
+			"manual-command": 4,
+			"app-context": 74,
+			"acorn": 120,
+			"reviewed-output": 6,
+			"svelte": 7,
+			"packed-runtime": 30,
+			"reviewed-fragment": 1,
+			"manual-config": 1,
+			"json": 1
+		},
+		"notRunnable": {
+			"app-context": 74,
+			"ambient-identifiers": 118,
+			"browser-component": 7,
+			"type-declarations-only": 1,
+			"requires-browser": 1
+		}
+	},
+	"blocks": [
+		{
+			"document": "README.md",
+			"fingerprint": "c8cc72c7020f9d38ecbdc6c753ba7f634ab63ebaf3fea20b44ff46590e0897ea",
+			"occurrence": 1,
+			"language": "bash",
+			"section": "Quick start",
+			"classification": "command",
+			"channel": "manual-command"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "e62d87baccfd6ee3b4474ae881d3b713461ee3f7e3daf328ea4305709c555b9a",
+			"occurrence": 1,
+			"language": "bash",
+			"section": "Manual setup > Step 1: Install everything",
+			"classification": "command",
+			"channel": "manual-command"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "02c07461dd71eb3a4818bcc98dfc641c538711530e0f904cdd0ae90cc005c380",
+			"occurrence": 1,
+			"language": "ts",
+			"section": "Manual setup > Step 2: Configure the adapter and Vite plugins",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws, @sveltejs/kit/vite, svelte-adapter-uws/vite, vite, svelte-adapter-uws, @sveltejs/kit/vite, svelte-adapter-uws/vite, vite"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "39e60db370f6f6e3f7bec79281cacd23b50ad4adb06df452a2e01d4a3af78887",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Manual setup > Step 3: Create the WebSocket hooks file",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers validateSession"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "921c6a1145c79e960173988bf8e65b6b145c40dbde829ebd0f3f636b23679013",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Manual setup > Step 4: Write a server function",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $lib/server/db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "e64a1576892c4dc91d6bfcf41ea1b6ae9c8d05290bbcb263a724a32c17875b3e",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Manual setup > Step 6: Use it in a component",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/chat, $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "728ddb46e4de7644dd2eb4db7d99c7a43472d4d895513aa82c92712a6e7eb06e",
+			"occurrence": 1,
+			"language": "plain",
+			"section": "How it works",
+			"classification": "output",
+			"channel": "reviewed-output"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "77cff289e077c11d133c7b7179281a40fcf1ebf4a66b5eddaba3846b85b3cf6a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Merge strategies > crud (default)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "8b3e38ce85e6fb7d6ad1c084195a83099faa128fdbb7508604f538031b81acba",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Merge strategies > crud (default)",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "7d2d31f0e62b38cfba88207372e780f2a774a06adfd3af13e0706ca0ea8bf380",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Merge strategies > latest",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "bb0b0dc4f95ff2d2e713ea30bbd1291874913ffe79e722faa616ca418e059104",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Merge strategies > set",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "1efcfd3eb95b5a3d8702b8496c042dacbfce3a80afd840722c57b9226aff8611",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Merge strategies > presence",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d5ee821e772e5cf169e84f0fa8bbc8613fc2823e7134c55c237a742a52c7a9af",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Merge strategies > presence",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/room, $live/room"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "3f1b0c2cf5fe4328fe4ef6011534632fa3754f0cd2fa45e5ff8b5cdcb9333db8",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Merge strategies > cursor",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "9ccd2f3dfc2089f0040b494e15012fd8ac0c1a261ac74670e84d73622957b3d2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Merge strategies > Redacting PII on the wire",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, loadAudit, loadFeed, loadTickets, projectForWire"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f5999d3dbf70b750c215f8d38da6593606b8895d6c32b85f84f2dd42a837ea81",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Merge strategies > Right to erasure (`live.forget`)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers auditLog, ctx, targetUserId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ab51b1c2f3127b6bc4a3fd2cb1d28b78eddf23bab0d4916d3c0f2dc3e0468788",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Merge strategies > Right to erasure (`live.forget`)",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/forget-store"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d1c652749d2b792f2a6cb9dcc343cfd1a8813cffe7a7fa8b6cb11724ef0d0a2a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Merge strategies > Right to erasure (`live.forget`)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, targetUserId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "3cdffc49112c1f01611743ff34843f66c7b92f89ba1d521aef2408c94f6015fe",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Connection state stores",
+			"classification": "syntax",
+			"channel": "svelte",
+			"reason": "not runnable: browser-component"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ce016ed835d57edfc369d121eca18de2b1205e079fbc56cc37c36bea61904264",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Connection state stores",
+			"classification": "syntax",
+			"channel": "svelte",
+			"reason": "not runnable: browser-component"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5c473a14b6e8f9e959c0f1152105aa570ef36cbc01cdb4726262bec3a22d32e2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Connection state stores",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws/client"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "bb56abd9ee1dbc171e0ac4f7b67d517ffac852a9dd1511890f481b113181f9ae",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Svelte 5 store helpers > `store.rune()` - Svelte 5 reactive object",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/todos, $live/todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "552b3ab9ff9c7973bd0c2c81f557356dbb01e19950ecdf2dde8a088ff7fa0218",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Svelte 5 store helpers > `createReactiveStream(source)` - the first-class primitive",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/todos, $live/todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "aae8ed5bef78adb10022a458e0a07a94d84ef6d4744ae3304ddd662021345174",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Svelte 5 store helpers > `store.map(fn)` - per-item projection",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/todos, $live/todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "eecef4e00dcc38d7909fb164ad2b8c80e48c66b8db8d77d60b8312141dcc691d",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Svelte 5 store helpers > `empty` - bundled placeholder store",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/todos, $live/todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "2fc8138d94806155baa86e3c29d20f296d56f8e94b896fc3f6145ffb80274507",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Error handling",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "9069c104b604d2aac9cb99c3d421f9a1e39f8c59524d1fc54738fe360962f957",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Error handling",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/chat, $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "122de95a6a0763e83f0f61487b12978ad8a43984ee5f4712bf74116603f6cfd7",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Error handling > Attach lifecycle: `store.phase`, `attach()`, `detach()`",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/game"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "dd25942dc2dda67d28b9a48296efb5ed40cc2c6f0adb7060bc9879a10652758c",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Error handling > Attach lifecycle: `store.phase`, `attach()`, `detach()`",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "924d9a65c5f5a24162864737c320f8ac2a79d83ced8307d8fdaa3d0aaf4fd81a",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Error handling > Reusable error boundary component",
+			"classification": "syntax",
+			"channel": "svelte",
+			"reason": "not runnable: browser-component"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "803d35d09fa642f79fb560602ace63596ed20fa401f209ebe34ac38a1c3b67e2",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Error handling > Reusable error boundary component",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $lib/StreamView.svelte, $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "b020feaec32bcd6da809874ed9a6998f0d76dfb31f38821405d660856e4e4f26",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Error handling > Reusable error boundary component",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $lib/StreamView.svelte, $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ab59376efff772f0d0f466572a5bcf6b565a3b81fc479ce2f6fb1dbe57dd6a97",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Per-module auth",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "8c38e3f5839060229041bcced078aa8106fcb6375040d6576ce8b932cf7db3aa",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Per-module auth",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers LiveError, guard, lookupPermissions"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ffba57170243dbbc72e0eb7725971ca9603c565607eef494a16a02f5a4bc9926",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Dynamic topics",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "65d4b8ccab9b9c43d720346f3e02a85ba989edd5e86ea86e4ad7ebc1ae1ecfa5",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Dynamic topics",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/rooms, $live/rooms"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "700623957c7b213e2d59a2fbd36a590b7f468da7964af5c9149b200e1e330107",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Topic registry",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, loadAudit"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "086005255a9c05144b64841696824a3679b42eb196e9d2168abb2d63b728bd45",
+			"occurrence": 1,
+			"language": "plain",
+			"section": "Topic registry > Build-time registry check",
+			"classification": "output",
+			"channel": "reviewed-output"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f37982e4b7a302fd32a5575620a6b650615ddd2e01743378379c1b292de6c7da",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Schema validation",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: zod"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "bca65818778a2ae5f3da49b915477fd46adf87194156879771a6e79529f51489",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Schema validation",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: arktype"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "cc3a6db2e404024e92de0d3dc3665cb69a31931a045ec3d4edba487579fa6019",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Schema validation > Validating stream arguments",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: zod"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "6d25470931db8f0608c57573b4ec9b6484953b48e108a9eecf9d512e2056554c",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Channels",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0551edc3e3b6bc801c34f24fccefe15fe4c9b7ca90758729207eb8bdf61b24ab",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Channels",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/typing"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a6ebd54a251c81c9c744452abb4e76b5d85da0d50b7114c88d4c24e39b81c730",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Channels",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "140c855504dd993c0730b69552400e3947dd27f98ef89786366e2509d2f8f97d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Channels",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, loader"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "1291c9063f2825e5e3e8fab136794f55a69a161d62af7e0361c6a1d57bb43f0a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "SSR hydration",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "90682f74ffcc2493275b4480998d0861270c9da1758bf80972d982fa1e57c8f8",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "SSR hydration",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/chat, $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "4e4e11d54f76d01f720e270ce34ed56b7203cee559a7b7148172a3c1002faa2c",
+			"occurrence": 1,
+			"language": "js",
+			"section": "SSR hydration",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/invitation"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "7bc9ef083f763b8dc466c3cac15d05ed43a7f9a302827554b682bfc30b32f68e",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "SSR hydration",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/invitation, $app/state, $live/invitation, $app/state"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "6cdefdbf69e554cf93c23f6d08fa9eac0c7762dd8b0922901078744d025dab28",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Batching",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/boards, $live/boards"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d4faf40435e852822d0ee1668febb814c28d02e5520b9301934b406d3cab384a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Batching",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers addColumn, batch, boardId, createBoard"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "695a80b805a53e173e01537a8e29fb7506c4c9800f0fa50eebd7cb4630c4a7a8",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Batching > Server-side batching",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "196c121bebdd1d66efcd81fdfd26e2aadc1bae9e237749c509c565bde68c9cb8",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Batching > Atomic publishing (`ctx.batch(fn)`)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "e1d1cebc30ec4c25165a29348eb341b0242f12d1c8aa1f1dc850bdc3b512c9ac",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Volatile RPC (fire-and-forget)",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "25ab71bf896ed3dcd27bce61704d71fc44ff1d283bcd41f81e8865fb8c9bc2dc",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Volatile RPC (fire-and-forget)",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/cursors, $live/cursors"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "99e4bfb351cf8a6b8c3f2b5652de325861467996bf42a8e50126263a2048a8c2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Volatile RPC (fire-and-forget) > Deprecating an endpoint",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, loadFeed"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "52c4df810880a32c4226732a89778630e94b6a7675351761b2cc336fe9b6b652",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Optimistic updates",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/todos, $live/todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0914cc4c84e669fd0953a45e028db2d21899e43e3419ed3d032a2477465fa22b",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Optimistic updates > Auto-rollback with `store.mutate()`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers addTodo, id, removeTodo, tempId, text, todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "96e75d700c52b2b87d43624b172511e802d05328bc60d27e475d680d6d3059e5",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Optimistic updates > RPC-bound shorthand: `rpc.createOptimistic()`",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5f31305b8d201bfd646bb505a4f05bea4f47d2119e3f4f4c1fda11503dc66eb5",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Optimistic updates > RPC-bound shorthand: `rpc.createOptimistic()`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers callArgs, rpc, store, wrappedChange"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "de4dc9ce6389eefc4ca60a261806a7ec8fba11cae9c3c4d70c32d7b8b087ddf1",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Optimistic updates > RPC-bound shorthand: `rpc.createOptimistic()`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers messages, sendMessage, tempId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "99ef758e15e63c6c1b64d2edca841471b4de0e7174dc7df43e928546d59c673a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Optimistic updates > RPC-bound shorthand: `rpc.createOptimistic()`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers messages, sendMessage, tempId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "9eacd519461adfb28702caf8f1771236b7f2248d6e289090bddc93da5836849c",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Stream pagination",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "568f5f7444176e3cf8e80300e0d89d6094dd4b92bb4a4487aab2268ee7b9760f",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Stream pagination",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/feed, $live/feed"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "564310b825cde4d130a04996fcff216d5edbaba073698c244d3aeaff735f9065",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Undo and redo",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/todos, $live/todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "cea01d4c7b2851d7cebc72b7545c5ff7204a0bb05967a5dfa7b2a6ae53fa89c5",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Request deduplication",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers getUser, userId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "42b40ac61564c3749536d0775b1909d1c40cc61ba3bf238c1c1d4fb8db66ddb4",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Request deduplication",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers getUser, userId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "8de5b28978a3accf6e9153d613d6e664665a5b5ad405f5fa8bec6691d8ce90b6",
+			"occurrence": 1,
+			"language": "plain",
+			"section": "Request deduplication",
+			"classification": "output",
+			"channel": "reviewed-output"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f8b3281f4795fea121ab2a1916a0d97178b2f5d7fc3766112e09ead7f5015b25",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Idempotency keys",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers OrderSchema, db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0f0cfc37d56c6bdbe2e4638e707800c39c6885397db4ad373a30cfebcb078261",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Idempotency keys",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/orders"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f96b9fc05e068f728050dabbb18095685f1f2cc1567ccff52a061ab5290a5a1c",
+			"occurrence": 1,
+			"language": "plain",
+			"section": "Idempotency keys",
+			"classification": "output",
+			"channel": "reviewed-output"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "65bce289e953c19457c3d9a9568e7fd48af05ce549e35eeb674c133509025523",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Idempotency keys",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers createOrder, id, payload"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "4bfab7032fce88b4800eb1b1a01357558abcfe9e37515c71fe585b8c72ecad01",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Offline queue",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "8e271a1f42859a9cdeb011829d522823c216376db668a3b2f75a15a3c57c0c7d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Offline queue > Durable persistence (survive a reload)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers configure, currentUserId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "6ea9fde397386a7f474b4903cc671f1068be0a61896e299ac5ff494474676205",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Offline queue > Upload checkpoint and consumer stores",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: type-declarations-only"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "36617f5a9221526f2cc2eda7f9e098d907c98136ee7bb77bc237c37b039f7f52",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Offline queue > Conflict resolution (replayed mutations)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers configure, mergeArgs"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "b76900333c3048502da3cfa6e7cb29acea510a90fe9b4a58252ba3e02e447ab2",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Connection hooks",
+			"classification": "syntax",
+			"channel": "svelte",
+			"reason": "not runnable: browser-component"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "68b2329e92997d5d29084e86157a3225245e8074d7161e7f5aa0ba979b440ffd",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Connection hooks > Coordinated protocol rollout and rollback",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers configure, realtime"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f97efc06a8fa80187c826a486d42c3c2944011a27390a17ce804cef98222e972",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Connection hooks > Pause and resume without re-rehydrating",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers configure"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "76881868e82f995005702c3217da1882a52ccfd8d279a2381c80de7d4de22b72",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Connection hooks > Cross-origin and native app usage",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: requires-browser: connects to the application's WebSocket endpoint."
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "7fd6b66b12b52b13582daf8c29b520bad2c31fd0796b1e63ad3ad7df6bd0d6e5",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Connection hooks > Cross-origin and native app usage",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers validateSession, validateToken"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "8602e0723e9543188842a37d26a40c67a45848fb04bdcf625a4092860efc575a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Connection hooks > Cross-origin and native app usage",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers configure"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "11d396d08f0e04649f1b91ead0aecb90f211d07bb0279b52cfd56c5399c2ed5c",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Connection hooks > Refreshing session cookies on connect (Cloudflare Tunnel and friends)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers rotate, shouldRotate, validateSession"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a3ce8c3438b7593711faaebecb7f983879c4b67581baf12ede8906595e383e64",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Connection hooks > Refreshing session cookies on connect (Cloudflare Tunnel and friends)",
+			"classification": "syntax",
+			"channel": "svelte",
+			"reason": "not runnable: browser-component"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "7a93bd7b10c424eee44d17c5507f51a9e53142d5799637f69cde8d3f3c815890",
+			"occurrence": 1,
+			"language": "js",
+			"section": "SvelteKit transport",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "37684f955157e1ceafd0ec5a272481a6ab47d6f83c3fff034ab7001ccb230b81",
+			"occurrence": 1,
+			"language": "js",
+			"section": "SvelteKit transport",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $lib/geometry"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "c0624b7dda3f03adcaaba6e205fb0bf69975bf52cad6307ab99011a2b048d428",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Combine stores",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/dashboard, $live/dashboard"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "7f2eb8f63e7e18caa7f83aa238869abfbe06cb25509af4a0820aeb2049a9b68a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Global middleware",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a6dde120d7aad03d1164e6fc3f45d5890c21b58b85c2cf8064e3ba9ebc1f1468",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Throttle and debounce",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "7a1a8de3e3c21f244d16fd5f40252f3c88ac5632f5fa321b1df456ed9dfdc418",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Stream lifecycle hooks",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live, stopUpstreamFeed"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0f913fc39ebbdf767d7d741ee6c7f73eeca8dea066e014a39f052fadb372c0b0",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Stream lifecycle hooks",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "3d74e25da90c4c58c81c87e2e6b133bf3e526d4a66a66fdb4b2d118d1d7cc9d6",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Stream lifecycle hooks",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers myPlugin"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "176cb1bc8877d789a2ba656223b4dd23b3157b3c8dd82e04b52a4edacfcb3789",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Stream lifecycle hooks > Staleness watchdog and per-stream `onError`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, loadAudit, log"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "70053bbd962c504090c6b6796fff684c950a6e25e3f3819d1c3b3ca6113196f9",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Stream lifecycle hooks > Staleness watchdog and per-stream `onError`",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "6f7d80c289c26f2a5fa0ca5cd85c81d51f0713c68b267ce5f832f09fd359ab97",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Stream lifecycle hooks > Topic-driven invalidation",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers ctx, live, loadTodos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "cb53cfb86f28002e70369992bfb88287632e74418e4f1515a63167668a1584cc",
+			"occurrence": 1,
+			"language": "js",
+			"section": "De-herding thundering-herd broadcasts",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers ctx, detour"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "052aa4e77ca2be2acd71f81188be70140bcdf7d31ce9df720262a20527a15eb8",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Access control",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "abc330074388328fd14825e24571498a1f9ea4352bb804269926fa040803c11e",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Access control",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "e96647b393632085c976bedbd8ad7a49db2628341e861a2e9b0c1bf4269f2b4d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Access control",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, loadAudit"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "bcf4a6dbfa4d16b12fbdf1f3507d29e5303e994aaf801913acfebd505268d1ac",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Access control > Authentication shorthand on guards",
+			"classification": "fragment",
+			"channel": "reviewed-fragment",
+			"reason": "Upgrade hook body; session is supplied by application authentication."
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f26dd6659ffd9bf4aa3e969c477ababe89caf2f2382e750d0ca71db216e74f2e",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Access control > Authentication shorthand on guards",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "cd18218208b4e5b2d08e333648c83c20273e32da048dbfe7d90609961246502e",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Access control > Authentication shorthand on guards",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "eacb7b64ade46d7611a79ee80b227412d7ec715e6ff2909ca2e6b778402f42ad",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Access control > Masking path existence (`maskNotFound`)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers realtime"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "e4646936110a5b73371b6639bb995585a1c05873480dddf3e6af5bfb68c266cb",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Access control > `live.scoped(predicate, fn)`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers SettingsSchema, db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0ed5e7614f5ebb7a82f0255c9efa5fa67db1c46a68fdc31d62c98de907107c06",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Access control > Subscribe-denial codes on stream stores",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/audit, $live/audit"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5b340f7d1f76d136b1657024068bb5f97bdc74dfbc07ca3b04c9cca381277dac",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Multi-tenancy (`live.tenant`)",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ac71f22fb8cd0f9803abfb56f2bd932960d77429e8940c648a883f16ef585af3",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Multi-tenancy (`live.tenant`) > What you get",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers loadOrders"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "6aa4049887e7c85b5440da8e89a3bc68e048660bcacbfe3b2713e45ec8c7180c",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rate limiting > Per-function rate limiting",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "e7bad2a99ab97cd74c5f1f24804842ffa298b9cab65e32eda3c63df1ec645620",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rate limiting > Registry-level rate limiting",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "e58d0d36d3af607bea9fefd6c64d56ba18d224dbd4c84262df0bd943fa94cde2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rate limiting > Global rate limiting with Redis",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis, svelte-adapter-uws-extensions/redis/ratelimit"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "cd6666a9ad76718ad2bc467979da0d5798061bef64c6e7e8ad57d6ae1bd66d24",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Load shedding",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers ACTIVE_PRESSURE_REASONS, LiveError, loader, search"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "df0d7130d089a46cf5481d2e0e1f0414b729a16ec8e3596e2e41b9c1d1f11184",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Concurrency control",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis/lock"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d15788348229dae9fcb91ea7a49f928360e22ef278557deef75ce9492a85a32d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Concurrency control > Bounded wait with `maxWaitMs`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, settle"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "cccbb2ce396a7d8d8c74e237e8cff0cb4e3878c77b022ca5503ecb12659de700",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5295a0e154c1a3dd8b3cc1ff40d692288b5fba238d2218878100d102477cf898",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers actuallyDelete"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "997baf10b84ca88ccde5b166ffc77398d107fefcee4a4cf0be4ab24645ae4135",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Server-initiated push",
+			"classification": "syntax",
+			"channel": "svelte",
+			"reason": "not runnable: browser-component"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "94ac4ae932be803ba75b27136f9dbb47605d868957fd5e9743635c79f84eb741",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "62df560882d00be6c7235be9b52154ab1c293681626d59731db8bcaf0bc41a87",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers itemId, userId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "4c9a0945af27cfbec52b82472a7117a48d8f14da17c1cee7c9b7494d79c22fab",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push > Routing by session",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "eb5765a0843bbda486b68bcbf3e738d12826ab21e65b000af171545ac67519d2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push > Routing by session",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ce3e2e4004014d5d411f37703446e60c54c83ea74940a370058f45322b301d6b",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push > Trust model: target.userId is whatever the caller passes",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "3715a24d737e6e7ce6952904bada7b1dc41202c3ed40521b5c58979347121b8a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push > Trust model: target.userId is whatever the caller passes",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers sameTenant"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "234750fcc1aefea2955c1aa4a176da812d07c5dda37dd842b43b6755915be8a2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push > Fire-and-forget: `live.notify`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, upload"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "e50bc6a93b9ac7877f261b426e14765e3356508fb7e6511eba724c8cd32a0dd9",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server-initiated push > Cluster routing",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis, svelte-adapter-uws-extensions/redis/registry"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a0d55c55551434fc2e622fb6c2557f3b72294f120f7a4572acd90074d8559643",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Prometheus metrics",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/prometheus"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "b876b36ed105a7493e57a713763681682dc5f10372f645b86e8ca7bb9e0b6deb",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Prometheus metrics",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers app, metrics"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "be3ce7a74d419572d34eccd703e97c81f6f0b660ad52ff5ed0bcf1b9401097a1",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Prometheus metrics > Cohort-stratified metrics - never trust the aggregate",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, registry"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "4c6bd842db8f597346d74d79db3a51bfc61a7e3777675f3fea1728c629d5cfc3",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Prometheus metrics > Per-subsystem performance budgets",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers elapsedMs, live, runTick"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d4a4654176c87f32f0930ef0c648c244238382372dc988f30e67c08ea35b9c17",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Prometheus metrics > Pause-aware lifeline `/metrics`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, registry"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0dead0333818d0d9b1a4ce4f8c5af0146815c7f30e951241d8482f362a5b4f91",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server introspection",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "39236d60c772584b5e1f55c4c3d4bf9b54d609a1ecf743c63a447757ea5929cb",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server introspection > The admin route (`/__realtime`)",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "52416972d68a7aa34e4712a56ea5b38732bd8ae674c541275de4136224fc6d1c",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Server introspection > The admin route (`/__realtime`)",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: ../../../hooks.ws.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a97b6b7e437ccfbe3f0cc0eb36d0402dd7f955d4aefb411d16e0b9bd21884d7f",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Production assertions",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "69ec7e8a9b8ba48888b53e4ce8a21fda5f939ecee47a522cb07f801f0294f3b1",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Circuit breaker",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/breaker"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d4d8fb4c4d74505f49d78fca1f72b46ebdd3c1ccdc41af3697018d76eabe227e",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Request correlation",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/postgres/tasks, svelte-adapter-uws-extensions/postgres/jobs"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "c5e5d1c9a8ea91d11ae83b0486bbece8cc99708aedb63b6b74261e9ae3d5f60e",
+			"occurrence": 1,
+			"language": "sql",
+			"section": "Request correlation",
+			"classification": "config",
+			"channel": "manual-config"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "386c9c209b21c09d1ccc4097747a505c60fe987225b09f780688a2039e8e6b1d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Request correlation > Distributed tracing",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "02fa9083c0f2b4dceec1b7214987e8236f0917e293390492d30fe2a0c6ac01c2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Per-room alarms",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers archiveIfStale, live, loadDoc"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0d913f2c8383e4c0bae749376932ff6489c6662accfc0c4db4f8df2c8b620796",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Per-room alarms",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis/alarm-store"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d78f7eb931a266a5c9fb98853f6d6953f206a9dce763f14db14472e021d26fa8",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Per-room alarms",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers closeAuction, live, loadAuction"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "4d6bba289b0a8c8af549af7d233441995136480412816e4bc4fa0014836ac7ed",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Cron scheduling",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0d40bfb57f2fc907e3f5e5a7a930335cadda449bd9fbcc21cfd9104998973d62",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Cron scheduling",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "509edba82bbd2991e137e8c95c6db4581e85c84670aae50082206fc51068a64a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Cron scheduling",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers deleteBoard, listStaleBoards, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "408d1caca74f6143981b16b81ceffe1f6defce273e814d2eaf47470bcace1cdf",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Cron scheduling > Wiring the platform",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "c30863ef0cb3d916031c9c6da51011876e929a1b97e56e51fa88ffa6741ef446",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Cron scheduling > Cluster mode",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis/leader, svelte-adapter-uws-extensions/redis/pubsub, svelte-adapter-uws-extensions/redis"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "3dee49393599d52944155910572df9b83ce70da28a49f2f7691bb130cedfc098",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Feature flags",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "9ac480014ec3d8832beeb440b3687c08c4e01aac6698d13ad60c046fd542a3c8",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Feature flags",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, maintenance"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "aacb8e5e6ff298a2f615dbb0870c584e5b16e7e7f2d455983fccc3483fd56ccf",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Feature flags",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/flags"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "e580063984c12c275283450216e83e895fb2eda1d5667f05b2f36267512e0121",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Feature flags",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers maintenance"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a3b7e3b38d848e11e9f3c449848c01cbe2fe0fbd3c35a59ea653f85240b83e49",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Derived streams",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d67c90024e574430c4c6fa6f89fa37458c589ec65db92317f969ebc68d8b3d3f",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Derived streams",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/dashboard"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5a109de16964a302336b13d21f47c40c486cfbc2279de7d7f5b0fe05afce702f",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Derived streams > Dynamic derived streams",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f4cb30aff2da0a984ebc04e9bc93a4c7823def609aa4663f847130261de206ea",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Derived streams > Dynamic derived streams",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/dashboard"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "c284741a3a5fb3710ada77246a461f0665a49f0b196ecb2d44f59d90af9d3c3e",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Derived streams > Activation",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "1e558128d0e86987cc74857aaa3db09a8a537517998b8c635592119168391add",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Effects",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers email, templates"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ce307e49d4ff2f526c465470d87675ae5f6c29906f230a22840191aae3fd82cc",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Aggregates",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "8a18b1ad8483b87ccadfce0652c4967e9ea138351b4f32ca958bb00dc2d9c2b3",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Aggregates > Time windows",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a5148703efa7d73798def06ba2348a367ed6e7ec3ea8a2310ab5f0503d26a297",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Aggregates > Time windows",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/topk"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "70364003e3abb97fb4e9ddc39afc479a81ae141d438c2514109f9fe07b26a5d5",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Aggregates > Time windows > Privacy: k-anonymity and differential privacy",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5b69f32ead46e570ee81d3f9b582a7ac38f860442d3fe7d4adc3434c968542fc",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Aggregates > Time windows > Per-window snapshots",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "321a55942973d1b2a6d26455118425b249922fa90cf691819eb23351529472a9",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Gates",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "be3b4fa263ee2c924aa9fc0b4ea85ca476875f8e71ee09955c610cf4050ad4bd",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Gates",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/beta, svelte/store, $live/beta, svelte/store"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ba155a021a3951927a66c422d5635e47270864f2a647d3abcfa81e1eb5d23dc4",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Pipes",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "170371d1abb9f62dc7433247f0e387086fd68287e481c4d39185c4ea6412cc3b",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Binary RPC",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers storage"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "36e12751e1c2a7c50c1c52a3677e4d333cc23f38eef159d951ce4f84d28ada5e",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Binary RPC",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/upload, $live/upload"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "72860df9e0567f731c1ccc2d0805ea888b888ef64bc06048f5b1bd30893dfbb2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Streaming uploads",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "944716c06059d257f40502d2e9a70858b18a50d89561e973b333bcbf0c02ce74",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Streaming uploads > Client",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/uploads, $live/uploads"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "c1e701d302ff2cd75c5d5aee3ec6a3405a0178b621cf04848f4a54b5bdaf8925",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Streaming uploads > Client",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers ac, handle"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f33ef10c868f00d9a20bd070b9a76478197e72db563140a61567a4867febbba6",
+			"occurrence": 1,
+			"language": "plain",
+			"section": "Streaming uploads > Wire format",
+			"classification": "output",
+			"channel": "reviewed-output"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "dde457513d110a6017ea29e8ff31824be7629f9bbdf0daed365cc5b2d3eb2909",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rooms",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers LiveError, db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "285a4346f3832e6ead37ea965f621fdc96630bed76c997d97b55fdcdf454f79a",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Rooms",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/collab, $live/collab"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5fa0af60fb84ff2be070da703ff0c4c55905dde8020a4ffb105d97c4c0d0fb77",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rooms > Room hooks shortcut",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: ./live/collab.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "0fefc9580910bceed2186cce24368b668a3fc91b36d4dce1858e593d1b0333e2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rooms > Lag compensation",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers applyMove, hitscan, live, loadWorld, snapshotPlayers"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "53073292aeb5062eefa6f751ebff763b7641d1fba3a5029a416cc40506affddf",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rooms > Lag compensation",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers game, gameId, targetId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "9b62671b1849c7546ee3d6649ffd4526436764a6322e5c6d0a4cdb122fe4db54",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rooms > Room enumeration (lobby browser)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live, loadGame, mapFor, nameFor"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5e8222fef06e16c6deb572a876c804a94110693616fb479b23a62a2a5bcd90e4",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Rooms > Room enumeration (lobby browser)",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/game, $live/game"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "94eeb39a5c8f4319a578f6ee9648af007bacc7e6b52f1bc664f3ef74af0a5cc2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rooms > Room enumeration (lobby browser) > Per-caller visibility (`enumerable` as a predicate)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers clanFor, isPrivate, live, loadGame, nameFor"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "b78de50c12d7ea16fbd5e75f69e30f52707ea7817330d46e22eb52188645f430",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rooms > Room enumeration (lobby browser) > Unguessable join / share codes (`shortCodes`)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers gameId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "33fad142502b0a358ee87b371ae9333324cbc75187a36836257cc9d3142c5415",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Rooms > Room ownership (`owner: true`)",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers addInvite, beginMatch, live, loadGame, log, removePlayer"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "8e58bcc09678dbc08af09fd704d8f1454193a72e1e95c2bef04327b1d1b308e8",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Rooms > Room ownership (`owner: true`)",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/game, $live/game"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "2d77be591fa30214eb014396370fc515f14043c8f7144df0ef2af69fbf06809a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Multiplayer",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a7ef98c3a80b955ffeaa6702e86dccf4f2b9db36e4a027aeb804edabfed377c8",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Multiplayer > The roster view",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers $effect, room"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "823ae1f39d9ea03191f49e8455438f68140463c902e9e016cdcdf976b0361299",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Multiplayer > The roster view",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/collab, $live/collab"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "fbd024d32921f7c41f1988f64e1bd92aaf65d554ca7c386b5f07bc2dcd7ede87",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Multiplayer > Raw sub-streams",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/collab, $live/collab"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "37730b9b9bd17eb011fda8d2ec47404f5b3232a85824f102caeab0e5c3c54e1b",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Multiplayer > Field surfaces: typing, selections, locks, reactions",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "30e351f345a250bbd2c6137d2baa7093953592aafb7447363b44ac61f7beb681",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Multiplayer > Field surfaces: typing, selections, locks, reactions",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/collab, $live/collab"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "92894bfaec93b87c3982ff0b98626eab461bb46bc6dd89daf09f005b9cca6b93",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Multiplayer > Field surfaces: typing, selections, locks, reactions",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/collab, $live/collab"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "c4777c1b0d182965776d3faa50f47f5946e032e7eeecbe2ba4410a6649cc5d51",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Multiplayer > Deterministic user colors",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers user"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "2ac1c909ff011dd89c014c508278e2e2b794f8cf0d5e446632d1cd7f4fb0922a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Smoothed entities",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "695ad0c23ffce787bc3c065606e15e3b41245861c5aa6c4724e9f86f8e532868",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Smoothed entities",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: ./board.shared.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "c172e518401b8f4f3c97c8bee693d9d82bf1de1ada65337eab85401677069143",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Smoothed entities",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/board, $live/board.shared.js, $live/board, $live/board.shared.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "088b07edf1c6ac2c7b12a7e6b7066560ce45262bb7596dae2e9e7495f46a4c94",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Smoothed entities",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers apply, live, spawn"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ac4afeef9178d8f4d0df1d90485689e4af72f9d8d7402ee9110774829ae1714a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Smoothed entities",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers apply, live, spawn"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "47aaadb18c7a7c1cf53daa67f33d24c98b92610d9a9852d5a9641bf6203445dd",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Smoothed entities",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers apply, live, spawn"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "b387f54a7546a22c135faf5c1495eb8faf38a6fbfd7bbce33f5af5935b646d49",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Smoothed entities",
+			"classification": "syntax",
+			"channel": "svelte",
+			"reason": "not runnable: browser-component"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d094c2c40fa1386a57b8b09a75cc5e347cda4ee0d4aefcbaea186b6255c70819",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Smoothed entities",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers apply, live, simulate, spawn"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "46d3b7601ff4416bb91e8d600c614c9543b0713af6d6598be2684f0cdf30e4df",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Smoothed entities",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers apply, arenaId, initial, live, topic"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a3284bef1ab9398a468620cdcbe9c910245b17c320efe41151d5ecefc0a13ac0",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Shared documents",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, roleFor"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "7b90978bc7b419a27940e646c5ae04d600fd773b7ea30e538081f5815a7f1521",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Shared documents",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/board, $live/board"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "87eed742268ebd02d9861b2d2d91677a46554c741da0fd77893512dae3d22d2b",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Shared documents",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers board, boardId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5c369814721d5e7c808268112bd1f2b14e4c731f0a9380ea34a41d1e36ac2a10",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Shared documents > Running across a cluster",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis/crdt"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "05fa7179f161dbd6c9efa58bd37dbffb0992bb623d67767aa4f25dda7ecd5e21",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Webhooks",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers stripe, webhookSecret"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "1854c33818247a320d831884daa9a5c633ea60c84c4e8f26233e713d88e49791",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Webhooks",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/integrations"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "98de7c06b180b21031fe04ce1d714921fb5a5cf9de55bde3294e48592f9e065d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Outbound webhooks",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "403ce7672dbb642db8ec40b7b24a1400f28d157536814fcc6b63163f27fb5ce3",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Outbound webhooks > Cluster delivery: at-least-once, leader-gated",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis/leader"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "cffb5f057a0bf7ed9bb1d9fabc51ef7564a9520f08ea914ec17eafa591336ed4",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Outbound webhooks > Delivery",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "1821bf49be2bf168f4dcab57da7084ec2e767aeae6f0cfb5ee92396fb41e4fe9",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Outbound webhooks > Dead-letter queue",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers realtime"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "fc5af0ef33f38393b3ffe6c4dbae7ddd2bb4d2749d787f4d54d0b0c8b76a130c",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Signals",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "9977f3e9fe504ca37259495577d988164d9e3eba25ed34e3dcd0365d0f54f91d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Signals",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers currentUser, showIncomingCall"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "277ed784b6cdac5cfda3625fb41476708fb25be20a39254ed9b1747ab729f2b7",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Signals",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "7d778edffe606b80ad5a331853f283f45c16d82dea577a41430f3fa62c015835",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Schema evolution",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "3f602832b84335d632b00214b5690dcc02641de6fdfab8b8242199785d2d331f",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Schema evolution > Demo + e2e: `subscribeAt(stream, { schemaVersion })`",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/todos, $live/todos"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d2e5137f95e51d48d8e0d6b2e21f318575ac78d55f3ca472f3999cdd178af990",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Schema evolution > Demo + e2e: `subscribeAt(stream, { schemaVersion })`",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $live/chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "15f9b3eecf8297ada7851bbf553b7ca2c99370e1e498c9e1e0de8de7cf5922f2",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Delta sync and replay > Delta sync",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "1ae7d1b71b217103c3e8812f6d965db0bb63593c454daf34eed84a6111f7371d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Delta sync and replay > Three-tier reconnect with `delta.fromSeq`",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live, loadAudit"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ea73f6fb0d7fe1b5748e665a3d4e0ce50304600457626e3276557fdb7e2ac3d9",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Delta sync and replay > Replay",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "6e5da09a2e5fa5952acc8f3977020a236105a8cc1973ce0b02b52c1af815f9b4",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Delta sync and replay > Replay > Auto-routing: `replay: true` is the only declaration you need",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "1fc00710b87c49103a3ac3ee8125e4228114af275c413b029bb10c0fde86e2a0",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Redis multi-instance",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis, svelte-adapter-uws-extensions/redis/pubsub, svelte-adapter-uws-extensions/redis/leader"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "2d336548dfdc6a3355413e803ad31e4e2761a6a1943d7eb34be41309514a9628",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Redis multi-instance",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers validateSession"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "9315ff3aed6b9602087970fa79d7911d4ad5e76063a8f1a64b13416890aa0352",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Redis multi-instance > Graceful shutdown",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers bus, leader"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "6db3192fb7cdc9f6c8fb10d3524a26225779ba3b7ef7bc9358dc4fed2adc57cf",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Redis multi-instance > Layer 1: manual wiring (experts)",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis, svelte-adapter-uws-extensions/redis/pubsub, svelte-adapter-uws-extensions/redis/leader"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "6d5208706fec9d531db4ed943d87256464ca0f1967555c14818a46c754624d27",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Redis multi-instance > Combined: Redis + rate limiting",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/redis, svelte-adapter-uws-extensions/redis/pubsub, svelte-adapter-uws-extensions/redis/leader, svelte-adapter-uws-extensions/redis/ratelimit"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "4d188d1cd71797ed745c287db8e348f03ce36a19ecad3fec0de2d799c5b21f0d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Postgres NOTIFY",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: svelte-adapter-uws-extensions/postgres, svelte-adapter-uws-extensions/postgres/notify"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "2b6b1d806c39cd6525ea19d6190683db3a3e48fa553a55dd48eb1b65217fcafe",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Postgres NOTIFY",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers db, live"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f57a708396a2ec8ea955baf017646e29b9ec7e92d1e7e970f4b6e915cce3f037",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Error reporting > Operational event sink",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers logger"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "5edd58038906eaaa48f8425bf2940729ff596fbba134e1ba661d811472ae5174",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Error reporting > onError hook",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers createMessage, sentry"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "f9c9f775c169bfd42d6a6adb231036d5e5e7caa3a35cb6e3d92bdf8012544014",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Error reporting > Standalone onError",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers sentry"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "3bc1ab465fd659a6eb4fe06a464919898eb52aee38d6fc93552670e97d655906",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Error reporting > Dev-mode publish rate warning",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "945c03e898d73d6449ff32f60d765008c9ce6b974f28e8e9c4f5453ac4faac98",
+			"occurrence": 1,
+			"language": "plain",
+			"section": "Error reporting > Dev-mode silent-topic warning",
+			"classification": "output",
+			"channel": "reviewed-output"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "fd11fd1e8b43ad5d004a48922ef844d18716f20113a62b536aad5c1efb28b82a",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Error reporting > Dev-mode silent-topic warning",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "88cf3a1bf6438e3e3aeb3104c3d327bc48530885111509587928b111f17d0161",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Custom message handling",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers createMessage"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "9b09495e10c9437b7ec97dd7641f1f64138832449755ea103634a00937825c37",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Custom message handling",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "368f7476fb92d471f5bb17e401f4e0fa267ca9be552118dffd26d07ee18fbdfd",
+			"occurrence": 1,
+			"language": "js",
+			"section": "DevTools",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "7275fd056a2d96bac11f12d9aa75fda62d1c15020ffc800d81f6808bab6d989d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "DevTools",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers realtime"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "d3d778fdfd1975c96ffe1cf13a186abbf4fece665320a461f385c37094cbd16d",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Testing",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: vitest, ../src/live/chat.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "52bfa3e9db7af13808399f03a83dee4365cf59c9976a081e92576bfb62af807b",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Testing > Chaos harness",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers chat"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "2cb24c7f7d458c113abdc70fb9a5bc54dc778d923f03b030504015f2aad74882",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Testing > Direct ctx unit tests",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers expect"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "76e6f727642dd935ff21b194b157248910fb593b17d8347a54d2a82071e6d7d4",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Testing > Recorded-response fixtures",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers afterEach, expect, renderInvoice"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "531be3ba7aca68b00d45e5f02022e9fe77d53aa47eaf1f038c2e2f8ceadfd7d6",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Testing > Asserting guard rejections",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers adminModule, expect"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a1feab34935ee0582fd75276cfbf7398f6251c528084b00666b534b47531a300",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Vite plugin options",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers sveltekit, uws"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "690a3e0bc1cc9a159af2dce2599865fa7e0b45eb46f2688fbd655406d976a711",
+			"occurrence": 1,
+			"language": "bash",
+			"section": "Benchmarks",
+			"classification": "command",
+			"channel": "manual-command"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "bc002dff0d7de0a338cfb83680d24cf0f2212f4826d6d5e0efb8eb2a7305e3f1",
+			"occurrence": 1,
+			"language": "bash",
+			"section": "Benchmarks > Event batching (browser)",
+			"classification": "command",
+			"channel": "manual-command"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "8eb84e17712703a11af958b920a7fdda617032bcdf60c12c18e8861d80ae52d0",
+			"occurrence": 1,
+			"language": "ts",
+			"section": "Tauri and Capacitor",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: @capacitor/cli"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "8427ff3f4fbcd608a99d3b2575e8ef6fb99d846d8049e6b2ac9c5c1a28919e91",
+			"occurrence": 1,
+			"language": "json",
+			"section": "Tauri and Capacitor",
+			"classification": "syntax",
+			"channel": "json"
+		}
+	]
+}

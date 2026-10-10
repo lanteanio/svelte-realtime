@@ -4941,3 +4941,9 @@ export interface RealtimeIntrospection {
  * admin route serves it behind a mandatory auth gate.
  */
 export function introspect(options?: { handlers?: boolean; topics?: boolean }): RealtimeIntrospection;
+
+/** Current assertion counts keyed by stable assertion category. */
+export function getAssertionCounters(): Map<string, number>;
+
+/** Marks a platform wrapper that already routes publishes through replay. */
+export const WRAPPED_FOR_REPLAY: unique symbol;

@@ -191,3 +191,30 @@ hard errors and HTML titles/headings that indicate a soft 404. Its read-only CI
 workflow runs weekly and manually, separately from the deterministic PR gate.
 Network availability is therefore not a prerequisite for editing local docs.
 When a redirect is intentional, update the link to the final canonical route.
+
+## README example coverage
+
+Every fenced README block has a content fingerprint and classification in
+[docs/code-blocks.v1.json](docs/code-blocks.v1.json). `npm run check:examples`
+requires complete coverage and compiles JavaScript, TypeScript, Svelte, JSON and
+YAML examples, checking this package's imports and documented member names.
+`npm run test:examples` extracts an actual npm tarball and executes every
+`executed/packed-runtime` block through its public exports. Dependencies come
+from the installed root tree; the tested package comes only from the tarball.
+The ordinary unit suite and `verify:docs` both run that execution harness.
+
+A Svelte browser component is compiled, never labelled Node-executed: it needs
+an application mount. Tutorial blocks compile and check package API references,
+but application imports and ambient values remain the host's responsibility.
+Commands, configuration/SQL and output blocks are explicitly inventoried as
+manual channels. Syntax-only blocks list the missing ambient identifiers or
+lifecycle reason instead of claiming standalone execution.
+
+After an intentional example change, run `npm run generate:examples`, review the
+classification diff, then `npm run verify:docs`. Prose inserted before a block
+does not change its identity. An invalid standalone excerpt needs an adjacent
+`<!-- doc-code: fragment reason="..." -->` marker. The fragment ceiling is pinned;
+growth additionally requires the reviewed `--accept-fragment-count` generator
+flag. Fix runnable examples instead of weakening their classification. Browser
+or service-dependent examples may use a `doc-code: no-run` marker with the exact
+reason prefix `requires-browser`, `external-service`, or `app-context`.
