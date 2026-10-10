@@ -68,7 +68,7 @@ it('provides roving tabs and keyboard stream expansion with readable toggle stat
  await page.keyboard.press('Enter');
  expect(await expand.getAttribute('aria-expanded')).toBe('true');
  expect(await page.locator('[id="' + await expand.getAttribute('aria-controls') + '"]').isVisible()).toBe(true);
- const pause = page.getByRole('button', { name: 'Pause event capture' });
+ const pause = page.getByRole('button', { name: 'Pause', exact: true });
  expect(await pause.getAttribute('aria-pressed')).toBe('false');
  await pause.click();
  expect(await pause.getAttribute('aria-pressed')).toBe('true');
@@ -79,10 +79,23 @@ it('provides roving tabs and keyboard stream expansion with readable toggle stat
  expect(await rpcs.getAttribute('aria-selected')).toBe('true');
 });
 
+it('keeps visible toggle labels in their accessible names in both pressed states', async () => {
+ await streamsFixture();
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ for (const [action, label] of [['toggle-pause', 'Pause'], ['toggle-raw', 'Raw']]) {
+  const toggle = page.locator('[data-action="' + action + '"]');
+  for (const pressed of ['false', 'true']) {
+   expect(await toggle.textContent()).toBe(label);
+   expect(await page.getByRole('button', { name: label, exact: true }).count()).toBe(1);
+   expect(await toggle.getAttribute('aria-pressed')).toBe(pressed);
+   await toggle.click();
+  }
+ }
+});
 it('retains controls and focused stream nodes across ticks, toggles, and list insertion', async () => {
  await streamsFixture();
  await page.getByRole('tab', { name: 'streams', exact: true }).click();
- const pause = page.getByRole('button', { name: 'Pause event capture' });
+ const pause = page.getByRole('button', { name: 'Pause', exact: true });
  await pause.focus();
  await page.evaluate(() => { window.savedControl = document.activeElement; });
  await page.waitForTimeout(1200);
@@ -313,7 +326,7 @@ it('announces meaningful transitions once while ordinary telemetry ticks stay qu
  });
  await page.waitForTimeout(1200);
  expect(await page.evaluate(() => window.announcements)).toEqual(['Connection: Connected.']);
- await page.getByRole('button', { name: 'Pause event capture' }).click();
+ await page.getByRole('button', { name: 'Pause', exact: true }).click();
  expect(await status.textContent()).toBe('Event capture paused.');
  await page.getByRole('button', { name: 'Clear events', exact: true }).click();
  expect(await status.textContent()).toBe('Captured stream events cleared.');
@@ -351,7 +364,7 @@ it('starts stream capture paused and synchronously purges visible and undo paylo
  expect(await page.locator('#svr-dt-content').textContent()).not.toContain('private-payload');
  await page.getByRole('button', { name: 'Clear captured data' }).click();
  expect(await page.locator('#svr-dt-capture-mode').textContent()).toBe('Metadata only');
- expect(await page.getByRole('button', { name: 'Pause event capture' }).getAttribute('aria-pressed')).toBe('true');
+ expect(await page.getByRole('button', { name: 'Pause', exact: true }).getAttribute('aria-pressed')).toBe('true');
  expect(await page.evaluate(() => window.realDevtools.undoClearCount)).toBe(0);
 });
 

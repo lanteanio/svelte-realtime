@@ -575,15 +575,15 @@ function renderStreams(el, dt) {
 	streamsPaused = dt.paused === true;
 	const streams = dt.streams ? Array.from(dt.streams.values()) : [];
 
-	const pauseLabel = message(streamsPaused ? 'Resume' : 'Pause');
+	const pauseLabel = message('Pause');
 	const pauseColor = streamsPaused ? 'var(--svr-dt-warning, #ffe18a)' : 'var(--svr-dt-muted, #b3b8cc)';
-	const modeLabel = message(streamsRawMode ? 'Raw' : 'Pretty');
+	const modeLabel = message('Raw');
 
 	let html = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:10px">` +
 		`<span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(message('Active ({count})', { count: number(streams.length) }))}</span>` +
 		`<span style="flex:1"></span>` +
-		`<button data-action="toggle-raw" aria-label="${esc(message('Raw payload format'))}" aria-pressed="${streamsRawMode}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(modeLabel)}</button>` +
-		`<button data-action="toggle-pause" aria-label="${esc(message('Pause event capture'))}" aria-pressed="${streamsPaused}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:${pauseColor};cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(pauseLabel)}</button>` +
+		`<button data-action="toggle-raw" aria-pressed="${streamsRawMode}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(modeLabel)}</button>` +
+		`<button data-action="toggle-pause" aria-pressed="${streamsPaused}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:${pauseColor};cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(pauseLabel)}</button>` +
 		`<button data-action="clear-events" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(message('Clear events'))}</button>` +
 		(dt.undoClearCount ? `<button data-action="undo-clear">${esc(message('Undo clear ({count})', { count: number(dt.undoClearCount) }))}</button>` : '') +
 		`</div>`;
@@ -602,7 +602,7 @@ function renderStreams(el, dt) {
 		const recentCount = (s.recentEvents && s.recentEvents.length) || 0;
 		const eventsId = 'svr-dt-events-' + encodeURIComponent(s.path);
 		const chevron = expanded ? '[-]' : '[+]';
-		const chevronColor = recentCount > 0 ? 'var(--svr-dt-muted, #b3b8cc)' : 'var(--svr-dt-muted, #b3b8cc)';
+		const chevronColor = 'var(--svr-dt-muted, #b3b8cc)';
 
 		html += `<div data-key="stream:${esc(s.path)}" style="padding:4px 0;border-bottom:1px solid var(--svr-dt-border, #7d859a)">` +
 			`<button type="button" data-action="toggle-stream" data-stream-path="${esc(s.path)}" aria-expanded="${expanded}" aria-controls="${esc(eventsId)}" style="background:none;border:none;color:inherit;font:inherit;text-align:start;cursor:pointer;display:flex;align-items:center;gap:4px">` +
