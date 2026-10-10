@@ -12,6 +12,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- The generated error reference indexes emitted runtime codes and operational message prefixes, with stable code/event anchors and explicit guidance coverage. Action: regenerate the reference when adding or changing an emitted error.
+
 - Opt-in RPC delivery metrics distinguish successful sends, backpressure, closed connections, and send exceptions from handler execution outcomes.
 
 - Contributor and release guidance includes the packed sibling consumer command, its prerequisites and the flags required for exact committed source identities.

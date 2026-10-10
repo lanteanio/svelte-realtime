@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { REALTIME_ERROR_REGISTRY } from '../src/error-registry.js';
+import { renderRuntimeInventory } from './runtime-error-inventory.js';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const OUTPUT = resolve(ROOT, 'docs/errors.md');
@@ -77,15 +78,16 @@ export function renderErrorReference(registry = REALTIME_ERROR_REGISTRY) {
 	return [
 		'# Runtime error reference',
 		'',
-		'This file is generated from the runtime-owned registry. Do not edit it by hand.',
-		'Runtime messages preserve the documented prefix and append the stable ID plus this package-local help route.',
+		'This file is generated from the runtime-owned registry and a runtime source inventory. Do not edit it by hand.',
+		'The registry-backed messages below preserve the documented prefix and append their stable ID plus this package-local help route.',
 		'',
 		'| Stable ID | Runtime code | Event | Message prefix |',
 		'|---|---|---|---|',
 		...rows,
 		'',
 		...sections.flatMap((section, index) => index === 0 ? [section] : ['', section]),
-		''
+		'',
+		renderRuntimeInventory(undefined, registry)
 	].join('\n');
 }
 
