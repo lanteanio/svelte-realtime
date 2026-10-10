@@ -88,7 +88,8 @@ let _defaultIdempotencyStore = null;
  * Lazy in-process idempotency store. Three-state acquire matching the contract
  * of `createIdempotencyStore` from svelte-adapter-uws-extensions, so swapping
  * the default for a multi-instance backend is a one-line change.
- * Bounded by maxEntries; lazy-sweeps expired records every 30s.
+ * Bounds cached results plus running keys by maxEntries without evicting live
+ * results; lazy-sweeps expired records every 30s or when needed for admission.
  */
 function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	/** @type {Map<string, { value: any, expiresAt: number }>} */
@@ -102,7 +103,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	// committed key, the tenant-scoped user key it belongs to (supplied by the
 	// caller via `acquire`'s `meta.user`), so forget can drop exactly that
 	// user's entries. The inverse map keeps every single-key drop (sweep,
-	// maxEntries eviction, commit, abort) O(1) so the index never leaks
+	// expiry, commit, abort) O(1) so the index never leaks
 	// references to already-evicted keys. A user record also pins the latest
 	// erasure stamp while any acquired slot or duplicate waiter is active; an
 	// empty key set must therefore survive until its last active arrival settles.
@@ -127,6 +128,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	/** @type {Map<string, number>} tenant-scoped user key -> last purge monotonic ms */
 	const purgedAt = new Map();
 	let lastSweep = runtimeNow();
+	let nextExpiry = Infinity;
 
 	function _retainUser(idemUser) {
 		if (idemUser === null) return null;
@@ -158,7 +160,25 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		}
 	}
 
+	function _sweepResults(now) {
+		nextExpiry = Infinity;
+		for (const [key, entry] of results) {
+			if (entry.expiresAt <= now) { results.delete(key); _indexDrop(key); }
+			else if (entry.expiresAt < nextExpiry) nextExpiry = entry.expiresAt;
+		}
+	}
+
 	function _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt) {
+		if (results.size + inflight.size >= maxEntries) {
+			const now = runtimeNow();
+			// Reclaim expired results on pressure, even before the periodic sweep.
+			// A full cache of live results rejects in constant time between expiries.
+			if (now >= nextExpiry) _sweepResults(now);
+			if (results.size + inflight.size >= maxEntries) {
+				_releaseUser(idemUser, activeUser);
+				throw new LiveError('IDEMPOTENCY_CAPACITY', 'The idempotency store is full; the handler has not run. Retry after capacity becomes available.');
+			}
+		}
 		let resolveInflight;
 		let rejectInflight;
 		const promise = new Promise((res, rej) => { resolveInflight = res; rejectInflight = rej; });
@@ -167,15 +187,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		// via `await inflight.get(key)`.
 		promise.catch(() => {});
 		inflight.set(key, promise);
-		if (results.size >= maxEntries) {
-			const drop = Math.max(1, Math.floor(maxEntries * 0.1));
-			let i = 0;
-			for (const k of results.keys()) {
-				results.delete(k);
-				_indexDrop(k);
-				if (++i >= drop) break;
-			}
-		}
+
 		let settled = false;
 		const ttlMs = ttlSec * 1000;
 		return {
@@ -193,7 +205,9 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 				const tomb = activeUser?.purgedAt;
 				const forgotten = tomb !== undefined && tomb + _IDEMPOTENCY_FORGET_GRACE_MS >= acquiredAt;
 				if (ttlMs > 0 && !forgotten) {
-					results.set(key, { value, expiresAt: runtimeNow() + ttlMs });
+					const expiresAt = runtimeNow() + ttlMs;
+					results.set(key, { value, expiresAt });
+					if (expiresAt < nextExpiry) nextExpiry = expiresAt;
 					_indexAdd(key, idemUser, activeUser);
 				}
 				inflight.delete(key);
@@ -224,9 +238,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 			const acquiredAt = monotonicNow();
 			if (now - lastSweep >= 30000) {
 				lastSweep = now;
-				for (const [k, e] of results) {
-					if (e.expiresAt <= now) { results.delete(k); _indexDrop(k); }
-				}
+				_sweepResults(now);
 				// Drop old recent-arrival tombstones. Active arrivals hold a
 				// separate shared stamp through their handler or duplicate wait,
 				// so this sweep cannot permit a late erased result to be cached.
@@ -531,7 +543,10 @@ function _assertConfigShape(helperName, cfg, allowed, hints) {
  * returning the first call's result (a true idempotent retry must carry the
  * same body); the framework fingerprints the request args to detect this.
  *
- * Default store is in-process (bounded). For multi-instance deployments,
+ * The default in-process store reserves up to 10,000 running keys and cached
+ * results. At capacity, new keys throw `LiveError('IDEMPOTENCY_CAPACITY')`
+ * before the handler runs; cached retries remain available until their TTL.
+ * For multi-instance deployments,
  * pass `store: createIdempotencyStore(redis)` from svelte-adapter-uws-extensions.
  *
  * @param {{ keyFrom?: (ctx: any, ...args: any[]) => string | null | undefined, store?: { acquire: (key: string, ttlSec: number) => Promise<any> }, ttl?: number }} config

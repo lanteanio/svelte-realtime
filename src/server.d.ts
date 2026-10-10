@@ -1920,7 +1920,10 @@ export namespace live {
 	 * the first call's result (a genuine idempotent retry must carry the same
 	 * body); the framework fingerprints the request args to detect the mismatch.
 	 *
-	 * Default store is in-process and bounded. For multi-instance deployments,
+	 * The default in-process store reserves up to 10,000 running keys and cached
+	 * results. At capacity, new keys throw `LiveError('IDEMPOTENCY_CAPACITY')`
+	 * before the handler runs; cached retries remain available until their TTL.
+	 * For multi-instance deployments,
 	 * pass `store: createIdempotencyStore(redis)` from
 	 * `svelte-adapter-uws-extensions/redis/idempotency` (or the durable
 	 * Postgres twin from `svelte-adapter-uws-extensions/postgres/idempotency` -
