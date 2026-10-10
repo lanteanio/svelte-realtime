@@ -175,6 +175,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reconnect deltas retain authoritative rows that overlap optimistic creates. A seeded multi-replica corpus now checks snapshot, delta, replay, buffering, acknowledgements, and rollback convergence.
 
+- The browser fixture uses the repository's Vite 8 generation and refreshes compatible dependencies to clear its security audit.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
