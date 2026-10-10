@@ -57,8 +57,13 @@ frozen source commit without becoming the artifact's source identity.
 Before tagging, require clean candidate checkouts, reconciled migration notes,
 changelogs, declarations and generated files, plus each repository's complete
 required verification lanes. Run this package's `npm run verify:release` and
-qualify the exact sibling heads together through the adapter-owned packed
-cross-repository consumer. Retain its pinned SHAs, installed dependency tree,
+qualify the exact sibling heads together through the extensions-owned packed
+consumer. From a sibling extensions checkout with dependencies installed, run
+`npm run gate:cross-repo -- --quick --require-clean --strict`. All discovered input
+checkouts must be clean; skipped required evidence fails. For isolated worktrees,
+add `--repo <absolute-path>` for each selected checkout. The default command without
+these flags permits working-tree edits and does not establish committed identities.
+Retain its pinned SHAs, installed dependency tree,
 logs, tarball digests and results. A skipped or unavailable required lane blocks
 release; it is not a pass. Test the published exact versions again before any
 public channel moves.

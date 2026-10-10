@@ -153,6 +153,32 @@ reproduction and ownership check before returning to todo. This is a stale-item
 rule, not a promise of scheduled triage or automatic closure. Reopen a closed
 item only with new evidence or a clearly unmet acceptance criterion.
 
+## Test coordinated sibling changes
+
+Keep local `svelte-adapter-uws`, `svelte-adapter-uws-extensions` and
+`svelte-realtime` checkouts together. Use a supported Node/native-addon host,
+Git, npm and network access for dependency installation. From the extensions
+checkout, install its dependencies and run its packed consumer gate:
+
+```bash
+npm ci
+npm run gate:cross-repo -- --quick
+```
+
+This packs the three current working trees into a clean consumer, checks peer
+resolution and public types, then exercises real native WebSocket delivery.
+Working-tree edits are allowed by default. To record exact committed source
+identities, make every discovered input checkout clean and run:
+
+```bash
+npm run gate:cross-repo -- --quick --require-clean --strict
+```
+
+`--require-clean` rejects dirty inputs; `--strict` fails skipped required evidence.
+For isolated worktrees or non-sibling paths, add `--repo <absolute-path>` for each
+selected checkout. Retain the reported SHAs, tarballs, dependency tree and results.
+This consumer check complements each repository's own required verification lanes.
+
 ## Choose verification by the changed surface
 
 Run a focused regression while editing, then select the following lanes. Times
