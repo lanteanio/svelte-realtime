@@ -1,12 +1,12 @@
-import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, PROCESS_TEST_TIMEOUT, removeFixture } from './process-fixtures.js';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, expect, it } from 'vitest';
 import { resolveNpmCli } from '../scripts/npm-cli.js';
 
 const fixtures = [];
-afterEach(() => { for (const fixture of fixtures.splice(0)) rmSync(fixture, { recursive: true, force: true }); });
+afterEach(() => { for (const fixture of fixtures.splice(0)) removeFixture(fixture, 'manual-npm-'); });
 
 it.each([
 	['Windows Node installation', 'node.exe', 'node_modules/npm/bin/npm-cli.js'],
@@ -19,7 +19,7 @@ it.each([
 	writeFileSync(target, 'process.stdout.write("npm cli reached");');
 	const cli = resolveNpmCli({ execPath: join(fixture, nodePath), npmExecPath: null });
 	expect(execFileSync(process.execPath, [cli], { encoding: 'utf8' })).toBe('npm cli reached');
-});
+}, PROCESS_TEST_TIMEOUT);
 
 it('reports a missing npm installation before creating an app', () => {
 	const fixture = mkdtempSync(join(tmpdir(), 'manual-npm-'));

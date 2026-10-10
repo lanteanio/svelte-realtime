@@ -1,6 +1,6 @@
 import { afterEach, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { spawnSync, PROCESS_TEST_TIMEOUT, removeFixture } from './process-fixtures.js';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { checkScaffoldBuild } from '../scripts/check-scaffold-build.js';
@@ -8,8 +8,7 @@ import { checkScaffoldBuild } from '../scripts/check-scaffold-build.js';
 const fixtures = [];
 afterEach(() => {
 	for (const fixture of fixtures.splice(0)) {
-		if (!fixture.startsWith(join(import.meta.dirname, '.scaffold-prerequisite-'))) throw new Error('Unexpected fixture path');
-		rmSync(fixture, { recursive: true, force: true });
+		removeFixture(fixture, '.scaffold-prerequisite-', import.meta.dirname);
 	}
 });
 
@@ -31,7 +30,7 @@ it.each([
 			const code = `import { runPreflight } from ${JSON.stringify(pathToFileURL(args[0]).href)};
 const result = await runPreflight(${JSON.stringify(profile)});
 if (!result.ok) process.exitCode = 1;`;
-			return spawnSync(file, ['--input-type=module', '-e', code], { ...options, timeout: 10000 });
+			return spawnSync(file, ['--input-type=module', '-e', code], options);
 		}
 		throw new Error('The build ran before prerequisites passed');
 	} })).toThrow(/Scaffold verification command failed/);
@@ -40,4 +39,4 @@ if (!result.ok) process.exitCode = 1;`;
 	expect(logs.join('\n')).toContain('preflight FAILED at prerequisite boundary');
 	expect(logs.join('\n')).not.toContain('Building the production app');
 	expect(existsSync(join(fixture, 'build'))).toBe(false);
-});
+}, PROCESS_TEST_TIMEOUT);

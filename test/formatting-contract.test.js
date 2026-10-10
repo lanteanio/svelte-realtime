@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, PROCESS_TEST_TIMEOUT, removeFixture } from './process-fixtures.js';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { findOffenses, indexEol, parseEditorConfig, propertiesFor } from '../scripts/check-formatting.js';
 
 const directories = [];
-afterEach(() => { for (const dir of directories.splice(0)) rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { for (const dir of directories.splice(0)) removeFixture(dir, 'realtime-format-'); });
 function fixture(content) {
 	const dir = mkdtempSync(join(tmpdir(), 'realtime-format-'));
 	directories.push(dir);
@@ -31,7 +31,7 @@ describe('formatting contract', () => {
 		writeFileSync(join(dir, 'sample.json'), '{\r\n  "ok": true\r\n}\r\n');
 		expect(indexEol(dir).get('sample.json')).toBe('lf');
 		expect(findOffenses(dir).offenses).toEqual([]);
-	});
+	}, PROCESS_TEST_TIMEOUT);
 	it('rejects whitespace, missing newline, odd indentation and malformed UTF-8', () => {
 		const dir = fixture('{\n  "ok": true\n}\n');
 		writeFileSync(join(dir, 'sample.json'), '{\n   "ok": true \n}');
@@ -41,7 +41,7 @@ describe('formatting contract', () => {
 		expect(failures).toContain('multiple of 2');
 		writeFileSync(join(dir, 'sample.json'), Buffer.from([0xff, 0x0a]));
 		expect(findOffenses(dir).offenses.join('\n')).toContain('invalid UTF-8');
-	});
+	}, PROCESS_TEST_TIMEOUT);
 	it('reads index metadata for Unicode and space-containing file names', () => {
 		const dir = fixture('{}\n');
 		const name = 'caf\u00e9 settings.json';
@@ -49,9 +49,9 @@ describe('formatting contract', () => {
 		execFileSync('git', ['add', '--', name], { cwd: dir, stdio: 'pipe' });
 		expect(indexEol(dir).get(name)).toBe('lf');
 		expect(findOffenses(dir).offenses).toEqual([]);
-	});
+	}, PROCESS_TEST_TIMEOUT);
 	it('checks text without any newline rather than treating it as binary', () => {
 		const dir = fixture('{}');
 		expect(findOffenses(dir).offenses.join('\n')).toContain('no final newline');
-	});
+	}, PROCESS_TEST_TIMEOUT);
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { anchorsOf, checkLink, linksOf } from '../scripts/check-links.js';
 import { crawlUrl, looksLikeSoft404 } from '../scripts/check-external-links.js';
+import { PROCESS_TEST_TIMEOUT } from './process-fixtures.js';
 
 describe('documentation link gates', () => {
 	it('checks source fragments against the dev index and published main snapshot', () => {
@@ -12,7 +13,7 @@ describe('documentation link gates', () => {
 			expect(checkLink('README.md', url + '#%ZZ', new Map())).toContain('malformed source anchor');
 			expect(checkLink('README.md', url + '#L1-L3', new Map())).toBeNull();
 		}
-	});
+	}, PROCESS_TEST_TIMEOUT);
 	it('matches GitHub punctuation, Unicode and colliding duplicate slugs', () => {
 		const anchors = anchorsOf('## A & B\n## A & B\n## A--B-1\n## A & B\n## Cafe\u0301 and _code_\n<a id="compatibility-old"></a>\n```md\n## Hidden\n```');
 		expect([...anchors]).toEqual(['a--b', 'a--b-1', 'a--b-1-1', 'a--b-2', 'cafe\u0301-and-code', 'compatibility-old']);
@@ -29,7 +30,7 @@ describe('documentation link gates', () => {
 		writeFileSync(file, 'temporary\n');
 		try { expect(checkLink('README.md', 'untracked-link-test.txt', docs)).toContain('not tracked'); }
 		finally { unlinkSync(file); }
-	});
+	}, PROCESS_TEST_TIMEOUT);
 	it('reports redirects, soft 404s and hard failures separately from successful pages', async () => {
 		const fetchImpl = async (url) => {
 			const pathname = new URL(url).pathname;

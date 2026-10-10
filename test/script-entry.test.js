@@ -1,17 +1,15 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, PROCESS_TEST_TIMEOUT, removeFixture } from './process-fixtures.js';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 let temporary;
 afterEach(() => {
 	if (!temporary) return;
-	const parent = resolve(tmpdir());
-	if (dirname(resolve(temporary)) !== parent || !basename(temporary).startsWith('realtime-script-entry-')) throw Error('Unexpected fixture cleanup path');
-	rmSync(temporary, { recursive: true, force: true });
+	removeFixture(temporary, 'realtime-script-entry-');
 	temporary = null;
 });
 
@@ -36,7 +34,7 @@ describe('script entry guards', () => {
 		expect(result.error).toBeUndefined();
 		expect(result.status).toBe(1);
 		expect(result.stderr).toContain('docs/errors.md is stale');
-	});
+	}, PROCESS_TEST_TIMEOUT);
 
 	it('keeps an imported gate inert even when the importing entrypoint is linked', () => {
 		const { actual, linked } = fixture();
@@ -45,7 +43,7 @@ describe('script entry guards', () => {
 		expect(result.error).toBeUndefined();
 		expect(result.status).toBe(0);
 		expect(result.stdout.trim()).toBe('import-only');
-	});
+	}, PROCESS_TEST_TIMEOUT);
 
 	it.runIf(process.platform === 'win32')('executes through a drive and filename case alias', () => {
 		const { actual } = fixture();
@@ -54,5 +52,5 @@ describe('script entry guards', () => {
 		expect(result.error).toBeUndefined();
 		expect(result.status).toBe(1);
 		expect(result.stderr).toContain('docs/errors.md is stale');
-	});
+	}, PROCESS_TEST_TIMEOUT);
 });

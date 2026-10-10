@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, PROCESS_TEST_TIMEOUT } from './process-fixtures.js';
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -63,7 +63,7 @@ describe('locked Svelte 4 compatibility profile', () => {
 		} finally {
 			const target = resolve(directory);
 			if (dirname(target) !== resolve(tmpdir()) || !basename(target).startsWith('svelte-support-')) throw new Error('Unsafe temporary repository cleanup');
-			rmSync(target, { recursive: true, force: true });
+			rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 		}
-	}, 30000);
+	}, PROCESS_TEST_TIMEOUT);
 });

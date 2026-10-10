@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { spawnSync, PROCESS_TEST_TIMEOUT, removeFixture } from './process-fixtures.js';
+import { mkdtempSync, readdirSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const fixtures = [];
@@ -10,9 +10,7 @@ const cli = pathToFileURL(join(testRoot, '../src/cli.js')).href;
 
 afterEach(() => {
 	for (const fixture of fixtures.splice(0)) {
-		const target = resolve(fixture);
-		if (dirname(target) !== testRoot || !basename(target).startsWith('.cli-node-floor-')) throw new Error('Unexpected CLI fixture path');
-		rmSync(target, { recursive: true, force: true });
+		removeFixture(fixture, '.cli-node-floor-', testRoot);
 	}
 });
 
@@ -28,7 +26,7 @@ syncBuiltinESMExports();
 process.argv = [process.execPath, ${JSON.stringify(cli)}, ...${JSON.stringify(args)}];
 await import(${JSON.stringify(cli)});`;
 	const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
-		cwd: fixture, encoding: 'utf8', timeout: 10000, windowsHide: true
+		cwd: fixture, encoding: 'utf8'
 	});
 	expect(result.error).toBeUndefined();
 	expect(readdirSync(fixture)).toEqual([]);
@@ -43,11 +41,11 @@ describe('scaffold Node prerequisite', () => {
 		expect(result.output).toContain(version);
 		expect(result.output).not.toContain('EXTERNAL_COMMAND_REACHED');
 		expect(result.output).not.toContain('Creating SvelteKit project');
-	});
+	}, PROCESS_TEST_TIMEOUT);
 
 	it.each(['22.12.0', '24.13.1'])('accepts Node %s at the prerequisite boundary', version => {
 		const result = runCli(version, ['--help']);
 		expect(result.status).toBe(0);
 		expect(result.output).toContain('Usage: npx svelte-realtime');
-	});
+	}, PROCESS_TEST_TIMEOUT);
 });

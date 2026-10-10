@@ -51,6 +51,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Process-based verification uses bounded child processes and explicit test deadlines on slower hosts; temporary-directory cleanup retries when Windows retains a file handle.
+
 - Importing the DevTools configuration API only mounts its overlay in explicit development mode. Accessible labels, duration units, telemetry messages and preview suffixes follow its presentation settings.
 
 - Forgetting a room member immediately removes its presence and cursor from connected peers, using the captured room platform for storage cleanup and owner succession when no erasure platform is configured. Bare and replay publications must confirm before erasure completes; failures remain retryable.
