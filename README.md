@@ -56,6 +56,8 @@ The in-process benchmark suite is not a production capacity claim.
 
 ---
 
+<a id="getting-started"></a>
+
 ## Quick start
 
 ```bash
@@ -4986,6 +4988,8 @@ In-process `live.idempotent()` store. At capacity, evicts the oldest 10% of entr
 
 ---
 
+<a id="limits-and-gotchas"></a>
+
 ## Production limits
 
 ### maxPayloadLength (default: 1MB)
@@ -5535,7 +5539,7 @@ With high-frequency streams (e.g. 1000 cursors at 20 updates/sec), this reduces 
 
 In Node/SSR (tests, `__directCall`, etc.), events apply synchronously - no batching overhead.
 
-See [bench/rpc.mjs](bench/rpc.mjs) for the full source.
+See [bench/rpc.mjs](https://github.com/lanteanio/svelte-realtime/blob/dev/bench/rpc.mjs) for the full source.
 
 ---
 

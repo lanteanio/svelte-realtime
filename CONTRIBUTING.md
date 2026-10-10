@@ -174,3 +174,20 @@ network access. On Linux install browser OS dependencies first with
 addon is a failed prerequisite, never a skipped success. The smoke job runs the
 same `npm run smoke` command on pull requests. This checkpoint complements the
 full browser and chaos suites; it does not replace them.
+
+## Documentation links
+
+`npm run check:links` checks rendered Markdown and HTML links without network
+requests, including GitHub heading slugs, duplicate headings, compatibility
+anchors, exact-case paths, tracked targets and files available in the npm package.
+Use a relative link for a packaged file. For repository-only source, use its
+GitHub `blob/dev` route; new source and its link must be staged together. Stable
+`blob/main` links use the committed `docs/main-source-tree.v1.json` snapshot.
+After a stable promotion, fetch the new main ref and run
+`node scripts/check-links.js --write-main-tree`, then review that diff.
+
+`npm run check:links:external` performs bounded HTTP requests and reports redirects,
+hard errors and HTML titles/headings that indicate a soft 404. Its read-only CI
+workflow runs weekly and manually, separately from the deterministic PR gate.
+Network availability is therefore not a prerequisite for editing local docs.
+When a redirect is intentional, update the link to the final canonical route.

@@ -14,13 +14,20 @@
       "node scripts/check-formatting.js",
       "publint",
       "attw --pack . --profile esm-only",
-      "node scripts/check-verification-inventory.js"
+      "node scripts/check-verification-inventory.js",
+      "node scripts/check-links.js"
     ],
     "check:errors": [
       "node scripts/generate-error-reference.js --check"
     ],
     "check:format": [
       "node scripts/check-formatting.js"
+    ],
+    "check:links": [
+      "node scripts/check-links.js"
+    ],
+    "check:links:external": [
+      "node scripts/check-external-links.js"
     ],
     "check:publish": [
       "publint",
@@ -51,7 +58,8 @@
       "node scripts/check-formatting.js",
       "publint",
       "attw --pack . --profile esm-only",
-      "node scripts/check-verification-inventory.js"
+      "node scripts/check-verification-inventory.js",
+      "node scripts/check-links.js"
     ],
     "sim:golden": [
       "node scripts/sim-golden.js"
@@ -73,6 +81,7 @@
       "publint",
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
+      "node scripts/check-links.js",
       "vitest run"
     ],
     "test:chaos": [
@@ -102,7 +111,8 @@
     "verify:docs": [
       "node scripts/check-formatting.js",
       "node scripts/generate-error-reference.js --check",
-      "node scripts/generate-onboarding-reference.js"
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-links.js"
     ],
     "verify:fast": [
       "node scripts/generate-error-reference.js --check",
@@ -117,7 +127,8 @@
       "node scripts/check-formatting.js",
       "publint",
       "attw --pack . --profile esm-only",
-      "node scripts/check-verification-inventory.js"
+      "node scripts/check-verification-inventory.js",
+      "node scripts/check-links.js"
     ],
     "verify:full": [
       "node scripts/generate-error-reference.js --check",
@@ -133,6 +144,7 @@
       "publint",
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
+      "node scripts/check-links.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -154,6 +166,7 @@
       "publint",
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
+      "node scripts/check-links.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -177,6 +190,7 @@
       "publint",
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
+      "node scripts/check-links.js",
       "vitest run"
     ]
   },
@@ -238,6 +252,22 @@
       ]
     },
     {
+      "workflow": "docs-links.yml",
+      "job": "external-links",
+      "step": "3",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "docs-links.yml",
+      "job": "external-links",
+      "step": "4",
+      "commands": [
+        "npm run check:links:external -- --concurrency=4 --timeout-ms=15000 --max-redirects=6"
+      ]
+    },
+    {
       "workflow": "verify.yml",
       "job": "verify",
       "step": "3",
@@ -271,6 +301,7 @@
         "publint",
         "attw --pack . --profile esm-only",
         "node scripts/check-verification-inventory.js",
+        "node scripts/check-links.js",
         "vitest run",
         "node scripts/sim-golden.js",
         "node test/fuzz-wire.mjs",
@@ -303,6 +334,7 @@
     }
   ],
   "notFullyHosted": [
+    "check:links:external",
     "test:chaos",
     "test:e2e",
     "test:watch",
