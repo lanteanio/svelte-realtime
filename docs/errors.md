@@ -223,7 +223,7 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-too-many-uploads"></a>
 ### <code>TOO_MANY_UPLOADS</code>
 
-- Searchable message prefixes: <code>too many concurrent uploads</code>; <code>too many concurrent uploads on this session</code>
+- Searchable message prefixes: <code>too many concurrent uploads</code>; <code>too many concurrent uploads on this session</code>; <code>too many uploads awaiting authorization on this session</code>
 - Owning sources: [src/server/upload.js](../src/server/upload.js)
 
 <a id="live-error-unauthenticated"></a>
@@ -1031,23 +1031,23 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/server.js:1909</code>
 - <code>src/server.js:2884</code>
 - <code>src/server/ctx.js:113</code>
-- <code>src/server/dispatch.js:1261</code>
-- <code>src/server/dispatch.js:1372</code>
-- <code>src/server/dispatch.js:1594</code>
-- <code>src/server/dispatch.js:1611</code>
+- <code>src/server/dispatch.js:1263</code>
+- <code>src/server/dispatch.js:1374</code>
+- <code>src/server/dispatch.js:1613</code>
+- <code>src/server/dispatch.js:1630</code>
 - <code>src/server/dispatch.js:172</code>
 - <code>src/server/dispatch.js:358</code>
-- <code>src/server/dispatch.js:381</code>
-- <code>src/server/dispatch.js:687</code>
-- <code>src/server/dispatch.js:787</code>
+- <code>src/server/dispatch.js:392</code>
+- <code>src/server/dispatch.js:699</code>
 - <code>src/server/dispatch.js:799</code>
-- <code>src/server/dispatch.js:846</code>
-- <code>src/server/idempotency.js:837</code>
+- <code>src/server/dispatch.js:811</code>
+- <code>src/server/dispatch.js:858</code>
+- <code>src/server/idempotency.js:865</code>
 - <code>src/server/push.js:699</code>
-- <code>src/server/upload.js:277</code>
-- <code>src/server/upload.js:373</code>
-- <code>src/server/upload.js:375</code>
-- <code>src/server/upload.js:693</code>
+- <code>src/server/upload.js:281</code>
+- <code>src/server/upload.js:386</code>
+- <code>src/server/upload.js:388</code>
+- <code>src/server/upload.js:715</code>
 - <code>src/shared/assert.js:120</code>
 - <code>src/shared/assert.js:75</code>
 - <code>src/shared/diagnostic-format.js:40</code>
