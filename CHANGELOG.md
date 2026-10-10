@@ -181,6 +181,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Diagnostics use the shared `lantean/diagnostic` identity and deliver to the same process-wide event sinks as the adapter.
 
+- Verification rejects unsupported diagnostic severity literals and checks delivery of real breaker warnings to the shared event sink.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
