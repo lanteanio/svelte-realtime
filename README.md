@@ -1583,7 +1583,18 @@ configure({
 
 The built-in store scans keys before reading values, so an unreadable mutation does not disable the other rows. Its sequence number stays reserved, the row stays stored for a later retry, and newer calls continue to persist. Custom stores can opt in with both `keys(prefix): Promise<string[]>` and `get(key): Promise<any>`; stores with only `getAll` retain the all-or-nothing restore behavior.
 
-Read `offlinePersistence()` from `svelte-realtime/client` to show persistence health in the app. It returns `{ status, unreadableRows, failedWrites }`: `disabled`, `restoring`, `ready`, `degraded` (an unreadable row/checkpoint or a failed mutation write), or `memory` (storage is unavailable or ephemeral). The counts cover the current scope and contain no row keys or mutation contents. An unreadable row is retained and retried on the next restore; it is never automatically deleted as a corrupt value. Its missed replay also counts toward the upload checkpoint's gap detection. A failed keys-only scan disables writes to protect rows whose sequence numbers are unknown.
+Read `offlinePersistence()` from `svelte-realtime/client` to show persistence health in the app. It returns `{ status, unreadableRows, failedWrites }`: `disabled`, `restoring`, `ready`, `degraded` (an unreadable row/checkpoint or a failed mutation write or expiry deletion), or `memory` (storage is unavailable or ephemeral). The counts contain no row keys or mutation contents. Failed writes cover the current scope; the built-in store also reports unreadable rows found in other namespaces during open-time retention cleanup. An unreadable row is retained and retried on the next restore; it is never automatically deleted as a corrupt value. Its missed replay also counts toward the upload checkpoint's gap detection. A failed keys-only scan disables writes to protect rows whose sequence numbers are unknown.
+
+Persisted mutations expire after **seven days** by default. Set a positive finite `offline.retentionMs` to choose a different retention period; this also limits replay while the page stays open. IndexedDB checks all queue namespaces at each database open and deletes demonstrably expired readable rows, with at most ten value reads/deletes in flight. This removes retired-account rows even when another account opens the database. Legacy rows use their `queuedAt` timestamp and the seven-day default. Custom stores own cleanup across inactive namespaces; the client removes expired rows from the active queue during restore. Unreadable values cannot supply an expiry timestamp, so they remain degraded and need explicit erasure.
+
+For logout or local data erasure, stop accepting new edits and **await `clearOffline()` before switching accounts or disabling persistence**:
+
+```js
+import { clearOffline } from 'svelte-realtime/client';
+await clearOffline();
+```
+
+It clears the active queue and checkpoint, rejects its pending callers with `OFFLINE_CLEARED`, waits for pending writes, and verifies storage deletion. `clearOffline({ persistKey: oldOpaqueKey })` erases another namespace in the currently configured store without emptying the active queue. A failed or unverifiable deletion rejects with `OFFLINE_CLEAR_FAILED`; handle that failure before claiming local data was erased. Calls created after clearing starts belong to the new queue. Requests already sent can still complete on the server; their late responses cannot recreate the erased local checkpoint. Coordinate other tabs or clients that can still write the same namespace. Account switching alone preserves former stored rows; choose explicit erasure for logout/privacy requirements.
 
 ### Upload checkpoint and consumer stores
 

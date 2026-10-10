@@ -7,7 +7,7 @@ export { RpcError, empty, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCap
 export { __upload, _resetUploadAutoDiscovery } from './client/upload.js';
 export { __rpc, __binaryRpc, __mpFields, batch, _resetClientPublishRateWarning } from './client/rpc.js';
 export { configure, combine, onSignal, onPush, _resetPushHandlers } from './client/misc.js';
-export { pendingMutations, uploading, offlineCheckpoint, offlinePersistence, _resetOffline } from './client/offline.js';
+export { pendingMutations, uploading, offlineCheckpoint, offlinePersistence, clearOffline, _resetOffline } from './client/offline.js';
 export { createIndexedDbStore, createMemoryStore } from './client/offline-store.js';
 export { __stream, _createStreamAtSchemaVersion, createReactiveStream } from './client/stream.js';
 

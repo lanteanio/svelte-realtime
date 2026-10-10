@@ -15,12 +15,19 @@
 // read, so the queue never writes over rows it has not seen.
 
 import { _IS_DEV } from './internal-state.js';
-import { setTimer, clearTimer } from '../client-runtime.js';
+import { setTimer, clearTimer, now } from '../client-runtime.js';
 
 const DB_NAME = 'svelte-realtime';
 const STORE_NAME = 'offline';
 
+export const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const STORAGE_TIMEOUT_MS = 5000;
+const _storeHealth = new WeakMap();
+export function _offlineStoreHealth(store) { return _storeHealth.get(store); }
+export function _markOfflineRowsErased(store, keys) {
+	const health = _storeHealth.get(store);
+	if (health) for (const key of keys) health.unreadable.delete(key);
+}
 const _storageWarned = new Set();
 function _warnStorage(err, operation) {
 	if (_IS_DEV && !_storageWarned.has(operation)) {
@@ -101,6 +108,8 @@ export function createMemoryStore() {
 export function createIndexedDbStore() {
 	/** @type {Promise<IDBDatabase | null> | null} */
 	let dbPromise = null;
+	let cleanupPromise = null;
+	const health = { unreadable: new Set(), failedErasure: false };
 
 	function open() {
 		if (dbPromise) return dbPromise;
@@ -123,11 +132,16 @@ export function createIndexedDbStore() {
 				};
 				req.onsuccess = () => {
 					const db = req.result;
+					if (settled) { db.close(); return; }
 					db.onclose = () => { if (dbPromise === pending) dbPromise = null; };
 					db.onversionchange = () => {
 						if (dbPromise === pending) dbPromise = null;
 						db.close();
 					};
+					cleanupPromise = purgeExpired(db).catch(err => {
+						if (dbPromise === pending) { dbPromise = null; db.close(); }
+						throw err;
+					});
 					finish(db);
 				};
 				req.onerror = () => finish(null, req.error || new Error('database open failed'));
@@ -151,19 +165,32 @@ export function createIndexedDbStore() {
 	async function commit(fn, operation) {
 		const db = await open();
 		if (!db) throw new Error('[svelte-realtime] offline persistence unavailable');
+		await cleanupPromise;
+		return commitDb(db, fn, operation);
+	}
+	async function commitDb(db, fn, operation) {
 		await new Promise((resolve, reject) => {
-			try {
-				const tx = db.transaction(STORE_NAME, 'readwrite');
-				fn(tx.objectStore(STORE_NAME));
-				tx.oncomplete = () => resolve(undefined);
-				tx.onabort = () => {
-					_warnStorage(tx.error, operation);
-					reject(tx.error || new Error('[svelte-realtime] offline store write aborted'));
-				};
-			} catch (err) {
+			let settled = false;
+			let tx;
+			const fail = err => {
+				if (settled) return;
+				settled = true; clearTimer(timer);
 				_warnStorage(err, operation);
-				reject(err);
-			}
+				reject(err || new Error('[svelte-realtime] offline store write aborted'));
+			};
+			const timer = setTimer(() => {
+				fail(new Error('database write timed out'));
+				try { tx?.abort(); } catch {}
+			}, STORAGE_TIMEOUT_MS);
+			try {
+				tx = db.transaction(STORE_NAME, 'readwrite');
+				fn(tx.objectStore(STORE_NAME), tx);
+				tx.oncomplete = () => {
+					if (settled) return;
+					settled = true; clearTimer(timer); resolve(undefined);
+				};
+				tx.onabort = () => fail(tx.error);
+			} catch (err) { fail(err); }
 		});
 	}
 
@@ -174,6 +201,10 @@ export function createIndexedDbStore() {
 		// a later reopen must never overwrite rows this scan did not see.
 		const db = await open();
 		if (!db) throw new Error('[svelte-realtime] offline persistence unavailable');
+		await cleanupPromise;
+		return readDb(db, prefix, keysOnly, exact);
+	}
+	async function readDb(db, prefix, keysOnly = false, exact = false) {
 		return new Promise((resolve, reject) => {
 			let settled = false;
 			let tx;
@@ -181,6 +212,7 @@ export function createIndexedDbStore() {
 				if (settled) return;
 				settled = true;
 				clearTimer(timer);
+				if (exact && /^q:.+:\d{12}$/.test(prefix)) health.unreadable.add(prefix);
 				_warnStorage(err, 'read');
 				reject(err || new Error('[svelte-realtime] offline store read failed'));
 			};
@@ -199,6 +231,7 @@ export function createIndexedDbStore() {
 					try {
 						const result = req.result;
 						if (exact) {
+							health.unreadable.delete(prefix);
 							settled = true; clearTimer(timer); resolve(result); return;
 						}
 						const cursor = result;
@@ -219,7 +252,38 @@ export function createIndexedDbStore() {
 			}
 		});
 	}
-	return {
+	async function purgeExpired(db) {
+		health.unreadable.clear();
+		health.failedErasure = false;
+		try {
+			const keys = await readDb(db, 'q:', true);
+			const at = now();
+			for (let i = 0; i < keys.length; i += 10) {
+				await Promise.all(keys.slice(i, i + 10).map(async key => {
+					if (!/^q:.+:\d{12}$/.test(key) || Number(key.slice(-12)) === 0) return;
+					try {
+						await commitDb(db, (store, tx) => {
+							// Check and delete in one transaction: another tab must not
+							// replace an expired row between the read and its deletion.
+							const req = store.get(key);
+							req.onerror = () => { health.unreadable.add(key); try { tx.abort(); } catch {} };
+							req.onsuccess = () => {
+								try {
+									const value = req.result;
+									health.unreadable.delete(key);
+									// Unreadable or unrecognizable expiry stays for explicit erasure.
+									const expiry = Number.isFinite(value?.expiresAt) ? value.expiresAt
+										: Number.isFinite(value?.queuedAt) ? value.queuedAt + DEFAULT_RETENTION_MS : Infinity;
+									if (expiry <= at) store.delete(key);
+								} catch { health.unreadable.add(key); try { tx.abort(); } catch {} }
+							};
+						}, 'delete');
+					} catch { if (!health.unreadable.has(key)) health.failedErasure = true; }
+				}));
+			}
+		} catch (err) { health.failedErasure = true; throw err; }
+	}
+	const store = {
 		getAll(prefix) { return read(prefix); },
 		keys(prefix) { return read(prefix, true); },
 		get(key) { return read(key, false, true); },
@@ -234,6 +298,8 @@ export function createIndexedDbStore() {
 			await commit((store) => { store.delete(IDBKeyRange.bound(prefix, prefix + '\uffff')); }, 'clear').catch(() => {});
 		}
 	};
+	_storeHealth.set(store, health);
+	return store;
 }
 
 /**

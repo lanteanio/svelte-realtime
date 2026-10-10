@@ -145,6 +145,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Concurrent chaos test runs use separate temporary contexts, fixture builds, result directories, and Redis Compose projects, with ownership-checked cleanup and a two-run CI regression.
 
+- Added `clearOffline()` for verified local queue/checkpoint erasure and pending-call cancellation. Persisted mutations expire after seven days by default; IndexedDB cleans expired readable rows across accounts when opened, with configurable finite retention. **Action required:** choose `offline.retentionMs` if your app needs a different window; await [offline erasure](README.md#durable-persistence-survive-a-reload) during logout.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

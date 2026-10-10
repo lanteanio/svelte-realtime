@@ -6,12 +6,14 @@
 // The queue ARRAY stays `_offlineQueue` in internal-state.js (rpc.js enqueues,
 // misc.js drains); this module owns everything that makes it durable and
 // observable. Persistence is opt-in (`configure({ offline: { persist } })`)
-// and always an upgrade: every storage call is fire-and-forget best-effort,
-// so a broken store degrades to exactly the in-memory behavior.
+// and queue writes degrade to in-memory behavior when storage fails.
+// Explicit erasure is awaited and rejects when deletion cannot be verified.
 
-import { randomUuid } from '../client-runtime.js';
+import { randomUuid, now } from '../client-runtime.js';
 import { _offlineQueue, RpcError, _IS_DEV, clientState } from './internal-state.js';
-import { resolveOfflineStore, _isDurableStore } from './offline-store.js';
+import { resolveOfflineStore, _isDurableStore, _offlineStoreHealth, _markOfflineRowsErased, DEFAULT_RETENTION_MS } from './offline-store.js';
+
+let _erasures = new WeakMap();
 
 /** A queue scope owns its counters and storage for its entire lifetime. */
 function _newScope(store = null, persistKey = 'default', persist = undefined) {
@@ -21,7 +23,7 @@ function _newScope(store = null, persistKey = 'default', persist = undefined) {
 		rehydratePromise: null, restoring: false, unstamped: [], scanFailed: false,
 		batch: { failedSeq: Infinity, clean: true }, droppedUnnumbered: false,
 		checkpointDirty: false, checkpointUnknown: false, entries: new Set(),
-		unreadableRows: 0, failedWrites: 0
+		unreadableRows: 0, failedWrites: 0, failedErasure: false, retentionMs: DEFAULT_RETENTION_MS, erased: false
 	};
 }
 let _scope = _newScope();
@@ -237,9 +239,11 @@ export function offlineCheckpoint() {
 /** Current scope storage health; contains no row keys or mutation arguments. */
 export function offlinePersistence() {
 	const durable = !!_scope.store && _isDurableStore(_scope.store);
+	const health = _scope.store && _offlineStoreHealth(_scope.store);
+	const unreadableRows = health ? health.unreadable.size : _scope.unreadableRows;
 	const status = !_scope.persist ? 'disabled' : _scope.restoring ? 'restoring' : !durable ? 'memory'
-		: _scope.unreadableRows || _scope.failedWrites || _scope.checkpointUnknown ? 'degraded' : 'ready';
-	return { status, unreadableRows: _scope.unreadableRows, failedWrites: _scope.failedWrites };
+		: unreadableRows || _scope.failedWrites || _scope.checkpointUnknown || _scope.failedErasure || health?.failedErasure ? 'degraded' : 'ready';
+	return { status, unreadableRows, failedWrites: _scope.failedWrites };
 }
 
 /** Read keys independently so an unreadable value cannot hide an occupied seq. */
@@ -276,28 +280,87 @@ export function _configureOfflinePersistence(offlineOpts) {
 	if (offlineOpts.persistKey !== undefined && (typeof offlineOpts.persistKey !== 'string' || offlineOpts.persistKey.length === 0)) {
 		throw new Error('[svelte-realtime] offline.persistKey must be a non-empty string');
 	}
+	if (offlineOpts.retentionMs !== undefined && (!Number.isFinite(offlineOpts.retentionMs) || offlineOpts.retentionMs <= 0)) {
+		throw new Error('[svelte-realtime] offline.retentionMs must be a positive finite number');
+	}
 	const persist = offlineOpts.persist === undefined ? _scope.persist : offlineOpts.persist;
 	const key = offlineOpts.persistKey ?? _scope.persistKey;
 	const store = persist === _scope.persist ? _scope.configuredStore : (persist ? resolveOfflineStore(persist) : null);
-	if (store === _scope.configuredStore && key === _scope.persistKey && !_scope.scanFailed) return;
+	const retentionMs = offlineOpts.retentionMs ?? _scope.retentionMs;
+	if (store === _scope.configuredStore && key === _scope.persistKey && !_scope.scanFailed) { _scope.retentionMs = retentionMs; return; }
+	_switchOfflineScope(store, key, persist, retentionMs);
+}
+
+function _switchOfflineScope(store, key, persist, retentionMs, code = 'OFFLINE_SCOPE_CHANGED') {
 	const previous = _scope;
 	const next = _newScope(store, key, persist);
+	next.retentionMs = retentionMs;
 	if (previous.draining) _retiredScopes.add(previous);
 	for (const retired of _retiredScopes) {
-		if (retired.configuredStore === store && retired.persistKey === key) retired.successor = next;
+		if (retired.configuredStore === store && retired.persistKey === key) {
+			retired.successor = next;
+			// Open-time expiry may have deleted its row while the request is
+			// still in flight. Keep that sequence owned until the drain settles.
+			if (!retired.erased) next.seq = Math.max(next.seq, retired.seq);
+		}
 	}
 	_scope = next;
 	next.restoring = !!store;
 	// Install the new scope before rejecting or notifying any application code.
 	const queued = _offlineQueue.splice(0);
 	for (const entry of [...queued, ...previous.entries]) {
-		entry.reject(new RpcError('OFFLINE_SCOPE_CHANGED', 'Offline queue scope changed before this mutation settled'));
+		entry.reject(new RpcError(code, code === 'OFFLINE_CLEARED' ? 'Offline mutation was cleared' : 'Offline queue scope changed before this mutation settled'));
 	}
 	previous.entries.clear();
 	for (const waiting of previous.unstamped) waiting.resolve(false);
 	previous.unstamped = [];
 	if (store) next.rehydratePromise = _rehydrate(next).catch(() => {});
 	_bumpPending();
+}
+
+/** Read keys without loading values when the store supports it. */
+async function _storedKeys(store, prefix) {
+	const keys = typeof store.keys === 'function' ? await store.keys(prefix) : _rowsOf(await store.getAll(prefix)).map(row => row.key);
+	if (!Array.isArray(keys) || keys.some(key => typeof key !== 'string')) throw new Error('offline store keys must return a string array');
+	return keys;
+}
+
+/** Erase one configured namespace and reject its outstanding callers. */
+export function clearOffline({ persistKey = _scope.persistKey } = {}) {
+	if (typeof persistKey !== 'string' || persistKey.length === 0) return Promise.reject(new RpcError('INVALID_REQUEST', 'persistKey must be a non-empty string'));
+	const current = _scope;
+	const store = current.configuredStore;
+	const active = persistKey === current.persistKey;
+	for (const scope of _retiredScopes) if (scope.configuredStore === store && scope.persistKey === persistKey) scope.erased = true;
+	if (active) current.erased = true;
+	let erased = Promise.resolve();
+	if (store) {
+		let scopes = _erasures.get(store);
+		if (!scopes) _erasures.set(store, scopes = new Map());
+		const previous = scopes.get(persistKey);
+		erased = (previous || Promise.resolve()).catch(() => {}).then(async () => {
+			const prefix = 'q:' + persistKey + ':';
+			const checkpoint = 'c:' + persistKey;
+			const writes = _writes.get(store);
+			if (writes) await Promise.all([...writes].filter(([key]) => _seqOfRowKey(key, prefix) > 0 || key === checkpoint).map(([, tail]) => tail));
+			const keys = (await _storedKeys(store, prefix)).filter(key => _seqOfRowKey(key, prefix) > 0);
+			for (let i = 0; i < keys.length; i += 10) await Promise.all(keys.slice(i, i + 10).map(key => store.delete(key)));
+			await store.delete(checkpoint);
+			// Built-in best-effort deletion can swallow storage failures. Verify
+			// the result before telling an application that erasure completed.
+			if ((await _storedKeys(store, prefix)).some(key => _seqOfRowKey(key, prefix) > 0) || (await _storedKeys(store, checkpoint)).includes(checkpoint)) {
+				throw new Error('stored data remains');
+			}
+			_markOfflineRowsErased(store, keys);
+		}).catch(cause => { const error = new RpcError('OFFLINE_CLEAR_FAILED', 'Offline stored data could not be erased'); error.cause = cause; throw error; });
+		scopes.set(persistKey, erased);
+		void erased.finally(() => { if (scopes.get(persistKey) === erased) scopes.delete(persistKey); }).catch(() => {});
+	}
+	if (active) {
+		_switchOfflineScope(store, persistKey, current.persist, current.retentionMs, 'OFFLINE_CLEARED');
+		_setUploading(false);
+	}
+	return erased;
 }
 
 /**
@@ -313,6 +376,8 @@ async function _rehydrate(scope) {
 	let rowsRead = false;
 	try {
 		if (!scope.store) return;
+		const erasure = _erasures.get(scope.store)?.get(scope.persistKey);
+		if (erasure) { await erasure; if (scope !== _scope) return; }
 		const stored = Promise.resolve(_isDurableStore(scope.store));
 		const prefix = 'q:' + scope.persistKey + ':';
 		// Re-entering a scope must see writes its prior lifetime already started.
@@ -327,6 +392,8 @@ async function _rehydrate(scope) {
 		/** @type {any[]} */
 		const restored = [];
 		let maxSeq = 0;
+		const expired = [];
+		const restoreTime = now();
 		for (const row of rows) {
 			const seq = _seqOfRowKey(row && row.key, prefix);
 			if (seq === 0) continue;
@@ -335,10 +402,19 @@ async function _rehydrate(scope) {
 			if (seq > maxSeq) maxSeq = seq;
 			const value = row.value;
 			if (!value || typeof value.path !== 'string' || !Array.isArray(value.args)) continue;
+			const queuedAt = Number.isFinite(value.queuedAt) ? value.queuedAt : 0;
+			const expiresAt = Math.min(Number.isFinite(value.expiresAt) ? value.expiresAt : Infinity, queuedAt + scope.retentionMs);
+			if (expiresAt <= restoreTime) {
+				expired.push(row.key);
+				scope.batch.failedSeq = Math.min(scope.batch.failedSeq, seq);
+				scope.batch.clean = false;
+				scope.checkpointDirty = true;
+				continue;
+			}
 			restored.push({
 				path: value.path,
 				args: value.args,
-				queuedAt: typeof value.queuedAt === 'number' ? value.queuedAt : 0,
+				queuedAt, expiresAt,
 				resolve: () => {},
 				reject: () => {},
 				idempotencyKey: typeof value.idempotencyKey === 'string' ? value.idempotencyKey : undefined,
@@ -347,6 +423,14 @@ async function _rehydrate(scope) {
 				restored: true,
 				stored
 			});
+		}
+		if (expired.length) {
+			try {
+				for (let i = 0; i < expired.length; i += 10) await Promise.all(expired.slice(i, i + 10).map(key => _write(scope.store, key, () => scope.store.delete(key))));
+				const remaining = new Set(await _storedKeys(scope.store, prefix));
+				scope.failedErasure = expired.some(key => remaining.has(key));
+			} catch { scope.failedErasure = true; }
+			if (scope !== _scope) return;
 		}
 		rowsRead = true;
 		if (maxSeq > scope.seq) scope.seq = maxSeq;
@@ -448,6 +532,7 @@ export function _offlineReady() {
  * @param {any} entry
  */
 export function _enqueuePersist(entry) {
+	if (_scope.store) entry.expiresAt = entry.queuedAt + _scope.retentionMs;
 	if (entry.idempotencyKey === undefined || entry.idempotencyKey === null) {
 		entry.idempotencyKey = 'off-' + randomUuid();
 	}
@@ -466,6 +551,7 @@ export function _enqueuePersist(entry) {
  * @returns {Promise<boolean> | undefined} Whether the write left a copy that outlives the page.
  */
 function _stamp(entry, scope = _scope) {
+	if (scope.erased) return undefined;
 	entry.seq = ++scope.seq;
 	if (!scope.store) return undefined;
 	const store = scope.store;
@@ -475,6 +561,7 @@ function _stamp(entry, scope = _scope) {
 		path: entry.path,
 		args: entry.args,
 		queuedAt: entry.queuedAt,
+		expiresAt: entry.expiresAt,
 		idempotencyKey: entry.idempotencyKey,
 		timeout: entry.timeout
 	};
@@ -498,6 +585,7 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 	const scope = original.successor || original;
 	original.entries.delete(entry);
 	entry.settled = true;
+	if (original.erased) return;
 	if (original.store && typeof entry.seq === 'number' && entry.seq > 0) {
 		const store = original.store;
 		const key = _entryKey(entry.seq, original);
@@ -726,6 +814,7 @@ export function _clearGapIfClean() {
 }
 
 function _putCheckpoint(scope = _scope) {
+	if (scope.erased) return;
 	const store = scope.store;
 	if (!store || scope.checkpointUnknown) return;
 	// The stored checkpoint is not read yet while the restore runs: writing
@@ -749,6 +838,7 @@ function _putCheckpoint(scope = _scope) {
  * @internal
  */
 export function _resetOffline() {
+	_erasures = new WeakMap();
 	_scope = _newScope();
 	_retiredScopes.clear();
 	_reportingDrops = false;

@@ -706,6 +706,8 @@ export function configure(config: {
 		maxQueue?: number;
 		/** Drop queued mutations older than this (ms) at replay time. @default 0 (no age limit) */
 		maxAge?: number;
+		/** Persisted mutation retention in milliseconds. Positive and finite; default seven days. */
+		retentionMs?: number;
 		/** Replay strategy on reconnect: 'sequential' (default), 'concurrent' (10-at-a-time), or a synchronous function that gets copies of the queued calls (oldest first; changing one changes no queued call) and returns the ones to replay, in order: the entries it got, or copies of them (one that keeps the entry's `resolve`, or a JSON copy, matched by `seq` and `idempotencyKey`), whose `path` and `args` (taken as JSON when it returns; a copy whose args cannot be taken as JSON drops its call, STALE with the error as the cause, unless the answer also holds a sendable copy of it) are replayed under the queued call's idempotency key. A call it leaves out, or answers with `null` for, rejects with STALE (`onReplayError` is called); an `undefined` item reads as a forgotten `return` and is warned about, its call left out like any other. A function that throws, returns a promise, returns no array, or returns items other than `null` none of which is a queued call decides nothing, and the queue replays as it is. A queued call whose stored args cannot be serialized (a custom store's, or one an earlier version stored with a BigInt or a cycle) is dropped as STALE before the function sees the rest. To refuse calls, use `beforeReplay`. 'batch' is accepted as an alias for 'concurrent'. Like the other offline hooks, a function sees each call's arguments as the JSON copy taken when it was queued. */
 		replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => Array<OfflineEntry | null>);
 		/** Filter function called before replaying each queued call. Return a falsy value to drop it (a filter that returns nothing drops every call). A filter that throws drops the call too (STALE, with its error as the cause), and so does one that returns a promise: it must answer synchronously. Both warn in development. `call.args` is the JSON copy taken when the call was queued (a `Date` arrives as its ISO string), here and in `onReplayError` and `onConflict`. */
@@ -833,11 +835,21 @@ export function offlineCheckpoint(): { lastUploadedSeq: number; gapDetected: boo
  * Current persistence health without mutation contents or storage keys.
  * disabled: persistence is off; restoring: reads are in progress; ready: durable
  * storage is available; degraded: some rows/checkpoint could not be read or a
- * queued write failed; memory: persistence is unavailable or the store is ephemeral.
- * Unreadable rows remain stored, reserve their seq, and retry on the next scope
- * restore. Counts reset on a new scope; failedWrites counts queued mutation writes.
+ * queued write or expiry deletion failed; memory: persistence is unavailable or the store is ephemeral.
+ * Unreadable rows remain stored, reserve their seq, and retry on a later restore.
+ * Built-in storage includes unreadable rows found across namespaces during open.
+ * failedWrites counts queued mutation writes in the current scope.
  */
 export function offlinePersistence(): { status: 'disabled' | 'restoring' | 'ready' | 'degraded' | 'memory'; unreadableRows: number; failedWrites: number };
+
+/**
+ * Erase one persistKey from the configured store (defaults to the current key).
+ * The active queue is emptied and pending callers reject with OFFLINE_CLEARED.
+ * Waits for prior writes and verifies queue/checkpoint deletion; rejects with
+ * OFFLINE_CLEAR_FAILED when erasure cannot be confirmed. Already-sent operations
+ * can still complete on the server. New calls after this invocation are retained.
+ */
+export function clearOffline(options?: { persistKey?: string }): Promise<void>;
 
 /**
  * Register a handler for point-to-point signals.

@@ -75,7 +75,7 @@ function fakeStore(seed = {}) {
 
 /** Persisted-entry seed row. */
 function seedEntry(persistKey, seq, path, args, idempotencyKey) {
-	return ['q:' + persistKey + ':' + String(seq).padStart(12, '0'), { seq, path, args, queuedAt: 1, idempotencyKey }];
+	return ['q:' + persistKey + ':' + String(seq).padStart(12, '0'), { seq, path, args, queuedAt: Date.now(), idempotencyKey }];
 }
 
 let mod;
@@ -192,7 +192,7 @@ const watch = (p) => {
  * reports its request before its transaction commits or aborts. The rows
  * outlive the client that wrote them, so a test can reload against them.
  */
-function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false, readFails = false, abortReads = false, readHangs = false, unreadableKeys = new Set() } = {}) {
+function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false, readFails = false, abortReads = false, readHangs = false, deleteHangs = false, afterGet = null, unreadableKeys = new Set() } = {}) {
 	const map = new Map();
 	const stores = new Set();
 	let closed = false;
@@ -202,12 +202,17 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 		close() { closed = true; },
 		objectStoreNames: { contains: (name) => stores.has(name) },
 		createObjectStore: (name) => { stores.add(name); },
-		transaction() {
+		transaction(_name, mode) {
 			if (closed) throw new Error('InvalidStateError');
 			/** @type {any} */
-			const tx = { error: null };
+			const tx = { error: null, pending: 0, aborted: false, abort() { tx.aborted = true; later(() => tx.onabort?.()); } };
+			const completed = () => {
+				tx.pending--;
+				later(() => { if (!tx.aborted && tx.pending === 0) tx.oncomplete?.(); });
+			};
 			tx.objectStore = () => ({
 				put(value, key) {
+					tx.pending++;
 					const copy = structuredClone(value);
 					/** @type {any} */
 					const req = {};
@@ -220,19 +225,21 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 								tx.onabort?.();
 							} else {
 								map.set(key, copy);
-								tx.oncomplete?.();
+								completed();
 							}
 						});
 					});
 					return req;
 				},
 				delete(keyOrRange) {
+					tx.pending++;
 					const keys = typeof keyOrRange === 'string'
 						? [keyOrRange]
 						: [...map.keys()].filter((k) => k >= keyOrRange.lower && k <= keyOrRange.upper);
 					/** @type {any} */
 					const req = {};
 					later(() => {
+						if (deleteHangs) return;
 						req.onsuccess?.();
 						later(() => {
 							if (abortDeletes) {
@@ -240,19 +247,22 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 								tx.onabort?.();
 							} else {
 								for (const k of keys) map.delete(k);
-								tx.oncomplete?.();
+								completed();
 							}
 						});
 					});
 					return req;
 				},
 				get(key) {
+					tx.pending++;
 					const req = {};
-					later(() => {
+					later(async () => {
 						if (readHangs) return;
-						if (readFails || unreadableKeys.has(key)) { req.error = new Error('Failed to read large IndexedDB value'); req.onerror?.(); return; }
-						if (abortReads) { tx.error = new Error('AbortError'); tx.onabort?.(); return; }
-						req.result = structuredClone(map.get(key)); req.onsuccess?.();
+						if (readFails || unreadableKeys.has(key)) { req.error = new Error('Failed to read large IndexedDB value'); req.onerror?.(); tx.abort(); return; }
+						if (abortReads) { tx.error = new Error('AbortError'); tx.abort(); return; }
+						req.result = structuredClone(map.get(key));
+						if (afterGet) await afterGet(key, mode);
+						req.onsuccess?.(); completed();
 					});
 					return req;
 				},
@@ -1104,8 +1114,8 @@ describe('offline queue - a call queued while the restore runs', () => {
 
 	it('restored rows without a valid seq take it from their key, and their copy goes when they settle', async () => {
 		const store = fakeStore({
-			'q:default:000000000003': { path: 'todos/add', args: [{ t: 'no-seq' }], queuedAt: 1, idempotencyKey: 'off-3' },
-			'q:default:000000000004': { seq: Infinity, path: 'todos/add', args: [{ t: 'bad-seq' }], queuedAt: 1, idempotencyKey: 'off-4' }
+			'q:default:000000000003': { path: 'todos/add', args: [{ t: 'no-seq' }], queuedAt: Date.now(), idempotencyKey: 'off-3' },
+			'q:default:000000000004': { seq: Infinity, path: 'todos/add', args: [{ t: 'bad-seq' }], queuedAt: Date.now(), idempotencyKey: 'off-4' }
 		});
 		mod.configure({ offline: { queue: true, persist: store } });
 		await flush(1);
@@ -1122,7 +1132,7 @@ describe('offline queue - a call queued while the restore runs', () => {
 
 	it('a restored row takes its seq from its key, also when its stored seq differs, so its settle deletes it', async () => {
 		const store = fakeStore({
-			'q:default:000000000005': { seq: 9, path: 'todos/add', args: [{ t: 'moved' }], queuedAt: 1, idempotencyKey: 'off-5' }
+			'q:default:000000000005': { seq: 9, path: 'todos/add', args: [{ t: 'moved' }], queuedAt: Date.now(), idempotencyKey: 'off-5' }
 		});
 		mod.configure({ offline: { queue: true, persist: store } });
 		await flush(1);
@@ -1162,12 +1172,12 @@ describe('offline queue - a call queued while the restore runs', () => {
 
 	it('only rows of exactly the queue key shape are restored, and an unrestorable one still holds its seq', async () => {
 		const store = fakeStore({
-			'q:default:12': { path: 'todos/add', args: [{ t: 'short' }], queuedAt: 1, idempotencyKey: 'off-short' },
-			'q:default:0000000000013': { path: 'todos/add', args: [{ t: 'long' }], queuedAt: 1, idempotencyKey: 'off-long' },
-			'q:default:00000000001x': { path: 'todos/add', args: [{ t: 'letter' }], queuedAt: 1, idempotencyKey: 'off-letter' },
-			'q:default:000000000000': { path: 'todos/add', args: [{ t: 'zero' }], queuedAt: 1, idempotencyKey: 'off-zero' },
+			'q:default:12': { path: 'todos/add', args: [{ t: 'short' }], queuedAt: Date.now(), idempotencyKey: 'off-short' },
+			'q:default:0000000000013': { path: 'todos/add', args: [{ t: 'long' }], queuedAt: Date.now(), idempotencyKey: 'off-long' },
+			'q:default:00000000001x': { path: 'todos/add', args: [{ t: 'letter' }], queuedAt: Date.now(), idempotencyKey: 'off-letter' },
+			'q:default:000000000000': { path: 'todos/add', args: [{ t: 'zero' }], queuedAt: Date.now(), idempotencyKey: 'off-zero' },
 			'q:default:000000000004': { path: 42, args: 'not a call' },
-			'q:default:000000000002': { path: 'todos/add', args: [{ t: 'real' }], queuedAt: 1, idempotencyKey: 'off-real' }
+			'q:default:000000000002': { path: 'todos/add', args: [{ t: 'real' }], queuedAt: Date.now(), idempotencyKey: 'off-real' }
 		});
 		mod.configure({ offline: { queue: true, persist: store } });
 		await flush(1);
@@ -2045,8 +2055,8 @@ describe('offline queue - a drop during the drain', () => {
 
 	it('a cut puts back every restored entry, also ones stored without a seq', async () => {
 		const store = fakeStore({
-			'q:default:000000000001': { path: 'todos/add', args: [{ t: 'a' }], queuedAt: 1, idempotencyKey: 'off-a' },
-			'q:default:000000000002': { path: 'todos/add', args: [{ t: 'b' }], queuedAt: 1, idempotencyKey: 'off-b' }
+			'q:default:000000000001': { path: 'todos/add', args: [{ t: 'a' }], queuedAt: Date.now(), idempotencyKey: 'off-a' },
+			'q:default:000000000002': { path: 'todos/add', args: [{ t: 'b' }], queuedAt: Date.now(), idempotencyKey: 'off-b' }
 		});
 		mod.configure({ offline: { queue: true, persist: store } });
 		await flush(1);
@@ -2548,7 +2558,7 @@ describe('the IndexedDB store', () => {
 	it('a restore whose read fails stores nothing for the rest of the page', async () => {
 		const idb = fakeIndexedDb();
 		vi.stubGlobal('indexedDB', idb);
-		await mod.createIndexedDbStore().put('q:default:000000000006', { seq: 6, path: 'todos/add', args: [{ t: 'stored' }], queuedAt: 1, idempotencyKey: 'off-6' });
+		await mod.createIndexedDbStore().put('q:default:000000000006', { seq: 6, path: 'todos/add', args: [{ t: 'stored' }], queuedAt: Date.now(), idempotencyKey: 'off-6' });
 		const unreadable = fakeIndexedDb({ readFails: true });
 		for (const [k, v] of idb.map) unreadable.map.set(k, v);
 		vi.stubGlobal('indexedDB', unreadable);
@@ -2608,7 +2618,7 @@ describe('offline queue - what a queued call stores', () => {
 
 		mod = await loadClient();
 		mod.configure({ offline: { queue: true, persist: true } });
-		await flush();
+		await until(() => mod.offlinePersistence().status !== 'restoring');
 		simulateStatus('disconnected');
 		simulateStatus('open');
 		await flush();
@@ -3344,4 +3354,243 @@ it('never replays a captured mutation evicted by a reentrant beforeReplay enqueu
 	await respondAll(() => ({ ok: true, data: 'done' }));
 	expect(added.value).toBe('done');
 	expect(wire.filter(frame => frame.rpc).map(frame => frame.rpc)).toEqual(['during/filter']);
+});
+
+
+describe('offline erasure and retention', () => {
+	it('clears current queued callers and persisted checkpoint before a reload', async () => {
+		const store = fakeStore({ 'c:default': { lastUploadedSeq: 7, gapDetected: true } });
+		const [pending] = await goOfflineAndQueue({ persist: store }, [['private/write', ['secret']]]);
+		const result = watch(pending);
+		await mod.clearOffline(); await flush();
+		expect(result.error).toMatchObject({ code: 'OFFLINE_CLEARED' });
+		expect([...store.map]).toEqual([]);
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 0, gapDetected: false });
+		mod = await loadClient(); mod.configure({ offline: { queue: true, persist: store } }); await flush();
+		simulateStatus('disconnected'); simulateStatus('open'); await flush();
+		expect(wire.filter(frame => frame.rpc)).toEqual([]);
+	});
+
+	it('erases an inactive key without erasing sibling namespaces or the active queue', async () => {
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('A', 1, 'write', ['erase'], 'erase'), seedEntry('A:child', 1, 'write', ['keep child'], 'child'),
+			['c:A', { lastUploadedSeq: 1 }], ['c:A:child', { lastUploadedSeq: 3 }]
+		]));
+		const [pending] = await goOfflineAndQueue({ persist: store, persistKey: 'B' }, [['write', ['keep current']]]);
+		const result = watch(pending);
+		await mod.clearOffline({ persistKey: 'A' });
+		expect(storedKeys(store)).toEqual(['q:A:child:000000000001', 'q:B:000000000001']);
+		expect(store.map.get('c:A:child')).toEqual({ lastUploadedSeq: 3 });
+		expect(store.map.has('c:A')).toBe(false);
+		expect(result.settled).toBe(false);
+	});
+
+	it('waits for a pending write and preserves calls queued after clearing starts', async () => {
+		const store = fakeStore(); const put = store.put;
+		let finish;
+		store.put = (key, value) => !finish && key.startsWith('q:') ? new Promise(resolve => { finish = () => resolve(put(key, value)); }) : put(key, value);
+		const [old] = await goOfflineAndQueue({ persist: store }, [['write', ['old']]]);
+		const result = watch(old); let cleared = false;
+		const clearing = mod.clearOffline().then(() => { cleared = true; });
+		const fresh = watch(mod.__rpc('write')('new')); await flush();
+		expect(cleared).toBe(false);
+		finish(); await clearing; await flush();
+		expect(result.error.code).toBe('OFFLINE_CLEARED');
+		expect(storedKeys(store)).toEqual(['q:default:000000000001']);
+		expect(store.map.get('q:default:000000000001').args).toEqual(['new']);
+		expect(fresh.settled).toBe(false);
+	});
+
+	it('a cleared in-flight response cannot recreate stored state', async () => {
+		const store = fakeStore();
+		const [pending] = await goOfflineAndQueue({ persist: store }, [['write', ['sent']]]);
+		const result = watch(pending);
+		simulateStatus('open'); await until(() => wire.some(frame => frame.rpc));
+		const sent = wire.find(frame => frame.rpc);
+		await mod.clearOffline(); await flush();
+		expect(result.error.code).toBe('OFFLINE_CLEARED');
+		simulateRpcResponse(sent.id, { ok: true, data: 'late' }); await flush();
+		expect([...store.map]).toEqual([]);
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 0, gapDetected: false });
+	});
+
+	it('rejects unverified erasure and keeps stored data visibly degraded', async () => {
+		const store = fakeStore();
+		await goOfflineAndQueue({ persist: store }, [['write', ['retained']]]);
+		store.delete = async () => {};
+		await expect(mod.clearOffline()).rejects.toMatchObject({ code: 'OFFLINE_CLEAR_FAILED' });
+		await flush();
+		expect(storedKeys(store)).toHaveLength(1);
+		expect(mod.offlinePersistence().status).toBe('memory');
+	});
+
+	it('deletes expired rows on restore and numbers new rows past their reserved seq', async () => {
+		const expired = seedEntry('default', 9, 'write', ['expired'], 'expired');
+		expired[1].queuedAt = Date.now() - 8 * 24 * 60 * 60 * 1000;
+		const store = fakeStore(Object.fromEntries([expired, seedEntry('default', 2, 'write', ['valid'], 'valid')]));
+		mod.configure({ offline: { queue: true, persist: store } }); simulateStatus('disconnected');
+		watch(mod.__rpc('write')('new')); await flush();
+		expect(storedKeys(store)).toEqual(['q:default:000000000002', 'q:default:000000000010']);
+		expect(store.map.get('q:default:000000000010').expiresAt - store.map.get('q:default:000000000010').queuedAt).toBe(7 * 24 * 60 * 60 * 1000);
+		simulateStatus('open'); await flush(); await respondAll(() => ({ ok: true, data: 'done' }));
+		expect(wire.filter(frame => frame.rpc).map(frame => frame.args)).toEqual([['valid'], ['new']]);
+	});
+
+	it('applies a finite configured retention to newly stored mutations and validates it', async () => {
+		const store = fakeStore();
+		await goOfflineAndQueue({ persist: store, retentionMs: 12345 }, [['write', ['new']]]);
+		const row = store.map.get('q:default:000000000001');
+		expect(row.expiresAt - row.queuedAt).toBe(12345);
+		for (const retentionMs of [0, -1, Infinity, NaN]) expect(() => mod.configure({ offline: { persist: store, retentionMs } })).toThrow(/retentionMs/);
+	});
+
+	it('clears memory-only queues and validates target keys', async () => {
+		const [pending] = await goOfflineAndQueue({}, [['write', ['memory']]]);
+		const result = watch(pending);
+		await mod.clearOffline(); await flush();
+		expect(result.error.code).toBe('OFFLINE_CLEARED');
+		await expect(mod.clearOffline({ persistKey: '' })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+	});
+});
+
+
+it('database open purges expired retired-account values without replaying them', async () => {
+	const expired = seedEntry('retired', 3, 'private/old', ['expired secret'], 'expired');
+	expired[1].queuedAt = Date.now() - 8 * 24 * 60 * 60 * 1000;
+	const valid = seedEntry('retired', 4, 'private/old', ['still retained'], 'valid');
+	const unreadable = seedEntry('retired', 5, 'private/old', ['unreadable'], 'broken');
+	const idb = fakeIndexedDb({ unreadableKeys: new Set([unreadable[0]]) });
+	for (const row of [expired, valid, unreadable]) idb.map.set(...row);
+	vi.stubGlobal('indexedDB', idb); vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		mod.configure({ offline: { queue: true, persist: true, persistKey: 'current' } });
+		simulateStatus('disconnected'); await until(() => mod.offlinePersistence().status !== 'restoring');
+		expect(idb.map.has(expired[0])).toBe(false);
+		expect(idb.map.has(valid[0])).toBe(true);
+		expect(idb.map.has(unreadable[0])).toBe(true);
+		expect(mod.offlinePersistence()).toMatchObject({ status: 'degraded', unreadableRows: 1 });
+		simulateStatus('open'); await flush();
+		expect(wire.filter(frame => frame.rpc)).toEqual([]);
+		await mod.clearOffline({ persistKey: 'retired' });
+		expect([...idb.map]).toEqual([]);
+		expect(mod.offlinePersistence().unreadableRows).toBe(0);
+	} finally { warn.mockRestore(); vi.unstubAllGlobals(); }
+});
+
+it('an obsolete restore cannot resurrect rows after clearOffline resolves', async () => {
+	const seed = seedEntry('default', 7, 'write', ['old'], 'old');
+	const store = fakeStore(Object.fromEntries([seed])); const getAll = store.getAll;
+	let finish;
+	store.getAll = prefix => !finish && prefix.startsWith('q:') ? new Promise(resolve => { finish = () => resolve([{ key: seed[0], value: seed[1] }]); }) : getAll(prefix);
+	mod.configure({ offline: { queue: true, persist: store } }); simulateStatus('disconnected');
+	await mod.clearOffline(); finish(); await flush();
+	expect([...store.map]).toEqual([]);
+	simulateStatus('open'); await flush();
+	expect(wire.filter(frame => frame.rpc)).toEqual([]);
+});
+
+it('expired persisted calls reject before replay even when the page stayed open', async () => {
+	const store = fakeStore();
+	const [pending] = await goOfflineAndQueue({ persist: store, retentionMs: 60000 }, [['write', ['expired']]]);
+	const result = watch(pending); const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60001);
+	try {
+		simulateStatus('open'); await flush();
+		expect(result.error).toMatchObject({ code: 'STALE' });
+		expect(wire.filter(frame => frame.rpc)).toEqual([]);
+		expect(storedKeys(store)).toEqual([]);
+	} finally { clock.mockRestore(); }
+});
+
+it('a failed built-in deletion never claims that offline erasure succeeded', async () => {
+	const idb = fakeIndexedDb({ abortDeletes: true });
+	vi.stubGlobal('indexedDB', idb); vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		await goOfflineAndQueue({ persist: true }, [['write', ['retained']]]);
+		await until(() => idb.map.size > 0);
+		await expect(mod.clearOffline()).rejects.toMatchObject({ code: 'OFFLINE_CLEAR_FAILED' });
+		expect([...idb.map.values()].some(row => row.args?.[0] === 'retained')).toBe(true);
+	} finally { warn.mockRestore(); vi.unstubAllGlobals(); }
+});
+
+
+it('open-time retention cannot wait forever for a stalled deletion', async () => {
+	vi.useFakeTimers();
+	const idb = fakeIndexedDb({ deleteHangs: true });
+	const expired = seedEntry('retired', 1, 'write', ['old'], 'old'); expired[1].queuedAt -= 8 * 24 * 60 * 60 * 1000;
+	idb.map.set(...expired);
+	vi.stubGlobal('indexedDB', idb); vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		mod.configure({ offline: { queue: true, persist: true, persistKey: 'current' } });
+		await vi.advanceTimersByTimeAsync(5100);
+		expect(mod.offlinePersistence().status).toBe('degraded');
+		expect(idb.map.has(expired[0])).toBe(true);
+	} finally { warn.mockRestore(); vi.useRealTimers(); vi.unstubAllGlobals(); }
+});
+
+it('a failed global key scan can reopen on a later configure retry', async () => {
+	const bad = fakeIndexedDb({ readFails: true });
+	vi.stubGlobal('indexedDB', bad); vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+	const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+	try {
+		mod.configure({ offline: { queue: true, persist: true } });
+		await until(() => mod.offlinePersistence().status !== 'restoring');
+		expect(mod.offlinePersistence().status).toBe('memory');
+		const good = fakeIndexedDb(); vi.stubGlobal('indexedDB', good);
+		mod.configure({ offline: { queue: true, persist: true } }); simulateStatus('disconnected');
+		watch(mod.__rpc('write')('recovered')); await until(() => good.map.size > 0);
+		expect([...good.map.values()].some(row => row.args?.[0] === 'recovered')).toBe(true);
+		expect(mod.offlinePersistence().status).toBe('ready');
+	} finally { warn.mockRestore(); vi.unstubAllGlobals(); }
+});
+
+
+it('expiry cleanup cannot reuse a sequence still owned by an older replay', async () => {
+ const idb = fakeIndexedDb();
+ vi.stubGlobal('indexedDB', idb); vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+ let clock;
+ try {
+  const [old] = await goOfflineAndQueue({ persist: true, persistKey: 'account', retentionMs: 60000 }, [['write', ['old']]]);
+  watch(old);
+  await until(() => idb.map.has('q:account:000000000001'));
+  simulateStatus('open'); await until(() => wire.some(frame => frame.rpc));
+  mod.configure({ offline: { queue: true, persistKey: 'other' } });
+  await until(() => mod.offlinePersistence().status !== 'restoring');
+  clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 60001);
+  idb.db.close(); idb.db.onclose();
+  mod.configure({ offline: { queue: true, persistKey: 'account' } });
+  await until(() => mod.offlinePersistence().status !== 'restoring');
+  expect(idb.map.has('q:account:000000000001')).toBe(false);
+  simulateStatus('disconnected');
+  watch(mod.__rpc('write')('new'));
+  await until(() => [...idb.map.values()].some(value => value.args?.[0] === 'new'));
+  expect([...idb.map.values()].some(value => value.args?.[0] === 'new')).toBe(true);
+  expect(idb.map.get('q:account:000000000002')?.args).toEqual(['new']);
+ } finally { clock?.mockRestore(); vi.unstubAllGlobals(); }
+});
+
+
+it('two store instances cannot erase a fresh replacement using a stale expiry read', async () => {
+ const expired = seedEntry('account', 1, 'write', ['expired'], 'old');
+ expired[1].queuedAt -= 8 * 24 * 60 * 60 * 1000;
+ let releaseRead, announceRead;
+ const readStarted = new Promise(resolve => { announceRead = resolve; });
+ const idb = fakeIndexedDb({ afterGet(key, mode) {
+  if (mode === 'readonly' && key === expired[0] && !releaseRead) {
+   announceRead(); return new Promise(resolve => { releaseRead = resolve; });
+  }
+ } });
+ idb.map.set(...expired);
+ vi.stubGlobal('indexedDB', idb); vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+ try {
+  const first = mod.createIndexedDbStore(); const second = mod.createIndexedDbStore();
+  const opening = first.keys('q:account:');
+  await Promise.race([opening, readStarted]);
+  const fresh = seedEntry('account', 1, 'write', ['fresh'], 'new')[1];
+  await second.put(expired[0], fresh);
+  releaseRead?.(); await opening;
+  expect(idb.map.get(expired[0])?.args).toEqual(['fresh']);
+ } finally { releaseRead?.(); vi.unstubAllGlobals(); }
 });

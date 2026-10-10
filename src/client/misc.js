@@ -8,7 +8,7 @@ import { _ensureHealthSubscription } from './health.js';
 import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped } from './offline.js';
 
 /**
- * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, restored?: boolean }} OfflineEntry
+ * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, expiresAt?: number, restored?: boolean }} OfflineEntry
  */
 
 const _CONFLICT_RESOLUTIONS = new Set(['lww', 'server-win', 'custom']);
@@ -67,7 +67,7 @@ let _replayingScope = null;
  * - return an args array to re-issue once with merged args, anything else to
  * drop. The `'batch'` replay strategy is an alias of `'concurrent'`.
  *
- * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => Array<OfflineEntry | null>), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void, persist?: boolean | import('./offline-store.js').OfflineStore, persistKey?: string, conflictResolution?: 'lww' | 'server-win' | 'custom', onConflict?: (call: { path: string, args: any[], queuedAt: number }, error: any) => any } }} config
+ * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, retentionMs?: number, replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => Array<OfflineEntry | null>), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void, persist?: boolean | import('./offline-store.js').OfflineStore, persistKey?: string, conflictResolution?: 'lww' | 'server-win' | 'custom', onConflict?: (call: { path: string, args: any[], queuedAt: number }, error: any) => any } }} config
  */
 export function configure(config) {
 	const previousScope = _offlineScope();
@@ -324,7 +324,7 @@ async function _drainOfflineQueue() {
 		for (const entry of captured) {
 			if (entry.settled) continue;
 			if (scope !== _offlineScope()) return;
-			if (maxAge > 0 && nowMs - entry.queuedAt > maxAge) {
+			if ((maxAge > 0 && nowMs - entry.queuedAt > maxAge) || (entry.expiresAt !== undefined && entry.expiresAt <= nowMs)) {
 				settleFail(entry, new RpcError('STALE', 'Offline mutation expired'));
 				continue;
 			}
