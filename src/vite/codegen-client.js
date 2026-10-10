@@ -10,9 +10,10 @@ import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE,
  * @param {string} filePath
  * @param {string} modulePath
  * @param {string} dir
+ * @param {number} [reconcileIntervalMs]
  * @returns {string}
  */
-export function _generateClientStubs(filePath, modulePath, dir) {
+export function _generateClientStubs(filePath, modulePath, dir, reconcileIntervalMs) {
 	const source = _readCached(filePath);
 
 	/** @type {string[]} */
@@ -213,6 +214,7 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 				lines.push(`import { createCrdtChannel } from 'svelte-adapter-uws/plugins/crdt/channel';`);
 				docRuntimeImported = true;
 			}
+			const reconcileOption = reconcileIntervalMs === undefined ? '' : `reconcileIntervalMs: ${JSON.stringify(reconcileIntervalMs)}, `;
 			const dLines = [];
 			dLines.push(`export const ${name} = {`);
 			dLines.push(`  _sync: __rpc(${JSON.stringify(modulePath + '/' + name + '/__doc/sync')}),`);
@@ -220,7 +222,7 @@ export function _generateClientStubs(filePath, modulePath, dir) {
 			dLines.push(`  _close: __rpc(${JSON.stringify(modulePath + '/' + name + '/__doc/close')}),`);
 			dLines.push(`  status: status,`);
 			dLines.push(`  ${kind}(...args) {`);
-			dLines.push(`    return _acquireDoc(${JSON.stringify(modulePath + '/' + name)} + '\\u0000' + JSON.stringify(args), ${JSON.stringify(kind)}, () => createCrdtChannel({ transport: {`);
+			dLines.push(`    return _acquireDoc(${JSON.stringify(modulePath + '/' + name)} + '\\u0000' + JSON.stringify(args), ${JSON.stringify(kind)}, () => createCrdtChannel({ ${reconcileOption}transport: {`);
 			dLines.push(`      sendUpdate: (bytes) => ${name}._update.send(...args, bytes),`);
 			dLines.push(`      sync: (sv, mountId) => ${name}._sync(...args, sv, mountId),`);
 			dLines.push(`      close: (mountId) => ${name}._close.send(...args, mountId)`);

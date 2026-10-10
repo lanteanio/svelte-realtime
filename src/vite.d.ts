@@ -21,6 +21,15 @@ export interface SvelteRealtimeOptions {
 	 * @default true
 	 */
 	devtools?: boolean;
+
+	/** Client settings shared by generated live.doc(), live.map(), and live.array() channels. */
+	crdt?: {
+		/**
+		 * Background state-vector reconciliation interval in milliseconds.
+		 * Zero disables it; invalid values use the adapter default. @default 30000
+		 */
+		reconcileIntervalMs?: number;
+	};
 }
 
 /**

@@ -7,7 +7,7 @@ export const _warnedExports = new Set();
 /** @type {Map<string, string>} Cache file contents to avoid redundant reads within a build cycle */
 export const _fileCache = new Map();
 
-/** @type {Map<string, { content: string, code: string }>} Cache generated stubs keyed by file path, validated against source content */
+/** @type {Map<string, { content: string, code: string, reconcileIntervalMs?: number }>} Cache generated stubs keyed by file path, validated against source content */
 export const _codeCache = new Map();
 
 /**

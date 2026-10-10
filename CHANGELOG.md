@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Vite's `crdt.reconcileIntervalMs` configures background reconciliation for
+  generated document, map, and array channels, including `0` to disable it.
+
 - Upload handlers receive `ctx.abortSignal` for cancellation. `ctx.signal`
   remains a deprecated alias during 0.x.
 

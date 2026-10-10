@@ -15,11 +15,14 @@ import { _installedSvelteVersion, _runeSubpathError } from './svelte-version.js'
  * Vite plugin for svelte-realtime.
  * Resolves `$live/` imports to virtual modules with auto-generated client stubs.
  *
- * @param {{ dir?: string }} [options]
+ * @param {import('../vite.js').SvelteRealtimeOptions} [options]
  * @returns {import('vite').Plugin}
  */
 export default function svelteRealtime(options) {
 	const dir = options?.dir || 'src/live';
+	const interval = options?.crdt?.reconcileIntervalMs;
+	const reconcileIntervalMs = typeof interval === 'number' && Number.isFinite(interval) && interval >= 0
+		? interval : undefined;
 	/** @type {string} */
 	let root = '';
 	/** @type {string} */
@@ -122,7 +125,7 @@ export default function svelteRealtime(options) {
 				const cacheKey = (ssr ? 'ssr:' : 'client:') + filePath;
 				const source = _readCached(filePath);
 				const cached = _codeCache.get(cacheKey);
-				if (cached && cached.content === source) {
+				if (cached && cached.content === source && (ssr || cached.reconcileIntervalMs === reconcileIntervalMs)) {
 					return cached.code;
 				}
 
@@ -130,7 +133,7 @@ export default function svelteRealtime(options) {
 				if (ssr) {
 					code = _generateSsrStubs(filePath, modulePath);
 				} else {
-					code = _generateClientStubs(filePath, modulePath, dir);
+					code = _generateClientStubs(filePath, modulePath, dir, reconcileIntervalMs);
 					const runeError = _runeSubpathError(code, modulePath, svelteVersion);
 					if (runeError) {
 						this.error(runeError);
@@ -138,7 +141,7 @@ export default function svelteRealtime(options) {
 					}
 				}
 
-				_codeCache.set(cacheKey, { content: source, code });
+				_codeCache.set(cacheKey, { content: source, code, reconcileIntervalMs });
 				return code;
 			}
 
