@@ -101,7 +101,7 @@ describe('cron wall-clock boundaries', () => {
 		await wake(); expect(fresh).toHaveLength(1);
 	});
 
-	it.each([false, true])('rechecks time and scheduler ownership after lazy startup, stopped=%s', async stopped => {
+	it.each([[false, false], [false, true], [true, false], [true, true]])('rechecks lazy startup ownership with stopped=%s and seconds=%s', async (stopped, seconds) => {
 		let resolve; const calls = [];
 		const loader = () => new Promise(r => { resolve = r; }); loader.__lazy = true;
 		__registerCron('lazy', loader);
@@ -110,7 +110,7 @@ describe('cron wall-clock boundaries', () => {
 		const pending = startup.callback(); await flush();
 		wall = origin + 122500;
 		if (stopped) _stopCronScheduler();
-		resolve(live.cron('* * * * *', 'lazy', () => { calls.push(wall - origin); }));
+		resolve(live.cron(seconds ? '* * * * * *' : '* * * * *', 'lazy', () => { calls.push(wall - origin); }));
 		await pending; await flush();
 		expect(calls).toEqual(stopped ? [] : [122500]);
 		if (stopped) expect(timers.size).toBe(0);

@@ -16,8 +16,6 @@ import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnost
 let _cronInterval = null;
 let _cronEpoch = 0;
 let _cronStopped = false;
-/** Last evaluated absolute slot for each registration; clock rollback never repeats it. */
-let _cronSlots = new WeakMap();
 
 /**
  * Sticky-once-set: flips to true when a 6-field schedule (sub-minute
@@ -92,7 +90,7 @@ export function __registerCron(path, fn) {
 	const parsed = /** @type {any} */ (fn).__cronParsed;
 	const topic = /** @type {any} */ (fn).__cronTopic;
 	if (!parsed || !topic) return;
-	cronRegistry.set(path, { schedule: parsed, fn, topic });
+	cronRegistry.set(path, { schedule: parsed, fn, topic, lastSlot: -Infinity });
 	// 6-field schedule means seconds-precision firing is required.
 	// Upgrade the tick to 1 Hz once any such schedule registers.
 	if (parsed.length === 6) _upgradeCronTo1Hz();
@@ -327,7 +325,6 @@ export function _cronIntrospect() {
 export function _clearCron() {
 	_stopCronScheduler();
 	_cronStopped = false;
-	_cronSlots = new WeakMap();
 	cronRegistry.clear();
 	_cronAt1Hz = false;
 	_cronRunning.clear();
@@ -343,12 +340,12 @@ export function _clearCron() {
  * lifecycle in-flight counter, so the drain waits for them.
  */
 export function _stopCronScheduler() {
+	_cronEpoch++;
 	_cronStopped = true;
 	_cancelCronTimers();
 }
 
 function _cancelCronTimers() {
-	_cronEpoch++;
 	if (_cronInterval !== null) {
 		clearTimer(_cronInterval);
 		_cronInterval = null;
@@ -424,9 +421,8 @@ export async function _tickCron(_at, epoch) {
 
 		if (scheduled) {
 			const slot = Math.floor(evaluatedAt / (isSixField ? 1000 : 60000));
-			const previous = _cronSlots.get(entry);
-			if (previous !== undefined && slot <= previous) continue;
-			_cronSlots.set(entry, slot);
+			if (slot <= entry.lastSlot) continue;
+			entry.lastSlot = slot;
 		} else if (!isSixField && _cronAt1Hz && second !== 0) continue;
 
 		let sf, mf, hf, df, monthf, wf;

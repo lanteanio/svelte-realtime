@@ -246,7 +246,7 @@ export const _ctxHelpersCache = new WeakMap();
 /** @type {Map<string, { prev: number, curr: number, windowStart: number, windowMs: number }>} */
 export const _rateLimits = new Map();
 
-/** @type {Map<string, { schedule: number[], fn: Function, topic: string }>} */
+/** @type {Map<string, { schedule: number[], fn: Function, topic: string, lastSlot: number }>} */
 export const cronRegistry = new Map();
 
 /** @type {Map<string, { sources: string[], fn: Function, topic: string, debounce: number, timer: ReturnType<typeof setTimeout> | null }>} */
