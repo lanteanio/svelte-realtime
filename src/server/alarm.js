@@ -17,7 +17,7 @@ import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
 import { _getCtxHelpers, _buildPersistedCtx } from './ctx.js';
 import { LiveError } from './live-error.js';
-import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
+import { emitOperationalEvent } from '../shared/diagnostic.js';
 import { _validTenantId, _topicInTenant } from './tenant.js';
 
 /**
@@ -51,20 +51,22 @@ const _MAX_UNRESOLVED_WARNINGS = 256;
 
 /**
  * Optional durable store seam (default null = in-memory live timers). A durable
- * store persists `{topic, at, meta}` so alarms survive a restart and fire once
- * cluster-wide; set it via `configureAlarm({ store })`. The realtime layer stays
+ * store persists `{topic, at, meta}` so alarms survive a restart and each attempt
+ * has one cluster-wide claim; set it via `configureAlarm({ store })`. The realtime layer stays
  * cluster-agnostic - the durable Postgres/Redis store is the extensions layer.
  *
  * - `nextGeneration(topic)` reserves a never-reused ordered generation.
  * - `get(topic)` reads the current row for cancellation after restart.
  * - `set(topic, at, meta, generation)` commits only the latest reserved generation.
- * - `delete(topic, generation)` atomically removes only that generation.
- *   Both mutation results resolve after durable commit; allocation and committed
+ * - `delete(topic, generation)` atomically cancels only that scheduled generation.
+ * - `claim` moves that generation into retained execution storage before firing;
+ *   `complete` removes it after success and `fail` records failure without deletion.
+ *   All mutation results resolve after durable commit; allocation and committed
  *   watermarks survive deletion so delayed writes cannot resurrect consumed rows.
  * - `due(nowMs)` (optional) returns the alarms whose `at <= nowMs` for the recovery
  *   poll. Omit it and cross-restart recovery is disabled (a one-time dev warning) -
  *   the in-memory timers still fire while the process lives.
- * @type {{ nextGeneration: (topic: string) => any, get: (topic: string) => any, set: (topic: string, at: number, meta: AlarmMeta | null, generation: string) => any, delete: (topic: string, generation: string) => any, due?: (nowMs: number) => any } | null}
+ * @type {{ nextGeneration: (topic: string) => any, get: (topic: string) => any, set: (topic: string, at: number, meta: AlarmMeta | null, generation: string) => any, delete: (topic: string, generation: string) => any, claim: Function, complete: Function, fail: Function, getExecution: Function, executions: Function, requeue: Function, due?: (nowMs: number) => any } | null}
  */
 let _alarmStore = null;
 
@@ -93,7 +95,7 @@ let _alarmLeader = null;
  * recovery is off). A `leader` without a `store` suppresses non-leader alarms with
  * no way to recover them - configure a store for real cluster durability.
  *
- * @param {{ store?: { nextGeneration: Function, get: Function, set: Function, delete: Function, due?: Function } | null, leader?: (() => boolean) | null, pollMs?: number } | null} config
+ * @param {{ store?: { nextGeneration: Function, get: Function, set: Function, delete: Function, claim: Function, complete: Function, fail: Function, getExecution: Function, executions: Function, requeue: Function, due?: Function } | null, leader?: (() => boolean) | null, pollMs?: number } | null} config
  */
 export function configureAlarm(config) {
 	if (config === null) { _alarmStore = null; _alarmLeader = null; _alarmPollMs = 15000; _clearAlarmPoll(); return; }
@@ -112,6 +114,9 @@ export function configureAlarm(config) {
 	if (config.store !== undefined) {
 		if (config.store !== null && (typeof config.store !== 'object' || typeof config.store.set !== 'function' || typeof config.store.delete !== 'function' || typeof config.store.nextGeneration !== 'function' || typeof config.store.get !== 'function')) {
 			throw new Error('[svelte-realtime] configureAlarm: store must implement nextGeneration(topic), get(topic), set(topic, at, meta, generation) and delete(topic, generation)');
+		}
+		if (config.store !== null && ['claim', 'complete', 'fail', 'getExecution', 'executions', 'requeue'].some(name => typeof config.store[name] !== 'function')) {
+			throw new Error('[svelte-realtime] configureAlarm: store must retain executions with claim, complete, fail, getExecution, executions and requeue');
 		}
 		if (config.store !== null && config.store.due !== undefined && typeof config.store.due !== 'function') {
 			throw new Error('[svelte-realtime] configureAlarm: store.due, when provided, must be a function due(nowMs)');
@@ -319,9 +324,10 @@ async function _fireClaim(wireTopic, entry) {
 			return;
 		}
 	}
+	let attempt = null;
 	if (entry.store) {
 		let claimed;
-		try { claimed = await entry.store.delete(wireTopic, entry.generation); }
+		try { claimed = await entry.store.claim(wireTopic, entry.generation); }
 		catch {
 			// Keep the row and retry its exact generation; never fire without a claim.
 			if (_pending.get(wireTopic) === entry && entry.epoch === _alarmEpoch) {
@@ -330,11 +336,12 @@ async function _fireClaim(wireTopic, entry) {
 			}
 			return;
 		}
-		if (claimed !== true) {
+		if (!claimed || !Number.isSafeInteger(claimed.attempt) || claimed.attempt < 1) {
 			if (_pending.get(wireTopic) === entry) _pending.delete(wireTopic);
 			_releaseTopic(wireTopic);
 			return;
 		}
+		attempt = claimed.attempt;
 	}
 	if (_pending.get(wireTopic) === entry) _pending.delete(wireTopic);
 	clearTimer(entry.timer);
@@ -351,10 +358,30 @@ async function _fireClaim(wireTopic, entry) {
 		if (_IS_DEV) {
 			console.warn('[svelte-realtime] alarm for "' + wireTopic + '" missed its window by ' + lateMs + 'ms (misfireMs=' + entry.misfireMs + '); skipped.');
 		}
+		await _settleAlarm(entry.store, wireTopic, entry.generation, attempt, true);
 		return;
 	}
 
-	await _invokeAlarm(wireTopic, entry.onAlarm, entry.meta, { at: entry.at, firedAt, lateMs, recovered: false, misfireMs: entry.misfireMs });
+	const succeeded = await _invokeAlarm(wireTopic, entry.onAlarm, entry.meta, { at: entry.at, firedAt, lateMs, recovered: false, misfireMs: entry.misfireMs, generation: entry.generation ?? null, attempt });
+	await _settleAlarm(entry.store, wireTopic, entry.generation, attempt, succeeded);
+}
+
+async function _settleAlarm(store, wireTopic, generation, attempt, succeeded) {
+	if (!store || attempt === null) return;
+	try {
+		if (succeeded) await store.complete(wireTopic, generation, attempt);
+		else await store.fail(wireTopic, generation, attempt, { errorClass: 'handler', failedAt: wallEpoch() });
+	} catch {
+		// claim already retained the execution. A failed acknowledgement or failure
+		// annotation never triggers another callback. An unacknowledged completion
+		// may already have removed the record, so operators inspect before retrying.
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.alarm',
+			event: 'alarm.execution.retained', severity: 'error', dataClass: 'operational',
+			message: 'An alarm execution outcome could not be confirmed; inspect retained executions before retrying.',
+			attributes: { outcome: succeeded ? 'completed' : 'failed' }
+		});
+	}
 }
 
 function _alarmTenant(wireTopic, meta) {
@@ -374,7 +401,7 @@ function _alarmTenant(wireTopic, meta) {
  * @param {string} wireTopic
  * @param {Function} onAlarm
  * @param {AlarmMeta | null} meta
- * @param {{ at: number, firedAt: number, lateMs: number, recovered: boolean, misfireMs?: number } | null} fire
+ * @param {{ at: number, firedAt: number, lateMs: number, recovered: boolean, misfireMs?: number, generation?: string | null, attempt?: number | null } | null} fire
  *   Fire-time visibility surfaced to the handler as `ctx.alarm`: the scheduled
  *   deadline, when it actually ran, how late that is, and whether the recovery
  *   poll (not the precise in-memory timer) fired it. Without this, a restart-
@@ -387,7 +414,7 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 			_alarmPlatformWarnFired = true;
 			console.warn('[svelte-realtime] alarm fired but no platform captured. Wire setCronPlatform(platform) from your hooks.ws.js init({ platform }) hook.');
 		}
-		return;
+		return false;
 	}
 
 	try {
@@ -406,9 +433,12 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 		// policy so a re-armed alarm keeps it.
 		_bindAlarmCtx(ctx, { wireTopic, onAlarm, alarmId: meta ? meta.alarmId : undefined, path: meta ? meta.path : undefined, tenantId: meta ? meta.tenantId : undefined, misfireMs: fire ? fire.misfireMs : undefined });
 		if (fire) {
-			ctx.alarm = Object.freeze({ at: fire.at, firedAt: fire.firedAt, lateMs: fire.lateMs, recovered: fire.recovered });
+			ctx.alarm = Object.freeze({ at: fire.at, firedAt: fire.firedAt, lateMs: fire.lateMs, recovered: fire.recovered,
+				generation: fire.generation ?? null, attempt: fire.attempt ?? 1,
+				idempotencyKey: fire.generation ? JSON.stringify([wireTopic, fire.generation]) : null });
 		}
 		await onAlarm(ctx);
+		return true;
 	} catch (err) {
 		if (state.serverErrorHandler) {
 			try { state.serverErrorHandler(wireTopic, err); } catch { /* observer-only */ }
@@ -418,10 +448,11 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 			component: 'server.alarm',
 			event: 'alarm.execution.failed',
 			severity: 'error',
-			dataClass: 'application',
+			dataClass: 'operational',
 			message: 'An alarm handler failed; the scheduler remains active.',
-			attributes: { topic: wireTopic, error: diagnosticErrorMessage(err) }
+			attributes: { errorClass: 'handler', durable: !!fire?.generation }
 		});
+		return false;
 	}
 }
 
@@ -525,12 +556,12 @@ async function _pollAlarmRows() {
 			}
 			continue;
 		}
-		// Claim only after a unique resolver exists. Atomic delete still arbitrates
+		// Claim only after a unique resolver exists. The atomic transition arbitrates
 		// the recovery poll against the precise timer and other workers.
 		let claimed;
-		try { claimed = await store.delete(wireTopic, row.generation); }
+		try { claimed = await store.claim(wireTopic, row.generation); }
 		catch { continue; }
-		if (claimed !== true) continue; // another poller / the owner's timer won the claim
+		if (!claimed || !Number.isSafeInteger(claimed.attempt) || claimed.attempt < 1) continue;
 		// Misfire policy on the recovery path: the stream's declared threshold is
 		// re-resolved from the registry (the persisted row stays policy-free). The
 		// claim above already consumed the row, so a skipped stale alarm is spent.
@@ -542,9 +573,11 @@ async function _pollAlarmRows() {
 			if (_IS_DEV) {
 				console.warn('[svelte-realtime] recovered alarm for "' + wireTopic + '" missed its window by ' + lateMs + 'ms (misfireMs=' + misfireMs + '); skipped.');
 			}
+			await _settleAlarm(store, wireTopic, row.generation, claimed.attempt, true);
 			continue;
 		}
-		await _invokeAlarm(wireTopic, onAlarm, meta, { at: at !== null ? at : firedAt, firedAt, lateMs, recovered: true, misfireMs });
+		const succeeded = await _invokeAlarm(wireTopic, onAlarm, meta, { at: at !== null ? at : firedAt, firedAt, lateMs, recovered: true, misfireMs, generation: row.generation, attempt: claimed.attempt });
+		await _settleAlarm(store, wireTopic, row.generation, claimed.attempt, succeeded);
 	}
 }
 

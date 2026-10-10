@@ -36,6 +36,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Room subscriptions release only the membership references they acquired, preserving other connections after capacity refusal, presence errors, or failed initialization.
 
+- Durable alarm claims retain their execution until successful completion. Failed and interrupted executions stay inspectable for explicit retry, preserving their generation and effect idempotency key without overwriting newer schedules.
+
 - Alarm scheduling and cancellation return awaited promises. Durable stores reserve ordered generations and condition writes and claims on those generations, preventing stale timers, recovery snapshots and deletes from consuming replacements. Legacy topic-only stores require a coordinated store upgrade.
 
 - Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.

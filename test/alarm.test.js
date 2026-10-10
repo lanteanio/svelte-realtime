@@ -232,7 +232,7 @@ describe('live.alarm', () => {
 			registerAlarmStream('rooms/claimed', () => { fired++; });
 			const store = {
 				...memStore(), due: () => [{ topic: 'room:claimed', generation: '1', at: Date.now() - 1, meta: { path: 'rooms/claimed' } }],
-				delete: () => false // another instance already claimed it
+				claim: () => null // another instance already claimed it
 			};
 			configureAlarm({ store });
 			await _pollAlarms();

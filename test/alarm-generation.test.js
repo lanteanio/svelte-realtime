@@ -179,8 +179,8 @@ describe('durable alarm generations', () => {
 
 	it('retries a failed precise claim without firing before storage confirms it', async () => {
 		configureAlarm({ pollMs: 10 });
-		const remove = store.delete;
-		store.delete = vi.fn().mockRejectedValueOnce(new Error('temporarily unavailable')).mockImplementation(remove);
+		const remove = store.claim;
+		store.claim = vi.fn().mockRejectedValueOnce(new Error('temporarily unavailable')).mockImplementation(remove);
 		await ctx.setAlarm(10010);
 		await vi.advanceTimersByTimeAsync(10);
 		expect(fired).not.toHaveBeenCalled();
@@ -188,7 +188,7 @@ describe('durable alarm generations', () => {
 		await vi.advanceTimersByTimeAsync(10);
 		expect(fired).toHaveBeenCalledTimes(1);
 		expect(store.get(topic)).toBeNull();
-		expect(store.delete.mock.calls).toEqual([[topic, '1'], [topic, '1']]);
+		expect(store.claim.mock.calls).toEqual([[topic, '1'], [topic, '1']]);
 	});
 
 	it('uses the store that supplied a recovery snapshot when configuration changes', async () => {
@@ -241,8 +241,8 @@ describe('durable alarm generations', () => {
 			const handlerEntered = deferred();
 			const handlerRelease = deferred();
 			fired.mockImplementation(async () => { handlerEntered.resolve(); await handlerRelease.promise; });
-			const remove = store.delete;
-			store.delete = async (...args) => { entered.resolve(); await release.promise; return remove(...args); };
+			const remove = store.claim;
+			store.claim = async (...args) => { entered.resolve(); await release.promise; return remove(...args); };
 			let polling;
 			if (recovered) { store.seed(topic, 9999, meta); polling = _pollAlarms(); }
 			else { await ctx.setAlarm(10010); await vi.advanceTimersByTimeAsync(10); }

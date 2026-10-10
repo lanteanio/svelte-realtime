@@ -457,7 +457,14 @@ export interface LiveContext<UserData = unknown> {
 	 * alarm can run arbitrarily late - check `lateMs` before a time-sensitive
 	 * action, or declare `alarm.misfireMs` to skip stale fires declaratively.
 	 */
-	alarm?: { at: number; firedAt: number; lateMs: number; recovered: boolean };
+	alarm?: {
+		at: number; firedAt: number; lateMs: number; recovered: boolean;
+		/** Durable generation and stable effect key; null for in-memory alarms. */
+		generation: string | null;
+		idempotencyKey: string | null;
+		/** Starts at one and increases when the same durable generation is requeued. */
+		attempt: number;
+	};
 
 	/**
 	 * The room's current owner identity key, or `null` when the room has none.
@@ -4250,12 +4257,25 @@ export interface AlarmDue {
 	meta?: AlarmMeta | null;
 }
 
+/** Exact retained execution identity, also used as the ordered inspection cursor. */
+export interface AlarmExecutionRef { topic: string; generation: string }
+
+/** A claimed execution remains durable until successful completion or explicit disposition. */
+export interface AlarmExecution extends AlarmDue {
+	attempt: number;
+	status: 'claimed' | 'failed';
+	claimedAt: number;
+	failedAt: number | null;
+	/** Stable failure classification; never the handler's raw error or payload. */
+	errorClass: 'handler' | null;
+}
+
 /**
  * A durable alarm store backing `live.alarm` across restarts + a cluster. The
  * in-memory default uses live process timers (an alarm survives the room going
  * idle within the process, but not a restart); a durable store persists
  * `{topic, at, meta, generation}` so an alarm survives a restart and each
- * generation can be claimed by only one worker. The Postgres / Redis implementations live in
+ * scheduled attempt can be claimed by only one worker. The Postgres / Redis implementations live in
  * `svelte-adapter-uws-extensions` (`createAlarmStore`).
  */
 export interface AlarmStore {
@@ -4279,14 +4299,41 @@ export interface AlarmStore {
 	 * write cannot resurrect a consumed generation. Resolve after durable commit.
 	 */
 	delete(topic: string, generation: string): boolean | Promise<boolean>;
+	/**
+	 * Atomically move a matching scheduled generation into retained execution
+	 * storage before returning its positive safe-integer attempt, or null if absent.
+	 * Never evict unresolved executions: reject capacity pressure without claiming.
+	 */
+	claim(topic: string, generation: string): { attempt: number } | null | Promise<{ attempt: number } | null>;
+	/** Delete only the retained execution at this exact generation and attempt after success. */
+	complete(topic: string, generation: string, attempt: number): boolean | Promise<boolean>;
+	/** Mark the exact retained attempt failed without removing it or changing a newer schedule. */
+	fail(topic: string, generation: string, attempt: number, failure: { errorClass: 'handler'; failedAt: number }): boolean | Promise<boolean>;
+	/** Read one retained execution; scheduled rows remain available through get(). */
+	getExecution(topic: string, generation: string): AlarmExecution | null | Promise<AlarmExecution | null>;
+	/**
+	 * Bounded inspection, ordered lexically by (topic, generation), after the given
+	 * exclusive cursor. Default limit 100; maximum 1000. No raw handler errors.
+	 */
+	executions(options?: { limit?: number; after?: AlarmExecutionRef | null }):
+		{ items: AlarmExecution[]; next: AlarmExecutionRef | null } |
+		Promise<{ items: AlarmExecution[]; next: AlarmExecutionRef | null }>;
+	/**
+	 * Atomically requeue a retained exact attempt at the requested epoch-ms time.
+	 * Preserve its generation and increment attempt on the next claim. Return false
+	 * if any newer generation was reserved or a schedule already exists. A claimed
+	 * execution requires allowAbandoned and operator confirmation its worker stopped;
+	 * failed executions do not. Never discard the record when refusing requeue.
+	 */
+	requeue(topic: string, generation: string, attempt: number, options: { at: number; allowAbandoned?: boolean }): boolean | Promise<boolean>;
 	/** Return due rows with their exact generations for conditional recovery claims. */
 	due?(nowMs: number): AlarmDue[] | Promise<AlarmDue[]>;
 }
 
 /**
  * Configure `live.alarm`. `store` plugs a durable cluster store into the seam so
- * alarms survive a restart; `leader` gates firing to one instance (so an alarm
- * fires exactly once cluster-wide), mirroring `configureCron({ leader })`; `pollMs`
+ * alarms survive a restart; `leader` gates recovery polling while atomic store
+ * claims arbitrate execution, mirroring `configureCron({ leader })`; `pollMs`
  * (default 15000) sets the recovery-poll cadence. All optional. Pass `null` to
  * clear store + leader and reset the cadence. With neither store nor leader,
  * `live.alarm` runs single-instance in-memory - correct for dev and a single box.
