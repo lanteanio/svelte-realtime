@@ -176,6 +176,8 @@ export interface LiveOperationPlatform extends Platform {
 }
 
 export interface LiveContext<UserData = unknown> {
+	/** Cooperative execution deadline from live.lock({ maxExecutionMs }); pass to abort-aware work. */
+	lockSignal?: AbortSignal;
 	/** User data attached during the WebSocket upgrade handshake. */
 	user: UserData;
 	/** The raw WebSocket connection. */
@@ -2113,6 +2115,10 @@ export namespace live {
 				 * key continue in their original order.
 				 */
 				maxWaitMs?: number;
+				/** Maximum queued callers per key for the default lock (1000). Zero rejects contention. Configure custom lock capacity on that instance. */
+				maxWaitersPerKey?: number;
+				/** Abort ctx.lockSignal and reject with LOCK_EXECUTION_TIMEOUT after acquisition (0..2147483647 ms). Mutual exclusion continues until the handler settles. */
+				maxExecutionMs?: number;
 			},
 		fn: T
 	): T;

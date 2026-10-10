@@ -183,9 +183,12 @@ const _liveMetrics = function metrics(registry, options = {}) {
 		rpcDelivery: registry.counter({ name: 'svelte_realtime_rpc_delivery_total', help: 'RPC reply transport outcomes', labelNames: ['path', 'outcome'] }),
 		streamGauge: registry.gauge({ name: 'svelte_realtime_stream_subscriptions', help: 'Active stream subscriptions' }),
 		cronCount: registry.counter({ name: 'svelte_realtime_cron_total', help: 'Total cron executions', labelNames: ['path', 'status'] }),
+		lockWaiters: registry.gauge({ name: 'svelte_realtime_lock_waiters', help: 'Queued in-process lock callers' }),
+		lockEvents: registry.counter({ name: 'svelte_realtime_lock_events_total', help: 'Lock queue and execution events', labelNames: ['status'] }),
 		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] }),
 		assertions: registry.counter({ name: 'svelte_realtime_assertion_violations_total', help: 'Production-assertion violations by category', labelNames: ['category'] })
 	};
+	state.metricsInstruments.lockWaiters.set?.(state.lockWaiterCount);
 	wireAssertionMetrics((category) => state.metricsInstruments.assertions.inc({ category }));
 
 	if (options.lifeline) {

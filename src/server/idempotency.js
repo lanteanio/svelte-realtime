@@ -1,6 +1,7 @@
 // @ts-check
 import { now as runtimeNow, monotonicNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { assert } from '../shared/assert.js';
+import { state as serverState } from './state.js';
 import { LiveError } from './live-error.js';
 import { _tenantKey } from './tenant.js';
 import { _getAuthenticatedId } from './identity.js';
@@ -396,126 +397,121 @@ export function _purgeIdempotencyUser(idemUser) {
 	return store.purgeUser(idemUser);
 }
 
-/**
- * Per-key serialization primitive. Mirrors the algorithm in the adapter's
- * Lock plugin (per-key FIFO waiter queue) inline to preserve server.js's
- * no-imports profile. Custom Lock instances passed via `live.lock({ lock })`
- * just need to expose `withLock(key, fn, opts?)` matching the adapter's
- * contract.
- *
- * The `opts.maxWaitMs` field, when set, rejects a queued waiter with a typed
- * `LOCK_TIMEOUT` error if it does not acquire the lock within that many
- * milliseconds. The current holder is not interrupted; only the waiting
- * caller gives up. Subsequent waiters on the same key are unaffected and
- * continue in their original order (`advance` skips cancelled entries).
- *
- * @returns {{ withLock: <T>(key: string, fn: () => T | Promise<T>, opts?: { maxWaitMs?: number }) => Promise<T>, held: (key: string) => boolean, size: () => number, clear: () => void }}
- */
+function _recordLockEvent(status) {
+	serverState.metricsInstruments?.lockEvents?.inc({ status });
+}
+function _countLockWaiters(delta) {
+	serverState.lockWaiterCount += delta;
+	serverState.metricsInstruments?.lockWaiters?.set?.(serverState.lockWaiterCount);
+}
+
+/** Bounded per-key FIFO; expiration removes a waiting node in constant time. */
 function _createInMemoryLock() {
-	/**
-	 * @typedef {Object} _Waiter
-	 * @property {() => any | Promise<any>} fn
-	 * @property {(value: any) => void} resolve
-	 * @property {(err: Error) => void} reject
-	 * @property {ReturnType<typeof setTimeout> | null} timer
-	 * @property {boolean} cancelled
-	 */
-	/** @type {Map<string, { running: boolean, queue: Array<_Waiter> }>} */
+	/** @type {Map<string, any>} */
 	const states = new Map();
 
+	function unlink(state, waiter) {
+		if (!waiter.queued) return;
+		if (waiter.previous) waiter.previous.next = waiter.next;
+		else state.head = waiter.next;
+		if (waiter.next) waiter.next.previous = waiter.previous;
+		else state.tail = waiter.previous;
+		waiter.previous = waiter.next = null;
+		waiter.queued = false;
+		state.count--;
+		if (waiter.timer !== null) { clearTimer(waiter.timer); waiter.timer = null; }
+		_countLockWaiters(-1);
+	}
+
 	function advance(key, state) {
-		while (state.queue.length > 0) {
-			const waiter = /** @type {_Waiter} */ (state.queue.shift());
-			// lock.waiter invariant: every queued waiter has resolve+reject
-			// captured at push time. Mismatch indicates corrupted queue state.
+		const waiter = state.head;
+		if (waiter) {
 			assert(typeof waiter.resolve === 'function' && typeof waiter.reject === 'function', 'realtime/lock.waiter.shape', { hasResolve: typeof waiter.resolve === 'function', hasReject: typeof waiter.reject === 'function' });
-			if (waiter.cancelled) continue;
-			if (waiter.timer != null) {
-				clearTimer(waiter.timer);
-				waiter.timer = null;
-			}
+			unlink(state, waiter);
+			_recordLockEvent('acquired');
 			runHead(key, state, waiter.fn).then(waiter.resolve, waiter.reject);
 			return;
 		}
 		state.running = false;
-		states.delete(key);
+		if (states.get(key) === state) states.delete(key);
 	}
 
 	async function runHead(key, state, fn) {
-		try {
-			return await fn();
-		} finally {
-			advance(key, state);
-		}
+		try { return await fn(); }
+		finally { advance(key, state); }
 	}
 
 	return {
 		withLock(key, fn, opts) {
-			if (typeof key !== 'string' || key.length === 0) {
-				return Promise.reject(new Error('lock: key must be a non-empty string'));
-			}
-			if (typeof fn !== 'function') {
-				return Promise.reject(new Error('lock: fn must be a function'));
-			}
-			const maxWaitMs = opts && opts.maxWaitMs;
-			if (maxWaitMs != null) {
-				if (typeof maxWaitMs !== 'number' || !Number.isFinite(maxWaitMs) || maxWaitMs < 0) {
-					return Promise.reject(new Error('lock: maxWaitMs must be a non-negative finite number'));
-				}
-			}
-
+			if (typeof key !== 'string' || key.length === 0) return Promise.reject(new Error('lock: key must be a non-empty string'));
+			if (typeof fn !== 'function') return Promise.reject(new Error('lock: fn must be a function'));
+			const maxWaitMs = opts?.maxWaitMs;
+			const maxWaiters = opts?.maxWaitersPerKey ?? 1000;
 			let state = states.get(key);
 			if (!state) {
-				state = { running: false, queue: [] };
+				state = { running: true, head: null, tail: null, count: 0 };
 				states.set(key, state);
-			}
-
-			if (!state.running) {
-				state.running = true;
 				return runHead(key, state, fn);
 			}
-
+			if (state.count >= maxWaiters) {
+				_recordLockEvent('queue_full');
+				return Promise.reject(new LiveError('LOCK_QUEUE_FULL', 'The lock waiter queue is full; the handler has not run. Retry after capacity becomes available.'));
+			}
 			return new Promise((resolve, reject) => {
-				/** @type {_Waiter} */
-				const waiter = { fn, resolve, reject, timer: null, cancelled: false };
+				const waiter = { fn, resolve, reject, timer: null, queued: true, previous: state.tail, next: null };
+				if (state.tail) state.tail.next = waiter;
+				else state.head = waiter;
+				state.tail = waiter;
+				state.count++;
+				_countLockWaiters(1);
+				_recordLockEvent('queued');
 				if (maxWaitMs != null) {
 					waiter.timer = setTimer(() => {
-						if (waiter.cancelled) return;
-						waiter.cancelled = true;
+						if (!waiter.queued) return;
 						waiter.timer = null;
-						const err = /** @type {Error & { code: string, key: string, maxWaitMs: number }} */ (
-							new Error("lock: timed out after " + maxWaitMs + "ms waiting for key '" + key + "'")
-						);
-						err.code = 'LOCK_TIMEOUT';
-						err.key = key;
-						err.maxWaitMs = maxWaitMs;
+						unlink(state, waiter);
+						_recordLockEvent('wait_timeout');
+						const err = new LiveError('LOCK_TIMEOUT', 'lock: timed out after ' + maxWaitMs + 'ms waiting for the lock');
+						/** @type {any} */ (err).key = key;
+						/** @type {any} */ (err).maxWaitMs = maxWaitMs;
 						reject(err);
 					}, maxWaitMs);
 				}
-				state.queue.push(waiter);
 			});
 		},
 		held(key) { return states.has(key); },
 		size() { return states.size; },
 		clear() {
-			for (const state of states.values()) {
-				for (const waiter of state.queue) {
-					if (waiter.cancelled) continue;
-					waiter.cancelled = true;
-					if (waiter.timer != null) {
-						clearTimer(waiter.timer);
-						waiter.timer = null;
-					}
-					const err = /** @type {Error & { code: string }} */ (new Error('lock: cleared'));
-					err.code = 'LOCK_CLEARED';
-					waiter.reject(err);
-				}
+			for (const state of states.values()) while (state.head) {
+				const waiter = state.head;
+				unlink(state, waiter);
+				waiter.reject(new LiveError('LOCK_CLEARED', 'lock: cleared'));
 			}
 			states.clear();
 		}
 	};
 }
 
+// Rejecting a caller cannot release mutual exclusion around work that is still
+// running. The lock callback settles only with the handler, even after abort.
+function _withLockDeadline(lock, key, fn, ctx, args, opts, maxExecutionMs) {
+	return new Promise((resolve, reject) => {
+		const held = lock.withLock(key, async () => {
+			const controller = new AbortController();
+			const signal = ctx.lockSignal ? AbortSignal.any([ctx.lockSignal, controller.signal]) : controller.signal;
+			signal.throwIfAborted();
+			const timer = setTimer(() => {
+				const error = new LiveError('LOCK_EXECUTION_TIMEOUT', 'The lock execution deadline elapsed; the handler must stop through ctx.lockSignal.');
+				_recordLockEvent('execution_timeout');
+				reject(error);
+				controller.abort(error);
+			}, maxExecutionMs);
+			try { return await fn({ ...ctx, lockSignal: signal }, ...args); }
+			finally { clearTimer(timer); }
+		}, opts);
+		Promise.resolve(held).then(resolve, reject);
+	});
+}
 /** @type {ReturnType<typeof _createInMemoryLock> | null} */
 let _defaultLock = null;
 
@@ -550,7 +546,7 @@ const _IDEMPOTENT_CONFIG_FIELDS = ['keyFrom', 'store', 'ttl'];
 const _IDEMPOTENT_CONFIG_HINTS = {
 	key: "live.lock uses 'key' but live.idempotent uses 'keyFrom' (the names diverged historically)"
 };
-const _LOCK_CONFIG_FIELDS = ['key', 'lock', 'maxWaitMs'];
+const _LOCK_CONFIG_FIELDS = ['key', 'lock', 'maxWaitMs', 'maxWaitersPerKey', 'maxExecutionMs'];
 const _LOCK_CONFIG_HINTS = {
 	keyFrom: "live.idempotent uses 'keyFrom' but live.lock uses 'key' (which accepts a string OR a function)"
 };
@@ -758,7 +754,7 @@ const _liveIdempotent = function idempotent(config, fn) {
  * from the caller's context. A null / undefined key bypasses the lock
  * (the handler runs unguarded for that call).
  *
- * Default lock is in-process and bounded only by your active key set.
+ * Default lock is in-process, with at most 1000 queued callers per key.
  * For multi-instance deployments, pass `lock: createDistributedLock(...)`
  * from `svelte-adapter-uws-extensions/redis/lock`. Any object that
  * exposes `withLock(key, fn, opts?)` matching the adapter's Lock contract
@@ -796,7 +792,7 @@ const _liveIdempotent = function idempotent(config, fn) {
  * );
  * ```
  *
- * @param {string | ((ctx: any, ...args: any[]) => string | null | undefined) | { key: string | ((ctx: any, ...args: any[]) => string | null | undefined), lock?: { withLock: (key: string, fn: () => any, opts?: { maxWaitMs?: number }) => Promise<any> }, maxWaitMs?: number }} keyOrConfig
+ * @param {string | ((ctx: any, ...args: any[]) => string | null | undefined) | { key: string | ((ctx: any, ...args: any[]) => string | null | undefined), lock?: { withLock: (key: string, fn: () => any, opts?: { maxWaitMs?: number }) => Promise<any> }, maxWaitMs?: number, maxWaitersPerKey?: number, maxExecutionMs?: number }} keyOrConfig
  * @param {Function} fn Handler function (ctx, ...args)
  * @returns {Function}
  */
@@ -807,6 +803,8 @@ const _liveLock = function lock(keyOrConfig, fn) {
 	let keyFrom;
 	let customLock = null;
 	let maxWaitMs;
+	let maxWaitersPerKey;
+	let maxExecutionMs;
 	if (typeof keyOrConfig === 'string') {
 		const staticKey = keyOrConfig;
 		if (staticKey.length === 0) {
@@ -835,9 +833,18 @@ const _liveLock = function lock(keyOrConfig, fn) {
 			}
 			customLock = cfg.lock;
 		}
+		if (cfg.maxWaitersPerKey !== undefined) {
+			if (!Number.isSafeInteger(cfg.maxWaitersPerKey) || cfg.maxWaitersPerKey < 0) throw new Error('[svelte-realtime] live.lock: maxWaitersPerKey must be a non-negative safe integer');
+			if (customLock) throw new Error('[svelte-realtime] live.lock: configure waiter capacity on the custom lock instance');
+			maxWaitersPerKey = cfg.maxWaitersPerKey;
+		}
+		if (cfg.maxExecutionMs !== undefined) {
+			if (typeof cfg.maxExecutionMs !== 'number' || !Number.isFinite(cfg.maxExecutionMs) || cfg.maxExecutionMs < 0 || cfg.maxExecutionMs > 2147483647) throw new Error('[svelte-realtime] live.lock: maxExecutionMs must be a non-negative finite number at most 2147483647');
+			maxExecutionMs = cfg.maxExecutionMs;
+		}
 		if (cfg.maxWaitMs !== undefined) {
-			if (typeof cfg.maxWaitMs !== 'number' || !Number.isFinite(cfg.maxWaitMs) || cfg.maxWaitMs < 0) {
-				throw new Error('[svelte-realtime] live.lock: maxWaitMs must be a non-negative finite number');
+			if (typeof cfg.maxWaitMs !== 'number' || !Number.isFinite(cfg.maxWaitMs) || cfg.maxWaitMs < 0 || cfg.maxWaitMs > 2147483647) {
+				throw new Error('[svelte-realtime] live.lock: maxWaitMs must be a non-negative finite number at most 2147483647');
 			}
 			maxWaitMs = cfg.maxWaitMs;
 		}
@@ -845,7 +852,7 @@ const _liveLock = function lock(keyOrConfig, fn) {
 		throw new Error('[svelte-realtime] live.lock: first argument must be a key string, key function, or config object');
 	}
 
-	const lockOpts = maxWaitMs != null ? { maxWaitMs } : undefined;
+	const lockOpts = maxWaitMs != null || maxWaitersPerKey != null ? { ...(maxWaitMs != null ? { maxWaitMs } : {}), ...(maxWaitersPerKey != null ? { maxWaitersPerKey } : {}) } : undefined;
 
 	const wrapper = async function lockedWrapper(ctx, ...args) {
 		const rawKey = keyFrom(ctx, ...args);
@@ -859,6 +866,7 @@ const _liveLock = function lock(keyOrConfig, fn) {
 		const key = _tenantKey(ctx.tenantId, rawKey);
 		const lockInst = customLock || _getDefaultLock();
 		try {
+			if (maxExecutionMs !== undefined) return await _withLockDeadline(lockInst, key, fn, ctx, args, lockOpts, maxExecutionMs);
 			return await lockInst.withLock(key, () => fn(ctx, ...args), lockOpts);
 		} catch (err) {
 			if (err && /** @type {any} */ (err).code === 'LOCK_TIMEOUT' && !(err instanceof LiveError)) {
@@ -873,7 +881,7 @@ const _liveLock = function lock(keyOrConfig, fn) {
 
 	/** @type {any} */ (wrapper).__isLive = true;
 	/** @type {any} */ (wrapper).__isLocked = true;
-	/** @type {any} */ (wrapper).__lockConfig = { keyFrom, lock: customLock, maxWaitMs };
+	/** @type {any} */ (wrapper).__lockConfig = { keyFrom, lock: customLock, maxWaitMs, maxWaitersPerKey, maxExecutionMs };
 	/** @type {any} */ (wrapper).__wrappedFn = fn;
 	return wrapper;
 };

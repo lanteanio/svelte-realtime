@@ -73,6 +73,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - New smooth entities are announced to peers even when they remain idle, including subscribers on other cluster instances. Repeated syncs do not repeat the announcement.
 
+- **Breaking:** The default `live.lock` now caps queued callers at 1000 per key and immediately releases timed-out queue nodes. Optional `maxExecutionMs` provides `ctx.lockSignal` cancellation without releasing mutual exclusion early; bounded-label metrics expose queue pressure and timeout events. **Action required:** handle `LOCK_QUEUE_FULL` under contention or configure `maxWaitersPerKey`; custom lock capacity remains configured on its instance. Timer delays above 2147483647 ms now reject at declaration.
+
 - Cron calendar matching in the system timezone now uses local date fields, preserving timezone changes and daylight-saving behavior while avoiding per-tick formatter allocation.
 
 - Source and IDE hook examples include `close` and `unsubscribe`, preserving subscription cleanup when copied into application hooks.

@@ -2330,7 +2330,7 @@ export const settleInvoice = live.lock(
 
 Concurrent callers wait in FIFO order for the holder's result. A `null` / `undefined` / empty key bypasses the lock (the handler runs unguarded for that call). Custom lock implementations need a single method: `withLock(key, fn, opts?) -> Promise<result>`.
 
-Default lock is in-process and bounded. For multi-instance deployments, pass `lock: createDistributedLock(redis)` from the extensions package - any object exposing the `withLock(key, fn, opts?)` contract works.
+The default in-process lock allows 1000 queued callers per key. Further callers receive `LOCK_QUEUE_FULL` without running the handler. Set `maxWaitersPerKey` to a non-negative integer to adjust capacity; zero rejects any contention. Custom lock capacity belongs on that instance, so combining `lock` with `maxWaitersPerKey` is rejected. For multi-instance deployments, pass `lock: createDistributedLock(redis)` from the extensions package - any object exposing the `withLock(key, fn, opts?)` contract works.
 
 ### Bounded wait with `maxWaitMs`
 
@@ -2346,6 +2346,10 @@ export const settleInvoice = live.lock(
 The current holder is **not** interrupted when a waiter times out - only the waiting caller gives up. Subsequent waiters on the same key are unaffected and continue in their original order. This is the right primitive for "fail fast under contention" rather than "cancel work in flight."
 
 For custom lock implementations, the option is forwarded as the third argument: `lockInst.withLock(key, fn, { maxWaitMs })`. The default in-process lock and `createDistributedLock` from the extensions package both honor it.
+
+Timed-out waiters are removed immediately, even if the current holder never settles. With `live.metrics(...)`, `svelte_realtime_lock_waiters` reports the queued count and `svelte_realtime_lock_events_total{status}` counts `queued`, `acquired`, `queue_full`, `wait_timeout` and `execution_timeout` events. Neither metric labels lock keys.
+
+Set `maxExecutionMs` to give an acquired handler a cooperative deadline. Pass `ctx.lockSignal` to abort-aware work such as `fetch`. The deadline aborts that signal and rejects the caller with `LOCK_EXECUTION_TIMEOUT`; the key stays held until the handler actually settles, preserving mutual exclusion even when the handler ignores cancellation. The deadline starts on acquisition and also works with custom lock instances. Both timer options accept milliseconds from 0 through 2147483647.
 
 ---
 

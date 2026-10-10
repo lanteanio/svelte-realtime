@@ -468,8 +468,9 @@ export const state = {
 	/** @type {boolean} One-shot dedup for the "createMessage({ platform: callback }) is redundant" dev-warn. */
 	manualPlatformCallbackWarnFired: false,
 
-	/** @type {{ rpcCount?: any, rpcDuration?: any, rpcErrors?: any, streamGauge?: any, cronCount?: any, cronErrors?: any, assertions?: any } | null} */
+	/** @type {{ rpcCount?: any, rpcDuration?: any, rpcErrors?: any, streamGauge?: any, cronCount?: any, cronErrors?: any, assertions?: any, lockWaiters?: any, lockEvents?: any } | null} */
 	metricsInstruments: null,
+	lockWaiterCount: 0,
 
 	/** @type {{ classes: Record<string, string[] | ((snapshot: any) => boolean)> } | null} */
 	admissionConfig: null,
