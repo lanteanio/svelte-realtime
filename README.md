@@ -2589,7 +2589,7 @@ Mount the metrics endpoint on your uWS app (typically in `svelte.config.js` or w
 app.get('/metrics', metrics.handler);
 ```
 
-The six-line shim adapts realtime's options-object call shape to the extensions registry's create methods. The histogram line forwards `buckets` through the registry's options form: realtime's duration histograms declare seconds-valued bounds from 1 ms to 10 s, and a shim that drops them leaves the registry's own millisecond-shaped default (starting at 1), which puts a 5 ms call and a 900 ms call in the same bucket. Once a metric is registered, every increment, observation, and gauge update flows directly to the extensions registry, so the emitted Prometheus output is exactly what `metrics.serialize()` produces.
+The six-line shim adapts realtime's options-object call shape to the extensions registry's create methods. The histogram line forwards `buckets` through the registry's options form: realtime's duration histograms declare seconds-valued bounds from 1 ms to 10 s, preserving that range independently of the extensions registry's configured defaults. The registry's generic default uses fractional seconds through 1 s. Once a metric is registered, every increment, observation, and gauge update flows directly to the extensions registry, so the emitted Prometheus output is exactly what `metrics.serialize()` produces.
 
 ### Registered metrics
 

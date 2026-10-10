@@ -51,6 +51,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Histogram integration guidance describes the extensions registry's fractional-second defaults and the explicit realtime range through 10 seconds.
+
 - Process-based verification uses bounded child processes and explicit test deadlines on slower hosts; temporary-directory cleanup retries when Windows retains a file handle.
 
 - The scaffold checks its Node prerequisite before resolving third-party dependencies, preserving the actionable upgrade message on older runtimes.
