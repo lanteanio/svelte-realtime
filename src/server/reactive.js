@@ -5,7 +5,7 @@ import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggrega
 import { _getBus } from './bus.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _fireWebhookOut } from './webhook-out.js';
-import { _resolveTenant, _tenantTopic, _stripTenantTopic } from './tenant.js';
+import { _resolveTenant, _tenantTopic, _stripTenantTopic, _isTenancyEnabled } from './tenant.js';
 import { _redactOrDrop, REDACT_DROP, _platformPublish, _noteTopicPublish } from './publish-helpers.js';
 import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
 import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms-gate.js';
@@ -644,22 +644,31 @@ function _wrapPlatformPublish(platform) {
 /** Resolve a live context and revoke sockets whose identity/tenant scope changed. */
 function _currentDerivedContext(entry, platform, select = true) {
 	const scopeKey = entry.fn.__derivedScopeKey;
+	// This scratch context is used only by internal identity helpers and never
+	// escapes to scope callbacks or compute functions.
+	const identityCtx = scopeKey ? null : { user: null, ws: null };
+	const unscoped = entry.tenantId === null && !_isTenancyEnabled();
 	for (const subscriber of entry.subscribers.values()) {
 		const ws = subscriber.ctx.ws || null;
 		let user, ctx, valid = false;
 		try {
 			user = ws?.getUserData ? ws.getUserData() : subscriber.ctx.user;
-			if (_resolveTenant(user) === entry.tenantId) {
+			if (unscoped || _resolveTenant(user) === entry.tenantId) {
 				// Default identity checks need only user/ws. Build the full public
 				// context only for a custom scope callback or the selected compute.
-				ctx = scopeKey ? _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null) : { user, ws };
+				if (scopeKey) ctx = _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null);
+				else { identityCtx.user = user; identityCtx.ws = ws; ctx = identityCtx; }
 				valid = _matchesDerivedScope(ctx, entry.args, scopeKey, entry.scope);
 			}
 		} catch { valid = false; }
 		if (valid) {
 			// Before compute only select one valid context. The mandatory scan
 			// after compute checks every recipient before any output is delivered.
-			if (select) return scopeKey ? ctx : _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null);
+			if (select) {
+				// A derived output can serve several sockets. Preserve the historic
+				// detached compute context while selecting current user data.
+				return _buildCtx(user || null, null, platform, _getCtxHelpers(platform), null);
+			}
 			continue;
 		}
 		// Remove transport membership before another member of this scope can

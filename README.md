@@ -3181,7 +3181,7 @@ On the client, dynamic derived streams are called like functions:
 <p>Members: {$orgStats(orgId)?.members}</p>
 ```
 
-Dynamic instances are isolated by authenticated identity, tenant, and arguments. Anonymous connections each get their own instance. Instances are created when the first subscriber connects and cleaned up when the last subscriber disconnects. Recomputations use the current user data of an active subscriber, and discard pending results when that subscriber leaves.
+Dynamic instances are isolated by authenticated identity, tenant, and arguments. Anonymous connections each get their own instance. Instances are created when the first subscriber connects and cleaned up when the last subscriber disconnects. Recomputations use the current user data of an active subscriber, and discard pending results when that subscriber leaves. As before, the shared recomputation context has `ctx.ws === null`; scope callbacks receive the actual subscribing socket.
 
 Use `scopeKey(ctx, ...args)` to define an explicit sharing boundary. It must be deterministic and synchronously return a string or finite number. Callers with the same scope and arguments share every update, so the key must include all permissions that affect the result. For example, sessions of the same user with different roles can use `scopeKey: (ctx) => JSON.stringify([ctx.user.id, ctx.user.role])`. Only use an organization-wide key when every member is authorized to receive the same output. Continue to check authorization in the compute function.
 

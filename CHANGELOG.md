@@ -93,6 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - A revoked derived loader cannot return stale initial data or roll back a newer subscription for the same connection and topic.
 
+- Derived authorization checks reuse an internal identity context and preserve detached recomputation contexts, avoiding per-subscriber and per-update connection-view allocation.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

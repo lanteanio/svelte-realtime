@@ -241,4 +241,17 @@ describe('dynamic derived identity', () => {
 		expect(current.events.map((e) => e.data)).toEqual(['one']);
 	});
 
+	it('keeps recomputations detached while scope callbacks receive the current socket', async () => {
+		const computeSockets = [];
+		const scopeSockets = [];
+		const { publish } = setup((ctx) => { computeSockets.push(ctx.ws); return ctx.user.id; },
+			{ scopeKey: (ctx) => { scopeSockets.push(ctx.ws); return ctx.user.id; } });
+		const { stream } = await join({ id: 'one' });
+		publish(); await flush();
+		expect(stream.events.map((e) => e.data)).toEqual(['one']);
+		expect(computeSockets[0]).toBeTruthy();
+		expect(computeSockets[1]).toBeNull();
+		expect(scopeSockets.every(ws => ws === computeSockets[0])).toBe(true);
+	});
+
 });
