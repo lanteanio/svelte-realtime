@@ -75,6 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Managed streams retain adapter subscription ownership across pending requests and let the adapter send the final unsubscribe once, including when another consumer shares the topic.
 
+- DevTools keeps translated opening focus reliable and masks Smooth identifiers until unsafe payload capture is enabled.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

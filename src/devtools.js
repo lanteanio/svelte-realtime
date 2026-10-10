@@ -107,7 +107,7 @@ function toggle() {
 	if (visible) previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 	if (panel) panel.style.display = visible ? 'flex' : 'none';
 	launcher?.setAttribute('aria-expanded', String(visible));
-	if (visible) panel?.querySelector('button[aria-label="Close DevTools"]')?.focus();
+	if (visible) panel?.querySelector('#svr-dt-close')?.focus();
 	else if (previousFocus?.isConnected) previousFocus.focus();
 	else launcher?.focus();
 	if (visible && !refreshInterval) {
@@ -163,6 +163,7 @@ function init() {
 	header.appendChild(badge);
 
 	const closeBtn = document.createElement('button');
+	closeBtn.id = 'svr-dt-close';
 	closeBtn.textContent = 'x';
 	closeBtn.dataset.ariaLabel = 'Close DevTools';
 	closeBtn.setAttribute('aria-label', message('Close DevTools'));
@@ -664,8 +665,8 @@ function renderSmooth(el, dt) {
 		}
 		if (!s) continue;
 		shown++;
-		const topic = isolated(s.topic || message('(connecting)'));
-		const self = isolated(s.self || '-');
+		const topic = dt.unsafeCapturePayloads ? isolated(s.topic || message('(connecting)')) : esc(message('[topic omitted]'));
+		const self = dt.unsafeCapturePayloads ? isolated(s.self || '-') : esc(message('[identity omitted]'));
 		const status = s.overflowed
 			? `<span style="color:var(--svr-dt-warning, #ffe18a)">${esc(message('Prediction paused - waiting for resync (Command window full)'))}</span>`
 			: `<span style="color:var(--svr-dt-success, #79db8f)">${esc(message('predicting'))}</span>`;

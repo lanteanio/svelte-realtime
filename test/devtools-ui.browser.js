@@ -364,7 +364,7 @@ it('keeps application labels unchanged when configuring overlay translations', a
  });
  expect(await page.locator('#host').getAttribute('aria-label')).toBe('Application action');
  await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).click();
- expect(await page.getByRole('button', { name: 'Close translated' }).count()).toBe(1);
+ expect(await page.getByRole('button', { name: 'Close translated' }).evaluate(el => el === document.activeElement)).toBe(true);
 });
 it('preserves complete payload text when grapheme segmentation is unavailable', async () => {
  await page.addInitScript(() => { Intl.Segmenter = undefined; });
@@ -390,4 +390,24 @@ it('announces later distinct RPC failures even when their summary text matches',
   document.getElementById('svr-dt-tab-rpcs').click();
  });
  await page.waitForFunction(() => window.failureAnnouncements.filter(text => text === 'An RPC failed. Open RPCs to inspect the result.').length === 2);
+});
+
+it('masks smooth identifiers by default and purges them while preserving safe telemetry', async () => {
+ await streamsFixture();
+ await page.evaluate(() => {
+  window.realDevtools.smooth.add(() => ({ topic: 'private-topic', self: 'private-user', remoteCount: 17, clockSynced: true, unacked: 2, windowCap: 256 }));
+ });
+ await page.getByRole('tab', { name: 'smooth', exact: true }).click();
+ expect(await page.getByRole('tabpanel').textContent()).not.toContain('private-');
+ expect(await page.getByRole('tabpanel').textContent()).toContain('17');
+ await page.evaluate(() => { window.realDevtools.unsafeCapturePayloads = true; document.getElementById('svr-dt-tab-smooth').click(); });
+ expect(await page.getByRole('tabpanel').textContent()).toContain('private-topic');
+ expect(await page.getByRole('tabpanel').textContent()).toContain('private-user');
+ await page.evaluate(() => { window.realDevtools.unsafeCapturePayloads = false; });
+ expect(await page.getByRole('tabpanel').textContent()).not.toContain('private-');
+ expect(await page.evaluate(() => window.realDevtools.smooth.size)).toBe(1);
+ await page.evaluate(() => { window.realDevtools.unsafeCapturePayloads = true; document.getElementById('svr-dt-tab-smooth').click(); });
+ await page.getByRole('button', { name: 'Clear captured data' }).click();
+ expect(await page.getByRole('tabpanel').textContent()).not.toContain('private-');
+ expect(await page.getByRole('tabpanel').textContent()).toContain('17');
 });

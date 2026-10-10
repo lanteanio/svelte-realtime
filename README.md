@@ -5184,7 +5184,7 @@ when unsafe capture is enabled. Pretty/Raw persists via `localStorage`; capture 
 
 **Privacy.** DevTools is metadata-only by default across every retained
 surface: RPC args/results, pending calls, fire-and-forget args, stream topics,
-stream payloads, and stream error messages. Object property values are not
+stream payloads, stream error messages, and Smooth topic/self identifiers. Object property values are not
 read; own property names may be enumerated only to count fields, but the names
 are never retained. Bare strings become type/length metadata. Unreadable or
 revoked proxies degrade to metadata instead of affecting the observed call.
