@@ -30,3 +30,22 @@ it('observes changes to the implicit local timezone in the same process', () => 
 	const result = execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 15000 });
 	expect(JSON.parse(result)).toEqual([1, 20, 2, 1]);
 }, 20000);
+
+it('matches Intl local calendar fields across historical offsets, DST and midnight', () => {
+	const module = new URL('../src/server/cron.js', import.meta.url).href;
+	const script = `import { _cronDateParts } from ${JSON.stringify(module)};
+		import assert from 'node:assert/strict';
+		const weekdays = { Sun:0, Mon:1, Tue:2, Wed:3, Thu:4, Fri:5, Sat:6 };
+		for (const zone of ['UTC','America/New_York','Europe/Paris','Asia/Kathmandu']) {
+			process.env.TZ = zone;
+			const fmt = new Intl.DateTimeFormat('en-US', { timeZone:zone, year:'numeric', month:'numeric', day:'numeric', hour:'numeric', minute:'numeric', second:'numeric', weekday:'short', hour12:false });
+			for (const instant of ['1900-01-01T00:00:00Z','2024-02-29T23:59:59Z','2026-03-08T06:59:59Z','2026-03-08T07:00:00Z','2026-11-01T05:30:00Z','2026-11-01T06:30:00Z','2026-12-31T23:59:59Z']) {
+				const ms = Date.parse(instant), fields = Object.fromEntries(fmt.formatToParts(ms).map(p=>[p.type,p.value]));
+				assert.deepEqual(_cronDateParts(ms), {second:+fields.second,minute:+fields.minute,hour:+fields.hour%24,day:+fields.day,month:+fields.month,weekday:weekdays[fields.weekday]}, zone+' '+instant);
+			}
+		}
+		assert.throws(()=>_cronDateParts(NaN), RangeError);
+		console.log('28 calendar comparisons passed');`;
+	const result = execFileSync(process.execPath, ['--input-type=module', '-e', script], { encoding:'utf8', timeout:15000, windowsHide:true });
+	expect(result.trim()).toBe('28 calendar comparisons passed');
+}, 20000);

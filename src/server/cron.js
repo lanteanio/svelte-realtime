@@ -2,7 +2,7 @@
 
 // Cron schedule parsing and matching. Pure helpers (no platform/state deps):
 // `_parseCron` compiles an expression to per-field matchers, `_cronDateParts`
-// reads the zoned wall-clock parts of an epoch-ms instant via Intl, and
+// reads the zoned wall-clock parts of an epoch-ms instant, and
 // `_cronFieldMatch` tests a matcher against a value. The cron tick engine in
 // server.js imports these back.
 
@@ -22,18 +22,23 @@ let _cronFormatterZone;
  * weekday 0-6 Sunday=0) for an epoch-ms reference, formatted in the given
  * IANA time zone. Passing `undefined` for the zone uses the host system zone,
  * which preserves the historical local-time cron behavior. The numeric
- * epoch-ms is handed straight to Intl - no intermediate Date is constructed,
- * so a seeded clock plus a pinned zone makes the parts fully reproducible.
+ * Explicit zones use Intl; the implicit system zone uses local Date getters.
+ * Both consume the supplied epoch, so a seeded clock stays reproducible.
  *
  * @param {number} ms - epoch milliseconds
  * @param {string | undefined} tz - IANA zone, or undefined for the system zone
  * @returns {{ second: number, minute: number, hour: number, day: number, month: number, weekday: number }}
  */
 export function _cronDateParts(ms, tz) {
-	// Resolve the implicit zone afresh so process/system timezone changes retain
-	// their historical behavior. Only one full formatter is retained, even when
-	// a simulation switches between many explicit zones.
-	const zone = tz === undefined ? new Intl.DateTimeFormat().resolvedOptions().timeZone : tz;
+	// Local getters observe process/system timezone changes without constructing
+	// an Intl formatter solely to rediscover its default zone on every tick.
+	if (tz === undefined) {
+		const date = new Date(ms);
+		if (!Number.isFinite(date.valueOf())) throw new RangeError('Invalid time value');
+		return { second: date.getSeconds(), minute: date.getMinutes(), hour: date.getHours(), day: date.getDate(), month: date.getMonth() + 1, weekday: date.getDay() };
+	}
+	// Retain only one formatter when a simulation switches explicit zones.
+	const zone = tz;
 	if (_cronFormatter === null || zone !== _cronFormatterZone) {
 		const fmt = new Intl.DateTimeFormat('en-US', {
 			timeZone: zone,

@@ -57,6 +57,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Cron calendar matching in the system timezone now uses local date fields, preserving timezone changes and daylight-saving behavior while avoiding per-tick formatter allocation.
+
 - Source and IDE hook examples include `close` and `unsubscribe`, preserving subscription cleanup when copied into application hooks.
 
 - Smooth joins on non-owner cluster instances scope their initial snapshot to the subscriber's area of interest while retaining the full server shadow for later visibility changes.
