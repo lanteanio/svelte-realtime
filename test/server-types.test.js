@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 it('accepts typed server options and rejects invalid values', () => {
 	const file = resolve(import.meta.dirname, 'smooth-config-consumer.ts').replaceAll('\\', '/');
 	const source = `
-import { configureForget, live, type SmoothConfig } from '../src/server.js';
+import { configureForget, introspect, live, type SmoothConfig } from '../src/server.js';
 const config: SmoothConfig = {
   topic: 'positions', apply: (state) => state, initial: {},
   snapshot: true, snapshotDebounceMs: 250
@@ -26,6 +26,15 @@ live.forget('user', { hashKey: null });
 configureForget({ hashKey: 42 });
 // @ts-expect-error audit keys must be strings, byte arrays or null
 live.forget('user', { hashKey: true });
+const versions = introspect().transport?.versions;
+if (versions) {
+  const adapter: string | null = versions.adapter;
+  const protocol: number | null = versions.protocolRevision;
+  const realtime: string | null = versions.realtime;
+  const extensions: string | null = versions.extensions;
+  void adapter; void protocol; void realtime; void extensions;
+}
+
 live.derived((id: string) => [id], (ctx, id: string) => id, {
   scopeKey: (ctx, id) => ctx.user.id + id
 });

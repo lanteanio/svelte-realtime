@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Server introspection declares the adapter version tuple; packed-consumer checks preserve startup version resolution and external runtime imports in SSR builds.
+
 - Vite registry updates stay inside the configured live directory, serialize with startup, and contain asynchronous reload failures. Nested worktree hooks no longer inherit the parent registry.
 
 - Idempotency TTLs reject fractions, NaN, and infinity during registration so in-memory and durable stores share the same non-negative integer seconds contract. Zero still skips cache writes.

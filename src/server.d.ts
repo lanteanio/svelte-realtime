@@ -4930,6 +4930,15 @@ export interface RealtimeIntrospection {
 	 * `null` on older adapters or before `init({ platform })` ran.
 	 */
 	transport: {
+		/** Installed package identities reported by the adapter; absent on older adapters. */
+		versions?: {
+			adapter: string | null;
+			protocolRevision: number | null;
+			/** Resolved package version; null when absent, 'unresolvable' when resolution or metadata fails. */
+			realtime: string | null;
+			/** Resolved package version; null when absent, 'unresolvable' when resolution or metadata fails. */
+			extensions: string | null;
+		};
 		connections: number;
 		closedWsAborts: number;
 		protection: 'normal' | 'elevated' | 'siege';
