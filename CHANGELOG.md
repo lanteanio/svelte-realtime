@@ -10,6 +10,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- Release guidance states the realtime package scope, application-owned responsibilities and concrete evidence required before stable promotion.
+
 - The README wordmark now ships with the package, and contributor guidance records the realtime library and infrastructure package roles.
 
 - Release guidance now defines frozen source identities, coordinated stable promotion, stable hotfix merge-back and verified dist-tag rollback.

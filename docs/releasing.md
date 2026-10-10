@@ -4,6 +4,42 @@ This package follows the ecosystem [release lifecycle](https://github.com/lantea
 The local workflow and ledger below bind that lifecycle to the realtime package;
 a green local check alone does not authorize publication or channel promotion.
 
+## Realtime package scope
+
+The 0.6 line serves SvelteKit application developers who need importable
+`$live` RPCs and reactive subscriptions, with generated client bindings and
+observable connection, retry and cleanup behavior. Its release evidence must
+cover those application boundaries alongside the ecosystem
+[stable-promotion contract](https://github.com/lanteanio/svelte-adapter-uws/blob/dev/docs/releasing.md#stable-promotion).
+
+The package does not provide an HTTP server, authentication provider, database
+engine or reference application UI. The adapter owns transport; optional
+extensions supply durable and clustered infrastructure. Applications still own
+authorization, persistence policy and reconciliation after an uncertain write;
+reconnection alone does not establish exactly-once delivery.
+
+Before promoting this package, attach the following evidence at the frozen
+source heads, in addition to the coordinated checks below:
+
+- Run `node scripts/check-manual-setup.js --fresh-install` at the supported
+  Node floor. The literal documented app must install, build, exchange updates
+  between two browser tabs, retain state across reload and demonstrate its
+  documented reset after a server restart, with no uncaught browser errors.
+- Run the declaration and generated-client gates in `npm run check`, the Vite
+  integration suite and the packed consumer. Public imports, room members,
+  cleanup hooks and declarations must agree in development and production;
+  browser output must not include server implementations.
+- Run the client/offline, stream lifecycle, simulation and browser chaos lanes
+  through `npm run verify:release`. Exercise interruption, timeout, reconnect,
+  replay and final cleanup, including the configured queue limits and typed
+  failure paths. Record the actual platform/tuple, test counts and logs; zero
+  failed required checks is the acceptance measure, and skipped checks require
+  completion before promotion.
+
+This evidence is collected for the release decision; the existence of these
+instructions does not establish that the current candidate is ready for
+`latest`. Keep the evidence linked to the immutable candidate identity.
+
 ## Branch roles and freeze
 
 - `dev` integrates work and supplies `next` prereleases.
