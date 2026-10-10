@@ -4524,7 +4524,7 @@ const unsub = onSignal(currentUser.id, (event, data) => {
 });
 ```
 
-Enable signal delivery in your `open` hook:
+Enable signal delivery in your `open` hook. Closed sockets are ignored if asynchronous setup outlives the connection; invalid user ids still throw:
 
 ```js
 import { enableSignals } from 'svelte-realtime/server';

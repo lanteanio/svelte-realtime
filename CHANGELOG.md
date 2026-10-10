@@ -33,6 +33,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 ### Fixed
 
 - Room departure, eviction, and user erasure remove cursor samples from connected peers. Cursor-only publishers are tracked through socket disconnect without requiring a room subscription; other tabs and cluster members retain their shared cursor until the identity leaves.
+- Signal subscription setup safely ignores a native socket that closes during asynchronous connection initialization.
 
 - Stream unsubscribe and disconnect cleanup wait for pending subscribe hooks, preventing room presence, ownership, and enumeration from surviving a departed socket.
 - Room actions cannot use the generated client member names `data`, `presence`, `cursors`, `owner` or `rooms`, even when an optional surface is disabled. Declaration errors now identify the action to rename.

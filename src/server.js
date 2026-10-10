@@ -3516,7 +3516,9 @@ function _runWithMiddleware(ctx, handler) {
  */
 export function enableSignals(ws, options) {
 	const idField = options?.idField || 'id';
-	const userData = ws.getUserData();
+	// An async open hook may resume after the native socket has closed.
+	let userData;
+	try { userData = ws.getUserData(); } catch { return; }
 	const userId = userData?.[idField];
 	// null / undefined = anonymous connection, silently skip (no signal
 	// subscription wired). This preserves the documented pattern of
@@ -3532,7 +3534,7 @@ export function enableSignals(ws, options) {
 	// tenant prefix), so a tenant-scoped channel would silently never reach the
 	// client. Under multi-tenancy, use globally-unique user ids (the norm) so signals
 	// stay isolated; see the README "Multi-tenancy" note.
-	ws.subscribe('__signal:' + userId);
+	try { ws.subscribe('__signal:' + userId); } catch {}
 }
 
 /**
