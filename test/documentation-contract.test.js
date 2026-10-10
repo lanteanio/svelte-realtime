@@ -38,3 +38,13 @@ it('keeps compatibility commands generated and native versions in one block', ()
 	expect(validateReadme(readme.replace('npm install -D ws', 'npm install -D missing'), manifest).join('\n')).toContain('compatibility block differs');
 	expect(validateReadme(readme + '\nuWebSockets.js v20.69.0\n', { ...manifest, readmeMaxLines: manifest.readmeMaxLines + 2 }).join('\n')).toContain('native version facts');
 });
+
+it('rejects Markdown and bare-URL injection in route labels and needs', () => {
+	for (const field of ['label', 'need']) {
+		for (const value of ['Injected](https://example.com) [Tutorial', '[foreign](https://example.com)', 'https://example.com', 'escaped\\] label']) {
+			const copy = structuredClone(manifest);
+			copy.paths[3][field] = value;
+			expect(validateManifest(copy, pkg).join('\n')).toContain(`${field} must be plain text`);
+		}
+	}
+});

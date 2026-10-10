@@ -117,6 +117,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Formatting checks retain Git line-ending metadata for Unicode and space-containing paths.
 
+- Documentation route labels and needs reject Markdown and URL injection outside their declared owner.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

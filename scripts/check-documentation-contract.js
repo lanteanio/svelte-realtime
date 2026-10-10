@@ -30,6 +30,9 @@ export function validateManifest(manifest, pkg) {
 		if (!fields(path, ['key', 'type', 'need', 'label', 'destination', 'owner'])) { failures.push(`path ${index} fields differ from schema`); continue; }
 		if (path.key !== keys[index] || path.type !== types[index]) failures.push(`path ${index} must be ${keys[index]}/${types[index]}`);
 		if (!Object.values(path).every(printable)) failures.push(`path ${index} values must be printable single lines`);
+		for (const field of ['need', 'label']) {
+			if (typeof path[field] !== 'string' || !/^[\p{L}\p{M}\p{N} .,?!()'-]+$/u.test(path[field])) failures.push(`path ${index} ${field} must be plain text without Markdown or URLs`);
+		}
 		if (destinations.has(path.destination)) failures.push(`duplicate destination: ${path.destination}`);
 		destinations.add(path.destination);
 		if (index < 3) {
