@@ -4027,6 +4027,7 @@ export function realtime(config) {
 		open: pushHooks.open,
 		close: pushHooks.close,
 		message,
+		unsubscribe,
 		init(ctx) {
 			if (!ctx || !ctx.platform) {
 				throw new Error('[svelte-realtime] realtime().init: missing platform on hook context (expected adapter init({ platform }) signature)');

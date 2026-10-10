@@ -2,7 +2,7 @@
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs';
 import { resolve, relative, sep, posix } from 'path';
 import { _readCached } from './source-cache.js';
-import { _exportsMessage } from './hooks-exports.js';
+import { _runtimeExports } from './hooks-exports.js';
 import { _readStringLiteral, _skipStringContent, _findMatchingBrace, _extractTemplatePattern, _parseArrowReturnTemplate, _warnUnsafeExports } from './scanner.js';
 import { _extractAggregateWindows, _extractFlagDecl } from './extract-options.js';
 import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE, DYNAMIC_STREAM_RE, CRON_EXPORT_RE, BINARY_EXPORT_RE, UPLOAD_EXPORT_RE, DERIVED_EXPORT_RE, DYNAMIC_DERIVED_RE, ROOM_EXPORT_RE, MULTIPLAYER_EXPORT_RE, SMOOTH_EXPORT_RE, DOC_EXPORT_RE, WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE, WEBHOOK_OUTBOUND_EXPORT_RE, CHANNEL_EXPORT_RE, DYNAMIC_CHANNEL_RE, RATE_LIMIT_EXPORT_RE, EFFECT_EXPORT_RE, AGGREGATE_EXPORT_RE, FLAG_EXPORT_RE, LOCK_EXPORT_RE, PUBLIC_EXPORT_RE, PUBLIC_COMMENT_RE, IDEMPOTENT_EXPORT_RE, VOLATILE_EXPORT_RE } from './patterns.js';
@@ -559,7 +559,7 @@ export function _findLiveFiles(dir) {
 }
 
 /**
- * Check that src/hooks.ws.{js,ts,mjs} exists and exports the `message` handler.
+ * Check that src/hooks.ws.{js,ts,mjs} exports the routing and cleanup handlers.
  * Warns at build/dev startup if the file is missing or misconfigured.
  * @param {string} root
  * @param {string} liveDir
@@ -581,7 +581,7 @@ export function _checkHooksFile(root, liveDir, dir) {
 			`[svelte-realtime] Found live modules in ${dir}/ but no src/hooks.ws.js - ` +
 			`WebSocket RPC will not work without it.\n` +
 			`  Create src/hooks.ws.js with at minimum:\n` +
-			`    export { message } from 'svelte-realtime/server';\n` +
+			`    export { message, close, unsubscribe } from 'svelte-realtime/server';\n` +
 			`    export function upgrade() { return {}; }\n` +
 			`  See: https://svti.me/hooks`
 		);
@@ -591,12 +591,28 @@ export function _checkHooksFile(root, liveDir, dir) {
 	let source;
 	try { source = readFileSync(found, 'utf-8'); } catch { return; }
 
-	if (_exportsMessage(source, found) === false) {
-		const name = 'src/hooks.ws' + (found.match(/\.(?:js|ts|mjs)$/)?.[0] || '.js');
+	const exports = _runtimeExports(source, found);
+	if (exports === null) return;
+	const name = 'src/hooks.ws' + (found.match(/\.(?:js|ts|mjs)$/)?.[0] || '.js');
+	if (!exports.has('message')) {
+		const needed = ['message', 'close', 'unsubscribe'].filter(handler => !exports.has(handler));
 		console.warn(
 			`[svelte-realtime] ${name} exists but does not export a \`message\` handler - ` +
 			`WebSocket RPC calls from ${dir}/ will go unhandled.\n` +
-			`  Add: export { message } from 'svelte-realtime/server';\n` +
+			`  Add: export { ${needed.join(', ')} } from 'svelte-realtime/server';\n` +
+			`  See: https://svti.me/hooks`
+		);
+		return;
+	}
+	const missing = ['unsubscribe', 'close'].filter(handler => !exports.has(handler));
+	if (missing.length) {
+		const consequences = missing.map(handler => handler === 'unsubscribe'
+			? 'Without unsubscribe, stream bookkeeping stays until the socket closes.'
+			: 'Without close, connection state remains after disconnect.');
+		console.warn(
+			`[svelte-realtime] ${name} exports message but is missing ${missing.join(' and ')}.\n` +
+			`  ${consequences.join(' ')}\n` +
+			`  Add: export { ${missing.join(', ')} } from 'svelte-realtime/server';\n` +
 			`  See: https://svti.me/hooks`
 		);
 	}

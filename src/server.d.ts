@@ -4876,6 +4876,7 @@ export interface RealtimeHooks {
 	open(ws: any, ctx: { platform: Platform }): void;
 	close(ws: any, ctx: { platform: Platform; subscriptions?: Set<string> | string[] }): void;
 	message(ws: any, ctx: { data: ArrayBuffer; platform: Platform }): void;
+	unsubscribe: typeof unsubscribe;
 	init(ctx: { platform: Platform }): void;
 	/**
 	 * Graceful shutdown. The adapter calls this once on SIGTERM, before it
@@ -4904,7 +4905,7 @@ export interface RealtimeHooks {
  * Single-replica:
  * ```js
  * import { realtime } from 'svelte-realtime/server';
- * export const { open, close, message, init, shutdown } = realtime();
+ * export const { open, close, message, unsubscribe, init, shutdown } = realtime();
  * export function upgrade({ cookies }) { ... }
  * ```
  *
@@ -4915,7 +4916,7 @@ export interface RealtimeHooks {
  * import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
  * import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
  * const redis = createRedisClient();
- * export const { open, close, message, init, shutdown } = realtime({
+ * export const { open, close, message, unsubscribe, init, shutdown } = realtime({
  *   bus: createPubSubBus(redis),
  *   leader: createLeader(redis).isLeader,
  * });
@@ -4938,7 +4939,7 @@ export function realtime(config?: RealtimeConfig): RealtimeHooks;
  * ```js
  * // src/hooks.ws.js
  * import { realtime, onShutdown } from 'svelte-realtime/server';
- * export const { open, close, message, init, shutdown } = realtime({ bus, leader: leader.isLeader });
+ * export const { open, close, message, unsubscribe, init, shutdown } = realtime({ bus, leader: leader.isLeader });
  * onShutdown(async () => { await leader.stop(); await bus.deactivate(); }, { drainMs: 3000 });
  * ```
  *

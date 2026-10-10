@@ -99,14 +99,9 @@ Starting from a SvelteKit 2 project. If you do not have one yet, run `npx sv@0.1
 
 Run the install and native preflight commands in [Version compatibility](#version-compatibility).
 
-Continue only after the last command prints `preflight OK`. A failure stops at
-the unmet prerequisite and prints the matching install or platform action.
+Continue only after the last command prints `preflight OK`. A failure stops at the unmet prerequisite and prints the matching install or platform action.
 
-What each package does:
-- `svelte-adapter-uws` (>=0.4.0) - the SvelteKit adapter that runs your app on uWebSockets.js with built-in WebSocket support
-- `svelte-realtime` - this library (RPC + streams on top of the adapter)
-- `uWebSockets.js` - the native C++ HTTP/WebSocket server (installed from GitHub, not npm)
-- `ws` - dev dependency used by the adapter during `npm run dev` (not needed in production)
+`svelte-adapter-uws` runs the SvelteKit server, `svelte-realtime` provides RPC and streams, `uWebSockets.js` supplies the native HTTP/WebSocket server, and the dev-only `ws` dependency supports `npm run dev`.
 
 ### Step 2: Configure the adapter and Vite plugins
 
@@ -132,9 +127,7 @@ export default defineConfig({
 });
 ```
 
-Do not add a second `svelte.config.js` to a current `sv` project:
-the direct `sveltekit({ ... })` configuration takes precedence, so the
-sidecar adapter can look configured while producing no runnable server.
+Do not add a second `svelte.config.js` to a current `sv` project: the direct `sveltekit({ ... })` configuration takes precedence, so the sidecar adapter can look configured while producing no runnable server.
 
 ### Step 3: Create the WebSocket hooks file
 
@@ -1624,7 +1617,7 @@ export const PROTOCOL_VERSION = 3;
 configure({ protocolVersion: PROTOCOL_VERSION });
 
 // hooks.ws.js
-export const { open, close, message, init, shutdown } = realtime({
+export const { open, close, message, unsubscribe, init, shutdown } = realtime({
   protocolVersion: {
     current: PROTOCOL_VERSION,
     minimum: 2,
@@ -1703,7 +1696,7 @@ Browser clients authenticate via cookies set during login. Native clients typica
 
 ```js
 // src/hooks.ws.js
-export { message } from 'svelte-realtime/server';
+export { message, close, unsubscribe } from 'svelte-realtime/server';
 
 export function upgrade({ cookies, url }) {
   // Browser - cookie auth
@@ -2245,6 +2238,7 @@ Resolution order per call: `exempt` -> per-handler `live.rateLimit(...)` wrappin
 Use the `beforeExecute` hook with the rate limit extension for global per-connection throttling:
 
 ```js
+export { close, unsubscribe } from 'svelte-realtime/server';
 import { createMessage, LiveError } from 'svelte-realtime/server';
 import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
 import { createRateLimit } from 'svelte-adapter-uws-extensions/redis/ratelimit';
@@ -2686,7 +2680,7 @@ Opt into an auth-gated HTTP endpoint with `realtime({ admin: { requires } })`. I
 ```js
 // hooks.ws.js
 import { realtime } from 'svelte-realtime/server';
-export const { open, close, message, init, shutdown, admin } = realtime({
+export const { open, close, message, unsubscribe, init, shutdown, admin } = realtime({
   admin: { requires: (request) => request.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}` }
 });
 ```
@@ -3001,6 +2995,7 @@ Cron expressions use 5 fields: `minute hour day month weekday`. Supported syntax
 Cron registers at module load but the tick can only publish once a `platform` reference has been captured. With `svelte-adapter-uws >= 0.5.0-next.15`, wire it from the new `init({ platform })` hook so the tick is ready from boot:
 
 ```js
+export { unsubscribe } from 'svelte-realtime/server';
 // src/hooks.ws.js
 import { setCronPlatform, pushHooks, message } from 'svelte-realtime/server';
 
@@ -4487,7 +4482,7 @@ By default an undeliverable webhook event (retries exhausted, or blocked by the 
 
 ```js
 // hooks.ws.js
-export const { open, close, message, init, shutdown, admin } = realtime({
+export const { open, close, message, unsubscribe, init, shutdown, admin } = realtime({
   webhooks: { deadLetter: true }, // default bounded in-memory store; pass a store instance for a cluster
   admin: { requires: (request) => request.headers.get('authorization') === `Bearer ${process.env.ADMIN_TOKEN}` }
 });
@@ -4709,7 +4704,7 @@ const redis = createRedisClient();
 const bus = createPubSubBus(redis);
 const leader = createLeader(redis);
 
-export const { open, close, message, init, shutdown } = realtime({
+export const { open, close, message, unsubscribe, init, shutdown } = realtime({
   bus,
   leader: leader.isLeader,
 });
@@ -4724,7 +4719,7 @@ Single-replica is the same file with no config:
 ```js
 // src/hooks.ws.js (single-replica)
 import { realtime } from 'svelte-realtime/server';
-export const { open, close, message, init, shutdown } = realtime();
+export const { open, close, message, unsubscribe, init, shutdown } = realtime();
 export function upgrade({ cookies }) {
   return validateSession(cookies.session_id) || false;
 }
@@ -4737,7 +4732,7 @@ export function upgrade({ cookies }) {
 ```js
 // src/hooks.ws.js
 import { realtime, onShutdown } from 'svelte-realtime/server';
-export const { open, close, message, init, shutdown } = realtime({ bus, leader: leader.isLeader });
+export const { open, close, message, unsubscribe, init, shutdown } = realtime({ bus, leader: leader.isLeader });
 
 onShutdown(async () => {
   await leader.stop();        // release the lease so a sibling takes over fast
@@ -4752,6 +4747,7 @@ The `shutdown` hook resolves with `{ drained, timedOut, remaining, elapsedMs }`;
 `realtime()` is sugar over the existing primitives. If you want fine control - per-route bus, custom hook composition, conditional cluster wiring - drop down to the building blocks. The pre-0.5.6 pattern still works unchanged, and as of 0.5.6 it routes through the same compose-at-publish-time pipeline, so reactive handlers (`live.effect`, `live.derived`, `live.aggregate`) pick up cluster relay automatically once a bus is wired:
 
 ```js
+export { unsubscribe } from 'svelte-realtime/server';
 // src/hooks.ws.js (manual primitives)
 import { setBus, setCronPlatform, _activateDerived, configureCron, pushHooks, message } from 'svelte-realtime/server';
 import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
@@ -4812,7 +4808,7 @@ const limiter = createRateLimit(redis, { points: 30, interval: 10000 });
 
 setBus(bus);
 
-export const { open, close, init, shutdown } = realtime({ leader: leader.isLeader });
+export const { open, close, unsubscribe, init, shutdown } = realtime({ leader: leader.isLeader });
 export function upgrade({ cookies }) { return validateSession(cookies.session_id) || false; }
 
 export const message = createMessage({
@@ -4834,7 +4830,7 @@ Combine live.stream with the Postgres NOTIFY bridge for zero-code reactivity. A 
 
 ```js
 // src/hooks.ws.js
-export { message } from 'svelte-realtime/server';
+export { message, close, unsubscribe } from 'svelte-realtime/server';
 import { createPgClient } from 'svelte-adapter-uws-extensions/postgres';
 import { createNotifyBridge } from 'svelte-adapter-uws-extensions/postgres/notify';
 
@@ -5039,6 +5035,7 @@ older registration out of order can never resurrect it later. A direct
 Both `handleRpc` and `createMessage` accept an `onError` callback for non-LiveError exceptions. `LiveError` throws are expected errors sent to the client; everything else is an unexpected failure. The callback is an application observer; the operational sink emits independently.
 
 ```js
+export { close, unsubscribe } from 'svelte-realtime/server';
 export const message = createMessage({
   onError(path, error, ctx) {
     sentry.captureException(error, {
@@ -5126,6 +5123,7 @@ When you need to mix RPC with custom WebSocket messages, use `onUnhandled` or dr
 
 **With createMessage:**
 ```js
+export { close, unsubscribe } from 'svelte-realtime/server';
 export const message = createMessage({
   onUnhandled(ws, data, platform) {
     // handle non-RPC messages (binary data, custom protocols, etc.)
@@ -5135,6 +5133,7 @@ export const message = createMessage({
 
 **With handleRpc:**
 ```js
+export { close, unsubscribe } from 'svelte-realtime/server';
 import { handleRpc } from 'svelte-realtime/server';
 
 export function message(ws, { data, platform }) {
@@ -5143,7 +5142,7 @@ export function message(ws, { data, platform }) {
 }
 ```
 
-**Progression:** `export { message }` -> `createMessage({...})` -> manual `handleRpc`. Start simple, add options when needed, drop to full control only if you have to.
+**Progression:** `export { message, close, unsubscribe }` -> `createMessage({...})` -> manual `handleRpc`. Start simple, add options when needed, drop to full control only if you have to.
 
 ---
 
@@ -5429,7 +5428,7 @@ Import from `svelte-realtime/server`.
 | `handleRpc(ws, data, platform, options?)` | Low-level RPC handler |
 | `message` | Ready-made message hook (auto bus-wraps when `setBus` is wired) |
 | `createMessage(options?)` | Custom message hook factory (auto bus-wraps unless `options.platform` is provided) |
-| `realtime(config?)` | One-call setup returning `{ open, close, message, init, shutdown, upgrade? }` - wires bus + leader + platform from a single declaration of cluster intent |
+| `realtime(config?)` | One-call setup returning `{ open, close, message, unsubscribe, init, shutdown, upgrade? }` - wires bus + leader + platform from a single declaration of cluster intent |
 | `onShutdown(handler, { drainMs }?)` | Register a teardown handler run on graceful shutdown after in-flight work drains; returns an unregister fn (re-export `shutdown` from `realtime()` for it to fire) |
 | `setBus(bus)` | Configure the process-wide bus consulted by every framework publish surface (alias for `configureCron({ bus })`) |
 | `getBus()` | Read the process-wide bus, or `null` |

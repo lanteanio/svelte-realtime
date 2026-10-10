@@ -62,7 +62,7 @@ const UPGRADE_HOOK_SCAFFOLD = `// SECURITY: this scaffolded upgrade() hook accep
 //
 // Delete the SCAFFOLD_PLACEHOLDER line below to silence the runtime
 // warning once your auth is in place.
-export { message } from 'svelte-realtime/server';
+export { message, close, unsubscribe } from 'svelte-realtime/server';
 
 const SCAFFOLD_PLACEHOLDER = true;
 

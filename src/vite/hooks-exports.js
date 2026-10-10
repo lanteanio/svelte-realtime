@@ -21,9 +21,9 @@ function collectBindings(node, names) {
  * null means the host compiler must decide (unsupported syntax or a star export).
  * @param {string} source
  * @param {string} filename
- * @returns {boolean | null}
+ * @returns {Set<string> | null}
  */
-export function _exportsMessage(source, filename) {
+export function _runtimeExports(source, filename) {
 	let body;
 	try {
 		body = parse(source, {
@@ -55,6 +55,7 @@ export function _exportsMessage(source, filename) {
 		} else if ('id' in declaration) collectBindings(declaration.id, names);
 	}
 	let unknown = false;
+	const exported = new Set();
 	for (const statement of body) {
 		if (statement.type === 'ExportAllDeclaration' && statement.exportKind !== 'type') unknown = true;
 		if (statement.type !== 'ExportNamedDeclaration' || statement.exportKind === 'type') continue;
@@ -64,14 +65,13 @@ export function _exportsMessage(source, filename) {
 			if (declaration.type === 'VariableDeclaration') {
 				for (const binding of declaration.declarations) collectBindings(binding.id, names);
 			} else if ('id' in declaration) collectBindings(declaration.id, names);
-			if (names.has('message') && valueBindings.has('message')) return true;
+			for (const name of names) if (valueBindings.has(name)) exported.add(name);
 		}
 		for (const specifier of statement.specifiers) {
 			if (specifier.type !== 'ExportSpecifier' || specifier.exportKind === 'type') continue;
 			const name = specifier.exported.type === 'Identifier' ? specifier.exported.name : specifier.exported.value;
-			if (name !== 'message') continue;
-			if (statement.source || !typeBindings.has(specifier.local.name) || valueBindings.has(specifier.local.name)) return true;
+			if (statement.source || !typeBindings.has(specifier.local.name) || valueBindings.has(specifier.local.name)) exported.add(name);
 		}
 	}
-	return unknown ? null : false;
+	return unknown ? null : exported;
 }

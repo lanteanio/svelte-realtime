@@ -783,6 +783,47 @@ describe('hooks.ws.js detection', () => {
 		return warns;
 	}
 
+	it('suggests only the missing message export when cleanup already exists', () => {
+		setup({ 'counter.js': 'export const counter = live.stream("count", () => 0);' });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.js'), "export { close, unsubscribe } from 'svelte-realtime/server';");
+		const warnings = captureWarns(() => createPlugin().buildStart()).filter(warning => warning.includes('hooks.ws'));
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("Add: export { message } from 'svelte-realtime/server';");
+	});
+
+	it('warns once about both cleanup handlers when only message is exported', () => {
+		setup({ 'counter.js': 'export const counter = live.stream("count", () => 0);' });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.js'), "export { message } from 'svelte-realtime/server';");
+		const warnings = captureWarns(() => createPlugin().buildStart()).filter(warning => warning.includes('hooks.ws'));
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain('missing unsubscribe and close');
+		expect(warnings[0]).toContain('stream bookkeeping stays until the socket closes');
+		expect(warnings[0]).toContain('connection state remains after disconnect');
+	});
+
+	it.each([
+		['unsubscribe', "export { message, close } from 'svelte-realtime/server'; export type { unsubscribe } from './types';"],
+		['close', "export { message, unsubscribe } from 'svelte-realtime/server'; import type { close } from './types'; export { close };"],
+		['close', "export { message, unsubscribe } from 'svelte-realtime/server'; export declare function close(): void;"]
+	])('identifies missing runtime %s despite a type-only export', (missing, source) => {
+		setup({ 'counter.js': 'export const counter = live.stream("count", () => 0);' });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.ts'), source);
+		const warnings = captureWarns(() => createPlugin().buildStart()).filter(warning => warning.includes('hooks.ws'));
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain('missing ' + missing + '.');
+	});
+
+	it.each([
+		"export { message, close, unsubscribe } from 'svelte-realtime/server';",
+		"export const { message, close, unsubscribe } = realtime();",
+		"export { handler as message, closed as close, left as 'unsubscribe' } from './handlers';",
+		"export function message() {} export function close() {} export function unsubscribe() {}",
+		"export * from './handlers';"
+	])('accepts complete or statically unknown cleanup exports', source => {
+		setup({ 'counter.js': 'export const counter = live.stream("count", () => 0);' });
+		writeFileSync(resolve(testRoot, 'src/hooks.ws.mjs'), source);
+		expect(captureWarns(() => createPlugin().buildStart()).filter(warning => warning.includes('hooks.ws'))).toEqual([]);
+	});
 
 	it.each([
 		['commented export', '// export { message };\nexport function upgrade() {}'],
@@ -884,7 +925,7 @@ export const send = live(async (ctx, text) => {});
 		});
 		mkdirSync(resolve(testRoot, 'src'), { recursive: true });
 		writeFileSync(resolve(testRoot, 'src/hooks.ws.js'), `
-export { message } from 'svelte-realtime/server';
+export { message, close, unsubscribe } from 'svelte-realtime/server';
 export function upgrade() { return {}; }
 `);
 
@@ -909,7 +950,7 @@ export const send = live(async (ctx, text) => {});
 		});
 		mkdirSync(resolve(testRoot, 'src'), { recursive: true });
 		writeFileSync(resolve(testRoot, 'src/hooks.ws.ts'), `
-export { message } from 'svelte-realtime/server';
+export { message, close, unsubscribe } from 'svelte-realtime/server';
 export function upgrade() { return {}; }
 `);
 
@@ -1012,6 +1053,7 @@ export const send = live(async (ctx, text) => {});
 		mkdirSync(resolve(testRoot, 'src'), { recursive: true });
 		writeFileSync(resolve(testRoot, 'src/hooks.ws.js'), `
 import { createMessage } from 'svelte-realtime/server';
+export { close, unsubscribe } from 'svelte-realtime/server';
 export const message = createMessage({ onError: console.error });
 export function upgrade() { return {}; }
 `);

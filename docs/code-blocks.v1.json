@@ -811,7 +811,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "68b2329e92997d5d29084e86157a3225245e8074d7161e7f5aa0ba979b440ffd",
+			"fingerprint": "a9c041929a4f89c039034439b96e33a33661e9f621cdf943f5506876340beaab",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Connection hooks > Coordinated protocol rollout and rollback",
@@ -841,7 +841,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "7fd6b66b12b52b13582daf8c29b520bad2c31fd0796b1e63ad3ad7df6bd0d6e5",
+			"fingerprint": "d96aa00cdf0c9dea22713ce5d35262de9db861226f6ea34ed1c9309894eac572",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Connection hooks > Cross-origin and native app usage",
@@ -1131,7 +1131,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "e58d0d36d3af607bea9fefd6c64d56ba18d224dbd4c84262df0bd943fa94cde2",
+			"fingerprint": "237e29b4ce1d2380852656d349748092f06f4e711184c9fb88dd52213388c27a",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Rate limiting > Global rate limiting with Redis",
@@ -1341,7 +1341,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "39236d60c772584b5e1f55c4c3d4bf9b54d609a1ecf743c63a447757ea5929cb",
+			"fingerprint": "f7a7671229d173ffed6335a646e9202fbb9f0d3441d039a4c562f6cc12d652c1",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Server introspection > The admin route (`/__realtime`)",
@@ -1470,7 +1470,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "408d1caca74f6143981b16b81ceffe1f6defce273e814d2eaf47470bcace1cdf",
+			"fingerprint": "ab19e1ce0d033aca7201369bd2058979885d0bc788e5e066a93e522a2ad6adad",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Cron scheduling > Wiring the platform",
@@ -2099,7 +2099,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "1821bf49be2bf168f4dcab57da7084ec2e767aeae6f0cfb5ee92396fb41e4fe9",
+			"fingerprint": "e3d15a612ef44074b42c94e9108553dc9b4a3bb783319d6eb372dd4ca8b6f9af",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Outbound webhooks > Dead-letter queue",
@@ -2209,7 +2209,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "1fc00710b87c49103a3ac3ee8125e4228114af275c413b029bb10c0fde86e2a0",
+			"fingerprint": "cb1841c92bc988bec81870dad045d95068498c8bc2e81a7aaf39511804142528",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Redis multi-instance",
@@ -2219,7 +2219,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "2d336548dfdc6a3355413e803ad31e4e2761a6a1943d7eb34be41309514a9628",
+			"fingerprint": "b8e0ce37ee29525f498ed410814a3ef3c4799f21f482ad141f7946fa48eaaf7a",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Redis multi-instance",
@@ -2229,7 +2229,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "9315ff3aed6b9602087970fa79d7911d4ad5e76063a8f1a64b13416890aa0352",
+			"fingerprint": "a1a20f1edf32c79970ece57679d428f202000345e4455bdb4bebc09ad976d2be",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Redis multi-instance > Graceful shutdown",
@@ -2239,7 +2239,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "6db3192fb7cdc9f6c8fb10d3524a26225779ba3b7ef7bc9358dc4fed2adc57cf",
+			"fingerprint": "7f2ac9b2affb8bd974ddd6e21e8c001dff1620f53eb3a01da2c9bb035bb6b1ac",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Redis multi-instance > Layer 1: manual wiring (experts)",
@@ -2249,7 +2249,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "6d5208706fec9d531db4ed943d87256464ca0f1967555c14818a46c754624d27",
+			"fingerprint": "303a35dfe04efbe9ae22ef6d05e301f286511fec6abdf68b9e43939e484235f0",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Redis multi-instance > Combined: Redis + rate limiting",
@@ -2259,7 +2259,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "4d188d1cd71797ed745c287db8e348f03ce36a19ecad3fec0de2d799c5b21f0d",
+			"fingerprint": "0e257ea42d9ca2e79742fe17b53df392735f72b341e841a77af315181da84b1a",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Postgres NOTIFY",
@@ -2289,7 +2289,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "5edd58038906eaaa48f8425bf2940729ff596fbba134e1ba661d811472ae5174",
+			"fingerprint": "d12c40bf288fbea0eb0a252ec6e3cb14d0d7321b8122cb63b9a16a155b6135a1",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Error reporting > onError hook",
@@ -2338,7 +2338,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "88cf3a1bf6438e3e3aeb3104c3d327bc48530885111509587928b111f17d0161",
+			"fingerprint": "f9d04e09d5a55497d97b509b19c07aef78aa1e54f8031984925be59266c95775",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Custom message handling",
@@ -2348,7 +2348,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "9b09495e10c9437b7ec97dd7641f1f64138832449755ea103634a00937825c37",
+			"fingerprint": "7488ad3d0b9b173b5ac76a13a14107619ebca848cf40260a305bc7c49378f402",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Custom message handling",
