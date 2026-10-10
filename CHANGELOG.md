@@ -66,6 +66,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Signal subscription setup safely ignores a native socket that closes during asynchronous connection initialization.
 
 - Stream unsubscribe and disconnect cleanup wait for pending subscribe hooks, preventing room presence, ownership, and enumeration from surviving a departed socket.
+- Contributor backlog and review guidance uses public GitHub issues, labels, assignments and pull requests.
+
 - RPC lifecycle comments distinguish parked unsent calls from requests rejected after a disconnect or socket replacement.
 
 - CLI prompt regression checks the actual default project name passed to scaffolding after empty input.
