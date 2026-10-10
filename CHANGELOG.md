@@ -41,6 +41,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Packed-package tests and manual setup extract archives using portable paths on Windows and Unix.
+
+- Browser test discovery includes new spec files in both development and production lanes.
+
 - Room departure, eviction, and user erasure remove cursor samples from connected peers. Cursor-only publishers are tracked through socket disconnect without requiring a room subscription; other tabs and cluster members retain their shared cursor until the identity leaves.
 - Repository checks execute through symlinked or junction-based checkout paths instead of silently skipping their entry points.
 
