@@ -18,6 +18,8 @@ function message(template, values = {}) {
 }
 /** @param {number} value @param {Intl.NumberFormatOptions} [options] */
 function number(value, options) { return options ? new Intl.NumberFormat(locale, options).format(value) : numberFormat.format(value); }
+/** @param {number} value @param {number} [maximumFractionDigits] */
+function duration(value, maximumFractionDigits = 3) { return number(value, { style: 'unit', unit: 'millisecond', unitDisplay: 'short', maximumFractionDigits }); }
 /** @param {unknown} value */
 function isolated(value) { return '<bdi dir="auto">' + esc(String(value)) + '</bdi>'; }
 
@@ -39,11 +41,13 @@ export function configureDevtools(options = {}) {
  if (panel) {
   panel.lang = nextNumber.resolvedOptions().locale;
   panel.dir = direction;
+  panel.setAttribute('aria-label', message('svelte-realtime DevTools'));
   for (const el of panel.querySelectorAll('[data-label]')) {
    const key = /** @type {HTMLElement} */ (el).dataset.label;
    el.textContent = message(key);
   }
   for (const el of [...panel.querySelectorAll('[data-aria-label]'), ...(launcher ? [launcher] : [])]) el.setAttribute('aria-label', message(/** @type {HTMLElement} */ (el).dataset.ariaLabel));
+  for (const el of panel.querySelectorAll('[data-title]')) el.setAttribute('title', message(/** @type {HTMLElement} */ (el).dataset.title));
   _forceRerender();
  }
 }
@@ -149,7 +153,7 @@ function init() {
 	panel.dir = direction;
 	panel.style.colorScheme = 'dark';
 	panel.setAttribute('role', 'region');
-	panel.setAttribute('aria-label', 'svelte-realtime DevTools');
+	panel.setAttribute('aria-label', message('svelte-realtime DevTools'));
 	panel.style.cssText = `
 		color-scheme: dark; display: none; flex-direction: column; box-sizing: border-box; position: fixed; bottom: 10px; right: 10px; width: min(420px, calc(100vw - 20px)); max-height: min(400px, calc(100dvh - 20px));
 		background: var(--svr-dt-surface, #1a1a2e); color: var(--svr-dt-text, #f2f4ff); border: 1px solid var(--svr-dt-border, #7d859a); border-radius: 8px;
@@ -181,7 +185,8 @@ function init() {
 	moveBtn.dataset.label = 'Move';
 	moveBtn.dataset.ariaLabel = 'Move DevTools';
 	moveBtn.setAttribute('aria-label', message('Move DevTools'));
-	moveBtn.title = 'Arrow keys move; Home and End dock; click cycles corners';
+	moveBtn.dataset.title = 'Arrow keys move; Home and End dock; click cycles corners';
+	moveBtn.title = message(moveBtn.dataset.title);
 	header.appendChild(moveBtn);
 	header.appendChild(closeBtn);
 
@@ -227,7 +232,8 @@ function init() {
 
 	const tabs = document.createElement('div');
 	tabs.setAttribute('role', 'tablist');
-	tabs.setAttribute('aria-label', 'DevTools views');
+	tabs.dataset.ariaLabel = 'DevTools views';
+	tabs.setAttribute('aria-label', message('DevTools views'));
 	tabs.style.cssText = 'display:flex;flex-shrink:0;border-bottom:1px solid var(--svr-dt-border, #7d859a);';
 
 	const content = document.createElement('div');
@@ -530,7 +536,7 @@ function renderRpcs(el, dt) {
 		html += '<div style="color:var(--svr-dt-warning, #ffe18a);margin-bottom:6px">' + esc(message('Pending ({count})', { count: number(pending.length) })) + '</div>';
 		for (const p of pending) {
 			const elapsed = now() - p.startTime;
-			html += `<div style="padding:2px 0;color:var(--svr-dt-muted, #b3b8cc)">${isolated(p.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(number(elapsed))}ms</span></div>`;
+			html += `<div style="padding:2px 0;color:var(--svr-dt-muted, #b3b8cc)">${isolated(p.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(duration(elapsed))}</span></div>`;
 		}
 		html += '<hr style="border-color:var(--svr-dt-border, #7d859a);margin:6px 0">';
 	}
@@ -540,7 +546,7 @@ function renderRpcs(el, dt) {
 	for (let i = 0; i < entries.length; i++) {
 		const h = entries[i];
 		const color = h.ok ? 'var(--svr-dt-success, #79db8f)' : 'var(--svr-dt-error, #ff9595)';
-		html += `<div data-key="rpc:${h.seq}" data-rpc-history style="padding:2px 0"><span style="color:${color}">${esc(message(h.ok ? 'OK' : 'ERR'))}</span> ${isolated(h.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(number(h.duration))}ms</span></div>`;
+		html += `<div data-key="rpc:${h.seq}" data-rpc-history style="padding:2px 0"><span style="color:${color}">${esc(message(h.ok ? 'OK' : 'ERR'))}</span> ${isolated(h.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(duration(h.duration))}</span></div>`;
 	}
 	if (entries.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">' + esc(message('Call a realtime function to see its result and duration here.')) + '</div>';
 
@@ -551,9 +557,7 @@ function renderRpcs(el, dt) {
 }
 
 /**
- * Format `lastEventTime` as a relative age string ("12s ago", "3m ago",
- * "never"). Bucketed coarsely so the rendered HTML doesn't churn every
- * tick of the 1s refresh.
+ * Format `lastEventTime` using localized relative seconds, minutes, or hours.
  * @param {number | null | undefined} t
  * @returns {string}
  */
@@ -593,7 +597,7 @@ function _renderPayload(value, raw) {
 				end += point.length;
 			}
 		}
-		if (end < str.length) str = str.slice(0, end) + '... [+' + (str.length - end) + ' code units]';
+		if (end < str.length) str = str.slice(0, end) + message('... [+{count} code units]', { count: number(str.length - end) });
 	}
 	return str;
 }
@@ -623,7 +627,7 @@ function renderStreams(el, dt) {
 			? `${esc(message('Last event:'))} ${isolated(s.lastEvent)} ${esc(_ageString(s.lastEventTime))}`
 			: esc(message('No event yet'));
 		const errPart = s.error
-			? `<div style="padding-block:1px;padding-inline:12px 0;color:var(--svr-dt-error, #ff9595)">err: ${isolated(s.error.code)} - ${isolated(s.error.message)}</div>`
+			? `<div style="padding-block:1px;padding-inline:12px 0;color:var(--svr-dt-error, #ff9595)">${esc(message('err:'))} ${isolated(s.error.code)} - ${isolated(s.error.message)}</div>`
 			: '';
 		const expanded = expandedStreams.has(s.path);
 		const recentCount = (s.recentEvents && s.recentEvents.length) || 0;
@@ -686,7 +690,7 @@ function renderSmooth(el, dt) {
 		let s;
 		try { s = statsFn(); } catch { s = null; }
 		if (s === undefined) {
-			html += `<div style="padding:4px 0;color:var(--svr-dt-warning, #ffe18a)">telemetry unavailable (needs svelte-adapter-uws &gt;= 0.6.0-next.35)</div>`;
+			html += `<div style="padding:4px 0;color:var(--svr-dt-warning, #ffe18a)">${esc(message('telemetry unavailable (needs svelte-adapter-uws >= 0.6.0-next.35)'))}</div>`;
 			shown++;
 			continue;
 		}
@@ -710,7 +714,7 @@ function renderSmooth(el, dt) {
 				`${esc(message('divergence:'))}<span style="color:${divColor}">${esc(number(divergence, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</span>` +
 				(s.correcting ? ` <span style="color:var(--svr-dt-warning, #ffe18a)">${esc(message('easing'))}</span>` : '') +
 				`</div>` +
-			`<div style="padding-block:1px;padding-inline:12px 0;color:var(--svr-dt-muted, #b3b8cc)">${esc(message('interp delay:'))}${esc(number(Number(s.interpDelayMs) || 0, { maximumFractionDigits: 0 }))}ms</div>` +
+			`<div style="padding-block:1px;padding-inline:12px 0;color:var(--svr-dt-muted, #b3b8cc)">${esc(message('interp delay:'))}${esc(duration(Number(s.interpDelayMs) || 0, 0))}</div>` +
 			`</div>`;
 	}
 	if (shown === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">' + esc(message('Create a live.smooth view to inspect prediction and interpolation.')) + '</div>';
@@ -757,7 +761,7 @@ function renderConnection(el, dt) {
 }
 
 // Auto-init when loaded
-if (typeof window !== 'undefined') {
+if (import.meta.env?.DEV === true && !import.meta.env?.PROD && typeof window !== 'undefined') {
 	configureDevtools({ locale: navigator.language });
 	init();
 }

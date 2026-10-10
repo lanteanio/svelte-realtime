@@ -12,6 +12,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- DevTools formats telemetry with Intl, supports locale and direction configuration, and isolates runtime identifiers.
+
 - Added an exact locked Svelte 4 compatibility fixture with generated version/setup documentation and CI checks for production builds, declarations, stores and two browser tabs. Action: use the linked Svelte 4 profile when reproducing support on that major version.
 
 - Smooth hit callbacks expose the server-applied rewind duration as `info.rewindMs`, including zero for current-state fallback.
@@ -48,6 +50,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - **Breaking:** Alarm scheduling and cancellation now return promises that must be awaited. Durable stores require the ordered-generation and retained-execution contract; `configureAlarm` rejects legacy topic-only stores. Upgrade the store and migrate existing rows with the runtime. Unhandled rejected mutations are no longer silent fire-and-forget writes. Reaching in-memory capacity now rejects with `ALARM_CAPACITY` instead of warning and dropping the schedule.
 
 ### Fixed
+
+- Importing the DevTools configuration API only mounts its overlay in explicit development mode. Accessible labels, duration units, telemetry messages and preview suffixes follow its presentation settings.
 
 - Forgetting a room member immediately removes its presence and cursor from connected peers, using the captured room platform for storage cleanup and owner succession when no erasure platform is configured. Bare and replay publications must confirm before erasure completes; failures remain retryable.
 
@@ -192,8 +196,6 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - DevTools explains prediction recovery and gives actionable instructions in empty views.
 
 - DevTools truncates payload previews at grapheme boundaries and reports omitted code units separately.
-
-- DevTools formats telemetry with Intl, supports locale and direction configuration, and isolates runtime identifiers.
 
 - DevTools shows the bound connection state, transition age, stable failure metadata, and recovery guidance.
 

@@ -15,7 +15,7 @@ beforeAll(async () => {
 		try {
 			const body = await readFile(new URL('..' + req.url, import.meta.url));
 			res.setHeader('Content-Type', 'text/javascript');
-			res.end((req.url === '/src/client/devtools-instrument.js' ? 'import.meta.env = { DEV: true, PROD: false };\n' : '') + body);
+			res.end((req.url === '/src/client/devtools-instrument.js' || req.url === '/src/devtools.js' ? 'import.meta.env = { DEV: true, PROD: false };\n' : '') + body);
 		} catch { res.writeHead(404).end(); }
 	});
 	await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
@@ -363,6 +363,41 @@ it('offers Undo clear and preserves events received after clearing', async () =>
  expect(await page.locator('#svr-dt-content').textContent()).toContain('after');
 });
 
+it('localizes accessible labels, telemetry messages, preview suffixes, and duration units', async () => {
+ await streamsFixture();
+ const expectedDuration = await page.evaluate(() => {
+  window.configureDevtools({ locale: 'ar-EG', messages: {
+   'svelte-realtime DevTools': 'Inspector translated',
+   'DevTools views': 'Views translated',
+   'Arrow keys move; Home and End dock; click cycles corners': 'Move instructions translated',
+   'err:': 'Error translated:',
+   '... [+{count} code units]': '... [omitted {count}]',
+   'telemetry unavailable (needs svelte-adapter-uws >= 0.6.0-next.35)': 'Telemetry translated'
+  } });
+  const dt = window.__svelte_realtime_devtools;
+  dt.history = [{ seq: 1, ok: true, path: 'example/read', duration: 1234 }];
+  dt.unsafeCapturePayloads = true;
+  const stream = dt.streams.get('chat');
+  stream.error = { code: 'EXAMPLE', message: 'Example error' };
+  stream.recentEvents = [{ event: 'update', ts: Date.now(), data: 'a'.repeat(220) }];
+  dt.smooth = new Set([() => undefined]);
+  return new Intl.NumberFormat('ar-EG', { style: 'unit', unit: 'millisecond', unitDisplay: 'short', maximumFractionDigits: 3 }).format(1234);
+ });
+ expect(await page.getByRole('region', { name: 'Inspector translated' }).count()).toBe(1);
+ expect(await page.getByRole('tablist', { name: 'Views translated' }).count()).toBe(1);
+ expect(await page.getByRole('button', { name: 'Move DevTools' }).getAttribute('title')).toBe('Move instructions translated');
+ await page.getByRole('tab', { name: 'rpcs', exact: true }).click();
+ expect(await page.locator('#svr-dt-content').textContent()).toContain(expectedDuration);
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ await page.locator('[data-action="toggle-stream"]').click();
+ const content = await page.locator('#svr-dt-content').textContent();
+ expect(content).toContain('Error translated:');
+ expect(content).toContain('... [omitted ');
+ expect(content).not.toContain('code units]');
+ await page.getByRole('tab', { name: 'smooth', exact: true }).click();
+ expect(await page.locator('#svr-dt-content').textContent()).toContain('Telemetry translated');
+});
+
 it('starts stream capture paused and synchronously purges visible and undo payloads', async () => {
  expect(await page.evaluate(() => window.realDevtools.paused)).toBe(true);
  await streamsFixture();
@@ -405,7 +440,8 @@ it.each([false, true])('bounds code-point previews without grapheme segmentation
  await page.locator('[data-action="toggle-stream"]').click();
  const source = JSON.stringify(payload);
  const prefix = Array.from(source).slice(0, cap).join('');
- const expected = prefix + '... [+' + (source.length - prefix.length) + ' code units]';
+ const omitted = await page.evaluate(count => new Intl.NumberFormat(navigator.language).format(count), source.length - prefix.length);
+ const expected = prefix + '... [+' + omitted + ' code units]';
  const preview = await page.locator('#svr-dt-content bdi[dir="ltr"]').textContent();
  expect(preview).toBe(expected);
  expect(preview.length).toBeLessThan(cap + 50);

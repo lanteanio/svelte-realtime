@@ -5168,7 +5168,7 @@ This applies to all handler types - `live()`, `live.stream()`, `live.cron()`, `l
 
 ## DevTools
 
-Instrumentation requires `import.meta.env.DEV === true` and a falsy `import.meta.env.PROD`; without a bundler environment, `__devtools` is null. In Vite dev mode, the plugin injects an overlay showing active streams, RPC history, and connection status. Open it with the DevTools button or `Ctrl+Shift+L`. Close or Escape restores focus to the opening control; the panel does not trap focus.
+Instrumentation and overlay mounting require `import.meta.env.DEV === true` and a falsy `import.meta.env.PROD`. Importing `configureDevtools` in production or without a bundler environment creates no overlay or keyboard listener; `__devtools` is null. In Vite dev mode, the plugin injects an overlay showing active streams, RPC history, and connection status. Open it with the DevTools button or `Ctrl+Shift+L`. Close or Escape restores focus to the opening control; the panel does not trap focus.
 
 The overlay uses a fixed dark theme for diagnostic contrast, plus system colors in forced-color mode. Hosts can override the CSS variables `--svr-dt-surface`, `--svr-dt-raised`, `--svr-dt-border`, `--svr-dt-text`, `--svr-dt-muted`, `--svr-dt-accent`, `--svr-dt-success`, `--svr-dt-warning`, `--svr-dt-error`, and `--svr-dt-focus` on the document root. Keep text and focus contrast when overriding them.
 
@@ -5184,13 +5184,13 @@ The Streams tab lists every store currently mounted on the page. For each one it
 | topic | Omitted with character-count metadata by default; the raw wire topic appears only during explicit unsafe payload capture. |
 | merge | The store's merge strategy (`crud`, `latest`, `set`, `presence`, `cursor`). |
 | subs | Active subscriber count; the entry disappears when this hits zero. |
-| last | Event name of the most recent pub/sub frame and its relative age (`12s ago`). |
+| Last event | Event name of the most recent pub/sub frame and its localized relative age (`12 seconds ago` in English). |
 | err | Stable error code plus an omitted-message marker by default; cleared on recovery. |
 
 **Click any stream row to expand its most recent 20 envelopes.** The safe
 default shows time, event name, and metadata such as value type, field count,
 or array/string length; it does not retain the payload value. Stream capture starts paused. Resume begins capturing; Pause stops
-capturing new events without affecting the live `last:` timestamp, and
+capturing new events without affecting the live `Last event:` timestamp, and
 Clear events empties every stream ring and offers Undo clear for 30 seconds. Undo merges new arrivals within the 20-event cap; another clear replaces the snapshot, and disabling unsafe capture purges it. Pretty/Raw affects payload rendering only
 when unsafe capture is enabled. Pretty/Raw persists via `localStorage`; capture starts paused on each page load.
 
@@ -5230,7 +5230,7 @@ The Smooth tab is a per-stream inspector for `live.smooth` views (multiplayer pr
 
 Browser regressions for the overlay run separately from the unit suite. Install Chromium with `npx playwright install chromium`, then run `npm run test:devtools`. A missing browser fails the suite.
 
-The overlay is stripped from production builds. Disable it in dev with:
+The plugin injects the overlay only in development. Disable that injection with:
 
 ```js
 realtime({ devtools: false })
