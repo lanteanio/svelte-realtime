@@ -11,7 +11,7 @@
 </p>
 
 <p align="center">
-  <a href="https://svelte-realtime.dev">Documentation</a> · <a href="https://svelte-realtime.dev/tutorial">Tutorial</a> · <a href="https://svelte-realtime-demo.lantean.io">Live Demo</a>
+  <a href="https://svelte-realtime.dev">Read the docs</a> | <a href="https://svelte-realtime.dev/tutorial">Try the tutorial</a> | <a href="https://svelte-realtime-demo.lantean.io">Open the live demo</a>
 </p>
 
 **Official links:** [GitHub owner](https://github.com/lanteanio) | [Documentation](https://svelte-realtime.dev/) | [Live demo](https://svelte-realtime-demo.lantean.io/) | `svti.me` is the ecosystem-owned runtime-help redirect domain.

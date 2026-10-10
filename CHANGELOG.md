@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- README entry links now describe the reader action for documentation, tutorial, and demo.
+
 - Documented erasure-hook user hashes as pseudonymous identifiers with access and retention requirements.
 
 - Described owner-succession replay behavior directly in its regression test.
