@@ -22,11 +22,10 @@ import { LiveError } from './live-error.js';
 // raw delimiter could otherwise collide with another tenant's namespace).
 const _VALID_TENANT_ID = /^[a-zA-Z0-9_-]+$/;
 
-// Cap the tenant id length so the wire prefix `@t/<id>/` always leaves room under
-// the adapter/bus 256-char topic cap on EVERY surface (a tenant id is a stable
-// slug / UUID; 64 comfortably fits a UUID). Framework-internal id budgets (e.g.
-// the room-enumeration id) reserve this worst case, so a tenant-scoped channel can
-// never silently exceed the cap and have its cluster deltas dropped.
+// Bound the wire prefix `@t/<id>/` to at most 68 characters; a 64-character
+// tenant id comfortably fits a slug or UUID. The prefix and logical topic share
+// the adapter/bus 256-character topic budget. Room-enumeration ids retain their
+// unconditional budget, so callers must also leave room for their tenant prefix.
 export const _MAX_TENANT_ID_LEN = 64;
 
 // The reserved topic namespace for tenant-scoped wire topics. `@` is not `__`, so
