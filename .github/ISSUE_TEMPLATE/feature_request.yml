@@ -1,0 +1,51 @@
+name: Feature request
+description: Propose a user-visible capability or contract change.
+title: ''
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities here. Use the private security link in the issue chooser.
+        Remove secrets, cookies, tokens, personal data, and private deployment details.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and users affected
+      description: Describe the observable limitation, who pays for it, and why existing APIs are insufficient.
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: State acceptance criteria in behavior terms, not only an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds and why they do not solve the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and scope
+      description: Note defaults, wire or type changes, sibling repositories, migration needs, and hot-path impact.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification plan
+      description: Name the tests, fixtures, platforms, and benchmarks that would prove the outcome.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: This request contains no vulnerability details or sensitive data.
+          required: true

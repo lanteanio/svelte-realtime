@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/lanteanio/svelte-realtime/security/advisories/new
+    about: Report vulnerabilities privately. Do not put exploit details in a public issue.

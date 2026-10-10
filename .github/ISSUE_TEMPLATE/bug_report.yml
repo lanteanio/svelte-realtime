@@ -1,0 +1,60 @@
+name: Bug report
+description: Report observable incorrect behavior with a reproducible case.
+title: ''
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities here. Use the private security link in the issue chooser.
+        Remove secrets, cookies, tokens, personal data, and private deployment details.
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: What happened, including the exact error or wire-visible result.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Provide the smallest code, repository, or ordered steps that reproduce the behavior.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      placeholder: 0.6.0-next.x
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include Node, npm, OS, architecture, SvelteKit, svelte-adapter-uws, browser, proxy, cluster mode, and relevant options.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification already run
+      description: List exact commands, whether the native addon was present, and any lane you could not run.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checks
+      options:
+        - label: I reproduced this on the current supported release or explained why I could not.
+          required: true
+        - label: This report contains no vulnerability details or sensitive data.
+          required: true

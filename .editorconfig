@@ -1,0 +1,22 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Markdown hard breaks use two trailing spaces.
+[*.md]
+trim_trailing_whitespace = false
+
+# npm owns these files and preserves two-space indentation.
+[{package.json,package-lock.json}]
+indent_style = space
+indent_size = 2
+
+[scripts/check-formatting.js]
+indent_style = tab
+
+[test/formatting-contract.test.js]
+indent_style = tab

@@ -97,6 +97,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Derived authorization checks reuse an internal identity context and preserve detached recomputation contexts, avoiding per-subscriber and per-update connection-view allocation.
 
+- Contributor templates collect reproducible evidence, document private security reports, and check tracked formatting without rewriting files.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
