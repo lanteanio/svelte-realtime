@@ -2595,7 +2595,7 @@ export namespace live {
 	 *
 	 * @param sources - Topic names to watch, or a factory function that receives runtime args
 	 * @param fn - Async function that computes the derived value
-	 * @param options - Merge mode and debounce settings
+	 * @param options - Merge mode, debounce, and dynamic output scope settings
 	 *
 	 * @example
 	 * ```js
@@ -2617,7 +2617,12 @@ export namespace live {
 	function derived<T extends (...args: any[]) => any>(
 		sources: (...args: any[]) => string[],
 		fn: T,
-		options?: { merge?: string; debounce?: number }
+		options?: {
+			merge?: string;
+			debounce?: number;
+			/** Defines which callers share one output. Defaults to authenticated identity; guests are per connection. */
+			scopeKey?: (ctx: LiveContext<any>, ...args: any[]) => string | number;
+		}
 	): T;
 	function derived<T extends () => any>(
 		sources: string[],

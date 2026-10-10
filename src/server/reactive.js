@@ -10,6 +10,7 @@ import { _redactOrDrop, REDACT_DROP, _platformPublish, _noteTopicPublish } from 
 import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
 import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms-gate.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
+import { _derivedScope } from './derived-topic.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -17,9 +18,12 @@ let _cronLeaderGet = () => null;
 // Seam: the tumbling boundary scheduler lives in server.js with the rest of the
 // window registration; a window closed outside its timer re-arms through this.
 let _scheduleBoundary = (/** @type {any} */ entry, /** @type {any} */ win) => {};
+// Drain framework ownership when a derived subscriber no longer belongs to its scope.
+let _releaseStream = (ws, topic, platform, fn) => {};
 export function installReactive(seams) {
 	_cronLeaderGet = seams.cronLeader;
 	_scheduleBoundary = seams.scheduleBoundary;
+	_releaseStream = seams.releaseStream;
 }
 
 /**
@@ -637,6 +641,47 @@ function _wrapPlatformPublish(platform) {
 	}
 }
 
+/** Resolve a live context and revoke sockets whose identity/tenant scope changed. */
+function _currentDerivedContext(entry, platform, select = true) {
+	let selected;
+	const scopeKey = entry.fn.__derivedScopeKey;
+	for (const subscriber of entry.subscribers.values()) {
+		const ws = subscriber.ctx.ws || null;
+		let user, ctx, valid = false;
+		try {
+			user = ws?.getUserData ? ws.getUserData() : subscriber.ctx.user;
+			if (_resolveTenant(user) === entry.tenantId) {
+				// Default identity checks need only user/ws. Build the full public
+				// context only for a custom scope callback or the selected compute.
+				ctx = scopeKey ? _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null) : { user, ws };
+				const scope = _derivedScope(ctx, entry.args, scopeKey);
+				valid = scope[0] === entry.scope[0] && scope[1] === entry.scope[1];
+			}
+		} catch { valid = false; }
+		if (valid) {
+			if (select && !selected) selected = scopeKey ? ctx : _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null);
+			continue;
+		}
+		// Remove transport membership before another member of this scope can
+		// publish. Drain our records synchronously; deferred hooks are idempotent.
+		const count = subscriber.count;
+		try {
+			if (ws) {
+				try { _releaseStream(ws, entry.topic, platform, entry.fn); }
+				finally {
+					// The adapter may synchronously invoke the public unsubscribe
+					// hook; ownership has already been drained with our lifetime mark.
+					if (platform.unsubscribe) platform.unsubscribe(ws, entry.topic);
+					else for (let i = 0; i < count; i++) ws.unsubscribe?.(entry.topic);
+				}
+			}
+		} finally {
+			for (let i = 0; i < count; i++) _deactivateDynamicDerived(entry.fn, entry.topic, subscriber.ctx);
+		}
+	}
+	return selected;
+}
+
 /**
  * Recompute a derived stream and publish the result.
  * For dynamic instances, entry.args holds the runtime args and a ctx is built from the platform.
@@ -647,13 +692,16 @@ async function _recomputeDerived(entry, platform) {
 	if (entry.running || !entry.active) return;
 	entry.running = true;
 	entry.pending = false;
-	const generation = entry.generation;
+	let generation = entry.generation;
 	try {
 		let result;
 		if (entry.args) {
-			const _h = _getCtxHelpers(platform);
-			const ctx = _buildCtx(entry.user || null, null, platform, _h, null);
+			const ctx = _currentDerivedContext(entry, platform);
+			if (!ctx || !entry.active) return;
+			generation = entry.generation;
+			entry.pending = false;
 			result = await entry.fn(ctx, ...entry.args);
+			_currentDerivedContext(entry, platform, false);
 		} else {
 			result = await entry.fn();
 		}
@@ -729,10 +777,13 @@ export function _purgeAggregateCohorts(contributorId) {
  * Activate a dynamic derived instance for a resolved topic.
  * Wires the instance's resolved sources into _derivedBySource so publishes trigger recomputation.
  * @param {Function} fn - The derived compute function
- * @param {string} resolvedTopic - The resolved output topic (e.g. '__derived:5:org_123')
- * @param {any} [user] - The subscribing client's user data, used for ctx during recomputation
+ * @param {string} resolvedTopic - The resolved output topic
+ * @param {any} ctx - The subscribing connection context
+ * @param {any[]} [subscribeArgs] - Original stream arguments
  */
-export function _activateDynamicDerived(fn, resolvedTopic, user) {
+export function _activateDynamicDerived(fn, resolvedTopic, ctx, subscribeArgs) {
+	ctx ||= {};
+	const user = ctx.user;
 	const entry = _dynamicDerivedByFn.get(fn);
 	if (!entry) return;
 
@@ -749,6 +800,9 @@ export function _activateDynamicDerived(fn, resolvedTopic, user) {
 	const existing = entry.instances.get(resolvedTopic);
 	if (existing) {
 		existing.refCount++;
+		const subscriber = existing.subscribers.get(ctx.ws || null);
+		if (subscriber) subscriber.count++;
+		else existing.subscribers.set(ctx.ws || null, { ctx: { ws: ctx.ws, user: ctx.ws ? undefined : ctx.user }, count: 1 });
 		return;
 	}
 
@@ -759,7 +813,7 @@ export function _activateDynamicDerived(fn, resolvedTopic, user) {
 	_maybeLateActivate();
 
 	const topicArgs = /** @type {any} */ (fn).__derivedTopicArgs;
-	const args = topicArgs && topicArgs.get(_stripTenantTopic(tenantId, resolvedTopic));
+	const args = subscribeArgs || (topicArgs && topicArgs.get(_stripTenantTopic(tenantId, resolvedTopic)));
 	if (!args) return;
 
 	const rawSources = entry.sourceFactory(...args);
@@ -780,7 +834,9 @@ export function _activateDynamicDerived(fn, resolvedTopic, user) {
 		timer: null,
 		refCount: 1,
 		active: true, generation: 0, running: false, pending: false,
-		user: user || null
+		subscribers: new Map([[ctx.ws || null, { ctx: { ws: ctx.ws, user: ctx.ws ? undefined : ctx.user }, count: 1 }]]),
+		scope: _derivedScope(ctx, args, fn.__derivedScopeKey),
+		tenantId
 	};
 
 	entry.instances.set(resolvedTopic, instance);
@@ -798,14 +854,23 @@ export function _activateDynamicDerived(fn, resolvedTopic, user) {
  * Removes the instance from _derivedBySource and cleans up.
  * @param {Function} fn - The derived compute function
  * @param {string} resolvedTopic - The resolved output topic
+ * @param {any} ctx - The departing connection context
  */
-export function _deactivateDynamicDerived(fn, resolvedTopic, user) {
+export function _deactivateDynamicDerived(fn, resolvedTopic, ctx) {
+	ctx ||= {};
 	const entry = _dynamicDerivedByFn.get(fn);
 	if (!entry) return;
 
 	const instance = entry.instances.get(resolvedTopic);
 	if (!instance) return;
 
+	const subscriber = instance.subscribers.get(ctx.ws || null);
+	if (!subscriber) return;
+	if (--subscriber.count === 0) {
+		instance.subscribers.delete(ctx.ws || null);
+		instance.generation++;
+		if (instance.running) instance.pending = true;
+	}
 	instance.refCount--;
 	if (instance.refCount > 0) return;
 	instance.active = false;
@@ -831,7 +896,7 @@ export function _deactivateDynamicDerived(fn, resolvedTopic, user) {
 	// topicArgs is keyed by the un-prefixed topic the topicFn produced; strip the
 	// tenant from the wire resolvedTopic so the matching entry is removed (parity
 	// with the single-tenant cleanup). Null tenant -> no-op strip.
-	if (topicArgs) topicArgs.delete(_stripTenantTopic(_resolveTenant(user), resolvedTopic));
+	if (topicArgs) topicArgs.delete(_stripTenantTopic(instance.tenantId, resolvedTopic));
 }
 
 /**

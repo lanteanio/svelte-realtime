@@ -345,10 +345,13 @@ describe('live.tenant: dynamic derived watches its own tenant sources (H3)', () 
 		_setTenantResolver((u) => u.org);
 		const fn = live.derived((orgArg) => ['orders:' + orgArg], async () => 0);
 		__registerDerived('test/g1-derived', fn);
-		const logical = /** @type {any} */ (fn).__streamTopic('shared'); // populates topicArgs
 		const p = mockPlatform();
-		/** @type {any} */ (fn).__onSubscribe(ctxFor(p, { org: 'a' }), _tenantTopic('a', logical));
-		/** @type {any} */ (fn).__onSubscribe(ctxFor(p, { org: 'b' }), _tenantTopic('b', logical));
+		const a = ctxFor(p, { org: 'a' });
+		const b = ctxFor(p, { org: 'b' });
+		const topicA = /** @type {any} */ (fn).__streamTopic(a, 'shared');
+		const topicB = /** @type {any} */ (fn).__streamTopic(b, 'shared');
+		/** @type {any} */ (fn).__onSubscribe(a, _tenantTopic('a', topicA));
+		/** @type {any} */ (fn).__onSubscribe(b, _tenantTopic('b', topicB));
 		// Each tenant watches its OWN wire source; the un-prefixed (cross-tenant)
 		// source is never registered, so one tenant's write cannot recompute another's.
 		expect(_derivedBySource.has('@t/a/orders:shared')).toBe(true);

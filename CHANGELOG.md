@@ -83,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Keyed streams consistently ignore rows without their key and warn in development. The max item count now applies to snapshots, hydration, pagination, and live additions.
 
+- Dynamic derived streams isolate outputs by identity and arguments, support explicit `scopeKey` sharing, and recompute from active subscribers without retaining departed authorization contexts.
+
+- Errors from connection hooks are reported without stopping offline replay or other Svelte store subscribers.
+
+- Reconnect snapshots and non-array pagination responses update the authoritative stream state during optimistic mutations, so settling a mutation cannot restore stale data.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

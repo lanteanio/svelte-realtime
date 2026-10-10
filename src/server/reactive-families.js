@@ -2,6 +2,7 @@
 import { live, getPlatform, publish } from '../server.js';
 import { _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState, _rollTumblingWindow } from './reactive.js';
 import { wallEpoch } from '../shared/runtime.js';
+import { _derivedScope, _derivedTopic } from './derived-topic.js';
 import { _aggregateByTopic } from './state.js';
 import { _normalizeAggregatePrivacy } from './differential-privacy.js';
 import { _registerReplayTopic } from './replay-routing.js';
@@ -174,7 +175,7 @@ export const _flagRegister = function flag(topic, initialValue, options) {
  *
  * @param {string[] | Function} sources - Topic names to watch, or a factory that receives runtime args
  * @param {Function} fn - Async function that computes the derived value
- * @param {{ merge?: string, debounce?: number }} [options]
+ * @param {{ merge?: string, debounce?: number, scopeKey?: Function }} [options]
  * @returns {Function}
  */
 export const _derivedRegister = function derived(sources, fn, options) {
@@ -182,6 +183,11 @@ export const _derivedRegister = function derived(sources, fn, options) {
 	const merge = options?.merge || 'set';
 	const debounce = options?.debounce || 0;
 	const dynamic = typeof sources === 'function';
+	if (options?.scopeKey !== undefined && typeof options.scopeKey !== 'function') {
+		throw new Error('[svelte-realtime] live.derived() scopeKey must be a function');
+	}
+	if (!dynamic && options?.scopeKey) throw new Error('[svelte-realtime] live.derived() scopeKey requires dynamic sources');
+	/** @type {any} */ (fn).__derivedScopeKey = options?.scopeKey;
 
 	/** @type {any} */ (fn).__isDerived = true;
 	/** @type {any} */ (fn).__isStream = true;
@@ -192,27 +198,7 @@ export const _derivedRegister = function derived(sources, fn, options) {
 	if (dynamic) {
 		/** @type {any} */ (fn).__derivedDynamic = true;
 		/** @type {any} */ (fn).__derivedSourceFactory = sources;
-		/** @type {Map<string, any[]>} */
-		const topicArgs = new Map();
-		const topicFn = (...args) => {
-			const t = baseTopic + '~' + args.map(a => String(a).replace(/~/g, '')).join('~');
-			topicArgs.set(t, args);
-			if (topicArgs.size > 10000) {
-				const iter = topicArgs.keys();
-				topicArgs.delete(iter.next().value);
-			}
-			return t;
-		};
-		/** @type {any} */ (topicFn).__topicUsesCtx = false;
-		/** @type {any} */ (fn).__streamTopic = topicFn;
-		/** @type {any} */ (fn).__derivedTopicArgs = topicArgs;
-
-		/** @type {any} */ (fn).__onSubscribe = function (_ctx, resolvedTopic) {
-			_activateDynamicDerived(fn, resolvedTopic, _ctx && _ctx.user);
-		};
-		/** @type {any} */ (fn).__onUnsubscribe = function (_ctx, resolvedTopic) {
-			_deactivateDynamicDerived(fn, resolvedTopic, _ctx && _ctx.user);
-		};
+		_configureDynamicDerived(fn, baseTopic);
 	} else {
 		/** @type {any} */ (fn).__streamTopic = baseTopic;
 		/** @type {any} */ (fn).__derivedSources = sources;
@@ -220,6 +206,25 @@ export const _derivedRegister = function derived(sources, fn, options) {
 
 	return fn;
 };
+
+/** @param {any} fn @param {string} baseTopic */
+export function _configureDynamicDerived(fn, baseTopic) {
+	const topicArgs = new Map();
+	const topicFn = (ctx, ...args) => {
+		const topic = _derivedTopic(baseTopic, _derivedScope(ctx, args, fn.__derivedScopeKey), args);
+		topicArgs.set(topic, args);
+		if (topicArgs.size > 10000) topicArgs.delete(topicArgs.keys().next().value);
+		return topic;
+	};
+	topicFn.__topicUsesCtx = true;
+	fn.__streamTopic = topicFn;
+	fn.__derivedTopicArgs = topicArgs;
+	fn.__onSubscribe = (ctx, topic, args) => _activateDynamicDerived(fn, topic, ctx, args);
+	fn.__onUnsubscribe = (ctx, topic) => {
+		// A revoked scope already drained this lifetime synchronously.
+		if (ctx?._releasedDerived !== fn) _deactivateDynamicDerived(fn, topic, ctx);
+	};
+}
 
 /**
  * Create a server-side reactive side effect.

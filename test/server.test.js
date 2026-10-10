@@ -5661,9 +5661,9 @@ describe('dynamic live.derived()', () => {
 			async (ctx, orgId) => ({ count: 0 })
 		);
 		expect(typeof fn.__streamTopic).toBe('function');
-		const resolved = fn.__streamTopic('org_123');
+		const resolved = fn.__streamTopic({}, 'org_123');
 		expect(typeof resolved).toBe('string');
-		expect(resolved).toContain('org_123');
+		expect(fn.__derivedTopicArgs.get(resolved)).toEqual(['org_123']);
 	});
 
 	it('different args produce different topics', () => {
@@ -5671,8 +5671,8 @@ describe('dynamic live.derived()', () => {
 			(orgId) => [`members:${orgId}`],
 			async (ctx, orgId) => ({ count: 0 })
 		);
-		const t1 = fn.__streamTopic('org_1');
-		const t2 = fn.__streamTopic('org_2');
+		const t1 = fn.__streamTopic({}, 'org_1');
+		const t2 = fn.__streamTopic({}, 'org_2');
 		expect(t1).not.toBe(t2);
 	});
 
@@ -5681,8 +5681,8 @@ describe('dynamic live.derived()', () => {
 			(a, b) => [`src:${a}:${b}`],
 			async (ctx, a, b) => ({ a, b })
 		);
-		const t1 = fn.__streamTopic('org:123', 'feature');
-		const t2 = fn.__streamTopic('org', '123:feature');
+		const t1 = fn.__streamTopic({}, 'org:123', 'feature');
+		const t2 = fn.__streamTopic({}, 'org', '123:feature');
 		expect(t1).not.toBe(t2);
 	});
 
@@ -5722,7 +5722,7 @@ describe('dynamic derived activation', () => {
 		_activateDerived(platform);
 
 		// Resolve the topic (simulates what _callTopicFn does during RPC)
-		const resolvedTopic = fn.__streamTopic('org_42');
+		const resolvedTopic = fn.__streamTopic({}, 'org_42');
 
 		// Activate the instance (simulates __onSubscribe hook)
 		fn.__onSubscribe({}, resolvedTopic);
@@ -5755,7 +5755,7 @@ describe('dynamic derived activation', () => {
 		const platform = mockPlatform();
 		_activateDerived(platform);
 
-		const resolvedTopic = fn.__streamTopic('org_shared');
+		const resolvedTopic = fn.__streamTopic({}, 'org_shared');
 
 		// Two subscribers activate for the same topic
 		fn.__onSubscribe({}, resolvedTopic);
@@ -5799,8 +5799,8 @@ describe('dynamic derived activation', () => {
 		const platform = mockPlatform();
 		_activateDerived(platform);
 
-		const topicA = fn.__streamTopic('A');
-		const topicB = fn.__streamTopic('B');
+		const topicA = fn.__streamTopic({}, 'A');
+		const topicB = fn.__streamTopic({}, 'B');
 
 		fn.__onSubscribe({}, topicA);
 		fn.__onSubscribe({}, topicB);
@@ -5831,7 +5831,7 @@ describe('dynamic derived activation', () => {
 		const platform = mockPlatform();
 		_activateDerived(platform);
 
-		const topic = fn.__streamTopic('org_debounce');
+		const topic = fn.__streamTopic({}, 'org_debounce');
 		fn.__onSubscribe({}, topic);
 
 		// Rapid-fire 5 publishes
@@ -5858,7 +5858,7 @@ describe('dynamic derived activation', () => {
 		const platform = mockPlatform();
 		_activateDerived(platform);
 
-		const topic = fn.__streamTopic('org_cleanup');
+		const topic = fn.__streamTopic({}, 'org_cleanup');
 		fn.__onSubscribe({}, topic);
 
 		// Source topic should trigger recomputation
@@ -5916,8 +5916,8 @@ describe('derived recomputation receives subscriber user data', () => {
 		const platform = mockPlatform();
 		_activateDerived(platform);
 
-		const resolvedTopic = fn.__streamTopic('org_99');
 		const fakeUser = { id: 'user_1', organization_id: 'org_99' };
+		const resolvedTopic = fn.__streamTopic({ user: fakeUser }, 'org_99');
 		fn.__onSubscribe({ user: fakeUser }, resolvedTopic);
 
 		platform.publish('user_src:org_99', 'updated', {});
@@ -5941,7 +5941,7 @@ describe('derived recomputation receives subscriber user data', () => {
 		const platform = mockPlatform();
 		_activateDerived(platform);
 
-		const resolvedTopic = fn.__streamTopic('org_77');
+		const resolvedTopic = fn.__streamTopic({}, 'org_77');
 		fn.__onSubscribe({}, resolvedTopic);
 
 		platform.publish('nulluser_src:org_77', 'updated', {});
@@ -7698,9 +7698,9 @@ describe('derived stream handleRpc response', () => {
 		__register('test/dynamicTopic', derivedFn);
 		__registerDerived('test/dynamicTopic', derivedFn);
 
-		const resolved = derivedFn.__streamTopic('org_99');
+		const resolved = derivedFn.__streamTopic({}, 'org_99');
 		expect(resolved).toContain('test/dynamicTopic');
-		expect(resolved).toContain('org_99');
+		expect(derivedFn.__derivedTopicArgs.get(resolved)).toEqual(['org_99']);
 		expect(resolved).not.toContain('__derived');
 	});
 

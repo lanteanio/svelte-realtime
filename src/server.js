@@ -72,7 +72,7 @@ import { installRateLimit, _consumeRateLimitBucket, _resolveRegistryRateLimit, _
 export { _resetRateLimits } from './server/rate-limit.js';
 import { _setBus, _getBus } from './server/bus.js';
 import { _getCtxHelpers, _buildCtx, installCtx } from './server/ctx.js';
-import { _ensureWrap, _maybeLateActivate, _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState, _publishWindow, _warnAggregateWindowFailure, _rollTumblingWindow, _TUMBLE_LEAD_MS, installReactive } from './server/reactive.js';
+import { _ensureWrap, _maybeLateActivate, _computeAggregateState, _computeWindowState, _publishWindow, _warnAggregateWindowFailure, _rollTumblingWindow, _TUMBLE_LEAD_MS, installReactive } from './server/reactive.js';
 import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, installCrdt } from './server/crdt.js';
 import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
 import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy, _setAfterLazyResolve } from './server/lazy.js';
@@ -102,7 +102,7 @@ import { createDeadLetterStore } from './server/dead-letter.js';
 export { configureWebhooks, getDeadLetter, replayDeadLetter, createDeadLetterStore };
 import { _multiplayerRegister, installMultiplayer } from './server/multiplayer.js';
 import { _roomRegister, installRoom } from './server/room.js';
-import { _flagRegister, _derivedRegister, _effectRegister, _aggregateRegister, installReactiveFamilies } from './server/reactive-families.js';
+import { _flagRegister, _derivedRegister, _configureDynamicDerived, _effectRegister, _aggregateRegister, installReactiveFamilies } from './server/reactive-families.js';
 import { handleRpc, _runGuard, guard, __directCall, message, createMessage, installDispatch } from './server/dispatch.js';
 export { handleRpc, guard, __directCall, message, createMessage };
 installDispatch({ isLazyResolved: _isLazyResolved, trackStreamSub: _trackStreamSub, rollbackStreamSubscribe: _rollbackStreamSubscribe, registerStaleWatch: _registerStaleWatch, registerInvalidationWatch: _registerInvalidationWatch, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, resolveAllLazy: _resolveAllLazy, runWithMiddleware: _runWithMiddleware, validate: _validate, callTopicFn: _callTopicFn, applyInitTransform: _applyInitTransform });
@@ -367,6 +367,7 @@ function _copyStreamMeta(target, source) {
 	if (source.__derivedDynamic) {
 		target.__derivedDynamic = source.__derivedDynamic;
 		target.__derivedSourceFactory = source.__derivedSourceFactory;
+		target.__derivedScopeKey = source.__derivedScopeKey;
 		target.__derivedTopicArgs = source.__derivedTopicArgs;
 		target.__derivedDebounce = source.__derivedDebounce;
 	}
@@ -3158,20 +3159,8 @@ export function __registerDerived(path, fn) {
 		const sourceFactory = /** @type {any} */ (fn).__derivedSourceFactory;
 		const debounce = /** @type {any} */ (fn).__derivedDebounce || 0;
 
-		/** @type {Map<string, any[]>} */
-		const topicArgs = new Map();
-		const topicFn = (...args) => {
-			const t = path + '~' + args.map(a => String(a).replace(/~/g, '')).join('~');
-			topicArgs.set(t, args);
-			if (topicArgs.size > 10000) {
-				const iter = topicArgs.keys();
-				topicArgs.delete(iter.next().value);
-			}
-			return t;
-		};
-		/** @type {any} */ (topicFn).__topicUsesCtx = false;
-		/** @type {any} */ (fn).__streamTopic = topicFn;
-		/** @type {any} */ (fn).__derivedTopicArgs = topicArgs;
+		_configureDynamicDerived(fn, path);
+		const topicFn = /** @type {any} */ (fn).__streamTopic;
 
 		const entry = {
 			sources: null, sourceFactory, fn, topic: topicFn,
@@ -3203,7 +3192,7 @@ export function __registerDerived(path, fn) {
  * triggered externally when the platform fires publish.
  * @param {import('svelte-adapter-uws').Platform} platform
  */
-installReactive({ cronLeader: _getCronLeader, scheduleBoundary: _scheduleNextBoundary });
+installReactive({ cronLeader: _getCronLeader, scheduleBoundary: _scheduleNextBoundary, releaseStream: (ws, topic, platform, fn) => _unsubscribeStream(ws, topic, platform, fn) });
 
 export function _activateDerived(platform) {
 	state.derivedPlatform = platform;
@@ -3542,6 +3531,10 @@ export function enableSignals(ws, options) {
  * @param {{ platform: import('svelte-adapter-uws').Platform }} ctx
  */
 export function unsubscribe(ws, topic, { platform }) {
+	_unsubscribeStream(ws, topic, platform);
+}
+
+function _unsubscribeStream(ws, topic, platform, releasedDerived) {
 	const topicMap = _wsStreamOwners.get(ws);
 	if (!topicMap) return;
 	const owners = topicMap.get(topic);
@@ -3555,7 +3548,7 @@ export function unsubscribe(ws, topic, { platform }) {
 	// helper (the hook topics here are already wire topics). Both reduce to the
 	// originals with no tenant resolver configured (tenantId null, _publishWire === publish).
 	const _helpers = _getCtxHelpers(platform);
-	const unsubCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId: _resolveTenant(user), _publishWire: _helpers.publish };
+	const unsubCtx = { user, ws, platform, publish: _helpers.publish, cursor: null, tenantId: _resolveTenant(user), _publishWire: _helpers.publish, _releasedDerived: releasedDerived };
 
 	// Compute remaining subscribers AFTER this ws fully drops the topic. The
 	// hook fires N times (one per logical sub on this ws) and every firing

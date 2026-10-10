@@ -2,7 +2,7 @@ import { it, expect } from 'vitest';
 import ts from 'typescript';
 import { resolve } from 'node:path';
 
-it('accepts typed smooth snapshot options and rejects invalid values', () => {
+it('accepts typed server options and rejects invalid values', () => {
 	const file = resolve(import.meta.dirname, 'smooth-config-consumer.ts').replaceAll('\\', '/');
 	const source = `
 import { live, type SmoothConfig } from '../src/server.js';
@@ -17,6 +17,14 @@ const invalidSnapshot: SmoothConfig = { ...config, snapshot: 'true' };
 // @ts-expect-error the cadence is numeric
 const invalidCadence: SmoothConfig = { ...config, snapshotDebounceMs: '250' };
 void invalidSnapshot; void invalidCadence;
+live.derived((id: string) => [id], (ctx, id: string) => id, {
+  scopeKey: (ctx, id) => ctx.user.id + id
+});
+live.derived(() => ['source'], () => 1, { scopeKey: () => 7 });
+// @ts-expect-error scope keys must be synchronous scalars
+live.derived(() => ['source'], () => 1, { scopeKey: async () => 'scope' });
+// @ts-expect-error object scope keys are not supported
+live.derived(() => ['source'], () => 1, { scopeKey: () => ({ id: 'scope' }) });
 `;
 	const options = {
 		noEmit: true, strict: true, skipLibCheck: true,
