@@ -21,7 +21,7 @@ let _cronFormatterZone;
  * Extract the cron date parts (second, minute, hour, day, month 1-12,
  * weekday 0-6 Sunday=0) for an epoch-ms reference, formatted in the given
  * IANA time zone. Passing `undefined` for the zone uses the host system zone,
- * which preserves the historical local-time cron behavior. The numeric
+ * which preserves the historical local-time cron behavior.
  * Explicit zones use Intl; the implicit system zone uses local Date getters.
  * Both consume the supplied epoch, so a seeded clock stays reproducible.
  *
@@ -33,7 +33,7 @@ export function _cronDateParts(ms, tz) {
 	// Local getters observe process/system timezone changes without constructing
 	// an Intl formatter solely to rediscover its default zone on every tick.
 	if (tz === undefined) {
-		const date = new Date(ms);
+		const date = new Date(ms); // determinism-allow: converts the supplied epoch without reading the wall clock.
 		if (!Number.isFinite(date.valueOf())) throw new RangeError('Invalid time value');
 		return { second: date.getSeconds(), minute: date.getMinutes(), hour: date.getHours(), day: date.getDate(), month: date.getMonth() + 1, weekday: date.getDay() };
 	}
