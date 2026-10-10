@@ -394,6 +394,7 @@ export function _purgeSmoothUser(identity) {
 	let count = 0;
 	const surrogateSuffix = '\u0000' + identity;
 	for (const rec of _smoothTopics.values()) {
+		if (rec.pendingJoins?.delete(identity)) count++;
 		const ws = rec.registry.get(identity);
 		if (ws !== undefined) {
 			// Delete the RTT tracker FIRST (a measured-latency fingerprint):
@@ -465,6 +466,7 @@ export function _smoothRecord(name, cfg, platform, rt) {
 				: 1,
 			tickNo: 0,
 			pendingWire: new Map(),
+			pendingJoins: new Set(),
 			noEcho: cfg.noEcho,
 			timer: null,
 			// Cluster bookkeeping (unused on the single-instance path). `cfg` is
@@ -845,6 +847,17 @@ function _armSmoothTick(rec) {
 		rec.timer = null;
 		_smoothTick(rec);
 	}, rec.tickMs);
+}
+
+/** A new entity owes peers one update even if its first drain stays idle. */
+function _smoothEnsureJoined(rec, key, ws, initial) {
+	const created = rec.authority.get(key) === undefined;
+	const ensured = rec.authority.ensure(key, ws, initial);
+	if (created) {
+		rec.pendingJoins.add(key);
+		_armSmoothTick(rec);
+	}
+	return ensured;
 }
 
 // --- Spatial cell-topic interest helpers (cells mode) ---------------------
@@ -1362,6 +1375,7 @@ function _smoothTick(rec) {
 	// broadcast path (byte-identical). Its local subscribers reconcile by re-syncing to
 	// the new owner after a handoff.
 	if (cluster && !rec.owned) {
+		rec.pendingJoins.clear();
 		_smoothCullTick(rec);
 		return;
 	}
@@ -1376,6 +1390,18 @@ function _smoothTick(rec) {
 	// in the catalog taken below, so they broadcast, ring-record, and cull
 	// atomically with the drain.
 	const worldRun = rec.world !== null ? rec.world.run(updates, acks, t) : null;
+	if (rec.pendingJoins.size > 0) {
+		const changed = new Set(updates.map(update => update.key));
+		for (const key of rec.pendingJoins) {
+			const entity = rec.authority.get(key);
+			if (entity === undefined || changed.has(key)) continue;
+			// The sync snapshot is the joiner's own copy, so use the same echo
+			// suppression as acknowledged commands. Read the current authority:
+			// a departed joiner must not return, and a moved one must not rewind.
+			updates.push({ key, state: entity.state, ws: entity.ws, commanded: true });
+		}
+		rec.pendingJoins.clear();
+	}
 	// Broadcast cadence gate (broadcastHz): the simulation keeps ticking at
 	// tickMs - commands drain, acknowledgements return, events fire, the
 	// lag-compensation ring records - but continuous entity updates go on the
@@ -1858,7 +1884,7 @@ function _ensureSmoothCluster(smooth) {
 			const surrogate = _smoothSurrogate(rec, originInstance, identity);
 			let existing = rec.authority.get(identity);
 			if (existing === undefined) {
-				rec.authority.ensure(identity, surrogate, _smoothSeed(rec, identity));
+				_smoothEnsureJoined(rec, identity, surrogate, _smoothSeed(rec, identity));
 				existing = rec.authority.get(identity);
 			} else if (existing.ws !== surrogate) {
 				// A newer sync re-owns this identity from another connection; a
@@ -1881,7 +1907,7 @@ function _ensureSmoothCluster(smooth) {
 			const rec = _smoothRecByWire(wireTopic);
 			if (!rec || !rec.owned) return;
 			const surrogate = _smoothSurrogate(rec, originInstance, identity);
-			const ensured = rec.authority.ensure(identity, surrogate, _smoothSeed(rec, identity));
+			const ensured = _smoothEnsureJoined(rec, identity, surrogate, _smoothSeed(rec, identity));
 			if (typeof smooth.sendSyncReply === 'function') {
 				smooth.sendSyncReply(wireTopic, corr, originInstance, { ack: ensured.lastAckedId, states: rec.authority.catalog() });
 			}
@@ -3082,18 +3108,15 @@ export const _smoothRegister = function smooth(config) {
 					// declared initial - identical to single-instance when snapshot is off).
 					const initial = _smoothSeed(rec, key, false);
 					const states = _smoothSyncRoster(rec, key, initial);
-					const ensured = rec.authority.ensure(key, ctx.ws, initial);
+					const ensured = _smoothEnsureJoined(rec, key, ctx.ws, initial);
 					if (rec.pendingSnapshot !== null) rec.pendingSnapshot.delete(key);
 					if (ctx.ws) rec.registry.set(key, ctx.ws);
 					// Cells mode: place the joiner's cell block now (from its just-ensured
 					// entity, or a retained reported center) - without this an owner-local
 					// joiner received nothing until its entity first moved.
 					if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
-					// A server-driven topic (onTick) exists only because the tick runs, so a
-					// client that subscribes and watches without sending a command first must
-					// still start the tick - otherwise it sees zero server entities. Idempotent
-					// (a pending timer is a no-op) and gated on an onTick world so non-onTick
-					// topics stay byte-identical (they legitimately arm on the first command).
+					// New entities already arm their announcement. An existing entity may
+					// rejoin an idle world, which must resume even without a new command.
 					if (rec.world !== null) _armSmoothTick(rec);
 					if (join) join.retained = true;
 					return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states, ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
@@ -3146,7 +3169,7 @@ export const _smoothRegister = function smooth(config) {
 			}
 			const initial = _smoothResolveInitial(cfg, key);
 			const states = _smoothSyncRoster(rec, key, initial);
-			const ensured = rec.authority.ensure(key, ctx.ws, initial);
+			const ensured = _smoothEnsureJoined(rec, key, ctx.ws, initial);
 			// Interest topics need the identity -> socket map even single-instance (the
 			// cluster path keeps it for ack routing; interest reuses it as the
 			// per-subscriber relevancy and delivery set; cells mode reuses it to follow a
@@ -3158,11 +3181,8 @@ export const _smoothRegister = function smooth(config) {
 			// full catalog below is the safe over-deliver on join; ongoing deltas are
 			// cell-scoped).
 			if (rec.cells && ctx.ws) _placeCellSubscriber(rec, key, ctx.ws);
-			// A server-driven topic (onTick) exists only because the tick runs, so a
-			// client that subscribes and watches without sending a command first must
-			// still start the tick - otherwise it sees zero server entities. Idempotent
-			// (a pending timer is a no-op) and gated on an onTick world so non-onTick
-			// topics stay byte-identical (they legitimately arm on the first command).
+			// New entities already arm their announcement. An existing entity may
+			// rejoin an idle world, which must resume even without a new command.
 			if (rec.world !== null) _armSmoothTick(rec);
 			if (join) join.retained = true;
 			return {
@@ -3243,7 +3263,7 @@ export const _smoothRegister = function smooth(config) {
 		}
 		const existing = rec.authority.get(key);
 		if (existing === undefined) {
-			rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
+			_smoothEnsureJoined(rec, key, ctx.ws, _smoothSeed(rec, key));
 			// Owner (or any interest / cells topic): register this socket so its ack,
 			// author exclusion, and the interest relevancy cull (or cells own-entity
 			// follow) can resolve it by identity.

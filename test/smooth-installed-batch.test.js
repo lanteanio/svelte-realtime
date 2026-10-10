@@ -131,7 +131,9 @@ describe('smooth wire delivery with adapter ' + manifest.version, () => {
 		const [handle, tick] = ticks.entries().next().value;
 		ticks.delete(handle);
 		tick();
-		const expectedCount = interest ? 3 : 2;
+		// Two commanded entities plus the other idle observer's announcement;
+		// each observer still excludes its own entity from the batch.
+		const expectedCount = 3;
 		await until(() => updates(json).length === expectedCount && binary.frames.length === (batched ? 1 : expectedCount));
 		const dict = new SmoothDecodeDict();
 		const decoded = binary.frames.map(bytes => {

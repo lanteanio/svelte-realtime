@@ -27,7 +27,7 @@ import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.j
 import svelteRealtime from '../src/vite.js';
 // Internal record map, for asserting a topic record is reclaimed (same module
 // instance server.js uses - ESM dedupes the import).
-import { _smoothTopics, _resetSmoothFanoutWarning } from '../src/server/smooth.js';
+import { _smoothTopics, _resetSmoothFanoutWarning, _purgeSmoothUser } from '../src/server/smooth.js';
 
 const textEncoder = new TextEncoder();
 const toArrayBuffer = (obj) => textEncoder.encode(JSON.stringify(obj)).buffer;
@@ -49,7 +49,7 @@ async function call(ws, platform, path, args) {
  */
 function fakeRuntime() {
 	const entities = new Map();
-	const calls = { ensure: [], enqueue: [], drains: 0, removeWs: 0, inject: [], set: [] };
+	const calls = { ensure: [], enqueue: [], drains: 0, lastDrainAt: 0, removeWs: 0, inject: [], set: [] };
 	let drainQueue = [];
 	const authority = {
 		ensure(key, ws, initial, opts) {
@@ -88,6 +88,7 @@ function fakeRuntime() {
 		},
 		drain() {
 			calls.drains++;
+			calls.lastDrainAt = Date.now();
 			const result = drainQueue.length > 0 ? drainQueue.shift() : { updates: [], acks: [], events: [], idle: true };
 			// The real authority advances each entity's state during the drain, so a
 			// post-drain catalog() reflects this tick's updates. Mirror that here so the
@@ -468,6 +469,23 @@ describe('live.smooth commands and the authoritative tick', () => {
 		await call(ws, platform, name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 1 } }]]);
 		await vi.advanceTimersByTimeAsync(20);
 		expect(platform.wirePublished[0].options?.excludeWs).toBeUndefined();
+	});
+
+	it('does not announce a join that departed or was purged before its tick', async () => {
+		const { name } = declareShape({ tickMs: 20 });
+		const platform = wirePlatform();
+		await call(mockWs({ id: 'viewer' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(20);
+		platform.wirePublished.length = 0;
+		const departed = mockWs({ id: 'departed' });
+		await call(departed, platform, name + '/shape/__smooth/sync', ['r1']);
+		await close(departed, { platform });
+		await call(mockWs({ id: 'purged' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		expect(_smoothTopics.get('shape:r1').pendingJoins.has('purged')).toBe(true);
+		_purgeSmoothUser('purged');
+		expect(_smoothTopics.get('shape:r1').pendingJoins.has('purged')).toBe(false);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(platform.wirePublished.filter(p => p.event === 'update')).toEqual([]);
 	});
 
 	it('excludes only commanded updates - onMissing motion reaches its owner', async () => {
@@ -2424,14 +2442,15 @@ describe('live.smooth onTick (the server world hook)', () => {
 		expect(spawn && spawn.data.data).toEqual({ x: 1, y: 2 });
 	});
 
-	it('does not arm the tick on a bare subscribe when there is no onTick world (client-authority unchanged)', async () => {
+	it('announces an idle join in one tick then rests without an onTick world', async () => {
 		const { name } = declareShape({ tickMs: 20 });
 		const platform = wirePlatform();
 		const ws1 = mockWs({ id: 'u1' });
 		await call(ws1, platform, name + '/shape/__smooth/sync', ['r1']);
 		await vi.advanceTimersByTimeAsync(60);
-		// A client-authority topic still waits for its first command before ticking.
-		expect(rt.calls.drains).toBe(0);
+		expect(rt.calls.drains).toBe(1);
+		expect(platform.wirePublished.filter(p => p.event === 'update').map(p => p.data.key)).toEqual(['u1']);
+		expect(_smoothTopics.get('shape:r1').timer).toBeNull();
 	});
 
 	it('arms the tick on a bare subscribe in the cluster owned path too', async () => {
@@ -2825,6 +2844,7 @@ describe('live.smooth interest (area-of-interest culling)', () => {
 		const { name } = declareInterest();
 		const platform = wirePlatform();
 		await call(mockWs({ id: 'A' }), platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(20); // settle the join announcement
 		const rec = _smoothTopics.get('shape:r1');
 		// X never synced, so it holds no registry membership: its report must not
 		// dirty relevancy nor arm a tick (which would force a full O(S x N)
@@ -2983,7 +3003,7 @@ describe('live.smooth lag-compensated shoot', () => {
 		await call(ws, platform, cmdPath, ['r1', [{ id: 1, cmd: { step: 1 } }]]);
 		rt.queueDrain({ updates: [{ key, state, ws, commanded: true }], acks: [], idle: false });
 		await vi.advanceTimersByTimeAsync(20);
-		return Date.now();
+		return rt.calls.lastDrainAt;
 	}
 
 	function paths(name) {
@@ -3734,7 +3754,7 @@ describe('live.smooth lag-compensated shoot with cell-topic interest (cells mode
 		await call(ws, platform, cmdPath, ['r1', [{ id: 1, cmd: { step: 1 } }]]);
 		rt.queueDrain({ updates: [{ key, state, ws, commanded: true }], acks: [], idle: false });
 		await vi.advanceTimersByTimeAsync(20);
-		return Date.now();
+		return rt.calls.lastDrainAt;
 	}
 
 	function paths(name) {

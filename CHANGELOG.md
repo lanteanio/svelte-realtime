@@ -57,6 +57,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- New smooth entities are announced to peers even when they remain idle, including subscribers on other cluster instances. Repeated syncs do not repeat the announcement.
+
 - Cron calendar matching in the system timezone now uses local date fields, preserving timezone changes and daylight-saving behavior while avoiding per-tick formatter allocation.
 
 - Source and IDE hook examples include `close` and `unsubscribe`, preserving subscription cleanup when copied into application hooks.

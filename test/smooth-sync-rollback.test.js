@@ -288,14 +288,20 @@ describe('failed smooth sync against the installed adapter', () => {
 
 	it('packs each visible state once before accepting a single-instance sync', async () => {
 		let calls = 0;
+		let callsAtReply;
+		const send = server.platform.send.bind(server.platform);
+		server.platform.send = (ws, topic, event, data) => {
+			if (topic === '__rpc') callsAtReply = calls;
+			return send(ws, topic, event, data);
+		};
 		const name = shape({ x: 0, y: 0 }, { wire: { state: {
-			pack(state) { if (++calls > 1) throw Error('duplicate packing'); return state; }, unpack: state => state
+			pack(state) { calls++; return state; }, unpack: state => state
 		} } });
 		const peer = await connect();
 		const result = await rpc(peer, name + '/sync');
 		expect(result.ok).toBe(true);
 		expect(result.data.states).toHaveLength(1);
-		expect(calls).toBe(1);
+		expect(callsAtReply).toBe(1);
 	});
 
 	for (const failure of ['synchronous throw', 'async rejection', 'throwing then getter']) {

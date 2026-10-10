@@ -154,9 +154,9 @@ describeUWS('live.smooth cell-topic interest against a real adapter', () => {
 		let cid = 0;
 		await until(() => {
 			author.rpc(name + '/shape/__smooth/command', ['r1', [{ id: ++cid, cmd: { dx: 1, dy: 0 } }]]);
-			return jsonPeer.cellUpdates(cellTopic, youA).length >= 1;
+			return jsonPeer.cellUpdates(cellTopic, youA).some(frame => frame.data.data.x > 0);
 		}, 3000, 40);
-		expect(jsonPeer.cellUpdates(cellTopic, youA)[0].data.data.x).toBeGreaterThan(0);
+		expect(jsonPeer.cellUpdates(cellTopic, youA).some(frame => frame.data.data.x > 0)).toBe(true);
 
 		// The capability peer receives the same publishes as native binary cohort
 		// frames (0x03) - the shared fan-out, not a per-subscriber walk.
@@ -183,13 +183,16 @@ describeUWS('live.smooth cell-topic interest against a real adapter', () => {
 		// block around the far center).
 		farPeer.rpc(name + '/shape/__smooth/center', ['r1', { x: 10000, y: 10000 }]);
 		await sleep(100); // the center report re-subscribes the socket's cell block
+		// Initial announcements arrived while this peer still viewed the near cell.
+		farPeer.frames.json.length = 0;
+		farPeer.frames.binary.length = 0;
 
 		// Positive control: the author is on its own cell "0,0" and DOES receive the
 		// update there - so the pipeline works and the far peer's zero below is real.
 		let cid = 0;
 		await until(() => {
 			author.rpc(name + '/shape/__smooth/command', ['r1', [{ id: ++cid, cmd: { dx: 1, dy: 0 } }]]);
-			return author.cellUpdates(cellTopic, youA).length >= 1;
+			return author.cellUpdates(cellTopic, youA).some(frame => frame.data.data.x > 0);
 		}, 3000, 40);
 		await sleep(80); // let any (erroneous) far-peer delivery arrive before asserting zero
 		// The far peer, no longer subscribed to "0,0", received no update there.

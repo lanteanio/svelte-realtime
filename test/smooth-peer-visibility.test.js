@@ -27,6 +27,9 @@ try {
 }
 const describeUWS = uWS ? describe : describe.skip;
 const { createTestServer } = uWS ? await import('svelte-adapter-uws/testing') : {};
+const smoothUrl = new URL(import.meta.resolve('svelte-adapter-uws/plugins/smooth'));
+const { parseBinaryFrame } = await import(new URL('../../runtime/wire.js', smoothUrl));
+const { decodeSmooth, SmoothDecodeDict } = await import(new URL('./codec.js', smoothUrl));
 
 // The real authority + binary codec from the installed adapter, in the shape
 // _setSmoothRuntime expects (so live.smooth() runs against the genuine wire).
@@ -66,12 +69,18 @@ function declareShape(extra = {}) {
 async function connectClient(url, caps) {
 	const ws = new WebSocket(url);
 	ws.binaryType = 'arraybuffer';
-	const frames = { json: [], binary: [] };
+	const frames = { json: [], binary: [], decoded: [] };
+	const dictionary = new SmoothDecodeDict();
 	ws.addEventListener('message', (e) => {
 		if (typeof e.data === 'string') {
 			try { frames.json.push(JSON.parse(e.data)); } catch { /* ignore non-JSON */ }
 		} else {
-			frames.binary.push(new Uint8Array(e.data));
+			const bytes = new Uint8Array(e.data);
+			frames.binary.push(bytes);
+			const frame = parseBinaryFrame(bytes);
+			const decoded = frame && decodeSmooth(frame.payload, dictionary, frame.schemaVersion);
+			if (decoded?.event === 'update') frames.decoded.push(decoded.data);
+			else if (decoded?.event === 'update-batch') frames.decoded.push(...decoded.data.updates);
 		}
 	});
 	await new Promise((resolve, reject) => {
@@ -153,26 +162,25 @@ describeUWS('live.smooth peer visibility against a real adapter', () => {
 		author.rpc(name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 5, dy: 0 } }]]);
 
 		// The plain peer receives the author's update on the wire topic, as JSON.
-		// The same single `data` object feeds both wire formats, so this JSON
-		// content match is the content check for both peers; binary-encoding
-		// fidelity is the adapter's own smooth-codec suite.
-		await until(() => jsonPeer.updates(wireTopic).length >= 1);
-		const upd = jsonPeer.updates(wireTopic)[0];
+		// Match the commanded value so an earlier idle announcement cannot
+		// satisfy either the JSON or the decoded binary assertion.
+		await until(() => jsonPeer.updates(wireTopic).some(m => m.data.key === youA && m.data.data.x === 5));
+		const upd = jsonPeer.updates(wireTopic).find(m => m.data.key === youA && m.data.data.x === 5);
 		expect(upd.data.key).toBe(youA);
 		expect(upd.data.data.x).toBe(5);
 
 		// The capability peer receives the binary fan-out for the same publish: a
 		// real 0x03 topic frame, proving the binary egress (the publishWire codec
 		// path) reached the capable subscriber.
-		await until(() => binPeer.frames.binary.length >= 1);
+		await until(() => binPeer.frames.decoded.some(update => update.key === youA && update.data.x === 5));
 		expect(binPeer.frames.binary[0][0]).toBe(0x03);
 
 		// The author is excluded from its own echo: it gets its acknowledgement but
-		// no update at all (the broadcast publishes only the one moved entity, with
-		// the author's own socket excluded). The shape declares no onMissing, so the
+		// no update of its own entity (peer join announcements are separate).
+		// The shape declares no onMissing, so the
 		// entity emits exactly one commanded update and no server-motion echo.
 		await until(() => author.acks(wireTopic).length >= 1);
-		expect(author.updates(wireTopic).length).toBe(0);
+		expect(author.updates(wireTopic).filter(m => m.data.key === youA)).toHaveLength(0);
 	});
 
 	it('delivers an in-range update per subscriber with interest on, and excludes the author', async () => {
@@ -201,12 +209,12 @@ describeUWS('live.smooth peer visibility against a real adapter', () => {
 		author.rpc(name + '/shape/__smooth/command', ['r1', [{ id: 1, cmd: { dx: 5, dy: 0 } }]]);
 
 		// The plain peer is delivered the author's moved entity (per-subscriber).
-		await until(() => jsonPeer.updates(wireTopic).some((m) => m.data.key === youA));
-		const upd = jsonPeer.updates(wireTopic).find((m) => m.data.key === youA);
+		await until(() => jsonPeer.updates(wireTopic).some((m) => m.data.key === youA && m.data.data.x === 5));
+		const upd = jsonPeer.updates(wireTopic).find((m) => m.data.key === youA && m.data.data.x === 5);
 		expect(upd.data.data.x).toBe(5);
 
 		// The capability peer is delivered it as a binary frame (the sendWire path).
-		await until(() => binPeer.frames.binary.length >= 1);
+		await until(() => binPeer.frames.decoded.some(update => update.key === youA && update.data.x === 5));
 		expect(binPeer.frames.binary[0][0]).toBe(0x03);
 
 		// The author's own entity is suppressed for the author (noEcho own-key
