@@ -727,8 +727,9 @@ export function configure(config: {
 		 */
 		persist?: boolean | OfflineStore;
 		/**
-		 * Scope for the persisted queue (pass your user id so one browser
-		 * profile never replays user A's mutations as user B after re-login).
+		 * Opaque account scope for the persisted queue. Changing it or the store
+		 * rejects former callers with OFFLINE_SCOPE_CHANGED, retains their stored
+		 * rows, and restores the new scope before storing new calls.
 		 * @default 'default'
 		 */
 		persistKey?: string;

@@ -977,7 +977,7 @@ describe('offline queue - a call queued while the restore runs', () => {
 		expect(storedKeys(store)).toEqual([row(7)]);
 	});
 
-	it('a restore that cannot read the stored queue stores nothing for the rest of the page', async () => {
+	it('a failed restore retry starts a fresh scope and rejects the old in-memory queue', async () => {
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		try {
 			const { store, release } = gatedStore({ fail: true });
@@ -997,7 +997,7 @@ describe('offline queue - a call queued while the restore runs', () => {
 
 			simulateStatus('failed');
 			await flush();
-			expect(during.error).toMatchObject({ code: 'CONNECTION_CLOSED' });
+			expect(during.error).toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
 			expect(after.error).toMatchObject({ code: 'CONNECTION_CLOSED' });
 			expect(store.ops).toEqual([]);
 		} finally {
@@ -3053,4 +3053,170 @@ describe('connection observer failures', () => {
 			log.mockRestore();
 		}
 	});
+});
+
+
+describe('offline queue scope changes', () => {
+	it('restores the new key and numbers new calls past its stored rows', async () => {
+		const store = fakeStore(Object.fromEntries([seedEntry('B', 7, 'stored/B', [], 'b')]));
+		const [old] = await goOfflineAndQueue({ persist: store, persistKey: 'A' }, [['queued/A', [1]]]);
+		mod.configure({ offline: { queue: true, persist: store, persistKey: 'B' } });
+		await expect(old).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+		const fresh = mod.__rpc('new/B')(); fresh.catch(() => {});
+		await flush();
+		expect(storedKeys(store)).toEqual(['q:A:000000000001', 'q:B:000000000007', 'q:B:000000000008']);
+		simulateStatus('open'); await flush(); await respondAll(() => ({ ok: true, data: 'ok' }));
+		await expect(fresh).resolves.toBe('ok');
+		expect(replayedPaths()).toEqual(['stored/B', 'new/B']);
+		expect(storedKeys(store)).toEqual(['q:A:000000000001']);
+		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(8);
+	});
+
+	it('ignores an old restore that finishes after switching key and checkpoint', async () => {
+		const store = fakeStore(Object.fromEntries([
+			seedEntry('A', 90, 'stored/A', [], 'a'), seedEntry('B', 5, 'stored/B', [], 'b'),
+			['c:A', { lastUploadedSeq: 99 }], ['c:B', { lastUploadedSeq: 7 }]
+		]));
+		const read = store.getAll.bind(store); let finish; const scanned = [];
+		store.getAll = (prefix) => { scanned.push(prefix); return prefix === 'q:A:' ? new Promise(resolve => { finish = async () => resolve(await read(prefix)); }) : read(prefix); };
+		const [old] = await goOfflineAndQueue({ persist: store, persistKey: 'A' }, [['waiting/A', []]]);
+		mod.configure({ offline: { queue: true, persist: store, persistKey: 'B' } });
+		await expect(old).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+		const fresh = mod.__rpc('new/B')(); fresh.catch(() => {});
+		await flush(); await finish(); await flush();
+		expect(scanned).not.toContain('c:A');
+		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(7);
+		expect(store.map.get('q:B:000000000008')?.path).toBe('new/B');
+		simulateStatus('open'); await flush(); await respondAll(() => ({ ok: true, data: 'ok' }));
+		expect(replayedPaths()).toEqual(['stored/B', 'new/B']);
+	});
+
+	it('allows a new scope to drain while a former scope RPC is in flight', async () => {
+		const store = fakeStore(Object.fromEntries([seedEntry('B', 1, 'stored/B', [], 'b')]));
+		const [first, second] = await goOfflineAndQueue({ persist: store, persistKey: 'A' }, [['old/first', []], ['old/second', []]]);
+		simulateStatus('open'); await until(() => sentCalls().length === 1);
+		const oldFrame = sentCalls()[0];
+		mod.configure({ offline: { queue: true, persist: store, persistKey: 'B' } });
+		await expect(first).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+		await expect(second).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+		await until(() => sentCalls().length === 2);
+		expect(replayedPaths()).toEqual(['old/first', 'stored/B']);
+		simulateRpcResponse(oldFrame.id, { ok: true, data: 'old applied' }); await flush();
+		expect(store.map.has('q:A:000000000001')).toBe(false);
+		expect(store.map.has('q:B:000000000001')).toBe(true);
+		expect(store.map.has('q:A:000000000002')).toBe(true);
+		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(0);
+		simulateRpcResponse(sentCalls()[1].id, { ok: true, data: 'new applied' }); await flush();
+		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(1);
+	});
+
+	it('treats enabling persistence as a queue switch without seq collisions', async () => {
+		const [old] = await goOfflineAndQueue({}, [['memory/old', []]]);
+		const store = fakeStore(Object.fromEntries([seedEntry('default', 1, 'stored/new', [], 'new')]));
+		mod.configure({ offline: { queue: true, persist: store } });
+		await expect(old).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+		const current = mod.__rpc('queued/new')(); current.catch(() => {}); await flush();
+		expect(store.map.get('q:default:000000000001')?.path).toBe('stored/new');
+		expect(store.map.get('q:default:000000000002')?.path).toBe('queued/new');
+		simulateStatus('open'); await flush(); await respondAll(() => ({ ok: true, data: null }));
+		expect(replayedPaths()).toEqual(['stored/new', 'queued/new']);
+	});
+
+	it('retries a failed scan when configured again with the same store', async () => {
+		const store = fakeStore(Object.fromEntries([seedEntry('default', 4, 'stored/retry', [], 'retry')]));
+		const read = store.getAll.bind(store); let fails = true;
+		store.getAll = async (prefix) => { if (fails) throw new Error('temporarily unavailable'); return read(prefix); };
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const [old] = await goOfflineAndQueue({ persist: store }, [['memory/failed', []]]); await flush();
+			fails = false; mod.configure({ offline: { queue: true, persist: store } });
+			await expect(old).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+			const current = mod.__rpc('queued/retry')(); current.catch(() => {}); await flush();
+			expect(store.map.get('q:default:000000000005')?.path).toBe('queued/retry');
+			simulateStatus('open'); await flush(); await respondAll(() => ({ ok: true, data: null }));
+			expect(replayedPaths()).toEqual(['stored/retry', 'queued/retry']);
+		} finally { warn.mockRestore(); }
+	});
+
+	it('changing only the store starts its own restore and retains old stored data', async () => {
+		const oldStore = fakeStore(); const nextStore = fakeStore(Object.fromEntries([seedEntry('same', 9, 'next/stored', [], 'next')]));
+		const [old] = await goOfflineAndQueue({ persist: oldStore, persistKey: 'same' }, [['old/store', []]]);
+		mod.configure({ offline: { queue: true, persist: nextStore, persistKey: 'same' } });
+		await expect(old).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+		await flush(); simulateStatus('open'); await flush(); await respondAll(() => ({ ok: true, data: null }));
+		expect(replayedPaths()).toEqual(['next/stored']);
+		expect(storedKeys(oldStore)).toEqual(['q:same:000000000001']);
+	});
+});
+
+
+describe('offline scope re-entry', () => {
+	it('waits for a prior lifetime write before scanning the same scope again', async () => {
+		const store = fakeStore(); const put = store.put.bind(store); let finish;
+		store.put = (key, value) => key === 'q:A:000000000001' && !finish
+			? new Promise(resolve => { finish = async () => { await put(key, value); resolve(); }; }) : put(key, value);
+		const [old] = await goOfflineAndQueue({ persist: store, persistKey: 'A' }, [['old/write', []]]);
+		await until(() => !!finish);
+		mod.configure({ offline: { queue: true, persist: store, persistKey: 'B' } });
+		mod.configure({ offline: { queue: true, persist: store, persistKey: 'A' } });
+		await expect(old).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+		const fresh = mod.__rpc('new/write')(); fresh.catch(() => {});
+		await finish(); await flush();
+		expect(store.map.get('q:A:000000000001')?.path).toBe('old/write');
+		expect(store.map.get('q:A:000000000002')?.path).toBe('new/write');
+		simulateStatus('open'); await flush(); await respondAll(() => ({ ok: true, data: null }));
+		expect(replayedPaths()).toEqual(['old/write', 'new/write']);
+	});
+
+	it('keeps queued callers when the same persistence configuration is repeated', async () => {
+		const [queued] = await goOfflineAndQueue({ persist: true, persistKey: 'stable' }, [['same/config', []]]);
+		mod.configure({ offline: { queue: true, persist: true, persistKey: 'stable' } });
+		simulateStatus('open'); await flush(); await respondAll(() => ({ ok: true, data: 'ok' }));
+		await expect(queued).resolves.toBe('ok');
+	});
+});
+
+
+it('a late original-scope reply cannot regress its re-entered checkpoint', async () => {
+	const store = fakeStore();
+	const [old] = await goOfflineAndQueue({ persist: store, persistKey: 'A' }, [['old/checkpoint', []]]);
+	simulateStatus('open'); await until(() => sentCalls().length === 1); const oldFrame = sentCalls()[0];
+	mod.configure({ offline: { queue: true, persist: store, persistKey: 'B' } });
+	await expect(old).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+	store.map.set('q:A:000000000007', seedEntry('A', 7, 'new/checkpoint', [], 'new')[1]);
+	mod.configure({ offline: { queue: true, persist: store, persistKey: 'A', replay: 'concurrent' } });
+	await until(() => sentCalls().length >= 3);
+	expect(replayedPaths()).toEqual(['old/checkpoint', 'old/checkpoint', 'new/checkpoint']);
+	for (const frame of sentCalls().slice(1)) simulateRpcResponse(frame.id, { ok: true, data: null });
+	await flush(); expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(7);
+	simulateRpcResponse(oldFrame.id, { ok: true, data: 'late' }); await flush();
+	expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(7);
+	expect(store.map.get('c:A')?.lastUploadedSeq).toBe(7);
+});
+
+
+it('a pending-count callback queues into the new scope only after its restore', async () => {
+	const store = fakeStore(Object.fromEntries([seedEntry('B', 5, 'B/stored', [], 'b')]));
+	const [old] = await goOfflineAndQueue({ persist: store, persistKey: 'A' }, [['A/old', []]]);
+	let armed = false, fresh;
+	const stop = mod.pendingMutations.subscribe((count) => {
+		if (armed && count === 0) { armed = false; fresh = mod.__rpc('B/from-count')(); fresh.catch(() => {}); }
+	});
+	armed = true; mod.configure({ offline: { queue: true, persist: store, persistKey: 'B' } });
+	await expect(old).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' }); await flush();
+	expect(store.map.get('q:B:000000000006')?.path).toBe('B/from-count');
+	stop(); simulateStatus('open'); await flush(); await respondAll(() => ({ ok: true, data: null }));
+	await expect(fresh).resolves.toBeNull();
+});
+
+it('a beforeReplay scope switch cannot send old work or empty the new queue', async () => {
+	const store = fakeStore(Object.fromEntries([seedEntry('B', 4, 'B/stored', [], 'b')]));
+	const [old] = await goOfflineAndQueue({ persist: store, persistKey: 'A', beforeReplay() {
+		mod.configure({ offline: { queue: true, persist: store, persistKey: 'B' } }); return true;
+	} }, [['A/old', []]]);
+	simulateStatus('open'); await flush();
+	await expect(old).rejects.toMatchObject({ code: 'OFFLINE_SCOPE_CHANGED' });
+	await respondAll(() => ({ ok: true, data: null }));
+	expect(replayedPaths()).toEqual(['B/stored']);
+	expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(4);
 });

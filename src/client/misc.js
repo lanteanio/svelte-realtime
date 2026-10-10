@@ -5,7 +5,7 @@ import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped } from './offline.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, restored?: boolean }} OfflineEntry
@@ -16,8 +16,8 @@ const _CONFLICT_RESOLUTIONS = new Set(['lww', 'server-win', 'custom']);
 /** @type {boolean} */
 let _configListenerAttached = false;
 
-/** @type {boolean} */
-let _replayingQueue = false;
+/** The active drain belongs to one queue scope. Older in-flight RPCs settle separately. */
+let _replayingScope = null;
 
 /**
  * Configure client-side connection hooks, RPC timeout, stream resume
@@ -59,7 +59,7 @@ let _replayingQueue = false;
  * The `offline` object grows the durable-queue options: `persist` (true =
  * IndexedDB in a browser, in-memory elsewhere; or a custom store) makes
  * queued mutations survive a reload, `persistKey` scopes the persisted queue
- * (pass your user id so one browser profile never replays user A's mutations
+ * (use an opaque account key so one browser profile never replays user A's mutations
  * as user B), and `conflictResolution` + `onConflict` decide what a REPLAYED
  * mutation does when the server rejects it with `LiveError('CONFLICT')`:
  * `'server-win'` (default) drops it, `'lww'` re-issues it once (the local
@@ -70,6 +70,7 @@ let _replayingQueue = false;
  * @param {{ url?: string, auth?: boolean | string, onConnect?: () => void, onDisconnect?: () => void, timeout?: number, resumeGraceMs?: number, resumeMaxCursorAgeMs?: number, volatileBackpressureBytes?: number, publishRateHint?: boolean, protocolVersion?: number, offline?: { queue?: boolean, maxQueue?: number, maxAge?: number, replay?: 'sequential' | 'concurrent' | 'batch' | ((queue: OfflineEntry[]) => Array<OfflineEntry | null>), beforeReplay?: (call: { path: string, args: any[], queuedAt: number }) => boolean, onReplayError?: (call: { path: string, args: any[], queuedAt: number }, error: any) => void, persist?: boolean | import('./offline-store.js').OfflineStore, persistKey?: string, conflictResolution?: 'lww' | 'server-win' | 'custom', onConflict?: (call: { path: string, args: any[], queuedAt: number }, error: any) => any } }} config
  */
 export function configure(config) {
+	const previousScope = _offlineScope();
 	clientState.config = config;
 
 	if (config.offline) {
@@ -145,6 +146,7 @@ export function configure(config) {
 			}
 		});
 	}
+	if (previousScope !== _offlineScope() && (_replayingScope || previousScope.configuredStore)) void _drainOfflineQueue();
 }
 
 /** Call an app observer without interrupting the connection status store. */
@@ -174,17 +176,21 @@ function _callConnectionHook(name) {
  * settled back in the queue for the next reconnect.
  */
 async function _drainOfflineQueue() {
-	if (_replayingQueue) return;
-	_replayingQueue = true;
+	const scope = _offlineScope();
+	if (_replayingScope === scope) return;
+	_replayingScope = scope;
+	_startOfflineDrain(scope);
 	let again = false;
 	try {
 		await _offlineReady();
+		if (scope !== _offlineScope()) return;
 		// Gone again while the restore was read, or the socket is being
 		// replaced (a replay is sent only on an open socket): the next open
 		// drains.
 		if (clientState.isOffline || clientState.terminated || !clientState.socketUp) return;
 		if (_offlineQueue.length === 0) return;
 		_setUploading(true);
+		if (scope !== _offlineScope()) return;
 
 		const offlineOpts = clientState.config.offline;
 		const beforeReplay = offlineOpts?.beforeReplay;
@@ -202,6 +208,7 @@ async function _drainOfflineQueue() {
 		let clean = batch.clean;
 		let lowestFailedSeq = batch.failedSeq;
 		_beginBatch();
+		if (scope !== _offlineScope()) return;
 		// The connection went away during the drain: nothing more is sent.
 		let cut = false;
 		/** @type {Set<OfflineEntry>} */
@@ -223,11 +230,13 @@ async function _drainOfflineQueue() {
 
 		/** @param {OfflineEntry} entry @param {any} err */
 		function settleFail(entry, err) {
+			if (scope !== _offlineScope()) return;
 			settled.add(entry);
 			clean = false;
 			lowestFailedSeq = Math.min(lowestFailedSeq, entry.seq ?? 0);
 			if (typeof entry.seq === 'number') _noteBatchFailure(entry.seq);
 			_settlePersist(entry, false);
+			if (scope !== _offlineScope()) return;
 			const over = overrides.get(entry);
 			_notifyReplayError({ path: over ? over.path : entry.path, args: over ? over.args : entry.args, queuedAt: entry.queuedAt }, err);
 			entry.reject(err);
@@ -253,7 +262,7 @@ async function _drainOfflineQueue() {
 				// replaced (app code run by the last settle can start that): a
 				// replay is sent only on an open socket, and on the closing one it
 				// would go nowhere and wait for its timeout.
-				if (cut || clientState.isOffline || clientState.terminated || !clientState.socketUp) {
+				if (scope !== _offlineScope() || cut || clientState.isOffline || clientState.terminated || !clientState.socketUp) {
 					cut = true;
 					return;
 				}
@@ -262,6 +271,7 @@ async function _drainOfflineQueue() {
 					settleOk(entry, result);
 					return;
 				} catch (err) {
+					if (scope !== _offlineScope()) return;
 					// The connection went away under the replay (a drop, a device
 					// sleep, the close for good) and it may never have reached the
 					// server: not a replay failure.
@@ -310,7 +320,8 @@ async function _drainOfflineQueue() {
 		let queue = [];
 		let asyncFilterWarned = false;
 		let throwingFilterWarned = false;
-		for (const entry of _offlineQueue) {
+		for (const entry of [..._offlineQueue]) {
+			if (scope !== _offlineScope()) return;
 			if (maxAge > 0 && nowMs - entry.queuedAt > maxAge) {
 				settleFail(entry, new RpcError('STALE', 'Offline mutation expired'));
 				continue;
@@ -354,8 +365,13 @@ async function _drainOfflineQueue() {
 			}
 			queue.push(entry);
 		}
+		if (scope !== _offlineScope()) return;
+		// Queued entries already belong to the live array. Track them separately
+		// only while a drain takes ownership, avoiding a second enqueue index.
+		_ownOfflineReplay(scope, queue);
 		_offlineQueue.length = 0;
 		_bumpPending();
+		if (scope !== _offlineScope()) return;
 
 		// A custom replay function picks the calls to replay and their order.
 		// It gets copies, so changing one changes no queued call (its seq or
@@ -438,6 +454,7 @@ async function _drainOfflineQueue() {
 			}
 		}
 
+		if (scope !== _offlineScope()) return;
 		// A replay that was cut off may have been applied: the drain is not clean.
 		if (cut) clean = false;
 		if (cut) {
@@ -449,6 +466,7 @@ async function _drainOfflineQueue() {
 			// The next drain carries on this batch: a call queued after one that
 			// failed here still leaves a hole when it goes up then.
 			_carryBatch(lowestFailedSeq);
+			if (scope !== _offlineScope()) return;
 			_offlineQueue.unshift(...back);
 			// After the close for good the queue is kept as it is for a later page
 			// load: trimming it would delete stored copies the close keeps.
@@ -469,12 +487,15 @@ async function _drainOfflineQueue() {
 			// left; one that failed or left a hole keeps the gap visible for the
 			// app to act on. The next drain starts a new batch.
 			if (clean) _clearGapIfClean();
+			if (scope !== _offlineScope()) return;
 			_endBatch();
 		}
 	} finally {
 		// First, so nothing that runs app code below can leave every later
 		// drain a no-op.
-		_replayingQueue = false;
+		_finishOfflineDrain(scope);
+		if (_replayingScope !== scope) return;
+		_replayingScope = null;
 		_bumpPending();
 		// Draining again keeps `uploading` up: what was put back still waits to
 		// go out, and that drain clears it when it ends.

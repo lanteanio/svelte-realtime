@@ -13,37 +13,33 @@ import { randomUuid } from '../client-runtime.js';
 import { _offlineQueue, RpcError, _IS_DEV, clientState } from './internal-state.js';
 import { resolveOfflineStore, _isDurableStore } from './offline-store.js';
 
-/** @type {import('./offline-store.js').OfflineStore | null} */
-let _store = null;
-/** @type {string} */
-let _persistKey = 'default';
-/** Monotone per-queue sequence; restored entries advance it past their max. */
-let _seq = 0;
-/** @type {{ lastUploadedSeq: number, gapDetected: boolean }} */
-let _checkpoint = { lastUploadedSeq: 0, gapDetected: false };
-/** @type {Promise<void> | null} Resolves when the one-shot rehydrate finished (null = persistence off). */
-let _rehydratePromise = null;
-/** True while the restore runs (the queue scan, then the checkpoint read). */
-let _restoring = false;
-/**
- * Entries queued while the restore runs, waiting for a seq.
- * @type {Array<{ entry: any, resolve: (stored: boolean | Promise<boolean> | undefined) => void }>}
- */
-let _unstamped = [];
-/** The stored queue could not be read, so the store is not used again in this page. */
-let _scanFailed = false;
-/**
- * The upload batch in progress (see `_batchState`). Stored with the
- * checkpoint, outside what `offlineCheckpoint()` returns.
- * @type {{ failedSeq: number, clean: boolean }}
- */
-let _batch = { failedSeq: Infinity, clean: true };
-/** A full queue dropped a call queued during the restore, before it had a seq. */
-let _droppedUnnumbered = false;
-/** The checkpoint changed while the restore ran; the restore writes it once done. */
-let _checkpointDirty = false;
-/** The stored queue was read but its checkpoint could not be: it is left alone for the page. */
-let _checkpointUnknown = false;
+/** A queue scope owns its counters and storage for its entire lifetime. */
+function _newScope(store = null, persistKey = 'default', persist = undefined) {
+	return {
+		store, configuredStore: store, persistKey, persist, seq: 0,
+		checkpoint: { lastUploadedSeq: 0, gapDetected: false },
+		rehydratePromise: null, restoring: false, unstamped: [], scanFailed: false,
+		batch: { failedSeq: Infinity, clean: true }, droppedUnnumbered: false,
+		checkpointDirty: false, checkpointUnknown: false, entries: new Set()
+	};
+}
+let _scope = _newScope();
+/** Entry ownership stays private when a replay callback receives an entry copy. */
+const _entryScopes = new WeakMap();
+// Only drains still awaiting work retain a retired scope. Its last response
+// can finish against a newer lifetime of the same namespace without replacing
+// that lifetime's checkpoint. Entries leave this set when their drain ends.
+const _retiredScopes = new Set();
+export function _startOfflineDrain(scope) { scope.draining = true; }
+/** Capture ownership only when calls leave the current queue for replay. */
+export function _ownOfflineReplay(scope, entries) {
+	scope.entries = new Set(entries);
+	for (const entry of entries) _entryScopes.set(entry, scope);
+}
+export function _finishOfflineDrain(scope) { scope.draining = false; scope.entries.clear(); _retiredScopes.delete(scope); }
+/** @internal A drain captures this identity so a later scope cannot borrow it. */
+export function _offlineScope() { return _scope; }
+
 /** Pending writes by store and key; unrelated entries persist independently. */
 let _writes = new WeakMap();
 
@@ -152,14 +148,14 @@ export function _setUploading(v) {
 	_uploadingStore.set(v);
 }
 
-function _entryKey(seq) {
+function _entryKey(seq, scope = _scope) {
 	// Zero-padded so string key order == numeric seq order (the store scans
 	// key ranges; IndexedDB compares keys lexicographically).
-	return 'q:' + _persistKey + ':' + String(seq).padStart(12, '0');
+	return 'q:' + scope.persistKey + ':' + String(seq).padStart(12, '0');
 }
 
-function _checkpointKey() {
-	return 'c:' + _persistKey;
+function _checkpointKey(scope = _scope) {
+	return 'c:' + scope.persistKey;
 }
 
 /**
@@ -234,14 +230,12 @@ function _write(store, key, call) {
  * @returns {{ lastUploadedSeq: number, gapDetected: boolean }}
  */
 export function offlineCheckpoint() {
-	return { ..._checkpoint };
+	return { ..._scope.checkpoint };
 }
 
 /**
- * @internal Configure persistence from `configure({ offline })`. Called by
- * misc.js. The restore runs once, for the scope configured first; a later
- * persistKey or store applies to writes from then on, with nothing restored
- * for it, and entries already in memory keep replaying regardless.
+ * @internal Switch queues when storage or identity changes. Previously stored
+ * rows remain in their own scope; callers still waiting there are rejected.
  * @param {any} offlineOpts
  */
 export function _configureOfflinePersistence(offlineOpts) {
@@ -249,15 +243,28 @@ export function _configureOfflinePersistence(offlineOpts) {
 	if (offlineOpts.persistKey !== undefined && (typeof offlineOpts.persistKey !== 'string' || offlineOpts.persistKey.length === 0)) {
 		throw new Error('[svelte-realtime] offline.persistKey must be a non-empty string');
 	}
-	if (!offlineOpts.persist) return;
-	const store = resolveOfflineStore(offlineOpts.persist);
-	if (_scanFailed) return;
-	_store = store;
-	_persistKey = offlineOpts.persistKey ?? 'default';
-	if (!_rehydratePromise) {
-		_restoring = true;
-		_rehydratePromise = _rehydrate().catch(() => {});
+	const persist = offlineOpts.persist === undefined ? _scope.persist : offlineOpts.persist;
+	const key = offlineOpts.persistKey ?? _scope.persistKey;
+	const store = persist === _scope.persist ? _scope.configuredStore : (persist ? resolveOfflineStore(persist) : null);
+	if (store === _scope.configuredStore && key === _scope.persistKey && !_scope.scanFailed) return;
+	const previous = _scope;
+	const next = _newScope(store, key, persist);
+	if (previous.draining) _retiredScopes.add(previous);
+	for (const retired of _retiredScopes) {
+		if (retired.configuredStore === store && retired.persistKey === key) retired.successor = next;
 	}
+	_scope = next;
+	next.restoring = !!store;
+	// Install the new scope before rejecting or notifying any application code.
+	const queued = _offlineQueue.splice(0);
+	for (const entry of [...queued, ...previous.entries]) {
+		entry.reject(new RpcError('OFFLINE_SCOPE_CHANGED', 'Offline queue scope changed before this mutation settled'));
+	}
+	previous.entries.clear();
+	for (const waiting of previous.unstamped) waiting.resolve(false);
+	previous.unstamped = [];
+	if (store) next.rehydratePromise = _rehydrate(next).catch(() => {});
+	_bumpPending();
 }
 
 /**
@@ -268,14 +275,22 @@ export function _configureOfflinePersistence(offlineOpts) {
  * Entries queued meanwhile get their seq and their write once the counter is
  * past the stored rows, before the promise a drain awaits resolves.
  */
-async function _rehydrate() {
+async function _rehydrate(scope) {
 	let read = false;
 	let rowsRead = false;
 	try {
-		if (!_store) return;
-		const stored = Promise.resolve(_isDurableStore(_store));
-		const prefix = 'q:' + _persistKey + ':';
-		const rows = _rowsOf(await _store.getAll(prefix));
+		if (!scope.store) return;
+		const stored = Promise.resolve(_isDurableStore(scope.store));
+		const prefix = 'q:' + scope.persistKey + ':';
+		// Re-entering a scope must see writes its prior lifetime already started.
+		const writes = _writes.get(scope.store);
+		if (writes) {
+			const pendingWrites = [...writes].filter(([key]) => _seqOfRowKey(key, prefix) > 0 || key === _checkpointKey(scope)).map(([, tail]) => tail);
+			if (pendingWrites.length) await Promise.all(pendingWrites);
+			if (scope !== _scope) return;
+		}
+		const rows = _rowsOf(await scope.store.getAll(prefix));
+		if (scope !== _scope) return;
 		/** @type {any[]} */
 		const restored = [];
 		let maxSeq = 0;
@@ -301,73 +316,79 @@ async function _rehydrate() {
 			});
 		}
 		rowsRead = true;
-		if (maxSeq > _seq) _seq = maxSeq;
+		if (maxSeq > scope.seq) scope.seq = maxSeq;
 		if (restored.length > 0) {
 			restored.sort((a, b) => a.seq - b.seq);
 			_offlineQueue.unshift(...restored);
 			_bumpPending();
 		}
-		const cp = _rowsOf(await _store.getAll(_checkpointKey()));
+		if (scope !== _scope) return;
+		const cp = _rowsOf(await scope.store.getAll(_checkpointKey(scope)));
+		if (scope !== _scope) return;
 		for (const row of cp) {
 			const value = row && row.value;
-			if (row && row.key === _checkpointKey() && value && (value.lastUploadedSeq === 0 || _validSeq(value.lastUploadedSeq))) {
-				_checkpoint = { lastUploadedSeq: value.lastUploadedSeq, gapDetected: !!value.gapDetected };
+			if (row && row.key === _checkpointKey(scope) && value && (value.lastUploadedSeq === 0 || _validSeq(value.lastUploadedSeq))) {
+				scope.checkpoint = {
+					lastUploadedSeq: Math.max(scope.checkpoint.lastUploadedSeq, value.lastUploadedSeq),
+					gapDetected: scope.checkpoint.gapDetected || !!value.gapDetected
+				};
 				// Merged with what a full queue dropped while the restore ran.
 				const storedFailedSeq = value.batchFailedSeq === 0 || _validSeq(value.batchFailedSeq) ? value.batchFailedSeq : Infinity;
-				_batch = {
-					failedSeq: Math.min(storedFailedSeq, _batch.failedSeq),
-					clean: value.batchClean !== false && _batch.clean
+				scope.batch = {
+					failedSeq: Math.min(storedFailedSeq, scope.batch.failedSeq),
+					clean: value.batchClean !== false && scope.batch.clean
 				};
 			}
 		}
 		// No new seq at or below one that already went up, also once its row
 		// is gone: a failure there would read as a hole in the upload order.
-		if (_checkpoint.lastUploadedSeq > _seq) _seq = _checkpoint.lastUploadedSeq;
+		if (scope.checkpoint.lastUploadedSeq > scope.seq) scope.seq = scope.checkpoint.lastUploadedSeq;
 		// Nor at the seq a carried batch failed at: a call queued now comes
 		// after it, so its success is a hole.
-		if (_batch.failedSeq !== Infinity && _batch.failedSeq > _seq) _seq = _batch.failedSeq;
+		if (scope.batch.failedSeq !== Infinity && scope.batch.failedSeq > scope.seq) scope.seq = scope.batch.failedSeq;
 		// A restored call a full queue dropped meanwhile, below one that went
 		// up before the reload, is a hole.
-		if (_batch.failedSeq < _checkpoint.lastUploadedSeq && !_checkpoint.gapDetected) {
-			_checkpoint.gapDetected = true;
-			_checkpointDirty = true;
+		if (scope.batch.failedSeq < scope.checkpoint.lastUploadedSeq && !scope.checkpoint.gapDetected) {
+			scope.checkpoint.gapDetected = true;
+			scope.checkpointDirty = true;
 		}
 		read = true;
 	} finally {
-		if (_store && !read && rowsRead) {
+		if (scope !== _scope) return;
+		if (scope.store && !read && rowsRead) {
 			// The queue was read, so new seqs go past every stored row; only the
 			// checkpoint is unknown, and writing it would replace one nobody
 			// has seen. It is left alone for the page.
-			_checkpointUnknown = true;
+			scope.checkpointUnknown = true;
 			if (_IS_DEV) console.warn('[svelte-realtime] the stored offline upload checkpoint could not be read, so it is not updated for this page; the queue itself is stored as usual.');
-		} else if (_store && !read) {
+		} else if (scope.store && !read) {
 			// What is stored could not be read in full, so any seq could be a
 			// stored row's: writing, deleting or checkpointing could destroy a
 			// mutation nobody has seen. The queue goes on in memory only.
-			_scanFailed = true;
-			_store = null;
+			scope.scanFailed = true;
+			scope.store = null;
 			if (_IS_DEV) console.warn('[svelte-realtime] offline persistence unavailable: the stored queue could not be read, so queued mutations stay in memory for this page (they will not survive a reload).');
 		}
 		// The entries queued during the restore get their seq and their write,
 		// in the order they were queued; one settled meanwhile (dropped by a
 		// full queue) is never written, and counts as failing just above the
 		// restored calls.
-		if (_droppedUnnumbered) {
-			_droppedUnnumbered = false;
-			if (_seq < _batch.failedSeq) {
-				_batch.failedSeq = _seq;
-				_checkpointDirty = true;
+		if (scope.droppedUnnumbered) {
+			scope.droppedUnnumbered = false;
+			if (scope.seq < scope.batch.failedSeq) {
+				scope.batch.failedSeq = scope.seq;
+				scope.checkpointDirty = true;
 			}
 		}
-		_restoring = false;
-		const waiting = _unstamped;
-		_unstamped = [];
+		scope.restoring = false;
+		const waiting = scope.unstamped;
+		scope.unstamped = [];
 		for (const { entry, resolve } of waiting) {
-			resolve(entry.settled ? false : _stamp(entry));
+			resolve(scope !== _scope || entry.settled ? false : _stamp(entry, scope));
 		}
-		if (_checkpointDirty) {
-			_checkpointDirty = false;
-			_putCheckpoint();
+		if (scope.checkpointDirty) {
+			scope.checkpointDirty = false;
+			_putCheckpoint(scope);
 		}
 	}
 }
@@ -377,7 +398,7 @@ async function _rehydrate() {
  * a reconnect drain never races the restore and replays a half-loaded queue.
  */
 export function _offlineReady() {
-	return _rehydratePromise || Promise.resolve();
+	return _scope.rehydratePromise || Promise.resolve();
 }
 
 /**
@@ -397,8 +418,8 @@ export function _enqueuePersist(entry) {
 	if (entry.idempotencyKey === undefined || entry.idempotencyKey === null) {
 		entry.idempotencyKey = 'off-' + randomUuid();
 	}
-	if (_restoring) {
-		entry.stored = new Promise((resolve) => { _unstamped.push({ entry, resolve }); });
+	if (_scope.restoring) {
+		entry.stored = new Promise((resolve) => { _scope.unstamped.push({ entry, resolve }); });
 	} else {
 		const stored = _stamp(entry);
 		if (stored) entry.stored = stored;
@@ -411,10 +432,10 @@ export function _enqueuePersist(entry) {
  * @param {any} entry
  * @returns {Promise<boolean> | undefined} Whether the write left a copy that outlives the page.
  */
-function _stamp(entry) {
-	entry.seq = ++_seq;
-	if (!_store) return undefined;
-	const store = _store;
+function _stamp(entry, scope = _scope) {
+	entry.seq = ++scope.seq;
+	if (!scope.store) return undefined;
+	const store = scope.store;
 	const durable = _isDurableStore(store);
 	const value = {
 		seq: entry.seq,
@@ -424,7 +445,7 @@ function _stamp(entry) {
 		idempotencyKey: entry.idempotencyKey,
 		timeout: entry.timeout
 	};
-	const key = _entryKey(entry.seq);
+	const key = _entryKey(entry.seq, scope);
 	return _write(store, key, () => store.put(key, value))
 		.then(() => durable, () => false);
 }
@@ -440,20 +461,24 @@ function _stamp(entry) {
  * @param {boolean} [hadEarlierFailure]
  */
 export function _settlePersist(entry, success, hadEarlierFailure) {
+	const original = _entryScopes.get(entry) || _scope;
+	const scope = original.successor || original;
+	original.entries.delete(entry);
 	entry.settled = true;
-	if (_store && typeof entry.seq === 'number' && entry.seq > 0) {
-		const store = _store;
-		const key = _entryKey(entry.seq);
+	if (original.store && typeof entry.seq === 'number' && entry.seq > 0) {
+		const store = original.store;
+		const key = _entryKey(entry.seq, original);
 		void _write(store, key, () => store.delete(key)).catch(() => {});
 	}
 	if (typeof entry.seq !== 'number') return;
+	if (entry.seq > scope.seq) scope.seq = entry.seq;
 	if (success) {
-		if (entry.seq > _checkpoint.lastUploadedSeq) _checkpoint.lastUploadedSeq = entry.seq;
-		if (hadEarlierFailure) _checkpoint.gapDetected = true;
-		_putCheckpoint();
-	} else if (entry.seq < _checkpoint.lastUploadedSeq && !_checkpoint.gapDetected) {
-		_checkpoint.gapDetected = true;
-		_putCheckpoint();
+		if (entry.seq > scope.checkpoint.lastUploadedSeq) scope.checkpoint.lastUploadedSeq = entry.seq;
+		if (hadEarlierFailure) scope.checkpoint.gapDetected = true;
+		_putCheckpoint(scope);
+	} else if (entry.seq < scope.checkpoint.lastUploadedSeq && !scope.checkpoint.gapDetected) {
+		scope.checkpoint.gapDetected = true;
+		_putCheckpoint(scope);
 	}
 }
 
@@ -505,11 +530,11 @@ export function _trimQueue(max) {
 		_settlePersist(entry, false);
 		// What is queued after it goes up later: holes in the batch's order.
 		if (typeof entry.seq === 'number') {
-			if (entry.seq < _batch.failedSeq) _batch.failedSeq = entry.seq;
+			if (entry.seq < _scope.batch.failedSeq) _scope.batch.failedSeq = entry.seq;
 		} else {
 			// Queued during the restore: numbered, it would have come right
 			// after the restored calls and below every call queued after it.
-			_droppedUnnumbered = true;
+			_scope.droppedUnnumbered = true;
 		}
 	}
 	if (dropped.length > 0) _putCheckpoint();
@@ -570,7 +595,7 @@ function _reportDrop(entry, err) {
  * @returns {{ failedSeq: number, clean: boolean }}
  */
 export function _batchState() {
-	return { ..._batch };
+	return { ..._scope.batch };
 }
 
 /**
@@ -581,8 +606,8 @@ export function _batchState() {
  * a page that closes before it lands leaves the stored batch as it was.
  */
 export function _beginBatch() {
-	if (!_batch.clean) return;
-	_batch = { failedSeq: _batch.failedSeq, clean: false };
+	if (!_scope.batch.clean) return;
+	_scope.batch = { failedSeq: _scope.batch.failedSeq, clean: false };
 	_putCheckpoint();
 }
 
@@ -592,8 +617,8 @@ export function _beginBatch() {
  * @param {number} seq
  */
 export function _noteBatchFailure(seq) {
-	if (seq >= _batch.failedSeq) return;
-	_batch = { failedSeq: seq, clean: _batch.clean };
+	if (seq >= _scope.batch.failedSeq) return;
+	_scope.batch = { failedSeq: seq, clean: _scope.batch.clean };
 	_putCheckpoint();
 }
 
@@ -604,14 +629,14 @@ export function _noteBatchFailure(seq) {
  */
 export function _carryBatch(failedSeq) {
 	// A full queue may have dropped a call while the drain ran.
-	_batch = { failedSeq: Math.min(_batch.failedSeq, failedSeq), clean: false };
+	_scope.batch = { failedSeq: Math.min(_scope.batch.failedSeq, failedSeq), clean: false };
 	_putCheckpoint();
 }
 
 /** @internal A drain replayed its whole batch: the next one starts afresh. */
 export function _endBatch() {
-	if (_batch.failedSeq === Infinity && _batch.clean) return;
-	_batch = { failedSeq: Infinity, clean: true };
+	if (_scope.batch.failedSeq === Infinity && _scope.batch.clean) return;
+	_scope.batch = { failedSeq: Infinity, clean: true };
 	_putCheckpoint();
 }
 
@@ -651,6 +676,7 @@ function _dropClosed(entry, makeError) {
 	const i = _offlineQueue.indexOf(entry);
 	if (i === -1) return;
 	_offlineQueue.splice(i, 1);
+	(_entryScopes.get(entry) || _scope).entries.delete(entry);
 	_bumpPending();
 	entry.reject(makeError());
 }
@@ -660,28 +686,28 @@ function _dropClosed(entry, makeError) {
  * upload order has no holes any more.
  */
 export function _clearGapIfClean() {
-	if (_checkpoint.gapDetected && _offlineQueue.length === 0) {
-		_checkpoint.gapDetected = false;
+	if (_scope.checkpoint.gapDetected && _offlineQueue.length === 0) {
+		_scope.checkpoint.gapDetected = false;
 		_putCheckpoint();
 	}
 }
 
-function _putCheckpoint() {
-	const store = _store;
-	if (!store || _checkpointUnknown) return;
+function _putCheckpoint(scope = _scope) {
+	const store = scope.store;
+	if (!store || scope.checkpointUnknown) return;
 	// The stored checkpoint is not read yet while the restore runs: writing
 	// now would replace it with this page's empty one. The restore writes
 	// once it has merged the two.
-	if (_restoring) {
-		_checkpointDirty = true;
+	if (scope.restoring) {
+		scope.checkpointDirty = true;
 		return;
 	}
 	const value = {
-		..._checkpoint,
-		batchFailedSeq: _batch.failedSeq === Infinity ? null : _batch.failedSeq,
-		batchClean: _batch.clean
+		...scope.checkpoint,
+		batchFailedSeq: scope.batch.failedSeq === Infinity ? null : scope.batch.failedSeq,
+		batchClean: scope.batch.clean
 	};
-	const key = _checkpointKey();
+	const key = _checkpointKey(scope);
 	void _write(store, key, () => store.put(key, value)).catch(() => {});
 }
 
@@ -690,20 +716,10 @@ function _putCheckpoint() {
  * @internal
  */
 export function _resetOffline() {
-	_store = null;
-	_persistKey = 'default';
-	_seq = 0;
-	_checkpoint = { lastUploadedSeq: 0, gapDetected: false };
-	_rehydratePromise = null;
-	_restoring = false;
-	_unstamped = [];
-	_scanFailed = false;
-	_batch = { failedSeq: Infinity, clean: true };
-	_droppedUnnumbered = false;
+	_scope = _newScope();
+	_retiredScopes.clear();
 	_reportingDrops = false;
 	_dropsToReport = [];
-	_checkpointDirty = false;
-	_checkpointUnknown = false;
 	_writes = new WeakMap();
 	_pendingStore.set(0);
 	_uploadingStore.set(false);

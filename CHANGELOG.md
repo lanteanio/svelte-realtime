@@ -129,6 +129,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - CLI prompts use Clack 1.8 while preserving the displayed default project name, validation, cancellation, and template selection behavior.
 
+- Changing the offline storage key or store switches queue ownership, cancels former callers, restores the new scope, and keeps late restore/replay work from writing to another account. Reconfiguring persistence retries failed scans.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
