@@ -39,8 +39,7 @@ The runtime handles pub/sub and protocol wiring; platform, native-addon, authent
 
 **Upgrading from 0.4.x?** See the [migration guide](./MIGRATION.md) for every breaking change between 0.4.x and 0.5.x.
 
-The shared [translation contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/TRANSLATING.md) defines the English source locale,
-application-owned catalogs, stable machine fields, placeholders, and bidirectional text across all three ecosystem packages.
+The shared [translation contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/TRANSLATING.md) defines the English source locale, application-owned catalogs, stable machine fields, placeholders, and bidirectional text across all three ecosystem packages.
 
 The canonical [privacy integration contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/PRIVACY-INTEGRATION.md) maps browser, in-process, Redis/Postgres, durable-work, telemetry, and application-owned data across all three packages. Its generated [host worksheet](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/privacy/v1/ropa-dpa-transfer-checklist.md) must be completed for the deployment; `live.forget` is one erasure leg and does not clear browsers, observability backends, backups, or unregistered stores.
 
