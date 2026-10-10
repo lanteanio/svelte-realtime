@@ -23,6 +23,9 @@ export const registry = new Map();
 /** @type {Map<string, Function>} */
 export const guards = new Map();
 
+/** @type {WeakMap<object, Map<string, Set<Promise<any>>>>} */
+export const _pendingSubscribeHooks = new WeakMap();
+
 /**
  * Per-topic set of WebSockets currently holding at least one realtime
  * stream subscription. Maintained as the source of truth for the

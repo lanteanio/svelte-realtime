@@ -27,6 +27,7 @@ import {
 	registry,
 	guards,
 	_topicWsCounts,
+	_pendingSubscribeHooks,
 	_topicStaleWatch,
 	_silentTopicWatch,
 	_topicCoalesce,
@@ -842,6 +843,15 @@ function _isRollingBack(ws, topic) {
 	return topics !== undefined && topics.has(topic);
 }
 
+function _afterSubscribeHooks(ws, topic, drain) {
+	const hooks = _pendingSubscribeHooks.get(ws)?.get(topic);
+	// Capture only hooks already running for this lifetime. A later rejoin
+	// must not delay or become part of an earlier subscription's drain.
+	return hooks?.size
+		? Promise.allSettled([...hooks]).then(() => drain(_topicWsCounts.get(topic)?.size || 0))
+		: Promise.resolve().then(() => drain(undefined));
+}
+
 function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 	if (isActive && !isActive()) return;
 	const topicMap = _wsStreamOwners.get(ws);
@@ -898,16 +908,17 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 		remainingSubscribers = wsSet ? wsSet.size - (wsSet.has(ws) ? 1 : 0) : 0;
 	}
 	if (/** @type {any} */ (fn).__onUnsubscribe && ctx) {
-		let topics = _rollingBack.get(ws);
-		if (!topics) { topics = new Set(); _rollingBack.set(ws, topics); }
-		topics.add(topic);
-		Promise.resolve()
-			.then(() => /** @type {any} */ (fn).__onUnsubscribe(ctx, topic, remainingSubscribers))
-			.catch(() => {})
-			.finally(() => {
-				const set = _rollingBack.get(ws);
-				if (set) { set.delete(topic); if (set.size === 0) _rollingBack.delete(ws); }
-			});
+		_afterSubscribeHooks(ws, topic, (current) => {
+			let topics = _rollingBack.get(ws);
+			if (!topics) { topics = new Set(); _rollingBack.set(ws, topics); }
+			topics.add(topic);
+			return Promise.resolve()
+				.then(() => /** @type {any} */ (fn).__onUnsubscribe(ctx, topic, current ?? remainingSubscribers))
+				.finally(() => {
+					const set = _rollingBack.get(ws);
+					if (set) { set.delete(topic); if (set.size === 0) _rollingBack.delete(ws); }
+				});
+		}).catch(() => {});
 	}
 }
 
@@ -3584,7 +3595,7 @@ function _unsubscribeStream(ws, topic, platform, releasedDerived, releasedTenant
 		for (let i = 0; i < entry.count; i++) {
 			if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
 			if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
-				Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(unsubCtx, topic, remainingSubscribers)).catch(() => {});
+				_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribe(unsubCtx, topic, current ?? remainingSubscribers)).catch(() => {});
 			}
 		}
 	}
@@ -3658,7 +3669,7 @@ export function close(ws, { platform, subscriptions }) {
 				for (let i = 0; i < entry.count; i++) {
 					if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
 					if (/** @type {any} */ (entry.fn).__onUnsubscribe) {
-						Promise.resolve().then(() => /** @type {any} */ (entry.fn).__onUnsubscribe(closeCtx, topic, remainingSubscribers)).catch(() => {});
+						_afterSubscribeHooks(ws, topic, (current) => /** @type {any} */ (entry.fn).__onUnsubscribe(closeCtx, topic, current ?? remainingSubscribers)).catch(() => {});
 					}
 				}
 			}
@@ -3679,7 +3690,7 @@ export function close(ws, { platform, subscriptions }) {
 			// the ws-set may not include them, so remaining defaults to 0.
 			const staticWsSet = _topicWsCounts.get(rawTopic);
 			const staticRemaining = staticWsSet ? staticWsSet.size : 0;
-			Promise.resolve().then(() => /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic, staticRemaining)).catch(() => {});
+			_afterSubscribeHooks(ws, rawTopic, (current) => /** @type {any} */ (fn).__onUnsubscribe(closeCtx, rawTopic, current ?? staticRemaining)).catch(() => {});
 		}
 	}
 

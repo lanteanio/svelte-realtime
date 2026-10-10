@@ -11,7 +11,7 @@ import { monotonicNow, randomUuid } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
 import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './validate.js';
-import { state, registry, guards, cronRegistry, _declaredRedact } from './state.js';
+import { state, registry, guards, cronRegistry, _declaredRedact, _pendingSubscribeHooks } from './state.js';
 import { _getBus } from './bus.js';
 import { _ensureWrap } from './reactive.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
@@ -895,7 +895,20 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		// `streamArgs` (3rd arg) lets a room enumeration registry capture the
 		// room-identifying args of the topic that just gained a subscriber; the
 		// presence hook ignores it.
-		try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic, streamArgs); } catch {}
+		let topics = _pendingSubscribeHooks.get(ws);
+		if (!topics) { topics = new Map(); _pendingSubscribeHooks.set(ws, topics); }
+		let hooks = topics.get(topic);
+		if (!hooks) { hooks = new Set(); topics.set(topic, hooks); }
+		// Register before invoking user code: even a synchronous hook can close
+		// its socket. Drains capture these promises before releasing ownership.
+		const joining = Promise.resolve().then(() => /** @type {any} */ (fn).__onSubscribe(ctx, topic, streamArgs));
+		hooks.add(joining);
+		try { await joining; } catch {}
+		finally {
+			hooks.delete(joining);
+			if (hooks.size === 0) topics.delete(topic);
+			if (topics.size === 0) _pendingSubscribeHooks.delete(ws);
+		}
 	}
 	// Settle both claim barriers this subscribe opened on the happy path: a no-op
 	// when the data-join already resolved with the claimed owner / roster entry,
