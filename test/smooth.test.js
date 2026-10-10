@@ -1399,6 +1399,37 @@ describe('live.smooth cluster (platform.smooth)', () => {
 		expect(sent).toContain('stat');
 	});
 
+	it('non-owner scopes the join snapshot while retaining far stationary entities for a later center change', async () => {
+		const { name } = declareShape({
+			tickMs: 20,
+			interest: { radius: 100, position: (s) => ({ x: s.x, y: s.y }) }
+		});
+		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });
+		const platform = clusterPlatform(sc);
+		const sub = mockWs({ id: 'viewer' });
+		const before = platform.sent.length;
+		fire(sub, platform, name + '/shape/__smooth/sync', ['r1']);
+		await vi.advanceTimersByTimeAsync(1);
+		sc.emit.syncReply(WT, sc.calls.requestSync[0][3], {
+			ack: 0,
+			states: [
+				{ key: 'viewer', state: { x: 0, y: 0 } },
+				{ key: 'near', state: { x: 60, y: 0 } },
+				{ key: 'far', state: { x: 500, y: 0 } }
+			]
+		});
+		await vi.advanceTimersByTimeAsync(1);
+		expect(platform.sent[before].data.data.states.map(s => s.key)).toEqual(['viewer', 'near']);
+		// The far entity never sends an update. Moving the observer's center must
+		// still reveal it from the full receive-side shadow, then remove it on exit.
+		await call(sub, platform, name + '/shape/__smooth/center', ['r1', { x: 500, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(platform.wireSent.filter(s => s.ws === sub && s.event === 'update').map(s => s.data.key)).toEqual(['far']);
+		await call(sub, platform, name + '/shape/__smooth/center', ['r1', { x: 0, y: 0 }]);
+		await vi.advanceTimersByTimeAsync(20);
+		expect(platform.wireSent.filter(s => s.ws === sub && s.event === 'remove').map(s => s.data.key)).toContain('far');
+	});
+
 	it('interest off: a non-owner re-emits relayed updates immediately (no receive-side cull, byte-identical)', async () => {
 		const { name } = declareShape(); // no interest
 		const sc = scriptedSmoothCluster({ owner: false, instanceId: 'B' });

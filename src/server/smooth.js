@@ -3109,14 +3109,14 @@ export const _smoothRegister = function smooth(config) {
 				}
 				// Scope and pack before committing any local subscriber state.
 				const catalog = reply && Array.isArray(reply.states) ? reply.states : [];
-				const states = _smoothWireStates(rec, rec.cells ? _smoothCellSnapshot(rec, key, catalog) : catalog);
+				const states = _smoothWireStates(rec, _smoothJoinSnapshot(rec, key, catalog));
 				if (ctx.ws) rec.registry.set(key, ctx.ws);
 				// Seed the receive-side shadow catalog from the owner's snapshot so the cull
 				// can deliver a stationary in-range remote entity on first sight (an entity
 				// that has not moved since this client joined sends no relay frame, so without
-				// the seed it would be invisible - an under-delivery). The full snapshot is
-				// still returned to the joining client below (a safe over-deliver on join);
-				// only the ongoing relayed deltas are culled.
+				// the seed it would be invisible - an under-delivery). Keep the full catalog
+				// here even though the client-facing snapshot above is scoped: a later
+				// center change must reveal stationary entities outside the initial view.
 				if (rec.interest !== null && reply && Array.isArray(reply.states)) {
 					for (let i = 0; i < reply.states.length; i++) rec.shadow.set(reply.states[i].key, reply.states[i].state);
 				}
