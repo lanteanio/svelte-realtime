@@ -5003,9 +5003,9 @@ A single `batch()` call is limited to 50 RPC calls. The client rejects before se
 
 The adapter rejects topic names longer than 256 characters or containing control characters (byte value < 32). This applies to subscribe, unsubscribe, and batch-subscribe messages.
 
-### ws.subscribe() vs the subscribe hook
+### Stream subscription authorization
 
-`live.stream()` calls `ws.subscribe(topic)` server-side, bypassing the adapter's `subscribe` hook entirely. This is correct - stream topics are gated by `guard()`, not the subscribe hook.
+`live.stream()` applies its realtime access guards, then awaits `platform.subscribe(ws, topic)` so the adapter's subscription hooks and per-connection limits also apply before the loader or room join runs. Older custom platforms without `platform.subscribe` fall back to `ws.subscribe`; only the realtime guards apply on that fallback.
 
 ---
 
