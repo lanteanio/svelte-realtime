@@ -5504,7 +5504,7 @@ The plugin resolves `$live/chat` to `src/live/chat.js`, generates client stubs, 
 
 ## Benchmarks
 
-The benchmark reports in-process RPC dispatch, copied merge kernels and non-RPC rejection. Requests are encoded before timing; response delivery is mocked and validates correlation, success and returned data. Network, request serialization and response encoding are excluded. Output records the package version, Node runtime, platform, execution mode and success/error counts. Set `NODE_ENV=production` in your environment for production-mode results; other values use development mode.
+The benchmark reports in-process RPC dispatch, copied merge kernels and non-RPC rejection. Requests are encoded before timing; response delivery is mocked and validates correlation, success and returned data. Network, request serialization and response encoding are excluded. Dispatch is a CPU microbenchmark with one request in flight in a closed loop. Output records the package version, Node runtime, CPU model and logical cores, platform, execution mode, command argument vector, success/error counts and non-RPC diagnostic count. Set `NODE_ENV=production` in your environment for production-mode results; other values use development mode.
 
 Run with (add `--check` for a short correctness check without throughput timings):
 

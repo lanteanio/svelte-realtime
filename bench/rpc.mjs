@@ -10,6 +10,7 @@
 //
 
 import { readFileSync } from 'node:fs';
+import { cpus } from 'node:os';
 import { live, handleRpc, __register } from '../src/server.js';
 
 const textEncoder = new TextEncoder();
@@ -146,6 +147,7 @@ async function benchRpcDispatch() {
 
 	if (unexpectedResponse || successes !== dispatchIterations || errors) throw new Error('RPC outcome accounting failed');
 	console.log(`RPC outcomes: ${successes} successes, ${errors} errors`);
+	console.log('Dispatch model: CPU microbenchmark; closed loop; one request in flight.');
 	if (checkOnly) return;
 	console.log('--- RPC dispatch overhead ---');
 	console.log(`Direct function call:     ${formatNs(directNsPerOp)}/op  (${formatOps(directIterations / (directMs / 1000))})`);
@@ -373,40 +375,43 @@ async function benchMergeStrategies() {
 async function benchFastReject() {
 	const ws = createMockWs({ id: 'user1' });
 	const platform = createMockPlatform();
-
-	// Various non-RPC payloads
 	const nonRpc = [
 		textEncoder.encode('plain text message').buffer,
 		textEncoder.encode('{"type":"custom","data":123}').buffer,
 		new Uint8Array([0xff, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d]).buffer,
 		textEncoder.encode('{"some":"json","not":"rpc"}').buffer,
 	];
-
 	let responses = 0;
 	platform.send = () => { responses++; return 1; };
-	let rejected = 0;
-	for (const payload of nonRpc) {
-		if (handleRpc(ws, payload, platform) !== false) throw new Error('Non-RPC fixture was handled by the RPC protocol');
-		rejected++;
+	let diagnostics = 0;
+	const warn = console.warn;
+	console.warn = () => { diagnostics++; };
+	try {
+		let rejected = 0;
+		for (const payload of nonRpc) {
+			if (handleRpc(ws, payload, platform) !== false) throw new Error('Non-RPC fixture was handled by the RPC protocol');
+			rejected++;
+		}
+		await Promise.resolve();
+		if (responses) throw new Error('Non-RPC fixture produced a response');
+		if (diagnostics) throw new Error(`Non-RPC fixtures emitted ${diagnostics} diagnostics`);
+		console.log(`Non-RPC fixtures: ${rejected} rejected, 0 handled, ${responses} responses`);
+		if (!checkOnly) {
+			const iterations = 500_000;
+			const start = performance.now();
+			for (let i = 0; i < iterations; i++) handleRpc(ws, nonRpc[i & 3], platform);
+			const ms = performance.now() - start;
+			await Promise.resolve();
+			if (responses) throw new Error('Non-RPC rejection loop produced a response');
+			if (diagnostics) throw new Error(`Non-RPC rejection loop emitted ${diagnostics} diagnostics`);
+			console.log('--- Fast-path rejection (non-RPC messages) ---');
+			console.log(`Non-RPC rejection:        ${formatNs((ms * 1e6) / iterations)}/op  (${formatOps(iterations / (ms / 1000))})`);
+			console.log();
+		}
+		console.log(`Non-RPC diagnostics: ${diagnostics}`);
+	} finally {
+		console.warn = warn;
 	}
-	await Promise.resolve();
-	if (responses) throw new Error('Non-RPC fixture produced a response');
-	console.log(`Non-RPC fixtures: ${rejected} rejected, 0 handled, ${responses} responses`);
-	if (checkOnly) return;
-
-	const iterations = 500_000;
-	const start = performance.now();
-
-	for (let i = 0; i < iterations; i++) {
-		handleRpc(ws, nonRpc[i & 3], platform);
-	}
-
-	const ms = performance.now() - start;
-	const nsPerOp = (ms * 1e6) / iterations;
-
-	console.log('--- Fast-path rejection (non-RPC messages) ---');
-	console.log(`Non-RPC rejection:        ${formatNs(nsPerOp)}/op  (${formatOps(iterations / (ms / 1000))})`);
-	console.log();
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +421,9 @@ async function benchFastReject() {
 console.log(`svelte-realtime ${version} benchmarks`);
 console.log(`Mode: ${process.env.NODE_ENV === 'production' ? 'production' : 'development'} (NODE_ENV=${process.env.NODE_ENV ?? 'unset'})`);
 console.log(`Runtime: Node ${process.version}, ${process.platform}/${process.arch}`);
+const cpu = cpus();
+console.log(`CPU: ${JSON.stringify(cpu[0]?.model ?? 'unknown')}; logical cores: ${cpu.length}`);
+console.log(`Command argv: ${JSON.stringify([process.execPath, ...process.execArgv, ...process.argv.slice(1)])}`);
 console.log('Scope: preencoded requests, mock response delivery with outcome validation; no network or response encoding.');
 console.log('='.repeat(50));
 console.log();
