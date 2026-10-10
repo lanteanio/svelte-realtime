@@ -3,7 +3,7 @@
   "owner": "svelte-realtime",
   "compatibilitySource": "src/cli-utils.js",
   "entryBudgetLines": 60,
-  "readmeMaxLines": 5583,
+  "readmeMaxLines": 5582,
   "paths": [
     {
       "key": "identity",
@@ -69,5 +69,6 @@
       "destination": "https://svelte-realtime.dev/guides/deployment",
       "owner": "svelte-realtime.dev"
     }
-  ]
+  ],
+  "readmeGrowth": []
 }

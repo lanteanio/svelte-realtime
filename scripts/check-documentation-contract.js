@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { anchorsOf, headingsOf } from './check-links.js';
+import { readReadmeBaselines, resizeReadmeManifest, validateGrowthRecords, validateReadmeGrowth } from './readme-ratchet.js';
 import { SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC, SCAFFOLD_EXTENSIONS_SPEC, SCAFFOLD_UWS_SPEC } from '../src/cli-utils.js';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PATHS_START = '<!-- documentation-paths:start -->';
@@ -51,7 +52,8 @@ function fields(value, expected) {
 }
 export function validateManifest(manifest, pkg) {
 	const failures = [];
-	if (!fields(manifest, ['schemaVersion', 'owner', 'compatibilitySource', 'entryBudgetLines', 'readmeMaxLines', 'paths'])) return ['manifest fields differ from schema'];
+	if (!fields(manifest, ['schemaVersion', 'owner', 'compatibilitySource', 'entryBudgetLines', 'readmeMaxLines', 'paths', ...(Object.hasOwn(manifest ?? {}, 'readmeGrowth') ? ['readmeGrowth'] : [])])) return ['manifest fields differ from schema'];
+	failures.push(...validateGrowthRecords(manifest));
 	if (manifest.schemaVersion !== 1 || manifest.owner !== pkg.name) failures.push('manifest version or package owner is invalid');
 	if (manifest.compatibilitySource !== 'src/cli-utils.js') failures.push('compatibility must use the CLI-owned tuple');
 	if (!Number.isInteger(manifest.entryBudgetLines) || manifest.entryBudgetLines < 30 || manifest.entryBudgetLines > 120) failures.push('entryBudgetLines must be between 30 and 120');
@@ -107,9 +109,9 @@ export function replaceBlock(source, start, end, content) {
 	const limits = bounds(source, start, end);
 	return source.slice(0, limits.start) + content + source.slice(limits.end);
 }
-export function validateReadme(readme, manifest) {
+export function validateReadme(readme, manifest, baseline) {
 	readme = readme.replace(/\r\n/g, '\n');
-	const failures = [];
+	const failures = validateReadmeGrowth(manifest, baseline);
 	let paths;
 	let compatibility;
 	try { paths = bounds(readme, PATHS_START, PATHS_END); compatibility = bounds(readme, COMPAT_START, COMPAT_END); } catch (error) { return [error.message]; }
@@ -129,24 +131,34 @@ export function validateReadme(readme, manifest) {
 	if (/uWebSockets\.js\/archive\/refs\/tags\/v\d+\.\d+\.\d+|\bv\d+\.\d+\.\d+\b/.test(outside)) failures.push('native version facts belong in the generated compatibility block');
 	return failures;
 }
-function main() {
-	const manifest = JSON.parse(readFileSync(resolve(root, 'docs/documentation.v1.json'), 'utf8'));
-	const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
+export function main({ directory = root, write = false, acceptReadmeGrowth = false, log = console.log } = {}) {
+	if (acceptReadmeGrowth && !write) throw new Error('--accept-readme-growth requires --write');
+	let manifest = JSON.parse(readFileSync(resolve(directory, 'docs/documentation.v1.json'), 'utf8'));
+	const pkg = JSON.parse(readFileSync(resolve(directory, 'package.json'), 'utf8'));
 	const schemaErrors = validateManifest(manifest, pkg);
 	if (schemaErrors.length) throw new Error(schemaErrors.join('\n'));
-	let readme = readFileSync(resolve(root, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
-	if (process.argv.includes('--write')) {
+	const { head, history } = readReadmeBaselines(directory);
+	let readme = readFileSync(resolve(directory, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
+	if (write) {
 		readme = replaceBlock(readme, PATHS_START, PATHS_END, renderPaths(manifest));
 		readme = replaceBlock(readme, COMPAT_START, COMPAT_END, renderCompatibility());
 		readme = replaceBlock(readme, TOPICS_START, TOPICS_END, renderTopics(readme));
-		writeFileSync(resolve(root, 'README.md'), readme);
-		writeFileSync(resolve(root, 'docs/package-exports.md'), renderExports(pkg));
+		manifest = resizeReadmeManifest(manifest, head, readme.split('\n').length, acceptReadmeGrowth);
 	}
-	const failures = validateReadme(readme, manifest);
-	if (readFileSync(resolve(root, 'docs/package-exports.md'), 'utf8').replace(/\r\n/g, '\n') !== renderExports(pkg)) failures.push('package exports index differs; run npm run generate:documentation');
+	const failures = validateReadme(readme, manifest, head);
+	// Validate every change after record adoption, including changes hidden by later commits.
+	for (let index = 0; index + 1 < history.length; index++) {
+		if (Object.hasOwn(history[index + 1], 'readmeGrowth')) failures.push(...validateReadmeGrowth(history[index], history[index + 1]));
+	}
+	if (!write && readFileSync(resolve(directory, 'docs/package-exports.md'), 'utf8').replace(/\r\n/g, '\n') !== renderExports(pkg)) failures.push('package exports index differs; run npm run generate:documentation');
 	if (failures.length) throw new Error(failures.join('\n'));
-	console.log(`documentation contract: eight owned paths; README ${readme.split('\n').length}/${manifest.readmeMaxLines} lines`);
+	if (write) {
+		writeFileSync(resolve(directory, 'README.md'), readme);
+		writeFileSync(resolve(directory, 'docs/documentation.v1.json'), JSON.stringify(manifest, null, 2) + '\n');
+		writeFileSync(resolve(directory, 'docs/package-exports.md'), renderExports(pkg));
+	}
+	log(`documentation contract: eight owned paths; README ${readme.split('\n').length}/${manifest.readmeMaxLines} lines`);
 }
 if (isScriptEntry(import.meta.url)) {
-	try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }
+	try { main({ write: process.argv.includes('--write'), acceptReadmeGrowth: process.argv.includes('--accept-readme-growth') }); } catch (error) { console.error(error.message); process.exitCode = 1; }
 }

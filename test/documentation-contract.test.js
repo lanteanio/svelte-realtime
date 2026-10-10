@@ -40,6 +40,11 @@ it('pins the README ratchet at its actual size with no headroom', () => {
 	expect(validateReadme(readme, manifest)).toEqual([]);
 	expect(validateReadme(readme + '\n', manifest).join('\n')).toContain('size ratchet');
 });
+it('rejects raising the README and its size limit together without an accepted growth record', () => {
+	const expanded = readme + '\n\n';
+	const raised = { ...manifest, readmeMaxLines: expanded.split('\n').length };
+	expect(validateReadme(expanded, raised, manifest).join('\n')).toContain('accepted README growth record');
+});
 it('enforces routing placement independently of total README size', () => {
 	const delayed = '\n'.repeat(manifest.entryBudgetLines) + readme;
 	expect(validateReadme(delayed, { ...manifest, readmeMaxLines: delayed.split('\n').length }).join('\n')).toContain('entry budget');

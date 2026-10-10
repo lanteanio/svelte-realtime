@@ -12,6 +12,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- README size increases require an explicit generator flag and a recorded change from the committed limit. Action: use `npm run generate:documentation -- --accept-readme-growth` when an intentional increase is needed.
+
 - DevTools formats telemetry with Intl, supports locale and direction configuration, and isolates runtime identifiers.
 
 - Added an exact locked Svelte 4 compatibility fixture with generated version/setup documentation and CI checks for production builds, declarations, stores and two browser tabs. Action: use the linked Svelte 4 profile when reproducing support on that major version.
