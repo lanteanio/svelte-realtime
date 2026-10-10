@@ -2259,7 +2259,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "0e257ea42d9ca2e79742fe17b53df392735f72b341e841a77af315181da84b1a",
+			"fingerprint": "45d2036a45b295225150d3a8bb24349631f828ef0389324222d99bfdc5a3b54e",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Postgres NOTIFY",
