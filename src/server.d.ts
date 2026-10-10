@@ -1930,6 +1930,9 @@ export namespace live {
 	 * The default in-process store reserves up to 10,000 running keys and cached
 	 * results. At capacity, new keys throw `LiveError('IDEMPOTENCY_CAPACITY')`
 	 * before the handler runs; cached retries remain available until their TTL.
+	 * Pending durable slots are polled for up to five seconds, then return
+	 * retryable `IDEMPOTENCY_IN_PROGRESS`; retry the same key and payload.
+	 * Waiting never cancels the original owner.
 	 * For multi-instance deployments,
 	 * pass `store: createIdempotencyStore(redis)` from
 	 * `svelte-adapter-uws-extensions/redis/idempotency` (or the durable

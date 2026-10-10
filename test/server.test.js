@@ -11775,21 +11775,25 @@ describe('live.idempotent()', () => {
 		expect(platform.sent[0].data.code).toBe('INVALID_REQUEST');
 	});
 
-	it('throws CONFLICT when store returns pending', async () => {
-		const customStore = { async acquire() { return { pending: true }; } };
-		const handler = live.idempotent(
-			{ keyFrom: () => 'p', store: customStore },
-			async () => 'never'
-		);
-		const ws = mockWs();
-		const platform = mockPlatform();
-		__register('idem/pending', handler);
+	it('returns retryable IN_PROGRESS after the pending-store wait expires', async () => {
+		vi.useFakeTimers();
+		try {
+			const customStore = { async acquire() { return { pending: true }; } };
+			const handler = live.idempotent(
+				{ keyFrom: () => 'p', store: customStore },
+				async () => 'never'
+			);
+			const ws = mockWs();
+			const platform = mockPlatform();
+			__register('idem/pending', handler);
 
-		handleRpc(ws, toArrayBuffer({ rpc: 'idem/pending', id: '1', args: [] }), platform);
-		await new Promise((r) => setTimeout(r, 10));
-
-		expect(platform.sent[0].data.ok).toBe(false);
-		expect(platform.sent[0].data.code).toBe('CONFLICT');
+			handleRpc(ws, toArrayBuffer({ rpc: 'idem/pending', id: '1', args: [] }), platform);
+			await vi.advanceTimersByTimeAsync(4999);
+			expect(platform.sent).toHaveLength(0);
+			await vi.advanceTimersByTimeAsync(1);
+			expect(platform.sent[0].data.ok).toBe(false);
+			expect(platform.sent[0].data.code).toBe('IDEMPOTENCY_IN_PROGRESS');
+		} finally { vi.useRealTimers(); }
 	});
 
 	it('composes with live.validated() (validation runs first)', async () => {

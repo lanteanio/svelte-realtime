@@ -307,6 +307,39 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	};
 }
 
+// Durable stores report a held slot rather than parking the caller. Bound the
+// entire follow-up wait, including a slow store read, without touching its owner.
+function _waitPendingIdempotency(store, key, ttlSec, meta) {
+	return new Promise((resolve, reject) => {
+		let settled = false, pollTimer = null, delay = 10;
+		const timeout = setTimer(() => finish(undefined, new LiveError('IDEMPOTENCY_IN_PROGRESS', 'The original request is still in progress; retry with the same idempotency key.')), 5000);
+		function finish(slot, error) {
+			if (settled) return;
+			settled = true;
+			clearTimer(timeout);
+			if (pollTimer !== null) clearTimer(pollTimer);
+			if (arguments.length > 1) reject(error); else resolve(slot);
+		}
+		async function poll() {
+			pollTimer = null;
+			try {
+				const slot = await store.acquire(key, ttlSec, meta);
+				if (settled) {
+					// A timed-out read may have won an unused slot after its former
+					// owner aborted. No handler ran here, so release only that slot.
+					if (slot?.acquired) { try { await slot.abort(); } catch {} }
+					return;
+				}
+				if (!slot?.pending) { finish(slot); return; }
+				pollTimer = setTimer(poll, delay);
+				delay = Math.min(delay * 2, 250);
+			} catch (error) { finish(undefined, error); }
+		}
+		pollTimer = setTimer(poll, delay);
+		delay *= 2;
+	});
+}
+
 function _getDefaultIdempotencyStore() {
 	if (_defaultIdempotencyStore) return _defaultIdempotencyStore;
 	_defaultIdempotencyStore = _createInMemoryIdempotencyStore();
@@ -546,6 +579,9 @@ function _assertConfigShape(helperName, cfg, allowed, hints) {
  * The default in-process store reserves up to 10,000 running keys and cached
  * results. At capacity, new keys throw `LiveError('IDEMPOTENCY_CAPACITY')`
  * before the handler runs; cached retries remain available until their TTL.
+ * Pending durable slots are polled for up to five seconds, then return
+ * retryable `IDEMPOTENCY_IN_PROGRESS`; retry the same key and payload.
+ * Waiting never cancels the original owner.
  * For multi-instance deployments,
  * pass `store: createIdempotencyStore(redis)` from svelte-adapter-uws-extensions.
  *
@@ -621,56 +657,59 @@ const _liveIdempotent = function idempotent(config, fn) {
 		// user for live.forget right-to-erasure - the in-memory store folds them
 		// into a key matching `_tenantKey(tenantId, userId)`, a durable backend
 		// denormalizes them into columns. Anonymous callers pass nothing.
-		const slot = await store.acquire(key, ttlSec, uid !== null ? { user: uid, tenant: ctx.tenantId } : undefined);
-		if (slot && slot.acquired) {
-			let data;
-			try {
-				data = await fn(ctx, ...args);
-			} catch (err) {
-				// PRE-COMMIT handler failure: nothing was recorded, so release the
-				// slot and let a legitimate retry run the handler again.
-				try { await slot.abort(); } catch {}
-				throw err;
+		let slot = await store.acquire(key, ttlSec, uid !== null ? { user: uid, tenant: ctx.tenantId } : undefined);
+		for (;;) {
+			if (slot && slot.acquired) {
+				let data;
+				try {
+					data = await fn(ctx, ...args);
+				} catch (err) {
+					// PRE-COMMIT handler failure: nothing was recorded, so release the
+					// slot and let a legitimate retry run the handler again.
+					try { await slot.abort(); } catch {}
+					throw err;
+				}
+				// Handler succeeded; its effect has run. A commit failure now is
+				// AMBIGUOUS - the store may have durably applied the record and only
+				// lost the acknowledgement, or it may have rejected before writing.
+				// Aborting here would delete a possibly-committed record and let a
+				// retry re-run the handler and DOUBLE-APPLY the effect, so the commit
+				// is deliberately OUTSIDE the abort scope. The slot is left intact for
+				// the store to reconcile, and the caller gets a typed
+				// IDEMPOTENCY_COMMIT_UNKNOWN so it reconciles rather than blindly retrying.
+				try {
+					// Wrap the result with its request fingerprint (skipped only when the
+					// args could not be serialized). The envelope is opaque to the store
+					// and is unwrapped before it ever reaches the caller.
+					await slot.commit(fp != null ? { [_FP]: fp, [_VAL]: data } : data);
+				} catch (err) {
+					const unknown = new LiveError(
+						'IDEMPOTENCY_COMMIT_UNKNOWN',
+						'the idempotency record could not be confirmed committed after the handler ran; the effect may have applied - reconcile before retrying rather than re-running'
+					);
+					/** @type {any} */ (unknown).cause = err;
+					throw unknown;
+				}
+				return data;
 			}
-			// Handler succeeded; its effect has run. A commit failure now is
-			// AMBIGUOUS - the store may have durably applied the record and only
-			// lost the acknowledgement, or it may have rejected before writing.
-			// Aborting here would delete a possibly-committed record and let a
-			// retry re-run the handler and DOUBLE-APPLY the effect, so the commit
-			// is deliberately OUTSIDE the abort scope. The slot is left intact for
-			// the store to reconcile, and the caller gets a typed
-			// IDEMPOTENCY_COMMIT_UNKNOWN so it reconciles rather than blindly retrying.
-			try {
-				// Wrap the result with its request fingerprint (skipped only when the
-				// args could not be serialized). The envelope is opaque to the store
-				// and is unwrapped before it ever reaches the caller.
-				await slot.commit(fp != null ? { [_FP]: fp, [_VAL]: data } : data);
-			} catch (err) {
-				const unknown = new LiveError(
-					'IDEMPOTENCY_COMMIT_UNKNOWN',
-					'the idempotency record could not be confirmed committed after the handler ran; the effect may have applied - reconcile before retrying rather than re-running'
-				);
-				/** @type {any} */ (unknown).cause = err;
-				throw unknown;
+			if (slot && slot.pending) {
+				slot = await _waitPendingIdempotency(store, key, ttlSec, uid !== null ? { user: uid, tenant: ctx.tenantId } : undefined);
+				continue;
 			}
-			return data;
-		}
-		if (slot && slot.pending) {
-			throw new LiveError('CONFLICT', 'A request with this idempotency key is already in progress');
-		}
-		const cached = slot.result;
-		if (cached !== null && typeof cached === 'object' && typeof (/** @type {any} */ (cached)[_FP]) === 'string') {
-			if (fp != null && /** @type {any} */ (cached)[_FP] !== fp) {
-				throw new LiveError(
-					'IDEMPOTENCY_KEY_REUSED',
-					'idempotency key reused with a different request payload; the same key must always carry the same request'
-				);
+			const cached = slot.result;
+			if (cached !== null && typeof cached === 'object' && typeof (/** @type {any} */ (cached)[_FP]) === 'string') {
+				if (fp != null && /** @type {any} */ (cached)[_FP] !== fp) {
+					throw new LiveError(
+						'IDEMPOTENCY_KEY_REUSED',
+						'idempotency key reused with a different request payload; the same key must always carry the same request'
+					);
+				}
+				return (/** @type {any} */ (cached))[_VAL];
 			}
-			return (/** @type {any} */ (cached))[_VAL];
+			// Legacy/raw cached value (a pre-upgrade entry, a store that does not
+			// round-trip the envelope, or unserializable args): return as-is.
+			return cached;
 		}
-		// Legacy/raw cached value (a pre-upgrade entry, a store that does not
-		// round-trip the envelope, or unserializable args): return as-is.
-		return cached;
 	};
 
 	/** @type {any} */ (wrapper).__isLive = true;

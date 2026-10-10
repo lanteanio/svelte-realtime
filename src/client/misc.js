@@ -1,6 +1,6 @@
 // @ts-check
 import { connect as _connect } from 'svelte-adapter-uws/client';
-import { now } from '../client-runtime.js';
+import { now, setTimer } from '../client-runtime.js';
 import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from './internal-state.js';
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
@@ -180,7 +180,7 @@ async function _drainOfflineQueue() {
 	if (_replayingScope === scope) return;
 	_replayingScope = scope;
 	_startOfflineDrain(scope);
-	let again = false;
+	let again = false, retryIdempotency = false;
 	try {
 		await _offlineReady();
 		if (scope !== _offlineScope()) return;
@@ -277,6 +277,11 @@ async function _drainOfflineQueue() {
 					// server: not a replay failure.
 					if (_isConnectionLoss(err)) {
 						cut = true;
+						return;
+					}
+					if (err && (err.code === 'IDEMPOTENCY_IN_PROGRESS' || err.code === 'IDEMPOTENCY_CAPACITY')) {
+						cut = true;
+						retryIdempotency = true;
 						return;
 					}
 					if (err && err.code === 'CONFLICT' && !retried) {
@@ -504,8 +509,13 @@ async function _drainOfflineQueue() {
 		_bumpPending();
 		// Draining again keeps `uploading` up: what was put back still waits to
 		// go out, and that drain clears it when it ends.
-		if (again) void _drainOfflineQueue();
-		else _setUploading(false);
+		if (again && !retryIdempotency) void _drainOfflineQueue();
+		else {
+			_setUploading(false);
+			if (again) setTimer(() => {
+				if (scope === _offlineScope()) void _drainOfflineQueue();
+			}, 1000);
+		}
 	}
 }
 
