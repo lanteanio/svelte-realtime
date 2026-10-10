@@ -455,23 +455,23 @@ export function createTestEnv(options) {
 			} else if (fn?.__isRoom) {
 				// Room export: register data stream + presence + cursors + actions
 				const path = moduleName + '/' + name;
-				if (fn.__dataStream) __register(path + '/__data', fn.__dataStream);
-				if (fn.__presenceStream) __register(path + '/__presence', fn.__presenceStream);
-				if (fn.__ownerStream) __register(path + '/__owner', fn.__ownerStream);
-				if (fn.__cursorStream) __register(path + '/__cursors', fn.__cursorStream);
-				if (fn.__reactionStream) __register(path + '/__reactions', fn.__reactionStream);
+				if (fn.__dataStream) __register(path + '/__data', fn.__dataStream, moduleName);
+				if (fn.__presenceStream) __register(path + '/__presence', fn.__presenceStream, moduleName);
+				if (fn.__ownerStream) __register(path + '/__owner', fn.__ownerStream, moduleName);
+				if (fn.__cursorStream) __register(path + '/__cursors', fn.__cursorStream, moduleName);
+				if (fn.__reactionStream) __register(path + '/__reactions', fn.__reactionStream, moduleName);
 				// A multiplayer export's send paths, at the paths the generated
 				// registry gives them.
 				if (fn.__cursorMove) __register(path + '/__cursor/move', fn.__cursorMove, moduleName);
 				if (fn.__cursorReportViewport) __register(path + '/__cursor/reportViewport', fn.__cursorReportViewport, moduleName);
 				if (fn.__presenceUpdate) __register(path + '/__presence/update', fn.__presenceUpdate, moduleName);
 				if (fn.__reactionEmit) __register(path + '/__reaction/emit', fn.__reactionEmit, moduleName);
-				if (fn.__roomsStream) __register(path + '/__rooms', fn.__roomsStream);
-				if (fn.__roomsSync) __register(path + '/__roomsSync', fn.__roomsSync);
+				if (fn.__roomsStream) __register(path + '/__rooms', fn.__roomsStream, moduleName);
+				if (fn.__roomsSync) __register(path + '/__roomsSync', fn.__roomsSync, moduleName);
 				if (typeof fn.__setEnumId === 'function') fn.__setEnumId(path);
 				if (fn.__actions) {
 					for (const [k, v] of Object.entries(fn.__actions)) {
-						__register(path + '/__action/' + k, v);
+						__register(path + '/__action/' + k, v, moduleName);
 					}
 				}
 			} else if (fn?.__isDerived) {

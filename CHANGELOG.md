@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Apply module guards to every room stream, room-list RPC and room action in `createTestEnv`, matching the generated registry. Tests with guarded room modules now enforce those guards.
+
 - Server introspection declares the adapter version tuple; packed-consumer checks preserve startup version resolution and external runtime imports in SSR builds.
 
 - Vite registry updates stay inside the configured live directory, serialize with startup, and contain asynchronous reload failures. Nested worktree hooks no longer inherit the parent registry.
