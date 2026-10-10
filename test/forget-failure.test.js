@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { live, configureForget, configureWebhooks, _resetForget } from '../src/server.js';
+import { live, configureForget, configureWebhooks, _resetForget, __registerAggregate, _activateDerived, _resetAggregates } from '../src/server.js';
 import { _pushRegistry } from '../src/server/push.js';
-import { _aggregateBySource } from '../src/server/state.js';
+import { aggregateRegistry } from '../src/server/state.js';
+import { mockPlatform } from './helpers/mock-platform.js';
 import { _crdtDecls } from '../src/server/crdt.js';
 import { setOperationalEventSink } from '../src/shared/diagnostic.js';
 
@@ -11,15 +12,16 @@ let events;
 let restoreSink;
 beforeEach(() => {
 	_resetForget();
+	_resetAggregates();
 	configureWebhooks({ deadLetter: false });
 	events = [];
 	restoreSink = setOperationalEventSink(record => events.push(record));
 });
 afterEach(() => {
 	_resetForget();
+	_resetAggregates();
 	configureWebhooks({ deadLetter: false });
 	_pushRegistry.clear();
-	_aggregateBySource.clear();
 	_crdtDecls.clear();
 	restoreSink();
 });
@@ -29,8 +31,15 @@ describe('incomplete erasure', () => {
 		const failure = new Error('private.person@example.test remains');
 		const purgeUser = asyncFailure ? () => Promise.reject(failure) : () => { throw failure; };
 		configureWebhooks({ deadLetter: store(purgeUser) });
-		const cohort = new Set(['member']);
-		_aggregateBySource.set('source', [{ cohort }]);
+		const aggregate = live.aggregate('source', { total: { init: () => 0, reduce: value => value + 1 } }, {
+			topic: 'output', forget: 'reset', privacy: { k: 2, strategy: 'suppress', contributor: value => value.id }
+		});
+		__registerAggregate('failure/aggregate', aggregate);
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		platform.publish('source', 'added', { id: 'member' });
+		const cohort = aggregateRegistry.get('failure/aggregate').cohort;
+		expect(cohort.has('member')).toBe(true);
 		const durable = vi.fn(async () => 3);
 		configureForget({ store: { purgeUser: durable } });
 		const onForget = vi.fn();
