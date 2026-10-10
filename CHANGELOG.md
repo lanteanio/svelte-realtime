@@ -49,6 +49,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Signal subscription setup safely ignores a native socket that closes during asynchronous connection initialization.
 
 - Stream unsubscribe and disconnect cleanup wait for pending subscribe hooks, preventing room presence, ownership, and enumeration from surviving a departed socket.
+- The scaffold rejects Node versions below 22.12 before prompting, creating a project or installing dependencies.
+  **Action required:** upgrade to the [supported runtime](README.md#version-compatibility) before running the scaffold.
+
 - Room actions cannot use the generated client member names `data`, `presence`, `cursors`, `owner` or `rooms`, even when an optional surface is disabled. Declaration errors now identify the action to rename.
 
 - `realtime()`, generated WebSocket hooks and README examples include stream and connection cleanup exports. The Vite plugin warns once when a routing hook omits `unsubscribe` or `close`, explaining the retained state.

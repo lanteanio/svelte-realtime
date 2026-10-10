@@ -17,6 +17,13 @@ import {
 	VALID_NAME_RE
 } from './cli-utils.js';
 
+// Reject the build toolchain floor before prompts, project creation or installs.
+const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
+if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 12)) {
+	console.error('[svelte-realtime] Scaffolding requires Node 22.12 or newer; found ' + process.versions.node + '. Upgrade Node before creating a project.');
+	process.exit(1);
+}
+
 const IS_WIN = process.platform === 'win32';
 
 /**
