@@ -128,3 +128,11 @@ it('fits a narrow viewport and remains reachable after movement and resize', asy
  await move.click();
  await inside();
 });
+
+it('honors host theme tokens and keeps selected tabs identifiable in forced colors', async () => {
+ await page.evaluate(() => { document.documentElement.style.setProperty('--svr-dt-surface', 'rgb(20, 30, 40)'); });
+ await streamsFixture();
+ expect(await page.locator('#svelte-realtime-devtools').evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(20, 30, 40)');
+ await page.emulateMedia({ forcedColors: 'active' });
+ expect(await page.getByRole('tab', { name: 'rpcs', exact: true }).evaluate(el => getComputedStyle(el).textDecorationLine)).toContain('underline');
+});

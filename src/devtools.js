@@ -78,26 +78,27 @@ function init() {
 
 	panel = document.createElement('div');
 	panel.id = 'svelte-realtime-devtools';
+	panel.style.colorScheme = 'dark';
 	panel.setAttribute('role', 'region');
 	panel.setAttribute('aria-label', 'svelte-realtime DevTools');
 	panel.style.cssText = `
-		display: none; flex-direction: column; box-sizing: border-box; position: fixed; bottom: 10px; right: 10px; width: min(420px, calc(100vw - 20px)); max-height: min(400px, calc(100dvh - 20px));
-		background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 8px;
+		color-scheme: dark; display: none; flex-direction: column; box-sizing: border-box; position: fixed; bottom: 10px; right: 10px; width: min(420px, calc(100vw - 20px)); max-height: min(400px, calc(100dvh - 20px));
+		background: var(--svr-dt-surface, #1a1a2e); color: var(--svr-dt-text, #f2f4ff); border: 1px solid var(--svr-dt-border, #7d859a); border-radius: 8px;
 		font-family: monospace; font-size: 12px; z-index: 99999; overflow: hidden;
 		box-shadow: 0 4px 20px rgba(0,0,0,0.5);
 	`;
 
 	const header = document.createElement('div');
 	header.style.cssText = `
-		padding: 6px 10px; background: #16213e; display: flex; justify-content: space-between;
-		align-items: center; gap: 8px; flex-shrink: 0; touch-action: none; cursor: move; user-select: none; border-bottom: 1px solid #333;
+		padding: 6px 10px; background: var(--svr-dt-raised, #16213e); display: flex; justify-content: space-between;
+		align-items: center; gap: 8px; flex-shrink: 0; touch-action: none; cursor: move; user-select: none; border-bottom: 1px solid var(--svr-dt-border, #7d859a);
 	`;
-	header.innerHTML = '<span style="font-weight:bold;color:#e94560">svelte-realtime</span>';
+	header.innerHTML = '<span style="font-weight:bold;color:var(--svr-dt-accent, #ff819a)">svelte-realtime</span>';
 
 	const closeBtn = document.createElement('button');
 	closeBtn.textContent = 'x';
 	closeBtn.setAttribute('aria-label', 'Close DevTools');
-	closeBtn.style.cssText = 'background:none;border:none;color:#888;cursor:pointer;font-size:14px;padding:0 4px;';
+	closeBtn.style.cssText = 'background:none;border:none;color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-size:14px;padding:0 4px;';
 	closeBtn.onclick = toggle;
 	const moveBtn = document.createElement('button');
 	moveBtn.type = 'button';
@@ -150,7 +151,7 @@ function init() {
 	const tabs = document.createElement('div');
 	tabs.setAttribute('role', 'tablist');
 	tabs.setAttribute('aria-label', 'DevTools views');
-	tabs.style.cssText = 'display:flex;flex-shrink:0;border-bottom:1px solid #333;';
+	tabs.style.cssText = 'display:flex;flex-shrink:0;border-bottom:1px solid var(--svr-dt-border, #7d859a);';
 
 	const content = document.createElement('div');
 	content.id = 'svr-dt-content';
@@ -170,7 +171,7 @@ function init() {
 		btn.setAttribute('aria-selected', String(name === activeTab));
 		btn.tabIndex = name === activeTab ? 0 : -1;
 		btn.style.cssText = `
-			flex:1;padding:5px;background:none;border:none;color:#888;cursor:pointer;
+			flex:1;padding:5px;background:none;border:none;color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;
 			font-family:monospace;font-size:11px;border-bottom:2px solid transparent;
 		`;
 		btn.onclick = () => {
@@ -182,15 +183,15 @@ function init() {
 				/** @type {HTMLElement} */ (b).tabIndex = b === btn ? 0 : -1;
 				/** @type {HTMLElement} */ (b).style.fontWeight = b === btn ? 'bold' : 'normal';
 				/** @type {HTMLElement} */ (b).style.borderBottomColor = 'transparent';
-				/** @type {HTMLElement} */ (b).style.color = '#888';
+				/** @type {HTMLElement} */ (b).style.color = 'var(--svr-dt-muted, #b3b8cc)';
 			}
-			btn.style.borderBottomColor = '#e94560';
-			btn.style.color = '#e0e0e0';
+			btn.style.borderBottomColor = 'var(--svr-dt-accent, #ff819a)';
+			btn.style.color = 'var(--svr-dt-text, #f2f4ff)';
 			render(content);
 		};
 		if (name === activeTab) {
-			btn.style.borderBottomColor = '#e94560';
-			btn.style.color = '#e0e0e0';
+			btn.style.borderBottomColor = 'var(--svr-dt-accent, #ff819a)';
+			btn.style.color = 'var(--svr-dt-text, #f2f4ff)';
 		}
 		btn.onkeydown = (event) => {
 			const index = tabNames.indexOf(name);
@@ -209,9 +210,27 @@ function init() {
 	panel.appendChild(header);
 	panel.appendChild(tabs);
 	panel.appendChild(content);
-	document.body.appendChild(panel);
+	const styles = document.createElement('style');
+ styles.textContent = `
+  #svelte-realtime-devtools button, #svr-dt-launcher {
+   font: inherit; color: var(--svr-dt-text, #f2f4ff); background: var(--svr-dt-raised, #16213e);
+   border: 1px solid var(--svr-dt-border, #7d859a); border-radius: 3px; cursor: pointer;
+  }
+  #svelte-realtime-devtools [aria-selected="true"] { font-weight: bold; text-decoration: underline; }
+  @media (forced-colors: active) {
+   #svelte-realtime-devtools, #svr-dt-launcher {
+    --svr-dt-surface: Canvas; --svr-dt-raised: Canvas; --svr-dt-text: CanvasText;
+    --svr-dt-muted: CanvasText; --svr-dt-border: ButtonText; --svr-dt-accent: LinkText;
+    --svr-dt-success: CanvasText; --svr-dt-warning: CanvasText; --svr-dt-error: CanvasText;
+   }
+   #svelte-realtime-devtools button { border: 1px solid ButtonText !important; }
+  }
+ `;
+ document.head.appendChild(styles);
+ document.body.appendChild(panel);
 	launcher = document.createElement('button');
 	launcher.type = 'button';
+	launcher.id = 'svr-dt-launcher';
 	launcher.textContent = 'DevTools';
 	launcher.setAttribute('aria-label', 'Toggle svelte-realtime DevTools');
 	launcher.setAttribute('aria-controls', panel.id);
@@ -334,22 +353,22 @@ function renderRpcs(el, dt) {
 
 	let html = '';
 	if (pending.length > 0) {
-		html += '<div style="color:#ffc107;margin-bottom:6px">Pending (' + esc(String(pending.length)) + ')</div>';
+		html += '<div style="color:var(--svr-dt-warning, #ffe18a);margin-bottom:6px">Pending (' + esc(String(pending.length)) + ')</div>';
 		for (const p of pending) {
 			const elapsed = now() - p.startTime;
-			html += `<div style="padding:2px 0;color:#aaa">${esc(p.path)} <span style="color:#666">${esc(String(elapsed))}ms</span></div>`;
+			html += `<div style="padding:2px 0;color:var(--svr-dt-muted, #b3b8cc)">${esc(p.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(String(elapsed))}ms</span></div>`;
 		}
-		html += '<hr style="border-color:#333;margin:6px 0">';
+		html += '<hr style="border-color:var(--svr-dt-border, #7d859a);margin:6px 0">';
 	}
 
 	const entries = history.filter(Boolean).sort((a, b) => (b.seq || 0) - (a.seq || 0));
 	html += '<div style="margin-bottom:4px">History (' + esc(String(entries.length)) + ')</div>';
 	for (let i = 0; i < Math.min(entries.length, 20); i++) {
 		const h = entries[i];
-		const color = h.ok ? '#4caf50' : '#f44336';
-		html += `<div style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:#666">${esc(String(h.duration))}ms</span></div>`;
+		const color = h.ok ? 'var(--svr-dt-success, #79db8f)' : 'var(--svr-dt-error, #ff9595)';
+		html += `<div style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(String(h.duration))}ms</span></div>`;
 	}
-	if (entries.length === 0) html += '<div style="color:#666">No RPC calls yet</div>';
+	if (entries.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">No RPC calls yet</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
@@ -395,15 +414,15 @@ function renderStreams(el, dt) {
 	const streams = dt.streams ? Array.from(dt.streams.values()) : [];
 
 	const pauseLabel = streamsPaused ? 'Resume' : 'Pause';
-	const pauseColor = streamsPaused ? '#ffc107' : '#888';
+	const pauseColor = streamsPaused ? 'var(--svr-dt-warning, #ffe18a)' : 'var(--svr-dt-muted, #b3b8cc)';
 	const modeLabel = streamsRawMode ? 'Raw' : 'Pretty';
 
 	let html = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:10px">` +
-		`<span style="color:#888">Active (${esc(String(streams.length))})</span>` +
+		`<span style="color:var(--svr-dt-muted, #b3b8cc)">Active (${esc(String(streams.length))})</span>` +
 		`<span style="flex:1"></span>` +
-		`<button data-action="toggle-raw" aria-label="Raw payload format" aria-pressed="${streamsRawMode}" style="background:none;border:1px solid #333;color:#aaa;cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(modeLabel)}</button>` +
-		`<button data-action="toggle-pause" aria-label="Pause event capture" aria-pressed="${streamsPaused}" style="background:none;border:1px solid #333;color:${pauseColor};cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(pauseLabel)}</button>` +
-		`<button data-action="clear-events" style="background:none;border:1px solid #333;color:#aaa;cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">Clear events</button>` +
+		`<button data-action="toggle-raw" aria-label="Raw payload format" aria-pressed="${streamsRawMode}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(modeLabel)}</button>` +
+		`<button data-action="toggle-pause" aria-label="Pause event capture" aria-pressed="${streamsPaused}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:${pauseColor};cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(pauseLabel)}</button>` +
+		`<button data-action="clear-events" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">Clear events</button>` +
 		`</div>`;
 
 	for (const s of streams) {
@@ -414,28 +433,28 @@ function renderStreams(el, dt) {
 			? `last:${esc(s.lastEvent)} ${esc(_ageString(s.lastEventTime))}`
 			: 'no events yet';
 		const errPart = s.error
-			? `<div style="padding:1px 0 1px 12px;color:#f44336">err: ${esc(s.error.code)} - ${esc(s.error.message)}</div>`
+			? `<div style="padding:1px 0 1px 12px;color:var(--svr-dt-error, #ff9595)">err: ${esc(s.error.code)} - ${esc(s.error.message)}</div>`
 			: '';
 		const expanded = expandedStreams.has(s.path);
 		const recentCount = (s.recentEvents && s.recentEvents.length) || 0;
 		const eventsId = 'svr-dt-events-' + encodeURIComponent(s.path);
 		const chevron = expanded ? '[-]' : '[+]';
-		const chevronColor = recentCount > 0 ? '#aaa' : '#555';
+		const chevronColor = recentCount > 0 ? 'var(--svr-dt-muted, #b3b8cc)' : 'var(--svr-dt-muted, #b3b8cc)';
 
-		html += `<div data-key="stream:${esc(s.path)}" style="padding:4px 0;border-bottom:1px solid #2a2a3e">` +
+		html += `<div data-key="stream:${esc(s.path)}" style="padding:4px 0;border-bottom:1px solid var(--svr-dt-border, #7d859a)">` +
 			`<button type="button" data-action="toggle-stream" data-stream-path="${esc(s.path)}" aria-expanded="${expanded}" aria-controls="${esc(eventsId)}" style="background:none;border:none;color:inherit;font:inherit;text-align:start;cursor:pointer;display:flex;align-items:center;gap:4px">` +
 			`<span style="color:${chevronColor};width:10px;display:inline-block">${chevron}</span>` +
 			`<span>${esc(s.path)}</span>` +
-			(recentCount > 0 ? `<span style="color:#666;font-size:10px;margin-left:6px">(${recentCount})</span>` : '') +
+			(recentCount > 0 ? `<span style="color:var(--svr-dt-muted, #b3b8cc);font-size:10px;margin-left:6px">(${recentCount})</span>` : '') +
 			`</button>` +
-			`<div style="padding:1px 0 1px 16px;color:#888">topic:${topic} merge:${merge} subs:${subs}</div>` +
-			`<div style="padding:1px 0 1px 16px;color:#666">${lastEvt}</div>` +
+			`<div style="padding:1px 0 1px 16px;color:var(--svr-dt-muted, #b3b8cc)">topic:${topic} merge:${merge} subs:${subs}</div>` +
+			`<div style="padding:1px 0 1px 16px;color:var(--svr-dt-muted, #b3b8cc)">${lastEvt}</div>` +
 			errPart;
 
 		html += `<div id="${esc(eventsId)}"${expanded ? '' : ' hidden'}>`;
 		if (expanded) {
 			if (recentCount === 0) {
-				html += `<div style="padding:4px 0 4px 24px;color:#555;font-style:italic">No events captured yet${streamsPaused ? ' (paused)' : ''}</div>`;
+				html += `<div style="padding:4px 0 4px 24px;color:var(--svr-dt-muted, #b3b8cc);font-style:italic">No events captured yet${streamsPaused ? ' (paused)' : ''}</div>`;
 			} else {
 				const recent = /** @type {Array<{event: string, data: any, ts: number}>} */ (s.recentEvents);
 				html += `<div style="padding:2px 0 4px 24px">`;
@@ -449,9 +468,9 @@ function renderStreams(el, dt) {
 					});
 					const payload = _renderPayload(ev.data, streamsRawMode);
 					if (streamsRawMode) {
-						html += `<div style="padding:1px 0;color:#aaa;word-break:break-all"><span style="color:#666">${esc(time)}</span> <span style="color:#e94560">${esc(ev.event)}</span> ${esc(payload)}</div>`;
+						html += `<div style="padding:1px 0;color:var(--svr-dt-muted, #b3b8cc);word-break:break-all"><span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(time)}</span> <span style="color:var(--svr-dt-accent, #ff819a)">${esc(ev.event)}</span> ${esc(payload)}</div>`;
 					} else {
-						html += `<div style="display:flex;gap:6px;padding:1px 0;align-items:baseline"><span style="color:#666;tabular-nums;flex-shrink:0">${esc(time)}</span><span style="color:#e94560;flex-shrink:0">${esc(ev.event)}</span><span style="color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(payload)}</span></div>`;
+						html += `<div style="display:flex;gap:6px;padding:1px 0;align-items:baseline"><span style="color:var(--svr-dt-muted, #b3b8cc);tabular-nums;flex-shrink:0">${esc(time)}</span><span style="color:var(--svr-dt-accent, #ff819a);flex-shrink:0">${esc(ev.event)}</span><span style="color:var(--svr-dt-muted, #b3b8cc);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(payload)}</span></div>`;
 					}
 				}
 				html += `</div>`;
@@ -460,7 +479,7 @@ function renderStreams(el, dt) {
 
 		html += `</div></div>`;
 	}
-	if (streams.length === 0) html += '<div style="color:#666">No active streams</div>';
+	if (streams.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">No active streams</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
@@ -476,13 +495,13 @@ function renderStreams(el, dt) {
  */
 function renderSmooth(el, dt) {
 	const accessors = dt.smooth ? [...dt.smooth] : [];
-	let html = `<div style="color:#888;margin-bottom:6px;font-size:10px">Smoothed channels (${esc(String(accessors.length))})</div>`;
+	let html = `<div style="color:var(--svr-dt-muted, #b3b8cc);margin-bottom:6px;font-size:10px">Smoothed channels (${esc(String(accessors.length))})</div>`;
 	let shown = 0;
 	for (const statsFn of accessors) {
 		let s;
 		try { s = statsFn(); } catch { s = null; }
 		if (s === undefined) {
-			html += `<div style="padding:4px 0;color:#c97">telemetry unavailable (needs svelte-adapter-uws &gt;= 0.6.0-next.35)</div>`;
+			html += `<div style="padding:4px 0;color:var(--svr-dt-warning, #ffe18a)">telemetry unavailable (needs svelte-adapter-uws &gt;= 0.6.0-next.35)</div>`;
 			shown++;
 			continue;
 		}
@@ -491,25 +510,25 @@ function renderSmooth(el, dt) {
 		const topic = esc(s.topic || '(connecting)');
 		const self = s.self ? esc(s.self) : '-';
 		const status = s.overflowed
-			? `<span style="color:#f44336">prediction KILLED (overflow)</span>`
-			: `<span style="color:#4caf50">predicting</span>`;
+			? `<span style="color:var(--svr-dt-error, #ff9595)">prediction KILLED (overflow)</span>`
+			: `<span style="color:var(--svr-dt-success, #79db8f)">predicting</span>`;
 		const unacked = Number(s.unacked) || 0;
 		const cap = Number(s.windowCap) || 0;
-		const unackedColor = cap > 0 && unacked / cap > 0.5 ? '#ffc107' : '#aaa';
+		const unackedColor = cap > 0 && unacked / cap > 0.5 ? 'var(--svr-dt-warning, #ffe18a)' : 'var(--svr-dt-muted, #b3b8cc)';
 		const divergence = Number(s.lastDivergence) || 0;
-		const divColor = divergence > 0 ? '#ffc107' : '#666';
-		const clockColor = s.clockSynced ? '#4caf50' : '#f44336';
-		html += `<div style="padding:4px 0;border-bottom:1px solid #2a2a3e">` +
+		const divColor = divergence > 0 ? 'var(--svr-dt-warning, #ffe18a)' : 'var(--svr-dt-muted, #b3b8cc)';
+		const clockColor = s.clockSynced ? 'var(--svr-dt-success, #79db8f)' : 'var(--svr-dt-error, #ff9595)';
+		html += `<div style="padding:4px 0;border-bottom:1px solid var(--svr-dt-border, #7d859a)">` +
 			`<div style="display:flex;align-items:center;gap:6px"><span>${topic}</span> ${status}</div>` +
-			`<div style="padding:1px 0 1px 12px;color:#888">self:${self} remote:${esc(String(Number(s.remoteCount) || 0))} clock:<span style="color:${clockColor}">${s.clockSynced ? 'synced' : 'unsynced'}</span></div>` +
-			`<div style="padding:1px 0 1px 12px;color:#888">unacked:<span style="color:${unackedColor}">${esc(String(unacked))}</span>/${esc(String(cap))} ` +
+			`<div style="padding:1px 0 1px 12px;color:var(--svr-dt-muted, #b3b8cc)">self:${self} remote:${esc(String(Number(s.remoteCount) || 0))} clock:<span style="color:${clockColor}">${s.clockSynced ? 'synced' : 'unsynced'}</span></div>` +
+			`<div style="padding:1px 0 1px 12px;color:var(--svr-dt-muted, #b3b8cc)">unacked:<span style="color:${unackedColor}">${esc(String(unacked))}</span>/${esc(String(cap))} ` +
 				`divergence:<span style="color:${divColor}">${esc(divergence.toFixed(2))}</span>` +
-				(s.correcting ? ` <span style="color:#ffc107">easing</span>` : '') +
+				(s.correcting ? ` <span style="color:var(--svr-dt-warning, #ffe18a)">easing</span>` : '') +
 				`</div>` +
-			`<div style="padding:1px 0 1px 12px;color:#666">interp delay:${esc((Number(s.interpDelayMs) || 0).toFixed(0))}ms</div>` +
+			`<div style="padding:1px 0 1px 12px;color:var(--svr-dt-muted, #b3b8cc)">interp delay:${esc((Number(s.interpDelayMs) || 0).toFixed(0))}ms</div>` +
 			`</div>`;
 	}
-	if (shown === 0) html += '<div style="color:#666">No smoothed channels active</div>';
+	if (shown === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">No smoothed channels active</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
@@ -524,7 +543,7 @@ function renderConnection(el, dt) {
 		<div style="padding:2px 0">Pending RPCs: ${esc(String(pending))}</div>
 		<div style="padding:2px 0">History entries: ${esc(String((dt.history || []).filter(Boolean).length))}</div>
 		<div style="padding:2px 0">Active streams: ${esc(String(dt.streams ? dt.streams.size : 0))}</div>
-		<div style="padding:4px 0;color:#666;font-size:11px">Press Ctrl+Shift+L to toggle</div>
+		<div style="padding:4px 0;color:var(--svr-dt-muted, #b3b8cc);font-size:11px">Press Ctrl+Shift+L to toggle</div>
 	`;
 
 	if (html !== _lastRenderedHtml) {

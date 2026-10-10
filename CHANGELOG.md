@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools fits small viewports and supports clamped pointer movement, keyboard movement, and corner docking.
 
+- DevTools uses shared host-overridable color tokens with a contrast-tested dark theme and forced-color support.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

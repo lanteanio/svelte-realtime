@@ -5158,6 +5158,8 @@ This applies to all handler types - `live()`, `live.stream()`, `live.cron()`, `l
 
 In dev mode, the Vite plugin injects an in-browser overlay that shows active streams, RPC history, and connection status. Open it with the DevTools button or `Ctrl+Shift+L`. Close or Escape restores focus to the opening control; the panel does not trap focus.
 
+The overlay uses a fixed dark theme for diagnostic contrast, plus system colors in forced-color mode. Hosts can override the CSS variables `--svr-dt-surface`, `--svr-dt-raised`, `--svr-dt-border`, `--svr-dt-text`, `--svr-dt-muted`, `--svr-dt-accent`, `--svr-dt-success`, `--svr-dt-warning`, and `--svr-dt-error` on the document root. Keep text and focus contrast when overriding them.
+
 The Streams tab lists every store currently mounted on the page. For each one it shows:
 
 | Field | Meaning |
