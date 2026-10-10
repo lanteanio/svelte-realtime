@@ -1,3 +1,4 @@
+import { readdirSync } from 'node:fs';
 import { defineConfig } from '@playwright/test';
 import { DEV_PORT, PROD_PORT } from './ports.js';
 
@@ -10,7 +11,7 @@ import { DEV_PORT, PROD_PORT } from './ports.js';
 // by the prod server.
 
 const projects = [];
-const specs = ['queue-replay.spec.js', 'lock.spec.js', 'smoke.spec.js', 'multi-page.spec.js', 'reconnect.spec.js', 'multi-page-auth.spec.js', 'schema-validation.spec.js', 'presence.spec.js', 'cursor.spec.js', 'channels.spec.js', 'room.spec.js', 'derived.spec.js', 'cron.spec.js', 'uploads.spec.js', 'multiplayer-room.spec.js'];
+const specs = readdirSync(new URL('.', import.meta.url)).filter(name => name.endsWith('.spec.js')).sort();
 for (const spec of specs) {
 	const baseName = spec.replace('.spec.js', '');
 	projects.push({
