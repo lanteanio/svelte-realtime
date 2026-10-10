@@ -81,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools keeps translated opening focus reliable and masks Smooth identifiers until unsafe payload capture is enabled.
 
+- Keyed streams consistently ignore rows without their key and warn in development. The max item count now applies to snapshots, hydration, pagination, and live additions.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

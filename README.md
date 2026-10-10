@@ -336,7 +336,7 @@ The `merge` option on `live.stream()` controls how live pub/sub events are appli
 
 ### crud (default)
 
-Handles `created`, `updated`, `deleted` events. The store maintains an array, keyed by `id` (configurable with `key`). Set `max` to cap the buffer size and drop the oldest items when exceeded (useful for live feeds with `prepend: true`).
+Handles `created`, `updated`, `deleted` events. The store maintains an array, keyed by `id` (configurable with `key`). Set `max` to cap the buffer size and drop the oldest items when exceeded (useful for live feeds with `prepend: true`). The cap applies to snapshots, hydration, live events, and pagination. Keyed streams ignore rows missing their key field and report the stream path and key once in development; explicit `null` keys remain valid.
 
 ```js
 // Server

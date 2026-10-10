@@ -2577,8 +2577,8 @@ describe('__stream() hydrate reconnect', () => {
 	});
 
 	it('channel keeps hydrated data on WebSocket reconnect', async () => {
-		const store = __stream('hydrate/cursors', { merge: 'cursor', key: 'userId' });
-		store.hydrate([{ userId: 'u1', x: 10, y: 20 }]);
+		const store = __stream('hydrate/cursors', { merge: 'cursor', key: 'key' });
+		store.hydrate([{ key: 'u1', x: 10, y: 20 }]);
 
 		const values = [];
 		const unsub = store.subscribe((v) => values.push(v));
@@ -2590,12 +2590,12 @@ describe('__stream() hydrate reconnect', () => {
 			data: [],
 			topic: 'hydrate-cursors',
 			merge: 'cursor',
-			key: 'userId',
+			key: 'key',
 			channel: true
 		});
 
 		// Hydrated value should persist
-		expect(values[values.length - 1]).toEqual([{ userId: 'u1', x: 10, y: 20 }]);
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 10, y: 20 }]);
 
 		// Disconnect and reconnect
 		simulateStatus('disconnected');
@@ -2608,12 +2608,12 @@ describe('__stream() hydrate reconnect', () => {
 			data: [],
 			topic: 'hydrate-cursors',
 			merge: 'cursor',
-			key: 'userId',
+			key: 'key',
 			channel: true
 		});
 
 		// Still the hydrated data, not empty
-		expect(values[values.length - 1]).toEqual([{ userId: 'u1', x: 10, y: 20 }]);
+		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 10, y: 20 }]);
 
 		unsub();
 	});
@@ -3300,6 +3300,58 @@ describe('__stream() pagination', () => {
 	function ids(arr) {
 		return arr.map((x) => x.id);
 	}
+
+	it('keyed pages and live events ignore keyless rows and report the stream key', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const ctx = await setupPaginated('page/keyless', 'page-keyless', [{ id: 1 }]);
+			simulateTopicMessage('page-keyless', { event: 'created', data: { title: 'missing' } });
+			await loadPage(ctx.store, [{ title: 'also missing' }, null, { id: 2 }]);
+			expect(ctx.last()).toEqual([{ id: 1 }, { id: 2 }]);
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toContain('page/keyless');
+			expect(warn.mock.calls[0][0]).toContain('"id"');
+			ctx.unsub();
+		} finally { warn.mockRestore(); }
+	});
+
+	it.each([false, true])('pagination and live additions share the max cap (prepend: %s)', async (prepend) => {
+		const ctx = await setupPaginated('page/capped/' + prepend, 'page-capped', [{ id: 1 }, { id: 2 }], { max: 2, prepend });
+		await loadPage(ctx.store, [{ id: 3 }, { id: 4 }]);
+		expect(ids(ctx.last())).toEqual([3, 4]);
+		simulateTopicMessage('page-capped', { event: 'created', data: { id: 5 } });
+		expect(ids(ctx.last())).toEqual(prepend ? [5, 3] : [4, 5]);
+		ctx.unsub();
+	});
+
+	it.each(['presence', 'cursor'])('%s ignores missing keys and caps snapshots, pages, and events', async (merge) => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const ctx = await setupPaginated('page/' + merge, 'page-keyed', [{ key: 1 }, { missing: true }], { merge, max: 2 });
+			await loadPage(ctx.store, [{ key: 2 }, { key: null }, { missing: true }]);
+			expect(ctx.last()).toEqual([{ key: 2 }, { key: null }]);
+			simulateTopicMessage('page-keyed', { event: merge === 'presence' ? 'join' : 'update', data: { key: 3 } });
+			expect(ctx.last()).toEqual([{ key: null }, { key: 3 }]);
+			simulateTopicMessage('page-keyed', { event: 'update', data: { missing: true } });
+			expect(ctx.last()).toEqual([{ key: null }, { key: 3 }]);
+			expect(warn).toHaveBeenCalledTimes(1);
+			expect(warn.mock.calls[0][0]).toContain('"key"');
+			ctx.unsub();
+		} finally { warn.mockRestore(); }
+	});
+
+	it('snapshots omit keyless rows and apply max without changing the supplied array', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			const initial = [{ id: 1 }, { title: 'missing' }, { id: 2 }, { id: 3 }];
+			const ctx = await setupPaginated('page/snapshot-cap', 'page-snapshot-cap', initial, { max: 2 });
+			expect(ctx.last()).toEqual([{ id: 2 }, { id: 3 }]);
+			expect(initial).toHaveLength(4);
+			ctx.store.hydrate(initial);
+			expect(ctx.last()).toEqual([{ id: 2 }, { id: 3 }]);
+			ctx.unsub();
+		} finally { warn.mockRestore(); }
+	});
 
 	it('loadMore dedupes a page entry already received as a live created event', async () => {
 		const ctx = await setupPaginated('pag/dedupe', 'pag-dedupe-topic', [{ id: 1, name: 'first' }]);
@@ -5550,7 +5602,7 @@ describe('client publish-rate dev hint', () => {
 	// Drive `n` live frames onto a topic at the current fake-clock time.
 	function feed(topic, n) {
 		for (let i = 0; i < n; i++) {
-			simulateTopicMessage(topic, { event: 'update', data: { id: i % 50, x: i } });
+			simulateTopicMessage(topic, { event: 'update', data: { id: i % 50, key: i % 50, x: i } });
 		}
 	}
 

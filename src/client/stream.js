@@ -830,6 +830,31 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	/** @type {number} Consecutive reconnect attempts (reset on successful fetch) */
 	let _reconnectAttempts = 0;
 
+	let _warnedMissingKey = false;
+	function _warnMissingKey() {
+		if (!_IS_DEV || _warnedMissingKey) return;
+		_warnedMissingKey = true;
+		console.warn('[svelte-realtime] stream ' + path + ' ignored a row missing key "' + mergeKeyField(merge, key) + '". Every row in a keyed stream must carry its key.');
+	}
+
+	function _limitRows(value) {
+		if (!Array.isArray(value) || merge === 'set' || !max || value.length <= max) return value;
+		return prepend && merge !== 'latest' ? value.slice(0, max) : value.slice(-max);
+	}
+
+	/** Validate array ingress without modifying the caller's snapshot. */
+	function _prepareRows(value) {
+		if (!Array.isArray(value)) return value;
+		if (merge !== 'set' && merge !== 'latest') {
+			const field = mergeKeyField(merge, key);
+			if (value.some((row) => row == null || row[field] === undefined)) {
+				_warnMissingKey();
+				value = value.filter((row) => row != null && row[field] !== undefined);
+			}
+		}
+		return _limitRows(value);
+	}
+
 	/**
 	 * Rebuild a (value, index) pair using the closure's merge / key.
 	 * @param {any} value
@@ -863,11 +888,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * _serverValue and replaying the queue on top). `set` / `latest` keep
 	 * plain concat (no key index exists to dedupe against).
 	 *
-	 * Scope: this dedupes rows that CARRY the key field. Rows missing it
-	 * are appended as-is - they cannot be indexed (rebuildIndex skips
-	 * undefined keys), so a keyed stream served keyless rows can still
-	 * render duplicate undefined keys. `max` is likewise not enforced
-	 * here; only the live-event path trims.
+	 * Keyless rows are ignored with a development warning. The configured max
+	 * bounds paged data just as it bounds incoming live data.
 	 *
 	 * @param {any[]} value
 	 * @param {Map<any, number>} index
@@ -885,7 +907,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			for (const item of page) {
 				const kv = item != null ? item[k] : undefined;
 				if (kv === undefined) {
-					fresh.push(item);
+					_warnMissingKey();
 					continue;
 				}
 				const existing = index.get(kv);
@@ -908,7 +930,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				fresh.push(item);
 			}
 		}
-		const next = prepend ? fresh.concat(base) : base.concat(fresh);
+		const next = _limitRows(prepend ? fresh.concat(base) : base.concat(fresh));
 		_rebuildIndexFn(next, index);
 		return next;
 	}
@@ -994,7 +1016,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			: envelope.data;
 
 		if (event === 'refreshed') {
-			value = data;
+			value = _prepareRows(data);
 			if (!local) _presenceSeeded.clear();
 			if (merge === 'crud' || merge === 'presence' || merge === 'cursor') {
 				_rebuildIndexFn(value, index);
@@ -1003,6 +1025,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		}
 
 		if (merge === 'crud') {
+			if (data == null || data[key] === undefined) {
+				_warnMissingKey();
+				return { value, replaced: false, modified: false };
+			}
 			if (!Array.isArray(value)) { value = []; index.clear(); }
 
 			if (event === 'created') {
@@ -1052,6 +1078,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			}
 			return { value, replaced: false, modified: true };
 		} else if (merge === 'presence') {
+			if (event !== 'set' && (data == null || data.key === undefined)) {
+				_warnMissingKey();
+				return { value, replaced: false, modified: false };
+			}
 			if (!Array.isArray(value)) { value = []; index.clear(); }
 			if (event === 'join') {
 				// A join keeps the key's publisher marks: a publisher's sequence
@@ -1129,12 +1159,21 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					_presenceFieldOrder.clear();
 					_presenceSeeded.clear();
 				}
-				value = data;
+				value = _prepareRows(data);
 				_rebuildIndexFn(value, index);
 				return { value, replaced: true, modified: true };
 			}
+			const limited = max && value.length > max ? _limitRows(value) : value;
+			if (limited !== value) {
+				_rebuildIndexFn(limited, index);
+				return { value: limited, replaced: true, modified: true };
+			}
 			return { value, replaced: false, modified: true };
 		} else if (merge === 'cursor') {
+			if (event !== 'set' && (data == null || data.key === undefined)) {
+				_warnMissingKey();
+				return { value, replaced: false, modified: false };
+			}
 			if (!Array.isArray(value)) { value = []; index.clear(); }
 			if (event === 'update') {
 				const idx = index.get(data.key);
@@ -1166,9 +1205,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				}
 			} else if (event === 'set') {
 				if (!local) _cursorOrder.clear();
-				value = data;
+				value = _prepareRows(data);
 				_rebuildIndexFn(value, index);
 				return { value, replaced: true, modified: true };
+			}
+			const limited = max && value.length > max ? _limitRows(value) : value;
+			if (limited !== value) {
+				_rebuildIndexFn(limited, index);
+				return { value: limited, replaced: true, modified: true };
 			}
 			return { value, replaced: false, modified: true };
 		} else if (merge === 'set') {
@@ -1286,7 +1330,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				? value.slice()
 				: (value && typeof value === 'object' ? { ...value } : value);
 			const result = change(draft);
-			const next = result === undefined ? draft : result;
+			const next = _prepareRows(result === undefined ? draft : result);
 			_rebuildIndexFn(next, index);
 			return next;
 		}
@@ -1749,10 +1793,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// return stale data before their sources populate.
 				} else {
 					if (_optimisticQueue.length > 0) {
-						_serverValue = response.data;
+						_serverValue = _prepareRows(response.data);
 						_rebuildIndexFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex));
 					} else {
-						currentValue = response.data;
+						currentValue = _prepareRows(response.data);
 					}
 					_presenceFieldOrder.clear();
 					_presenceSeeded.clear();
@@ -2491,7 +2535,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 							if (Array.isArray(response.data) && Array.isArray(_serverValue)) {
 								_serverValue = _appendPage(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), response.data);
 							} else if (response.data !== undefined) {
-								_serverValue = response.data;
+								_serverValue = _prepareRows(response.data);
 								_rebuildIndexFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex));
 							}
 							// A page row must NOT absorb an in-flight queue entry with
@@ -2513,7 +2557,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 						if (Array.isArray(response.data) && Array.isArray(currentValue)) {
 							currentValue = _appendPage(currentValue, _index, response.data);
 						} else if (response.data !== undefined) {
-							currentValue = response.data;
+							currentValue = _prepareRows(response.data);
 							_rebuildIndex();
 						}
 
@@ -2573,7 +2617,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					);
 				}
 			}
-			currentValue = initialData;
+			currentValue = _prepareRows(initialData);
 			_rebuildIndex();
 			store.set(currentValue);
 			return this;
