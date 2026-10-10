@@ -12,6 +12,11 @@
 // regardless of the host locale.
 const _CRON_WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
+/** @type {Intl.DateTimeFormat | null} */
+let _cronFormatter = null;
+/** @type {string | undefined} */
+let _cronFormatterZone;
+
 /**
  * Extract the cron date parts (second, minute, hour, day, month 1-12,
  * weekday 0-6 Sunday=0) for an epoch-ms reference, formatted in the given
@@ -25,13 +30,22 @@ const _CRON_WEEKDAY_INDEX = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sa
  * @returns {{ second: number, minute: number, hour: number, day: number, month: number, weekday: number }}
  */
 export function _cronDateParts(ms, tz) {
-	const fmt = new Intl.DateTimeFormat('en-US', {
-		timeZone: tz,
-		year: 'numeric', month: 'numeric', day: 'numeric',
-		hour: 'numeric', minute: 'numeric', second: 'numeric',
-		weekday: 'short',
-		hour12: false
-	});
+	// Resolve the implicit zone afresh so process/system timezone changes retain
+	// their historical behavior. Only one full formatter is retained, even when
+	// a simulation switches between many explicit zones.
+	const zone = tz === undefined ? new Intl.DateTimeFormat().resolvedOptions().timeZone : tz;
+	if (_cronFormatter === null || zone !== _cronFormatterZone) {
+		const fmt = new Intl.DateTimeFormat('en-US', {
+			timeZone: zone,
+			year: 'numeric', month: 'numeric', day: 'numeric',
+			hour: 'numeric', minute: 'numeric', second: 'numeric',
+			weekday: 'short',
+			hour12: false
+		});
+		_cronFormatter = fmt;
+		_cronFormatterZone = zone;
+	}
+	const fmt = _cronFormatter;
 	const parts = fmt.formatToParts(ms);
 	const get = (k) => Number(parts.find(p => p.type === k)?.value);
 	let hour = get('hour');
