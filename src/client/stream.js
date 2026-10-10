@@ -1787,11 +1787,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				}
 
 				if (response.delta === true && Array.isArray(response.data)) {
+					// Delta rows update the same baseline that _applyMerge writes.
+					// A displayed optimistic create need not exist on the server yet.
+					const deltaIndex = _optimisticQueue.length > 0 ? _serverIndex : _index;
 					for (const item of response.data) {
 						if (item._deleted) {
 							_applyMerge({ event: 'deleted', data: item });
 						} else {
-							const exists = _index.has(item[key]);
+							const exists = deltaIndex.has(item[key]);
 							_applyMerge({ event: exists ? 'updated' : 'created', data: item });
 						}
 					}

@@ -173,6 +173,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Browser checks cover live smooth telemetry refresh and generated counter controls across mobile, tablet, and wide desktop viewports.
 
+- Reconnect deltas retain authoritative rows that overlap optimistic creates. A seeded multi-replica corpus now checks snapshot, delta, replay, buffering, acknowledgements, and rollback convergence.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

@@ -59,6 +59,16 @@ then review the generated diff. Update simulation goldens only for an intentiona
 behavior change, recording the seed and rationale. Never bless a failing result
 just to make a check green.
 
+The client convergence corpus runs with `npx vitest run test/optimistic-convergence.test.js`.
+A failure prints its seed, operations and delivery trace. Set
+`REALTIME_CLIENT_SEED` to that value and rerun the command to reproduce it
+(PowerShell: `$env:REALTIME_CLIENT_SEED='svti-client-sim-12'`). It uses the DST
+seeded RNG and fixed epoch with two to four independent stream stores, a model
+server, and a controlled shared transport. Per-topic events retain wire order;
+replicas receive different prefixes, reconnect recovery forms, buffered events,
+and acknowledgement/rollback schedules. This covers client optimistic CRUD
+convergence, not adapter prediction or CRDT convergence.
+
 ## Formatting
 
 `.editorconfig` is the formatting contract. Preserve the surrounding indentation
