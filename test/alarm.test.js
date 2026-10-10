@@ -1,3 +1,4 @@
+import { memoryAlarmStore as memStore } from './helpers/alarm-store.js';
 // live.alarm: per-room durable alarm primitive. v1 = realtime in-memory scheduler
 // + store seam. Tests the alarm mechanism via _bindAlarmCtx (the same binding the
 // stream loader-dispatch establishes) + the option validation + the ctx defaults.
@@ -162,22 +163,22 @@ describe('live.alarm', () => {
 	});
 
 	describe('store seam', () => {
-		it('mirrors set/delete to a wired durable store', () => {
+		it('mirrors set/delete to a wired durable store', async () => {
 			const ops = [];
-			configureAlarm({ store: { set: (t, at) => ops.push(['set', t, at]), delete: (t) => ops.push(['delete', t]), due: () => [] } });
+			configureAlarm({ store: { ...memStore(), set: (t, at) => { ops.push(['set', t, at]); return true; }, delete: (t) => { ops.push(['delete', t]); return true; } } });
 			const ctx = alarmCtx('room:store', () => {});
 			const at = Date.now() + 100000;
-			ctx.setAlarm(at);
-			ctx.deleteAlarm();
+			await ctx.setAlarm(at);
+			await ctx.deleteAlarm();
 			expect(ops).toEqual([['set', 'room:store', at], ['delete', 'room:store']]);
 		});
 
-		it('passes stable id, legacy path, and tenant metadata to store.set', () => {
+		it('passes stable id, legacy path, and tenant metadata to store.set', async () => {
 			let captured;
-			configureAlarm({ store: { set: (t, at, meta) => { captured = meta; }, delete: () => true, due: () => [] } });
+			configureAlarm({ store: { ...memStore(), set: (t, at, meta) => { captured = meta; return true; } } });
 			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
 			_bindAlarmCtx(ctx, { wireTopic: '@t/acme/room:7', onAlarm: () => {}, alarmId: 'room-message-expiry', path: 'rooms/messages', tenantId: 'acme' });
-			ctx.setAlarm(Date.now() + 1000);
+			await ctx.setAlarm(Date.now() + 1000);
 			expect(captured).toEqual({ alarmId: 'room-message-expiry', path: 'rooms/messages', tenantId: 'acme' });
 		});
 	});
@@ -185,15 +186,7 @@ describe('live.alarm', () => {
 	describe('durable recovery poll', () => {
 		// A minimal in-memory durable store: topic -> { at, meta }. delete() returns
 		// the atomic-claim boolean; due() returns rows with at <= now.
-		function memStore() {
-			const rows = new Map();
-			return {
-				rows,
-				set: (t, at, meta) => { rows.set(t, { at, meta: meta ?? null }); },
-				delete: (t) => { const had = rows.has(t); rows.delete(t); return had; },
-				due: (now) => [...rows.entries()].filter(([, r]) => r.at <= now).map(([t, r]) => ({ topic: t, at: r.at, meta: r.meta }))
-			};
-		}
+
 
 		const registered = [];
 		function registerAlarmStream(path, onAlarm, id) {
@@ -211,7 +204,7 @@ describe('live.alarm', () => {
 			configureAlarm({ store });
 			// Simulate an alarm armed before a restart: only the durable row exists
 			// (no in-memory _pending entry anywhere), already overdue.
-			store.set('room:orphan', Date.now() - 1000, { path: 'rooms/orphan', tenantId: null });
+			store.seed('room:orphan', Date.now() - 1000, { path: 'rooms/orphan', tenantId: null });
 			await _pollAlarms();
 			expect(fired).not.toBeNull();
 			expect(typeof fired.publish).toBe('function');
@@ -226,9 +219,9 @@ describe('live.alarm', () => {
 			// Arm a live future in-memory alarm (stays in _pending)...
 			const ctx = _buildCtx(null, null, platform, _getCtxHelpers(platform), null);
 			_bindAlarmCtx(ctx, { wireTopic: 'room:live', onAlarm: () => {}, path: 'rooms/live', tenantId: null });
-			ctx.setAlarm(Date.now() + 100000);
+			await ctx.setAlarm(Date.now() + 100000);
 			// ...but desync the durable row to overdue so due() returns it.
-			store.rows.set('room:live', { at: Date.now() - 1000, meta: { path: 'rooms/live' } });
+			store.rows.get('room:live').at = Date.now() - 1000;
 			await _pollAlarms();
 			expect(pollFired).toBe(0); // poll deferred to the live timer
 			expect(store.rows.has('room:live')).toBe(true); // not claimed by the poll
@@ -238,7 +231,7 @@ describe('live.alarm', () => {
 			let fired = 0;
 			registerAlarmStream('rooms/claimed', () => { fired++; });
 			const store = {
-				set: () => {}, due: () => [{ topic: 'room:claimed', at: Date.now() - 1, meta: { path: 'rooms/claimed' } }],
+				...memStore(), due: () => [{ topic: 'room:claimed', generation: '1', at: Date.now() - 1, meta: { path: 'rooms/claimed' } }],
 				delete: () => false // another instance already claimed it
 			};
 			configureAlarm({ store });
@@ -249,7 +242,7 @@ describe('live.alarm', () => {
 		it('retains an unresolved row for a compatible worker or rollback', async () => {
 			const store = memStore();
 			configureAlarm({ store });
-			store.set('room:gone', Date.now() - 1000, { path: 'rooms/does-not-exist' });
+			store.seed('room:gone', Date.now() - 1000, { path: 'rooms/does-not-exist' });
 			await _pollAlarms();
 			expect(store.rows.has('room:gone')).toBe(true);
 		});
@@ -259,7 +252,7 @@ describe('live.alarm', () => {
 			registerAlarmStream('rooms/new-name', () => { fired++; }, 'room-expiry');
 			const store = memStore();
 			configureAlarm({ store });
-			store.set('room:renamed', Date.now() - 1000, {
+			store.seed('room:renamed', Date.now() - 1000, {
 				alarmId: 'room-expiry',
 				path: 'rooms/old-name',
 				tenantId: null
@@ -274,7 +267,7 @@ describe('live.alarm', () => {
 			registerAlarmStream('rooms/reused-path', () => { wrongHandlerFired++; }, 'different-alarm');
 			const store = memStore();
 			configureAlarm({ store });
-			store.set('room:missing-id', Date.now() - 1000, {
+			store.seed('room:missing-id', Date.now() - 1000, {
 				alarmId: 'retired-alarm',
 				path: 'rooms/reused-path',
 				tenantId: null
@@ -290,7 +283,7 @@ describe('live.alarm', () => {
 			registerAlarmStream('rooms/duplicate-b', () => { fired++; }, 'duplicate-alarm');
 			const store = memStore();
 			configureAlarm({ store });
-			store.set('room:duplicate', Date.now() - 1000, {
+			store.seed('room:duplicate', Date.now() - 1000, {
 				alarmId: 'duplicate-alarm',
 				path: 'rooms/gone',
 				tenantId: null
@@ -304,7 +297,7 @@ describe('live.alarm', () => {
 			let fired = 0;
 			registerAlarmStream('rooms/gated', () => { fired++; });
 			const store = memStore();
-			store.set('room:gated', Date.now() - 1000, { path: 'rooms/gated' });
+			store.seed('room:gated', Date.now() - 1000, { path: 'rooms/gated' });
 
 			configureAlarm({ store, leader: () => false });
 			await _pollAlarms();
@@ -320,7 +313,9 @@ describe('live.alarm', () => {
 		it('a store without due() runs no poll and does not throw', async () => {
 			let fired = 0;
 			registerAlarmStream('rooms/nodue', () => { fired++; });
-			configureAlarm({ store: { set: () => {}, delete: () => true } });
+			const store = memStore();
+			delete store.due;
+			configureAlarm({ store });
 			await _pollAlarms(); // guarded: no due -> no-op
 			expect(fired).toBe(0);
 		});
@@ -385,15 +380,7 @@ describe('live.alarm', () => {
 	});
 
 	describe('fire-time visibility (ctx.alarm) + misfire policy', () => {
-		function memStore() {
-			const rows = new Map();
-			return {
-				rows,
-				set: (t, at, meta) => { rows.set(t, { at, meta: meta ?? null }); },
-				delete: (t) => { const had = rows.has(t); rows.delete(t); return had; },
-				due: (now) => [...rows.entries()].filter(([, r]) => r.at <= now).map(([t, r]) => ({ topic: t, at: r.at, meta: r.meta }))
-			};
-		}
+
 
 		it('exposes ctx.alarm = { at, firedAt, lateMs, recovered:false } on a timer fire', async () => {
 			let seen = null;
@@ -459,7 +446,7 @@ describe('live.alarm', () => {
 				const store = memStore();
 				configureAlarm({ store });
 				const at = Date.now() - 2000;
-				store.set('room:rec-vis', at, { path: 'rooms/rec-vis', tenantId: null });
+				store.seed('room:rec-vis', at, { path: 'rooms/rec-vis', tenantId: null });
 				await _pollAlarms();
 				expect(seen).not.toBeNull();
 				expect(seen.at).toBe(at);
@@ -477,7 +464,7 @@ describe('live.alarm', () => {
 			try {
 				const store = memStore();
 				configureAlarm({ store });
-				store.set('room:rec-mf', Date.now() - 5000, { path: 'rooms/rec-mf', tenantId: null });
+				store.seed('room:rec-mf', Date.now() - 5000, { path: 'rooms/rec-mf', tenantId: null });
 				await _pollAlarms();
 				expect(fired).toBe(0);
 				expect(store.rows.has('room:rec-mf')).toBe(false); // claimed + dropped

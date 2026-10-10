@@ -36,6 +36,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Room subscriptions release only the membership references they acquired, preserving other connections after capacity refusal, presence errors, or failed initialization.
 
+- Alarm scheduling and cancellation return awaited promises. Durable stores reserve ordered generations and condition writes and claims on those generations, preventing stale timers, recovery snapshots and deletes from consuming replacements. Legacy topic-only stores require a coordinated store upgrade.
+
 - Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.
 
 - Framework signals, room membership and multiplayer events, smooth and document updates, and automatic stream publishes declare an unsequenced delivery policy so multi-worker adapters accept them. Application publish options and replay-assigned sequences retain their existing meaning.

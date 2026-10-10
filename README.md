@@ -2910,14 +2910,14 @@ export default live.stream('doc:current', loadDoc, {
 });
 
 // Inside any handler that runs with this room's ctx (the loader, a room action):
-ctx.setAlarm(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days from now
-const at = ctx.getAlarm(); // epoch-ms, or null
-ctx.deleteAlarm();         // cancel
+await ctx.setAlarm(Date.now() + 30 * 24 * 60 * 60 * 1000); // durable commit before return
+const at = ctx.getAlarm(); // locally acknowledged timer, epoch-ms or null
+await ctx.deleteAlarm();   // cancel the observed generation
 ```
 
 Different from `live.cron` (which is recurring, schedule-based, and global): an alarm is **per-room**, **one-shot**, and set imperatively. The classic pattern is TTL-style cleanup - refresh the alarm on every write (`ctx.setAlarm(now + 30d)`); if it ever fires, the room has not been touched in 30 days, so clean it up. Exactly one pending alarm per room: `setAlarm` replaces the previous one, and a re-`setAlarm` inside `onAlarm` re-arms it. A long horizon is fine - a multi-week alarm is chased to its deadline in capped timer hops, so it fires when you asked, not ~24 days early (the `setTimeout` ceiling).
 
-By default alarms are in-memory: they survive the room going idle within the process but not a restart. For durability across restarts and exactly-once firing across a cluster, `configureAlarm({ store, leader })` plugs in a durable store + a leader gate (the same leader primitive cron uses). The owning instance still fires precisely via its in-memory timer; the elected leader also runs a recovery poll that sweeps the store for alarms an instance left behind when it restarted before its timer ran, and fires those. Single-fire is guaranteed by an atomic claim - the two paths can never both fire the same alarm:
+By default alarms are in-memory: they survive the room going idle within the process but not a restart. For durability across restarts and a single claim per generation across a cluster, `configureAlarm({ store, leader })` plugs in a durable store + a leader gate (the same leader primitive cron uses). The owning instance still fires precisely via its in-memory timer; the elected leader also runs a recovery poll that sweeps the store for alarms an instance left behind when it restarted before its timer ran, and fires those. An atomic generation-checked claim prevents the two paths from both consuming the same schedule:
 
 ```js
 // hooks.ws.js init - durable + cluster single-fire
@@ -2926,13 +2926,13 @@ import { createAlarmStore } from 'svelte-adapter-uws-extensions/redis/alarm-stor
 // or: from 'svelte-adapter-uws-extensions/postgres/alarm-store'
 
 configureAlarm({
-  store: createAlarmStore(client), // durable, survives restart, fires once cluster-wide
+  store: createAlarmStore(client), // use a generation-aware store implementation
   leader: () => leader.isLeader(),  // the same leader primitive cron uses
   pollMs: 15000                     // recovery-poll cadence (optional, default 15s)
 });
 ```
 
-The store is any object implementing the seam contract (`set(topic, at, meta)` / `delete(topic)` returning whether it removed the row / an optional `due(nowMs)` for cross-restart recovery), so you can back it with whatever durable store you already run; `createAlarmStore` from `svelte-adapter-uws-extensions` ships Redis and Postgres implementations. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Its persisted tenant scope restores `ctx.tenantId` and every scoped helper without calling the tenant resolver with a missing user. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses).
+Await both scheduling and cancellation: storage failures and superseded writes reject their promises. `getAlarm()` reads the locally acknowledged timer. The [durable store contract](docs/durable-alarms.md) requires ordered generation reservations and conditional claims; upgrade legacy topic-only stores and migrate rows together with the realtime release. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Its persisted tenant scope restores `ctx.tenantId` and every scoped helper without calling the tenant resolver with a missing user. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses).
 
 Give every durable alarm a stable `alarm.id` before renaming its stream RPC
 path. The id is persisted beside the legacy path, and recovery resolves the id

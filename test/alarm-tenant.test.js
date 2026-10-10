@@ -1,3 +1,4 @@
+import { memoryAlarmStore as memoryStore } from './helpers/alarm-store.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { live, configureAlarm, _resetAlarms } from '../src/server.js';
 import { _bindAlarmCtx, _pollAlarms } from '../src/server/alarm.js';
@@ -6,15 +7,7 @@ import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.j
 import { state, registry } from '../src/server/state.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 
-function memoryStore() {
-	const rows = new Map();
-	return {
-	rows,
-	set(topic, at, meta) { rows.set(topic, { topic, at, meta }); },
-	delete(topic) { return rows.delete(topic); },
-	due(now) { return [...rows.values()].filter(row => row.at <= now); }
-	};
-}
+
 
 describe('alarm callback tenant scope', () => {
 	let platform, savedPlatform;
@@ -50,7 +43,7 @@ describe('alarm callback tenant scope', () => {
 		for (const tenantId of ['acme', 'beta', null]) {
 		const topic = tenantId === null ? 'room' : `@t/${tenantId}/room`;
 		if (recovered) {
-			store.set(topic, Date.now() - 1, { path: 'rooms/tenant-alarm', tenantId });
+			store.seed(topic, Date.now() - 1, { path: 'rooms/tenant-alarm', tenantId });
 		} else {
 			const ctx = _buildCtx({ tenant: tenantId }, null, platform, _getCtxHelpers(platform), null);
 			expect(ctx.tenantId).toBe(tenantId);
@@ -73,9 +66,9 @@ describe('alarm callback tenant scope', () => {
 	const store = memoryStore();
 	const onAlarm = vi.fn();
 	registry.set('rooms/tenant-alarm', live.stream('room', () => ({}), { alarm: { onAlarm } }));
-	store.set('@t/acme/room', Date.now() - 1, { path: 'rooms/tenant-alarm', tenantId: 'beta' });
-	store.set('@t/bad/room', Date.now() - 1, { path: 'rooms/tenant-alarm', tenantId: 'bad/id' });
-	store.set('@t/missing/room', Date.now() - 1, { path: 'rooms/tenant-alarm' });
+	store.seed('@t/acme/room', Date.now() - 1, { path: 'rooms/tenant-alarm', tenantId: 'beta' });
+	store.seed('@t/bad/room', Date.now() - 1, { path: 'rooms/tenant-alarm', tenantId: 'bad/id' });
+	store.seed('@t/missing/room', Date.now() - 1, { path: 'rooms/tenant-alarm' });
 	configureAlarm({ store });
 	await _pollAlarms();
 	expect(onAlarm).not.toHaveBeenCalled();

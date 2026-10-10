@@ -33,13 +33,17 @@ import { _validTenantId, _topicInTenant } from './tenant.js';
  * Per-room pending alarms (the in-memory store). One entry per room, keyed by the
  * WIRE topic (already tenant-scoped, so two tenants' same logical room never
  * collide). `setAlarm` replaces the entry.
- * @type {Map<string, { at: number, timer: any, onAlarm: Function, meta: AlarmMeta | null, misfireMs?: number }>}
+ * @type {Map<string, { at: number, timer: any, onAlarm: Function, meta: AlarmMeta | null, misfireMs?: number, store?: any, generation?: string | null, epoch?: number }>}
  */
 const _pending = new Map();
+const _mutations = new Map();
+// Mutation topics without an acknowledged local timer reserve capacity while writing.
+const _reservedTopics = new Set();
+const _alarmAcknowledged = Promise.resolve();
+let _alarmEpoch = 0;
 
 /** Cap on concurrently-pending alarms so a runaway setAlarm-per-unique-topic can't exhaust memory. */
 const _MAX_ALARMS = 100000;
-let _alarmCapWarnFired = false;
 let _alarmPlatformWarnFired = false;
 let _alarmDueWarnFired = false;
 const _alarmUnresolvedWarned = new Set();
@@ -51,14 +55,16 @@ const _MAX_UNRESOLVED_WARNINGS = 256;
  * cluster-wide; set it via `configureAlarm({ store })`. The realtime layer stays
  * cluster-agnostic - the durable Postgres/Redis store is the extensions layer.
  *
- * - `set(topic, at, meta)` persists/replaces an alarm.
- * - `delete(topic)` removes it and returns whether THIS call removed a present row
- *   (the atomic claim that guarantees single-fire between the precise in-memory
- *   timer and the recovery poll).
+ * - `nextGeneration(topic)` reserves a never-reused ordered generation.
+ * - `get(topic)` reads the current row for cancellation after restart.
+ * - `set(topic, at, meta, generation)` commits only the latest reserved generation.
+ * - `delete(topic, generation)` atomically removes only that generation.
+ *   Both mutation results resolve after durable commit; allocation and committed
+ *   watermarks survive deletion so delayed writes cannot resurrect consumed rows.
  * - `due(nowMs)` (optional) returns the alarms whose `at <= nowMs` for the recovery
  *   poll. Omit it and cross-restart recovery is disabled (a one-time dev warning) -
  *   the in-memory timers still fire while the process lives.
- * @type {{ set: (topic: string, at: number, meta?: AlarmMeta | null) => any, delete: (topic: string) => any, due?: (nowMs: number) => any } | null}
+ * @type {{ nextGeneration: (topic: string) => any, get: (topic: string) => any, set: (topic: string, at: number, meta: AlarmMeta | null, generation: string) => any, delete: (topic: string, generation: string) => any, due?: (nowMs: number) => any } | null}
  */
 let _alarmStore = null;
 
@@ -87,7 +93,7 @@ let _alarmLeader = null;
  * recovery is off). A `leader` without a `store` suppresses non-leader alarms with
  * no way to recover them - configure a store for real cluster durability.
  *
- * @param {{ store?: { set: Function, delete: Function, due?: Function } | null, leader?: (() => boolean) | null, pollMs?: number } | null} config
+ * @param {{ store?: { nextGeneration: Function, get: Function, set: Function, delete: Function, due?: Function } | null, leader?: (() => boolean) | null, pollMs?: number } | null} config
  */
 export function configureAlarm(config) {
 	if (config === null) { _alarmStore = null; _alarmLeader = null; _alarmPollMs = 15000; _clearAlarmPoll(); return; }
@@ -104,8 +110,8 @@ export function configureAlarm(config) {
 		_alarmPollMs = config.pollMs;
 	}
 	if (config.store !== undefined) {
-		if (config.store !== null && (typeof config.store !== 'object' || typeof config.store.set !== 'function' || typeof config.store.delete !== 'function')) {
-			throw new Error('[svelte-realtime] configureAlarm: store must implement set(topic, at) and delete(topic)');
+		if (config.store !== null && (typeof config.store !== 'object' || typeof config.store.set !== 'function' || typeof config.store.delete !== 'function' || typeof config.store.nextGeneration !== 'function' || typeof config.store.get !== 'function')) {
+			throw new Error('[svelte-realtime] configureAlarm: store must implement nextGeneration(topic), get(topic), set(topic, at, meta, generation) and delete(topic, generation)');
 		}
 		if (config.store !== null && config.store.due !== undefined && typeof config.store.due !== 'function') {
 			throw new Error('[svelte-realtime] configureAlarm: store.due, when provided, must be a function due(nowMs)');
@@ -162,30 +168,67 @@ export function _bindAlarmCtx(ctx, binding) {
 	ctx.deleteAlarm = () => _deleteAlarm(wireTopic);
 }
 
+function _reserveTopic(wireTopic) {
+	if (_pending.has(wireTopic) || _reservedTopics.has(wireTopic)) return;
+	if (_pending.size + _reservedTopics.size >= _MAX_ALARMS) {
+		throw new Error('[svelte-realtime] alarm registry reached its pending alarm limit');
+	}
+	_reservedTopics.add(wireTopic);
+}
+
+function _releaseTopic(wireTopic) {
+	if (!_pending.has(wireTopic) && _mutations.has(wireTopic)) _reservedTopics.add(wireTopic);
+	else _reservedTopics.delete(wireTopic);
+}
+
+function _queueMutation(wireTopic, work) {
+	_reserveTopic(wireTopic);
+	const previous = _mutations.get(wireTopic);
+	const result = (previous || Promise.resolve()).then(work);
+	const cleanup = () => {
+		if (_mutations.get(wireTopic) === tail) _mutations.delete(wireTopic);
+		_releaseTopic(wireTopic);
+	};
+	const tail = result.then(cleanup, cleanup);
+	_mutations.set(wireTopic, tail);
+	return result;
+}
+
+function _validGeneration(generation) {
+	return typeof generation === 'string' && /^[1-9][0-9]*$/.test(generation);
+}
+
+function _armAlarm(wireTopic, at, onAlarm, meta, misfireMs, store, generation) {
+	const existing = _pending.get(wireTopic);
+	if (existing) clearTimer(existing.timer);
+	else if (_pending.size + _reservedTopics.size >= _MAX_ALARMS && !_reservedTopics.has(wireTopic)) {
+		throw new Error('[svelte-realtime] alarm registry reached its pending alarm limit');
+	}
+	if (_reservedTopics.size) _reservedTopics.delete(wireTopic);
+	const entry = store
+		? { at, timer: null, onAlarm, meta, misfireMs, store, generation, epoch: _alarmEpoch }
+		: { at, timer: null, onAlarm, meta, misfireMs };
+	_pending.set(wireTopic, entry);
+	entry.timer = _schedule(wireTopic, entry);
+}
+
 function _setAlarm(wireTopic, at, onAlarm, meta = null, misfireMs = undefined) {
 	if (typeof at !== 'number' || !Number.isFinite(at)) {
 		throw new LiveError('VALIDATION', '[svelte-realtime] ctx.setAlarm(at): at must be a finite epoch-ms number');
 	}
-	const existing = _pending.get(wireTopic);
-	if (existing) {
-		// Exactly one pending alarm per room: cancel and replace.
-		clearTimer(existing.timer);
-	} else if (_pending.size >= _MAX_ALARMS) {
-		if (!_alarmCapWarnFired) {
-			_alarmCapWarnFired = true;
-			console.warn(
-				'[svelte-realtime] alarm registry reached MAX_ALARMS=' + _MAX_ALARMS +
-				'; new alarms are dropped until existing ones fire or are deleted.\n' +
-				'  This usually means setAlarm is being called with an unbounded set of distinct room topics.'
-			);
-		}
-		return;
+	const store = _alarmStore;
+	if (!store) {
+		_armAlarm(wireTopic, at, onAlarm, meta, misfireMs, null, null);
+		return _alarmAcknowledged;
 	}
-	_pending.set(wireTopic, { at, timer: _schedule(wireTopic, at), onAlarm, meta, misfireMs });
-	// Durable store (when wired): persist so the alarm survives a restart + fires
-	// once cluster-wide. Best-effort - the in-memory timer is the live path. `meta`
-	// carries the resolver path so a recovery poll can re-find onAlarm after a restart.
-	if (_alarmStore) { try { _alarmStore.set(wireTopic, at, meta); } catch { /* best-effort */ } }
+	const epoch = _alarmEpoch;
+	return _queueMutation(wireTopic, async () => {
+		const generation = await store.nextGeneration(wireTopic);
+		if (!_validGeneration(generation)) throw new Error('[svelte-realtime] alarm store returned an invalid generation');
+		const committed = await store.set(wireTopic, at, meta, generation);
+		if (committed !== true) throw new Error('[svelte-realtime] alarm schedule was superseded before durable commit');
+		if (epoch === _alarmEpoch) _armAlarm(wireTopic, at, onAlarm, meta, misfireMs, store, generation);
+	});
 }
 
 /**
@@ -207,11 +250,11 @@ const _MAX_TIMER_DELAY_MS = 2147483647;
  * intent, not an error.
  * @returns {any} the timer handle
  */
-function _schedule(wireTopic, at) {
-	const remaining = at - wallEpoch();
+function _schedule(wireTopic, entry) {
+	const remaining = entry.at - wallEpoch();
 	const long = remaining > _MAX_TIMER_DELAY_MS;
 	const timer = setTimer(
-		long ? () => _hop(wireTopic) : () => _fire(wireTopic),
+		long ? () => _hop(wireTopic, entry) : () => _fire(wireTopic, entry),
 		long ? _MAX_TIMER_DELAY_MS : Math.max(0, remaining)
 	);
 	if (timer && timer.unref) timer.unref();
@@ -223,11 +266,10 @@ function _schedule(wireTopic, at) {
  * capped hop, or the final fire when the remaining time now fits in one timer).
  * The entry's `at` is unchanged; only its timer handle advances.
  */
-function _hop(wireTopic) {
+function _hop(wireTopic, entry) {
 	if (_isShuttingDown()) return;
-	const entry = _pending.get(wireTopic);
-	if (!entry) return; // deleted / replaced while hopping
-	entry.timer = _schedule(wireTopic, entry.at);
+	if (_pending.get(wireTopic) !== entry) return;
+	entry.timer = _schedule(wireTopic, entry);
 }
 
 function _getAlarm(wireTopic) {
@@ -236,61 +278,67 @@ function _getAlarm(wireTopic) {
 }
 
 function _deleteAlarm(wireTopic) {
-	const e = _pending.get(wireTopic);
-	if (e) { clearTimer(e.timer); _pending.delete(wireTopic); }
-	if (_alarmStore) { try { _alarmStore.delete(wireTopic); } catch { /* best-effort */ } }
+	const store = _alarmStore;
+	if (!store) {
+		const entry = _pending.get(wireTopic);
+		if (entry) { clearTimer(entry.timer); _pending.delete(wireTopic); }
+		if (_mutations.size || _reservedTopics.size) _releaseTopic(wireTopic);
+		return _alarmAcknowledged;
+	}
+	return _queueMutation(wireTopic, async () => {
+		const entry = _pending.get(wireTopic);
+		const row = entry?.store === store ? entry : await store.get(wireTopic);
+		if (row) {
+			if (!_validGeneration(row.generation)) throw new Error('[svelte-realtime] alarm store returned an invalid generation');
+			const removed = await store.delete(wireTopic, row.generation);
+			if (typeof removed !== 'boolean') throw new Error('[svelte-realtime] alarm store returned an invalid delete result');
+		}
+		if (entry && _pending.get(wireTopic) === entry) {
+			clearTimer(entry.timer);
+			_pending.delete(wireTopic);
+		}
+	});
 }
 
-async function _fire(wireTopic) {
-	// Graceful shutdown: stop firing so the in-flight drain can finish. An
-	// in-memory alarm is lost on shutdown regardless (a durable store re-fires it
-	// after restart), so skipping is consistent.
+async function _fire(wireTopic, entry) {
 	if (_isShuttingDown()) return;
+	_enterInFlight();
+	try { await _fireClaim(wireTopic, entry); }
+	finally { _exitInFlight(); }
+}
 
-	const entry = _pending.get(wireTopic);
-	if (!entry) return; // already deleted / fired (race with deleteAlarm or a re-set)
-	// One-shot: remove the in-memory entry + cancel its (already-fired) timer FIRST,
-	// regardless of leadership - so a re-setAlarm inside onAlarm arms a fresh entry
-	// rather than being clobbered, AND a non-leader whose local timer fired does not
-	// leave a stale entry behind (the leader fires from the durable store instead).
-	_pending.delete(wireTopic);
-	clearTimer(entry.timer);
-
-	// Cluster leader gate - applied to the PRECISE path only when there is NO
-	// durable store to arbitrate. With a store, the atomic `delete`-claim below
-	// already guarantees exactly one instance fires (the arming instance's precise
-	// timer or the leader's recovery sweep, whichever claims the row first). Gating
-	// the precise path on leadership as well would throw away on-time firing for
-	// every alarm armed on a NON-leader - the majority, since clients are
-	// load-balanced: its precise timer would return here, and it would fire only
-	// via the leader's up-to-pollMs-late recovery sweep, or be dropped entirely
-	// when misfireMs < pollMs. So with a store, let the arming instance fire
-	// precisely and rely on the claim for single-fire. Without a store the
-	// in-memory timer is the sole arbiter, so the discouraged leader-without-store
-	// config keeps leader-only firing. A throwing leader fails closed (skip) -
-	// better to miss one fire than to double-fire.
-	if (_alarmLeader !== null && _alarmStore === null) {
+async function _fireClaim(wireTopic, entry) {
+	if (_isShuttingDown() || _pending.get(wireTopic) !== entry) return;
+	if (_alarmLeader !== null && !entry.store) {
 		let isLeader;
 		try { isLeader = _alarmLeader(); }
-		catch (err) {
-			if (_IS_DEV) console.error('[svelte-realtime] configureAlarm leader threw; skipping alarm fire:', err);
+		catch { isLeader = false; }
+		if (!isLeader) {
+			_pending.delete(wireTopic);
+			_releaseTopic(wireTopic);
 			return;
 		}
-		if (!isLeader) return;
 	}
-
-	// The firing instance claims the durable record atomically: `delete` returns
-	// whether THIS call removed a present row. If the recovery poll already fired
-	// (and claimed) it, the claim fails and we skip - this is the single-fire
-	// backstop between the precise in-memory timer and the poll. A store error fails
-	// OPEN (fire anyway): at-least-once is the durable-alarm contract, so onAlarm
-	// must be idempotent. No store -> the local one-shot above is the sole arbiter.
-	if (_alarmStore) {
+	if (entry.store) {
 		let claimed;
-		try { claimed = await _alarmStore.delete(wireTopic); }
-		catch { claimed = true; }
-		if (!claimed) return;
+		try { claimed = await entry.store.delete(wireTopic, entry.generation); }
+		catch {
+			// Keep the row and retry its exact generation; never fire without a claim.
+			if (_pending.get(wireTopic) === entry && entry.epoch === _alarmEpoch) {
+				entry.timer = setTimer(() => _fire(wireTopic, entry), _alarmPollMs);
+				entry.timer?.unref?.();
+			}
+			return;
+		}
+		if (claimed !== true) {
+			if (_pending.get(wireTopic) === entry) _pending.delete(wireTopic);
+			_releaseTopic(wireTopic);
+			return;
+		}
 	}
+	if (_pending.get(wireTopic) === entry) _pending.delete(wireTopic);
+	clearTimer(entry.timer);
+	_releaseTopic(wireTopic);
 
 	// Misfire policy: with `misfireMs` set, an alarm firing later than its
 	// deadline plus the threshold is dropped instead of run - AFTER the claim,
@@ -321,8 +369,8 @@ function _alarmTenant(wireTopic, meta) {
  * Build a fresh ws-less server ctx for the room and run its `onAlarm`. Shared by
  * the precise in-memory timer (`_fire`) and the cross-restart recovery poll
  * (`_pollAlarms`); the caller has already claimed the alarm (one-shot / store
- * claim), so this just reconstructs ctx and invokes the handler with in-flight
- * accounting + error isolation - the same contract as a cron tick.
+ * claim) and owns in-flight accounting through callback completion. This helper
+ * reconstructs ctx and isolates handler errors, like a cron tick.
  * @param {string} wireTopic
  * @param {Function} onAlarm
  * @param {AlarmMeta | null} meta
@@ -342,9 +390,6 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 		return;
 	}
 
-	// Count the in-flight handler so onShutdown's drain waits for it (paired with
-	// the _exitInFlight in finally) - same contract as a cron tick.
-	_enterInFlight();
 	try {
 		const _h = _getCtxHelpers(platform);
 		// Fresh ws-less server ctx (the room may be empty), exactly like a cron tick.
@@ -377,8 +422,6 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 			message: 'An alarm handler failed; the scheduler remains active.',
 			attributes: { topic: wireTopic, error: diagnosticErrorMessage(err) }
 		});
-	} finally {
-		_exitInFlight();
 	}
 }
 
@@ -387,13 +430,21 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
  * passed but whose owning instance never fired them (it restarted/crashed before
  * its in-memory timer ran, so no `_pending` entry exists anywhere). For each, it
  * re-resolves `onAlarm` from the registry by the persisted RPC path, claims the row
- * atomically, and fires. Topics still live in `_pending` are skipped - the owner's
- * precise timer fires those. Mirrors `cron-engine._tickCron`'s leader gate + lazy
+ * atomically, and fires. Generations still live in `_pending` are skipped - the
+ * owner's precise timer fires those. Mirrors `cron-engine._tickCron`'s leader gate + lazy
  * resolution + in-flight drain.
  */
 export async function _pollAlarms() {
 	if (_isShuttingDown()) return;
-	if (!_alarmStore || typeof _alarmStore.due !== 'function') return;
+	_enterInFlight();
+	try { await _pollAlarmRows(); }
+	finally { _exitInFlight(); }
+}
+
+async function _pollAlarmRows() {
+	if (_isShuttingDown()) return;
+	const store = _alarmStore;
+	if (!store || typeof store.due !== 'function') return;
 	// Resolve lazy stream modules so `registry.get(path).__streamOptions.alarm` is
 	// populated before we decide a row is stale (mirrors the cron tick).
 	if (!_isLazyResolved()) await _resolveAllLazy();
@@ -412,7 +463,7 @@ export async function _pollAlarms() {
 	}
 
 	let due;
-	try { due = await _alarmStore.due(wallEpoch()); }
+	try { due = await store.due(wallEpoch()); }
 	catch (err) {
 		if (_IS_DEV) console.error('[svelte-realtime] alarm store due() failed; skipping poll:', err);
 		return;
@@ -422,9 +473,10 @@ export async function _pollAlarms() {
 	for (const row of due) {
 		if (_isShuttingDown()) return;
 		const wireTopic = row && row.topic;
-		if (typeof wireTopic !== 'string') continue;
+		if (typeof wireTopic !== 'string' || !_validGeneration(row.generation)) continue;
 		// The owner's live timer fires this one precisely - don't race it from the poll.
-		if (_pending.has(wireTopic)) continue;
+		const local = _pending.get(wireTopic);
+		if (local?.store === store && local.generation === row.generation) continue;
 		const meta = (row && row.meta) || null;
 		// Invalid persisted scope must never consume a row or run in another tenant.
 		try { _alarmTenant(wireTopic, meta); }
@@ -476,9 +528,9 @@ export async function _pollAlarms() {
 		// Claim only after a unique resolver exists. Atomic delete still arbitrates
 		// the recovery poll against the precise timer and other workers.
 		let claimed;
-		try { claimed = await _alarmStore.delete(wireTopic); }
+		try { claimed = await store.delete(wireTopic, row.generation); }
 		catch { continue; }
-		if (!claimed) continue; // another poller / the owner's timer won the claim
+		if (claimed !== true) continue; // another poller / the owner's timer won the claim
 		// Misfire policy on the recovery path: the stream's declared threshold is
 		// re-resolved from the registry (the persisted row stays policy-free). The
 		// claim above already consumed the row, so a skipped stale alarm is spent.
@@ -520,10 +572,12 @@ function _clearAlarmPoll() {
  * @internal
  */
 export function _resetAlarms() {
+	_alarmEpoch++;
+	_mutations.clear();
+	_reservedTopics.clear();
 	for (const e of _pending.values()) clearTimer(e.timer);
 	_pending.clear();
 	_clearAlarmPoll();
-	_alarmCapWarnFired = false;
 	_alarmPlatformWarnFired = false;
 	_alarmDueWarnFired = false;
 	_alarmUnresolvedWarned.clear();

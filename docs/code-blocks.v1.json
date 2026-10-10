@@ -1410,7 +1410,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "02fa9083c0f2b4dceec1b7214987e8236f0917e293390492d30fe2a0c6ac01c2",
+			"fingerprint": "24878171e2da1b3ac0855797533781909a14480bfad6ae5007d5dc9ee7c68cd6",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Per-room alarms",
@@ -1420,7 +1420,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "0d913f2c8383e4c0bae749376932ff6489c6662accfc0c4db4f8df2c8b620796",
+			"fingerprint": "2c24ab3438770a53f2b5a89e8d1ce78254568cef0ae419c9bbf3388d3906e4d4",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Per-room alarms",

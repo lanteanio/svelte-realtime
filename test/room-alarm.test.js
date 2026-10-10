@@ -1,3 +1,4 @@
+import { memoryAlarmStore as memStore } from './helpers/alarm-store.js';
 // live.room({ alarm }) - a durable alarm declared on a room. The promise already
 // shipped in the README, server.d.ts, and the ctx.setAlarm error string; this
 // proves it works: the data stream carries the alarm option (so the loader
@@ -18,15 +19,7 @@ function mkCtx(id, platform) {
 	return { user: { id }, platform, publish: cap, _publishWire: cap };
 }
 
-function memStore() {
-	const rows = new Map();
-	return {
-		rows,
-		set: (t, at, meta) => { rows.set(t, { at, meta: meta ?? null }); },
-		delete: (t) => { const had = rows.has(t); rows.delete(t); return had; },
-		due: (now) => [...rows.entries()].filter(([, r]) => r.at <= now).map(([t, r]) => ({ topic: t, at: r.at, meta: r.meta }))
-	};
-}
+
 
 describe('live.room({ alarm })', () => {
 	let platform, savedCron;
@@ -69,7 +62,7 @@ describe('live.room({ alarm })', () => {
 		const at = Date.now() + 50_000; // far future: only the durable row, no fire during the test
 		const game = mkRoom({
 			alarm: { onAlarm: () => {} },
-			actions: { arm: async (ctx, id) => { ctx.setAlarm(at); } }
+			actions: { arm: async (ctx, id) => { await ctx.setAlarm(at); } }
 		});
 		// Registration captures the base module path (exactly as codegen / the harness do).
 		game.__setEnumId('rooms/game');
@@ -95,7 +88,7 @@ describe('live.room({ alarm })', () => {
 		const store = memStore();
 		configureAlarm({ store });
 		// A durable row left by a pre-restart arm: overdue, no in-memory _pending entry.
-		store.set('game:7', Date.now() - 1000, { path: 'rooms/game/__data', tenantId: null });
+		store.seed('game:7', Date.now() - 1000, { path: 'rooms/game/__data', tenantId: null });
 
 		await _pollAlarms();
 

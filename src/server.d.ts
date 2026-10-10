@@ -431,21 +431,23 @@ export interface LiveContext<UserData = unknown> {
 	 *
 	 * Durable across restart + cluster single-fire when a store + leader are wired
 	 * via `configureAlarm`; in-memory (survives the room going idle within the
-	 * process) otherwise.
+	 * process) otherwise. Await the returned promise: it resolves after durable
+	 * commit and timer installation, and rejects on storage failure or supersession.
+	 * Same-process writes to a room execute in invocation order.
 	 *
 	 * @example
 	 * ```js
 	 * // TTL-style cleanup: refresh on activity, fire if untouched for 30 days.
-	 * ctx.setAlarm(Date.now() + 30 * 24 * 60 * 60 * 1000);
+	 * await ctx.setAlarm(Date.now() + 30 * 24 * 60 * 60 * 1000);
 	 * ```
 	 */
-	setAlarm: (at: number) => void;
+	setAlarm: (at: number) => Promise<void>;
 
-	/** The room's pending alarm time (epoch-ms), or `null` if none is set. */
+	/** The locally acknowledged timer's epoch-ms time, or null; does not read storage. */
 	getAlarm: () => number | null;
 
-	/** Cancel the room's pending alarm, if any. */
-	deleteAlarm: () => void;
+	/** Await durable cancellation of the observed generation; a newer schedule is preserved. */
+	deleteAlarm: () => Promise<void>;
 
 	/**
 	 * Fire-time visibility, present ONLY inside `onAlarm`: the scheduled
@@ -4241,6 +4243,8 @@ export interface AlarmMeta {
 
 /** A due alarm returned by `AlarmStore.due(nowMs)` for the recovery poll. */
 export interface AlarmDue {
+	/** Positive decimal-string generation, allocated by this store. */
+	generation: string;
 	topic: string;
 	at: number;
 	meta?: AlarmMeta | null;
@@ -4250,25 +4254,32 @@ export interface AlarmDue {
  * A durable alarm store backing `live.alarm` across restarts + a cluster. The
  * in-memory default uses live process timers (an alarm survives the room going
  * idle within the process, but not a restart); a durable store persists
- * `{topic, at, meta}` so an alarm survives a restart and - paired with a `leader` -
- * fires exactly once cluster-wide. The Postgres / Redis implementations live in
+ * `{topic, at, meta, generation}` so an alarm survives a restart and each
+ * generation can be claimed by only one worker. The Postgres / Redis implementations live in
  * `svelte-adapter-uws-extensions` (`createAlarmStore`).
  */
 export interface AlarmStore {
-	/** Persist (or replace) the alarm for `topic`, due at epoch-ms `at`. */
-	set(topic: string, at: number, meta?: AlarmMeta | null): void | Promise<void>;
 	/**
-	 * Remove the alarm for `topic`. Returns whether THIS call removed a present row -
-	 * the atomic claim that guarantees single-fire between the precise in-memory timer
-	 * and the recovery poll. (`void` is treated as a successful claim for back-compat.)
+	 * Atomically reserve a strictly increasing positive decimal-string generation
+	 * for this topic. Never reuse generations, including after delete or restart.
+	 * Reservation leaves the current scheduled row unchanged.
 	 */
-	delete(topic: string): boolean | void | Promise<boolean | void>;
+	nextGeneration(topic: string): string | Promise<string>;
+	/** Read the current scheduled row, or null. Used for cancellation after restart. */
+	get(topic: string): AlarmDue | null | Promise<AlarmDue | null>;
 	/**
-	 * Optional. Return the alarms whose `at <= nowMs` (the recovery poll reads this on
-	 * the leader to fire alarms an instance left behind when it restarted before its
-	 * in-memory timer ran). Omit it and cross-restart recovery is disabled; in-memory
-	 * timers still fire while the process lives.
+	 * Commit only the latest reserved generation, strictly newer than the retained
+	 * committed/deleted watermark. Return false for a stale generation without
+	 * modifying the row. Resolve true only after durable commit; reject on failure.
 	 */
+	set(topic: string, at: number, meta: AlarmMeta | null, generation: string): boolean | Promise<boolean>;
+	/**
+	 * Atomically delete only the row with the expected generation. Return true iff
+	 * this call removed it. Preserve allocation and committed watermarks so a late
+	 * write cannot resurrect a consumed generation. Resolve after durable commit.
+	 */
+	delete(topic: string, generation: string): boolean | Promise<boolean>;
+	/** Return due rows with their exact generations for conditional recovery claims. */
 	due?(nowMs: number): AlarmDue[] | Promise<AlarmDue[]>;
 }
 
