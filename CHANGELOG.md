@@ -153,6 +153,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Production browser fixtures wire realtime initialization and shutdown, drain through the adapter on teardown, and verify the packed build with real Linux SIGTERM signals for completed and timed-out RPC work.
 
+- Aggregate erasure requires an explicit whole-state reset policy, clears pending output and held privacy values, and prevents late snapshots from restoring erased data.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

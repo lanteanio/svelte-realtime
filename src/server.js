@@ -72,7 +72,7 @@ import { installRateLimit, _consumeRateLimitBucket, _resolveRegistryRateLimit, _
 export { _resetRateLimits } from './server/rate-limit.js';
 import { _setBus, _getBus } from './server/bus.js';
 import { _getCtxHelpers, _buildCtx, installCtx } from './server/ctx.js';
-import { _ensureWrap, _maybeLateActivate, _computeAggregateState, _computeWindowState, _publishWindow, _warnAggregateWindowFailure, _rollTumblingWindow, _TUMBLE_LEAD_MS, installReactive } from './server/reactive.js';
+import { _ensureWrap, _maybeLateActivate, _computeAggregateState, _createAggregateState, _copyAggregateState, _computeWindowState, _publishWindow, _warnAggregateWindowFailure, _rollTumblingWindow, _TUMBLE_LEAD_MS, installReactive } from './server/reactive.js';
 import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, installCrdt } from './server/crdt.js';
 import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
 import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy, _setAfterLazyResolve } from './server/lazy.js';
@@ -2475,13 +2475,14 @@ export function __registerAggregate(path, fn) {
 	const source = /** @type {any} */ (fn).__aggregateSource;
 	const reducers = /** @type {any} */ (fn).__aggregateReducers;
 	const topic = /** @type {any} */ (fn).__streamTopic;
-	const initState = /** @type {any} */ (fn).__aggregateInitState;
+	const forget = /** @type {any} */ (fn).__aggregateForget;
 	const snapshot = /** @type {any} */ (fn).__aggregateSnapshot;
 	const debounce = /** @type {any} */ (fn).__aggregateDebounce || 0;
 	if (!source || !topic) return;
 	const privacy = /** @type {any} */ (fn).__aggregatePrivacy || null;
+	const initial = _createAggregateState(reducers, forget);
 	const entry = {
-		source, reducers, topic, state: { ...initState }, snapshot, debounce, timer: null,
+		source, reducers, topic, state: initial, snapshot, debounce, timer: null, forget, _generation: 0,
 		_reducerEntries: Object.entries(reducers), _hydrationPromise: null,
 		// k-anon / DP privacy state. `cohort` counts distinct contributors (only
 		// when a contributor extractor is configured); `_lastWire` holds the last
@@ -2491,18 +2492,19 @@ export function __registerAggregate(path, fn) {
 		privacy,
 		cohort: (privacy && privacy.contributor) ? new Set() : null,
 		_windowStart: 0,
-		_lastWire: privacy ? _computeAggregateState({ ...initState }, reducers) : undefined
+		_lastWire: privacy ? _computeAggregateState(forget === 'reset' ? _copyAggregateState(initial) : { ...initial }, reducers) : undefined
 	};
 
 	if (snapshot) {
+		const generation = entry._generation;
 		entry._hydrationPromise = (async () => {
 			try {
 				const snapshotState = await snapshot();
-				if (snapshotState && typeof snapshotState === 'object') {
+				if (entry._generation === generation && snapshotState && typeof snapshotState === 'object') {
 					_safeAssignSnapshot(entry.state, snapshotState);
 				}
 			} catch {}
-			entry._hydrationPromise = null;
+			if (entry._generation === generation) entry._hydrationPromise = null;
 		})();
 	}
 
@@ -2528,7 +2530,7 @@ function _registerWindowedAggregate(path, fn) {
 	const source = /** @type {any} */ (fn).__aggregateSource;
 	const reducers = /** @type {any} */ (fn).__aggregateReducers;
 	const baseTopic = /** @type {any} */ (fn).__aggregateBaseTopic;
-	const initState = /** @type {any} */ (fn).__aggregateInitState;
+	const forget = /** @type {any} */ (fn).__aggregateForget;
 	const snapshots = /** @type {any} */ (fn).__aggregateSnapshots || {};
 	const legacySnapshot = /** @type {any} */ (fn).__aggregateSnapshot;
 	const debounce = /** @type {any} */ (fn).__aggregateDebounce || 0;
@@ -2548,6 +2550,7 @@ function _registerWindowedAggregate(path, fn) {
 		debounce,
 		_hydrationPromise: null,
 		windowed: true,
+		forget, _generation: 0,
 		// The event fold checks for a passed boundary only when a window tumbles.
 		_tumbling: Object.values(windowsSpec).some((spec) => spec.type === 'tumbling'),
 		privacy
@@ -2563,7 +2566,7 @@ function _registerWindowedAggregate(path, fn) {
 		if (spec.type === 'lifetime') {
 			windowStates.set(wn, {
 				type: 'lifetime', spec, name: wn, outputTopic,
-				state: { ...initState },
+				state: _createAggregateState(reducers, forget),
 				debounce: winDebounce, timer: null
 			});
 		} else if (spec.type === 'tumbling') {
@@ -2573,7 +2576,7 @@ function _registerWindowedAggregate(path, fn) {
 			const nextBoundary = boundaryAfter(wall);
 			windowStates.set(wn, {
 				type: 'tumbling', spec, name: wn, outputTopic,
-				state: { ...initState },
+				state: _createAggregateState(reducers, forget),
 				debounce: winDebounce, timer: null,
 				boundaryTimer: null,
 				boundaryAfter,
@@ -2584,11 +2587,7 @@ function _registerWindowedAggregate(path, fn) {
 			const bucketCount = Math.ceil(spec.durationMs / spec.slideMs);
 			const buckets = [];
 			for (let i = 0; i < bucketCount; i++) {
-				const b = {};
-				for (const [field, r] of _reducerEntries) {
-					if (r.init) b[field] = r.init();
-				}
-				buckets.push(b);
+				buckets.push(_createAggregateState(reducers, forget));
 			}
 			windowStates.set(wn, {
 				type: 'sliding', spec, name: wn, outputTopic,
@@ -2624,7 +2623,7 @@ function _registerWindowedAggregate(path, fn) {
 			win._windowStart = win.type === 'tumbling'
 				? win.nextBoundary
 				: (win.type === 'sliding' ? Math.floor(wall / win.spec.slideMs) : 0);
-			win._lastWire = _computeWindowState(win, reducers);
+			win._lastWire = forget === 'reset' ? _copyAggregateState(_computeWindowState(win, reducers)) : _computeWindowState(win, reducers);
 		}
 	}
 
@@ -2632,18 +2631,19 @@ function _registerWindowedAggregate(path, fn) {
 	// by the legacy `snapshot` option for backwards compat with apps that
 	// adopted windows by adding a single `lifetime` slot.
 	const hydrationTasks = [];
+	const generation = entry._generation;
 	for (const [wn, win] of windowStates) {
 		const perWindowSnap = snapshots[wn] || (wn === 'lifetime' ? legacySnapshot : null);
 		if (!perWindowSnap || win.type === 'sliding') continue;
 		hydrationTasks.push((async () => {
 			try {
 				const s = await perWindowSnap();
-				if (s && typeof s === 'object') _safeAssignSnapshot(win.state, s);
+				if (entry._generation === generation && s && typeof s === 'object') _safeAssignSnapshot(win.state, s);
 			} catch {}
 		})());
 	}
 	if (hydrationTasks.length > 0) {
-		entry._hydrationPromise = Promise.all(hydrationTasks).then(() => { entry._hydrationPromise = null; });
+		entry._hydrationPromise = Promise.all(hydrationTasks).then(() => { if (entry._generation === generation) entry._hydrationPromise = null; });
 	}
 
 	aggregateRegistry.set(path, entry);
@@ -2724,11 +2724,7 @@ function _scheduleNextSlide(entry, win) {
 		try {
 			// Advance the ring head and clear the new current bucket.
 			win.bucketIndex = (win.bucketIndex + 1) % win.bucketCount;
-			const fresh = {};
-			for (const [field, r] of entry._reducerEntries) {
-				if (r.init) fresh[field] = r.init();
-			}
-			win.buckets[win.bucketIndex] = fresh;
+			win.buckets[win.bucketIndex] = _createAggregateState(entry.reducers, entry.forget);
 			// The evicted bucket's contributors leave the k-anonymity cohort too.
 			if (win.bucketCohorts) win.bucketCohorts[win.bucketIndex] = new Set();
 			// Refresh the noise seed each slide from the exact wall-clock slide

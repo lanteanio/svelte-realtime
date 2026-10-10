@@ -1,4 +1,5 @@
 // @ts-check
+import { serialize, deserialize } from 'node:v8';
 import { now as runtimeNow, wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { _IS_DEV } from './env.js';
 import { state, _derivedBySource, _effectBySource, _webhookOutBySource, _aggregateBySource, _aggregateByTopic, _watchedTopics, _dynamicDerivedByFn, _silentTopicWatch } from './state.js';
@@ -66,6 +67,22 @@ export function _computeAggregateState(state, reducers) {
 		}
 	}
 	return result;
+}
+
+/** Copy state without retaining references to application-owned seeds. */
+export function _copyAggregateState(value) {
+	return deserialize(serialize(value));
+}
+
+/** Build a new reducer state; reset policy never lends an initializer's seed to reducers. */
+export function _createAggregateState(reducers, forget) {
+	const fresh = {};
+	for (const [field, r] of Object.entries(reducers)) {
+		if (r.init) fresh[field] = r.init();
+	}
+	// Unlike structuredClone, this copies buffer views and rejects raw shared
+	// memory instead of keeping writable aliases. Functions also reject.
+	return forget === 'reset' ? _copyAggregateState(fresh) : fresh;
 }
 
 /**
@@ -186,11 +203,7 @@ export function _rollTumblingWindow(entry, win, wall, platform) {
 	// failing the publish or subscribe that happened to close the window.
 	let reset = false;
 	try {
-		const fresh = {};
-		for (const [field, r] of entry._reducerEntries) {
-			if (r.init) fresh[field] = r.init();
-		}
-		win.state = fresh;
+		win.state = _createAggregateState(entry.reducers, entry.forget);
 		reset = true;
 	} catch (err) {
 		_warnAggregateWindowFailure(entry, err, 'init');
@@ -741,44 +754,70 @@ async function _recomputeDerived(entry, platform) {
 }
 
 /**
- * Right-to-erasure purge for the k-anonymity cohorts: remove one contributor
- * id from every live aggregate's cohort set (single-state, per-window, and
- * per-hop-bucket alike). The k-gate re-evaluates on the next publish - a
- * cohort shrunk below `k` re-suppresses until enough distinct contributors
- * return, which is the privacy-safe polarity. Reducer STATE is untouched:
- * reducer folds are generally non-invertible, and the aggregate values they
- * hold are exactly the statistical outputs the k-gate governs - removing the
- * user from the cohort is what withdraws the user from the publishing
- * decision. The cohort key is whatever `privacy.contributor(data)` returns;
- * this purge removes the userId-valued key (apps whose contributor keys are
- * not user ids purge through their own key mapping).
- *
- * Returns the number of cohort sets the id was removed from, for the forget
- * cascade's per-surface count.
+ * Arbitrary reducer state cannot be inverted or attributed from a bounded cohort.
+ * An explicit reset policy clears every aggregate holder, across all contributors.
+ * Missing policies and failed resets are incomplete erasure, even if no cohort
+ * currently contains the user. The historical surface name remains compatible.
  * @param {string} contributorId
+ * @param {any} [platform]
  * @returns {number}
  */
-export function _purgeAggregateCohorts(contributorId) {
+export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatform || state.derivedPlatform) {
+	const entries = new Set([..._aggregateBySource.values()].flatMap(group => [...group]));
+	const memberships = [];
+	const failures = [];
+	const resets = [];
 	let count = 0;
-	/** @type {Set<any>} an aggregate may be registered under several source topics */
-	const seen = new Set();
-	for (const entries of _aggregateBySource.values()) {
+	// Quarantine every aggregate before invoking application initializers or
+	// publishers: reentrant source events must not repopulate an erased holder.
+	for (const group of _aggregateBySource.values()) {
+		for (const entry of entries) if (group.delete(entry)) memberships.push([group, entry]);
+	}
+	try {
 		for (const entry of entries) {
-			if (seen.has(entry)) continue;
-			seen.add(entry);
-			if (entry.cohort && entry.cohort.delete(contributorId)) count++;
-			if (entry.windowStates) {
-				for (const win of entry.windowStates.values()) {
-					if (win.cohort && win.cohort.delete(contributorId)) count++;
-					if (win.bucketCohorts) {
-						for (const bucket of win.bucketCohorts) {
-							if (bucket && bucket.delete(contributorId)) count++;
-						}
-					}
+			entry._generation++;
+			entry._hydrationPromise = null;
+			const holders = entry.windowStates ? [...entry.windowStates.values()] : [entry];
+			for (const holder of holders) {
+				if (holder.timer) { clearTimer(holder.timer); holder.timer = null; }
+				if (entry.forget !== 'reset') {
+					if (holder.cohort) holder.cohort.delete(contributorId);
+					if (holder.bucketCohorts) for (const cohort of holder.bucketCohorts) cohort.delete(contributorId);
+					failures.push(new Error('Aggregate has no erasure reset policy'));
+					continue;
 				}
+				// Drop all old references first, including when init/compute/clone
+				// fails. A subsequent live.forget retries the incomplete reset.
+				if (holder.buckets) holder.buckets = Array.from({ length: holder.bucketCount }, () => ({}));
+				else holder.state = {};
+				holder._lastWire = undefined;
+				if (holder.cohort) holder.cohort.clear();
+				if (holder.bucketCohorts) for (const cohort of holder.bucketCohorts) cohort.clear();
+				resets.push([entry, holder]);
 			}
 		}
+		// All old holder references are gone before any initializer runs.
+		for (const [entry, holder] of resets) {
+			try {
+				if (holder.buckets) {
+					holder.buckets = Array.from({ length: holder.bucketCount }, () => _createAggregateState(entry.reducers, entry.forget));
+					holder.bucketIndex = 0;
+				} else holder.state = _createAggregateState(entry.reducers, entry.forget);
+				const clean = _copyAggregateState(entry.windowStates ? _computeWindowState(holder, entry.reducers) : _computeAggregateState(holder.state, entry.reducers));
+				holder._lastWire = clean;
+				const topic = holder.outputTopic || entry.topic;
+				// A reset emits the clean initial value even below k, so clients
+				// discard the previously held value containing erased input.
+				const wire = _redactOrDrop(topic, clean);
+				if (wire === REDACT_DROP) throw new Error('Aggregate erasure reset was dropped by redaction');
+				if (platform) _platformPublish(platform, topic, 'set', wire);
+				count++;
+			} catch (error) { failures.push(error); }
+		}
+	} finally {
+		for (const [group, entry] of memberships) group.add(entry);
 	}
+	if (failures.length) throw new AggregateError(failures, 'Aggregate erasure incomplete');
 	return count;
 }
 

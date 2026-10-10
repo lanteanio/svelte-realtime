@@ -713,24 +713,24 @@ describe('live.forget - aggregate k-anonymity cohorts', () => {
 		_aggregateBySource.clear();
 	});
 
-	it('withdraws the user from single-state, window, and hop-bucket cohorts', async () => {
+	it('does not claim cohort removal erased arbitrary reducer state', async () => {
 		const { _aggregateBySource } = await import('../src/server/state.js');
+		const single = { _generation: 0, cohort: new Set(['u1', 'u2']) };
 		const entry = {
-			cohort: new Set(['u1', 'u2']),
+			_generation: 0,
 			windowStates: new Map([
 				['w1', { cohort: new Set(['u1', 'u3']) }],
 				['w2', { bucketCohorts: [new Set(['u1']), new Set(['u2', 'u1'])] }]
 			])
 		};
-		// The same entry registered under two source topics counts once.
-		_aggregateBySource.set('topic-a', [entry]);
-		_aggregateBySource.set('topic-b', [entry]);
+		// Actual watcher groups are Sets; aliases must not duplicate cleanup.
+		_aggregateBySource.set('topic-a', new Set([single, entry]));
+		_aggregateBySource.set('topic-b', new Set([entry]));
 
-		const res = await live.forget('u1');
+		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 
-		expect(res.surfaces.aggregateCohorts).toBe(4);
-		expect(entry.cohort.has('u1')).toBe(false);
-		expect(entry.cohort.has('u2')).toBe(true);
+		expect(single.cohort.has('u1')).toBe(false);
+		expect(single.cohort.has('u2')).toBe(true);
 		expect(entry.windowStates.get('w1').cohort.has('u1')).toBe(false);
 		expect(entry.windowStates.get('w2').bucketCohorts[0].size).toBe(0);
 		expect(entry.windowStates.get('w2').bucketCohorts[1].has('u2')).toBe(true);

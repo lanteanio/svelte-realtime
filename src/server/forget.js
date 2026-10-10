@@ -55,8 +55,8 @@ import { state } from './state.js';
 let _forgetStore = null;
 
 /**
- * Optional platform (default null). Needed only for the cluster presence-roster
- * release leg of the in-memory presence purge (it reads `platform.redis`).
+ * Optional platform (default null). Supplies the cluster presence Redis handle
+ * and aggregate reset publication; aggregates can use their captured platform.
  * Single-instance deployments leave it null. Set via `configureForget({ platform })`.
  * @type {any}
  */
@@ -133,10 +133,9 @@ const _descriptors = [
 		if (typeof dl.purgeUser !== 'function') throw new Error('Dead-letter store has no purgeUser method');
 		return dl.purgeUser(t, u);
 	} },
-	// k-anonymity cohorts: withdraw the user from every live aggregate's
-	// contributor set so the k-gate re-evaluates without them (reducer state
-	// is non-invertible by design; the cohort governs publication).
-	{ name: 'aggregateCohorts', run: (_t, u) => _purgeAggregateCohorts(u) }
+	// Aggregate reducer state is arbitrary: an explicit reset policy must
+	// discard every holder, or this surface reports incomplete erasure.
+	{ name: 'aggregateCohorts', run: (_t, u) => _purgeAggregateCohorts(u, _forgetPlatform || undefined) }
 ];
 
 /**

@@ -1,6 +1,6 @@
 // @ts-check
 import { live, getPlatform, publish } from '../server.js';
-import { _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _computeWindowState, _rollTumblingWindow } from './reactive.js';
+import { _activateDynamicDerived, _deactivateDynamicDerived, _computeAggregateState, _createAggregateState, _computeWindowState, _rollTumblingWindow } from './reactive.js';
 import { wallEpoch } from '../shared/runtime.js';
 import { _derivedScope, _derivedTopic } from './derived-topic.js';
 import { _aggregateByTopic } from './state.js';
@@ -280,7 +280,7 @@ export const _effectRegister = function effect(sources, fn, options) {
  *
  * @param {string} source - Topic to watch for events
  * @param {Record<string, { init?: () => any, reduce?: (acc: any, event: string, data: any) => any, compute?: (state: any) => any, combine?: (...buckets: any[]) => any }>} reducers
- * @param {{ topic: string, snapshot?: () => Promise<any>, snapshots?: Record<string, () => Promise<any>>, debounce?: number, windows?: Record<string, any> }} options
+ * @param {{ topic: string, snapshot?: () => Promise<any>, snapshots?: Record<string, () => Promise<any>>, debounce?: number, windows?: Record<string, any>, forget?: 'reset' }} options
  * @returns {Function}
  */
 export const _aggregateRegister = function aggregate(source, reducers, options) {
@@ -291,11 +291,8 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	// bad shape throws at declaration, not on the first publish. null when absent.
 	const privacy = _normalizeAggregatePrivacy(options?.privacy, topic);
 
-	// Build initial state from init() functions
-	const initState = {};
-	for (const [field, r] of Object.entries(reducers)) {
-		if (r.init) initState[field] = r.init();
-	}
+	const forget = options?.forget;
+	if (forget !== undefined && forget !== 'reset') throw new Error("[svelte-realtime] live.aggregate: forget must be 'reset'");
 
 	// ---- Windowed form ----
 	if (windowsSpec) {
@@ -319,7 +316,7 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 		/** @type {any} */ (root).__isLive = true;
 		/** @type {any} */ (root).__aggregateSource = source;
 		/** @type {any} */ (root).__aggregateReducers = reducers;
-		/** @type {any} */ (root).__aggregateInitState = initState;
+		/** @type {any} */ (root).__aggregateForget = forget;
 		/** @type {any} */ (root).__aggregateBaseTopic = topic;
 		/** @type {any} */ (root).__aggregateSnapshot = options?.snapshot || null;
 		/** @type {any} */ (root).__aggregateSnapshots = options?.snapshots || null;
@@ -337,11 +334,11 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 			const perWindowInit = async function aggregatePerWindowInit() {
 				const entry = _aggregateByTopic.get(topic);
 				if (!entry || !entry.windowStates) {
-					return _computeAggregateState(initState, reducers);
+					return _computeAggregateState(_createAggregateState(reducers, forget), reducers);
 				}
 				if (entry._hydrationPromise) await entry._hydrationPromise;
 				const winState = entry.windowStates.get(wn);
-				if (!winState) return _computeAggregateState(initState, reducers);
+				if (!winState) return _computeAggregateState(_createAggregateState(reducers, forget), reducers);
 				// A load after the boundary, before the boundary timer has run,
 				// closes the ended window first, as the timer would have.
 				if (winState.type === 'tumbling') _rollTumblingWindow(entry, winState, wallEpoch());
@@ -363,7 +360,7 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 		return root;
 	}
 
-	// ---- Single-state form (existing behavior, untouched) ----
+	// ---- Single-state form ----
 	const initFn = async function aggregateInit() {
 		const entry = _aggregateByTopic.get(topic);
 		if (entry) {
@@ -374,7 +371,7 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 			if (entry.privacy) return entry._lastWire;
 			return _computeAggregateState(entry.state, reducers);
 		}
-		return _computeAggregateState(initState, reducers);
+		return _computeAggregateState(_createAggregateState(reducers, forget), reducers);
 	};
 
 	/** @type {any} */ (initFn).__isAggregate = true;
@@ -384,7 +381,7 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	/** @type {any} */ (initFn).__streamOptions = { merge: 'set' };
 	/** @type {any} */ (initFn).__aggregateSource = source;
 	/** @type {any} */ (initFn).__aggregateReducers = reducers;
-	/** @type {any} */ (initFn).__aggregateInitState = initState;
+	/** @type {any} */ (initFn).__aggregateForget = forget;
 	/** @type {any} */ (initFn).__aggregateSnapshot = options?.snapshot || null;
 	/** @type {any} */ (initFn).__aggregateDebounce = debounce;
 	/** @type {any} */ (initFn).__aggregatePrivacy = privacy;
