@@ -7,7 +7,7 @@
 // before it emits, and _recordRpcMetrics length-bounds every label as a backstop.
 // Driven through the REAL handleRpc dispatch path; asserts the emitted series.
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { live } from '../src/server.js';
 import { state } from '../src/server/state.js';
 import { _recordRpcMetrics } from '../src/server/metrics.js';
@@ -126,7 +126,10 @@ describe('RPC metric label cardinality', () => {
 
 	it('folds N distinct UNREGISTERED UPLOAD paths (chunk-0 args header) into one __unknown__ series', async () => {
 		const ws = openWs();
-		for (let i = 0; i < 15; i++) handleRpc(ws, uploadChunk0Frame(i + 1, 'ghostup/p' + i), env.platform);
+		for (let i = 0; i < 15; i++) {
+			handleRpc(ws, uploadChunk0Frame(i + 1, 'ghostup/p' + i), env.platform);
+			await vi.waitFor(() => expect(rpcPaths(reg)).toHaveLength(i + 1));
+		}
 		await settle();
 		expect(new Set(rpcPaths(reg))).toEqual(new Set(['__unknown__']));
 		expect(rpcPaths(reg).length).toBeGreaterThanOrEqual(15);
