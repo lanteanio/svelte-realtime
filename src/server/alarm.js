@@ -354,7 +354,7 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 		// data)` - the same room-action ergonomic. Route through `_publishWire` (the
 		// raw, non-prefixing publish for a topic that is ALREADY a wire topic) so a
 		// pathological tenant resolver cannot double-prefix the already-scoped topic.
-		ctx.publish = (event, data) => ctx._publishWire(wireTopic, event, data);
+		ctx.publish = (event, data) => ctx._publishWire(wireTopic, event, data, { seq: false });
 		// Re-bind the alarm helpers so onAlarm can re-arm (TTL refresh from inside the
 		// handler) or cancel its own room's alarm - carrying the same resolver meta so
 		// a re-armed alarm stays recoverable across a restart, and the same misfire

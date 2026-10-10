@@ -61,6 +61,7 @@ describe('alarm callback tenant scope', () => {
 		if (recovered) await _pollAlarms();
 		else await vi.advanceTimersByTimeAsync(20);
 		expect(seen).toEqual(['acme', 'beta', null].map(tenantId => ({ tenantId, recovered })));
+			expect(platform.published.filter(row => row.event === 'alarm').map(row => row.options)).toEqual([{ seq: false }, { seq: false }, { seq: false }]);
 		expect(platform.published.map(row => row.topic)).toEqual([
 		'@t/acme/room', '@t/acme/side', '@t/beta/room', '@t/beta/side', 'room', 'side'
 		]);
