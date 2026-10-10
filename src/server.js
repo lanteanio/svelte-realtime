@@ -57,7 +57,7 @@ import {
 } from './server/state.js';
 import { _IS_DEV } from './server/env.js';
 import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge, _closeCursorPublishers } from './server/presence.js';
-import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope } from './server/tenant.js';
+import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope, _tenantTopic, _TENANT_TOPIC_NS, _isTenancyEnabled } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
 import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _platformPublish, UNSEQUENCED } from './server/publish-helpers.js';
 import { _resetNoiseBlockCache } from './server/differential-privacy.js';
@@ -119,7 +119,7 @@ export { assert, fatal, setFatalSink, resetFatalSink, getAssertionCounters, _res
 export { colorForKey, hueForKey } from './shared/color.js';
 import { createShortCode } from './shared/short-code.js';
 export { LiveError };
-export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge };
+export { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceList, _clusterPresenceMerge, _closeCursorPublishers };
 
 // The deterministic shared RNG the smooth simulation seeds per command, re-exported
 // so app/game code can draw the same reproducible randomness outside `apply` (world
@@ -516,15 +516,16 @@ export function _resetVolatileRegistry() {
  * engine for the common `prefix*` shape.
  *
  * @param {string} pattern
+ * @param {boolean} [unscoped] Exclude tenant wire topics from an unscoped watcher.
  * @returns {{ regex: RegExp, prefix: string, prefixOnly: boolean }}
  */
-function _compileInvalidatePattern(pattern) {
+function _compileInvalidatePattern(pattern, unscoped = false) {
 	const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.+');
-	const regex = new RegExp('^' + escaped + '$');
+	const regex = new RegExp('^' + (unscoped ? '(?!@t/)' : '') + escaped + '$');
 	const firstStar = pattern.indexOf('*');
 	const prefix = firstStar === -1 ? pattern : pattern.slice(0, firstStar);
 	const lastStar = pattern.lastIndexOf('*');
-	const prefixOnly = firstStar !== -1 && lastStar === pattern.length - 1 && firstStar === lastStar;
+	const prefixOnly = firstStar !== -1 && lastStar === pattern.length - 1 && firstStar === lastStar && !(unscoped && (prefix.startsWith(_TENANT_TOPIC_NS) || _TENANT_TOPIC_NS.startsWith(prefix)));
 	return { regex, prefix, prefixOnly };
 }
 
@@ -544,12 +545,15 @@ function _registerInvalidationWatch(topic, fn, ctx, args, platform) {
 	const patterns = fn.__streamInvalidateOn;
 	if (!patterns) return;
 	const onError = fn.__streamOnError || null;
+	// Compile the trusted scope once; publishing keeps its existing matcher path.
+	const scope = _tenantTopic(ctx.tenantId, '');
 	for (const p of patterns) {
-		let entry = _topicInvalidationWatch.get(p);
+		const key = scope + '\0' + p;
+		let entry = _topicInvalidationWatch.get(key);
 		if (!entry) {
-			const { regex, prefix, prefixOnly } = _compileInvalidatePattern(p);
+			const { regex, prefix, prefixOnly } = _compileInvalidatePattern(scope + p, !scope && _isTenancyEnabled());
 			entry = { regex, prefix, prefixOnly, watchers: [] };
-			_topicInvalidationWatch.set(p, entry);
+			_topicInvalidationWatch.set(key, entry);
 		}
 		if (entry.watchers.some(w => w.topic === topic && w.fn === fn)) continue;
 		entry.watchers.push({ topic, fn, ctx, args, platform, onError, reloading: false });
@@ -567,12 +571,14 @@ function _registerInvalidationWatch(topic, fn, ctx, args, platform) {
 function _unregisterInvalidationWatch(topic, fn) {
 	const patterns = fn.__streamInvalidateOn;
 	if (!patterns) return;
+	const scope = _isTenancyEnabled() && topic.startsWith(_TENANT_TOPIC_NS) ? topic.slice(0, topic.indexOf('/', _TENANT_TOPIC_NS.length) + 1) : '';
 	for (const p of patterns) {
-		const entry = _topicInvalidationWatch.get(p);
+		const key = scope + '\0' + p;
+		const entry = _topicInvalidationWatch.get(key);
 		if (!entry) continue;
 		const idx = entry.watchers.findIndex(w => w.topic === topic && w.fn === fn);
 		if (idx >= 0) entry.watchers.splice(idx, 1);
-		if (entry.watchers.length === 0) _topicInvalidationWatch.delete(p);
+		if (entry.watchers.length === 0) _topicInvalidationWatch.delete(key);
 	}
 }
 
