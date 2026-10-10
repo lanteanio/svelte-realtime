@@ -42,3 +42,5 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run smoke
+      - name: Exercise the manual counter in a fresh app
+        run: node scripts/check-manual-setup.js --fresh-install

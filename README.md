@@ -138,85 +138,83 @@ sidecar adapter can look configured while producing no runnable server.
 
 ### Step 3: Create the WebSocket hooks file
 
-Create `src/hooks.ws.js` in your project root. This file tells the adapter how to handle WebSocket connections and messages.
+Create `src/hooks.ws.js`. This local-only demo accepts every connection with a fresh identity; replace `upgrade` with verified session authentication before deployment.
 
 ```js
 // src/hooks.ws.js
-export { message } from 'svelte-realtime/server';
+export { message, close, unsubscribe } from 'svelte-realtime/server';
 
-export function upgrade({ cookies }) {
-  // Return user data to attach to the connection, or false to reject.
-  // This runs on every new WebSocket connection.
-  const session = validateSession(cookies.session_id);
-  if (!session) return false;
-  return { id: session.userId, name: session.name };
+export function upgrade() {
+  return { id: crypto.randomUUID() };
 }
 ```
 
-`message` is a ready-made hook that routes incoming WebSocket messages to your live functions. `upgrade` decides who can connect and attaches user data to the connection.
+`message` routes RPC and streams; without it, requests time out. `unsubscribe` releases stream bookkeeping when a view leaves; without it, state lasts until disconnect. `close` releases connection state on disconnect; omitting it leaks that state.
 
 > **This file is required.** The Vite plugin will warn at startup if it finds live modules in `src/live/` but no `src/hooks.ws.js` (or `.ts`). Without it, WebSocket messages have nothing on the server side to route them, and all RPC calls will silently time out.
 
-### Step 4: Write a server function
+### Step 4: Add an in-memory counter
 
 Create the `src/live/` directory. Every `.js` file in this directory becomes a module of callable server functions.
 
 ```js
-// src/live/chat.js
-import { live, LiveError } from 'svelte-realtime/server';
-import { db } from '$lib/server/db';
+// src/live/counter.js
+// realtime-allow-public
+import { live } from 'svelte-realtime/server';
 
-// A plain RPC function - clients can call this like a regular async function
-export const sendMessage = live(async (ctx, text) => {
-  if (!ctx.user) throw new LiveError('UNAUTHENTICATED', 'Login required');
-
-  const msg = await db.messages.insert({ userId: ctx.user.id, text });
-  ctx.publish('messages', 'created', msg);
-  return msg;
+let count = 0;
+export const increment = live((ctx) => {
+  count++;
+  ctx.publish('count', 'set', count);
+  return count;
 });
-
-// A stream - clients get a Svelte store with initial data + live updates
-export const messages = live.stream('messages', async (ctx) => {
-  return db.messages.latest(50);
-}, { merge: 'crud', key: 'id', prepend: true });
+export const counter = live.stream('count', () => count, { merge: 'set' });
 ```
 
 `live()` marks a function as callable over WebSocket. The first argument is always `ctx` (context), which contains the user data from `upgrade()`, the WebSocket connection, and a `publish` function for sending events to all subscribers.
 
 `live.stream()` creates a reactive subscription. When a client subscribes, it gets the initial data from the function, then receives live updates whenever someone publishes to that topic.
 
-### Step 6: Use it in a component
+### Step 5: Replace the home page
 
 ```svelte
-<!-- src/routes/chat/+page.svelte -->
+<!-- src/routes/+page.svelte -->
 <script>
-  import { sendMessage, messages } from '$live/chat';
-  let text = $state('');
-
-  async function send() {
-    await sendMessage(text);
-    text = '';
+  import { counter, increment } from '$live/counter';
+  const status = counter.status;
+  const error = counter.error;
+  let pending = $state(false);
+  let failure = $state('');
+  async function increase() {
+    if (pending) return;
+    pending = true;
+    failure = '';
+    try { await increment(); }
+    catch (error) { failure = error instanceof Error ? error.message : 'Please try again.'; }
+    finally { pending = false; }
   }
 </script>
 
-{#if $messages === undefined}
-  <p>Loading...</p>
-{:else}
-  {#each $messages as msg (msg.id)}
-    <p><b>{msg.userId}:</b> {msg.text}</p>
-  {/each}
-{/if}
-
-<input bind:value={text} />
-<button onclick={send}>Send</button>
+<h1>Shared counter</h1>
+<p role="status" aria-live="polite">
+  {#if failure || $error}{failure || $error.message}
+  {:else if $counter === undefined || $status !== 'connected'}Connecting...
+  {:else}Count: {$counter}{/if}
+</p>
+<button onclick={increase} disabled={$status !== 'connected'} aria-disabled={pending}>
+  Increase count by one
+</button>
 ```
 
-`$live/chat` is a virtual import. The Vite plugin reads your `src/live/chat.js` file, sees which functions are wrapped in `live()` and `live.stream()`, and generates lightweight client stubs that call them over WebSocket.
+`$live/counter` is generated from `src/live/counter.js`: `increment` is an async RPC function and `counter` is a store that receives the initial value and every published update. No database, Redis or separate backend is needed for this single-process demo.
 
-- `sendMessage` becomes a regular async function on the client.
-- `messages` becomes a Svelte store. It starts as `undefined` (loading), then populates with the initial data, then merges live updates as they arrive.
+### Step 6: Start, try and stop
 
-That is the entire setup. Run `npm run dev` and it works.
+Run `npm run dev -- --host 127.0.0.1`. Vite prints a local URL (normally `http://127.0.0.1:5173`); open that exact URL in two tabs. Both show `Count: 0`. Click **Increase count by one** in either tab: both must show `Count: 1` without refreshing.
+
+Stop with Ctrl+C. Restart the command and reload both tabs to reset the counter to zero; refreshing a tab alone preserves the server's count. The counter is intentionally lost on restart or server-module reload. Before deployment, replace the demo identity and choose durable storage for data you need to retain.
+
+If the button stays disabled, inspect the browser console and terminal, confirm all three hook exports and both Vite plugins, then reload after fixing the error. If the port is busy, use the URL Vite prints. Native-addon or Node errors belong to the preflight in step 1; resolve them before continuing. To check the production build, run `npm run build` (a runnable `build/index.js` is created), then `node build/index.js`; stop that server with Ctrl+C too.
 
 ---
 

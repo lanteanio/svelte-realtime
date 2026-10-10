@@ -32,6 +32,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Stream unsubscribe and disconnect cleanup wait for pending subscribe hooks, preventing room presence, ownership, and enumeration from surviving a departed socket.
 
+- Manual setup now runs a dependency-free shared counter with complete connection hooks, local-only identity, two-tab checks and restart instructions.
+
 - Clarify that stream subscriptions also pass through adapter authorization and connection limits before loading data or joining a room.
 
 - Room subscriptions release only the membership references they acquired, preserving other connections after capacity refusal, presence errors, or failed initialization.

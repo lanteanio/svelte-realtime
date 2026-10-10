@@ -639,6 +639,14 @@
       "commands": [
         "node scripts/smoke.js"
       ]
+    },
+    {
+      "workflow": "verify.yml",
+      "job": "smoke",
+      "step": "Exercise the manual counter in a fresh app",
+      "commands": [
+        "node scripts/check-manual-setup.js --fresh-install"
+      ]
     }
   ],
   "notFullyHosted": [

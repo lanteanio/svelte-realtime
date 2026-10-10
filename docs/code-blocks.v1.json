@@ -8,27 +8,27 @@
 		"total": 245,
 		"classifications": {
 			"command": 4,
-			"tutorial": 74,
-			"syntax": 128,
+			"tutorial": 73,
+			"executed": 33,
 			"output": 6,
-			"executed": 31,
+			"syntax": 127,
 			"fragment": 1,
 			"config": 1
 		},
 		"channels": {
 			"manual-command": 4,
-			"app-context": 74,
-			"acorn": 120,
+			"app-context": 73,
+			"packed-runtime": 33,
 			"reviewed-output": 6,
+			"acorn": 119,
 			"svelte": 7,
-			"packed-runtime": 31,
 			"reviewed-fragment": 1,
 			"manual-config": 1,
 			"json": 1
 		},
 		"notRunnable": {
-			"app-context": 74,
-			"ambient-identifiers": 118,
+			"app-context": 73,
+			"ambient-identifiers": 117,
 			"browser-component": 7,
 			"type-declarations-only": 1,
 			"requires-browser": 1
@@ -65,33 +65,33 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "39e60db370f6f6e3f7bec79281cacd23b50ad4adb06df452a2e01d4a3af78887",
+			"fingerprint": "183cb84ac831376d315128c39a1c8cbb8f27e952c5e1652110060c2ae216d1e8",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Manual setup > Step 3: Create the WebSocket hooks file",
-			"classification": "syntax",
-			"channel": "acorn",
-			"reason": "not runnable: ambient-identifiers validateSession"
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "921c6a1145c79e960173988bf8e65b6b145c40dbde829ebd0f3f636b23679013",
+			"fingerprint": "c31ee66d5d09a8940177084bc6c59246d49390900a1813b4b2b66fce316c1426",
 			"occurrence": 1,
 			"language": "js",
-			"section": "Manual setup > Step 4: Write a server function",
-			"classification": "tutorial",
-			"channel": "app-context",
-			"reason": "app-context imports: $lib/server/db"
+			"section": "Manual setup > Step 4: Add an in-memory counter",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "e64a1576892c4dc91d6bfcf41ea1b6ae9c8d05290bbcb263a724a32c17875b3e",
+			"fingerprint": "c273715fa00113dcf6be7df349ed3e26be7e51c797db858d94c9aa9204b831a5",
 			"occurrence": 1,
 			"language": "svelte",
-			"section": "Manual setup > Step 6: Use it in a component",
+			"section": "Manual setup > Step 5: Replace the home page",
 			"classification": "tutorial",
 			"channel": "app-context",
-			"reason": "app-context imports: $live/chat, $live/chat"
+			"reason": "app-context imports: $live/counter, $live/counter"
 		},
 		{
 			"document": "README.md",
