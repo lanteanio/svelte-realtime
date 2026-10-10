@@ -44,6 +44,8 @@ let _droppedUnnumbered = false;
 let _checkpointDirty = false;
 /** The stored queue was read but its checkpoint could not be: it is left alone for the page. */
 let _checkpointUnknown = false;
+/** Pending writes by store and key; unrelated entries persist independently. */
+let _writes = new WeakMap();
 
 /**
  * A readable value for the consumer stores, set only by the queue logic. Not
@@ -206,6 +208,18 @@ function _seqOfRowKey(key, prefix) {
  */
 function _storeCall(call) {
 	return new Promise((resolve) => resolve(call()));
+}
+
+/** Serialize mutations of one stored key, including after a failed write. */
+function _write(store, key, call) {
+	let keys = _writes.get(store);
+	if (!keys) _writes.set(store, keys = new Map());
+	const previous = keys.get(key);
+	const result = previous ? previous.then(call) : _storeCall(call);
+	const tail = result.catch(() => {});
+	keys.set(key, tail);
+	void tail.then(() => { if (keys.get(key) === tail) keys.delete(key); });
+	return result;
 }
 
 /**
@@ -410,7 +424,8 @@ function _stamp(entry) {
 		idempotencyKey: entry.idempotencyKey,
 		timeout: entry.timeout
 	};
-	return _storeCall(() => store.put(_entryKey(entry.seq), value))
+	const key = _entryKey(entry.seq);
+	return _write(store, key, () => store.put(key, value))
 		.then(() => durable, () => false);
 }
 
@@ -428,7 +443,8 @@ export function _settlePersist(entry, success, hadEarlierFailure) {
 	entry.settled = true;
 	if (_store && typeof entry.seq === 'number' && entry.seq > 0) {
 		const store = _store;
-		void _storeCall(() => store.delete(_entryKey(entry.seq))).catch(() => {});
+		const key = _entryKey(entry.seq);
+		void _write(store, key, () => store.delete(key)).catch(() => {});
 	}
 	if (typeof entry.seq !== 'number') return;
 	if (success) {
@@ -665,7 +681,8 @@ function _putCheckpoint() {
 		batchFailedSeq: _batch.failedSeq === Infinity ? null : _batch.failedSeq,
 		batchClean: _batch.clean
 	};
-	void _storeCall(() => store.put(_checkpointKey(), value)).catch(() => {});
+	const key = _checkpointKey();
+	void _write(store, key, () => store.put(key, value)).catch(() => {});
 }
 
 /**
@@ -687,6 +704,7 @@ export function _resetOffline() {
 	_dropsToReport = [];
 	_checkpointDirty = false;
 	_checkpointUnknown = false;
+	_writes = new WeakMap();
 	_pendingStore.set(0);
 	_uploadingStore.set(false);
 }

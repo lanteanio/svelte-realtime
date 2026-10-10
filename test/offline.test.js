@@ -326,6 +326,50 @@ describe('offline queue - durability', () => {
 		expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(1);
 	});
 
+	it('settling waits for a delayed enqueue write before deleting the stored mutation', async () => {
+		const store = fakeStore();
+		const put = store.put;
+		let finishWrite;
+		store.put = (key, value) => key.startsWith('q:')
+			? new Promise((resolve) => { finishWrite = () => resolve(put(key, value)); })
+			: put(key, value);
+		const [pending] = await goOfflineAndQueue({ persist: store }, [['todos/add', ['queued']]]);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'saved' }));
+		await expect(pending).resolves.toBe('saved');
+		expect(store.ops.filter(([op]) => op === 'delete')).toEqual([]);
+		finishWrite();
+		await flush();
+		expect(storedKeys(store)).toEqual([]);
+		mod = await loadClient();
+		mod.configure({ offline: { queue: true, persist: store } });
+		await flush();
+		expect(replayedPaths()).toEqual([]);
+	});
+
+	it('checkpoint writes finish in upload order even when the first write is delayed', async () => {
+		const store = fakeStore();
+		const put = store.put;
+		let finishWrite;
+		let checkpointCalls = 0;
+		store.put = (key, value) => {
+			if (key.startsWith('c:') && ++checkpointCalls === 1) {
+				return new Promise((resolve) => { finishWrite = () => resolve(put(key, value)); });
+			}
+			return put(key, value);
+		};
+		const [pending] = await goOfflineAndQueue({ persist: store }, [['todos/add', ['queued']]]);
+		simulateStatus('open');
+		await flush();
+		await respondAll(() => ({ ok: true, data: 'saved' }));
+		await expect(pending).resolves.toBe('saved');
+		expect(checkpointCalls).toBe(1);
+		finishWrite();
+		await flush();
+		expect(store.map.get('c:default')).toMatchObject({ lastUploadedSeq: 1, batchClean: true });
+	});
+
 	it('a store that throws instead of rejecting does not fail a replay the server applied', async () => {
 		const store = fakeStore();
 		store.put = () => { throw new Error('storage broke'); };

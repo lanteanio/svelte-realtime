@@ -5,6 +5,12 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Offline persistence orders writes and deletes for each stored key, so a delayed write cannot restore a settled mutation or replace a newer upload checkpoint.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
