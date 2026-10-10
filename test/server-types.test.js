@@ -23,6 +23,20 @@ const config: SmoothConfig = {
   snapshot: true, snapshotDebounceMs: 250
 };
 live.smooth(config);
+live.smooth({
+  ...config, interest: { radius: 100, position: (state) => state },
+  hitTest: {
+    hitbox: { shape: 'circle', radius: 5 },
+    shot: { type: 'ray', origin: (_cmd, state) => state, dir: () => 0, maxDist: 100 },
+    onHit: (ctx, target, info) => {
+      const rewindMs: number = info.rewindMs;
+      ctx.emitEvent('hit', { target: target.key, rewindMs });
+      // @ts-expect-error applied rewind duration is numeric
+      const text: string = info.rewindMs;
+      void text;
+    }
+  }
+});
 live.smooth({ topic: 'positions', apply: (state) => state, initial: {}, snapshot: false });
 // @ts-expect-error snapshots are enabled with a boolean
 const invalidSnapshot: SmoothConfig = { ...config, snapshot: 'true' };

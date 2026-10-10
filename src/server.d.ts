@@ -3641,7 +3641,16 @@ export interface SmoothHitTestConfig {
 	onHit: (
 		ctx: SmoothShotCtx,
 		target: SmoothHitTarget,
-		info: { dist: number; point: SmoothPoint; fraction: number; rewindAt: number; fallback: boolean }
+		info: {
+			dist: number;
+			point: SmoothPoint;
+			fraction: number;
+			/** Requested, bounded instant on the room's monotonic clock. */
+			rewindAt: number;
+			/** Applied rewind duration in milliseconds; zero for current-state fallback. */
+			rewindMs: number;
+			fallback: boolean;
+		}
 	) => { stop?: boolean } | void | Promise<{ stop?: boolean } | void>;
 	/** Broadphase cull tuning. `cone` is a cosine in `[-1, 1]`. */
 	broadphase?: { maxDist?: number; cone?: number };

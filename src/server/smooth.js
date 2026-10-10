@@ -2773,7 +2773,7 @@ export async function _smoothResolveShot(rec, name, shooterKey, shooterEntity, c
 	for (let i = 0; i < hits.length; i++) {
 		const h = hits[i];
 		const target = { key: h.key, pos: h.pos, state: h.state };
-		const info = { dist: h.dist, point: h.point, fraction: maxDist > 0 ? h.dist / maxDist : 0, rewindAt, fallback: h.fallback };
+		const info = { dist: h.dist, point: h.point, fraction: maxDist > 0 ? h.dist / maxDist : 0, rewindAt, rewindMs: h.fallback ? 0 : nowMono - rewindAt, fallback: h.fallback };
 		const verdict = await ht.onHit(shootCtx, target, info);
 		if (verdict && verdict.stop) break;
 	}

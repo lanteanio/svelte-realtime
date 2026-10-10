@@ -2988,6 +2988,52 @@ describe('live.smooth lag-compensated shoot', () => {
 		expect(rt.calls.drains).toBeGreaterThan(drainsBefore);
 	});
 
+	it.each([
+		{ label: 'historical state', ticks: 4, age: 20, expected: 20, fallback: false },
+		{ label: 'bounded old request', ticks: 4, age: 1000, expected: 40, fallback: false },
+		{ label: 'missing timestamp', ticks: 4, age: null, expected: 0, fallback: false },
+		{ label: 'future timestamp', ticks: 4, age: -1000, expected: 0, fallback: false },
+		{ label: 'unavailable history', ticks: 1, age: 1000, expected: 0, fallback: true }
+	])('exposes applied rewind milliseconds for $label', async ({ ticks, age, expected, fallback }) => {
+		const infos = [];
+		const { name } = hitShape((ctx, target, info) => {
+			infos.push(info);
+			ctx.emitEvent('measured-hit', { victim: target.key, rewindMs: info.rewindMs });
+		}, { maxRewindMs: 40 });
+		const p = paths(name);
+		const platform = wirePlatform();
+		const shooter = mockWs({ id: 'u1' });
+		const target = mockWs({ id: 'u2' });
+		await call(shooter, platform, p.sync, ['r1']);
+		await call(target, platform, p.sync, ['r1']);
+		for (let i = 0; i < ticks; i++) await moveTick(platform, target, p.cmd, 'u2', { x: 100 + i, y: 0 });
+		const now = Date.now();
+		await call(shooter, platform, p.shoot, ['r1', { cmd: { aim: 0 }, ...(age === null ? {} : { rt: now - age }) }]);
+		expect(infos).toHaveLength(1);
+		expect(infos[0]).toMatchObject({ rewindMs: expected, fallback });
+		if (!fallback) expect(infos[0].rewindAt + infos[0].rewindMs).toBe(now);
+		expect(platform.wirePublished.find((frame) => frame.data.type === 'measured-hit')?.data.data)
+			.toEqual({ victim: 'u2', rewindMs: expected });
+	});
+
+	it('keeps applied rewind duration on the monotonic clock across a wall backstep', async () => {
+		const infos = [];
+		const { name } = hitShape((_ctx, _target, info) => infos.push(info));
+		const p = paths(name);
+		const platform = wirePlatform();
+		const shooter = mockWs({ id: 'u1' });
+		const target = mockWs({ id: 'u2' });
+		await call(shooter, platform, p.sync, ['r1']);
+		await call(target, platform, p.sync, ['r1']);
+		for (let i = 0; i < 4; i++) await moveTick(platform, target, p.cmd, 'u2', { x: 100 + i, y: 0 });
+		const before = Date.now();
+		vi.setSystemTime(before - 5000);
+		await call(shooter, platform, p.shoot, ['r1', { cmd: { aim: 0 }, rt: Date.now() - 20 }]);
+		expect(infos).toHaveLength(1);
+		expect(infos[0]).toMatchObject({ rewindMs: 20, fallback: false });
+		expect(infos[0].rewindAt).toBeGreaterThan(Date.now());
+	});
+
 	it('misses an entity off the ray path (no damage, no hit event)', async () => {
 		const { name } = hitShape();
 		const p = paths(name);
@@ -3554,6 +3600,7 @@ describe('live.smooth lag-compensated shoot', () => {
 					key: target.key,
 					dist: info.dist,
 					rewindAt: info.rewindAt,
+					rewindMs: info.rewindMs,
 					fraction: info.fraction,
 					fallback: info.fallback,
 					px: info.point.x,
@@ -3928,6 +3975,30 @@ describe('live.smooth forwarded shot (cluster relayShoot / onShoot)', () => {
 		const relayedEvents = sc.calls.relayBroadcast.filter((a) => a[1] === 'event');
 		expect(relayedEvents.length).toBe(eventsBefore + 1);
 		expect(relayedEvents[relayedEvents.length - 1][2].type).toBe('hit');
+	});
+
+	it.each([
+		{ age: null, expected: 0 },
+		{ age: 20, expected: 20 },
+		{ age: 1000, expected: 40 }
+	])('exposes the owner-applied rewind duration for forwarded age $age', async ({ age, expected }) => {
+		const infos = [];
+		const { name } = hitShape({ onHit: (_ctx, _target, info) => infos.push(info) });
+		const p = paths(name);
+		const sc = scriptedSmoothCluster({ owner: true, instanceId: 'A' });
+		const platform = clusterPlatform(sc);
+		const target = mockWs({ id: 'u2' });
+		await call(target, platform, p.sync, ['r1']);
+		sc.emit.sync(WT, 'rs', 'B', 'c1');
+		await call(target, platform, p.cmd, ['r1', [{ id: 1, cmd: {} }]]);
+		for (let i = 0; i < 4; i++) {
+			rt.queueDrain({ updates: [{ key: 'u2', state: { x: 100 + i, y: 0 }, ws: target, commanded: true }], acks: [], idle: false });
+			await vi.advanceTimersByTimeAsync(20);
+		}
+		sc.emit.shoot(WT, 'rs', 'B', { cmd: { aim: 0 }, reach: 40, rewindAge: age });
+		await vi.advanceTimersByTimeAsync(1);
+		expect(infos).toHaveLength(1);
+		expect(infos[0]).toMatchObject({ rewindMs: expected, fallback: false });
 	});
 
 	it('a forwarded shot cannot spoof the shooter identity in the detection hook', async () => {
