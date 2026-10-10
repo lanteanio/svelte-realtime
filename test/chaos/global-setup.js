@@ -113,6 +113,7 @@ function startInstance(port, redisUrl, label, cleanupPort, cleanupToken, onSpawn
 
 export default async function globalSetup() {
 	initializeRun(run);
+	globalThis.__chaosOwner = run.id;
 	const instances = [];
 	let persisted = null;
 	try {

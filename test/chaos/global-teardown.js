@@ -14,7 +14,8 @@ const run = chaosRun();
 const ctxFile = run.context;
 
 export default async function globalTeardown() {
-	if (!existsSync(run.marker)) return;
+	// A rejected duplicate run identifier never grants cleanup ownership.
+	if (globalThis.__chaosOwner !== run.id || !existsSync(run.marker)) return;
 	const ctx = globalThis.__chaosCtx;
 	let persisted = null;
 	const errors = [];
@@ -61,4 +62,5 @@ export default async function globalTeardown() {
 	}
 	removeRun(run);
 	delete globalThis.__chaosCtx;
+	delete globalThis.__chaosOwner;
 }

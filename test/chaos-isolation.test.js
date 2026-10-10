@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { chaosRun, composeArgs, initializeRun, prepareFixture, readContext, removeRun } from './chaos/run-context.js';
@@ -46,6 +46,21 @@ describe('parallel chaos ownership', () => {
 		writeFileSync(run.marker, JSON.stringify({ id: run.id, repository: 'another repository' }));
 		try { expect(() => removeRun(run)).toThrow(/ownership/); }
 		finally { writeFileSync(run.marker, marker); }
+	});
+
+	it('does not tear down another invocation after a duplicate identifier is refused', async () => {
+		const run = createRun();
+		writeFileSync(run.context, JSON.stringify({ runId: run.id, port: 1 }));
+		vi.stubEnv('REALTIME_CHAOS_RUN_ID', run.id);
+		vi.resetModules();
+		try {
+			const { default: setup } = await import('./chaos/global-setup.js');
+			const { default: teardown } = await import('./chaos/global-teardown.js');
+			await expect(setup()).rejects.toThrow();
+			await teardown();
+			expect(readContext(run).port).toBe(1);
+			expect(existsSync(run.marker)).toBe(true);
+		} finally { vi.unstubAllEnvs(); }
 	});
 
 	it('copies source into separate build roots and never removes shared dependencies', () => {
