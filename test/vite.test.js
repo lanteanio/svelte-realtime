@@ -396,6 +396,24 @@ export const messages = live.stream('messages', async (ctx) => []);
 		expect(code).toContain('__registerGuard("chat"');
 	});
 
+	it.each(['public.js', 'nested/public.ts'])('registers public RPC exports on both graphs in %s', (filename) => {
+		setup({ [filename]: `
+import { live, guard } from 'svelte-realtime/server';
+export const _guard = guard(() => {});
+export const ordinary = live(async () => 'ordinary');
+export const publicValue = live.public(async () => 'public');
+` });
+		const modulePath = filename.replace(/\.[jt]s$/, '');
+		const plugin = createPlugin();
+		const client = plugin.load('\0live:' + modulePath, { ssr: false });
+		const registry = plugin.load('\0live:__registry', { ssr: true });
+		expect(client).toContain('__rpc("' + modulePath + '/publicValue"');
+		expect(registry).toContain('__register("' + modulePath + '/publicValue"');
+		expect(registry).toContain('m.publicValue');
+		expect(registry).toContain('__register("' + modulePath + '/ordinary"');
+		expect(registry).toContain('__registerGuard("' + modulePath + '"');
+	});
+
 	it('handles multiple modules', () => {
 		setup({
 			'chat.js': `export const send = live(async () => {});`,

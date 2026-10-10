@@ -258,8 +258,8 @@ export function _generateRegistry(liveDir, dir, topicsRegistry) {
 		const registered = new Set();
 		let match;
 		// live() and the wrappers that share the plain __register line
-		// (validated/lock/idempotent/rateLimit/volatile).
-		for (const re of [LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE, VOLATILE_EXPORT_RE]) {
+		// (public/validated/lock/idempotent/rateLimit/volatile).
+		for (const re of [LIVE_EXPORT_RE, PUBLIC_EXPORT_RE, VALIDATED_EXPORT_RE, LOCK_EXPORT_RE, IDEMPOTENT_EXPORT_RE, RATE_LIMIT_EXPORT_RE, VOLATILE_EXPORT_RE]) {
 			re.lastIndex = 0;
 			while ((match = re.exec(source)) !== null) {
 				const name = match[1];

@@ -165,6 +165,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Mapped streams use Svelte derived stores for lazy activation and shared teardown; repeated cleanup no longer disconnects another consumer.
 
+- Public RPC exports register in the generated server registry, matching their generated client callable paths.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
