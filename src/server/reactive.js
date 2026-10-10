@@ -413,6 +413,8 @@ function _wrapPlatformPublish(platform) {
 		const derivedEntries = _derivedBySource.get(topic);
 		if (derivedEntries) {
 			for (const entry of derivedEntries) {
+				entry.generation++;
+				entry.pending = true;
 				if (entry.debounce > 0) {
 					if (entry.timer) clearTimer(entry.timer);
 					entry.timer = setTimer(() => {
@@ -642,6 +644,10 @@ function _wrapPlatformPublish(platform) {
  * @param {import('svelte-adapter-uws').Platform} platform
  */
 async function _recomputeDerived(entry, platform) {
+	if (entry.running || !entry.active) return;
+	entry.running = true;
+	entry.pending = false;
+	const generation = entry.generation;
 	try {
 		let result;
 		if (entry.args) {
@@ -651,6 +657,9 @@ async function _recomputeDerived(entry, platform) {
 		} else {
 			result = await entry.fn();
 		}
+		// A source change invalidates the result immediately, including while
+		// the next debounce timer is waiting. Only the current lifetime can emit.
+		if (!entry.active || entry.generation !== generation) return;
 		// Uniform piiRedact: a derived stream recomputes from sources and may
 		// carry PII; redact if its topic declared piiRedact (no-op otherwise).
 		const wire = _redactOrDrop(entry.topic, result);
@@ -668,6 +677,9 @@ async function _recomputeDerived(entry, platform) {
 			message: 'A derived stream recomputation failed; later source events may retry it.',
 			attributes: { topic: entry.topic, error: diagnosticErrorMessage(err), help: 'https://svti.me/derived' }
 		});
+	} finally {
+		entry.running = false;
+		if (entry.active && entry.pending && !entry.timer) _recomputeDerived(entry, platform);
 	}
 }
 
@@ -767,6 +779,7 @@ export function _activateDynamicDerived(fn, resolvedTopic, user) {
 		debounce: entry.debounce,
 		timer: null,
 		refCount: 1,
+		active: true, generation: 0, running: false, pending: false,
 		user: user || null
 	};
 
@@ -795,6 +808,8 @@ export function _deactivateDynamicDerived(fn, resolvedTopic, user) {
 
 	instance.refCount--;
 	if (instance.refCount > 0) return;
+	instance.active = false;
+	instance.pending = false;
 
 	if (instance.timer) clearTimer(instance.timer);
 

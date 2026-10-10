@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Offline persistence orders writes and deletes for each stored key, so a delayed write cannot restore a settled mutation or replace a newer upload checkpoint.
 - Smooth configuration types accept the existing `snapshot` and
   `snapshotDebounceMs` options for cluster handoff.
+- Derived streams serialize asynchronous recomputations, discard results invalidated by newer source events, and stop pending work when a dynamic stream closes or its module reloads.
 
 ## [0.6.0-next.91] - 2026-10-10
 

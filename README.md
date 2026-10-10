@@ -3110,6 +3110,12 @@ const on = await maintenance.getLatest();
 
 ## Derived streams
 
+Each derived instance runs one recomputation at a time. Source changes during a
+computation invalidate its result and schedule one fresh computation of the latest
+state. Debounced streams also discard stale results while the next timer is
+waiting. Closing the last dynamic subscriber or replacing its module discards
+pending results.
+
 Server-side computed streams that recompute when any source topic publishes.
 
 ```js

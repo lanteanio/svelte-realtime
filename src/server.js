@@ -3187,7 +3187,7 @@ export function __registerDerived(path, fn) {
 	const sources = /** @type {any} */ (fn).__derivedSources;
 	const debounce = /** @type {any} */ (fn).__derivedDebounce || 0;
 	if (!sources) return;
-	derivedRegistry.set(path, { sources, fn, topic: path, debounce, timer: null });
+	derivedRegistry.set(path, { sources, fn, topic: path, debounce, timer: null, active: true, generation: 0, running: false, pending: false });
 	for (const src of sources) {
 		let set = _derivedBySource.get(src);
 		if (!set) { set = new Set(); _derivedBySource.set(src, set); }
@@ -3294,9 +3294,13 @@ export function _prepareHmr() {
 
 	// Clear debounce timers
 	for (const e of derivedRegistry.values()) {
-		if (e.timer) clearTimer(e.timer);
-		if (e.instances) {
-			for (const inst of e.instances.values()) { if (inst.timer) clearTimer(inst.timer); }
+		const entries = e.instances ? e.instances.values() : [e];
+		for (const entry of entries) {
+			entry.active = false;
+			entry.generation++;
+			entry.pending = false;
+			if (entry.timer) clearTimer(entry.timer);
+			entry.timer = null;
 		}
 	}
 	for (const e of effectRegistry.values()) { if (e.timer) clearTimer(e.timer); }
@@ -3389,6 +3393,7 @@ export function _restoreHmr(snap) {
 			if (v.instances) {
 				for (const inst of v.instances.values()) {
 					inst.timer = null;
+					inst.active = true;
 					for (const src of inst.resolvedSources) {
 						let set = _derivedBySource.get(src);
 						if (!set) { set = new Set(); _derivedBySource.set(src, set); }
@@ -3398,6 +3403,7 @@ export function _restoreHmr(snap) {
 				}
 			}
 		} else {
+			v.active = true;
 			for (const src of v.sources) {
 				let set = _derivedBySource.get(src);
 				if (!set) { set = new Set(); _derivedBySource.set(src, set); }
