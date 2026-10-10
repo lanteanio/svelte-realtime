@@ -2,6 +2,7 @@
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs';
 import { resolve, relative, sep, posix } from 'path';
 import { _readCached } from './source-cache.js';
+import { _exportsMessage } from './hooks-exports.js';
 import { _readStringLiteral, _skipStringContent, _findMatchingBrace, _extractTemplatePattern, _parseArrowReturnTemplate, _warnUnsafeExports } from './scanner.js';
 import { _extractAggregateWindows, _extractFlagDecl } from './extract-options.js';
 import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE, DYNAMIC_STREAM_RE, CRON_EXPORT_RE, BINARY_EXPORT_RE, UPLOAD_EXPORT_RE, DERIVED_EXPORT_RE, DYNAMIC_DERIVED_RE, ROOM_EXPORT_RE, MULTIPLAYER_EXPORT_RE, SMOOTH_EXPORT_RE, DOC_EXPORT_RE, WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE, WEBHOOK_OUTBOUND_EXPORT_RE, CHANNEL_EXPORT_RE, DYNAMIC_CHANNEL_RE, RATE_LIMIT_EXPORT_RE, EFFECT_EXPORT_RE, AGGREGATE_EXPORT_RE, FLAG_EXPORT_RE, LOCK_EXPORT_RE, PUBLIC_EXPORT_RE, PUBLIC_COMMENT_RE, IDEMPOTENT_EXPORT_RE, VOLATILE_EXPORT_RE } from './patterns.js';
@@ -590,17 +591,7 @@ export function _checkHooksFile(root, liveDir, dir) {
 	let source;
 	try { source = readFileSync(found, 'utf-8'); } catch { return; }
 
-	// Recognise every way a hooks file can export `message`:
-	//   - direct re-export:    export { message } from 'svelte-realtime/server'
-	//   - import-then-export:  import { message } from '...'; export { message }
-	//     (the scaffold and e2e fixture both use this two-statement form)
-	//   - local declaration:   export const/function message = ...
-	// The specifier-list regex covers the first two without needing a `from`
-	// clause; a leading `from` (the direct re-export) still satisfies it.
-	const hasMessage = /export\s*\{[^}]*\bmessage\b[^}]*\}/.test(source)
-		|| /export\s+(?:const|function|async\s+function)\s+message\b/.test(source);
-
-	if (!hasMessage) {
+	if (_exportsMessage(source, found) === false) {
 		const name = 'src/hooks.ws' + (found.match(/\.(?:js|ts|mjs)$/)?.[0] || '.js');
 		console.warn(
 			`[svelte-realtime] ${name} exists but does not export a \`message\` handler - ` +

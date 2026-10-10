@@ -120,6 +120,7 @@
     "node": ">=22.0.0"
   },
   "dependencies": {
+    "@babel/parser": "^7.29.9",
     "@clack/prompts": "^0.10.1"
   },
   "peerDependencies": {

@@ -123,6 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Erasure rejects incomplete in-memory and document cleanup after attempting the remaining surfaces, and reports bounded operator diagnostics without private failure payloads.
 
+- Hook validation checks JavaScript and TypeScript runtime exports, avoiding false warnings for handler aliases and missing warnings for comments or type-only exports. Scaffolds use a direct message re-export.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
