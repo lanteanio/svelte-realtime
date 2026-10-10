@@ -152,6 +152,19 @@ export function _maybeReplayPublish(platform, topic, event, data) {
 }
 
 /**
+ * Erasure must observe replay acknowledgement instead of the normal best-effort
+ * publication path. Keep confirmation work off ordinary publication calls.
+ * @internal
+ */
+export function _confirmedReplayPublish(platform, topic, event, data) {
+	const replay = platform && platform.replay;
+	if (!_replayEligibleTopics.has(topic) || !replay || typeof replay.publish !== 'function'
+		|| platform[WRAPPED_FOR_REPLAY]) return false;
+	_noteTopicPublish(topic);
+	return Promise.resolve(replay.publish(platform, topic, event, data)).then(() => true);
+}
+
+/**
  * Reset replay-routing state. Tests only.
  * @internal
  */

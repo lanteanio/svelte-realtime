@@ -178,16 +178,17 @@ describe('live.room owner - single instance', () => {
 		expect(pub).toEqual([]); // grace window: nothing yet
 		await vi.advanceTimersByTimeAsync(5001);
 		await flushAsync();
-		expect(pub).toEqual([
+		expect(pub.filter(frame => frame.topic.endsWith(':owner'))).toEqual([
 			{ topic: 'game:7:owner', event: 'set', data: { key: 'bob', reason: 'succeeded' } }
 		]);
+		expect(pub).toContainEqual({ topic: 'game:7:cursors', event: 'remove', data: { key: 'alice' } });
 		expect(changes).toEqual([
 			{ topic: 'game:7', owner: 'alice', previous: null, reason: 'claimed' },
 			{ topic: 'game:7', owner: 'bob', previous: 'alice', reason: 'succeeded' }
 		]);
 	});
 
-	it('a non-owner leaving changes nothing', async () => {
+	it('a non-owner leaving preserves ownership', async () => {
 		vi.useFakeTimers();
 		const game = mkRoom();
 		const ds = game.__dataStream;
@@ -200,7 +201,8 @@ describe('live.room owner - single instance', () => {
 		await ds.__onUnsubscribe(bob, 'game:7', 1);
 		await vi.advanceTimersByTimeAsync(5001);
 		await flushAsync();
-		expect(pub).toEqual([]);
+		expect(pub.filter(frame => frame.topic.endsWith(':owner'))).toEqual([]);
+		expect(pub).toEqual([{ topic: 'game:7:cursors', event: 'remove', data: { key: 'bob' } }]);
 	});
 
 	it('an emptied room vacates the role and the next joiner claims fresh', async () => {
@@ -215,7 +217,8 @@ describe('live.room owner - single instance', () => {
 		await ds.__onUnsubscribe(alice, 'game:7', 0);
 		await vi.advanceTimersByTimeAsync(5001);
 		await flushAsync();
-		expect(pub.at(-1)).toEqual({ topic: 'game:7:owner', event: 'set', data: { key: null, reason: 'vacated' } });
+		expect(pub.filter(frame => frame.topic.endsWith(':owner')).at(-1)).toEqual({ topic: 'game:7:owner', event: 'set', data: { key: null, reason: 'vacated' } });
+		expect(pub).toContainEqual({ topic: 'game:7:cursors', event: 'remove', data: { key: 'alice' } });
 		expect(changes.at(-1)).toEqual({ topic: 'game:7', owner: null, previous: 'alice', reason: 'vacated' });
 
 		pub.length = 0;
@@ -551,9 +554,10 @@ describe('live.room owner - cluster (two instances over shared fake redis)', () 
 		await flushAsync();
 		// Instance A observed the release, so A alone announces; bob (lowest
 		// join sequence) inherits even though he lives on instance B.
-		expect(pubA).toEqual([
+		expect(pubA.filter(frame => frame.topic.endsWith(':owner'))).toEqual([
 			{ topic: 'game:7:owner', event: 'set', data: { key: 'bob', reason: 'succeeded' } }
 		]);
+		expect(pubA).toContainEqual({ topic: 'game:7:cursors', event: 'remove', data: { key: 'alice' } });
 		expect(pubB).toEqual([]);
 		expect(changes.filter((c) => c.reason === 'succeeded')).toHaveLength(1);
 	});
@@ -626,16 +630,18 @@ describe('live.room owner - cluster without scripting (fallback path)', () => {
 		await ds.__onUnsubscribe(alice, 'game:7', 1);
 		await vi.advanceTimersByTimeAsync(5001);
 		await flushAsync();
-		expect(pubA).toEqual([
+		expect(pubA.filter(frame => frame.topic.endsWith(':owner'))).toEqual([
 			{ topic: 'game:7:owner', event: 'set', data: { key: 'bob', reason: 'succeeded' } }
 		]);
+		expect(pubA).toContainEqual({ topic: 'game:7:cursors', event: 'remove', data: { key: 'alice' } });
 
 		await ds.__onUnsubscribe(bob, 'game:7', 0);
 		await vi.advanceTimersByTimeAsync(5001);
 		await flushAsync();
-		expect(pubB).toEqual([
+		expect(pubB.filter(frame => frame.topic.endsWith(':owner'))).toEqual([
 			{ topic: 'game:7:owner', event: 'set', data: { key: null, reason: 'vacated' } }
 		]);
+		expect(pubB).toContainEqual({ topic: 'game:7:cursors', event: 'remove', data: { key: 'bob' } });
 	});
 });
 

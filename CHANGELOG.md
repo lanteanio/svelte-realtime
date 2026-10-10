@@ -47,7 +47,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
-- Forgetting a room member immediately removes its presence and cursor from connected peers, using the captured room platform for storage cleanup and owner succession when no erasure platform is configured. Failed publications remain retryable.
+- Forgetting a room member immediately removes its presence and cursor from connected peers, using the captured room platform for storage cleanup and owner succession when no erasure platform is configured. Bare and replay publications must confirm before erasure completes; failures remain retryable.
 
 - Packed-package tests and manual setup extract archives using portable paths on Windows and Unix.
 

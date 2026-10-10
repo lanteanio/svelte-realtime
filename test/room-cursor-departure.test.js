@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { live, configureForget, _resetForget } from '../src/server.js';
 import { state, _presenceRef } from '../src/server/state.js';
+import { _clusterPresenceAcquire, _clusterPresenceRelease, _removeCursorIfDeparted } from '../src/server/presence.js';
 import { createTestEnv } from '../src/testing.js';
 import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.js';
 
@@ -378,5 +379,43 @@ describe('cursor samples follow room membership departures', () => {
 		expect(cursors.value[0]?.x).toBe(2);
 		expect(cursors.events.some(event => event.event === 'remove')).toBe(false);
 	});
+
+	for (const controlLoss of ['release', 'expiry']) for (const ending of ['disconnect', 'forget']) {
+		it(`cleans a remote cursor after control ${controlLoss} when a cursor-unaware member ends by ${ending}`, async () => {
+			const hashes = new Map();
+			const hash = key => { if (!hashes.has(key)) hashes.set(key, new Map()); return hashes.get(key); };
+			env.platform.redis = {
+				hget: async (key, field) => hashes.get(key)?.get(field) ?? null,
+				hgetall: async key => Object.fromEntries(hashes.get(key) || []),
+				hset: async (key, field, value) => { hash(key).set(field, String(value)); return 1; },
+				hincrby: async (key, field, by) => { const next = Number(hash(key).get(field) || 0) + by; hash(key).set(field, String(next)); return next; },
+				hdel: async (key, ...fields) => fields.reduce((n, field) => n + Number(hashes.get(key)?.delete(field) || false), 0),
+				expire: async () => 1
+			};
+			env.register('remote', {
+				members: live.room({ topic: () => 'remote-shared', init: () => [], owner: true }),
+				pointers: live.multiplayer({ topic: () => 'remote-shared', cursors: true })
+			});
+			const member = env.connect({ id: 'alice' }), peer = env.connect({ id: 'bob' });
+			member.subscribe('remote/members/__data');
+			const cursors = peer.subscribe('remote/pointers/__cursors');
+			await vi.advanceTimersByTimeAsync(0);
+			expect(_presenceRef.get('remote-shared\0alice').cursors).toBe(false);
+			// A foreign replica acquires only shared counters and broadcasts its
+			// sample. It has no cursor ref in this process's membership map.
+			await _clusterPresenceAcquire(env.platform, '\0cursors:remote-shared', 'alice', null);
+			env.platform.publish('remote-shared:cursors', 'update', { key: 'alice', x: 5 }, { seq: false });
+			expect(cursors.value).toEqual([{ key: 'alice', x: 5 }]);
+			if (controlLoss === 'release') await _clusterPresenceRelease(env.platform, '\0cursors:remote-shared', 'alice');
+			else hashes.delete('__live-presence:\0cursors:remote-shared');
+			await _removeCursorIfDeparted(env.platform, 'remote-shared', 'alice');
+			expect(cursors.value).toHaveLength(1);
+			expect(await env.platform.redis.hget('__live-presence:\0cursors:remote-shared', 'd:alice')).toBeNull();
+			if (ending === 'forget') await live.forget('alice');
+			else { member.disconnect(); await vi.advanceTimersByTimeAsync(5001); }
+			expect(cursors.value).toEqual([]);
+			expect(cursors.events.filter(e => e.event === 'remove')).toEqual([{ event: 'remove', data: { key: 'alice' } }]);
+		});
+	}
 
 });

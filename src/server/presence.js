@@ -3,7 +3,7 @@ import { _presenceRef, state } from './state.js';
 import { clearTimer, setTimer } from '../shared/runtime.js';
 import { _topicInTenant } from './tenant.js';
 import { _ownerPurge, _ownerEmit } from './room-owner.js';
-import { _maybeReplayPublish, _registerReplayTopic } from './replay-routing.js';
+import { _maybeReplayPublish, _confirmedReplayPublish, _registerReplayTopic } from './replay-routing.js';
 import { _platformPublish, UNSEQUENCED } from './publish-helpers.js';
 import { safeAssign } from '../shared/safe-assign.js';
 
@@ -31,7 +31,12 @@ export function _cursorPublisherActive(platform, topic, key) {
 	return _presenceIdentityActive(platform, _cursorControlTopic(topic), key);
 }
 
-/** Remove the sample only after both independent identity lifetimes depart. */
+/**
+ * Remove the sample only after both independent identity lifetimes depart.
+ * Always send the idempotent removal at that boundary: a cursor-only publisher
+ * on another replica may have departed first and lost its control row to cleanup
+ * or expiry. This member's config cannot prove that peers hold no cursor sample.
+ */
 export async function _removeCursorIfDeparted(platform, topic, key, publish) {
 	if (await _presenceIdentityActive(platform, topic, key, true)) return;
 	if (await _cursorPublisherActive(platform, topic, key)) return;
@@ -286,13 +291,17 @@ export async function _clusterPresenceRelease(platform, topic, key) {
  * wired (single-process is unchanged). Null platform -> null (nothing to publish
  * through). Shared by the presence purge and the `live.forget` store fan-in.
  * @param {any} platform
- * @returns {((wireTopic: string, event: string, data: any) => void) | null}
+ * @param {boolean} [confirmed] Require replay and bare publication acknowledgement.
+ * @returns {((wireTopic: string, event: string, data: any) => any) | null}
  */
-export function _ownerReplayPublisher(platform) {
+export function _ownerReplayPublisher(platform, confirmed = false) {
 	if (!platform) return null;
 	return (wireTopic, event, data) => {
 		if (platform.replay) _registerReplayTopic(wireTopic);
-		if (!_maybeReplayPublish(platform, wireTopic, event, data)) return _platformPublish(platform, wireTopic, event, data, UNSEQUENCED);
+		const replayed = confirmed
+			? _confirmedReplayPublish(platform, wireTopic, event, data)
+			: _maybeReplayPublish(platform, wireTopic, event, data);
+		return replayed || _platformPublish(platform, wireTopic, event, data, UNSEQUENCED);
 	};
 }
 
@@ -365,7 +374,7 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 				const publish = publishLeave || (publishPlatform && typeof publishPlatform.publish === 'function'
 					? (wireTopic, event, data, options) => _platformPublish(publishPlatform, wireTopic, event, data, options) : null);
 				if (!publish) throw new Error('Presence erasure has no publication platform');
-				const ownerPublish = publishLeave || _ownerReplayPublisher(publishPlatform);
+				const ownerPublish = publishLeave || _ownerReplayPublisher(publishPlatform, true);
 				let incomplete = false;
 				if (!progress.presenceDone) {
 					try {
@@ -377,7 +386,7 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 							if (!Number.isSafeInteger(count) || count < 0) throw new Error('Presence erasure was not confirmed');
 						}
 						if (!cursorPublisher) await publish(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED);
-						if (ref.cursors) await publish(topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
+						await publish(topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
 						progress.presenceDone = true;
 					} catch { incomplete = true; }
 				}

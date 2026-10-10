@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { live, configureForget, _resetForget } from '../src/server.js';
 import { createTestEnv } from '../src/testing.js';
+import { WRAPPED_FOR_REPLAY } from '../src/server/replay-routing.js';
 import { _presenceRef } from '../src/server/state.js';
 import { _resetOwnerForTests } from '../src/server/room-owner.js';
 import { _setTenantResolver, _resetTenantResolver, _tenantTopic } from '../src/server/tenant.js';
@@ -81,7 +82,7 @@ describe('forget updates connected room peers', () => {
 			expect(peer.roster.value.map(row => row.key).sort()).toEqual(['alice', 'bob']); expect(peer.owner.value.key).toBe('alice');
 		}
 		expect(published.mock.calls.map(call => call[0])).toEqual([
-			_tenantTopic('one', 'forget-board') + ':presence', _tenantTopic('one', 'forget-board') + ':owner'
+			_tenantTopic('one', 'forget-board') + ':presence', _tenantTopic('one', 'forget-board') + ':cursors', _tenantTopic('one', 'forget-board') + ':owner'
 		]);
 	});
 
@@ -131,4 +132,44 @@ describe('forget updates connected room peers', () => {
 		expect(await env.platform.redis.hget('__live-presence:\0cursors:drawing-board', 'c:alice')).toBeNull();
 		expect(published).toHaveBeenCalledWith('drawing-board:cursors', 'remove', { key: 'alice' }, { seq: false });
 	});
+	it.each(['synchronous', 'asynchronous'])('retries an owner replay publication after %s failure without bare fallback', async mode => {
+		let broken = false;
+		env.platform.replay = { publish: (_platform, topic, event, data) => {
+			if (broken) {
+				if (mode === 'synchronous') throw new Error('replay unavailable');
+				return Promise.reject(new Error('replay unavailable'));
+			}
+			return originalPublish(topic, event, data, { seq: false });
+		} };
+		await connect('alice'); const bob = await connect('bob'); const { owner } = await watch(bob);
+		const completed = vi.fn(); published.mockClear(); broken = true;
+		await expect(live.forget('alice', { onForget: completed })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		expect(completed).not.toHaveBeenCalled(); expect(owner.value.key).toBe('alice');
+		expect(published.mock.calls.filter(([topic]) => topic.endsWith(':owner'))).toEqual([]);
+		expect(_presenceRef.get('forget-board\0alice')).toMatchObject({ data: null, gone: true, erasure: { ownerDone: false } });
+		broken = false; await live.forget('alice');
+		expect(owner.value.key).toBe('bob'); expect(_presenceRef.has('forget-board\0alice')).toBe(false);
+	});
+
+	it.each([false, true])('does not complete or audit until owner replay publication settles (wrapped=%s)', async wrapped => {
+		let hold = false, release, entered;
+		const gate = new Promise(resolve => { release = resolve; });
+		const started = new Promise(resolve => { entered = resolve; });
+		const route = (topic, event, data, options) => {
+			if (hold && topic.endsWith(':owner')) { entered(); return gate.then(() => originalPublish(topic, event, data, options)); }
+			return originalPublish(topic, event, data, options);
+		};
+		const replay = vi.fn((_platform, topic, event, data) => route(topic, event, data, { seq: false }));
+		env.platform.replay = { publish: replay };
+		if (wrapped) { env.platform[WRAPPED_FOR_REPLAY] = true; published.mockImplementation(route); }
+		await connect('alice'); const bob = await connect('bob'); const { owner } = await watch(bob);
+		hold = true; const completed = vi.fn(); let settled = false;
+		const forgetting = live.forget('alice', { onForget: completed }).then(result => { settled = true; return result; });
+		await started; await vi.advanceTimersByTimeAsync(0);
+		expect(settled).toBe(false); expect(completed).not.toHaveBeenCalled(); expect(owner.value.key).toBe('alice');
+		release(); await forgetting;
+		expect(owner.value.key).toBe('bob'); expect(completed).toHaveBeenCalledOnce();
+		if (wrapped) expect(replay).not.toHaveBeenCalled();
+	});
+
 });
