@@ -103,7 +103,7 @@ export { configureWebhooks, getDeadLetter, replayDeadLetter, createDeadLetterSto
 import { _multiplayerRegister, installMultiplayer } from './server/multiplayer.js';
 import { _roomRegister, installRoom } from './server/room.js';
 import { _flagRegister, _derivedRegister, _configureDynamicDerived, _effectRegister, _aggregateRegister, installReactiveFamilies } from './server/reactive-families.js';
-import { handleRpc, _runGuard, guard, __directCall, message, createMessage, installDispatch } from './server/dispatch.js';
+import { handleRpc, _runGuard, _unknownPathReply, guard, __directCall, message, createMessage, installDispatch } from './server/dispatch.js';
 export { handleRpc, guard, __directCall, message, createMessage };
 installDispatch({ isLazyResolved: _isLazyResolved, trackStreamSub: _trackStreamSub, rollbackStreamSubscribe: _rollbackStreamSubscribe, registerStaleWatch: _registerStaleWatch, registerInvalidationWatch: _registerInvalidationWatch, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, resolveAllLazy: _resolveAllLazy, runWithMiddleware: _runWithMiddleware, validate: _validate, callTopicFn: _callTopicFn, applyInitTransform: _applyInitTransform });
 export { _resetUploadAutoDiscovery };
@@ -3453,7 +3453,7 @@ live.webhooks = {
 	outbound(...args) { return _webhooksOutboundRegister(...args); }
 };
 
-installUpload({ resolveAllLazy: _resolveAllLazy, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, runGuard: _runGuard, runWithMiddleware: _runWithMiddleware });
+installUpload({ unknownPathReply: _unknownPathReply, resolveAllLazy: _resolveAllLazy, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, runGuard: _runGuard, runWithMiddleware: _runWithMiddleware });
 
 /**
  * Run global middleware chain, then call `handler`.

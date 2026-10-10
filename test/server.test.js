@@ -318,9 +318,9 @@ describe('handleRpc()', () => {
 			await flush();
 			const answered = pDefault.sent.find((m) => m.topic === '__upload');
 			expect(answered).toBeTruthy();
-			// NOT_FOUND proves the header survived intact: a dropped/blanked header
+			// The masked unknown-path denial proves the header survived: a dropped header
 			// would fail earlier with INVALID_REQUEST ('missing rpc path').
-			expect(answered.data.code).toBe('NOT_FOUND');
+			expect(answered.data.code).toBe('FORBIDDEN');
 
 			// With the tighter bound the same frame is over-deep: dropped as malformed,
 			// so nothing is sent at all.
@@ -366,19 +366,19 @@ describe('handleRpc()', () => {
 		expect(platform.sent[0].data.data).toEqual({ id: 1, text: 'hello' });
 	});
 
-	it('returns NOT_FOUND for unknown paths', async () => {
+	it('masks unknown paths by default', async () => {
 		const data = toArrayBuffer({ rpc: 'unknown/fn', id: 'b1', args: [] });
 		handleRpc(ws, data, platform);
 
 		await new Promise((r) => setTimeout(r, 10));
 
 		expect(platform.sent[0].data.ok).toBe(false);
-		expect(platform.sent[0].data.code).toBe('NOT_FOUND');
+		expect(platform.sent[0].data.code).toBe('FORBIDDEN');
 	});
 
 	describe('maskNotFound (enumeration-safe unknown paths)', () => {
 		afterEach(() => {
-			state.maskNotFound = false;
+			state.maskNotFound = true;
 		});
 
 		it('answers an unknown path as a guard denial for a user-carrying caller', async () => {
@@ -1658,7 +1658,7 @@ describe('live.upload()', () => {
 		expect(resp.error).toMatch(/already active/);
 	});
 
-	it('rejects unknown paths with NOT_FOUND', async () => {
+	it('masks unknown upload paths', async () => {
 		handleRpc(ws, buildUploadChunkFrame({
 			streamId: 8, seq: 0, isLast: true,
 			args: { rpc: 'uploads/missing', args: [] }
@@ -1666,7 +1666,7 @@ describe('live.upload()', () => {
 		await flushUploadAsync();
 
 		const resp = lastUploadResponse(platform, 8);
-		expect(resp).toEqual({ ok: false, code: 'NOT_FOUND', error: 'Not found', requestId: '00000008' });
+		expect(resp).toEqual({ ok: false, code: 'FORBIDDEN', error: 'Access denied', requestId: '00000008' });
 	});
 
 	it('rejects when the path is not a live.upload handler', async () => {

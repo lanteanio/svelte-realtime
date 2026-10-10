@@ -356,12 +356,12 @@ export const state = {
 	/**
 	 * `realtime({ maskNotFound: true })`: answer a wire RPC to an unknown path
 	 * exactly as a guard denial would answer the same caller, so probing
-	 * cannot separate "exists but forbidden" from "does not exist". Off by
-	 * default (apps legitimately key on NOT_FOUND). The RPC metric keeps
+	 * cannot separate "exists but forbidden" from "does not exist". Enabled by
+	 * default; apps may explicitly opt out for NOT_FOUND. The RPC metric keeps
 	 * recording NOT_FOUND either way - only the wire reply masks.
 	 * @type {boolean}
 	 */
-	maskNotFound: false,
+	maskNotFound: true,
 
 	/**
 	 * Wire-subscribe authorization. When true (the default), realtime arms the

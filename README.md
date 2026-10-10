@@ -2144,13 +2144,13 @@ Bare `Error` throws from any guard auto-classify: thrown errors against an anony
 
 ### Masking path existence (`maskNotFound`)
 
-By default, calling an unregistered path returns `NOT_FOUND` while a guard-denied existing path returns `FORBIDDEN`/`UNAUTHENTICATED` - which lets an unauthenticated prober map which paths exist. For auth-sensitive apps, opt into uniform answers:
+Unknown text, batch, binary, and upload paths return the same generic denial as a guard by default: `UNAUTHENTICATED` without an authenticated identity, or `FORBIDDEN` otherwise. Binary/upload handler types and limits are checked after authorization. Apps that require explicit missing-path replies can opt out:
 
 ```js
-realtime({ maskNotFound: true });
+realtime({ maskNotFound: false });
 ```
 
-An unknown path is then answered exactly as a guard denial would answer the same caller (same code, same message), so probing cannot separate "exists but forbidden" from "does not exist". Off by default because clients legitimately key on `NOT_FOUND`; the RPC metric keeps recording `NOT_FOUND` server-side either way, and the dev-mode unknown-path console warning still fires.
+The opt-out returns `NOT_FOUND` and lets callers distinguish missing paths from guarded endpoints. Custom `LiveError` guard messages and middleware responses remain application-controlled; keep them generic if path existence is private. Server metrics still record `NOT_FOUND`, and dev-mode unknown-path warnings remain available.
 
 ### `live.scoped(predicate, fn)`
 

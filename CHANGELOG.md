@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Unknown RPC paths now use generic authorization denials by default across text, batches, binary calls, and uploads. Binary and upload guards run before handler type and limit checks. **Action required:** set `maskNotFound: false` only if clients require explicit missing-path replies; this permits path enumeration.
+
 - Shutdown reports whether tracked work drained or timed out, with remaining work and elapsed time available before teardown and in the hook result.
 
 - Aggregate privacy controls are documented as cohort suppression and keyed statistical noise, without a differential privacy guarantee or enforced privacy budget.

@@ -4650,14 +4650,14 @@ export interface RealtimeConfig {
 	 */
 	protocolVersion?: number | ProtocolVersionPolicy;
 	/**
-	 * Enumeration-safe unknown paths (opt-in). When set, a wire RPC to an
-	 * unregistered path is answered exactly as a guard denial would answer the
-	 * same caller (`UNAUTHENTICATED` without a user, `FORBIDDEN` with one, the
-	 * same fixed messages), so probing cannot separate "exists but forbidden"
-	 * from "does not exist". Off by default: it changes the wire contract for
-	 * clients that key on `NOT_FOUND`. The RPC metric keeps recording
-	 * `NOT_FOUND` server-side either way - only the wire reply masks. The
-	 * dev-mode unknown-path console warning is unaffected. @default false
+	 * Mask unknown text, batch, binary, and upload paths as a generic guard denial
+	 * by default: UNAUTHENTICATED without an authenticated identity, FORBIDDEN
+	 * otherwise. Handler type and payload limits are checked after authorization.
+	 * Explicit false restores NOT_FOUND replies for apps that require them;
+	 * it permits callers to distinguish missing paths from guarded endpoints.
+	 * Custom guard errors and middleware responses remain application-controlled.
+	 * Server metrics still record NOT_FOUND and dev warnings remain visible.
+	 * @default true
 	 */
 	maskNotFound?: boolean;
 	/**

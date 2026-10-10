@@ -1061,7 +1061,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "eacb7b64ade46d7611a79ee80b227412d7ec715e6ff2909ca2e6b778402f42ad",
+			"fingerprint": "189ffc5b4ace2d501c1720463d993ac1b895b06642ba12f18c903c12add8e538",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Access control > Masking path existence (`maskNotFound`)",

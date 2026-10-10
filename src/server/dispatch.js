@@ -370,7 +370,7 @@ export async function _runGuard(guardFn, ctx) {
  * @param {any} ws
  * @returns {{ ok: false, code: string, error: string }}
  */
-function _unknownPathReply(ws) {
+export function _unknownPathReply(ws) {
 	if (state.maskNotFound) {
 		const user = typeof ws?.getUserData === 'function' ? ws.getUserData() : null;
 		// Authenticated-identity semantics (not user-non-null): anonymous
@@ -1318,19 +1318,6 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 		return;
 	}
 
-	if (!/** @type {any} */ (fn).__isBinary) {
-		_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
-		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Not a binary endpoint' }, requestId);
-		return;
-	}
-
-	const maxBinarySize = /** @type {any} */ (fn).__maxBinarySize || 10485760;
-	if (payload.byteLength > maxBinarySize) {
-		_recordRpcMetrics(path, 'PAYLOAD_TOO_LARGE', _metricsStart);
-		_respond(ws, platform, id, { ok: false, code: 'PAYLOAD_TOO_LARGE', error: 'Binary payload exceeds size limit' }, requestId);
-		return;
-	}
-
 	const _h = _getCtxHelpers(platform);
 	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null, null, requestId);
 
@@ -1339,6 +1326,11 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 			const guardFn = await _resolveGuard(modulePath);
 			if (guardFn) await _runGuard(guardFn, ctx);
+
+			// Endpoint type and limits are private until the guard permits access.
+			if (!/** @type {any} */ (fn).__isBinary) throw new LiveError('INVALID_REQUEST', 'Not a binary endpoint');
+			const maxBinarySize = /** @type {any} */ (fn).__maxBinarySize || 10485760;
+			if (payload.byteLength > maxBinarySize) throw new LiveError('PAYLOAD_TOO_LARGE', 'Binary payload exceeds size limit');
 
 			if (options?.beforeExecute) {
 				await options.beforeExecute(ws, path, [payload, ...(extraArgs || [])]);

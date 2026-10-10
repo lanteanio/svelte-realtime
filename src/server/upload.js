@@ -15,8 +15,9 @@ const textDecoder = new TextDecoder();
 // Seam: the guard / middleware / lazy-resolve / registry machinery stays in
 // server.js (entangled with the registry + _globalMiddleware); the upload pump
 // reaches it through these, injected at init.
-let _resolveAllLazy, _resolveRegistryEntry, _resolveGuard, _runGuard, _runWithMiddleware;
+let _unknownPathReply, _resolveAllLazy, _resolveRegistryEntry, _resolveGuard, _runGuard, _runWithMiddleware;
 export function installUpload(seams) {
+	_unknownPathReply = seams.unknownPathReply;
 	_resolveAllLazy = seams.resolveAllLazy;
 	_resolveRegistryEntry = seams.resolveRegistryEntry;
 	_resolveGuard = seams.resolveGuard;
@@ -616,63 +617,14 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			// Unregistered, client-controlled path (from the upload chunk-0 args
 			// header): fold to a bounded label, mirroring the RPC NOT_FOUND sites.
 			_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
-			upload.fail('NOT_FOUND', 'Not found');
+			const reply = _unknownPathReply(ws);
+			upload.fail(reply.code, reply.error);
 			return;
 		}
 		// Resolved to a registered endpoint: `path` is now a bounded registry key.
 		pathRegistered = true;
-		if (!/** @type {any} */ (fn).__isUpload) {
-			_recordRpcMetrics(path, 'INVALID_REQUEST', _metricsStart);
-			upload.fail('INVALID_REQUEST', 'Not an upload endpoint');
-			return;
-		}
-
-		const uploadOptions = /** @type {any} */ (fn).__uploadOptions;
-
-		// Capacity caps. perWs and _totalActiveUploads already include this
-		// upload, so subtract one to count "others".
-		let othersInSession = 0;
-		for (const e of perWs.values()) if (e !== upload) othersInSession++;
-		if (othersInSession >= uploadOptions.maxConcurrentPerSession) {
-			_recordRpcMetrics(path, 'TOO_MANY_UPLOADS', _metricsStart);
-			upload.fail('TOO_MANY_UPLOADS', 'too many concurrent uploads on this session');
-			return;
-		}
-		if (_totalActiveUploads - 1 >= uploadOptions.maxConcurrentTotal) {
-			_recordRpcMetrics(path, 'TOO_MANY_UPLOADS', _metricsStart);
-			upload.fail('TOO_MANY_UPLOADS', 'too many concurrent uploads');
-			return;
-		}
-		if (upload.bytesReceived > uploadOptions.maxSize) {
-			_recordRpcMetrics(path, 'PAYLOAD_TOO_LARGE', _metricsStart);
-			upload.fail(
-				realtimeErrorCode(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
-				realtimeErrorMessage(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE)
-			);
-			return;
-		}
-
-		// Transition to running phase and create the live iterable.
-		upload.options = uploadOptions;
 		upload.ctrl = new AbortController();
 		upload.streamWrap = _createUploadStream(upload.ctrl);
-		upload.phase = 'running';
-
-		// The bytes are now under the user's per-handler maxSize cap, not
-		// the pre-handler aggregate cap. Release the aggregate accounting
-		// here so other concurrent uploads can use the budget.
-		_releasePendingUploadBytes(upload);
-
-		// Drain chunks queued during the pending phase into the live stream.
-		const drained = upload.pendingChunks;
-		upload.pendingChunks = null;
-		for (let i = 0; i < drained.length; i++) {
-			const c = drained[i];
-			if (c.payload && c.payload.byteLength > 0) {
-				upload.streamWrap.push(new Uint8Array(c.payload));
-			}
-			if (c.isLast) upload.streamWrap.end();
-		}
 
 		const _h = _getCtxHelpers(platform);
 		ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null, null, _streamIdHex(streamId));
@@ -685,6 +637,31 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			const modulePath = /** @type {any} */ (fn).__modulePath || path.substring(0, path.lastIndexOf('/'));
 			const guardFn = await _resolveGuard(modulePath);
 			if (guardFn) await _runGuard(guardFn, ctx);
+
+			if (upload.phase === 'settled') return;
+			// Keep pending caps active while authorization is unresolved. Handler
+			// type and configured limits become visible only after access succeeds.
+			if (!/** @type {any} */ (fn).__isUpload) throw new LiveError('INVALID_REQUEST', 'Not an upload endpoint');
+			const uploadOptions = /** @type {any} */ (fn).__uploadOptions;
+			let othersInSession = 0;
+			for (const entry of perWs.values()) if (entry !== upload) othersInSession++;
+			if (othersInSession >= uploadOptions.maxConcurrentPerSession) throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads on this session');
+			if (_totalActiveUploads - 1 >= uploadOptions.maxConcurrentTotal) throw new LiveError('TOO_MANY_UPLOADS', 'too many concurrent uploads');
+			if (upload.bytesReceived > uploadOptions.maxSize) throw new LiveError(
+				realtimeErrorCode(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE),
+				realtimeErrorMessage(REALTIME_ERROR_IDS.UPLOAD_MAX_SIZE)
+			);
+
+			upload.options = uploadOptions;
+			upload.phase = 'running';
+			_releasePendingUploadBytes(upload);
+			const drained = upload.pendingChunks;
+			upload.pendingChunks = null;
+			for (let i = 0; i < drained.length; i++) {
+				const chunk = drained[i];
+				if (chunk.payload && chunk.payload.byteLength > 0) upload.streamWrap.push(new Uint8Array(chunk.payload));
+				if (chunk.isLast) upload.streamWrap.end();
+			}
 
 			// Capture guard + ctx for reauthEvery so the chunk pump can
 			// re-run the same gate against the live ctx without re-resolving
@@ -753,13 +730,13 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 export function _drainUploadsOnClose(ws) {
 	const perWs = _wsUploads.get(ws);
 	if (!perWs) return;
-	for (const upload of perWs.values()) {
-		if (upload.phase === 'settled') continue;
+	for (const [streamId, upload] of perWs) {
 		upload.phase = 'settled';
 		if (upload.ctrl) {
 			try { upload.ctrl.abort(new LiveError('DISCONNECTED', 'connection closed')); } catch {}
 		}
-		_totalActiveUploads = Math.max(0, _totalActiveUploads - 1);
+		upload.pendingChunks = null;
+		_cleanupUpload(ws, perWs, streamId);
 	}
 	_wsUploads.delete(ws);
 }
