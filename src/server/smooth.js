@@ -2982,7 +2982,8 @@ export const _smoothRegister = function smooth(config) {
 			// which is what the broadcast walk delivers by. Reserved-prefix
 			// topics never ride the client's own subscribe frames.
 			if (ctx.ws && ctx.platform && typeof ctx.platform.subscribe === 'function') {
-				const denial = await ctx.platform.subscribe(ctx.ws, rec.wireTopic);
+				const admission = ctx.platform.subscribe(ctx.ws, rec.wireTopic);
+				const denial = admission && typeof admission.then === 'function' ? await admission : admission;
 				if (denial) {
 					throw new LiveError(
 						denial === 'UNAUTHENTICATED' ? 'UNAUTHENTICATED' : 'FORBIDDEN',

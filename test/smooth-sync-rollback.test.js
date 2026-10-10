@@ -298,4 +298,23 @@ describe('failed smooth sync against the installed adapter', () => {
 		expect(calls).toBe(1);
 	});
 
+	for (const failure of ['synchronous throw', 'async rejection', 'throwing then getter']) {
+		it('rolls back adapter admission failure: ' + failure, async () => {
+			const name = shape({ x: 0, y: 0 });
+			const peer = await connect();
+			const subscribe = server.platform.subscribe.bind(server.platform);
+			server.platform.subscribe = (ws, topic) => {
+				subscribe(ws, topic);
+				if (failure === 'synchronous throw') throw Error('admission failed');
+				if (failure === 'async rejection') return Promise.reject(Error('admission failed'));
+				return { get then() { throw Error('admission failed'); } };
+			};
+			expect((await rpc(peer, name + '/sync')).ok).toBe(false);
+			expect(peer.native.isSubscribed(wireTopic)).toBe(false);
+			expect(_smoothTopics.has(topic)).toBe(false);
+			server.platform.subscribe = subscribe;
+			expect((await rpc(peer, name + '/sync')).ok).toBe(true);
+		});
+	}
+
 });
