@@ -192,14 +192,18 @@ const watch = (p) => {
  * reports its request before its transaction commits or aborts. The rows
  * outlive the client that wrote them, so a test can reload against them.
  */
-function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false, readFails = false, abortReads = false } = {}) {
+function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false, readFails = false, abortReads = false, readHangs = false } = {}) {
 	const map = new Map();
 	const stores = new Set();
+	let closed = false;
+	let opens = 0;
 	const later = (fn) => setTimeout(fn, 0);
 	const db = {
+		close() { closed = true; },
 		objectStoreNames: { contains: (name) => stores.has(name) },
 		createObjectStore: (name) => { stores.add(name); },
 		transaction() {
+			if (closed) throw new Error('InvalidStateError');
 			/** @type {any} */
 			const tx = { error: null };
 			tx.objectStore = () => ({
@@ -248,6 +252,7 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 					const req = { result: null };
 					let i = 0;
 					const step = () => later(() => {
+						if (readHangs) return;
 						if (readFails) {
 							req.error = new Error('Failed to read large IndexedDB value');
 							req.onerror?.();
@@ -271,7 +276,10 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 	};
 	return {
 		map,
+		db,
+		get opens() { return opens; },
 		open() {
+			opens++;
 			/** @type {any} */
 			const req = { error: null };
 			later(() => {
@@ -280,6 +288,7 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 					req.onerror?.();
 					return;
 				}
+				closed = false;
 				req.result = db;
 				if (stores.size === 0) req.onupgradeneeded?.();
 				req.onsuccess?.();
@@ -2436,6 +2445,41 @@ describe('the IndexedDB store', () => {
 		vi.unstubAllGlobals();
 	});
 
+	it.each(['onclose', 'onversionchange'])('reopens after the database receives %s', async (event) => {
+		const idb = fakeIndexedDb();
+		vi.stubGlobal('indexedDB', idb);
+		const store = mod.createIndexedDbStore();
+		await store.put('q:first', { value: 1 });
+		if (event === 'onclose') idb.db.close();
+		idb.db[event]();
+		await store.put('q:second', { value: 2 });
+		expect(idb.opens).toBe(2);
+		expect(idb.map.get('q:second')).toEqual({ value: 2 });
+	});
+
+	it.each(['open', 'read'])('a hung database %s cannot keep queued calls from replaying', async (operation) => {
+		vi.useFakeTimers();
+		try {
+			const request = {};
+			vi.stubGlobal('indexedDB', operation === 'open' ? { open: () => request } : fakeIndexedDb({ readHangs: true }));
+			mod.configure({ offline: { queue: true, persist: true } });
+			simulateStatus('disconnected');
+			const pending = mod.__rpc('todos/add')('memory');
+			simulateStatus('open');
+			await vi.advanceTimersByTimeAsync(6000);
+			expect(sentCalls()).toHaveLength(1);
+			simulateRpcResponse(sentCalls()[0].id, { ok: true, data: 'saved' });
+			await expect(pending).resolves.toBe('saved');
+			if (operation === 'open') {
+				request.result = { close: vi.fn() };
+				request.onsuccess();
+				expect(request.result.close).toHaveBeenCalledOnce();
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('delete settles once its transaction has committed', async () => {
 		const idb = fakeIndexedDb();
 		vi.stubGlobal('indexedDB', idb);
@@ -2482,9 +2526,9 @@ describe('the IndexedDB store', () => {
 		await expect(mod.createIndexedDbStore().getAll('q:')).rejects.toThrow(/AbortError/);
 	});
 
-	it('a read when the database cannot open finds nothing', async () => {
+	it('a read when the database cannot open rejects without assuming an empty queue', async () => {
 		vi.stubGlobal('indexedDB', fakeIndexedDb({ openFails: true }));
-		await expect(mod.createIndexedDbStore().getAll('q:')).resolves.toEqual([]);
+		await expect(mod.createIndexedDbStore().getAll('q:')).rejects.toThrow(/unavailable/);
 	});
 
 	it('a restore whose read fails stores nothing for the rest of the page', async () => {

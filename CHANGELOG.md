@@ -30,10 +30,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A server event with a null key confirms only the matching optimistic mutation, preserving unrelated function-based updates.
 
 - Removed unused optimistic-key bookkeeping from client stream merges; optimistic confirmation continues to use mutation queue entries.
+
 - Offline persistence orders writes and deletes for each stored key, so a delayed write cannot restore a settled mutation or replace a newer upload checkpoint.
+
 - Smooth configuration types accept the existing `snapshot` and
   `snapshotDebounceMs` options for cluster handoff.
+
 - Derived streams serialize asynchronous recomputations, discard results invalidated by newer source events, and stop pending work when a dynamic stream closes or its module reloads.
+
+- IndexedDB persistence reopens closed connections and bounds database opens and restore scans to five seconds, allowing offline replay to continue when browser storage hangs. Storage warnings distinguish failed writes from failed deletions.
 
 ## [0.6.0-next.91] - 2026-10-10
 
