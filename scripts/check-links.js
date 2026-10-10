@@ -69,7 +69,7 @@ let mainTreeCache = null;
 export function mainTreeSnapshot() {
 	if (mainTreeCache === null) {
 		const raw = JSON.parse(readFileSync(join(root, MAIN_TREE_SNAPSHOT), 'utf8'));
-		mainTreeCache = { commit: raw.commit, paths: new Set(raw.paths) };
+		mainTreeCache = { commit: raw.commit, paths: new Set(raw.paths), anchors: raw.anchors || {} };
 	}
 	return mainTreeCache;
 }
@@ -256,14 +256,20 @@ export function slugify(heading) {
  * @param {string} text
  * @returns {Set<string>}
  */
-export function anchorsOf(text) {
-	const anchors = new Set();
+export function headingsOf(text) {
+	const headings = [];
 	const seen = new GithubSlugger();
 	const tokens = markdown.parse(text, {});
 	for (let index = 0; index < tokens.length; index++) {
 		if (tokens[index].type !== 'heading_open' || tokens[index + 1]?.type !== 'inline') continue;
-		anchors.add(seen.slug(renderedInlineText(tokens[index + 1].content)));
+		const title = renderedInlineText(tokens[index + 1].content);
+		headings.push({ title, level: Number(tokens[index].tag.slice(1)), anchor: seen.slug(title) });
 	}
+	return headings;
+}
+
+export function anchorsOf(text) {
+	const anchors = new Set(headingsOf(text).map((heading) => heading.anchor));
 	const rendered = parseFragment(markdown.render(text));
 	function visit(node) {
 		if (node.tagName === 'a') {
@@ -359,6 +365,26 @@ function loadDocs() {
  * @param {{ packagedDocs?: Set<string>, packagedFiles?: Set<string> }} [options]
  * @returns {string | null} the failure, or null when it resolves
  */
+const sourceAnchors = new Map();
+function checkSourceAnchor(ref, path, target) {
+	const fragment = new URL(target).hash.slice(1);
+	if (!fragment || !/\.md$/i.test(path) || /^L\d+(?:-L\d+)?$/.test(fragment)) return null;
+	let decoded;
+	try { decoded = decodeURIComponent(fragment); } catch { return 'malformed source anchor'; }
+	let anchors;
+	if (ref === 'main' && !onMainLine()) {
+		anchors = mainTreeSnapshot().anchors[path];
+		if (!anchors) return `missing published Markdown anchor snapshot: ${path}`;
+	} else {
+		if (!sourceAnchors.has(path)) {
+			const source = execFileSync('git', ['-C', root, 'show', ':' + path], { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 });
+			sourceAnchors.set(path, [...anchorsOf(source)]);
+		}
+		anchors = sourceAnchors.get(path);
+	}
+	return anchors.includes(decoded) ? null : `no source heading produces #${decoded} in ${ref}/${path}`;
+}
+
 export function checkLink(rel, target, docs, options = {}) {
 	// A single-slash scheme typo (https:/example.com) parses as a relative
 	// path in a browser but matches the scheme regex below, so it would be
@@ -388,14 +414,14 @@ export function checkLink(rel, target, docs, options = {}) {
 				return `same-repo source link names a path absent from the published main tree: ${target}` +
 					' (content that ships with this line links blob/dev until a stable promotion; after one, regenerate the snapshot with: node scripts/check-links.js --write-main-tree)';
 			}
-			return null;
+			return checkSourceAnchor(ref, decoded, target);
 		}
 		// The dev line's own tree - and main's too when this checkout IS the
 		// published main tip, where the snapshot would be a SHA self-reference.
 		if (!treeContains(staged, decoded)) {
 			return `same-repo source link names a path absent from the staged tree (the git index): ${target}`;
 		}
-		return null;
+		return checkSourceAnchor(ref, decoded, target);
 	}
 	if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith('//')) return null; // external or mailto
 	if (target.startsWith('#')) {
@@ -446,7 +472,8 @@ function writeMainTree() {
 	const body = {
 		comment: 'File list of the published stable tree (origin/main), consumed by scripts/check-links.js to validate same-repo blob/main source links without network or a full clone. Regenerate after a stable promotion: node scripts/check-links.js --write-main-tree',
 		commit,
-		paths
+		paths,
+		anchors: Object.fromEntries(paths.filter((path) => /\.md$/i.test(path)).map((path) => [path, [...anchorsOf(execFileSync('git', ['-C', root, 'show', commit + ':' + path], { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 }))]]))
 	};
 	writeFileSync(join(root, MAIN_TREE_SNAPSHOT), JSON.stringify(body, null, '\t') + '\n');
 	console.log(`check-links: wrote ${MAIN_TREE_SNAPSHOT} at origin/main ${commit.slice(0, 7)} (${paths.length} paths).`);

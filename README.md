@@ -36,7 +36,7 @@
 
 After the scaffold's native preflight and production build pass, write server functions, import them in components, and call them over WebSocket. The runtime handles pub/sub and protocol wiring; platform, native-addon, authentication, and build prerequisites still apply.
 
-**Upgrading from 0.4.x?** See the [migration guide](./MIGRATION.md) for every breaking change between 0.4.x and 0.5.x.
+**Upgrading?** Read the [release history](./CHANGELOG.md), [migration guide](./MIGRATION.md), and [companion adapter migration guide](https://github.com/lanteanio/svelte-adapter-uws/blob/main/MIGRATION.md).
 
 The shared [translation contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/TRANSLATING.md) defines the English source locale, application-owned catalogs, stable machine fields, placeholders, and bidirectional text across all three ecosystem packages.
 
@@ -255,72 +255,33 @@ Note: `ctx.user` may contain adapter-injected properties (`__subscriptions`, `re
 
 ## Table of contents
 
-**Core**
-- [Getting started](#getting-started)
-- [Merge strategies](#merge-strategies)
-- [Connection state stores](#connection-state-stores)
-- [Svelte 5 store helpers](#svelte-5-store-helpers)
-- [Error handling](#error-handling)
-- [Per-module auth](#per-module-auth)
-- [Dynamic topics](#dynamic-topics)
-- [Topic registry](#topic-registry)
-- [Schema validation](#schema-validation)
-- [Channels](#channels)
-- [SSR hydration](#ssr-hydration)
+<!-- topic-index:start -->
 
-**Client features**
-- [Batching](#batching)
-- [Volatile RPC (fire-and-forget)](#volatile-rpc-fire-and-forget)
-- [Optimistic updates](#optimistic-updates)
-- [Stream pagination](#stream-pagination)
-- [Undo and redo](#undo-and-redo)
-- [Request deduplication](#request-deduplication)
-- [Idempotency keys](#idempotency-keys)
-- [Offline queue](#offline-queue)
-- [Connection hooks](#connection-hooks)
-- [SvelteKit transport](#sveltekit-transport)
-- [Combine stores](#combine-stores)
+### Start here
 
-**Server features**
-- [Global middleware](#global-middleware)
-- [Throttle and debounce](#throttle-and-debounce)
-- [Stream lifecycle hooks](#stream-lifecycle-hooks)
-- [Access control](#access-control)
-- [Rate limiting](#rate-limiting)
-- [Load shedding](#load-shedding)
-- [Concurrency control](#concurrency-control)
-- [Server-initiated push](#server-initiated-push)
-- [Request correlation](#request-correlation)
-- [Cron scheduling](#cron-scheduling)
-- [Derived streams](#derived-streams)
-- [Effects](#effects)
-- [Aggregates](#aggregates)
-- [Gates](#gates)
-- [Pipes](#pipes)
-- [Binary RPC](#binary-rpc)
-- [Rooms](#rooms)
-- [Multiplayer](#multiplayer)
-- [Smoothed entities](#smoothed-entities)
-- [Webhooks](#webhooks)
-- [Signals](#signals)
-- [Schema evolution](#schema-evolution)
-- [Delta sync and replay](#delta-sync-and-replay)
+[Quick start](#quick-start) | [Version compatibility](#version-compatibility) | [Manual setup](#manual-setup) | [How it works](#how-it-works)
 
-**Deployment**
-- [Redis multi-instance](#redis-multi-instance)
-- [Postgres NOTIFY](#postgres-notify)
-- [Clustering](#clustering)
-- [Limits and gotchas](#limits-and-gotchas)
+### Server and streams
 
-**Reference**
-- [Error reporting](#error-reporting)
-- [Custom message handling](#custom-message-handling)
-- [DevTools](#devtools)
-- [Testing](#testing)
-- [Server API reference](#server-api-reference)
-- [Client API reference](#client-api-reference)
-- [Vite plugin options](#vite-plugin-options)
-- [Benchmarks](#benchmarks)
+[Merge strategies](#merge-strategies) | [Error handling](#error-handling) | [Per-module auth](#per-module-auth) | [Dynamic topics](#dynamic-topics) | [Topic registry](#topic-registry) | [Schema validation](#schema-validation) | [Channels](#channels) | [SSR hydration](#ssr-hydration) | [Global middleware](#global-middleware) | [Throttle and debounce](#throttle-and-debounce) | [Stream lifecycle hooks](#stream-lifecycle-hooks) | [De-herding thundering-herd broadcasts](#de-herding-thundering-herd-broadcasts) | [Access control](#access-control) | [Multi-tenancy (live.tenant)](#multi-tenancy-livetenant) | [Rate limiting](#rate-limiting) | [Load shedding](#load-shedding) | [Concurrency control](#concurrency-control) | [Server-initiated push](#server-initiated-push) | [Prometheus metrics](#prometheus-metrics) | [Server introspection](#server-introspection) | [Production assertions](#production-assertions) | [Circuit breaker](#circuit-breaker) | [Request correlation](#request-correlation) | [Per-room alarms](#per-room-alarms) | [Cron scheduling](#cron-scheduling) | [Feature flags](#feature-flags) | [Derived streams](#derived-streams) | [Effects](#effects) | [Aggregates](#aggregates) | [Gates](#gates) | [Pipes](#pipes) | [Binary RPC](#binary-rpc) | [Streaming uploads](#streaming-uploads) | [Rooms](#rooms) | [Multiplayer](#multiplayer) | [Smoothed entities](#smoothed-entities) | [Shared documents](#shared-documents) | [Webhooks](#webhooks) | [Outbound webhooks](#outbound-webhooks) | [Signals](#signals) | [Schema evolution](#schema-evolution) | [Delta sync and replay](#delta-sync-and-replay)
+
+### Client features
+
+[Connection state stores](#connection-state-stores) | [Svelte 5 store helpers](#svelte-5-store-helpers) | [Batching](#batching) | [Volatile RPC (fire-and-forget)](#volatile-rpc-fire-and-forget) | [Optimistic updates](#optimistic-updates) | [Stream pagination](#stream-pagination) | [Undo and redo](#undo-and-redo) | [Request deduplication](#request-deduplication) | [Idempotency keys](#idempotency-keys) | [Offline queue](#offline-queue) | [Connection hooks](#connection-hooks) | [SvelteKit transport](#sveltekit-transport) | [Combine stores](#combine-stores)
+
+### Deployment
+
+[Redis multi-instance](#redis-multi-instance) | [Postgres NOTIFY](#postgres-notify) | [Failure modes](#failure-modes) | [Clustering](#clustering) | [Capacity model](#capacity-model) | [Production limits](#production-limits) | [Tauri and Capacitor](#tauri-and-capacitor)
+
+### Reference
+
+[Error reporting](#error-reporting) | [Custom message handling](#custom-message-handling) | [Server-Side HMR](#server-side-hmr) | [DevTools](#devtools) | [Testing](#testing) | [Server API reference](#server-api-reference) | [Client API reference](#client-api-reference) | [Vite plugin options](#vite-plugin-options) | [Benchmarks](#benchmarks) | [License](#license)
+
+
+
+[Package exports](./docs/package-exports.md) | [Release history](./CHANGELOG.md) | [Migration guide](./MIGRATION.md)
+
+<!-- topic-index:end -->
 
 ---
 

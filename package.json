@@ -79,6 +79,7 @@
     "LICENSE",
     "README.md",
     "MIGRATION.md",
+    "CHANGELOG.md",
     "protocol.schema.json"
   ],
   "scripts": {

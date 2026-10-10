@@ -4,6 +4,15 @@ import { anchorsOf, checkLink, linksOf } from '../scripts/check-links.js';
 import { crawlUrl, looksLikeSoft404 } from '../scripts/check-external-links.js';
 
 describe('documentation link gates', () => {
+	it('checks source fragments against the dev index and published main snapshot', () => {
+		for (const ref of ['dev', 'main']) {
+			const url = `https://github.com/lanteanio/svelte-realtime/blob/${ref}/README.md`;
+			expect(checkLink('README.md', url + '#merge-strategies', new Map())).toBeNull();
+			expect(checkLink('README.md', url + '#missing-source-fragment', new Map())).toContain('no source heading');
+			expect(checkLink('README.md', url + '#%ZZ', new Map())).toContain('malformed source anchor');
+			expect(checkLink('README.md', url + '#L1-L3', new Map())).toBeNull();
+		}
+	});
 	it('matches GitHub punctuation, Unicode and colliding duplicate slugs', () => {
 		const anchors = anchorsOf('## A & B\n## A & B\n## A--B-1\n## A & B\n## Cafe\u0301 and _code_\n<a id="compatibility-old"></a>\n```md\n## Hidden\n```');
 		expect([...anchors]).toEqual(['a--b', 'a--b-1', 'a--b-1-1', 'a--b-2', 'cafe\u0301-and-code', 'compatibility-old']);

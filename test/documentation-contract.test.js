@@ -1,9 +1,39 @@
 import { readFileSync } from 'node:fs';
 import { expect, it } from 'vitest';
-import { PATHS_START, PATHS_END, renderPaths, validateManifest, validateReadme } from '../scripts/check-documentation-contract.js';
+import { PATHS_START, PATHS_END, renderPaths, renderTopics, renderExports, validateManifest, validateReadme } from '../scripts/check-documentation-contract.js';
+import { headingsOf, linksOf } from '../scripts/check-links.js';
 const manifest = JSON.parse(readFileSync(new URL('../docs/documentation.v1.json', import.meta.url), 'utf8'));
 const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+
+it('indexes every second-level heading and every public import', () => {
+	const targets = new Set(linksOf(renderTopics(readme)).map((link) => link.target));
+	for (const heading of headingsOf(readme).filter((heading) => heading.level === 2 && heading.title !== 'Table of contents')) {
+		expect(targets.has('#' + heading.anchor), heading.title).toBe(true);
+	}
+	const exports = renderExports(pkg);
+	for (const subpath of Object.keys(pkg.exports)) expect(exports).toContain('`' + (subpath === '.' ? pkg.name : pkg.name + subpath.slice(1)) + '`');
+	expect(readFileSync(new URL('../docs/package-exports.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n')).toBe(exports);
+});
+
+it('rejects a missing topic and exposes newly added headings', () => {
+	expect(validateReadme(readme.replace('[Merge strategies](#merge-strategies)', ''), manifest).join('\n')).toContain('topic index differs');
+	const expanded = readme + '\n## New capability\n';
+	expect(validateReadme(expanded, { ...manifest, readmeMaxLines: expanded.split('\n').length }).join('\n')).toContain('topic index differs');
+	expect(renderTopics(expanded)).toContain('[New capability](#new-capability)');
+});
+
+it('preserves rendered duplicate heading slugs and ignores fenced headings', () => {
+	const rendered = renderTopics('## A & B\n## A & B\n## A--B-1\n## A & B\n```md\n## Hidden\n```\n');
+	expect(linksOf(rendered).map((link) => link.target).slice(0, 4)).toEqual(['#a--b', '#a--b-1', '#a--b-1-1', '#a--b-2']);
+	expect(rendered).not.toContain('Hidden');
+});
+
+it('packages release history and keeps new exports visible', () => {
+	expect(pkg.files).toContain('CHANGELOG.md');
+	expect(renderExports({ ...pkg, exports: { ...pkg.exports, './added': { default: './src/added.js', types: './src/added.d.ts' } } })).toContain('`svelte-realtime/added`');
+	expect(() => renderExports({ ...pkg, exports: { './missing': { default: './src/missing.js' } } })).toThrow('runtime and type targets');
+});
 
 it('pins the README ratchet at its actual size with no headroom', () => {
 	expect(manifest.readmeMaxLines).toBe(readme.split('\n').length);

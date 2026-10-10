@@ -10,6 +10,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- Generated README topic and package-export indexes cover every public section and import. Release history ships with the package, and source-link fragments are checked against the matching Git tree.
+
 - An offline release ledger records every published artifact and checks changelog identities, unpublished markers, and immutable history.
 
 - Erasure audit hooks support optional HMAC keys configured once or per call, validated before cleanup; default pseudonymous identifiers remain unchanged.

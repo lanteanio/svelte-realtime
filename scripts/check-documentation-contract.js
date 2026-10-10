@@ -3,13 +3,44 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { anchorsOf } from './check-links.js';
+import { anchorsOf, headingsOf } from './check-links.js';
 import { SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC, SCAFFOLD_EXTENSIONS_SPEC, SCAFFOLD_UWS_SPEC } from '../src/cli-utils.js';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PATHS_START = '<!-- documentation-paths:start -->';
 export const PATHS_END = '<!-- documentation-paths:end -->';
 const COMPAT_START = '<!-- compatibility:start -->';
 const COMPAT_END = '<!-- compatibility:end -->';
+export const TOPICS_START = '<!-- topic-index:start -->';
+export const TOPICS_END = '<!-- topic-index:end -->';
+
+function topicCategory(title) {
+	if (/Quick start|Version compatibility|Manual setup|How it works/.test(title)) return 'Start here';
+	if (/Connection|Svelte 5|Batching|Volatile RPC|Optimistic|pagination|Undo|deduplication|Idempotency|Offline|transport|Combine/.test(title)) return 'Client features';
+	if (/Redis|Postgres|Failure modes|Clustering|Capacity|Production limits|Tauri/.test(title)) return 'Deployment';
+	if (/reference|options|reporting|Custom message|DevTools|Testing|Benchmarks|License|HMR/.test(title)) return 'Reference';
+	return 'Server and streams';
+}
+
+export function renderTopics(readme) {
+	const groups = new Map();
+	for (const heading of headingsOf(readme)) {
+		if (heading.level !== 2 || heading.title === 'Table of contents') continue;
+		const category = topicCategory(heading.title);
+		if (!groups.has(category)) groups.set(category, []);
+		const label = heading.title.replace(/[\\[\]]/g, '\\$&');
+		groups.get(category).push(`[${label}](#${heading.anchor})`);
+	}
+	return [TOPICS_START, ...[...groups].map(([name, links]) => `### ${name}\n\n${links.join(' | ')}`), '', '[Package exports](./docs/package-exports.md) | [Release history](./CHANGELOG.md) | [Migration guide](./MIGRATION.md)', TOPICS_END].join('\n\n');
+}
+
+export function renderExports(pkg) {
+	const rows = Object.entries(pkg.exports).map(([subpath, entry]) => {
+		const name = subpath === '.' ? pkg.name : pkg.name + subpath.slice(1);
+		if (!entry.types || !entry.default) throw new Error(`Export ${subpath} needs runtime and type targets`);
+		return `| \`${name}\` | [JavaScript](../${entry.default.slice(2)}) | [Types](../${entry.types.slice(2)}) |`;
+	});
+	return ['# Package exports', '', 'Every public import path is listed below. Start with the [server reference](../README.md#server-api-reference), [client reference](../README.md#client-api-reference), or [topic index](../README.md#table-of-contents) for usage.', '', '| Import | Runtime | Declarations |', '| --- | --- | --- |', ...rows, '', 'For changes between versions, see the [release history](../CHANGELOG.md) and [migration guide](../MIGRATION.md).', ''].join('\n');
+}
 const keys = ['identity', 'first-success', 'compatibility', 'tutorial', 'how-to', 'reference', 'explanation', 'operations'];
 const types = ['Identity', 'First success', 'Compatibility', 'Tutorial', 'How-to', 'Reference', 'Explanation', 'Operations'];
 const site = 'svelte-realtime.dev';
@@ -83,6 +114,10 @@ export function validateReadme(readme, manifest) {
 	try { paths = bounds(readme, PATHS_START, PATHS_END); compatibility = bounds(readme, COMPAT_START, COMPAT_END); } catch (error) { return [error.message]; }
 	if (readme.slice(paths.start, paths.end) !== renderPaths(manifest)) failures.push('routing block differs from the manifest; run npm run generate:documentation');
 	if (readme.slice(compatibility.start, compatibility.end) !== renderCompatibility()) failures.push('compatibility block differs from CLI tuple; run npm run generate:documentation');
+	try {
+		const topics = bounds(readme, TOPICS_START, TOPICS_END);
+		if (readme.slice(topics.start, topics.end) !== renderTopics(readme)) failures.push('topic index differs from README headings; run npm run generate:documentation');
+	} catch (error) { failures.push(error.message); }
 	const endLine = readme.slice(0, paths.end).split('\n').length;
 	if (endLine > manifest.entryBudgetLines) failures.push(`routing block ends at ${endLine}, beyond entry budget ${manifest.entryBudgetLines}`);
 	const total = readme.split('\n').length;
@@ -102,9 +137,12 @@ function main() {
 	if (process.argv.includes('--write')) {
 		readme = replaceBlock(readme, PATHS_START, PATHS_END, renderPaths(manifest));
 		readme = replaceBlock(readme, COMPAT_START, COMPAT_END, renderCompatibility());
+		readme = replaceBlock(readme, TOPICS_START, TOPICS_END, renderTopics(readme));
 		writeFileSync(resolve(root, 'README.md'), readme);
+		writeFileSync(resolve(root, 'docs/package-exports.md'), renderExports(pkg));
 	}
 	const failures = validateReadme(readme, manifest);
+	if (readFileSync(resolve(root, 'docs/package-exports.md'), 'utf8').replace(/\r\n/g, '\n') !== renderExports(pkg)) failures.push('package exports index differs; run npm run generate:documentation');
 	if (failures.length) throw new Error(failures.join('\n'));
 	console.log(`documentation contract: eight owned paths; README ${readme.split('\n').length}/${manifest.readmeMaxLines} lines`);
 }
