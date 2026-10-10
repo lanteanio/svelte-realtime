@@ -71,6 +71,7 @@ export function createLagComp(opts) {
 
 	/** @type {Map<string, ReturnType<typeof _newRing>>} per entity key */
 	const rings = new Map();
+	let lastRecordAt = NaN;
 
 	return {
 		/**
@@ -83,6 +84,24 @@ export function createLagComp(opts) {
 		 * @param {number} t the tick wall stamp (wallEpoch ms)
 		 */
 		record(catalog, t) {
+			// Catch-up ticks can share a wall-clock millisecond. Replace that
+			// instant's samples without evicting older history or its gap marker.
+			// Distinct timestamps keep the ordinary per-entity append path.
+			if (t === lastRecordAt) {
+				catalog = catalog.filter(entry => {
+					const ring = rings.get(entry.key);
+					if (ring === undefined || ring.t[ring.head] !== t) return true;
+					let point;
+					try { point = position(entry.state); } catch { point = null; }
+					if (point) {
+						ring.x[ring.head] = point.x;
+						ring.y[ring.head] = point.y;
+						ring.st[ring.head] = entry.state;
+					}
+					return false;
+				});
+			}
+			lastRecordAt = t;
 			for (let i = 0; i < catalog.length; i++) {
 				const entry = catalog[i];
 				let p;

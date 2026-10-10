@@ -1,6 +1,6 @@
 // @ts-check
 import { live } from '../server.js';
-import { wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
+import { monotonicNow, wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
 import { _tenantTopic } from './tenant.js';
@@ -469,6 +469,8 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			pendingJoins: new Set(),
 			noEcho: cfg.noEcho,
 			timer: null,
+			tickDue: 0,
+			ticking: false,
 			// Cluster bookkeeping (unused on the single-instance path). `cfg` is
 			// stashed so the module-level relay handlers can resolve a topic's
 			// initial-state factory; `registry` maps a local subscriber's identity
@@ -843,10 +845,34 @@ function _smoothSendUpdatesTo(rec, ws, list) {
 
 function _armSmoothTick(rec) {
 	if (rec.timer !== null) return;
-	rec.timer = setTimer(() => {
-		rec.timer = null;
-		_smoothTick(rec);
-	}, rec.tickMs);
+	const now = monotonicNow();
+	// Continuing ticks advance the deadline, not the callback's finish time.
+	// A demand-armed wake starts fresh instead of replaying an idle interval.
+	rec.tickDue = rec.ticking ? rec.tickDue + rec.tickMs : now + rec.tickMs;
+	rec.timer = setTimer(() => _runSmoothTicks(rec), Math.max(0, Math.ceil(rec.tickDue - now)));
+}
+
+function _runSmoothTicks(rec) {
+	rec.ticking = true;
+	try {
+		for (let count = 1; ; count++) {
+			rec.timer = null;
+			_smoothTick(rec);
+			// The tick owns rearming: idle, removal, and lost ownership stop here.
+			if (rec.timer === null || monotonicNow() < rec.tickDue) return;
+			clearTimer(rec.timer);
+			if (count === 8) {
+				// Bound catch-up work after a stalled event loop. Discard the older
+				// debt and yield for a full tick before starting another callback.
+				rec.timer = null;
+				rec.ticking = false;
+				_armSmoothTick(rec);
+				return;
+			}
+		}
+	} finally {
+		rec.ticking = false;
+	}
 }
 
 /** A new entity owes peers one update even if its first drain stays idle. */

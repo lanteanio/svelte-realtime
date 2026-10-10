@@ -213,6 +213,22 @@ describe('lag-comp ring: rewindWithin (rewound candidate gate)', () => {
 });
 
 describe('lag-comp ring keyed through the monotonic clock (wall backstep safety)', () => {
+	it('coalesces catch-up records at one instant without losing older history', () => {
+		const ring = mk({ tickMs: 20, maxRewindMs: 100 });
+		ring.record([at('t', 0, 0)], 1000);
+		ring.record([at('t', 20, 0)], 1020);
+		for (let x = 21; x <= 40; x++) ring.record([at('t', x, 0)], 1020);
+		expect(ring.sample('t', 1010)).toMatchObject({ x: 20, fallback: false });
+		expect(ring.sample('t', 1020)).toMatchObject({ x: 40, fallback: false });
+	});
+	it('keeps the absence boundary when multiple catch-up records share its time', () => {
+		const ring = mk({ tickMs: 20, maxRewindMs: 200 });
+		ring.record([at('t', 0, 0)], 1000);
+		ring.record([at('t', 20, 0)], 1100);
+		ring.record([at('t', 40, 0)], 1100);
+		expect(ring.sample('t', 1050)).toBeNull();
+	});
+
 	// The smooth tick keys the ring through createMonotonicClock (record at mono(t)),
 	// so a server wall-clock step cannot feed the ring a timestamp older than its
 	// newest. This drives the same record sequence a tick would, including a backstep.

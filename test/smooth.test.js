@@ -24,10 +24,15 @@ import {
 import { mockWs } from './helpers/mock-ws.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.js';
+import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import svelteRealtime from '../src/vite.js';
 // Internal record map, for asserting a topic record is reclaimed (same module
 // instance server.js uses - ESM dedupes the import).
 import { _smoothTopics, _resetSmoothFanoutWarning, _purgeSmoothUser } from '../src/server/smooth.js';
+
+// Keep duration and wall clocks on the same virtual timer axis in this suite.
+beforeEach(() => setRuntimeEnv({ clock: { monotonic: () => Date.now() } }));
+afterEach(() => resetRuntimeEnv());
 
 const textEncoder = new TextEncoder();
 const toArrayBuffer = (obj) => textEncoder.encode(JSON.stringify(obj)).buffer;
