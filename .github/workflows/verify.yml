@@ -21,6 +21,7 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run verify:pr
+      - run: npm run test:smooth-stack
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 15

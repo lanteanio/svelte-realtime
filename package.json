@@ -118,7 +118,8 @@
     "test:scaffold": "vitest run --config vitest.scaffold.config.js",
     "verify:scaffold": "npm run test:scaffold",
     "test:chaos:parallel": "node scripts/check-chaos-isolation.js",
-    "test:lifecycle": "node scripts/check-production-lifecycle.js"
+    "test:lifecycle": "node scripts/check-production-lifecycle.js",
+    "test:smooth-stack": "node scripts/check-smooth-stack.js"
   },
   "engines": {
     "node": ">=22.0.0"

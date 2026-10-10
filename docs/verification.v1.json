@@ -126,6 +126,9 @@
     "test:scaffold": [
       "vitest run --config vitest.scaffold.config.js"
     ],
+    "test:smooth-stack": [
+      "node scripts/check-smooth-stack.js"
+    ],
     "test:watch": [
       "vitest"
     ],
@@ -371,6 +374,14 @@
         "node test/fuzz-wire.mjs",
         "vitest run --config vitest.devtools.config.js",
         "vitest run --config vitest.scaffold.config.js"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "job": "verify",
+      "step": "6",
+      "commands": [
+        "node scripts/check-smooth-stack.js"
       ]
     },
     {

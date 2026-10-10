@@ -178,6 +178,15 @@ pinned `node:24.13.1-trixie-slim` image (pulled when absent); the optional
 `REALTIME_LIFECYCLE_NODE_IMAGE` override must provide a compatible Linux native
 runtime. The chaos CI job runs this packed artifact check before browser tests.
 
+`npm run test:smooth-stack` exercises real smooth sockets against the installed
+adapter and the pinned historical `0.6.0-next.61` package. The installed path
+must use one binary batch per tick; the historical path must deliver equivalent
+per-entity frames. Both broadcast and per-viewer interest delivery verify binary
+and JSON payloads plus author exclusion. The check downloads the historical npm
+archive into a temporary directory and reuses installed native/peer dependencies;
+it does not change the supported adapter floor or the workspace dependency graph.
+Native support is required, and skipped cases fail the gate. CI runs the matrix.
+
 ## First-success checkpoint
 
 After root `npm ci`, run `npm run smoke`. The command prints Node, npm, OS,

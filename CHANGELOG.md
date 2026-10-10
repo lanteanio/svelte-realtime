@@ -169,6 +169,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Packed shutdown verification holds work behind an explicit completion gate and gives the adapter enough time to finish the realtime drain.
 
+- Smooth wire batching is verified over real sockets against the installed adapter and the historical per-entity fallback.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
