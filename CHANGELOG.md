@@ -125,7 +125,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Hook validation checks JavaScript and TypeScript runtime exports, avoiding false warnings for handler aliases and missing warnings for comments or type-only exports. Scaffolds use a direct message re-export.
 
-- Generated counter examples announce connection, count and error changes, offer a connection retry, and handle failed increments with labelled keyboard controls.
+- Generated counter examples announce connection, count and error changes, offer a connection retry, and handle failed increments with labelled keyboard controls. Their Chromium accessibility checks run in the pull request verification lane.
 
 - CLI prompts use Clack 1.8 while preserving the displayed default project name, validation, cancellation, and template selection behavior.
 

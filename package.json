@@ -105,7 +105,7 @@
     "verify:devtools": "npm run test:devtools",
     "verify:browser": "npm run test:e2e",
     "verify:chaos": "npm run test:chaos",
-    "verify:pr": "npm run verify:unit && npm run verify:sim && npm run verify:devtools",
+    "verify:pr": "npm run verify:unit && npm run verify:sim && npm run verify:devtools && npm run verify:scaffold",
     "verify:full": "npm run verify:pr && npm run verify:browser && npm run verify:chaos",
     "smoke": "node scripts/smoke.js",
     "check:links": "node scripts/check-links.js",
@@ -115,7 +115,8 @@
     "test:examples": "vitest run test/documentation-code.test.js test/packed-readme-examples.test.js",
     "check:documentation": "node scripts/check-documentation-contract.js",
     "generate:documentation": "node scripts/check-documentation-contract.js --write",
-    "test:scaffold": "vitest run --config vitest.scaffold.config.js"
+    "test:scaffold": "vitest run --config vitest.scaffold.config.js",
+    "verify:scaffold": "npm run test:scaffold"
   },
   "engines": {
     "node": ">=22.0.0"

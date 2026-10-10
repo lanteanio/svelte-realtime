@@ -117,6 +117,9 @@
     "test:fuzz": [
       "node test/fuzz-wire.mjs"
     ],
+    "test:scaffold": [
+      "vitest run --config vitest.scaffold.config.js"
+    ],
     "test:watch": [
       "vitest"
     ],
@@ -177,6 +180,7 @@
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
       "vitest run --config vitest.devtools.config.js",
+      "vitest run --config vitest.scaffold.config.js",
       "playwright test --config test/e2e/playwright.config.js",
       "playwright test --config test/chaos/playwright.config.js"
     ],
@@ -200,7 +204,11 @@
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
-      "vitest run --config vitest.devtools.config.js"
+      "vitest run --config vitest.devtools.config.js",
+      "vitest run --config vitest.scaffold.config.js"
+    ],
+    "verify:scaffold": [
+      "vitest run --config vitest.scaffold.config.js"
     ],
     "verify:sim": [
       "node scripts/sim-golden.js",
@@ -339,7 +347,8 @@
         "vitest run",
         "node scripts/sim-golden.js",
         "node test/fuzz-wire.mjs",
-        "vitest run --config vitest.devtools.config.js"
+        "vitest run --config vitest.devtools.config.js",
+        "vitest run --config vitest.scaffold.config.js"
       ]
     },
     {

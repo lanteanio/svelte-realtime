@@ -136,12 +136,13 @@ first dependency and browser downloads take longer. CI uses the same scripts.
 | Public exports, declarations, generator, dependency | `npm run verify:fast` and affected unit tests | 1-3 minutes |
 | Server, protocol, scheduling, auth | `npm run verify:unit` and `npm run verify:sim` | 2-10 minutes |
 | Client or DevTools DOM | unit lane and `npm run verify:devtools` | 2-10 minutes |
+| CLI example UI | unit lane and `npm run verify:scaffold` | 1-3 minutes |
 | Browser transport, reconnect, Svelte integration | `npm run verify:browser` | 5-15 minutes |
 | Cluster recovery or Redis routing | `npm run verify:chaos` | 5-20 minutes |
 | Broad refactor or release candidate | `npm run verify:full` | 10-30 minutes |
 
 `verify:pr` composes unit (including pretest), deterministic simulation/fuzz and
-DevTools browser checks. `verify:full` adds application E2E and all chaos tests.
+DevTools and scaffold browser checks. `verify:full` adds application E2E and all chaos tests.
 Install fixture dependencies and Chromium as above before browser or full lanes.
 Chaos additionally needs a working Docker daemon (`docker info`) for Redis.
 Do not claim the full lane passed when a required service or native runtime was
