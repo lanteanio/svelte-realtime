@@ -382,7 +382,7 @@ function init() {
 		}
 	});
 
-	// Sync paused state from localStorage into __devtools on first init
+	// Apply the initial paused capture state to the instrumentation.
 	{
 		const dt = /** @type {any} */ (window).__svelte_realtime_devtools;
 		if (dt) dt.paused = streamsPaused;

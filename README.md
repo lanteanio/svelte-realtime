@@ -5211,17 +5211,16 @@ if (__devtools) {
 }
 ```
 
-The opt-in still applies case-insensitive exact-key redaction, but that is
-defense in depth rather than a secrecy guarantee: `token` matches while
-`sessionToken` does not, and bare strings such as echoed error text have no
-key to redact. Keep it off on shared machines, recorded demos, or pages that
-load untrusted scripts. Setting `unsafeCapturePayloads` back to `false`
-immediately purges payload-bearing history, pending, volatile, topic, error,
-and stream-preview state, including undo snapshots and visible previews. Disconnect
-also clears captures, disables unsafe capture, and pauses stream capture. Use the
-visible Clear captured data action or `__devtools.clear()` at an account change
-that keeps the same connection open. Unsafe recursion remains capped at depth 5 and arrays
-at 50 items.
+The opt-in applies case-insensitive exact-key redaction: `token` matches but
+`sessionToken` does not. Bare strings, including echoed error text, have no key
+to redact. Keep it off on shared machines, recorded demos, or pages that load
+untrusted scripts. Disabling `unsafeCapturePayloads` immediately purges payloads
+from history, pending calls, volatile sends, topics, errors, stream previews,
+undo snapshots, and visible previews. Pending calls retain their path and start
+time so later results enter History as metadata only, even after capture is re-enabled.
+Disconnect also clears captures, disables unsafe capture, and pauses streams.
+Use Clear captured data or `__devtools.clear()` when changing accounts on the
+same connection. Unsafe capture caps recursion at depth 5 and arrays at 50 items.
 
 The RPC tab shows pending calls (with elapsed time) and a 50-entry ring buffer of recent results (ok/err, duration). The Connection tab shows the bound connection state, time since its transition, stable failure class/code, recovery guidance, and counters. The header also shows the state. External close reasons and authentication text are never retained. Opening DevTools does not create a connection.
 

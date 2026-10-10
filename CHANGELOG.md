@@ -57,6 +57,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Failed smooth initialization releases a newly added wire subscription and empty topic record, while preserving live members, accepted resyncs, and concurrent joins.
 
 - Room departure, eviction, and user erasure remove cursor samples from connected peers. Cursor-only publishers are tracked through socket disconnect without requiring a room subscription; other tabs and cluster members retain their shared cursor until the identity leaves.
+
+- Clearing DevTools captures preserves pending RPC timing and records disconnect failures without payloads.
+
 - DevTools coalesces automatic status announcements over five seconds while confirming user actions immediately.
 
 - DevTools payload previews stay bounded without grapheme segmentation and never split a surrogate pair at the cutoff.

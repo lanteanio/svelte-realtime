@@ -62,7 +62,8 @@ it('purges all retained payloads and undo snapshots on disconnect', () => {
  expect(__devtools.undoClearCount).toBe(1);
  _devtoolsConnectionStatus('disconnected');
  expect(__devtools.history.filter(Boolean)).toEqual([]);
- expect(__devtools.pending.size).toBe(0);
+ expect(__devtools.pending.get('pending')).toEqual({ path: 'call', args: [], startTime: expect.any(Number), payloadsCleared: true });
+ _devtoolsEnd('pending', false, { code: 'DISCONNECTED' });
  expect(__devtools.volatile.filter(Boolean)).toEqual([]);
  expect(__devtools.streams.get('chat').topic).toBe('[topic omitted]');
  expect(__devtools.undoClearCount).toBe(0);

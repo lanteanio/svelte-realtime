@@ -165,3 +165,99 @@ describe('RPC frame ownership with the real adapter', () => {
 		expect(sentRequests(sockets()[0])).toEqual([]);
 	});
 });
+
+describe('DevTools pending diagnostics with the real adapter', () => {
+ for (const unsafe of [false, true]) {
+  it.each(['disconnected', 'failed'])('records %s after scrubbing pending payloads (unsafe=' + unsafe + ')', async state => {
+   const ws = await openWithRpc();
+   const dt = client.__devtools;
+   dt.clear();
+   dt.unsafeCapturePayloads = unsafe;
+   const call = client.__rpc('profile/save').fresh({ email: 'pending-secret@example.test' });
+   call.catch(() => {});
+   const code = state === 'disconnected' ? 'DISCONNECTED' : 'CONNECTION_CLOSED';
+   const rejected = expect(call).rejects.toMatchObject({ code });
+   const frame = rpcFrames(ws).at(-1);
+   const startTime = dt.pending.get(frame.id).startTime;
+   ws.serverClose(state === 'disconnected' ? 1006 : 1008, 'private-close-text');
+   await rejected;
+   const history = dt.history.filter(Boolean);
+   expect(history).toHaveLength(1);
+   expect(history[0]).toMatchObject({ path: 'profile/save', ok: false, args: [], result: { captured: false, code } });
+   expect(history[0].duration).toBeGreaterThanOrEqual(0);
+   expect(history[0].time - startTime).toBeGreaterThanOrEqual(history[0].duration);
+   expect(dt.pending.size).toBe(0);
+   expect(dt.unsafeCapturePayloads).toBe(false);
+   expect(JSON.stringify(history)).not.toContain('pending-secret');
+   expect(JSON.stringify(history)).not.toContain('private-close-text');
+  });
+  it.each([['clear', false], ['opt-out', false], ['clear', true], ['opt-out', true]])('keeps a sent call pending through %s (re-enable=%s, unsafe=' + unsafe + ')', async (action, reenable) => {
+   const ws = await openWithRpc();
+   const dt = client.__devtools;
+   dt.clear();
+   dt.unsafeCapturePayloads = unsafe;
+   const call = client.__rpc('profile/save').fresh({ email: 'pending-secret@example.test' });
+   call.catch(() => {});
+   const frame = rpcFrames(ws).at(-1);
+   const entry = dt.pending.get(frame.id);
+   const startTime = entry.startTime;
+   if (action === 'clear') dt.clear();
+   else dt.unsafeCapturePayloads = false;
+   expect(dt.pending.get(frame.id)).toEqual({ path: 'profile/save', args: [], startTime, payloadsCleared: true });
+   expect(entry.args).toEqual([]);
+   expect(dt.history.filter(Boolean)).toEqual([]);
+   if (reenable) dt.unsafeCapturePayloads = true;
+   answer(ws, frame, { ok: true, data: { email: 'result-secret@example.test' } });
+   await expect(call).resolves.toEqual({ email: 'result-secret@example.test' });
+   expect(dt.pending.size).toBe(0);
+   const history = dt.history.filter(Boolean);
+   expect(history).toHaveLength(1);
+   expect(history[0]).toMatchObject({ path: 'profile/save', ok: true, args: [], result: { captured: false } });
+   expect(JSON.stringify(history)).not.toContain('secret@example.test');
+   if (reenable) {
+    const fresh = client.__rpc('profile/current').fresh();
+    const nextFrame = rpcFrames(ws).at(-1);
+    answer(ws, nextFrame, { ok: true, data: 'new-capture' });
+    await expect(fresh).resolves.toBe('new-capture');
+    expect(dt.history.filter(Boolean).find(entry => entry.path === 'profile/current').result).toBe('new-capture');
+   }
+  });
+  it('keeps an unsent call visible through reconnect (unsafe=' + unsafe + ')', async () => {
+   const dt = client.__devtools;
+   dt.unsafeCapturePayloads = unsafe;
+   const call = client.__rpc('profile/save').fresh({ email: 'pending-secret@example.test' });
+   call.catch(() => {});
+   const [id, entry] = [...dt.pending.entries()][0];
+   const startTime = entry.startTime;
+   sockets()[0].serverClose(1006);
+   expect(dt.pending.get(id)).toEqual({ path: 'profile/save', args: [], startTime, payloadsCleared: true });
+   await until(() => sockets().length === 2);
+   const ws = sockets()[1];
+   ws.open();
+   const frame = rpcFrames(ws)[0];
+   expect(frame.id).toBe(id);
+   answer(ws, frame, { ok: true, data: 'private-response' });
+   await expect(call).resolves.toBe('private-response');
+   expect(dt.pending.size).toBe(0);
+   const history = dt.history.filter(Boolean);
+   expect(history).toHaveLength(1);
+   expect(history[0]).toMatchObject({ path: 'profile/save', ok: true, args: [], result: { captured: false } });
+   expect(JSON.stringify(history)).not.toContain('private-response');
+   expect(JSON.stringify(history)).not.toContain('pending-secret');
+  });
+ }
+});
+it('retains the disconnect error when the adapter immediately exhausts reconnect attempts', async () => {
+ adapter.connect().close();
+ adapter.connect({ maxReconnectAttempts: 0 });
+ const dt = client.__devtools;
+ const call = client.__rpc('profile/save').fresh('pending-secret');
+ const rejected = expect(call).rejects.toMatchObject({ code: 'DISCONNECTED' });
+ const ws = sockets().at(-1);
+ ws.open();
+ ws.serverClose(1006);
+ await rejected;
+ expect(dt.connection.state).toBe('failed');
+ expect(dt.history.filter(Boolean)).toHaveLength(1);
+ expect(dt.history.filter(Boolean)[0]).toMatchObject({ path: 'profile/save', ok: false, args: [], result: { captured: false, code: 'DISCONNECTED' } });
+});

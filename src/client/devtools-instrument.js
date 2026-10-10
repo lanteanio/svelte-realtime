@@ -315,9 +315,9 @@ function _isErrorShaped(result) {
 	}
 }
 
-function _devtoolsResult(result, ok) {
+function _devtoolsResult(result, ok, payloadsCleared) {
 	if (!__devtools) return result;
-	if (!__devtools.unsafeCapturePayloads) {
+	if (payloadsCleared || !__devtools.unsafeCapturePayloads) {
 		const metadata = _devtoolsMetadata(result);
 		if (ok !== false) return metadata;
 		const rawName = _safeRead(result, 'name');
@@ -390,7 +390,7 @@ export function _devtoolsEnd(id, ok, result) {
 		path: entry.path,
 		args: entry.args,
 		ok,
-		result: _devtoolsResult(result, ok),
+		result: _devtoolsResult(result, ok, entry.payloadsCleared),
 		duration: now() - entry.startTime,
 		time: now(),
 		seq: ++_devtoolsSeq
@@ -500,7 +500,11 @@ export function _devtoolsSmoothRegister(statsFn) {
 export function _devtoolsConnectionStatus(state) {
  if (!__devtools) return;
  const connection = __devtools.connection;
- if (state === 'disconnected' || state === 'failed' || ((connection.state === 'open' || connection.state === 'suspended') && state === 'connecting')) __devtools.clear();
+ const lost = state === 'disconnected' || state === 'failed';
+ const wasLost = connection.state === 'disconnected' || connection.state === 'failed';
+ // A disconnect can be followed immediately by exhausted retries. Keep the
+ // metadata-only errors recorded between those two states of the same loss.
+ if ((lost && (!wasLost || _unsafeCapturePayloads)) || ((connection.state === 'open' || connection.state === 'suspended') && state === 'connecting')) __devtools.clear();
  if (connection.state !== state) {
   connection.state = state;
   connection.since = now();
@@ -556,7 +560,11 @@ function _clearCaptures() {
  __devtools.paused = true;
  _forgetClearedEvents();
  __devtools.history.fill(null);
- __devtools.pending.clear();
+ // Keep correlation and timing so a later settlement remains observable.
+ for (const entry of __devtools.pending.values()) {
+  entry.args = [];
+  entry.payloadsCleared = true;
+ }
  __devtools.volatile.fill(null);
  for (const stream of __devtools.streams.values()) {
   if (stream.topic !== null) stream.topic = '[topic omitted]';
