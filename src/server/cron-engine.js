@@ -126,11 +126,9 @@ export function __registerCron(path, fn) {
  * @example
  * ```js
  * // src/hooks.ws.js (adapter next.15+)
- * import { setCronPlatform, pushHooks, message, upgrade } from 'svelte-realtime/server';
+ * import { setCronPlatform } from 'svelte-realtime/server';
  *
- * export { upgrade, message };
- * export const open = pushHooks.open;
- * export const close = pushHooks.close;
+ * export { upgrade, open, close, message, unsubscribe } from 'svelte-realtime/server';
  *
  * export function init({ platform }) {
  *     setCronPlatform(platform);

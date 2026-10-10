@@ -4040,6 +4040,7 @@ export class LiveError extends Error {
  *
  * @example
  * ```js
+ * export { close, unsubscribe } from 'svelte-realtime/server';
  * export function message(ws, { data, platform }) {
  *   if (handleRpc(ws, data, platform)) return;
  *   // custom non-RPC handling here
@@ -4061,7 +4062,7 @@ export function handleRpc(
  *
  * @example
  * ```js
- * export { message } from 'svelte-realtime/server';
+ * export { message, close, unsubscribe } from 'svelte-realtime/server';
  * ```
  */
 export function message(
@@ -4074,6 +4075,7 @@ export function message(
  *
  * @example
  * ```js
+ * export { close, unsubscribe } from 'svelte-realtime/server';
  * export const message = createMessage({
  *   platform: (p) => bus.wrap(p),
  *   async beforeExecute(ws, rpcPath) {
@@ -4176,11 +4178,9 @@ export function __directCall(
  * @example
  * ```js
  * // src/hooks.ws.js (adapter next.15+)
- * import { setCronPlatform, pushHooks, message, upgrade } from 'svelte-realtime/server';
+ * import { setCronPlatform } from 'svelte-realtime/server';
  *
- * export { upgrade, message };
- * export const open = pushHooks.open;
- * export const close = pushHooks.close;
+ * export { upgrade, open, close, message, unsubscribe } from 'svelte-realtime/server';
  *
  * export function init({ platform }: { platform: Platform }) {
  *     setCronPlatform(platform);
@@ -4945,7 +4945,7 @@ export interface RealtimeHooks {
  * ```js
  * import { realtime } from 'svelte-realtime/server';
  * export const { open, close, message, unsubscribe, init, shutdown } = realtime();
- * export function upgrade({ cookies }) { ... }
+ * export function upgrade({ cookies }) { return validate(cookies); }
  * ```
  *
  * Cluster:
@@ -4959,7 +4959,7 @@ export interface RealtimeHooks {
  *   bus: createPubSubBus(redis),
  *   leader: createLeader(redis).isLeader,
  * });
- * export function upgrade({ cookies }) { ... }
+ * export function upgrade({ cookies }) { return validate(cookies); }
  * ```
  *
  * Handler-level code is byte-identical between the two modes; the only

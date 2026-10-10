@@ -3780,7 +3780,7 @@ export function _resetManualPlatformCallbackWarn() {
  * @example
  * ```js
  * // hooks.ws.js (Layer 1 / expert wiring)
- * import { setBus, setCronPlatform, _activateDerived, configureCron, message } from 'svelte-realtime/server';
+ * import { setBus, setCronPlatform, _activateDerived, configureCron } from 'svelte-realtime/server';
  * import { createRedisClient } from 'svelte-adapter-uws-extensions/redis';
  * import { createPubSubBus } from 'svelte-adapter-uws-extensions/redis/pubsub';
  * import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
@@ -3790,7 +3790,7 @@ export function _resetManualPlatformCallbackWarn() {
  * setBus(bus);
  * configureCron({ leader: createLeader(redis).isLeader });
  *
- * export { message };
+ * export { message, close, unsubscribe } from 'svelte-realtime/server';
  * export function init({ platform }) {
  *   setCronPlatform(platform);
  *   _activateDerived(platform);
@@ -3919,13 +3919,13 @@ export function publish(topic, event, data, options) {
 /**
  * One-call setup that wires every framework seam from a single
  * declaration of cluster intent. Returns the standard adapter hook
- * set (`open`, `close`, `message`, `init`) plus optional `upgrade`,
+ * set (`open`, `close`, `message`, `unsubscribe`, `init`, `shutdown`) plus optional `upgrade`,
  * so `hooks.ws.js` is a one-import-one-destructure file:
  *
  * ```js
  * // src/hooks.ws.js (single-replica)
  * import { realtime } from 'svelte-realtime/server';
- * export const { upgrade, open, close, message, init } = realtime({
+ * export const { upgrade, open, close, message, unsubscribe, init, shutdown } = realtime({
  *   upgrade: ({ cookies }) => validate(cookies),
  * });
  * ```
@@ -3938,7 +3938,7 @@ export function publish(topic, event, data, options) {
  * import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
  *
  * const redis = createRedisClient();
- * export const { upgrade, open, close, message, init } = realtime({
+ * export const { upgrade, open, close, message, unsubscribe, init, shutdown } = realtime({
  *   bus: createPubSubBus(redis),
  *   leader: createLeader(redis).isLeader,
  *   upgrade: ({ cookies }) => validate(cookies),
