@@ -265,6 +265,12 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 						}
 						progress.presenceDone = true;
 						if (publishLeave) { try { publishLeave(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED); } catch { /* best-effort */ } }
+						if (ref.cursors) {
+							try {
+								if (publishLeave) publishLeave(topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
+								else if (platform) _platformPublish(platform, topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
+							} catch { /* best-effort */ }
+						}
 					} catch { incomplete = true; }
 				}
 				if (!progress.ownerDone) {

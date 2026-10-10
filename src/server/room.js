@@ -437,7 +437,10 @@ export const _roomRegister = function room(config) {
 					await _retirePresenceRef(k, r, () => {
 						const pending = [];
 						if (hadPresence) pending.push(_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
-							if (res.isLast) ctx._publishWire(t + ':presence', 'leave', { key: u }, UNSEQUENCED);
+							if (res.isLast) {
+								ctx._publishWire(t + ':presence', 'leave', { key: u }, UNSEQUENCED);
+								if (r.cursors) ctx._publishWire(t + ':cursors', 'remove', { key: u }, UNSEQUENCED);
+							}
 						}).catch(() => {}));
 						pending.push(_ownerOnLeave(ctx.platform, t, u).then((change) => {
 							if (change) _ownerEmit(t, ctx.tenantId, change, ctx._publishWire);
@@ -472,7 +475,7 @@ export const _roomRegister = function room(config) {
 			// published (see __isMember): a field update published ahead of it
 			// reaches every client before the entry it belongs to.
 			let joined;
-			const member = { count: 1, timer: null, data: presenceData, joining: /** @type {Promise<void> | null} */ (new Promise((r) => { joined = r; })), gone: false };
+			const member = { count: 1, timer: null, data: presenceData, cursors: !!cursorConfig, joining: /** @type {Promise<void> | null} */ (new Promise((r) => { joined = r; })), gone: false };
 			_presenceRef.set(refKey, member);
 			rememberMember(ctx, member);
 			try {
@@ -571,6 +574,7 @@ export const _roomRegister = function room(config) {
 					pending.push(_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
 						if (res.isLast) {
 							ctx._publishWire(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED);
+							if (ref.cursors) ctx._publishWire(topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
 						}
 					}).catch(() => {}));
 				}

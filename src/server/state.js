@@ -278,6 +278,7 @@ export const _lazyQueue = [];
  *    dev path). Production wires a cluster-aware `platform.presence` and
  *    bypasses this fallback. Memory: bounded by `MAX_PRESENCE_REF`; entries
  *    are dropped on the grace-timer expiry or under cap eviction.
+ *  - `cursors`: whether departure also removes the identity's cursor sample.
  *  - `joining`: while the member's join is being published, a promise that
  *    settles once it is out; null after.
  *  - `gone`: set when the entry leaves the map, by whichever path removes it,
@@ -285,7 +286,7 @@ export const _lazyQueue = [];
  *    lookup. Re-inserting the same entry clears it.
  *  - `leaving` / `erasure`: departed refs retain only cleanup ownership until
  *    release settles or strict erasure confirms; their data is scrubbed.
- * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any, joining?: Promise<void> | null, gone?: boolean, leaving?: Promise<void>, erasure?: { presenceDone: boolean, ownerDone: boolean, ownerUnconfirmed: boolean, pending: Promise<void> | null } }>}
+ * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any, cursors?: boolean, joining?: Promise<void> | null, gone?: boolean, leaving?: Promise<void>, erasure?: { presenceDone: boolean, ownerDone: boolean, ownerUnconfirmed: boolean, pending: Promise<void> | null } }>}
  */
 export const _presenceRef = new (class PresenceRefs extends Map {
 	set(key, ref) {
