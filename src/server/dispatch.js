@@ -16,7 +16,7 @@ import { _getBus } from './bus.js';
 import { _ensureWrap } from './reactive.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } from './rate-limit.js';
-import { _recordRpcMetrics } from './metrics.js';
+import { _recordRpcMetrics, _recordRpcDelivery, _rpcClosedSockets } from './metrics.js';
 import { _shouldShed } from './admission.js';
 import { _getIdentityKey, _getAuthenticatedId } from './identity.js';
 import { _bindAlarmCtx } from './alarm.js';
@@ -534,7 +534,7 @@ export function handleRpc(ws, data, platform, options) {
  */
 async function _executeRpc(ws, msg, platform, options) {
 	const result = await _executeSingleRpc(ws, msg, platform, options);
-	_respond(ws, platform, msg.id, result);
+	_respond(ws, platform, msg.id, result, undefined, msg.rpc);
 }
 
 /**
@@ -613,7 +613,7 @@ async function _executeBatch(ws, msg, platform, options) {
 			if (typeof call?.id !== 'string') continue;
 			results.push({ id: call.id, ok: false, code: 'INVALID_REQUEST', error: `Batch exceeds maximum of ${MAX_RPC_BATCH_CALLS} calls`, requestId: _operationRequestId(call.id) });
 		}
-		_respond(ws, platform, '__batch', { batch: results });
+		_respond(ws, platform, '__batch', { batch: results }, undefined, '__batch__');
 		return;
 	}
 
@@ -643,7 +643,8 @@ async function _executeBatch(ws, msg, platform, options) {
 		}));
 	}
 
-	_respond(ws, platform, '__batch', { batch: results });
+	_respond(ws, platform, '__batch', { batch: results }, undefined,
+		state.metricsInstruments ? batch.map(call => typeof call?.id === 'string' ? call.rpc : null) : undefined);
 }
 
 // Settle both per-socket claim barriers a stream subscribe opened (the owner
@@ -1297,11 +1298,11 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 	const requestId = _operationRequestId(header.id);
 	const protocolRejection = _protocolRejection(ws, platform);
 	if (protocolRejection) {
-		_respond(ws, platform, header.id, protocolRejection, requestId);
+		_respond(ws, platform, header.id, protocolRejection, requestId, header.rpc);
 		return;
 	}
 	if (_isShuttingDown()) {
-		_respond(ws, platform, header.id, { ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down' }, requestId);
+		_respond(ws, platform, header.id, { ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down' }, requestId, header.rpc);
 		return;
 	}
 	_enterInFlight();
@@ -1318,7 +1319,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 
 	if (!_validPathRe.test(path)) {
 		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
-		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' }, requestId);
+		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'Invalid path' }, requestId, path);
 		return;
 	}
 
@@ -1326,7 +1327,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 		// Pre-registry (path not yet resolved), so it may be unregistered and
 		// client-controlled: fold to a bounded label rather than record the raw path.
 		_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
-		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' }, requestId);
+		_respond(ws, platform, id, { ok: false, code: 'INVALID_REQUEST', error: 'args must be an array' }, requestId, path);
 		return;
 	}
 
@@ -1337,7 +1338,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 		// unauthenticated caller must not be able to allocate a metric series per
 		// distinct unknown path. See metrics.js for the length backstop.
 		_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
-		_respond(ws, platform, id, _unknownPathReply(ws, path), requestId);
+		_respond(ws, platform, id, _unknownPathReply(ws, path), requestId, path);
 		return;
 	}
 
@@ -1364,13 +1365,13 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 				const _resp = { ok: true, data: result };
 				const _dep = _deprecationSignal(ws, path, fn);
 				if (_dep) _resp.deprecation = _dep;
-				_respond(ws, platform, id, _resp, requestId);
+				_respond(ws, platform, id, _resp, requestId, path);
 		});
 		_recordRpcMetrics(path, '', _metricsStart, ws);
 	} catch (err) {
 		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		if (err instanceof LiveError) {
-			_respond(ws, platform, id, { ok: false, code: err.code, error: err.message }, requestId);
+			_respond(ws, platform, id, { ok: false, code: err.code, error: err.message }, requestId, path);
 		} else {
 			if (options?.onError) {
 				try { options.onError(path, err, ctx); } catch {}
@@ -1389,7 +1390,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 						help: 'https://svti.me/binary'
 					}
 				});
-			_respond(ws, platform, id, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' }, requestId);
+			_respond(ws, platform, id, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' }, requestId, path);
 		}
 	}
 }
@@ -1445,7 +1446,7 @@ function _migrateItem(item, fromVersion, toVersion, migrateFns) {
 	return result;
 }
 
-function _respond(ws, platform, correlationId, payload, requestId) {
+function _respond(ws, platform, correlationId, payload, requestId, paths) {
 	payload = requestId ? _withFailureRequestId(payload, requestId) : payload;
 	if (_IS_DEV) {
 		// Estimate size without double-serialization.
@@ -1465,8 +1466,18 @@ function _respond(ws, platform, correlationId, payload, requestId) {
 			}));
 		}
 	}
+	const trackDelivery = state.metricsInstruments !== null && paths !== undefined;
+	const closedBefore = trackDelivery ? platform.closedWsAborts : undefined;
+	/** @type {'delivered' | 'backpressure' | 'closed' | 'exception'} */
+	let outcome = 'exception';
 	try {
 		const result = platform.send(ws, '__rpc', correlationId, payload);
+		if (trackDelivery) {
+			// Native sends return 1 on success, 0 for buffered backpressure,
+			// and 2 when dropped. The adapter counts closed-socket aborts.
+			outcome = _rpcClosedSockets.has(ws) || platform.closedWsAborts > closedBefore ? 'closed'
+				: result === 0 || result === 2 ? 'backpressure' : 'delivered';
+		}
 		if (result === 0 && _IS_DEV) {
 			console.warn(formatDiagnostic({
 				source: 'svelte-realtime',
@@ -1478,6 +1489,7 @@ function _respond(ws, platform, correlationId, payload, requestId) {
 			}));
 		}
 	} catch (err) {
+		if (trackDelivery && _rpcClosedSockets.has(ws)) outcome = 'closed';
 		// uWS throws when accessing a closed WebSocket - expected during mid-RPC disconnect.
 		if (_IS_DEV) {
 			console.warn(formatDiagnostic({
@@ -1492,6 +1504,12 @@ function _respond(ws, platform, correlationId, payload, requestId) {
 					error: diagnosticError(err)
 				}
 			}));
+		}
+	} finally {
+		if (trackDelivery) {
+			if (Array.isArray(paths)) {
+				for (const path of paths) _recordRpcDelivery(path, outcome);
+			} else _recordRpcDelivery(paths, outcome);
 		}
 	}
 }

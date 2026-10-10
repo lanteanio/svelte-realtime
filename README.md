@@ -2599,7 +2599,8 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 
 - `svelte_realtime_rpc_total` - RPC call count by path and status
 - `svelte_realtime_rpc_duration_seconds` - RPC latency by path, with explicit fractional-second buckets from 1 ms through 10 s
-- `svelte_realtime_rpc_errors_total` - RPC errors by path and code
+- `svelte_realtime_rpc_errors_total` - RPC execution errors by path and code
+- `svelte_realtime_rpc_delivery_total` - final text/binary RPC reply attempts by bounded `path` and `outcome`: `delivered` (accepted without pressure, not a client acknowledgement), `backpressure` (buffered or dropped), `closed`, or `exception`. Batch replies count each call; an oversized batch rejection counts once under `__batch__`; early stream attaches, uploads, direct calls and fire-and-forget calls are excluded. Execution success remains independent of delivery.
 - `svelte_realtime_stream_subscriptions` - active stream subscription gauge
 - `svelte_realtime_cron_total` - cron execution count by path and status
 - `svelte_realtime_cron_errors_total` - cron errors by path
@@ -2607,7 +2608,7 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 
 ### Cohort-stratified metrics - never trust the aggregate
 
-An aggregate p99 that looks healthy can hide a cohort - old devices, cellular links, a far region - that is entirely broken, because the fast majority drowns it in the quantile. Pass a `cohort` classifier and every RPC series carries the caller's cohort label:
+An aggregate p99 that looks healthy can hide a cohort - old devices, cellular links, a far region - that is entirely broken, because the fast majority drowns it in the quantile. Pass a `cohort` classifier and every RPC execution series carries the caller's cohort label:
 
 ```js
 live.metrics(registry, {

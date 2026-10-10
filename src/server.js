@@ -63,7 +63,7 @@ import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, 
 import { _resetNoiseBlockCache } from './server/differential-privacy.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot, _compensateUnavailable } from './server/history-compensation.js';
 import { WRAPPED_FOR_REPLAY, _resetReplayRouting, _registerReplayTopic, _maybeReplayPublish } from './server/replay-routing.js';
-import { _recordRpcMetrics, installMetrics } from './server/metrics.js';
+import { _recordRpcMetrics, _rpcClosedSockets, installMetrics } from './server/metrics.js';
 import { _shouldShed, _resetAdmission, installAdmission } from './server/admission.js';
 export { PRESSURE_REASONS } from './server/admission.js';
 import { _getIdentityKey, _getAuthenticatedId, _isIdentityValue, _resetUnusableIdWarning } from './server/identity.js';
@@ -3636,6 +3636,7 @@ const _firedUnsubscribes = new WeakMap();
  * @param {{ platform: import('svelte-adapter-uws').Platform }} ctx
  */
 export function close(ws, { platform, subscriptions }) {
+	if (state.metricsInstruments) _rpcClosedSockets.add(ws);
 	_closeCursorPublishers(ws, platform);
 	// Mark the socket closed before any drain below runs: an in-flight smooth
 	// sync/command handler awoken after this call re-checks the mark and bails

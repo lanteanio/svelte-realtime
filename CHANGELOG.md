@@ -12,6 +12,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- Opt-in RPC delivery metrics distinguish successful sends, backpressure, closed connections, and send exceptions from handler execution outcomes.
+
 - Contributor and release guidance includes the packed sibling consumer command, its prerequisites and the flags required for exact committed source identities.
 
 - README size increases require an explicit generator flag and a recorded change from the committed limit. Action: use `npm run generate:documentation -- --accept-readme-growth` when an intentional increase is needed.

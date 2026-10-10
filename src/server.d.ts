@@ -2842,7 +2842,9 @@ export namespace live {
 
 	/**
 	 * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
-	 * subscriptions, and cron executions. Zero overhead if never called.
+	 * subscriptions, and cron executions. Disabled until called. RPC delivery
+	 * outcomes are separate from execution: delivered, backpressure, closed,
+	 * or exception. Delivery acceptance is not a client acknowledgement.
 	 *
 	 * Call once at server start (e.g. the top of `src/hooks.ws.{js,ts}`).
 	 * See the README "Prometheus metrics" section for a working example
@@ -2865,7 +2867,7 @@ export namespace live {
 	 */
 	function metrics(registry: MetricsRegistry, options?: {
 		/**
-		 * Stratify the RPC series by client cohort (device class, network
+		 * Stratify RPC execution series by client cohort (device class, network
 		 * class, region - whatever your upgrade hook stashed on the
 		 * connection's user data). Classified ONCE per connection and cached;
 		 * distinct labels are bounded at 16 (overflow folds into `'other'`;

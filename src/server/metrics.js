@@ -1,7 +1,8 @@
 // @ts-check
 import { monotonicNow, setIntervalTimer, clearIntervalTimer } from '../shared/runtime.js';
 import { wireAssertionMetrics } from '../shared/assert.js';
-import { state } from './state.js';
+import { state, registry } from './state.js';
+import { _validPathRe } from './validate.js';
 import { _IS_DEV } from './env.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 
@@ -13,6 +14,24 @@ import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnost
  * @type {WeakMap<object, string>}
  */
 const _cohortByWs = new WeakMap();
+
+/** Closed connections can still have asynchronous RPC replies in flight. */
+export const _rpcClosedSockets = new WeakSet();
+
+/**
+ * Delivery is a transport outcome, independent of handler success. Only
+ * registered paths become labels; arbitrary caller paths share sentinels.
+ * @param {unknown} path
+ * @param {'delivered' | 'backpressure' | 'closed' | 'exception'} outcome
+ */
+export function _recordRpcDelivery(path, outcome) {
+	const mi = state.metricsInstruments;
+	if (!mi) return;
+	const label = path === '__batch__' ? path
+		: typeof path !== 'string' || !_validPathRe.test(path) ? '__invalid__'
+		: registry.has(path) ? _metricPath(path) : '__unknown__';
+	mi.rpcDelivery.inc({ path: label, outcome });
+}
 
 /** Distinct cohort labels seen, bounded so a buggy classifier cannot explode series cardinality. */
 const _cohortSeen = new Set();
@@ -116,7 +135,8 @@ export const DURATION_BUCKETS_SECONDS = Object.freeze([
 
 /**
  * Opt-in Prometheus metrics integration. Instruments RPC calls, stream
- * subscriptions, and cron executions. Zero overhead if never called.
+ * subscriptions, and cron executions. Disabled until called. RPC reply
+ * delivery has its own bounded path/outcome counter, without cohort labels.
  *
  * Call once at server start (e.g. the top of `src/hooks.ws.{js,ts}`).
  *
@@ -128,7 +148,7 @@ export const DURATION_BUCKETS_SECONDS = Object.freeze([
  * registry must honour (a registry adapter that drops them measures nothing).
  *
  * Options:
- * - `cohort(userData) => string`: stratify the RPC series by client cohort
+ * - `cohort(userData) => string`: stratify RPC execution series by client cohort
  *   (device class, network class, region - whatever your upgrade hook stashed
  *   on the connection's user data). Small cardinality REQUIRED: distinct
  *   labels are bounded at 16 (overflow folds into 'other'), classify once per
@@ -161,6 +181,7 @@ const _liveMetrics = function metrics(registry, options = {}) {
 		rpcCount: registry.counter({ name: 'svelte_realtime_rpc_total', help: 'Total RPC calls', labelNames: rpcLabels }),
 		rpcDuration: registry.histogram({ name: 'svelte_realtime_rpc_duration_seconds', help: 'RPC call duration', labelNames: cohortFn ? ['path', 'cohort'] : ['path'], buckets: [...DURATION_BUCKETS_SECONDS] }),
 		rpcErrors: registry.counter({ name: 'svelte_realtime_rpc_errors_total', help: 'Total RPC errors', labelNames: cohortFn ? ['path', 'code', 'cohort'] : ['path', 'code'] }),
+		rpcDelivery: registry.counter({ name: 'svelte_realtime_rpc_delivery_total', help: 'RPC reply transport outcomes', labelNames: ['path', 'outcome'] }),
 		streamGauge: registry.gauge({ name: 'svelte_realtime_stream_subscriptions', help: 'Active stream subscriptions' }),
 		cronCount: registry.counter({ name: 'svelte_realtime_cron_total', help: 'Total cron executions', labelNames: ['path', 'status'] }),
 		cronErrors: registry.counter({ name: 'svelte_realtime_cron_errors_total', help: 'Total cron errors', labelNames: ['path'] }),
