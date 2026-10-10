@@ -5,7 +5,7 @@ All notable changes to `svelte-realtime` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-next.91] - 2026-09-12
+## [0.6.0-next.91] - 2026-10-10
 
 ### Added
 
@@ -261,7 +261,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the member leaves its count behind, so the row then stands until the room
   goes idle long enough for the roster to expire.
 
-- **Adapter peer range moves to `svelte-adapter-uws@^0.6.0-next.94`.** The
+- **Adapter peer range moves to `svelte-adapter-uws@^0.6.0-next.95`.** The
   scaffold pin, the README compatibility row, and the generated first-run
   transcript follow it. The operation platform view (`ctx.platform`) now
   inherits the adapter's `traceContext` and `trace` declarations instead of

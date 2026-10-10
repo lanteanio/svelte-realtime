@@ -65,7 +65,7 @@ npm run dev
 ```
 
 The non-interactive route installs the audited
-`svelte-adapter-uws@0.6.0-next.94` / `svelte-realtime@0.6.0-next.91` /
+`svelte-adapter-uws@0.6.0-next.95` / `svelte-realtime@0.6.0-next.91` /
 uWebSockets.js v20.69.0 tuple, checks Node, OS, architecture, libc, and the
 native addon, writes one current-`sv` Vite configuration, and completes a
 production build before it prints `Verified`. The example then opens with a
@@ -82,7 +82,7 @@ The three ecosystem packages move together. Bump them as a group:
 |---|---|---|---|
 | `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |
 | `^0.5.8` | `^0.5.0` | `^0.5.0` | Stable. Node 22+ required. |
-| `0.6.0-next.94` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated development candidate. Publish the tuple together before using these exact registry commands. |
+| `0.6.0-next.95` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated development candidate. Publish the tuple together before using these exact registry commands. |
 
 Mixed-version installs are rejected at install time with a peer-dep warning.
 
@@ -97,7 +97,7 @@ Starting from a SvelteKit 2 project. If you do not have one yet, run `npx sv@0.1
 ### Step 1: Install everything
 
 ```bash
-npm install svelte-adapter-uws@0.6.0-next.94 svelte-realtime@0.6.0-next.91
+npm install svelte-adapter-uws@0.6.0-next.95 svelte-realtime@0.6.0-next.91
 npm install https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
 npm install -D ws
 npm exec -- svelte-adapter-uws-preflight
