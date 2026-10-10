@@ -131,6 +131,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Changing the offline storage key or store switches queue ownership, cancels former callers, restores the new scope, and keeps late restore/replay work from writing to another account. Reconfiguring persistence retries failed scans.
 
+- Offline restore reserves sequence numbers with a keys-only scan and skips unreadable values without disabling other persisted mutations. `offlinePersistence()` exposes storage health, unreadable row counts, and failed queued writes.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

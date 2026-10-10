@@ -38,6 +38,8 @@ function _warnStorage(err, operation) {
 /**
  * @typedef {Object} OfflineStore
  * @property {(prefix: string) => Promise<Array<{ key: string, value: any }>>} getAll - Every entry whose key starts with `prefix`, key-sorted. Rejects when the entries could not be read.
+ * @property {(prefix: string) => Promise<string[]>} [keys] - Optional keys-only scan; pair with get to isolate unreadable values.
+ * @property {(key: string) => Promise<any>} [get] - Optional single-value read; rejects when the value cannot be read.
  * @property {(key: string, value: any) => Promise<void>} put - Resolves once the value is stored, rejects when it could not be.
  * @property {(key: string) => Promise<void>} delete
  * @property {(prefix: string) => Promise<void>} clear - Delete every entry whose key starts with `prefix`.
@@ -71,6 +73,8 @@ export function createMemoryStore() {
 			out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 			return out;
 		},
+		async keys(prefix) { return [...map.keys()].filter(key => key.startsWith(prefix)).sort(); },
+		async get(key) { return map.get(key); },
 		async put(key, value) {
 			map.set(key, value);
 		},
@@ -163,53 +167,62 @@ export function createIndexedDbStore() {
 		});
 	}
 
-	return {
-		async getAll(prefix) {
-			// Key-range scan over the prefix: [prefix, prefix + U+FFFF]. Keys are
-			// ASCII-constructed by the queue, so the sentinel upper bound is safe.
-			// An unavailable database is an unreadable queue, not an empty one:
-			// a later reopen must never overwrite rows this scan did not see.
-			const db = await open();
-			if (!db) throw new Error('[svelte-realtime] offline persistence unavailable');
-			return new Promise((resolve, reject) => {
-				let settled = false;
-				let tx;
-				const fail = (err) => {
+	async function read(prefix, keysOnly = false, exact = false) {
+		// Key-range scan over the prefix: [prefix, prefix + U+FFFF]. Keys are
+		// ASCII-constructed by the queue, so the sentinel upper bound is safe.
+		// An unavailable database is an unreadable queue, not an empty one:
+		// a later reopen must never overwrite rows this scan did not see.
+		const db = await open();
+		if (!db) throw new Error('[svelte-realtime] offline persistence unavailable');
+		return new Promise((resolve, reject) => {
+			let settled = false;
+			let tx;
+			const fail = (err) => {
+				if (settled) return;
+				settled = true;
+				clearTimer(timer);
+				_warnStorage(err, 'read');
+				reject(err || new Error('[svelte-realtime] offline store read failed'));
+			};
+			const timer = setTimer(() => {
+				fail(new Error('database read timed out'));
+				try { tx?.abort(); } catch {}
+			}, STORAGE_TIMEOUT_MS);
+			try {
+				tx = db.transaction(STORE_NAME, 'readonly');
+				const store = tx.objectStore(STORE_NAME);
+				const range = exact ? null : IDBKeyRange.bound(prefix, prefix + '\uffff');
+				const out = [];
+				const req = exact ? store.get(prefix) : keysOnly ? store.openKeyCursor(range) : store.openCursor(range);
+				req.onsuccess = () => {
 					if (settled) return;
-					settled = true;
-					clearTimer(timer);
-					_warnStorage(err, 'read');
-					reject(err || new Error('[svelte-realtime] offline store read failed'));
-				};
-				const timer = setTimer(() => {
-					fail(new Error('database read timed out'));
-					try { tx?.abort(); } catch {}
-				}, STORAGE_TIMEOUT_MS);
-				try {
-					tx = db.transaction(STORE_NAME, 'readonly');
-					const store = tx.objectStore(STORE_NAME);
-					const range = IDBKeyRange.bound(prefix, prefix + '\uffff');
-					const out = [];
-					const req = store.openCursor(range);
-					req.onsuccess = () => {
-						if (settled) return;
-						const cursor = req.result;
+					try {
+						const result = req.result;
+						if (exact) {
+							settled = true; clearTimer(timer); resolve(result); return;
+						}
+						const cursor = result;
 						if (cursor) {
-							out.push({ key: String(cursor.key), value: cursor.value });
+							out.push(keysOnly ? String(cursor.key) : { key: String(cursor.key), value: cursor.value });
 							cursor.continue();
 						} else {
 							settled = true;
 							clearTimer(timer);
 							resolve(out);
 						}
-					};
-					req.onerror = () => fail(req.error);
-					tx.onabort = () => fail(tx.error);
-				} catch (err) {
-					fail(err);
-				}
-			});
-		},
+					} catch (err) { fail(err); }
+				};
+				req.onerror = () => fail(req.error);
+				tx.onabort = () => fail(tx.error);
+			} catch (err) {
+				fail(err);
+			}
+		});
+	}
+	return {
+		getAll(prefix) { return read(prefix); },
+		keys(prefix) { return read(prefix, true); },
+		get(key) { return read(key, false, true); },
 		async put(key, value) {
 			await commit((store) => { store.put(value, key); }, 'write');
 		},

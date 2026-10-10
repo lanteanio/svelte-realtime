@@ -192,7 +192,7 @@ const watch = (p) => {
  * reports its request before its transaction commits or aborts. The rows
  * outlive the client that wrote them, so a test can reload against them.
  */
-function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false, readFails = false, abortReads = false, readHangs = false } = {}) {
+function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false, readFails = false, abortReads = false, readHangs = false, unreadableKeys = new Set() } = {}) {
 	const map = new Map();
 	const stores = new Set();
 	let closed = false;
@@ -246,7 +246,18 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 					});
 					return req;
 				},
-				openCursor(range) {
+				get(key) {
+					const req = {};
+					later(() => {
+						if (readHangs) return;
+						if (readFails || unreadableKeys.has(key)) { req.error = new Error('Failed to read large IndexedDB value'); req.onerror?.(); return; }
+						if (abortReads) { tx.error = new Error('AbortError'); tx.onabort?.(); return; }
+						req.result = structuredClone(map.get(key)); req.onsuccess?.();
+					});
+					return req;
+				},
+				openKeyCursor(range) { return this.openCursor(range, true); },
+				openCursor(range, keysOnly = false) {
 					const keys = [...map.keys()].filter((k) => k >= range.lower && k <= range.upper).sort();
 					/** @type {any} */
 					const req = { result: null };
@@ -264,7 +275,8 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 							return;
 						}
 						const key = keys[i++];
-						req.result = key === undefined ? null : { key, value: structuredClone(map.get(key)), continue: step };
+						if (!keysOnly && unreadableKeys.has(key)) { req.error = new Error('Failed to read large IndexedDB value'); req.onerror?.(); return; }
+						req.result = key === undefined ? null : { key, ...(keysOnly ? {} : { value: structuredClone(map.get(key)) }), continue: step };
 						req.onsuccess?.();
 					});
 					step();
@@ -3219,4 +3231,81 @@ it('a beforeReplay scope switch cannot send old work or empty the new queue', as
 	await respondAll(() => ({ ok: true, data: null }));
 	expect(replayedPaths()).toEqual(['B/stored']);
 	expect(mod.offlineCheckpoint().lastUploadedSeq).toBe(4);
+});
+
+
+describe('offline persistence health and isolated value reads', () => {
+	beforeEach(() => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+	});
+	afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+	it('restores readable IndexedDB rows around a broken value and preserves every key across reloads', async () => {
+		const brokenKey = seedEntry('default', 9, 'write', ['broken'], 'broken')[0];
+		const idb = fakeIndexedDb({ unreadableKeys: new Set([brokenKey]) });
+		for (const row of [seedEntry('default', 2, 'write', ['readable'], 'readable'), seedEntry('default', 9, 'write', ['broken'], 'broken')]) idb.map.set(...row);
+		vi.stubGlobal('indexedDB', idb);
+		mod.configure({ offline: { queue: true, persist: true } });
+		simulateStatus('disconnected');
+		const fresh = watch(mod.__rpc('write')('new'));
+		await until(() => idb.map.has('q:default:000000000010'));
+		expect(idb.map.get('q:default:000000000010').args).toEqual(['new']);
+		expect(mod.offlinePersistence()).toEqual({ status: 'degraded', unreadableRows: 1, failedWrites: 0 });
+		expect(idb.map.has(brokenKey)).toBe(true);
+		mod = await loadClient();
+		mod.configure({ offline: { queue: true, persist: true } });
+		simulateStatus('disconnected');
+		await until(() => mod.offlinePersistence().status !== 'restoring');
+		simulateStatus('open');
+		await until(() => wire.some(frame => frame.rpc));
+		await respondAll(() => ({ ok: true, data: true }));
+		await until(() => [...idb.map.keys()].filter(key => key.startsWith('q:')).length === 1);
+		expect(wire.filter(frame => frame.rpc).map(frame => frame.args)).toEqual([['readable'], ['new']]);
+		expect([...idb.map.keys()].filter(key => key.startsWith('q:'))).toEqual([brokenKey]);
+		expect(mod.offlineCheckpoint()).toEqual({ lastUploadedSeq: 10, gapDetected: true });
+		expect(mod.offlinePersistence().unreadableRows).toBe(1);
+		expect(fresh.settled).toBe(false);
+	});
+
+	it('a failed key scan disables writes and exposes memory-only health', async () => {
+		const store = fakeStore(Object.fromEntries([seedEntry('default', 8, 'write', ['stored'], 'stored')]));
+		store.keys = async () => { throw new Error('key scan unavailable'); };
+		store.get = async key => store.map.get(key);
+		mod.configure({ offline: { queue: true, persist: store } });
+		simulateStatus('disconnected');
+		watch(mod.__rpc('write')('memory'));
+		await flush();
+		expect(mod.offlinePersistence()).toEqual({ status: 'memory', unreadableRows: 0, failedWrites: 0 });
+		expect(storedKeys(store)).toEqual(['q:default:000000000008']);
+	});
+
+	it('custom keys/get stores skip unreadable rows without calling a bulk value scan', async () => {
+		const store = fakeStore(Object.fromEntries([seedEntry('default', 6, 'write', ['broken'], 'broken')]));
+		store.keys = async prefix => [...store.map.keys()].filter(key => key.startsWith(prefix));
+		store.get = async () => { throw new Error('bad value'); };
+		const getAll = vi.spyOn(store, 'getAll');
+		mod.configure({ offline: { queue: true, persist: store } });
+		simulateStatus('disconnected');
+		watch(mod.__rpc('write')('new'));
+		await flush();
+		expect(getAll).toHaveBeenCalledWith('c:default');
+		expect(getAll).not.toHaveBeenCalledWith('q:default:');
+		expect(storedKeys(store)).toEqual(['q:default:000000000006', 'q:default:000000000007']);
+		expect(mod.offlinePersistence()).toMatchObject({ status: 'degraded', unreadableRows: 1 });
+	});
+
+	it('reports disabled, restoring, ready and failed-write health without exposing mutation data', async () => {
+		expect(mod.offlinePersistence().status).toBe('disabled');
+		const store = fakeStore();
+		let finish;
+		store.getAll = () => new Promise(resolve => { finish = resolve; });
+		mod.configure({ offline: { queue: true, persist: store } });
+		expect(mod.offlinePersistence().status).toBe('restoring');
+		finish([]); await flush(1); finish([]); await flush(1);
+		expect(mod.offlinePersistence().status).toBe('ready');
+		store.put = async () => { throw new Error('quota'); };
+		simulateStatus('disconnected'); watch(mod.__rpc('private/write')('private argument')); await flush();
+		expect(mod.offlinePersistence()).toEqual({ status: 'degraded', unreadableRows: 0, failedWrites: 1 });
+	});
 });

@@ -770,6 +770,10 @@ export interface OfflineStore {
 	 * for the page. Entries under a key the queue did not write are ignored.
 	 */
 	getAll(prefix: string): Promise<Array<{ key: string; value: any }>>;
+	/** Optional keys-only scan. Implement with get to restore around unreadable rows. */
+	keys?(prefix: string): Promise<string[]>;
+	/** Optional single-value read. Rejects if the value cannot be read. */
+	get?(key: string): Promise<any>;
 	/**
 	 * Resolves once the value is stored and rejects when it could not be. A
 	 * queued mutation whose write rejected exists only in memory, so a
@@ -786,7 +790,7 @@ export interface OfflineStore {
  * resolves once its transaction commits and rejects when the database cannot
  * open or the transaction aborts; `delete` and `clear` also settle only once
  * their transaction has committed or failed, and swallow a failure; `getAll`
- * rejects when a read fails (and finds nothing when the database cannot open).
+ * rejects when a read fails or the database cannot open. Optional keys/get isolate unreadable rows.
  */
 export function createIndexedDbStore(): OfflineStore;
 /**
@@ -824,6 +828,16 @@ export const uploading: Readable<boolean>;
  * alongside the queue when `persist` is on.
  */
 export function offlineCheckpoint(): { lastUploadedSeq: number; gapDetected: boolean };
+
+/**
+ * Current persistence health without mutation contents or storage keys.
+ * disabled: persistence is off; restoring: reads are in progress; ready: durable
+ * storage is available; degraded: some rows/checkpoint could not be read or a
+ * queued write failed; memory: persistence is unavailable or the store is ephemeral.
+ * Unreadable rows remain stored, reserve their seq, and retry on the next scope
+ * restore. Counts reset on a new scope; failedWrites counts queued mutation writes.
+ */
+export function offlinePersistence(): { status: 'disabled' | 'restoring' | 'ready' | 'degraded' | 'memory'; unreadableRows: number; failedWrites: number };
 
 /**
  * Register a handler for point-to-point signals.

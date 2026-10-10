@@ -20,7 +20,8 @@ function _newScope(store = null, persistKey = 'default', persist = undefined) {
 		checkpoint: { lastUploadedSeq: 0, gapDetected: false },
 		rehydratePromise: null, restoring: false, unstamped: [], scanFailed: false,
 		batch: { failedSeq: Infinity, clean: true }, droppedUnnumbered: false,
-		checkpointDirty: false, checkpointUnknown: false, entries: new Set()
+		checkpointDirty: false, checkpointUnknown: false, entries: new Set(),
+		unreadableRows: 0, failedWrites: 0
 	};
 }
 let _scope = _newScope();
@@ -233,6 +234,38 @@ export function offlineCheckpoint() {
 	return { ..._scope.checkpoint };
 }
 
+/** Current scope storage health; contains no row keys or mutation arguments. */
+export function offlinePersistence() {
+	const durable = !!_scope.store && _isDurableStore(_scope.store);
+	const status = !_scope.persist ? 'disabled' : _scope.restoring ? 'restoring' : !durable ? 'memory'
+		: _scope.unreadableRows || _scope.failedWrites || _scope.checkpointUnknown ? 'degraded' : 'ready';
+	return { status, unreadableRows: _scope.unreadableRows, failedWrites: _scope.failedWrites };
+}
+
+/** Read keys independently so an unreadable value cannot hide an occupied seq. */
+async function _readQueueRows(scope, prefix) {
+	const store = scope.store;
+	if (typeof store.keys !== 'function' || typeof store.get !== 'function') return _rowsOf(await store.getAll(prefix));
+	const keys = await store.keys(prefix);
+	if (!Array.isArray(keys) || keys.some(key => typeof key !== 'string')) throw new Error('offline store keys must return a string array');
+	const rows = [];
+	for (let i = 0; i < keys.length; i += 10) {
+		if (scope !== _scope) return [];
+		const chunk = await Promise.all(keys.slice(i, i + 10).filter(key => _seqOfRowKey(key, prefix) > 0).map(async key => {
+			try { return { key, value: await store.get(key) }; }
+			catch {
+				scope.unreadableRows++;
+				scope.batch.failedSeq = Math.min(scope.batch.failedSeq, _seqOfRowKey(key, prefix));
+				scope.batch.clean = false;
+				scope.checkpointDirty = true;
+				return { key, value: undefined };
+			}
+		}));
+		rows.push(...chunk);
+	}
+	return rows;
+}
+
 /**
  * @internal Switch queues when storage or identity changes. Previously stored
  * rows remain in their own scope; callers still waiting there are rejected.
@@ -289,7 +322,7 @@ async function _rehydrate(scope) {
 			if (pendingWrites.length) await Promise.all(pendingWrites);
 			if (scope !== _scope) return;
 		}
-		const rows = _rowsOf(await scope.store.getAll(prefix));
+		const rows = await _readQueueRows(scope, prefix);
 		if (scope !== _scope) return;
 		/** @type {any[]} */
 		const restored = [];
@@ -447,7 +480,7 @@ function _stamp(entry, scope = _scope) {
 	};
 	const key = _entryKey(entry.seq, scope);
 	return _write(store, key, () => store.put(key, value))
-		.then(() => durable, () => false);
+		.then(() => durable, () => { scope.failedWrites++; return false; });
 }
 
 /**
