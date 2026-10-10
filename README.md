@@ -2097,7 +2097,7 @@ Unknown text, batch, binary, and upload paths return the same generic denial as 
 realtime({ maskNotFound: false });
 ```
 
-The opt-out returns `NOT_FOUND` and lets callers distinguish missing paths from guarded endpoints. Custom `LiveError` guard messages and middleware responses remain application-controlled; keep them generic if path existence is private. Server metrics still record `NOT_FOUND`, and dev-mode unknown-path warnings remain available.
+The opt-out returns `NOT_FOUND` and lets callers distinguish missing paths from guarded endpoints. Custom `LiveError` guard messages and middleware responses remain application-controlled; keep them generic if path existence is private. Masking covers response contents, not guard timing. Server metrics still record `NOT_FOUND`, and dev-mode unknown-path warnings remain available for all four transports. Each socket may have four uploads awaiting authorization, independently of private handler limits; excess starts receive `TOO_MANY_UPLOADS`. Cancelling frees buffered bytes immediately, while an unfinished guard holds its admission slot until it settles.
 
 ### `live.scoped(predicate, fn)`
 

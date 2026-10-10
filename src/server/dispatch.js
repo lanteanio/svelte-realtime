@@ -369,9 +369,20 @@ export async function _runGuard(guardFn, ctx) {
  * records NOT_FOUND either way; only the wire reply masks.
  *
  * @param {any} ws
+ * @param {string} path
  * @returns {{ ok: false, code: string, error: string }}
  */
-export function _unknownPathReply(ws) {
+export function _unknownPathReply(ws, path) {
+	if (_IS_DEV) {
+		console.warn(formatDiagnostic({
+			source: 'svelte-realtime',
+			component: 'server.rpc',
+			event: 'rpc.path.not-found',
+			severity: 'warn',
+			message: 'An RPC call did not match a registered live function.',
+			attributes: { path, help: 'https://svti.me/rpc' }
+		}));
+	}
 	if (state.maskNotFound) {
 		const user = typeof ws?.getUserData === 'function' ? ws.getUserData() : null;
 		// Authenticated-identity semantics (not user-non-null): anonymous
@@ -1177,21 +1188,11 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 	const args = rawArgs || [];
 	const fn = await _resolveRegistryEntry(path);
 	if (!fn) {
-		if (_IS_DEV) {
-			console.warn(formatDiagnostic({
-				source: 'svelte-realtime',
-				component: 'server.rpc',
-				event: 'rpc.path.not-found',
-				severity: 'warn',
-				message: 'An RPC call did not match a registered live function.',
-				attributes: { path, help: 'https://svti.me/rpc' }
-			}));
-		}
 		// Fold the unregistered (client-controlled) path to a bounded label - an
 		// unauthenticated caller must not be able to allocate a metric series per
 		// distinct unknown path. See metrics.js for the length backstop.
 		_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
-		return { id, ..._unknownPathReply(ws) };
+		return { id, ..._unknownPathReply(ws, path) };
 	}
 
 	const _h = _getCtxHelpers(platform);
@@ -1336,7 +1337,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 		// unauthenticated caller must not be able to allocate a metric series per
 		// distinct unknown path. See metrics.js for the length backstop.
 		_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
-		_respond(ws, platform, id, _unknownPathReply(ws), requestId);
+		_respond(ws, platform, id, _unknownPathReply(ws, path), requestId);
 		return;
 	}
 

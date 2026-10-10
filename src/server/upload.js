@@ -77,6 +77,10 @@ const _UPLOAD_FLAG_RESERVED_MASK = 0xFC;
 // Once the handler is resolved, per-handler caps in __uploadOptions take over.
 const _UPLOAD_PENDING_MAX_CHUNKS = 64;
 const _UPLOAD_PENDING_MAX_SIZE = 16 * 1024 * 1024;
+// Admission before route lookup cannot depend on private handler options.
+const _UPLOAD_PENDING_MAX_PER_SESSION = 4;
+/** @type {WeakMap<object, number>} */
+const _pendingUploadStarts = new WeakMap();
 
 /**
  * Per-WS upload registry. WeakMap so connections that GC before close()
@@ -324,6 +328,14 @@ function _releasePendingUploadBytes(upload) {
 	upload._pendingAggBytes = 0;
 }
 
+function _releasePendingUploadStart(ws, upload) {
+	if (!upload._pendingStart) return;
+	upload._pendingStart = false;
+	const remaining = (_pendingUploadStarts.get(ws) || 0) - 1;
+	// A zero entry is weakly held and avoids allocating a map slot per upload.
+	_pendingUploadStarts.set(ws, remaining);
+}
+
 /**
  * Remove an upload from the registry and decrement the global counter.
  * Idempotent.
@@ -351,6 +363,7 @@ function _createUploadEntry(ws, perWs, streamId, platform) {
 	const upload = {
 		streamId,
 		phase: 'pending',
+		_pendingStart: true,
 		pendingChunks: [],
 		expectedSeq: 0,
 		bytesReceived: 0,
@@ -415,6 +428,13 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 			});
 			return;
 		}
+		const pendingStarts = _pendingUploadStarts.get(ws) || 0;
+		if (pendingStarts >= _UPLOAD_PENDING_MAX_PER_SESSION) {
+			_respondUpload(ws, platform, streamId, {
+				ok: false, code: 'TOO_MANY_UPLOADS', error: 'too many uploads awaiting authorization on this session'
+			});
+			return;
+		}
 		// Aggregate pre-handler-resolution memory cap. Reject chunk-0
 		// BEFORE allocating the pending entry so the registry does not
 		// even hold a record of the rejected upload. Worst-case attack
@@ -440,6 +460,7 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 		state.pendingUploadBytes += initialBytes;
 		perWs.set(streamId, upload);
 		_totalActiveUploads++;
+		_pendingUploadStarts.set(ws, pendingStarts + 1);
 
 		_startUpload(ws, perWs, streamId, upload, argsHeader, platform, options);
 		return;
@@ -616,7 +637,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			// Unregistered, client-controlled path (from the upload chunk-0 args
 			// header): fold to a bounded label, mirroring the RPC NOT_FOUND sites.
 			_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
-			const reply = _unknownPathReply(ws);
+			const reply = _unknownPathReply(ws, path);
 			upload.fail(reply.code, reply.error);
 			return;
 		}
@@ -653,6 +674,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 
 			upload.options = uploadOptions;
 			upload.phase = 'running';
+			_releasePendingUploadStart(ws, upload);
 			_releasePendingUploadBytes(upload);
 			const drained = upload.pendingChunks;
 			upload.pendingChunks = null;
@@ -714,6 +736,10 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			try { upload.ctrl.abort(err instanceof Error ? err : new Error(String(err))); } catch {}
 		}
 	} finally {
+		// Cancellation releases payload bytes immediately, but a still-running
+		// guard keeps its admission slot until it settles, preventing cancel/retry
+		// loops from starting unbounded asynchronous authorization work.
+		_releasePendingUploadStart(ws, upload);
 		_exitInFlight();
 		_cleanupUpload(ws, perWs, streamId, upload);
 	}

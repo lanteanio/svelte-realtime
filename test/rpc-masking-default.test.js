@@ -8,16 +8,16 @@ beforeEach(async () => {
  server = await import('../src/server.js');
  vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); });
 
-function frame(kind, path, payloadSize = 0) {
+function frame(kind, path, payloadSize = 0, streamId = 1) {
  const request = { rpc: path, id: 'request', args: [] };
  if (kind === 'text' || kind === 'batch') return new TextEncoder().encode(JSON.stringify(kind === 'batch' ? { batch: [request] } : request)).buffer;
  const header = new TextEncoder().encode(JSON.stringify(request));
  const start = kind === 'upload' ? 12 : 3;
  const data = new Uint8Array(start + header.length + payloadSize);
  const view = new DataView(data.buffer);
- if (kind === 'upload') { data[0] = 1; data[1] = 3; view.setUint32(2, 1); view.setUint16(10, header.length); }
+ if (kind === 'upload') { data[0] = 1; data[1] = 3; view.setUint32(2, streamId); view.setUint16(10, header.length); }
  else view.setUint16(1, header.length);
  data.set(header, start);
  return data.buffer;
@@ -35,6 +35,16 @@ function deny() {
  server.__register('sealed/plain', server.live(async () => 'never'));
  server.__register('sealed/binary', server.live.binary(async () => 'never', { maxSize: 1 }));
  server.__register('sealed/upload', server.live.upload(async () => 'never', { maxSize: 1 }));
+}
+for (const kind of ['text', 'batch', 'binary', 'upload']) {
+ for (const mode of ['development', 'production']) it(`${kind} keeps masked path diagnostics in ${mode}`, async () => {
+  vi.stubEnv('NODE_ENV', mode); vi.resetModules();
+  server = await import('../src/server.js');
+  expect(await reply(kind, 'sealed/missing', null)).toEqual({ ok: false, code: 'UNAUTHENTICATED', error: 'Authentication required' });
+  const warnings = console.warn.mock.calls.filter(args => String(args[0]).includes('rpc.path.not-found'));
+  expect(warnings).toHaveLength(mode === 'development' ? 1 : 0);
+  if (mode === 'development') expect(warnings[0][0]).toContain('sealed/missing');
+ });
 }
 for (const kind of ['text', 'batch', 'binary', 'upload']) {
  for (const [label, user, code, error] of [
@@ -85,6 +95,36 @@ it('closing during an upload guard releases pending byte capacity immediately', 
   expect(state.pendingUploadBytes).toBe(0);
  } finally { release(); }
  await new Promise(resolve => setTimeout(resolve, 10));
+ expect(handler).not.toHaveBeenCalled();
+ expect(state.pendingUploadBytes).toBe(0);
+});
+
+it('bounds pending upload authorization per socket independently of handler limits and cancellation', async () => {
+ let release;
+ const held = new Promise(resolve => { release = resolve; });
+ const guard = vi.fn(async () => { await held; throw new server.LiveError('FORBIDDEN', 'Access denied'); });
+ const handler = vi.fn(async () => 'never');
+ server.__registerGuard('sealed', server.guard(guard));
+ server.__register('sealed/upload', server.live.upload(handler, { maxConcurrentPerSession: 100 }));
+ const ws = mockWs({}); const other = mockWs({}); const platform = mockPlatform();
+ const { state } = await import('../src/server/state.js');
+ try {
+  for (let id = 1; id <= 20; id++) server.handleRpc(ws, frame('upload', 'sealed/upload', 8, id), platform);
+  server.handleRpc(other, frame('upload', 'sealed/upload', 8), platform);
+  await vi.waitFor(() => expect(guard).toHaveBeenCalledTimes(5));
+  expect(platform.sent.filter(entry => entry.data.code === 'TOO_MANY_UPLOADS')).toHaveLength(16);
+  expect(state.pendingUploadBytes).toBe(40);
+  const cancel = new Uint8Array(6); cancel[0] = 2; cancel[1] = 0x10; new DataView(cancel.buffer).setUint32(2, 1);
+  server.handleRpc(ws, cancel.buffer, platform);
+  expect(state.pendingUploadBytes).toBe(32);
+  server.handleRpc(ws, frame('upload', 'sealed/upload', 8, 21), platform);
+  expect(platform.sent.at(-1).data.code).toBe('TOO_MANY_UPLOADS');
+  expect(guard).toHaveBeenCalledTimes(5);
+ } finally { release(); }
+ await vi.waitFor(() => expect(state.pendingUploadBytes).toBe(0));
+ server.handleRpc(ws, frame('upload', 'sealed/upload', 8, 22), platform);
+ await vi.waitFor(() => expect(guard).toHaveBeenCalledTimes(6));
+ await vi.waitFor(() => expect(platform.sent.at(-1).data.code).toBe('FORBIDDEN'));
  expect(handler).not.toHaveBeenCalled();
  expect(state.pendingUploadBytes).toBe(0);
 });

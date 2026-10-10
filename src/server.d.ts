@@ -4009,7 +4009,7 @@ export function guard(
  * - `CONFLICT` - a request with the same idempotency key is already
  *   in flight (multi-instance store only).
  * - `SERVICE_UNAVAILABLE` - circuit breaker open.
- * - `NOT_FOUND` - live function not registered at the requested path,
+ * - `NOT_FOUND` - live function not registered (`maskNotFound: false`),
  *   or `live.push({ userId })` cannot find an active connection.
  * - `TIMEOUT` - `live.push` did not receive a reply within `timeoutMs`.
  * - `INVALID_REQUEST` - malformed envelope or args.
@@ -4769,6 +4769,10 @@ export interface RealtimeConfig {
 	 * Explicit false restores NOT_FOUND replies for apps that require them;
 	 * it permits callers to distinguish missing paths from guarded endpoints.
 	 * Custom guard errors and middleware responses remain application-controlled.
+	 * Masking covers response contents, not guard timing. Four uploads per socket
+	 * may await authorization; excess starts return TOO_MANY_UPLOADS independently
+	 * of private handler limits. Cancellation releases bytes immediately, but an
+	 * unfinished guard retains its admission slot until it settles.
 	 * Server metrics still record NOT_FOUND and dev warnings remain visible.
 	 * @default true
 	 */
