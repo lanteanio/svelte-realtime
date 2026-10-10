@@ -10,6 +10,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- A tag-only release workflow verifies source identity and the complete test contract before passing one hashed tarball to protected npm trusted publication. Local publication runs the check chain first.
+
 - Generated README topic and package-export indexes cover every public section and import. Release history ships with the package, and source-link fragments are checked against the matching Git tree.
 
 - An offline release ledger records every published artifact and checks changelog identities, unpublished markers, and immutable history.

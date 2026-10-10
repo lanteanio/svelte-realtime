@@ -1,5 +1,48 @@
 # Recording releases
 
+## Trusted publication workflow
+
+The tag-only `.github/workflows/release.yml` publishes an annotated
+`svelte-realtime@<version>` tag from the correct source lineage: prereleases
+from `dev` to `next`, stable releases from `main` to `latest`. The identity gate
+binds package name, canonical version, tag object, event revision, checkout and
+repository URL. A dirty checkout or unrelated source lineage fails closed.
+
+Before enabling publication, configure the npm trusted publisher for
+`lanteanio/svelte-realtime`, workflow `release.yml`, environment `npm-release`.
+Protect that environment with required reviewers and restrict its deployment
+tags to `svelte-realtime@*`. Protect the source branches and release tags against
+unreviewed changes and tag replacement. These account settings require separate
+verification; checked-in workflow tests do not prove they are configured.
+There is no token fallback and no manual-dispatch publication path.
+
+The `verify` job has only `contents: read`. It installs locked root and fixture
+dependencies, Chromium, and checks Docker before `npm run verify:release` runs
+the unit, simulation, DevTools, scaffold, browser, chaos, lifecycle, smooth-stack
+and smoke checks. `prepublishOnly` runs the full check chain, and source identity
+is checked again afterward so test or lifecycle mutations cannot enter the pack.
+The job packs one
+retained tarball and exports its SHA-256 digest separately from the artifact.
+
+The protected `publish` job alone has `id-token: write`. It installs no project
+dependencies, runs no repository scripts, compares the downloaded tarball with
+the verification digest, and publishes those exact bytes with npm provenance,
+`--ignore-scripts`, and the quarantine tag `candidate`. Pinned Node, npm and
+full-commit action references are part of the checked contract.
+
+The workflow never routes a candidate to `next` or `latest`. After publication,
+verify the exact npm version, integrity and source attestation; test the packed
+consumer and record publication in the ledger. A maintainer then authorizes a
+separate dist-tag promotion. Failed candidates remain recorded and quarantined.
+Publication, tag creation, public routing and registry rollback each require
+the maintainer's authorization.
+
+`scripts/check-release-workflow.js` closes the workflow's job, step, permission,
+command and npm-script inventories. Intentional script changes update that
+guard in the same change, alongside the generated verification inventory.
+
+## Artifact records
+
 The [release manifest](release-manifest.md) is the artifact ledger. Its three
 append-only tables follow the adapter's candidate, publication and routing
 format. The [changelog](https://github.com/lanteanio/svelte-realtime/blob/dev/CHANGELOG.md) describes behavior and must have one

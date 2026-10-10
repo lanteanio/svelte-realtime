@@ -18,7 +18,8 @@
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
-      "node scripts/check-release-ledger.js"
+      "node scripts/check-release-ledger.js",
+      "node scripts/check-release-workflow.js"
     ],
     "check:documentation": [
       "node scripts/check-documentation-contract.js"
@@ -63,6 +64,26 @@
     "generate:verification": [
       "node scripts/check-verification-inventory.js --write"
     ],
+    "prepublishOnly": [
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-types.js",
+      "node scripts/check-diagnostic-attribution.js",
+      "node scripts/check-publish-routing.js",
+      "node scripts/check-determinism.js",
+      "node scripts/check-slugs.js",
+      "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+      "node scripts/check-scaffold-build.js",
+      "node scripts/check-formatting.js",
+      "publint",
+      "attw --pack . --profile esm-only",
+      "node scripts/check-verification-inventory.js",
+      "node scripts/check-links.js",
+      "node scripts/check-doc-code.js",
+      "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js",
+      "node scripts/check-release-workflow.js"
+    ],
     "pretest": [
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
@@ -80,7 +101,8 @@
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
-      "node scripts/check-release-ledger.js"
+      "node scripts/check-release-ledger.js",
+      "node scripts/check-release-workflow.js"
     ],
     "sim:golden": [
       "node scripts/sim-golden.js"
@@ -106,6 +128,7 @@
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
+      "node scripts/check-release-workflow.js",
       "vitest run"
     ],
     "test:chaos": [
@@ -174,7 +197,8 @@
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
-      "node scripts/check-release-ledger.js"
+      "node scripts/check-release-ledger.js",
+      "node scripts/check-release-workflow.js"
     ],
     "verify:full": [
       "node scripts/generate-error-reference.js --check",
@@ -194,6 +218,7 @@
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
+      "node scripts/check-release-workflow.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -220,11 +245,42 @@
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
+      "node scripts/check-release-workflow.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
       "vitest run --config vitest.devtools.config.js",
       "vitest run --config vitest.scaffold.config.js"
+    ],
+    "verify:release": [
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-types.js",
+      "node scripts/check-diagnostic-attribution.js",
+      "node scripts/check-publish-routing.js",
+      "node scripts/check-determinism.js",
+      "node scripts/check-slugs.js",
+      "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+      "node scripts/check-scaffold-build.js",
+      "node scripts/check-formatting.js",
+      "publint",
+      "attw --pack . --profile esm-only",
+      "node scripts/check-verification-inventory.js",
+      "node scripts/check-links.js",
+      "node scripts/check-doc-code.js",
+      "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js",
+      "node scripts/check-release-workflow.js",
+      "vitest run",
+      "node scripts/sim-golden.js",
+      "node test/fuzz-wire.mjs",
+      "vitest run --config vitest.devtools.config.js",
+      "vitest run --config vitest.scaffold.config.js",
+      "playwright test --config test/e2e/playwright.config.js",
+      "playwright test --config test/chaos/playwright.config.js",
+      "node scripts/check-production-lifecycle.js",
+      "node scripts/check-smooth-stack.js",
+      "node scripts/smoke.js"
     ],
     "verify:scaffold": [
       "vitest run --config vitest.scaffold.config.js"
@@ -251,6 +307,7 @@
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
+      "node scripts/check-release-workflow.js",
       "vitest run"
     ]
   },
@@ -344,6 +401,168 @@
       ]
     },
     {
+      "workflow": "release.yml",
+      "job": "verify",
+      "step": "Install pinned npm",
+      "commands": [
+        "npm install --global npm@11.8.0"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "verify",
+      "step": "Install locked root dependencies",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "verify",
+      "step": "Verify tag, package, and source identity",
+      "commands": [
+        "node scripts/prepare-release.js"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "verify",
+      "step": "Install Chromium",
+      "commands": [
+        "npm exec -- playwright install --with-deps chromium"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "verify",
+      "step": "Verify Docker daemon",
+      "commands": [
+        "docker info"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "verify",
+      "step": "Run the complete release verification contract",
+      "commands": [
+        "node scripts/generate-error-reference.js --check",
+        "node scripts/generate-onboarding-reference.js",
+        "node scripts/check-types.js",
+        "node scripts/check-diagnostic-attribution.js",
+        "node scripts/check-publish-routing.js",
+        "node scripts/check-determinism.js",
+        "node scripts/check-slugs.js",
+        "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+        "node scripts/check-scaffold-build.js",
+        "node scripts/check-formatting.js",
+        "publint",
+        "attw --pack . --profile esm-only",
+        "node scripts/check-verification-inventory.js",
+        "node scripts/check-links.js",
+        "node scripts/check-doc-code.js",
+        "node scripts/check-documentation-contract.js",
+        "node scripts/check-release-ledger.js",
+        "node scripts/check-release-workflow.js",
+        "vitest run",
+        "node scripts/sim-golden.js",
+        "node test/fuzz-wire.mjs",
+        "vitest run --config vitest.devtools.config.js",
+        "vitest run --config vitest.scaffold.config.js",
+        "playwright test --config test/e2e/playwright.config.js",
+        "playwright test --config test/chaos/playwright.config.js",
+        "node scripts/check-production-lifecycle.js",
+        "node scripts/check-smooth-stack.js",
+        "node scripts/smoke.js"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "verify",
+      "step": "Run the publication lifecycle gate",
+      "commands": [
+        "node scripts/generate-error-reference.js --check",
+        "node scripts/generate-onboarding-reference.js",
+        "node scripts/check-types.js",
+        "node scripts/check-diagnostic-attribution.js",
+        "node scripts/check-publish-routing.js",
+        "node scripts/check-determinism.js",
+        "node scripts/check-slugs.js",
+        "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+        "node scripts/check-scaffold-build.js",
+        "node scripts/check-formatting.js",
+        "publint",
+        "attw --pack . --profile esm-only",
+        "node scripts/check-verification-inventory.js",
+        "node scripts/check-links.js",
+        "node scripts/check-doc-code.js",
+        "node scripts/check-documentation-contract.js",
+        "node scripts/check-release-ledger.js",
+        "node scripts/check-release-workflow.js"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "verify",
+      "step": "Verify retained source identity",
+      "commands": [
+        "node scripts/prepare-release.js"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "verify",
+      "step": "Pack retained artifact",
+      "commands": [
+        "$ErrorActionPreference = 'Stop'",
+        "New-Item -ItemType Directory -Force release-artifacts | Out-Null",
+        "$packJson = npm pack --json --pack-destination release-artifacts",
+        "if ($LASTEXITCODE -ne 0) { throw 'npm pack failed' }",
+        "$records = @($packJson | ConvertFrom-Json)",
+        "if ($records.Count -ne 1) { throw 'npm pack did not return exactly one artifact' }",
+        "$filename = [IO.Path]::GetFileName([string]$records[0].filename)",
+        "if ($filename -notmatch '^[a-z0-9._-]+\\.tgz$') { throw 'npm pack returned an unsafe artifact name' }",
+        "$tarball = 'release-artifacts/' + $filename",
+        "if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'retained tarball is missing' }",
+        "$sha256 = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLowerInvariant()",
+        "'tarball=' + $tarball >> $env:GITHUB_OUTPUT",
+        "'filename=' + $filename >> $env:GITHUB_OUTPUT",
+        "'sha256=' + $sha256 >> $env:GITHUB_OUTPUT"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "publish",
+      "step": "Install OIDC-capable npm",
+      "commands": [
+        "npm install --global npm@11.8.0"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "publish",
+      "step": "Refuse to publish anything but the verified bytes",
+      "commands": [
+        "$ErrorActionPreference = 'Stop'",
+        "$expected = '${{ needs.verify.outputs.sha256 }}'",
+        "if ($expected -notmatch '^[0-9a-f]{64}$') { throw 'the verify job produced no usable digest' }",
+        "$filename = '${{ needs.verify.outputs.filename }}'",
+        "if ($filename -notmatch '^[a-z0-9._-]+\\.tgz$') { throw 'refusing an unsafe artifact name' }",
+        "$tarball = 'release-artifacts/' + $filename",
+        "if (-not (Test-Path -LiteralPath $tarball -PathType Leaf)) { throw 'downloaded tarball is missing' }",
+        "$actual = (Get-FileHash -LiteralPath $tarball -Algorithm SHA256).Hash.ToLowerInvariant()",
+        "if ($actual -ne $expected) { throw 'downloaded tarball is not the verified artifact' }",
+        "'verified digest ' + $actual"
+      ]
+    },
+    {
+      "workflow": "release.yml",
+      "job": "publish",
+      "step": "Publish exact tarball to quarantine with trusted OIDC",
+      "commands": [
+        "npm publish \"release-artifacts/${{ needs.verify.outputs.filename }}\" --tag candidate --provenance --ignore-scripts"
+      ]
+    },
+    {
       "workflow": "verify.yml",
       "job": "verify",
       "step": "3",
@@ -381,6 +600,7 @@
         "node scripts/check-doc-code.js",
         "node scripts/check-documentation-contract.js",
         "node scripts/check-release-ledger.js",
+        "node scripts/check-release-workflow.js",
         "vitest run",
         "node scripts/sim-golden.js",
         "node test/fuzz-wire.mjs",
@@ -423,13 +643,8 @@
   ],
   "notFullyHosted": [
     "check:links:external",
-    "test:chaos",
-    "test:e2e",
     "test:examples",
     "test:watch",
-    "verify:browser",
-    "verify:chaos",
-    "verify:docs",
-    "verify:full"
+    "verify:docs"
   ]
 }
