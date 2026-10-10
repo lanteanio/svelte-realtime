@@ -52,12 +52,68 @@ export function _validTenantId(id) {
 	return id;
 }
 
+/** @param {string} message @returns {never} */
+function _invalidTenantConfig(message) {
+	throw new LiveError('VALIDATION', 'live.tenant(id, config): ' + message);
+}
+
+/** Validate data fields without invoking accessors. This runs only on registration.
+ * @param {unknown} value
+ * @param {string} path
+ * @param {string[]} allowed
+ * @returns {Record<string, PropertyDescriptor>}
+ */
+function _tenantConfigFields(value, path, allowed) {
+	if (value === null || typeof value !== 'object' || Array.isArray(value)) _invalidTenantConfig(path + ' must be a plain object.');
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) _invalidTenantConfig(path + ' must be a plain object.');
+	const fields = Object.getOwnPropertyDescriptors(value);
+	for (const key of Reflect.ownKeys(fields)) {
+		if (path === 'config' && key === 'quota') _invalidTenantConfig('quota is not supported. Tenant scoping does not install budget enforcement; configure admission in the owning adapter or application.');
+		if (typeof key !== 'string' || !allowed.includes(key)) _invalidTenantConfig(path + ' has an unknown field: ' + String(key) + '.');
+		if (!('value' in fields[key])) _invalidTenantConfig(path + '.' + key + ' must be a data field, not an accessor.');
+	}
+	return fields;
+}
+
+/** Validate and snapshot the public metadata carrier. No budget is enforced here.
+ * @param {unknown} config
+ * @returns {import('../server.js').TenantConfig}
+ */
+export function _validateTenantConfig(config) {
+	const fields = _tenantConfigFields(config, 'config', ['metadata']);
+	if (fields.metadata?.value === undefined) return Object.freeze({});
+	const values = _tenantConfigFields(fields.metadata.value, 'config.metadata', ['entitlement', 'caps']);
+	/** @type {{entitlement?: string, caps?: import('../server.js').TenantCaps}} */
+	const metadata = {};
+	const entitlement = values.entitlement?.value;
+	if (entitlement !== undefined) {
+		if (typeof entitlement !== 'string' || entitlement.length > 64 || !_VALID_TENANT_ID.test(entitlement)) _invalidTenantConfig('config.metadata.entitlement must be a non-empty [a-zA-Z0-9_-] label of at most 64 chars.');
+		metadata.entitlement = entitlement;
+	}
+	if (values.caps?.value !== undefined) {
+		const limits = _tenantConfigFields(values.caps.value, 'config.metadata.caps', ['windowMs', 'actions', 'bytes', 'recipientDeliveries', 'storedBytes']);
+		const windowMs = limits.windowMs?.value;
+		if (!Number.isSafeInteger(windowMs) || windowMs <= 0) _invalidTenantConfig('config.metadata.caps.windowMs must be a positive safe integer.');
+		/** @type {{windowMs: number, actions?: number, bytes?: number, recipientDeliveries?: number, storedBytes?: number}} */
+		const caps = { windowMs };
+		for (const key of /** @type {const} */ (['actions', 'bytes', 'recipientDeliveries', 'storedBytes'])) {
+			const value = limits[key]?.value;
+			if (value === undefined) continue;
+			if (!Number.isSafeInteger(value) || value < 0) _invalidTenantConfig('config.metadata.caps.' + key + ' must be a non-negative safe integer.');
+			caps[key] = value;
+		}
+		metadata.caps = Object.freeze(caps);
+	}
+	return Object.freeze({ metadata: Object.freeze(metadata) });
+}
+
 /**
  * Global tenant-config registry (tenant id -> config object), populated by
  * `live.tenant(id, config)`. This is application metadata; storing it does not
  * install budget enforcement or configure an adapter or extension. Applications
  * can read the same registered value through the tenant handle.
- * @type {Map<string, any>}
+ * @type {Map<string, import('../server.js').TenantConfig>}
  * @internal
  */
 export const _tenantConfigRegistry = new Map();

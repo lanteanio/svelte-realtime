@@ -5,7 +5,23 @@ import { resolve } from 'node:path';
 it('accepts typed server options and rejects invalid values', () => {
 	const file = resolve(import.meta.dirname, 'smooth-config-consumer.ts').replaceAll('\\', '/');
 	const source = `
-import { configureForget, introspect, live, type SmoothConfig } from '../src/server.js';
+import { configureForget, introspect, live, type SmoothConfig, type TenantConfig } from '../src/server.js';
+const tenantConfig: TenantConfig = { metadata: { entitlement: 'pro', caps: { windowMs: 1000, actions: 1, bytes: 2048, recipientDeliveries: 2, storedBytes: 4096 } } };
+const tenant = live.tenant('acme', tenantConfig);
+const registered: TenantConfig | null = tenant.config;
+void registered;
+// @ts-expect-error legacy quota has no enforcement consumer
+live.tenant('acme', { quota: { actions: 1 } });
+// @ts-expect-error unknown metadata fields are rejected
+live.tenant('acme', { metadata: { plan: 'pro' } });
+// @ts-expect-error cap windows are required
+live.tenant('acme', { metadata: { caps: { actions: 1 } } });
+// @ts-expect-error cap values are numeric
+live.tenant('acme', { metadata: { caps: { windowMs: 1000, bytes: '2048' } } });
+// @ts-expect-error the registry exposes readonly metadata
+if (tenant.config?.metadata?.caps) tenant.config.metadata.caps.actions = 2;
+// @ts-expect-error handles expose a getter, not a writable config slot
+tenant.config = {};
 const publicHandler = live.public((ctx, label: string, count: number): string => {
   ctx.signal('reader', 'status', { label });
   return label.repeat(count);

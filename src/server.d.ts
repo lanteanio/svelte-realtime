@@ -125,6 +125,32 @@ export interface TenantScope {
 	publish(topic: string, event: string, data: any, options?: any): any;
 }
 
+/** Declared ceilings for an application's admission policy. Storing them installs no enforcer. */
+export interface TenantCaps {
+	/** Positive safe integer window in milliseconds for actions, bytes and recipientDeliveries. */
+	readonly windowMs: number;
+	/** Optional non-negative safe integer actions per window; zero declares no allowance. */
+	readonly actions?: number;
+	/** Optional non-negative safe integer payload bytes per window. */
+	readonly bytes?: number;
+	/** Optional non-negative safe integer recipient deliveries per window (fan-out counts each recipient). */
+	readonly recipientDeliveries?: number;
+	/** Optional non-negative safe integer retained bytes ceiling; independent of the window reset. */
+	readonly storedBytes?: number;
+}
+
+/** Unenforced policy metadata. Omitted caps declare no ceiling for that dimension. */
+export interface TenantMetadata {
+	/** Attribution label: 1-64 characters from [a-zA-Z0-9_-]. */
+	readonly entitlement?: string;
+	readonly caps?: TenantCaps;
+}
+
+/** Validated, copied and deeply frozen at registration; no adapter or extension consumes it automatically. */
+export interface TenantConfig {
+	readonly metadata?: TenantMetadata;
+}
+
 /**
  * Server-side handle returned by `live.tenant(id, config)`. For use OUTSIDE a
  * request handler; inside one prefer `ctx.tenant(id)`.
@@ -133,7 +159,7 @@ export interface TenantHandle {
 	/** The validated tenant id. */
 	id: string;
 	/** The registered application metadata, or `null`; no automatic quota enforcement. */
-	config: any;
+	readonly config: TenantConfig | null;
 	/** Publish into this tenant's scope using the active server platform. */
 	publish(topic: string, event: string, data: any, options?: any): any;
 }
@@ -2983,7 +3009,7 @@ export namespace live {
 	 * acme.publish('maintenance', 'scheduled', { at: '02:00' });
 	 * ```
 	 */
-	function tenant(id: string, config?: Record<string, any>): TenantHandle;
+	function tenant(id: string, config?: TenantConfig): TenantHandle;
 
 	/**
 	 * Declarative access control helpers for subscribe-time gating.

@@ -51,6 +51,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Changed
 
+- **Tenant policy metadata is typed and validated.** `live.tenant(id, config)` snapshots an immutable `metadata` carrier with an entitlement label and declared action, byte, recipient-delivery, and retained-byte caps. No automatic enforcement is installed. **Action:** replace arbitrary config fields and `null` with the documented `TenantConfig` shape; configure enforcement explicitly in its owning application or adapter.
+
 - **Breaking:** `live.tenant` rejects the unsupported `quota` option instead of retaining an unenforced limit. **Action required:** remove that option and configure actual admission limits in the owning adapter, extension or application. Tenant configuration carries metadata and does not automatically install enforcement.
 
 - **Breaking:** Unknown RPC paths use generic authorization denials by default across text, batches, binary calls, and uploads. **Action required:** set `maskNotFound: false` only if clients require explicit missing-path replies; this permits path enumeration. All transports retain development diagnostics. Four uploads per socket may await authorization, independently of private handler limits; excess starts return `TOO_MANY_UPLOADS`.

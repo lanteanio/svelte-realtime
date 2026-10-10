@@ -2175,9 +2175,13 @@ export const broadcastToOrg = live(async (ctx, orgId, msg) => {
 
 // Outside a handler (a background job):
 import { live } from 'svelte-realtime/server';
-const acme = live.tenant('acme', { metadata: { entitlement: 'pro' } });
+const acme = live.tenant('acme', { metadata: { entitlement: 'pro', caps: { windowMs: 1000, actions: 100, bytes: 65536, recipientDeliveries: 1000, storedBytes: 1048576 } } });
 acme.publish('maintenance', 'scheduled', { at: '02:00' });
 ```
+
+`TenantConfig` accepts only optional `metadata`, with optional `entitlement` (a 1-64 character `[a-zA-Z0-9_-]` attribution label) and `caps`. When `caps` is present, `windowMs` must be a positive safe integer in milliseconds. Optional `actions`, `bytes` (payload bytes), and `recipientDeliveries` (each fan-out recipient counts) declare per-window ceilings; `storedBytes` declares retained bytes independently of the window reset. Every ceiling is a non-negative safe integer: zero declares no allowance, omission declares no ceiling. These are application policy metadata, not enforced limits: connect them explicitly to an admission implementation in your application or owning adapter/extensions configuration. No adapter or extension reads this registry automatically.
+
+Registration rejects unknown fields, invalid values, non-plain objects, and accessor properties with `LiveError('VALIDATION', ...)`; a rejected update keeps the previous config. It copies and deeply freezes accepted metadata, so mutate neither the input nor `handle.config` to update a policy: call `live.tenant(id, newConfig)` again. Omit `config` to retrieve the existing handle state; `{}` replaces it with empty metadata. `null` and the removed `quota` field are invalid.
 
 ### What is NOT auto-scoped (by design)
 

@@ -57,7 +57,7 @@ import {
 } from './server/state.js';
 import { _IS_DEV } from './server/env.js';
 import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge, _closeCursorPublishers } from './server/presence.js';
-import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope, _tenantTopic, _TENANT_TOPIC_NS, _isTenancyEnabled } from './server/tenant.js';
+import { _setTenantResolver, _resolveTenant, _validTenantId, _validateTenantConfig, _tenantConfigRegistry, _makeTenantScope, _tenantTopic, _TENANT_TOPIC_NS, _isTenancyEnabled } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
 import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _platformPublish, UNSEQUENCED } from './server/publish-helpers.js';
 import { _resetNoiseBlockCache } from './server/differential-privacy.js';
@@ -3137,18 +3137,12 @@ live.breaker = function breaker(options, fn) { return _breakerRegister(options, 
  *   scope using the active server platform.
  *
  * @param {string} id - tenant id ([a-zA-Z0-9_-], <= 64 chars)
- * @param {object} [config] - opt-in per-tenant config carrier (not enforced by the core)
- * @returns {{ id: string, config: any, publish: (topic: string, event: string, data: any, options?: any) => any }}
+ * @param {import('./server.js').TenantConfig} [config] - validated metadata snapshot; no automatic budget enforcement
+ * @returns {import('./server.js').TenantHandle}
  */
 live.tenant = function tenant(id, config) {
 	const tenantId = _validTenantId(id);
-	if (config !== undefined && config !== null) {
-		if (typeof config !== 'object' || Array.isArray(config)) {
-			throw new LiveError('VALIDATION', 'live.tenant(id, config): config must be a plain object containing application metadata.');
-		}
-		if ('quota' in config) throw new LiveError('VALIDATION', 'live.tenant(id, config): quota is not supported. Tenant scoping does not install budget enforcement; configure admission in the owning adapter or application.');
-		_tenantConfigRegistry.set(tenantId, config);
-	}
+	if (config !== undefined) _tenantConfigRegistry.set(tenantId, _validateTenantConfig(config));
 	return {
 		id: tenantId,
 		// Read live so a later re-declare with new config is reflected.
