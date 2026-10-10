@@ -124,6 +124,7 @@ it('fits a narrow viewport and remains reachable after movement and resize', asy
  await page.keyboard.press('End');
  await inside();
  await page.setViewportSize({ width: 250, height: 200 });
+ await page.waitForFunction(() => document.getElementById('svelte-realtime-devtools').getBoundingClientRect().bottom <= innerHeight);
  await inside();
  await move.click();
  await inside();
@@ -135,4 +136,29 @@ it('honors host theme tokens and keeps selected tabs identifiable in forced colo
  expect(await page.locator('#svelte-realtime-devtools').evaluate(el => getComputedStyle(el).backgroundColor)).toBe('rgb(20, 30, 40)');
  await page.emulateMedia({ forcedColors: 'active' });
  expect(await page.getByRole('tab', { name: 'rpcs', exact: true }).evaluate(el => getComputedStyle(el).textDecorationLine)).toContain('underline');
+});
+
+it('renders readable text and a high-contrast inset keyboard outline', async () => {
+ await streamsFixture();
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ await page.locator('[data-action="toggle-stream"]').click();
+ const pairs = await page.locator('#svelte-realtime-devtools').evaluate(root => {
+  return [...root.querySelectorAll('*')].filter(el => [...el.childNodes].some(n => n.nodeType === 3 && n.textContent.trim()) && el.getBoundingClientRect().height > 0).map(el => {
+   let bg = el;
+   while (bg && getComputedStyle(bg).backgroundColor === 'rgba(0, 0, 0, 0)') bg = bg.parentElement;
+   return [el.textContent, getComputedStyle(el).color, getComputedStyle(bg).backgroundColor];
+  });
+ });
+ const luminance = color => color.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => v / 255).map(v => v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4).reduce((sum, v, i) => sum + v * [0.2126, 0.7152, 0.0722][i], 0);
+ const contrast = (a, b) => (Math.max(luminance(a), luminance(b)) + 0.05) / (Math.min(luminance(a), luminance(b)) + 0.05);
+ for (const [text, foreground, background] of pairs) expect(contrast(foreground, background), text).toBeGreaterThanOrEqual(4.5);
+ await page.getByRole('tab', { name: 'streams', exact: true }).focus();
+ await page.keyboard.press('ArrowRight');
+ const focus = await page.getByRole('tab', { name: 'smooth', exact: true }).evaluate(el => {
+  const style = getComputedStyle(el);
+  return { width: style.outlineWidth, color: style.outlineColor, offset: style.outlineOffset, background: getComputedStyle(document.getElementById('svelte-realtime-devtools')).backgroundColor };
+ });
+ expect(focus.width).toBe('2px');
+ expect(focus.offset).toBe('-2px');
+ expect(contrast(focus.color, focus.background)).toBeGreaterThanOrEqual(3);
 });

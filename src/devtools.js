@@ -217,11 +217,14 @@ function init() {
    border: 1px solid var(--svr-dt-border, #7d859a); border-radius: 3px; cursor: pointer;
   }
   #svelte-realtime-devtools [aria-selected="true"] { font-weight: bold; text-decoration: underline; }
+  #svelte-realtime-devtools :focus-visible, #svr-dt-launcher:focus-visible {
+   outline: 2px solid var(--svr-dt-focus, #ffffff); outline-offset: -2px;
+  }
   @media (forced-colors: active) {
    #svelte-realtime-devtools, #svr-dt-launcher {
     --svr-dt-surface: Canvas; --svr-dt-raised: Canvas; --svr-dt-text: CanvasText;
     --svr-dt-muted: CanvasText; --svr-dt-border: ButtonText; --svr-dt-accent: LinkText;
-    --svr-dt-success: CanvasText; --svr-dt-warning: CanvasText; --svr-dt-error: CanvasText;
+    --svr-dt-focus: Highlight; --svr-dt-success: CanvasText; --svr-dt-warning: CanvasText; --svr-dt-error: CanvasText;
    }
    #svelte-realtime-devtools button { border: 1px solid ButtonText !important; }
   }
