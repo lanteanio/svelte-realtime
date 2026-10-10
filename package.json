@@ -122,7 +122,7 @@
   },
   "dependencies": {
     "@babel/parser": "^7.29.9",
-    "@clack/prompts": "^0.10.1"
+    "@clack/prompts": "^1.8.1"
   },
   "peerDependencies": {
     "@sveltejs/kit": "^2.0.0",

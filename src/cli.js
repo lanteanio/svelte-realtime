@@ -31,6 +31,7 @@ function bin(name) {
 }
 
 const DEMO_REPO = 'https://github.com/lanteanio/svelte-realtime-demo.git';
+const DEFAULT_PROJECT_NAME = 'my-app';
 
 // The scaffolded upgrade() hook is intentionally permissive so the first
 // `npm run dev` works without any identity wiring: every connection gets a
@@ -99,9 +100,10 @@ const name =
 	/** @type {string} */ (
 		await p.text({
 			message: 'Project name',
-			placeholder: 'my-app',
+			placeholder: DEFAULT_PROJECT_NAME,
+			defaultValue: DEFAULT_PROJECT_NAME,
 			validate(value) {
-				if (!value) return 'Required.';
+				value = value || DEFAULT_PROJECT_NAME;
 				if (!VALID_NAME_RE.test(value))
 					return 'Use only letters, numbers, hyphens, and underscores.';
 				if (existsSync(resolve(process.cwd(), value))) return `Directory "${value}" already exists.`;

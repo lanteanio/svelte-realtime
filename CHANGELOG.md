@@ -127,6 +127,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Generated counter examples announce connection, count and error changes, offer a connection retry, and handle failed increments with labelled keyboard controls.
 
+- CLI prompts use Clack 1.8 while preserving the displayed default project name, validation, cancellation, and template selection behavior.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
