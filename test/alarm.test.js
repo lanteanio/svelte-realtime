@@ -49,11 +49,11 @@ describe('live.alarm', () => {
 		expect(ctx.getAlarm()).toBeNull();
 	});
 
-	it('rejects a non-finite at', () => {
+	it('rejects a non-finite at', async () => {
 		const ctx = alarmCtx('room:bad', () => {});
-		expect(() => ctx.setAlarm(NaN)).toThrow(/finite/);
-		expect(() => ctx.setAlarm('soon')).toThrow(/finite/);
-		expect(() => ctx.setAlarm(Infinity)).toThrow(/finite/);
+		await expect(ctx.setAlarm(NaN)).rejects.toThrow(/finite/);
+		await expect(ctx.setAlarm('soon')).rejects.toThrow(/finite/);
+		await expect(ctx.setAlarm(Infinity)).rejects.toThrow(/finite/);
 	});
 
 	it('fires onAlarm at the scheduled time with no subscribers', async () => {

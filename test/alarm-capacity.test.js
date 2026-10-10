@@ -13,11 +13,13 @@ function context(topic) {
 beforeEach(() => {
 	_resetAlarms(); configureAlarm(null);
 	setRuntimeEnv({ clock: { wallEpoch: () => 1000 }, timers: { set: () => 0, clear: () => {}, setInterval: () => 0, clearInterval: () => {} } });
-	for (let index = 0; index < 100000; index++) context('alarm-cap:' + index).setAlarm(2000);
 });
 afterEach(() => { _resetAlarms(); configureAlarm(null); resetRuntimeEnv(); });
 
 describe('alarm registry capacity acknowledgements', () => {
+	beforeEach(() => {
+		for (let index = 0; index < 100000; index++) context('alarm-cap:' + index).setAlarm(2000);
+	});
 	it('rejects an in-memory refusal through the returned promise while allowing replacement and cancellation', async () => {
 		const refused = context('alarm-cap:overflow');
 		let failure;
@@ -48,4 +50,21 @@ describe('alarm registry capacity acknowledgements', () => {
 		await refused.setAlarm(3000); expect(refused.getAlarm()).toBe(3000);
 		expect(store.nextGeneration).toHaveBeenCalledOnce(); expect(store.set).toHaveBeenCalledOnce();
 	});
+});
+
+it.each(['memory', 'durable'])('rejects invalid deadlines through the %s mutation promise', async mode => {
+	const store = memoryAlarmStore();
+	store.nextGeneration = vi.fn(store.nextGeneration); store.set = vi.fn(store.set);
+	if (mode === 'durable') configureAlarm({ store });
+	const ctx = context('alarm-validation');
+	await ctx.setAlarm(2000);
+	store.nextGeneration.mockClear(); store.set.mockClear();
+	for (const at of [NaN, Infinity, -Infinity, '3000', undefined, null]) {
+		let failure;
+		expect(() => { failure = ctx.setAlarm(at).catch(error => error); }).not.toThrow();
+		expect(await failure).toBeInstanceOf(LiveError);
+		expect(await failure).toMatchObject({ code: 'VALIDATION' });
+		expect(ctx.getAlarm()).toBe(2000);
+	}
+	expect(store.nextGeneration).not.toHaveBeenCalled(); expect(store.set).not.toHaveBeenCalled();
 });

@@ -220,7 +220,7 @@ function _armAlarm(wireTopic, at, onAlarm, meta, misfireMs, store, generation) {
 
 function _setAlarm(wireTopic, at, onAlarm, meta = null, misfireMs = undefined) {
 	if (typeof at !== 'number' || !Number.isFinite(at)) {
-		throw new LiveError('VALIDATION', '[svelte-realtime] ctx.setAlarm(at): at must be a finite epoch-ms number');
+		return Promise.reject(new LiveError('VALIDATION', '[svelte-realtime] ctx.setAlarm(at): at must be a finite epoch-ms number'));
 	}
 	const store = _alarmStore;
 	if (!store) {
