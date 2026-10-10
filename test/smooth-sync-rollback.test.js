@@ -286,4 +286,16 @@ describe('failed smooth sync against the installed adapter', () => {
 		expect(relayLeave).toHaveBeenCalledTimes(1);
 	});
 
+	it('packs each visible state once before accepting a single-instance sync', async () => {
+		let calls = 0;
+		const name = shape({ x: 0, y: 0 }, { wire: { state: {
+			pack(state) { if (++calls > 1) throw Error('duplicate packing'); return state; }, unpack: state => state
+		} } });
+		const peer = await connect();
+		const result = await rpc(peer, name + '/sync');
+		expect(result.ok).toBe(true);
+		expect(result.data.states).toHaveLength(1);
+		expect(calls).toBe(1);
+	});
+
 });

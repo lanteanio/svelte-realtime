@@ -3172,7 +3172,7 @@ export const _smoothRegister = function smooth(config) {
 				// Interest on (either mode): scope the join snapshot to the joiner's
 				// area of interest (the roster fanout is O(n^2) if every joiner gets
 				// the whole board). Broadcast path: the full catalog, unchanged.
-				states: _smoothSyncRoster(rec, key),
+				states,
 				...(rec.lagComp !== null && { lc: 1 }),
 				...(rec.cells && { cells: 1 })
 			};
