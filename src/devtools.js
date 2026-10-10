@@ -2,7 +2,7 @@
 // DevTools overlay for svelte-realtime (dev-mode only)
 // Injected by the Vite plugin via transformIndexHtml
 
-import { now, setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from './client-runtime.js';
+import { now, monotonicNow, setTimer, clearTimer, setIntervalTimer, clearIntervalTimer } from './client-runtime.js';
 
 /** @type {Intl.LocalesArgument | undefined} */
 let locale;
@@ -62,10 +62,16 @@ let lastConnection = '';
 let lastErrors = '';
 let lastRpcFailure = 0;
 let announcementTimer = null;
+const automaticAnnouncementInterval = 5000;
+let automaticAnnouncementDue = 0;
+let automaticConnection = null;
+let automaticErrors = null;
+let automaticRpcFailures = 0;
 
-/** @param {string} text */
-function announce(text) {
+/** @param {string} text @param {boolean} [automatic] */
+function announce(text, automatic = false) {
  if (!statusMessage) return;
+ if (!automatic) automaticAnnouncementDue = monotonicNow() + automaticAnnouncementInterval;
  if (announcementTimer !== null) clearTimer(announcementTimer);
  announcementTimer = null;
  if (statusMessage.textContent === text) {
@@ -382,7 +388,12 @@ function init() {
 		if (dt) dt.paused = streamsPaused;
 	}
 
-	window.addEventListener('svelte-realtime-devtools-clear', _forceRerender);
+	window.addEventListener('svelte-realtime-devtools-clear', () => {
+  automaticRpcFailures = 0;
+  if (announcementTimer !== null) clearTimer(announcementTimer);
+  announcementTimer = null;
+  _forceRerender();
+ });
 
 	// Refresh managed by toggle() - no idle timer when hidden
 }
@@ -420,27 +431,39 @@ function render(el) {
 
 /** @param {any} dt */
 function announceTransitions(dt) {
- const updates = [];
  const connection = dt.connection?.state || 'idle';
  if (lastConnection !== connection) {
   lastConnection = connection;
-  updates.push(message('Connection: {state}.', { state: message(connectionLabel(connection)) }));
+  automaticConnection = connection;
  }
  const errors = [...(dt.streams?.values() || [])].filter(stream => stream.error);
  const signature = JSON.stringify(errors.map(stream => [stream.path, stream.error.code]));
  if (signature !== lastErrors) {
-  if (errors.length) updates.push(message('Streams with errors: {count}.', { count: number(errors.length) }));
-  else if (lastErrors && lastErrors !== '[]') updates.push(message('Stream errors cleared.'));
+  if (errors.length || (lastErrors && lastErrors !== '[]')) automaticErrors = errors.length;
   lastErrors = signature;
  }
- const newestFailure = Math.max(0, ...(dt.history || []).filter(entry => entry && !entry.ok).map(entry => entry.seq || 0));
- if (newestFailure > lastRpcFailure) {
-  lastRpcFailure = newestFailure;
-  updates.push(message('An RPC failed. Open RPCs to inspect the result.'));
+ const failures = (dt.history || []).filter(entry => entry && !entry.ok && (entry.seq || 0) > lastRpcFailure);
+ if (failures.length) {
+  lastRpcFailure = Math.max(lastRpcFailure, ...failures.map(entry => entry.seq));
+  automaticRpcFailures += failures.length;
  }
- if (updates.length) announce(updates.join(' '));
+ if (automaticConnection === null && automaticErrors === null && !automaticRpcFailures) return;
+ const time = monotonicNow();
+ if (time < automaticAnnouncementDue) return;
+ const updates = [];
+ if (automaticConnection !== null) updates.push(message('Connection: {state}.', { state: message(connectionLabel(automaticConnection)) }));
+ if (automaticErrors !== null) updates.push(automaticErrors
+  ? message('Streams with errors: {count}.', { count: number(automaticErrors) })
+  : message('Stream errors cleared.'));
+ if (automaticRpcFailures) updates.push(automaticRpcFailures === 1
+  ? message('An RPC failed. Open RPCs to inspect the result.')
+  : message('{count} RPC failures. Open RPCs to inspect the results.', { count: number(automaticRpcFailures) }));
+ automaticConnection = null;
+ automaticErrors = null;
+ automaticRpcFailures = 0;
+ automaticAnnouncementDue = time + automaticAnnouncementInterval;
+ announce(updates.join(' '), true);
 }
-
 function constrainPanel() {
  if (!panel || !visible || !panel.style.top) return;
  const rect = panel.getBoundingClientRect();

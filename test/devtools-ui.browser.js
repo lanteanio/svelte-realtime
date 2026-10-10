@@ -8,7 +8,7 @@ beforeAll(async () => {
 	server = createServer(async (req, res) => {
 		if (req.url === '/') {
 			res.setHeader('Content-Type', 'text/html');
-			res.end('<button id="host">Host control</button><script type="module">import { configureDevtools } from "/src/devtools.js"; window.configureDevtools = configureDevtools; import { __devtools } from "/src/client/devtools-instrument.js"; window.realDevtools = __devtools;</script>');
+			res.end('<button id="host">Host control</button><script type="module">import { configureDevtools } from "/src/devtools.js"; window.configureDevtools = configureDevtools; import { __devtools, _devtoolsStart, _devtoolsEnd } from "/src/client/devtools-instrument.js"; window.realDevtools = __devtools; window.recordRpc = { start: _devtoolsStart, end: _devtoolsEnd };</script>');
 			return;
 		}
 		if (!/^\/src\/[a-z/-]+\.js$/.test(req.url)) { res.writeHead(404).end(); return; }
@@ -53,6 +53,14 @@ describe('DevTools focus', () => {
 async function streamsFixture() {
  await page.evaluate(() => { window.__svelte_realtime_devtools = window.realDevtools; Object.assign(window.realDevtools, { paused: false, pending: new Map(), history: [], streams: new Map([['chat', { path: 'chat', topic: 'chat', subCount: 1, recentEvents: [], lastEventTime: Date.now(), lastEvent: 'update' }]]) }); });
  await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).click();
+}
+async function clockedStreamsFixture() {
+ const start = new Date('2026-01-01T00:00:00Z');
+ await page.clock.install({ time: start });
+ await page.reload();
+ await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).waitFor();
+ await page.clock.pauseAt(new Date(start.getTime() + 60000));
+ await streamsFixture();
 }
 it('provides roving tabs and keyboard stream expansion with readable toggle states', async () => {
  await streamsFixture();
@@ -314,7 +322,8 @@ it('shows connection state, cause, and an appropriate recovery action', async ()
 });
 
 it('announces meaningful transitions once while ordinary telemetry ticks stay quiet', async () => {
- await streamsFixture();
+ await clockedStreamsFixture();
+ await page.clock.runFor(5000);
  const status = page.getByRole('status');
  expect(await status.getAttribute('aria-live')).toBe('polite');
  expect(await status.getAttribute('aria-atomic')).toBe('true');
@@ -324,7 +333,7 @@ it('announces meaningful transitions once while ordinary telemetry ticks stay qu
   window.__svelte_realtime_devtools.connection = { state: 'open', since: Date.now() };
   document.getElementById('svr-dt-tab-streams').click();
  });
- await page.waitForTimeout(1200);
+ await page.clock.runFor(1200);
  expect(await page.evaluate(() => window.announcements)).toEqual(['Connection: Connected.']);
  await page.getByRole('button', { name: 'Pause', exact: true }).click();
  expect(await status.textContent()).toBe('Event capture paused.');
@@ -334,6 +343,10 @@ it('announces meaningful transitions once while ordinary telemetry ticks stay qu
   window.__svelte_realtime_devtools.streams.get('chat').error = { code: 'FORBIDDEN' };
   document.getElementById('svr-dt-tab-streams').click();
  });
+ expect(await status.textContent()).toBe('Captured stream events cleared.');
+ await page.clock.runFor(4999);
+ expect(await status.textContent()).toBe('Captured stream events cleared.');
+ await page.clock.runFor(1001);
  expect(await status.textContent()).toBe('Streams with errors: 1.');
 });
 
@@ -398,8 +411,78 @@ it.each([false, true])('bounds code-point previews without grapheme segmentation
  expect(preview.length).toBeLessThan(cap + 50);
  expect(preview.isWellFormed()).toBe(true);
 });
-it('announces later distinct RPC failures even when their summary text matches', async () => {
+it('coalesces repeated RPC failures while keeping user confirmations immediate', async () => {
+ const start = new Date('2026-01-01T00:00:00Z');
+ await page.clock.install({ time: start });
+ await page.reload();
+ await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).waitFor();
+ await page.clock.pauseAt(new Date(start.getTime() + 60000));
  await streamsFixture();
+ await page.clock.runFor(5000);
+ await page.evaluate(() => {
+  window.failureAnnouncements = [];
+  const status = document.querySelector('[role="status"]');
+  new MutationObserver(() => {
+   if (status.textContent) window.failureAnnouncements.push({ text: status.textContent, at: performance.now() });
+  }).observe(status, { childList: true, subtree: true });
+ });
+ for (let id = 1; id <= 10; id++) {
+  await page.evaluate(id => {
+   window.recordRpc.start('status/check', String(id), []);
+   window.recordRpc.end(String(id), false, { code: 'UNAVAILABLE' });
+  }, id);
+  await page.clock.runFor(1000);
+ }
+ await page.clock.runFor(1000);
+ const summaries = await page.evaluate(() => window.failureAnnouncements);
+ expect(summaries.map(item => item.text)).toEqual([
+  'An RPC failed. Open RPCs to inspect the result.',
+  '5 RPC failures. Open RPCs to inspect the results.',
+  '4 RPC failures. Open RPCs to inspect the results.'
+ ]);
+ expect(summaries[1].at - summaries[0].at).toBeGreaterThanOrEqual(5000);
+ expect(summaries[2].at - summaries[1].at).toBeGreaterThanOrEqual(5000);
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ await page.getByRole('button', { name: 'Pause', exact: true }).click();
+ expect(await page.getByRole('status').textContent()).toBe('Event capture paused.');
+ await page.getByRole('button', { name: 'Clear events', exact: true }).click();
+ expect(await page.getByRole('status').textContent()).toBe('Captured stream events cleared.');
+});
+it.each(['button', 'api', 'pending repeat'])('discards queued RPC summaries when captures are cleared through %s', async clear => {
+ await clockedStreamsFixture();
+ await page.clock.runFor(5000);
+ await page.evaluate(() => {
+  window.recordRpc.start('status/check', 'first', []);
+  window.recordRpc.end('first', false, { code: 'UNAVAILABLE' });
+ });
+ await page.clock.runFor(1000);
+ await page.evaluate(() => {
+  window.recordRpc.start('status/check', 'queued', []);
+  window.recordRpc.end('queued', false, { code: 'UNAVAILABLE' });
+ });
+ await page.clock.runFor(1000);
+ if (clear === 'pending repeat') await page.clock.runFor(4000);
+ if (clear === 'button') await page.getByRole('button', { name: 'Clear captured data' }).click();
+ else await page.evaluate(() => window.realDevtools.clear());
+ await page.evaluate(() => {
+  window.afterClearAnnouncements = [];
+  const status = document.querySelector('[role="status"]');
+  new MutationObserver(() => {
+   if (status.textContent) window.afterClearAnnouncements.push(status.textContent);
+  }).observe(status, { childList: true, subtree: true });
+ });
+ await page.clock.runFor(6050);
+ expect(await page.evaluate(() => window.afterClearAnnouncements)).toEqual([]);
+ await page.evaluate(() => {
+  window.recordRpc.start('status/check', 'fresh', []);
+  window.recordRpc.end('fresh', false, { code: 'UNAVAILABLE' });
+ });
+ await page.clock.runFor(1050);
+ expect(await page.evaluate(() => window.afterClearAnnouncements)).toEqual(['An RPC failed. Open RPCs to inspect the result.']);
+});
+it('announces later distinct RPC failures even when their summary text matches', async () => {
+ await clockedStreamsFixture();
+ await page.clock.runFor(5000);
  await page.evaluate(() => {
   window.failureAnnouncements = [];
   new MutationObserver(() => window.failureAnnouncements.push(document.querySelector('[role="status"]').textContent)).observe(document.querySelector('[role="status"]'), { childList: true, subtree: true });
@@ -410,7 +493,8 @@ it('announces later distinct RPC failures even when their summary text matches',
   window.realDevtools.history.push({ seq: 2, ok: false, path: 'two', duration: 1 });
   document.getElementById('svr-dt-tab-rpcs').click();
  });
- await page.waitForFunction(() => window.failureAnnouncements.filter(text => text === 'An RPC failed. Open RPCs to inspect the result.').length === 2);
+ await page.clock.runFor(5050);
+ expect(await page.evaluate(() => window.failureAnnouncements.filter(text => text === 'An RPC failed. Open RPCs to inspect the result.').length)).toBe(2);
 });
 
 it('masks smooth identifiers by default and purges them while preserving safe telemetry', async () => {
