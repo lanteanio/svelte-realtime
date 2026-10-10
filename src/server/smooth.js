@@ -2958,7 +2958,7 @@ export const _smoothRegister = function smooth(config) {
 		const roomArgs = args.slice(0, argCount);
 		if (guard) await guard(ctx, ...roomArgs);
 		const name = resolveName(ctx, roomArgs);
-		const rt = await _loadSmoothRuntime();
+		const rt = _smoothRuntime || await _loadSmoothRuntime();
 		const rec = _smoothRecord(name, cfg, ctx.platform, rt);
 		const key = _getIdentityKey(ctx);
 		if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
