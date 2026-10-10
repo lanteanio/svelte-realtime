@@ -95,7 +95,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - The scaffold rejects Node versions below 22.12 before prompting, creating a project or installing dependencies.
   **Action required:** upgrade to the [supported runtime](README.md#version-compatibility) before running the scaffold.
 
-- Room actions cannot use the generated client member names `data`, `presence`, `cursors`, `owner` or `rooms`, even when an optional surface is disabled. Declaration errors now identify the action to rename.
+- **Breaking:** Room actions cannot use the generated client member names `data`, `presence`, `cursors`, `owner` or `rooms`, even when an optional surface is disabled. Declaration errors now identify the action to rename. **Action required:** rename any action using one of these names before upgrading.
 
 - `realtime()`, generated WebSocket hooks and README examples include stream and connection cleanup exports. The Vite plugin warns once when a routing hook omits `unsubscribe` or `close`, explaining the retained state.
 

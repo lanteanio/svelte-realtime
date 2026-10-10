@@ -3614,6 +3614,8 @@ export const board = live.room({
 });
 ```
 
+Room actions may not be named `data`, `presence`, `cursors`, `owner` or `rooms`, whether or not the corresponding surface is enabled. `live.room()` throws at declaration for these names; rename a conflicting action.
+
 On the client, the room export becomes an object with sub-streams and actions. Room actions receive the same leading arguments as the topic function (boardId in this case), followed by any action-specific arguments:
 
 ```svelte
