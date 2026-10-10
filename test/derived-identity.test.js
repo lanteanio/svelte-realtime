@@ -223,4 +223,22 @@ describe('dynamic derived identity', () => {
 		} finally { state.metricsInstruments = previousMetrics; }
 	});
 
+	it.each(['resolve', 'reject'])('keeps a new subscription when an old revoked loader later %ss', async (outcome) => {
+		let settle;
+		let first = true;
+		const { publish } = setup((ctx) => {
+			if (first) { first = false; return new Promise((resolve, reject) => { settle = outcome === 'resolve' ? () => resolve('OLD') : () => reject(new Error('Old loader failed')); }); }
+			return ctx.user.id;
+		});
+		const user = { id: 'one' };
+		const client = env.connect(user);
+		const old = client.subscribe('stats/derived'); await flush();
+		user.id = 'two'; publish(); await flush();
+		user.id = 'one';
+		const current = client.subscribe('stats/derived'); await current.waitFor(() => true);
+		settle(); await flush(); publish(); await flush();
+		expect(old.value).toBeUndefined();
+		expect(current.events.map((e) => e.data)).toEqual(['one']);
+	});
+
 });

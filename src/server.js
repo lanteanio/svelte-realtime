@@ -767,8 +767,8 @@ function _trackStreamSub(ws, topic, fn) {
 	let owners = topicMap.get(topic);
 	const isFirstSubForTopic = !owners;
 	if (!owners) { owners = []; topicMap.set(topic, owners); }
-	const existing = owners.find(o => o.fn === fn);
-	if (existing) { existing.count++; } else { owners.push({ fn, count: 1 }); }
+	let owner = owners.find(o => o.fn === fn);
+	if (owner) { owner.count++; } else { owner = { fn, count: 1 }; owners.push(owner); }
 	if (isFirstSubForTopic) {
 		// An explicit unsubscribe records the topic so close() does not drain
 		// its hooks a second time. A fresh subscribe makes the topic live again
@@ -822,6 +822,9 @@ function _trackStreamSub(ws, topic, fn) {
 	}
 	if (isFirstSubForTopic) _armSilentTopicWatch(topic);
 	if (state.metricsInstruments) state.metricsInstruments.streamGauge.inc();
+	// A later subscription for the same fn/topic gets a different owner after
+	// revocation. Pending replies and rollbacks must refer to their own lifetime.
+	return () => topicMap.get(topic) === owners && owners.includes(owner) && owner.count > 0;
 }
 
 /**
@@ -839,7 +842,8 @@ function _isRollingBack(ws, topic) {
 	return topics !== undefined && topics.has(topic);
 }
 
-function _rollbackStreamSubscribe(ws, topic, fn, ctx) {
+function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
+	if (isActive && !isActive()) return;
 	const topicMap = _wsStreamOwners.get(ws);
 	// A scope revoke can drain this pending subscription while its loader is
 	// awaiting. Its eventual failure must not unsubscribe or decrement twice.

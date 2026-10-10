@@ -91,6 +91,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Dynamic derived subscriptions recheck scope after asynchronous admission and initial responses, and drain ownership even when session or tenant lookup fails.
 
+- A revoked derived loader cannot return stale initial data or roll back a newer subscription for the same connection and topic.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

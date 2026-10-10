@@ -664,7 +664,7 @@ function _settleClaimBarriers(ws, topic, fn) {
  * @param {any} ctx
  * @param {any[]} args
  * @param {{ id: string, seq?: number, schemaVersion?: number, version?: any, attach?: boolean }} msg
- * @param {{ topic: any, claimTopic?: any, validate?: () => void }} subscribedRef
+ * @param {{ topic: any, claimTopic?: any, validate?: () => void, isActive?: () => boolean }} subscribedRef
  * @returns {Promise<any>}
  */
 async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef) {
@@ -726,6 +726,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		const admittedScope = _derivedScope(ctx, streamArgs, scopeKey);
 		subscribedRef.validate = () => {
 			try {
+				if (subscribedRef.isActive && !subscribedRef.isActive()) throw new Error('Subscription revoked');
 				const user = ws.getUserData();
 				const current = _buildCtx(user, ws, platform, _getCtxHelpers(platform), ctx.cursor);
 				const scope = _derivedScope(current, streamArgs, scopeKey);
@@ -840,7 +841,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: _subscribeDenial, error: _subscribeDenial === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
 	}
-	_trackStreamSub(ws, topic, fn);
+	subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
 	subscribedRef.topic = topic;
 
 	// Replay-topic + dynamic-piiRedact registration, performed only now that
@@ -1173,7 +1174,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 
 	const _h = _getCtxHelpers(platform);
 	const ctx = _buildCtx(ws.getUserData(), ws, platform, _h, clientCursor !== undefined ? clientCursor : null, msg.idempotencyKey, requestId);
-	/** @type {{ topic: any, claimTopic: any, validate?: () => void }} */
+	/** @type {{ topic: any, claimTopic: any, validate?: () => void, isActive?: () => boolean }} */
 	const _subscribedRef = { topic: null, claimTopic: null };
 
 	try {
@@ -1224,7 +1225,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 		_recordRpcMetrics(path, (_result && _result.ok === false) ? (_result.code || 'UNKNOWN') : '', _metricsStart, ws);
 		return _result;
 	} catch (err) {
-		if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx);
+		if (_subscribedRef.topic) _rollbackStreamSubscribe(ws, _subscribedRef.topic, fn, ctx, _subscribedRef.isActive);
 		// A throw that escaped after the claim barriers opened but before the
 		// happy-path settle (the guard `__streamFilter` throws, an internal
 		// bookkeeping failure) would leave a paired :owner/:presence loader in this
