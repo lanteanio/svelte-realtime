@@ -121,7 +121,7 @@ export function _warnAggregateWindowFailure(entry, err, what = 'publish') {
 export function _publishWindow(entry, win, platform = state.cronPlatform) {
 	if (!platform) return;
 	const computed = _computeWindowState(win, entry.reducers);
-	// Privacy gate (k-anon suppress / DP noise) then piiRedact, mirroring the
+	// Privacy gate (k-anon suppress / keyed noise) then piiRedact, mirroring the
 	// event-fold publish in fireWatchers so the timer-driven boundary / slide
 	// publishes are gated identically.
 	const gated = _gateAggregate(win, computed, win.outputTopic);
@@ -519,7 +519,7 @@ function _wrapPlatformPublish(platform) {
 								else if (winRef.cohort) _cohortAdd(winRef.cohort, _c, _k);
 							} catch {}
 						}
-						// Privacy gate (k-anon suppress / DP noise), then uniform piiRedact
+						// Privacy gate (k-anon suppress / keyed noise), then uniform piiRedact
 						// (a no-op unless this output topic is also a declared piiRedact stream).
 						const _gw = _gateAggregate(winRef, _computeWindowState(win, entry.reducers), winRef.outputTopic);
 						if (!_gw.publish) continue; // below k: hold the last published value
@@ -549,7 +549,7 @@ function _wrapPlatformPublish(platform) {
 				if (entry.privacy && entry.privacy.contributor) {
 					try { _cohortAdd(entry.cohort, entry.privacy.contributor(data), entry.privacy.k); } catch {}
 				}
-				// Privacy gate (k-anon suppress / DP noise), then uniform piiRedact.
+				// Privacy gate (k-anon suppress / keyed noise), then uniform piiRedact.
 				const _ga = _gateAggregate(entry, _computeAggregateState(entry.state, entry.reducers), entry.topic);
 				if (!_ga.publish) continue; // below k: hold the last published value
 				const computed = _redactOrDrop(entry.topic, _ga.value);

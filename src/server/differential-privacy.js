@@ -3,48 +3,20 @@ import { _IS_DEV } from './env.js';
 import { state } from './state.js';
 
 /**
- * Privacy layer for `live.aggregate({ privacy })`: k-anonymity suppression plus
- * differential-privacy noise on the published aggregate.
+ * Aggregate publication controls: contributor thresholds and keyed noise.
+ * Below k, suppression retains the last published value. Perturbation adds
+ * zero-mean Laplace or Gaussian noise to selected numeric fields.
  *
- * Two protections, composable via `strategy`:
+ * Noise draws use HMAC-SHA256 with the operator secret and a domain containing
+ * tenant, topic, window and draw counter. Replicas sharing the secret emit the
+ * same draws; subscribers cannot reproduce them from public topic inputs.
+ * A secret is required. Using the full keyed hash avoids a small PRNG seed's
+ * enumerable noise vectors and keeps deterministic simulation reproducible.
  *
- * - k-anonymity (`suppress` / `hybrid`): an aggregate is not published until at
- *   least `k` DISTINCT contributors have fed the window. Below the threshold the
- *   last published value is HELD (the topic stays at its previous state) - never
- *   a null or an explicit marker, because "the cohort just dropped below k" is
- *   itself the side-channel k-anonymity exists to close.
- *
- * - differential privacy (`perturb` / `hybrid`): zero-mean Laplace or Gaussian
- *   noise is added to each numeric aggregate field. The uniforms are drawn
- *   DIRECTLY from `HMAC-SHA256(privacySecret, counter | tenantId|topic|windowStart)`
- *   in counter mode - keyed by the operator secret (`realtime({ privacySecret })`), so a
- *   subscriber cannot recompute the draws and subtract them (an unkeyed seed
- *   over public inputs makes the "noise" removable and provides zero privacy);
- *   deterministic under the shared secret, so every cluster replica (which each
- *   compute the full aggregate over the source firehose) emits IDENTICAL noise;
- *   a per-node random offset would let a client that reconnects to another node
- *   difference the two values and recover the truth, and would itself be a node
- *   fingerprint. The seed refreshes per tumbling boundary and per sliding slide
- *   so each window draws fresh noise; lifetime and single-state aggregates have
- *   no boundary, so their offset stays constant (see KNOWN LIMITATION). Noise
- *   strategies REFUSE to run without a configured secret (see
- *   `_applyAggregatePrivacy`) - failing loudly beats silently emitting
- *   removable noise.
- *
- * KNOWN LIMITATION (documented; the sequential-composition accountant is a
- * deferred follow-up): within one window the noise offset is constant, so an
- * observer watching a live-updating aggregate sees exact deltas between updates.
- * Proper continual-observation DP (tree-based) costs more noise and is out of
- * scope for the first cut. Per-aggregate epsilon is independent; correlated
- * aggregates over one source are additively de-anonymizing - surface epsilon in
- * the audit and budget across aggregates at the application layer.
- *
- * The uniform stream is pure keyed hashing (no global RNG and no clock), so the
- * noise is reproducible under deterministic simulation. It deliberately does NOT
- * seed a small PRNG: a 32-bit seed would leave the whole per-window noise vector
- * one of 2^32 candidates, and for integer-valued fields the published fraction
- * pins the draw, so an offline search would recover and subtract the noise. The
- * search space has to be the key's, not the seed width's.
+ * This mechanism does not provide a differential privacy guarantee: it does
+ * not clip contributions or account for composed releases. The offset stays
+ * constant within each window, so differences between releases expose exact
+ * aggregate changes. Epsilon, delta and sensitivity only set the noise scale.
  */
 
 const DEFAULTS = { k: 5, epsilon: 1.0, delta: 1e-5, sensitivity: 1, noise: 'laplace', strategy: 'hybrid' };
@@ -247,7 +219,7 @@ export function _applyAggregatePrivacy(computed, cohortSize, seedStr, cfg, secre
 	// aggregate), so emitting it would advertise privacy while providing none.
 	if (typeof secret !== 'string' || secret.length === 0) {
 		throw new Error(
-			'[svelte-realtime] live.aggregate privacy: differential-privacy noise requires an operator secret. ' +
+			'[svelte-realtime] live.aggregate privacy: keyed statistical noise requires an operator secret. ' +
 			'Set realtime({ privacySecret: process.env.PRIVACY_SECRET }) (shared by every replica). ' +
 			"Use strategy 'suppress' for k-anonymity-only."
 		);

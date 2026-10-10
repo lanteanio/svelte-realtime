@@ -1610,10 +1610,10 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "70364003e3abb97fb4e9ddc39afc479a81ae141d438c2514109f9fe07b26a5d5",
+			"fingerprint": "5a3350f3fbb8ce6b7d2d3857664665afc129684856c40a89cf3de332a8e54bd9",
 			"occurrence": 1,
 			"language": "js",
-			"section": "Aggregates > Time windows > Privacy: k-anonymity and differential privacy",
+			"section": "Aggregates > Time windows > Privacy: cohort suppression and keyed noise",
 			"classification": "syntax",
 			"channel": "acorn",
 			"reason": "not runnable: ambient-identifiers live"

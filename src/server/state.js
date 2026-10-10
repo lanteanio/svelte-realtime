@@ -379,7 +379,7 @@ export const state = {
 	authorizeWireSubscribe: true,
 
 	/**
-	 * Operator secret keying the differential-privacy noise seed
+	 * Operator secret keying the keyed statistical noise seed
 	 * (`live.aggregate({ privacy })` with a `perturb` / `hybrid` strategy). Set via
 	 * `realtime({ privacySecret })`; shared by every cluster replica so all of
 	 * them draw identical noise for the same window. `null` (default) leaves

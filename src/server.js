@@ -3251,7 +3251,7 @@ function _assertPrivacySecretConfigured() {
 	}
 	if (offenders.length === 0) return;
 	throw new Error(
-		'[svelte-realtime] live.aggregate privacy: differential-privacy noise requires an operator secret, but ' +
+		'[svelte-realtime] live.aggregate privacy: keyed statistical noise requires an operator secret, but ' +
 		offenders.length + " aggregate(s) declare a noise strategy without one: '" + offenders.join("', '") + "'.\n" +
 		'  Set realtime({ privacySecret: process.env.PRIVACY_SECRET }) - the same value on every replica, so they ' +
 		"draw identical noise. Use strategy 'suppress' for k-anonymity only."
@@ -3945,7 +3945,7 @@ export function realtime(config) {
 	const cfg = config || {};
 	const { bus, leader, upgrade: upgradeFn, onError, tenant, admin, webhooks, protocolVersion, maskNotFound, authorizeWireSubscribe, privacySecret } = cfg;
 
-	// Differential-privacy key (opt-in, required for DP noise): the operator
+	// Aggregate noise key (opt-in, required for keyed noise): the operator
 	// secret that keys the per-window noise seed (HMAC-SHA256 over
 	// tenant|topic|windowStart). Share it across every replica so they draw
 	// identical noise. Without it a `perturb` / `hybrid` privacy aggregate

@@ -1165,16 +1165,18 @@ export function live<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(f
  */
 /**
  * Privacy configuration for `live.aggregate({ privacy })` - k-anonymity
- * suppression and differential-privacy noise on the published aggregate.
+ * suppression and keyed statistical noise on the published aggregate.
+ * No differential privacy guarantee: contributions are not clipped, releases
+ * are not budgeted, and a constant per-window offset exposes exact changes.
  */
 export interface AggregatePrivacyConfig {
 	/** k-anonymity threshold: minimum distinct contributors before the aggregate publishes. Default 5. */
 	k?: number;
-	/** Differential-privacy budget; smaller epsilon = more noise = more privacy. Default 1.0. */
+	/** Noise-scale divisor; smaller values add more noise. Not a privacy budget. Default 1.0. */
 	epsilon?: number;
-	/** Failure probability for the Gaussian mechanism. Default 1e-5. */
+	/** Gaussian scale parameter, not an enforced disclosure probability. Default 1e-5. */
 	delta?: number;
-	/** L1 (Laplace) / L2 (Gaussian) sensitivity of the aggregate. Default 1. */
+	/** Caller-declared noise-scale multiplier. Contributions are not clipped. Default 1. */
 	sensitivity?: number;
 	/** Noise distribution. Default 'laplace'. */
 	noise?: 'laplace' | 'gaussian';
@@ -2556,13 +2558,13 @@ export namespace live {
 			 */
 			windows?: Record<string, WindowSpec>;
 			/**
-			 * Privacy layer: k-anonymity suppression and/or differential-privacy
+			 * Privacy layer: cohort suppression and/or keyed statistical
 			 * noise on the published aggregate. Default off. `strategy` 'suppress'
 			 * withholds the aggregate until at least `k` distinct contributors
 			 * (counted via `contributor(data)`) have fed the window - holding the
 			 * last published value, never a null/marker. 'perturb' adds zero-mean
 			 * Laplace / Gaussian noise to numeric fields. 'hybrid' (default) does
-			 * both. Noise is seeded by (topic, window) so every cluster replica
+			 * both. Noise is keyed by the operator secret, tenant, topic and window so every cluster replica
 			 * emits identical noise.
 			 */
 			privacy?: AggregatePrivacyConfig;
@@ -4659,7 +4661,7 @@ export interface RealtimeConfig {
 	 */
 	maskNotFound?: boolean;
 	/**
-	 * Operator secret keying the differential-privacy noise seed for
+	 * Operator secret keying the keyed statistical noise seed for
 	 * `live.aggregate({ privacy })` with a `perturb` / `hybrid` strategy. The
 	 * per-window noise is seeded by HMAC-SHA256 of this secret over
 	 * tenant|topic|windowStart, so every replica sharing the secret draws

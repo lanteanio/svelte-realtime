@@ -44,8 +44,7 @@ application-owned catalogs, stable machine fields, placeholders, and bidirection
 
 The canonical [privacy integration contract](https://github.com/lanteanio/svelte-adapter-uws/blob/main/PRIVACY-INTEGRATION.md)
 maps browser, in-process, Redis/Postgres, durable-work, telemetry, and
-application-owned data across all three packages. Its generated
-[host worksheet](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/privacy/v1/ropa-dpa-transfer-checklist.md)
+application-owned data across all three packages. Its generated [host worksheet](https://github.com/lanteanio/svelte-adapter-uws/blob/main/docs/privacy/v1/ropa-dpa-transfer-checklist.md)
 must be completed for the deployment; `live.forget` is one erasure leg and
 does not clear browsers, observability backends, backups, or unregistered
 stores.
@@ -3336,12 +3335,13 @@ Output topics: `events:view:topk:last10min`, `events:view:topk:today`, `events:v
 <ul>{#each $trending.today?.top ?? [] as row}<li>{row.itemId}: {row.count}</li>{/each}</ul>
 ```
 
-#### Privacy: k-anonymity and differential privacy
+<a id="privacy-k-anonymity-and-differential-privacy"></a>
+#### Privacy: cohort suppression and keyed noise
 
-Pass a `privacy` option to turn an aggregate into a privacy-preserving one without changing its reducers. Two protections, chosen by `strategy`:
+The `privacy` option controls publication through a contributor threshold and statistical perturbation. These controls do not establish a differential privacy guarantee. Choose their behavior with `strategy`:
 
 - **k-anonymity** (`'suppress'` / `'hybrid'`) - the aggregate is not published until at least `k` DISTINCT contributors have fed the window, counted via `contributor(data)`. Below the threshold the last published value is held; it is never replaced with `null` or a marker, because "the cohort just dropped below k" is itself the signal k-anonymity exists to hide. A fresh subscribe also sees the held value, never the live below-k aggregate.
-- **differential privacy** (`'perturb'` / `'hybrid'`) - zero-mean Laplace (or Gaussian) noise is added to each numeric field. The noise is seeded by `HMAC-SHA256(privacySecret, tenant|topic|window)` - keyed by the operator secret set via `realtime({ privacySecret })`, so every cluster replica sharing the secret (each independently computing the full aggregate over the source firehose) produces identical noise, while a subscriber who does not have the secret cannot recompute the draws and subtract them (a per-node random offset would let a client reconnecting to another node difference the values and recover the truth). **A noise strategy requires `realtime({ privacySecret })`** - without it the aggregate refuses to publish (it throws at publish time) rather than emit attacker-removable noise; k-anonymity-only (`'suppress'`) aggregates need no secret.
+- **keyed noise** (`'perturb'` / `'hybrid'`) adds zero-mean Laplace or Gaussian noise to selected numeric fields. HMAC-SHA256 derives the draws from the operator's `realtime({ privacySecret })` and the tenant, topic and window. Replicas sharing that secret emit identical draws, preventing subscribers from averaging independent replica noise. Public inputs alone cannot reproduce the draws. A noise strategy refuses to publish without the secret; threshold-only (`'suppress'`) aggregates need no secret.
 
 ```js
 export const salaryByDept = live.aggregate('salary:reported', {
@@ -3351,7 +3351,7 @@ export const salaryByDept = live.aggregate('salary:reported', {
   privacy: {
     strategy: 'hybrid',          // k-anon AND noise (the default)
     k: 5,                        // hold until >= 5 distinct contributors
-    epsilon: 1.0,                // smaller epsilon = more noise = more privacy
+    epsilon: 1.0,                // smaller epsilon = more noise; not a budget
     contributor: (d) => d.userId // who fed this event (for the k-anon cohort)
   }
 });
@@ -3359,7 +3359,7 @@ export const salaryByDept = live.aggregate('salary:reported', {
 
 Defaults: `k: 5`, `epsilon: 1.0`, `delta: 1e-5` (Gaussian), `sensitivity: 1`, `noise: 'laplace'`, `strategy: 'hybrid'`. `suppress` and `hybrid` require `contributor`; `perturb` is noise-only. Restrict noise to specific fields with `fields: ['avg']` (default: all numeric fields). Works across single-state and `lifetime` / `tumbling` / `sliding` windows (each window has its own cohort; a fresh window draws fresh noise; sliding counts the distinct-contributor union across active buckets). Default off - aggregates without `privacy` are unchanged.
 
-**Limitation.** Within one window the noise offset is constant (re-seeded per window - per tumbling boundary and per sliding slide; `lifetime` and single-state aggregates have no boundary so their offset is constant for the process), so an observer watching a live-updating aggregate sees exact deltas between updates. Proper continual-observation DP costs more noise and is a follow-up. Per-aggregate epsilon is independent, so budget correlated aggregates over the same source at the application layer. After a restart, a privacy aggregate restored from a `snapshot` re-earns its `k` from live contributors (the cohort is counted from live events, not persisted), so it holds the restored value until `k` distinct contributors arrive again.
+**Statistical contract.** Noise is constant within each window, so differences between updates reveal exact aggregate changes. Contributions are not clipped and releases have no composition accountant; `epsilon`, `delta` and `sensitivity` set the noise scale rather than enforce a privacy budget. Use this for thresholded or perturbed statistics, not for releasing sensitive data under a differential privacy guarantee. A snapshot restores reducer state; the contributor threshold is rebuilt from live events, so a restored value remains held until `k` distinct contributors arrive again.
 
 #### Built-in `combine` helpers
 

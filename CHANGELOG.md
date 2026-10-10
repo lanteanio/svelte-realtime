@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Aggregate privacy controls are documented as cohort suppression and keyed statistical noise, without a differential privacy guarantee or enforced privacy budget.
+
 - The wire fuzz gate resolves runtime primitives from the installed adapter source layout.
 
 - Circuit breaker wrappers honor the extensions guard and recovery probes, preserve handler errors for failure tracking, and return actionable availability messages while recording bounded operator diagnostics.

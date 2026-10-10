@@ -108,7 +108,7 @@ describe('_applyAggregatePrivacy - k-anonymity', () => {
 	});
 });
 
-describe('_applyAggregatePrivacy - differential-privacy noise', () => {
+describe('_applyAggregatePrivacy - keyed statistical noise', () => {
 	const cfg = _normalizeAggregatePrivacy({ strategy: 'perturb', epsilon: 1, sensitivity: 1 }, 't');
 
 	it('is deterministic: same seed + secret -> identical noise (cross-replica identity)', () => {

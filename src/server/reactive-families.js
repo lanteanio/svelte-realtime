@@ -287,7 +287,7 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	const topic = options.topic;
 	const debounce = options?.debounce || 0;
 	const windowsSpec = options?.windows || null;
-	// k-anonymity + differential-privacy config; validated + normalized here so a
+	// k-anonymity + aggregate-noise config; validated + normalized here so a
 	// bad shape throws at declaration, not on the first publish. null when absent.
 	const privacy = _normalizeAggregatePrivacy(options?.privacy, topic);
 
