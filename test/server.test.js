@@ -7424,7 +7424,7 @@ describe('live.flag()', () => {
 		const f = live.flag('flag:beta', false);
 		f.set(true);
 		expect(platform.published).toEqual([
-			{ topic: 'flag:beta', event: 'set', data: true, options: undefined }
+			{ topic: 'flag:beta', event: 'set', data: true, options: { seq: false } }
 		]);
 	});
 
@@ -12682,7 +12682,7 @@ describe('auto-replay routing', () => {
 			__register('flag/single-proc-implicit', flag);
 			flag.set('ON');
 			// Still broadcasts live via a bare platform.publish.
-			expect(platform.published).toEqual([{ topic: 'flag/single-proc-implicit', event: 'set', data: 'ON' }]);
+			expect(platform.published).toEqual([{ topic: 'flag/single-proc-implicit', event: 'set', data: 'ON', options: { seq: false } }]);
 			// ...and no "install the replay extension" warning fired.
 			const warned = warnSpy.mock.calls.some((c) => String(c[0]).includes('platform.replay'));
 			expect(warned).toBe(false);
