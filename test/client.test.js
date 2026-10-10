@@ -878,6 +878,22 @@ describe('__stream() mutate queue-replay correctness', () => {
 		ctx.unsub();
 	});
 
+	it('a null-keyed server event confirms only the matching keyed mutate', async () => {
+		const ctx = await setupCrudStream('qr/null-key', 't-null-key', []);
+		const keyed = deferred();
+		const free = deferred();
+		const a = ctx.store.mutate(() => keyed.promise, { event: 'created', data: { id: null, name: 'Pending' } });
+		const b = ctx.store.mutate(() => free.promise, (rows) => [...rows, { id: 'local', name: 'Local' }]);
+		simulateTopicMessage('t-null-key', { event: 'created', data: { id: null, name: 'Confirmed' } });
+		expect(ctx.values.at(-1)).toEqual([{ id: null, name: 'Confirmed' }, { id: 'local', name: 'Local' }]);
+		keyed.resolve();
+		await a;
+		free.resolve();
+		await b;
+		expect(ctx.values.at(-1)).toEqual([{ id: null, name: 'Confirmed' }, { id: 'local', name: 'Local' }]);
+		ctx.unsub();
+	});
+
 	it('absorbed optimistic on asyncOp failure: server-confirmed value retained', async () => {
 		const ctx = await setupCrudStream('qr/abs-fail', 't-af', []);
 		const d = deferred();

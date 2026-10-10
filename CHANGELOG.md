@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A server event with a null key confirms only the matching optimistic mutation, preserving unrelated function-based updates.
+
 - Removed unused optimistic-key bookkeeping from client stream merges; optimistic confirmation continues to use mutation queue entries.
 - Offline persistence orders writes and deletes for each stored key, so a delayed write cannot restore a settled mutation or replace a newer upload checkpoint.
 - Smooth configuration types accept the existing `snapshot` and

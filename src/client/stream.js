@@ -8,6 +8,7 @@ const setTopicManaged = typeof _adapterClient.setTopicManaged === 'function'
 	? _adapterClient.setTopicManaged
 	: () => {};
 const _hasManagedMarking = typeof _adapterClient.setTopicManaged === 'function';
+const _NO_OPTIMISTIC_KEY = Symbol('no optimistic key');
 
 // Explicit wire release for server-managed topics. The adapter client sends no
 // unsubscribe frame for a topic marked managed (symmetric to the subscribe
@@ -2374,7 +2375,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				);
 			}
 
-			let optimisticKey = null;
+			let optimisticKey = _NO_OPTIMISTIC_KEY;
 			if (isEvent) {
 				const k = mergeKeyField(merge, key);
 				if (k && optimisticChange.data && optimisticChange.data[k] !== undefined) {
