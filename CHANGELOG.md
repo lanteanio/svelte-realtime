@@ -36,6 +36,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Server introspection declares the adapter version tuple; packed-consumer checks preserve startup version resolution and external runtime imports in SSR builds.
 
+- Run the installed native preflight before generated scaffold build verification, publish the Linux libc floor, and verify the minimum Node 22.12 build profile on Ubuntu 24.04.
+
 - Vite registry updates stay inside the configured live directory, serialize with startup, and contain asynchronous reload failures. Nested worktree hooks no longer inherit the parent registry.
 
 - Idempotency TTLs reject fractions, NaN, and infinity during registration so in-memory and durable stores share the same non-negative integer seconds contract. Zero still skips cache writes.
