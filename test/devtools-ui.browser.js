@@ -51,7 +51,7 @@ describe('DevTools focus', () => {
 	});
 });
 async function streamsFixture() {
- await page.evaluate(() => { window.__svelte_realtime_devtools = window.realDevtools; Object.assign(window.realDevtools, { pending: new Map(), history: [], streams: new Map([['chat', { path: 'chat', topic: 'chat', subCount: 1, recentEvents: [], lastEventTime: Date.now(), lastEvent: 'update' }]]) }); });
+ await page.evaluate(() => { window.__svelte_realtime_devtools = window.realDevtools; Object.assign(window.realDevtools, { paused: false, pending: new Map(), history: [], streams: new Map([['chat', { path: 'chat', topic: 'chat', subCount: 1, recentEvents: [], lastEventTime: Date.now(), lastEvent: 'update' }]]) }); });
  await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).click();
 }
 it('provides roving tabs and keyboard stream expansion with readable toggle states', async () => {
@@ -335,4 +335,22 @@ it('offers Undo clear and preserves events received after clearing', async () =>
  await page.getByRole('button', { name: 'Undo clear (1)', exact: true }).click();
  expect(await page.locator('#svr-dt-content').textContent()).toContain('before');
  expect(await page.locator('#svr-dt-content').textContent()).toContain('after');
+});
+
+it('starts stream capture paused and synchronously purges visible and undo payloads', async () => {
+ expect(await page.evaluate(() => window.realDevtools.paused)).toBe(true);
+ await streamsFixture();
+ await page.evaluate(() => {
+  window.realDevtools.unsafeCapturePayloads = true;
+  window.realDevtools.streams.get('chat').recentEvents = [{ event: 'update', data: 'private-payload', ts: Date.now() }];
+ });
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ await page.locator('[data-action="toggle-stream"]').click();
+ expect(await page.locator('#svr-dt-content').textContent()).toContain('private-payload');
+ await page.evaluate(() => { window.realDevtools.unsafeCapturePayloads = false; });
+ expect(await page.locator('#svr-dt-content').textContent()).not.toContain('private-payload');
+ await page.getByRole('button', { name: 'Clear captured data' }).click();
+ expect(await page.locator('#svr-dt-capture-mode').textContent()).toBe('Metadata only');
+ expect(await page.getByRole('button', { name: 'Pause event capture' }).getAttribute('aria-pressed')).toBe('true');
+ expect(await page.evaluate(() => window.realDevtools.undoClearCount)).toBe(0);
 });

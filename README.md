@@ -5177,10 +5177,10 @@ The Streams tab lists every store currently mounted on the page. For each one it
 
 **Click any stream row to expand its most recent 20 envelopes.** The safe
 default shows time, event name, and metadata such as value type, field count,
-or array/string length; it does not retain the payload value. Pause stops
+or array/string length; it does not retain the payload value. Stream capture starts paused. Resume begins capturing; Pause stops
 capturing new events without affecting the live `last:` timestamp, and
 Clear events empties every stream ring and offers Undo clear for 30 seconds. Undo merges new arrivals within the 20-event cap; another clear replaces the snapshot, and disabling unsafe capture purges it. Pretty/Raw affects payload rendering only
-when unsafe capture is enabled. Pretty/Raw + Pause persist via `localStorage`.
+when unsafe capture is enabled. Pretty/Raw persists via `localStorage`; capture starts paused on each page load.
 
 **Privacy.** DevTools is metadata-only by default across every retained
 surface: RPC args/results, pending calls, fire-and-forget args, stream topics,
@@ -5207,7 +5207,10 @@ defense in depth rather than a secrecy guarantee: `token` matches while
 key to redact. Keep it off on shared machines, recorded demos, or pages that
 load untrusted scripts. Setting `unsafeCapturePayloads` back to `false`
 immediately purges payload-bearing history, pending, volatile, topic, error,
-and stream-preview state. Unsafe recursion remains capped at depth 5 and arrays
+and stream-preview state, including undo snapshots and visible previews. Disconnect
+also clears captures, disables unsafe capture, and pauses stream capture. Use the
+visible Clear captured data action or `__devtools.clear()` at an account change
+that keeps the same connection open. Unsafe recursion remains capped at depth 5 and arrays
 at 50 items.
 
 The RPC tab shows pending calls (with elapsed time) and a 50-entry ring buffer of recent results (ok/err, duration). The Connection tab shows the bound connection state, time since its transition, stable failure class/code, recovery guidance, and counters. The header also shows the state. External close reasons and authentication text are never retained. Opening DevTools does not create a connection.

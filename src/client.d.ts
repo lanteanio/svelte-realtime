@@ -907,6 +907,10 @@ export function combine(...args: [...Readable<any>[], (...values: any[]) => any]
  * `null` in production builds (tree-shaken).
  */
 export const __devtools: {
+ /** Purge captures and undo state, disable unsafe payloads, and pause stream capture.
+  * Called on disconnect. Call when changing account without reconnecting.
+  */
+ clear(): void;
  /** Clear stream previews, keeping one undo snapshot for 30 seconds. */
  clearEvents(): void;
  /** Restore cleared previews alongside new arrivals within the per-stream cap. */
@@ -970,7 +974,7 @@ export const __devtools: {
 	 */
 	redactKeys: Set<string>;
 	/**
-	 * When true, per-stream event PAYLOAD capture is suspended (the panel's pause
+	 * True by default. When true, per-stream event capture is suspended (the panel's pause
 	 * button). `lastEvent`/`lastEventTime` still update, and RPC history, pending
 	 * and volatile capture are unaffected.
 	 */

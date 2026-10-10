@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { __devtools, _devtoolsStream, _devtoolsStreamEvent } from '../src/client/devtools-instrument.js';
+import { __devtools, _devtoolsStream, _devtoolsStreamEvent, _devtoolsStart, _devtoolsEnd, _devtoolsVolatileSent, _devtoolsConnectionStatus } from '../src/client/devtools-instrument.js';
 
 beforeEach(() => {
  vi.useFakeTimers();
@@ -48,4 +48,24 @@ describe('DevTools clear undo', () => {
   __devtools.undoClearEvents();
   expect(__devtools.streams.get('chat').recentEvents).toEqual([]);
  });
+});
+
+it('purges all retained payloads and undo snapshots on disconnect', () => {
+ __devtools.unsafeCapturePayloads = true;
+ _devtoolsStart('call', 'one', ['secret']);
+ _devtoolsEnd('one', true, 'secret');
+ _devtoolsStart('call', 'pending', ['secret']);
+ _devtoolsVolatileSent('send', ['secret']);
+ _devtoolsStream('chat', 'secret', 1);
+ _devtoolsStreamEvent('chat', 'update', 'secret');
+ __devtools.clearEvents();
+ expect(__devtools.undoClearCount).toBe(1);
+ _devtoolsConnectionStatus('disconnected');
+ expect(__devtools.history.filter(Boolean)).toEqual([]);
+ expect(__devtools.pending.size).toBe(0);
+ expect(__devtools.volatile.filter(Boolean)).toEqual([]);
+ expect(__devtools.streams.get('chat').topic).toBe('[topic omitted]');
+ expect(__devtools.undoClearCount).toBe(0);
+ expect(__devtools.unsafeCapturePayloads).toBe(false);
+ expect(__devtools.paused).toBe(true);
 });

@@ -23,6 +23,7 @@ describe('devtools metadata-only default', () => {
 	beforeEach(() => {
 		expect(__devtools, GATE).toBeTruthy();
 		__devtools.unsafeCapturePayloads = false;
+	__devtools.paused = false;
 	});
 
 	it('retains no topic, argument, result, event, or error value by default', () => {
@@ -97,6 +98,7 @@ describe('devtools metadata-only default', () => {
 		_devtoolsEnd('dt-purge', true, { profile: 'purge-me-too' });
 		expect(JSON.stringify(__devtools.history)).toContain('purge-me');
 		__devtools.unsafeCapturePayloads = false;
+	__devtools.paused = false;
 		expect(__devtools.history.every((entry) => entry === null)).toBe(true);
 		expect(__devtools.pending.size).toBe(0);
 		expect(__devtools.volatile.every((entry) => entry === null)).toBe(true);
@@ -111,6 +113,7 @@ describe('devtools redaction on the RPC/volatile paths', () => {
 
 	afterEach(() => {
 		__devtools.unsafeCapturePayloads = false;
+	__devtools.paused = false;
 	});
 
 	it('fails closed for revoked Proxy arguments and rejected results in unsafe mode', () => {

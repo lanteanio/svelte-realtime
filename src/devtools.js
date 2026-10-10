@@ -79,12 +79,11 @@ const expandedStreams = new Set();
 let streamsRawMode = false;
 
 /** Mirror of `__devtools.paused` so the toggle survives panel re-renders. */
-let streamsPaused = false;
+let streamsPaused = true;
 
 try {
 	if (typeof localStorage !== 'undefined') {
 		streamsRawMode = localStorage.getItem('svr-dt-raw') === '1';
-		streamsPaused = localStorage.getItem('svr-dt-paused') === '1';
 	}
 } catch {}
 
@@ -274,6 +273,24 @@ function init() {
 
 	panel.appendChild(header);
 	panel.appendChild(tabs);
+ const privacy = document.createElement('div');
+ privacy.style.cssText = 'display:flex;gap:8px;padding:4px 8px;flex-shrink:0;align-items:center';
+ const captureMode = document.createElement('span');
+ captureMode.id = 'svr-dt-capture-mode';
+ privacy.appendChild(captureMode);
+ const clearCapture = document.createElement('button');
+ clearCapture.type = 'button';
+ clearCapture.dataset.label = 'Clear captured data';
+ clearCapture.textContent = message('Clear captured data');
+ clearCapture.onclick = () => {
+  const dt = /** @type {any} */ (window).__svelte_realtime_devtools;
+  dt?.clear();
+  streamsPaused = true;
+  announce(message('Captured data cleared. Payload capture disabled.'));
+  _forceRerender();
+ };
+ privacy.appendChild(clearCapture);
+ panel.appendChild(privacy);
 	panel.appendChild(content);
 	statusMessage = document.createElement('div');
 	statusMessage.setAttribute('role', 'status');
@@ -335,7 +352,6 @@ function init() {
 			streamsPaused = !streamsPaused;
 			if (dt) dt.paused = streamsPaused;
 			announce(message(streamsPaused ? 'Event capture paused.' : 'Event capture resumed.'));
-			try { if (typeof localStorage !== 'undefined') localStorage.setItem('svr-dt-paused', streamsPaused ? '1' : '0'); } catch {}
 			_forceRerender();
 		} else if (action === 'toggle-raw') {
 			streamsRawMode = !streamsRawMode;
@@ -358,6 +374,8 @@ function init() {
 		if (dt) dt.paused = streamsPaused;
 	}
 
+	window.addEventListener('svelte-realtime-devtools-clear', _forceRerender);
+
 	// Refresh managed by toggle() - no idle timer when hidden
 }
 
@@ -375,6 +393,8 @@ function render(el) {
 		return;
 	}
 
+	const captureMode = document.getElementById('svr-dt-capture-mode');
+	if (captureMode) captureMode.textContent = message(devtools.unsafeCapturePayloads ? 'Unsafe payload capture enabled' : 'Metadata only');
 	announceTransitions(devtools);
 	const badge = document.getElementById('svr-dt-connection');
 	if (badge) badge.textContent = message(connectionLabel(devtools.connection?.state || 'idle'));
@@ -543,6 +563,7 @@ function _renderPayload(value, raw) {
 
 /** @param {HTMLElement} el @param {any} dt */
 function renderStreams(el, dt) {
+	streamsPaused = dt.paused === true;
 	const streams = dt.streams ? Array.from(dt.streams.values()) : [];
 
 	const pauseLabel = message(streamsPaused ? 'Resume' : 'Pause');

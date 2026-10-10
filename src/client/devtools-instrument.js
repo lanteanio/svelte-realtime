@@ -36,6 +36,7 @@ function _forgetClearedEvents() {
 
 /**
  * @type {{
+ *   clear: () => void,
  *   clearEvents: () => void,
  *   undoClearEvents: () => void,
  *   undoClearCount: number,
@@ -53,6 +54,7 @@ function _forgetClearedEvents() {
  */
 export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.env?.PROD)
 	? {
+		clear: _clearCaptures,
 		clearEvents: _clearEvents,
 		undoClearEvents: _undoClearEvents,
 		get undoClearCount() {
@@ -74,20 +76,9 @@ export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.en
 		set unsafeCapturePayloads(value) {
 			_unsafeCapturePayloads = value === true;
 			if (_unsafeCapturePayloads) return;
-			// Turning unsafe capture back off is also a purge boundary. Values
-			// captured while the opt-in was active must not remain reachable from
-			// the page-global devtools object after the operator disables it.
-			_forgetClearedEvents();
-			this.history.fill(null);
-			this.pending.clear();
-			this.volatile.fill(null);
-			for (const stream of this.streams.values()) {
-				if (stream.topic !== null) stream.topic = '[topic omitted]';
-				if (stream.error) stream.error = { code: stream.error.code, message: '[message omitted]' };
-				stream.recentEvents = [];
-			}
+			_clearCaptures();
 		},
-		paused: false,
+		paused: true,
 		// Live smoothed-channel telemetry accessors (the "smooth" tab). Pull-based:
 		// each entry is a `() => channel.stats()` the panel calls on its refresh
 		// tick, so a smooth view costs nothing until the panel is open. The smooth
@@ -511,6 +502,7 @@ export function _devtoolsSmoothRegister(statsFn) {
 export function _devtoolsConnectionStatus(state) {
  if (!__devtools) return;
  const connection = __devtools.connection;
+ if (state === 'disconnected' || state === 'failed' || ((connection.state === 'open' || connection.state === 'suspended') && state === 'connecting')) __devtools.clear();
  if (connection.state !== state) {
   connection.state = state;
   connection.since = now();
@@ -558,4 +550,22 @@ function _undoClearEvents() {
   stream.recentEvents = [...saved.events, ...stream.recentEvents].slice(-_MAX_STREAM_EVENTS);
  }
  _forgetClearedEvents();
+}
+
+function _clearCaptures() {
+ if (!__devtools) return;
+ _unsafeCapturePayloads = false;
+ __devtools.paused = true;
+ _forgetClearedEvents();
+ __devtools.history.fill(null);
+ __devtools.pending.clear();
+ __devtools.volatile.fill(null);
+ for (const stream of __devtools.streams.values()) {
+  if (stream.topic !== null) stream.topic = '[topic omitted]';
+  if (stream.error) stream.error = { code: stream.error.code, message: '[message omitted]' };
+  stream.recentEvents = [];
+ }
+ if (typeof window !== 'undefined' && typeof window.dispatchEvent === 'function') {
+  window.dispatchEvent(new Event('svelte-realtime-devtools-clear'));
+ }
 }
