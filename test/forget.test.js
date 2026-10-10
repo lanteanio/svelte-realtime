@@ -75,6 +75,7 @@ describe('live.forget - push registry', () => {
 });
 
 describe('live.forget - presence', () => {
+	beforeEach(() => configureForget({ platform: { publish: vi.fn() } }));
 	it('deletes the user refs in tenant scope, clears the grace timer, leaves others', async () => {
 		let fired = false;
 		const timer = setTimer(() => { fired = true; }, 10);

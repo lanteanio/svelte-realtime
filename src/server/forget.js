@@ -56,7 +56,7 @@ let _forgetStore = null;
 
 /**
  * Optional platform (default null). Supplies the cluster presence Redis handle
- * and aggregate reset publication; aggregates can use their captured platform.
+ * and aggregate reset publication; local refs can use their captured platform.
  * Single-instance deployments leave it null. Set via `configureForget({ platform })`.
  * @type {any}
  */
@@ -125,10 +125,6 @@ function _hashUserId(userId, key) {
  */
 const _descriptors = [
 	{ name: 'push', run: (_t, u) => _purgePushUser(u) },
-	// Presence release publishes no immediate `leave` event in v1 (publishLeave
-	// is null): the local ref is deleted and the cluster roster decremented, so
-	// new reads are correct; current subscribers see the leave when the user's
-	// socket disconnects. A connection-less leave broadcast is a follow-up.
 	{ name: 'presence', run: (t, u) => _purgePresenceUser(_forgetPlatform, t, u, null) },
 	{ name: 'rateLimit', run: (t, u) => _purgeRateLimitUser(t, u) },
 	{ name: 'idempotency', run: (t, u) => _purgeIdempotencyUser(_tenantKey(t, u)) },

@@ -91,7 +91,7 @@ function _trackCursorPublisherSlow(ctx, topic, key) {
 		ref.count++;
 		if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
 	} else {
-		ref = { count: 1, timer: null, data: null, cursors: true, cursorPublisher: true, cursorKey: key, cursorTopic: topic, joining: null, gone: false };
+		ref = { count: 1, timer: null, data: null, platform: ctx.platform, cursors: true, cursorPublisher: true, cursorKey: key, cursorTopic: topic, joining: null, gone: false };
 		_presenceRef.set(refKey, ref);
 		ref.joining = _clusterPresenceAcquire(ctx.platform, controlTopic, key, null).then(() => { ref.joining = null; });
 	}
@@ -292,7 +292,7 @@ export function _ownerReplayPublisher(platform) {
 	if (!platform) return null;
 	return (wireTopic, event, data) => {
 		if (platform.replay) _registerReplayTopic(wireTopic);
-		if (!_maybeReplayPublish(platform, wireTopic, event, data)) _platformPublish(platform, wireTopic, event, data, UNSEQUENCED);
+		if (!_maybeReplayPublish(platform, wireTopic, event, data)) return _platformPublish(platform, wireTopic, event, data, UNSEQUENCED);
 	};
 }
 
@@ -333,7 +333,6 @@ export function _retirePresenceRef(refKey, ref, release) {
  */
 export async function _purgePresenceUser(platform, tenantId, userId, publishLeave) {
 	if (typeof userId !== 'string' || userId.length === 0) return 0;
-	const ownerPublish = publishLeave || _ownerReplayPublisher(platform) || (() => {});
 	const targets = [];
 	// Mark every target synchronously: a later ref's grace timer must not erase
 	// its retry ownership while an earlier ref waits for Redis.
@@ -361,35 +360,42 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 			progress.pending = Promise.resolve().then(async () => {
 				if (ref.joining) await ref.joining;
 				if (ref.leaving) await ref.leaving;
+				const storagePlatform = ref.platform || platform;
+				const publishPlatform = platform || ref.platform;
+				const publish = publishLeave || (publishPlatform && typeof publishPlatform.publish === 'function'
+					? (wireTopic, event, data, options) => _platformPublish(publishPlatform, wireTopic, event, data, options) : null);
+				if (!publish) throw new Error('Presence erasure has no publication platform');
+				const ownerPublish = publishLeave || _ownerReplayPublisher(publishPlatform);
 				let incomplete = false;
 				if (!progress.presenceDone) {
 					try {
-						const redis = platform && platform.redis;
+						const redis = storagePlatform && storagePlatform.redis;
 						if (redis && typeof redis.hincrby === 'function') {
 							// HDEL is idempotent even if Redis applied a previous attempt
 							// whose response never reached this process.
 							const count = await redis.hdel(_PRESENCE_KEY_PREFIX + storageTopic, 'c:' + userId, 'd:' + userId);
 							if (!Number.isSafeInteger(count) || count < 0) throw new Error('Presence erasure was not confirmed');
 						}
+						if (!cursorPublisher) await publish(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED);
+						if (ref.cursors) await publish(topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
 						progress.presenceDone = true;
-						if (publishLeave && !cursorPublisher) { try { publishLeave(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED); } catch { /* best-effort */ } }
-						if (ref.cursors) {
-							try {
-								if (publishLeave) publishLeave(topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
-								else if (platform) _platformPublish(platform, topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
-							} catch { /* best-effort */ }
-						}
 					} catch { incomplete = true; }
 				}
 				if (cursorPublisher) progress.ownerDone = true;
 				if (!progress.ownerDone) {
 					try {
-						const { owner, change } = await _ownerPurge(platform, topic, userId);
-						progress.ownerDone = true;
-						if (change) _ownerEmit(topic, tenantId, change, ownerPublish);
-						else if (progress.ownerUnconfirmed) _ownerEmit(topic, tenantId, {
+						const { owner, change } = await _ownerPurge(storagePlatform, topic, userId);
+						const announcement = change || (progress.ownerUnconfirmed ? {
 							owner, previous: null, reason: owner === null ? 'vacated' : 'succeeded', _hook: null
-						}, ownerPublish);
+						} : null);
+						if (announcement) {
+							let published;
+							_ownerEmit(topic, tenantId, announcement, (wireTopic, event, data, options) => {
+								published = Promise.resolve().then(() => ownerPublish(wireTopic, event, data, options));
+							});
+							await published;
+						}
+						progress.ownerDone = true;
 					} catch { progress.ownerUnconfirmed = true; incomplete = true; }
 				}
 				if (incomplete) throw new Error('Presence or owner erasure could not be confirmed');

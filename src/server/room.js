@@ -481,7 +481,7 @@ export const _roomRegister = function room(config) {
 			// published (see __isMember): a field update published ahead of it
 			// reaches every client before the entry it belongs to.
 			let joined;
-			const member = { count: 1, timer: null, data: presenceData, cursors: !!cursorConfig, joining: /** @type {Promise<void> | null} */ (new Promise((r) => { joined = r; })), gone: false };
+			const member = { count: 1, timer: null, data: presenceData, platform: ctx.platform, cursors: !!cursorConfig, joining: /** @type {Promise<void> | null} */ (new Promise((r) => { joined = r; })), gone: false };
 			_presenceRef.set(refKey, member);
 			rememberMember(ctx, member);
 			try {
