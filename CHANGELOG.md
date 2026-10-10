@@ -57,6 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Long DevTools paths, topics, errors, and channel identifiers wrap within the panel.
 
+- DevTools renders every retained RPC history entry, including the oldest entries in its 50-record ring.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

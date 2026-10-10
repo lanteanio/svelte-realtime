@@ -180,3 +180,19 @@ it('wraps long diagnostic identifiers without clipping them', async () => {
   for (const [scroll, client] of rows) expect(scroll).toBeLessThanOrEqual(client + 1);
  }
 });
+
+it('shows every retained RPC record from empty history through the full ring', async () => {
+ await streamsFixture();
+ const counts = await page.evaluate(() => {
+  const results = [];
+  for (let count = 0; count <= 50; count++) {
+   window.__svelte_realtime_devtools.history = Array.from({ length: count }, (_, seq) => ({ seq, path: 'call/' + seq, ok: true, duration: seq }));
+   document.getElementById('svr-dt-tab-rpcs').click();
+   results.push(document.querySelectorAll('[data-rpc-history]').length);
+  }
+  return results;
+ });
+ expect(counts).toEqual(Array.from({ length: 51 }, (_, count) => count));
+ expect(await page.locator('[data-rpc-history]').first().textContent()).toContain('call/49');
+ expect(await page.locator('[data-rpc-history]').last().textContent()).toContain('call/0');
+});

@@ -368,10 +368,10 @@ function renderRpcs(el, dt) {
 
 	const entries = history.filter(Boolean).sort((a, b) => (b.seq || 0) - (a.seq || 0));
 	html += '<div style="margin-bottom:4px">History (' + esc(String(entries.length)) + ')</div>';
-	for (let i = 0; i < Math.min(entries.length, 20); i++) {
+	for (let i = 0; i < entries.length; i++) {
 		const h = entries[i];
 		const color = h.ok ? 'var(--svr-dt-success, #79db8f)' : 'var(--svr-dt-error, #ff9595)';
-		html += `<div style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(String(h.duration))}ms</span></div>`;
+		html += `<div data-key="rpc:${h.seq}" data-rpc-history style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(String(h.duration))}ms</span></div>`;
 	}
 	if (entries.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">No RPC calls yet</div>';
 
