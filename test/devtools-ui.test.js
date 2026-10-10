@@ -78,3 +78,26 @@ it('provides roving tabs and keyboard stream expansion with readable toggle stat
  await page.keyboard.press('Home');
  expect(await rpcs.getAttribute('aria-selected')).toBe('true');
 });
+
+it('retains controls and focused stream nodes across ticks, toggles, and list insertion', async () => {
+ await streamsFixture();
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ const pause = page.getByRole('button', { name: 'Pause event capture' });
+ await pause.focus();
+ await page.evaluate(() => { window.savedControl = document.activeElement; });
+ await page.waitForTimeout(1200);
+ expect(await pause.evaluate(el => el === document.activeElement && el === window.savedControl)).toBe(true);
+ await pause.click();
+ expect(await pause.evaluate(el => el === document.activeElement && el === window.savedControl)).toBe(true);
+ const expander = page.locator('[data-action="toggle-stream"]');
+ await expander.focus();
+ await page.keyboard.press('Enter');
+ expect(await expander.evaluate(el => el === document.activeElement)).toBe(true);
+ await page.evaluate(() => {
+  window.savedStream = document.activeElement;
+  const dt = window.__svelte_realtime_devtools;
+  dt.streams = new Map([['first', { path: 'first', subCount: 1, recentEvents: [] }], ...dt.streams]);
+ });
+ await page.waitForTimeout(1200);
+ expect(await page.locator('[data-stream-path="chat"]').evaluate(el => el === document.activeElement && el === window.savedStream)).toBe(true);
+});

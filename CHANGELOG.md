@@ -47,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools tabs, stream expanders, and capture toggles expose keyboard and assistive-technology state.
 
+- DevTools preserves focused controls and stream rows during telemetry refreshes.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

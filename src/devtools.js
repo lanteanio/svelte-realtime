@@ -265,6 +265,38 @@ function esc(s) {
 /** @type {string} */
 let _lastRenderedHtml = '';
 
+/**
+ * Reconcile keyed elements in place so focused controls and text selections
+ * survive telemetry updates. Newly parsed markup remains inert until patched.
+ * @param {HTMLElement} element
+ * @param {string} html
+ */
+function patchContent(element, html) {
+ const template = document.createElement('template');
+ template.innerHTML = html;
+ /** @param {Node} node */
+ const key = (node) => node instanceof HTMLElement ? node.dataset.key || node.dataset.action || node.id : '';
+ /** @param {Node} parent @param {Node} desired */
+ function patch(parent, desired) {
+  const retained = new Set();
+  for (const source of Array.from(desired.childNodes)) {
+   const nodeKey = key(source);
+   let target = Array.from(parent.childNodes).find(node => !retained.has(node) && node.nodeType === source.nodeType && node.nodeName === source.nodeName && (nodeKey ? key(node) === nodeKey : !key(node)));
+   if (!target) target = source.cloneNode(false);
+   const position = parent.childNodes[retained.size];
+   if (position !== target) parent.insertBefore(target, position || null);
+   retained.add(target);
+   if (target instanceof Element && source instanceof Element) {
+    for (const attribute of Array.from(target.attributes)) if (!source.hasAttribute(attribute.name)) target.removeAttribute(attribute.name);
+    for (const attribute of Array.from(source.attributes)) if (target.getAttribute(attribute.name) !== attribute.value) target.setAttribute(attribute.name, attribute.value);
+    patch(target, source);
+   } else if (target.nodeValue !== source.nodeValue) target.nodeValue = source.nodeValue;
+  }
+  for (const node of Array.from(parent.childNodes)) if (!retained.has(node)) parent.removeChild(node);
+ }
+ patch(element, template.content);
+}
+
 /** @param {HTMLElement} el @param {any} dt */
 function renderRpcs(el, dt) {
 	const pending = dt.pending ? Array.from(dt.pending.values()) : [];
@@ -291,7 +323,7 @@ function renderRpcs(el, dt) {
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
-		el.innerHTML = html;
+		patchContent(el, html);
 	}
 }
 
@@ -360,7 +392,7 @@ function renderStreams(el, dt) {
 		const chevron = expanded ? '[-]' : '[+]';
 		const chevronColor = recentCount > 0 ? '#aaa' : '#555';
 
-		html += `<div style="padding:4px 0;border-bottom:1px solid #2a2a3e">` +
+		html += `<div data-key="stream:${esc(s.path)}" style="padding:4px 0;border-bottom:1px solid #2a2a3e">` +
 			`<button type="button" data-action="toggle-stream" data-stream-path="${esc(s.path)}" aria-expanded="${expanded}" aria-controls="${esc(eventsId)}" style="background:none;border:none;color:inherit;font:inherit;text-align:start;cursor:pointer;display:flex;align-items:center;gap:4px">` +
 			`<span style="color:${chevronColor};width:10px;display:inline-block">${chevron}</span>` +
 			`<span>${esc(s.path)}</span>` +
@@ -402,7 +434,7 @@ function renderStreams(el, dt) {
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
-		el.innerHTML = html;
+		patchContent(el, html);
 	}
 }
 
@@ -451,7 +483,7 @@ function renderSmooth(el, dt) {
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
-		el.innerHTML = html;
+		patchContent(el, html);
 	}
 }
 
@@ -467,7 +499,7 @@ function renderConnection(el, dt) {
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
-		el.innerHTML = html;
+		patchContent(el, html);
 	}
 }
 
