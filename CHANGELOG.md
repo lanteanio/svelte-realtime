@@ -79,6 +79,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Signal subscription setup safely ignores a native socket that closes during asynchronous connection initialization.
 
 - Stream unsubscribe and disconnect cleanup wait for pending subscribe hooks, preventing room presence, ownership, and enumeration from surviving a departed socket.
+
+- Release-ledger verification rejects committed history rewrites, including reverted changes and merged branches.
+
 - Contributor backlog and review guidance uses public GitHub issues, labels, assignments and pull requests.
 
 - RPC lifecycle comments distinguish parked unsent calls from requests rejected after a disconnect or socket replacement.
@@ -610,6 +613,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   frames.
 
 ### Fixed
+
+<a id="scaffolder-sveltekit-2-pin"></a>
 
 - **The scaffolder sets up a working project again.** It ran the latest
   `sv`, and since `sv` 1.0 (released 2026-10-01) that creates a SvelteKit 3
@@ -1957,7 +1962,7 @@ Added cluster fan-out for `live.push({ topic })` and `live.notify({ topic })` th
 
 ## [0.5.13] - 2026-10-10
 
-Published artifact identity is retained in the [release manifest](docs/release-manifest.md). The registry provides no Git head, and the npm artifact contains no changelog; no source commit or additional release behavior is inferred.
+The scaffolder pin to `sv@0.17.1` is described in the [folded scaffolder entry](#scaffolder-sveltekit-2-pin). Published artifact identity is retained in the [release manifest](docs/release-manifest.md); the registry provides no Git head, so no source commit is inferred.
 
 ## [0.5.12] - 2026-08-29
 

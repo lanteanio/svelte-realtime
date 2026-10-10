@@ -1,15 +1,20 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { expect, it } from 'vitest';
-import { CANDIDATE, NOT_PUBLISHED, parseManifest, readBaseline, validateReleaseLedger } from '../scripts/check-release-ledger.js';
+import { CANDIDATE, NOT_PUBLISHED, parseManifest, readBaseline, validateReleaseHistory, validateReleaseLedger } from '../scripts/check-release-ledger.js';
 
 const recordedManifest = readFileSync(new URL('../docs/release-manifest.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const recordedChangelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const recordedVersion = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 // A stable fixture lets the real package advance and publish without weakening candidate coverage.
 const versions = new Set(['0.1.4', '0.1.9', '0.6.0-next.42', '0.5.13']);
+// Each real-history fixture composes up to 18 Git commands, each bounded at 30s.
+const HISTORY_TIMEOUT = 600000;
+
 const manifest = recordedManifest.split('\n').filter((line) => !line.startsWith('| svelte-realtime |') || versions.has(line.split('|')[2].trim())).join('\n');
 const current = '0.6.0-next.91';
 const changelog = `## [Unreleased]
@@ -101,9 +106,11 @@ it('rejects deletion, reordering and edits to committed rows while allowing appe
 		expect(check(manifest, changelog, appended)).toContain(`append-only: ${heading}`);
 	}
 });
-it('reads only the requested Git baseline and fails on an unavailable one', () => {
+it('reads only the requested Git baseline and fails on an unavailable one', async () => {
 	const directory = mkdtempSync(join(tmpdir(), 'realtime-ledger-'));
-	const git = (...args) => execFileSync('git', args, { cwd: directory, stdio: 'pipe', timeout: 10000 });
+	// Temporary history must not execute the developer's global repository hooks.
+	mkdirSync(join(directory, '.empty-hooks'));
+	const git = (...args) => execFileSync('git', ['-c', `core.hooksPath=${join(directory, '.empty-hooks')}`, ...args], { cwd: directory, stdio: 'pipe', timeout: 30000 });
 	try {
 		git('init', '-q');
 		git('-c', 'user.name=Ledger test', '-c', 'user.email=ledger@example.invalid', 'commit', '--allow-empty', '-qm', 'Initial history');
@@ -115,5 +122,88 @@ it('reads only the requested Git baseline and fails on an unavailable one', () =
 		expect(readBaseline(directory, 'HEAD').replace(/\r\n/g, '\n')).toBe(manifest.replace(/\r\n/g, '\n'));
 		expect(readBaseline(directory, 'HEAD^')).toBeUndefined();
 		expect(() => readBaseline(directory, 'missing-baseline')).toThrow();
-	} finally { rmSync(directory, { recursive: true, force: true }); }
-}, 30000);
+	} finally { await removeFixture(directory); }
+}, HISTORY_TIMEOUT);
+
+async function removeFixture(directory) {
+	const target = resolve(directory);
+	if (dirname(target) !== resolve(tmpdir()) || !basename(target).startsWith('realtime-ledger-')) throw new Error('Unsafe ledger fixture cleanup');
+	await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+}
+async function historyFixture(run, { rootLedger = false } = {}) {
+	const directory = mkdtempSync(join(tmpdir(), 'realtime-ledger-'));
+	// Temporary history must not execute the developer's global repository hooks.
+	mkdirSync(join(directory, '.empty-hooks'));
+	const git = (...args) => execFileSync('git', ['-c', `core.hooksPath=${join(directory, '.empty-hooks')}`, ...args], { cwd: directory, encoding: 'utf8', stdio: 'pipe', timeout: 30000 }).trim();
+	const commit = (message, text) => {
+		if (text !== undefined) writeFileSync(join(directory, 'docs/release-manifest.md'), text);
+		git('add', '-A');
+		git('-c', 'user.name=Ledger test', '-c', 'user.email=ledger@example.invalid', 'commit', '--allow-empty', '-qm', message);
+	};
+	try {
+		git('init', '-q', '-b', 'main');
+		mkdirSync(join(directory, 'docs'));
+		if (!rootLedger) commit('Initial history');
+		commit('Record artifacts', manifest);
+		return await run({ directory, git, commit });
+	} finally { await removeFixture(directory); }
+}
+
+it('catches a committed rewrite after an unrelated commit instead of trusting HEAD', async () => {
+	await historyFixture(({ directory, commit }) => {
+		const rewritten = manifest.replace('No release tag.', 'Rewritten identity note.');
+		commit('Rewrite recorded identity', rewritten);
+		commit('Unrelated followup');
+		mkdirSync(join(directory, 'scripts'));
+		writeFileSync(join(directory, 'scripts/check-release-ledger.js'), readFileSync(new URL('../scripts/check-release-ledger.js', import.meta.url)));
+		writeFileSync(join(directory, 'scripts/script-entry.js'), readFileSync(new URL('../scripts/script-entry.js', import.meta.url)));
+		writeFileSync(join(directory, 'package.json'), JSON.stringify({ type: 'module', version: current }));
+		writeFileSync(join(directory, 'CHANGELOG.md'), changelog);
+		expect(() => execFileSync(process.execPath, ['scripts/check-release-ledger.js'], { cwd: directory, encoding: 'utf8', stdio: 'pipe', timeout: 150000, env: { ...process.env, RELEASE_LEDGER_BASE: 'HEAD' } })).toThrow(/Published releases row 1/);
+	});
+}, HISTORY_TIMEOUT);
+
+it('audits rewrites on a merged branch even after the branch restores the original rows', async () => {
+	await historyFixture(({ directory, git, commit }) => {
+		git('checkout', '-qb', 'side');
+		commit('Rewrite then restore', manifest.replace('No release tag.', 'Rewritten identity note.'));
+		const rewrittenCommit = git('rev-parse', 'HEAD');
+		commit('Restore original rows', manifest);
+		git('checkout', '-q', 'main');
+		git('-c', 'user.name=Ledger test', '-c', 'user.email=ledger@example.invalid', 'merge', '--no-ff', '-qm', 'Merge restored branch', 'side');
+		expect(validateReleaseHistory(directory, manifest).join('\n')).toContain(rewrittenCommit);
+	});
+}, HISTORY_TIMEOUT);
+
+it('accepts committed appends and still checks the working copy against HEAD with an older baseline', async () => {
+	await historyFixture(({ directory, commit }) => {
+		const marker = '| --- | --- | --- | --- | --- | --- | --- |';
+		const appended = manifest.replace(marker, marker + '\n| 9.0.0 | proposed | 2026-10-10T12:00:00.000Z | head | tag | latest | reviewed caf\u00e9 \u{1f680} |');
+		commit('Append candidate event', appended);
+		commit('Keep history unchanged');
+		expect(validateReleaseHistory(directory, appended)).toEqual([]);
+		expect(validateReleaseLedger(manifest, changelog, current, readBaseline(directory, 'HEAD~2'))).toEqual([]);
+		expect(validateReleaseHistory(directory, manifest).join('\n')).toContain('Candidate event log row 1');
+	}, { rootLedger: true });
+}, HISTORY_TIMEOUT);
+
+it('rejects deleting and readding the whole ledger', async () => {
+	await historyFixture(({ directory, commit }) => {
+		rmSync(join(directory, 'docs/release-manifest.md'));
+		commit('Remove ledger');
+		commit('Restore ledger', manifest);
+		expect(validateReleaseHistory(directory, manifest).join('\n')).toContain('deleted the ledger');
+	});
+}, HISTORY_TIMEOUT);
+
+it('fails closed without complete Git history', async () => {
+	await historyFixture(async ({ directory, git }) => {
+		const shallow = mkdtempSync(join(tmpdir(), 'realtime-ledger-shallow-'));
+		const archive = mkdtempSync(join(tmpdir(), 'realtime-ledger-archive-'));
+		try {
+			git('clone', '--quiet', '--depth=1', pathToFileURL(directory).href, shallow);
+			expect(() => validateReleaseHistory(shallow, manifest)).toThrow('full Git checkout');
+			expect(() => validateReleaseHistory(archive, manifest)).toThrow();
+		} finally { await removeFixture(shallow); await removeFixture(archive); }
+	});
+}, HISTORY_TIMEOUT);

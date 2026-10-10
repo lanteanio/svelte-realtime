@@ -149,7 +149,7 @@ cannot precede npm's publication instant. Preserve existing rows byte for byte
 apart from Markdown whitespace. Use a correction event with evidence if an
 existing fact was recorded incorrectly; do not rewrite the old identity.
 
-The initial reconstruction records missing historical tags as `legacy-none`.
+Historical releases without a release tag are recorded as `legacy-none`.
 If a later direct publication has no tag, record `legacy-none` with a factual
 note rather than creating a retrospective tag. `legacy-unrecorded` as a Git
 head is accepted only for the observed `0.5.13` registry omission. New missing
@@ -249,14 +249,18 @@ checks against today's external state.
 ## Offline verification
 
 `npm run check:release` verifies table shape, published metadata, exact changelog
-headings, unpublished markers and append-only rows against local `HEAD`.
-`npm run check` and `npm run verify:docs` include this check. For a complete
-branch review, run `npm run check:release -- --baseline-ref <base-commit>`.
-The package verification workflow uses the pull request base or previous push
-commit via `RELEASE_LEDGER_BASE` and fetches history; manual workflow runs compare
-against `HEAD`. An unavailable baseline fails with a Git error instead of
-silently dropping the history check. A baseline predating the ledger permits
-the initial reconstruction.
+headings, unpublished markers and append-only rows throughout the complete
+local Git history. Every ledger change must preserve each parent's existing
+rows as a prefix, including changes later reverted or merged. The working copy
+must also preserve `HEAD`. A committed rewrite therefore remains a failure
+after an unrelated commit or a later release tag.
+`npm run check` and `npm run verify:docs` include this check. An additional
+branch baseline can be checked with `npm run check:release -- --baseline-ref
+<base-commit>`; package verification supplies the pull request base or previous
+push via `RELEASE_LEDGER_BASE`. Baselines predating the ledger permit its first
+addition, but do not bypass the committed-history audit. Verification and
+release workflows fetch full history. Shallow checkouts, source archives without
+`.git`, and unavailable baselines fail closed; use a complete Git checkout.
 
 The gate checks table shape, immutable published identities and append-only
 history; maintainers review candidate and routing transition evidence. It does
@@ -265,5 +269,5 @@ and Git only. It cannot discover a new npm
 publication, verify a live dist-tag, or prove that a recorded candidate workflow
 ran. Maintainers must append registry facts after every publication and review
 candidate and routing evidence. No check command publishes, tags, or reroutes a
-package. The original reconstruction used registry metadata for all 150 known
-versions and confirmed that local and remote release-tag lists were empty.
+package. Historical artifact metadata and missing release tags are recorded
+in the manifest.

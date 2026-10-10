@@ -74,15 +74,7 @@ export function validateReleaseLedger(manifest, changelog, currentVersion, basel
 		if (baseline !== undefined) previous = parseManifest(baseline);
 	} catch (error) { return [error.message]; }
 	const errors = [];
-	if (previous) {
-		for (const name of Object.keys(TABLES)) {
-			for (const [index, row] of previous[name].entries()) {
-				if (JSON.stringify(row) !== JSON.stringify(tables[name][index])) {
-					errors.push(`Manifest history is append-only: ${name} row ${index + 1} was removed, reordered or changed`);
-				}
-			}
-		}
-	}
+	if (previous) errors.push(...compareRows(previous, tables));
 	const published = new Set();
 	let priorTime = '';
 	for (const values of tables['Published releases']) {
@@ -121,8 +113,67 @@ export function validateReleaseLedger(manifest, changelog, currentVersion, basel
 	return errors;
 }
 
+function compareRows(previous, current) {
+	const errors = [];
+	for (const name of Object.keys(TABLES)) {
+		for (const [index, row] of previous[name].entries()) {
+			if (JSON.stringify(row) !== JSON.stringify(current[name][index])) {
+				errors.push(`Manifest history is append-only: ${name} row ${index + 1} was removed, reordered or changed`);
+			}
+		}
+	}
+	return errors;
+}
+
+/** Audit every reachable ledger change, including changes later reverted or merged. */
+export function validateReleaseHistory(directory, workingManifest) {
+	const options = { cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 };
+	const git = (...args) => execFileSync('git', args, options).trim();
+	if (git('rev-parse', '--is-shallow-repository') !== 'false') {
+		throw new Error('Release ledger history requires a full Git checkout; fetch with --unshallow first');
+	}
+	const head = git('rev-parse', '--verify', 'HEAD^{commit}');
+	const commits = git('log', '--full-history', '--reverse', '--format=%H %P', head, '--', manifestPath);
+	const edges = commits.split('\n').filter(Boolean).map(line => line.trim().split(/\s+/));
+	const revisions = [...new Set([head, ...edges.flat()])];
+	// Batch immutable blobs so a long release history does not spawn Git per row.
+	const data = execFileSync('git', ['cat-file', '--batch'], {
+		...options, stdio: ['pipe', 'pipe', 'pipe'], encoding: undefined, maxBuffer: 64 * 1024 * 1024,
+		input: revisions.map(commit => `${commit}:${manifestPath}\n`).join('')
+	});
+	const cache = new Map();
+	let offset = 0;
+	for (const commit of revisions) {
+		const newline = data.indexOf(10, offset);
+		if (newline < 0) throw new Error('Incomplete Git release-ledger batch response');
+		const header = data.subarray(offset, newline).toString('utf8');
+		offset = newline + 1;
+		if (header === `${commit}:${manifestPath} missing`) { cache.set(commit, undefined); continue; }
+		const match = /^[0-9a-f]+ blob ([0-9]+)$/.exec(header);
+		if (!match) throw new Error(`Invalid Git release-ledger object: ${header}`);
+		const end = offset + Number(match[1]);
+		if (!Number.isSafeInteger(end) || end >= data.length || data[end] !== 10) throw new Error('Truncated Git release-ledger blob');
+		cache.set(commit, parseManifest(data.subarray(offset, end).toString('utf8')));
+		offset = end + 1;
+	}
+	if (offset !== data.length) throw new Error('Unexpected Git release-ledger batch output');
+	const errors = [];
+	for (const [commit, ...parents] of edges) {
+		const current = cache.get(commit);
+		for (const parent of parents) {
+			const previous = cache.get(parent);
+			if (previous === undefined) continue;
+			if (current === undefined) errors.push(`Manifest history is append-only: ${commit} deleted the ledger from parent ${parent}`);
+			else errors.push(...compareRows(previous, current).map(error => `${commit} against parent ${parent}: ${error}`));
+		}
+	}
+	const previous = cache.get(head);
+	if (previous !== undefined) errors.push(...compareRows(previous, parseManifest(workingManifest)));
+	return errors;
+}
+
 export function readBaseline(directory, ref) {
-	const options = { cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 10000 };
+	const options = { cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 30000 };
 	const commit = execFileSync('git', ['rev-parse', '--verify', '--end-of-options', `${ref}^{commit}`], options).trim();
 	if (!execFileSync('git', ['ls-tree', '--name-only', commit, '--', manifestPath], options).trim()) return undefined;
 	return execFileSync('git', ['show', `${commit}:${manifestPath}`], options);
@@ -135,9 +186,12 @@ function main() {
 	const manifest = readFileSync(resolve(root, manifestPath), 'utf8');
 	const changelog = readFileSync(resolve(root, 'CHANGELOG.md'), 'utf8');
 	const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
-	const errors = validateReleaseLedger(manifest, changelog, pkg.version, readBaseline(root, baselineRef));
+	const errors = [
+		...validateReleaseLedger(manifest, changelog, pkg.version, baselineRef === 'HEAD' ? undefined : readBaseline(root, baselineRef)),
+		...validateReleaseHistory(root, manifest)
+	];
 	if (errors.length) throw new Error(errors.join('\n'));
-	console.log(`release ledger: ${parseManifest(manifest)['Published releases'].length} published identities match changelog headings; history agrees with ${baselineRef}`);
+	console.log(`release ledger: ${parseManifest(manifest)['Published releases'].length} published identities match changelog headings; committed history is append-only and agrees with ${baselineRef}`);
 }
 if (isScriptEntry(import.meta.url)) {
 	try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }

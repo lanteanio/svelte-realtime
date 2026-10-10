@@ -4,17 +4,16 @@ Append-only candidate events, published identities and routing events. See
 [releasing](releasing.md) for recording a candidate, publication or rollback.
 The changelog describes behavior; this ledger identifies npm artifacts.
 
-The initial 150 published rows were reconstructed from the
+The 150 historical published rows record the
 [primary npm registry metadata](https://registry.npmjs.org/svelte-realtime)
-on 2026-10-10. Both local tags and the remote tag listing were empty at this
-reconstruction, so `legacy-none` records the absence of a release tag. The
-registry omitted `gitHead` for `0.5.13`; its `legacy-unrecorded` marker preserves
+as of 2026-10-10. These artifacts have no release tags; `legacy-none` records
+that absence. The registry omitted `gitHead` for `0.5.13`; its `legacy-unrecorded` marker preserves
 that missing fact instead of attributing the artifact to an invented commit.
 All other Git heads, integrity strings, shasums and publication instants are
 copied from the registry. Historical target channels are inferred from version
 syntax (`next` for prereleases, `latest` for stable versions), not a claim about
 past dist-tag movements. The observed dist-tags were `latest: 0.5.13` and
-`next: 0.6.0-next.90`; no historical routing events were reconstructed.
+`next: 0.6.0-next.90`; the ledger contains no historical routing events.
 
 ## Candidate event log
 
