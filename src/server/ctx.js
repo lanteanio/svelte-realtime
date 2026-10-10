@@ -146,7 +146,13 @@ function _mapBatchTopics(messages, tenantId) {
 }
 
 const _scopedHelperCache = new WeakMap();
+const _unscopedHelperCache = new WeakMap();
+
 function _getScopedHelpers(helpers, tenantId) {
+	if (tenantId === null) {
+		const cached = _unscopedHelperCache.get(helpers);
+		if (cached) return cached;
+	}
 	let byTenant = _scopedHelperCache.get(helpers);
 	if (!byTenant) { byTenant = new Map(); _scopedHelperCache.set(helpers, byTenant); }
 	const key = tenantId === null ? '\0none' : tenantId;
@@ -169,6 +175,7 @@ function _getScopedHelpers(helpers, tenantId) {
 			batch: (messages) => helpers.batch(_mapBatchTopics(messages, tenantId))
 		};
 		byTenant.set(key, wrapped);
+		if (tenantId === null) _unscopedHelperCache.set(helpers, wrapped);
 	}
 	return wrapped;
 }
