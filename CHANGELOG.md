@@ -67,6 +67,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools shows the bound connection state, transition age, stable failure metadata, and recovery guidance.
 
+- DevTools announces connection, error, capture, and clear transitions through one polite status region.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

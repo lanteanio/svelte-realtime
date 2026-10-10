@@ -299,3 +299,27 @@ it('shows connection state, cause, and an appropriate recovery action', async ()
  expect(await page.locator('#svr-dt-connection').textContent()).toBe('Connected');
  expect(await page.getByRole('tabpanel').textContent()).not.toContain('TERMINAL');
 });
+
+it('announces meaningful transitions once while ordinary telemetry ticks stay quiet', async () => {
+ await streamsFixture();
+ const status = page.getByRole('status');
+ expect(await status.getAttribute('aria-live')).toBe('polite');
+ expect(await status.getAttribute('aria-atomic')).toBe('true');
+ await page.evaluate(() => {
+  window.announcements = [];
+  new MutationObserver(() => window.announcements.push(document.querySelector('[role="status"]').textContent)).observe(document.querySelector('[role="status"]'), { childList: true, subtree: true, characterData: true });
+  window.__svelte_realtime_devtools.connection = { state: 'open', since: Date.now() };
+  document.getElementById('svr-dt-tab-streams').click();
+ });
+ await page.waitForTimeout(1200);
+ expect(await page.evaluate(() => window.announcements)).toEqual(['Connection: Connected.']);
+ await page.getByRole('button', { name: 'Pause event capture' }).click();
+ expect(await status.textContent()).toBe('Event capture paused.');
+ await page.getByRole('button', { name: 'Clear events', exact: true }).click();
+ expect(await status.textContent()).toBe('Captured stream events cleared.');
+ await page.evaluate(() => {
+  window.__svelte_realtime_devtools.streams.get('chat').error = { code: 'FORBIDDEN' };
+  document.getElementById('svr-dt-tab-streams').click();
+ });
+ expect(await status.textContent()).toBe('Streams with errors: 1.');
+});

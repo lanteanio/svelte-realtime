@@ -56,6 +56,17 @@ let activeTab = 'rpcs';
 let previousFocus = null;
 /** @type {HTMLButtonElement | null} */
 let launcher = null;
+/** @type {HTMLElement | null} */
+let statusMessage = null;
+let lastConnection = '';
+let lastErrors = '';
+let lastRpcFailure = 0;
+
+/** @param {string} text */
+function announce(text) {
+ if (statusMessage && statusMessage.textContent !== text) statusMessage.textContent = text;
+}
+
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let refreshInterval = null;
@@ -81,7 +92,7 @@ try {
 function _forceRerender() {
 	_lastRenderedHtml = '';
 	if (!panel) return;
-	const content = panel.querySelector('div:last-child');
+	const content = panel.querySelector('#svr-dt-content');
 	if (content) render(/** @type {HTMLElement} */ (content));
 }
 
@@ -94,10 +105,10 @@ function toggle() {
 	else if (previousFocus?.isConnected) previousFocus.focus();
 	else launcher?.focus();
 	if (visible && !refreshInterval) {
-		const content = panel?.querySelector('div:last-child');
+		const content = panel?.querySelector('#svr-dt-content');
 		if (content) render(/** @type {HTMLElement} */ (content));
 		refreshInterval = setIntervalTimer(() => {
-			const content = panel?.querySelector('div:last-child');
+			const content = panel?.querySelector('#svr-dt-content');
 			if (content) render(/** @type {HTMLElement} */ (content));
 		}, 1000);
 	} else if (!visible && refreshInterval) {
@@ -264,6 +275,12 @@ function init() {
 	panel.appendChild(header);
 	panel.appendChild(tabs);
 	panel.appendChild(content);
+	statusMessage = document.createElement('div');
+	statusMessage.setAttribute('role', 'status');
+	statusMessage.setAttribute('aria-live', 'polite');
+	statusMessage.setAttribute('aria-atomic', 'true');
+	statusMessage.style.cssText = 'padding:4px 8px;flex-shrink:0';
+	panel.appendChild(statusMessage);
 	const styles = document.createElement('style');
  styles.textContent = `
   #svelte-realtime-devtools button, #svr-dt-launcher {
@@ -317,6 +334,7 @@ function init() {
 		} else if (action === 'toggle-pause') {
 			streamsPaused = !streamsPaused;
 			if (dt) dt.paused = streamsPaused;
+			announce(message(streamsPaused ? 'Event capture paused.' : 'Event capture resumed.'));
 			try { if (typeof localStorage !== 'undefined') localStorage.setItem('svr-dt-paused', streamsPaused ? '1' : '0'); } catch {}
 			_forceRerender();
 		} else if (action === 'toggle-raw') {
@@ -325,6 +343,7 @@ function init() {
 			_forceRerender();
 		} else if (action === 'clear-events') {
 			if (dt) for (const s of dt.streams.values()) s.recentEvents = [];
+			announce(message('Captured stream events cleared.'));
 			_forceRerender();
 		}
 	});
@@ -352,6 +371,7 @@ function render(el) {
 		return;
 	}
 
+	announceTransitions(devtools);
 	const badge = document.getElementById('svr-dt-connection');
 	if (badge) badge.textContent = message(connectionLabel(devtools.connection?.state || 'idle'));
 	if (activeTab === 'rpcs') {
@@ -364,6 +384,29 @@ function render(el) {
 		renderConnection(el, devtools);
 	}
 	constrainPanel();
+}
+
+/** @param {any} dt */
+function announceTransitions(dt) {
+ const updates = [];
+ const connection = dt.connection?.state || 'idle';
+ if (lastConnection !== connection) {
+  lastConnection = connection;
+  updates.push(message('Connection: {state}.', { state: message(connectionLabel(connection)) }));
+ }
+ const errors = [...(dt.streams?.values() || [])].filter(stream => stream.error);
+ const signature = JSON.stringify(errors.map(stream => [stream.path, stream.error.code]));
+ if (signature !== lastErrors) {
+  if (errors.length) updates.push(message('Streams with errors: {count}.', { count: number(errors.length) }));
+  else if (lastErrors && lastErrors !== '[]') updates.push(message('Stream errors cleared.'));
+  lastErrors = signature;
+ }
+ const newestFailure = Math.max(0, ...(dt.history || []).filter(entry => entry && !entry.ok).map(entry => entry.seq || 0));
+ if (newestFailure > lastRpcFailure) {
+  lastRpcFailure = newestFailure;
+  updates.push(message('An RPC failed. Open RPCs to inspect the result.'));
+ }
+ if (updates.length) announce(updates.join(' '));
 }
 
 function constrainPanel() {
