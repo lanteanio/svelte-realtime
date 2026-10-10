@@ -1180,6 +1180,9 @@ export function live<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(f
  * suppression and keyed statistical noise on the published aggregate.
  * No differential privacy guarantee: contributions are not clipped, releases
  * are not budgeted, and a constant per-window offset exposes exact changes.
+ * Single-state and lifetime offsets persist across restarts with the same secret,
+ * topic and noise configuration. One known true value removes that offset from
+ * past and future releases of the corresponding field.
  */
 export interface AggregatePrivacyConfig {
 	/** k-anonymity threshold: minimum distinct contributors before the aggregate publishes. Default 5. */
@@ -4757,9 +4760,9 @@ export interface RealtimeConfig {
 	 * Operator secret keying the keyed statistical noise seed for
 	 * `live.aggregate({ privacy })` with a `perturb` / `hybrid` strategy. The
 	 * per-window noise is seeded by HMAC-SHA256 of this secret over
-	 * tenant|topic|windowStart, so every replica sharing the secret draws
-	 * identical noise while a subscriber (who does not have it) cannot recompute
-	 * and subtract the draws. REQUIRED for noise strategies: without it a
+	 * topic and windowStart (the reserved tenant slot is empty), so replicas draw
+	 * identical noise with the same secret. Public inputs alone cannot reproduce
+	 * the draws; a known true value can expose a reused offset. REQUIRED: without it a
 	 * `perturb` / `hybrid` aggregate throws at publish time rather than emit
 	 * attacker-removable noise. k-anonymity-only (`suppress`) aggregates do not
 	 * need it. @default undefined

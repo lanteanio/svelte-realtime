@@ -8,15 +8,18 @@ import { state } from './state.js';
  * zero-mean Laplace or Gaussian noise to selected numeric fields.
  *
  * Noise draws use HMAC-SHA256 with the operator secret and a domain containing
- * tenant, topic, window and draw counter. Replicas sharing the secret emit the
- * same draws; subscribers cannot reproduce them from public topic inputs.
+ * an empty reserved tenant slot, topic, window and draw counter. Replicas emit the
+ * same draws with the same secret; public inputs alone cannot reproduce them.
  * A secret is required. Using the full keyed hash avoids a small PRNG seed's
  * enumerable noise vectors and keeps deterministic simulation reproducible.
  *
  * This mechanism does not provide a differential privacy guarantee: it does
  * not clip contributions or account for composed releases. The offset stays
  * constant within each window, so differences between releases expose exact
- * aggregate changes. Epsilon, delta and sensitivity only set the noise scale.
+ * aggregate changes. Single-state and lifetime aggregates reuse their offset
+ * across restarts with the same secret, topic and noise configuration. One known
+ * true value removes that offset from past and future releases of that field.
+ * Epsilon, delta and sensitivity only set the noise scale.
  */
 
 const DEFAULTS = { k: 5, epsilon: 1.0, delta: 1e-5, sensitivity: 1, noise: 'laplace', strategy: 'hybrid' };

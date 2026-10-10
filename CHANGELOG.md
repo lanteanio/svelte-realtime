@@ -53,6 +53,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Failed smooth initialization releases a newly added wire subscription and empty topic record, while preserving live members, accepted resyncs, and concurrent joins.
 
 - Room departure, eviction, and user erasure remove cursor samples from connected peers. Cursor-only publishers are tracked through socket disconnect without requiring a room subscription; other tabs and cluster members retain their shared cursor until the identity leaves.
+- Aggregate privacy guidance explains that single-state and lifetime noise offsets persist across restarts and can be removed with one known true value.
+
 - PostgreSQL notification examples await startup before serving traffic and document dedicated-session budgets and ordered shutdown.
 
 - DevTools instrumentation requires an explicit development build signal, so production clients from bundlers without import.meta.env retain no DevTools histories.
