@@ -4,7 +4,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 import { resolveNpmCli } from './npm-cli.js';
@@ -32,7 +32,7 @@ function pack(directory) {
 function installPacked(file, name) {
 	const target = join(app, 'node_modules', name);
 	mkdirSync(target, { recursive: true });
-	const extracted = spawnSync('tar', ['-xzf', file, '-C', target, '--strip-components=1'], { encoding: 'utf8', timeout: 30000 });
+	const extracted = spawnSync('tar', ['-xzf', relative(workspace, file).replaceAll('\\', '/'), '-C', relative(workspace, target).replaceAll('\\', '/'), '--strip-components=1'], { cwd: workspace, encoding: 'utf8', timeout: 30000 });
 	assert.equal(extracted.status, 0, extracted.stderr);
 }
 async function port() {
