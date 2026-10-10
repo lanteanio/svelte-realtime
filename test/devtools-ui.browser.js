@@ -15,7 +15,7 @@ beforeAll(async () => {
 		try {
 			const body = await readFile(new URL('..' + req.url, import.meta.url));
 			res.setHeader('Content-Type', 'text/javascript');
-			res.end(body);
+			res.end((req.url === '/src/client/devtools-instrument.js' ? 'import.meta.env = { DEV: true, PROD: false };\n' : '') + body);
 		} catch { res.writeHead(404).end(); }
 	});
 	await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
