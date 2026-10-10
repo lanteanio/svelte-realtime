@@ -3328,6 +3328,13 @@ export interface SmoothConfig {
 	noEcho?: boolean;
 	/** Per-entity command queue bound (an integer of at least 1). @default 1024 */
 	queueCap?: number;
+	/**
+	 * Persist entity state for cluster owner handoff. Requires
+	 * svelte-adapter-uws-extensions >= 0.6.0-next.20. @default false
+	 */
+	snapshot?: boolean;
+	/** Minimum interval between snapshot writes in milliseconds. Must be positive. @default 1000 */
+	snapshotDebounceMs?: number;
 	/** Number of room-identifying args the topic function expects (excluding ctx). @default topicFn.length - 1 */
 	topicArgs?: number;
 	/**
