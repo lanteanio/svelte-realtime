@@ -219,18 +219,21 @@ export function ensureListener() {
  * nothing has yet. It is the first realtime listener on the status store, so
  * it sees 'failed' before the others.
  *
- * - 'disconnected' rejects every in-flight request with DISCONNECTED and
- *   drains uploads. The adapter reconnects, unless that drop used up the
- *   last reconnect attempt, in which case 'failed' follows at once.
+ * - 'disconnected' rejects pending requests with DISCONNECTED, except unsent
+ *   RPCs parked in their own pending entries: those keep waiting within their
+ *   existing timeout. Uploads are drained. The adapter reconnects unless the
+ *   drop used up the last attempt, in which case 'failed' follows at once.
  * - 'failed' means closed for good (an explicit close, a terminal close code,
  *   an auth preflight failure or exhausted retries; the adapter reports
  *   nothing else for that connection afterwards). The client is `terminated`
  *   from then on and settles what it still holds with CONNECTION_CLOSED.
  * - 'connecting' while a socket was up means the adapter replaced it with no
- *   'disconnected' in between. Offline replays sent on the old socket are
- *   rejected with DISCONNECTED, cut as by a drop; other requests keep
- *   waiting (one the adapter held in its send queue goes out on the new
- *   socket).
+ *   'disconnected' in between. Every sent non-stream request is rejected with
+ *   DISCONNECTED; stream subscribes and parked, unsent RPCs keep waiting.
+ *
+ * RPC frames never enter the adapter's send queue. A non-queuing send that
+ * returns false while status still says open drops the frame; its request
+ * waits for disconnection or its existing timeout to reject it.
  *
  * `clientState.socketUp` follows whether a socket is up ('open' or
  * 'suspended'); the offline drain starts only while one is.
