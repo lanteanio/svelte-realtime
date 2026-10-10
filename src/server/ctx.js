@@ -11,7 +11,7 @@ import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
 import { _compensateUnavailable } from './history-compensation.js';
 import { _observeSilentTopicPublish, _activatePublishRateWarning } from './dev-warnings.js';
 import { _noteTopicPublish } from './publish-helpers.js';
-import { _resolveTenant, _tenantTopic, _makeTenantScope, _TENANT_TOPIC_NS, _isTenancyEnabled } from './tenant.js';
+import { _resolveTenant, _tenantTopic, _makeTenantScope, _TENANT_TOPIC_NS, _isTenancyEnabled, _validTenantId } from './tenant.js';
 import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../error-registry.js';
 
 /**
@@ -582,7 +582,7 @@ function _collectBatch(ctx, fn) {
 	return result;
 }
 
-export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, operationRequestId) {
+export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, operationRequestId, persistedTenantId = undefined) {
 	// Server-trusted tenant id for this connection (null when no resolver is
 	// configured -> single-tenant, zero-cost path). When set, ctx.publish prefixes
 	// every topic to the tenant's wire namespace; ctx._publishWire stays the raw
@@ -595,8 +595,11 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, o
 	// `_getScopedHelpers(helpers, null)` keeps the guard and skips the prefixing,
 	// and is memoized per platform so the default path still allocates one wrapper
 	// set, not one per RPC.
-	const tenancy = _isTenancyEnabled();
-	const tenantId = tenancy ? _resolveTenant(user) : null;
+	const tenancy = persistedTenantId !== undefined || _isTenancyEnabled();
+	// Background work restores its recorded scope without resolving a missing user.
+	const tenantId = persistedTenantId !== undefined
+		? (persistedTenantId === null ? null : _validTenantId(persistedTenantId))
+		: (tenancy ? _resolveTenant(user) : null);
 	const scopedHelpers = _getScopedHelpers(helpers, tenantId);
 	const connectionId = ws && platform ? (platform.connectionId ?? platform.requestId) : undefined;
 	const requestId = operationRequestId ?? platform?.requestId;

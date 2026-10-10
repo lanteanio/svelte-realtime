@@ -30,6 +30,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Room subscriptions release only the membership references they acquired, preserving other connections after capacity refusal, presence errors, or failed initialization.
 
+- Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.
+
 - Apply module guards to every room stream, room-list RPC and room action in `createTestEnv`, matching the generated registry. Tests with guarded room modules now enforce those guards.
 
 - Server introspection declares the adapter version tuple; packed-consumer checks preserve startup version resolution and external runtime imports in SSR builds.

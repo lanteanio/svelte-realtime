@@ -2932,7 +2932,7 @@ configureAlarm({
 });
 ```
 
-The store is any object implementing the seam contract (`set(topic, at, meta)` / `delete(topic)` returning whether it removed the row / an optional `due(nowMs)` for cross-restart recovery), so you can back it with whatever durable store you already run; `createAlarmStore` from `svelte-adapter-uws-extensions` ships Redis and Postgres implementations. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses).
+The store is any object implementing the seam contract (`set(topic, at, meta)` / `delete(topic)` returning whether it removed the row / an optional `due(nowMs)` for cross-restart recovery), so you can back it with whatever durable store you already run; `createAlarmStore` from `svelte-adapter-uws-extensions` ships Redis and Postgres implementations. The alarm fires with a server context (no `ctx.ws`, no `ctx.user`) - load any state you need inside `onAlarm`. Its persisted tenant scope restores `ctx.tenantId` and every scoped helper without calling the tenant resolver with a missing user. Requires `setCronPlatform(platform)` to be wired (the same capture cron uses).
 
 Give every durable alarm a stable `alarm.id` before renaming its stream RPC
 path. The id is persisted beside the legacy path, and recovery resolves the id

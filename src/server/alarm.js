@@ -18,6 +18,7 @@ import { _resolveAllLazy, _isLazyResolved } from './lazy.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { LiveError } from './live-error.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
+import { _validTenantId, _topicInTenant } from './tenant.js';
 
 /**
  * @typedef {{ alarmId?: string, path?: string, tenantId?: string | null }} AlarmMeta
@@ -308,6 +309,14 @@ async function _fire(wireTopic) {
 	await _invokeAlarm(wireTopic, entry.onAlarm, entry.meta, { at: entry.at, firedAt, lateMs, recovered: false, misfireMs: entry.misfireMs });
 }
 
+function _alarmTenant(wireTopic, meta) {
+	const tenantId = meta?.tenantId == null ? null : _validTenantId(meta.tenantId);
+	if (!_topicInTenant(tenantId, wireTopic)) {
+		throw new LiveError('VALIDATION', '[svelte-realtime] alarm tenant metadata must match its wire topic');
+	}
+	return tenantId;
+}
+
 /**
  * Build a fresh ws-less server ctx for the room and run its `onAlarm`. Shared by
  * the precise in-memory timer (`_fire`) and the cross-restart recovery poll
@@ -339,7 +348,7 @@ async function _invokeAlarm(wireTopic, onAlarm, meta, fire = null) {
 	try {
 		const _h = _getCtxHelpers(platform);
 		// Fresh ws-less server ctx (the room may be empty), exactly like a cron tick.
-		const ctx = _buildCtx(null, null, platform, _h, null);
+		const ctx = _buildCtx(null, null, platform, _h, null, undefined, undefined, _alarmTenant(wireTopic, meta));
 		// Room-scope ctx.publish to the firing room's WIRE topic (already
 		// tenant-scoped), so onAlarm publishes to its own room with `ctx.publish(event,
 		// data)` - the same room-action ergonomic. Route through `_publishWire` (the
@@ -417,6 +426,9 @@ export async function _pollAlarms() {
 		// The owner's live timer fires this one precisely - don't race it from the poll.
 		if (_pending.has(wireTopic)) continue;
 		const meta = (row && row.meta) || null;
+		// Invalid persisted scope must never consume a row or run in another tenant.
+		try { _alarmTenant(wireTopic, meta); }
+		catch { continue; }
 		const path = meta && meta.path;
 		const alarmId = meta && meta.alarmId;
 		let fn;
