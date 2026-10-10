@@ -2593,12 +2593,14 @@ export namespace live {
 			windows?: Record<string, WindowSpec>;
 			/**
 			 * Required for confirmed live.forget erasure of arbitrary reducer data.
-			 * Resets the entire aggregate across all users, windows and buckets,
+			 * 'retain' declares all reducer state, snapshots and outputs non-personal:
+			 * keep them and their timers while deleting framework contributor identity.
+			 * 'reset' resets the entire aggregate across all users, windows and buckets,
 			 * cancels pending output/hydration and publishes a clean initial value.
 			 * init() must return non-personal serializable state (no functions or shared memory).
 			 * Missing policy or failed reset reports FORGET_INCOMPLETE.
 			 */
-			forget?: 'reset';
+			forget?: 'reset' | 'retain';
 			/**
 			 * Privacy layer: cohort suppression and/or keyed statistical
 			 * noise on the published aggregate. Default off. `strategy` 'suppress'

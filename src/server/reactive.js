@@ -775,17 +775,19 @@ export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatf
 	}
 	try {
 		for (const entry of entries) {
-			entry._generation++;
-			entry._hydrationPromise = null;
+			if (entry.forget === 'reset') {
+				entry._generation++;
+				entry._hydrationPromise = null;
+			}
 			const holders = entry.windowStates ? [...entry.windowStates.values()] : [entry];
 			for (const holder of holders) {
-				if (holder.timer) { clearTimer(holder.timer); holder.timer = null; }
 				if (entry.forget !== 'reset') {
 					if (holder.cohort) holder.cohort.delete(contributorId);
 					if (holder.bucketCohorts) for (const cohort of holder.bucketCohorts) cohort.delete(contributorId);
-					failures.push(new Error('Aggregate has no erasure reset policy'));
+					if (entry.forget !== 'retain') failures.push(new Error('Aggregate has no erasure policy'));
 					continue;
 				}
+				if (holder.timer) { clearTimer(holder.timer); holder.timer = null; }
 				// Drop all old references first, including when init/compute/clone
 				// fails. A subsequent live.forget retries the incomplete reset.
 				if (holder.buckets) holder.buckets = Array.from({ length: holder.bucketCount }, () => ({}));

@@ -271,7 +271,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Production browser fixtures wire realtime initialization and shutdown, drain through the adapter on teardown, and verify the packed build with real Linux SIGTERM signals for completed and timed-out RPC work.
 
-- Aggregate erasure requires an explicit whole-state reset policy, clears pending output and held privacy values, and prevents late snapshots from restoring erased data.
+- Aggregate erasure requires an explicit policy. `forget: 'reset'` clears pending output and held privacy values and prevents late snapshots from restoring erased data; `forget: 'retain'` preserves declared non-personal state while removing contributor identities. Missing policies report `FORGET_INCOMPLETE` without disturbing hydration or timers. **Action required:** declare a policy on every aggregate used with `live.forget`; use `retain` only when reducer state, snapshots and outputs contain no personal data.
 
 - Stream subscriptions split by the shared 50-call limit and a conservative byte budget. Oversized incoming batches reject every affected request immediately; complex arguments serialize only when sent.
 

@@ -88,6 +88,41 @@ describe('aggregate erasure contract', () => {
 		expect(await loader()).toEqual({ byUser: {} });
 	});
 
+	it.each([false, true])('preserves non-reset hydration and pending output (windowed: %s)', async windowed => {
+		vi.useFakeTimers();
+		let finish;
+		const snapshot = () => new Promise(resolve => { finish = resolve; });
+		const fields = { count: { init: () => 0, reduce: value => value + 1 } };
+		const env = setup({ snapshot, debounce: 50, ...(windowed ? { windows: { lifetime: { type: 'lifetime' } } } : {}) }, fields);
+		const hydration = env.entry._hydrationPromise;
+		const generation = env.entry._generation;
+		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		expect(env.entry._hydrationPromise).toBe(hydration);
+		expect(env.entry._generation).toBe(generation);
+		finish({ count: 10 }); await hydration;
+		const loader = windowed ? env.fn.__windowStreams.lifetime : env.fn;
+		expect(await loader()).toEqual({ count: 10 });
+		env.add();
+		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await vi.advanceTimersByTimeAsync(50);
+		expect(env.platform.published.at(-1).data).toEqual({ count: 11 });
+	});
+
+	it.each([false, true])('retains explicitly non-personal values and removes contributor identity (windowed: %s)', async windowed => {
+		let finish;
+		const snapshot = () => new Promise(resolve => { finish = resolve; });
+		const fields = { count: { init: () => 0, reduce: value => value + 1 } };
+		const env = setup({ forget: 'retain', snapshot, privacy: { k: 2, strategy: 'suppress', contributor: value => value.id }, ...(windowed ? { windows: { lifetime: { type: 'lifetime' } } } : {}) }, fields);
+		const hydration = env.entry._hydrationPromise;
+		env.add();
+		await expect(live.forget('alice')).resolves.toMatchObject({ ok: true });
+		expect(env.entry._hydrationPromise).toBe(hydration);
+		finish({ count: 20 }); await hydration;
+		const holder = windowed ? env.entry.windowStates.get('lifetime') : env.entry;
+		expect(holder.state).toEqual({ count: 20 });
+		expect(holder.cohort.size).toBe(0);
+	});
+
 	it('continues other aggregates and permits retry after initializer failure', async () => {
 		let fail = false;
 		const env = setup({ forget: 'reset' }, { byUser: { ...reducers().byUser, init: () => { if (fail) throw new Error('unavailable'); return {}; } } });

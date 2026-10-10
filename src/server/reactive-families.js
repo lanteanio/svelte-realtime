@@ -281,7 +281,7 @@ export const _effectRegister = function effect(sources, fn, options) {
  *
  * @param {string} source - Topic to watch for events
  * @param {Record<string, { init?: () => any, reduce?: (acc: any, event: string, data: any) => any, compute?: (state: any) => any, combine?: (...buckets: any[]) => any }>} reducers
- * @param {{ topic: string, snapshot?: () => Promise<any>, snapshots?: Record<string, () => Promise<any>>, debounce?: number, windows?: Record<string, any>, forget?: 'reset' }} options
+ * @param {{ topic: string, snapshot?: () => Promise<any>, snapshots?: Record<string, () => Promise<any>>, debounce?: number, windows?: Record<string, any>, forget?: 'reset' | 'retain' }} options
  * @returns {Function}
  */
 export const _aggregateRegister = function aggregate(source, reducers, options) {
@@ -293,7 +293,7 @@ export const _aggregateRegister = function aggregate(source, reducers, options) 
 	const privacy = _normalizeAggregatePrivacy(options?.privacy, topic);
 
 	const forget = options?.forget;
-	if (forget !== undefined && forget !== 'reset') throw new Error("[svelte-realtime] live.aggregate: forget must be 'reset'");
+	if (forget !== undefined && forget !== 'reset' && forget !== 'retain') throw new Error("[svelte-realtime] live.aggregate: forget must be 'reset' or 'retain'");
 
 	// ---- Windowed form ----
 	if (windowsSpec) {
