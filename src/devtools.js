@@ -341,8 +341,12 @@ function init() {
 			streamsRawMode = !streamsRawMode;
 			try { if (typeof localStorage !== 'undefined') localStorage.setItem('svr-dt-raw', streamsRawMode ? '1' : '0'); } catch {}
 			_forceRerender();
+		} else if (action === 'undo-clear') {
+			dt?.undoClearEvents();
+			announce(message('Cleared events restored.'));
+			_forceRerender();
 		} else if (action === 'clear-events') {
-			if (dt) for (const s of dt.streams.values()) s.recentEvents = [];
+			if (dt) dt.clearEvents();
 			announce(message('Captured stream events cleared.'));
 			_forceRerender();
 		}
@@ -551,6 +555,7 @@ function renderStreams(el, dt) {
 		`<button data-action="toggle-raw" aria-label="${esc(message('Raw payload format'))}" aria-pressed="${streamsRawMode}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(modeLabel)}</button>` +
 		`<button data-action="toggle-pause" aria-label="${esc(message('Pause event capture'))}" aria-pressed="${streamsPaused}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:${pauseColor};cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(pauseLabel)}</button>` +
 		`<button data-action="clear-events" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(message('Clear events'))}</button>` +
+		(dt.undoClearCount ? `<button data-action="undo-clear">${esc(message('Undo clear ({count})', { count: number(dt.undoClearCount) }))}</button>` : '') +
 		`</div>`;
 
 	for (const s of streams) {

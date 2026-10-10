@@ -5179,7 +5179,7 @@ The Streams tab lists every store currently mounted on the page. For each one it
 default shows time, event name, and metadata such as value type, field count,
 or array/string length; it does not retain the payload value. Pause stops
 capturing new events without affecting the live `last:` timestamp, and
-Clear events drops every stream ring. Pretty/Raw affects payload rendering only
+Clear events empties every stream ring and offers Undo clear for 30 seconds. Undo merges new arrivals within the 20-event cap; another clear replaces the snapshot, and disabling unsafe capture purges it. Pretty/Raw affects payload rendering only
 when unsafe capture is enabled. Pretty/Raw + Pause persist via `localStorage`.
 
 **Privacy.** DevTools is metadata-only by default across every retained

@@ -69,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools announces connection, error, capture, and clear transitions through one polite status region.
 
+- Cleared DevTools stream events can be restored for 30 seconds while new events continue arriving.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

@@ -907,6 +907,12 @@ export function combine(...args: [...Readable<any>[], (...values: any[]) => any]
  * `null` in production builds (tree-shaken).
  */
 export const __devtools: {
+ /** Clear stream previews, keeping one undo snapshot for 30 seconds. */
+ clearEvents(): void;
+ /** Restore cleared previews alongside new arrivals within the per-stream cap. */
+ undoClearEvents(): void;
+ /** Number of cleared events still available to restore. */
+ readonly undoClearCount: number;
  /** Connection metadata; external close reasons and auth text are never retained. */
  connection: {
   state: string;

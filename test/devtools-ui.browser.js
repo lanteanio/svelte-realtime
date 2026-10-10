@@ -8,7 +8,7 @@ beforeAll(async () => {
 	server = createServer(async (req, res) => {
 		if (req.url === '/') {
 			res.setHeader('Content-Type', 'text/html');
-			res.end('<button id="host">Host control</button><script type="module">import { configureDevtools } from "/src/devtools.js"; window.configureDevtools = configureDevtools;</script>');
+			res.end('<button id="host">Host control</button><script type="module">import { configureDevtools } from "/src/devtools.js"; window.configureDevtools = configureDevtools; import { __devtools } from "/src/client/devtools-instrument.js"; window.realDevtools = __devtools;</script>');
 			return;
 		}
 		if (!/^\/src\/[a-z/-]+\.js$/.test(req.url)) { res.writeHead(404).end(); return; }
@@ -51,7 +51,7 @@ describe('DevTools focus', () => {
 	});
 });
 async function streamsFixture() {
- await page.evaluate(() => { window.__svelte_realtime_devtools = { pending: new Map(), history: [], streams: new Map([['chat', { path: 'chat', topic: 'chat', subCount: 1, recentEvents: [], lastEventTime: Date.now(), lastEvent: 'update' }]]) }; });
+ await page.evaluate(() => { window.__svelte_realtime_devtools = window.realDevtools; Object.assign(window.realDevtools, { pending: new Map(), history: [], streams: new Map([['chat', { path: 'chat', topic: 'chat', subCount: 1, recentEvents: [], lastEventTime: Date.now(), lastEvent: 'update' }]]) }); });
  await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).click();
 }
 it('provides roving tabs and keyboard stream expansion with readable toggle states', async () => {
@@ -322,4 +322,17 @@ it('announces meaningful transitions once while ordinary telemetry ticks stay qu
   document.getElementById('svr-dt-tab-streams').click();
  });
  expect(await status.textContent()).toBe('Streams with errors: 1.');
+});
+
+it('offers Undo clear and preserves events received after clearing', async () => {
+ await streamsFixture();
+ await page.evaluate(() => { window.realDevtools.streams.get('chat').recentEvents = [{ event: 'before', data: 1, ts: Date.now() }]; });
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ await page.locator('[data-action="toggle-stream"]').click();
+ await page.getByRole('button', { name: 'Clear events', exact: true }).click();
+ expect(await page.locator('#svr-dt-content').textContent()).not.toContain('before');
+ await page.evaluate(() => { window.realDevtools.streams.get('chat').recentEvents.push({ event: 'after', data: 2, ts: Date.now() }); });
+ await page.getByRole('button', { name: 'Undo clear (1)', exact: true }).click();
+ expect(await page.locator('#svr-dt-content').textContent()).toContain('before');
+ expect(await page.locator('#svr-dt-content').textContent()).toContain('after');
 });

@@ -1,5 +1,5 @@
 // @ts-check
-import { now } from '../client-runtime.js';
+import { now, setTimer, clearTimer } from '../client-runtime.js';
 
 // - DevTools instrumentation (non-production only) ---------------------------
 
@@ -22,9 +22,23 @@ const _MAX_STREAM_EVENTS = 20;
 
 const _DEVTOOLS_VOLATILE_MAX = 100;
 let _unsafeCapturePayloads = false;
+let _clearedEvents = new Map();
+let _clearExpiry = null;
+let _clearDeadline = 0;
+
+function _forgetClearedEvents() {
+ _clearedEvents.clear();
+ if (_clearExpiry !== null) clearTimer(_clearExpiry);
+ _clearExpiry = null;
+ _clearDeadline = 0;
+}
+
 
 /**
  * @type {{
+ *   clearEvents: () => void,
+ *   undoClearEvents: () => void,
+ *   undoClearCount: number,
  *   connection: { state: string, since: number, failure: any },
  *   history: any[],
  *   streams: Map<string, any>,
@@ -39,6 +53,14 @@ let _unsafeCapturePayloads = false;
  */
 export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.env?.PROD)
 	? {
+		clearEvents: _clearEvents,
+		undoClearEvents: _undoClearEvents,
+		get undoClearCount() {
+			if (_clearDeadline && now() >= _clearDeadline) _forgetClearedEvents();
+			let count = 0;
+			for (const { events } of _clearedEvents.values()) count += events.length;
+			return count;
+		},
 		connection: { state: 'idle', since: now(), failure: null },
 		history: new Array(50).fill(null),
 		streams: new Map(),
@@ -55,6 +77,7 @@ export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.en
 			// Turning unsafe capture back off is also a purge boundary. Values
 			// captured while the opt-in was active must not remain reachable from
 			// the page-global devtools object after the operator disables it.
+			_forgetClearedEvents();
 			this.history.fill(null);
 			this.pending.clear();
 			this.volatile.fill(null);
@@ -511,4 +534,28 @@ export function _devtoolsConnectionFailure(failure) {
   ...(Number.isInteger(code) ? { code } : {}),
   ...(Number.isInteger(status) ? { status } : {})
  };
+}
+
+function _clearEvents() {
+ if (!__devtools) return;
+ _forgetClearedEvents();
+ for (const [path, stream] of __devtools.streams) {
+  const events = stream.recentEvents;
+  stream.recentEvents = [];
+  if (events.length) _clearedEvents.set(path, { events, target: stream.recentEvents });
+ }
+ if (_clearedEvents.size) {
+  _clearDeadline = now() + 30000;
+  _clearExpiry = setTimer(_forgetClearedEvents, 30000);
+ }
+}
+
+function _undoClearEvents() {
+ if (!__devtools || !__devtools.undoClearCount) return;
+ for (const [path, saved] of _clearedEvents) {
+  const stream = __devtools.streams.get(path);
+  if (!stream || stream.recentEvents !== saved.target) continue;
+  stream.recentEvents = [...saved.events, ...stream.recentEvents].slice(-_MAX_STREAM_EVENTS);
+ }
+ _forgetClearedEvents();
 }
