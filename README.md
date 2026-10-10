@@ -2163,7 +2163,7 @@ The tenant id must be a delimiter-safe slug (`[a-zA-Z0-9_-]`, at most 64 chars -
 - **`ctx.tenantId`** - the connection's server-trusted tenant (or `null`). Available on every handler ctx; use it to scope your own database reads.
 - **Automatic scoping** - inside a handler, `ctx.publish`, every `live.stream` / `live.room` subscribe, presence, cursors, `<export>.rooms()` enumeration, `live.multiplayer`, `live.smooth`, `live.doc` / `live.map` / `live.array`, `live.idempotent`, `live.lock`, `live.rateLimit`, and dynamic `live.derived` are all keyed by the tenant. You write your handlers exactly as before.
 - **`ctx.tenant(otherId).publish(topic, event, data)`** - the explicit cross-tenant escape, for an admin or system handler that must publish into another tenant.
-- **`live.tenant(id, config)`** - a server-side handle for code OUTSIDE a request handler. It validates the id, records an optional per-tenant `config` (quota / metrics / breaker settings, consumed by the cluster extensions), and its `.publish(topic, event, data)` targets that tenant's scope using the active server platform.
+- **`live.tenant(id, config)`** - a server-side handle for code OUTSIDE a request handler. It validates the id, records optional application metadata, and its `.publish(topic, event, data)` targets that tenant's scope using the active server platform. Namespace isolation does not enforce fair-share budgets. The unsupported `quota` option throws `VALIDATION`; no adapter or extension automatically consumes this metadata. Configure real admission limits in the owning adapter, extension or application.
 
 ```js
 // Inside a handler - automatic, plus the explicit cross-tenant escape:
@@ -2175,7 +2175,7 @@ export const broadcastToOrg = live(async (ctx, orgId, msg) => {
 
 // Outside a handler (a background job):
 import { live } from 'svelte-realtime/server';
-const acme = live.tenant('acme', { quota: { messagesPerSec: 100 } });
+const acme = live.tenant('acme', { metadata: { entitlement: 'pro' } });
 acme.publish('maintenance', 'scheduled', { at: '02:00' });
 ```
 

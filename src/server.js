@@ -3131,9 +3131,8 @@ live.breaker = function breaker(options, fn) { return _breakerRegister(options, 
  * is the cross-tenant escape. This factory is a thin complement for code OUTSIDE a
  * request handler:
  * - it validates `id` (the same delimiter-safe, length-bounded charset as the resolver),
- * - it records `config` (quota / metrics / breaker settings) in a global registry
- *   that the deferred quota / metrics slices consume - the realtime core does not
- *   enforce it here, and
+ * - it records application metadata in a registry without installing quota
+ *   enforcement or automatically configuring an adapter or extension, and
  * - it returns a handle whose `.publish(topic, event, data)` targets the tenant's
  *   scope using the active server platform.
  *
@@ -3145,8 +3144,9 @@ live.tenant = function tenant(id, config) {
 	const tenantId = _validTenantId(id);
 	if (config !== undefined && config !== null) {
 		if (typeof config !== 'object' || Array.isArray(config)) {
-			throw new LiveError('VALIDATION', 'live.tenant(id, config): config must be a plain object (quota / metrics / breaker settings).');
+			throw new LiveError('VALIDATION', 'live.tenant(id, config): config must be a plain object containing application metadata.');
 		}
+		if ('quota' in config) throw new LiveError('VALIDATION', 'live.tenant(id, config): quota is not supported. Tenant scoping does not install budget enforcement; configure admission in the owning adapter or application.');
 		_tenantConfigRegistry.set(tenantId, config);
 	}
 	return {

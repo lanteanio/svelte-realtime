@@ -54,9 +54,9 @@ export function _validTenantId(id) {
 
 /**
  * Global tenant-config registry (tenant id -> config object), populated by
- * `live.tenant(id, config)`. The realtime core does NOT enforce the config; it is
- * a forward-looking carrier consumed by the deferred quota / metrics / breaker
- * slices (extensions / adapter). Kept here so any consumer reads one source.
+ * `live.tenant(id, config)`. This is application metadata; storing it does not
+ * install budget enforcement or configure an adapter or extension. Applications
+ * can read the same registered value through the tenant handle.
  * @type {Map<string, any>}
  * @internal
  */

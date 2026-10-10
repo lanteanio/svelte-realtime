@@ -273,15 +273,18 @@ describe('live.tenant: ctx.signal keys by user id (point-to-point delivery contr
 });
 
 describe('live.tenant(id, config) factory', () => {
+	it('rejects unsupported quota configuration instead of claiming enforcement', () => {
+		expect(() => live.tenant('quota-owner', { quota: { messagesPerSec: 1 } })).toThrow(/quota.*not supported/);
+	});
 	it('validates the id, registers the config, and publishes into the tenant scope', () => {
 		expect(() => live.tenant('bad:id')).toThrow();
 		const p = mockPlatform();
 		const saved = state.derivedPlatform;
 		state.derivedPlatform = p; // the handle publishes through the active server platform
 		try {
-			const acme = live.tenant('acme', { quota: { rps: 10 } });
+			const acme = live.tenant('acme', { metadata: { entitlement: 'pro' } });
 			expect(acme.id).toBe('acme');
-			expect(acme.config).toEqual({ quota: { rps: 10 } });
+			expect(acme.config).toEqual({ metadata: { entitlement: 'pro' } });
 			acme.publish('orders', 'created', { n: 1 });
 			expect(p.published[0].topic).toBe('@t/acme/orders'); // scoped to the tenant
 			expect(() => acme.publish('__signal:x', 'e', {})).toThrow(); // reserved guard on the logical topic

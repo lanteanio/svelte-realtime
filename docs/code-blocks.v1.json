@@ -1101,7 +1101,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "ac71f22fb8cd0f9803abfb56f2bd932960d77429e8940c648a883f16ef585af3",
+			"fingerprint": "8fdab3fd5488296f44ef3eb2c9a732a1c16908e6fb041b78ccc8bed2a6cf80f6",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Multi-tenancy (`live.tenant`) > What you get",

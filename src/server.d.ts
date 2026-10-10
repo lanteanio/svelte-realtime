@@ -132,7 +132,7 @@ export interface TenantScope {
 export interface TenantHandle {
 	/** The validated tenant id. */
 	id: string;
-	/** The registered config object (quota / metrics / breaker), or `null`. */
+	/** The registered application metadata, or `null`; no automatic quota enforcement. */
 	config: any;
 	/** Publish into this tenant's scope using the active server platform. */
 	publish(topic: string, event: string, data: any, options?: any): any;
@@ -2970,8 +2970,8 @@ export namespace live {
 	 *
 	 * Tenant isolation is automatic and opt-in via `realtime({ tenant })`; inside a
 	 * handler `ctx.tenant(id).publish(...)` is the cross-tenant escape. This factory
-	 * validates `id`, records `config` (quota / metrics / breaker settings consumed
-	 * by the cluster extensions - the realtime core does not enforce it), and exposes
+	 * validates `id`, records application metadata without installing quota enforcement
+	 * or automatically configuring an adapter or extension, and exposes
 	 * a `publish` that targets the tenant's scope using the active server platform.
 	 *
 	 * @param id - tenant id ([a-zA-Z0-9_-], at most 64 chars)
@@ -2979,7 +2979,7 @@ export namespace live {
 	 *
 	 * @example
 	 * ```js
-	 * const acme = live.tenant('acme', { quota: { messagesPerSec: 100 } });
+	 * const acme = live.tenant('acme', { metadata: { entitlement: 'pro' } });
 	 * acme.publish('maintenance', 'scheduled', { at: '02:00' });
 	 * ```
 	 */

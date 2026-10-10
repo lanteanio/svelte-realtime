@@ -51,6 +51,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Changed
 
+- **Breaking:** `live.tenant` rejects the unsupported `quota` option instead of retaining an unenforced limit. **Action required:** remove that option and configure actual admission limits in the owning adapter, extension or application. Tenant configuration carries metadata and does not automatically install enforcement.
+
 - **Breaking:** Unknown RPC paths use generic authorization denials by default across text, batches, binary calls, and uploads. **Action required:** set `maskNotFound: false` only if clients require explicit missing-path replies; this permits path enumeration. All transports retain development diagnostics. Four uploads per socket may await authorization, independently of private handler limits; excess starts return `TOO_MANY_UPLOADS`.
 
 - **Breaking:** Alarm scheduling and cancellation now return promises that must be awaited. Durable stores require the ordered-generation and retained-execution contract; `configureAlarm` rejects legacy topic-only stores. Upgrade the store and migrate existing rows with the runtime. Unhandled rejected mutations are no longer silent fire-and-forget writes. Reaching in-memory capacity now rejects with `ALARM_CAPACITY` instead of warning and dropping the schedule.
