@@ -179,7 +179,7 @@ export async function crawlUrl(startUrl, options = {}) {
 				signal: controller.signal,
 				headers: {
 					accept: 'text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.2',
-					'user-agent': 'svelte-adapter-uws-doc-link-check/1'
+					'user-agent': 'svelte-realtime-doc-link-check/1'
 				}
 			});
 		} catch (error) {
