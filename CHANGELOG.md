@@ -55,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools text meets AA contrast and keyboard focus has a visible, unclipped indicator.
 
+- Long DevTools paths, topics, errors, and channel identifiers wrap within the panel.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

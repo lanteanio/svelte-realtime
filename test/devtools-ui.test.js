@@ -162,3 +162,21 @@ it('renders readable text and a high-contrast inset keyboard outline', async () 
  expect(focus.offset).toBe('-2px');
  expect(contrast(focus.color, focus.background)).toBeGreaterThanOrEqual(3);
 });
+
+it('wraps long diagnostic identifiers without clipping them', async () => {
+ await page.setViewportSize({ width: 320, height: 600 });
+ await streamsFixture();
+ await page.evaluate(() => {
+  const long = 'identifier'.repeat(80);
+  const dt = window.__svelte_realtime_devtools;
+  dt.pending.set('p', { path: long, startTime: Date.now() });
+  dt.history = [{ path: long, ok: false, duration: 1, seq: 1 }];
+  dt.streams = new Map([[long, { path: long, topic: long, subCount: 1, recentEvents: [], error: { code: long, message: long } }]]);
+  dt.smooth = new Set([() => ({ topic: long, self: long, overflowed: true })]);
+ });
+ for (const name of ['streams', 'smooth', 'rpcs']) {
+  await page.getByRole('tab', { name, exact: true }).click();
+  const rows = await page.locator('#svr-dt-content').evaluate(root => [...root.querySelectorAll('div, button')].filter(el => el.getBoundingClientRect().width > 0).map(el => [el.scrollWidth, el.clientWidth]));
+  for (const [scroll, client] of rows) expect(scroll).toBeLessThanOrEqual(client + 1);
+ }
+});

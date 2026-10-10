@@ -216,6 +216,8 @@ function init() {
    font: inherit; color: var(--svr-dt-text, #f2f4ff); background: var(--svr-dt-raised, #16213e);
    border: 1px solid var(--svr-dt-border, #7d859a); border-radius: 3px; cursor: pointer;
   }
+  #svelte-realtime-devtools div, #svelte-realtime-devtools span, #svelte-realtime-devtools button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; box-sizing: border-box; }
+  #svelte-realtime-devtools div { flex-wrap: wrap; }
   #svelte-realtime-devtools [aria-selected="true"] { font-weight: bold; text-decoration: underline; }
   #svelte-realtime-devtools :focus-visible, #svr-dt-launcher:focus-visible {
    outline: 2px solid var(--svr-dt-focus, #ffffff); outline-offset: -2px;
