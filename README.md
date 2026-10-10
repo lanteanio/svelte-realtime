@@ -1626,6 +1626,8 @@ Call `configure()` once at app startup. The hooks fire on state transitions only
 | `resumeGraceMs` | Stream resume-grace window in ms (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to disable. |
 | `resumeMaxCursorAgeMs` | Max outage in ms a reconnect trusts the retained replay cursor before rehydrating fully (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to always rehydrate on reconnect. |
 
+Connection hooks are observers. Thrown errors and rejected promises are reported through `reportError` (or `console.error` where unavailable); reconnect replay and other status subscribers continue.
+
 ### Coordinated protocol rollout and rollback
 
 Put the baked client integer in one application-owned constant. The client

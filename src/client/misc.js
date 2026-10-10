@@ -136,14 +136,30 @@ export function configure(config) {
 			}
 			if (s === 'open') {
 				clientState.isOffline = false;
-				if (clientState.config.onConnect) clientState.config.onConnect();
+				_callConnectionHook('onConnect');
 				_drainOfflineQueue();
 			}
 			if (s === 'disconnected' || s === 'failed') {
 				clientState.isOffline = true;
-				if (clientState.config.onDisconnect) clientState.config.onDisconnect();
+				_callConnectionHook('onDisconnect');
 			}
 		});
+	}
+}
+
+/** Call an app observer without interrupting the connection status store. */
+function _callConnectionHook(name) {
+	const hook = clientState.config[name];
+	if (typeof hook !== 'function') return;
+	const report = (err) => {
+		if (typeof globalThis.reportError === 'function') globalThis.reportError(err);
+		else console.error('[svelte-realtime] ' + name + ' threw:', err);
+	};
+	try {
+		const result = hook();
+		if (result && typeof result.then === 'function') Promise.resolve(result).catch(report);
+	} catch (err) {
+		report(err);
 	}
 }
 

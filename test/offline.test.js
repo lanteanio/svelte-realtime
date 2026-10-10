@@ -12,6 +12,9 @@ import { mkdirSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
 import { resolve } from 'path';
 import { pathToFileURL } from 'url';
 import { compileModule } from 'svelte/compiler';
+import { writable } from 'svelte/store';
+
+let realStatusStore;
 
 let statusCallbacks;
 let statusInitialValue;
@@ -28,7 +31,8 @@ function simulateStatus(s) {
 	// Like the adapter's status store, a later subscriber gets the last value.
 	statusInitialValue = s;
 	socketOpen = s === 'open' || s === 'suspended';
-	for (const cb of [...statusCallbacks]) cb(s);
+	if (realStatusStore) realStatusStore.set(s);
+	else for (const cb of [...statusCallbacks]) cb(s);
 	// Like the adapter, the send queue is flushed once the open status is out.
 	if (socketOpen) wire.push(...adapterQueue.splice(0));
 }
@@ -84,10 +88,11 @@ beforeEach(async () => {
  * A fresh client module graph over a fresh adapter mock: what a page load
  * gets. Calling it again inside a test is a reload.
  */
-async function loadClient() {
+async function loadClient(realStatus = false) {
 	vi.resetModules();
 	statusCallbacks = new Set();
 	statusInitialValue = 'open';
+	realStatusStore = realStatus ? writable('open') : null;
 	topicCallbacks = new Map();
 	wire = [];
 	adapterQueue = [];
@@ -118,7 +123,7 @@ async function loadClient() {
 			}
 		}),
 		onDerived: () => ({ subscribe: () => () => {} }),
-		status: {
+		status: realStatusStore || {
 			subscribe: (fn) => {
 				statusCallbacks.add(fn);
 				fn(statusInitialValue);
@@ -2946,5 +2951,36 @@ describe('offline queue - connection closed for good', () => {
 			await expect(p).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
 			expect(idb.map.size).toBe(0);
 		});
+	});
+});
+
+
+describe('connection observer failures', () => {
+	it('throwing hooks preserve offline replay and the shared Svelte notification queue', async () => {
+		mod = await loadClient(true);
+		const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const hookError = new Error('observer failed');
+		try {
+			mod.configure({ offline: { queue: true }, onConnect() { throw hookError; }, onDisconnect() { throw hookError; } });
+			const statuses = [];
+			const unsubscribe = realStatusStore.subscribe((value) => statuses.push(value));
+			const unrelated = writable(0);
+			const values = [];
+			const stop = unrelated.subscribe((value) => values.push(value));
+			simulateStatus('disconnected');
+			const pending = mod.__rpc('todos/add')('queued');
+			simulateStatus('open');
+			await flush();
+			await respondAll(() => ({ ok: true, data: 'saved' }));
+			await expect(pending).resolves.toBe('saved');
+			unrelated.set(1);
+			expect(statuses).toEqual(['open', 'disconnected', 'open']);
+			expect(values).toEqual([0, 1]);
+			expect(log).toHaveBeenCalledTimes(2);
+			unsubscribe();
+			stop();
+		} finally {
+			log.mockRestore();
+		}
 	});
 });
