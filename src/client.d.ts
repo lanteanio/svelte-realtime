@@ -783,6 +783,15 @@ export interface OfflineStore {
 	 * page load.
 	 */
 	put(key: string, value: any): Promise<void>;
+	/**
+	 * Atomically read the current value and delete only when its expiry is <= now.
+	 * Expiry is the earlier of finite expiresAt and queuedAt + retentionMs; absent
+	 * expiresAt falls back to queuedAt + seven days. Rows with neither timestamp never expire automatically.
+	 * Return true only after deletion commits, false when absent or not expired;
+	 * reject when the read/deletion cannot be confirmed. Required when a custom
+	 * store permits concurrent external writers; legacy delete assumes exclusive use.
+	 */
+	deleteExpired?(key: string, options: { now: number; retentionMs: number }): Promise<boolean>;
 	delete(key: string): Promise<void>;
 	clear(prefix: string): Promise<void>;
 }

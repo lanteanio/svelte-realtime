@@ -21,6 +21,13 @@ const DB_NAME = 'svelte-realtime';
 const STORE_NAME = 'offline';
 
 export const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/** Recognize expiry without inventing an age for a row with no timestamp. */
+export function _offlineExpiry(value, retentionMs) {
+	const queuedAt = Number.isFinite(value?.queuedAt) ? value.queuedAt : Infinity;
+	const storedExpiry = Number.isFinite(value?.expiresAt) ? value.expiresAt : queuedAt + DEFAULT_RETENTION_MS;
+	return retentionMs === undefined ? storedExpiry : Math.min(storedExpiry, queuedAt + retentionMs);
+}
+
 const STORAGE_TIMEOUT_MS = 5000;
 const _storeHealth = new WeakMap();
 export function _offlineStoreHealth(store) { return _storeHealth.get(store); }
@@ -48,6 +55,7 @@ function _warnStorage(err, operation) {
  * @property {(prefix: string) => Promise<string[]>} [keys] - Optional keys-only scan; pair with get to isolate unreadable values.
  * @property {(key: string) => Promise<any>} [get] - Optional single-value read; rejects when the value cannot be read.
  * @property {(key: string, value: any) => Promise<void>} put - Resolves once the value is stored, rejects when it could not be.
+ * @property {(key: string, options: { now: number, retentionMs: number }) => Promise<boolean>} [deleteExpired] - Atomically delete only if the current value is expired; rejects unconfirmed deletion.
  * @property {(key: string) => Promise<void>} delete
  * @property {(prefix: string) => Promise<void>} clear - Delete every entry whose key starts with `prefix`.
  */
@@ -87,6 +95,10 @@ export function createMemoryStore() {
 		},
 		async delete(key) {
 			map.delete(key);
+		},
+		async deleteExpired(key, options) {
+			if (_offlineExpiry(map.get(key), options.retentionMs) > options.now) return false;
+			return map.delete(key);
 		},
 		async clear(prefix) {
 			for (const key of [...map.keys()]) {
@@ -252,6 +264,27 @@ export function createIndexedDbStore() {
 			}
 		});
 	}
+	async function deleteExpiredDb(db, key, at, retentionMs) {
+		let removed = false;
+		await commitDb(db, (store, tx) => {
+			// The read and conditional deletion share one transaction, so another
+			// tab cannot replace the row between its expiry check and deletion.
+			const req = store.get(key);
+			req.onerror = () => { health.unreadable.add(key); try { tx.abort(); } catch {} };
+			req.onsuccess = () => {
+				let expiry;
+				try { expiry = _offlineExpiry(req.result, retentionMs); }
+				catch { health.unreadable.add(key); try { tx.abort(); } catch {} return; }
+				health.unreadable.delete(key);
+				if (expiry <= at) {
+					try { store.delete(key); removed = true; }
+					catch { health.failedErasure = true; try { tx.abort(); } catch {} }
+				}
+			};
+		}, 'delete');
+		return removed;
+	}
+
 	async function purgeExpired(db) {
 		health.unreadable.clear();
 		health.failedErasure = false;
@@ -261,24 +294,8 @@ export function createIndexedDbStore() {
 			for (let i = 0; i < keys.length; i += 10) {
 				await Promise.all(keys.slice(i, i + 10).map(async key => {
 					if (!/^q:.+:\d{12}$/.test(key) || Number(key.slice(-12)) === 0) return;
-					try {
-						await commitDb(db, (store, tx) => {
-							// Check and delete in one transaction: another tab must not
-							// replace an expired row between the read and its deletion.
-							const req = store.get(key);
-							req.onerror = () => { health.unreadable.add(key); try { tx.abort(); } catch {} };
-							req.onsuccess = () => {
-								try {
-									const value = req.result;
-									health.unreadable.delete(key);
-									// Unreadable or unrecognizable expiry stays for explicit erasure.
-									const expiry = Number.isFinite(value?.expiresAt) ? value.expiresAt
-										: Number.isFinite(value?.queuedAt) ? value.queuedAt + DEFAULT_RETENTION_MS : Infinity;
-									if (expiry <= at) store.delete(key);
-								} catch { health.unreadable.add(key); try { tx.abort(); } catch {} }
-							};
-						}, 'delete');
-					} catch { if (!health.unreadable.has(key)) health.failedErasure = true; }
+					try { await deleteExpiredDb(db, key, at, undefined); }
+					catch { if (!health.unreadable.has(key)) health.failedErasure = true; }
 				}));
 			}
 		} catch (err) { health.failedErasure = true; throw err; }
@@ -287,6 +304,12 @@ export function createIndexedDbStore() {
 		getAll(prefix) { return read(prefix); },
 		keys(prefix) { return read(prefix, true); },
 		get(key) { return read(key, false, true); },
+		async deleteExpired(key, options) {
+			const db = await open();
+			if (!db) throw new Error('[svelte-realtime] offline persistence unavailable');
+			await cleanupPromise;
+			return deleteExpiredDb(db, key, options.now, options.retentionMs);
+		},
 		async put(key, value) {
 			await commit((store) => { store.put(value, key); }, 'write');
 		},

@@ -11,7 +11,7 @@
 
 import { randomUuid, now } from '../client-runtime.js';
 import { _offlineQueue, RpcError, _IS_DEV, clientState } from './internal-state.js';
-import { resolveOfflineStore, _isDurableStore, _offlineStoreHealth, _markOfflineRowsErased, DEFAULT_RETENTION_MS } from './offline-store.js';
+import { resolveOfflineStore, _isDurableStore, _offlineStoreHealth, _markOfflineRowsErased, _offlineExpiry, DEFAULT_RETENTION_MS } from './offline-store.js';
 
 let _erasures = new WeakMap();
 
@@ -403,7 +403,7 @@ async function _rehydrate(scope) {
 			const value = row.value;
 			if (!value || typeof value.path !== 'string' || !Array.isArray(value.args)) continue;
 			const queuedAt = Number.isFinite(value.queuedAt) ? value.queuedAt : 0;
-			const expiresAt = Math.min(Number.isFinite(value.expiresAt) ? value.expiresAt : Infinity, queuedAt + scope.retentionMs);
+			const expiresAt = _offlineExpiry(value, scope.retentionMs);
 			if (expiresAt <= restoreTime) {
 				expired.push(row.key);
 				scope.batch.failedSeq = Math.min(scope.batch.failedSeq, seq);
@@ -426,9 +426,21 @@ async function _rehydrate(scope) {
 		}
 		if (expired.length) {
 			try {
-				for (let i = 0; i < expired.length; i += 10) await Promise.all(expired.slice(i, i + 10).map(key => _write(scope.store, key, () => scope.store.delete(key))));
-				const remaining = new Set(await _storedKeys(scope.store, prefix));
-				scope.failedErasure = expired.some(key => remaining.has(key));
+				const conditional = typeof scope.store.deleteExpired === 'function';
+				for (let i = 0; i < expired.length; i += 10) {
+					if (scope !== _scope || scope.erased) return;
+					await Promise.all(expired.slice(i, i + 10).map(key => _write(scope.store, key, async () => {
+						if (!conditional) return scope.store.delete(key);
+						const removed = await scope.store.deleteExpired(key, { now: restoreTime, retentionMs: scope.retentionMs });
+						if (typeof removed !== 'boolean') throw new Error('offline store deleteExpired must return a boolean');
+					})));
+				}
+				// Conditional stores confirm their transaction and may retain a
+				// fresh replacement. Legacy stores need a separate verification.
+				if (!conditional) {
+					const remaining = new Set(await _storedKeys(scope.store, prefix));
+					scope.failedErasure = expired.some(key => remaining.has(key));
+				}
 			} catch { scope.failedErasure = true; }
 			if (scope !== _scope) return;
 		}

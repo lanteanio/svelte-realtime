@@ -147,6 +147,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `clearOffline()` for verified local queue/checkpoint erasure and pending-call cancellation. Persisted mutations expire after seven days by default; IndexedDB cleans expired readable rows across accounts when opened, with configurable finite retention. **Action required:** choose `offline.retentionMs` if your app needs a different window; await [offline erasure](README.md#durable-persistence-survive-a-reload) during logout.
 
+- Active offline retention checks expiry atomically before deleting, preserving fresh rows from another tab. Shared custom stores can implement `deleteExpired` for the same guarantee; rows without timestamps remain available for explicit erasure.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

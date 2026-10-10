@@ -3594,3 +3594,61 @@ it('two store instances cannot erase a fresh replacement using a stale expiry re
   expect(idb.map.get(expired[0])?.args).toEqual(['fresh']);
  } finally { releaseRead?.(); vi.unstubAllGlobals(); }
 });
+
+
+it('active restore cannot erase fresh cross-tab replacement after a stale read', async () => {
+ const expired = seedEntry('account', 1, 'write', ['expired'], 'old');
+ expired[1].queuedAt -= 10000;
+ let releaseRead, announceRead;
+ const readStarted = new Promise(resolve => { announceRead = resolve; });
+ const idb = fakeIndexedDb({ afterGet(key, mode) {
+  if (mode === 'readonly' && key === expired[0] && !releaseRead) {
+   announceRead(); return new Promise(resolve => { releaseRead = resolve; });
+  }
+ } });
+ idb.map.set(...expired);
+ vi.stubGlobal('indexedDB', idb); vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+ try {
+  const first = mod.createIndexedDbStore(); const second = mod.createIndexedDbStore();
+  mod.configure({ offline: { queue: true, persist: first, persistKey: 'account', retentionMs: 1000 } });
+  simulateStatus('disconnected'); await readStarted;
+  const fresh = seedEntry('account', 1, 'write', ['fresh'], 'new')[1];
+  await second.put(expired[0], fresh);
+  releaseRead(); await until(() => mod.offlinePersistence().status !== 'restoring');
+  expect(idb.map.get(expired[0])?.args).toEqual(['fresh']);
+ } finally { releaseRead?.(); vi.unstubAllGlobals(); }
+});
+
+
+it('custom conditional expiry preserves a fresh row and rejects malformed confirmations', async () => {
+ const expired = seedEntry('default', 1, 'write', ['expired'], 'old'); expired[1].queuedAt -= 10000;
+ const store = fakeStore(Object.fromEntries([expired]));
+ store.deleteExpired = async (key, options) => {
+  expect(options.retentionMs).toBe(1000);
+  expect(options.now).toBeGreaterThan(expired[1].queuedAt);
+  store.map.set(key, seedEntry('default', 1, 'write', ['fresh'], 'new')[1]);
+  return false;
+ };
+ mod.configure({ offline: { queue: true, persist: store, retentionMs: 1000 } });
+ simulateStatus('disconnected'); await until(() => mod.offlinePersistence().status !== 'restoring');
+ expect(store.map.get(expired[0]).args).toEqual(['fresh']);
+ expect(mod.offlinePersistence().status).toBe('ready');
+ mod.configure({ offline: { persist: false } });
+ store.map.set(...expired); store.deleteExpired = async () => undefined;
+ mod.configure({ offline: { queue: true, persist: store, retentionMs: 1000 } });
+ await until(() => mod.offlinePersistence().status !== 'restoring');
+ expect(mod.offlinePersistence().status).toBe('degraded');
+ expect(store.map.has(expired[0])).toBe(true);
+});
+
+it('retention keeps rows whose readable values contain no expiry timestamp', async () => {
+ const unknown = seedEntry('default', 1, 'write', ['unknown age'], 'old'); delete unknown[1].queuedAt;
+ const idb = fakeIndexedDb(); idb.map.set(...unknown);
+ vi.stubGlobal('indexedDB', idb); vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+ try {
+  mod.configure({ offline: { queue: true, persist: true, retentionMs: 1000 } });
+  simulateStatus('disconnected'); await until(() => mod.offlinePersistence().status !== 'restoring');
+  expect(idb.map.get(unknown[0])?.args).toEqual(['unknown age']);
+  expect(mod.offlinePersistence().status).toBe('ready');
+ } finally { vi.unstubAllGlobals(); }
+});
