@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { get } from 'svelte/store';
 	import { status } from 'svelte-adapter-uws/client';
-	import { stats, feed, tickNow, getCounts, resetCron } from '$live/cronjobs';
+	import { stats, feed, tickNow, getCounts, resetCron, holdInitialLoads, releaseInitialLoads } from '$live/cronjobs';
 
 	function waitForOpen() {
 		return new Promise((resolve) => {
@@ -41,19 +41,20 @@
 		window.__test = {
 			ready: async () => {
 				await waitForOpen();
-				// stats loader returns null initially; wait until the
-				// initial fetch completes (the store transitions away from
-				// undefined). feed loader returns [].
-				await waitOn(stats, (v) => v === null || (v && typeof v === 'object'));
-				await waitOn(feed, (v) => Array.isArray(v));
+				await Promise.all([stats.attach(), feed.attach()]);
 			},
 			reset: async () => {
 				await waitForOpen();
+				// Value defaults do not acknowledge an initial loader response.
+				// Finish both subscriptions before publishing the reset barrier.
+				await Promise.all([stats.attach(), feed.attach()]);
 				await resetCron();
 				await waitOn(feed, (v) => Array.isArray(v) && v.length === 0);
 				await waitOn(stats, (v) => v === null);
-				// Drain late refreshed:[] / set:null frames (uws batching).
-				await new Promise((r) => setTimeout(r, 100));
+				const counts = await getCounts();
+				if (counts.ticks !== 0 || counts.itemCount !== 0 || counts.feedCount !== 0) {
+					throw new Error('Cron reset did not clear server state: ' + JSON.stringify(counts));
+				}
 			},
 			readStats: () => get(stats),
 			readFeed: () => get(feed),
@@ -72,8 +73,11 @@
 				});
 			},
 			tickNow: async () => tickNow(),
-			getCounts: async () => getCounts()
+			getCounts: async () => getCounts(),
+			holdInitialLoads: async (userId) => holdInitialLoads(userId),
+			releaseInitialLoads: async () => releaseInitialLoads()
 		};
+		return () => { stats.detach(); feed.detach(); };
 	});
 </script>
 

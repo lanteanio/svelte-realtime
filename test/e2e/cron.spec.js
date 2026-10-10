@@ -151,3 +151,34 @@ test('sanity: cron does not fire on unrelated publishes', async ({ page }) => {
 	expect(afterTick.ticks).toBe(1);
 	expect(afterTick.itemCount).toBe(1);
 });
+
+
+test('reset waits for initial subscription snapshots before clearing prior state', async ({ browser, page }, testInfo) => {
+	await page.evaluate(async () => { await window.__test.tickNow(); await window.__test.tickNow(); });
+	await page.evaluate(() => window.__test.waitFeedCount(2));
+	await page.evaluate(() => window.__test.holdInitialLoads('slow-cron'));
+	const url = new URL(baseURLFromProject(testInfo));
+	const context = await browser.newContext();
+	await context.addCookies([{ name: 'user', value: 'slow-cron', domain: url.hostname, path: '/' }]);
+	try {
+		const slow = await context.newPage();
+		await slow.goto('/cron'); await slow.waitForFunction(() => window.__test);
+		await expect.poll(() => page.evaluate(() => window.__test.getCounts())).toMatchObject({ heldLoads: 2 });
+		const before = await slow.evaluate(async () => {
+			window.__resetPromise = window.__test.reset();
+			// One roundtrip lets every client-side reset continuation enqueue;
+			// the next observes any premature reset on the same socket.
+			await window.__test.getCounts();
+			return window.__test.getCounts();
+		});
+		expect(before).toMatchObject({ ticks: 2, itemCount: 2, feedCount: 2 });
+		await page.evaluate(() => window.__test.releaseInitialLoads());
+		await slow.evaluate(() => window.__resetPromise);
+		expect(await slow.evaluate(() => window.__test.readFeed())).toEqual([]);
+		expect(await slow.evaluate(() => window.__test.readStats())).toBeNull();
+		expect(await page.evaluate(() => window.__test.getCounts())).toMatchObject({ ticks: 0, itemCount: 0, feedCount: 0 });
+	} finally {
+		await page.evaluate(() => window.__test.releaseInitialLoads());
+		await context.close();
+	}
+});

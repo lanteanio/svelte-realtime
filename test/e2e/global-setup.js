@@ -31,9 +31,9 @@ function startServer(script, port) {
 			if (!resolved) {
 				resolved = true;
 				proc.kill();
-				reject(new Error('Server did not start within 60s.\noutput: ' + output));
+				reject(new Error('Server did not start within 120s.\noutput: ' + output));
 			}
-		}, 60000);
+		}, 120000);
 
 		function check() {
 			if (!resolved && isReady(output)) {
