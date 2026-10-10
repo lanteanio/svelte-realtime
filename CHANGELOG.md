@@ -115,7 +115,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Idempotency erasure remains effective for long-running handlers and duplicate waiters after the recent-tombstone sweep, while fresh calls outside the grace window cache normally.
 
-- Durable alarm claims retain their execution until successful completion. Failed and interrupted executions stay inspectable for explicit retry, preserving their generation and effect idempotency key without overwriting newer schedules.
+- Durable alarm claims retain their execution until successful completion. Failed and interrupted executions stay inspectable for explicit retry, preserving their generation and effect idempotency key without overwriting newer schedules. **Action required:** upgrade custom stores to the full retained-execution contract and enable `due()` polling for explicit retries; see the [0.6 upgrade guide](docs/0.6-upgrade.md). The `alarm.execution.failed` event now carries operational `errorClass`/`durable` fields, without raw handler errors or topic identifiers; update diagnostic consumers.
 
 - Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.
 

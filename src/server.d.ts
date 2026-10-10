@@ -4352,6 +4352,10 @@ export interface AlarmStore {
 	 * if any newer generation was reserved or a schedule already exists. A claimed
 	 * execution requires allowAbandoned and operator confirmation its worker stopped;
 	 * failed executions do not. Never discard the record when refusing requeue.
+	 * Requeue only writes the schedule; it does not arm a local timer. Execution
+	 * requires due() and a subsequent eligible recovery poll (leader-gated when
+	 * configured, at pollMs cadence, subject to delays/misfire policy). Without
+	 * due(), a successful requeue remains stored and does not execute.
 	 */
 	requeue(topic: string, generation: string, attempt: number, options: { at: number; allowAbandoned?: boolean }): boolean | Promise<boolean>;
 	/** Return due rows with their exact generations for conditional recovery claims. */

@@ -42,6 +42,49 @@ describe('durable alarm execution retention', () => {
 		vi.useRealTimers();
 	});
 
+	it.each(['claim', 'complete', 'fail', 'getExecution', 'executions', 'requeue'])('rejects a store missing %s while retaining the prior valid configuration', async method => {
+		const incomplete = { ...store }; delete incomplete[method];
+		expect(() => configureAlarm({ store: incomplete })).toThrow('must retain executions');
+		await ctx.setAlarm(10010); await vi.advanceTimersByTimeAsync(10);
+		expect(fired).toHaveBeenCalledTimes(1);
+	});
+
+	it('exposes explicit non-durable alarm identity in memory mode', async () => {
+		configureAlarm(null);
+		await ctx.setAlarm(10010); await vi.advanceTimersByTimeAsync(10);
+		const alarm = fired.mock.calls[0][0].alarm;
+		expect(alarm).toEqual({ at: 10010, firedAt: 10010, lateMs: 0, recovered: false, generation: null, attempt: 1, idempotencyKey: null });
+		expect(Object.isFrozen(alarm)).toBe(true);
+	});
+
+	it('retains an explicit requeue without dispatch when the store omits due()', async () => {
+		delete store.due;
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try { configureAlarm({ store }); } finally { warn.mockRestore(); }
+		fired.mockRejectedValueOnce(new Error('failed'));
+		await ctx.setAlarm(10010); await vi.advanceTimersByTimeAsync(10);
+		expect(await store.requeue(topic, '1', 1, { at: 10010 })).toBe(true);
+		await vi.advanceTimersByTimeAsync(200000); await _pollAlarms();
+		expect(fired).toHaveBeenCalledTimes(1);
+		expect(store.get(topic)).toMatchObject({ generation: '1', at: 10010 });
+	});
+
+	it('dispatches an explicit requeue only on an eligible recovery poll', async () => {
+		fired.mockRejectedValueOnce(new Error('failed'));
+		await ctx.setAlarm(10010); await vi.advanceTimersByTimeAsync(10);
+		let leader = false;
+		configureAlarm({ store, leader: () => leader, pollMs: 5000 });
+		expect(await store.requeue(topic, '1', 1, { at: 10010 })).toBe(true);
+		await vi.advanceTimersByTimeAsync(5000);
+		expect(fired).toHaveBeenCalledTimes(1);
+		leader = true;
+		await vi.advanceTimersByTimeAsync(4999);
+		expect(fired).toHaveBeenCalledTimes(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(fired).toHaveBeenCalledTimes(2);
+		expect(fired.mock.calls[1][0].alarm).toMatchObject({ recovered: true, generation: '1', attempt: 2 });
+	});
+
 	for (const recovered of [false, true]) {
 		it(`retains a failed ${recovered ? 'recovery' : 'precise'} execution and retries its stable identity explicitly`, async () => {
 			fired.mockRejectedValueOnce(new Error('private callback payload'));

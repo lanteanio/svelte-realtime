@@ -2936,7 +2936,7 @@ indefinitely, and a pre-id worker can only understand the old path. An
 unresolved or duplicate id is retained, not claimed and dropped, and emits
 `alarm.recovery.unresolved` for operator disposition.
 
-A durable alarm can fire late - a restart-recovered alarm arbitrarily so. Inside `onAlarm`, `ctx.alarm` says exactly how the fire happened: `{ at, firedAt, lateMs, recovered }` - the scheduled deadline, when the handler actually ran, the difference, and whether the recovery poll (rather than the precise in-memory timer) fired it. For handlers where a late fire would be wrong rather than merely delayed (an auction close, a game round end), declare a misfire threshold and stale fires are skipped declaratively - the alarm is consumed, never run:
+A durable alarm can fire late - a restart-recovered alarm arbitrarily so. Inside `onAlarm`, `ctx.alarm` says exactly how the fire happened: `{ at, firedAt, lateMs, recovered, generation, attempt, idempotencyKey }` - the deadline, execution time, lateness, recovery origin, and durable retry identity. In-memory alarms use null generation/key and attempt one; durable attempts share the key described in the [store contract](docs/durable-alarms.md). For handlers where a late fire would be wrong rather than merely delayed (an auction close, a game round end), declare a misfire threshold and stale fires are skipped declaratively - the alarm is consumed, never run:
 
 ```js
 export default live.stream('auction:current', loadAuction, {
