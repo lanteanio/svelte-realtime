@@ -61,6 +61,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools explains prediction recovery and gives actionable instructions in empty views.
 
+- DevTools truncates payload previews at grapheme boundaries and reports omitted code units separately.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

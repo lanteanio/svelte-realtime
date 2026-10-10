@@ -405,12 +405,22 @@ function _ageString(t) {
  * @param {boolean} raw
  * @returns {string}
  */
+const payloadSegmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+
 function _renderPayload(value, raw) {
 	if (value === undefined) return '';
 	let str;
-	try { str = JSON.stringify(value); } catch { str = String(value); }
+	try { str = JSON.stringify(value) ?? String(value); } catch { str = String(value); }
 	const cap = raw ? 500 : 200;
-	if (str.length > cap) str = str.slice(0, cap) + '... [+' + (str.length - cap) + ']';
+	if (str.length > cap) {
+		let end = 0, count = 0;
+		const segments = payloadSegmenter ? payloadSegmenter.segment(str) : str;
+		for (const item of segments) {
+			if (count++ === cap) break;
+			end += typeof item === 'string' ? item.length : item.segment.length;
+		}
+		if (end < str.length) str = str.slice(0, end) + '... [+' + (str.length - end) + ' code units]';
+	}
 	return str;
 }
 

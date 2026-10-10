@@ -209,3 +209,18 @@ it('explains how to populate empty views and describes prediction recovery', asy
  await page.getByRole('tab', { name: 'smooth', exact: true }).click();
  expect(await page.locator('#svr-dt-content').textContent()).toContain('Prediction paused - waiting for resync (Command window full)');
 });
+
+it('keeps emoji, combining marks, and joined sequences intact at the preview boundary', async () => {
+ await streamsFixture();
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ await page.locator('[data-action="toggle-stream"]').click();
+ for (const grapheme of ['\u{1f600}', 'e\u0301', '\u{1f469}\u200d\u{1f4bb}', '\u{1f1e9}\u{1f1ea}']) {
+  await page.evaluate(value => {
+   window.__svelte_realtime_devtools.streams.get('chat').recentEvents = [{ event: 'update', ts: Date.now(), data: 'a'.repeat(198) + value + 'tail' }];
+   document.getElementById('svr-dt-tab-streams').click();
+  }, grapheme);
+  const text = await page.locator('#svr-dt-content').textContent();
+  expect(text).toContain('a'.repeat(198) + grapheme + '... [+5 code units]');
+  expect(text.isWellFormed()).toBe(true);
+ }
+});
