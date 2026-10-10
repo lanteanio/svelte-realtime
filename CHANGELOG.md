@@ -99,6 +99,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Contributor templates collect reproducible evidence, document private security reports, and check tracked formatting without rewriting files.
 
+- Contribution guidance defines task readiness, review evidence, ownership, blocked work and risk-based backlog ordering.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

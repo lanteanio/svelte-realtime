@@ -71,3 +71,52 @@ criteria and that nobody else is implementing it. A maintainer applies a
 `good first issue` label only when scope, expected behavior, relevant files,
 verification and an available reviewer are explicit; the label is not a promise
 that arbitrary open issues are suitable for beginners.
+
+## Backlog and review contract
+
+Relay Kanban is the workspace source of truth for ownership, dependencies and
+status. GitHub issues and PRs are linked evidence, not a second independent
+implementation queue. Use the owning project and task UUID when updating Relay;
+short task keys can repeat across projects. Claim the task before implementation,
+record progress and handoffs, and release the claim when work pauses or finishes.
+
+Ready means the item states a user-visible outcome, owning repository and files,
+acceptance criteria, a reproduction or verification plan, dependencies and any
+unresolved decision. Record risk, cost of delay and estimated scope. Separate a
+support question from an actionable defect or feature before scheduling it.
+An unresolved product or compatibility decision stays in backlog.
+
+| State | Entry and exit rule |
+| --- | --- |
+| backlog | Demand is recorded; refine scope, ownership and decisions until Ready. |
+| todo | Ready and ordered; a contributor can claim it without guessing acceptance. |
+| in_progress | Claimed implementation has an owner and current evidence. |
+| in_review | Implementation is integrated on the review branch, relevant checks pass, and an independent reviewer can assess it. |
+| done | Independent review and maintainer acceptance are recorded; required release or follow-up work has an explicit owner. |
+
+Done requires the accepted behavior, a regression where meaningful, relevant
+verification lanes, synchronized documentation/types/wire artifacts, changelog
+and compatibility notes where applicable, and recorded independent review.
+Code written or a green isolated test alone does not satisfy Done. Review may
+return an item to todo or in_progress with concrete unmet acceptance criteria.
+
+Use a provisional limit of three implementation items per repository. Finish or
+unblock existing work before starting another item. Coordinated parallel work
+may exceed this limit when the session owner explicitly assigns independent
+scopes and records who owns shared files and integration. The exception does not
+remove task claims or review requirements.
+
+A blocked item keeps its actual state and records the blocking task or decision,
+responsible owner, next action and evidence needed to resume. Populate blockedBy
+for task dependencies; file a task in the owning project for another repository.
+Do not keep a claim while waiting for an external owner. Recheck the blocker
+before resuming, and record why an abandoned approach no longer applies.
+
+Order Ready work by safety and correctness risk, then cost of delay, then effort
+and dependency impact. Explain the ordering with concrete user impact; a numeric
+priority alone does not justify interrupting claimed work. Reassess the
+provisional WIP limit during backlog planning using blocked and review queues.
+At that planning point, items without fresh evidence for 30 days require a
+reproduction and ownership check before returning to todo. This is a stale-item
+rule, not a promise of scheduled triage or automatic closure. Reopen a closed
+item only with new evidence or a clearly unmet acceptance criterion.
