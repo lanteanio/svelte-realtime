@@ -3442,11 +3442,15 @@ export function _restoreHmr(snap) {
 	for (const [k, v] of snap.aggregates) {
 		v.timer = null;
 		aggregateRegistry.set(k, v);
-		_aggregateByTopic.set(v.topic, v);
+		_aggregateByTopic.set(v.baseTopic || v.topic, v);
 		let srcSet = _aggregateBySource.get(v.source);
 		if (!srcSet) { srcSet = new Set(); _aggregateBySource.set(v.source, srcSet); }
 		srcSet.add(v);
 		_watchedTopics.add(v.source);
+		if (v.windowStates) for (const win of v.windowStates.values()) {
+			if (win.type === 'tumbling') _scheduleNextBoundary(v, win);
+			else if (win.type === 'sliding') _scheduleNextSlide(v, win);
+		}
 	}
 
 	// Restore smooth topic records. Timers were cancelled in the snapshot

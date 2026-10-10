@@ -16,6 +16,8 @@ import {
 	__registerAggregate,
 	_activateDerived,
 	_resetAggregates,
+	_prepareHmr,
+	_restoreHmr,
 	setCronPlatform
 } from '../src/server.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
@@ -81,6 +83,35 @@ afterEach(() => {
 });
 
 describe('tumbling windows close on the exact clock', () => {
+	it('restores window loaders and autonomous timers after a failed module reload', async () => {
+		vi.useFakeTimers({ now: B0 - 2000 });
+		installExactNow();
+		const fn = live.aggregate('restored:source', {
+			count: { init: () => 0, reduce: value => value + 1, combine: (...values) => values.reduce((a, b) => a + b, 0) }
+		}, { topic: 'restored:output', windows: {
+			minute: { type: 'tumbling', period: 'minute' },
+			recent: { type: 'sliding', durationMs: 2000, slideMs: 1000 },
+			lifetime: { type: 'lifetime' }
+		} });
+		__registerAggregate('restored/aggregate', fn);
+		const platform = timedPlatform();
+		_activateDerived(platform); setCronPlatform(platform);
+		platform.publish('restored:source', 'add', {});
+		platform.publish('restored:source', 'add', {});
+		const snap = _prepareHmr();
+		_restoreHmr(snap);
+		for (const loader of Object.values(fn.__windowStreams)) expect(await loader()).toEqual({ count: 2 });
+		platform.published.length = 0;
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(platform.published.filter(event => event.topic === 'restored:output:minute').map(event => event.data.count)).toEqual([2]);
+		expect(platform.published.filter(event => event.topic === 'restored:output:recent').map(event => event.data.count)).toEqual([2, 0]);
+		expect(await fn.__windowStreams.minute()).toEqual({ count: 0 });
+		expect(await fn.__windowStreams.recent()).toEqual({ count: 0 });
+		expect(await fn.__windowStreams.lifetime()).toEqual({ count: 2 });
+		platform.publish('restored:source', 'add', {});
+		expect(await fn.__windowStreams.lifetime()).toEqual({ count: 3 });
+	});
+
 	it('closes at the boundary, not when the lagging cached clock reaches it', () => {
 		vi.useFakeTimers({ now: B0 - 2000 });
 		installCachedClock(300);
