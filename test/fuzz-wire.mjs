@@ -1,6 +1,6 @@
 // Property-based fuzz of svelte-adapter-uws wire protocol primitives.
 //
-// Resolves adapter source via `node_modules/svelte-adapter-uws/files/` by
+// Resolves adapter source via `node_modules/svelte-adapter-uws/src/runtime/` by
 // default (works in CI against the installed peer dep). Set ADAPTER_ROOT
 // to point at a sibling checkout for local-dev runs against live source.
 //
@@ -19,18 +19,19 @@ const here = dirname(fileURLToPath(import.meta.url));
 const ADAPTER_ROOT = process.env.ADAPTER_ROOT
 	? resolve(process.env.ADAPTER_ROOT)
 	: resolve(here, '../node_modules/svelte-adapter-uws');
-const FILES = `${ADAPTER_ROOT}/files`;
+const FILES = `${ADAPTER_ROOT}/src/runtime`;
 const RUNS = Math.max(1, Number(process.env.FUZZ_RUNS) || 1);
 const VERBOSE = !!process.env.FUZZ_VERBOSE;
 
 const cookies = await import(pathToFileURL(`${FILES}/cookies.js`).href);
 const utils = await import(pathToFileURL(`${FILES}/utils.js`).href);
+const { splitCookiesString } = await import(pathToFileURL(`${FILES}/utils/cookies-string.js`).href);
 
 const { parseCookies, serializeCookie } = cookies;
 const {
 	isValidWireTopic, parse_origin, parse_as_bytes, resolveRequestId,
 	completeEnvelope, wrapBatchEnvelope, collapseByCoalesceKey,
-	nextTopicSeq, splitCookiesString, esc
+	nextTopicSeq, esc
 } = utils;
 
 // Local copy of parseRange (not exported; mirrors handler.js).
