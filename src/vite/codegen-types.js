@@ -18,10 +18,11 @@ const LOAD_OPTS = '{ args?: any[]; user?: any; fallback?: any; onError?: (err: a
  * Creates `$types.d.ts` in the live directory with ambient module declarations.
  * @param {string} liveDir
  * @param {string} dir
+ * @param {(path: string) => string} [readSource]
  */
-export function _writeTypeDeclarations(liveDir, dir) {
+export function _writeTypeDeclarations(liveDir, dir, readSource = _readCached) {
 	const typesPath = resolve(liveDir, '$types.d.ts');
-	const content = _generateTypeDeclarations(liveDir, dir);
+	const content = _generateTypeDeclarations(liveDir, dir, readSource);
 	if (content) {
 		// Skip identical rewrites: an mtime bump re-enters file watchers, and
 		// with a second Vite instance on the same checkout it would ping-pong
@@ -33,7 +34,7 @@ export function _writeTypeDeclarations(liveDir, dir) {
 		}
 	} else if (existsSync(typesPath)) {
 		// Remove stale declarations when all live modules are deleted
-		try { rmSync(typesPath); } catch {}
+		rmSync(typesPath, { force: true });
 	}
 }
 
@@ -43,9 +44,10 @@ export function _writeTypeDeclarations(liveDir, dir) {
  * For JS files, falls back to `any`.
  * @param {string} liveDir
  * @param {string} dir
+ * @param {(path: string) => string} [readSource]
  * @returns {string}
  */
-export function _generateTypeDeclarations(liveDir, dir) {
+export function _generateTypeDeclarations(liveDir, dir, readSource = _readCached) {
 	if (!existsSync(liveDir)) return '';
 
 	const files = _findLiveFiles(liveDir);
@@ -59,7 +61,7 @@ export function _generateTypeDeclarations(liveDir, dir) {
 
 	for (const filePath of files) {
 		const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-		const source = _readCached(filePath);
+		const source = readSource(filePath);
 		const isTS = filePath.endsWith('.ts');
 
 		/** @type {string[]} */

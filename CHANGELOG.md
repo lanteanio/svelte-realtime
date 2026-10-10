@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Upload handlers receive `ctx.abortSignal` for cancellation. `ctx.signal`
   remains a deprecated alias during 0.x.
 
+- Expose `generateTypes({ root, dir })` from `svelte-realtime/vite` so typecheck scripts can refresh `$live` declarations without a production build.
+
 ### Fixed
 
 - Vite registry updates stay inside the configured live directory, serialize with startup, and contain asynchronous reload failures. Nested worktree hooks no longer inherit the parent registry.

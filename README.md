@@ -5541,7 +5541,7 @@ export default {
 | `devtools` | `true` | Enable the in-browser DevTools overlay in dev mode |
 | `crdt.reconcileIntervalMs` | `30000` | Background reconciliation interval in milliseconds for generated document channels; `0` disables it |
 
-The plugin resolves `$live/chat` to `src/live/chat.js`, generates client stubs, supports nested directories (`$live/rooms/lobby`), and watches for file changes in dev mode. When `typedImports` is enabled, it generates type declarations that strip the `ctx` parameter and infer return types.
+The plugin resolves `$live/chat` to `src/live/chat.js`, generates client stubs, supports nested directories (`$live/rooms/lobby`), and watches for file changes in dev mode. When `typedImports` is enabled, it generates type declarations that strip the `ctx` parameter and infer return types. Before a typecheck-only command, create `scripts/generate-live.mjs` with `import { generateTypes } from 'svelte-realtime/vite'; generateTypes();` and run `node scripts/generate-live.mjs && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json` from the project root (for example in your package's `check` script). `generateTypes({ root, dir })` synchronously refreshes `$types.d.ts` without a production build or executing server modules; defaults are the working directory and `src/live`. It does not load Vite configuration: pass the plugin's `dir` for a custom live directory and include the generated file in your TypeScript configuration. Repeated calls pick up added, changed and deleted modules, keep unchanged output intact, and report filesystem failures.
 
 ---
 
