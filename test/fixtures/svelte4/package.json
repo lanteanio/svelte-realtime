@@ -1,0 +1,30 @@
+{
+  "name": "svelte-realtime-svelte4-fixture",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "check": "svelte-kit sync && svelte-check --tsconfig ./jsconfig.json",
+    "build": "svelte-kit sync && vite build",
+    "stores": "node stores.mjs",
+    "smoke": "node smoke.mjs"
+  },
+  "dependencies": {
+    "@sveltejs/kit": "2.70.2",
+    "svelte": "4.2.20",
+    "svelte-adapter-uws": "0.6.0-next.95",
+    "svelte-realtime": "file:../../.."
+  },
+  "devDependencies": {
+    "@playwright/test": "1.59.1",
+    "@sveltejs/vite-plugin-svelte": "3.1.2",
+    "svelte-check": "3.8.6",
+    "typescript": "5.9.3",
+    "vite": "5.4.21"
+  },
+  "overrides": {
+    "cookie": "^0.7.2"
+  }
+}

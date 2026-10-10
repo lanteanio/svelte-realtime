@@ -19,7 +19,8 @@
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
-      "node scripts/check-release-workflow.js"
+      "node scripts/check-release-workflow.js",
+      "node scripts/check-svelte-support.js"
     ],
     "check:documentation": [
       "node scripts/check-documentation-contract.js"
@@ -45,6 +46,9 @@
     ],
     "check:release": [
       "node scripts/check-release-ledger.js"
+    ],
+    "check:svelte-support": [
+      "node scripts/check-svelte-support.js"
     ],
     "check:verification": [
       "node scripts/check-verification-inventory.js"
@@ -82,7 +86,8 @@
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
-      "node scripts/check-release-workflow.js"
+      "node scripts/check-release-workflow.js",
+      "node scripts/check-svelte-support.js"
     ],
     "pretest": [
       "node scripts/generate-error-reference.js --check",
@@ -102,7 +107,8 @@
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
-      "node scripts/check-release-workflow.js"
+      "node scripts/check-release-workflow.js",
+      "node scripts/check-svelte-support.js"
     ],
     "sim:golden": [
       "node scripts/sim-golden.js"
@@ -129,6 +135,7 @@
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
       "node scripts/check-release-workflow.js",
+      "node scripts/check-svelte-support.js",
       "vitest run"
     ],
     "test:chaos": [
@@ -198,7 +205,8 @@
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
-      "node scripts/check-release-workflow.js"
+      "node scripts/check-release-workflow.js",
+      "node scripts/check-svelte-support.js"
     ],
     "verify:full": [
       "node scripts/generate-error-reference.js --check",
@@ -219,6 +227,7 @@
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
       "node scripts/check-release-workflow.js",
+      "node scripts/check-svelte-support.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -246,6 +255,7 @@
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
       "node scripts/check-release-workflow.js",
+      "node scripts/check-svelte-support.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -271,6 +281,7 @@
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
       "node scripts/check-release-workflow.js",
+      "node scripts/check-svelte-support.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -308,6 +319,7 @@
       "node scripts/check-documentation-contract.js",
       "node scripts/check-release-ledger.js",
       "node scripts/check-release-workflow.js",
+      "node scripts/check-svelte-support.js",
       "vitest run"
     ]
   },
@@ -463,6 +475,7 @@
         "node scripts/check-documentation-contract.js",
         "node scripts/check-release-ledger.js",
         "node scripts/check-release-workflow.js",
+        "node scripts/check-svelte-support.js",
         "vitest run",
         "node scripts/sim-golden.js",
         "node test/fuzz-wire.mjs",
@@ -497,7 +510,8 @@
         "node scripts/check-doc-code.js",
         "node scripts/check-documentation-contract.js",
         "node scripts/check-release-ledger.js",
-        "node scripts/check-release-workflow.js"
+        "node scripts/check-release-workflow.js",
+        "node scripts/check-svelte-support.js"
       ]
     },
     {
@@ -601,6 +615,7 @@
         "node scripts/check-documentation-contract.js",
         "node scripts/check-release-ledger.js",
         "node scripts/check-release-workflow.js",
+        "node scripts/check-svelte-support.js",
         "vitest run",
         "node scripts/sim-golden.js",
         "node test/fuzz-wire.mjs",

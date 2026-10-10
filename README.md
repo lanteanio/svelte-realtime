@@ -87,7 +87,7 @@ npm exec -- svelte-adapter-uws-preflight
 
 Mixed-version installs are rejected at install time with a peer-dep warning. Scaffold builds need Node 22.12 or newer; the pinned native server supports Node 22 or newer with a matching OS/architecture binary. Linux requires glibc 2.38 or newer; musl (including Alpine) is unsupported. Run the native preflight above before building; it checks the installed addon as well as Node, OS, architecture and libc.
 
-Svelte 4 and 5 are both supported. Four features ship Svelte 5 rune modules and need Svelte 5: `live.doc`, `live.smooth`, a `live.multiplayer` export with presence, cursors, an owner or a field surface (Svelte 5.7 or later), and an enumerable `live.room` (its `rooms()` lobby view). On an older Svelte the Vite plugin stops the build with an error naming the `$live` module, the feature and the Svelte it needs. `store.rune()` needs Svelte 5 too and throws a descriptive error when called on Svelte 4.
+Svelte 4 and 5 are both supported; the [locked Svelte 4 profile](docs/svelte-support.md) gives exact versions and executable checks. Four features ship Svelte 5 rune modules and need Svelte 5: `live.doc`, `live.smooth`, a `live.multiplayer` export with presence, cursors, an owner or a field surface (Svelte 5.7 or later), and an enumerable `live.room` (its `rooms()` lobby view). On an older Svelte the Vite plugin stops the build with an error naming the `$live` module, the feature and the Svelte it needs. `store.rune()` needs Svelte 5 too and throws a descriptive error when called on Svelte 4.
 
 ---
 

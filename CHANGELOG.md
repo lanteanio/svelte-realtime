@@ -12,6 +12,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- Added an exact locked Svelte 4 compatibility fixture with generated version/setup documentation and CI checks for production builds, declarations, stores and two browser tabs. Action: use the linked Svelte 4 profile when reproducing support on that major version.
+
 - The 0.6 consumer guide indexes capabilities, compatibility changes and required upgrade actions.
   **Action required:** review the [0.6 guide](docs/0.6-upgrade.md) for the features your application uses.
 

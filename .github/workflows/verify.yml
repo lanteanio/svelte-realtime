@@ -44,3 +44,25 @@ jobs:
       - run: npm run smoke
       - name: Exercise the manual counter in a fresh app
         run: node scripts/check-manual-setup.js --fresh-install
+  svelte4:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: test/fixtures/svelte4
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version-file: test/fixtures/svelte4/.nvmrc
+          cache: npm
+          cache-dependency-path: test/fixtures/svelte4/package-lock.json
+      - run: npm ci --install-links
+      - run: npm exec -- svelte-adapter-uws-preflight
+      - run: npm exec -- playwright install --with-deps chromium
+      - run: npm run build
+      - run: npm run check
+      - run: npm run stores
+      - run: npm run smoke

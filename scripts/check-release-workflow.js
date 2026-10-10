@@ -124,7 +124,7 @@ const PUBLISH_STEPS = [
 // they run BEFORE the verification steps, where their effects are still
 // tested.
 const EXPECTED_SCRIPTS = {
-	"check": "node scripts/generate-error-reference.js --check && node scripts/generate-onboarding-reference.js && node scripts/check-types.js && node scripts/check-diagnostic-attribution.js && node scripts/check-publish-routing.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js && node scripts/check-scaffold-build.js && npm run check:format && npm run check:publish && npm run check:verification && npm run check:links && npm run check:examples && npm run check:documentation && npm run check:release && node scripts/check-release-workflow.js",
+	"check": "node scripts/generate-error-reference.js --check && node scripts/generate-onboarding-reference.js && node scripts/check-types.js && node scripts/check-diagnostic-attribution.js && node scripts/check-publish-routing.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js && node scripts/check-scaffold-build.js && npm run check:format && npm run check:publish && npm run check:verification && npm run check:links && npm run check:examples && npm run check:documentation && npm run check:release && node scripts/check-release-workflow.js && npm run check:svelte-support",
 	"check:errors": "node scripts/generate-error-reference.js --check",
 	"generate:errors": "node scripts/generate-error-reference.js --write",
 	"generate:onboarding": "node scripts/generate-onboarding-reference.js --write --sync-docs-site",
@@ -163,6 +163,7 @@ const EXPECTED_SCRIPTS = {
 	"test:lifecycle": "node scripts/check-production-lifecycle.js",
 	"test:smooth-stack": "node scripts/check-smooth-stack.js",
 	"check:release": "node scripts/check-release-ledger.js",
+	"check:svelte-support": "node scripts/check-svelte-support.js",
 	"prepublishOnly": "npm run check",
 	"verify:release": "npm run verify:full && npm run test:lifecycle && npm run test:smooth-stack && npm run smoke"
 };
