@@ -1774,7 +1774,13 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					// Channels return an empty placeholder; derived streams may
 					// return stale data before their sources populate.
 				} else {
-					currentValue = response.data;
+					if (_optimisticQueue.length > 0) {
+						_serverValue = response.data;
+						_rebuildIndexFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex));
+						currentValue = _replayQueue().value;
+					} else {
+						currentValue = response.data;
+					}
 					_presenceFieldOrder.clear();
 					_presenceSeeded.clear();
 					_cursorOrder.clear();
@@ -2509,8 +2515,13 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 						// concatenated into currentValue would vanish on the next
 						// _recomputeDisplay. Apply the page to the un-overlaid
 						// server state and recompute the display instead.
-						if (_optimisticQueue.length > 0 && Array.isArray(response.data) && Array.isArray(_serverValue)) {
-							_serverValue = _appendPage(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), response.data);
+						if (_optimisticQueue.length > 0) {
+							if (Array.isArray(response.data) && Array.isArray(_serverValue)) {
+								_serverValue = _appendPage(_serverValue, /** @type {Map<any, number>} */ (_serverIndex), response.data);
+							} else if (response.data !== undefined) {
+								_serverValue = response.data;
+								_rebuildIndexFn(_serverValue, /** @type {Map<any, number>} */ (_serverIndex));
+							}
 							// A page row must NOT absorb an in-flight queue entry with
 							// the same key. A live event means "this change just
 							// committed"; a page row only means "this is the row as of

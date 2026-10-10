@@ -7988,7 +7988,7 @@ describe('refreshed event', () => {
 			key: 'id'
 		});
 
-		// Apply an optimistic placeholder (registers in _optimisticKeys)
+		// Apply an optimistic placeholder for the server row to replace.
 		store.optimistic('created', { id: 'temp-x', title: 'pending' });
 
 		// Refresh arrives - server's authoritative state replaces everything,
@@ -8664,5 +8664,56 @@ describe('assert() helper (client)', () => {
 		try { assert(false, 'realtime/test.cat-z'); } catch {}
 		try { assert(false, 'realtime/test.cat-z'); } catch {}
 		expect(getAssertionCounters().get('realtime/test.cat-z')).toBe(2);
+	});
+});
+
+
+describe('stream snapshots during optimistic mutation', () => {
+	it.each(['crud', 'set'])('reconnect preserves the snapshot after a %s mutation settles', async (merge) => {
+		const initial = merge === 'crud' ? [{ id: 1, name: 'Old' }] : { count: 1 };
+		const fresh = merge === 'crud' ? [{ id: 2, name: 'Fresh' }] : { count: 10 };
+		const change = merge === 'crud'
+			? (rows) => [...rows, { id: 3, name: 'Local' }]
+			: (value) => ({ count: value.count + 1 });
+		const expected = merge === 'crud' ? [...fresh, { id: 3, name: 'Local' }] : { count: 11 };
+		const store = __stream('snapshots/' + merge, { merge, key: 'id' });
+		const values = [];
+		const unsub = store.subscribe((value) => values.push(value));
+		await flush();
+		const first = sendQueuedFn.mock.calls.at(-1)[0];
+		simulateRpcResponse(first.id, { ok: true, data: initial, topic: 'snapshots-' + merge, merge, key: 'id' });
+		let settle;
+		const pending = store.mutate(() => new Promise((resolve) => { settle = resolve; }), change);
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		const reconnect = sendQueuedFn.mock.calls.at(-1)[0];
+		expect(reconnect.id).not.toBe(first.id);
+		simulateRpcResponse(reconnect.id, { ok: true, data: fresh, topic: 'snapshots-' + merge, merge, key: 'id' });
+		expect(values.at(-1)).toEqual(expected);
+		settle();
+		await pending;
+		expect(values.at(-1)).toEqual(expected);
+		unsub();
+	});
+
+	it('a non-array page updates server state while a mutation is pending', async () => {
+		const store = __stream('snapshots/page', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((value) => values.push(value));
+		await flush();
+		const first = sendQueuedFn.mock.calls.at(-1)[0];
+		simulateRpcResponse(first.id, { ok: true, data: { count: 1 }, topic: 'snapshots-page', merge: 'set', cursor: 'next', hasMore: true });
+		let settle;
+		const pending = store.mutate(() => new Promise((resolve) => { settle = resolve; }), (value) => ({ count: value.count + 1 }));
+		const more = store.loadMore();
+		const page = sendQueuedFn.mock.calls.at(-1)[0];
+		simulateRpcResponse(page.id, { ok: true, data: { count: 10 }, hasMore: false });
+		await more;
+		expect(values.at(-1)).toEqual({ count: 11 });
+		settle();
+		await pending;
+		expect(values.at(-1)).toEqual({ count: 11 });
+		unsub();
 	});
 });
