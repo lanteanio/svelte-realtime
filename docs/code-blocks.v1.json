@@ -5,13 +5,13 @@
 	],
 	"fragmentCeiling": 1,
 	"summary": {
-		"total": 244,
+		"total": 245,
 		"classifications": {
 			"command": 4,
 			"tutorial": 74,
 			"syntax": 128,
 			"output": 6,
-			"executed": 30,
+			"executed": 31,
 			"fragment": 1,
 			"config": 1
 		},
@@ -21,7 +21,7 @@
 			"acorn": 120,
 			"reviewed-output": 6,
 			"svelte": 7,
-			"packed-runtime": 30,
+			"packed-runtime": 31,
 			"reviewed-fragment": 1,
 			"manual-config": 1,
 			"json": 1
@@ -768,6 +768,16 @@
 			"classification": "syntax",
 			"channel": "acorn",
 			"reason": "not runnable: ambient-identifiers configure, currentUserId"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "ab2ab47c45f70a92c77644bdc714bb0527b1a5f9e24354c45dccb457e1f764e1",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Offline queue > Durable persistence (survive a reload)",
+			"classification": "executed",
+			"channel": "packed-runtime",
+			"verification": "test/packed-readme-examples.test.js"
 		},
 		{
 			"document": "README.md",

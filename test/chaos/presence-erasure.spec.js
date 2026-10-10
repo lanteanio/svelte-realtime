@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { readFileSync } from 'node:fs';
+import { chaosRun, readContext } from './run-context.js';
 import { createRequire } from 'node:module';
 import { randomUUID } from 'node:crypto';
 import { live, configureForget, _resetForget } from '../../src/server.js';
@@ -8,7 +8,7 @@ import { _resetOwnerForTests, _ownerGet } from '../../src/server/room-owner.js';
 
 const require = createRequire(new URL('../fixture/package.json', import.meta.url));
 const Redis = require('ioredis');
-const { redisUrl } = JSON.parse(readFileSync(new URL('.chaos-ctx.json', import.meta.url), 'utf8'));
+const { redisUrl } = readContext(chaosRun());
 
 for (const fault of ['none', 'before', 'after', 'malformed']) {
 	test(`strict erasure on real Redis Lua: ${fault} response failure`, async () => {
