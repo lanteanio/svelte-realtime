@@ -17,6 +17,9 @@ import { _ownerOnJoin, _ownerOnLeave, _ownerTransfer, _ownerGet, _ownerEmit, _ow
 import { _registerReplayTopic } from './replay-routing.js';
 import { _bindAlarmCtx } from './alarm.js';
 
+// Reserve optional surfaces too, so enabling one cannot change an action's meaning.
+const _NAMESPACE_MEMBERS = new Set(['data', 'presence', 'cursors', 'owner', 'rooms']);
+
 // Seam: the shared topic-fn resolver (_callTopicFn) and the rollback marker
 // set (_rollingBack) stay in server.js - the staying stream-subscribe rollback
 // path writes _rollingBack and the room onUnsubscribe reads it. Set at init
@@ -61,6 +64,16 @@ export const _roomRegister = function room(config) {
 		onOwnerChange,
 		alarm: alarmCfg
 	} = config;
+
+	if (actions) {
+		for (const action of Object.keys(actions)) {
+			if (_NAMESPACE_MEMBERS.has(action)) {
+				throw new Error(
+					`[svelte-realtime] live.room() action '${action}' has the name of a member the generated client namespace already provides. Rename the action.\n  See: https://svti.me/rooms`
+				);
+			}
+		}
+	}
 
 	if (alarmCfg !== undefined) {
 		if (typeof alarmCfg !== 'object' || alarmCfg === null || typeof alarmCfg.onAlarm !== 'function') {

@@ -31,6 +31,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 ### Fixed
 
 - Stream unsubscribe and disconnect cleanup wait for pending subscribe hooks, preventing room presence, ownership, and enumeration from surviving a departed socket.
+- Room actions cannot use the generated client member names `data`, `presence`, `cursors`, `owner` or `rooms`, even when an optional surface is disabled. Declaration errors now identify the action to rename.
+
 - `realtime()`, generated WebSocket hooks and README examples include stream and connection cleanup exports. The Vite plugin warns once when a routing hook omits `unsubscribe` or `close`, explaining the retained state.
 
 - Manual setup now runs a dependency-free shared counter with complete connection hooks, local-only identity, two-tab checks and restart instructions.
