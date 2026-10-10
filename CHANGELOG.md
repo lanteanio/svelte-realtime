@@ -45,6 +45,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools has a visible launcher, a named region, and restores focus after Close or Escape.
 
+- DevTools tabs, stream expanders, and capture toggles expose keyboard and assistive-technology state.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

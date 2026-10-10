@@ -50,3 +50,31 @@ describe('DevTools focus', () => {
 		expect(await launcher.getAttribute('aria-expanded')).toBe('false');
 	});
 });
+async function streamsFixture() {
+ await page.evaluate(() => { window.__svelte_realtime_devtools = { pending: new Map(), history: [], streams: new Map([['chat', { path: 'chat', topic: 'chat', subCount: 1, recentEvents: [], lastEventTime: Date.now(), lastEvent: 'update' }]]) }; });
+ await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).click();
+}
+it('provides roving tabs and keyboard stream expansion with readable toggle states', async () => {
+ await streamsFixture();
+ const rpcs = page.getByRole('tab', { name: 'rpcs', exact: true });
+ await rpcs.focus();
+ await page.keyboard.press('ArrowRight');
+ const streams = page.getByRole('tab', { name: 'streams', exact: true });
+ expect(await streams.getAttribute('aria-selected')).toBe('true');
+ expect(await rpcs.getAttribute('tabindex')).toBe('-1');
+ expect(await page.getByRole('tabpanel', { name: 'streams' }).count()).toBe(1);
+ const expand = page.locator('[data-action="toggle-stream"]');
+ await expand.focus();
+ await page.keyboard.press('Enter');
+ expect(await expand.getAttribute('aria-expanded')).toBe('true');
+ expect(await page.locator('[id="' + await expand.getAttribute('aria-controls') + '"]').isVisible()).toBe(true);
+ const pause = page.getByRole('button', { name: 'Pause event capture' });
+ expect(await pause.getAttribute('aria-pressed')).toBe('false');
+ await pause.click();
+ expect(await pause.getAttribute('aria-pressed')).toBe('true');
+ await streams.focus();
+ await page.keyboard.press('End');
+ expect(await page.getByRole('tab', { name: 'connection', exact: true }).getAttribute('aria-selected')).toBe('true');
+ await page.keyboard.press('Home');
+ expect(await rpcs.getAttribute('aria-selected')).toBe('true');
+});

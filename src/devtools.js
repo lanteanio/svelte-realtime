@@ -118,23 +118,39 @@ function init() {
 	document.addEventListener('mouseup', () => { dragging = false; });
 
 	const tabs = document.createElement('div');
+	tabs.setAttribute('role', 'tablist');
+	tabs.setAttribute('aria-label', 'DevTools views');
 	tabs.style.cssText = 'display:flex;border-bottom:1px solid #333;';
 
 	const content = document.createElement('div');
+	content.id = 'svr-dt-content';
+	content.setAttribute('role', 'tabpanel');
+	content.setAttribute('aria-labelledby', 'svr-dt-tab-' + activeTab);
+	content.tabIndex = 0;
 	content.style.cssText = 'padding:8px;overflow-y:auto;max-height:320px;';
 
 	const tabNames = ['rpcs', 'streams', 'smooth', 'connection'];
 	for (const name of tabNames) {
 		const btn = document.createElement('button');
 		btn.textContent = name;
+		btn.type = 'button';
+		btn.id = 'svr-dt-tab-' + name;
+		btn.setAttribute('role', 'tab');
+		btn.setAttribute('aria-controls', content.id);
+		btn.setAttribute('aria-selected', String(name === activeTab));
+		btn.tabIndex = name === activeTab ? 0 : -1;
 		btn.style.cssText = `
 			flex:1;padding:5px;background:none;border:none;color:#888;cursor:pointer;
 			font-family:monospace;font-size:11px;border-bottom:2px solid transparent;
 		`;
 		btn.onclick = () => {
 			activeTab = name;
+			content.setAttribute('aria-labelledby', btn.id);
 			_lastRenderedHtml = '';
 			for (const b of tabs.children) {
+				b.setAttribute('aria-selected', String(b === btn));
+				/** @type {HTMLElement} */ (b).tabIndex = b === btn ? 0 : -1;
+				/** @type {HTMLElement} */ (b).style.fontWeight = b === btn ? 'bold' : 'normal';
 				/** @type {HTMLElement} */ (b).style.borderBottomColor = 'transparent';
 				/** @type {HTMLElement} */ (b).style.color = '#888';
 			}
@@ -146,6 +162,17 @@ function init() {
 			btn.style.borderBottomColor = '#e94560';
 			btn.style.color = '#e0e0e0';
 		}
+		btn.onkeydown = (event) => {
+			const index = tabNames.indexOf(name);
+			const next = event.key === 'ArrowRight' ? (index + 1) % tabNames.length
+				: event.key === 'ArrowLeft' ? (index + tabNames.length - 1) % tabNames.length
+				: event.key === 'Home' ? 0 : event.key === 'End' ? tabNames.length - 1 : -1;
+			if (next < 0) return;
+			event.preventDefault();
+			const target = /** @type {HTMLButtonElement} */ (tabs.children[next]);
+			target.focus();
+			target.click();
+		};
 		tabs.appendChild(btn);
 	}
 
@@ -312,8 +339,8 @@ function renderStreams(el, dt) {
 	let html = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:10px">` +
 		`<span style="color:#888">Active (${esc(String(streams.length))})</span>` +
 		`<span style="flex:1"></span>` +
-		`<button data-action="toggle-raw" style="background:none;border:1px solid #333;color:#aaa;cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(modeLabel)}</button>` +
-		`<button data-action="toggle-pause" style="background:none;border:1px solid #333;color:${pauseColor};cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(pauseLabel)}</button>` +
+		`<button data-action="toggle-raw" aria-label="Raw payload format" aria-pressed="${streamsRawMode}" style="background:none;border:1px solid #333;color:#aaa;cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(modeLabel)}</button>` +
+		`<button data-action="toggle-pause" aria-label="Pause event capture" aria-pressed="${streamsPaused}" style="background:none;border:1px solid #333;color:${pauseColor};cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(pauseLabel)}</button>` +
 		`<button data-action="clear-events" style="background:none;border:1px solid #333;color:#aaa;cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">Clear events</button>` +
 		`</div>`;
 
@@ -329,19 +356,21 @@ function renderStreams(el, dt) {
 			: '';
 		const expanded = expandedStreams.has(s.path);
 		const recentCount = (s.recentEvents && s.recentEvents.length) || 0;
+		const eventsId = 'svr-dt-events-' + encodeURIComponent(s.path);
 		const chevron = expanded ? '[-]' : '[+]';
 		const chevronColor = recentCount > 0 ? '#aaa' : '#555';
 
 		html += `<div style="padding:4px 0;border-bottom:1px solid #2a2a3e">` +
-			`<div data-action="toggle-stream" data-stream-path="${esc(s.path)}" style="cursor:pointer;display:flex;align-items:center;gap:4px">` +
+			`<button type="button" data-action="toggle-stream" data-stream-path="${esc(s.path)}" aria-expanded="${expanded}" aria-controls="${esc(eventsId)}" style="background:none;border:none;color:inherit;font:inherit;text-align:start;cursor:pointer;display:flex;align-items:center;gap:4px">` +
 			`<span style="color:${chevronColor};width:10px;display:inline-block">${chevron}</span>` +
 			`<span>${esc(s.path)}</span>` +
 			(recentCount > 0 ? `<span style="color:#666;font-size:10px;margin-left:6px">(${recentCount})</span>` : '') +
-			`</div>` +
+			`</button>` +
 			`<div style="padding:1px 0 1px 16px;color:#888">topic:${topic} merge:${merge} subs:${subs}</div>` +
 			`<div style="padding:1px 0 1px 16px;color:#666">${lastEvt}</div>` +
 			errPart;
 
+		html += `<div id="${esc(eventsId)}"${expanded ? '' : ' hidden'}>`;
 		if (expanded) {
 			if (recentCount === 0) {
 				html += `<div style="padding:4px 0 4px 24px;color:#555;font-style:italic">No events captured yet${streamsPaused ? ' (paused)' : ''}</div>`;
@@ -367,7 +396,7 @@ function renderStreams(el, dt) {
 			}
 		}
 
-		html += `</div>`;
+		html += `</div></div>`;
 	}
 	if (streams.length === 0) html += '<div style="color:#666">No active streams</div>';
 
