@@ -1475,7 +1475,7 @@ export interface UploadOptions {
 	 * Re-run the module guard against the live `ctx` every N bytes
 	 * received past the last re-auth. On rejection the upload aborts
 	 * with the guard's error code (`UNAUTHENTICATED` / `FORBIDDEN`)
-	 * and the consumer observes `ctx.signal.aborted`.
+	 * and the consumer observes `ctx.abortSignal.aborted`.
 	 *
 	 * Default unset: the guard runs once at chunk-0 only. Pass a byte
 	 * threshold (e.g. `5 * 1024 * 1024`) for long uploads where the
@@ -1609,7 +1609,7 @@ export namespace live {
 	 * Mark a function as a streaming upload handler.
 	 *
 	 * The handler consumes `ctx.stream` (an async iterable of `Uint8Array`
-	 * chunks), can react to `ctx.signal` for cancel / disconnect / cap-
+	 * chunks), can react to `ctx.abortSignal` for cancel / disconnect / cap-
 	 * exceeded events, and returns a JSON-serialisable result when done.
 	 * The Vite plugin generates a client stub returning `UploadHandle<T>`
 	 * (see `svelte-realtime/client`).
@@ -1636,7 +1636,7 @@ export namespace live {
 	 * export const avatar = live.upload(async (ctx, name, mime) => {
 	 *   if (!ctx.user) throw new LiveError('UNAUTHENTICATED');
 	 *   for await (const chunk of ctx.stream) {
-	 *     ctx.signal.throwIfAborted();
+	 *     ctx.abortSignal.throwIfAborted();
 	 *     await sink.write(chunk);
 	 *   }
 	 *   return { url: `/uploads/${name}` };

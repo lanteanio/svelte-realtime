@@ -234,7 +234,7 @@ The `ctx` object passed to every server function contains:
 | `ctx.requestId` | Per-operation correlation id; a bounded RPC envelope id on WebSocket or the per-request adapter id for HTTP/SSR |
 | `ctx.throttle` | `(topic, event, data, ms)` - publish at most once per `ms` ms |
 | `ctx.debounce` | `(topic, event, data, ms)` - publish after `ms` ms of silence |
-| `ctx.signal` | `(userId, event, data)` - point-to-point message (an upload handler's `ctx.signal` is an `AbortSignal` instead - see [Streaming uploads](#streaming-uploads)) |
+| `ctx.signal` | `(userId, event, data)` - point-to-point message (upload handlers use `ctx.abortSignal` for cancellation; their legacy `ctx.signal` is a deprecated cancellation alias - see [Streaming uploads](#streaming-uploads)) |
 | `ctx.batch` | `(messages)` - publish multiple messages in one call via `platform.batch()` |
 
 For stable runtime IDs, exact emitted prefixes, causes, and recovery guidance, see
@@ -3465,7 +3465,7 @@ export const avatar = live.upload(async (ctx, name, mime) => {
   let bytes = 0;
   try {
     for await (const chunk of ctx.stream) {
-      ctx.signal.throwIfAborted();
+      ctx.abortSignal.throwIfAborted();
       await sink.write(chunk);
       bytes += chunk.byteLength;
     }
@@ -3486,7 +3486,7 @@ The handler signature is `(ctx, ...args)` like a regular RPC. `ctx` carries the 
 
 - `ctx.stream` - `AsyncIterable<Uint8Array>` yielding chunks in arrival order.
 - `ctx.abortSignal` - `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, `maxBufferedChunks` overflow, or a `reauthEvery` rejection. Wire cleanup and cancellable work to it.
-- `ctx.signal` - deprecated alias for `ctx.abortSignal`, retained during 0.x. It replaces the point-to-point `ctx.signal(userId, event, data)` method inside upload handlers. To send a point-to-point event from an upload handler, use `ctx.publish('__signal:' + userId, event, data)`, or send it from a regular `live()` handler.
+- `ctx.signal` - deprecated alias for `ctx.abortSignal`, retained during 0.x. It replaces the point-to-point `ctx.signal(userId, event, data)` method inside upload handlers. Send point-to-point events from a regular `live()` handler.
 - `ctx.upload` - `{ id }` for log correlation.
 
 Guards and global middleware run once before the first chunk is consumed. An unauthorised client never gets to send bytes.

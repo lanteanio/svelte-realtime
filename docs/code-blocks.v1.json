@@ -1690,7 +1690,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "72860df9e0567f731c1ccc2d0805ea888b888ef64bc06048f5b1bd30893dfbb2",
+			"fingerprint": "ddcb78588e2824f2468c1f2d36a74f0f18691290469ab239c55e7b5c0ac484ef",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Streaming uploads",
