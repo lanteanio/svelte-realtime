@@ -152,4 +152,22 @@ describe('room drains wait for pending subscribe hooks', () => {
 		expect(events).toEqual(['fast left', 'slow joined', 'slow left']);
 		expect(_pendingSubscribeHooks.has(ws)).toBe(false);
 	});
+
+	it('registers before a synchronous subscribe hook closes its own socket', async () => {
+		const events = [];
+		env.register('reentrant', { room: live.stream('reentrant', () => [], {
+			onSubscribe(ctx) {
+				expect(_pendingSubscribeHooks.has(ctx.ws)).toBe(true);
+				close(ctx.ws, { platform: env.platform });
+				events.push('joined');
+			},
+			onUnsubscribe() { events.push('left'); }
+		}) });
+		const ws = mockWs({ id: 'alice' });
+		sockets.push(ws);
+		handleRpc(ws, toArrayBuffer({ rpc: 'reentrant/room', id: 'join', stream: true }), env.platform);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(events).toEqual(['joined', 'left']);
+		expect(_pendingSubscribeHooks.has(ws)).toBe(false);
+	});
 });

@@ -895,19 +895,24 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		// `streamArgs` (3rd arg) lets a room enumeration registry capture the
 		// room-identifying args of the topic that just gained a subscriber; the
 		// presence hook ignores it.
-		let topics = _pendingSubscribeHooks.get(ws);
-		if (!topics) { topics = new Map(); _pendingSubscribeHooks.set(ws, topics); }
-		let hooks = topics.get(topic);
-		if (!hooks) { hooks = new Set(); topics.set(topic, hooks); }
 		// Register before invoking user code: even a synchronous hook can close
-		// its socket. Drains capture these promises before releasing ownership.
-		const joining = Promise.resolve().then(() => /** @type {any} */ (fn).__onSubscribe(ctx, topic, streamArgs));
-		hooks.add(joining);
-		try { await joining; } catch {}
+		// its socket. Drains capture these records before releasing ownership.
+		// Most joins finish before a drain. Allocate their completion promise only
+		// when a drain actually needs to wait, avoiding an extra hook microtask.
+		const joining = /** @type {import('./state.js').PendingSubscribeHook} */ ({ topic, complete: null, promise: null, next: _pendingSubscribeHooks.get(ws) || null });
+		_pendingSubscribeHooks.set(ws, joining);
+		try { await /** @type {any} */ (fn).__onSubscribe(ctx, topic, streamArgs); } catch {}
 		finally {
-			hooks.delete(joining);
-			if (hooks.size === 0) topics.delete(topic);
-			if (topics.size === 0) _pendingSubscribeHooks.delete(ws);
+			joining.complete?.();
+			const head = _pendingSubscribeHooks.get(ws);
+			if (head === joining) {
+				if (joining.next) _pendingSubscribeHooks.set(ws, joining.next);
+				else _pendingSubscribeHooks.delete(ws);
+			} else {
+				for (let previous = head; previous; previous = previous.next) {
+					if (previous.next === joining) { previous.next = joining.next; break; }
+				}
+			}
 		}
 	}
 	// Settle both claim barriers this subscribe opened on the happy path: a no-op

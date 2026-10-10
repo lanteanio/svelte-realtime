@@ -23,7 +23,8 @@ export const registry = new Map();
 /** @type {Map<string, Function>} */
 export const guards = new Map();
 
-/** @type {WeakMap<object, Map<string, Set<Promise<any>>>>} */
+/** @typedef {{ topic: string, complete: (() => void) | null, promise: Promise<void> | null, next: PendingSubscribeHook | null }} PendingSubscribeHook */
+/** @type {WeakMap<object, PendingSubscribeHook>} */
 export const _pendingSubscribeHooks = new WeakMap();
 
 /**
@@ -286,7 +287,7 @@ export const _lazyQueue = [];
  *    lookup. Re-inserting the same entry clears it.
  *  - `leaving` / `erasure`: departed refs retain only cleanup ownership until
  *    release settles or strict erasure confirms; their data is scrubbed.
- * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any, cursors?: boolean, joining?: Promise<void> | null, gone?: boolean, leaving?: Promise<void>, erasure?: { presenceDone: boolean, ownerDone: boolean, ownerUnconfirmed: boolean, pending: Promise<void> | null } }>}
+ * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any, cursors?: boolean, cursorKey?: string | null, cursorTopic?: string | null, cursorPublisher?: boolean, joining?: Promise<void> | null, gone?: boolean, leaving?: Promise<void>, erasure?: { presenceDone: boolean, ownerDone: boolean, ownerUnconfirmed: boolean, pending: Promise<void> | null } }>}
  */
 export const _presenceRef = new (class PresenceRefs extends Map {
 	set(key, ref) {

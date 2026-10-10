@@ -1,11 +1,108 @@
 // @ts-check
-import { _presenceRef } from './state.js';
-import { clearTimer } from '../shared/runtime.js';
+import { _presenceRef, state } from './state.js';
+import { clearTimer, setTimer } from '../shared/runtime.js';
 import { _topicInTenant } from './tenant.js';
 import { _ownerPurge, _ownerEmit } from './room-owner.js';
 import { _maybeReplayPublish, _registerReplayTopic } from './replay-routing.js';
 import { _platformPublish, UNSEQUENCED } from './publish-helpers.js';
 import { safeAssign } from '../shared/safe-assign.js';
+
+// Cursor-only publishers have their own lifetime. A reserved control topic keeps
+// their counters separate from data membership while sharing the bounded ref map.
+const _cursorPublishers = new WeakMap();
+const _cursorClosedWs = new WeakSet();
+const _CURSOR_CONTROL_PREFIX = '\0cursors:';
+const _cursorControlTopic = topic => _CURSOR_CONTROL_PREFIX + topic;
+
+async function _presenceIdentityActive(platform, topic, key, includeOwner = false) {
+	const ref = _presenceRef.get(topic + '\0' + key);
+	if (ref && !ref.gone) return true;
+	const redis = platform && platform.redis;
+	if (!redis || typeof redis.hget !== 'function') return false;
+	try {
+		if (Number(await redis.hget(_PRESENCE_KEY_PREFIX + topic, 'c:' + key)) > 0) return true;
+		return includeOwner && Number(await redis.hget('__live-room-owner:' + topic, 'n:' + key)) > 0;
+	}
+	catch { return false; }
+}
+
+/** Whether a separate cursor-only publisher still owns this identity. */
+export function _cursorPublisherActive(platform, topic, key) {
+	return _presenceIdentityActive(platform, _cursorControlTopic(topic), key);
+}
+
+/** Remove the sample only after both independent identity lifetimes depart. */
+export async function _removeCursorIfDeparted(platform, topic, key, publish) {
+	if (await _presenceIdentityActive(platform, topic, key, true)) return;
+	if (await _cursorPublisherActive(platform, topic, key)) return;
+	if (publish) publish(topic + ':cursors', 'remove', { key }, UNSEQUENCED);
+	else _platformPublish(platform, topic + ':cursors', 'remove', { key }, UNSEQUENCED);
+}
+
+/** Retire a standalone publisher without draining data membership or ownership. */
+export function _retireCursorPublisher(refKey, ref, platform) {
+	const sep = refKey.lastIndexOf('\0');
+	const topic = ref.cursorTopic ?? refKey.slice(_CURSOR_CONTROL_PREFIX.length, sep);
+	const key = ref.cursorKey ?? refKey.slice(sep + 1);
+	return _retirePresenceRef(refKey, ref, async () => {
+		const { isLast } = await _clusterPresenceRelease(platform, _cursorControlTopic(topic), key);
+		if (isLast) await _removeCursorIfDeparted(platform, topic, key);
+	});
+}
+
+function _releaseCursorPublisher(platform, topic, ref) {
+	const key = ref.cursorKey, refKey = _cursorControlTopic(topic) + '\0' + key;
+	if (key == null || ref.erasure || ref.leaving || _presenceRef.get(refKey) !== ref) return;
+	if (--ref.count > 0) return;
+	ref.timer = setTimer(() => _retireCursorPublisher(refKey, ref, platform).catch(() => {}), 5000);
+}
+
+/** Track the first cursor-only publish; subsequent samples stay synchronous. */
+export function _trackCursorPublisher(ctx, topic, key) {
+	if (ctx.ws && _cursorClosedWs.has(ctx.ws)) return false;
+	const held = ctx.ws && _cursorPublishers.get(ctx.ws)?.get(topic);
+	if (held && held.cursorKey === key && !held.gone && !held.joining) return true;
+	return _trackCursorPublisherSlow(ctx, topic, key);
+}
+
+// Keep deferred-acquire closures off the synchronous sample path.
+function _trackCursorPublisherSlow(ctx, topic, key) {
+	const ws = ctx.ws;
+	if (!ws || !ctx.platform) return true;
+	if (_cursorClosedWs.has(ws)) return false;
+	let slots = _cursorPublishers.get(ws);
+	const held = slots?.get(topic);
+	if (held && held.cursorKey === key && !held.gone) {
+		return held.joining ? held.joining.then(() => !held.gone && slots.get(topic) === held && !_cursorClosedWs.has(ws)) : true;
+	}
+	const controlTopic = _cursorControlTopic(topic), refKey = controlTopic + '\0' + key;
+	let ref = _presenceRef.get(refKey);
+	if (ref?.erasure) return false;
+	if (ref?.leaving) return ref.leaving.then(() => _trackCursorPublisher(ctx, topic, key));
+	if (!ref && _presenceRef.size >= state.maxPresenceRef) return false;
+	if (!slots) { slots = new Map(); _cursorPublishers.set(ws, slots); }
+	if (held) _releaseCursorPublisher(ctx.platform, topic, held);
+	if (ref) {
+		ref.count++;
+		if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
+	} else {
+		ref = { count: 1, timer: null, data: null, cursors: true, cursorPublisher: true, cursorKey: key, cursorTopic: topic, joining: null, gone: false };
+		_presenceRef.set(refKey, ref);
+		ref.joining = _clusterPresenceAcquire(ctx.platform, controlTopic, key, null).then(() => { ref.joining = null; });
+	}
+	slots.set(topic, ref);
+	return ref.joining ? ref.joining.then(() => !ref.gone && slots.get(topic) === ref && !_cursorClosedWs.has(ws)) : true;
+}
+
+/** Drain cursor publishers even when the socket never subscribed to a stream. */
+export function _closeCursorPublishers(ws, platform) {
+	_cursorClosedWs.add(ws);
+	const slots = _cursorPublishers.get(ws);
+	if (!slots) return;
+	_cursorPublishers.delete(ws);
+	for (const [topic, ref] of slots) _releaseCursorPublisher(platform, topic, ref);
+	slots.clear();
+}
 
 /**
  * Direct handle to the in-memory presence-ref map for tests that need to seed
@@ -204,6 +301,8 @@ export function _retirePresenceRef(refKey, ref, release) {
 	if (ref.leaving) return ref.leaving;
 	ref.gone = true;
 	ref.data = null;
+	ref.cursorKey = null;
+	ref.cursorTopic = null;
 	ref.count = 0;
 	if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
 	ref.leaving = Promise.resolve().then(async () => {
@@ -236,18 +335,22 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 	for (const [refKey, ref] of _presenceRef) {
 		const sep = refKey.lastIndexOf('\0');
 		if (sep < 0 || refKey.slice(sep + 1) !== userId) continue;
-		const topic = refKey.slice(0, sep);
+		const storageTopic = refKey.slice(0, sep);
+		const cursorPublisher = !!ref.cursorPublisher;
+		const topic = cursorPublisher ? storageTopic.slice(_CURSOR_CONTROL_PREFIX.length) : storageTopic;
 		if (!_topicInTenant(tenantId, topic)) continue;
 		if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
 		ref.gone = true;
 		ref.count = 0;
 		ref.data = null;
+		ref.cursorKey = null;
+		ref.cursorTopic = null;
 		ref.erasure ??= { presenceDone: false, ownerDone: false, ownerUnconfirmed: false, pending: null };
-		targets.push({ refKey, ref, topic });
+		targets.push({ refKey, ref, topic, storageTopic, cursorPublisher });
 	}
 	let removed = 0;
 	let failed = false;
-	for (const { refKey, ref, topic } of targets) {
+	for (const { refKey, ref, topic, storageTopic, cursorPublisher } of targets) {
 		const progress = ref.erasure;
 		if (!progress.pending) {
 			progress.pending = Promise.resolve().then(async () => {
@@ -260,11 +363,11 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 						if (redis && typeof redis.hincrby === 'function') {
 							// HDEL is idempotent even if Redis applied a previous attempt
 							// whose response never reached this process.
-							const count = await redis.hdel(_PRESENCE_KEY_PREFIX + topic, 'c:' + userId, 'd:' + userId);
+							const count = await redis.hdel(_PRESENCE_KEY_PREFIX + storageTopic, 'c:' + userId, 'd:' + userId);
 							if (!Number.isSafeInteger(count) || count < 0) throw new Error('Presence erasure was not confirmed');
 						}
 						progress.presenceDone = true;
-						if (publishLeave) { try { publishLeave(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED); } catch { /* best-effort */ } }
+						if (publishLeave && !cursorPublisher) { try { publishLeave(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED); } catch { /* best-effort */ } }
 						if (ref.cursors) {
 							try {
 								if (publishLeave) publishLeave(topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
@@ -273,6 +376,7 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 						}
 					} catch { incomplete = true; }
 				}
+				if (cursorPublisher) progress.ownerDone = true;
 				if (!progress.ownerDone) {
 					try {
 						const { owner, change } = await _ownerPurge(platform, topic, userId);

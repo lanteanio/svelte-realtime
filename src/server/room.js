@@ -7,7 +7,7 @@ import { LiveError } from './live-error.js';
 import { _validSegmentRe } from './validate.js';
 import { _IS_DEV } from './env.js';
 import { state, _presenceRef } from './state.js';
-import { _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _presenceRosterEntry, _retirePresenceRef } from './presence.js';
+import { _clusterPresenceAcquire, _removeCursorIfDeparted, _retireCursorPublisher, _clusterPresenceRelease, _clusterPresenceList, _presenceRosterEntry, _retirePresenceRef } from './presence.js';
 import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId, _ENUM_TOPIC_PREFIX } from './rooms-cluster.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot } from './history-compensation.js';
 import { _getIdentityKey } from './identity.js';
@@ -430,23 +430,29 @@ export const _roomRegister = function room(config) {
 				let retired = false;
 				for (const [k, r] of _presenceRef) {
 					if (r.erasure || (!r.timer && !r.leaving)) continue;
+					if (r.cursorPublisher) {
+						await _retireCursorPublisher(k, r, ctx.platform);
+						retired = true;
+						break;
+					}
 					const [t, u] = k.split('\0');
 					const hadPresence = r.data != null;
 					// Keep the ref discoverable while Redis is in flight. Another
 					// admission may share this departure; both recheck afterwards.
 					await _retirePresenceRef(k, r, () => {
 						const pending = [];
-						if (hadPresence) pending.push(_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
+						let clusterLast = true;
+						if (hadPresence || r.cursors) pending.push(_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
+							clusterLast = res.isLast;
 							if (res.isLast) {
-								ctx._publishWire(t + ':presence', 'leave', { key: u }, UNSEQUENCED);
-								if (r.cursors) ctx._publishWire(t + ':cursors', 'remove', { key: u }, UNSEQUENCED);
+								if (hadPresence) ctx._publishWire(t + ':presence', 'leave', { key: u }, UNSEQUENCED);
 							}
 						}).catch(() => {}));
 						pending.push(_ownerOnLeave(ctx.platform, t, u).then((change) => {
 							if (change) _ownerEmit(t, ctx.tenantId, change, ctx._publishWire);
 						}).catch(() => {}));
 						if (onLeave) Promise.resolve().then(() => onLeave(ctx, t)).catch(() => {});
-						return Promise.all(pending);
+						return Promise.all(pending).then(() => clusterLast ? _removeCursorIfDeparted(ctx.platform, t, u, ctx._publishWire) : undefined);
 					});
 					retired = true;
 					break;
@@ -522,9 +528,9 @@ export const _roomRegister = function room(config) {
 				// Cluster transition: bump shared count; only the first replica to
 				// reach 1 publishes 'join'. With no platform.redis the helper
 				// returns isFirst=true unconditionally, matching the in-memory path.
-				if (presenceData) {
+				if (presenceData || cursorConfig) {
 					const { isFirst } = await _clusterPresenceAcquire(ctx.platform, topic, userId, presenceData);
-					if (isFirst && !member.erasure) {
+					if (presenceData && isFirst && !member.erasure) {
 						// `topic` is the wire data topic; publish raw (no second prefix).
 						// Shaped like a snapshot entry, so a member reads a joiner's
 						// fields in the same place whichever way the entry arrived.
@@ -570,11 +576,12 @@ export const _roomRegister = function room(config) {
 			// at the same transition. Both are independently best-effort.
 			const releaseIdentity = () => {
 				const pending = [];
-				if (presenceFn) {
+				let clusterLast = true;
+				if (presenceFn || ref.cursors) {
 					pending.push(_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
+						clusterLast = res.isLast;
 						if (res.isLast) {
-							ctx._publishWire(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED);
-							if (ref.cursors) ctx._publishWire(topic + ':cursors', 'remove', { key: userId }, UNSEQUENCED);
+							if (presenceFn) ctx._publishWire(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED);
 						}
 					}).catch(() => {}));
 				}
@@ -586,7 +593,7 @@ export const _roomRegister = function room(config) {
 				if (onLeave) {
 					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
 				}
-				return Promise.all(pending);
+				return Promise.all(pending).then(() => clusterLast ? _removeCursorIfDeparted(ctx.platform, topic, userId, ctx._publishWire) : undefined);
 			};
 
 			// On rollback (failed stream init), skip grace and release

@@ -56,7 +56,7 @@ import {
 	_dynamicDerivedByFn
 } from './server/state.js';
 import { _IS_DEV } from './server/env.js';
-import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge } from './server/presence.js';
+import { _presenceRefForTest, _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _clusterPresenceMerge, _closeCursorPublishers } from './server/presence.js';
 import { _setTenantResolver, _resolveTenant, _validTenantId, _tenantConfigRegistry, _makeTenantScope } from './server/tenant.js';
 import { _parseCron, _cronDateParts, _cronFieldMatch } from './server/cron.js';
 import { _throttles, _debounces, _throttlePublish, _debouncePublish, _skipGate, _checkPublishHelperArgs, _redactOrDrop, REDACT_DROP, _platformPublish, UNSEQUENCED } from './server/publish-helpers.js';
@@ -844,11 +844,16 @@ function _isRollingBack(ws, topic) {
 }
 
 function _afterSubscribeHooks(ws, topic, drain) {
-	const hooks = _pendingSubscribeHooks.get(ws)?.get(topic);
 	// Capture only hooks already running for this lifetime. A later rejoin
 	// must not delay or become part of an earlier subscription's drain.
-	return hooks?.size
-		? Promise.allSettled([...hooks]).then(() => drain(_topicWsCounts.get(topic)?.size || 0))
+	let pending;
+	for (let hook = _pendingSubscribeHooks.get(ws); hook; hook = hook.next) {
+		if (hook.topic !== topic) continue;
+		const record = hook;
+		(pending ||= []).push(record.promise ||= new Promise(resolve => { record.complete = resolve; }));
+	}
+	return pending
+		? Promise.all(pending).then(() => drain(_topicWsCounts.get(topic)?.size || 0))
 		: Promise.resolve().then(() => drain(undefined));
 }
 
@@ -3626,6 +3631,7 @@ const _firedUnsubscribes = new WeakMap();
  * @param {{ platform: import('svelte-adapter-uws').Platform }} ctx
  */
 export function close(ws, { platform, subscriptions }) {
+	_closeCursorPublishers(ws, platform);
 	// Mark the socket closed before any drain below runs: an in-flight smooth
 	// sync/command handler awoken after this call re-checks the mark and bails
 	// instead of re-creating an entity the drains can never clean up again.

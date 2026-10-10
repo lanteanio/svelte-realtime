@@ -3881,6 +3881,8 @@ Written as `room.releaseLock('title')`, the cleanup reaches the room the view is
 
 In a room with a `presence` function or an owner, only members send: the server publishes a cursor sample, a field or a reaction from a connection whose user is a member of that room on the same server instance, and drops anyone else's - a `watch(...)` view, a namespace `board.move(id, ...)` with nothing on the page holding the room, a view whose user left more than the presence grace window ago. Development builds warn once when that happens. A view's sends do not race its join: the lock the effect above takes as the page mounts, or right after a switch, and a keystroke before the room has loaded all wait for the join, which is answered together with the room's data, and go out then: the fields merged (the latest value of each), the newest cursor position, and the reactions in order (the latest 64). A room with neither presence nor an owner has no members and publishes every send.
 
+Cursor samples disappear after the identity's last room membership or cursor-only publisher passes the five-second disconnect grace, and on user erasure. Cursor-only publishing does not join the roster or hold the room's owner role.
+
 To show a room without entering it - a lobby preview, a moderator's view - use `board.watch(...)`, which takes plain args or a getter the same way (`board.watch(() => boardId)`). It returns the same reactive view, typed as `MultiplayerView`, without the data stream and without the send methods: the viewer is on nobody's roster and cannot become the owner.
 
 ```svelte

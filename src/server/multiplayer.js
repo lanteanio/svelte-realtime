@@ -2,7 +2,7 @@
 import { UNSEQUENCED } from './publish-helpers.js';
 import { live } from '../server.js';
 import { _getIdentityKey } from './identity.js';
-import { _clusterPresenceMerge } from './presence.js';
+import { _clusterPresenceMerge, _trackCursorPublisher } from './presence.js';
 import { _tenantTopic } from './tenant.js';
 import { _IS_DEV } from './env.js';
 import { randomU32 } from '../shared/runtime.js';
@@ -284,6 +284,10 @@ export const _multiplayerRegister = function multiplayer(config) {
 		const key = _getIdentityKey(ctx);
 		const ok = _mayPublish(ctx, topic, key);
 		if (ok !== true && !(await ok)) return;
+		if (_isMember === null && config.cursors) {
+			const tracked = _trackCursorPublisher(ctx, _tenantTopic(ctx.tenantId ?? null, topic), key);
+			if (tracked !== true && !(await tracked)) return;
+		}
 		_publishCursor(ctx, topic, key, args, {});
 	});
 	/** @type {any} */ (roomExport).__cursorReportViewport = live.volatile(async (ctx, ...args) => {
@@ -292,6 +296,10 @@ export const _multiplayerRegister = function multiplayer(config) {
 		const key = _getIdentityKey(ctx);
 		const ok = _mayPublish(ctx, topic, key);
 		if (ok !== true && !(await ok)) return;
+		if (_isMember === null && config.cursors) {
+			const tracked = _trackCursorPublisher(ctx, _tenantTopic(ctx.tenantId ?? null, topic), key);
+			if (tracked !== true && !(await tracked)) return;
+		}
 		_publishCursor(ctx, topic, key, args, { viewport: true });
 	});
 
