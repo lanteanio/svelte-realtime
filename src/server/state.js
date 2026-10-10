@@ -280,7 +280,9 @@ export const _lazyQueue = [];
  *  - `gone`: set when the entry leaves the map, by whichever path removes it,
  *    so a cached membership answer (room.js) knows it is stale without a
  *    lookup. Re-inserting the same entry clears it.
- * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any, joining?: Promise<void> | null, gone?: boolean }>}
+ *  - `leaving` / `erasure`: departed refs retain only cleanup ownership until
+ *    release settles or strict erasure confirms; their data is scrubbed.
+ * @type {Map<string, { count: number, timer: ReturnType<typeof setTimeout> | null, data: any, joining?: Promise<void> | null, gone?: boolean, leaving?: Promise<void>, erasure?: { presenceDone: boolean, ownerDone: boolean, ownerUnconfirmed: boolean, pending: Promise<void> | null } }>}
  */
 export const _presenceRef = new (class PresenceRefs extends Map {
 	set(key, ref) {

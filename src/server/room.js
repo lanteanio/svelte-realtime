@@ -6,7 +6,7 @@ import { LiveError } from './live-error.js';
 import { _validSegmentRe } from './validate.js';
 import { _IS_DEV } from './env.js';
 import { state, _presenceRef } from './state.js';
-import { _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _presenceRosterEntry } from './presence.js';
+import { _clusterPresenceAcquire, _clusterPresenceRelease, _clusterPresenceList, _presenceRosterEntry, _retirePresenceRef } from './presence.js';
 import { _clusterRoomsAcquire, _clusterRoomsRelease, _clusterRoomsList, _stableEnumId, _ENUM_TOPIC_PREFIX } from './rooms-cluster.js';
 import { _resolveHistoryConfig, _createHistoryStore, _freezeSnapshot } from './history-compensation.js';
 import { _getIdentityKey } from './identity.js';
@@ -378,65 +378,53 @@ export const _roomRegister = function room(config) {
 			const userId = _getIdentityKey(ctx);
 			const refKey = topic + '\0' + userId;
 
-			let ref = _presenceRef.get(refKey);
-			if (ref) {
-				// Cancel pending grace leave if reconnecting
-				if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
-				ref.count++;
-				// Refresh LRU position so active entries survive eviction
-				_presenceRef.delete(refKey);
-				_presenceRef.set(refKey, ref);
-				// A reconnect still resolves the self-delivery barrier so a paired
-				// :presence loader in this batch never waits on the dispatch settle.
-				if (presenceFn) _presenceClaimResolve(ctx.ws, topic, { key: userId, data: ref.data });
-				return;
-			}
-
-			if (_presenceRef.size >= state.maxPresenceRef) {
-				for (const [k, r] of _presenceRef) {
-					if (r.timer) {
-						clearTimer(r.timer);
-						const [t, u] = k.split('\0');
-						// Cluster release runs eagerly here too: an evicted entry
-						// would otherwise leak a phantom counter on Redis. A null
-						// payload marks an entry whose presence acquire never ran
-						// (an owner-only room's membership ref) - skip the paired
-						// release for those.
-						if (r.data != null) {
-							_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
-								if (res.isLast) {
-									// `t` is the wire data topic (the ref-map key is wire); publish raw
-									// so the `:presence` sub-topic is not prefixed a second time.
-									ctx._publishWire(t + ':presence', 'leave', { key: u });
-								}
-							}).catch(() => {});
-						}
-						// The sweep spans every room's entries, so the owner release
-						// runs unconditionally; a topic without owner tracking is a
-						// cheap no-op inside the helper, and an owner-tracking topic
-						// evicted here must run its succession or the departed owner
-						// would linger until the roster TTL.
-						_ownerOnLeave(ctx.platform, t, u).then((change) => {
-							if (change) _ownerEmit(t, ctx.tenantId, change, ctx._publishWire);
-						}).catch(() => {});
-						if (onLeave) {
-							Promise.resolve().then(() => onLeave(ctx, t)).catch(() => {});
-						}
-						_presenceRef.delete(k);
-					}
-				}
-				if (_presenceRef.size >= state.maxPresenceRef) {
-					if (!state.presenceRefWarnFired) {
-						state.presenceRefWarnFired = true;
-						console.warn(
-							"[svelte-realtime] presence-ref map reached MAX_PRESENCE_REF=" + state.maxPresenceRef +
-							"; new joiners will not appear in any subscriber's roster, and their cursor samples, presence fields and reactions are not published, until existing entries clear.\n" +
-							"  For multi-instance deploys, wire `platform.redis` (raw ioredis client) so the cluster-shared Redis presence is bypasses the in-memory cap.\n" +
-							"  See: https://svti.me/presence"
-						);
-					}
+			// Recheck admission after every awaited departure: another subscribe
+			// may have installed this identity while the old ref was retiring.
+			for (;;) {
+				const ref = _presenceRef.get(refKey);
+				if (ref && ref.erasure) throw new LiveError('FORBIDDEN', 'Room membership is being erased');
+				if (ref && ref.leaving) { await ref.leaving; continue; }
+				if (ref) {
+					if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
+					ref.count++;
+					_presenceRef.delete(refKey);
+					_presenceRef.set(refKey, ref);
+					if (presenceFn) _presenceClaimResolve(ctx.ws, topic, { key: userId, data: ref.data });
 					return;
 				}
+				if (_presenceRef.size < state.maxPresenceRef) break;
+				let retired = false;
+				for (const [k, r] of _presenceRef) {
+					if (r.erasure || (!r.timer && !r.leaving)) continue;
+					const [t, u] = k.split('\0');
+					const hadPresence = r.data != null;
+					// Keep the ref discoverable while Redis is in flight. Another
+					// admission may share this departure; both recheck afterwards.
+					await _retirePresenceRef(k, r, () => {
+						const pending = [];
+						if (hadPresence) pending.push(_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
+							if (res.isLast) ctx._publishWire(t + ':presence', 'leave', { key: u });
+						}).catch(() => {}));
+						pending.push(_ownerOnLeave(ctx.platform, t, u).then((change) => {
+							if (change) _ownerEmit(t, ctx.tenantId, change, ctx._publishWire);
+						}).catch(() => {}));
+						if (onLeave) Promise.resolve().then(() => onLeave(ctx, t)).catch(() => {});
+						return Promise.all(pending);
+					});
+					retired = true;
+					break;
+				}
+				if (retired) continue;
+				if (!state.presenceRefWarnFired) {
+					state.presenceRefWarnFired = true;
+					console.warn(
+						"[svelte-realtime] presence-ref map reached MAX_PRESENCE_REF=" + state.maxPresenceRef +
+						"; new joiners will not appear in any subscriber's roster, and their cursor samples, presence fields and reactions are not published, until existing entries clear.\n" +
+						"  For multi-instance deploys, wire `platform.redis` (raw ioredis client) so the cluster-shared Redis presence is bypasses the in-memory cap.\n" +
+						"  See: https://svti.me/presence"
+					);
+				}
+				return;
 			}
 
 			// Compute presence payload BEFORE storing the ref so the in-memory
@@ -469,7 +457,7 @@ export const _roomRegister = function room(config) {
 					let ownerValue = null;
 					try {
 						const change = await _ownerOnJoin(ctx.platform, topic, userId, onOwnerChange);
-						if (change) {
+						if (change && !member.erasure) {
 							// Seed the owner replay buffer before the emit so a racing first-joiner
 							// subscribe reads the just-claimed owner from the buffer. Registering the
 							// wire :owner topic here (not only at owner-stream subscribe) closes the
@@ -498,7 +486,7 @@ export const _roomRegister = function room(config) {
 				// returns isFirst=true unconditionally, matching the in-memory path.
 				if (presenceData) {
 					const { isFirst } = await _clusterPresenceAcquire(ctx.platform, topic, userId, presenceData);
-					if (isFirst) {
+					if (isFirst && !member.erasure) {
 						// `topic` is the wire data topic; publish raw (no second prefix).
 						// Shaped like a snapshot entry, so a member reads a joiner's
 						// fields in the same place whichever way the entry arrived.
@@ -523,7 +511,7 @@ export const _roomRegister = function room(config) {
 			const refKey = topic + '\0' + userId;
 
 			const ref = _presenceRef.get(refKey);
-			if (!ref) return;
+			if (!ref || ref.erasure || ref.leaving) return;
 
 			ref.count--;
 			if (ref.count > 0) return;
@@ -532,21 +520,23 @@ export const _roomRegister = function room(config) {
 			// when the cluster count hits 0, and ownership runs its succession
 			// at the same transition. Both are independently best-effort.
 			const releaseIdentity = () => {
+				const pending = [];
 				if (presenceFn) {
-					_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
+					pending.push(_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
 						if (res.isLast) {
 							ctx._publishWire(topic + ':presence', 'leave', { key: userId });
 						}
-					}).catch(() => {});
+					}).catch(() => {}));
 				}
 				if (ownerEnabled) {
-					_ownerOnLeave(ctx.platform, topic, userId).then((change) => {
+					pending.push(_ownerOnLeave(ctx.platform, topic, userId).then((change) => {
 						if (change) _ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
-					}).catch(() => {});
+					}).catch(() => {}));
 				}
 				if (onLeave) {
 					Promise.resolve().then(() => onLeave(ctx, topic)).catch(() => {});
 				}
+				return Promise.all(pending);
 			};
 
 			// On rollback (failed stream init), skip grace and release
@@ -554,14 +544,12 @@ export const _roomRegister = function room(config) {
 			// subscriber across the cluster - only then do we publish 'leave'.
 			if (ctx.ws && _isRollingBack(ctx.ws, topic)) {
 				if (ref.timer) clearTimer(ref.timer);
-				_presenceRef.delete(refKey);
-				releaseIdentity();
+				_retirePresenceRef(refKey, ref, releaseIdentity);
 				return;
 			}
 
 			ref.timer = setTimer(() => {
-				_presenceRef.delete(refKey);
-				releaseIdentity();
+				_retirePresenceRef(refKey, ref, releaseIdentity);
 			}, 5000);
 		} : undefined
 	});
@@ -603,7 +591,7 @@ export const _roomRegister = function room(config) {
 			if (ref === undefined) return false;
 			if (!ref.joining) {
 				if (ws) lastYes.set(ws, { tenantId, topic, key, ref });
-				return true;
+				return !ref.gone;
 			}
 			return ref.joining.then(() => isMember(tenantId, topic, key, ws));
 		};

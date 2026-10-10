@@ -299,13 +299,7 @@ const _OWNER_JOIN_SCRIPT =
 // the successor: the remaining member with the lowest join sequence (key
 // comparison as a pure backstop). An emptied room clears the role and the
 // allocator so a future room starts fresh.
-const _OWNER_LEAVE_SCRIPT =
-	"local k = ARGV[1]\n" +
-	"local n = redis.call('HINCRBY', KEYS[1], 'n:' .. k, -1)\n" +
-	"if n > 0 then\n" +
-	"  redis.call('EXPIRE', KEYS[1], ARGV[2])\n" +
-	"  return {redis.call('HGET', KEYS[1], 'o') or '', '', ''}\n" +
-	"end\n" +
+const _OWNER_SUCCESSION_SCRIPT =
 	"redis.call('HDEL', KEYS[1], 'n:' .. k, 'j:' .. k)\n" +
 	"local o = redis.call('HGET', KEYS[1], 'o')\n" +
 	"if not o or o ~= k then\n" +
@@ -333,6 +327,19 @@ const _OWNER_LEAVE_SCRIPT =
 	"end\n" +
 	"redis.call('HDEL', KEYS[1], 'o', 'q')\n" +
 	"return {'', 'vacated', k}";
+
+const _OWNER_LEAVE_SCRIPT =
+	"local k = ARGV[1]\n" +
+	"local n = redis.call('HINCRBY', KEYS[1], 'n:' .. k, -1)\n" +
+	"if n > 0 then\n" +
+	"  redis.call('EXPIRE', KEYS[1], ARGV[2])\n" +
+	"  return {redis.call('HGET', KEYS[1], 'o') or '', '', ''}\n" +
+	"end\n" +
+	_OWNER_SUCCESSION_SCRIPT;
+
+// Erasure removes the whole identity, not one replica count. Repeating after an
+// uncertain Redis reply is safe and cannot decrement another membership.
+const _OWNER_PURGE_SCRIPT = "local k = ARGV[1]\n" + _OWNER_SUCCESSION_SCRIPT;
 
 // Explicit transfer: a compare-and-set from the current owner to a live
 // member. Refused (no change) when the caller no longer holds the role or
@@ -372,11 +379,12 @@ const _asChange = (res) => {
  * @param {string} script
  * @param {string} hKey
  * @param {string[]} argv
+ * @param {boolean} [strict] propagate storage failures during erasure
  * @returns {Promise<any>}
  */
-async function _runOwnerScript(redis, script, hKey, argv) {
+async function _runOwnerScript(redis, script, hKey, argv, strict = false) {
 	if (typeof redis.eval === 'function') {
-		try { return await redis.eval(script, 1, hKey, ...argv); } catch { return null; }
+		try { return await redis.eval(script, 1, hKey, ...argv); } catch (error) { if (strict) throw error; return null; }
 	}
 	try {
 		const ttl = script === _OWNER_TRANSFER_SCRIPT ? argv[2] : argv[1];
@@ -394,9 +402,9 @@ async function _runOwnerScript(redis, script, hKey, argv) {
 			await redis.hset(hKey, 'o', k);
 			return [k, 'claimed', o == null ? '' : o];
 		}
-		if (script === _OWNER_LEAVE_SCRIPT) {
+		if (script === _OWNER_LEAVE_SCRIPT || script === _OWNER_PURGE_SCRIPT) {
 			const k = argv[0];
-			const n = await redis.hincrby(hKey, 'n:' + k, -1);
+			const n = script === _OWNER_PURGE_SCRIPT ? 0 : await redis.hincrby(hKey, 'n:' + k, -1);
 			if (n > 0) { await expire(); return [(await redis.hget(hKey, 'o')) || '', '', '']; }
 			await redis.hdel(hKey, 'n:' + k, 'j:' + k);
 			const o = await redis.hget(hKey, 'o');
@@ -423,7 +431,8 @@ async function _runOwnerScript(redis, script, hKey, argv) {
 		await redis.hset(hKey, 'o', to);
 		await expire();
 		return [to, 'transferred', from];
-	} catch {
+	} catch (error) {
+		if (strict) throw error;
 		return null;
 	}
 }
@@ -504,6 +513,31 @@ export async function _ownerOnLeave(platform, topic, key) {
 	}
 	_ownerRooms.delete(topic);
 	return { owner: null, previous: key, reason: 'vacated', _hook: hook };
+}
+
+/**
+ * Strict, idempotent erasure for a known room. Local membership is retained until
+ * Redis confirms deletion. The returned snapshot also lets a retry repair the
+ * replay value when a previous attempt committed but its reply was lost, without
+ * firing the authoritative succession hook twice.
+ * @internal
+ */
+export async function _ownerPurge(platform, topic, key) {
+	const redis = _ownerRedis(platform);
+	if (!redis) {
+		const change = await _ownerOnLeave(platform, topic, key);
+		return { owner: change ? change.owner : await _ownerGet(platform, topic), change };
+	}
+	const entry = _ownerRooms.get(topic);
+	const result = await _runOwnerScript(redis, _OWNER_PURGE_SCRIPT, _OWNER_KEY_PREFIX + topic, [key, String(_OWNER_TTL_SEC)], true);
+	if (!Array.isArray(result) || result.length !== 3 || result.some(v => typeof v !== 'string')
+		|| !['', 'succeeded', 'vacated'].includes(result[1])) throw new Error('Owner erasure was not confirmed');
+	if (entry) {
+		entry.members.delete(key);
+		if (entry.members.size === 0) _ownerRooms.delete(topic);
+	}
+	const change = _asChange(result);
+	return { owner: result[0] || null, change: change ? { ...change, _hook: entry ? entry.hook : null } : null };
 }
 
 /**

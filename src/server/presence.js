@@ -2,7 +2,7 @@
 import { _presenceRef } from './state.js';
 import { clearTimer } from '../shared/runtime.js';
 import { _topicInTenant } from './tenant.js';
-import { _ownerOnLeave, _ownerEmit } from './room-owner.js';
+import { _ownerPurge, _ownerEmit } from './room-owner.js';
 import { _maybeReplayPublish, _registerReplayTopic } from './replay-routing.js';
 import { _platformPublish } from './publish-helpers.js';
 import { safeAssign } from '../shared/safe-assign.js';
@@ -195,61 +195,96 @@ export function _ownerReplayPublisher(platform) {
 }
 
 /**
- * Right-to-erasure (`live.forget`): drop every presence-ref entry a user holds,
- * scoped to one tenant. Refs are keyed `topic\0userKey`; the userKey is the
- * segment after the LAST `\0` (a validated wire topic and a validated userId
- * each contain no `\0`, so there is exactly one separator). For each match the
- * grace-leave timer is cleared FIRST (entries hold a live setTimeout), the local
- * ref deleted, then - when a platform is wired - the cluster roster is
- * decremented and, if this was the last holder cluster-wide, a `leave` is
- * published so other replicas and subscribers drop the user; otherwise a phantom
- * presence counter lingers in the Redis roster. A custom presence key that is
- * not the userId is not user-addressable and is left untouched.
- * @param {any} platform the configured forget platform, or null for single-instance
+ * Keep a departing ref discoverable until its asynchronous release settles.
+ * It grants no membership and serves no payload. A concurrent erasure can take
+ * ownership of the ref instead of losing the only known Redis cleanup target.
+ * @internal
+ */
+export function _retirePresenceRef(refKey, ref, release) {
+	if (ref.leaving) return ref.leaving;
+	ref.gone = true;
+	ref.data = null;
+	ref.count = 0;
+	if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
+	ref.leaving = Promise.resolve().then(async () => {
+		if (ref.joining) await ref.joining;
+		await release();
+	}).finally(() => {
+		if (!ref.erasure && _presenceRef.get(refKey) === ref) _presenceRef.delete(refKey);
+	});
+	return ref.leaving;
+}
+
+/**
+ * Right-to-erasure: remove a user's presence and owner identity in every known
+ * room in this tenant. Scrub payloads and invalidate membership before awaiting
+ * storage. Failed refs remain as tombstones in the existing bounded ref map;
+ * neither disconnect nor reconnect may consume them before a confirmed retry.
+ * Remote-only rooms still require the configured durable erasure store.
+ * @param {any} platform
  * @param {string | null} tenantId
  * @param {string} userId
  * @param {((wireTopic: string, event: string, data: any) => void) | null} [publishLeave]
- * @returns {Promise<number>} refs removed
+ * @returns {Promise<number>} refs whose cleanup was confirmed
  */
 export async function _purgePresenceUser(platform, tenantId, userId, publishLeave) {
 	if (typeof userId !== 'string' || userId.length === 0) return 0;
-	// Owner succession, unlike a presence leave, does NOT self-heal on the
-	// forgotten user's later disconnect: the purge already dropped its presence
-	// ref, so a subsequent close hits `if (!ref) return` and never re-runs
-	// succession. So the `:owner` change must be published even though the forget
-	// cascade wires no `publishLeave`. Route it through the platform and, when the
-	// replay extension is present, through the `:owner` replay buffer, so live
-	// subscribers update AND a resuming or fresh client gap-fills the successor
-	// rather than reading the erased owner.
-	const _ownerPublish = _ownerReplayPublisher(platform);
-	let n = 0;
-	for (const [refKey, ref] of [..._presenceRef]) {
+	const ownerPublish = publishLeave || _ownerReplayPublisher(platform) || (() => {});
+	const targets = [];
+	// Mark every target synchronously: a later ref's grace timer must not erase
+	// its retry ownership while an earlier ref waits for Redis.
+	for (const [refKey, ref] of _presenceRef) {
 		const sep = refKey.lastIndexOf('\0');
-		if (sep < 0) continue;
+		if (sep < 0 || refKey.slice(sep + 1) !== userId) continue;
 		const topic = refKey.slice(0, sep);
-		const key = refKey.slice(sep + 1);
-		if (key !== userId) continue;
 		if (!_topicInTenant(tenantId, topic)) continue;
 		if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
-		_presenceRef.delete(refKey);
-		n++;
-		if (platform) {
-			try {
-				const res = await _clusterPresenceRelease(platform, topic, key);
-				if (res && res.isLast && publishLeave) {
-					try { publishLeave(topic + ':presence', 'leave', { key }); } catch { /* publish best-effort */ }
-				}
-			} catch { /* cluster release best-effort; the local ref is already gone */ }
-		}
-		// A purged user must also drop any room-owner role it holds, or the
-		// room would keep a forgotten identity as owner until the roster TTL.
-		// A topic without owner tracking is a no-op inside the helper.
-		try {
-			const change = await _ownerOnLeave(platform, topic, key);
-			if (change) _ownerEmit(topic, tenantId, change, publishLeave || _ownerPublish || (() => { /* no platform: nothing to publish through */ }));
-		} catch { /* owner release best-effort; the membership is already gone */ }
+		ref.gone = true;
+		ref.count = 0;
+		ref.data = null;
+		ref.erasure ??= { presenceDone: false, ownerDone: false, ownerUnconfirmed: false, pending: null };
+		targets.push({ refKey, ref, topic });
 	}
-	return n;
+	let removed = 0;
+	let failed = false;
+	for (const { refKey, ref, topic } of targets) {
+		const progress = ref.erasure;
+		if (!progress.pending) {
+			progress.pending = Promise.resolve().then(async () => {
+				if (ref.joining) await ref.joining;
+				if (ref.leaving) await ref.leaving;
+				let incomplete = false;
+				if (!progress.presenceDone) {
+					try {
+						const redis = platform && platform.redis;
+						if (redis && typeof redis.hincrby === 'function') {
+							// HDEL is idempotent even if Redis applied a previous attempt
+							// whose response never reached this process.
+							const count = await redis.hdel(_PRESENCE_KEY_PREFIX + topic, 'c:' + userId, 'd:' + userId);
+							if (!Number.isSafeInteger(count) || count < 0) throw new Error('Presence erasure was not confirmed');
+						}
+						progress.presenceDone = true;
+						if (publishLeave) { try { publishLeave(topic + ':presence', 'leave', { key: userId }); } catch { /* best-effort */ } }
+					} catch { incomplete = true; }
+				}
+				if (!progress.ownerDone) {
+					try {
+						const { owner, change } = await _ownerPurge(platform, topic, userId);
+						progress.ownerDone = true;
+						if (change) _ownerEmit(topic, tenantId, change, ownerPublish);
+						else if (progress.ownerUnconfirmed) _ownerEmit(topic, tenantId, {
+							owner, previous: null, reason: owner === null ? 'vacated' : 'succeeded', _hook: null
+						}, ownerPublish);
+					} catch { progress.ownerUnconfirmed = true; incomplete = true; }
+				}
+				if (incomplete) throw new Error('Presence or owner erasure could not be confirmed');
+				if (_presenceRef.get(refKey) === ref) _presenceRef.delete(refKey);
+			}).finally(() => { progress.pending = null; });
+		}
+		try { await progress.pending; removed++; } catch { failed = true; }
+	}
+	if (failed) throw new Error('Presence erasure could not be confirmed for every room');
+	return removed;
 }
 
 /**

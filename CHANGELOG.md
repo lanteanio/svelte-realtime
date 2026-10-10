@@ -141,6 +141,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Unsent RPC frames remain owned by their pending requests, so disconnect or timeout rejection cannot leave a frame that sends after reconnect. Initial calls wait through failed connection attempts, including batches and binary RPCs.
 
+- Presence and room-owner erasure now report unconfirmed Redis cleanup, retain bounded retry state, and remove identity fields idempotently across join and disconnect races.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

@@ -19,7 +19,7 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'chaos',
-			testMatch: ['multi-instance.spec.js', 'recovery.spec.js', 'room-lobby-cluster.spec.js']
+			testMatch: ['multi-instance.spec.js', 'recovery.spec.js', 'room-lobby-cluster.spec.js', 'presence-erasure.spec.js']
 		}
 	]
 });
