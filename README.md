@@ -4826,7 +4826,7 @@ Without a `platform` callback, `createMessage` auto-wraps with whatever `setBus(
 
 ## Postgres NOTIFY
 
-Combine live.stream with the Postgres NOTIFY bridge for zero-code reactivity. A DB trigger fires `pg_notify()`, the bridge calls `platform.publish()`, and the stream auto-updates.
+Combine live.stream with the Postgres NOTIFY bridge for zero-code reactivity. A DB trigger fires `pg_notify()`, the bridge calls `platform.publish()`, and the stream auto-updates. Await startup before serving traffic. Use a direct or session-pooled DSN and budget one dedicated session per bridge per replica; advisory followers also consume a session. Follow the [notification lifecycle](docs/postgres-notify.md) for owned and external-pool shutdown. Notifications missed while disconnected are not replayed.
 
 ```js
 // src/hooks.ws.js
@@ -4840,8 +4840,8 @@ const notify = createNotifyBridge(pg, {
   parse: (payload) => JSON.parse(payload)
 });
 
-export function open(ws, { platform }) {
-  notify.activate(platform);
+export async function init({ platform }) {
+  await notify.activate(platform);
 }
 ```
 
