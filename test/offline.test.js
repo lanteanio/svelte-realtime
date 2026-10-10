@@ -3309,3 +3309,37 @@ describe('offline persistence health and isolated value reads', () => {
 		expect(mod.offlinePersistence()).toEqual({ status: 'degraded', unreadableRows: 0, failedWrites: 1 });
 	});
 });
+
+
+it('keeps a mutation queued during beforeReplay when the callback disconnects', async () => {
+	const store = fakeStore();
+	let added;
+	const [first] = await goOfflineAndQueue({ persist: store, beforeReplay() {
+		if (!added) { simulateStatus('disconnected'); added = watch(mod.__rpc('during/filter')('new')); }
+		return true;
+	} }, [['before/filter', ['old']]]);
+	simulateStatus('open'); await flush();
+	expect(wire.filter(frame => frame.rpc)).toHaveLength(0);
+	simulateStatus('open'); await flush();
+	await respondAll(() => ({ ok: true, data: 'done' }));
+	await expect(first).resolves.toBe('done');
+	expect(added.value).toBe('done');
+	expect(wire.filter(frame => frame.rpc).map(frame => frame.rpc)).toEqual(['before/filter', 'during/filter']);
+	expect(storedKeys(store)).toEqual([]);
+});
+
+it('never replays a captured mutation evicted by a reentrant beforeReplay enqueue', async () => {
+	const store = fakeStore();
+	let added;
+	const [first] = await goOfflineAndQueue({ persist: store, maxQueue: 1, beforeReplay() {
+		if (!added) { simulateStatus('disconnected'); added = watch(mod.__rpc('during/filter')('replacement')); }
+		return true;
+	} }, [['before/filter', ['evicted']]]);
+	const evicted = watch(first);
+	simulateStatus('open'); await flush();
+	expect(evicted.error).toMatchObject({ code: 'QUEUE_FULL' });
+	simulateStatus('open'); await flush();
+	await respondAll(() => ({ ok: true, data: 'done' }));
+	expect(added.value).toBe('done');
+	expect(wire.filter(frame => frame.rpc).map(frame => frame.rpc)).toEqual(['during/filter']);
+});

@@ -320,7 +320,9 @@ async function _drainOfflineQueue() {
 		let queue = [];
 		let asyncFilterWarned = false;
 		let throwingFilterWarned = false;
-		for (const entry of [..._offlineQueue]) {
+		const captured = new Set(_offlineQueue);
+		for (const entry of captured) {
+			if (entry.settled) continue;
 			if (scope !== _offlineScope()) return;
 			if (maxAge > 0 && nowMs - entry.queuedAt > maxAge) {
 				settleFail(entry, new RpcError('STALE', 'Offline mutation expired'));
@@ -368,8 +370,11 @@ async function _drainOfflineQueue() {
 		if (scope !== _offlineScope()) return;
 		// Queued entries already belong to the live array. Track them separately
 		// only while a drain takes ownership, avoiding a second enqueue index.
+		queue = queue.filter(entry => !entry.settled);
 		_ownOfflineReplay(scope, queue);
-		_offlineQueue.length = 0;
+		let remaining = 0;
+		for (const entry of _offlineQueue) if (!captured.has(entry)) _offlineQueue[remaining++] = entry;
+		_offlineQueue.length = remaining;
 		_bumpPending();
 		if (scope !== _offlineScope()) return;
 

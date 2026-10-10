@@ -133,6 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Offline restore reserves sequence numbers with a keys-only scan and skips unreadable values without disabling other persisted mutations. `offlinePersistence()` exposes storage health, unreadable row counts, and failed queued writes.
 
+- Offline replay keeps mutations queued by a replay callback and never sends calls that callback-driven overflow already evicted.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
