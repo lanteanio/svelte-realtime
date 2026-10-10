@@ -1,7 +1,7 @@
 // The "smooth" devtools tab is pull-based: a live `live.smooth` view registers
 // a `() => channel.stats()` accessor, and the panel calls it on its refresh
-// tick. These tests cover the registry contract (the panel render is a dev-only
-// DOM overlay, untested like the rest of devtools.js).
+// tick. These tests cover the registry contract; the browser suites exercise
+// the rendered panel and a live channel across mobile and desktop viewports.
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { __devtools, _devtoolsSmoothRegister } from '../src/client/devtools-instrument.js';

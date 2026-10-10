@@ -25,6 +25,12 @@ binary. State your Node version, OS, architecture, addon availability, exact
 commands and omitted checks in the pull request; a skipped native test is not
 evidence of native runtime coverage.
 
+DevTools and generated counter browser checks share 320x568, 768x1024, and
+1440x900 viewports. `test:devtools` renders a real adapter smooth channel through
+`SmoothEntity` and waits for normal inspector refresh ticks after commands,
+resynchronization, and teardown. `test:scaffold` compiles the CLI page template
+and checks rendered counts, failure/retry controls, and accessibility.
+
 ## Changes and review evidence
 
 Use concise imperative commit subjects describing behavior. A conventional-commit

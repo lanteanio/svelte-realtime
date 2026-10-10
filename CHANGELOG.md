@@ -171,6 +171,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Smooth wire batching is verified over real sockets against the installed adapter and the historical per-entity fallback.
 
+- Browser checks cover live smooth telemetry refresh and generated counter controls across mobile, tablet, and wide desktop viewports.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
