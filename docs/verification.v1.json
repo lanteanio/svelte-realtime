@@ -17,7 +17,8 @@
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
-      "node scripts/check-documentation-contract.js"
+      "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js"
     ],
     "check:documentation": [
       "node scripts/check-documentation-contract.js"
@@ -40,6 +41,9 @@
     "check:publish": [
       "publint",
       "attw --pack . --profile esm-only"
+    ],
+    "check:release": [
+      "node scripts/check-release-ledger.js"
     ],
     "check:verification": [
       "node scripts/check-verification-inventory.js"
@@ -75,7 +79,8 @@
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
-      "node scripts/check-documentation-contract.js"
+      "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js"
     ],
     "sim:golden": [
       "node scripts/sim-golden.js"
@@ -100,6 +105,7 @@
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js",
       "vitest run"
     ],
     "test:chaos": [
@@ -148,7 +154,8 @@
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
       "vitest run test/documentation-code.test.js test/packed-readme-examples.test.js",
-      "node scripts/check-documentation-contract.js"
+      "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js"
     ],
     "verify:fast": [
       "node scripts/generate-error-reference.js --check",
@@ -166,7 +173,8 @@
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
-      "node scripts/check-documentation-contract.js"
+      "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js"
     ],
     "verify:full": [
       "node scripts/generate-error-reference.js --check",
@@ -185,6 +193,7 @@
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -210,6 +219,7 @@
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -240,6 +250,7 @@
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
       "node scripts/check-documentation-contract.js",
+      "node scripts/check-release-ledger.js",
       "vitest run"
     ]
   },
@@ -369,6 +380,7 @@
         "node scripts/check-links.js",
         "node scripts/check-doc-code.js",
         "node scripts/check-documentation-contract.js",
+        "node scripts/check-release-ledger.js",
         "vitest run",
         "node scripts/sim-golden.js",
         "node test/fuzz-wire.mjs",

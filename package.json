@@ -82,7 +82,7 @@
     "protocol.schema.json"
   ],
   "scripts": {
-    "check": "node scripts/generate-error-reference.js --check && node scripts/generate-onboarding-reference.js && node scripts/check-types.js && node scripts/check-diagnostic-attribution.js && node scripts/check-publish-routing.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js && node scripts/check-scaffold-build.js && npm run check:format && npm run check:publish && npm run check:verification && npm run check:links && npm run check:examples && npm run check:documentation",
+    "check": "node scripts/generate-error-reference.js --check && node scripts/generate-onboarding-reference.js && node scripts/check-types.js && node scripts/check-diagnostic-attribution.js && node scripts/check-publish-routing.js && node scripts/check-determinism.js && node scripts/check-slugs.js && node --no-warnings --experimental-vm-modules scripts/check-syntax.js && node scripts/check-scaffold-build.js && npm run check:format && npm run check:publish && npm run check:verification && npm run check:links && npm run check:examples && npm run check:documentation && npm run check:release",
     "check:errors": "node scripts/generate-error-reference.js --check",
     "generate:errors": "node scripts/generate-error-reference.js --write",
     "generate:onboarding": "node scripts/generate-onboarding-reference.js --write --sync-docs-site",
@@ -99,7 +99,7 @@
     "check:verification": "node scripts/check-verification-inventory.js",
     "generate:verification": "node scripts/check-verification-inventory.js --write",
     "verify:fast": "npm run check",
-    "verify:docs": "npm run check:format && npm run check:errors && node scripts/generate-onboarding-reference.js && npm run check:links && npm run check:examples && npm run test:examples && npm run check:documentation",
+    "verify:docs": "npm run check:format && npm run check:errors && node scripts/generate-onboarding-reference.js && npm run check:links && npm run check:examples && npm run test:examples && npm run check:documentation && npm run check:release",
     "verify:unit": "npm test",
     "verify:sim": "npm run sim:golden && npm run test:fuzz",
     "verify:devtools": "npm run test:devtools",
@@ -119,7 +119,8 @@
     "verify:scaffold": "npm run test:scaffold",
     "test:chaos:parallel": "node scripts/check-chaos-isolation.js",
     "test:lifecycle": "node scripts/check-production-lifecycle.js",
-    "test:smooth-stack": "node scripts/check-smooth-stack.js"
+    "test:smooth-stack": "node scripts/check-smooth-stack.js",
+    "check:release": "node scripts/check-release-ledger.js"
   },
   "engines": {
     "node": ">=22.0.0"

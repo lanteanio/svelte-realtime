@@ -14,6 +14,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
@@ -21,6 +22,8 @@ jobs:
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm run verify:pr
+        env:
+          RELEASE_LEDGER_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
       - run: npm run test:smooth-stack
   smoke:
     runs-on: ubuntu-latest

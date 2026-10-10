@@ -4,10 +4,13 @@ All notable changes to `svelte-realtime` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Published artifact identities are recorded in the [release manifest](docs/release-manifest.md).
 
 ## [Unreleased]
 
 ### Added
+
+- An offline release ledger records every published artifact and checks changelog identities, unpublished markers, and immutable history.
 
 - Erasure audit hooks support optional HMAC keys configured once or per call, validated before cleanup; default pseudonymous identifiers remain unchanged.
 
@@ -202,6 +205,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve live platform trace and request correlation when reactive publishes pass through a cluster bus.
 
 ## [0.6.0-next.91] - 2026-10-10
+
+*Not published to npm; release candidate.*
 
 ### Added
 
@@ -1136,6 +1141,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`live.forget` now announces the owner successions the durable store already committed even when the erasure is signalled incomplete for retry.** The cluster-wide owner eviction erases the user room by room; if one room's hand-off commits but a sibling room hits a transient error, the store rejects the whole purge (the erasure is incomplete and the app must retry) - but it carries the already-committed successions on the thrown error. Previously that rejection published nothing, and the retry finds the committed room already handed off (it reports no succession the second time), so a committed `u1 -> u2` change reached the `:owner` stream on NEITHER the failing call nor the retry - already-subscribed clients kept the erased owner label until the next owner transition. `live.forget` now publishes those committed successions from the error before surfacing `FORGET_STORE_FAILED`, so each reaches the wire exactly once; the announcement is best-effort and fully guarded, so a throwing bus can never mask the retry signal. Needs the producing half in `svelte-adapter-uws-extensions`' `createForgetStore` (>= the release that carries `ownerSuccessions` on the incomplete-erasure error); an older store that never partially fails is unaffected.
 - **Dropping a stream's last subscriber now releases the server-side subscription while the socket stays open - room registry counts, presence rosters, and owner succession no longer wait for the socket to close.** The adapter client (0.6.0-next.61+) sends no wire unsubscribe frame for a server-managed topic, reasoning it never sent the subscribe frame - but the server holds real wire state for it (the stream RPC ran `platform.subscribe`), and only the client knows when the last local ref let go. So a "leave" with the tab still open told the server nothing: the adapter kept delivering publishes to the socket, the app's `unsubscribe` hook chain never fired, and every unsubscribe drain - the room enumeration registry release, the presence `leave`, the owner succession - deferred to socket close. On a lobby this is the "member count climbs while one user cycles join/leave" leak, and it matches the production `subs.total-mismatch` adapter assert. The realtime client now refcounts the managed topics it marks and, when the last local stream ref releases one on an open socket, sends the explicit unsubscribe frame itself. Duplicate-safe against a future adapter-side fix (the server handles a redundant unsubscribe as a no-op), refcounted so two stream instances sharing one wire topic never cut each other off, and a no-op on older adapters without managed-topic marking (their own topic refcount already sends the frame). The frame is handed to the adapter's own send (gated on the socket being OPEN), so it still fires on a backgrounded (`'suspended'`) tab whose socket is live - the exact "unmount live views on hide" pattern that would otherwise re-leak - and is skipped only when the client is `terminated` by an explicit `connect().close()`, where there is no subscription to release and re-reading connection status would wrongly reconnect the closed socket. Reminder that a custom `unsubscribe` hook in `hooks.ws.js` must chain the framework's - now documented in the README.
 
+## [0.6.0-next.88] - 2026-07-16
+
+Settled the room claim barrier after a denied data-stream subscription so paired loaders, the batch response, and graceful shutdown can finish.
+
 ## [0.6.0-next.87] - 2026-07-16
 
 ### Fixed
@@ -1256,6 +1265,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0-next.76] - 2026-07-09
 
+*Not published to npm; superseded before release.*
+
 ### Added
 
 - **A resource-leak churn harness over the realtime layer's structural registries (`test/sim-leak.test.js`).** The registries that grow and shrink with connection life - the per-topic subscriber index, the refcounted transform/redact/volatile/coalesce registrations, the presence reference map with its leave grace timer, the smoothed-entity record map with its per-subscriber bookkeeping - now have a churn regression gate: clients join and leave across cycles under fresh identities and fresh topics every cycle (so a retained entry can never be masked by key reuse), the harness samples every registry's size at each cycle's end, and a monotonic growth trend fails the test. The trend verdict comes from the adapter's published leak kernel (`createResourceTracker` / `structuralResourceProbes` / `assertNoResourceGrowth` on `svelte-adapter-uws/sim`, dev-time only - the shipped package is unchanged), so both repos share one definition of what a leak looks like in a series. The harness proves its own teeth with a planted per-connection retention (detected) against the identical churn with a correct release path (clean), and the smoothed-entity leg churns players through a record held live by an anchor subscriber with interest culling on, so a per-subscriber entry that failed to shed would accumulate visibly instead of vanishing with a reclaimed record. Behavior is untouched: this is test surface only, plus the repo's installed adapter refreshed to `0.6.0-next.67`, which also means the smooth-runtime integration tests now exercise the adapter's current temporal-codec wire paths instead of the pre-codec plugin.
@@ -1313,6 +1324,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`shortCodes()` - unguessable, sequential-free join / share codes.** Room enumeration hides a room's *existence* from callers who cannot see it, but a room joined by a code or share link has a second exposure: if the code is the room's sequential id (`?game=1`, `?game=2`, ...), anyone can scan the id space to find and address rooms. `shortCodes({ secret })` turns a monotonic counter into an unguessable, non-sequential, fixed-length Base62 code and back - `codes.encode(id)` for the public code, `codes.decode(code)` to recover the id (or `null` if malformed). It is built on a keyed Feistel network, so the mapping is bijective (collision-free, no lookup table) and reversible with your secret (no DB round-trip to resolve a code), keyed so adjacent ids scatter to unrelated codes, and deterministic so a code minted on any instance resolves on every instance and across restarts. `length` (default 6, ~56.8 billion codes; max 8) and `rounds` (default 4) are configurable; the codec is pure and determinism-clean (safe under the DST simulator). Set a stable `secret` for production/cluster stability; without one a per-process random key is used and a one-time dev warning fires. A code is a hard-to-guess handle, not proof of authorization - `decode` is total over the space, so keep your room `guard` and validate the decoded id, exactly as you would any client-supplied id.
 
 ## [0.6.0-next.67] - 2026-07-05
+
+*Not published to npm; superseded before release.*
 
 ### Added
 
@@ -1453,6 +1466,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0-next.47] - 2026-06-26
 
+*Not published to npm; superseded before release.*
+
 ### Added
 
 - **`degradation` store - the precomputed mitigation for a server-side degradation, surfaced client-side.** When the extensions pub/sub bus is wired with a degradation policy (`svelte-adapter-uws-extensions >= 0.6.0-next.35`), a `degraded` event now carries a precomputed client mitigation (which streams/rpcs to treat as unavailable, how long to hold off, ready-to-render banner copy). The new `degradation` store surfaces it: `{ active, mitigation, recovery }` - read `$degradation.mitigation.bannerCopy` / `.retryAfterMs` to render a notice and schedule a retry with zero per-failure app code. The existing `health` store is unchanged (still `Readable<'healthy' | 'degraded'>`), so this is purely additive. Because the degraded event is pushed with the de-herd window, the `degradation` store (and the `health` flip) update after this client's own random delay, so 50k clients ramp their reactions across the cooldown instead of retrying in lockstep.
@@ -1473,6 +1488,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`configureAlarm` store seam.** A store now persists resolver metadata so the recovery poll can re-find a handler after a restart: `set(topic, at, meta)` gains a third `meta` argument (the stream's RPC path + tenant), `delete(topic)` is now read for its return value (the atomic single-fire claim), and an optional `due(nowMs)` enables the recovery poll. A store without `due` still works (in-memory timers fire while the process lives) but logs once that cross-restart recovery is off. Existing in-memory usage and the `{ leader }`-only configuration are unchanged. Note: renaming an alarm-bearing stream's RPC path across a deploy abandons that stream's in-flight durable alarms (the poll resolves handlers by path; a removed/renamed path is garbage-collected, never fired).
 
+## [0.6.0-next.46] - 2026-06-26
+
+Added `ctx.publish` jitter windows with per-client deferred delivery and ordering for subsequent frames.
+
+## [0.6.0-next.45] - 2026-06-26
+
+Added leader-gated recovery polling and atomic durable-store claims for alarms whose owning instance restarted before its local timer fired.
+
 ## [0.6.0-next.44] - 2026-06-26
 
 ### Added
@@ -1491,6 +1514,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Notes
 
 - `live.push({ topic })` / `live.notify({ topic })` use the topic verbatim. Unlike `ctx.publish`, these connection-less calls have no `ctx` and so do NOT auto-apply tenant scoping; a multi-tenant caller must pass an already-tenant-qualified topic (the same contract as `live.cron` publishing).
+
+## [0.6.0-next.43] - 2026-06-26
+
+Isolated client-envelope idempotency cache keys by the authenticated user so callers sharing an idempotency key cannot receive another user's cached response.
+
+## [0.6.0-next.42] - 2026-06-26
+
+Added cluster fan-out for `live.push({ topic })` and `live.notify({ topic })` through a configured topic-broadcast coordinator, with session routing support.
 
 ## [0.6.0-next.41] - 2026-06-26
 
@@ -1665,11 +1696,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0-next.14] - 2026-06-20
 
+*Not published to npm; superseded before release.*
+
 ### Added
 
 - **`view.reportCenter(x, y)` / `view.clearCenter()`: a free-cam override for area-of-interest culling.** A `live.smooth({ interest })` topic culls each subscriber around its own entity by default. That is right for a player driving an avatar, wrong for a spectator or a free-cam whose view is somewhere else entirely - centred on its idle entity, such a viewer would be delivered only its own quiet corner instead of the action it is watching. Call `view.reportCenter(x, y)` to point culling at where the camera actually looks (in the topic's position units); the server measures relevance from there until `view.clearCenter()` reverts to the own-entity default. Report it when the camera moves, not every frame - an unchanged center is dropped client-side, and the report rides a volatile send (a lost one is corrected by the next). A reported center takes effect even on a still board (the relevancy pass re-runs on the report, not only on entity motion), so panning across a paused scene reveals what is there. Inert on a topic declared without `interest`. Single-instance and on a cluster topic's owning instance today; a center reported to a non-owning instance is stored but dormant until the cross-instance cull lands (the subscriber keeps its safe whole-relay delivery meanwhile). Realtime-only - no adapter or extensions change.
 
 ## [0.6.0-next.13] - 2026-06-20
+
+*Not published to npm; superseded before release.*
 
 ### Added
 
@@ -1827,6 +1862,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   {#if $maintenance}<Banner />{/if}
   ```
 
+## [0.5.13] - 2026-10-10
+
+Published artifact identity is retained in the [release manifest](docs/release-manifest.md). The registry provides no Git head, and the npm artifact contains no changelog; no source commit or additional release behavior is inferred.
+
+## [0.5.12] - 2026-08-29
+
+Excluded generated declarations from live hot updates and skipped identical type-file rewrites to prevent a self-sustaining reload loop.
+
+## [0.5.11] - 2026-07-21
+
+Kept live functions registered through Vite's cold-start dependency optimization and corrected warnings for hooks exports.
+
 ## [0.5.10] - 2026-05-25
 
 ### Fixed
@@ -1834,6 +1881,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`live.push` and `live.notify`: cluster-first lookup when `configurePush({ remoteRegistry })` is configured.** Pre-fix, both delegates short-circuited on the local `_pushRegistry` whenever this instance had any entry for the target userId, even if a later registration on a different instance had become the cluster-canonical owner. Result on a multi-replica deploy with the same user open in multiple tabs across workers: the push routed to whichever tab happened to be on the caller's instance, not to the cluster-canonical (most-recently-opened) tab the documentation already promised. Routing was non-deterministic: the same `live.push({ userId })` call returned different recipients depending on which instance the caller was running on. Post-fix, `live.push` / `live.notify` consult the `remoteRegistry` first when one is configured. The registry's own self-targeting short-circuit (`registry.request`'s `ownerInstanceId === instanceId` fast path in `svelte-adapter-uws-extensions/redis/registry.js`) preserves single-tab performance -- no extra Redis hop when the canonical owner IS this instance. Multi-tab same-user across instances now routes deterministically to the cluster-canonical recipient. The local entry is consulted only as a fallback when `remoteRegistry` rejects with an "offline" error AND the local registry has an entry for the userId (covers the brief propagation race where `pushHooks.open` has populated local + Redis but the cluster pub/sub event hasn't yet applied to this instance's userToInstance index). Updates the three tests that previously codified the local-first behavior (`prefers the local registry over the remote registry...`, the symmetric notify test, `configurePush({ identify, remoteRegistry })`) and adds two new tests covering the propagation-race fallback for both push and notify. Single-instance deployments (no `remoteRegistry` configured) are unaffected -- the local-only path is preserved as-is.
 
 ## [0.5.9] - 2026-05-22
+
+*Not published to npm; superseded before release.*
 
 ### Added
 
@@ -1991,6 +2040,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Client stream `cleanup()` now resets session-resume cursors (`_lastSeq`, `_lastVersion`, `_schemaVersion`, `_cursor`, `_hasMore`, `_loadingMore`) alongside `currentValue`.** Pre-fix, when a dynamic-topic stream's last subscriber unsubscribed (e.g. a SvelteKit page unmounted), the deferred-cleanup microtask reset `currentValue = undefined` and `store.set(undefined)` but left the resume cursors set to their prior-session values. On the next mount (e.g. browser back / forward to the same page) the cached store's first subscribe sent the stale `seq` to the server, the server's `_executeStreamRpc` treated it as a session-resume, ran `platform.replay.since(topic, clientSeq)` which legitimately returned an empty array (no events occurred between unmount and remount on a quiet topic), and responded `{ data: [], replay: true, seq: currentSeq }`. The client's replay branch then looped over the empty array (zero `_applyMerge` calls) and called `store.set(currentValue)` -- but `currentValue` was still `undefined` from cleanup. Any `{#if $store === undefined}` spinner hung forever. Even when events DID occur during the unmount window (replay returned non-empty), the result was wrong: the user got only the delta since their last seen seq, not the full snapshot they expected on remount. The fix resets all session-resume state inside `cleanup()` so the next subscribe is genuinely fresh. In-session WS reconnects do NOT go through `cleanup()` (the reconnect path at the `status === 'open'` handler keeps `_lastSeq` so the replay-buffer gap-fill works for sleep/wake and transient drops), so the optimization is preserved for the cases it was designed for. Reproducer: open a board page with `{ replay: true }` streams, browser-back, click the same board link -- pre-fix hangs on spinner forever, post-fix loads cleanly.
+
+## [0.5.0] - 2026-05-16
+
+Stable release of the changes described under [0.5.0-next.22](#050-next22---2026-05-16), the changelog heading retained at the published Git head.
 
 ## [0.5.0-next.22] - 2026-05-16
 
@@ -3489,6 +3542,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [0.1.9] and earlier
+## [0.1.9] - 2026-03-15
 
 See [git history](https://github.com/lanteanio/svelte-realtime/commits/main) for changes prior to 0.4.0.
+
+## [0.1.8] - 2026-03-15
+
+This published version was previously covered by the [0.1.9 and earlier archive](#019---2026-03-15). Its exact artifact identity is retained in the [release manifest](docs/release-manifest.md); separate original release notes are unavailable.
+
+## [0.1.7] - 2026-03-15
+
+This published version was previously covered by the [0.1.9 and earlier archive](#019---2026-03-15). Its exact artifact identity is retained in the [release manifest](docs/release-manifest.md); separate original release notes are unavailable.
+
+## [0.1.6] - 2026-03-15
+
+This published version was previously covered by the [0.1.9 and earlier archive](#019---2026-03-15). Its exact artifact identity is retained in the [release manifest](docs/release-manifest.md); separate original release notes are unavailable.
+
+## [0.1.5] - 2026-03-15
+
+This published version was previously covered by the [0.1.9 and earlier archive](#019---2026-03-15). Its exact artifact identity is retained in the [release manifest](docs/release-manifest.md); separate original release notes are unavailable.
+
+## [0.1.4] - 2026-03-14
+
+This published version was previously covered by the [0.1.9 and earlier archive](#019---2026-03-15). Its exact artifact identity is retained in the [release manifest](docs/release-manifest.md); separate original release notes are unavailable.

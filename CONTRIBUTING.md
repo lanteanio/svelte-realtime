@@ -50,6 +50,8 @@ Add user-visible changes under `CHANGELOG.md` Unreleased. Describe compatibility
 impact using semver: fixes preserve the contract, additions preserve existing
 calls, and breaking changes require migration guidance. Maintainers choose the
 release version and prerelease tag; do not bump the version merely to open a PR.
+Record published artifact identities and routing events as described in
+[releasing](docs/releasing.md); `npm run check:release` verifies the local ledger.
 Keep dependency changes and their root or fixture lockfiles together. Use npm to
 update lockfiles, review the resolved diff, and do not hand-edit generated lock data.
 
