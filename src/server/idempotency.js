@@ -92,6 +92,11 @@ let _defaultIdempotencyStore = null;
  * results; lazy-sweeps expired records every 30s or when needed for admission.
  */
 function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
+	const tenantLimit = Math.min(1000, maxEntries);
+	const reserve = Math.min(1000, Math.floor(maxEntries / 10));
+	const reserveLimit = Math.min(100, reserve);
+	const tenantCounts = new Map();
+	const keyTenants = new Map();
 	/** @type {Map<string, { value: any, expiresAt: number }>} */
 	const results = new Map();
 	/** @type {Map<string, Promise<any>>} */
@@ -130,6 +135,21 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	let lastSweep = runtimeNow();
 	let nextExpiry = Infinity;
 
+	function _releaseCapacity(key) {
+		if (!keyTenants.has(key)) return;
+		const tenant = keyTenants.get(key);
+		keyTenants.delete(key);
+		const count = tenantCounts.get(tenant) - 1;
+		if (count === 0) tenantCounts.delete(tenant);
+		else tenantCounts.set(tenant, count);
+	}
+
+	function _atCapacity(tenant) {
+		const used = results.size + inflight.size;
+		const count = tenantCounts.get(tenant) || 0;
+		return used >= maxEntries || count >= tenantLimit || (used >= maxEntries - reserve && count >= reserveLimit);
+	}
+
 	function _retainUser(idemUser) {
 		if (idemUser === null) return null;
 		let user = userKeys.get(idemUser);
@@ -163,18 +183,18 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	function _sweepResults(now) {
 		nextExpiry = Infinity;
 		for (const [key, entry] of results) {
-			if (entry.expiresAt <= now) { results.delete(key); _indexDrop(key); }
+			if (entry.expiresAt <= now) { results.delete(key); _indexDrop(key); _releaseCapacity(key); }
 			else if (entry.expiresAt < nextExpiry) nextExpiry = entry.expiresAt;
 		}
 	}
 
-	function _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt) {
-		if (results.size + inflight.size >= maxEntries) {
+	function _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, tenant) {
+		if (_atCapacity(tenant)) {
 			const now = runtimeNow();
 			// Reclaim expired results on pressure, even before the periodic sweep.
 			// A full cache of live results rejects in constant time between expiries.
 			if (now >= nextExpiry) _sweepResults(now);
-			if (results.size + inflight.size >= maxEntries) {
+			if (_atCapacity(tenant)) {
 				_releaseUser(idemUser, activeUser);
 				throw new LiveError('IDEMPOTENCY_CAPACITY', 'The idempotency store is full; the handler has not run. Retry after capacity becomes available.');
 			}
@@ -187,6 +207,8 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 		// via `await inflight.get(key)`.
 		promise.catch(() => {});
 		inflight.set(key, promise);
+		keyTenants.set(key, tenant);
+		tenantCounts.set(tenant, (tenantCounts.get(tenant) || 0) + 1);
 
 		let settled = false;
 		const ttlMs = ttlSec * 1000;
@@ -211,6 +233,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 					_indexAdd(key, idemUser, activeUser);
 				}
 				inflight.delete(key);
+				if (!results.has(key)) _releaseCapacity(key);
 				_releaseUser(idemUser, activeUser);
 				if (resolveInflight) resolveInflight(value);
 			},
@@ -218,6 +241,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 				if (settled) return;
 				settled = true;
 				inflight.delete(key);
+				_releaseCapacity(key);
 				_releaseUser(idemUser, activeUser);
 				_indexDrop(key);
 				if (rejectInflight) rejectInflight(new Error('ABORTED'));
@@ -255,6 +279,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 				if (cached.expiresAt > now) return { result: cached.value };
 				results.delete(key);
 				_indexDrop(key);
+				_releaseCapacity(key);
 			}
 			// Pin before waiting: duplicates keep the purge stamp belonging to their
 			// arrival even when the original handler finishes after the lazy sweep.
@@ -273,7 +298,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 					return { result: re.value };
 				}
 			}
-			return _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt);
+			return _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt, meta?.tenant ?? null);
 		},
 		/**
 		 * Right-to-erasure: drop every cached + in-flight entry recorded under a
@@ -298,6 +323,7 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 			for (const k of user.keys) {
 				if (results.delete(k)) n++;
 				inflight.delete(k);
+				_releaseCapacity(k);
 				keyUser.delete(k);
 			}
 			user.keys.clear();
@@ -656,8 +682,10 @@ const _liveIdempotent = function idempotent(config, fn) {
 		// Pass the raw (user, tenant) so the store can record this entry under the
 		// user for live.forget right-to-erasure - the in-memory store folds them
 		// into a key matching `_tenantKey(tenantId, userId)`, a durable backend
-		// denormalizes them into columns. Anonymous callers pass nothing.
-		let slot = await store.acquire(key, ttlSec, uid !== null ? { user: uid, tenant: ctx.tenantId } : undefined);
+		// denormalizes them into columns. The default store also needs anonymous tenant scope for admission.
+		const acquireMeta = uid !== null ? { user: uid, tenant: ctx.tenantId }
+			: store === _defaultIdempotencyStore && ctx.tenantId != null ? { tenant: ctx.tenantId } : undefined;
+		let slot = await store.acquire(key, ttlSec, acquireMeta);
 		for (;;) {
 			if (slot && slot.acquired) {
 				let data;
@@ -693,7 +721,7 @@ const _liveIdempotent = function idempotent(config, fn) {
 				return data;
 			}
 			if (slot && slot.pending) {
-				slot = await _waitPendingIdempotency(store, key, ttlSec, uid !== null ? { user: uid, tenant: ctx.tenantId } : undefined);
+				slot = await _waitPendingIdempotency(store, key, ttlSec, acquireMeta);
 				continue;
 			}
 			const cached = slot.result;

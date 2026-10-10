@@ -5,7 +5,7 @@ import { createTestEnv } from '../src/testing.js';
 import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.js';
 
-const CAPACITY = 10000;
+const CAPACITY = 1000;
 const capacityError = { code: 'IDEMPOTENCY_CAPACITY' };
 function deferred() {
 	let resolve;
@@ -26,7 +26,7 @@ describe('idempotency capacity preserves accepted effects', () => {
 		_resetIdempotencyStore(); _resetForget(); _resetTenantResolver(); resetRuntimeEnv();
 	});
 
-	it('rejects hostile tenant churn before its effect instead of evicting another tenant result', async () => {
+	it.each([true, false])('rejects hostile tenant churn before its effect and permits fresh honest work (identified: %s)', async identified => {
 		_setTenantResolver(user => user.tenant);
 		env = createTestEnv();
 		const effects = new Map();
@@ -35,16 +35,30 @@ describe('idempotency capacity preserves accepted effects', () => {
 			const count = (effects.get(id) || 0) + 1; effects.set(id, count);
 			return count;
 		}) });
-		const honest = env.connect({ id: 'same-user', tenant: 'honest' });
-		const hostile = env.connect({ id: 'same-user', tenant: 'hostile' });
+		const honest = env.connect(identified ? { id: 'same-user', tenant: 'honest' } : { tenant: 'honest' });
+		const hostile = env.connect(identified ? { id: 'same-user', tenant: 'hostile' } : { tenant: 'hostile' });
 		expect(await honest.call('work/run', 'paid')).toBe(1);
-		for (let i = 0; i < CAPACITY - 1; i++) await hostile.call('work/run', String(i));
+		for (let i = 0; i < CAPACITY; i++) await hostile.call('work/run', String(i));
 		const overflow = await hostile.call('work/run', 'overflow').catch(error => error);
 		expect(await honest.call('work/run', 'paid')).toBe(1);
+		expect(await honest.call('work/run', 'fresh')).toBe(1);
 		expect(effects.get('honest:paid')).toBe(1);
 		expect(overflow).toMatchObject(capacityError);
 		expect(effects.has('hostile:overflow')).toBe(false);
 		expect(await hostile.call('work/run', '0')).toBe(1);
+	});
+
+	it('protects a global reserve for tenants below one hundred entries', async () => {
+		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key);
+		for (let tenant = 0; tenant < 9; tenant++) {
+			const ctx = { user: { id: 'member' }, tenantId: String(tenant) };
+			for (let i = 0; i < CAPACITY; i++) await run(ctx, String(i));
+		}
+		const fresh = { user: { id: 'member' }, tenantId: 'fresh' };
+		for (let i = 0; i < 100; i++) await expect(run(fresh, String(i))).resolves.toBe(String(i));
+		await expect(run(fresh, 'overflow')).rejects.toMatchObject(capacityError);
+		await expect(run({ user: { id: 'member' }, tenantId: 'other' }, 'new')).resolves.toBe('new');
+		await expect(run({ user: { id: 'member' }, tenantId: '0' }, '0')).resolves.toBe('0');
 	});
 
 	for (const ttl of [0, 60]) {
