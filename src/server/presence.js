@@ -35,6 +35,11 @@ export function _cursorPublisherActive(platform, topic, key) {
 export async function _removeCursorIfDeparted(platform, topic, key, publish) {
 	if (await _presenceIdentityActive(platform, topic, key, true)) return;
 	if (await _cursorPublisherActive(platform, topic, key)) return;
+	// An independent lifetime may join while either Redis read is pending.
+	// Recheck both local refs at the final synchronous publish boundary.
+	const member = _presenceRef.get(topic + '\0' + key);
+	const publisher = _presenceRef.get(_cursorControlTopic(topic) + '\0' + key);
+	if ((member && !member.gone) || (publisher && !publisher.gone)) return;
 	if (publish) publish(topic + ':cursors', 'remove', { key }, UNSEQUENCED);
 	else _platformPublish(platform, topic + ':cursors', 'remove', { key }, UNSEQUENCED);
 }

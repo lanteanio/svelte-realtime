@@ -352,4 +352,31 @@ describe('cursor samples follow room membership departures', () => {
 		expect(peers.map(peer => peer.value.length)).toEqual([0, 0, 1]);
 	});
 
+
+	it('does not remove a new member sample after an old publisher waits on Redis', async () => {
+		let entered, resume, gated = false;
+		const started = new Promise(resolve => { entered = resolve; });
+		const gate = new Promise(resolve => { resume = resolve; });
+		const counts = new Map();
+		env.platform.redis = {
+			hset: async () => 1, expire: async () => 1, hdel: async () => 2,
+			hincrby: async (hash, key, by) => { const n=(counts.get(hash)||0)+by; counts.set(hash,n); return n; },
+			hget: async (hash, key) => {
+				if (hash === '__live-presence:simple-room' && !gated) { gated = true; entered(); await gate; return null; }
+				return counts.get(hash) ?? null;
+			}
+		};
+		const { alice, cursors } = await simple();
+		await alice.call('simple/room/__cursor/move', { x: 1 });
+		alice.disconnect(); await vi.advanceTimersByTimeAsync(5001); await started;
+		env.register('new', { room: live.multiplayer({ topic: () => 'simple-room', presence: ctx => ({ name: ctx.user.id }), cursors: true }) });
+		const member = env.connect({ id: 'alice' });
+		member.subscribe('new/room/__data'); await vi.advanceTimersByTimeAsync(0);
+		await member.call('new/room/__cursor/move', { x: 2 });
+		expect(cursors.value[0].x).toBe(2);
+		resume(); await vi.advanceTimersByTimeAsync(0);
+		expect(cursors.value[0]?.x).toBe(2);
+		expect(cursors.events.some(event => event.event === 'remove')).toBe(false);
+	});
+
 });
