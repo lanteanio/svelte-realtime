@@ -223,7 +223,7 @@ function _orphanSubscribe(id, ticket, heldTopic, parked) {
 	pending.set(id, record);
 	if (clientState.socketUp) arm();
 }
-import { writable } from 'svelte/store';
+import { derived, writable } from 'svelte/store';
 // Namespace import lets .rune() access fromStore (Svelte 5 only) without
 // breaking the module under Svelte 4 - missing exports become undefined,
 // not module-load errors.
@@ -557,46 +557,20 @@ export function _createStreamAtSchemaVersion(path, options, dynamicArgs, schemaV
  * @returns {{ subscribe: (fn: (v: U[]) => void) => () => void, rune: () => { readonly current: U[] }, map: <V>(g: (item: U) => V) => any }}
  */
 function _createMappedStore(source, fn) {
-	const out = writable(/** @type {any} */ (undefined));
-	/** @type {(() => void) | null} */
-	let unsub = null;
-	let consumers = 0;
-
-	function activate() {
-		if (unsub) return;
-		unsub = source.subscribe((v) => {
-			if (v == null) {
-				out.set([]);
-			} else if (Array.isArray(v)) {
-				out.set(v.map(fn));
-			} else {
-				if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
-					const tname = typeof v === 'object' ? (v.constructor?.name || 'object') : typeof v;
-					console.warn(
-						`[svelte-realtime] .map() expects an array source; got ${tname}.\n  See: https://svti.me/merge`
-					);
-				}
-				out.set([]);
-			}
-		});
-	}
-
-	function deactivate() {
-		if (unsub) {
-			unsub();
-			unsub = null;
+	const out = derived(source, (v) => {
+		if (v == null) return [];
+		if (Array.isArray(v)) return v.map(fn);
+		if (typeof process !== 'undefined' && process.env?.NODE_ENV !== 'production') {
+			const tname = typeof v === 'object' ? (v.constructor?.name || 'object') : typeof v;
+			console.warn(
+				`[svelte-realtime] .map() expects an array source; got ${tname}.\n  See: https://svti.me/merge`
+			);
 		}
-	}
+		return [];
+	});
 
 	return {
-		subscribe(consumer) {
-			if (consumers++ === 0) activate();
-			const unsubLocal = out.subscribe(consumer);
-			return () => {
-				unsubLocal();
-				if (--consumers === 0) deactivate();
-			};
-		},
+		subscribe: out.subscribe,
 		rune() {
 			return createReactiveStream(this);
 		},

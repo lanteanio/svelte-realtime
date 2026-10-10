@@ -157,6 +157,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Stream subscriptions split by the shared 50-call limit and a conservative byte budget. Oversized incoming batches reject every affected request immediately; complex arguments serialize only when sent.
 
+- Mapped streams use Svelte derived stores for lazy activation and shared teardown; repeated cleanup no longer disconnects another consumer.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

@@ -1229,3 +1229,65 @@ it('an oversized incoming stream batch settles every client request without time
  expect(handler).not.toHaveBeenCalled();
  for (const off of offs) off();
 });
+
+
+describe('mapped stream lifecycle', () => {
+ it('shares lazy activation and keeps another consumer alive after repeated cleanup', async () => {
+  env.register('mapped', { feed: live.stream('mapped:feed', async () => [{ id: 1, name: 'A' }]) });
+  const source = __stream('mapped/feed', { merge: 'crud', key: 'id' });
+  const mapped = source.map(item => item.name);
+  await ticks();
+  expect(subscribeFrames()).toHaveLength(0);
+  const first = []; const second = [];
+  const offFirst = mapped.subscribe(value => first.push(value));
+  const offSecond = mapped.subscribe(value => second.push(value));
+  await ticks();
+  expect(subscribeFrames()).toHaveLength(1);
+  await deliverToServer(); await deliverToClient();
+  expect(first.at(-1)).toEqual(['A']);
+  expect(second.at(-1)).toEqual(['A']);
+  offFirst(); offFirst();
+  await ticks();
+  expect(unsubscribeFrames('mapped:feed')).toHaveLength(0);
+  for (const fn of [...net.clientTopics.get('mapped:feed')]) fn({ event: 'created', data: { id: 2, name: 'B' } });
+  expect(first.at(-1)).toEqual(['A']);
+  expect(second.at(-1)).toEqual(['A', 'B']);
+  offSecond();
+  await ticks();
+  expect(unsubscribeFrames('mapped:feed')).toHaveLength(1);
+  await deliverToServer();
+  expect(net.serverTopics.has('mapped:feed')).toBe(false);
+ });
+
+ it('chains projections once per emission and restarts after the last consumer leaves', async () => {
+  env.register('mapped', { feed: live.stream('mapped:chain', async () => [{ id: 1, name: 'Alpha' }]) });
+  const source = __stream('mapped/feed', { merge: 'crud', key: 'id' });
+  const projectName = vi.fn(item => item.name);
+  const projectLength = vi.fn(name => name.length);
+  const names = source.map(projectName);
+  const lengths = names.map(projectLength);
+  const values = []; const other = [];
+  const off = lengths.subscribe(value => values.push(value));
+  const offOther = lengths.subscribe(value => other.push(value));
+  await ticks(); await deliverToServer(); await deliverToClient();
+  expect(values.at(-1)).toEqual([5]);
+  expect(other.at(-1)).toEqual([5]);
+  expect(projectName).toHaveBeenCalledTimes(1);
+  expect(projectLength).toHaveBeenCalledTimes(1);
+  off(); offOther();
+  await ticks(); await deliverToServer();
+  expect(net.serverTopics.has('mapped:chain')).toBe(false);
+  projectName.mockClear(); projectLength.mockClear();
+  const resumed = [];
+  const offResumed = lengths.subscribe(value => resumed.push(value));
+  await ticks();
+  expect(subscribeFrames()).toHaveLength(1);
+  await deliverToServer(); await deliverToClient();
+  expect(resumed.at(-1)).toEqual([5]);
+  expect(projectName).toHaveBeenCalled();
+  expect(projectLength).toHaveBeenCalled();
+  offResumed();
+  await ticks(); await deliverToServer();
+  expect(net.serverTopics.has('mapped:chain')).toBe(false);
+ });
+});
