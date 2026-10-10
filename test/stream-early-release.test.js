@@ -1173,3 +1173,59 @@ describe('a stream released before its subscribe is answered', () => {
 		expect(net.serverTopics.has('pagedq:feed')).toBe(false);
 	});
 });
+
+
+it('stream coalescing keeps large Unicode argument lists under its byte budget and preserves order', async () => {
+ env.register('sized', { item: live.stream((ctx, id) => 'sized:' + id, async (ctx, id) => [{ id }]) });
+ const make = __stream('sized/item', { merge: 'crud', key: 'id' }, true);
+ const padding = '\u79d8\u5bc6'.repeat(2000);
+ const values = new Map(); const offs = [];
+ for (let i = 0; i < 23; i++) offs.push(make(i, padding).subscribe(value => values.set(i, value)));
+ await ticks();
+ const frames = subscribeFrames();
+ expect(frames.length).toBeGreaterThan(1);
+ expect(frames.flatMap(frame => frame.batch || [frame]).map(call => call.args[0])).toEqual(Array.from({ length: 23 }, (_, i) => i));
+ for (const frame of frames) expect(textEncoder.encode(JSON.stringify(frame)).byteLength).toBeLessThanOrEqual(64 * 1024);
+ await deliverToServer(); await deliverToClient();
+ for (let i = 0; i < 23; i++) expect(values.get(i)).toEqual([{ id: i }]);
+ for (const off of offs) off();
+});
+
+it('complex stream arguments travel alone without an extra toJSON call during coalescing', async () => {
+ env.register('custom', { item: live.stream((ctx, value) => 'custom:' + value.id, async (ctx, value) => [value]) });
+ const make = __stream('custom/item', { merge: 'crud', key: 'id' }, true);
+ let serializations = 0; const offs = [];
+ for (let i = 0; i < 3; i++) offs.push(make({ toJSON() { serializations++; return { id: i }; } }).subscribe(() => {}));
+ expect(serializations).toBe(3); // Dynamic cache keys, as before.
+ await ticks();
+ expect(serializations).toBe(3);
+ expect(subscribeFrames()).toHaveLength(3);
+ expect(subscribeFrames().every(frame => !frame.batch)).toBe(true);
+ await deliverToServer(); await deliverToClient();
+ expect(serializations).toBe(6); // Each transport serialization runs it once.
+ expect(pending.size).toBe(0);
+ for (const off of offs) off();
+});
+
+it('an oversized incoming stream batch settles every client request without timeouts', async () => {
+ const handler = vi.fn(async (ctx, id) => [{ id }]);
+ env.register('oversized', { item: live.stream((ctx, id) => 'oversized:' + id, handler) });
+ const make = __stream('oversized/item', { merge: 'crud', key: 'id' }, true);
+ const outcomes = []; const offs = [];
+ for (let i = 0; i < 51; i++) {
+  const stream = make(i);
+  offs.push(stream.subscribe(() => {}));
+  offs.push(stream.error.subscribe(error => { if (error) outcomes.push(error); }));
+ }
+ await ticks();
+ // A previous client or a custom transport may still send an unsplit batch.
+ const calls = net.toServer.splice(0).flatMap(frame => frame.batch || [frame]);
+ expect(calls).toHaveLength(51);
+ net.toServer.push({ batch: calls });
+ await deliverToServer(1, 'none'); await deliverToClient();
+ expect(pending.size).toBe(0);
+ expect(outcomes).toHaveLength(51);
+ expect(outcomes.every(error => error.code === 'INVALID_REQUEST')).toBe(true);
+ expect(handler).not.toHaveBeenCalled();
+ for (const off of offs) off();
+});

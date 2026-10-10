@@ -1172,6 +1172,8 @@ Each call resolves or rejects independently - one failure does not cancel the ot
 
 A `batch()` containing only one call sends a bare RPC frame (no batch envelope) and the server replies through the normal RPC path - so the defensive "always wrap writes in batch() for symmetry" pattern pays no envelope overhead. Batches of 2+ keep the envelope.
 
+RPC batches accept at most 50 calls. Oversized incoming batches return `INVALID_REQUEST` for every supplied request id. Stream subscriptions created in one turn split automatically at that shared count and a conservative 64 KiB coalescing budget, preserving order. Complex arguments travel separately so sizing never invokes application serialization hooks. This is a batching budget: individual requests retain the transport's payload limit, including a primitive request larger than the coalescing budget.
+
 ### Server-side batching
 
 Use `ctx.batch()` inside RPC handlers to publish multiple messages in a single call:

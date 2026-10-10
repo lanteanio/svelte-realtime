@@ -1,5 +1,6 @@
 // @ts-check
 import * as _adapterClient from 'svelte-adapter-uws/client';
+import { MAX_RPC_BATCH_CALLS, STREAM_BATCH_BYTES } from '../shared/rpc-limits.js';
 // Server-managed subscription marking. Older adapters (before the wire-subscribe
 // authorization surface) lack it; degrade to a no-op, which leaves the prior
 // behavior exactly (the client sends its redundant subscribe frame, and no gate
@@ -276,7 +277,7 @@ export function createReactiveStream(source) {
 
 /**
  * Microtask-batched stream subscribe RPCs.
- * Collects all subscribe RPCs within a single microtask and sends them as one batch frame.
+ * Coalesces subscribe RPCs within one microtask into bounded batch frames.
  * @type {Array<any> | null}
  */
 let _subscribeBatch = null;
@@ -334,8 +335,31 @@ function _batchedSubscribe(ticket) {
 	_subscribeBatch.push(ticket);
 }
 
-/** The server refuses a batch frame of more than this many calls, all of them. */
-const _SUBSCRIBE_BATCH_MAX = 50;
+/** Bound JSON primitive bytes without calling application toJSON/getters. */
+function _primitiveJsonBound(value) {
+	if (typeof value === 'string') return value.length * 6 + 2;
+	if (typeof value === 'number') return 25;
+	if (value === null || value === undefined) return 4;
+	if (typeof value === 'boolean') return 5;
+	return Infinity;
+}
+
+/** Complex arguments travel alone so measuring them cannot serialize twice. */
+function _subscribeByteBound(request) {
+	let bytes = 128 + _primitiveJsonBound(request.rpc) + _primitiveJsonBound(request.id)
+		+ _primitiveJsonBound(request.seq) + _primitiveJsonBound(request.version) + _primitiveJsonBound(request.schemaVersion);
+	for (const arg of request.args) {
+		bytes += _primitiveJsonBound(arg) + 1;
+		if (bytes > STREAM_BATCH_BYTES) break;
+	}
+	return bytes;
+}
+
+function _sendSubscribeRange(conn, requests, start, end) {
+	if (end <= start) return;
+	conn.sendQueued(end - start === 1 ? requests[start]
+		: { batch: start === 0 && end === requests.length ? requests : requests.slice(start, end) });
+}
 
 /** @type {number} Streams whose last subscriber left and whose cleanup microtask has not run yet */
 let _cleanupsPending = 0;
@@ -373,10 +397,24 @@ function _flushSubscribeBatch(deferred) {
 	// A split can land between a room's data stream and its :owner or
 	// :presence subscribe, which the server pairs within one frame; that
 	// pairing is soft, and the joiner's own join corrects its view.
-	for (let i = 0; i < requests.length; i += _SUBSCRIBE_BATCH_MAX) {
-		const chunk = requests.length <= _SUBSCRIBE_BATCH_MAX ? requests : requests.slice(i, i + _SUBSCRIBE_BATCH_MAX);
-		conn.sendQueued(chunk.length === 1 ? chunk[0] : { batch: chunk });
+	let start = 0;
+	let bytes = 11; // {"batch":[]} plus one comma per following entry.
+	for (let i = 0; i < requests.length; i++) {
+		const bound = _subscribeByteBound(requests[i]);
+		if (i > start && (i - start === MAX_RPC_BATCH_CALLS || bytes + bound + 1 > STREAM_BATCH_BYTES)) {
+			_sendSubscribeRange(conn, requests, start, i);
+			start = i;
+			bytes = 11;
+		}
+		bytes += bound + (i > start ? 1 : 0);
+		if (bound > STREAM_BATCH_BYTES) {
+			// Keep the transport's existing individual-request size contract.
+			_sendSubscribeRange(conn, requests, i, i + 1);
+			start = i + 1;
+			bytes = 11;
+		}
 	}
+	_sendSubscribeRange(conn, requests, start, requests.length);
 }
 
 /** @type {Map<string, { store: any, refCount: number }>} */

@@ -1,4 +1,5 @@
 // @ts-check
+import { MAX_RPC_BATCH_CALLS } from '../shared/rpc-limits.js';
 import { now, microtask, setTimer, clearTimer } from '../client-runtime.js';
 import { __devtools, _devtoolsStart, _devtoolsEnd, _devtoolsVolatileSent } from './devtools-instrument.js';
 import { _conn, ensureListener, ensureDisconnectListener, _getTimeout, _connectionClosedError } from './connection.js';
@@ -700,16 +701,16 @@ export function batch(fn, options) {
 
 	if (collected.length === 0) return Promise.resolve([]);
 
-	if (collected.length > 50) {
+	if (collected.length > MAX_RPC_BATCH_CALLS) {
 		for (const call of collected) {
 			const entry = pending.get(call.id);
 			if (entry) {
 				pending.delete(call.id);
 				if (entry.timer) clearTimer(entry.timer);
-				entry.reject(new RpcError('INVALID_REQUEST', 'Batch exceeds maximum of 50 calls'));
+				entry.reject(new RpcError('INVALID_REQUEST', `Batch exceeds maximum of ${MAX_RPC_BATCH_CALLS} calls`));
 			}
 		}
-		return Promise.reject(new RpcError('INVALID_REQUEST', 'Batch exceeds maximum of 50 calls'));
+		return Promise.reject(new RpcError('INVALID_REQUEST', `Batch exceeds maximum of ${MAX_RPC_BATCH_CALLS} calls`));
 	}
 
 	const conn = _conn();

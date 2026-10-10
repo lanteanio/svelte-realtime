@@ -5,6 +5,7 @@
 // (subscription bookkeeping, registry/guard/lazy resolvers, middleware, shared
 // validators) lives in server.js and is injected once at init via installDispatch.
 import { assert } from '../shared/assert.js';
+import { MAX_RPC_BATCH_CALLS } from '../shared/rpc-limits.js';
 import { diagnosticErrorMessage, emitOperationalEvent, formatDiagnostic } from '../shared/diagnostic.js';
 import { monotonicNow, randomUuid } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
@@ -594,11 +595,14 @@ async function _executeBatch(ws, msg, platform, options) {
 	const { batch, sequential } = msg;
 	const _batchMetricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
-	if (batch.length > 50) {
+	if (batch.length > MAX_RPC_BATCH_CALLS) {
 		_recordRpcMetrics('__batch__', 'INVALID_REQUEST', _batchMetricsStart);
-		_respond(ws, platform, '__batch', {
-			batch: [{ id: '', ok: false, code: 'INVALID_REQUEST', error: 'Batch exceeds maximum of 50 calls', requestId: randomUuid() }]
-		});
+		const results = [];
+		for (const call of batch) {
+			if (typeof call?.id !== 'string') continue;
+			results.push({ id: call.id, ok: false, code: 'INVALID_REQUEST', error: `Batch exceeds maximum of ${MAX_RPC_BATCH_CALLS} calls`, requestId: _operationRequestId(call.id) });
+		}
+		_respond(ws, platform, '__batch', { batch: results });
 		return;
 	}
 

@@ -155,6 +155,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Aggregate erasure requires an explicit whole-state reset policy, clears pending output and held privacy values, and prevents late snapshots from restoring erased data.
 
+- Stream subscriptions split by the shared 50-call limit and a conservative byte budget. Oversized incoming batches reject every affected request immediately; complex arguments serialize only when sent.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
