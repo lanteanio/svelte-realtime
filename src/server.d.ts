@@ -2907,7 +2907,7 @@ export namespace live {
 	 * ```
 	 */
 	function breaker<T extends Function>(
-		options: { breaker: any; fallback?: any },
+		options: { breaker: any; name?: string; fallback?: any },
 		fn: T
 	): T;
 

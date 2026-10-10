@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Circuit breaker wrappers honor the extensions guard and recovery probes, preserve handler errors for failure tracking, and return actionable availability messages while recording bounded operator diagnostics.
+
 - Redis, Postgres, and idempotency integration examples use the extensions package exports and factory names.
 
 - README entry links now describe the reader action for documentation, tutorial, and demo.

@@ -2796,11 +2796,14 @@ import { createCircuitBreaker } from 'svelte-adapter-uws-extensions/breaker';
 const dbBreaker = createCircuitBreaker({ failureThreshold: 5, resetTimeout: 30000 });
 
 export const items = live.stream('items',
-  live.breaker({ breaker: dbBreaker, fallback: [] }, async (ctx) => {
+  live.breaker({ breaker: dbBreaker, name: 'database', fallback: [] }, async (ctx) => {
     return db.items.list();
   })
 );
 ```
+
+The wrapper calls the breaker's `guard()` before each operation, including recovery probes, and records successful or failed operations. Legacy breakers exposing `isOpen()` are also supported. Without a fallback, an open breaker returns `SERVICE_UNAVAILABLE` with a retry message. The optional `name` identifies the breaker in operator events (trimmed to 120 characters); it is never sent in that error response. One `breaker.open` operational event is emitted on the first refusal after registration or an admitted operation. Its `openObservedAt` is the epoch time when this wrapper observed a refusal, not the breaker's original trip time.
+
 
 If `fallback` is omitted and the circuit is open, the call throws `LiveError('SERVICE_UNAVAILABLE', ...)`.
 
