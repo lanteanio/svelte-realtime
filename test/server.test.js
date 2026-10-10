@@ -2179,7 +2179,7 @@ describe('handleRpc() batch dev warnings', () => {
 
 		expect(warn).toHaveBeenCalledOnce();
 		const line = warn.mock.calls[0][0];
-		expect(line).toMatch(/^\[oss-realtime\/diagnostic source=svelte-realtime component=server\.rpc event=rpc\.execution\.non-live-error severity=warn\]/);
+		expect(line).toMatch(/^\[lantean\/diagnostic source=svelte-realtime component=server\.rpc event=rpc\.execution\.non-live-error severity=warn\]/);
 		expect(line).not.toMatch(/[\u0000-\u001f\u007f-\uffff]/);
 		expect(JSON.parse(line.slice(line.indexOf('{'))).attributes).toMatchObject({
 			path: 'bwarn/fail',
@@ -17086,7 +17086,7 @@ describe('assert() helper', () => {
 		expect(getAssertionCounters().get('realtime/test.cat-b')).toBe(1);
 		expect(errSpy).toHaveBeenCalledTimes(1);
 		const logged = errSpy.mock.calls[0][0];
-		expect(logged).toMatch(/^\[oss-realtime\/diagnostic source=svelte-realtime component=runtime\.assertion event=invariant\.violated severity=warn\]/);
+		expect(logged).toMatch(/^\[lantean\/diagnostic source=svelte-realtime component=runtime\.assertion event=invariant\.violated severity=warn\]/);
 		expect(logged).toContain('"category":"realtime/test.cat-b"');
 		expect(logged).toContain('"x":1');
 	});
@@ -17407,7 +17407,7 @@ describe('fatal() hard tier (server)', () => {
 		expect(() => fatal(false, 'realtime/test.fatal-y', { v: 7 })).toThrow(/realtime\/test\.fatal-y/);
 		expect(getAssertionCounters().get('realtime/test.fatal-y')).toBe(1);
 		const logged = errSpy.mock.calls[0][0];
-		expect(logged).toMatch(/^\[oss-realtime\/diagnostic source=svelte-realtime component=runtime\.assertion event=invariant\.violated severity=fatal\]/);
+		expect(logged).toMatch(/^\[lantean\/diagnostic source=svelte-realtime component=runtime\.assertion event=invariant\.violated severity=fatal\]/);
 		expect(logged).toContain('"severity":"fatal"');
 		expect(logged).toContain('"v":7');
 	});

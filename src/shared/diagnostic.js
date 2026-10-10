@@ -1,7 +1,5 @@
-// Wire-compatible bridge for the public diagnostic contract exported by
-// svelte-adapter-uws/observability. The current peer floor predates that
-// subpath, so realtime cannot import it until the next coordinated floor
-// raise. Prefix contract tests keep this small bridge byte-compatible.
+// Browser-safe bridge for the shared diagnostic contract. Keep its prefix and
+// process-wide sink identity compatible with svelte-adapter-uws/observability.
 
 import { wallIso } from './runtime.js';
 import { createDiagnostic, formatDiagnostic } from './diagnostic-format.js';
@@ -13,8 +11,8 @@ export {
 	formatDiagnostic
 } from './diagnostic-format.js';
 
-const OPERATIONAL_EVENT_SINK = Symbol.for('oss-realtime.operational-event-sink.v1');
-const OPERATIONAL_EVENT_SINK_REGISTRY = Symbol.for('oss-realtime.operational-event-sink-registry.v1');
+const OPERATIONAL_EVENT_SINK = Symbol.for('lantean.operational-event-sink.v1');
+const OPERATIONAL_EVENT_SINK_REGISTRY = Symbol.for('lantean.operational-event-sink-registry.v1');
 
 function defaultOperationalEventSink(record) {
 	const method = record.severity === 'debug' ? 'debug'
@@ -36,6 +34,11 @@ function sinkFailureFallback(record) {
 	}));
 }
 
+// Define own slots so inherited setters cannot swallow shared registrations.
+function defineGlobal(key, value) {
+	Object.defineProperty(globalThis, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
 function operationalEventSinkRegistry() {
 	let registry = globalThis[OPERATIONAL_EVENT_SINK_REGISTRY];
 	if (!registry || !Array.isArray(registry.entries)) {
@@ -45,14 +48,14 @@ function operationalEventSinkRegistry() {
 				? [{ sink: inherited, active: true }]
 				: []
 		};
-		globalThis[OPERATIONAL_EVENT_SINK_REGISTRY] = registry;
+		defineGlobal(OPERATIONAL_EVENT_SINK_REGISTRY, registry);
 	}
 	return registry;
 }
 
 function syncOperationalEventSink(registry) {
 	const current = registry.entries[registry.entries.length - 1];
-	if (current) globalThis[OPERATIONAL_EVENT_SINK] = current.sink;
+	if (current) defineGlobal(OPERATIONAL_EVENT_SINK, current.sink);
 	else delete globalThis[OPERATIONAL_EVENT_SINK];
 }
 
@@ -69,7 +72,7 @@ export function setOperationalEventSink(sink) {
 	}
 	const entry = { sink, active: true };
 	registry.entries.push(entry);
-	globalThis[OPERATIONAL_EVENT_SINK] = sink;
+	defineGlobal(OPERATIONAL_EVENT_SINK, sink);
 	return () => {
 		if (!entry.active) return;
 		entry.active = false;

@@ -11,7 +11,7 @@ describe('diagnostic prefix contract', () => {
 			message: 'socket closed',
 			attributes: { code: 1006 }
 		});
-		expect(line).toMatch(/^\[oss-realtime\/diagnostic source=svelte-realtime component=runtime\.client event=socket\.closed severity=warn\] socket closed /);
+		expect(line).toMatch(/^\[lantean\/diagnostic source=svelte-realtime component=runtime\.client event=socket\.closed severity=warn\] socket closed /);
 		const record = JSON.parse(line.slice(line.indexOf('{')));
 		expect(record).toMatchObject({
 			schemaVersion: 1,

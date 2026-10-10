@@ -179,6 +179,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The browser fixture uses the repository's Vite 8 generation and refreshes compatible dependencies to clear its security audit.
 
+- Diagnostics use the shared `lantean/diagnostic` identity and deliver to the same process-wide event sinks as the adapter.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

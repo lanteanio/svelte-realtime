@@ -8711,7 +8711,7 @@ describe('assert() helper (client)', () => {
 		expect(() => assert(false, 'realtime/test.cat-y', { v: 2 })).toThrow(/realtime\/test\.cat-y/);
 		expect(getAssertionCounters().get('realtime/test.cat-y')).toBe(1);
 		const logged = errSpy.mock.calls[0][0];
-		expect(logged).toMatch(/^\[oss-realtime\/diagnostic source=svelte-realtime component=runtime\.assertion event=invariant\.violated severity=warn\]/);
+		expect(logged).toMatch(/^\[lantean\/diagnostic source=svelte-realtime component=runtime\.assertion event=invariant\.violated severity=warn\]/);
 		const record = JSON.parse(logged.slice(logged.indexOf('{')));
 		expect(record).toMatchObject({
 			source: 'svelte-realtime',

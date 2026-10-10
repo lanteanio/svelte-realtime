@@ -2,7 +2,7 @@
 // module free of Node imports: the public client exports `shared/assert.js`,
 // which uses the formatter when a client invariant fails.
 
-export const DIAGNOSTIC_PREFIX = 'oss-realtime/diagnostic';
+export const DIAGNOSTIC_PREFIX = 'lantean/diagnostic';
 
 const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\uffff]/g;
 

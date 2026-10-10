@@ -8,7 +8,7 @@ import { parse } from 'acorn';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const sourceRoot = join(root, 'src');
 const families = [
-	['canonical', /^\[oss-realtime\/diagnostic /],
+	['canonical', /^\[lantean\/diagnostic /],
 	['realtime', /^\[(?:svelte-realtime|realtime\/(?:assert|fatal))\]/]
 ];
 const formatters = new Set(['formatDiagnostic']);
