@@ -167,6 +167,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Public RPC exports register in the generated server registry, matching their generated client callable paths.
 
+- Packed shutdown verification holds work behind an explicit completion gate and gives the adapter enough time to finish the realtime drain.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

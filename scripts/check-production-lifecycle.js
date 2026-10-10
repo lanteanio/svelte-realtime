@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { cpSync, existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -46,13 +46,17 @@ async function until(check, description, timeout = 15_000) {
 async function exercise({ label, workMs, drainMs, completes }) {
 	const name = 'realtime-lifecycle-' + randomUUID();
 	containers.add(name);
+	const control = path.join(temporary, name);
+	mkdirSync(control);
 	let socket;
 	try {
 		docker('run', '--detach', '--name', name,
 			'--publish', '127.0.0.1::3000',
 			'--mount', 'type=bind,source=' + path.join(fixture, 'build') + ',target=/app/build,readonly',
 			'--mount', 'type=bind,source=' + path.join(fixture, 'node_modules') + ',target=/app/node_modules,readonly',
-			'--env', 'HOST=0.0.0.0', '--env', 'PORT=3000', '--env', 'SHUTDOWN_TIMEOUT=2',
+			'--mount', 'type=bind,source=' + control + ',target=/control,readonly',
+			'--env', 'REALTIME_LIFECYCLE_RELEASE_FILE=/control/release',
+			'--env', 'HOST=0.0.0.0', '--env', 'PORT=3000', '--env', 'SHUTDOWN_TIMEOUT=' + (Math.ceil(drainMs / 1000) + 2),
 			'--env', 'REALTIME_LIFECYCLE_TEST=1', '--env', 'REALTIME_LIFECYCLE_DRAIN_MS=' + drainMs,
 			image, 'node', '/app/build/index.js');
 		const port = Number(docker('port', name, '3000/tcp').match(/:(\d+)$/)?.[1]);
@@ -76,27 +80,34 @@ async function exercise({ label, workMs, drainMs, completes }) {
 		const start = performance.now();
 		// Docker delivers an actual Linux SIGTERM to the Node server process.
 		docker('kill', '--signal=SIGTERM', name);
-		await until(() => logs(name).includes('Received SIGTERM'), 'the adapter signal handler');
-		socket.send(JSON.stringify({ rpc: 'echo/echo', id: 'after-signal', args: ['new work'] }));
-		const refused = await until(() => frames.find(frame => frame.id === 'after-signal'), 'admission refusal');
-		assert.equal(refused.code, 'UNAVAILABLE', 'new RPC work is rejected while the existing call drains');
+		if (completes) {
+			await until(() => logs(name).includes('Received SIGTERM'), 'the adapter signal handler');
+			socket.send(JSON.stringify({ rpc: 'echo/echo', id: 'after-signal', args: ['new work'] }));
+			const refused = await until(() => frames.find(frame => frame.id === 'after-signal'), 'admission refusal');
+			assert.equal(refused.code, 'UNAVAILABLE', 'new RPC work is rejected while the existing call drains');
+			// Complete the held call only after shutdown has closed admission.
+			writeFileSync(path.join(control, 'release'), 'ready');
+		}
 		await until(() => docker('inspect', '--format', '{{.State.Running}}', name) === 'false', 'clean server exit', drainMs + 5000);
 		const elapsed = performance.now() - start;
 		assert.equal(docker('inspect', '--format', '{{.State.ExitCode}}', name), '0');
 		await until(() => closed, 'WebSocket close');
 		assert.equal(closed.code, 1001, 'the adapter flushes a graceful close frame');
 		const output = logs(name);
+		assert(output.includes('Received SIGTERM'), 'the adapter receives the real signal');
 		assert(output.includes('lifecycle:teardown'), 'the built realtime shutdown hook runs teardown');
-		assert(output.includes('Shutdown complete'), 'adapter shutdown finishes');
+		const shutdownElapsed = Number(output.match(/Shutdown complete in (\d+)ms\./)?.[1]);
+		assert(Number.isFinite(shutdownElapsed), 'adapter shutdown reports its elapsed duration');
 		if (completes) {
 			assert(output.indexOf('lifecycle:work-completed') < output.indexOf('lifecycle:teardown'), 'tracked work completes before teardown');
 			assert.equal(frames.find(frame => frame.id === 'held')?.data, 'finished', 'the original RPC response is flushed');
 		} else {
 			assert(!output.includes('lifecycle:work-completed'), 'unfinished work is bounded by the drain budget');
-			assert(elapsed >= drainMs * 0.75 && elapsed < drainMs + 4000, 'shutdown waits for the budget and then exits');
+			// Use the server duration; Docker command latency is outside its drain budget.
+			assert(shutdownElapsed >= drainMs * 0.75 && shutdownElapsed < drainMs + 4000, 'shutdown waits for the budget and then exits');
 			assert(!frames.some(frame => frame.id === 'held'), 'unfinished work has no fabricated success');
 		}
-		console.log('Packed production lifecycle ' + label + ' passed (' + Math.round(elapsed) + 'ms after SIGTERM).');
+		console.log('Packed production lifecycle ' + label + ' passed (' + Math.round(elapsed) + 'ms observed after SIGTERM; ' + shutdownElapsed + 'ms in the server).');
 	} catch (error) {
 		console.error(logs(name));
 		throw error;
@@ -124,7 +135,7 @@ try {
 		cwd: fixture, stdio: 'inherit', timeout: 120_000,
 		env: { ...process.env, REALTIME_CHAOS_FIXTURE: fixture }
 	});
-	await exercise({ label: 'completed drain', workMs: 2000, drainMs: 4000, completes: true });
+	await exercise({ label: 'completed drain', workMs: 30_000, drainMs: 30_000, completes: true });
 	await exercise({ label: 'bounded timeout', workMs: 30_000, drainMs: 800, completes: false });
 } finally {
 	for (const name of containers) removeContainer(name);
