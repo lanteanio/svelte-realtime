@@ -7,7 +7,7 @@ const H = vi.hoisted(() => ({ cb: null, statusCb: null, sent: [] }));
 vi.mock('svelte-adapter-uws/client', () => {
 	const on = (topic) => ({ subscribe: (fn) => { if (topic === '__realtime') H.cb = fn; return () => { H.cb = null; }; } });
 	const status = { subscribe: (fn) => { H.statusCb = fn; fn('disconnected'); return () => {}; } };
-	const conn = { sendQueued: (value) => H.sent.push(value), on, status };
+	const conn = { send: (value) => H.sent.push(value), sendQueued: (value) => H.sent.push(value), on, status };
 	return { on, status, connect: () => conn, setTopicManaged: () => {} };
 });
 

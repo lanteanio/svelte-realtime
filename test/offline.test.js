@@ -2008,7 +2008,7 @@ describe('offline queue - a drop during the drain', () => {
 		expect(storedKeys(store)).toEqual([]);
 	});
 
-	it('a regular call the adapter queued as the socket closed still settles on the new socket', async () => {
+	it('a regular call interrupted as the socket closes rejects and never sends on the new socket', async () => {
 		mod.configure({ offline: { queue: true } });
 		simulateClosing();
 		const w = watch(mod.__rpc('todos/add')({ t: 'live' }));
@@ -2018,7 +2018,9 @@ describe('offline queue - a drop during the drain', () => {
 		simulateStatus('open');
 		await flush();
 		await respondAll(() => ({ ok: true, data: 'ok' }));
-		expect(w.value).toBe('ok');
+		expect(w.error).toMatchObject({ code: 'DISCONNECTED' });
+		expect(sentCalls()).toEqual([]);
+		expect(adapterQueue).toEqual([]);
 	});
 
 	it('a cut puts calls back in the order they were queued, as they were queued', async () => {

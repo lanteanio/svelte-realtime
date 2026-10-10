@@ -402,6 +402,45 @@ export function __mpFields() {
 }
 
 /**
+ * Pending requests own their unsent frames. The adapter queue cannot remove a
+ * frame when its promise settles, so only the non-queuing send is used here.
+ * @param {any} conn
+ * @param {any} frame
+ * @param {string[]} ids
+ */
+function _sendPendingFrame(conn, frame, ids) {
+	if (clientState.socketUp) {
+		for (const id of ids) {
+			const entry = pending.get(id);
+			if (entry) entry.rpcSent = true;
+		}
+		conn.send(frame);
+		return;
+	}
+	const wake = () => {
+		if (!clientState.socketUp) return;
+		const active = ids.filter(id => pending.has(id));
+		if (active.length === 0) return;
+		for (const id of active) {
+			const entry = pending.get(id);
+			entry.rpcWaiting = false;
+			entry.rpcSent = true;
+			delete entry.wake;
+		}
+		// A settled call must never ride along in an otherwise live batch.
+		if (frame.batch && active.length !== ids.length) frame = { ...frame, batch: frame.batch.filter(call => pending.has(call.id)) };
+		conn.send(frame);
+	};
+	for (const id of ids) {
+		const entry = pending.get(id);
+		if (entry) {
+			entry.rpcWaiting = true;
+			entry.wake = wake;
+		}
+	}
+}
+
+/**
  * Internal: send an RPC request over the WebSocket.
  * @param {string} path
  * @param {any[]} args
@@ -514,7 +553,7 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 		});
 		const envelope = idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args };
 		if (replay) conn.send(envelope);
-		else conn.sendQueued(envelope);
+		else _sendPendingFrame(conn, envelope, [id]);
 	});
 }
 
@@ -604,7 +643,7 @@ export function __binaryRpc(path) {
 			frame.set(bufBytes, 3 + headerBytes.length);
 
 			// Send a view of exactly the right size (frame may be oversized from reuse)
-			conn.sendQueued(frame.buffer.slice(0, size));
+			_sendPendingFrame(conn, frame.buffer.slice(0, size), [id]);
 		});
 	};
 }
@@ -704,7 +743,7 @@ export function batch(fn, options) {
 		}, effectiveTimeout);
 		const existing = pending.get(call.id);
 		if (existing) existing.timer = timer;
-		conn.sendQueued(call);
+		_sendPendingFrame(conn, call, [call.id]);
 		return Promise.all(promises);
 	}
 
@@ -733,7 +772,7 @@ export function batch(fn, options) {
 	// Send all calls as one frame
 	const payload = { batch: collected };
 	if (options?.sequential) payload.sequential = true;
-	conn.sendQueued(payload);
+	_sendPendingFrame(conn, payload, collected.map(call => call.id));
 
 	// Return promise that resolves when all individual promises resolve
 	return Promise.all(promises).finally(() => clearTimer(batchTimer));

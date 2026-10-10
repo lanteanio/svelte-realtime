@@ -39,6 +39,7 @@ beforeEach(async () => {
 	// factory, stores and request hook.
 	connectFn = vi.fn(() => ({
 		sendQueued: sendQueuedFn,
+		send: sendQueuedFn,
 		get bufferedAmount() { return 0; },
 		on: adapterMock.on,
 		status: adapterMock.status,

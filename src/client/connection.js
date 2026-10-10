@@ -261,7 +261,11 @@ export function ensureDisconnectListener() {
 			clientState.terminated = true;
 			_settleClosedForGood();
 		} else if (s === 'disconnected') {
+			clientState.socketUp = false;
 			for (const [id, entry] of pending) {
+				// Calls made before an open still own their frames and may wait
+				// through failed connection attempts, bounded by their timeout.
+				if (entry.rpcWaiting) continue;
 				pending.delete(id);
 				if (entry.timer) clearTimer(entry.timer);
 				entry.reject(_connectionLost('DISCONNECTED', 'WebSocket connection lost'));
@@ -306,11 +310,10 @@ export function ensureDisconnectListener() {
 		} else if (!up) {
 			if (clientState.socketUp && s === 'connecting') {
 				// The adapter replaced a socket it was closing, with no
-				// 'disconnected' in between. A replay went out on the old socket
-				// with a send that does not queue, so nothing answers it or sends
-				// it again: it is cut, as by a drop.
+				// 'disconnected' in between. Calls already sent on that socket
+				// cannot receive an answer; unsent calls still own their frames.
 				for (const [id, entry] of pending) {
-					if (!entry.replay) continue;
+					if (!entry.replay && !entry.rpcSent) continue;
 					pending.delete(id);
 					if (entry.timer) clearTimer(entry.timer);
 					entry.reject(_connectionLost('DISCONNECTED', 'WebSocket connection replaced'));

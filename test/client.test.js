@@ -87,6 +87,7 @@ beforeEach(async () => {
 
 	connectFn = vi.fn(() => ({
 		sendQueued: sendQueuedFn,
+		send: sendQueuedFn,
 		get bufferedAmount() { return mockBufferedAmount; },
 		...connShape
 	}));
@@ -4080,6 +4081,7 @@ describe('__upload()', () => {
 		// Override the connect mock to omit bufferedAmount entirely
 		connectFn.mockImplementation(() => ({
 			sendQueued: sendQueuedFn,
+		send: sendQueuedFn,
 			// no bufferedAmount
 			...connShape
 		}));

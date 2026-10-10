@@ -135,6 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Offline replay keeps mutations queued by a replay callback and never sends calls that callback-driven overflow already evicted.
 
+- Unsent RPC frames remain owned by their pending requests, so disconnect or timeout rejection cannot leave a frame that sends after reconnect. Initial calls wait through failed connection attempts, including batches and binary RPCs.
+
+- RPC argument serialization failures consistently reject with `INVALID_REQUEST` and the original cause before sending, queuing, or retaining request timers, including batched and binary calls.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
