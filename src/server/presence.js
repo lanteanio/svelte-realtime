@@ -368,7 +368,9 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 		if (!progress.pending) {
 			progress.pending = Promise.resolve().then(async () => {
 				if (ref.joining) await ref.joining;
-				if (ref.leaving) await ref.leaving;
+				// A failed best-effort departure does not confirm erasure. Wait for
+				// it to settle, then let the strict idempotent cleanup below retry.
+				if (ref.leaving) await ref.leaving.catch(() => {});
 				const storagePlatform = ref.platform || platform;
 				const publishPlatform = platform || ref.platform;
 				const publish = publishLeave || (publishPlatform && typeof publishPlatform.publish === 'function'

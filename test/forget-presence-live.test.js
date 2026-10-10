@@ -172,4 +172,33 @@ describe('forget updates connected room peers', () => {
 		if (wrapped) expect(replay).not.toHaveBeenCalled();
 	});
 
+	it('retries strict erasure after a concurrently retiring publisher rejects', async () => {
+		env.platform.redis = fakeRedis();
+		env.register('drawing', { room: live.multiplayer({ topic: () => 'drawing-board', cursors: true }) });
+		const alice = env.connect({ id: 'alice' }), bob = env.connect({ id: 'bob' }); clients.push(alice, bob);
+		const cursors = bob.subscribe('drawing/room/__cursors'); await vi.advanceTimersByTimeAsync(0);
+		await alice.call('drawing/room/__cursor/move', { x: 3 });
+		let release, entered, blocked = true;
+		const gate = new Promise(resolve => { release = resolve; });
+		const started = new Promise(resolve => { entered = resolve; });
+		const read = env.platform.redis.hget.getMockImplementation();
+		env.platform.redis.hget.mockImplementation(async (key, field) => {
+			if (blocked && key === '__live-presence:drawing-board') { entered(); await gate; }
+			return read(key, field);
+		});
+		published.mockImplementation((topic, event, data, options) => {
+			if (event === 'remove') throw new Error('departure publication unavailable');
+			return originalPublish(topic, event, data, options);
+		});
+		alice.disconnect(); vi.advanceTimersByTime(5001); await started;
+		const ref = _presenceRef.get('\0cursors:drawing-board\0alice'); expect(ref.leaving).toBeTruthy();
+		const erasing = live.forget('alice'); const failed = expect(erasing).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await vi.advanceTimersByTimeAsync(0); expect(ref.erasure).toBeTruthy();
+		blocked = false; release(); await failed;
+		expect(cursors.value).toHaveLength(1); expect(_presenceRef.has('\0cursors:drawing-board\0alice')).toBe(true);
+		published.mockImplementation(originalPublish);
+		await expect(live.forget('alice')).resolves.toMatchObject({ ok: true });
+		expect(cursors.value).toEqual([]); expect(_presenceRef.has('\0cursors:drawing-board\0alice')).toBe(false);
+	});
+
 });
