@@ -946,6 +946,13 @@ export interface StreamOptions extends LiveOptions {
 	 * The extractor must be synchronous and total (no throws on valid data).
 	 * Returning `null` or `undefined` collapses to a single per-topic key.
 	 *
+	 * Static topics and pure, context-independent literal-prefix factories with
+	 * single-segment string arguments keep relaying coalesced through a platform
+	 * with `relayCoalesced` when this instance has no local subscribers.
+	 * A factory may run again on publish to verify a topic and must be side-effect free.
+	 * The origin relays the original-data key and transformed payload.
+	 * Context-dependent factories need a local subscription to resolve metadata.
+	 *
 	 * Subscribers tracked via the standard stream subscribe path are
 	 * fanned-out automatically. Manual `ws.subscribe()` to a coalescing
 	 * topic is unsupported.

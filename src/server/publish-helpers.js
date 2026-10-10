@@ -2,7 +2,7 @@
 import { now as runtimeNow, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
-import { _topicRedact, _declaredRedact, _declaredRedactPattern, _declaredStreamTopic, _silentTopicWatch } from './state.js';
+import { _topicRedact, _declaredRedact, _declaredRedactPattern, _declaredStreamTopic, _silentTopicWatch, _declaredCoalesce, _declaredCoalescePattern } from './state.js';
 import { _stripAnyTenantTopic } from './tenant.js';
 import { _observeSilentTopicPublish } from './dev-warnings.js';
 
@@ -45,6 +45,19 @@ export function _platformPublish(platform, topic, event, data, options) {
  * Fail-closed: the caller MUST NOT publish on this value.
  */
 export const REDACT_DROP = Symbol('svti.redact.drop');
+
+/** Resolve declared coalescing even when the publishing replica has no members. */
+export function _resolveCoalesce(topic) {
+	if (typeof topic !== 'string') return null;
+	const logical = topic.charCodeAt(0) === 64 ? _stripAnyTenantTopic(topic) : topic;
+	const exact = _declaredCoalesce.get(logical);
+	if (exact) return exact;
+	if (_declaredCoalescePattern.size === 0 || _declaredStreamTopic.has(logical)) return null;
+	for (const entry of _declaredCoalescePattern.values()) {
+		if (logical.startsWith(entry.prefix) && entry.verify(logical)) return entry;
+	}
+	return null;
+}
 
 /**
  * Resolve a topic's piiRedact redactor entry (or null) for a WIRE topic at a

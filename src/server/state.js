@@ -86,6 +86,11 @@ export const _silentTopicWatch = new Map();
  */
 export const _topicCoalesce = new Map();
 
+/** Declaration metadata survives the last local subscriber. */
+export const _declaredCoalesce = new Map();
+/** Literal-prefix factory patterns used when a wire topic has no local owner. */
+export const _declaredCoalescePattern = new Map();
+
 /**
  * Per-topic transform registry. When a stream registered with `transform`
  * is subscribed, its topic is recorded here. The publish helper applies

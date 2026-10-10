@@ -2,9 +2,9 @@
 import { now as runtimeNow, microtask } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
-import { _ctxHelpersCache, _topicVolatile, _topicStaleWatch, _silentTopicWatch, _topicInvalidationWatch, _topicCoalesce, _topicTransform, _topicRedact, _declaredRedact, _declaredRedactPattern } from './state.js';
+import { _ctxHelpersCache, _topicVolatile, _topicStaleWatch, _silentTopicWatch, _topicInvalidationWatch, _topicCoalesce, _topicTransform, _topicRedact, _declaredRedact, _declaredRedactPattern, _declaredCoalesce, _declaredCoalescePattern } from './state.js';
 import { _maybeReplayPublish } from './replay-routing.js';
-import { _checkPublishHelperArgs, _throttlePublish, _debouncePublish, _skipGate, _redactOrDrop, REDACT_DROP, _resolveRedactor, UNSEQUENCED } from './publish-helpers.js';
+import { _checkPublishHelperArgs, _throttlePublish, _debouncePublish, _skipGate, _redactOrDrop, REDACT_DROP, _resolveRedactor, _resolveCoalesce, UNSEQUENCED } from './publish-helpers.js';
 import { _validUserIdReason } from './validate.js';
 import { _shouldShed } from './admission.js';
 import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
@@ -288,7 +288,12 @@ export function _getCtxHelpers(platform) {
 			// relay already coalesces per-microtask postMessages; this lifts
 			// the same idea to the wire level so subscribers receive ONE frame
 			// per microtask containing every event they're entitled to.
-			if (_topicCoalesce.size === 0 && _topicTransform.size === 0 && _topicRedact.size === 0 && _declaredRedact.size === 0 && _declaredRedactPattern.size === 0) {
+			// Declared coalescing without a local subscriber only matters to a
+			// platform that relays coalesced envelopes. Without one, the plain
+			// publish is what reaches subscribers on other workers.
+			let c;
+			const noCoalesce = (_topicCoalesce.size === 0 && _declaredCoalesce.size === 0 && _declaredCoalescePattern.size === 0) || !(c = _topicCoalesce.get(topic) || (platform.relayCoalesced ? _resolveCoalesce(topic) : null));
+			if (noCoalesce && _topicTransform.size === 0 && _topicRedact.size === 0 && _declaredRedact.size === 0 && _declaredRedactPattern.size === 0) {
 				// A jittered publish carries a de-herd window `j` only on the single
 				// `platform.publish` envelope - not the replay buffer or the batch
 				// frame - so it takes the direct path. That is the right shape: jitter
@@ -310,8 +315,7 @@ export function _getCtxHelpers(platform) {
 				pendingBatch.push({ topic, event, data, options: finalOptions });
 				return true;
 			}
-			const c = _topicCoalesce.get(topic);
-			const t = _topicTransform.get(topic);
+			const t = _topicTransform.get(topic) || (c?.transform ? c : null);
 			// coalesceBy reads the ORIGINAL data (before transform) so the key
 			// extractor sees the un-projected fields it was written against.
 			// Throws are routed to the registered stream's onError (if any),
@@ -359,7 +363,7 @@ export function _getCtxHelpers(platform) {
 			// publish (routed to the stream's onError if set) rather than
 			// broadcasting un-redacted data. The redactor is non-mutating, so a
 			// transform-less topic (wireData === data) is not corrupted in place.
-			const r = _resolveRedactor(topic);
+			const r = (_topicRedact.size || _declaredRedact.size || _declaredRedactPattern.size) ? _resolveRedactor(topic) : null;
 			if (r) {
 				try {
 					wireData = r.redact(wireData);

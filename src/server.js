@@ -33,6 +33,8 @@ import {
 	_topicStaleWatch,
 	_silentTopicWatch,
 	_topicCoalesce,
+	_declaredCoalesce,
+	_declaredCoalescePattern,
 	_topicTransform,
 	_topicRedact,
 	_declaredRedact,
@@ -1106,6 +1108,55 @@ function _deriveTopicPattern(value) {
 	}
 }
 
+// Runtime routing requires a stricter probe than descriptive topic metadata.
+// Reading a fake context or argument field must not invent a fallback topic.
+function _deriveCoalesceTopicPattern(factory, providedArgs) {
+	let inspected = false;
+	const deny = () => { inspected = true; throw new Error('Topic probe inspected runtime data'); };
+	const traps = { get: deny, set: deny, has: deny, ownKeys: deny, getOwnPropertyDescriptor: deny, getPrototypeOf: deny, setPrototypeOf: deny, defineProperty: deny, deleteProperty: deny, isExtensible: deny, preventExtensions: deny };
+	const args = providedArgs || new Array(Math.max(1, factory.length));
+	args[0] = new Proxy({}, traps);
+	for (let index = 1; !providedArgs && index < args.length; index++) {
+		const marker = '{arg' + index + '}';
+		args[index] = new Proxy({}, { ...traps, get: (_target, key) => key === Symbol.toPrimitive ? (hint) => hint === 'number' ? deny() : marker : deny() });
+	}
+	try {
+		const result = factory(...args);
+		if (inspected || typeof result !== 'string') return '<dynamic>';
+		if (!providedArgs && factory.length > 1 && !/\{arg\d+\}/.test(result)) return '<dynamic>';
+		return result;
+	} catch { return '<dynamic>'; }
+}
+
+function _coalesceTopicVerifier(factory, pattern) {
+	const positions = [];
+	const source = pattern.split(/(\{arg\d+\})/).map(part => {
+		const token = /^\{arg(\d+)\}$/.exec(part);
+		if (token) { positions.push(Number(token[1])); return '([^/:]+)'; }
+		return part.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
+	}).join('');
+	const matcher = new RegExp('^' + source + '$');
+	// Pure factories have stable results; bound retained resolved topic strings.
+	const verified = new Set();
+	return topic => {
+		if (verified.has(topic)) return true;
+		const match = matcher.exec(topic);
+		if (!match) return false;
+		const args = new Array(Math.max(1, factory.length));
+		for (let index = 0; index < positions.length; index++) {
+			const position = positions[index], value = match[index + 1];
+			if (args[position] !== undefined && args[position] !== value) return false;
+			args[position] = value;
+		}
+		// Conditional prefixes and context-dependent branches must reproduce the
+		// candidate topic before its payload can be transformed or coalesced.
+		if (_deriveCoalesceTopicPattern(factory, args) !== topic) return false;
+		if (verified.size === 1000) verified.delete(verified.values().next().value);
+		verified.add(topic);
+		return true;
+	};
+}
+
 /** One topic segment for a dynamic-redact pattern placeholder: any run that does not cross the `/` or `:` separators. */
 const _REDACT_SEGMENT = '[^/:]+';
 
@@ -1367,6 +1418,16 @@ live.stream = function stream(topic, initFn, options) {
 	if (typeof topic === 'string') _declaredStreamTopic.add(topic);
 	/** @type {any} */ (initFn).__streamOptions = merged;
 	if (coalesceBy) /** @type {any} */ (initFn).__coalesceBy = coalesceBy;
+	if (coalesceBy) {
+		const entry = { coalesceBy, transform: transform || null, onError: streamOnError || null, ws: [] };
+		if (typeof topic === 'string') _declaredCoalesce.set(topic, entry);
+		else {
+			const pattern = _deriveCoalesceTopicPattern(topic);
+			const compiled = _compileRedactPattern(pattern);
+			if (compiled) _declaredCoalescePattern.set(pattern, { ...entry, ...compiled, verify: _coalesceTopicVerifier(topic, pattern) });
+			else if (pattern !== '<dynamic>' && !pattern.includes('{arg')) _declaredCoalesce.set(pattern, entry);
+		}
+	}
 	if (argsSchema) /** @type {any} */ (initFn).__streamArgs = argsSchema;
 	if (transform) /** @type {any} */ (initFn).__streamTransform = transform;
 	if (_piiRedactor) {
@@ -1922,6 +1983,8 @@ installDevWarnings(live);
  */
 export function _resetCoalesceRegistry() {
 	_topicCoalesce.clear();
+	_declaredCoalesce.clear();
+	_declaredCoalescePattern.clear();
 }
 
 /**
@@ -3374,6 +3437,8 @@ export function _prepareHmr() {
 		aggregates: new Map(aggregateRegistry),
 		smooth: new Map(_smoothTopics),
 		hadCron: _cronTimerActive(),
+		declaredCoalesce: new Map(_declaredCoalesce),
+		declaredCoalescePattern: new Map(_declaredCoalescePattern),
 	};
 
 	// Clear debounce timers
@@ -3419,6 +3484,8 @@ export function _prepareHmr() {
 
 	// Clear all registries and lookup maps
 	registry.clear();
+	_declaredCoalesce.clear();
+	_declaredCoalescePattern.clear();
 	guards.clear();
 	derivedRegistry.clear();
 	effectRegistry.clear();
@@ -3455,6 +3522,10 @@ export function _prepareHmr() {
  * @param {object} snap
  */
 export function _restoreHmr(snap) {
+	_declaredCoalesce.clear();
+	_declaredCoalescePattern.clear();
+	for (const [key, value] of snap.declaredCoalesce || []) _declaredCoalesce.set(key, value);
+	for (const [key, value] of snap.declaredCoalescePattern || []) _declaredCoalescePattern.set(key, value);
 	for (const [k, v] of snap.registry) {
 		registry.set(k, v);
 		if (/** @type {any} */ (v).__isStream && /** @type {any} */ (v).__onUnsubscribe) {
