@@ -197,6 +197,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Skip attach-window frames already included in explicit latest/set replay responses while preserving live changes beyond the replay read.
 
+- Preserve live platform trace and request correlation when reactive publishes pass through a cluster bus.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

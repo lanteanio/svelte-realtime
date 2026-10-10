@@ -390,11 +390,11 @@ function _wrapPlatformPublish(platform) {
 		}
 		// Surrogate holds derivedPublishLocal as its publish so inbound
 		// cluster relays still fire reactive watchers on this instance
-		// but do not bounce back out. Spread carries the rest of the
-		// platform surface (subscribe, send, redis, replay, ...) so the
-		// extensions's bus.wrap sees a complete platform shape.
+		// but do not bounce back out. Delegate the remaining platform
+		// surface so changing accessors, including active trace and request
+		// identity, are read at publication instead of captured at wrap time.
 		/** @type {any} */
-		const surrogate = Object.assign(Object.create(Object.getPrototypeOf(platform)), platform);
+		const surrogate = Object.create(platform);
 		surrogate.publish = derivedPublishLocal;
 		if (originalPublishBatched) surrogate.publishBatched = derivedPublishBatchedLocal;
 		const wrapped = bus.wrap(surrogate);
