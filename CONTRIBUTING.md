@@ -123,3 +123,36 @@ At that planning point, items without fresh evidence for 30 days require a
 reproduction and ownership check before returning to todo. This is a stale-item
 rule, not a promise of scheduled triage or automatic closure. Reopen a closed
 item only with new evidence or a clearly unmet acceptance criterion.
+
+## Choose verification by the changed surface
+
+Run a focused regression while editing, then select the following lanes. Times
+are rough planning ranges on a warm development machine, not CI time budgets;
+first dependency and browser downloads take longer. CI uses the same scripts.
+
+| Change | Required evidence | Approximate warm duration |
+| --- | --- | --- |
+| Docs, error text, contributor guidance | `npm run verify:docs` | seconds |
+| Public exports, declarations, generator, dependency | `npm run verify:fast` and affected unit tests | 1-3 minutes |
+| Server, protocol, scheduling, auth | `npm run verify:unit` and `npm run verify:sim` | 2-10 minutes |
+| Client or DevTools DOM | unit lane and `npm run verify:devtools` | 2-10 minutes |
+| Browser transport, reconnect, Svelte integration | `npm run verify:browser` | 5-15 minutes |
+| Cluster recovery or Redis routing | `npm run verify:chaos` | 5-20 minutes |
+| Broad refactor or release candidate | `npm run verify:full` | 10-30 minutes |
+
+`verify:pr` composes unit (including pretest), deterministic simulation/fuzz and
+DevTools browser checks. `verify:full` adds application E2E and all chaos tests.
+Install fixture dependencies and Chromium as above before browser or full lanes.
+Chaos additionally needs a working Docker daemon (`docker info`) for Redis.
+Do not claim the full lane passed when a required service or native runtime was
+unavailable: record the failed prerequisite and exact omitted command in the PR.
+Maintainers must accept the limitation or require another environment before merge.
+
+[The generated verification inventory](docs/verification.v1.json) expands package
+scripts including npm pre/post hooks and every root-package workflow command.
+`notFullyHosted` explicitly lists checks whose full command set is not in CI;
+the application E2E lane and the complete chaos lane need contributor evidence
+(the recovery CI job runs only its named recovery spec). The inventory excludes
+steps targeting another working directory or npm prefix. Any script or workflow
+change must run `npm run generate:verification` and include the reviewed diff;
+`npm run check:verification` fails when the inventory no longer matches reality.

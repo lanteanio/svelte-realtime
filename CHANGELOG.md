@@ -103,6 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The pretest checks validate packed npm exports and declarations with publint and Are The Types Wrong.
 
+- Verification lanes and a generated CI inventory make required checks and non-hosted coverage explicit for contributors.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

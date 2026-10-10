@@ -1,0 +1,286 @@
+{
+  "schemaVersion": 1,
+  "scripts": {
+    "check": [
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-types.js",
+      "node scripts/check-diagnostic-attribution.js",
+      "node scripts/check-publish-routing.js",
+      "node scripts/check-determinism.js",
+      "node scripts/check-slugs.js",
+      "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+      "node scripts/check-scaffold-build.js",
+      "node scripts/check-formatting.js",
+      "publint",
+      "attw --pack . --profile esm-only",
+      "node scripts/check-verification-inventory.js"
+    ],
+    "check:errors": [
+      "node scripts/generate-error-reference.js --check"
+    ],
+    "check:format": [
+      "node scripts/check-formatting.js"
+    ],
+    "check:publish": [
+      "publint",
+      "attw --pack . --profile esm-only"
+    ],
+    "check:verification": [
+      "node scripts/check-verification-inventory.js"
+    ],
+    "generate:errors": [
+      "node scripts/generate-error-reference.js --write"
+    ],
+    "generate:onboarding": [
+      "node scripts/generate-onboarding-reference.js --write --sync-docs-site"
+    ],
+    "generate:verification": [
+      "node scripts/check-verification-inventory.js --write"
+    ],
+    "pretest": [
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-types.js",
+      "node scripts/check-diagnostic-attribution.js",
+      "node scripts/check-publish-routing.js",
+      "node scripts/check-determinism.js",
+      "node scripts/check-slugs.js",
+      "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+      "node scripts/check-scaffold-build.js",
+      "node scripts/check-formatting.js",
+      "publint",
+      "attw --pack . --profile esm-only",
+      "node scripts/check-verification-inventory.js"
+    ],
+    "sim:golden": [
+      "node scripts/sim-golden.js"
+    ],
+    "test": [
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-types.js",
+      "node scripts/check-diagnostic-attribution.js",
+      "node scripts/check-publish-routing.js",
+      "node scripts/check-determinism.js",
+      "node scripts/check-slugs.js",
+      "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+      "node scripts/check-scaffold-build.js",
+      "node scripts/check-formatting.js",
+      "publint",
+      "attw --pack . --profile esm-only",
+      "node scripts/check-verification-inventory.js",
+      "vitest run"
+    ],
+    "test:chaos": [
+      "playwright test --config test/chaos/playwright.config.js"
+    ],
+    "test:devtools": [
+      "vitest run --config vitest.devtools.config.js"
+    ],
+    "test:e2e": [
+      "playwright test --config test/e2e/playwright.config.js"
+    ],
+    "test:fuzz": [
+      "node test/fuzz-wire.mjs"
+    ],
+    "test:watch": [
+      "vitest"
+    ],
+    "verify:browser": [
+      "playwright test --config test/e2e/playwright.config.js"
+    ],
+    "verify:chaos": [
+      "playwright test --config test/chaos/playwright.config.js"
+    ],
+    "verify:devtools": [
+      "vitest run --config vitest.devtools.config.js"
+    ],
+    "verify:docs": [
+      "node scripts/check-formatting.js",
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js"
+    ],
+    "verify:fast": [
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-types.js",
+      "node scripts/check-diagnostic-attribution.js",
+      "node scripts/check-publish-routing.js",
+      "node scripts/check-determinism.js",
+      "node scripts/check-slugs.js",
+      "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+      "node scripts/check-scaffold-build.js",
+      "node scripts/check-formatting.js",
+      "publint",
+      "attw --pack . --profile esm-only",
+      "node scripts/check-verification-inventory.js"
+    ],
+    "verify:full": [
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-types.js",
+      "node scripts/check-diagnostic-attribution.js",
+      "node scripts/check-publish-routing.js",
+      "node scripts/check-determinism.js",
+      "node scripts/check-slugs.js",
+      "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+      "node scripts/check-scaffold-build.js",
+      "node scripts/check-formatting.js",
+      "publint",
+      "attw --pack . --profile esm-only",
+      "node scripts/check-verification-inventory.js",
+      "vitest run",
+      "node scripts/sim-golden.js",
+      "node test/fuzz-wire.mjs",
+      "vitest run --config vitest.devtools.config.js",
+      "playwright test --config test/e2e/playwright.config.js",
+      "playwright test --config test/chaos/playwright.config.js"
+    ],
+    "verify:pr": [
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-types.js",
+      "node scripts/check-diagnostic-attribution.js",
+      "node scripts/check-publish-routing.js",
+      "node scripts/check-determinism.js",
+      "node scripts/check-slugs.js",
+      "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+      "node scripts/check-scaffold-build.js",
+      "node scripts/check-formatting.js",
+      "publint",
+      "attw --pack . --profile esm-only",
+      "node scripts/check-verification-inventory.js",
+      "vitest run",
+      "node scripts/sim-golden.js",
+      "node test/fuzz-wire.mjs",
+      "vitest run --config vitest.devtools.config.js"
+    ],
+    "verify:sim": [
+      "node scripts/sim-golden.js",
+      "node test/fuzz-wire.mjs"
+    ],
+    "verify:unit": [
+      "node scripts/generate-error-reference.js --check",
+      "node scripts/generate-onboarding-reference.js",
+      "node scripts/check-types.js",
+      "node scripts/check-diagnostic-attribution.js",
+      "node scripts/check-publish-routing.js",
+      "node scripts/check-determinism.js",
+      "node scripts/check-slugs.js",
+      "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+      "node scripts/check-scaffold-build.js",
+      "node scripts/check-formatting.js",
+      "publint",
+      "attw --pack . --profile esm-only",
+      "node scripts/check-verification-inventory.js",
+      "vitest run"
+    ]
+  },
+  "hosted": [
+    {
+      "workflow": "chaos-recovery.yml",
+      "job": "recovery-chaos",
+      "step": "Install realtime and fixture dependencies",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "chaos-recovery.yml",
+      "job": "recovery-chaos",
+      "step": "Install Chromium",
+      "commands": [
+        "npm exec -- playwright install --with-deps chromium"
+      ]
+    },
+    {
+      "workflow": "chaos-recovery.yml",
+      "job": "recovery-chaos",
+      "step": "Verify Docker daemon",
+      "commands": [
+        "docker info"
+      ]
+    },
+    {
+      "workflow": "chaos-recovery.yml",
+      "job": "recovery-chaos",
+      "step": "Run Redis and instance recovery at the event revision",
+      "commands": [
+        "npm exec -- playwright test --config test/chaos/playwright.config.js recovery.spec.js --reporter=line,junit"
+      ]
+    },
+    {
+      "workflow": "devtools.yml",
+      "job": "devtools",
+      "step": "3",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "devtools.yml",
+      "job": "devtools",
+      "step": "4",
+      "commands": [
+        "npx playwright install --with-deps chromium"
+      ]
+    },
+    {
+      "workflow": "devtools.yml",
+      "job": "devtools",
+      "step": "5",
+      "commands": [
+        "vitest run --config vitest.devtools.config.js"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "job": "verify",
+      "step": "3",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "job": "verify",
+      "step": "4",
+      "commands": [
+        "npx playwright install --with-deps chromium"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "job": "verify",
+      "step": "5",
+      "commands": [
+        "node scripts/generate-error-reference.js --check",
+        "node scripts/generate-onboarding-reference.js",
+        "node scripts/check-types.js",
+        "node scripts/check-diagnostic-attribution.js",
+        "node scripts/check-publish-routing.js",
+        "node scripts/check-determinism.js",
+        "node scripts/check-slugs.js",
+        "node --no-warnings --experimental-vm-modules scripts/check-syntax.js",
+        "node scripts/check-scaffold-build.js",
+        "node scripts/check-formatting.js",
+        "publint",
+        "attw --pack . --profile esm-only",
+        "node scripts/check-verification-inventory.js",
+        "vitest run",
+        "node scripts/sim-golden.js",
+        "node test/fuzz-wire.mjs",
+        "vitest run --config vitest.devtools.config.js"
+      ]
+    }
+  ],
+  "notFullyHosted": [
+    "test:chaos",
+    "test:e2e",
+    "test:watch",
+    "verify:browser",
+    "verify:chaos",
+    "verify:full"
+  ]
+}
