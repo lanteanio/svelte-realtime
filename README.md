@@ -5160,6 +5160,11 @@ In dev mode, the Vite plugin injects an in-browser overlay that shows active str
 
 The overlay uses a fixed dark theme for diagnostic contrast, plus system colors in forced-color mode. Hosts can override the CSS variables `--svr-dt-surface`, `--svr-dt-raised`, `--svr-dt-border`, `--svr-dt-text`, `--svr-dt-muted`, `--svr-dt-accent`, `--svr-dt-success`, `--svr-dt-warning`, `--svr-dt-error`, and `--svr-dt-focus` on the document root. Keep text and focus contrast when overriding them.
 
+Use `configureDevtools` from `svelte-realtime/devtools` in development to set
+`locale`, optional `direction` (`ltr` or `rtl`), and a `messages` map from English
+labels to translated labels. Numbers, event times, and relative ages use Intl
+formatters; runtime identifiers have independent bidirectional isolation.
+
 The Streams tab lists every store currently mounted on the page. For each one it shows:
 
 | Field | Meaning |

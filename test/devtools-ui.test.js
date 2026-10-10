@@ -8,7 +8,7 @@ beforeAll(async () => {
 	server = createServer(async (req, res) => {
 		if (req.url === '/') {
 			res.setHeader('Content-Type', 'text/html');
-			res.end('<button id="host">Host control</button><script type="module" src="/src/devtools.js"></script>');
+			res.end('<button id="host">Host control</button><script type="module">import { configureDevtools } from "/src/devtools.js"; window.configureDevtools = configureDevtools;</script>');
 			return;
 		}
 		if (!/^\/src\/[a-z/-]+\.js$/.test(req.url)) { res.writeHead(404).end(); return; }
@@ -223,4 +223,20 @@ it('keeps emoji, combining marks, and joined sequences intact at the preview bou
   expect(text).toContain('a'.repeat(198) + grapheme + '... [+5 code units]');
   expect(text.isWellFormed()).toBe(true);
  }
+});
+
+it('formats telemetry by locale and isolates identifiers in right-to-left presentation', async () => {
+ await streamsFixture();
+ await page.evaluate(async () => {
+  window.configureDevtools({ locale: 'ar-EG', messages: { streams: 'Streams translated' } });
+  const stream = window.__svelte_realtime_devtools.streams.get('chat');
+  stream.subCount = 1234;
+ });
+ const tab = page.getByRole('tab', { name: 'Streams translated', exact: true });
+ await tab.click();
+ expect(await page.locator('#svelte-realtime-devtools').getAttribute('dir')).toBe('rtl');
+ expect(await page.locator('#svelte-realtime-devtools').getAttribute('lang')).toBe('ar-EG');
+ expect(await page.locator('#svr-dt-content').textContent()).toContain(new Intl.NumberFormat('ar-EG').format(1234));
+ expect(await page.locator('[data-action="toggle-stream"] bdi').getAttribute('dir')).toBe('auto');
+ expect(await page.locator('#svr-dt-content').textContent()).toContain(new Intl.RelativeTimeFormat('ar-EG', { numeric: 'auto' }).format(0, 'second'));
 });

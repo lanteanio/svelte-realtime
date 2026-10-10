@@ -4,6 +4,50 @@
 
 import { now, setIntervalTimer, clearIntervalTimer } from './client-runtime.js';
 
+/** @type {Intl.LocalesArgument | undefined} */
+let locale;
+let messages = {};
+let numberFormat = new Intl.NumberFormat();
+let timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+let relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+let direction = 'ltr';
+
+/** @param {string} template @param {Record<string, string | number>} [values] */
+function message(template, values = {}) {
+ return (messages[template] ?? template).replace(/\{(\w+)\}/g, (match, key) => key in values ? String(values[key]) : match);
+}
+/** @param {number} value @param {Intl.NumberFormatOptions} [options] */
+function number(value, options) { return options ? new Intl.NumberFormat(locale, options).format(value) : numberFormat.format(value); }
+/** @param {unknown} value */
+function isolated(value) { return '<bdi dir="auto">' + esc(String(value)) + '</bdi>'; }
+
+/** Configure the overlay's locale, reading direction, and translated labels.
+ * @param {import('./devtools.js').DevtoolsPresentation} options
+ */
+export function configureDevtools(options = {}) {
+ const nextLocale = options.locale;
+ const nextNumber = new Intl.NumberFormat(nextLocale);
+ const nextTime = new Intl.DateTimeFormat(nextLocale, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+ const nextRelative = new Intl.RelativeTimeFormat(nextLocale, { numeric: 'auto' });
+ const language = new Intl.Locale(nextNumber.resolvedOptions().locale);
+ locale = nextLocale;
+ numberFormat = nextNumber;
+ timeFormat = nextTime;
+ relativeFormat = nextRelative;
+ messages = options.messages || {};
+ direction = options.direction || language.getTextInfo?.().direction || language.textInfo?.direction || (/^(ar|fa|he|ur|ps|dv)(-|$)/.test(language.language) ? 'rtl' : 'ltr');
+ if (panel) {
+  panel.lang = nextNumber.resolvedOptions().locale;
+  panel.dir = direction;
+  for (const el of panel.querySelectorAll('[data-label]')) {
+   const key = /** @type {HTMLElement} */ (el).dataset.label;
+   el.textContent = message(key);
+  }
+  for (const el of document.querySelectorAll('[data-aria-label]')) el.setAttribute('aria-label', message(/** @type {HTMLElement} */ (el).dataset.ariaLabel));
+  _forceRerender();
+ }
+}
+
 /** @type {HTMLElement | null} */
 let panel = null;
 let visible = false;
@@ -78,6 +122,8 @@ function init() {
 
 	panel = document.createElement('div');
 	panel.id = 'svelte-realtime-devtools';
+	panel.lang = numberFormat.resolvedOptions().locale;
+	panel.dir = direction;
 	panel.style.colorScheme = 'dark';
 	panel.setAttribute('role', 'region');
 	panel.setAttribute('aria-label', 'svelte-realtime DevTools');
@@ -97,13 +143,16 @@ function init() {
 
 	const closeBtn = document.createElement('button');
 	closeBtn.textContent = 'x';
-	closeBtn.setAttribute('aria-label', 'Close DevTools');
+	closeBtn.dataset.ariaLabel = 'Close DevTools';
+	closeBtn.setAttribute('aria-label', message('Close DevTools'));
 	closeBtn.style.cssText = 'background:none;border:none;color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-size:14px;padding:0 4px;';
 	closeBtn.onclick = toggle;
 	const moveBtn = document.createElement('button');
 	moveBtn.type = 'button';
-	moveBtn.textContent = 'Move';
-	moveBtn.setAttribute('aria-label', 'Move DevTools');
+	moveBtn.textContent = message('Move');
+	moveBtn.dataset.label = 'Move';
+	moveBtn.dataset.ariaLabel = 'Move DevTools';
+	moveBtn.setAttribute('aria-label', message('Move DevTools'));
 	moveBtn.title = 'Arrow keys move; Home and End dock; click cycles corners';
 	header.appendChild(moveBtn);
 	header.appendChild(closeBtn);
@@ -163,7 +212,8 @@ function init() {
 	const tabNames = ['rpcs', 'streams', 'smooth', 'connection'];
 	for (const name of tabNames) {
 		const btn = document.createElement('button');
-		btn.textContent = name;
+		btn.textContent = message(name);
+		btn.dataset.label = name;
 		btn.type = 'button';
 		btn.id = 'svr-dt-tab-' + name;
 		btn.setAttribute('role', 'tab');
@@ -195,8 +245,8 @@ function init() {
 		}
 		btn.onkeydown = (event) => {
 			const index = tabNames.indexOf(name);
-			const next = event.key === 'ArrowRight' ? (index + 1) % tabNames.length
-				: event.key === 'ArrowLeft' ? (index + tabNames.length - 1) % tabNames.length
+			const next = event.key === (direction === 'rtl' ? 'ArrowLeft' : 'ArrowRight') ? (index + 1) % tabNames.length
+				: event.key === (direction === 'rtl' ? 'ArrowRight' : 'ArrowLeft') ? (index + tabNames.length - 1) % tabNames.length
 				: event.key === 'Home' ? 0 : event.key === 'End' ? tabNames.length - 1 : -1;
 			if (next < 0) return;
 			event.preventDefault();
@@ -236,8 +286,9 @@ function init() {
 	launcher = document.createElement('button');
 	launcher.type = 'button';
 	launcher.id = 'svr-dt-launcher';
-	launcher.textContent = 'DevTools';
-	launcher.setAttribute('aria-label', 'Toggle svelte-realtime DevTools');
+	launcher.textContent = message('DevTools');
+	launcher.dataset.ariaLabel = 'Toggle svelte-realtime DevTools';
+	launcher.setAttribute('aria-label', message('Toggle svelte-realtime DevTools'));
 	launcher.setAttribute('aria-controls', panel.id);
 	launcher.setAttribute('aria-expanded', 'false');
 	launcher.style.cssText = 'position:fixed;bottom:10px;left:10px;z-index:99998';
@@ -292,7 +343,7 @@ function render(el) {
 		devtools = window.__svelte_realtime_devtools;
 	} catch { return; }
 	if (!devtools) {
-		el.textContent = 'Use a realtime client on this page to begin inspecting requests.';
+		el.textContent = message('Use a realtime client on this page to begin inspecting requests.');
 		return;
 	}
 
@@ -358,22 +409,22 @@ function renderRpcs(el, dt) {
 
 	let html = '';
 	if (pending.length > 0) {
-		html += '<div style="color:var(--svr-dt-warning, #ffe18a);margin-bottom:6px">Pending (' + esc(String(pending.length)) + ')</div>';
+		html += '<div style="color:var(--svr-dt-warning, #ffe18a);margin-bottom:6px">' + esc(message('Pending ({count})', { count: number(pending.length) })) + '</div>';
 		for (const p of pending) {
 			const elapsed = now() - p.startTime;
-			html += `<div style="padding:2px 0;color:var(--svr-dt-muted, #b3b8cc)">${esc(p.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(String(elapsed))}ms</span></div>`;
+			html += `<div style="padding:2px 0;color:var(--svr-dt-muted, #b3b8cc)">${isolated(p.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(number(elapsed))}ms</span></div>`;
 		}
 		html += '<hr style="border-color:var(--svr-dt-border, #7d859a);margin:6px 0">';
 	}
 
 	const entries = history.filter(Boolean).sort((a, b) => (b.seq || 0) - (a.seq || 0));
-	html += '<div style="margin-bottom:4px">History (' + esc(String(entries.length)) + ')</div>';
+	html += '<div style="margin-bottom:4px">' + esc(message('History ({count})', { count: number(entries.length) })) + '</div>';
 	for (let i = 0; i < entries.length; i++) {
 		const h = entries[i];
 		const color = h.ok ? 'var(--svr-dt-success, #79db8f)' : 'var(--svr-dt-error, #ff9595)';
-		html += `<div data-key="rpc:${h.seq}" data-rpc-history style="padding:2px 0"><span style="color:${color}">${h.ok ? 'OK' : 'ERR'}</span> ${esc(h.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(String(h.duration))}ms</span></div>`;
+		html += `<div data-key="rpc:${h.seq}" data-rpc-history style="padding:2px 0"><span style="color:${color}">${esc(message(h.ok ? 'OK' : 'ERR'))}</span> ${isolated(h.path)} <span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(number(h.duration))}ms</span></div>`;
 	}
-	if (entries.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">Call a realtime function to see its result and duration here.</div>';
+	if (entries.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">' + esc(message('Call a realtime function to see its result and duration here.')) + '</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
@@ -389,12 +440,11 @@ function renderRpcs(el, dt) {
  * @returns {string}
  */
 function _ageString(t) {
-	if (!t) return 'never';
-	const ms = now() - t;
-	if (ms < 1000) return 'just now';
-	if (ms < 60_000) return Math.floor(ms / 1000) + 's ago';
-	if (ms < 3_600_000) return Math.floor(ms / 60_000) + 'm ago';
-	return Math.floor(ms / 3_600_000) + 'h ago';
+	if (t == null) return message('No event yet');
+ const ms = Math.max(0, now() - t);
+ if (ms < 60_000) return relativeFormat.format(-Math.floor(ms / 1000), 'second');
+ if (ms < 3_600_000) return relativeFormat.format(-Math.floor(ms / 60_000), 'minute');
+ return relativeFormat.format(-Math.floor(ms / 3_600_000), 'hour');
 }
 
 /**
@@ -428,27 +478,27 @@ function _renderPayload(value, raw) {
 function renderStreams(el, dt) {
 	const streams = dt.streams ? Array.from(dt.streams.values()) : [];
 
-	const pauseLabel = streamsPaused ? 'Resume' : 'Pause';
+	const pauseLabel = message(streamsPaused ? 'Resume' : 'Pause');
 	const pauseColor = streamsPaused ? 'var(--svr-dt-warning, #ffe18a)' : 'var(--svr-dt-muted, #b3b8cc)';
-	const modeLabel = streamsRawMode ? 'Raw' : 'Pretty';
+	const modeLabel = message(streamsRawMode ? 'Raw' : 'Pretty');
 
 	let html = `<div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;font-size:10px">` +
-		`<span style="color:var(--svr-dt-muted, #b3b8cc)">Active (${esc(String(streams.length))})</span>` +
+		`<span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(message('Active ({count})', { count: number(streams.length) }))}</span>` +
 		`<span style="flex:1"></span>` +
-		`<button data-action="toggle-raw" aria-label="Raw payload format" aria-pressed="${streamsRawMode}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(modeLabel)}</button>` +
-		`<button data-action="toggle-pause" aria-label="Pause event capture" aria-pressed="${streamsPaused}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:${pauseColor};cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(pauseLabel)}</button>` +
-		`<button data-action="clear-events" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">Clear events</button>` +
+		`<button data-action="toggle-raw" aria-label="${esc(message('Raw payload format'))}" aria-pressed="${streamsRawMode}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(modeLabel)}</button>` +
+		`<button data-action="toggle-pause" aria-label="${esc(message('Pause event capture'))}" aria-pressed="${streamsPaused}" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:${pauseColor};cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(pauseLabel)}</button>` +
+		`<button data-action="clear-events" style="background:none;border:1px solid var(--svr-dt-border, #7d859a);color:var(--svr-dt-muted, #b3b8cc);cursor:pointer;font-family:monospace;font-size:10px;padding:1px 6px;border-radius:3px">${esc(message('Clear events'))}</button>` +
 		`</div>`;
 
 	for (const s of streams) {
-		const merge = s.merge ? esc(s.merge) : '?';
-		const topic = esc(s.topic || '?');
-		const subs = esc(String(s.subCount));
+		const merge = isolated(s.merge || '?');
+		const topic = isolated(s.topic || '?');
+		const subs = esc(number(s.subCount));
 		const lastEvt = s.lastEvent
-			? `last:${esc(s.lastEvent)} ${esc(_ageString(s.lastEventTime))}`
-			: 'no events yet';
+			? `${esc(message('Last event:'))} ${isolated(s.lastEvent)} ${esc(_ageString(s.lastEventTime))}`
+			: esc(message('No event yet'));
 		const errPart = s.error
-			? `<div style="padding:1px 0 1px 12px;color:var(--svr-dt-error, #ff9595)">err: ${esc(s.error.code)} - ${esc(s.error.message)}</div>`
+			? `<div style="padding-block:1px;padding-inline:12px 0;color:var(--svr-dt-error, #ff9595)">err: ${isolated(s.error.code)} - ${isolated(s.error.message)}</div>`
 			: '';
 		const expanded = expandedStreams.has(s.path);
 		const recentCount = (s.recentEvents && s.recentEvents.length) || 0;
@@ -459,33 +509,28 @@ function renderStreams(el, dt) {
 		html += `<div data-key="stream:${esc(s.path)}" style="padding:4px 0;border-bottom:1px solid var(--svr-dt-border, #7d859a)">` +
 			`<button type="button" data-action="toggle-stream" data-stream-path="${esc(s.path)}" aria-expanded="${expanded}" aria-controls="${esc(eventsId)}" style="background:none;border:none;color:inherit;font:inherit;text-align:start;cursor:pointer;display:flex;align-items:center;gap:4px">` +
 			`<span style="color:${chevronColor};width:10px;display:inline-block">${chevron}</span>` +
-			`<span>${esc(s.path)}</span>` +
-			(recentCount > 0 ? `<span style="color:var(--svr-dt-muted, #b3b8cc);font-size:10px;margin-left:6px">(${recentCount})</span>` : '') +
+			`<span>${isolated(s.path)}</span>` +
+			(recentCount > 0 ? `<span style="color:var(--svr-dt-muted, #b3b8cc);font-size:10px;margin-inline-start:6px">(${esc(number(recentCount))})</span>` : '') +
 			`</button>` +
-			`<div style="padding:1px 0 1px 16px;color:var(--svr-dt-muted, #b3b8cc)">topic:${topic} merge:${merge} subs:${subs}</div>` +
-			`<div style="padding:1px 0 1px 16px;color:var(--svr-dt-muted, #b3b8cc)">${lastEvt}</div>` +
+			`<div style="padding-block:1px;padding-inline:16px 0;color:var(--svr-dt-muted, #b3b8cc)">${esc(message('topic:'))}${topic} ${esc(message('merge:'))}${merge} ${esc(message('subs:'))}${subs}</div>` +
+			`<div style="padding-block:1px;padding-inline:16px 0;color:var(--svr-dt-muted, #b3b8cc)">${lastEvt}</div>` +
 			errPart;
 
 		html += `<div id="${esc(eventsId)}"${expanded ? '' : ' hidden'}>`;
 		if (expanded) {
 			if (recentCount === 0) {
-				html += `<div style="padding:4px 0 4px 24px;color:var(--svr-dt-muted, #b3b8cc);font-style:italic">${streamsPaused ? 'Resume capture, then trigger a stream update.' : 'Trigger a stream update to capture an event.'}</div>`;
+				html += `<div style="padding-block:4px;padding-inline:24px 0;color:var(--svr-dt-muted, #b3b8cc);font-style:italic">${esc(message(streamsPaused ? 'Resume capture, then trigger a stream update.' : 'Trigger a stream update to capture an event.'))}</div>`;
 			} else {
 				const recent = /** @type {Array<{event: string, data: any, ts: number}>} */ (s.recentEvents);
-				html += `<div style="padding:2px 0 4px 24px">`;
+				html += `<div style="padding-block:2px 4px;padding-inline:24px 0">`;
 				for (let i = recent.length - 1; i >= 0; i--) {
 					const ev = recent[i];
-					const time = new Date(ev.ts).toLocaleTimeString('en', { // determinism-allow: formats a captured event timestamp for display, not a clock read
-						hour12: false,
-						hour: '2-digit',
-						minute: '2-digit',
-						second: '2-digit'
-					});
+					const time = timeFormat.format(ev.ts);
 					const payload = _renderPayload(ev.data, streamsRawMode);
 					if (streamsRawMode) {
-						html += `<div style="padding:1px 0;color:var(--svr-dt-muted, #b3b8cc);word-break:break-all"><span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(time)}</span> <span style="color:var(--svr-dt-accent, #ff819a)">${esc(ev.event)}</span> ${esc(payload)}</div>`;
+						html += `<div style="padding:1px 0;color:var(--svr-dt-muted, #b3b8cc);word-break:break-all"><span style="color:var(--svr-dt-muted, #b3b8cc)">${esc(time)}</span> <span style="color:var(--svr-dt-accent, #ff819a)">${isolated(ev.event)}</span> <bdi dir="ltr">${esc(payload)}</bdi></div>`;
 					} else {
-						html += `<div style="display:flex;gap:6px;padding:1px 0;align-items:baseline"><span style="color:var(--svr-dt-muted, #b3b8cc);tabular-nums;flex-shrink:0">${esc(time)}</span><span style="color:var(--svr-dt-accent, #ff819a);flex-shrink:0">${esc(ev.event)}</span><span style="color:var(--svr-dt-muted, #b3b8cc);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(payload)}</span></div>`;
+						html += `<div style="display:flex;gap:6px;padding:1px 0;align-items:baseline"><span style="color:var(--svr-dt-muted, #b3b8cc);tabular-nums;flex-shrink:0">${esc(time)}</span><span style="color:var(--svr-dt-accent, #ff819a);flex-shrink:0">${isolated(ev.event)}</span><span style="color:var(--svr-dt-muted, #b3b8cc);overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><bdi dir="ltr">${esc(payload)}</bdi></span></div>`;
 					}
 				}
 				html += `</div>`;
@@ -494,7 +539,7 @@ function renderStreams(el, dt) {
 
 		html += `</div></div>`;
 	}
-	if (streams.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">Subscribe to a live stream to inspect its events here.</div>';
+	if (streams.length === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">' + esc(message('Subscribe to a live stream to inspect its events here.')) + '</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
@@ -510,7 +555,7 @@ function renderStreams(el, dt) {
  */
 function renderSmooth(el, dt) {
 	const accessors = dt.smooth ? [...dt.smooth] : [];
-	let html = `<div style="color:var(--svr-dt-muted, #b3b8cc);margin-bottom:6px;font-size:10px">Smoothed channels (${esc(String(accessors.length))})</div>`;
+	let html = `<div style="color:var(--svr-dt-muted, #b3b8cc);margin-bottom:6px;font-size:10px">${esc(message('Smoothed channels ({count})', { count: number(accessors.length) }))}</div>`;
 	let shown = 0;
 	for (const statsFn of accessors) {
 		let s;
@@ -522,11 +567,11 @@ function renderSmooth(el, dt) {
 		}
 		if (!s) continue;
 		shown++;
-		const topic = esc(s.topic || '(connecting)');
-		const self = s.self ? esc(s.self) : '-';
+		const topic = isolated(s.topic || message('(connecting)'));
+		const self = isolated(s.self || '-');
 		const status = s.overflowed
-			? `<span style="color:var(--svr-dt-warning, #ffe18a)">Prediction paused - waiting for resync (Command window full)</span>`
-			: `<span style="color:var(--svr-dt-success, #79db8f)">predicting</span>`;
+			? `<span style="color:var(--svr-dt-warning, #ffe18a)">${esc(message('Prediction paused - waiting for resync (Command window full)'))}</span>`
+			: `<span style="color:var(--svr-dt-success, #79db8f)">${esc(message('predicting'))}</span>`;
 		const unacked = Number(s.unacked) || 0;
 		const cap = Number(s.windowCap) || 0;
 		const unackedColor = cap > 0 && unacked / cap > 0.5 ? 'var(--svr-dt-warning, #ffe18a)' : 'var(--svr-dt-muted, #b3b8cc)';
@@ -535,15 +580,15 @@ function renderSmooth(el, dt) {
 		const clockColor = s.clockSynced ? 'var(--svr-dt-success, #79db8f)' : 'var(--svr-dt-error, #ff9595)';
 		html += `<div style="padding:4px 0;border-bottom:1px solid var(--svr-dt-border, #7d859a)">` +
 			`<div style="display:flex;align-items:center;gap:6px"><span>${topic}</span> ${status}</div>` +
-			`<div style="padding:1px 0 1px 12px;color:var(--svr-dt-muted, #b3b8cc)">self:${self} remote:${esc(String(Number(s.remoteCount) || 0))} clock:<span style="color:${clockColor}">${s.clockSynced ? 'synced' : 'unsynced'}</span></div>` +
-			`<div style="padding:1px 0 1px 12px;color:var(--svr-dt-muted, #b3b8cc)">unacked:<span style="color:${unackedColor}">${esc(String(unacked))}</span>/${esc(String(cap))} ` +
-				`divergence:<span style="color:${divColor}">${esc(divergence.toFixed(2))}</span>` +
-				(s.correcting ? ` <span style="color:var(--svr-dt-warning, #ffe18a)">easing</span>` : '') +
+			`<div style="padding-block:1px;padding-inline:12px 0;color:var(--svr-dt-muted, #b3b8cc)">${esc(message('self:'))}${self} ${esc(message('remote:'))}${esc(number(Number(s.remoteCount) || 0))} ${esc(message('clock:'))}<span style="color:${clockColor}">${esc(message(s.clockSynced ? 'synced' : 'unsynced'))}</span></div>` +
+			`<div style="padding-block:1px;padding-inline:12px 0;color:var(--svr-dt-muted, #b3b8cc)">${esc(message('unacked:'))}<span style="color:${unackedColor}">${esc(number(unacked))}</span>/${esc(number(cap))} ` +
+				`${esc(message('divergence:'))}<span style="color:${divColor}">${esc(number(divergence, { minimumFractionDigits: 2, maximumFractionDigits: 2 }))}</span>` +
+				(s.correcting ? ` <span style="color:var(--svr-dt-warning, #ffe18a)">${esc(message('easing'))}</span>` : '') +
 				`</div>` +
-			`<div style="padding:1px 0 1px 12px;color:var(--svr-dt-muted, #b3b8cc)">interp delay:${esc((Number(s.interpDelayMs) || 0).toFixed(0))}ms</div>` +
+			`<div style="padding-block:1px;padding-inline:12px 0;color:var(--svr-dt-muted, #b3b8cc)">${esc(message('interp delay:'))}${esc(number(Number(s.interpDelayMs) || 0, { maximumFractionDigits: 0 }))}ms</div>` +
 			`</div>`;
 	}
-	if (shown === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">Create a live.smooth view to inspect prediction and interpolation.</div>';
+	if (shown === 0) html += '<div style="color:var(--svr-dt-muted, #b3b8cc)">' + esc(message('Create a live.smooth view to inspect prediction and interpolation.')) + '</div>';
 
 	if (html !== _lastRenderedHtml) {
 		_lastRenderedHtml = html;
@@ -555,10 +600,10 @@ function renderSmooth(el, dt) {
 function renderConnection(el, dt) {
 	const pending = dt.pending ? dt.pending.size : 0;
 	const html = `
-		<div style="padding:2px 0">Pending RPCs: ${esc(String(pending))}</div>
-		<div style="padding:2px 0">History entries: ${esc(String((dt.history || []).filter(Boolean).length))}</div>
-		<div style="padding:2px 0">Active streams: ${esc(String(dt.streams ? dt.streams.size : 0))}</div>
-		<div style="padding:4px 0;color:var(--svr-dt-muted, #b3b8cc);font-size:11px">Press Ctrl+Shift+L to toggle</div>
+		<div style="padding:2px 0">${esc(message('Pending RPCs: {count}', { count: number(pending) }))}</div>
+		<div style="padding:2px 0">${esc(message('History entries: {count}', { count: number((dt.history || []).filter(Boolean).length) }))}</div>
+		<div style="padding:2px 0">${esc(message('Active streams: {count}', { count: number(dt.streams ? dt.streams.size : 0) }))}</div>
+		<div style="padding:4px 0;color:var(--svr-dt-muted, #b3b8cc);font-size:11px">${esc(message('Press Ctrl+Shift+L to toggle'))}</div>
 	`;
 
 	if (html !== _lastRenderedHtml) {
@@ -569,5 +614,6 @@ function renderConnection(el, dt) {
 
 // Auto-init when loaded
 if (typeof window !== 'undefined') {
+	configureDevtools({ locale: navigator.language });
 	init();
 }

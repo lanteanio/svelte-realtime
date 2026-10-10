@@ -63,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools truncates payload previews at grapheme boundaries and reports omitted code units separately.
 
+- DevTools formats telemetry with Intl, supports locale and direction configuration, and isolates runtime identifiers.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added
