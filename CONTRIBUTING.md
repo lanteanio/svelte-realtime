@@ -218,3 +218,20 @@ growth additionally requires the reviewed `--accept-fragment-count` generator
 flag. Fix runnable examples instead of weakening their classification. Browser
 or service-dependent examples may use a `doc-code: no-run` marker with the exact
 reason prefix `requires-browser`, `external-service`, or `app-context`.
+
+## README entry ownership and size
+
+[docs/documentation.v1.json](docs/documentation.v1.json) owns the eight ordered
+reader paths: package identity, first success and compatibility stay in README;
+tutorial, how-to, reference, explanation and operations route to the owned site.
+`npm run generate:documentation` renders the routing table and compatibility
+commands from the manifest and the CLI-owned tuple in `src/cli-utils.js`.
+The generator never increases the README size allowance. After changing generated
+commands, run `npm run generate:examples` to refresh their code-fence inventory.
+
+`entryBudgetLines` caps the line where the routing block ends.
+`readmeMaxLines` independently caps the entire README and is pinned at the current
+length. Adding one line fails the size gate. Move extended content into package
+docs or the owning site and lower the ratchet as content moves. A size increase
+is an explicit reviewed contract change, not silent headroom. The manifest routes
+readers; it does not claim that the site's information architecture is complete.

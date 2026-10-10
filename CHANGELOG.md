@@ -111,6 +111,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Every README code fence has compiled or explicitly scoped coverage; runnable examples execute against the packed npm package, and documented server symbols have matching declarations.
 
+- The README has generated reader routes, CLI-owned compatibility commands, and separate enforced entry-position and total-size budgets.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

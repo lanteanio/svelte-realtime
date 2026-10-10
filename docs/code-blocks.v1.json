@@ -49,7 +49,7 @@
 			"fingerprint": "e62d87baccfd6ee3b4474ae881d3b713461ee3f7e3daf328ea4305709c555b9a",
 			"occurrence": 1,
 			"language": "bash",
-			"section": "Manual setup > Step 1: Install everything",
+			"section": "Version compatibility",
 			"classification": "command",
 			"channel": "manual-command"
 		},

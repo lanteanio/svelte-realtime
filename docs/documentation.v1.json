@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "owner": "svelte-realtime",
+  "compatibilitySource": "src/cli-utils.js",
+  "entryBudgetLines": 60,
+  "readmeMaxLines": 5629,
+  "paths": [
+    {
+      "key": "identity",
+      "type": "Identity",
+      "need": "Decide whether this package fits",
+      "label": "Package overview",
+      "destination": "#svelte-realtime",
+      "owner": "README.md"
+    },
+    {
+      "key": "first-success",
+      "type": "First success",
+      "need": "Run the first working example",
+      "label": "Quick start",
+      "destination": "#quick-start",
+      "owner": "README.md"
+    },
+    {
+      "key": "compatibility",
+      "type": "Compatibility",
+      "need": "Choose a supported tuple",
+      "label": "Version compatibility",
+      "destination": "#version-compatibility",
+      "owner": "README.md"
+    },
+    {
+      "key": "tutorial",
+      "type": "Tutorial",
+      "need": "Learn by building",
+      "label": "Interactive lessons",
+      "destination": "https://svelte-realtime.dev/tutorial",
+      "owner": "svelte-realtime.dev"
+    },
+    {
+      "key": "how-to",
+      "type": "How-to",
+      "need": "Add realtime to an existing app",
+      "label": "Manual setup",
+      "destination": "https://svelte-realtime.dev/docs/manual-setup",
+      "owner": "svelte-realtime.dev"
+    },
+    {
+      "key": "reference",
+      "type": "Reference",
+      "need": "Look up RPC behavior",
+      "label": "RPC reference",
+      "destination": "https://svelte-realtime.dev/docs/rpc",
+      "owner": "svelte-realtime.dev"
+    },
+    {
+      "key": "explanation",
+      "type": "Explanation",
+      "need": "Understand boundaries and flow",
+      "label": "Architecture",
+      "destination": "https://svelte-realtime.dev/docs/architecture",
+      "owner": "svelte-realtime.dev"
+    },
+    {
+      "key": "operations",
+      "type": "Operations",
+      "need": "Deploy and operate a service",
+      "label": "Deployment guide",
+      "destination": "https://svelte-realtime.dev/guides/deployment",
+      "owner": "svelte-realtime.dev"
+    }
+  ]
+}

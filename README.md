@@ -4,6 +4,7 @@
   </a>
 </p>
 
+<a id="svelte-realtime"></a>
 <h1 align="center">svelte-realtime</h1>
 
 <p align="center">
@@ -15,6 +16,21 @@
 </p>
 
 **Official links:** [GitHub owner](https://github.com/lanteanio) | [Documentation](https://svelte-realtime.dev/) | [Live demo](https://svelte-realtime-demo.lantean.io/) | `svti.me` is the ecosystem-owned runtime-help redirect domain.
+
+<!-- documentation-paths:start -->
+**Choose a documentation path:**
+
+| Need | Type | Start here | Owner |
+| --- | --- | --- | --- |
+| Decide whether this package fits | Identity | [Package overview](#svelte-realtime) | README.md |
+| Run the first working example | First success | [Quick start](#quick-start) | README.md |
+| Choose a supported tuple | Compatibility | [Version compatibility](#version-compatibility) | README.md |
+| Learn by building | Tutorial | [Interactive lessons](https://svelte-realtime.dev/tutorial) | svelte-realtime.dev |
+| Add realtime to an existing app | How-to | [Manual setup](https://svelte-realtime.dev/docs/manual-setup) | svelte-realtime.dev |
+| Look up RPC behavior | Reference | [RPC reference](https://svelte-realtime.dev/docs/rpc) | svelte-realtime.dev |
+| Understand boundaries and flow | Explanation | [Architecture](https://svelte-realtime.dev/docs/architecture) | svelte-realtime.dev |
+| Deploy and operate a service | Operations | [Deployment guide](https://svelte-realtime.dev/guides/deployment) | svelte-realtime.dev |
+<!-- documentation-paths:end -->
 
 ---
 
@@ -70,7 +86,8 @@ For interactive prompts, run `npx svelte-realtime@0.6.0-next.91 my-app` in a ter
 
 The non-interactive route installs the audited
 `svelte-adapter-uws@0.6.0-next.95` / `svelte-realtime@0.6.0-next.91` /
-uWebSockets.js v20.69.0 tuple, checks Node, OS, architecture, libc, and the
+uWebSockets.js tuple in [Version compatibility](#version-compatibility), checks
+Node, OS, architecture, libc, and the
 native addon, writes one current-`sv` Vite configuration, and completes a
 production build before it prints `Verified`. The example then opens with a
 working counter. The exact owned checkpoints and the one expected scaffold-auth
@@ -82,11 +99,22 @@ warning are pinned in the generated [first-run transcript](./docs/first-run.md).
 
 The three ecosystem packages move together. Bump them as a group:
 
+<!-- compatibility:start -->
 | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |
 | `^0.5.8` | `^0.5.0` | `^0.5.0` | Stable. Node 22+ required. |
-| `0.6.0-next.95` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated development candidate. Publish the tuple together before using these exact registry commands. |
+| `0.6.0-next.95` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated candidate; publish the tuple together before these registry commands are used. |
+
+Install the CLI-owned candidate tuple and run its native preflight:
+
+```bash
+npm install svelte-adapter-uws@0.6.0-next.95 svelte-realtime@0.6.0-next.91
+npm install https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
+npm install -D ws
+npm exec -- svelte-adapter-uws-preflight
+```
+<!-- compatibility:end -->
 
 Mixed-version installs are rejected at install time with a peer-dep warning.
 
@@ -100,12 +128,7 @@ Starting from a SvelteKit 2 project. If you do not have one yet, run `npx sv@0.1
 
 ### Step 1: Install everything
 
-```bash
-npm install svelte-adapter-uws@0.6.0-next.95 svelte-realtime@0.6.0-next.91
-npm install https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
-npm install -D ws
-npm exec -- svelte-adapter-uws-preflight
-```
+Run the install and native preflight commands in [Version compatibility](#version-compatibility).
 
 Continue only after the last command prints `preflight OK`. A failure stops at
 the unmet prerequisite and prints the matching install or platform action.

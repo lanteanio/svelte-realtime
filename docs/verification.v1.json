@@ -16,7 +16,11 @@
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
-      "node scripts/check-doc-code.js"
+      "node scripts/check-doc-code.js",
+      "node scripts/check-documentation-contract.js"
+    ],
+    "check:documentation": [
+      "node scripts/check-documentation-contract.js"
     ],
     "check:errors": [
       "node scripts/generate-error-reference.js --check"
@@ -39,6 +43,9 @@
     ],
     "check:verification": [
       "node scripts/check-verification-inventory.js"
+    ],
+    "generate:documentation": [
+      "node scripts/check-documentation-contract.js --write"
     ],
     "generate:errors": [
       "node scripts/generate-error-reference.js --write"
@@ -67,7 +74,8 @@
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
-      "node scripts/check-doc-code.js"
+      "node scripts/check-doc-code.js",
+      "node scripts/check-documentation-contract.js"
     ],
     "sim:golden": [
       "node scripts/sim-golden.js"
@@ -91,6 +99,7 @@
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
+      "node scripts/check-documentation-contract.js",
       "vitest run"
     ],
     "test:chaos": [
@@ -126,7 +135,8 @@
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
-      "vitest run test/documentation-code.test.js test/packed-readme-examples.test.js"
+      "vitest run test/documentation-code.test.js test/packed-readme-examples.test.js",
+      "node scripts/check-documentation-contract.js"
     ],
     "verify:fast": [
       "node scripts/generate-error-reference.js --check",
@@ -143,7 +153,8 @@
       "attw --pack . --profile esm-only",
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
-      "node scripts/check-doc-code.js"
+      "node scripts/check-doc-code.js",
+      "node scripts/check-documentation-contract.js"
     ],
     "verify:full": [
       "node scripts/generate-error-reference.js --check",
@@ -161,6 +172,7 @@
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
+      "node scripts/check-documentation-contract.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -184,6 +196,7 @@
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
+      "node scripts/check-documentation-contract.js",
       "vitest run",
       "node scripts/sim-golden.js",
       "node test/fuzz-wire.mjs",
@@ -209,6 +222,7 @@
       "node scripts/check-verification-inventory.js",
       "node scripts/check-links.js",
       "node scripts/check-doc-code.js",
+      "node scripts/check-documentation-contract.js",
       "vitest run"
     ]
   },
@@ -321,6 +335,7 @@
         "node scripts/check-verification-inventory.js",
         "node scripts/check-links.js",
         "node scripts/check-doc-code.js",
+        "node scripts/check-documentation-contract.js",
         "vitest run",
         "node scripts/sim-golden.js",
         "node test/fuzz-wire.mjs",
