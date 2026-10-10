@@ -25,6 +25,7 @@ let _unsafeCapturePayloads = false;
 
 /**
  * @type {{
+ *   connection: { state: string, since: number, failure: any },
  *   history: any[],
  *   streams: Map<string, any>,
  *   pending: Map<string, any>,
@@ -38,6 +39,7 @@ let _unsafeCapturePayloads = false;
  */
 export const __devtools = (typeof import.meta !== 'undefined' && !import.meta.env?.PROD)
 	? {
+		connection: { state: 'idle', since: now(), failure: null },
 		history: new Array(50).fill(null),
 		streams: new Map(),
 		pending: new Map(),
@@ -480,4 +482,33 @@ export function _devtoolsSmoothRegister(statsFn) {
 	if (!__devtools) return () => {};
 	__devtools.smooth.add(statsFn);
 	return () => { if (__devtools) __devtools.smooth.delete(statsFn); };
+}
+
+/** @param {string} state */
+export function _devtoolsConnectionStatus(state) {
+ if (!__devtools) return;
+ const connection = __devtools.connection;
+ if (connection.state !== state) {
+  connection.state = state;
+  connection.since = now();
+ }
+ if (state === 'open') connection.failure = null;
+}
+
+/** Retain stable failure metadata without close text or authentication details.
+ * @param {any} failure
+ */
+export function _devtoolsConnectionFailure(failure) {
+ if (!__devtools) return;
+ if (!failure) { __devtools.connection.failure = null; return; }
+ const kind = _safeRead(failure, 'kind');
+ const category = _safeRead(failure, 'class');
+ const code = _safeRead(failure, 'code');
+ const status = _safeRead(failure, 'status');
+ __devtools.connection.failure = {
+  kind: kind === 'ws-close' || kind === 'auth-preflight' ? kind : 'unknown',
+  class: ['TERMINAL', 'EXHAUSTED', 'THROTTLE', 'RETRY', 'AUTH', 'DRAIN'].includes(category) ? category : 'UNKNOWN',
+  ...(Number.isInteger(code) ? { code } : {}),
+  ...(Number.isInteger(status) ? { status } : {})
+ };
 }

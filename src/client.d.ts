@@ -907,6 +907,12 @@ export function combine(...args: [...Readable<any>[], (...values: any[]) => any]
  * `null` in production builds (tree-shaken).
  */
 export const __devtools: {
+ /** Connection metadata; external close reasons and auth text are never retained. */
+ connection: {
+  state: string;
+  since: number;
+  failure: { kind: string; class: string; code?: number; status?: number } | null;
+ };
 	/**
 	 * Fixed-size ring, pre-filled with `null` and overwritten in place - filter
 	 * the holes out and sort by `seq` before reading it as a timeline.

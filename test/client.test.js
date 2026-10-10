@@ -8746,3 +8746,16 @@ describe('stream snapshots during optimistic mutation', () => {
 		unsub();
 	});
 });
+
+describe('DevTools connection metadata', () => {
+ it('observes the bound connection without retaining external failure text', () => {
+  expect(__devtools.connection.state).toBe('idle');
+  const stop = failure.subscribe(() => {});
+  expect(__devtools.connection.state).toBe('open');
+  simulateFailure({ kind: 'ws-close', class: 'TERMINAL', code: 4401, reason: 'private session detail', diagnosticReason: 'private session detail' });
+  simulateStatus('failed');
+  expect(__devtools.connection).toMatchObject({ state: 'failed', failure: { kind: 'ws-close', class: 'TERMINAL', code: 4401 } });
+  expect(JSON.stringify(__devtools.connection)).not.toContain('private session detail');
+  stop();
+ });
+});

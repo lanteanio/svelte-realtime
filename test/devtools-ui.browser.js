@@ -285,3 +285,17 @@ it('reclamps a moved panel when telemetry grows and when reopened after a resize
  expect(rect.x + rect.width).toBeLessThanOrEqual(320);
  expect(rect.y + rect.height).toBeLessThanOrEqual(240);
 });
+
+it('shows connection state, cause, and an appropriate recovery action', async () => {
+ await streamsFixture();
+ await page.evaluate(() => { window.__svelte_realtime_devtools.connection = { state: 'failed', since: Date.now() - 5000, failure: { class: 'TERMINAL', kind: 'ws-close', code: 4401 } }; });
+ await page.getByRole('tab', { name: 'connection', exact: true }).click();
+ expect(await page.locator('#svr-dt-connection').textContent()).toBe('Connection stopped');
+ expect(await page.getByRole('tabpanel').textContent()).toContain('TERMINAL');
+ expect(await page.getByRole('tabpanel').textContent()).toContain('4401');
+ expect(await page.getByRole('tabpanel').textContent()).toContain('Check your session, then reload');
+ await page.evaluate(() => { window.__svelte_realtime_devtools.connection = { state: 'open', since: Date.now(), failure: null }; });
+ await page.getByRole('tab', { name: 'connection', exact: true }).click();
+ expect(await page.locator('#svr-dt-connection').textContent()).toBe('Connected');
+ expect(await page.getByRole('tabpanel').textContent()).not.toContain('TERMINAL');
+});

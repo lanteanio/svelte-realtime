@@ -1,5 +1,6 @@
 // @ts-check
 import { derived } from 'svelte/store';
+import { __devtools, _devtoolsConnectionStatus, _devtoolsConnectionFailure } from './devtools-instrument.js';
 import { connect as _connect, status as _adapterStatus } from 'svelte-adapter-uws/client';
 import { now, clearTimer } from '../client-runtime.js';
 import { clientState, RpcError, pending, pendingUploads, _IS_DEV, _connectionLost } from './internal-state.js';
@@ -247,12 +248,14 @@ export function ensureDisconnectListener() {
 	_adapterStatus.subscribe(() => {})();
 	_bound = _connect();
 	disconnectListenerAttached = true;
+	if (__devtools) _bound.failure?.subscribe(_devtoolsConnectionFailure);
 
 	let lastOpenAt = 0;
 	let fastCloseCount = 0;
 	let cfTunnelWarned = false;
 
 	_bound.status.subscribe((s) => {
+		if (__devtools) _devtoolsConnectionStatus(s);
 		if (s === 'failed') {
 			// Before anything that can run app code: a call it makes must see it.
 			clientState.terminated = true;

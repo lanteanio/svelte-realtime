@@ -5210,7 +5210,7 @@ immediately purges payload-bearing history, pending, volatile, topic, error,
 and stream-preview state. Unsafe recursion remains capped at depth 5 and arrays
 at 50 items.
 
-The RPC tab shows pending calls (with elapsed time) and a 50-entry ring buffer of recent results (ok/err, duration). The Connection tab summarizes the same counters.
+The RPC tab shows pending calls (with elapsed time) and a 50-entry ring buffer of recent results (ok/err, duration). The Connection tab shows the bound connection state, time since its transition, stable failure class/code, recovery guidance, and counters. The header also shows the state. External close reasons and authentication text are never retained. Opening DevTools does not create a connection.
 
 The Smooth tab is a per-stream inspector for `live.smooth` views (multiplayer prediction + lag compensation). For each live smoothed channel it pulls the prediction/interpolation telemetry from the adapter on each refresh tick: `predicting` vs `Prediction paused - waiting for resync` (`Command window full`; prediction resumes after the next acknowledgement), the un-acked reconciliation window (`unacked`/`windowCap`), the most recent reconciliation `divergence` and whether a correction is still `easing`, the remote-entity count, the `interp delay`, and whether the server clock is `synced`. Pull-based, so a smoothed view costs nothing until the tab is open. It needs `svelte-adapter-uws >= 0.6.0-next.35` (the channel's `stats()` surface); on an older adapter the row reads "telemetry unavailable".
 

@@ -141,6 +141,10 @@ function init() {
 	`;
 	header.innerHTML = '<span style="font-weight:bold;color:var(--svr-dt-accent, #ff819a)">svelte-realtime</span>';
 
+	const badge = document.createElement('span');
+	badge.id = 'svr-dt-connection';
+	header.appendChild(badge);
+
 	const closeBtn = document.createElement('button');
 	closeBtn.textContent = 'x';
 	closeBtn.dataset.ariaLabel = 'Close DevTools';
@@ -348,6 +352,8 @@ function render(el) {
 		return;
 	}
 
+	const badge = document.getElementById('svr-dt-connection');
+	if (badge) badge.textContent = message(connectionLabel(devtools.connection?.state || 'idle'));
 	if (activeTab === 'rpcs') {
 		renderRpcs(el, devtools);
 	} else if (activeTab === 'streams') {
@@ -610,10 +616,29 @@ function renderSmooth(el, dt) {
 	}
 }
 
+/** @param {string} state */
+function connectionLabel(state) {
+ return ({ idle: 'Not connected', connecting: 'Connecting', open: 'Connected', disconnected: 'Disconnected', suspended: 'Connected in background', failed: 'Connection stopped' })[state] || state;
+}
+/** @param {any} connection */
+function connectionAction(connection) {
+ if (connection.state === 'open' || connection.state === 'suspended') return 'Connection is ready.';
+ if (connection.state === 'idle') return 'Use a realtime client to connect.';
+ if (connection.state === 'failed') return connection.failure?.class === 'AUTH' || connection.failure?.class === 'TERMINAL' ? 'Check your session, then reload to reconnect.' : 'Reload to start a new connection.';
+ if (connection.failure?.class === 'THROTTLE') return 'Server is busy. Automatic retry is pending.';
+ if (connection.failure?.class === 'DRAIN') return 'Server is restarting. Automatic reconnect is pending.';
+ return 'Waiting for automatic reconnect. Check the network if this continues.';
+}
+
 /** @param {HTMLElement} el @param {any} dt */
 function renderConnection(el, dt) {
 	const pending = dt.pending ? dt.pending.size : 0;
+	const connection = dt.connection || { state: 'idle', since: null, failure: null };
+	const cause = connection.failure;
 	const html = `
+		<div data-key="connection-state"><strong>${esc(message(connectionLabel(connection.state)))}</strong> ${esc(_ageString(connection.since))}</div>
+		${cause ? `<div>${esc(message('Cause:'))} ${isolated(cause.class)} ${isolated(cause.kind)} ${isolated(cause.code ?? cause.status ?? '')}</div>` : ''}
+		<div>${esc(message(connectionAction(connection)))}</div>
 		<div style="padding:2px 0">${esc(message('Pending RPCs: {count}', { count: number(pending) }))}</div>
 		<div style="padding:2px 0">${esc(message('History entries: {count}', { count: number((dt.history || []).filter(Boolean).length) }))}</div>
 		<div style="padding:2px 0">${esc(message('Active streams: {count}', { count: number(dt.streams ? dt.streams.size : 0) }))}</div>
