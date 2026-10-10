@@ -19,6 +19,7 @@
 
 import { _IS_DEV } from './env.js';
 import { wallEpoch } from '../shared/runtime.js';
+import { emitOperationalEvent } from '../shared/diagnostic.js';
 import { _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { _validTenantId, _tenantKey } from './tenant.js';
 import { _validIdReason, _MAX_USER_ID_LENGTH } from './validate.js';
@@ -124,12 +125,13 @@ const _descriptors = [
 	// The webhook dead-letter queue retains full event payloads on delivery
 	// exhaustion. Purge rides the store's own purgeUser (the in-memory store
 	// stamps a capture-time userId via its forgetUserId extractor; the durable
-	// stores implement the same contract). A store without purgeUser - or
-	// records captured without an extractor - cannot attribute events to a
-	// user and reports 0 (the documented limitation, never a silent lie).
+	// stores implement the same contract). An enabled store must provide its
+	// erasure method; records without attribution remain the app's responsibility.
 	{ name: 'webhookDeadLetter', run: (t, u) => {
 		const dl = state.webhookDeadLetter;
-		return dl && typeof dl.purgeUser === 'function' ? dl.purgeUser(t, u) : 0;
+		if (!dl) return 0;
+		if (typeof dl.purgeUser !== 'function') throw new Error('Dead-letter store has no purgeUser method');
+		return dl.purgeUser(t, u);
 	} },
 	// k-anonymity cohorts: withdraw the user from every live aggregate's
 	// contributor set so the k-gate re-evaluates without them (reducer state
@@ -191,6 +193,18 @@ function _publishOwnerSuccessions(tenantId, successions) {
 	return n;
 }
 
+/** @param {string[]} failedSurfaces @param {number} rowsAffected */
+function _reportIncomplete(failedSurfaces, rowsAffected) {
+	try {
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.forget', event: 'forget.incomplete',
+			severity: 'error', dataClass: 'operational',
+			message: 'Erasure could not be confirmed for every configured surface; resolve the failed cleanup and retry.',
+			attributes: { failedSurfaces: [...failedSurfaces], rowsAffected }
+		});
+	} catch { /* Diagnostic failures must not interrupt the remaining cleanup. */ }
+}
+
 const _liveForget = async function forget(userId, opts) {
 	if (typeof userId !== 'string' || userId.length === 0) {
 		throw new LiveError('INVALID_REQUEST', 'live.forget(userId) requires a non-empty userId string');
@@ -237,6 +251,7 @@ const _liveForget = async function forget(userId, opts) {
 	try {
 		/** @type {Record<string, number>} */
 		const surfaces = {};
+		const failedSurfaces = [];
 		let rowsAffected = 0;
 
 		// In-memory descriptors run sequentially: the surface is small, the work
@@ -245,10 +260,10 @@ const _liveForget = async function forget(userId, opts) {
 			let count = 0;
 			try {
 				count = await d.run(tenantId, userId, cascade);
-			} catch (err) {
-				// A single surface failing must not abort the erasure of the
-				// others (partial erasure beats none). Record and continue.
-				if (_IS_DEV) console.error('[svelte-realtime] live.forget surface "' + d.name + '" threw:', err);
+				if (!Number.isSafeInteger(count) || count < 0) throw new Error('Purge method did not confirm a valid removal count');
+			} catch {
+				// Attempt every independent surface before reporting incomplete work.
+				failedSurfaces.push(d.name);
 				count = 0;
 			}
 			const n = typeof count === 'number' && count > 0 ? count : 0;
@@ -263,8 +278,8 @@ const _liveForget = async function forget(userId, opts) {
 			let dropped = 0;
 			try {
 				dropped = _purgeCrdtDocs(crdtDocs);
-			} catch (err) {
-				if (_IS_DEV) console.error('[svelte-realtime] live.forget cascade.crdt threw:', err);
+			} catch {
+				failedSurfaces.push('crdtDocs');
 			}
 			surfaces.crdtDocs = dropped;
 			rowsAffected += dropped;
@@ -305,19 +320,9 @@ const _liveForget = async function forget(userId, opts) {
 					surfaces.durable = 0;
 				}
 			} catch (err) {
-				// A durable failure is a real erasure failure (an un-purged row is
-				// a compliance breach). Surface it to the caller - unlike an
-				// in-memory surface, we do NOT swallow it, so the app can retry.
-				// Log without the `ownerSuccessions` the store attaches for
-				// announcement: those carry SUCCESSOR user ids (other users), which
-				// must not reach a log even in dev (no PII in logs). The
-				// message + underlying failure reasons stay for debuggability.
-				if (_IS_DEV) {
-					const logErr = err && typeof err === 'object' && 'ownerSuccessions' in /** @type {any} */ (err)
-						? { message: /** @type {any} */ (err).message, failures: /** @type {any} */ (err).failures, partialCounts: /** @type {any} */ (err).partialCounts }
-						: err;
-					console.error('[svelte-realtime] live.forget durable store.purgeUser threw:', logErr);
-				}
+				// Keep failure metadata bounded and omit store exceptions, which can
+				// include erased or successor identities and payloads.
+				_reportIncomplete([...failedSurfaces, 'durable'], rowsAffected);
 				// The store may have COMMITTED some owner successions before a
 				// sibling room's transient failure aborted the leg: those evictions
 				// are durable and authoritative, so announce them now even though the
@@ -347,6 +352,11 @@ const _liveForget = async function forget(userId, opts) {
 			if (successions !== null) {
 				surfaces.ownerSuccessions = _publishOwnerSuccessions(tenantId, successions);
 			}
+		}
+
+		if (failedSurfaces.length) {
+			_reportIncomplete(failedSurfaces, rowsAffected);
+			throw new LiveError('FORGET_INCOMPLETE', 'Erasure is incomplete; resolve failed cleanup surfaces and retry');
 		}
 
 		const at = wallEpoch();

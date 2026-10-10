@@ -121,6 +121,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Documentation route labels and needs reject Markdown and URL injection outside their declared owner.
 
+- Erasure rejects incomplete in-memory and document cleanup after attempting the remaining surfaces, and reports bounded operator diagnostics without private failure payloads.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

@@ -155,7 +155,6 @@ function _crdtRelease(rec, ws, name) {
 	if (rec.authority) rec.authority.release(name);
 }
 
-let _crdtDropWarned = false;
 
 /**
  * Right-to-erasure whole-document drop: erase the named documents' loaded
@@ -170,30 +169,27 @@ let _crdtDropWarned = false;
  * `persist` store. Connected editors observe the document as unloaded; their
  * local replicas die with their sessions.
  *
- * Returns the number of replicas dropped. On an adapter whose authority
- * predates `drop()`, dev-warns once and returns what it could do (0 for those
- * declarations) - the forget result then under-counts rather than lies.
+ * Returns the number of replicas dropped. Missing or failed drop methods
+ * reject after all named replicas are attempted, so an incomplete cascade
+ * cannot be reported as a completed erasure.
  * @param {string[]} names bare document topic names
  * @returns {number}
  */
 export function _purgeCrdtDocs(names) {
 	let count = 0;
+	let failed = false;
 	for (const rec of _crdtDecls.values()) {
 		if (!rec.authority) continue;
 		if (typeof rec.authority.drop !== 'function') {
-			if (_IS_DEV && !_crdtDropWarned) {
-				_crdtDropWarned = true;
-				console.warn(
-					'[svelte-realtime] live.forget cascade.crdt: this adapter\'s document authority has no drop(topic) ' +
-					'(needs svelte-adapter-uws >= 0.6.0-next.71); the loaded replicas were NOT dropped.'
-				);
-			}
+			if (names.length) failed = true;
 			continue;
 		}
 		for (const name of names) {
-			if (rec.authority.drop(name)) count++;
+			try { if (rec.authority.drop(name)) count++; }
+			catch { failed = true; }
 		}
 	}
+	if (failed) throw new Error('Some loaded document replicas could not be erased');
 	return count;
 }
 

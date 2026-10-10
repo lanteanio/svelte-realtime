@@ -700,11 +700,10 @@ describe('live.forget - webhook dead-letter queue', () => {
 		expect(store.list().every((r) => r.userId !== 'u1')).toBe(true);
 	});
 
-	it('reports 0 for a store without purgeUser (documented limitation, no throw)', async () => {
+	it('rejects incomplete erasure for an enabled store without purgeUser', async () => {
 		const { configureWebhooks } = await import('../src/server.js');
 		configureWebhooks({ deadLetter: { add: () => '1', get: () => null, remove: () => false, count: () => 0, list: () => [], summary: () => ({}), clear: () => {} } });
-		const res = await live.forget('u1');
-		expect(res.surfaces.webhookDeadLetter).toBe(0);
+		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 	});
 });
 
@@ -767,11 +766,10 @@ describe('live.forget - cascade.crdt whole-document drop', () => {
 		expect(res.rowsAffected).toBeGreaterThanOrEqual(1);
 	});
 
-	it('reports 0 when the adapter authority has no drop()', async () => {
+	it('rejects incomplete erasure when the adapter authority has no drop()', async () => {
 		const { _crdtDecls } = await import('../src/server/crdt.js');
 		_crdtDecls.set('decl-1', { key: 'decl-1', authority: {} });
-		const res = await live.forget('u1', { cascade: { crdt: ['notes:42'] } });
-		expect(res.surfaces.crdtDocs).toBe(0);
+		await expect(live.forget('u1', { cascade: { crdt: ['notes:42'] } })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 	});
 });
 

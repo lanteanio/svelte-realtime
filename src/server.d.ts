@@ -2160,7 +2160,12 @@ export namespace live {
 	 * `configureForget({ store })`; the promise resolves ONLY after the durable
 	 * store confirms (resolving early would be a compliance lie). A durable
 	 * failure rejects with `LiveError('FORGET_STORE_FAILED')` so the incomplete
-	 * erasure can be retried. A store reporting cluster-wide owner evictions
+	 * erasure can be retried. In-memory or named-document failures reject with
+	 * FORGET_INCOMPLETE after attempting every independent surface and the
+	 * durable store. An enabled dead-letter store must provide purgeUser.
+	 * The forget.incomplete operator event names failed surfaces without user
+	 * IDs or exception payloads; onForget runs only on complete success.
+	 * A store reporting cluster-wide owner evictions
 	 * (the `ownerSuccessions` envelope) has each successor published on the
 	 * room's `:owner` topic through the replay buffer, so subscribers and
 	 * resumers on every replica see the successor instead of the erased owner.
@@ -4718,7 +4723,7 @@ export interface DeadLetterStore {
 	 * stamp (the `forgetUserId` extractor) matches. Records captured without
 	 * an extractor carry no stamp and are not user-attributable. Optional so
 	 * a minimal custom store still satisfies the interface; `live.forget`
-	 * reports 0 for a store without it.
+	 * rejects FORGET_INCOMPLETE for an enabled store without it.
 	 */
 	purgeUser?(tenantId: string | null, userId: string): number | Promise<number>;
 	clear(): void;
