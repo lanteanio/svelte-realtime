@@ -133,6 +133,12 @@ describe('runtime emission inventory', () => {
 		expect(inventory.dynamicSites).toEqual(['src/example.js:1']);
 	});
 
+	it('lists a dynamic console branch alongside its known prefix', () => {
+		const inventory = scan("console.warn(ready ? '[svelte-realtime] Known' : dynamicMessage);");
+		expect(inventory.diagnostics[0].prefixes).toEqual(['[svelte-realtime] Known']);
+		expect(inventory.dynamicSites).toEqual(['src/example.js:1']);
+	});
+
 	it('keeps source changes reviewable and escapes literal prefixes in generated Markdown', () => {
 		const before = scan("new LiveError('VALIDATION', 'before');");
 		const after = scan("new LiveError('VALIDATION', '<script>|after\\n');");

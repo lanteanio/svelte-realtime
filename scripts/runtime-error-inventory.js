@@ -98,6 +98,7 @@ export function scanRuntimeErrors(files = sources()) {
 					if (node.arguments[0]?.arguments?.[0]?.type !== 'ObjectExpression') dynamicSites.add(path + ':' + node.loc.start.line);
 					return;
 				}
+				if (!complete(node.arguments[0], true)) dynamicSites.add(path + ':' + node.loc.start.line);
 				for (const prefix of message) {
 					const id = 'console-' + createHash('sha256').update(prefix).digest('hex').slice(0, 16);
 					record(diagnostics, id, [prefix], path, { kind: 'legacy console prefix' });
