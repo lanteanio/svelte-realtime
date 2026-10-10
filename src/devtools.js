@@ -542,34 +542,38 @@ function _ageString(t) {
  return relativeFormat.format(-Math.floor(ms / 3_600_000), 'hour');
 }
 
+const payloadSegmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
+
 /**
- * Render a payload value for the recent-events list. Returns a JSON
- * string truncated to ~200 chars in pretty mode (~500 chars in raw
- * mode) so a malformed-large-payload doesn't blow out the panel.
+ * Render a JSON preview capped at 200 graphemes in pretty mode or 500 in raw
+ * mode. Without grapheme segmentation, cap by code point to preserve surrogate
+ * pairs while keeping large payloads out of the panel.
  * @param {any} value
  * @param {boolean} raw
  * @returns {string}
  */
-const payloadSegmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null;
-
 function _renderPayload(value, raw) {
 	if (value === undefined) return '';
 	let str;
 	try { str = JSON.stringify(value) ?? String(value); } catch { str = String(value); }
 	const cap = raw ? 500 : 200;
-	if (str.length > cap && payloadSegmenter) {
+	if (str.length > cap) {
 		let end = 0, count = 0;
-		const segments = payloadSegmenter.segment(str);
-		for (const item of segments) {
-			if (count++ === cap) break;
-			end += item.segment.length;
+		if (payloadSegmenter) {
+			for (const item of payloadSegmenter.segment(str)) {
+				if (count++ === cap) break;
+				end += item.segment.length;
+			}
+		} else {
+			for (const point of str) {
+				if (count++ === cap) break;
+				end += point.length;
+			}
 		}
 		if (end < str.length) str = str.slice(0, end) + '... [+' + (str.length - end) + ' code units]';
 	}
-	// Without segmentation, preserve the whole string instead of breaking a grapheme.
 	return str;
 }
-
 /** @param {HTMLElement} el @param {any} dt */
 function renderStreams(el, dt) {
 	streamsPaused = dt.paused === true;

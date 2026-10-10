@@ -379,16 +379,24 @@ it('keeps application labels unchanged when configuring overlay translations', a
  await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).click();
  expect(await page.getByRole('button', { name: 'Close translated' }).evaluate(el => el === document.activeElement)).toBe(true);
 });
-it('preserves complete payload text when grapheme segmentation is unavailable', async () => {
+it.each([false, true])('bounds code-point previews without grapheme segmentation (raw=%s)', async raw => {
  await page.addInitScript(() => { Intl.Segmenter = undefined; });
  await page.reload();
  await page.getByRole('button', { name: 'Toggle svelte-realtime DevTools' }).waitFor();
  await streamsFixture();
- const payload = 'a'.repeat(198) + 'e\u0301\u{1f469}\u200d\u{1f4bb}' + 'tail';
+ const cap = raw ? 500 : 200;
+ const payload = 'a'.repeat(cap - 2) + String.fromCodePoint(0x1f469, 0x200d, 0x1f4bb, 0x65, 0x301) + 'tail'.repeat(2500);
  await page.evaluate(data => { window.realDevtools.streams.get('chat').recentEvents = [{ event: 'update', data, ts: Date.now() }]; }, payload);
  await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ if (raw) await page.getByRole('button', { name: 'Raw', exact: true }).click();
  await page.locator('[data-action="toggle-stream"]').click();
- expect(await page.locator('#svr-dt-content').textContent()).toContain(payload);
+ const source = JSON.stringify(payload);
+ const prefix = Array.from(source).slice(0, cap).join('');
+ const expected = prefix + '... [+' + (source.length - prefix.length) + ' code units]';
+ const preview = await page.locator('#svr-dt-content bdi[dir="ltr"]').textContent();
+ expect(preview).toBe(expected);
+ expect(preview.length).toBeLessThan(cap + 50);
+ expect(preview.isWellFormed()).toBe(true);
 });
 it('announces later distinct RPC failures even when their summary text matches', async () => {
  await streamsFixture();
