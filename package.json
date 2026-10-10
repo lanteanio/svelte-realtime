@@ -89,6 +89,7 @@
     "pretest": "npm run check",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:devtools": "vitest run --config vitest.devtools.config.js",
     "test:e2e": "playwright test --config test/e2e/playwright.config.js",
     "test:chaos": "playwright test --config test/chaos/playwright.config.js",
     "test:fuzz": "node test/fuzz-wire.mjs",

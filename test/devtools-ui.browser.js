@@ -240,3 +240,28 @@ it('formats telemetry by locale and isolates identifiers in right-to-left presen
  expect(await page.locator('[data-action="toggle-stream"] bdi').getAttribute('dir')).toBe('auto');
  expect(await page.locator('#svr-dt-content').textContent()).toContain(new Intl.RelativeTimeFormat('ar-EG', { numeric: 'auto' }).format(0, 'second'));
 });
+
+it('keeps focus on reordered stream controls and falls back when the stream leaves', async () => {
+ await streamsFixture();
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ await page.locator('[data-stream-path="chat"]').focus();
+ await page.evaluate(() => {
+  const dt = window.__svelte_realtime_devtools;
+  window.focusedRow = document.activeElement;
+  dt.streams.set('other', { path: 'other', subCount: 1, recentEvents: [] });
+  document.getElementById('svr-dt-tab-streams').click();
+  dt.streams = new Map([...dt.streams].reverse());
+  document.getElementById('svr-dt-tab-streams').click();
+ });
+ expect(await page.locator('[data-stream-path="chat"]').evaluate(el => el === window.focusedRow && el === document.activeElement)).toBe(true);
+ await page.evaluate(() => {
+  window.__svelte_realtime_devtools.streams.delete('other');
+  document.getElementById('svr-dt-tab-streams').click();
+ });
+ expect(await page.locator('[data-stream-path="chat"]').evaluate(el => el === document.activeElement)).toBe(true);
+ await page.evaluate(() => {
+  window.__svelte_realtime_devtools.streams.delete('chat');
+  document.getElementById('svr-dt-tab-streams').click();
+ });
+ expect(await page.getByRole('tabpanel').evaluate(el => el === document.activeElement)).toBe(true);
+});

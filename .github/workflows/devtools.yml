@@ -1,0 +1,27 @@
+name: DevTools browser checks
+
+on:
+  pull_request:
+    paths: ['src/**', 'test/devtools-ui.browser.js', 'vitest.devtools.config.js', 'package*.json', '.github/workflows/devtools.yml']
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  devtools:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:devtools

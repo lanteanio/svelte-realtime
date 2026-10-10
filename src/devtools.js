@@ -377,6 +377,7 @@ let _lastRenderedHtml = '';
  * @param {string} html
  */
 function patchContent(element, html) {
+ const focused = element.contains(document.activeElement) ? document.activeElement : null;
  const template = document.createElement('template');
  template.innerHTML = html;
  /** @param {Node} node */
@@ -400,6 +401,10 @@ function patchContent(element, html) {
   for (const node of Array.from(parent.childNodes)) if (!retained.has(node)) parent.removeChild(node);
  }
  patch(element, template.content);
+ if (focused instanceof HTMLElement && document.activeElement !== focused) {
+  if (focused.isConnected) focused.focus({ preventScroll: true });
+  else element.focus({ preventScroll: true });
+ }
 }
 
 /** @param {HTMLElement} el @param {any} dt */
