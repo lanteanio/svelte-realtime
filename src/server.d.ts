@@ -2204,6 +2204,7 @@ export namespace live {
 			tenantId?: string | null;
 			cascade?: boolean | { crdt?: string[] };
 			onForget?: (record: {
+				/** Stable unkeyed SHA-256 prefix (32 hex characters); linkable and enumerable, not anonymous. */
 				userIdHash: string;
 				tenantId: string | null;
 				cascade: boolean | { crdt?: string[] };

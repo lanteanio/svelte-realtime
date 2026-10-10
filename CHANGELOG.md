@@ -17,6 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Documented erasure-hook user hashes as pseudonymous identifiers with access and retention requirements.
+
 - Described owner-succession replay behavior directly in its regression test.
 
 - Clarified that tenant prefixes and logical topics share the transport topic-length budget.

@@ -88,9 +88,9 @@ export function configureForget(config) {
 }
 
 /**
- * PII-free fingerprint of a userId for the audit hook - a forget record must
- * never carry the raw id it is erasing (no PII in logs). Matches the idempotency
- * identity fingerprint (sha256, 32 hex chars).
+ * Stable pseudonymous fingerprint for the optional erasure hook. The raw id
+ * is omitted, but an unkeyed hash remains linkable and enumerable for guessable
+ * ids. Matches the idempotency identity fingerprint (sha256, 32 hex chars).
  * @param {string} userId
  * @returns {string}
  */
@@ -351,8 +351,8 @@ const _liveForget = async function forget(userId, opts) {
 
 		const at = wallEpoch();
 
-		// PII-free audit hook: the app's record of the erasure. Receives a HASHED
-		// userId (never the raw id), the tenant, the cascade flag, and the counts.
+		// Optional erasure hook: receives a stable pseudonymous hash of the
+		// userId, the tenant, the cascade flag, and the counts.
 		// Caught-and-recorded: a throwing hook never aborts a completed erasure.
 		const onForget = o.onForget;
 		if (onForget) {

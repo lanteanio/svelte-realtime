@@ -1,7 +1,7 @@
 // live.forget: right-to-erasure. Covers the in-memory cascade (push, presence
 // with grace-timer clear, rate-limit, idempotency reverse index), tenant
 // scoping (no cross-tenant / cross-user bleed), the durable store seam
-// (resolve-after-confirm + failure surfacing), the PII-free onForget hook, the
+// (resolve-after-confirm + failure surfacing), the pseudonymous onForget record, the
 // descriptor-completeness guard, and the constant-shape result.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
