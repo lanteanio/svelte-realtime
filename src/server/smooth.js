@@ -3010,7 +3010,7 @@ export const _smoothRegister = function smooth(config) {
 				if (rec.authority.size === 0 && rec.timer === null) _smoothForget(rec);
 				throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
 			}
-			if (!_smoothSyncAdmit(rec, _getIdentityKey(ctx))) {
+			if (!_smoothSyncAdmit(rec, key)) {
 				throw new LiveError(
 					'RATE_LIMITED',
 					'smooth re-sync rate exceeded (max ' + _SMOOTH_SYNC_MAX_PER_WINDOW + ' per ' +
