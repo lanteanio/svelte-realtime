@@ -358,12 +358,12 @@ async function _fireClaim(wireTopic, entry) {
 		if (_IS_DEV) {
 			console.warn('[svelte-realtime] alarm for "' + wireTopic + '" missed its window by ' + lateMs + 'ms (misfireMs=' + entry.misfireMs + '); skipped.');
 		}
-		await _settleAlarm(entry.store, wireTopic, entry.generation, attempt, true);
+		if (entry.store) await _settleAlarm(entry.store, wireTopic, entry.generation, attempt, true);
 		return;
 	}
 
 	const succeeded = await _invokeAlarm(wireTopic, entry.onAlarm, entry.meta, { at: entry.at, firedAt, lateMs, recovered: false, misfireMs: entry.misfireMs, generation: entry.generation ?? null, attempt });
-	await _settleAlarm(entry.store, wireTopic, entry.generation, attempt, succeeded);
+	if (entry.store) await _settleAlarm(entry.store, wireTopic, entry.generation, attempt, succeeded);
 }
 
 async function _settleAlarm(store, wireTopic, generation, attempt, succeeded) {
