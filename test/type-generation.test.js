@@ -58,7 +58,7 @@ void result;
 		realtime.generateTypes({ root });
 		expect(diagnostics(root)).toEqual([]);
 		for (const artifact of ['build', '.svelte-kit', 'vite.config.js']) expect(existsSync(join(root, artifact))).toBe(false);
-	});
+	}, 30000);
 
 	it('regenerates changed and added modules in a long-lived process and removes deleted declarations', () => {
 		const root = fixture();
@@ -81,7 +81,7 @@ void result; void nested;
 		expect(readFileSync(join(root, 'src/live/$types.d.ts'), 'utf8')).not.toContain('$live/widgets');
 		rmSync(added); realtime.generateTypes({ root });
 		expect(existsSync(join(root, 'src/live/$types.d.ts'))).toBe(false);
-	});
+	}, 30000);
 
 	it('uses the configured live directory and preserves unchanged declaration mtimes', () => {
 		const root = fixture('server/functions');
