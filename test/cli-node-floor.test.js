@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnSync, PROCESS_TEST_TIMEOUT, removeFixture } from './process-fixtures.js';
-import { mkdtempSync, readdirSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync } from 'node:fs';
+import { isBuiltin } from 'node:module';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { parse } from '@babel/parser';
 
 const fixtures = [];
 const testRoot = resolve(import.meta.dirname);
@@ -34,7 +36,13 @@ await import(${JSON.stringify(cli)});`;
 }
 
 describe('scaffold Node prerequisite', () => {
-	it.each(['20.19.0', '22.0.0', '22.11.0'])('rejects Node %s before prompts or external commands', version => {
+	it('keeps dependency resolution behind the Node prerequisite', () => {
+		const entry = parse(readFileSync(new URL(cli), 'utf8'), { sourceType: 'module' });
+		const dependencies = entry.program.body.filter(node => node.type === 'ImportDeclaration').map(node => node.source.value);
+		expect(dependencies.filter(specifier => !isBuiltin(specifier))).toEqual([]);
+	});
+
+	it.each(['18.0.0', '20.0.0', '20.11.1', '20.19.0', '22.0.0', '22.11.0'])('rejects Node %s before prompts or external commands', version => {
 		const result = runCli(version, ['example-app', '--template', 'example']);
 		expect(result.status).toBe(1);
 		expect(result.output).toContain('Node 22.12 or newer');

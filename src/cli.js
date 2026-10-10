@@ -3,8 +3,15 @@
 import { execFileSync } from 'child_process';
 import { writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
 import { resolve, join } from 'path';
-import * as p from '@clack/prompts';
-import {
+// Reject the build toolchain floor before loading dependencies or starting work.
+const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
+if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 12)) {
+	console.error('[svelte-realtime] Scaffolding requires Node 22.12 or newer; found ' + process.versions.node + '. Upgrade Node before creating a project.');
+	process.exit(1);
+}
+
+const p = await import('@clack/prompts');
+const {
 	detectAgent,
 	parseArgs,
 	renderScaffoldAuthWarningStatement,
@@ -15,14 +22,7 @@ import {
 	SCAFFOLD_SV_SPEC,
 	SCAFFOLD_UWS_SPEC,
 	VALID_NAME_RE
-} from './cli-utils.js';
-
-// Reject the build toolchain floor before prompts, project creation or installs.
-const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
-if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 12)) {
-	console.error('[svelte-realtime] Scaffolding requires Node 22.12 or newer; found ' + process.versions.node + '. Upgrade Node before creating a project.');
-	process.exit(1);
-}
+} = await import('./cli-utils.js');
 
 const IS_WIN = process.platform === 'win32';
 
