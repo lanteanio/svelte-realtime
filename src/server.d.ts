@@ -432,7 +432,8 @@ export interface LiveContext<UserData = unknown> {
 	 * Durable across restart + cluster single-fire when a store + leader are wired
 	 * via `configureAlarm`; in-memory (survives the room going idle within the
 	 * process) otherwise. Await the returned promise: it resolves after durable
-	 * commit and timer installation, and rejects on storage failure or supersession.
+	 * commit and timer installation, and rejects on storage failure or when a newer
+	 * schedule for the same room was committed first.
 	 * Same-process writes to a room execute in invocation order.
 	 *
 	 * @example
