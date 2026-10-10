@@ -219,6 +219,24 @@ export const _roomRegister = function room(config) {
 	}
 
 	const roomExport = {};
+	// Release only the ref this socket actually acquired. A refused join may
+	// remain subscribed, and an erased identity may later have a different ref.
+	const socketMembers = new WeakMap();
+	const subscriptionMembers = new WeakMap();
+	const beginMember = (ctx, topic) => {
+		if (!ctx.ws) return;
+		let members = socketMembers.get(ctx.ws);
+		if (!members) { members = new Map(); socketMembers.set(ctx.ws, members); }
+		let slots = members.get(topic);
+		if (!slots) { slots = new Set(); members.set(topic, slots); }
+		const slot = { ref: null };
+		slots.add(slot);
+		subscriptionMembers.set(ctx, slot);
+	};
+	const rememberMember = (ctx, member) => {
+		const slot = subscriptionMembers.get(ctx);
+		if (slot) slot.ref = member;
+	};
 
 	// Enumeration registry: which of this room's topics currently have
 	// subscribers, with a subscriber count and the `meta` captured at the moment
@@ -369,6 +387,7 @@ export const _roomRegister = function room(config) {
 		key: keyField,
 		alarm: alarmCfg,
 		onSubscribe: (presenceFn || isEnumerable || ownerEnabled) ? async (ctx, topic, args) => {
+			if (presenceFn || ownerEnabled) beginMember(ctx, topic);
 			// Enumeration is best-effort and must never suppress the presence join
 			// below - the two are independent concerns sharing one hook.
 			if (isEnumerable) { try { await _enumOnSub(ctx, topic, args); } catch { /* enum is best-effort */ } }
@@ -387,6 +406,7 @@ export const _roomRegister = function room(config) {
 				if (ref) {
 					if (ref.timer) { clearTimer(ref.timer); ref.timer = null; }
 					ref.count++;
+					rememberMember(ctx, ref);
 					_presenceRef.delete(refKey);
 					_presenceRef.set(refKey, ref);
 					if (presenceFn) _presenceClaimResolve(ctx.ws, topic, { key: userId, data: ref.data });
@@ -440,6 +460,7 @@ export const _roomRegister = function room(config) {
 			let joined;
 			const member = { count: 1, timer: null, data: presenceData, joining: /** @type {Promise<void> | null} */ (new Promise((r) => { joined = r; })), gone: false };
 			_presenceRef.set(refKey, member);
+			rememberMember(ctx, member);
 			try {
 				// Sequence the joiner's OWN roster entry into the paired :presence
 				// subscribe response (see room-owner.js): the batch runs its items in
@@ -511,6 +532,17 @@ export const _roomRegister = function room(config) {
 			const refKey = topic + '\0' + userId;
 
 			const ref = _presenceRef.get(refKey);
+			if (ctx.ws) {
+				const members = socketMembers.get(ctx.ws);
+				const slots = members?.get(topic);
+				// Rollback carries the subscribe ctx, so it must release that
+				// attempt rather than an earlier successful sub on this socket.
+				const slot = subscriptionMembers.get(ctx) || slots?.values().next().value;
+				const acquired = slots?.delete(slot) ? slot.ref : null;
+				if (slots?.size === 0) members.delete(topic);
+				if (members?.size === 0) socketMembers.delete(ctx.ws);
+				if (ref !== acquired) return;
+			}
 			if (!ref || ref.erasure || ref.leaving) return;
 
 			ref.count--;
