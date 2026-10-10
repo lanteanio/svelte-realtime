@@ -3114,6 +3114,72 @@ describe('MultiplayerRoom roster aggregation', () => {
 		return { deps: { ...fixed, bind: ([id]) => roomDeps(id) }, room: (id) => ({ ...fixed, ...roomDeps(id) }), sent, answer };
 	}
 
+	it('restores retained presence only after a reconnect joins, with offline releases winning', async () => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const deps = room('a');
+		const r = new MultiplayerRoom(deps);
+		answer('a');
+		r.acquireLock('title');
+		r.acquireLock('body');
+		const selection = { start: 1, end: 3 };
+		r.setSelection(selection);
+		r.setTyping(true);
+		selection.end = 99;
+		sent.length = 0;
+		deps.status.set('disconnected');
+		const released = r.releaseLock('title');
+		r.setTyping(false);
+		r.move({ x: 2 });
+		expect(sent).toEqual([]);
+		// Opening the socket does not mean the room has rejoined yet.
+		deps.status.set('open');
+		expect(sent).toEqual([]);
+		answer('a', 'attaching');
+		expect(sent).toEqual([]);
+		answer('a');
+		expect(sent).toEqual([
+			['a', 'releaseLock', { 'lock:title': null }],
+			['a', 'acquireLock', { 'lock:body': true }],
+			['a', 'setSelection', { selection: { start: 1, end: 3 } }],
+			['a', 'setTyping', { typing: false }],
+			['a', 'move', { x: 2 }]
+		]);
+		await expect(released).resolves.toBe('releaseLock-ack');
+		sent.length = 0;
+		deps.status.set('disconnected');
+		deps.status.set('open');
+		answer('a', 'attaching');
+		answer('a');
+		expect(sent).toEqual([
+			['a', 'acquireLock', { 'lock:body': true }],
+			['a', 'setSelection', { selection: { start: 1, end: 3 } }]
+		]);
+		r.destroy();
+	});
+
+	it('restores shared room fields once and forgets them when the final view leaves', async () => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const deps = room('a');
+		const first = new MultiplayerRoom(deps);
+		const second = new MultiplayerRoom(deps);
+		answer('a');
+		first.acquireLock('title');
+		sent.length = 0;
+		answer('a', 'attaching');
+		answer('a');
+		expect(sent).toEqual([['a', 'acquireLock', { 'lock:title': true }]]);
+		first.destroy();
+		second.destroy();
+		await Promise.resolve();
+		sent.length = 0;
+		const fresh = new MultiplayerRoom(room('a'));
+		answer('a');
+		expect(sent).toEqual([]);
+		fresh.destroy();
+	});
+
 	it('the README lock effect: the lock it takes on mount and after a switch waits for each join', async () => {
 		const probe = await loadOwnerProbe();
 		const { deps, sent, answer } = joiningRooms();

@@ -126,7 +126,7 @@ const _HELD_DELTA_KEYS = 64;
 /**
  * Per data store: its attach phase, kept current by one subscription that
  * lives as long as the store, and the sends waiting for its join.
- * @type {WeakMap<object, { phase: string | null, hold: JoinHold | null }>}
+ * @type {WeakMap<object, any>}
  */
 const _joins = new WeakMap();
 
@@ -134,21 +134,44 @@ const _joins = new WeakMap();
 function _joinOf(store) {
 	let j = _joins.get(store);
 	if (j === undefined) {
-		const state = { phase: /** @type {string | null} */ (null), hold: /** @type {JoinHold | null} */ (null) };
+		const state = {
+			phase: /** @type {string | null} */ (null), hold: /** @type {JoinHold | null} */ (null),
+			fields: new Map(), refs: 0, offline: false, waiting: false, attached: false
+		};
 		j = state;
 		_joins.set(store, j);
 		const phase = store.phase;
 		if (phase && typeof phase.subscribe === 'function') {
 			phase.subscribe((/** @type {string} */ p) => {
 				state.phase = p;
-				if (p === 'attaching' || state.hold === null) return;
+				if (p === 'attaching') {
+					if (state.attached) _restoreJoin(state);
+					return;
+				}
+				state.waiting = false;
+				if (p === 'attached') state.attached = true;
+				if (state.offline || state.hold === null) return;
 				const hold = state.hold;
 				state.hold = null;
 				hold.flush();
 			});
 		}
+		if (store.status && typeof store.status.subscribe === 'function') {
+			store.status.subscribe((/** @type {string} */ s) => {
+				if (s === 'reconnecting') _restoreJoin(state);
+			});
+		}
 	}
 	return j;
+}
+
+/** Keep the last fields behind the next confirmed membership attachment. */
+function _restoreJoin(state) {
+	state.waiting = true;
+	if (state.refs === 0 || state.fields.size === 0) return;
+	const hold = state.hold ??= new JoinHold();
+	const fields = hold.fields ??= new Map();
+	for (const [key, value] of state.fields) if (!fields.has(key)) fields.set(key, value);
 }
 
 /**
@@ -448,10 +471,21 @@ export class MultiplayerRoom {
 		this.#live = true;
 		const deps = this.#bound;
 		try {
+			const join = deps.membership ? _joinOf(deps.membership) : null;
+			if (join) {
+				join.refs++;
+				this.#unsubs.push(() => { if (--join.refs === 0) join.fields.clear(); });
+			}
 			// No room (a getter that names none) has no roster or cursor streams.
 			if (deps.presence) this.#unsubs.push(deps.presence.subscribe((v) => { this.#presence = v || []; }));
 			if (deps.cursors) this.#unsubs.push(deps.cursors.subscribe((v) => { this.#cursors = v || []; }));
-			this.#unsubs.push(deps.status.subscribe((v) => { this.#status = v; }));
+			this.#unsubs.push(deps.status.subscribe((v) => {
+				this.#status = v;
+				if (join) {
+					join.offline = v !== 'open' && v !== 'connected';
+					if (join.offline) _restoreJoin(join);
+				}
+			}));
 			// The room's data stream: subscribing it is what makes the local user
 			// a member others see (and a candidate for ownership). Its value is
 			// the room's data, which this view does not read. A watch() view is
@@ -650,8 +684,17 @@ export class MultiplayerRoom {
 		const m = b.membership;
 		if (!m) return send(...args);
 		const join = _joinOf(m);
+		if (name === 'setTyping' || name === 'setSelection' || name === 'acquireLock' || name === 'releaseLock') {
+			for (const [key, value] of Object.entries(args[0])) {
+				if (value == null || value === false) join.fields.delete(key);
+				else {
+					try { join.fields.set(key, { value: JSON.parse(JSON.stringify(value)), send }); }
+					catch { /* A value that cannot reach the wire cannot be restored. */ }
+				}
+			}
+		}
 		if (join.hold === null) {
-			if (join.phase !== 'attaching') {
+			if (join.phase !== 'attaching' && !join.offline && !join.waiting) {
 				// The room an effect names before the view has moved there: the view
 				// subscribes its data stream later in this same flush, so the send
 				// waits for that join as well. Should nothing subscribe it, what was
@@ -659,7 +702,7 @@ export class MultiplayerRoom {
 				if (join.phase === null || this.#ahead === null || b !== this.#ahead.bound) return send(...args);
 				const hold = new JoinHold();
 				Promise.resolve().then(() => {
-					if (join.hold !== hold || join.phase === 'attaching') return;
+					if (join.hold !== hold || join.phase === 'attaching' || join.offline || join.waiting) return;
 					join.hold = null;
 					hold.flush();
 				});

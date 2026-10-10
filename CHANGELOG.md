@@ -51,6 +51,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Multiplayer room views restore their latest selection, locks and typing after rejoining, and hold sends throughout connection outages. Offline releases override retained claims, and the final view leaving clears retained state.
+
 - Cron browser fixtures acknowledge subscriptions before reset, serialize requested ticks, and confirm empty server and client state.
 
 - Failed development module reloads restore aggregate window loaders and their boundary and slide timers, preserving autonomous window updates until the next successful reload.
