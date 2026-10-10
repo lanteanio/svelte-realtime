@@ -101,3 +101,30 @@ it('retains controls and focused stream nodes across ticks, toggles, and list in
  await page.waitForTimeout(1200);
  expect(await page.locator('[data-stream-path="chat"]').evaluate(el => el === document.activeElement && el === window.savedStream)).toBe(true);
 });
+
+it('fits a narrow viewport and remains reachable after movement and resize', async () => {
+ await page.setViewportSize({ width: 320, height: 240 });
+ await streamsFixture();
+ const panel = page.getByRole('region', { name: 'svelte-realtime DevTools' });
+ const inside = async () => {
+  const rect = await panel.boundingBox();
+  const size = page.viewportSize();
+  expect(rect.x).toBeGreaterThanOrEqual(0);
+  expect(rect.y).toBeGreaterThanOrEqual(0);
+  expect(rect.x + rect.width).toBeLessThanOrEqual(size.width);
+  expect(rect.y + rect.height).toBeLessThanOrEqual(size.height);
+ };
+ await inside();
+ const move = page.getByRole('button', { name: 'Move DevTools' });
+ await move.focus();
+ await page.keyboard.press('Home');
+ await page.keyboard.press('ArrowLeft');
+ await page.keyboard.press('ArrowUp');
+ await inside();
+ await page.keyboard.press('End');
+ await inside();
+ await page.setViewportSize({ width: 250, height: 200 });
+ await inside();
+ await move.click();
+ await inside();
+});

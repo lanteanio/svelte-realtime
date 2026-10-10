@@ -49,6 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - DevTools preserves focused controls and stream rows during telemetry refreshes.
 
+- DevTools fits small viewports and supports clamped pointer movement, keyboard movement, and corner docking.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

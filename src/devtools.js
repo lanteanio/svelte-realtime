@@ -44,9 +44,9 @@ function _forceRerender() {
 function toggle() {
 	visible = !visible;
 	if (visible) previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-	if (panel) panel.style.display = visible ? 'block' : 'none';
+	if (panel) panel.style.display = visible ? 'flex' : 'none';
 	launcher?.setAttribute('aria-expanded', String(visible));
-	if (visible) panel?.querySelector('button')?.focus();
+	if (visible) panel?.querySelector('button[aria-label="Close DevTools"]')?.focus();
 	else if (previousFocus?.isConnected) previousFocus.focus();
 	else launcher?.focus();
 	if (visible && !refreshInterval) {
@@ -81,7 +81,7 @@ function init() {
 	panel.setAttribute('role', 'region');
 	panel.setAttribute('aria-label', 'svelte-realtime DevTools');
 	panel.style.cssText = `
-		display: none; position: fixed; bottom: 10px; right: 10px; width: 420px; max-height: 400px;
+		display: none; flex-direction: column; box-sizing: border-box; position: fixed; bottom: 10px; right: 10px; width: min(420px, calc(100vw - 20px)); max-height: min(400px, calc(100dvh - 20px));
 		background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 8px;
 		font-family: monospace; font-size: 12px; z-index: 99999; overflow: hidden;
 		box-shadow: 0 4px 20px rgba(0,0,0,0.5);
@@ -90,7 +90,7 @@ function init() {
 	const header = document.createElement('div');
 	header.style.cssText = `
 		padding: 6px 10px; background: #16213e; display: flex; justify-content: space-between;
-		align-items: center; cursor: move; user-select: none; border-bottom: 1px solid #333;
+		align-items: center; gap: 8px; flex-shrink: 0; touch-action: none; cursor: move; user-select: none; border-bottom: 1px solid #333;
 	`;
 	header.innerHTML = '<span style="font-weight:bold;color:#e94560">svelte-realtime</span>';
 
@@ -99,35 +99,65 @@ function init() {
 	closeBtn.setAttribute('aria-label', 'Close DevTools');
 	closeBtn.style.cssText = 'background:none;border:none;color:#888;cursor:pointer;font-size:14px;padding:0 4px;';
 	closeBtn.onclick = toggle;
+	const moveBtn = document.createElement('button');
+	moveBtn.type = 'button';
+	moveBtn.textContent = 'Move';
+	moveBtn.setAttribute('aria-label', 'Move DevTools');
+	moveBtn.title = 'Arrow keys move; Home and End dock; click cycles corners';
+	header.appendChild(moveBtn);
 	header.appendChild(closeBtn);
 
-	// Drag support
-	let dragging = false, dx = 0, dy = 0;
-	header.onmousedown = (e) => {
-		dragging = true;
-		dx = e.clientX - panel.offsetLeft;
-		dy = e.clientY - panel.offsetTop;
-	};
-	document.addEventListener('mousemove', (e) => {
-		if (!dragging) return;
-		panel.style.left = (e.clientX - dx) + 'px';
-		panel.style.top = (e.clientY - dy) + 'px';
-		panel.style.right = 'auto';
-		panel.style.bottom = 'auto';
-	});
-	document.addEventListener('mouseup', () => { dragging = false; });
+	/** @param {number} x @param {number} y */
+ function movePanel(x, y) {
+  if (!panel) return;
+  const rect = panel.getBoundingClientRect();
+  panel.style.left = Math.max(10, Math.min(x, window.innerWidth - rect.width - 10)) + 'px';
+  panel.style.top = Math.max(10, Math.min(y, window.innerHeight - rect.height - 10)) + 'px';
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+ }
+ let dragging = false, dx = 0, dy = 0;
+ header.onpointerdown = (event) => {
+  if (event.button !== 0 || /** @type {Element} */ (event.target).closest('button')) return;
+  dragging = true;
+  const rect = panel.getBoundingClientRect();
+  dx = event.clientX - rect.left;
+  dy = event.clientY - rect.top;
+  header.setPointerCapture(event.pointerId);
+ };
+ header.onpointermove = (event) => { if (dragging) movePanel(event.clientX - dx, event.clientY - dy); };
+ header.onpointerup = header.onpointercancel = () => { dragging = false; };
+ moveBtn.onkeydown = (event) => {
+  const rect = panel.getBoundingClientRect();
+  const step = event.shiftKey ? 40 : 10;
+  const positions = { ArrowLeft: [rect.left - step, rect.top], ArrowRight: [rect.left + step, rect.top], ArrowUp: [rect.left, rect.top - step], ArrowDown: [rect.left, rect.top + step], Home: [10, 10], End: [window.innerWidth, window.innerHeight] };
+  const position = positions[event.key];
+  if (!position) return;
+  event.preventDefault();
+  movePanel(position[0], position[1]);
+ };
+ let corner = 0;
+ moveBtn.onclick = () => {
+  movePanel(corner % 2 ? window.innerWidth : 10, corner > 1 ? window.innerHeight : 10);
+  corner = (corner + 1) % 4;
+ };
+ window.addEventListener('resize', () => {
+  if (!visible) return;
+  const rect = panel.getBoundingClientRect();
+  movePanel(rect.left, rect.top);
+ });
 
 	const tabs = document.createElement('div');
 	tabs.setAttribute('role', 'tablist');
 	tabs.setAttribute('aria-label', 'DevTools views');
-	tabs.style.cssText = 'display:flex;border-bottom:1px solid #333;';
+	tabs.style.cssText = 'display:flex;flex-shrink:0;border-bottom:1px solid #333;';
 
 	const content = document.createElement('div');
 	content.id = 'svr-dt-content';
 	content.setAttribute('role', 'tabpanel');
 	content.setAttribute('aria-labelledby', 'svr-dt-tab-' + activeTab);
 	content.tabIndex = 0;
-	content.style.cssText = 'padding:8px;overflow-y:auto;max-height:320px;';
+	content.style.cssText = 'padding:8px;overflow:auto;min-height:0;max-height:320px;';
 
 	const tabNames = ['rpcs', 'streams', 'smooth', 'connection'];
 	for (const name of tabNames) {
