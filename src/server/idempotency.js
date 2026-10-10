@@ -103,8 +103,10 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	// caller via `acquire`'s `meta.user`), so forget can drop exactly that
 	// user's entries. The inverse map keeps every single-key drop (sweep,
 	// maxEntries eviction, commit, abort) O(1) so the index never leaks
-	// references to already-evicted keys.
-	/** @type {Map<string, Set<string>>} tenant-scoped user key -> cache keys */
+	// references to already-evicted keys. A user record also pins the latest
+	// erasure stamp while any acquired slot or duplicate waiter is active; an
+	// empty key set must therefore survive until its last active arrival settles.
+	/** @type {Map<string, { keys: Set<string>, active: number, purgedAt: number | undefined }>} */
 	const userKeys = new Map();
 	/** @type {Map<string, string>} cache key -> tenant-scoped user key */
 	const keyUser = new Map();
@@ -119,25 +121,94 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 	// in-flight acquire time and let the commit through. The explicit grace window
 	// reproduces the coarse ~1s over-drop the old cached-wall clock gave implicitly
 	// (a duplicate re-acquiring in the same wall tick as the purge was dropped),
-	// now that both stamps are sub-ms. Swept with the 30s result sweep so the map
-	// stays bounded to recent erasures.
+	// now that both stamps are sub-ms. Recent tombstones are swept after 30s;
+	// active arrivals retain their shared purge stamp until they settle, even when
+	// a handler or a duplicate waiter outlives that sweep.
 	/** @type {Map<string, number>} tenant-scoped user key -> last purge monotonic ms */
 	const purgedAt = new Map();
 	let lastSweep = runtimeNow();
 
-	function _indexAdd(cacheKey, idemUser) {
-		if (!idemUser) return;
+	function _retainUser(idemUser) {
+		if (idemUser === null) return null;
+		let user = userKeys.get(idemUser);
+		if (!user) {
+			user = { keys: new Set(), active: 0, purgedAt: purgedAt.get(idemUser) };
+			userKeys.set(idemUser, user);
+		}
+		user.active++;
+		return user;
+	}
+	function _releaseUser(idemUser, user) {
+		if (user && --user.active === 0 && user.keys.size === 0) userKeys.delete(idemUser);
+	}
+
+	function _indexAdd(cacheKey, idemUser, user) {
+		if (!user) return;
 		keyUser.set(cacheKey, idemUser);
-		let set = userKeys.get(idemUser);
-		if (!set) { set = new Set(); userKeys.set(idemUser, set); }
-		set.add(cacheKey);
+		user.keys.add(cacheKey);
 	}
 	function _indexDrop(cacheKey) {
 		const idemUser = keyUser.get(cacheKey);
 		if (idemUser === undefined) return;
 		keyUser.delete(cacheKey);
-		const set = userKeys.get(idemUser);
-		if (set) { set.delete(cacheKey); if (set.size === 0) userKeys.delete(idemUser); }
+		const user = userKeys.get(idemUser);
+		if (user) {
+			user.keys.delete(cacheKey);
+			if (user.keys.size === 0 && user.active === 0) userKeys.delete(idemUser);
+		}
+	}
+
+	function _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt) {
+		let resolveInflight;
+		let rejectInflight;
+		const promise = new Promise((res, rej) => { resolveInflight = res; rejectInflight = rej; });
+		// Suppress unhandled-rejection logs when there are no waiters at the
+		// moment a handler aborts. Real awaiters attach their own handlers
+		// via `await inflight.get(key)`.
+		promise.catch(() => {});
+		inflight.set(key, promise);
+		if (results.size >= maxEntries) {
+			const drop = Math.max(1, Math.floor(maxEntries * 0.1));
+			let i = 0;
+			for (const k of results.keys()) {
+				results.delete(k);
+				_indexDrop(k);
+				if (++i >= drop) break;
+			}
+		}
+		let settled = false;
+		const ttlMs = ttlSec * 1000;
+		return {
+			acquired: true,
+			async commit(value) {
+				if (settled) return;
+				settled = true;
+				// Drop the cache write if this user was purged at-or-after this
+				// slot was acquired (within the grace window): the request was in
+				// flight when live.forget ran, so caching its result would
+				// resurrect the forgotten user. Both stamps are MONOTONIC so a
+				// backward wall step cannot let the commit through; the grace
+				// window also drops a duplicate that re-acquires just after the
+				// purge, matching the old cached-wall over-drop.
+				const tomb = activeUser?.purgedAt;
+				const forgotten = tomb !== undefined && tomb + _IDEMPOTENCY_FORGET_GRACE_MS >= acquiredAt;
+				if (ttlMs > 0 && !forgotten) {
+					results.set(key, { value, expiresAt: runtimeNow() + ttlMs });
+					_indexAdd(key, idemUser, activeUser);
+				}
+				inflight.delete(key);
+				_releaseUser(idemUser, activeUser);
+				if (resolveInflight) resolveInflight(value);
+			},
+			async abort() {
+				if (settled) return;
+				settled = true;
+				inflight.delete(key);
+				_releaseUser(idemUser, activeUser);
+				_indexDrop(key);
+				if (rejectInflight) rejectInflight(new Error('ABORTED'));
+			}
+		};
 	}
 
 	return {
@@ -156,9 +227,9 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 				for (const [k, e] of results) {
 					if (e.expiresAt <= now) { results.delete(k); _indexDrop(k); }
 				}
-				// Drop tombstones older than the sweep window: any slot that was
-				// in flight across a purge has long since committed, so the
-				// tombstone has done its job and a new request may cache again.
+				// Drop old recent-arrival tombstones. Active arrivals hold a
+				// separate shared stamp through their handler or duplicate wait,
+				// so this sweep cannot permit a late erased result to be cached.
 				// Tombstone times are MONOTONIC, so age them against monotonicNow()
 				// (never the wall `now` above - mixing domains would mis-drop a
 				// tombstone across an NTP step).
@@ -173,60 +244,24 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 				results.delete(key);
 				_indexDrop(key);
 			}
-			while (inflight.has(key)) {
-				try { await inflight.get(key); } catch {}
-				const re = results.get(key);
-				if (re && re.expiresAt > runtimeNow()) return { result: re.value };
-			}
-			let resolveInflight;
-			let rejectInflight;
-			const promise = new Promise((res, rej) => { resolveInflight = res; rejectInflight = rej; });
-			// Suppress unhandled-rejection logs when there are no waiters at the
-			// moment a handler aborts. Real awaiters attach their own handlers
-			// via `await inflight.get(key)`.
-			promise.catch(() => {});
-			inflight.set(key, promise);
-			if (results.size >= maxEntries) {
-				const drop = Math.max(1, Math.floor(maxEntries * 0.1));
-				let i = 0;
-				for (const k of results.keys()) {
-					results.delete(k);
-					_indexDrop(k);
-					if (++i >= drop) break;
-				}
-			}
+			// Pin before waiting: duplicates keep the purge stamp belonging to their
+			// arrival even when the original handler finishes after the lazy sweep.
 			// The tenant-scoped user key this committed result belongs to, if the
 			// caller is authenticated (forget reverse index). Anonymous calls pass
 			// no user and stay unindexed. `meta` carries the raw { user, tenant } so
 			// a durable backend can denormalize them into separate columns; the
 			// in-memory index folds them into one key matching live.forget.
 			const idemUser = meta && typeof meta.user === 'string' ? _tenantKey(meta.tenant, meta.user) : null;
-			const ttlMs = ttlSec * 1000;
-			return {
-				acquired: true,
-				async commit(value) {
-					// Drop the cache write if this user was purged at-or-after this
-					// slot was acquired (within the grace window): the request was in
-					// flight when live.forget ran, so caching its result would
-					// resurrect the forgotten user. Both stamps are MONOTONIC so a
-					// backward wall step cannot let the commit through; the grace
-					// window also drops a duplicate that re-acquires just after the
-					// purge, matching the old cached-wall over-drop.
-					const tomb = idemUser !== null ? purgedAt.get(idemUser) : undefined;
-					const forgotten = tomb !== undefined && tomb + _IDEMPOTENCY_FORGET_GRACE_MS >= acquiredAt;
-					if (ttlMs > 0 && !forgotten) {
-						results.set(key, { value, expiresAt: runtimeNow() + ttlMs });
-						_indexAdd(key, idemUser);
-					}
-					inflight.delete(key);
-					if (resolveInflight) resolveInflight(value);
-				},
-				async abort() {
-					inflight.delete(key);
-					_indexDrop(key);
-					if (rejectInflight) rejectInflight(new Error('ABORTED'));
+			const activeUser = _retainUser(idemUser);
+			while (inflight.has(key)) {
+				try { await inflight.get(key); } catch {}
+				const re = results.get(key);
+				if (re && re.expiresAt > runtimeNow()) {
+					_releaseUser(idemUser, activeUser);
+					return { result: re.value };
 				}
-			};
+			}
+			return _acquireSlot(key, ttlSec, idemUser, activeUser, acquiredAt);
 		},
 		/**
 		 * Right-to-erasure: drop every cached + in-flight entry recorded under a
@@ -242,16 +277,19 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 			// MONOTONIC (step-immune, sub-ms): a backward wall step could otherwise
 			// stamp the purge below an in-flight acquire and let the commit through,
 			// re-caching the erased user's PII for the full TTL.
-			purgedAt.set(idemUser, monotonicNow());
-			const set = userKeys.get(idemUser);
-			if (!set) return 0;
+			const stamp = monotonicNow();
+			purgedAt.set(idemUser, stamp);
+			const user = userKeys.get(idemUser);
+			if (!user) return 0;
+			user.purgedAt = stamp;
 			let n = 0;
-			for (const k of set) {
+			for (const k of user.keys) {
 				if (results.delete(k)) n++;
 				inflight.delete(k);
 				keyUser.delete(k);
 			}
-			userKeys.delete(idemUser);
+			user.keys.clear();
+			if (user.active === 0) userKeys.delete(idemUser);
 			return n;
 		}
 	};

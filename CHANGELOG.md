@@ -42,6 +42,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Clarify that stream subscriptions also pass through adapter authorization and connection limits before loading data or joining a room.
 
 - Room subscriptions release only the membership references they acquired, preserving other connections after capacity refusal, presence errors, or failed initialization.
+- Idempotency erasure remains effective for long-running handlers and duplicate waiters after the recent-tombstone sweep, while fresh calls outside the grace window cache normally.
 
 - Durable alarm claims retain their execution until successful completion. Failed and interrupted executions stay inspectable for explicit retry, preserving their generation and effect idempotency key without overwriting newer schedules.
 
