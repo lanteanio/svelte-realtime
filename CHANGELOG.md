@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The scaffold exits with an actionable error when piped input omits a project
   name or template, instead of starting an unusable prompt and exiting 13.
 
+- DevTools has a visible launcher, a named region, and restores focus after Close or Escape.
+
 ## [0.6.0-next.91] - 2026-10-10
 
 ### Added

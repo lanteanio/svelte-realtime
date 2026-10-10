@@ -8,6 +8,10 @@ import { now, setIntervalTimer, clearIntervalTimer } from './client-runtime.js';
 let panel = null;
 let visible = false;
 let activeTab = 'rpcs';
+/** @type {HTMLElement | null} */
+let previousFocus = null;
+/** @type {HTMLButtonElement | null} */
+let launcher = null;
 
 /** @type {ReturnType<typeof setInterval> | null} */
 let refreshInterval = null;
@@ -39,7 +43,12 @@ function _forceRerender() {
 
 function toggle() {
 	visible = !visible;
+	if (visible) previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 	if (panel) panel.style.display = visible ? 'block' : 'none';
+	launcher?.setAttribute('aria-expanded', String(visible));
+	if (visible) panel?.querySelector('button')?.focus();
+	else if (previousFocus?.isConnected) previousFocus.focus();
+	else launcher?.focus();
 	if (visible && !refreshInterval) {
 		const content = panel?.querySelector('div:last-child');
 		if (content) render(/** @type {HTMLElement} */ (content));
@@ -61,10 +70,16 @@ function init() {
 			e.preventDefault();
 			toggle();
 		}
+		if (e.key === 'Escape' && visible && panel?.contains(document.activeElement)) {
+			e.preventDefault();
+			toggle();
+		}
 	});
 
 	panel = document.createElement('div');
 	panel.id = 'svelte-realtime-devtools';
+	panel.setAttribute('role', 'region');
+	panel.setAttribute('aria-label', 'svelte-realtime DevTools');
 	panel.style.cssText = `
 		display: none; position: fixed; bottom: 10px; right: 10px; width: 420px; max-height: 400px;
 		background: #1a1a2e; color: #e0e0e0; border: 1px solid #333; border-radius: 8px;
@@ -81,6 +96,7 @@ function init() {
 
 	const closeBtn = document.createElement('button');
 	closeBtn.textContent = 'x';
+	closeBtn.setAttribute('aria-label', 'Close DevTools');
 	closeBtn.style.cssText = 'background:none;border:none;color:#888;cursor:pointer;font-size:14px;padding:0 4px;';
 	closeBtn.onclick = toggle;
 	header.appendChild(closeBtn);
@@ -137,6 +153,15 @@ function init() {
 	panel.appendChild(tabs);
 	panel.appendChild(content);
 	document.body.appendChild(panel);
+	launcher = document.createElement('button');
+	launcher.type = 'button';
+	launcher.textContent = 'DevTools';
+	launcher.setAttribute('aria-label', 'Toggle svelte-realtime DevTools');
+	launcher.setAttribute('aria-controls', panel.id);
+	launcher.setAttribute('aria-expanded', 'false');
+	launcher.style.cssText = 'position:fixed;bottom:10px;left:10px;z-index:99998';
+	launcher.onclick = toggle;
+	document.body.appendChild(launcher);
 
 	// Event delegation for the Streams tab's interactive controls.
 	// innerHTML rewrites blow away inline handlers on each render, so all

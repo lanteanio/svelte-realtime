@@ -5156,7 +5156,7 @@ This applies to all handler types - `live()`, `live.stream()`, `live.cron()`, `l
 
 ## DevTools
 
-In dev mode, the Vite plugin injects an in-browser overlay that shows active streams, RPC history, and connection status. Toggle with `Ctrl+Shift+L`.
+In dev mode, the Vite plugin injects an in-browser overlay that shows active streams, RPC history, and connection status. Open it with the DevTools button or `Ctrl+Shift+L`. Close or Escape restores focus to the opening control; the panel does not trap focus.
 
 The Streams tab lists every store currently mounted on the page. For each one it shows:
 
