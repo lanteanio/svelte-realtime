@@ -481,6 +481,7 @@ export function _smoothRecord(name, cfg, platform, rt) {
 			registry: new Map(),
 			// In-flight joins share a wire reservation until every attempt settles.
 			syncJoins: new Map(),
+			syncPending: 0,
 			surrogates: new Map(),
 			pendingSync: new Map(),
 			eventSeq: 0,
@@ -667,10 +668,10 @@ function _smoothResolveInitial(cfg, key) {
  * path - this is exactly `_smoothResolveInitial(rec.cfg, key)`.
  * @param {any} rec @param {string} key
  */
-function _smoothSeed(rec, key) {
+function _smoothSeed(rec, key, consume = true) {
 	if (rec.pendingSnapshot !== null && rec.pendingSnapshot.has(key)) {
 		const state = rec.pendingSnapshot.get(key);
-		rec.pendingSnapshot.delete(key);
+		if (consume) rec.pendingSnapshot.delete(key);
 		return state;
 	}
 	return _smoothResolveInitial(rec.cfg, key);
@@ -1159,10 +1160,10 @@ function _smoothCenterPolicy(rec, ctx, key, center) {
  * reply that goes straight to the joiner - the cluster owner's cross-instance
  * sync reply stays the full catalog (see onSync).
  */
-function _smoothJoinSnapshot(rec, identity) {
-	if (rec.cells) return _smoothCellSnapshot(rec, identity);
-	if (rec.interest !== null) return rec.interest.snapshotFor(identity, rec.authority.catalog());
-	return rec.authority.catalog();
+function _smoothJoinSnapshot(rec, identity, catalog) {
+	if (rec.cells) return _smoothCellSnapshot(rec, identity, catalog);
+	if (rec.interest !== null) return rec.interest.snapshotFor(identity, catalog);
+	return catalog;
 }
 
 /**
@@ -1178,8 +1179,12 @@ function _smoothJoinSnapshot(rec, identity) {
  * bounded by `_SMOOTH_SYNC_MAX_PER_WINDOW` at the RPC instead, which also caps
  * the reply serialization a cache could never remove.
  */
-function _smoothSyncRoster(rec, identity) {
-	return _smoothWireStates(rec, _smoothJoinSnapshot(rec, identity));
+function _smoothSyncRoster(rec, identity, initial) {
+	// Prepare the prospective roster before ensure transfers ownership and clears
+	// another socket's queued commands. App wire packing can throw.
+	const catalog = rec.authority.catalog();
+	if (rec.authority.get(identity) === undefined) catalog.push({ key: identity, state: initial });
+	return _smoothWireStates(rec, _smoothJoinSnapshot(rec, identity, catalog));
 }
 
 /**
@@ -1675,6 +1680,11 @@ export function _drainSmoothOnClose(ws) {
 			if (pending.timer !== null) clearTimer(pending.timer);
 			pending.resolve(null);
 			if (cluster && !rec.registry.has(pending.identity) && typeof cluster.relayLeave === 'function') {
+				let stillJoining = false;
+				for (const other of rec.pendingSync.values()) {
+					if (other.identity === pending.identity) { stillJoining = true; break; }
+				}
+				if (stillJoining) continue;
 				cluster.relayLeave(rec.wireTopic, pending.identity, cluster.instanceId);
 			}
 		}
@@ -1770,7 +1780,7 @@ function _smoothForget(rec) {
 	if (rec.timer !== null) { clearTimer(rec.timer); rec.timer = null; }
 	// A parked join still owns this record. Its finalizer reclaims an empty
 	// record after all concurrent joins have settled.
-	if (rec.syncJoins.size > 0) return;
+	if (rec.syncPending > 0) return;
 	// Settle every suspended sync so its awaiting handler resumes (and hits its
 	// CONNECTION_CLOSED liveness re-check) rather than hanging forever.
 	for (const p of rec.pendingSync.values()) {
@@ -2956,12 +2966,16 @@ export const _smoothRegister = function smooth(config) {
 			throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
 		}
 		let join = rec.syncJoins.get(ctx.ws);
-		if (!join) {
+		if (!join && rec.authority.get(key)?.ws !== ctx.ws && rec.registry.get(key) !== ctx.ws) {
 			const retained = !!(ctx.ws && typeof ctx.ws.isSubscribed === 'function' && ctx.ws.isSubscribed(rec.wireTopic));
-			join = { pending: 0, retained };
-			rec.syncJoins.set(ctx.ws, join);
+			if (!retained) {
+				join = { pending: 0, retained: false };
+				rec.syncJoins.set(ctx.ws, join);
+			}
 		}
-		join.pending++;
+		if (join) join.pending++;
+		rec.syncPending++;
+		let remoteSync = false;
 		try {
 			// Walk-visible membership for the reserved wire topic: the platform
 			// subscribe updates the adapter's per-connection subscription state,
@@ -3065,7 +3079,10 @@ export const _smoothRegister = function smooth(config) {
 					// This instance ticks the topic: ensure the entity against the real
 					// socket (seeded from the snapshot when one was recovered, else the
 					// declared initial - identical to single-instance when snapshot is off).
-					const ensured = rec.authority.ensure(key, ctx.ws, _smoothSeed(rec, key));
+					const initial = _smoothSeed(rec, key, false);
+					const states = _smoothSyncRoster(rec, key, initial);
+					const ensured = rec.authority.ensure(key, ctx.ws, initial);
+					if (rec.pendingSnapshot !== null) rec.pendingSnapshot.delete(key);
 					if (ctx.ws) rec.registry.set(key, ctx.ws);
 					// Cells mode: place the joiner's cell block now (from its just-ensured
 					// entity, or a retained reported center) - without this an owner-local
@@ -3077,17 +3094,21 @@ export const _smoothRegister = function smooth(config) {
 					// (a pending timer is a no-op) and gated on an onTick world so non-onTick
 					// topics stay byte-identical (they legitimately arm on the first command).
 					if (rec.world !== null) _armSmoothTick(rec);
-					join.retained = true;
-					return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states: _smoothSyncRoster(rec, key), ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
+					if (join) join.retained = true;
+					return { topic: name, t: wallEpoch(), you: key, ack: ensured.lastAckedId, states, ...(rec.lagComp !== null && { lc: 1 }), ...(rec.cells && { cells: 1 }) };
 				}
 				// Non-owner: ask the owner for the catalog. On a timeout, return a
 				// local-empty basis - incoming broadcasts reconcile the client.
 				const corr = cluster.instanceId + ':' + (++_smoothCorrSeq);
+				remoteSync = true;
 				const reply = await _smoothRequestSync(rec, cluster, key, corr, ctx.ws);
 				if (ctx.ws && _smoothClosedWs.has(ctx.ws)) {
 					if (rec.authority.size === 0 && rec.registry.size === 0 && rec.timer === null) _smoothForget(rec);
 					throw new LiveError('CONNECTION_CLOSED', 'WebSocket closed during smooth sync');
 				}
+				// Scope and pack before committing any local subscriber state.
+				const catalog = reply && Array.isArray(reply.states) ? reply.states : [];
+				const states = _smoothWireStates(rec, rec.cells ? _smoothCellSnapshot(rec, key, catalog) : catalog);
 				if (ctx.ws) rec.registry.set(key, ctx.ws);
 				// Seed the receive-side shadow catalog from the owner's snapshot so the cull
 				// can deliver a stationary in-range remote entity on first sight (an entity
@@ -3103,27 +3124,28 @@ export const _smoothRegister = function smooth(config) {
 				// into lastPos by the follow), and scope the client-facing roster to its
 				// cell block - the owner's reply is deliberately the FULL catalog (it is
 				// also the own-position source here), but the client gets O(block).
-				let states = reply && Array.isArray(reply.states) ? reply.states : [];
 				if (rec.cells) {
 					if (ctx.ws) {
-						const ownEntry = states.find((s) => s && s.key === key);
+						const ownEntry = catalog.find((s) => s && s.key === key);
 						if (ownEntry !== undefined) _smoothCellFollow(rec, key, ctx.ws, ownEntry.state);
 						else _placeCellSubscriber(rec, key, ctx.ws); // a reported center / lastPos fallback
 					}
-					states = _smoothCellSnapshot(rec, key, states);
 				}
-				join.retained = true;
+				if (join) join.retained = true;
+				remoteSync = false;
 				return {
 					topic: name,
 					t: wallEpoch(),
 					you: key,
 					ack: reply ? reply.ack : 0,
-					states: _smoothWireStates(rec, states),
+					states,
 					...(rec.lagComp !== null && { lc: 1 }),
 					...(rec.cells && { cells: 1 })
 				};
 			}
-			const ensured = rec.authority.ensure(key, ctx.ws, _smoothResolveInitial(cfg, key));
+			const initial = _smoothResolveInitial(cfg, key);
+			const states = _smoothSyncRoster(rec, key, initial);
+			const ensured = rec.authority.ensure(key, ctx.ws, initial);
 			// Interest topics need the identity -> socket map even single-instance (the
 			// cluster path keeps it for ack routing; interest reuses it as the
 			// per-subscriber relevancy and delivery set; cells mode reuses it to follow a
@@ -3141,7 +3163,7 @@ export const _smoothRegister = function smooth(config) {
 			// (a pending timer is a no-op) and gated on an onTick world so non-onTick
 			// topics stay byte-identical (they legitimately arm on the first command).
 			if (rec.world !== null) _armSmoothTick(rec);
-			join.retained = true;
+			if (join) join.retained = true;
 			return {
 				topic: name,
 				t: wallEpoch(),
@@ -3155,7 +3177,8 @@ export const _smoothRegister = function smooth(config) {
 				...(rec.cells && { cells: 1 })
 			};
 		} finally {
-			if (--join.pending === 0) {
+			rec.syncPending--;
+			if (join && --join.pending === 0) {
 				// A sibling sync on this socket can have succeeded while this one
 				// awaited admission. Only roll back a wholly unaccepted reservation.
 				if (!join.retained && ctx.ws && !_smoothClosedWs.has(ctx.ws)) {
@@ -3163,10 +3186,17 @@ export const _smoothRegister = function smooth(config) {
 					else if (typeof ctx.ws.unsubscribe === 'function') ctx.ws.unsubscribe(rec.wireTopic);
 				}
 				rec.syncJoins.delete(ctx.ws);
+				if (!join.retained && !rec.authority.get(key) && !rec.registry.has(key)) rec.syncRate.delete(key);
 			}
-			if (!rec.authority.get(key) && !rec.registry.has(key)) rec.syncRate.delete(key);
 			const cluster = rec.platform && rec.platform.smooth;
-			if (rec.syncJoins.size === 0 && rec.registry.size === 0 && (!rec.owned && cluster || rec.authority.size === 0)) _smoothForget(rec);
+			if (remoteSync && !rec.owned && cluster && !rec.registry.has(key) && !_smoothClosedWs.has(ctx.ws)) {
+				let stillJoining = false;
+				for (const pending of rec.pendingSync.values()) {
+					if (pending.identity === key) { stillJoining = true; break; }
+				}
+				if (!stillJoining && typeof cluster.relayLeave === 'function') cluster.relayLeave(rec.wireTopic, key, cluster.instanceId);
+			}
+			if (rec.syncPending === 0 && rec.registry.size === 0 && (!rec.owned && cluster || rec.authority.size === 0)) _smoothForget(rec);
 		}
 	});
 
