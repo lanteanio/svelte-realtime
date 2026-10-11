@@ -64,9 +64,9 @@ The registry-backed messages below preserve the documented prefix and append the
 
 ## Emitted error coverage
 
-Coverage listing only: the scanner inventories direct LiveError constructors with literal codes, error reply objects, structured diagnostic events, and console warning/error prefixes in src/**/*.js. Comments and example declarations are excluded. It does not infer causes or safe recovery actions from strings.
+Coverage listing only: the scanner inventories direct LiveError and RpcError constructors, literal arguments of local error helpers, code assignments on locally declared Error objects, error reply objects, structured diagnostic events, and console warning/error prefixes in src/**/*.js. Comments and example declarations are excluded. It does not infer causes or safe recovery actions from strings.
 
-Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 29 literal runtime codes and 111 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
+Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 38 literal runtime codes and 111 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
 
 Code anchors stay stable when messages change. Structured diagnostic IDs use the emitted event; legacy console IDs are derived from the literal prefix and change when that prefix changes. These coverage IDs are documentation anchors, not IDs appended to legacy runtime messages. Escaped \n and \r in the listing stand for actual newlines and carriage returns.
 
@@ -80,19 +80,19 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 ### <code>CANCELLED</code>
 
 - Searchable message prefixes: <code>upload cancelled</code>
-- Owning sources: [src/server/upload.js](../src/server/upload.js)
+- Owning sources: [src/client/upload.js](../src/client/upload.js), [src/server/upload.js](../src/server/upload.js)
 
 <a id="live-error-connection-closed"></a>
 ### <code>CONNECTION_CLOSED</code>
 
-- Searchable message prefixes: <code>WebSocket closed</code>; <code>WebSocket closed during document sync</code>; <code>WebSocket closed during smooth sync</code>
-- Owning sources: [src/server/crdt.js](../src/server/crdt.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/smooth.js](../src/server/smooth.js)
+- Searchable message prefixes: <code>Connection permanently closed</code>; <code>WebSocket closed</code>; <code>WebSocket closed during document sync</code>; <code>WebSocket closed during smooth sync</code>
+- Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/client/stream.js](../src/client/stream.js), [src/client/upload.js](../src/client/upload.js), [src/server/crdt.js](../src/server/crdt.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/smooth.js](../src/server/smooth.js)
 
 <a id="live-error-disconnected"></a>
 ### <code>DISCONNECTED</code>
 
-- Searchable message prefixes: <code>WebSocket connection lost</code>; <code>connection closed</code>
-- Owning sources: [src/server/upload.js](../src/server/upload.js), [src/testing.js](../src/testing.js)
+- Searchable message prefixes: <code>Connection interrupted (device sleep)</code>; <code>WebSocket connection lost</code>; <code>connection closed</code>
+- Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/client/stream.js](../src/client/stream.js), [src/client/upload.js](../src/client/upload.js), [src/server/upload.js](../src/server/upload.js), [src/testing.js](../src/testing.js)
 
 <a id="live-error-forbidden"></a>
 ### <code>FORBIDDEN</code>
@@ -157,8 +157,8 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-invalid-request"></a>
 ### <code>INVALID_REQUEST</code>
 
-- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>Reserved topic prefix</code>; <code>Topic function must return a string, got </code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>streamId already active</code>
-- Owning sources: [src/server.js](../src/server.js), [src/server/derived-topic.js](../src/server/derived-topic.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/forget.js](../src/server/forget.js), [src/server/idempotency.js](../src/server/idempotency.js), [src/server/upload.js](../src/server/upload.js)
+- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Binary RPC payload is detached (transferred) and cannot be sent</code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>Reserved topic prefix</code>; <code>Topic function must return a string, got </code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>persistKey must be a non-empty string</code>; <code>streamId already active</code>
+- Owning sources: [src/client/offline.js](../src/client/offline.js), [src/client/rpc.js](../src/client/rpc.js), [src/server.js](../src/server.js), [src/server/derived-topic.js](../src/server/derived-topic.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/forget.js](../src/server/forget.js), [src/server/idempotency.js](../src/server/idempotency.js), [src/server/upload.js](../src/server/upload.js)
 
 <a id="live-error-invalid-topic"></a>
 ### <code>INVALID_TOPIC</code>
@@ -172,10 +172,22 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Searchable message prefixes: <code>ctx.signal:</code>
 - Owning sources: [src/server/ctx.js](../src/server/ctx.js)
 
+<a id="live-error-load-more-error"></a>
+### <code>LOAD_MORE_ERROR</code>
+
+- Searchable message prefixes: dynamic (inspect the owning source).
+- Owning sources: [src/client/stream.js](../src/client/stream.js)
+
+<a id="live-error-lock-cleared"></a>
+### <code>LOCK_CLEARED</code>
+
+- Searchable message prefixes: <code>lock: cleared</code>
+- Owning sources: [src/server/idempotency.js](../src/server/idempotency.js)
+
 <a id="live-error-lock-timeout"></a>
 ### <code>LOCK_TIMEOUT</code>
 
-- Searchable message prefixes: dynamic (inspect the owning source).
+- Searchable message prefixes: <code>lock: timed out after </code>
 - Owning sources: [src/server/idempotency.js](../src/server/idempotency.js)
 
 <a id="live-error-not-found"></a>
@@ -183,6 +195,24 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 
 - Searchable message prefixes: <code>Live function '</code>; <code>Not found</code>; <code>no active connection for </code>
 - Owning sources: [src/server/dispatch.js](../src/server/dispatch.js), [src/server/push.js](../src/server/push.js)
+
+<a id="live-error-offline-cleared"></a>
+### <code>OFFLINE_CLEARED</code>
+
+- Searchable message prefixes: <code>Offline mutation was cleared</code>; <code>Offline queue scope changed before this mutation settled</code>
+- Owning sources: [src/client/offline.js](../src/client/offline.js)
+
+<a id="live-error-offline-clear-failed"></a>
+### <code>OFFLINE_CLEAR_FAILED</code>
+
+- Searchable message prefixes: <code>Offline stored data could not be erased</code>
+- Owning sources: [src/client/offline.js](../src/client/offline.js)
+
+<a id="live-error-offline-scope-changed"></a>
+### <code>OFFLINE_SCOPE_CHANGED</code>
+
+- Searchable message prefixes: <code>Offline mutation was cleared</code>; <code>Offline queue scope changed before this mutation settled</code>
+- Owning sources: [src/client/offline.js](../src/client/offline.js)
 
 <a id="live-error-overloaded"></a>
 ### <code>OVERLOADED</code>
@@ -194,13 +224,19 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 ### <code>PAYLOAD_TOO_LARGE</code>
 
 - Searchable message prefixes: <code>Binary RPC header exceeds 65535 bytes</code>; <code>Binary payload exceeds size limit</code>; <code>upload exceeds maxSize</code>
-- Owning sources: [src/server/dispatch.js](../src/server/dispatch.js), [src/server/upload.js](../src/server/upload.js), [src/testing.js](../src/testing.js)
+- Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/upload.js](../src/server/upload.js), [src/testing.js](../src/testing.js)
 
 <a id="live-error-protocol-mismatch"></a>
 ### <code>PROTOCOL_MISMATCH</code>
 
 - Searchable message prefixes: dynamic (inspect the owning source).
 - Owning sources: [src/server/dispatch.js](../src/server/dispatch.js)
+
+<a id="live-error-queue-full"></a>
+### <code>QUEUE_FULL</code>
+
+- Searchable message prefixes: <code>Offline queue overflow - oldest mutation dropped</code>
+- Owning sources: [src/client/offline.js](../src/client/offline.js)
 
 <a id="live-error-rate-limited"></a>
 ### <code>RATE_LIMITED</code>
@@ -214,11 +250,29 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Searchable message prefixes: <code>Service is temporarily unavailable, try again shortly</code>
 - Owning sources: [src/server/breaker.js](../src/server/breaker.js)
 
+<a id="live-error-source-error"></a>
+### <code>SOURCE_ERROR</code>
+
+- Searchable message prefixes: dynamic (inspect the owning source).
+- Owning sources: [src/client/upload.js](../src/client/upload.js)
+
+<a id="live-error-stale"></a>
+### <code>STALE</code>
+
+- Searchable message prefixes: <code>Offline mutation dropped by beforeReplay filter</code>; <code>Offline mutation dropped by the replay function</code>; <code>Offline mutation dropped: beforeReplay returned a promise</code>; <code>Offline mutation dropped: beforeReplay threw</code>; <code>Offline mutation dropped: its stored args cannot be sent</code>; <code>Offline mutation dropped: the replay function gave it args that cannot be sent</code>; <code>Offline mutation expired</code>
+- Owning sources: [src/client/misc.js](../src/client/misc.js)
+
+<a id="live-error-stream-error"></a>
+### <code>STREAM_ERROR</code>
+
+- Searchable message prefixes: <code>Stream '</code>
+- Owning sources: [src/client/stream.js](../src/client/stream.js)
+
 <a id="live-error-timeout"></a>
 ### <code>TIMEOUT</code>
 
-- Searchable message prefixes: dynamic (inspect the owning source).
-- Owning sources: [src/server/push.js](../src/server/push.js)
+- Searchable message prefixes: <code>Batch timed out after 30s</code>; <code>Binary RPC '</code>; <code>RPC '</code>; <code>Stream '</code>; <code>loadMore '</code>
+- Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/client/stream.js](../src/client/stream.js), [src/server/push.js](../src/server/push.js)
 
 <a id="live-error-too-many-uploads"></a>
 ### <code>TOO_MANY_UPLOADS</code>
@@ -1027,6 +1081,17 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 
 These sites have a computed code, event, or message prefix that the literal scanner cannot resolve. They remain visible here instead of being counted as full literal coverage. Wire forwarding and application-provided messages may vary at runtime.
 
+- <code>src/client/connection.js:109</code>
+- <code>src/client/connection.js:185</code>
+- <code>src/client/connection.js:210</code>
+- <code>src/client/internal-state.js:128</code>
+- <code>src/client/offline.js:312</code>
+- <code>src/client/stream.js:1890</code>
+- <code>src/client/stream.js:2622</code>
+- <code>src/client/upload.js:579</code>
+- <code>src/client/upload.js:629</code>
+- <code>src/client/upload.js:681</code>
+- <code>src/hooks.js:50</code>
 - <code>src/hooks.js:57</code>
 - <code>src/server.js:1909</code>
 - <code>src/server.js:2884</code>

@@ -148,3 +148,18 @@ describe('runtime emission inventory', () => {
 		expect(renderRuntimeInventory(after)).not.toContain('<script>');
 	});
 });
+
+
+describe('client and plain error coverage', () => {
+	it('indexes emitted client codes and lock errors with literal message prefixes', () => {
+		const inventory = scanRuntimeErrors();
+		for (const code of ['QUEUE_FULL', 'STALE', 'STREAM_ERROR', 'LOAD_MORE_ERROR', 'SOURCE_ERROR', 'OFFLINE_CLEAR_FAILED', 'OFFLINE_SCOPE_CHANGED', 'OFFLINE_CLEARED', 'LOCK_CLEARED']) expect(inventory.errors.find(row => row.key === code), code).toBeDefined();
+		expect(inventory.errors.find(row => row.key === 'LOCK_CLEARED').prefixes).toContain('lock: cleared');
+		expect(inventory.errors.find(row => row.key === 'LOCK_TIMEOUT').prefixes).toContain('lock: timed out after ');
+		expect(inventory.errors.find(row => row.key === 'TIMEOUT').prefixes).toContain("RPC '");
+	});
+	it('resolves plain Error declarations only in their lexical scope', () => {
+		const inventory = scanRuntimeErrors([{path:'src/example.js', source: "{const err = new Error('first'); err.code='ONE';} {const err = new Error('second'); err.code='TWO';}"}]);
+		expect(inventory.errors.map(row => [row.key, row.prefixes])).toEqual([['ONE',['first']],['TWO',['second']]]);
+	});
+});

@@ -18,9 +18,11 @@ function fixture() {
 	const actual = join(temporary, 'actual'), linked = join(temporary, 'linked');
 	for (const dir of ['scripts', 'src', 'docs']) mkdirSync(join(actual, dir), { recursive: true });
 	writeFileSync(join(actual, 'package.json'), '{"type":"module"}\n');
-	writeFileSync(join(actual, 'src/error-registry.js'), 'export const REALTIME_ERROR_REGISTRY = [];\n');
+	writeFileSync(join(actual, 'src/error-registry.js'), 'export const REALTIME_ERROR_REGISTRY = []; export const REALTIME_ERROR_IDS = {};\n');
+	symlinkSync(join(repository, 'node_modules'), join(actual, 'node_modules'), 'junction');
 	writeFileSync(join(actual, 'docs/errors.md'), 'deliberately stale\n');
 	cpSync(join(repository, 'scripts/generate-error-reference.js'), join(actual, 'scripts/generate-error-reference.js'));
+	cpSync(join(repository, 'scripts/runtime-error-inventory.js'), join(actual, 'scripts/runtime-error-inventory.js'));
 	const helper = join(repository, 'scripts/script-entry.js');
 	if (existsSync(helper)) cpSync(helper, join(actual, 'scripts/script-entry.js'));
 	symlinkSync(actual, linked, 'junction');
