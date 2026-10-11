@@ -61,7 +61,7 @@ export function validateWorkflow(workflow) {
 
 export function trackedArtifacts(directory = root) {
 	return execFileSync('git', ['ls-files', '-z'], { cwd: directory, encoding: 'utf8', windowsHide: true })
-		.split('\0').filter((path) => /(?:^|\/)(?:build|\.svelte-kit|node_modules)\//.test(path));
+		.split('\0').filter((path) => /(?:^|\/)(?:build|\.svelte-kit|node_modules)\//.test(path) || /^test\/.*\/src\/live\/\$types\.d\.ts$/.test(path));
 }
 
 export function renderSupport(profile) {

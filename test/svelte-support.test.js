@@ -51,7 +51,7 @@ describe('locked Svelte 4 compatibility profile', () => {
 		try {
 			copyFileSync(new URL('../.gitignore', import.meta.url), join(directory, '.gitignore'));
 			git('init', '--quiet');
-			const artifacts = ['test/fixtures/svelte4/build/server/chunk.js', 'test/fixtures/another/nested/.svelte-kit/output/server.js', 'test/fixtures/svelte4/node_modules/pkg/index.js'];
+			const artifacts = ['test/fixtures/svelte4/build/server/chunk.js', 'test/fixtures/another/nested/.svelte-kit/output/server.js', 'test/fixtures/svelte4/node_modules/pkg/index.js', 'test/fixtures/svelte4/src/live/$types.d.ts'];
 			for (const path of artifacts) {
 				mkdirSync(dirname(join(directory, path)), { recursive: true });
 				writeFileSync(join(directory, path), 'export {};\n');
