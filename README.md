@@ -706,7 +706,7 @@ board.detach();
 - `attaching` covers every in-flight subscribe (first attach, reconnect, resume); `failed` holds until a retry re-enters `attaching`; the resume-grace release reads as `detached`.
 - While `attaching`, the server names the wire topic before subscribing the socket. The client buffers live frames until the response and applies them over it, preserving changes published during the loader read. Delivery across a loader snapshot is at least once: `latest` can append a row already present in that snapshot; use a keyed merge when rows require identity. `set` replaces the value on each frame. A replay response lets `latest` and `set` skip buffered frames whose sequence occurs in the returned event array. The response watermark alone never proves inclusion: it can also cover live frames published after that array or snapshot was read.
 
-For RPC calls, errors are thrown as `RpcError` with a `code` field:
+RPC promises reject with `RpcError` and a `code` field. Unserializable arguments reject with `INVALID_REQUEST` and the original `cause`, retaining no pending request or timer:
 
 ```js
 import { sendMessage } from '$live/chat';

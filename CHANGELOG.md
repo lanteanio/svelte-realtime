@@ -69,6 +69,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Dead-letter store declarations accept asynchronous backends and nullable capture IDs, while the built-in memory store retains synchronous return types.
 
+- Invalid RPC arguments consistently reject with INVALID_REQUEST and their original cause, without retaining pending requests or timeouts. Unsent requests capture JSON before connection status delivery.
+- Protocol advertisements precede parked RPCs and application connection hooks when the socket opens.
+
 - Smooth simulation ticks keep monotonic deadlines across callback work and catch up after timer delays, with at most eight ticks per callback. Idle rooms restart without old debt, and rewind history preserves distinct timestamps during catch-up.
 
 - New smooth entities are announced to peers even when they remain idle, including subscribers on other cluster instances. Repeated syncs do not repeat the announcement.

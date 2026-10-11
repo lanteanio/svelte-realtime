@@ -261,3 +261,111 @@ it('retains the disconnect error when the adapter immediately exhausts reconnect
  expect(dt.history.filter(Boolean)).toHaveLength(1);
  expect(dt.history.filter(Boolean)[0]).toMatchObject({ path: 'profile/save', ok: false, args: [], result: { captured: false, code: 'DISCONNECTED' } });
 });
+
+describe('RPC serialization with the real adapter', () => {
+	const badArgs = {
+		bigint: () => ({ nested: 1n }),
+		cycle: () => { const value = {}; value.self = value; return value; },
+		toJSON: () => ({ toJSON() { throw new TypeError('cannot encode'); } })
+	};
+	for (const state of ['open', 'connecting', 'offline']) {
+		for (const [entry, invoke] of Object.entries({
+			regular: arg => client.__rpc('save')(arg),
+			fresh: arg => client.__rpc('save').fresh(arg),
+			options: arg => client.__rpc('save').with({ idempotencyKey: 'key' })(arg),
+			batch: arg => client.batch(() => [client.__rpc('save')(arg)]),
+			binary: arg => client.__binaryRpc('save')(new Uint8Array([1]), arg)
+		})) {
+			for (const [kind, make] of Object.entries(badArgs)) {
+				it(`${entry} rejects ${kind} while ${state} without retaining pending work`, async () => {
+					if (state !== 'connecting') await openWithRpc();
+					if (state === 'offline') {
+						client.configure({ offline: { queue: true } });
+						sockets()[0].serverClose(1006);
+					}
+					const { pending } = await import('../src/client/internal-state.js');
+					const runtime = await import('../src/client-runtime.js');
+					const timers = new Map();
+					runtime.setRuntimeEnv({ timers: { set(fn) { const handle = {}; timers.set(handle, fn); return handle; }, clear(handle) { timers.delete(handle); } } });
+					client.__devtools.clear();
+					const sent = sockets()[0].sent.length;
+					let promise;
+					expect(() => { promise = invoke(make()); }).not.toThrow();
+					await expect(promise).rejects.toMatchObject({ code: 'INVALID_REQUEST', cause: expect.any(TypeError) });
+					expect(pending.size).toBe(0);
+					expect(timers.size).toBe(0);
+					runtime.resetRuntimeEnv();
+					expect(sockets()[0].sent).toHaveLength(sent);
+					expect(client.__devtools.pending.size).toBe(0);
+					expect(client.__devtools.history.filter(Boolean)).toHaveLength(1);
+					expect(client.__devtools.history.filter(Boolean)[0].result).toMatchObject({ code: 'INVALID_REQUEST' });
+				});
+			}
+		}
+	}
+	it('keeps Svelte status delivery and hello alive after a parked invalid argument', async () => {
+		const promise = client.__rpc('save').fresh({ nested: 1n });
+		await expect(promise).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		const good = client.__rpc('save').fresh('safe');
+		const independent = writable(0);
+		const seen = [];
+		const stop = independent.subscribe(value => seen.push(value));
+		expect(() => sockets()[0].open()).not.toThrow();
+		independent.set(1);
+		expect(seen).toEqual([0, 1]);
+		expect(sockets()[0].frames().some(frame => frame.type === 'hello')).toBe(true);
+		answerRequests(sockets()[0]);
+		await expect(good).resolves.toBe('ok');
+		stop();
+	});
+	it('advertises the protocol before parked requests and later open hooks', async () => {
+		const promise = client.__rpc('save').fresh('queued');
+		client.configure({ protocolVersion: 1, onConnect() { client.__rpc('hook').send('hook'); } });
+		sockets()[0].open();
+		const frames = sockets()[0].frames();
+		const advertisement = frames.findIndex(frame => frame.type === 'proto');
+		expect(advertisement).toBeGreaterThanOrEqual(0);
+		expect(advertisement).toBeLessThan(frames.findIndex(frame => frame.rpc === 'save'));
+		expect(advertisement).toBeLessThan(frames.findIndex(frame => frame.rpc === 'hook'));
+		expect(frames.filter(frame => frame.type === 'proto')).toHaveLength(1);
+		answerRequests(sockets()[0]);
+		await expect(promise).resolves.toBe('ok');
+	});
+});
+
+it('rejects every member and clears the timer when a multi-call batch cannot encode', async () => {
+	await openWithRpc();
+	const { pending } = await import('../src/client/internal-state.js');
+	const runtime = await import('../src/client-runtime.js');
+	const timers = new Map();
+	runtime.setRuntimeEnv({ timers: { set(fn) { const handle = {}; timers.set(handle, fn); return handle; }, clear(handle) { timers.delete(handle); } } });
+	const sent = sockets()[0].sent.length;
+	let members;
+	try {
+		const result = client.batch(() => members = [client.__rpc('save').fresh({ nested: 1n }), client.__rpc('other').fresh('valid')]);
+		await expect(result).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		expect((await Promise.allSettled(members)).map(result => result.status)).toEqual(['rejected', 'rejected']);
+		expect(pending.size).toBe(0);
+		expect(timers.size).toBe(0);
+		expect(sockets()[0].sent).toHaveLength(sent);
+	} finally { runtime.resetRuntimeEnv(); }
+});
+
+for (const mode of ['regular', 'fresh', 'binary']) {
+	it(`cleans up ${mode} when the native socket send throws`, async () => {
+		await openWithRpc();
+		const { pending } = await import('../src/client/internal-state.js');
+		const runtime = await import('../src/client-runtime.js');
+		const timers = new Map();
+		runtime.setRuntimeEnv({ timers: { set(fn) { const handle = {}; timers.set(handle, fn); return handle; }, clear(handle) { timers.delete(handle); } } });
+		const cause = new Error('socket refused the frame');
+		sockets()[0].send = () => { throw cause; };
+		try {
+			const rpc = client.__rpc('save');
+			const result = mode === 'binary' ? client.__binaryRpc('save')(new Uint8Array([1])) : mode === 'fresh' ? rpc.fresh('value') : rpc('value');
+			await expect(result).rejects.toMatchObject({ code: 'INVALID_REQUEST', cause });
+			expect(pending.size).toBe(0);
+			expect(timers.size).toBe(0);
+		} finally { runtime.resetRuntimeEnv(); }
+	});
+}

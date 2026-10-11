@@ -304,6 +304,11 @@ export function ensureDisconnectListener() {
 		const up = s === 'open' || s === 'suspended';
 		if (up && !clientState.socketUp) {
 			clientState.socketUp = true;
+			// Advertise before waking request-owned frames or any later status
+			// subscribers can send application work through strict admission.
+			if (clientState.config.protocolVersion !== undefined) {
+				try { _bound.send({ type: 'proto', v: clientState.config.protocolVersion }); } catch { /* transport can close during the transition */ }
+			}
 			// Entries parked while the socket was down (a stream subscribe whose
 			// stream moved on, its request possibly still in the adapter's send
 			// queue) start waiting for their answer now.

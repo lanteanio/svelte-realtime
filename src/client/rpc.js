@@ -140,7 +140,9 @@ export function __rpc(path) {
 	function rpcCall(...args) {
 		// Dedup: coalesce identical calls within the same microtask
 		if (!clientState.batchCollector) {
-			const dedupKey = _buildDedupKey(path, args);
+			let dedupKey;
+			try { dedupKey = _buildDedupKey(path, args); }
+			catch (cause) { return _invalidArgs(path, args, cause); }
 			const existing = _dedupMap.get(dedupKey);
 			if (existing) {
 				_warnCoalesceOnce(path);
@@ -411,6 +413,14 @@ export function __mpFields() {
  */
 function _parkPendingFrame(conn, frame, requestIds) {
 	const ids = typeof requestIds === 'string' ? [requestIds] : requestIds;
+	// Capture cold-path JSON now: user getters and toJSON must never run from
+	// a status subscriber, where a throw would interrupt every store update.
+	try {
+		if (!(frame instanceof ArrayBuffer) && !ArrayBuffer.isView(frame)) frame = JSON.parse(JSON.stringify(frame));
+	} catch (cause) {
+		for (const id of ids) _rejectSend(id, cause);
+		return;
+	}
 	const wake = () => {
 		if (!clientState.socketUp) return;
 		const active = ids.filter(id => pending.has(id));
@@ -422,7 +432,8 @@ function _parkPendingFrame(conn, frame, requestIds) {
 		}
 		// A settled call must never ride along in an otherwise live batch.
 		if (frame.batch && active.length !== ids.length) frame = { ...frame, batch: frame.batch.filter(call => pending.has(call.id)) };
-		conn.send(frame);
+		try { conn.send(frame); }
+		catch (cause) { for (const id of active) _rejectSend(id, cause); }
 	};
 	for (const id of ids) {
 		const entry = pending.get(id);
@@ -431,6 +442,31 @@ function _parkPendingFrame(conn, frame, requestIds) {
 			entry.wake = wake;
 		}
 	}
+}
+
+/** @param {unknown} cause */
+function _serializationError(cause) {
+	const error = new RpcError('INVALID_REQUEST', 'RPC request could not be encoded or sent');
+	Object.defineProperty(error, 'cause', { value: cause, configurable: true, writable: true });
+	return error;
+}
+
+/** @param {string} path @param {any[]} args @param {unknown} cause */
+function _invalidArgs(path, args, cause) {
+	const error = _serializationError(cause);
+	const id = _nextId();
+	_devtoolsStart(path, id, args);
+	_devtoolsEnd(id, false, error);
+	return Promise.reject(error);
+}
+
+/** @param {string} id @param {unknown} cause */
+function _rejectSend(id, cause) {
+	const entry = pending.get(id);
+	if (!entry) return;
+	pending.delete(id);
+	if (entry.timer) clearTimer(entry.timer);
+	entry.reject(_serializationError(cause));
 }
 
 /**
@@ -471,7 +507,7 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 		try {
 			queuedArgs = JSON.parse(JSON.stringify(args));
 		} catch (err) {
-			return Promise.reject(err);
+			return _invalidArgs(path, args, err);
 		}
 		const maxQueue = _queueLimit(clientState.config.offline);
 		return new Promise((resolve, reject) => {
@@ -545,8 +581,10 @@ export function _sendRpc(path, args, idempotencyKey, timeout, replay) {
 			replay: replay === true
 		});
 		const envelope = idempotencyKey ? { rpc: path, id, args, idempotencyKey } : { rpc: path, id, args };
-		if (replay || clientState.socketUp) conn.send(envelope);
-		else _parkPendingFrame(conn, envelope, id);
+		try {
+			if (replay || clientState.socketUp) conn.send(envelope);
+			else _parkPendingFrame(conn, envelope, id);
+		} catch (cause) { _rejectSend(id, cause); }
 	});
 }
 
@@ -592,7 +630,9 @@ export function __binaryRpc(path) {
 			});
 
 			// Wire format: byte[0] = 0x00, byte[1-2] = header length (uint16 BE), then JSON header, then binary payload
-			const header = JSON.stringify({ rpc: path, id, args: args.length > 0 ? args : undefined });
+			let header;
+			try { header = JSON.stringify({ rpc: path, id, args: args.length > 0 ? args : undefined }); }
+			catch (cause) { _rejectSend(id, cause); return; }
 			const headerBytes = _textEncoder.encode(header);
 			if (headerBytes.length > 0xFFFF) {
 				pending.delete(id);
@@ -637,8 +677,10 @@ export function __binaryRpc(path) {
 
 			// Send a view of exactly the right size (frame may be oversized from reuse)
 			const payload = frame.buffer.slice(0, size);
-			if (clientState.socketUp) conn.send(payload);
-			else _parkPendingFrame(conn, payload, id);
+			try {
+				if (clientState.socketUp) conn.send(payload);
+				else _parkPendingFrame(conn, payload, id);
+			} catch (cause) { _rejectSend(id, cause); }
 		});
 	};
 }
@@ -738,8 +780,10 @@ export function batch(fn, options) {
 		}, effectiveTimeout);
 		const existing = pending.get(call.id);
 		if (existing) existing.timer = timer;
-		if (clientState.socketUp) conn.send(call);
-		else _parkPendingFrame(conn, call, call.id);
+		try {
+			if (clientState.socketUp) conn.send(call);
+			else _parkPendingFrame(conn, call, call.id);
+		} catch (cause) { _rejectSend(call.id, cause); }
 		return Promise.all(promises);
 	}
 
@@ -768,8 +812,10 @@ export function batch(fn, options) {
 	// Send all calls as one frame
 	const payload = { batch: collected };
 	if (options?.sequential) payload.sequential = true;
-	if (clientState.socketUp) conn.send(payload);
-	else _parkPendingFrame(conn, payload, collected.map(call => call.id));
+	try {
+		if (clientState.socketUp) conn.send(payload);
+		else _parkPendingFrame(conn, payload, collected.map(call => call.id));
+	} catch (cause) { for (const call of collected) _rejectSend(call.id, cause); }
 
 	// Return promise that resolves when all individual promises resolve
 	return Promise.all(promises).finally(() => clearTimer(batchTimer));

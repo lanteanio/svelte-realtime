@@ -128,13 +128,6 @@ export function configure(config) {
 		let isFirst = true;
 		conn.status.subscribe((s) => {
 			if (isFirst) { isFirst = false; return; }
-			// The adapter reports a socket that opens while document.hidden as
-			// `suspended`, then continues its onopen path synchronously. Advertise at
-			// both connection-ready states so hello/resubscribe/queued work can never
-			// outrun strict protocol admission. App reconnect work remains open-only.
-			if ((s === 'open' || s === 'suspended') && clientState.config.protocolVersion !== undefined) {
-				try { _conn().sendQueued({ type: 'proto', v: clientState.config.protocolVersion }); } catch { /* no connection handle yet */ }
-			}
 			if (s === 'open') {
 				clientState.isOffline = false;
 				_callConnectionHook('onConnect');

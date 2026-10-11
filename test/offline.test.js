@@ -2659,8 +2659,8 @@ describe('offline queue - what a queued call stores', () => {
 		const big = watch(mod.__rpc('todos/save').fresh({ count: 1n }));
 		const loop = watch(mod.__rpc('todos/save').fresh(cyclic));
 		await flush(1);
-		expect(big.error).toBeInstanceOf(TypeError);
-		expect(loop.error).toBeInstanceOf(TypeError);
+		expect(big.error).toMatchObject({ code: 'INVALID_REQUEST', cause: expect.any(TypeError) });
+		expect(loop.error).toMatchObject({ code: 'INVALID_REQUEST', cause: expect.any(TypeError) });
 		expect(pendingSeen).toBe(0);
 		expect(store.ops).toEqual([]);
 	});
@@ -2671,7 +2671,7 @@ describe('offline queue - what a queued call stores', () => {
 		const kept = watch(mod.__rpc('todos/save')({ t: 'kept' }));
 		const big = watch(mod.__rpc('todos/save').fresh({ count: 1n }));
 		await flush(1);
-		expect(big.error).toBeInstanceOf(TypeError);
+		expect(big.error).toMatchObject({ code: 'INVALID_REQUEST', cause: expect.any(TypeError) });
 		expect(kept.settled).toBe(false);
 		let pendingSeen;
 		mod.pendingMutations.subscribe((n) => { pendingSeen = n; });
