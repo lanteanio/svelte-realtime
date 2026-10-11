@@ -552,3 +552,24 @@ it('masks smooth identifiers by default and purges them while preserving safe te
  expect(await page.getByRole('tabpanel').textContent()).not.toContain('private-');
  expect(await page.getByRole('tabpanel').textContent()).toContain('17');
 });
+
+
+it.each(['de-DE', 'ar-EG'])('keeps untranslated labels English for browser locale %s', async locale => {
+ await page.close();
+ page = await browser.newPage({ locale });
+ await page.goto(origin);
+ await page.locator('#svr-dt-launcher').waitFor();
+ expect(await page.locator('#svelte-realtime-devtools').getAttribute('lang')).toBe('en');
+ expect(await page.locator('#svelte-realtime-devtools').getAttribute('dir')).toBe('ltr');
+ await page.evaluate(locale => window.configureDevtools({ locale }), locale);
+ expect(await page.locator('#svelte-realtime-devtools').getAttribute('lang')).toBe('en');
+ expect(await page.locator('#svr-dt-launcher').getAttribute('lang')).toBe('en');
+});
+it('relabels the visible launcher together with its accessible name', async () => {
+ await page.evaluate(() => window.configureDevtools({ locale: 'de', messages: {
+  'DevTools': 'Werkzeuge', 'Toggle svelte-realtime DevTools': 'Werkzeuge umschalten'
+ } }));
+ const launcher = page.getByRole('button', { name: 'Werkzeuge umschalten' });
+ expect(await launcher.textContent()).toBe('Werkzeuge');
+ expect(await launcher.getAttribute('lang')).toBe('de');
+});

@@ -11,6 +11,7 @@ let numberFormat = new Intl.NumberFormat();
 let timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 let relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 let direction = 'ltr';
+let labelLocale = 'en';
 
 /** @param {string} template @param {Record<string, string | number>} [values] */
 function message(template, values = {}) {
@@ -31,7 +32,9 @@ export function configureDevtools(options = {}) {
  const nextNumber = new Intl.NumberFormat(nextLocale);
  const nextTime = new Intl.DateTimeFormat(nextLocale, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
  const nextRelative = new Intl.RelativeTimeFormat(nextLocale, { numeric: 'auto' });
- const language = new Intl.Locale(nextNumber.resolvedOptions().locale);
+ const hasTranslations = options.messages && Object.keys(options.messages).length > 0;
+ labelLocale = hasTranslations ? nextNumber.resolvedOptions().locale : 'en';
+ const language = new Intl.Locale(labelLocale);
  locale = nextLocale;
  numberFormat = nextNumber;
  timeFormat = nextTime;
@@ -39,10 +42,11 @@ export function configureDevtools(options = {}) {
  messages = options.messages || {};
  direction = options.direction || language.getTextInfo?.().direction || language.textInfo?.direction || (/^(ar|fa|he|ur|ps|dv)(-|$)/.test(language.language) ? 'rtl' : 'ltr');
  if (panel) {
-  panel.lang = nextNumber.resolvedOptions().locale;
+  panel.lang = labelLocale;
   panel.dir = direction;
   panel.setAttribute('aria-label', message('svelte-realtime DevTools'));
-  for (const el of panel.querySelectorAll('[data-label]')) {
+  if (launcher) { launcher.lang = labelLocale; launcher.dir = direction; }
+  for (const el of [...panel.querySelectorAll('[data-label]'), ...(launcher ? [launcher] : [])]) {
    const key = /** @type {HTMLElement} */ (el).dataset.label;
    el.textContent = message(key);
   }
@@ -149,7 +153,7 @@ function init() {
 
 	panel = document.createElement('div');
 	panel.id = 'svelte-realtime-devtools';
-	panel.lang = numberFormat.resolvedOptions().locale;
+	panel.lang = labelLocale;
 	panel.dir = direction;
 	panel.style.colorScheme = 'dark';
 	panel.setAttribute('role', 'region');
@@ -345,6 +349,9 @@ function init() {
 	launcher.type = 'button';
 	launcher.id = 'svr-dt-launcher';
 	launcher.textContent = message('DevTools');
+	launcher.dataset.label = 'DevTools';
+	launcher.lang = labelLocale;
+	launcher.dir = direction;
 	launcher.dataset.ariaLabel = 'Toggle svelte-realtime DevTools';
 	launcher.setAttribute('aria-label', message('Toggle svelte-realtime DevTools'));
 	launcher.setAttribute('aria-controls', panel.id);
