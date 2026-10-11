@@ -54,34 +54,48 @@ function properties(node) {
 	return Object.fromEntries(node.properties.filter(property => property.type === 'Property' && !property.computed)
 		.map(property => [property.key.name ?? property.key.value, property.value]));
 }
-// Resolve only local declarations and literal arguments of named local helpers.
-// Unknown arguments remain dynamic; no application-provided value is inferred.
-function localValues(node, parents, ast) {
-	if (node?.type !== 'Identifier') return literals(node);
-	for (const scope of [...parents].reverse()) {
-		if (scope.type === 'FunctionDeclaration' && ast.body.includes(scope)) {
-			const index = scope.params.findIndex(param => (param.type === 'AssignmentPattern' ? param.left : param).name === node.name);
-			if (index < 0) continue;
-			const values = literals(scope.params[index].right);
-			walk(ast, call => {
-				if (call.type === 'CallExpression' && call.callee.name === scope.id?.name) values.push(...literals(call.arguments[index]));
-			});
-			return values;
-		}
-	}
-	return [];
+// Resolve lexical bindings conservatively; unknown arguments remain dynamic.
+function binds(pattern, name) {
+	if (!pattern) return false;
+	if (pattern.type === 'Identifier') return pattern.name === name;
+	if (pattern.type === 'AssignmentPattern') return binds(pattern.left, name);
+	if (pattern.type === 'RestElement') return binds(pattern.argument, name);
+	if (pattern.type === 'ArrayPattern') return pattern.elements.some(item => binds(item, name));
+	if (pattern.type === 'ObjectPattern') return pattern.properties.some(item => binds(item.type === 'RestElement' ? item.argument : item.value, name));
+	return false;
 }
-function assignedErrorMessage(node, parents) {
-	const name = node.left.object?.name;
+function binding(name, parents) {
 	for (const scope of [...parents].reverse()) {
+		if (['FunctionDeclaration', 'FunctionExpression', 'ArrowFunctionExpression'].includes(scope.type)) {
+			const index = scope.params.findIndex(param => binds(param, name));
+			if (index >= 0) return (scope.params[index].type === 'Identifier' || (scope.params[index].type === 'AssignmentPattern' && scope.params[index].left.type === 'Identifier')) ? { scope, index, parameter: scope.params[index] } : {};
+			if (scope.id?.name === name) return { declaration: scope };
+		}
+		if (scope.type === 'CatchClause' && binds(scope.param, name)) return {};
 		if (scope.type !== 'BlockStatement' && scope.type !== 'Program') continue;
 		for (const statement of scope.body) {
-			if (statement.start >= node.start) break;
+			if (statement.type === 'FunctionDeclaration' && statement.id?.name === name) return { declaration: statement };
 			if (statement.type !== 'VariableDeclaration') continue;
-			const declaration = statement.declarations.find(item => item.id.name === name);
-			if (declaration) return statement.kind === 'const' && declaration.init?.type === 'NewExpression' && declaration.init.callee.name === 'Error' ? declaration.init.arguments[0] : undefined;
+			const declaration = statement.declarations.find(item => binds(item.id, name));
+			if (declaration) return { declaration, kind: statement.kind };
 		}
 	}
+}
+function localValues(node, parents, ast) {
+	if (node?.type !== 'Identifier') return literals(node);
+	const found = binding(node.name, parents);
+	if (!found?.parameter || found.scope.type !== 'FunctionDeclaration' || !ast.body.includes(found.scope)) return [];
+	const values = literals(found.parameter.right);
+	walk(ast, (call, callParents) => {
+		if (call.type !== 'CallExpression' || call.callee.type !== 'Identifier') return;
+		if (binding(call.callee.name, callParents)?.declaration === found.scope) values.push(...literals(call.arguments[found.index]));
+	});
+	return values;
+}
+function assignedErrorMessage(node, parents) {
+	const found = binding(node.left.object?.name, parents);
+	const declaration = found?.declaration;
+	return found?.kind === 'const' && declaration.start < node.start && declaration.init?.type === 'NewExpression' && declaration.init.callee.name === 'Error' ? declaration.init.arguments[0] : undefined;
 }
 const sorted = values => [...new Set(values)].sort();
 const anchor = (kind, key) => kind === 'diagnostic' ? kind + '-' + encodeURIComponent(key)

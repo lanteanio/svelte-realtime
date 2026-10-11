@@ -163,3 +163,14 @@ describe('client and plain error coverage', () => {
 		expect(inventory.errors.map(row => [row.key, row.prefixes])).toEqual([['ONE',['first']],['TWO',['second']]]);
 	});
 });
+
+
+it('does not infer error codes through shadowed helper parameters or calls', () => {
+	for (const source of [
+		"function outer(code){function inner(code){return new RpcError(code)}} outer('OUTER')",
+		"function outer(code){function inner({code}){return new RpcError(code)}} outer('OUTER')",
+		"function fail(code){return new RpcError(code)}; function caller(fail){fail('NOT_LOCAL')}",
+		"function fail(code){return new RpcError(code)}; function caller(){const fail = other; fail('NOT_LOCAL')}",
+		"const err = new Error('outer'); function inner(err){err.code='NOT_ERROR'}"
+	]) expect(scanRuntimeErrors([{path:'src/example.js', source}]).errors).toEqual([]);
+});
