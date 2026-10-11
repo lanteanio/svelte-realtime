@@ -4859,12 +4859,12 @@ export interface DeadLetterRecord {
 
 /** Storage interface for dead-lettered outbound-webhook events. */
 export interface DeadLetterStore {
-	add(rec: Omit<DeadLetterRecord, 'id'>): string;
-	get(id: string): DeadLetterRecord | null;
-	remove(id: string): boolean;
-	count(filter?: { topic?: string }): number;
-	list(filter?: { topic?: string; limit?: number }): DeadLetterRecord[];
-	summary(): { total: number; byTopic: Record<string, number>; oldest: number | null; newest: number | null };
+	add(rec: Omit<DeadLetterRecord, 'id'> & { startedAt?: number }): string | null | Promise<string | null>;
+	get(id: string): DeadLetterRecord | null | Promise<DeadLetterRecord | null>;
+	remove(id: string): boolean | Promise<boolean>;
+	count(filter?: { topic?: string }): number | Promise<number>;
+	list(filter?: { topic?: string; limit?: number }): DeadLetterRecord[] | Promise<DeadLetterRecord[]>;
+	summary(): DeadLetterSummary | Promise<DeadLetterSummary>;
 	/**
 	 * Right-to-erasure purge: drop every record whose capture-time userId
 	 * stamp (the `forgetUserId` extractor) matches. Records captured without
@@ -4873,6 +4873,25 @@ export interface DeadLetterStore {
 	 * rejects FORGET_INCOMPLETE for an enabled store without it.
 	 */
 	purgeUser?(tenantId: string | null, userId: string): number | Promise<number>;
+	clear(): void | Promise<void>;
+}
+
+export interface DeadLetterSummary {
+	total: number;
+	byTopic: Record<string, number>;
+	oldest: number | null;
+	newest: number | null;
+}
+
+/** The built-in store performs every operation synchronously. */
+export interface MemoryDeadLetterStore extends DeadLetterStore {
+	add(rec: Omit<DeadLetterRecord, 'id'> & { startedAt?: number }): string | null;
+	get(id: string): DeadLetterRecord | null;
+	remove(id: string): boolean;
+	count(filter?: { topic?: string }): number;
+	list(filter?: { topic?: string; limit?: number }): DeadLetterRecord[];
+	summary(): DeadLetterSummary;
+	purgeUser(tenantId: string | null, userId: string): number;
 	clear(): void;
 }
 
@@ -4892,7 +4911,7 @@ export function createDeadLetterStore(options?: {
 	 * holds and records are not user-purgeable.
 	 */
 	forgetUserId?: (event: { topic: string; event: string; data: unknown }) => string | null | undefined;
-}): DeadLetterStore;
+}): MemoryDeadLetterStore;
 
 /**
  * Configure the outbound-webhook plane. `deadLetter` captures undeliverable

@@ -65,6 +65,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Dead-letter store declarations accept asynchronous backends and nullable capture IDs, while the built-in memory store retains synchronous return types.
+
 - Smooth simulation ticks keep monotonic deadlines across callback work and catch up after timer delays, with at most eight ticks per callback. Idle rooms restart without old debt, and rewind history preserves distinct timestamps during catch-up.
 
 - New smooth entities are announced to peers even when they remain idle, including subscribers on other cluster instances. Repeated syncs do not repeat the announcement.

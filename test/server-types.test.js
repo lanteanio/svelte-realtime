@@ -6,6 +6,19 @@ it('accepts typed server options and rejects invalid values', () => {
 	const file = resolve(import.meta.dirname, 'smooth-config-consumer.ts').replaceAll('\\', '/');
 	const source = `
 import { configureForget, introspect, live, type SmoothConfig, type TenantConfig } from '../src/server.js';
+import { configureWebhooks, createDeadLetterStore, type DeadLetterStore } from '../src/server.js';
+import type { RedisDeadLetterStore } from 'svelte-adapter-uws-extensions/redis/dead-letter';
+declare const redisDeadLetter: RedisDeadLetterStore;
+configureWebhooks({ deadLetter: redisDeadLetter });
+const asyncDeadLetter: DeadLetterStore = {
+  add: async () => null, get: async () => null, remove: async () => false,
+  count: async () => 0, list: async () => [],
+  summary: async () => ({ total: 0, byTopic: {}, oldest: null, newest: null }),
+  purgeUser: async () => 0, clear: async () => {}
+};
+configureWebhooks({ deadLetter: asyncDeadLetter });
+const memoryCount: number = createDeadLetterStore().count();
+void memoryCount;
 const tenantConfig: TenantConfig = { metadata: { entitlement: 'pro', caps: { windowMs: 1000, actions: 1, bytes: 2048, recipientDeliveries: 2, storedBytes: 4096 } } };
 const tenant = live.tenant('acme', tenantConfig);
 const registered: TenantConfig | null = tenant.config;

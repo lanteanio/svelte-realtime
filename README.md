@@ -4509,7 +4509,7 @@ It is **off by default** - a DLQ retains the (attacker-influenceable) event payl
 
 Replay re-runs the **complete** delivery path, so the SSRF gate is re-applied at fire time (re-resolving and re-pinning the host) - a dead-lettered event can never be replayed to a host that has since become internal or started rebinding. A record whose webhook was removed from your code since it failed reports `webhook-unregistered` rather than firing.
 
-`configureWebhooks({ deadLetter })` is the imperative equivalent of the `webhooks` config; `createDeadLetterStore({ max, ttlMs })` builds the default store (a cluster substitutes a durable Redis/Postgres store with the same interface).
+`configureWebhooks({ deadLetter })` is the imperative equivalent of the `webhooks` config; `createDeadLetterStore({ max, ttlMs })` builds the synchronous default store. A cluster substitutes a durable Redis/Postgres store with the same interface; every `DeadLetterStore` method may return a promise. `add` returns a record ID or `null` when an erasure tombstone suppresses capture.
 
 ---
 
