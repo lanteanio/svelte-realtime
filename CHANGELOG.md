@@ -55,7 +55,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Changed
 
-- **Tenant policy metadata is typed and validated.** `live.tenant(id, config)` snapshots an immutable `metadata` carrier with an entitlement label and declared action, byte, recipient-delivery, and retained-byte caps. No automatic enforcement is installed. **Action:** replace arbitrary config fields and `null` with the documented `TenantConfig` shape; configure enforcement explicitly in its owning application or adapter.
+- **Breaking:** Tenant policy metadata is typed and validated. `live.tenant(id, config)` snapshots an immutable `metadata` carrier with an entitlement label and declared action, byte, recipient-delivery, and retained-byte caps. No automatic enforcement is installed. **Action required:** replace arbitrary config fields and `null` with the documented `TenantConfig` shape; configure enforcement explicitly in its owning application or adapter.
 
 - **Breaking:** `live.tenant` rejects the unsupported `quota` option instead of retaining an unenforced limit. **Action required:** remove that option and configure actual admission limits in the owning adapter, extension or application. Tenant configuration carries metadata and does not automatically install enforcement.
 
