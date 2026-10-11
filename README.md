@@ -647,7 +647,10 @@ The data store value never changes shape. It is always your data type or `undefi
 |---|---|---|
 | `$store` | `T \| undefined` | Your data. Never replaced by an error object. On failure, the last loaded value is preserved. |
 | `store.error` | `Readable<RpcError \| null>` | Current error, or `null` when healthy. |
+| `store.pending` | `Readable<boolean>` | Attach spinner indicator, delayed by 100ms by default; false on SSR. |
 | `store.status` | `Readable<'loading' \| 'connected' \| 'reconnecting' \| 'error'>` | Connection status. |
+
+For a spinner without fast-response flicker, subscribe to `store.pending`. It becomes true only while an initial attach, reconnect, or resume takes longer than `pendingDelay`, and clears immediately on completion, failure, or detachment. Set `pendingDelay: 0` in the `live.stream(..., { pendingDelay: 0 })` options for an immediate indicator, or use another nonnegative integer millisecond literal. Observing this indicator alone does not attach the stream. Connection `status` and page quiescence still report work immediately. RPC promises, pagination and predicted writes do not expose this attach indicator.
 
 Handle loading in your template:
 

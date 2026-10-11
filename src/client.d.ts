@@ -215,6 +215,8 @@ export interface StreamStore<T = any> extends Readable<T> {
 	readonly error: Readable<RpcError | null>;
 	/** Reactive store holding the connection status: 'loading', 'connected', 'reconnecting', or 'error'. */
 	readonly status: Readable<'loading' | 'connected' | 'reconnecting' | 'error'>;
+	/** Delayed attach indicator. False during SSR; observing it does not attach the stream. */
+	readonly pending: Readable<boolean>;
 	/**
 	 * The per-subscription attach lifecycle, distinct from `status` (a health
 	 * projection): `initialized -> attaching -> attached -> detached | failed`.
@@ -422,6 +424,8 @@ export function __stream(
 		prepend?: boolean;
 		max?: number;
 		replay?: boolean;
+		/** Attach indicator delay in integer milliseconds. Default 100; 0 is immediate. */
+		pendingDelay?: number;
 	},
 	isDynamic?: false
 ): StreamStore;
@@ -434,6 +438,8 @@ export function __stream(
 		prepend?: boolean;
 		max?: number;
 		replay?: boolean;
+		/** Attach indicator delay in integer milliseconds. Default 100; 0 is immediate. */
+		pendingDelay?: number;
 	} | undefined,
 	isDynamic: true
 ): (...args: any[]) => StreamStore;

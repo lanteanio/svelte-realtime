@@ -341,8 +341,8 @@ export const banner = live.flag('flag:banner', false);
 
 		// The raw server export is a flag handle without .subscribe; SSR must
 		// shadow it with a readable (static shape, matching the client stub).
-		expect(code).toContain('const _banner = readable(undefined);');
-		expect(code).toContain('_banner.hydrate = (d) => readable(d);');
+		expect(code).toContain('const _banner = __pending(readable(undefined));');
+		expect(code).toContain('_banner.hydrate = (d) => __pending(readable(d));');
 		expect(code).toContain('__directCall("flags/banner"');
 		expect(code).toContain('export { _banner as banner };');
 	});
@@ -2024,8 +2024,8 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 
 		expect(code).toContain("import { readable } from 'svelte/store'");
 		expect(code).toContain("import { __directCall } from 'svelte-realtime/server'");
-		expect(code).toContain("const _messages = readable(undefined)");
-		expect(code).toContain("_messages.hydrate = (d) => readable(d)");
+		expect(code).toContain("const _messages = __pending(readable(undefined))");
+		expect(code).toContain("_messages.hydrate = (d) => __pending(readable(d))");
 		expect(code).toContain('_messages.load = (platform, options) => __directCall("chat/messages"');
 		expect(code).toContain("export { _messages as messages }");
 	});
@@ -2042,7 +2042,7 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 		const code = plugin.load('\0live:board', { ssr: true });
 
 		expect(code).toContain("import { readable } from 'svelte/store'");
-		expect(code).toContain("const _notes = (...args) => { const s = readable(undefined); s.hydrate = (d) => readable(d); return s; }");
+		expect(code).toContain("const _notes = (...args) => { const s = __pending(readable(undefined)); s.hydrate = (d) => __pending(readable(d)); return s; }");
 		expect(code).toContain('_notes.load = (platform, options) => __directCall("board/notes"');
 		expect(code).toContain("export { _notes as notes }");
 	});
@@ -2070,7 +2070,7 @@ export const inbox = live.stream(
 
 		const ssrCode = plugin.load('\0live:auth', { ssr: true });
 		// Static SSR shape: a readable directly, NOT a factory
-		expect(ssrCode).toContain("const _inbox = readable(undefined)");
+		expect(ssrCode).toContain("const _inbox = __pending(readable(undefined))");
 		expect(ssrCode).not.toMatch(/const _inbox = \(\.\.\.args\) =>/);
 
 		const clientCode = plugin.load('\0live:auth', { ssr: false });
@@ -2132,7 +2132,7 @@ export const messages = live.stream('messages', async (ctx) => [], { merge: 'cru
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:chat', { ssr: true });
 
-		expect(code).toContain("_messages.hydrate = (d) => readable(d)");
+		expect(code).toContain("_messages.hydrate = (d) => __pending(readable(d))");
 	});
 
 	it('dynamic stream SSR stub factory returns store with .hydrate()', () => {
@@ -2146,7 +2146,7 @@ export const notes = live.stream((boardId) => 'notes/' + boardId, async (ctx) =>
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:board', { ssr: true });
 
-		expect(code).toContain("s.hydrate = (d) => readable(d)");
+		expect(code).toContain("s.hydrate = (d) => __pending(readable(d))");
 	});
 });
 

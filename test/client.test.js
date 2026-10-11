@@ -8953,3 +8953,107 @@ it('preserves public upload error metadata', async () => {
 	simulateUploadResponse(handle.streamId, { ok: false, code: 'LIMIT', error: 'Limit reached', params: { count: 3 }, details: ['retry'] });
 	await expect(handle).rejects.toMatchObject({ code: 'LIMIT', params: { count: 3 }, details: ['retry'] });
 });
+
+describe('stream pending indicator', () => {
+	beforeEach(() => { vi.stubGlobal('window', {}); vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] }); });
+	afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+	async function start(options = {}) {
+		const store = __stream('pending/items', { merge: 'set', ...options });
+		const seen = [];
+		const stopPending = store.pending.subscribe(v => seen.push(v));
+		const stop = store.subscribe(() => {});
+		await flush();
+		const request = sendQueuedFn.mock.calls.at(-1)[0];
+		const answer = () => simulateRpcResponse(request.id, { ok: true, data: [], topic: 'pending:items', merge: 'set' });
+		return { store, seen, stopPending, stop, answer, request };
+	}
+
+	it('never emits true for a fast answer and leaves status immediate', async () => {
+		const ctx = await start();
+		let status;
+		const stopStatus = ctx.store.status.subscribe(v => { status = v; });
+		expect(status).toBe('loading');
+		vi.advanceTimersByTime(99);
+		ctx.answer();
+		vi.advanceTimersByTime(101);
+		expect(ctx.seen).toEqual([false]);
+		expect(status).toBe('connected');
+		ctx.stop(); ctx.stopPending(); stopStatus(); await flush();
+	});
+
+	it('shows a slow attach at the threshold and clears immediately on completion', async () => {
+		const ctx = await start();
+		vi.advanceTimersByTime(99);
+		expect(ctx.seen).toEqual([false]);
+		vi.advanceTimersByTime(1);
+		expect(ctx.seen).toEqual([false, true]);
+		ctx.answer();
+		expect(ctx.seen).toEqual([false, true, false]);
+		ctx.stop(); ctx.stopPending(); await flush();
+	});
+
+	it('supports zero delay and clears on an error', async () => {
+		const ctx = await start({ pendingDelay: 0 });
+		expect(ctx.seen.at(-1)).toBe(true);
+		simulateRpcResponse(ctx.request.id, { ok: false, error: 'denied', code: 'FORBIDDEN' });
+		expect(ctx.seen.at(-1)).toBe(false);
+		ctx.stop(); ctx.stopPending(); await flush();
+	});
+
+	it('cancels on disposal before the threshold', async () => {
+		const ctx = await start({ pendingDelay: 250 });
+		ctx.stop(); await flush();
+		vi.advanceTimersByTime(250);
+		expect(ctx.seen).toEqual([false]);
+		ctx.answer(); ctx.stopPending();
+	});
+
+	it('uses the original attach time for late observers and restarts on reconnect', async () => {
+		const ctx = await start();
+		ctx.stopPending();
+		vi.advanceTimersByTime(80);
+		const seen = [];
+		const stopPending = ctx.store.pending.subscribe(v => seen.push(v));
+		vi.advanceTimersByTime(20);
+		expect(seen).toEqual([false, true]);
+		ctx.answer();
+		simulateStatus('disconnected'); simulateStatus('open');
+		vi.advanceTimersToNextTimer(); await flush();
+		vi.advanceTimersByTime(99);
+		expect(seen.at(-1)).toBe(false);
+		vi.advanceTimersByTime(1);
+		expect(seen.at(-1)).toBe(true);
+		const request = sendQueuedFn.mock.calls.at(-1)[0];
+		simulateRpcResponse(request.id, { ok: true, data: [], topic: 'pending:items', merge: 'set' });
+		expect(seen.at(-1)).toBe(false);
+		ctx.stop(); stopPending(); await flush();
+	});
+
+	it('does not attach from an indicator subscriber or allocate an unobserved indicator timer', async () => {
+		const store = __stream('pending/lazy');
+		const before = vi.getTimerCount();
+		const stopPending = store.pending.subscribe(() => {});
+		expect(sendQueuedFn).not.toHaveBeenCalled();
+		expect(vi.getTimerCount()).toBe(before);
+		stopPending();
+		const stop = store.subscribe(() => {}); await flush();
+		const timers = vi.getTimerCount();
+		const observe = store.pending.subscribe(() => {});
+		expect(vi.getTimerCount()).toBe(timers + 1);
+		observe();
+		expect(vi.getTimerCount()).toBe(timers);
+		stop(); await flush();
+	});
+
+	it('stays false without browser timers during SSR', async () => {
+		vi.stubGlobal('window', undefined);
+		const ctx = await start({ pendingDelay: 0 });
+		expect(ctx.seen).toEqual([false]);
+		ctx.answer(); ctx.stop(); ctx.stopPending(); await flush();
+	});
+
+	it.each([-1, NaN, Infinity, 0.5, 2147483648])('rejects invalid pendingDelay %s', value => {
+		expect(() => __stream('pending/invalid', { pendingDelay: value })).toThrow(RangeError);
+	});
+});

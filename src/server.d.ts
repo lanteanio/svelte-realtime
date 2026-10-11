@@ -663,6 +663,8 @@ export interface PiiRedactRules {
 export type PiiRedactConfig = true | ((data: any) => any) | PiiRedactRules;
 
 export interface StreamOptions {
+	/** Client pending indicator delay in integer milliseconds (0..2147483647). Default 100; 0 is immediate. Use a numeric literal. */
+	pendingDelay?: number;
 	/**
 	 * Per-room alarm (live.alarm). When set, a handler can call `ctx.setAlarm(at)`
 	 * to schedule a one-shot wake-up that runs `onAlarm` at time `at`, even if the

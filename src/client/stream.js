@@ -437,7 +437,7 @@ const _evictable = new Set();
  * cached store instances keyed by serialized args.
  *
  * @param {string} path - e.g. 'chat/messages'
- * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number }} [options]
+ * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, pendingDelay?: number }} [options]
  * @param {boolean} [isDynamic] - If true, returns a function that accepts args
  * @returns {import('svelte/store').Readable<any> | ((...args: any[]) => import('svelte/store').Readable<any>)}
  */
@@ -588,7 +588,7 @@ function _createMappedStore(source, fn) {
 
 /**
  * @param {string} path
- * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number }} [options]
+ * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, pendingDelay?: number }} [options]
  * @param {any[]} [dynamicArgs]
  * @returns {any}
  */
@@ -602,6 +602,10 @@ function _createMappedStore(source, fn) {
  *   `subscribeAt` helper from `svelte-realtime/testing/client`.
  */
 function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
+	const pendingDelay = options?.pendingDelay ?? 100;
+	if (!Number.isInteger(pendingDelay) || pendingDelay < 0 || pendingDelay > 2147483647) {
+		throw new RangeError('[svelte-realtime] pendingDelay must be an integer from 0 to 2147483647');
+	}
 	let merge = options?.merge || 'crud';
 	let key = options?.key || 'id';
 	let prepend = options?.prepend || false;
@@ -631,9 +635,26 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	let _phase = 'initialized';
 	const _phaseStore = writable(/** @type {'initialized' | 'attaching' | 'attached' | 'detached' | 'failed'} */ ('initialized'));
 
+	let _attachStarted = 0;
+	// Only observed indicators allocate a timer; health remains immediate.
+	/** @type {import('svelte/store').Readable<boolean> | undefined} */
+	let _pendingStore;
+	function _subscribePending(fn) {
+		_pendingStore ??= derived(_phaseStore, (phase, set) => {
+			if (phase !== 'attaching' || typeof window === 'undefined') { set(false); return; }
+			const remaining = pendingDelay - (monotonicNow() - _attachStarted);
+			if (remaining <= 0) { set(true); return; }
+			set(false);
+			const timer = setTimer(() => set(true), remaining);
+			return () => clearTimer(timer);
+		}, false);
+		return _pendingStore.subscribe(fn);
+	}
+
 	function _setPhase(/** @type {'initialized' | 'attaching' | 'attached' | 'detached' | 'failed'} */ p) {
 		if (_phase === p) return;
 		_phase = p;
+		if (p === 'attaching') _attachStarted = monotonicNow();
 		_phaseStore.set(p);
 	}
 
@@ -2186,6 +2207,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		__streamArgs: dynamicArgs,
 		error: { subscribe: _errorStore.subscribe },
 		status: { subscribe: _statusStore.subscribe },
+		pending: { subscribe: _subscribePending },
 		phase: { subscribe: _phaseStore.subscribe },
 
 		/**
