@@ -83,3 +83,16 @@ it('rejects Markdown and bare-URL injection in route labels and needs', () => {
 		}
 	}
 });
+
+
+it('rejects swapped, renamed, missing and extra reader paths', () => {
+ const swapped = structuredClone(manifest);
+ [swapped.paths[3], swapped.paths[4]] = [swapped.paths[4], swapped.paths[3]];
+ expect(validateManifest(swapped, pkg).join('\n')).toContain('path 3 must be tutorial/Tutorial');
+ const renamed = structuredClone(manifest);
+ renamed.paths[3].key = 'walkthrough';
+ expect(validateManifest(renamed, pkg).join('\n')).toContain('path 3 must be tutorial/Tutorial');
+ for (const paths of [manifest.paths.slice(0, 7), [...manifest.paths, manifest.paths[0]]]) {
+  expect(validateManifest({...manifest, paths}, pkg).join('\n')).toContain('exactly eight ordered paths');
+ }
+});

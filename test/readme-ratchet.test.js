@@ -54,5 +54,14 @@ it('rejects unrecorded working and committed growth through the real documentati
 		save({ ...accepted, readmeMaxLines: accepted.readmeMaxLines + 1, entryBudgetLines: accepted.entryBudgetLines + 1 });
 		git('add', 'docs/documentation.v1.json'); git('commit', '-qm', 'Change routing budget');
 		expect(() => run()).toThrow('accepted README growth record');
+		run({ write: true, acceptReadmeGrowth: true });
+		git('add', 'docs/documentation.v1.json'); git('commit', '-qm', 'Repair documentation growth record');
+		run();
+		const repaired = readFileSync(join(directory, 'docs/documentation.v1.json'));
+		git('rm', 'docs/documentation.v1.json'); git('commit', '-qm', 'Remove documentation manifest');
+		writeFileSync(join(directory, 'docs/documentation.v1.json'), repaired);
+		run();
+		git('add', 'docs/documentation.v1.json'); git('commit', '-qm', 'Restore documentation manifest');
+		run();
 	} finally { removeFixture(directory, 'realtime-readme-'); }
 }, 600_000);

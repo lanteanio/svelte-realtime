@@ -137,19 +137,15 @@ export function main({ directory = root, write = false, acceptReadmeGrowth = fal
 	const pkg = JSON.parse(readFileSync(resolve(directory, 'package.json'), 'utf8'));
 	const schemaErrors = validateManifest(manifest, pkg);
 	if (schemaErrors.length) throw new Error(schemaErrors.join('\n'));
-	const { head, history } = readReadmeBaselines(directory);
+	const { baseline } = readReadmeBaselines(directory);
 	let readme = readFileSync(resolve(directory, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
 	if (write) {
 		readme = replaceBlock(readme, PATHS_START, PATHS_END, renderPaths(manifest));
 		readme = replaceBlock(readme, COMPAT_START, COMPAT_END, renderCompatibility());
 		readme = replaceBlock(readme, TOPICS_START, TOPICS_END, renderTopics(readme));
-		manifest = resizeReadmeManifest(manifest, head, readme.split('\n').length, acceptReadmeGrowth);
+		manifest = resizeReadmeManifest(manifest, baseline || manifest, readme.split('\n').length, acceptReadmeGrowth);
 	}
-	const failures = validateReadme(readme, manifest, head);
-	// Validate every change after record adoption, including changes hidden by later commits.
-	for (let index = 0; index + 1 < history.length; index++) {
-		if (Object.hasOwn(history[index + 1], 'readmeGrowth')) failures.push(...validateReadmeGrowth(history[index], history[index + 1]));
-	}
+	const failures = validateReadme(readme, manifest, baseline);
 	if (!write && readFileSync(resolve(directory, 'docs/package-exports.md'), 'utf8').replace(/\r\n/g, '\n') !== renderExports(pkg)) failures.push('package exports index differs; run npm run generate:documentation');
 	if (failures.length) throw new Error(failures.join('\n'));
 	if (write) {

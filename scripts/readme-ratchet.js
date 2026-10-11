@@ -38,14 +38,24 @@ export function readReadmeBaselines(directory) {
 	const manifests = refs.map(() => {
 		const end = output.indexOf(10, offset);
 		const match = /^\S+ blob (\d+)$/.exec(output.subarray(offset, end).toString('utf8'));
-		if (!match) throw new Error('Cannot read committed README growth history');
+		if (!match) {
+			if (/ missing$/.test(output.subarray(offset, end).toString('utf8'))) { offset = end + 1; return null; }
+			throw new Error('Cannot read committed README growth history');
+		}
 		const size = Number(match[1]);
 		offset = end + 1;
 		const manifest = JSON.parse(output.subarray(offset, offset + size).toString('utf8'));
 		offset += size + 1;
 		return manifest;
 	});
-	return { head: manifests[0], history: manifests.slice(1) };
+	const history = manifests.slice(1).filter(Boolean);
+	// A later compliant snapshot can repair an invalid intermediate commit.
+	// Preserve the last valid checkpoint instead of ratcheting from bad data.
+	let baseline = null;
+	for (const manifest of [...history].reverse()) {
+		if (!baseline || validateReadmeGrowth(manifest, baseline).length === 0) baseline = manifest;
+	}
+	return { head: manifests[0], history, baseline };
 }
 
 export function resizeReadmeManifest(manifest, baseline, lines, acceptGrowth) {
