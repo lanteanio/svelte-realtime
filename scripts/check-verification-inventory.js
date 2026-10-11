@@ -23,6 +23,20 @@ export function expandScript(name, scripts, stack = []) {
 	return commands;
 }
 
+export function automaticTriggers(on) {
+	const events = typeof on === 'string' ? { [on]: null } : Array.isArray(on) ? Object.fromEntries(on.map(name => [name, null])) : on || {};
+	if (Object.hasOwn(events, 'pull_request')) return true;
+	if (!Object.hasOwn(events, 'push')) return false;
+	const push = events.push || {};
+	return Object.hasOwn(push, 'branches') || Object.hasOwn(push, 'branches-ignore') || (!Object.hasOwn(push, 'tags') && !Object.hasOwn(push, 'tags-ignore'));
+}
+export function validateLaneTable(contributing, scripts) {
+	const section = contributing.split('## Choose verification by the changed surface')[1]?.split('\n## ')[0] || '';
+	const table = section.split('\n').filter(line => line.startsWith('|')).join('\n');
+	const required = Object.keys(scripts).filter(name => name.startsWith('verify:') || ['smoke', 'test:smooth-stack', 'test:chaos:parallel'].includes(name));
+	const missing = required.filter(name => !table.includes('npm run ' + name + String.fromCharCode(96)));
+	if (missing.length) throw new Error('Verification table is missing lanes: ' + missing.join(', '));
+}
 export function buildInventory(pkg, workflows) {
 	const scripts = Object.fromEntries(Object.keys(pkg.scripts).sort().map((name) => [name, expandScript(name, pkg.scripts)]));
 	const hosted = [];
@@ -41,19 +55,20 @@ export function buildInventory(pkg, workflows) {
 					if (match && Object.hasOwn(pkg.scripts, match[1])) commands.push(...expandScript(match[1], pkg.scripts));
 					else commands.push(line);
 				}
-				if (commands.length) hosted.push({ workflow: file, job, step: step.name || String(index + 1), commands });
+				if (commands.length) hosted.push({ workflow: file, automatic: automaticTriggers(workflow.on), job, step: step.name || String(index + 1), commands });
 			}
 		}
 	}
-	const allHosted = new Set(hosted.flatMap((step) => step.commands));
-	const notFullyHosted = Object.keys(scripts).filter((name) => /^(check|test|sim:|verify:)/.test(name) && scripts[name].some((command) => !allHosted.has(command)));
-	return { schemaVersion: 1, scripts, hosted, notFullyHosted };
+	const allHosted = new Set(hosted.filter(step => step.automatic).flatMap((step) => step.commands));
+	const notFullyHosted = Object.keys(scripts).filter((name) => /^(check|test|sim:|verify:|smoke$)/.test(name) && scripts[name].some((command) => !allHosted.has(command)));
+	return { schemaVersion: 2, scripts, workflowTriggers: Object.fromEntries(Object.entries(workflows).sort().map(([file, workflow]) => [file, workflow.on ?? null])), hosted, notFullyHosted };
 }
 
 export function renderInventory(pkg, workflows) { return JSON.stringify(buildInventory(pkg, workflows), null, 2) + '\n'; }
 function main() {
 	const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 	const workflows = Object.fromEntries(readdirSync(resolve(root, '.github/workflows')).filter((file) => /\.ya?ml$/.test(file)).map((file) => [file, parse(readFileSync(resolve(root, '.github/workflows', file), 'utf8'))]));
+	validateLaneTable(readFileSync(resolve(root, 'CONTRIBUTING.md'), 'utf8').replace(/\r\n/g, '\n'), pkg.scripts);
 	const output = renderInventory(pkg, workflows);
 	const target = resolve(root, 'docs/verification.v1.json');
 	if (process.argv.includes('--write')) writeFileSync(target, output);

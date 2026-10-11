@@ -195,7 +195,12 @@ first dependency and browser downloads take longer. CI uses the same scripts.
 | Browser transport, reconnect, Svelte integration | `npm run verify:browser` | 5-15 minutes |
 | Production lifecycle or shutdown hooks | `npm run test:lifecycle` | 1-3 minutes |
 | Cluster recovery or Redis routing | `npm run verify:chaos` | 5-20 minutes |
-| Broad refactor or release candidate | `npm run verify:full` | 10-30 minutes |
+| Every pull request | `npm run verify:pr` | 5-15 minutes |
+| Broad refactor | `npm run verify:full` | 10-30 minutes |
+| Release candidate | `npm run verify:release` | 15-45 minutes |
+| Native adapter delivery or batch wire | `npm run test:smooth-stack` | 1-3 minutes |
+| Installation and production smoke | `npm run smoke` | 1-5 minutes |
+| Concurrent chaos fixture lifecycle | `npm run test:chaos:parallel` | 5-20 minutes |
 
 `verify:pr` composes unit (including pretest), deterministic simulation/fuzz and
 DevTools and scaffold browser checks. `verify:full` adds application E2E and all chaos tests.
@@ -216,12 +221,15 @@ Maintainers must accept the limitation or require another environment before mer
 
 [The generated verification inventory](docs/verification.v1.json) expands package
 scripts including npm pre/post hooks and every root-package workflow command.
-`notFullyHosted` explicitly lists checks whose full command set is not in CI;
+`notFullyHosted` lists checks whose full command set is absent from pull-request
+or branch-push workflows. Tag-only, schedule-only and manual workflows are
+recorded with their triggers but do not qualify as automatic contribution checks;
 the application E2E lane and the complete chaos lane need contributor evidence
 (the recovery CI job runs its named recovery spec and the parallel isolation check). The inventory excludes
 steps targeting another working directory or npm prefix. Any script or workflow
 change must run `npm run generate:verification` and include the reviewed diff;
-`npm run check:verification` fails when the inventory no longer matches reality.
+`npm run check:verification` fails when the inventory drifts or the table omits
+a verification lane, smoke, smooth-stack or parallel chaos evidence.
 
 `npm run test:lifecycle` packs the current checkout, installs that tarball into
 an isolated fixture, and builds production. Docker runs the built server under

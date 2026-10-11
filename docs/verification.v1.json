@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scripts": {
     "check": [
       "node scripts/generate-error-reference.js --check",
@@ -323,9 +323,77 @@
       "vitest run"
     ]
   },
+  "workflowTriggers": {
+    "chaos-recovery.yml": {
+      "pull_request": {
+        "paths": [
+          "src/**",
+          "test/chaos/**",
+          "scripts/check-chaos-isolation.js",
+          "scripts/check-production-lifecycle.js",
+          "test/fixture/**",
+          "test/e2e/prod-server.js",
+          "package.json",
+          "package-lock.json",
+          ".github/workflows/chaos-recovery.yml"
+        ]
+      },
+      "push": {
+        "branches": [
+          "main",
+          "dev"
+        ]
+      },
+      "workflow_dispatch": null
+    },
+    "devtools.yml": {
+      "pull_request": {
+        "paths": [
+          "src/**",
+          "test/devtools-ui.browser.js",
+          "vitest.devtools.config.js",
+          "package*.json",
+          ".github/workflows/devtools.yml"
+        ]
+      },
+      "push": {
+        "branches": [
+          "main",
+          "dev"
+        ]
+      },
+      "workflow_dispatch": null
+    },
+    "docs-links.yml": {
+      "schedule": [
+        {
+          "cron": "43 5 * * 2"
+        }
+      ],
+      "workflow_dispatch": null
+    },
+    "release.yml": {
+      "push": {
+        "tags": [
+          "svelte-realtime@*"
+        ]
+      }
+    },
+    "verify.yml": {
+      "pull_request": null,
+      "push": {
+        "branches": [
+          "main",
+          "dev"
+        ]
+      },
+      "workflow_dispatch": null
+    }
+  },
   "hosted": [
     {
       "workflow": "chaos-recovery.yml",
+      "automatic": true,
       "job": "recovery-chaos",
       "step": "Install realtime and fixture dependencies",
       "commands": [
@@ -334,6 +402,7 @@
     },
     {
       "workflow": "chaos-recovery.yml",
+      "automatic": true,
       "job": "recovery-chaos",
       "step": "Install Chromium",
       "commands": [
@@ -342,6 +411,7 @@
     },
     {
       "workflow": "chaos-recovery.yml",
+      "automatic": true,
       "job": "recovery-chaos",
       "step": "Verify Docker daemon",
       "commands": [
@@ -350,6 +420,7 @@
     },
     {
       "workflow": "chaos-recovery.yml",
+      "automatic": true,
       "job": "recovery-chaos",
       "step": "Verify packed production shutdown",
       "commands": [
@@ -358,6 +429,7 @@
     },
     {
       "workflow": "chaos-recovery.yml",
+      "automatic": true,
       "job": "recovery-chaos",
       "step": "Verify concurrent chaos isolation",
       "commands": [
@@ -366,6 +438,7 @@
     },
     {
       "workflow": "chaos-recovery.yml",
+      "automatic": true,
       "job": "recovery-chaos",
       "step": "Run Redis and instance recovery at the event revision",
       "commands": [
@@ -374,6 +447,7 @@
     },
     {
       "workflow": "devtools.yml",
+      "automatic": true,
       "job": "devtools",
       "step": "3",
       "commands": [
@@ -382,6 +456,7 @@
     },
     {
       "workflow": "devtools.yml",
+      "automatic": true,
       "job": "devtools",
       "step": "4",
       "commands": [
@@ -390,6 +465,7 @@
     },
     {
       "workflow": "devtools.yml",
+      "automatic": true,
       "job": "devtools",
       "step": "5",
       "commands": [
@@ -398,6 +474,7 @@
     },
     {
       "workflow": "docs-links.yml",
+      "automatic": false,
       "job": "external-links",
       "step": "3",
       "commands": [
@@ -406,6 +483,7 @@
     },
     {
       "workflow": "docs-links.yml",
+      "automatic": false,
       "job": "external-links",
       "step": "4",
       "commands": [
@@ -414,6 +492,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "verify",
       "step": "Install pinned npm",
       "commands": [
@@ -422,6 +501,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "verify",
       "step": "Install locked root dependencies",
       "commands": [
@@ -430,6 +510,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "verify",
       "step": "Verify tag, package, and source identity",
       "commands": [
@@ -438,6 +519,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "verify",
       "step": "Install Chromium",
       "commands": [
@@ -446,6 +528,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "verify",
       "step": "Verify Docker daemon",
       "commands": [
@@ -454,6 +537,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "verify",
       "step": "Run the complete release verification contract",
       "commands": [
@@ -490,6 +574,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "verify",
       "step": "Run the publication lifecycle gate",
       "commands": [
@@ -516,6 +601,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "verify",
       "step": "Verify retained source identity",
       "commands": [
@@ -524,6 +610,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "verify",
       "step": "Pack retained artifact",
       "commands": [
@@ -545,6 +632,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "publish",
       "step": "Install OIDC-capable npm",
       "commands": [
@@ -553,6 +641,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "publish",
       "step": "Refuse to publish anything but the verified bytes",
       "commands": [
@@ -570,6 +659,7 @@
     },
     {
       "workflow": "release.yml",
+      "automatic": false,
       "job": "publish",
       "step": "Publish exact tarball to quarantine with trusted OIDC",
       "commands": [
@@ -578,6 +668,7 @@
     },
     {
       "workflow": "verify.yml",
+      "automatic": true,
       "job": "verify",
       "step": "3",
       "commands": [
@@ -586,6 +677,7 @@
     },
     {
       "workflow": "verify.yml",
+      "automatic": true,
       "job": "verify",
       "step": "4",
       "commands": [
@@ -594,6 +686,7 @@
     },
     {
       "workflow": "verify.yml",
+      "automatic": true,
       "job": "verify",
       "step": "5",
       "commands": [
@@ -625,6 +718,7 @@
     },
     {
       "workflow": "verify.yml",
+      "automatic": true,
       "job": "verify",
       "step": "6",
       "commands": [
@@ -633,6 +727,7 @@
     },
     {
       "workflow": "verify.yml",
+      "automatic": true,
       "job": "smoke",
       "step": "3",
       "commands": [
@@ -641,6 +736,7 @@
     },
     {
       "workflow": "verify.yml",
+      "automatic": true,
       "job": "smoke",
       "step": "4",
       "commands": [
@@ -649,6 +745,7 @@
     },
     {
       "workflow": "verify.yml",
+      "automatic": true,
       "job": "smoke",
       "step": "5",
       "commands": [
@@ -657,6 +754,7 @@
     },
     {
       "workflow": "verify.yml",
+      "automatic": true,
       "job": "smoke",
       "step": "Exercise the manual counter in a fresh app",
       "commands": [
@@ -666,8 +764,14 @@
   ],
   "notFullyHosted": [
     "check:links:external",
+    "test:chaos",
+    "test:e2e",
     "test:examples",
     "test:watch",
-    "verify:docs"
+    "verify:browser",
+    "verify:chaos",
+    "verify:docs",
+    "verify:full",
+    "verify:release"
   ]
 }
