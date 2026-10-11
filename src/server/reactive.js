@@ -677,7 +677,17 @@ function _currentDerivedContext(entry, platform, select = true) {
 			if (unscoped || _resolveTenant(user) === entry.tenantId) {
 				// Default identity checks need only user/ws. Build the full public
 				// context only for a custom scope callback or the selected compute.
-				if (scopeKey) ctx = _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null);
+				if (scopeKey) {
+					ctx = subscriber.scopeCtx;
+					if (!ctx || subscriber.scopePlatform !== platform || ctx.requestId !== platform?.requestId ||
+						ctx.connectionId !== (ws ? platform?.connectionId ?? platform?.requestId : undefined)) {
+						ctx = subscriber.scopeCtx = _buildCtx(user || null, ws, platform, _getCtxHelpers(platform), null);
+						subscriber.scopePlatform = platform;
+					}
+					ctx.user = user || null;
+					ctx.traceContext = platform?.traceContext ?? null;
+					ctx.trace = platform?.trace ?? null;
+				}
 				else { identityCtx.user = user; identityCtx.ws = ws; ctx = identityCtx; }
 				valid = _matchesDerivedScope(ctx, entry.args, scopeKey, entry.scope);
 			}
@@ -697,6 +707,7 @@ function _currentDerivedContext(entry, platform, select = true) {
 		const count = subscriber.count;
 		try {
 			if (ws) {
+				try { platform.send(ws, '__rpc', '__topic_error', { topic: entry.topic, code: 'FORBIDDEN', error: 'Stream access changed; subscribe again to refresh your view' }); } catch {}
 				try { _releaseStream(ws, entry.topic, platform, entry.fn, entry.tenantId); }
 				finally {
 					// The adapter may synchronously invoke the public unsubscribe

@@ -6896,6 +6896,15 @@ describe('subscribe-denial routing', () => {
 		return { store, errorValues, cleanup: () => { errorUnsub(); dataUnsub(); } };
 	}
 
+	it('routes a server scope revocation to the matching stream error store', async () => {
+		const revoked = await setupStreamSubscribed('derived:old');
+		const retained = await setupStreamSubscribed('derived:other');
+		simulateRpcResponse('__topic_error', { topic: 'derived:old', code: 'FORBIDDEN', error: 'Stream access changed' });
+		expect(revoked.errorValues.at(-1)).toMatchObject({ code: 'FORBIDDEN', message: 'Stream access changed' });
+		expect(retained.errorValues.at(-1)).toBeNull();
+		revoked.cleanup(); retained.cleanup();
+	});
+
 	it('routes a FORBIDDEN denial to the matching stream error store', async () => {
 		const ctx = await setupStreamSubscribed('feed:42');
 		expect(ctx.errorValues[ctx.errorValues.length - 1]).toBeNull();

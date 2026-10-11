@@ -83,6 +83,28 @@ describe('dynamic derived identity', () => {
 		expect(different.stream.value).toBe('ab');
 	});
 
+	it('refreshes custom scope contexts after session and correlation changes', async () => {
+		let socket;
+		let requestId = 'request-one';
+		let traceContext = { traceId: 'trace-one' };
+		const observations = [];
+		const { publish } = setup(() => 'shared', { scopeKey: ctx => {
+			socket = ctx.ws;
+			observations.push({ label: ctx.user.label, requestId: ctx.requestId, platformRequestId: ctx.platform.requestId, traceContext: ctx.traceContext });
+			return ctx.user.group;
+		} });
+		Object.defineProperties(env.platform, {
+			requestId: { configurable: true, get: () => requestId },
+			traceContext: { configurable: true, get: () => traceContext }
+		});
+		await join({ id: 'member', label: 'before', group: 'team' });
+		publish(); await flush();
+		socket.getUserData = () => ({ id: 'member', label: 'after', group: 'team' });
+		requestId = 'request-two'; traceContext = { traceId: 'trace-two' };
+		publish(); await flush();
+		expect(observations.at(-1)).toEqual({ label: 'after', requestId, platformRequestId: requestId, traceContext });
+	});
+
 	it('preserves scope and lifecycle registration through stream wrappers', async () => {
 		const { publish } = setup((ctx) => ctx.user.id, { scopeKey: (ctx) => ctx.user.id }, (fn) => live.scoped(() => true, fn));
 		const { stream } = await join({ id: 'one' });
@@ -93,11 +115,15 @@ describe('dynamic derived identity', () => {
 		const { publish } = setup((ctx) => ctx.user.role);
 		const user = { id: 'same', role: 'ADMIN_ONLY' };
 		const revoked = await join(user);
+		const notices = [];
+		const send = env.platform.send;
+		env.platform.send = (ws, topic, event, data) => { if (event === '__topic_error') notices.push(data); return send(ws, topic, event, data); };
 		const remaining = await join({ id: 'same', role: 'ADMIN_ONLY' });
 		user.id = 'different'; user.role = 'MEMBER';
 		publish(); await flush();
 		expect(revoked.stream.events).toEqual([]);
 		expect(remaining.stream.events.map((e) => e.data)).toEqual(['ADMIN_ONLY']);
+		expect(notices).toEqual([{ topic: revoked.stream.topic, code: 'FORBIDDEN', error: expect.any(String) }]);
 	});
 
 	it('rechecks explicit scope authorization after an asynchronous computation', async () => {
@@ -209,7 +235,7 @@ describe('dynamic derived identity', () => {
 		let subscriptions = 0;
 		state.metricsInstruments = {
 			streamGauge: { inc: () => subscriptions++, dec: () => subscriptions-- },
-			rpcCount: { inc() {} }, rpcErrors: { inc() {} }, rpcDuration: { observe() {} }
+			rpcCount: { inc() {} }, rpcDelivery: { inc() {} }, rpcErrors: { inc() {} }, rpcDuration: { observe() {} }
 		};
 		try {
 			const user = { id: 'admin' };

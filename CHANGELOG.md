@@ -12,6 +12,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- Dynamic derived streams accept `scopeKey` for explicit sharing among callers authorized for the same output.
+
 - The generated error reference indexes emitted runtime codes and operational message prefixes, with stable code/event anchors and explicit guidance coverage. Action: regenerate the reference when adding or changing an emitted error.
 
 - Opt-in RPC delivery metrics distinguish successful sends, backpressure, closed connections, and send exceptions from handler execution outcomes.
@@ -56,6 +58,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Expose `generateTypes({ root, dir })` from `svelte-realtime/vite` so typecheck scripts can refresh `$live` declarations without a production build.
 
 ### Changed
+
+- Dynamic derived streams default to one computation per authenticated identity and use opaque output topics. Scope revocation sets the affected stream error to `FORBIDDEN`; resubscribe to refresh the view.
 
 - **Breaking:** Tenant policy metadata is typed and validated. `live.tenant(id, config)` snapshots an immutable `metadata` carrier with an entitlement label and declared action, byte, recipient-delivery, and retained-byte caps. No automatic enforcement is installed. **Action required:** replace arbitrary config fields and `null` with the documented `TenantConfig` shape; configure enforcement explicitly in its owning application or adapter.
 
@@ -261,8 +265,6 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Keyed streams consistently ignore rows without their key and warn in development. The max item count now applies to snapshots, hydration, pagination, and live additions.
 
-- Dynamic derived streams isolate outputs by identity and arguments, support explicit `scopeKey` sharing, and recompute from active subscribers without retaining departed authorization contexts.
-
 - Errors from connection hooks are reported without stopping offline replay or other Svelte store subscribers.
 
 - Reconnect snapshots and non-array pagination responses update the authoritative stream state during optimistic mutations, so settling a mutation cannot restore stale data.
@@ -352,6 +354,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Skip attach-window frames already included in explicit latest/set replay responses while preserving live changes beyond the replay read.
 
 - Preserve live platform trace and request correlation when reactive publishes pass through a cluster bus.
+
+### Security
+
+- Dynamic derived outputs isolate caller identities and recompute from current subscribers, preventing departed privileged contexts from serving other callers.
 
 ## [0.6.0-next.91] - 2026-10-10
 

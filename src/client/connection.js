@@ -170,6 +170,11 @@ export function ensureListener() {
 	store.subscribe((envelope) => {
 		if (!envelope) return;
 		const { event: correlationId, data } = envelope;
+		if (correlationId === '__topic_error' && typeof data?.topic === 'string') {
+			const setters = _streamErrorByTopic.get(data.topic);
+			if (setters) for (const setError of setters) setError(new RpcError(data.code || 'FORBIDDEN', data.error || 'Stream access changed'));
+			return;
+		}
 
 		// Batch response
 		if (correlationId === '__batch' && data?.batch) {
