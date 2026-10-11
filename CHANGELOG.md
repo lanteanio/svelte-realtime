@@ -73,6 +73,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Dead-letter store declarations accept asynchronous backends and nullable capture IDs, while the built-in memory store retains synchronous return types.
 
+- Multiplayer room sends remain live while a background tab keeps its WebSocket open, including rooms mounted in the background.
+
 - Invalid RPC arguments consistently reject with INVALID_REQUEST and their original cause, without retaining pending requests or timeouts. Unsent requests capture JSON before connection status delivery.
 - Protocol advertisements precede parked RPCs and application connection hooks when the socket opens.
 

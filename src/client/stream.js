@@ -2071,7 +2071,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		/** True while `status.subscribe` reports the value current at attach. */
 		let attaching = true;
 		statusUnsub = _conn().status.subscribe((s) => {
-			if (s !== 'open') {
+			if (s !== 'open' && s !== 'suspended') {
 				// First step away from a live connection: record when the outage
 				// began (once) so the reconnect can measure how stale the retained
 				// cursor is. Only after we have opened at least once - the initial
@@ -2086,6 +2086,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				if (s === 'failed') _closedForGood();
 				return;
 			}
+			// Visibility changes keep the same socket and membership. Only a
+			// genuine outage starts another subscribe on a ready connection.
+			if (hasOpenedOnce && !_listenerDown) return;
 			_listenerDown = false;
 			// A subscribe queued behind a closed socket may age past the trust
 			// bound before its first open. Supersede it before accepting any
