@@ -26,7 +26,8 @@ export interface SvelteRealtimeOptions {
 	crdt?: {
 		/**
 		 * Background state-vector reconciliation interval in milliseconds.
-		 * Zero disables it; invalid values use the adapter default. @default 30000
+		 * Zero disables it; invalid values use the adapter default.
+		 * Finite intervals are capped at 2147483647 ms before reaching the adapter. @default 30000
 		 */
 		reconcileIntervalMs?: number;
 	};

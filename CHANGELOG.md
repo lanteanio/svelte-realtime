@@ -67,6 +67,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Cron followers record observed schedule slots, preventing a mid-minute leadership change from repeating a minute job.
 
+- Document reconciliation configuration caps finite intervals at 2147483647 ms, preserving disabled and default values across generated channels.
+
 - Batched publication relays each event once when ordinary WebSocket clients require individual frames, preserves one watcher execution per event, and forwards compression options.
 
 - Dead-letter store declarations accept asynchronous backends and nullable capture IDs, while the built-in memory store retains synchronous return types.

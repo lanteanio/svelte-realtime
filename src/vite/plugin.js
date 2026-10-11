@@ -22,7 +22,7 @@ export default function svelteRealtime(options) {
 	const dir = options?.dir || 'src/live';
 	const interval = options?.crdt?.reconcileIntervalMs;
 	const reconcileIntervalMs = typeof interval === 'number' && Number.isFinite(interval) && interval >= 0
-		? interval : undefined;
+		? Math.min(interval, 2147483647) : undefined;
 	/** @type {string} */
 	let root = '';
 	/** @type {string} */

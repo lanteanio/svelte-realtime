@@ -34,9 +34,9 @@ function channels(instance) {
 }
 
 describe('document reconcile configuration', () => {
-	it.each([0, 1250])('passes interval %s to every generated document channel', (interval) => {
+	it.each([0, 1250, 2147483647, 2147483648, Number.MAX_VALUE])('passes interval %s to every generated document channel', (interval) => {
 		for (const [index, channel] of channels(plugin(interval)).entries()) {
-			expect(channel.reconcileIntervalMs).toBe(interval);
+			expect(channel.reconcileIntervalMs).toBe(Math.min(interval, 2147483647));
 			const name = ['document', 'dictionary', 'list'][index];
 			expect(channel.transport.sync('vector', 'mount')).toEqual({
 				path: `docs/${name}/__doc/sync`, args: [7, 'vector', 'mount']

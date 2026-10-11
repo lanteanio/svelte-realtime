@@ -4342,7 +4342,7 @@ Values are plain JSON values with replace-on-write semantics (`m.set(k, { ...m.g
 
 ### Running across a cluster
 
-Document channels reconcile in the background every 30 seconds so a dropped final update can converge without another edit or reconnect. Configure all generated `live.doc()`, `live.map()`, and `live.array()` channels in `vite.config.js` with `realtime({ crdt: { reconcileIntervalMs: 10000 } })`. Use `0` to disable background reconciliation; invalid values retain the adapter default. Text views acquired from a document use that document's channel and cadence.
+Document channels reconcile in the background every 30 seconds so a dropped final update can converge without another edit or reconnect. Configure all generated `live.doc()`, `live.map()`, and `live.array()` channels in `vite.config.js` with `realtime({ crdt: { reconcileIntervalMs: 10000 } })`. Use `0` to disable background reconciliation; invalid values retain the adapter default. Finite intervals are capped at `2147483647` ms before reaching the adapter. Text views acquired from a document use that document's channel and cadence.
 
 On a single process, documents are correct out of the box. Behind a load balancer, two people editing one document land on different instances - so clustered deployments must wire the CRDT coordinator from the extensions package, or the instances will not converge and each will overwrite the others' persisted snapshot:
 
@@ -5511,7 +5511,7 @@ export default {
 | `dir` | `'src/live'` | Directory containing live modules |
 | `typedImports` | `true` | Generate `.d.ts` for typed `$live/` imports |
 | `devtools` | `true` | Enable the in-browser DevTools overlay in dev mode |
-| `crdt.reconcileIntervalMs` | `30000` | Background reconciliation interval in milliseconds for generated document channels; `0` disables it |
+| `crdt.reconcileIntervalMs` | `30000` | Background reconciliation interval in milliseconds for generated document channels; `0` disables it; finite intervals cap at `2147483647` |
 
 The plugin resolves `$live/chat` to `src/live/chat.js`, generates client stubs, supports nested directories (`$live/rooms/lobby`), and watches for file changes in dev mode. When `typedImports` is enabled, it generates type declarations that strip the `ctx` parameter and infer return types. Before a typecheck-only command, create `scripts/generate-live.mjs` with `import { generateTypes } from 'svelte-realtime/vite'; generateTypes();` and run `node scripts/generate-live.mjs && svelte-kit sync && svelte-check --tsconfig ./tsconfig.json` from the project root (for example in your package's `check` script). `generateTypes({ root, dir })` synchronously refreshes `$types.d.ts` without a production build or executing server modules; defaults are the working directory and `src/live`. It does not load Vite configuration: pass the plugin's `dir` for a custom live directory and include the generated file in your TypeScript configuration. Repeated calls pick up added, changed and deleted modules, keep unchanged output intact, and report filesystem failures.
 
