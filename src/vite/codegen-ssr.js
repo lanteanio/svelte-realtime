@@ -133,7 +133,6 @@ export function _generateSsrStubs(filePath, modulePath) {
 	// Re-export non-stream exports, wrap store-like exports in readable() for SSR $ prefix support
 	const lines = [
 		`import { readable } from 'svelte/store';`,
-		`const __pending = (s) => Object.assign(s, { pending: readable(false) });`,
 		`import { __directCall } from 'svelte-realtime/server';`,
 		`export * from ${safePath};`
 	];
@@ -141,13 +140,13 @@ export function _generateSsrStubs(filePath, modulePath) {
 	for (const name of storeNames) {
 		if (dynamicNames.has(name)) {
 			// Dynamic stream: factory returns a readable with .hydrate() for SSR rendering
-			lines.push(`const _${name} = (...args) => { const s = __pending(readable(undefined)); s.hydrate = (d) => __pending(readable(d)); return s; };`);
+			lines.push(`const _${name} = (...args) => { const s = Object.assign(readable(undefined), { pending: readable(false) }); s.hydrate = (d) => Object.assign(readable(d), { pending: readable(false) }); return s; };`);
 			lines.push(`_${name}.load = (platform, options) => __directCall(${safeModulePath(name)}, options?.args || [], platform, options);`);
 			lines.push(`export { _${name} as ${name} };`);
 		} else {
 			// Static stream: readable with .hydrate() for SSR rendering
-			lines.push(`const _${name} = __pending(readable(undefined));`);
-			lines.push(`_${name}.hydrate = (d) => __pending(readable(d));`);
+			lines.push(`const _${name} = Object.assign(readable(undefined), { pending: readable(false) });`);
+			lines.push(`_${name}.hydrate = (d) => Object.assign(readable(d), { pending: readable(false) });`);
 			lines.push(`_${name}.load = (platform, options) => __directCall(${safeModulePath(name)}, options?.args || [], platform, options);`);
 			lines.push(`export { _${name} as ${name} };`);
 		}
@@ -161,8 +160,8 @@ export function _generateSsrStubs(filePath, modulePath) {
 		// path so SSR can hydrate a specific window's initial state.
 		const memberDecls = [];
 		for (const wn of windows) {
-			memberDecls.push(`const _${name}_${wn} = __pending(readable(undefined));`);
-			memberDecls.push(`_${name}_${wn}.hydrate = (d) => __pending(readable(d));`);
+			memberDecls.push(`const _${name}_${wn} = Object.assign(readable(undefined), { pending: readable(false) });`);
+			memberDecls.push(`_${name}_${wn}.hydrate = (d) => Object.assign(readable(d), { pending: readable(false) });`);
 			memberDecls.push(`_${name}_${wn}.load = (platform, options) => __directCall(${JSON.stringify(modulePath + '/' + name + '/__window/' + wn)}, options?.args || [], platform, options);`);
 		}
 		lines.push(...memberDecls);
@@ -177,19 +176,19 @@ export function _generateSsrStubs(filePath, modulePath) {
 		// boardId-equivalent argument). Actions are no-op promise-returning
 		// stubs that resolve with undefined; they are never called during
 		// SSR (action handlers fire post-hydration on user interaction).
-		lines.push(`const _${name}_data = (...args) => { const s = __pending(readable(undefined)); s.hydrate = (d) => __pending(readable(d)); return s; };`);
+		lines.push(`const _${name}_data = (...args) => { const s = Object.assign(readable(undefined), { pending: readable(false) }); s.hydrate = (d) => Object.assign(readable(d), { pending: readable(false) }); return s; };`);
 		lines.push(`_${name}_data.load = (platform, options) => __directCall(${JSON.stringify(modulePath + '/' + name + '/__data')}, options?.args || [], platform, options);`);
 		const subFactories = [`data: _${name}_data`];
 		if (info.hasPresence) {
-			lines.push(`const _${name}_presence = (...args) => __pending(readable(undefined));`);
+			lines.push(`const _${name}_presence = (...args) => Object.assign(readable(undefined), { pending: readable(false) });`);
 			subFactories.push(`presence: _${name}_presence`);
 		}
 		if (info.hasCursors) {
-			lines.push(`const _${name}_cursors = (...args) => __pending(readable(undefined));`);
+			lines.push(`const _${name}_cursors = (...args) => Object.assign(readable(undefined), { pending: readable(false) });`);
 			subFactories.push(`cursors: _${name}_cursors`);
 		}
 		if (info.hasOwner) {
-			lines.push(`const _${name}_owner = (...args) => __pending(readable(undefined));`);
+			lines.push(`const _${name}_owner = (...args) => Object.assign(readable(undefined), { pending: readable(false) });`);
 			subFactories.push(`owner: _${name}_owner`);
 		}
 		// The lobby-browser view renders empty during SSR (no live subscription);
@@ -208,19 +207,19 @@ export function _generateSsrStubs(filePath, modulePath) {
 		// Multiplayer namespace: the same factory-shaped sub-streams a room
 		// uses, plus an empty connection-status readable and no-op cursor
 		// methods. The client factory replaces all of this on hydration.
-		lines.push(`const _${name}_data = (...args) => { const s = __pending(readable(undefined)); s.hydrate = (d) => __pending(readable(d)); return s; };`);
+		lines.push(`const _${name}_data = (...args) => { const s = Object.assign(readable(undefined), { pending: readable(false) }); s.hydrate = (d) => Object.assign(readable(d), { pending: readable(false) }); return s; };`);
 		lines.push(`_${name}_data.load = (platform, options) => __directCall(${JSON.stringify(modulePath + '/' + name + '/__data')}, options?.args || [], platform, options);`);
 		const mpFactories = [`data: _${name}_data`];
 		if (info.hasPresence) {
-			lines.push(`const _${name}_presence = (...args) => __pending(readable(undefined));`);
+			lines.push(`const _${name}_presence = (...args) => Object.assign(readable(undefined), { pending: readable(false) });`);
 			mpFactories.push(`presence: _${name}_presence`);
 		}
 		if (info.hasCursors) {
-			lines.push(`const _${name}_cursors = (...args) => __pending(readable(undefined));`);
+			lines.push(`const _${name}_cursors = (...args) => Object.assign(readable(undefined), { pending: readable(false) });`);
 			mpFactories.push(`cursors: _${name}_cursors`);
 		}
 		if (info.hasOwner) {
-			lines.push(`const _${name}_owner = (...args) => __pending(readable(undefined));`);
+			lines.push(`const _${name}_owner = (...args) => Object.assign(readable(undefined), { pending: readable(false) });`);
 			mpFactories.push(`owner: _${name}_owner`);
 		}
 		mpFactories.push(`status: readable('connecting')`);

@@ -2,12 +2,13 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { readable, get } from 'svelte/store';
+import { _fileCache } from '../src/vite/source-cache.js';
 import { _generateClientStubs } from '../src/vite/codegen-client.js';
 import { _extractStreamOptions } from '../src/vite/extract-options.js';
 import { _generateSsrStubs } from '../src/vite/codegen-ssr.js';
 
 const fixture = resolve('test/__pending_fixture.js');
-afterEach(() => { try { unlinkSync(fixture); } catch {} vi.restoreAllMocks(); });
+afterEach(() => { _fileCache.delete(fixture); try { unlinkSync(fixture); } catch {} vi.restoreAllMocks(); });
 
 describe('pending indicator code generation', () => {
 	it('forwards zero and custom stream delays to client stubs', () => {
@@ -26,16 +27,23 @@ export const room = live.stream((ctx, id) => 'room:' + id, async () => [], { pen
 export const items = live.stream('items', async () => [], { pendingDelay: ${value} });`, 'items')).toThrow(/pendingDelay/);
 	});
 
+	it('uses the last declared delay and rejects an unknown overriding spread', () => {
+		expect(_extractStreamOptions("export const items = live.stream('items', () => [], { pendingDelay: 10, pendingDelay: 250 });", 'items').pendingDelay).toBe(250);
+		expect(() => _extractStreamOptions("export const items = live.stream('items', () => [], { pendingDelay: 10, ...unknown });", 'items')).toThrow(/pendingDelay/);
+		expect(_extractStreamOptions("export const items = live.stream('items', () => [], { ...unknown, pendingDelay: 250 });", 'items').pendingDelay).toBe(250);
+	});
+
 	it('exposes inert pending on static, dynamic and hydrated SSR streams', () => {
 		writeFileSync(fixture, `
 export const items = live.stream('items', async () => []);
+export const _pending = live.stream('named', async () => []);
 export const room = live.stream((ctx, id) => 'room:' + id, async () => []);
 `);
 		const code = _generateSsrStubs(fixture, 'pending');
 		const executable = code.split('\n').filter(line => !/^(import |export )/.test(line)).join('\n');
 		const timer = vi.spyOn(globalThis, 'setTimeout');
-		const [items, room] = new Function('readable', executable + '\nreturn [_items, _room];')(readable);
-		for (const store of [items, room('a'), items.hydrate([]), room('a').hydrate([])]) {
+		const [items, room, named] = new Function('readable', executable + '\nreturn [_items, _room, __pending];')(readable);
+		for (const store of [items, named, room('a'), items.hydrate([]), room('a').hydrate([])]) {
 			expect(get(store.pending)).toBe(false);
 		}
 		expect(timer).not.toHaveBeenCalled();

@@ -526,9 +526,10 @@ export function _applyParsedOptions(opts, optStr) {
 	const maxVal = _extractTopLevelRawValue(optStr, 'max');
 	if (maxVal && /^\d+$/.test(maxVal)) opts.max = parseInt(maxVal, 10);
 
-	const pendingDelayVal = _extractTopLevelRawValue(optStr, 'pendingDelay');
-	if (pendingDelayVal !== null) {
-		if (!/^\d+$/.test(pendingDelayVal) || Number(pendingDelayVal) > 2147483647) {
+	const pendingConfig = _readConfig('', optStr, 0);
+	if (pendingConfig.values.has('pendingDelay')) {
+		const pendingDelayVal = pendingConfig.values.get('pendingDelay');
+		if (!pendingConfig.stable.has('pendingDelay') || typeof pendingDelayVal !== 'string' || !/^\d+$/.test(pendingDelayVal) || Number(pendingDelayVal) > 2147483647) {
 			throw new RangeError('[svelte-realtime] pendingDelay must be an integer literal from 0 to 2147483647');
 		}
 		opts.pendingDelay = Number(pendingDelayVal);
