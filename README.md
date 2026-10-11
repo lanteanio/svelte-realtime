@@ -2347,7 +2347,7 @@ The current holder is **not** interrupted when a waiter times out - only the wai
 
 For custom lock implementations, the option is forwarded as the third argument: `lockInst.withLock(key, fn, { maxWaitMs })`. The default in-process lock and `createDistributedLock` from the extensions package both honor it.
 
-Timed-out waiters are removed immediately, even if the current holder never settles. With `live.metrics(...)`, `svelte_realtime_lock_waiters` reports the queued count and `svelte_realtime_lock_events_total{status}` counts `queued`, `acquired`, `queue_full`, `wait_timeout` and `execution_timeout` events. Neither metric labels lock keys.
+Timed-out waiters are removed immediately, even if the current holder never settles. With `live.metrics(...)`, `svelte_realtime_lock_waiters` reports the queued count and `svelte_realtime_lock_events_total{status}` counts `queued`, `acquired`, `queue_full`, `wait_timeout` and `execution_timeout` events. The `acquired` event counts queued callers that obtain the lock. Neither metric labels lock keys.
 
 Set `maxExecutionMs` to give an acquired handler a cooperative deadline. Pass `ctx.lockSignal` to abort-aware work such as `fetch`. The deadline aborts that signal and rejects the caller with `LOCK_EXECUTION_TIMEOUT`; the key stays held until the handler actually settles, preserving mutual exclusion even when the handler ignores cancellation. The deadline starts on acquisition and also works with custom lock instances. Both timer options accept milliseconds from 0 through 2147483647.
 

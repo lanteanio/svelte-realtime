@@ -66,7 +66,7 @@ The registry-backed messages below preserve the documented prefix and append the
 
 Coverage listing only: the scanner inventories direct LiveError and RpcError constructors, literal arguments of local error helpers, code assignments on locally declared Error objects, error reply objects, structured diagnostic events, and console warning/error prefixes in src/**/*.js. Comments and example declarations are excluded. It does not infer causes or safe recovery actions from strings.
 
-Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 38 literal runtime codes and 111 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
+Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 111 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
 
 Code anchors stay stable when messages change. Structured diagnostic IDs use the emitted event; legacy console IDs are derived from the literal prefix and change when that prefix changes. These coverage IDs are documentation anchors, not IDs appended to legacy runtime messages. Escaped \n and \r in the listing stand for actual newlines and carriage returns.
 
@@ -157,7 +157,7 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-invalid-request"></a>
 ### <code>INVALID_REQUEST</code>
 
-- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Binary RPC payload is detached (transferred) and cannot be sent</code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>Reserved topic prefix</code>; <code>Topic function must return a string, got </code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>persistKey must be a non-empty string</code>; <code>streamId already active</code>
+- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Binary RPC payload is detached (transferred) and cannot be sent</code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>RPC request could not be encoded or sent</code>; <code>Reserved topic prefix</code>; <code>Topic function must return a string, got </code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>persistKey must be a non-empty string</code>; <code>streamId already active</code>
 - Owning sources: [src/client/offline.js](../src/client/offline.js), [src/client/rpc.js](../src/client/rpc.js), [src/server.js](../src/server.js), [src/server/derived-topic.js](../src/server/derived-topic.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/forget.js](../src/server/forget.js), [src/server/idempotency.js](../src/server/idempotency.js), [src/server/upload.js](../src/server/upload.js)
 
 <a id="live-error-invalid-topic"></a>
@@ -182,6 +182,18 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 ### <code>LOCK_CLEARED</code>
 
 - Searchable message prefixes: <code>lock: cleared</code>
+- Owning sources: [src/server/idempotency.js](../src/server/idempotency.js)
+
+<a id="live-error-lock-execution-timeout"></a>
+### <code>LOCK_EXECUTION_TIMEOUT</code>
+
+- Searchable message prefixes: <code>The lock execution deadline elapsed; the handler must stop through ctx.lockSignal.</code>
+- Owning sources: [src/server/idempotency.js](../src/server/idempotency.js)
+
+<a id="live-error-lock-queue-full"></a>
+### <code>LOCK_QUEUE_FULL</code>
+
+- Searchable message prefixes: <code>The lock waiter queue is full; the handler has not run. Retry after capacity becomes available.</code>
 - Owning sources: [src/server/idempotency.js](../src/server/idempotency.js)
 
 <a id="live-error-lock-timeout"></a>
@@ -1107,7 +1119,7 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/server/dispatch.js:799</code>
 - <code>src/server/dispatch.js:811</code>
 - <code>src/server/dispatch.js:858</code>
-- <code>src/server/idempotency.js:865</code>
+- <code>src/server/idempotency.js:873</code>
 - <code>src/server/push.js:699</code>
 - <code>src/server/upload.js:281</code>
 - <code>src/server/upload.js:386</code>
