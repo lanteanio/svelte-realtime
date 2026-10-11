@@ -405,7 +405,6 @@ function _wrapPlatformPublish(platform) {
 	}
 
 	let _publishDepth = 0;
-	let localBatchDepth = 0;
 
 	function fireWatchers(topic, event, data) {
 		if (!_watchedTopics.has(topic)) return;
@@ -624,9 +623,10 @@ function _wrapPlatformPublish(platform) {
 		if (originalPublishBatched && (!Array.isArray(rest) || rest.length > 0)) {
 			// Adapter fallbacks call platform.publish for clients without batching.
 			// The outer batch owns watcher delivery and the bus owns its relay.
-			localBatchDepth++;
+			const publish = platform.publish;
+			platform.publish = originalPublish;
 			try { result = originalPublishBatched(rest, opts); }
-			finally { localBatchDepth--; }
+			finally { platform.publish = publish; }
 		}
 		if (Array.isArray(batch) && _watchedTopics.size > 0) {
 			for (const item of batch) {
@@ -642,7 +642,6 @@ function _wrapPlatformPublish(platform) {
 	// locally (with watchers) and relays to the cluster in one step.
 	// Without a bus, identical to the legacy local-only path.
 	platform.publish = function derivedPublish(topic, event, data, opts) {
-		if (localBatchDepth > 0) return originalPublish(topic, event, data, opts);
 		_refreshBusCache();
 		if (_busPublish) return _busPublish(topic, event, data, opts);
 		return derivedPublishLocal(topic, event, data, opts);
