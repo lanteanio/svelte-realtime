@@ -9059,6 +9059,24 @@ describe('stream pending indicator', () => {
 });
 
 describe('function timeout defaults', () => {
+	it.each(['success', 'cancel'])('clears the upload deadline on early %s', async (mode) => {
+		vi.useFakeTimers();
+		try {
+			const before = vi.getTimerCount();
+			const handle = __upload('budget/settled', { timeout: 300_000 })(new Uint8Array([1]));
+			await vi.advanceTimersByTimeAsync(0);
+			expect(vi.getTimerCount()).toBe(before + 1);
+			if (mode === 'success') {
+				simulateUploadResponse(handle.streamId, { ok: true, data: 'done' });
+				expect(await handle).toBe('done');
+			} else {
+				handle.cancel();
+				await expect(handle).rejects.toMatchObject({ code: 'CANCELLED' });
+			}
+			expect(vi.getTimerCount()).toBe(before);
+		} finally { vi.useRealTimers(); }
+	});
+
 	it('preserves the base callable and deduplication for empty per-call options', async () => {
 		const call = __rpc('budget/empty', { timeout: 300_000 });
 		for (const options of [undefined, {}, { timeout: undefined }]) expect(call.with(options)).toBe(call);
