@@ -378,11 +378,14 @@ export async function _tickCron(_at, epoch) {
 	// The leader call must be cheap and synchronous; the extensions
 	// implementation maintains the lease in the background and exposes
 	// the "am I leader right now" state as a cached boolean read.
+	let isLeader = true;
 	if (_cronLeader !== null) {
-		let isLeader;
+		let leaderFailed = false;
 		try {
 			isLeader = _cronLeader();
 		} catch (err) {
+			isLeader = false;
+			leaderFailed = true;
 			// A throwing leader fn is a configuration bug; fail closed
 			// (do not fire) and surface the cause in dev. Fail-closed is
 			// the safe default: better to skip a tick than to double-fire
@@ -391,21 +394,15 @@ export async function _tickCron(_at, epoch) {
 				console.error('[svelte-realtime] configureCron leader function threw; skipping tick:', err, '\n  See: https://svti.me/cron');
 			}
 			if (state.metricsInstruments) state.metricsInstruments.cronCount.inc({ path: '*', status: 'leader-error' });
-			return;
 		}
-		if (!isLeader) {
+		if (!isLeader && !leaderFailed) {
 			if (state.metricsInstruments) state.metricsInstruments.cronCount.inc({ path: '*', status: 'not-leader' });
-			return;
 		}
 	}
 
-	// Extract the wall-clock date parts the schedule matches against by
-	// formatting the runtime epoch-ms through Intl in the effective time zone,
-	// without constructing a Date. The effective zone is the system zone by
-	// default (preserving the historical local-time cron behavior); a seeded
-	// simulation harness pins it (e.g. 'UTC') so the same epoch-ms always
-	// yields the same parts. The schedule math below is unchanged - only the
-	// parts extraction is now Intl + time-zone based.
+	// Scheduled ticks read the exact wall clock; manual ticks use the runtime
+	// epoch. Calendar fields use local Date getters for the system zone or
+	// Intl for an explicit zone, including a simulation's pinned time zone.
 	const scheduled = epoch !== undefined;
 	const evaluatedAt = scheduled ? wallEpoch() : runtimeNow();
 	const { second, minute, hour, day, month, weekday } = _cronDateParts(
@@ -422,6 +419,9 @@ export async function _tickCron(_at, epoch) {
 			if (slot <= entry.lastSlot) continue;
 			entry.lastSlot = slot;
 		} else if (!isSixField && _cronAt1Hz && second !== 0) continue;
+		// Followers consume observed slots too, so gaining leadership cannot
+		// repeat a minute that the previous leader already had a chance to run.
+		if (!isLeader) continue;
 
 		let sf, mf, hf, df, monthf, wf;
 		if (isSixField) {

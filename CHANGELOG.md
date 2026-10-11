@@ -65,6 +65,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Cron followers record observed schedule slots, preventing a mid-minute leadership change from repeating a minute job.
+
 - Dead-letter store declarations accept asynchronous backends and nullable capture IDs, while the built-in memory store retains synchronous return types.
 
 - Smooth simulation ticks keep monotonic deadlines across callback work and catch up after timer delays, with at most eight ticks per callback. Idle rooms restart without old debt, and rewind history preserves distinct timestamps during catch-up.

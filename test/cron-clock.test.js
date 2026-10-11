@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { live, __registerCron, setCronPlatform, _clearCron, _tickCron } from '../src/server.js';
+import { live, __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron } from '../src/server.js';
 import { _stopCronScheduler, _cronIntrospect } from '../src/server/cron-engine.js';
 import { resetRuntimeEnv, setRuntimeEnv } from '../src/shared/runtime.js';
 import { _resetLazy } from '../src/server/lazy.js';
@@ -34,12 +34,32 @@ function register(path, schedule, calls) {
 }
 
 beforeEach(() => {
-	_clearCron(); _resetLazy(); _lazyQueue.length = 0;
+	_clearCron(); configureCron({ leader: null }); _resetLazy(); _lazyQueue.length = 0;
 	installClock(); setCronPlatform({ publish() {} });
 });
-afterEach(() => { _clearCron(); _lazyQueue.length = 0; _resetLazy(); resetRuntimeEnv(); });
+afterEach(() => { configureCron({ leader: null }); _clearCron(); _lazyQueue.length = 0; _resetLazy(); resetRuntimeEnv(); });
 
 describe('cron wall-clock boundaries', () => {
+	it.each(['follower', 'error'])('does not replay a minute observed before gaining leadership from %s', async (mode) => {
+		let leader = false;
+		configureCron({ leader: () => {
+			if (!leader && mode === 'error') throw new Error('Lease unavailable');
+			return leader;
+		} });
+		const minutes = [], seconds = [];
+		register('minutes', '* * * * *', minutes);
+		register('seconds', '* * * * * *', seconds);
+		await wake();
+		wall = origin + 15000;
+		leader = true;
+		await wake();
+		expect(minutes).toEqual([]);
+		expect(seconds).toEqual([15000]);
+		wall = origin + 60000;
+		await wake();
+		expect(minutes).toEqual([60000]);
+	});
+
 	it('evaluates each matching minute once despite repeated timer drift and cached-clock lag', async () => {
 		const calls = []; register('minutes', '* * * * *', calls);
 		for (let i = 0; i < 122; i++) { lag = i % 2 ? 900 : 100; await wake(500); }
