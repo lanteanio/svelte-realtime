@@ -1,7 +1,7 @@
 // @ts-check
 import { _readCached } from './source-cache.js';
 import { _isDynamicExport } from './extract-types.js';
-import { _extractStreamOptions, _extractChannelOptions, _extractAggregateWindows, _extractRoomInfo, _extractMultiplayerInfo } from './extract-options.js';
+import { _extractFunctionTimeout, _extractStreamOptions, _extractChannelOptions, _extractAggregateWindows, _extractRoomInfo, _extractMultiplayerInfo } from './extract-options.js';
 import { _warnUnsafeExports } from './scanner.js';
 import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE, DYNAMIC_STREAM_RE, CRON_EXPORT_RE, BINARY_EXPORT_RE, UPLOAD_EXPORT_RE, DERIVED_EXPORT_RE, DYNAMIC_DERIVED_RE, ROOM_EXPORT_RE, MULTIPLAYER_EXPORT_RE, SMOOTH_EXPORT_RE, DOC_EXPORT_RE, WEBHOOK_EXPORT_RE, WEBHOOK_INBOUND_EXPORT_RE, WEBHOOK_OUTBOUND_EXPORT_RE, CHANNEL_EXPORT_RE, DYNAMIC_CHANNEL_RE, RATE_LIMIT_EXPORT_RE, EFFECT_EXPORT_RE, AGGREGATE_EXPORT_RE, FLAG_EXPORT_RE, LOCK_EXPORT_RE, PUBLIC_EXPORT_RE, PUBLIC_COMMENT_RE, IDEMPOTENT_EXPORT_RE, VOLATILE_EXPORT_RE } from './patterns.js';
 
@@ -33,6 +33,11 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 	// JSON.stringify closes that path-injection break-out.
 	/** @param {string} name */
 	const safeModulePath = (name) => JSON.stringify(modulePath + '/' + name);
+	/** @param {string} name */
+	const timeoutArgument = (name) => {
+		const timeout = _extractFunctionTimeout(source, name);
+		return timeout === undefined ? '' : ', ' + JSON.stringify({ timeout });
+	};
 
 	// Detect live() exports
 	let match;
@@ -55,7 +60,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 			if (exportedNames.has(name)) continue;
 			exportedNames.add(name);
 			imports.add('__rpc');
-			lines.push(`export const ${name} = __rpc(${safeModulePath(name)});`);
+			lines.push(`export const ${name} = __rpc(${safeModulePath(name)}${timeoutArgument(name)});`);
 		}
 	}
 
@@ -66,7 +71,9 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 		if (!/^\w+$/.test(name)) continue;
 		exportedNames.add(name);
 		imports.add('__stream');
-		const streamOptions = _extractStreamOptions(source, name);
+		const streamOptions = { ..._extractStreamOptions(source, name) };
+		const timeout = _extractFunctionTimeout(source, name);
+		if (timeout !== undefined) streamOptions.timeout = timeout;
 		const isDynamic = _isDynamicExport(source, name, 'live\\.stream');
 		if (isDynamic) {
 			// Dynamic topic: generate a function wrapper that passes args
@@ -120,7 +127,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 		if (!exportedNames.has(name)) {
 			exportedNames.add(name);
 			imports.add('__upload');
-			lines.push(`export const ${name} = __upload(${safeModulePath(name)});`);
+			lines.push(`export const ${name} = __upload(${safeModulePath(name)}${timeoutArgument(name)});`);
 		}
 	}
 

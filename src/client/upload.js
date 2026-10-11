@@ -1,5 +1,5 @@
 // @ts-check
-import { now, setTimer, microtask } from '../client-runtime.js';
+import { now, setTimer, clearTimer, microtask } from '../client-runtime.js';
 import { clientState, RpcError, _textEncoder, _isDev, pendingUploads } from './internal-state.js';
 import { _conn, ensureDisconnectListener } from './connection.js';
 
@@ -512,7 +512,7 @@ class UploadHandle {
 	 * @param {string} path
 	 * @param {any} source
 	 * @param {any[]} args
-	 * @param {{ streamId: number, total: number | undefined }} options
+	 * @param {{ streamId: number, total: number | undefined, timeout?: number }} options
 	 */
 	constructor(path, source, args, options) {
 		this._path = path;
@@ -556,6 +556,13 @@ class UploadHandle {
 		this._promise.catch(() => {});
 
 		pendingUploads.set(this._streamId, this);
+		this._timer = options.timeout === undefined ? null : setTimer(() => {
+			if (this._settled) return;
+			if (!clientState.terminated) {
+				try { _conn().sendQueued(_encodeUploadCancelFrame(this._streamId)); } catch { /* disconnected */ }
+			}
+			this._settle(false, new RpcError('TIMEOUT', `Upload '${path}' timed out after ${options.timeout / 1000}s`));
+		}, options.timeout);
 
 		// Microtask-deferred start so users can attach listeners + set up
 		// cancellation between `const h = avatar(file)` and the first chunk.
@@ -685,6 +692,7 @@ class UploadHandle {
 	_settle(ok, payload) {
 		if (this._settled) return;
 		this._settled = true;
+		if (this._timer !== null) clearTimer(this._timer);
 		this._wakePump();
 		pendingUploads.delete(this._streamId);
 		if (ok) {
@@ -820,15 +828,16 @@ class UploadHandle {
  * ```
  *
  * @param {string} path
+ * @param {{ timeout?: number }} [defaults]
  * @returns {(source: any, ...args: any[]) => UploadHandle}
  */
-export function __upload(path) {
+export function __upload(path, defaults) {
 	return function uploadCall(source, ...args) {
 		// The chunk-0 header, and with it the payload size that keeps every
 		// frame within the adapter's maxPayloadLength, is chosen at start
 		// once the client knows whether this socket's server grants credits.
 		const streamId = _nextUploadStreamId();
 		const total = _uploadSourceTotal(source);
-		return new UploadHandle(path, source, args, { streamId, total });
+		return new UploadHandle(path, source, args, { streamId, total, timeout: defaults?.timeout });
 	};
 }

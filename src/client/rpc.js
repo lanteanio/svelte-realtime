@@ -134,9 +134,10 @@ function _buildDedupKey(path, args) {
  * Used by generated client stubs.
  *
  * @param {string} path - e.g. 'chat/sendMessage'
- * @returns {((...args: any[]) => Promise<any>) & { fresh: (...args: any[]) => Promise<any>, with: (opts: { idempotencyKey?: string }) => (...args: any[]) => Promise<any> }}
+ * @param {{ timeout?: number }} [defaults]
+ * @returns {((...args: any[]) => Promise<any>) & { fresh: (...args: any[]) => Promise<any>, with: (opts: { idempotencyKey?: string, timeout?: number }) => (...args: any[]) => Promise<any> }}
  */
-export function __rpc(path) {
+export function __rpc(path, defaults) {
 	function rpcCall(...args) {
 		// Dedup: coalesce identical calls within the same microtask
 		if (!clientState.batchCollector) {
@@ -149,17 +150,17 @@ export function __rpc(path) {
 				return existing;
 			}
 
-			const promise = _sendRpc(path, args);
+			const promise = _sendRpc(path, args, undefined, defaults?.timeout);
 			_dedupMap.set(dedupKey, promise);
 			microtask(() => _dedupMap.delete(dedupKey));
 			return promise;
 		}
-		return _sendRpc(path, args);
+		return _sendRpc(path, args, undefined, defaults?.timeout);
 	}
 
 	/** Bypass deduplication - always send a fresh request. */
 	rpcCall.fresh = function freshCall(...args) {
-		return _sendRpc(path, args);
+		return _sendRpc(path, args, undefined, defaults?.timeout);
 	};
 
 	/**
@@ -283,7 +284,7 @@ export function __rpc(path) {
 	 */
 	rpcCall.with = function withOptions(opts) {
 		const idempotencyKey = opts && opts.idempotencyKey;
-		const timeout = opts && opts.timeout;
+		const timeout = opts?.timeout ?? defaults?.timeout;
 		if (!idempotencyKey && !timeout) return rpcCall;
 		return function withCall(...args) {
 			// Dedup only when an idempotency key is bound. Timeout-only calls

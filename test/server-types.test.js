@@ -22,6 +22,16 @@ void metadata;
 import { configureWebhooks, createDeadLetterStore, type DeadLetterStore } from '../src/server.js';
 import type { RedisDeadLetterStore } from 'svelte-adapter-uws-extensions/redis/dead-letter';
 declare const redisDeadLetter: RedisDeadLetterStore;
+live(async (_ctx) => 1, { timeout: 300_000 });
+live.stream('budget', async (_ctx) => [], { timeout: 300_000 });
+live.upload(async (_ctx) => 1, { timeout: 300_000 });
+// @ts-expect-error timeout is numeric
+live(async (_ctx) => 1, { timeout: '300000' });
+// @ts-expect-error timeout is numeric
+live.stream('budget', async (_ctx) => [], { timeout: '300000' });
+// @ts-expect-error timeout is numeric
+live.upload(async (_ctx) => 1, { timeout: '300000' });
+
 configureWebhooks({ deadLetter: redisDeadLetter });
 const asyncDeadLetter: DeadLetterStore = {
   add: async () => null, get: async () => null, remove: async () => false,

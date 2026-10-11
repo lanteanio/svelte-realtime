@@ -38,7 +38,7 @@ export class RpcError extends Error {
  *
  * @internal
  */
-export function __rpc(path: string): ((...args: any[]) => Promise<any>) & {
+export function __rpc(path: string, defaults?: { timeout?: number }): ((...args: any[]) => Promise<any>) & {
 	/** Bypass deduplication - always send a fresh request. */
 	fresh: (...args: any[]) => Promise<any>;
 	/**
@@ -419,6 +419,7 @@ export interface MappedStore<U> extends Readable<U[]> {
 export function __stream(
 	path: string,
 	options?: {
+		timeout?: number;
 		merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor';
 		key?: string;
 		prepend?: boolean;
@@ -433,6 +434,7 @@ export function __stream(
 export function __stream(
 	path: string,
 	options: {
+		timeout?: number;
 		merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor';
 		key?: string;
 		prepend?: boolean;
@@ -593,7 +595,7 @@ export interface UploadHandle<T = any> extends Promise<T> {
  *
  * @internal
  */
-export function __upload<T = any>(path: string): (
+export function __upload<T = any>(path: string, defaults?: { timeout?: number }): (
 	source: Blob | ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array>,
 	...args: any[]
 ) => UploadHandle<T>;

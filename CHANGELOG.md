@@ -22,6 +22,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `createTestEnv().connect()` clients expose `sendRaw(frame)` and `onMessage(listener)` to drive the real dispatcher with encoded frames.
 
+- Declare client request budgets with `live(fn, { timeout })`, `live.stream(..., { timeout })`, and `live.upload(fn, { timeout })`. Generated stubs carry the budget; per-call RPC overrides retain precedence over function and app-wide defaults.
+
 - Streams expose a `pending` store that turns true only once an attach has taken longer than `pendingDelay` (100 ms by default, `0` for immediate), so a quick load never flashes a spinner. Connection status and errors stay immediate.
 
 ### Changed

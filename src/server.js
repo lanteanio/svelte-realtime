@@ -79,6 +79,7 @@ import { _ensureWrap, _maybeLateActivate, _computeAggregateState, _createAggrega
 import { _crdtLoadError, _setCrdtRuntime, _resetCrdt, _crdtRegister, _drainCrdtOnClose, _crdtClosedWs, _crdtDeclRegistrations, installCrdt } from './server/crdt.js';
 import { _smoothLoadError, _setSmoothRuntime, _resetSmooth, _setSmoothSpecifierForTest, _smoothRegister, _drainSmoothOnClose, _smoothTopics, _smoothClosedWs, installSmooth } from './server/smooth.js';
 import { _resolveAllLazy, _isLazyResolved, _resetLazy, installLazy, _setAfterLazyResolve } from './server/lazy.js';
+import { validateFunctionTimeout } from './shared/function-timeout.js';
 import { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError, _ensureCronInterval, _getCronLeader, _cronTimerActive, _stopCronScheduler } from './server/cron-engine.js';
 export { __registerCron, setCronPlatform, configureCron, _clearCron, _tickCron, onCronError };
 export { setOperationalEventSink, emitOperationalEvent } from './shared/diagnostic.js';
@@ -1066,9 +1067,11 @@ async function _resolveGuard(modulePath) {
  * Mark a function as RPC-callable.
  * @template {Function} T
  * @param {T} fn
+ * @param {{ timeout?: number }} [options]
  * @returns {T}
  */
-export function live(fn) {
+export function live(fn, options) {
+	validateFunctionTimeout(options?.timeout);
 	/** @type {any} */ (fn).__isLive = true;
 	return fn;
 }
@@ -1249,10 +1252,11 @@ export function defineTopics(map) {
  * Topic can be a static string or a function of (ctx, ...args) => string for dynamic topics.
  * @param {string | Function} topic
  * @param {Function} initFn
- * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, replay?: boolean | { size?: number }, coalesceBy?: (data: any) => string | number | null | undefined }} [options]
+ * @param {{ timeout?: number, merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, replay?: boolean | { size?: number }, coalesceBy?: (data: any) => string | number | null | undefined }} [options]
  * @returns {Function}
  */
 live.stream = function stream(topic, initFn, options) {
+	validateFunctionTimeout(options?.timeout);
 	if (typeof topic === 'string' && topic.startsWith('__')) {
 		throw new Error(`[svelte-realtime] live.stream topic '${topic}' uses reserved prefix '__'\n  See: https://svti.me/streams`);
 	}
@@ -1455,7 +1459,7 @@ live.stream = function stream(topic, initFn, options) {
  * Channels have no initFn - clients subscribe to a topic and receive events immediately.
  *
  * @param {string | Function} topic - Static topic string or function (ctx, ...args) => string for dynamic channels
- * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, max?: number }} [options]
+ * @param {{ timeout?: number, merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, max?: number }} [options]
  * @returns {Function}
  */
 live.channel = function channel(topic, options) {
@@ -1519,10 +1523,11 @@ live.binary = function binary(fn, options) {
  * globally, 64 buffered chunks before flow-control kicks in.
  *
  * @param {(ctx: any, ...args: any[]) => Promise<any>} fn
- * @param {{ maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number, reauthEvery?: number }} [options]
+ * @param {{ timeout?: number, maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number, reauthEvery?: number }} [options]
  * @returns {Function}
  */
 live.upload = function upload(fn, options) {
+	validateFunctionTimeout(options?.timeout);
 	/** @type {any} */ (fn).__isLive = true;
 	/** @type {any} */ (fn).__isUpload = true;
 	// reauthEvery (bytes): when >0, every N bytes received past the last

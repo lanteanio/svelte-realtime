@@ -283,8 +283,8 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-timeout"></a>
 ### <code>TIMEOUT</code>
 
-- Searchable message prefixes: <code>Batch timed out after 30s</code>; <code>Binary RPC '</code>; <code>RPC '</code>; <code>Stream '</code>; <code>loadMore '</code>
-- Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/client/stream.js](../src/client/stream.js), [src/server/push.js](../src/server/push.js)
+- Searchable message prefixes: <code>Batch timed out after 30s</code>; <code>Binary RPC '</code>; <code>RPC '</code>; <code>Stream '</code>; <code>Upload '</code>; <code>loadMore '</code>
+- Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/client/stream.js](../src/client/stream.js), [src/client/upload.js](../src/client/upload.js), [src/server/push.js](../src/server/push.js)
 
 <a id="live-error-too-many-uploads"></a>
 ### <code>TOO_MANY_UPLOADS</code>
@@ -1099,15 +1099,15 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/client/connection.js:258</code>
 - <code>src/client/internal-state.js:140</code>
 - <code>src/client/offline.js:315</code>
-- <code>src/client/stream.js:1911</code>
-- <code>src/client/stream.js:2644</code>
-- <code>src/client/upload.js:625</code>
-- <code>src/client/upload.js:736</code>
-- <code>src/client/upload.js:800</code>
+- <code>src/client/stream.js:1912</code>
+- <code>src/client/stream.js:2645</code>
+- <code>src/client/upload.js:632</code>
+- <code>src/client/upload.js:744</code>
+- <code>src/client/upload.js:808</code>
 - <code>src/hooks.js:51</code>
 - <code>src/hooks.js:58</code>
-- <code>src/server.js:1952</code>
-- <code>src/server.js:2956</code>
+- <code>src/server.js:1957</code>
+- <code>src/server.js:2961</code>
 - <code>src/server/ctx.js:113</code>
 - <code>src/server/dispatch.js:1280</code>
 - <code>src/server/dispatch.js:1394</code>

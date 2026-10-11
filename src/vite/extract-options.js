@@ -1,6 +1,57 @@
 // @ts-check
 import { _skipNonCode, _readStringLiteral } from './scanner.js';
 import { _MULTIPLAYER_NAMESPACE_MEMBERS } from '../shared/multiplayer-members.js';
+import { validateFunctionTimeout } from '../shared/function-timeout.js';
+
+/**
+ * Read a declaration's client budget without evaluating server code.
+ * @param {string} source
+ * @param {string} name
+ * @returns {number | undefined}
+ */
+export function _extractFunctionTimeout(source, name) {
+	/** @param {string} text @param {number} depth @returns {number | undefined} */
+	function read(text, depth) {
+		if (depth > 20) return undefined;
+		const value = _resolveValue(source, text, depth);
+		if (value === null) return undefined;
+		const expression = _unwrap(value);
+		const call = _callOpen(expression);
+		if (!call) return undefined;
+		const args = [];
+		let at = call.open;
+		while (at < expression.length && expression[at] !== ')') {
+			const end = _expressionEnd(expression, at);
+			args.push(expression.slice(at, end).trim());
+			if (expression[end] !== ',') break;
+			at = end + 1;
+		}
+		const optionIndex = call.callee === 'live.stream' ? 2 : 1;
+		if (['live', 'live.stream', 'live.upload'].includes(call.callee)) {
+			const options = args[optionIndex];
+			if (!options || options === 'undefined') return undefined;
+			const object = _exactObject(source, options, 0, false);
+			if (!object) return undefined;
+			const config = _readConfig(source, object.body, 0);
+			if (!config.values.has('timeout')) return undefined;
+			const raw = config.values.get('timeout');
+			if (raw === 'undefined' && config.stable.has('timeout')) return undefined;
+			if (!config.stable.has('timeout') || raw == null || !/^\d[\d_]*(?:\.\d[\d_]*)?(?:e[+-]?\d+)?$/i.test(raw)) {
+				throw new Error(`Cannot read client timeout for '${name}'; use a positive numeric literal or module-local constant`);
+			}
+			return validateFunctionTimeout(Number(raw.replaceAll('_', '')));
+		}
+		if (/^live\.(?:public|validated|lock|idempotent|rateLimit|volatile)$/.test(call.callee)) {
+			for (const arg of args) {
+				const timeout = read(arg, depth + 1);
+				if (timeout !== undefined) return timeout;
+			}
+		}
+		return undefined;
+	}
+	const declaration = _moduleBinding(source, name);
+	return declaration === null ? undefined : read(declaration, 0);
+}
 
 /**
  * Walk a string and extract the content of the last balanced `{ ... }` block
@@ -408,7 +459,7 @@ export function _readTopLevelValue(body, start) {
  * Extract stream options from source code.
  * @param {string} source
  * @param {string} name
- * @returns {{ merge?: string, key?: string, prepend?: boolean, max?: number }}
+ * @returns {{ timeout?: number, merge?: string, key?: string, prepend?: boolean, max?: number }}
  */
 export function _extractStreamOptions(source, name) {
 	/** @type {any} */

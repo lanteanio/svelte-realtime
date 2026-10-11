@@ -437,7 +437,7 @@ const _evictable = new Set();
  * cached store instances keyed by serialized args.
  *
  * @param {string} path - e.g. 'chat/messages'
- * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, pendingDelay?: number }} [options]
+ * @param {{ timeout?: number, merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, pendingDelay?: number }} [options]
  * @param {boolean} [isDynamic] - If true, returns a function that accepts args
  * @returns {import('svelte/store').Readable<any> | ((...args: any[]) => import('svelte/store').Readable<any>)}
  */
@@ -588,7 +588,7 @@ function _createMappedStore(source, fn) {
 
 /**
  * @param {string} path
- * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, pendingDelay?: number }} [options]
+ * @param {{ timeout?: number, merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, pendingDelay?: number }} [options]
  * @param {any[]} [dynamicArgs]
  * @returns {any}
  */
@@ -1719,6 +1719,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_ticket = ticket;
 
 		const _startTime = now();
+		const timeout = options?.timeout ?? _getTimeout();
 		const timer = setTimer(() => {
 			pendingId = null;
 			_ticket = null;
@@ -1733,12 +1734,12 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				pending.delete(id);
 				if (handedRef) _sendManagedRelease(handedRef);
 			}
-			if (now() - _startTime > 90000) {
+			if (now() - _startTime > Math.max(90000, timeout * 3)) {
 				_setError(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
 				return;
 			}
-			_setError(new RpcError('TIMEOUT', `Stream '${path}' timed out after 30s`));
-		}, _getTimeout());
+			_setError(new RpcError('TIMEOUT', `Stream '${path}' timed out after ${timeout / 1000}s`));
+		}, timeout);
 
 		pending.set(id, {
 			stream: true,

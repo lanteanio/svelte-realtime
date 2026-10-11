@@ -1471,7 +1471,30 @@ await createOrder.with({ idempotencyKey: id, timeout: 60_000 })(payload);
 | `.with({})` option | Description |
 |---|---|
 | `idempotencyKey` | Carried in the envelope for the server's `live.idempotent` wrapper |
-| `timeout` | Per-call timeout in ms; overrides the global `configure({ timeout })` default. Sleep-detect threshold scales with the override |
+| `timeout` | Per-call timeout in ms; overrides the function declaration and global `configure({ timeout })` default. Sleep-detect threshold scales with the override |
+
+Declare a slow function's default where it is registered:
+`export const report = live(buildReport, { timeout: 300_000 })`.
+
+Timeout precedence is `report.with({ timeout })`, then `live(fn, { timeout })`, then
+`configure({ timeout })` (30,000 ms by default). `.fresh()` and idempotency-only
+`.with()` calls inherit the function budget. Calls inside `batch()` still share
+its batch timer; fire-and-forget calls have no response timer.
+
+`live.stream(topic, init, { timeout })` applies the same declaration to the client
+initialization/refetch request, not the lifetime of a subscription.
+`live.upload(fn, { timeout })` opts an upload into a total client deadline and sends
+the upload cancellation frame on expiry; undeclared uploads retain no deadline.
+A client timeout does not forcibly stop an RPC handler. Upload handlers can observe
+cancellation through `ctx.abortSignal`.
+
+The Vite plugin reads budgets without running server code. Use an integer literal
+from 1 through 2,147,483,647 ms, or a module-local constant containing one; options
+objects and known spreads can also be module-local constants. A visibly declared
+`timeout` that cannot be resolved fails the build. Runtime-generated options remain
+supported, but their timeout values are not carried to client stubs; use `.with()`
+for runtime RPC budgets.
+
 
 ---
 
@@ -1605,7 +1628,7 @@ Call `configure()` once at app startup. The hooks fire on state transitions only
 | `onConnect()` | Called when the WebSocket connection opens after a reconnect |
 | `onDisconnect()` | Called when the WebSocket connection closes |
 | `beforeReconnect()` | Called before each reconnection attempt (can be async) |
-| `timeout` | Default RPC timeout in ms (default `30000`). Per-call `.with({ timeout })` overrides. |
+| `timeout` | App-wide RPC timeout in ms (default `30000`). Function declarations override it; per-call `.with({ timeout })` takes precedence over both. |
 | `protocolVersion` | Baked non-negative integer advertised before queued work on every connection. Pair it with the server range policy below. |
 | `resumeGraceMs` | Stream resume-grace window in ms (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to disable. |
 | `resumeMaxCursorAgeMs` | Max outage in ms a reconnect trusts the retained replay cursor before rehydrating fully (default `60000`). See [Pause and resume without re-rehydrating](#pause-and-resume-without-re-rehydrating) below. Set to `0` to always rehydrate on reconnect. |

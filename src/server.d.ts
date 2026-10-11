@@ -662,7 +662,7 @@ export interface PiiRedactRules {
  */
 export type PiiRedactConfig = true | ((data: any) => any) | PiiRedactRules;
 
-export interface StreamOptions {
+export interface StreamOptions extends LiveOptions {
 	/** Client pending indicator delay in integer milliseconds (0..2147483647). Default 100; 0 is immediate. Use a numeric literal. */
 	pendingDelay?: number;
 	/**
@@ -1195,6 +1195,19 @@ export interface MetricsRegistry {
 }
 
 /**
+ * Options for `live(fn, options)`.
+ */
+export interface LiveOptions {
+	/**
+	 * Default client request budget in milliseconds (integer, 1..2147483647).
+	 * The generated client stub waits this long before rejecting with
+	 * TIMEOUT; `.with({ timeout })` on a call overrides it, and functions that
+	 * declare none use `configure({ timeout })`.
+	 */
+	timeout?: number;
+}
+
+/**
  * Mark a function as RPC-callable over WebSocket.
  *
  * The first argument is always `ctx: LiveContext`. Additional arguments
@@ -1209,7 +1222,7 @@ export interface MetricsRegistry {
  * });
  * ```
  */
-export function live<T extends (ctx: LiveContext, ...args: any[]) => any>(fn: T): T;
+export function live<T extends (ctx: LiveContext, ...args: any[]) => any>(fn: T, options?: LiveOptions): T;
 
 /**
  * The shape of a single entry on a `defineTopics` map: either a static
@@ -1490,7 +1503,7 @@ export const pushHooks: {
 /**
  * Options for `live.upload()`.
  */
-export interface UploadOptions {
+export interface UploadOptions extends LiveOptions {
 	/**
 	 * Hard cap on total bytes per upload. Bytes received past this point
 	 * abort the upload with `LiveError('PAYLOAD_TOO_LARGE')`.

@@ -9057,3 +9057,69 @@ describe('stream pending indicator', () => {
 		expect(() => __stream('pending/invalid', { pendingDelay: value })).toThrow(RangeError);
 	});
 });
+
+describe('function timeout defaults', () => {
+	it('keeps a five-minute RPC pending while an undeclared RPC uses the global budget', async () => {
+		vi.useFakeTimers();
+		try {
+			const slow = __rpc('budget/slow', { timeout: 300_000 });
+			const long = slow();
+			const short = __rpc('budget/default')();
+			short.catch(() => {});
+			let settled = false;
+			long.finally(() => { settled = true; });
+			await vi.advanceTimersByTimeAsync(299_999);
+			await expect(short).rejects.toMatchObject({ code: 'TIMEOUT' });
+			expect(settled).toBe(false);
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, { ok: true, data: 'done' });
+			expect(await long).toBe('done');
+		} finally { vi.useRealTimers(); }
+	});
+
+	it.each(['fresh', 'idempotent'])('preserves the declaration for %s calls and per-call overrides', async (mode) => {
+		vi.useFakeTimers();
+		try {
+			configure({ timeout: 100 });
+			const slow = __rpc('budget/modes', { timeout: 1000 });
+			const base = mode === 'fresh' ? slow.fresh() : slow.with({ idempotencyKey: 'x' })();
+			const override = slow.with({ timeout: 200 })();
+			base.catch(() => {}); override.catch(() => {});
+			await vi.advanceTimersByTimeAsync(200);
+			await expect(override).rejects.toMatchObject({ code: 'TIMEOUT' });
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, { ok: true, data: 'ok' });
+			expect(await base).toBe('ok');
+		} finally { vi.useRealTimers(); }
+	});
+
+	it('uses the declared stream initialization timeout without classifying it as sleep', async () => {
+		vi.useFakeTimers();
+		try {
+			const stream = __stream('budget/stream', { timeout: 300_000 });
+			let error;
+			const stopError = stream.error.subscribe((e) => { error = e; });
+			const stop = stream.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(299_999);
+			expect(error).toBeNull();
+			await vi.advanceTimersByTimeAsync(1);
+			expect(error).toMatchObject({ code: 'TIMEOUT' });
+			expect(error.message).toContain('300s');
+			stop(); stopError();
+		} finally { vi.useRealTimers(); }
+	});
+
+	it('cancels an upload at its declared budget and clears settled timers', async () => {
+		vi.useFakeTimers();
+		try {
+			const handle = __upload('budget/upload', { timeout: 1000 })(new Uint8Array([1]));
+			await vi.advanceTimersByTimeAsync(1000);
+			await expect(handle).rejects.toMatchObject({ code: 'TIMEOUT' });
+			const controls = sendQueuedFn.mock.calls.map(([frame]) => frame).filter((frame) => frame instanceof ArrayBuffer && new Uint8Array(frame)[0] === 2 && new Uint8Array(frame)[1] === 16);
+			expect(controls).toHaveLength(1);
+			await vi.advanceTimersByTimeAsync(1000);
+			const later = sendQueuedFn.mock.calls.map(([frame]) => frame).filter((frame) => frame instanceof ArrayBuffer && new Uint8Array(frame)[0] === 2 && new Uint8Array(frame)[1] === 16);
+			expect(later).toHaveLength(1);
+		} finally { vi.useRealTimers(); }
+	});
+});
