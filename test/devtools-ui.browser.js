@@ -573,3 +573,17 @@ it('relabels the visible launcher together with its accessible name', async () =
  expect(await launcher.textContent()).toBe('Werkzeuge');
  expect(await launcher.getAttribute('lang')).toBe('de');
 });
+
+
+it.each([false, true])('bounds oversized grapheme clusters with Intl.Segmenter (raw=%s)', async raw => {
+ await streamsFixture();
+ expect(await page.evaluate(() => typeof Intl.Segmenter)).toBe('function');
+ await page.evaluate(() => { window.realDevtools.streams.get('chat').recentEvents = [{ event: 'update', ts: Date.now(), data: 'a' + '\u0301'.repeat(200000) + String.fromCodePoint(0x1f600) }]; });
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ if (raw) await page.getByRole('button', { name: 'Raw', exact: true }).click();
+ await page.locator('[data-action="toggle-stream"]').click();
+ const preview = await page.locator('#svr-dt-content bdi[dir="ltr"]').textContent();
+ expect(preview.length).toBeLessThan((raw ? 500 : 200) * 8 + 60);
+ expect(preview).toContain('code units]');
+ expect(preview.isWellFormed()).toBe(true);
+});

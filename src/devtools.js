@@ -580,7 +580,9 @@ const payloadSegmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segment
 
 /**
  * Render a JSON preview capped at 200 graphemes in pretty mode or 500 in raw
- * mode. Without grapheme segmentation, cap by code point to preserve surrogate
+ * mode, with a hard ceiling of eight code units per allowed grapheme. An
+ * oversized cluster is cut at a code-point boundary. Without segmentation,
+ * cap by code point to preserve surrogate
  * pairs while keeping large payloads out of the panel.
  * @param {any} value
  * @param {boolean} raw
@@ -594,7 +596,9 @@ function _renderPayload(value, raw) {
 	if (str.length > cap) {
 		let end = 0, count = 0;
 		if (payloadSegmenter) {
-			for (const item of payloadSegmenter.segment(str)) {
+			let windowEnd = Math.min(str.length, cap * 8);
+			if (windowEnd < str.length && /[\uD800-\uDBFF]/.test(str[windowEnd - 1])) windowEnd--;
+			for (const item of payloadSegmenter.segment(str.slice(0, windowEnd))) {
 				if (count++ === cap) break;
 				end += item.segment.length;
 			}
