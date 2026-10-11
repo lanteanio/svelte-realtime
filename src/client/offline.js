@@ -29,6 +29,9 @@ function _newScope(store = null, persistKey = 'default', persist = undefined) {
 let _scope = _newScope();
 /** Entry ownership stays private when a replay callback receives an entry copy. */
 const _entryScopes = new WeakMap();
+// Stored work from a closed session waits for a later page load.
+const _heldAfterClose = new WeakSet();
+export const _isHeldAfterClose = (entry) => _heldAfterClose.has(entry);
 // Only drains still awaiting work retain a retired scope. Its last response
 // can finish against a newer lifetime of the same namespace without replacing
 // that lifetime's checkpoint. Entries leave this set when their drain ends.
@@ -783,7 +786,7 @@ export function _endBatch() {
  * @param {() => Error} makeError
  */
 export function _closeOfflineQueue(makeError) {
-	for (const entry of [..._offlineQueue]) _keepIfStored(entry, makeError);
+	for (const entry of new Set([..._offlineQueue, ..._scope.entries])) _keepIfStored(entry, makeError);
 }
 
 /**
@@ -792,6 +795,7 @@ export function _closeOfflineQueue(makeError) {
  * @param {() => Error} makeError
  */
 export function _keepIfStored(entry, makeError) {
+	_heldAfterClose.add(entry);
 	if (entry.stored === undefined) {
 		_dropClosed(entry, makeError);
 		return;

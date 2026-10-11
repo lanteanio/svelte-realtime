@@ -361,13 +361,6 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Searchable message prefixes: <code>[svelte-realtime] volatile RPC '</code>
 - Owning sources: [src/client/rpc.js](../src/client/rpc.js)
 
-<a id="diagnostic-console-06e4b752d0cc0678"></a>
-### <code>console-06e4b752d0cc0678</code>
-
-- Kind: legacy console prefix
-- Searchable message prefixes: <code>[svelte-realtime] configure({ url, auth }) is ignored once the connection has closed for good; reload the page to connect again.</code>
-- Owning sources: [src/client/misc.js](../src/client/misc.js)
-
 <a id="diagnostic-console-0746db52cc0430fe"></a>
 ### <code>console-0746db52cc0430fe</code>
 
@@ -577,6 +570,13 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Kind: legacy console prefix
 - Searchable message prefixes: <code>[svelte-realtime] createMessage({ platform: callback }) is redundant when `setBus(...)` is wired: </code>
 - Owning sources: [src/server/dispatch.js](../src/server/dispatch.js)
+
+<a id="diagnostic-console-576249d8b7ff4b02"></a>
+### <code>console-576249d8b7ff4b02</code>
+
+- Kind: legacy console prefix
+- Searchable message prefixes: <code>[svelte-realtime] configure({ url, auth }) is ignored once the connection has closed for good; call the adapter connect() explicitly to connect again.</code>
+- Owning sources: [src/client/misc.js](../src/client/misc.js)
 
 <a id="diagnostic-console-5861c9238fa01b16"></a>
 ### <code>console-5861c9238fa01b16</code>
@@ -1093,12 +1093,12 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 
 These sites have a computed code, event, or message prefix that the literal scanner cannot resolve. They remain visible here instead of being counted as full literal coverage. Wire forwarding and application-provided messages may vary at runtime.
 
-- <code>src/client/connection.js:109</code>
-- <code>src/client/connection.js:177</code>
-- <code>src/client/connection.js:192</code>
-- <code>src/client/connection.js:217</code>
-- <code>src/client/internal-state.js:138</code>
-- <code>src/client/offline.js:312</code>
+- <code>src/client/connection.js:150</code>
+- <code>src/client/connection.js:218</code>
+- <code>src/client/connection.js:233</code>
+- <code>src/client/connection.js:258</code>
+- <code>src/client/internal-state.js:140</code>
+- <code>src/client/offline.js:315</code>
 - <code>src/client/stream.js:1890</code>
 - <code>src/client/stream.js:2622</code>
 - <code>src/client/upload.js:625</code>

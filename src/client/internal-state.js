@@ -13,6 +13,7 @@ import { randomFloat } from '../client-runtime.js';
  * @type {{
  *   batchCollector: Array<{ rpc: string, id: string, args: any[] }> | null,
  *   terminated: boolean,
+ *   closedEpoch: number,
  *   config: any,
  *   isOffline: boolean,
  *   socketUp: boolean,
@@ -26,6 +27,7 @@ export const clientState = {
 	// The connection reported 'failed': closed for good. Requests fail at once
 	// with CONNECTION_CLOSED and one-way sends drop. Kept by connection.js.
 	terminated: false,
+	closedEpoch: 0,
 	config: {},
 	isOffline: false,
 	// The adapter socket is open (or open behind a hidden tab), as its status

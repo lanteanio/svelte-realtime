@@ -1,5 +1,5 @@
 // @ts-check
-import { derived } from 'svelte/store';
+import { derived, readable } from 'svelte/store';
 import { __devtools, _devtoolsConnectionStatus, _devtoolsConnectionFailure } from './devtools-instrument.js';
 import { connect as _connect, status as _adapterStatus } from 'svelte-adapter-uws/client';
 import { now, clearTimer } from '../client-runtime.js';
@@ -7,13 +7,9 @@ import { clientState, RpcError, pending, pendingUploads, _IS_DEV, _connectionLos
 import { _closeOfflineQueue } from './offline.js';
 
 /**
- * The adapter connection this client is bound to. Everything the client does
- * with the adapter goes through it: sends, topic stores, the status store,
- * the request handler. The adapter's own `connect()`, `on()` and `status`
- * build a new connection, and a new socket, whenever none exists, which is
- * the case once `close()` has run. Through the bound connection a call made
- * after a close for good only reaches the closed connection, whose stores
- * report 'failed' and whose sends go nowhere.
+ * Current connection object. The module status follows explicit adapter
+ * replacements; all realtime consumers follow this binding without creating
+ * a connection merely because an API is used after close().
  * @type {any}
  */
 let _bound = null;
@@ -25,8 +21,52 @@ let _bound = null;
  */
 export function _conn() {
 	if (_bound === null) ensureDisconnectListener();
-	return _bound;
+	return _following;
 }
+
+/** @type {Set<(connection: any) => void>} */
+const _followers = new Set();
+
+/** Subscribe to one bound connection, then move only on explicit replacement. */
+function _followBinding(subscribe) {
+	return (fn) => {
+		let active = true;
+		let generation = 0;
+		let stop = () => {};
+		const follow = (connection) => {
+			const own = ++generation;
+			stop();
+			stop = () => {};
+			if (!active || connection !== _bound) return;
+			const cleanup = subscribe(connection, value => {
+				if (active && own === generation && connection === _bound) fn(value);
+			});
+			if (active && own === generation && connection === _bound) stop = cleanup;
+			else cleanup();
+		};
+		_followers.add(follow);
+		follow(_bound);
+		return () => { active = false; generation++; _followers.delete(follow); stop(); };
+	};
+}
+
+// Sends never call connect(). Store consumers survive an explicit replacement
+// while remaining attached to the closed connection until that happens.
+const _following = {
+	send: (...args) => _bound.send(...args),
+	sendQueued: (...args) => _bound.sendQueued(...args),
+	get bufferedAmount() { return _bound.bufferedAmount; },
+	status: { subscribe: _followBinding((connection, fn) => connection.status.subscribe(fn)) },
+	// A connection from an adapter without a failure store reports none.
+	failure: { subscribe: _followBinding((connection, fn) => connection.failure ? connection.failure.subscribe(fn) : () => {}) },
+	denials: { subscribe: _followBinding((connection, fn) => connection.denials.subscribe(fn)) },
+	on: (topic) => ({ subscribe: _followBinding((connection, fn) => connection.on(topic).subscribe(fn)) }),
+	onRequest: (handler) => _followBinding((connection) => connection.onRequest(handler))(() => {}),
+	_onLeaseDegraded: _followBinding((connection, fn) => {
+		fn(false);
+		return typeof connection._onLeaseDegraded === 'function' ? connection._onLeaseDegraded(fn) : () => {};
+	})
+};
 
 /** @type {boolean} */
 let listenerAttached = false;
@@ -58,6 +98,7 @@ function _warnDeprecation(dep) {
 
 /** @type {boolean} */
 let disconnectListenerAttached = false;
+let _applyStatus;
 
 /** @type {boolean} */
 let denialsListenerAttached = false;
@@ -255,19 +296,41 @@ export function ensureDisconnectListener() {
 	// when options passed to a later connect() cannot apply; connect() without
 	// options then returns it. Marked attached only once bound, so a throw here
 	// is retried by the next call.
-	_adapterStatus.subscribe(() => {})();
-	_bound = _connect();
+	let initialStatus;
+	_adapterStatus.subscribe(s => { initialStatus = s; })();
+	// A first realtime consumer can arrive after the app already closed the
+	// adapter. Reading that closed status must not call explicit connect().
+	_bound = initialStatus === 'failed' ? {
+		status: readable('failed'), failure: readable(null), denials: readable(null),
+		on: () => readable(null), onRequest: () => () => {},
+		send: () => false, sendQueued: () => false
+	} : _connect();
 	disconnectListenerAttached = true;
-	if (__devtools) _bound.failure?.subscribe(_devtoolsConnectionFailure);
+	if (__devtools) _following.failure.subscribe(_devtoolsConnectionFailure);
 
 	let lastOpenAt = 0;
 	let fastCloseCount = 0;
 	let cfTunnelWarned = false;
 
-	_bound.status.subscribe((s) => {
+	_applyStatus = (s) => {
+		// Only a live module status can authorize looking up a replacement.
+		// The bound status also catches close/connect in a queued store update.
+		const candidate = s !== 'failed' && _closedForGoodNow() ? _connect() : _bound;
+		const replaced = candidate !== _bound;
+		if (replaced) {
+			if (!clientState.terminated) {
+				clientState.closedEpoch++;
+				clientState.terminated = true;
+				_settleClosedForGood();
+			}
+			_bound = candidate;
+			clientState.terminated = false;
+			clientState.socketUp = false;
+		}
 		if (__devtools) _devtoolsConnectionStatus(s);
 		if (s === 'failed') {
 			// Before anything that can run app code: a call it makes must see it.
+			if (!clientState.terminated) clientState.closedEpoch++;
 			clientState.terminated = true;
 			_settleClosedForGood();
 		} else if (s === 'disconnected') {
@@ -338,7 +401,15 @@ export function ensureDisconnectListener() {
 			}
 			clientState.socketUp = false;
 		}
-	});
+		if (replaced) {
+			const connection = _bound;
+			for (const follow of [..._followers]) {
+				if (_bound !== connection) break;
+				follow(connection);
+			}
+		}
+	};
+	_adapterStatus.subscribe(_applyStatus);
 }
 
 /**

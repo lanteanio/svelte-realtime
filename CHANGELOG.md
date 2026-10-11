@@ -67,6 +67,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - A stream subscribe refused by its loader now releases the connection's adapter membership, derived taps and grant, so a later raw subscribe to that topic is judged afresh instead of admitted on the refused grant, and the same socket can resubscribe and receive live frames. Another stream still holding the topic on that socket keeps it, and an independent subscribe still awaiting its hook can complete.
 
+- Calling the adapter's `connect()` after `close()` revives the realtime client: new RPCs work, mounted streams reload over the new connection and clear their `CONNECTION_CLOSED` error, and status, signal, denial, health and push listeners follow the new connection. No realtime call opens a socket between the close and the app's `connect()`, and offline mutations rejected or kept stored at the close are not replayed onto the new connection.
+
 ## [0.6.0-next.91] - 2026-10-13
 
 ### Added

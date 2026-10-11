@@ -5,7 +5,7 @@ import { clientState, RpcError, _offlineQueue, _IS_DEV, _isConnectionLoss } from
 import { _sendRpc } from './rpc.js';
 import { _conn, _closedForGoodNow, _connectionClosedError } from './connection.js';
 import { _ensureHealthSubscription } from './health.js';
-import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped } from './offline.js';
+import { _configureOfflinePersistence, _offlineReady, _offlineScope, _startOfflineDrain, _finishOfflineDrain, _ownOfflineReplay, _keepIfStored, _isHeldAfterClose, _settlePersist, _bumpPending, _setUploading, _clearGapIfClean, _trimQueue, _batchState, _beginBatch, _noteBatchFailure, _carryBatch, _endBatch, _queueLimit, _notifyReplayError, _settleDropped } from './offline.js';
 
 /**
  * @typedef {{ path: string, args: any[], queuedAt: number, resolve: Function, reject: Function, idempotencyKey?: string, timeout?: number, seq?: number, expiresAt?: number, restored?: boolean }} OfflineEntry
@@ -99,7 +99,7 @@ export function configure(config) {
 			// A client whose connection closed for good stays closed; building a
 			// connection here would only open a socket nothing listens on.
 			if (_IS_DEV) {
-				console.warn('[svelte-realtime] configure({ url, auth }) is ignored once the connection has closed for good; reload the page to connect again.');
+				console.warn('[svelte-realtime] configure({ url, auth }) is ignored once the connection has closed for good; call the adapter connect() explicitly to connect again.');
 			}
 		} else {
 			/** @type {{ url?: string, auth?: boolean | string }} */
@@ -169,6 +169,8 @@ function _callConnectionHook(name) {
  * settled back in the queue for the next reconnect.
  */
 async function _drainOfflineQueue() {
+	const closedEpoch = clientState.closedEpoch;
+	const closed = () => closedEpoch !== clientState.closedEpoch;
 	const scope = _offlineScope();
 	if (_replayingScope === scope) return;
 	_replayingScope = scope;
@@ -180,8 +182,8 @@ async function _drainOfflineQueue() {
 		// Gone again while the restore was read, or the socket is being
 		// replaced (a replay is sent only on an open socket): the next open
 		// drains.
-		if (clientState.isOffline || clientState.terminated || !clientState.socketUp) return;
-		if (_offlineQueue.length === 0) return;
+		if (closed() || clientState.isOffline || clientState.terminated || !clientState.socketUp) return;
+		if (!_offlineQueue.some(entry => !_isHeldAfterClose(entry))) return;
 		_setUploading(true);
 		if (scope !== _offlineScope()) return;
 
@@ -255,7 +257,7 @@ async function _drainOfflineQueue() {
 				// replaced (app code run by the last settle can start that): a
 				// replay is sent only on an open socket, and on the closing one it
 				// would go nowhere and wait for its timeout.
-				if (scope !== _offlineScope() || cut || clientState.isOffline || clientState.terminated || !clientState.socketUp) {
+				if (scope !== _offlineScope() || closed() || cut || clientState.isOffline || clientState.terminated || !clientState.socketUp) {
 					cut = true;
 					return;
 				}
@@ -318,7 +320,7 @@ async function _drainOfflineQueue() {
 		let queue = [];
 		let asyncFilterWarned = false;
 		let throwingFilterWarned = false;
-		const captured = new Set(_offlineQueue);
+		const captured = new Set(_offlineQueue.filter(entry => !_isHeldAfterClose(entry)));
 		for (const entry of captured) {
 			if (entry.settled) continue;
 			if (scope !== _offlineScope()) return;
@@ -459,6 +461,7 @@ async function _drainOfflineQueue() {
 
 		if (scope !== _offlineScope()) return;
 		// A replay that was cut off may have been applied: the drain is not clean.
+		if (closed()) cut = true;
 		if (cut) clean = false;
 		if (cut) {
 			// What the drain did not settle goes back to the front of the queue
@@ -473,8 +476,8 @@ async function _drainOfflineQueue() {
 			_offlineQueue.unshift(...back);
 			// After the close for good the queue is kept as it is for a later page
 			// load: trimming it would delete stored copies the close keeps.
-			const dropped = clientState.terminated ? [] : _trimQueue(_queueLimit(offlineOpts));
-			if (clientState.terminated) {
+			const dropped = (closed() || clientState.terminated) ? [] : _trimQueue(_queueLimit(offlineOpts));
+			if (closed() || clientState.terminated) {
 				// Handled as the queue was at the close: kept with a stored copy,
 				// rejected without one.
 				for (const entry of back) _keepIfStored(entry, _connectionClosedError);
