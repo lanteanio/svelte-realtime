@@ -405,6 +405,7 @@ function _wrapPlatformPublish(platform) {
 	}
 
 	let _publishDepth = 0;
+	let localBatchDepth = 0;
 
 	function fireWatchers(topic, event, data) {
 		if (!_watchedTopics.has(topic)) return;
@@ -608,7 +609,7 @@ function _wrapPlatformPublish(platform) {
 		return result;
 	}
 
-	function derivedPublishBatchedLocal(batch) {
+	function derivedPublishBatchedLocal(batch, opts) {
 		if (_silentTopicWatch.size > 0 && Array.isArray(batch)) {
 			for (const item of batch) if (item && typeof item.topic === 'string') _noteTopicPublish(item.topic);
 		}
@@ -619,7 +620,14 @@ function _wrapPlatformPublish(platform) {
 			// array, so the common case stays allocation-free.
 			rest = _enumGateInterceptBatch(platform, batch);
 		}
-		const result = (originalPublishBatched && (!Array.isArray(rest) || rest.length > 0)) ? originalPublishBatched(rest) : undefined;
+		let result;
+		if (originalPublishBatched && (!Array.isArray(rest) || rest.length > 0)) {
+			// Adapter fallbacks call platform.publish for clients without batching.
+			// The outer batch owns watcher delivery and the bus owns its relay.
+			localBatchDepth++;
+			try { result = originalPublishBatched(rest, opts); }
+			finally { localBatchDepth--; }
+		}
 		if (Array.isArray(batch) && _watchedTopics.size > 0) {
 			for (const item of batch) {
 				if (!item || typeof item.topic !== 'string') continue;
@@ -634,6 +642,7 @@ function _wrapPlatformPublish(platform) {
 	// locally (with watchers) and relays to the cluster in one step.
 	// Without a bus, identical to the legacy local-only path.
 	platform.publish = function derivedPublish(topic, event, data, opts) {
+		if (localBatchDepth > 0) return originalPublish(topic, event, data, opts);
 		_refreshBusCache();
 		if (_busPublish) return _busPublish(topic, event, data, opts);
 		return derivedPublishLocal(topic, event, data, opts);
@@ -646,10 +655,10 @@ function _wrapPlatformPublish(platform) {
 		// this wrap, derived / effect / aggregate watchers never fire on
 		// publishes from the batched path - they only fire from the unbatched
 		// platform.publish path that some test mocks happen to use.
-		/** @type {any} */ (platform).publishBatched = function derivedPublishBatched(batch) {
+		/** @type {any} */ (platform).publishBatched = function derivedPublishBatched(batch, opts) {
 			_refreshBusCache();
-			if (_busPublishBatched) return _busPublishBatched(batch);
-			return derivedPublishBatchedLocal(batch);
+			if (_busPublishBatched) return _busPublishBatched(batch, opts);
+			return derivedPublishBatchedLocal(batch, opts);
 		};
 	}
 }
