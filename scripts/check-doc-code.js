@@ -380,6 +380,18 @@ function declarationExports(source) {
 	return { names, hasDefault };
 }
 
+const exportNamesCache = new Map();
+function packageExportNames(directory) {
+	if (exportNamesCache.has(directory)) return exportNamesCache.get(directory);
+	const pkg = packageMeta(directory), names = new Set();
+	for (const key of Object.keys(pkg.exports || {})) {
+		const text = declarationClosureText(pkg.name + (key === '.' ? '' : key.slice(1)), directory);
+		if (text) for (const name of declarationExports(text).names) names.add(name);
+	}
+	exportNamesCache.set(directory, names);
+	return names;
+}
+
 function scriptSource(block) {
 	if (block.language !== 'svelte') return block.content;
 	return [...block.content.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
@@ -739,6 +751,9 @@ export function classifyBlock(block, rootDirectory = root) {
 	if (analysis.problem) {
 		return { errors: [where + ': ' + compiler + ' failed: ' + analysis.problem] };
 	}
+	const declaredAmbient = marker?.directive === 'ambient' ? marker.attributes.names.split(/\s*,\s*|\s+/) : [];
+	const missingImports = analysis.free.filter(name => packageExportNames(rootDirectory).has(name) && !declaredAmbient.includes(name));
+	if (missingImports.length) return { errors: [where + ': package exports need imports or explicit ambient names: ' + missingImports.join(', ')] };
 	const { appContext } = splitSpecifiers(analysis.imports, pkg.name);
 	if (appContext.length || analysis.dynamicImport) {
 		const detail = appContext.length ? appContext.join(', ') : 'dynamic import';
@@ -808,7 +823,7 @@ function summarize(records) {
 	return { classifications, channels, notRunnable };
 }
 
-export function buildManifest(sources, { previousManifest = null, acceptFragmentCount = false } = {}, rootDirectory = root) {
+export function buildManifest(sources, { previousManifest = null, acceptFragmentCount = false, acceptExecutedCount = false } = {}, rootDirectory = root) {
 	const blocks = [];
 	const errors = [];
 	for (const document of documents) {
@@ -847,10 +862,14 @@ export function buildManifest(sources, { previousManifest = null, acceptFragment
 		failure.problems = [failure.message];
 		throw failure;
 	}
+	const executed = blocks.filter(block => block.classification === 'executed').length;
+	const previousFloor = previousManifest?.executedFloor ?? previousManifest?.summary?.classifications?.executed ?? 0;
+	if (executed < previousFloor && !acceptExecutedCount) throw new Error('executed count ' + executed + ' is below the pinned floor ' + previousFloor + '; use --accept-executed-count for an intentional reviewed reduction');
 	return {
 		schemaVersion: 2,
 		documents,
 		fragmentCeiling: fragments,
+		executedFloor: executed,
 		summary: { total: blocks.length, ...summarize(blocks) },
 		blocks
 	};
@@ -869,6 +888,7 @@ export function validateManifest(manifest, sources, rootDirectory = root) {
 	if (!Number.isInteger(manifest?.fragmentCeiling) || manifest.fragmentCeiling < 0) {
 		errors.push('manifest fragmentCeiling must be a non-negative integer');
 	}
+	if (!Number.isInteger(manifest?.executedFloor) || manifest.executedFloor < 0) errors.push('manifest executedFloor must be a non-negative integer');
 	const records = new Map();
 	for (const record of manifest?.blocks || []) {
 		const key = blockKey(record);
@@ -877,6 +897,7 @@ export function validateManifest(manifest, sources, rootDirectory = root) {
 	}
 	const seen = new Set();
 	let fragmentCount = 0;
+	let executedCount = 0;
 	for (const document of documents) {
 		const source = sources[document];
 		if (typeof source !== 'string') {
@@ -898,6 +919,7 @@ export function validateManifest(manifest, sources, rootDirectory = root) {
 			}
 			const expected = outcome.record;
 			if (expected.classification === 'fragment') fragmentCount++;
+			if (expected.classification === 'executed') executedCount++;
 			// Content fingerprints identify examples independently of surrounding prose.
 			for (const field of ['language', 'section']) {
 				if (record[field] !== block[field]) {
@@ -944,6 +966,7 @@ export function validateManifest(manifest, sources, rootDirectory = root) {
 			'; growing the fragment set is a reviewed act (see --accept-fragment-count)'
 		);
 	}
+	if (executedCount < manifest?.executedFloor) errors.push('executed count ' + executedCount + ' is below the pinned floor ' + manifest.executedFloor);
 	if (manifest?.summary) {
 		const recomputed = { total: manifest.blocks?.length || 0, ...summarize(manifest.blocks || []) };
 		if (JSON.stringify(manifest.summary) !== JSON.stringify(recomputed)) {
@@ -990,7 +1013,8 @@ function main() {
 		try {
 			manifest = buildManifest(sources, {
 				previousManifest,
-				acceptFragmentCount: process.argv.includes('--accept-fragment-count')
+				acceptFragmentCount: process.argv.includes('--accept-fragment-count'),
+				acceptExecutedCount: process.argv.includes('--accept-executed-count')
 			});
 		} catch (error) {
 			console.error('check-doc-code --write FAILED:');

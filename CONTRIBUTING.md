@@ -308,7 +308,10 @@ classification diff, then `npm run verify:docs`. Prose inserted before a block
 does not change its identity. An invalid standalone excerpt needs an adjacent
 `<!-- doc-code: fragment reason="..." -->` marker. The fragment ceiling is pinned;
 growth additionally requires the reviewed `--accept-fragment-count` generator
-flag. Fix runnable examples instead of weakening their classification. Browser
+flag. The executed count is a floor: reducing it requires the reviewed
+`--accept-executed-count` flag. Package exports used without imports require an
+explicit `ambient` marker naming them. Fix runnable examples instead of weakening
+their classification. Browser
 or service-dependent examples may use a `doc-code: no-run` marker with the exact
 reason prefix `requires-browser`, `external-service`, or `app-context`.
 

@@ -29,3 +29,22 @@ describe('README example verification', () => {
 		expect(result.record).toMatchObject({ classification: 'tutorial', channel: 'app-context' });
 	});
 });
+
+
+it('rejects a missing package import instead of silently downgrading execution', () => {
+ const source = { 'README.md': "~~~js\nimport { LiveError } from 'svelte-realtime/server';\nnew LiveError('VALIDATION', 'Invalid input');\n~~~" };
+ const manifest = buildManifest(source);
+ expect(manifest.executedFloor).toBe(1);
+ const missing = {'README.md': source['README.md'].replace("import { LiveError } from 'svelte-realtime/server';\n", '')};
+ expect(() => buildManifest(missing, {previousManifest:manifest})).toThrow('package exports need imports');
+ const explicit = {'README.md':'<!-- doc-code: ambient names="LiveError" -->\n'+missing['README.md']};
+ expect(() => buildManifest(explicit, {previousManifest:manifest})).toThrow('below the pinned floor');
+ expect(buildManifest(explicit, {previousManifest:manifest, acceptExecutedCount:true}).executedFloor).toBe(0);
+});
+it('rejects lowering execution through a newly free application binding', () => {
+ const manifest = buildManifest({'README.md':'~~~js\nconsole.log(1);\n~~~'});
+ expect(() => buildManifest({'README.md':'~~~js\nconsole.log(missingBinding);\n~~~'}, {previousManifest:manifest})).toThrow('below the pinned floor');
+ const wrong = structuredClone(manifest);
+ wrong.blocks[0].classification = 'syntax';
+ expect(validateManifest(wrong, {'README.md':'~~~js\nconsole.log(1);\n~~~'}).join('\n')).toContain('classification must be executed');
+});

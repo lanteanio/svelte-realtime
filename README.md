@@ -283,7 +283,7 @@ The `merge` option on `live.stream()` controls how live pub/sub events are appli
 ### crud (default)
 
 Handles `created`, `updated`, `deleted` events. The store maintains an array, keyed by `id` (configurable with `key`). Set `max` to cap the buffer size and drop the oldest items when exceeded (useful for live feeds with `prepend: true`). The cap applies to snapshots, hydration, live events, and pagination. Keyed streams ignore rows missing their key field and report the stream path and key once in development; explicit `null` keys remain valid.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // Server
 export const todos = live.stream('todos', async (ctx) => {
@@ -311,7 +311,7 @@ export const addTodo = live(async (ctx, text) => {
 ### latest
 
 Ring buffer of the last N events. Good for activity feeds and logs.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const activity = live.stream('activity', async (ctx) => {
   return db.activity.recent(100);
@@ -321,7 +321,7 @@ export const activity = live.stream('activity', async (ctx) => {
 ### set
 
 Replaces the entire value. Good for counters, status indicators, and aggregated data.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const stats = live.stream('stats', async (ctx) => {
   return { users: 42, messages: 1337 };
@@ -331,7 +331,7 @@ export const stats = live.stream('stats', async (ctx) => {
 ### presence
 
 Tracks connected users with `join` and `leave` events. Items are keyed by `.key`.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const presence = live.stream(
   (ctx, roomId) => 'presence:' + roomId,
@@ -360,7 +360,7 @@ Events: `join` (add/update by key), `leave` (remove by key), `set` (replace all)
 ### cursor
 
 Tracks cursor positions with `update` and `remove` events. Items are keyed by `.key`.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const cursors = live.stream(
   (ctx, docId) => 'cursors:' + docId,
@@ -403,7 +403,7 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 ### Redacting PII on the wire
 
 `piiRedact` strips, masks, or pseudonymizes sensitive fields before a stream's data leaves the process. It runs the SAME projection for every subscriber, on every egress path - the initial load, live publishes (including `ctx.publishThrottled` / `ctx.publishDebounced` / `ctx.batch`), server-pushed reloads, the out-of-band top-level `publish()`, cron ticks that target the stream, and replay. Redaction happens BEFORE the replay buffer, so raw PII never rests in the buffer and a reconnecting client's gap-fill cannot leak it.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // Strip the built-in sensitive-key set (token / secret / password / auth /
 // session / cookie / jwt / credential) - zero config.
@@ -481,7 +481,7 @@ Stores whose payloads are app-defined (sessions, dead-letter, replay buffers, ta
 The store's `purgeUser` may return a total (number), a per-store breakdown (object of counts), or the owner-succession envelope `{ rowsAffected, ownerSuccessions }`. The envelope's `ownerSuccessions` array (`{ topic, owner, reason }` per room, the room's wire data topic) carries the `:owner` changes the store's cluster-wide owner eviction produced - the rooms the erased user owned that the forgetting instance could NOT resolve locally (the user's room refs live only on other instances). `live.forget` publishes each on the room's `:owner` topic through the replay buffer, so live subscribers on every replica see the successor and a resuming client gap-fills it instead of the erased owner; the count lands in `surfaces.ownerSuccessions`. Without the envelope (a plain count store) behavior is unchanged - succession still resolves locally for rooms this instance holds. The room-level `onOwnerChange` server hook does not fire for these fan-in successions (it is bound to a room's local join state, which the forgetting instance need not hold); the wire event and replay buffer are the erasure-critical halves.
 
 CRDT documents (`live.doc`/`map`/`array`) merge edits from many users into shared state, so a forgotten user's merged content is not surgically erasable BY CONSTRUCTION - the only true erasure is dropping the whole document, and only your app knows which documents the user contributed to. Name them in the cascade:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 await live.forget(targetUserId, {
   cascade: { crdt: ['notes:42', 'board:7'] }   // whole-document drops
@@ -839,7 +839,7 @@ export const banUser = live(async (ctx, userId) => {
 Both `deleteUser` and `banUser` require admin access. No need to check in each function.
 
 `guard()` accepts multiple functions for composable middleware chains. They run in order, and earlier ones can enrich `ctx` for later ones:
-
+<!-- doc-code: ambient names="LiveError, guard" -->
 ```js
 export const _guard = guard(
   (ctx) => { if (!ctx.user) throw new LiveError('UNAUTHENTICATED'); },
@@ -895,7 +895,7 @@ Same arguments return the same cached store instance. The cache is cleaned up wh
 ## Topic registry
 
 Centralize topic strings so the SQL trigger and the stream definition reference one source of truth. `defineTopics(map)` validates the map at boot and exposes `__patterns` for tooling.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // src/lib/topics.js
 import { defineTopics } from 'svelte-realtime/server';
@@ -970,7 +970,7 @@ On the client, validated exports work like regular `live()` calls. Validation er
 ### Validating stream arguments
 
 Stream arguments validate via the `args` option on `live.stream()`. Validation runs BEFORE topic resolution, so a malformed argument can never reach a dynamic topic function.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 import { z } from 'zod';
 
@@ -1007,7 +1007,7 @@ export const typing = live.channel('typing:lobby', { merge: 'presence' });
 ```
 
 Dynamic channels work the same way:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const cursors = live.channel(
   (ctx, docId) => 'cursors:' + docId,
@@ -1016,7 +1016,7 @@ export const cursors = live.channel(
 ```
 
 For high-frequency streams where a missed frame is acceptable (typing indicators, telemetry pings, raw cursor positions you don't need replayed on reconnect), set `volatile: true` on the stream:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const cursors = live.stream(
   (ctx, roomId) => `room:${roomId}:cursors`,
@@ -1107,7 +1107,7 @@ Group multiple RPC calls into a single WebSocket frame to reduce round trips.
 ```
 
 By default, calls in a batch run in parallel on the server. Pass `{ sequential: true }` when order matters:
-
+<!-- doc-code: ambient names="batch" -->
 ```js
 const [board, column] = await batch(() => [
   createBoard('My Board'),
@@ -1124,7 +1124,7 @@ RPC batches accept at most 50 calls. Oversized incoming batches return `INVALID_
 ### Server-side batching
 
 Use `ctx.batch()` inside RPC handlers to publish multiple messages in a single call:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const resetBoard = live(async (ctx, boardId) => {
   await db.boards.reset(boardId);
@@ -1138,7 +1138,7 @@ export const resetBoard = live(async (ctx, boardId) => {
 ### Atomic publishing (`ctx.batch(fn)`)
 
 Pass a function instead of a list and `ctx.batch` becomes an all-or-nothing collector: every `ctx.publish` the function makes - **including after `await`s** - is buffered, published together when the function returns (or its promise resolves), and dropped entirely when it throws (or rejects). A rejected handler never leaves a partial publish trail:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const transferFunds = live(async (ctx, from, to, amount) => {
   return ctx.batch(async () => {
@@ -1213,7 +1213,7 @@ At 60-120Hz on a single hot path that is 100K+ short-lived heap allocations per 
 ### Deprecating an endpoint
 
 Mark any live function deprecated with `live.deprecate(fn, options)`. It is additive - wrap a stream, channel, or RPC handler and the marker composes with the function's other markers:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // src/live/feed.js
 export const legacyFeed = live.deprecate(
@@ -1503,7 +1503,7 @@ A queued call keeps a copy of its arguments in the form the wire carries them (J
 ### Durable persistence (survive a reload)
 
 By default the queue lives in memory and dies with the tab. Turn on `persist` and queued mutations survive reloads and browser restarts - stored in IndexedDB, restored on the next load, and replayed on reconnect:
-
+<!-- doc-code: ambient names="configure" -->
 ```js
 configure({
   offline: {
@@ -1547,7 +1547,7 @@ import { pendingMutations, uploading, offlineCheckpoint } from 'svelte-realtime/
 ### Conflict resolution (replayed mutations)
 
 When a REPLAYED mutation is rejected by the server with `LiveError('CONFLICT')` - the canonical app-thrown code for "the server state moved under this write" - the queue resolves it per policy instead of the plain error path:
-
+<!-- doc-code: ambient names="configure" -->
 ```js
 configure({
   offline: {
@@ -1610,7 +1610,7 @@ Connection hooks are observers. Thrown errors and rejected promises are reported
 
 Put the baked client integer in one application-owned constant. The client
 advertises it before resubscribe and queued RPC work:
-
+<!-- doc-code: ambient names="configure, realtime" -->
 ```js
 // shared/protocol.js
 export const PROTOCOL_VERSION = 3;
@@ -1662,7 +1662,7 @@ This is the default for two reasons:
 2. **Browser back/forward feels instant.** Navigating away and back within the grace window restores the previous data immediately, and any events the user missed are gap-filled by the server.
 
 If the grace expires without a new subscriber, the data model resets and the next subscribe is a true cold start. Apps that prefer aggressive memory reclamation can shorten or disable the grace:
-
+<!-- doc-code: ambient names="configure" -->
 ```js
 configure({ resumeGraceMs: 0 });        // every unsub is a full reset (pre-grace behavior)
 configure({ resumeGraceMs: 5_000 });    // 5s grace covers brief toggles
@@ -1714,7 +1714,7 @@ export function upgrade({ cookies, url }) {
 ```
 
 The native client passes the token in the URL:
-
+<!-- doc-code: ambient names="configure" -->
 ```js
 configure({ url: 'wss://my-sveltekit-app.com/ws?token=...' });
 ```
@@ -1849,7 +1849,7 @@ Middleware runs in registration order. Each must call `next()` to continue the c
 ## Throttle and debounce
 
 Use `ctx.throttle()` and `ctx.debounce()` inside any `live()` function to rate-limit publishes.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const updatePosition = live(async (ctx, x, y) => {
   // Throttle: publishes immediately, then at most once per 50ms (trailing edge guaranteed)
@@ -1869,7 +1869,7 @@ export const saveSearch = live(async (ctx, query) => {
 ## Stream lifecycle hooks
 
 Use `onSubscribe` and `onUnsubscribe` in stream options to run logic when clients join or leave a stream.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const presence = live.stream('room:lobby', async (ctx) => {
   return db.presence.list('lobby');
@@ -1912,7 +1912,7 @@ The third argument `remainingSubscribers` counts OTHER WebSockets still holding 
 ### Staleness watchdog and per-stream `onError`
 
 Streams whose underlying source can quietly stop emitting (CDC drops, polling stalls, upstream cache evicts the key) declare `staleAfterMs` to arm a per-topic watchdog. Every `ctx.publish` to the topic resets the timer; if no events arrive for the configured duration, the realtime layer re-runs the loader and broadcasts the result as a `refreshed` event. The client merges `refreshed` as a full-state replacement across every merge strategy.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const auditFeed = live.stream(
   (ctx, orgId) => `audit:${orgId}`,
@@ -1939,7 +1939,7 @@ onError: (err, ctx, topic) => {
 ### Topic-driven invalidation
 
 For mutations whose effects don't fit the merge-strategy model cleanly (bulk operations, server-side recomputation, cascading writes), declare an `invalidateOn` pattern so any matching `ctx.publish` triggers a loader rerun:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const todos = live.stream('todos', loadTodos, {
   merge: 'crud',
@@ -2008,7 +2008,7 @@ export const items = live.stream('items', async (ctx) => {
 ```
 
 For **per-user data isolation**, use dynamic topics so each user subscribes to their own topic:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // Each user gets their own topic - no cross-user data leakage
 export const myOrders = live.stream(
@@ -2048,7 +2048,7 @@ not match a map that never declared it, and a mapped value that is neither `true
 function denies rather than throwing.
 
 `live.access.org` and `live.access.user` follow the SQL `[table]_id` convention. Override the field for non-default user shapes:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // Stream that takes an orgId arg and verifies the caller belongs to that org
 export const auditFeed = live.stream(
@@ -2094,7 +2094,7 @@ Bare `Error` throws from any guard auto-classify: thrown errors against an anony
 ### Masking path existence (`maskNotFound`)
 
 Unknown text, batch, binary, and upload paths return the same generic denial as a guard by default: `UNAUTHENTICATED` without an authenticated identity, or `FORBIDDEN` otherwise. Binary/upload handler types and limits are checked after authorization. Apps that require explicit missing-path replies can opt out:
-
+<!-- doc-code: ambient names="realtime" -->
 ```js
 realtime({ maskNotFound: false });
 ```
@@ -2104,7 +2104,7 @@ The opt-out returns `NOT_FOUND` and lets callers distinguish missing paths from 
 ### `live.scoped(predicate, fn)`
 
 Wrap an RPC handler with a per-call access predicate that throws `UNAUTHENTICATED` (no user) or `FORBIDDEN` (predicate rejects). Composes with `live.validated`, `live.rateLimit`, etc.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const editOrgSettings = live.scoped(
   live.access.org(),
@@ -2210,7 +2210,7 @@ Startup fails closed if the installed `svelte-adapter-uws` cannot confirm strict
 ### Per-function rate limiting
 
 Use `live.rateLimit()` to apply a sliding window rate limiter to a single function:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const sendMessage = live.rateLimit({ points: 5, window: 10000 }, async (ctx, text) => {
   const msg = await db.messages.insert({ userId: ctx.user.id, text });
@@ -2266,7 +2266,7 @@ export const message = createMessage({
 ## Load shedding
 
 Under sustained pressure, drop low-priority traffic before it reaches the handler. `live.admission(config)` registers named pressure rules; `ctx.shed(className)` checks them; the `classOfService` stream option gates new subscribes automatically.
-
+<!-- doc-code: ambient names="LiveError" -->
 ```js
 import { live } from 'svelte-realtime/server';
 
@@ -2303,7 +2303,7 @@ export const expensiveSearch = live(async (ctx, query) => {
 ## Concurrency control
 
 `live.lock(keyOrConfig, fn)` serializes concurrent RPC calls that resolve to the same key. Composes with `live.validated`, `live.idempotent`, `live.rateLimit`, etc.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // Per-org leaderboard recompute: one in-flight per org, others wait for the result
 export const recomputeLeaderboard = live.lock(
@@ -2337,7 +2337,7 @@ The default in-process lock allows 1000 queued callers per key. Further callers 
 ### Bounded wait with `maxWaitMs`
 
 Pass `maxWaitMs` (in the config-object form) to bound how long a queued caller will wait before giving up. On timeout the wrapper rejects with `LiveError('LOCK_TIMEOUT', ...)` so the client receives a typed error with `.code === 'LOCK_TIMEOUT'` (plus `.key` and `.maxWaitMs` fields for observability).
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const settleInvoice = live.lock(
   { key: (ctx, id) => `invoice:${id}`, maxWaitMs: 5000 },
@@ -2435,7 +2435,7 @@ Multi-device users see most-recent-connection-wins routing within each instance,
 ### Routing by session
 
 Target a specific session instead of a user with `{ sessionId }`. The session id is read off the socket by `sessionIdentify`, defaulting to `ws.getUserData()?.session_id ?? ws.getUserData()?.sessionId`:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 live.configurePush({ sessionIdentify: (ws) => ws.getUserData()?.sid });
 
@@ -2449,7 +2449,7 @@ A push/notify target names exactly one of `{ userId }`, `{ sessionId }`, or `{ t
 Session routing follows the cluster automatically when the configured `remoteRegistry` exposes `requestSession` - the extensions connection registry created with a `sessionIdentify` option does (`svelte-adapter-uws-extensions >= 0.6.0-next.32`), so `live.push({ sessionId })` reaches the session on whichever instance currently owns it. Without a `requestSession`-capable registry it stays single-instance.
 
 **Broadcast to a topic.** `live.push({ topic }, event, data)` fans a request out to **every** subscriber of the topic and aggregates the replies - the request/reply analog of `publish`:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 const { replies, errors, count, delivered } = await live.push({ topic: 'room:42' }, 'ping', {});
 // replies: [...successful replies]   errors: [{ message }]   count: total subscribers   delivered: replies.length
@@ -2467,7 +2467,7 @@ Partial success is the contract: a subscriber that times out or errors lands in 
 `live.push` and `live.notify` are **server-trust primitives**. Calling `live.push({ userId: someId }, event, data)` delivers `event` to whichever connection is registered under `someId`, full stop. The framework does NOT check that the server context invoking the push is allowed to address that user. It cannot - your authorization model lives outside the framework.
 
 This matters most when a message handler interpolates a wire-supplied target:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // BUG: `msg.to` is client-controlled. Any authenticated user can push
 // arbitrary events to any other user - including admins, including
@@ -2519,7 +2519,7 @@ The same contract applies to any future push-target shape (`{ group, role, tenan
 ### Fire-and-forget: `live.notify`
 
 For server-initiated events where you don't need a reply - progress notifications, "upload complete" pings, "new message available" hints, cron-driven price ticks fanned out to many users - use `live.notify(target, event, data)` instead of `live.push`:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // Inside an upload completion handler:
 live.notify({ userId: upload.userId }, 'upload:complete', { id: upload.id });
@@ -2615,7 +2615,7 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 ### Cohort-stratified metrics - never trust the aggregate
 
 An aggregate p99 that looks healthy can hide a cohort - old devices, cellular links, a far region - that is entirely broken, because the fast majority drowns it in the quantile. Pass a `cohort` classifier and every RPC execution series carries the caller's cohort label:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 live.metrics(registry, {
   // Classified ONCE per connection from whatever your upgrade hook stashed
@@ -2629,7 +2629,7 @@ Distinct labels are bounded at 16 (overflow folds into `'other'`; a pre-identifi
 ### Per-subsystem performance budgets
 
 Declare how long a subsystem is ALLOWED to take, measure what it ACTUALLY takes, and let the dashboard render budget vs actual over time - the drift is the early warning, the exceeded counter is the alert:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 const tickBudget = live.perfBudget('tick', 8); // 8ms per game tick
 
@@ -2644,7 +2644,7 @@ Emits `svelte_realtime_perf_budget_seconds` (gauge - the declaration), `svelte_r
 ### Pause-aware lifeline `/metrics`
 
 A `/metrics` handler that serializes the registry inline competes with whatever is melting the event loop - exactly when you need the numbers most, the scrape adds work or stalls. The lifeline decouples them: the registry is pre-serialized on a background interval into an in-memory snapshot, and the admin route serves THAT string in O(1):
-
+<!-- doc-code: ambient names="live" -->
 ```js
 live.metrics(registry, { lifeline: true }); // or { lifeline: { intervalMs: 5000 } }
 ```
@@ -2862,7 +2862,7 @@ every live handler also receives `ctx.traceContext` and `ctx.trace`.
 Realtime creates one `realtime.rpc` child span per RPC, including concurrent
 calls on the same WebSocket, and the operation-scoped `ctx.platform` exposes
 that same context:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const submitOrder = live(async (ctx, input) => {
   return ctx.trace.run(
@@ -2897,7 +2897,7 @@ surface project both trace fields as `null`.
 ## Per-room alarms
 
 `live.alarm` is "wake this room once at time T, even if nobody is connected." Declare a stream (or room) with an `alarm` handler, then arm it imperatively from inside the room's handlers with `ctx.setAlarm(at)`:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export default live.stream('doc:current', loadDoc, {
   alarm: {
@@ -2948,7 +2948,7 @@ unresolved or duplicate id is retained, not claimed and dropped, and emits
 `alarm.recovery.unresolved` for operator disposition.
 
 A durable alarm can fire late - a restart-recovered alarm arbitrarily so. Inside `onAlarm`, `ctx.alarm` says exactly how the fire happened: `{ at, firedAt, lateMs, recovered, generation, attempt, idempotencyKey }` - the deadline, execution time, lateness, recovery origin, and durable retry identity. In-memory alarms use null generation/key and attempt one; durable attempts share the key described in the [store contract](docs/durable-alarms.md). For handlers where a late fire would be wrong rather than merely delayed (an auction close, a game round end), declare a misfire threshold and stale fires are skipped declaratively - the alarm is consumed, never run:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export default live.stream('auction:current', loadAuction, {
   alarm: {
@@ -2977,7 +2977,7 @@ export const refreshStats = live.cron('*/5 * * * *', 'stats', async () => {
 ```
 
 The cron function publishes its return value as a `set` event on the given topic. Pair it with a `merge: 'set'` stream:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const stats = live.stream('stats', async (ctx) => {
   return db.stats();
@@ -2985,7 +2985,7 @@ export const stats = live.stream('stats', async (ctx) => {
 ```
 
 The function receives a `ctx` object with `publish`, `throttle`, `debounce`, and `signal` - the same helpers available in RPC handlers (minus `user` and `ws`, since cron runs outside a connection). Use `ctx.publish` for fine-grained control, e.g. publishing individual `created`/`deleted` events on a crud stream:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const cleanup = live.cron('0 * * * *', 'boards', async (ctx) => {
   const stale = await listStaleBoards();
@@ -3083,7 +3083,7 @@ export const maintenance = live.flag('flag:maintenance', false);
 ```
 
 Flip it from any handler - the `.set(value)` call publishes through the framework-owned platform, so the new value reaches every local subscriber and relays across the cluster when a bus is wired:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const toggleMaintenance = live(async (ctx, on) => {
   maintenance.set(on);
@@ -3153,7 +3153,7 @@ On the client, derived streams work like regular streams:
 ### Dynamic derived streams
 
 When source topics depend on runtime arguments (e.g., an org ID, a room ID), pass a source factory function instead of a static array. The factory receives the same args the client passes at subscribe time:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const orgStats = live.derived(
   (orgId) => [`memberships:${orgId}`, `emails:${orgId}`, `audit:${orgId}`],
@@ -3302,7 +3302,7 @@ The `privacy` option controls publication through a contributor threshold and st
 
 - **k-anonymity** (`'suppress'` / `'hybrid'`) - the aggregate is not published until at least `k` DISTINCT contributors have fed the window, counted via `contributor(data)`. Below the threshold the last published value is held; it is never replaced with `null` or a marker, because "the cohort just dropped below k" is itself the signal k-anonymity exists to hide. A fresh subscribe also sees the held value, never the live below-k aggregate.
 - **keyed noise** (`'perturb'` / `'hybrid'`) adds zero-mean Laplace or Gaussian noise to selected numeric fields. HMAC-SHA256 derives the draws from the operator's `realtime({ privacySecret })` and the topic and window; the reserved tenant seed slot is currently empty. Replicas sharing that secret emit identical draws, preventing subscribers from averaging independent replica noise. Public inputs alone cannot reproduce the draws. A noise strategy refuses to publish without the secret; threshold-only (`'suppress'`) aggregates need no secret.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const salaryByDept = live.aggregate('salary:reported', {
   avg: { init: () => ({ sum: 0, n: 0 }), reduce: (s, e, d) => ({ sum: s.sum + d.amount, n: s.n + 1 }), compute: (s) => s.n ? s.sum / s.n : 0 }
@@ -3602,7 +3602,7 @@ Server -> client responses ride the existing `__upload` topic via `platform.send
 ## Rooms
 
 Bundle data, presence, cursors, and scoped actions into a single declaration.
-
+<!-- doc-code: ambient names="LiveError" -->
 ```js
 // src/live/collab.js
 import { live } from 'svelte-realtime/server';
@@ -3669,7 +3669,7 @@ export const { message, close, unsubscribe } = board.hooks;
 ### Lag compensation
 
 For real-time games, the moment a player acts and the moment the server evaluates that action are separated by network latency - by the time a shot arrives, the target has moved on the server. A room can opt into a bounded history of state snapshots and evaluate actions against the state *as it was when the player acted*: declare `history` with a `capture` function (your snapshot of your own authoritative state - the framework never guesses at state shape), and call `ctx.compensate()` inside an action with the client-stamped command time, passed as an ordinary action argument:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const game = live.room({
   topic: (ctx, gameId) => 'game:' + gameId,
@@ -3713,7 +3713,7 @@ How it behaves:
 ### Room enumeration (lobby browser)
 
 A lobby browser needs to list the *active* rooms of a type - the open games, and how many players are in each. Opt in with a `meta` function (or `enumerable: true` for a count-only list) and the export gains a `rooms()` view:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const game = live.room({
   topic: (ctx, id) => 'game:' + id,
@@ -3746,7 +3746,7 @@ How it behaves:
 #### Per-caller visibility (`enumerable` as a predicate)
 
 Some rooms should not appear in everyone's lobby - private matches, clan lobbies, invite-only sessions. Pass `enumerable` a predicate instead of `true` and each caller sees only the rooms it is allowed to see:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const game = live.room({
   topic: (ctx, id) => 'game:' + id,
@@ -3790,7 +3790,7 @@ const id   = codes.decode('7Qm2xK'); // "7Qm2xK"  -> 42        (or null if malfo
 ### Room ownership (`owner: true`)
 
 A lobby needs someone in charge: the member who can start the game, kick a troll, or close the room. Modeling that as a boolean on your own state breaks the moment the host disconnects - now nobody can act. Opt in with `owner: true` and the room tracks an **owner role with deterministic succession**: the first member to join holds it, the longest-joined remaining member inherits it when the owner leaves, and an emptied room clears it.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const game = live.room({
   topic: (ctx, id) => 'game:' + id,
@@ -3957,7 +3957,7 @@ The raw `data` / `presence` / `cursors` factory stores stay on the export for ba
 ### Field surfaces: typing, selections, locks, reactions
 
 Declare a collaborative field surface on the export and the room view lights up a reactive projection plus a send method for it. Typing, selections, and locks are published onto the same presence roster `room.others` reads, so they cost no extra subscription; reactions ride a dedicated stream.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const board = live.multiplayer({
   topic: (ctx, boardId) => 'board:' + boardId,
@@ -4119,7 +4119,7 @@ Requires Svelte 5 (the view is a rune class) and svelte-adapter-uws 0.6.0-next.2
 **Cluster-aware:** wire `platform.smooth = createSmoothCluster(redisClient)` from `svelte-adapter-uws-extensions/redis/smooth` and the smoothed-entity layer detects it and routes through it automatically. Because the authority's `apply` is order-dependent (unlike a document merge, it cannot run on every instance), the model is single-owner-per-topic: one instance holds a per-topic Redis lease and ticks that topic; the others forward their clients' commands to it and re-broadcast its updates, acknowledgements, and events to their own subscribers, so a load balancer can spread one topic's players across instances and cross-instance events still fire exactly once. On owner death the lease expires, another instance takes over with a fresh authority, and clients re-sync. Without it, `live.smooth()` runs single-instance (correct on one process, divergent across a load-balanced cluster - so wire the coordinator for any multi-instance deployment). **Warm handoff:** pass `snapshot: true` to recover gracefully from an owner crash - the owner persists a debounced state snapshot and the instance that takes over resumes each entity from its last state instead of resetting it to `initial` (snapping a player back to spawn). Off by default; tune the write cadence with `snapshotDebounceMs`. Needs `svelte-adapter-uws-extensions >= 0.6.0-next.20`.
 
 **Area of interest** (an uncapped lobby): a smoothed topic broadcasts every entity's motion to every subscriber, which is right for a small room and ruinous for a lobby of thousands where each client only sees its own neighbourhood. Opt into `interest` and the tick delivers each subscriber only the entities inside its area of interest:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const arena = live.smooth({
   topic: (ctx, arenaId) => `arena:${arenaId}`,
@@ -4145,7 +4145,7 @@ The area-of-interest centre is the subscriber's own entity by default, so a play
 > **Authoritative games: gate the centre report.** By default reports are ungated (`centerPolicy: 'any'`) - deliberately, because on self-selecting surfaces (cursors, canvases, geo-dashboards) choosing your own view IS the feature. On a server-authoritative game topic, though, an ungated report is a radar cheat: a modified client recenters replication anywhere on the map. Set `interest: { centerPolicy: 'own-entity' }` to clamp every connection that owns a positioned entity to that entity (spectators - connections whose entity resolves no position - keep the free-cam), or pass a callback `(ctx, center, ownPos) => boolean | { x, y }` to decide per report (return a point to clamp instead of rejecting; a throw rejects). A rejected report behaves like no report, a previously-accepted override is dropped, and clearing is always allowed. It applies identically in cells mode, where the report drives the cell subscriptions themselves. `lod` bands let distant motion fade at a throttled, id-staggered cadence instead of consuming the same bandwidth as a nearby duel; a small hysteresis margin on the band edges stops an entity hovering on a ring from flickering, and an entity entering range (or crossing into a nearer band) is always delivered at once. Relevancy is a delivery preference, never authorization - the `guard` stays the separate auth layer - and the polarity is to over-deliver: a subscriber with no resolvable centre is delivered the whole board. The join snapshot is scoped the same way: a syncing subscriber receives the in-range roster plus the always-visible entities (and always its own entity, its reconciliation basis), not the whole board - entities it later moves toward are caught up on first sight. **Off by default**, gated end to end on `interest != null`, so a topic without it is byte-identical to the broadcast-all path (the gate overhead benchmarks within noise, well under 1%). Culling re-sends an entity only when it actually moved since a subscriber last saw it, which relies on `apply` returning a NEW state object on a change rather than mutating in place - the same contract the broadcast itself already depends on (an in-place mutation makes the authority think nothing changed). At arena scale the cull delivers roughly 90% less per client, and the saving grows with the population. It works single-instance and across the cluster: a topic's owner culls its own local subscribers against the full cluster-wide catalog, and every other instance runs the same cull on the receive side - it keeps a shadow catalog (seeded from the owner's cold-join snapshot so a stationary in-range entity is never missed, then updated from inbound relays) and delivers each of its local subscribers only the relayed updates inside its area of interest. So the last hop to a remote player is culled too, never over-delivered. The inter-instance relay itself still carries every update between instances (the owner cannot cull per remote subscriber, since it does not hold a remote subscriber's centre); trimming that bus traffic is a separate future optimization.
 
 **Cell-topic interest (population scale):** per-client culling computes each subscriber's visible set on the server and sends it *per subscriber*, so every client's frame differs and the server encodes once per connection - fine at hundreds of subscribers, a wall at thousands. For a high-population arena, set `interest: { cells: true }` and area-of-interest becomes SUBSCRIPTION instead of server-side filtering:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const mega = live.smooth({
   topic: (ctx, arenaId) => `arena:${arenaId}`,
@@ -4167,7 +4167,7 @@ Choose by population: per-client `interest` (above) for a small-to-mid room wher
 Cells mode works single-instance and across the cluster. The topic's owner relays each cell frame - with its cell topic - over the smooth coordinator (the same in-order channel and per-owner sequence the base broadcasts ride), and every other instance republishes it natively to its own subscribed sockets through its own codec: no frame bytes or wire ids ever cross the bus. Each instance drives its OWN sockets' cell subscriptions - a joiner's block is placed at sync (on the owner from its ensured entity; on a non-owner from its own entry in the owner's reply), follows the subscriber's own entity via its acknowledgements and relayed updates, and honors a reported `view.reportCenter(x, y)` locally - and the join roster stays cell-scoped on every path. Two residuals to know: a command-less remote entity that `onMissing` teleports beyond its subscriber's block breaks the own-entity follow until a center report or resync, and a shot forwarded from a non-owning instance gates on the rewound-position radius rather than receipt-time cell membership (the same polarity per-client interest has on a cluster - the gate stays server-side either way).
 
 **Hit detection (lag-compensated shooting)** is the latency problem the [`live.action` lag compensation](#lag-compensation) section solves, applied to smoothed entities: by the time a player's shot reaches the server every target has moved on, so a hit that landed on the shooter's screen misses on the server. Declare `hitTest` and the server resolves each shot against the world *as the shooter saw it* - it rewinds every candidate entity to the instant the shooter rendered it, tests the shot against those historical positions, and applies the result authoritatively, with no bit-exact cross-host determinism contract. It builds on `interest` - the shooter's replicated set is the security gate, so `hitTest` requires `interest` (either mode: the per-client relevancy membership, or the shooter's cell subscription under `cells: true`):
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const arena = live.smooth({
   topic: (ctx, arenaId) => `arena:${arenaId}`,
@@ -4224,7 +4224,7 @@ Other knobs (all optional): `teleportThreshold` (position units - abort the rewi
 Requires `svelte-adapter-uws >= 0.6.0-next.29` - the client echoes the server-authored stamp the rewind window is computed from. **Off by default and gated end to end on `hitTest`**, so the broadcast hot path and the wire are byte-identical when it is off. Works single-instance and across the cluster: a shot from an instance that does not own the topic is measured at that edge (the replay defense and the latency picture run against the reconstructed owner clock) and forwarded as bounded durations to the owner, which resolves it on its own ring axis - the inter-instance hop is never folded into the rewind window. Forwarded shots need a coordinator that carries them (`svelte-adapter-uws-extensions >= 0.6.0-next.21`); on an older coordinator a non-owner's shot stays inert.
 
 **Server logic (`onTick`)** is the hook for everything the players do not command: knockback and other server forces, deaths and respawns, scripted movers, NPCs. Without it, `live.smooth` state changes only through client commands (plus `hitTest`'s `applyTo` inside a shot); with it, your server code runs once per authoritative tick - after the command drain, before the broadcast - so it reads the tick's settled states and everything it writes broadcasts atomically with that same tick:
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const arena = live.smooth({
   topic: (ctx, arenaId) => `arena:${arenaId}`,
@@ -4252,7 +4252,7 @@ Active ticks follow monotonic deadlines, so callback work does not add to every 
 Three things to know. Ticking stays demand-armed: when every entity rests, ticks - and `onTick` - stop until the next command or sync; return `true` from `onTick` to request the next tick anyway (the heartbeat for time-based logic like respawn timers - return it while timers are pending, and the topic goes fully idle when you stop). On a cluster, `onTick` runs on the topic's owning instance only (where the authoritative tick runs); server entities live with that tick, and after an ownership handoff the new owner's first `onTick` simply re-ensures them (with `snapshot: true`, their states recover through the same warm-handoff path as everyone else). And server entities share the key space with client identities, so give them their own namespace (an `npc:` prefix) - a client whose identity matched a server key would take the entity over at sync. A throwing `onTick` never kills the tick. Off by default; requires `svelte-adapter-uws >= 0.6.0-next.47`.
 
 **Wire views (`wire`)** shrink what crosses the wire when the simulation state is rich. The binary framing is already compact, but any state beyond a bare `{x, y}` rides inside it as a JSON string - and a real game state (velocities, animation, counters, flags) serializes to kilobytes of spelled-out field names and full-precision doubles, per entity, per tick; the command batch pays the same field-name price at the command rate. Declare the state's compact wire form once, in the shared module both sides import (exactly like `apply`):
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // shared/wire.js - the app owns its wire format
 export const wire = {
@@ -4405,7 +4405,7 @@ The flat `live.webhook(...)` above is an alias for `live.webhooks.inbound(...)`;
 ## Outbound webhooks
 
 The mirror of inbound: `live.webhooks.outbound(sources, config)` fires an HTTP POST to an external endpoint whenever one of the `sources` topics publishes. Use it to forward your events to other systems - Slack, a partner's API, an internal pipeline.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // src/live/integrations.js
 export const slackAlerts = live.webhooks.outbound(['alerts'], {
@@ -4420,7 +4420,7 @@ That's the whole wiring - no `+server.js`, no client code. It fires on every `pl
 #### Cluster delivery: at-least-once, leader-gated
 
 In a single process every publish fires the webhook once. In a cluster every replica receives the published event, so to fire it **once** wire a leader (the same one cron uses):
-
+<!-- doc-code: ambient names="configureCron" -->
 ```js
 import { createLeader } from 'svelte-adapter-uws-extensions/redis/leader';
 configureCron({ leader: createLeader(redis).isLeader });
@@ -4498,7 +4498,7 @@ The freshness check is what closes capture-replay: without it any observed (body
 ### Dead-letter queue
 
 By default an undeliverable webhook event (retries exhausted, or blocked by the SSRF gate / a redirect loop) is reported via `onFailure` and then dropped. Enable the **dead-letter queue** to retain it for inspection and replay once the endpoint recovers:
-
+<!-- doc-code: ambient names="realtime" -->
 ```js
 // hooks.ws.js
 export const { open, close, message, unsubscribe, init, shutdown, admin } = realtime({
@@ -4524,7 +4524,7 @@ Replay re-runs the **complete** delivery path, so the SSRF gate is re-applied at
 ## Signals
 
 Point-to-point ephemeral messaging. Send a signal to a specific user without broadcasting to a topic. Signals use `seq: false` so they work across adapter workers without allocating a per-worker replay sequence.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // Server: send a signal
 const handler = live(async (ctx, targetUserId, offer) => {
@@ -4553,7 +4553,7 @@ export function open(ws) { enableSignals(ws); }
 ## Schema evolution
 
 Versioned streams with declarative migration functions. When you change a data shape, old clients receive migrated data automatically.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const todos = live.stream('todos', async (ctx) => {
   return db.todos.all();
@@ -4620,7 +4620,7 @@ const v1Messages = subscribeAt(messages('room-1'), { schemaVersion: 1 });
 ### Delta sync
 
 Enable delta sync for efficient reconnection on streams with large datasets. Instead of refetching all data, the server sends only what changed since the client's last known version.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const inventory = live.stream('inventory', async (ctx) => {
   return db.inventory.all();
@@ -4647,7 +4647,7 @@ How it works:
 ### Three-tier reconnect with `delta.fromSeq`
 
 For seq-based reconnects where the bounded replay buffer cannot satisfy the gap (the client's `lastSeenSeq` is older than the oldest entry in the buffer), `delta.fromSeq(sinceSeq)` is the user-supplied bridge to the durable store. The server falls back to full rehydrate only when `fromSeq` returns `null` / `undefined`.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const auditFeed = live.stream(
   (ctx, orgId) => `audit:${orgId}`,
@@ -4673,7 +4673,7 @@ Resolution order on reconnect-with-seq: replay buffer (bounded, fast) -> `delta.
 ### Replay
 
 Enable seq-based replay for gap-free stream reconnection. When a client reconnects, it sends its last known sequence number. If the server has the missed events buffered, it sends only those instead of a full refetch.
-
+<!-- doc-code: ambient names="live" -->
 ```js
 export const feed = live.stream('feed', async (ctx) => {
   return db.feed.latest(50);
@@ -4863,7 +4863,7 @@ export async function init({ platform }) {
   await notify.activate(platform);
 }
 ```
-
+<!-- doc-code: ambient names="live" -->
 ```js
 // src/live/orders.js - no ctx.publish needed, the DB trigger handles it
 export const createOrder = live(async (ctx, items) => {
@@ -5052,7 +5052,7 @@ older registration out of order can never resurrect it later. A direct
 ### onError hook
 
 Both `handleRpc` and `createMessage` accept an `onError` callback for non-LiveError exceptions. `LiveError` throws are expected errors sent to the client; everything else is an unexpected failure. The callback is an application observer; the operational sink emits independently.
-
+<!-- doc-code: ambient names="createMessage" -->
 ```js
 export { close, unsubscribe } from 'svelte-realtime/server';
 export const message = createMessage({
@@ -5141,6 +5141,7 @@ For streams whose loader can fail, add `onError(err, ctx, topic)` to the stream 
 When you need to mix RPC with custom WebSocket messages, use `onUnhandled` or drop to `handleRpc` directly.
 
 **With createMessage:**
+<!-- doc-code: ambient names="createMessage" -->
 ```js
 export { close, unsubscribe } from 'svelte-realtime/server';
 export const message = createMessage({
@@ -5248,7 +5249,7 @@ The Smooth tab is a per-stream inspector for `live.smooth` views (multiplayer pr
 Browser regressions for the overlay run separately from the unit suite. Install Chromium with `npx playwright install chromium`, then run `npm run test:devtools`. A missing browser fails the suite.
 
 The plugin injects the overlay only in development. Disable that injection with:
-
+<!-- doc-code: ambient names="realtime" -->
 ```js
 realtime({ devtools: false })
 ```
