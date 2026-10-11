@@ -284,8 +284,8 @@ export function __rpc(path, defaults) {
 	 */
 	rpcCall.with = function withOptions(opts) {
 		const idempotencyKey = opts && opts.idempotencyKey;
+		if (!idempotencyKey && !opts?.timeout) return rpcCall;
 		const timeout = opts?.timeout ?? defaults?.timeout;
-		if (!idempotencyKey && !timeout) return rpcCall;
 		return function withCall(...args) {
 			// Dedup only when an idempotency key is bound. Timeout-only calls
 			// bypass dedup - the longer-waiting caller would otherwise be

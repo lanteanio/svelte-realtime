@@ -9059,6 +9059,16 @@ describe('stream pending indicator', () => {
 });
 
 describe('function timeout defaults', () => {
+	it('preserves the base callable and deduplication for empty per-call options', async () => {
+		const call = __rpc('budget/empty', { timeout: 300_000 });
+		for (const options of [undefined, {}, { timeout: undefined }]) expect(call.with(options)).toBe(call);
+		const first = call('x');
+		expect(call.with({})('x')).toBe(first);
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: 'ok' });
+		expect(await first).toBe('ok');
+	});
+
 	it('keeps a five-minute RPC pending while an undeclared RPC uses the global budget', async () => {
 		vi.useFakeTimers();
 		try {
