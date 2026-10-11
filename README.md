@@ -5202,10 +5202,10 @@ The Streams tab lists every store currently mounted on the page. For each one it
 
 **Click any stream row to expand its most recent 20 envelopes.** The safe
 default shows time, event name, and metadata such as value type, field count,
-or array/string length; it does not retain the payload value. Stream capture starts paused. Resume begins capturing; Pause stops
+or array/string length; it does not retain the payload value. Stream capture starts paused. Turn off Pause to capture; turn it on to stop
 capturing new events without affecting the live `Last event:` timestamp, and
-Clear events empties every stream ring and offers Undo clear for 30 seconds. Undo merges new arrivals within the 20-event cap; another clear replaces the snapshot, and disabling unsafe capture purges it. Pretty/Raw affects payload rendering only
-when unsafe capture is enabled. Pretty/Raw persists via `localStorage`; capture starts paused on each page load.
+Clear events empties every stream ring and offers Undo clear for 30 seconds. Undo merges new arrivals within the 20-event cap; another clear replaces the snapshot, and disabling unsafe capture purges it. The Raw toggle affects payload rendering only
+when unsafe capture is enabled. The Raw setting persists via `localStorage`; capture starts paused on each page load.
 
 **Privacy.** DevTools is metadata-only by default across every retained
 surface: RPC args/results, pending calls, fire-and-forget args, stream topics,

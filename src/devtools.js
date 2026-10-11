@@ -330,6 +330,7 @@ function init() {
   }
   #svelte-realtime-devtools div, #svelte-realtime-devtools span, #svelte-realtime-devtools button { min-width: 0; max-width: 100%; overflow-wrap: anywhere; box-sizing: border-box; }
   #svelte-realtime-devtools div { flex-wrap: wrap; }
+  #svelte-realtime-devtools [aria-pressed="true"] { font-weight: bold; text-decoration: underline; }
   #svelte-realtime-devtools [aria-selected="true"] { font-weight: bold; text-decoration: underline; }
   #svelte-realtime-devtools :focus-visible, #svr-dt-launcher:focus-visible {
    outline: 2px solid var(--svr-dt-focus, #ffffff); outline-offset: -2px;
@@ -648,7 +649,7 @@ function renderStreams(el, dt) {
 
 		html += `<div data-key="stream:${esc(s.path)}" style="padding:4px 0;border-bottom:1px solid var(--svr-dt-border, #7d859a)">` +
 			`<button type="button" data-action="toggle-stream" data-stream-path="${esc(s.path)}" aria-expanded="${expanded}" aria-controls="${esc(eventsId)}" style="background:none;border:none;color:inherit;font:inherit;text-align:start;cursor:pointer;display:flex;align-items:center;gap:4px">` +
-			`<span style="color:${chevronColor};width:10px;display:inline-block">${chevron}</span>` +
+			`<span aria-hidden="true" style="color:${chevronColor};width:10px;display:inline-block">${chevron}</span>` +
 			`<span>${isolated(s.path)}</span>` +
 			(recentCount > 0 ? `<span style="color:var(--svr-dt-muted, #b3b8cc);font-size:10px;margin-inline-start:6px">(${esc(number(recentCount))})</span>` : '') +
 			`</button>` +
@@ -659,7 +660,7 @@ function renderStreams(el, dt) {
 		html += `<div id="${esc(eventsId)}"${expanded ? '' : ' hidden'}>`;
 		if (expanded) {
 			if (recentCount === 0) {
-				html += `<div style="padding-block:4px;padding-inline:24px 0;color:var(--svr-dt-muted, #b3b8cc);font-style:italic">${esc(message(streamsPaused ? 'Resume capture, then trigger a stream update.' : 'Trigger a stream update to capture an event.'))}</div>`;
+				html += `<div style="padding-block:4px;padding-inline:24px 0;color:var(--svr-dt-muted, #b3b8cc);font-style:italic">${esc(message(streamsPaused ? 'Turn off Pause, then trigger a stream update.' : 'Trigger a stream update to capture an event.'))}</div>`;
 			} else {
 				const recent = /** @type {Array<{event: string, data: any, ts: number}>} */ (s.recentEvents);
 				html += `<div style="padding-block:2px 4px;padding-inline:24px 0">`;

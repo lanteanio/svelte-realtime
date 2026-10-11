@@ -587,3 +587,22 @@ it.each([false, true])('bounds oversized grapheme clusters with Intl.Segmenter (
  expect(preview).toContain('code units]');
  expect(preview.isWellFormed()).toBe(true);
 });
+
+
+it('distinguishes pressed stream toggles without color in forced colors', async () => {
+ await page.emulateMedia({ forcedColors: 'active' });
+ await streamsFixture();
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ for (const name of ['Raw', 'Pause']) {
+  const button = page.getByRole('button', { name, exact: true });
+  expect(await button.getAttribute('aria-pressed')).toBe('false');
+  const unpressed = await button.evaluate(el => ({ weight: getComputedStyle(el).fontWeight, decoration: getComputedStyle(el).textDecorationLine }));
+  await button.click();
+  expect(await button.getAttribute('aria-pressed')).toBe('true');
+  const pressed = await button.evaluate(el => ({ weight: getComputedStyle(el).fontWeight, decoration: getComputedStyle(el).textDecorationLine }));
+  expect(pressed.decoration).toContain('underline');
+  expect(pressed).not.toEqual(unpressed);
+  await button.click();
+  expect(await button.evaluate(el => ({ weight: getComputedStyle(el).fontWeight, decoration: getComputedStyle(el).textDecorationLine }))).toEqual(unpressed);
+ }
+});
