@@ -32,10 +32,9 @@ try {
 	}))[0];
 	assert.equal(packed.version, '0.6.0-next.61');
 	assert.equal(packed.shasum, 'd9261c5faad6a737ed62a67174fcd88edda6aad3');
-	const archive = path.join(temporary, packed.filename);
-	const paths = execFileSync('tar', ['-tf', archive], { encoding: 'utf8' }).trim().split(/\r?\n/);
+	const paths = execFileSync('tar', ['-tf', packed.filename], { cwd: temporary, encoding: 'utf8' }).trim().split(/\r?\n/);
 	assert(paths.every(entry => entry.startsWith('package/') && !entry.split('/').includes('..')), 'package extraction stays inside its owned directory');
-	execFileSync('tar', ['-xf', archive, '-C', temporary], { timeout: 30_000 });
+	execFileSync('tar', ['-xf', packed.filename, '-C', '.'], { cwd: temporary, timeout: 30_000 });
 	const adapterRoot = path.join(temporary, 'package');
 	// Reuse only native/peer dependencies. The adapter implementation and codecs
 	// come from the historical archive; the supported installed floor stays intact.
