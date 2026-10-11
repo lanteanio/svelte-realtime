@@ -123,10 +123,9 @@ export function _recordRpcMetrics(path, code, startTime, ws) {
 /**
  * Duration histogram bounds, in seconds with fractional bucket edges from 1 ms
  * to 10 s (the same list the adapter registers for its HTTP and upgrade
- * durations). Registries default to millisecond-shaped buckets starting at 1,
- * which puts a 5 ms call and a 900 ms call in the same bucket; samples already
- * recorded in the wrong buckets cannot be repaired afterwards, so every
- * duration histogram passes this list explicitly.
+ * durations). Explicit bounds preserve this 1 ms to 10 s layout regardless
+ * of a registry's configured defaultBuckets. Every duration histogram passes
+ * this list explicitly because recorded samples cannot be rebucketed later.
  */
 export const DURATION_BUCKETS_SECONDS = Object.freeze([
 	0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1,
