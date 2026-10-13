@@ -4361,7 +4361,7 @@ export interface AlarmStore {
 	 * Reservation leaves the current scheduled row unchanged.
 	 */
 	nextGeneration(topic: string): string | Promise<string>;
-	/** Read the current scheduled row, or null. Used for cancellation after restart. */
+	/** Read the current scheduled row, or null. Must observe this store's acknowledged writes; used before every cancellation. */
 	get(topic: string): AlarmDue | null | Promise<AlarmDue | null>;
 	/**
 	 * Commit only the latest reserved generation, strictly newer than the retained

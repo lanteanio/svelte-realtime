@@ -67,7 +67,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - **Breaking:** Unknown RPC paths use generic authorization denials by default across text, batches, binary calls, and uploads. **Action required:** set `maskNotFound: false` only if clients require explicit missing-path replies; this permits path enumeration. All transports retain development diagnostics. Four uploads per socket may await authorization, independently of private handler limits; excess starts return `TOO_MANY_UPLOADS`.
 
-- **Breaking:** Alarm scheduling and cancellation now return promises that must be awaited. Durable stores require the ordered-generation and retained-execution contract; `configureAlarm` rejects legacy topic-only stores. Upgrade the store and migrate existing rows with the runtime. Unhandled rejected mutations are no longer silent fire-and-forget writes. Reaching in-memory capacity now rejects with `ALARM_CAPACITY` instead of warning and dropping the schedule.
+- **Breaking:** Alarm scheduling and cancellation now return promises that must be awaited. Durable stores require the ordered-generation and retained-execution contract; `configureAlarm` rejects legacy topic-only stores. Upgrade the store and migrate existing rows with the runtime. Unhandled rejected mutations are no longer silent fire-and-forget writes. Reaching in-memory capacity now rejects with `ALARM_CAPACITY` instead of warning and dropping the schedule. Durable cancellation reads the current row first, so it also cancels a schedule another worker replaced.
 
 ### Fixed
 

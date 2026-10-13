@@ -165,12 +165,18 @@ describe('live.alarm', () => {
 	describe('store seam', () => {
 		it('mirrors set/delete to a wired durable store', async () => {
 			const ops = [];
-			configureAlarm({ store: { ...memStore(), set: (t, at) => { ops.push(['set', t, at]); return true; }, delete: (t) => { ops.push(['delete', t]); return true; } } });
+			const backing = memStore();
+			configureAlarm({ store: {
+				...backing,
+				set: (t, at, ...rest) => { ops.push(['set', t, at]); return backing.set(t, at, ...rest); },
+				delete: (t, ...rest) => { ops.push(['delete', t]); return backing.delete(t, ...rest); }
+			} });
 			const ctx = alarmCtx('room:store', () => {});
 			const at = Date.now() + 100000;
 			await ctx.setAlarm(at);
 			await ctx.deleteAlarm();
 			expect(ops).toEqual([['set', 'room:store', at], ['delete', 'room:store']]);
+			expect(backing.get('room:store')).toBeNull();
 		});
 
 		it('passes stable id, legacy path, and tenant metadata to store.set', async () => {

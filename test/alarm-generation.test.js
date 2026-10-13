@@ -162,6 +162,26 @@ describe('durable alarm generations', () => {
 		});
 	}
 
+	it('cancels a newer worker schedule even when an older local timer exists', async () => {
+		await ctx.setAlarm(11000);
+		const generation = store.nextGeneration(topic);
+		expect(await store.set(topic, 12000, meta, generation)).toBe(true);
+		expect(ctx.getAlarm()).toBe(11000);
+		await ctx.deleteAlarm();
+		expect(store.get(topic)).toBeNull();
+		expect(ctx.getAlarm()).toBeNull();
+		await vi.advanceTimersByTimeAsync(2000);
+		await _pollAlarms();
+		expect(fired).not.toHaveBeenCalled();
+	});
+
+	it('preserves the local timer when reading current durable cancellation state fails', async () => {
+		await ctx.setAlarm(11000);
+		store.get = async () => { throw new Error('read failed'); };
+		await expect(ctx.deleteAlarm()).rejects.toThrow('read failed');
+		expect(ctx.getAlarm()).toBe(11000);
+	});
+
 	it('removes the observed durable row before cancellation resolves', async () => {
 		await ctx.setAlarm(11000);
 		await ctx.deleteAlarm();

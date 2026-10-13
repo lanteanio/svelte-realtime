@@ -7,7 +7,7 @@ A durable store must implement this generation contract:
 | Method | Contract |
 | --- | --- |
 | `nextGeneration(topic)` | Atomically reserve a strictly increasing positive decimal-string generation for the topic. Never reuse it, including after deletion or restart. Leave the current scheduled row unchanged. |
-| `get(topic)` | Return `{ topic, at, meta, generation }` for the current schedule, or `null`. |
+| `get(topic)` | Return `{ topic, at, meta, generation }` for the current schedule, or `null`. Read acknowledged writes: cancellation deletes the generation this returns. |
 | `set(topic, at, meta, generation)` | Commit only the latest reserved generation, strictly newer than the retained committed/deleted watermark. Return `true` after durable commit; return `false` for an obsolete generation without modifying the row. Reject storage failures. |
 | `delete(topic, generation)` | Atomically remove only a matching current generation and return whether it was removed. Resolve after commit. Retain allocation and committed watermarks so delayed writes cannot resurrect consumed schedules. |
 | `due(nowMs)` | Optional: return due rows with their exact generations for restart recovery. |
@@ -20,7 +20,7 @@ The runtime serializes mutations for a room within a process. Across workers, `n
 
 Keep both the allocation counter and the last committed generation after a row is cancelled or claimed. They are durable tombstones, not expiring schedule data. A repeated or delayed `set` for a consumed generation must return `false`, and a subsequent reservation must exceed every earlier generation.
 
-Both precise timers and recovery pass the generation of the row they observed. The runtime never refreshes the generation merely to obtain a successful claim. A stale timer, stale recovery snapshot or cancellation therefore cannot consume a replacement. `deleteAlarm()` uses the locally acknowledged generation when present; after restart it reads the current row with `get` before conditionally deleting it.
+Both precise timers and recovery pass the generation of the row they observed. The runtime never refreshes the generation merely to obtain a successful claim. A stale timer, stale recovery snapshot or cancellation therefore cannot consume a replacement. `deleteAlarm()` reads the current durable row with `get` before conditionally deleting it, even when this worker has an older local timer. A replacement committed after that read survives the conditional delete.
 
 `ctx.setAlarm()` and `ctx.deleteAlarm()` resolve only after the store acknowledges the mutation. A rejected or superseded schedule does not replace an acknowledged local timer. Storage claim failures do not run callbacks; precise timers retry their same generation, while recovery retries on a later poll. Graceful shutdown counts an active claim through callback completion and persisted outcome before teardown.
 

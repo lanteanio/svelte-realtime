@@ -56,7 +56,7 @@ const _MAX_UNRESOLVED_WARNINGS = 256;
  * cluster-agnostic - the durable Postgres/Redis store is the extensions layer.
  *
  * - `nextGeneration(topic)` reserves a never-reused ordered generation.
- * - `get(topic)` reads the current row for cancellation after restart.
+ * - `get(topic)` reads the current row before cancellation.
  * - `set(topic, at, meta, generation)` commits only the latest reserved generation.
  * - `delete(topic, generation)` atomically cancels only that scheduled generation.
  * - `claim` moves that generation into retained execution storage before firing;
@@ -294,7 +294,7 @@ function _deleteAlarm(wireTopic) {
 	}
 	return _queueMutation(wireTopic, async () => {
 		const entry = _pending.get(wireTopic);
-		const row = entry?.store === store ? entry : await store.get(wireTopic);
+		const row = await store.get(wireTopic);
 		if (row) {
 			if (!_validGeneration(row.generation)) throw new Error('[svelte-realtime] alarm store returned an invalid generation');
 			const removed = await store.delete(wireTopic, row.generation);
