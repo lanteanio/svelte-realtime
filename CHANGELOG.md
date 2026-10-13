@@ -12,8 +12,6 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ## [0.6.0-next.91] - 2026-10-13
 
-*Not published to npm; release candidate.*
-
 ### Added
 
 - Dynamic derived streams accept `scopeKey` for explicit sharing among callers authorized for the same output.

@@ -26,6 +26,7 @@ registry metadata exists, together with its complete published row.
 | Candidate | Event | Event UTC | Git head | Planned tag | Target channel | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
 | 0.6.0-next.91 | proposed | 2026-10-13T22:15:27.639Z | d9a1f0952b4f3acb97d63243ddb0234d8d4591c7 | svelte-realtime@0.6.0-next.91 | next | npm test at this head with published svelte-adapter-uws 0.6.0-next.96 and svelte-adapter-uws-extensions 0.6.0-next.64 installed: all checks, 156 files, 4054 tests passed. |
+| 0.6.0-next.91 | published | 2026-10-13T22:28:50.738Z | d9a1f0952b4f3acb97d63243ddb0234d8d4591c7 | svelte-realtime@0.6.0-next.91 | next | npm records gitHead 54c8c55e2df0c0807650d20a72375d42591baec3 for 0.6.0-next.91, which adds only the proposed row above to this head. No release tag was created. The tarball matches 54c8c55 except CRLF line endings in 49 text files. |
 
 ## Published releases
 
@@ -185,6 +186,7 @@ corrections in the event log below while retaining the original row.
 | svelte-realtime | 0.6.0-next.90 | next | c76a05892aa6f95222644583f49ab22843d29e5c | legacy-none | sha512-hwO7wUxAbm500AtzBtry59kKgKyrsGUal7K7TdVH415CwLkYvcRWPg2fx3GvFC5PMURkyCqCQj55Q5Af6Go8aQ== | ddeaecb7036c9b79de0ef9046b9b881c978250fe | 2026-07-30T18:23:30.979Z | No release tag. |
 | svelte-realtime | 0.5.12 | latest | a82929af181e21f85ddace975a4af2d5f1f48287 | legacy-none | sha512-dcHAAMR+X1hHx647WHdOE/R+jxvGq9DqrHB1+o4g+rcSythEifSFC6BBEa+mVQIimiXuxhDajSpWY+Jg+DX5hg== | 4957ed6d58e0f70300bb233f993bad4b30e52895 | 2026-08-29T16:51:16.023Z | No release tag. |
 | svelte-realtime | 0.5.13 | latest | legacy-unrecorded | legacy-none | sha512-wpRYc25SRFNhyi4YfaGMsGKzbTPyR3jRxigh3r58cdmsixNCOWdKqgCAbiQrUwVpnC7psV43JLTkRM9HJcZjbQ== | e530eb8dfa3b4b9caffd49ca2ab3a4a464fb27e5 | 2026-10-10T10:24:32.518Z | Registry omitted gitHead; no release tag. |
+| svelte-realtime | 0.6.0-next.91 | next | 54c8c55e2df0c0807650d20a72375d42591baec3 | legacy-none | sha512-iqTj1BZLwGvsbSsYCkLMZF9SNKJGnQz4oesal9kXUyk3gx6fmrDtZ/cvYGq7OmTGm/P+/QXOU0gDbRujNNdzrg== | 5b6b20f2e7a8593ef1458a53dd11395f62011cde | 2026-10-13T22:26:01.792Z | No release tag. Published from dev at 54c8c55, one ledger row past the qualified source d9a1f09; 49 text files carry CRLF line endings. |
 
 ## Routing, corrections and rollback events
 
@@ -196,3 +198,4 @@ even if routing is rolled back or the version is later deprecated.
 
 | Event ID | Event UTC | Event | Corrected event | Corrected UTC | Package | Channel | From version | To version | Corrects event | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| svelte-realtime-next-2026-10-13-1 | 2026-10-13T22:26:01.792Z | routed | - | - | svelte-realtime | next | 0.6.0-next.90 | 0.6.0-next.91 | - | npm publish with the next tag; observed next=0.6.0-next.90 on 2026-10-13 before publication and next=0.6.0-next.91 at 2026-10-13T22:28:50.738Z. | No quarantine candidate tag was used. |
