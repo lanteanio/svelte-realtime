@@ -404,13 +404,19 @@ describe('connection closed for good (real adapter client)', () => {
 	it('a call from an adapter status subscriber that runs before the client opens no socket', async () => {
 		/** @type {Promise<any>[]} */
 		const calls = [];
-		adapter.status.subscribe((s) => { if (s === 'failed') calls.push(client.__rpc('audit/closed')()); });
-		await openWithRpc();
+		const unsubscribe = adapter.status.subscribe((s) => { if (s === 'failed') calls.push(client.__rpc('audit/closed')()); });
+		try {
+			await openWithRpc();
 
-		adapter.connect().close();
-		expect(sockets()).toHaveLength(1);
-		expect(calls).toHaveLength(1);
-		await expect(calls[0]).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+			adapter.connect().close();
+			expect(sockets()).toHaveLength(1);
+			expect(calls).toHaveLength(1);
+			await expect(calls[0]).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		} finally {
+			// Adapter stores follow a later explicit connect(), so a subscriber
+			// left behind would hear the cleanup connection close too.
+			unsubscribe();
+		}
 	});
 
 	it('creates its connection the way the adapter stores do, so connect() options passed later still warn', async () => {
