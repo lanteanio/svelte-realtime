@@ -6,7 +6,7 @@ by hand.
 
 ## Audited candidate tuple
 
-- `svelte-adapter-uws@0.6.0-next.95`
+- `svelte-adapter-uws@0.6.0-next.96`
 - `svelte-realtime@0.6.0-next.91`
 - `svelte-adapter-uws-extensions@0.6.0-next.64`
 - `https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz`

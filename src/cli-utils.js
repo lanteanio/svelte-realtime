@@ -6,7 +6,7 @@ const VALID_TEMPLATES = ['minimal', 'example', 'demo'];
 // One audited onboarding tuple. Keep these exact so a scaffold cannot silently
 // combine independent "latest" releases whose native ABI or peer contract has
 // not been verified together.
-export const SCAFFOLD_ADAPTER_SPEC = 'svelte-adapter-uws@0.6.0-next.95';
+export const SCAFFOLD_ADAPTER_SPEC = 'svelte-adapter-uws@0.6.0-next.96';
 export const SCAFFOLD_REALTIME_SPEC = 'svelte-realtime@0.6.0-next.91';
 export const SCAFFOLD_EXTENSIONS_SPEC = 'svelte-adapter-uws-extensions@0.6.0-next.64';
 export const SCAFFOLD_UWS_SPEC =

@@ -73,12 +73,12 @@ The three ecosystem packages move together. Bump them as a group:
 | --- | --- | --- | --- |
 | `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |
 | `^0.5.8` | `^0.5.0` | `^0.5.0` | Stable. Node 22+ required. |
-| `0.6.0-next.95` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated candidate; publish the tuple together before these registry commands are used. |
+| `0.6.0-next.96` | `0.6.0-next.91` | `0.6.0-next.64` | Coordinated candidate; publish the tuple together before these registry commands are used. |
 
 Install the CLI-owned candidate tuple and run its native preflight:
 
 ```bash
-npm install svelte-adapter-uws@0.6.0-next.95 svelte-realtime@0.6.0-next.91
+npm install svelte-adapter-uws@0.6.0-next.96 svelte-realtime@0.6.0-next.91
 npm install https://github.com/uNetworking/uWebSockets.js/archive/refs/tags/v20.69.0.tar.gz
 npm install -D ws
 npm exec -- svelte-adapter-uws-preflight

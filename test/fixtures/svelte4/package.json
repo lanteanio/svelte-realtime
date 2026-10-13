@@ -14,7 +14,7 @@
   "dependencies": {
     "@sveltejs/kit": "2.70.2",
     "svelte": "4.2.20",
-    "svelte-adapter-uws": "0.6.0-next.95",
+    "svelte-adapter-uws": "0.6.0-next.96",
     "svelte-realtime": "file:../../.."
   },
   "devDependencies": {

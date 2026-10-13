@@ -311,9 +311,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   the member leaves its count behind, so the row then stands until the room
   goes idle long enough for the roster to expire.
 
-- **Adapter peer range moves to `svelte-adapter-uws@^0.6.0-next.95`.** The
+- **Adapter peer range moves to `svelte-adapter-uws@^0.6.0-next.96`.** The
   scaffold pin, the README compatibility row, and the generated first-run
-  transcript follow it. The operation platform view (`ctx.platform`) now
+  transcript follow it; the scaffold installs it with
+  `svelte-adapter-uws-extensions@0.6.0-next.64`. The operation platform view (`ctx.platform`) now
   inherits the adapter's `traceContext` and `trace` declarations instead of
   restating them as optional, matching the shape the adapter ships.
   `SmoothEntity.shoot` depends on the adapter channel's options argument,

@@ -136,7 +136,7 @@
   "peerDependencies": {
     "@sveltejs/kit": "^2.0.0",
     "svelte": "^4.0.0 || ^5.0.0",
-    "svelte-adapter-uws": "^0.6.0-next.95"
+    "svelte-adapter-uws": "^0.6.0-next.96"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
