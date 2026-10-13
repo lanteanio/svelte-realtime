@@ -25,6 +25,7 @@ registry metadata exists, together with its complete published row.
 
 | Candidate | Event | Event UTC | Git head | Planned tag | Target channel | Evidence |
 | --- | --- | --- | --- | --- | --- | --- |
+| 0.6.0-next.91 | proposed | 2026-10-13T22:15:27.639Z | d9a1f0952b4f3acb97d63243ddb0234d8d4591c7 | svelte-realtime@0.6.0-next.91 | next | npm test at this head with published svelte-adapter-uws 0.6.0-next.96 and svelte-adapter-uws-extensions 0.6.0-next.64 installed: all checks, 156 files, 4054 tests passed. |
 
 ## Published releases
 
