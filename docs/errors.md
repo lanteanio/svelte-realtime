@@ -139,7 +139,7 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-internal"></a>
 ### <code>INTERNAL</code>
 
-- Searchable message prefixes: <code>document load failed for "</code>; <code>live.doc() failed to load the adapter CRDT plugin: </code>; <code>live.doc() requires svelte-adapter-uws 0.6.0-next.25 or newer (the CRDT replica plugin is missing from the installed adapter)</code>; <code>live.smooth() failed to load the adapter smooth plugin: </code>; <code>live.smooth() onTick requires svelte-adapter-uws 0.6.0-next.47 or newer (the installed adapter authority has no server-entity surface)</code>; <code>live.smooth() requires svelte-adapter-uws 0.6.0-next.24 or newer (the smooth plugin is missing from the installed adapter)</code>; <code>live.tenant(...).publish requires an active server platform; call it after the realtime server is wired (inside a handler use ctx.tenant(id).publish instead).</code>
+- Searchable message prefixes: <code>document load failed for "</code>; <code>live.doc() failed to load the adapter CRDT plugin: </code>; <code>live.doc() requires svelte-adapter-uws 0.6.0-next.25 or newer (the CRDT replica plugin is missing from the installed adapter)</code>; <code>live.smooth() failed to load the adapter smooth plugin: </code>; <code>live.smooth() maxCommandsPerTick requires an adapter with command drain limits; upgrade svelte-adapter-uws before enabling this option</code>; <code>live.smooth() onTick requires svelte-adapter-uws 0.6.0-next.47 or newer (the installed adapter authority has no server-entity surface)</code>; <code>live.smooth() requires svelte-adapter-uws 0.6.0-next.24 or newer (the smooth plugin is missing from the installed adapter)</code>; <code>live.tenant(...).publish requires an active server platform; call it after the realtime server is wired (inside a handler use ctx.tenant(id).publish instead).</code>
 - Owning sources: [src/server.js](../src/server.js), [src/server/crdt.js](../src/server/crdt.js), [src/server/smooth.js](../src/server/smooth.js)
 
 <a id="live-error-internal-error"></a>
@@ -1094,8 +1094,9 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 These sites have a computed code, event, or message prefix that the literal scanner cannot resolve. They remain visible here instead of being counted as full literal coverage. Wire forwarding and application-provided messages may vary at runtime.
 
 - <code>src/client/connection.js:109</code>
-- <code>src/client/connection.js:185</code>
-- <code>src/client/connection.js:210</code>
+- <code>src/client/connection.js:175</code>
+- <code>src/client/connection.js:190</code>
+- <code>src/client/connection.js:215</code>
 - <code>src/client/internal-state.js:128</code>
 - <code>src/client/offline.js:312</code>
 - <code>src/client/stream.js:1890</code>
@@ -1119,7 +1120,7 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/server/dispatch.js:799</code>
 - <code>src/server/dispatch.js:811</code>
 - <code>src/server/dispatch.js:858</code>
-- <code>src/server/idempotency.js:873</code>
+- <code>src/server/idempotency.js:880</code>
 - <code>src/server/push.js:699</code>
 - <code>src/server/upload.js:281</code>
 - <code>src/server/upload.js:386</code>
