@@ -15,7 +15,15 @@ const versions = new Set(['0.1.4', '0.1.9', '0.6.0-next.42', '0.5.13']);
 // Each real-history fixture composes up to 18 Git commands, each bounded at 30s.
 const HISTORY_TIMEOUT = 600000;
 
-const manifest = recordedManifest.split('\n').filter((line) => !line.startsWith('| svelte-realtime |') || versions.has(line.split('|')[2].trim())).join('\n');
+// The package's own candidate and routing events are history, not fixture data,
+// so both event tables start empty.
+const eventTables = new Set(['## Candidate event log', '## Routing, corrections and rollback events']);
+let section = '';
+const manifest = recordedManifest.split('\n').filter((line) => {
+	if (line.startsWith('## ')) section = line;
+	if (eventTables.has(section) && line.startsWith('| ') && !/^\| (Candidate|Event ID|---) /.test(line)) return false;
+	return !line.startsWith('| svelte-realtime |') || versions.has(line.split('|')[2].trim());
+}).join('\n');
 const current = '0.6.0-next.91';
 const changelog = `## [Unreleased]
 
