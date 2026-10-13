@@ -3,7 +3,7 @@ import { now as runtimeNow, monotonicNow, setTimer, clearTimer } from '../shared
 import { assert } from '../shared/assert.js';
 import { state as serverState } from './state.js';
 import { LiveError } from './live-error.js';
-import { _tenantKey } from './tenant.js';
+import { _tenantKey, _isTenancyEnabled } from './tenant.js';
 import { _getAuthenticatedId } from './identity.js';
 import { createHash } from 'node:crypto';
 
@@ -147,8 +147,15 @@ function _createInMemoryIdempotencyStore({ maxEntries = 10000 } = {}) {
 
 	function _atCapacity(tenant) {
 		const used = results.size + inflight.size;
+		if (used >= maxEntries) return true;
 		const count = tenantCounts.get(tenant) || 0;
-		return used >= maxEntries || count >= tenantLimit || (used >= maxEntries - reserve && count >= reserveLimit);
+		const inReserve = used >= maxEntries - reserve && count >= reserveLimit;
+		// Without a tenant resolver there is no tenant boundary to divide the
+		// store by, so an app that never configures one keeps all of it. With a
+		// resolver, callers it leaves unscoped stay one capped bucket so they
+		// cannot crowd out resolved tenants.
+		if (tenant === null && !_isTenancyEnabled()) return inReserve && tenantCounts.size > (count > 0 ? 1 : 0);
+		return count >= tenantLimit || inReserve;
 	}
 
 	function _retainUser(idemUser) {

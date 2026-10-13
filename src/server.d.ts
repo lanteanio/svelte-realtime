@@ -1961,8 +1961,10 @@ export namespace live {
 	 * body); the framework fingerprints the request args to detect the mismatch.
 	 *
 	 * The default in-process store reserves up to 10,000 running keys and cached
-	 * results, with at most 1,000 per tenant (null is one bucket). The final 1,000
-	 * global slots admit only tenants holding fewer than 100 entries. These are
+	 * results, with at most 1,000 per tenant. Without a tenant resolver, calls may
+	 * use all of them; with one, calls it leaves unscoped share one 1,000-slot
+	 * bucket. The final 1,000 global slots admit only tenants holding fewer than
+	 * 100 entries. These are
 	 * process-local bounds, not per-user quotas. At capacity, new keys throw `LiveError('IDEMPOTENCY_CAPACITY')`
 	 * before the handler runs; cached retries remain available until their TTL.
 	 * Pending durable slots are polled for up to five seconds, then return

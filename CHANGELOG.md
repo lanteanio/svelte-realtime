@@ -172,7 +172,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Durable idempotency duplicates wait for their original result; bounded retryable responses preserve offline mutations and retry with backoff instead of entering conflict handling.
 
-- The in-process idempotency store protects accepted results and partitions admission by tenant, reserving capacity for small tenants and counting running handlers. **Action required:** handle retryable `IDEMPOTENCY_CAPACITY` when tenant or process capacity is exhausted; handlers have not run. The default limits are 1,000 per tenant and 10,000 total, with the final 1,000 reserved for tenants below 100 entries.
+- The in-process idempotency store protects accepted results and partitions admission by tenant, reserving capacity for small tenants and counting running handlers. **Action required:** handle retryable `IDEMPOTENCY_CAPACITY` when tenant or process capacity is exhausted; handlers have not run. The default limits are 1,000 per tenant and 10,000 total, with the final 1,000 reserved for tenants below 100 entries. Without a tenant resolver the whole store is available.
 
 - Idempotency erasure remains effective for long-running handlers and duplicate waiters after the recent-tombstone sweep, while fresh calls outside the grace window cache normally.
 

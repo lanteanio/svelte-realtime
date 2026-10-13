@@ -6,6 +6,8 @@ import { setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.js';
 
 const CAPACITY = 1000;
+const GLOBAL = 10000;
+const RESERVE = 1000;
 const capacityError = { code: 'IDEMPOTENCY_CAPACITY' };
 function deferred() {
 	let resolve;
@@ -61,22 +63,52 @@ describe('idempotency capacity preserves accepted effects', () => {
 		await expect(run({ user: { id: 'member' }, tenantId: '0' }, '0')).resolves.toBe('0');
 	});
 
+	it('gives calls without a tenant the whole store', async () => {
+		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key);
+		const ctx = { user: { id: 'member' } };
+		for (let i = 0; i < GLOBAL; i++) await run(ctx, String(i));
+		await expect(run(ctx, 'overflow')).rejects.toMatchObject(capacityError);
+		await expect(run({ user: { id: 'other' } }, 'new')).rejects.toMatchObject(capacityError);
+		await expect(run(ctx, '0')).resolves.toBe('0');
+	});
+
+	it('caps calls a tenant resolver leaves unscoped as one bucket', async () => {
+		_setTenantResolver(user => user.tenant ?? null);
+		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key);
+		const anonymous = { user: null };
+		for (let i = 0; i < CAPACITY; i++) await run(anonymous, String(i));
+		await expect(run(anonymous, 'overflow')).rejects.toMatchObject(capacityError);
+		await expect(run({ user: { id: 'member' }, tenantId: 'paid' }, 'first')).resolves.toBe('first');
+	});
+
+	it('keeps calls without a tenant out of the reserve while a tenant holds slots', async () => {
+		const run = live.idempotent({ keyFrom: (ctx, key) => key }, async (ctx, key) => key);
+		const small = { user: { id: 'member' }, tenantId: 'small' };
+		await run(small, 'first');
+		const plain = { user: { id: 'member' } };
+		for (let i = 0; i < GLOBAL - RESERVE - 1; i++) await run(plain, String(i));
+		await expect(run(plain, 'overflow')).rejects.toMatchObject(capacityError);
+		for (let i = 0; i < 99; i++) await expect(run(small, String(i))).resolves.toBe(String(i));
+		await expect(run(small, 'overflow')).rejects.toMatchObject(capacityError);
+		await expect(run({ user: { id: 'member' }, tenantId: 'fresh' }, 'new')).resolves.toBe('new');
+	});
+
 	for (const ttl of [0, 60]) {
 		it(`reserves capacity for concurrent pending handlers with TTL ${ttl}`, async () => {
 			const gate = deferred(); gates.push(gate);
 			let effects = 0;
 			const run = live.idempotent({ ttl, keyFrom: (ctx, key) => key }, async () => { effects++; await gate.promise; return effects; });
 			const ctx = { user: { id: 'member' } };
-			const pending = Array.from({ length: CAPACITY }, (_, i) => run(ctx, String(i)));
+			const pending = Array.from({ length: GLOBAL }, (_, i) => run(ctx, String(i)));
 			await nextTurn();
 			const duplicate = ttl > 0 ? run(ctx, '0') : null;
 			const overflow = run(ctx, 'overflow').catch(error => error);
 			await nextTurn();
-			expect(effects).toBe(CAPACITY);
+			expect(effects).toBe(GLOBAL);
 			gate.resolve(); await Promise.all(pending);
-			if (duplicate) expect(await duplicate).toBe(CAPACITY);
+			if (duplicate) expect(await duplicate).toBe(GLOBAL);
 			expect(await overflow).toMatchObject(capacityError);
-			if (ttl === 0) await expect(run(ctx, 'fresh')).resolves.toBe(CAPACITY + 1);
+			if (ttl === 0) await expect(run(ctx, 'fresh')).resolves.toBe(GLOBAL + 1);
 			else await expect(run(ctx, 'fresh')).rejects.toMatchObject(capacityError);
 		});
 	}
@@ -88,7 +120,7 @@ describe('idempotency capacity preserves accepted effects', () => {
 			return key;
 		});
 		const ctx = { user: { id: 'member' } };
-		for (let i = 0; i < CAPACITY - 1; i++) await run(ctx, String(i));
+		for (let i = 0; i < GLOBAL - 1; i++) await run(ctx, String(i));
 		const pending = run(ctx, 'abort').catch(error => error);
 		await nextTurn();
 		await expect(run(ctx, 'overflow')).rejects.toMatchObject(capacityError);
@@ -100,7 +132,7 @@ describe('idempotency capacity preserves accepted effects', () => {
 	it('reclaims expired results under pressure before the periodic sweep is due', async () => {
 		const run = live.idempotent({ ttl: 1, keyFrom: (ctx, key) => key }, async (ctx, key) => key);
 		const ctx = { user: { id: 'member' } };
-		for (let i = 0; i < CAPACITY; i++) await run(ctx, String(i));
+		for (let i = 0; i < GLOBAL; i++) await run(ctx, String(i));
 		clock += 1001;
 		await expect(run(ctx, 'fresh')).resolves.toBe('fresh');
 	});
@@ -109,7 +141,7 @@ describe('idempotency capacity preserves accepted effects', () => {
 		const run = live.idempotent({ keyFrom: (ctx, key) => ctx.user.id + ':' + key }, async (ctx, key) => key);
 		const alice = { user: { id: 'alice' } }, bob = { user: { id: 'bob' } };
 		await run(alice, 'erase');
-		for (let i = 0; i < CAPACITY - 1; i++) await run(bob, String(i));
+		for (let i = 0; i < GLOBAL - 1; i++) await run(bob, String(i));
 		await expect(run(bob, 'overflow')).rejects.toMatchObject(capacityError);
 		await live.forget('alice');
 		await expect(run(bob, 'fresh')).resolves.toBe('fresh');

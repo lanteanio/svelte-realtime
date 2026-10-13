@@ -4941,7 +4941,7 @@ Each cap is one of three saturation behaviors:
 | `MAX_OPTIMISTIC_QUEUE_DEPTH`         | 1,000       | REJECT       | Per-stream in-flight `mutate()` queue depth.                        |
 | Rate-limit identities                | 5,000       | REJECT       | Per-function `live.rateLimit()` buckets after stale-sweep.          |
 | Throttle/debounce timers             | 5,000       | direct       | At cap, publishes immediately instead of dropping.                  |
-| Idempotency results                  | 10,000      | FIFO-evict   | In-process `live.idempotent()` store; evicts oldest 10%.            |
+| Idempotency results                  | 10,000      | REJECT       | In-process `live.idempotent()` store; never evicts live results.    |
 | Per-stream history                   | 50          | FIFO         | `store.history` undo/redo ring; configurable via `enableHistory`.   |
 | Per-stream devtools events           | 20          | FIFO         | Recent-events ring shown in `__devtools`.                           |
 
@@ -4988,7 +4988,7 @@ For multi-instance deploys, wire a cluster-aware `platform.presence` (e.g. from 
 
 ### Idempotency results (10,000)
 
-In-process `live.idempotent()` store: cached results and running keys share 10,000 slots, with at most 1,000 per trusted tenant (`ctx.tenantId`; null is one bucket). The final 1,000 global slots are reserved for tenants holding fewer than 100 entries. A tenant at its limit cannot consume another tenant's share or evict accepted results. Total capacity can still be exhausted by multiple tenants; these are process-local admission bounds, not a distributed budget or a per-user quota. New keys at capacity receive `IDEMPOTENCY_CAPACITY` before the handler runs; existing cached retries still work. Expiry, abort and erasure free slots. Expired results are pruned every 30 seconds and on admission pressure; unexpired results are never evicted. A zero TTL holds only a running slot.
+In-process `live.idempotent()` store: cached results and running keys share 10,000 slots, with at most 1,000 per trusted tenant (`ctx.tenantId`). Without a tenant resolver, calls may use all of them; with one, calls it leaves unscoped share one 1,000-slot bucket. The final 1,000 global slots are reserved for tenants holding fewer than 100 entries. A tenant at its limit cannot consume another tenant's share or evict accepted results. Total capacity can still be exhausted by multiple tenants; these are process-local admission bounds, not a distributed budget or a per-user quota. New keys at capacity receive `IDEMPOTENCY_CAPACITY` before the handler runs; existing cached retries still work. Expiry, abort and erasure free slots. Expired results are pruned every 30 seconds and on admission pressure; unexpired results are never evicted. A zero TTL holds only a running slot.
 
 ---
 
