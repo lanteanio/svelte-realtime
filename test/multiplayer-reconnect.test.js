@@ -120,18 +120,6 @@ export const board = live.multiplayer({
 	await vi.advanceTimersByTimeAsync(0);
 	await lock;
 	expect(roster.value[0]).toMatchObject({ 'lock:title': true, 'lock:body': true, typing: true, selection: { start: 1, end: 3 } });
-	const subscribeCount = frames.filter(frame => frame.subscribe).length;
-	adapter.status.set('suspended');
-	const backgroundTyping = room.setTyping(false);
-	await vi.advanceTimersByTimeAsync(0);
-	await backgroundTyping;
-	expect(roster.value[0].typing).toBe(false);
-	adapter.status.set('open');
-	const foregroundTyping = room.setTyping(true);
-	await vi.advanceTimersByTimeAsync(0);
-	await foregroundTyping;
-	expect(roster.value[0].typing).toBe(true);
-	expect(frames.filter(frame => frame.subscribe)).toHaveLength(subscribeCount);
 	online = false;
 	adapter.status.set('disconnected');
 	close(ws, { platform: env.platform });

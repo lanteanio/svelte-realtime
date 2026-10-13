@@ -61,7 +61,7 @@ export interface MultiplayerRoomDeps {
 	cursors?: Readable<any[]>;
 	/** Connection-status store. */
 	status: Readable<string>;
-	/** The room's data stream. The room holds it for its lifetime, which is what makes the local user a member others see (and a candidate for ownership); its value is not read. While disconnected or its `phase` reads `'attaching'`, the room holds its sends until the join is answered; background suspension keeps sending through the open socket, as it does for a send to the room an effect names just before the view moves there. Omitted for a view that only observes. */
+	/** The room's data stream. The room holds it for its lifetime, which is what makes the local user a member others see (and a candidate for ownership); its value is not read. While its `phase` reads `'attaching'`, the room holds its sends until the join is answered, as it does for a send to the room an effect names just before the view moves there. Omitted for a view that only observes. */
 	membership?: Readable<any>;
 	/** Reactions sub-stream (the bounded ring of recent emotes), when enabled. */
 	reactions?: Readable<any[]>;
@@ -75,8 +75,6 @@ export interface MultiplayerRoomDeps {
 	setTyping?: (...args: any[]) => any;
 	/** Outbound presence-field send callback for selection ranges. */
 	setSelection?: (...args: any[]) => any;
-	/** Outbound callback that restores retained presence fields after rejoining. */
-	restorePresence?: (delta: Record<string, any>) => any;
 	/** Selection mode: `'crdt'` (live.doc-anchored) or `'offset'` (raw). */
 	selections?: 'offset' | 'crdt';
 	/** Outbound presence-field send callback for advisory lock acquisition. */

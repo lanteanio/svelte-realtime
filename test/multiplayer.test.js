@@ -3114,24 +3114,6 @@ describe('MultiplayerRoom roster aggregation', () => {
 		return { deps: { ...fixed, bind: ([id]) => roomDeps(id) }, room: (id) => ({ ...fixed, ...roomDeps(id) }), sent, answer };
 	}
 
-	it.each(['open', 'suspended'])('keeps sends live across background suspension from %s', async initial => {
-		await loadShippedRuneModule();
-		const { room, sent, answer } = joiningRooms();
-		const deps = room('a');
-		deps.status.set(initial);
-		const r = new MultiplayerRoom(deps);
-		answer('a');
-		await expect(Promise.resolve(r.acquireLock('title'))).resolves.toBe('acquireLock-ack');
-		deps.status.set('suspended');
-		await expect(Promise.resolve(r.setTyping(true))).resolves.toBe('setTyping-ack');
-		r.setSelection({ start: 1, end: 2 });
-		deps.status.set('open');
-		await expect(Promise.resolve(r.releaseLock('title'))).resolves.toBe('releaseLock-ack');
-		await expect(Promise.resolve(r.move({ x: 2 }))).resolves.toBe('move-ack');
-		expect(sent.map(call => call[1])).toEqual(['acquireLock', 'setTyping', 'setSelection', 'releaseLock', 'move']);
-		r.destroy();
-	});
-
 	it('restores retained presence only after a reconnect joins, with offline releases winning', async () => {
 		await loadShippedRuneModule();
 		const { room, sent, answer } = joiningRooms();
