@@ -3,18 +3,31 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 // Mock the adapter client like degradation-client.test.js: capture the `__realtime`
 // subscriber so the test can deliver a `protocol-stale` frame; the connection has
 // no flow-control input.
-const H = vi.hoisted(() => ({ cb: null, statusCb: null, sent: [] }));
+const H = vi.hoisted(() => ({ cb: null, statusSubs: [], status: 'disconnected', sent: [] }));
 vi.mock('svelte-adapter-uws/client', () => {
 	const on = (topic) => ({ subscribe: (fn) => { if (topic === '__realtime') H.cb = fn; return () => { H.cb = null; }; } });
-	const status = { subscribe: (fn) => { H.statusCb = fn; fn('disconnected'); return () => {}; } };
+	// Every status subscriber hears every change, in subscription order, as the
+	// adapter's store delivers them.
+	const status = {
+		subscribe: (fn) => {
+			H.statusSubs.push(fn);
+			fn(H.status);
+			return () => { H.statusSubs.splice(H.statusSubs.indexOf(fn), 1); };
+		}
+	};
 	const conn = { send: (value) => H.sent.push(value), sendQueued: (value) => H.sent.push(value), on, status };
 	return { on, status, connect: () => conn, setTopicManaged: () => {} };
 });
 
+import { status as adapterStatus } from 'svelte-adapter-uws/client';
 import { health, _resetHealth, _ensureHealthSubscription } from '../src/client/health.js';
 import { configure } from '../src/client/misc.js';
 
 const deliver = (env) => { if (H.cb) H.cb(env); };
+const setStatus = (s) => {
+	H.status = s;
+	for (const fn of [...H.statusSubs]) fn(s);
+};
 
 describe('protocol-compat signal: client health', () => {
 	beforeEach(() => { _resetHealth(); H.cb = null; H.sent.length = 0; });
@@ -88,26 +101,38 @@ describe('protocol-compat signal: client health', () => {
 		expect(typeof H.cb).toBe('function');
 	});
 
-	it('advertises synchronously before normal and hidden-tab reconnect work', () => {
+	it('advertises once per socket, before any other status subscriber sends', () => {
+		// Bind the connection first, then attach app work the way a stream created
+		// before configure() does: its status subscriber runs ahead of configure's.
+		_ensureHealthSubscription();
+		adapterStatus.subscribe((s) => { if (s === 'open' || s === 'suspended') H.sent.push('app-work'); });
 		configure({
 			protocolVersion: 3,
 			onConnect: () => H.sent.push('onConnect')
 		});
-		expect(typeof H.statusCb).toBe('function');
 		// Adapter onopen sets `suspended` synchronously when the document is hidden,
 		// then continues with hello/resubscribe/sendQueue. The proto must already be
-		// queued at that boundary, without running visible-app reconnect work.
-		H.statusCb('suspended');
+		// sent at that boundary, without running visible-app reconnect work.
+		setStatus('suspended');
 		H.sent.push('adapter-onopen-continues');
 		expect(H.sent).toEqual([
 			{ type: 'proto', v: 3 },
+			'app-work',
 			'adapter-onopen-continues'
 		]);
 
+		// The tab comes back on the same socket; the server already has the version.
 		H.sent.length = 0;
-		H.statusCb('open');
+		setStatus('open');
+		expect(H.sent).toEqual(['app-work', 'onConnect']);
+
+		// A new socket after a drop advertises again, ahead of everything else.
+		H.sent.length = 0;
+		setStatus('disconnected');
+		setStatus('open');
 		expect(H.sent).toEqual([
 			{ type: 'proto', v: 3 },
+			'app-work',
 			'onConnect'
 		]);
 	});
