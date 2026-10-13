@@ -10,17 +10,17 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ## [Unreleased]
 
+## [0.6.0-next.91] - 2026-10-13
+
+*Not published to npm; release candidate.*
+
 ### Added
 
 - Dynamic derived streams accept `scopeKey` for explicit sharing among callers authorized for the same output.
 
-- The generated error reference indexes emitted runtime codes and operational message prefixes, with stable code/event anchors and explicit guidance coverage. Action: regenerate the reference when adding or changing an emitted error.
+- The [error reference](docs/errors.md) indexes every emitted runtime code and operational message prefix, with stable code and event anchors.
 
 - Opt-in RPC delivery metrics distinguish successful sends, backpressure, closed connections, and send exceptions from handler execution outcomes.
-
-- Contributor and release guidance includes the packed sibling consumer command, its prerequisites and the flags required for exact committed source identities.
-
-- README size increases require an explicit generator flag and a recorded change from the committed limit. Action: use `npm run generate:documentation -- --accept-readme-growth` when an intentional increase is needed.
 
 - DevTools formats telemetry with Intl, supports locale and direction configuration, and isolates runtime identifiers.
 
@@ -33,17 +33,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - The 0.6 consumer guide indexes capabilities, compatibility changes and required upgrade actions.
   **Action required:** review the [0.6 guide](docs/0.6-upgrade.md) for the features your application uses.
 
-- Release guidance states the realtime package scope, application-owned responsibilities and concrete evidence required before stable promotion.
-
-- The README wordmark now ships with the package, and contributor guidance records the realtime library and infrastructure package roles.
-
-- Release guidance now defines frozen source identities, coordinated stable promotion, stable hotfix merge-back and verified dist-tag rollback.
-
 - A tag-only release workflow verifies source identity and the complete test contract before passing one hashed tarball to protected npm trusted publication. Local publication runs the check chain first.
 
 - Generated README topic and package-export indexes cover every public section and import. Release history ships with the package, and source-link fragments are checked against the matching Git tree.
-
-- An offline release ledger records every published artifact and checks changelog identities, unpublished markers, and immutable history.
 
 - Erasure audit hooks support optional HMAC keys configured once or per call, validated before cleanup; default pseudonymous identifiers remain unchanged.
 
@@ -56,312 +48,6 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   remains a deprecated alias during 0.x.
 
 - Expose `generateTypes({ root, dir })` from `svelte-realtime/vite` so typecheck scripts can refresh `$live` declarations without a production build.
-
-### Changed
-
-- Dynamic derived streams default to one computation per authenticated identity and use opaque output topics. Scope revocation sets the affected stream error to `FORBIDDEN`; resubscribe to refresh the view.
-
-- **Breaking:** Tenant policy metadata is typed and validated. `live.tenant(id, config)` snapshots an immutable `metadata` carrier with an entitlement label and declared action, byte, recipient-delivery, and retained-byte caps. No automatic enforcement is installed. **Action required:** replace arbitrary config fields and `null` with the documented `TenantConfig` shape; configure enforcement explicitly in its owning application or adapter.
-
-- **Breaking:** `live.tenant` rejects the unsupported `quota` option instead of retaining an unenforced limit. **Action required:** remove that option and configure actual admission limits in the owning adapter, extension or application. Tenant configuration carries metadata and does not automatically install enforcement.
-
-- **Breaking:** Unknown RPC paths use generic authorization denials by default across text, batches, binary calls, and uploads. **Action required:** set `maskNotFound: false` only if clients require explicit missing-path replies; this permits path enumeration. All transports retain development diagnostics. Four uploads per socket may await authorization, independently of private handler limits; excess starts return `TOO_MANY_UPLOADS`.
-
-- **Breaking:** Alarm scheduling and cancellation now return promises that must be awaited. Durable stores require the ordered-generation and retained-execution contract; `configureAlarm` rejects legacy topic-only stores. Upgrade the store and migrate existing rows with the runtime. Unhandled rejected mutations are no longer silent fire-and-forget writes. Reaching in-memory capacity now rejects with `ALARM_CAPACITY` instead of warning and dropping the schedule. Durable cancellation reads the current row first, so it also cancels a schedule another worker replaced.
-
-### Fixed
-
-- Cron followers record observed schedule slots, preventing a mid-minute leadership change from repeating a minute job.
-
-- Document reconciliation configuration caps finite intervals at 2147483647 ms, preserving disabled and default values across generated channels.
-
-- Batched publication relays each event once when ordinary WebSocket clients require individual frames, preserves one watcher execution per event, and forwards compression options.
-
-- Dead-letter store declarations accept asynchronous backends and nullable capture IDs, while the built-in memory store retains synchronous return types.
-
-- Invalid RPC arguments consistently reject with INVALID_REQUEST and their original cause, without retaining pending requests or timeouts. Unsent requests capture JSON before connection status delivery.
-- Protocol advertisements precede parked RPCs and application connection hooks when the socket opens.
-
-- Smooth simulation ticks keep monotonic deadlines across callback work and catch up after timer delays, with at most eight ticks per callback. Idle rooms restart without old debt, and rewind history preserves distinct timestamps during catch-up.
-
-- New smooth entities are announced to peers even when they remain idle, including subscribers on other cluster instances. Repeated syncs do not repeat the announcement.
-
-- **Breaking:** The default `live.lock` now caps queued callers at 1000 per key and immediately releases timed-out queue nodes. Optional `maxExecutionMs` provides `ctx.lockSignal` cancellation without releasing mutual exclusion early; bounded-label metrics expose queue pressure and timeout events. **Action required:** handle `LOCK_QUEUE_FULL` under contention or configure `maxWaitersPerKey`; custom lock capacity remains configured on its instance. Timer delays above 2147483647 ms now reject at declaration.
-
-- Cron calendar matching in the system timezone now uses local date fields, preserving timezone changes and daylight-saving behavior while avoiding per-tick formatter allocation.
-
-- Source and IDE hook examples include `close` and `unsubscribe`, preserving subscription cleanup when copied into application hooks.
-
-- Smooth joins on non-owner cluster instances scope their initial snapshot to the subscriber's area of interest while retaining the full server shadow for later visibility changes.
-
-- Multiplayer room views restore their latest selection, locks and typing after rejoining, and hold sends throughout connection outages. Generated rooms combine restoration into one delta within the server's field limits. Retention is byte-bounded, offline releases override retained claims, and the final view leaving clears automatic restoration even during an outage.
-
-- Cron browser fixtures acknowledge subscriptions before reset, serialize requested ticks, and confirm empty server and client state.
-
-- Failed development module reloads restore aggregate window loaders and their boundary and slide timers, preserving autonomous window updates until the next successful reload.
-
-- Histogram integration guidance describes the extensions registry's fractional-second defaults and the explicit realtime range through 10 seconds.
-
-- Process-based verification uses bounded child processes and explicit test deadlines on slower hosts; temporary-directory cleanup retries when Windows retains a file handle.
-
-- The scaffold checks its Node prerequisite before resolving third-party dependencies, preserving the actionable upgrade message on older runtimes.
-
-- Importing the DevTools configuration API only mounts its overlay in explicit development mode. Accessible labels, duration units, telemetry messages and preview suffixes follow its presentation settings.
-
-- Forgetting a room member immediately removes its presence and cursor from connected peers, using the captured room platform for storage cleanup and owner succession when no erasure platform is configured. Bare and replay publications must confirm before erasure completes; failures remain retryable.
-
-- Packed-package tests and manual setup extract archives using portable paths on Windows and Unix.
-
-- Browser test discovery includes new spec files in both development and production lanes.
-- Failed smooth initialization releases a newly added wire subscription and empty topic record, while preserving live members, accepted resyncs, and concurrent joins.
-
-- Room departure, eviction, and user erasure remove cursor samples from connected peers. Cursor-only publishers are tracked through socket disconnect without requiring a room subscription; other tabs and cluster members retain their shared cursor until the identity leaves.
-- RPC benchmark output records CPU details, command arguments and sequential dispatch scope, and rejects diagnostics from non-RPC fixtures.
-
-- Clearing DevTools captures preserves pending RPC timing and records disconnect failures without payloads.
-
-- DevTools coalesces automatic status announcements over five seconds while confirming user actions immediately.
-
-- DevTools payload previews stay bounded without grapheme segmentation and never split a surrogate pair at the cutoff.
-
-- DevTools capture and payload-format toggles keep stable visible names that match their accessible names in both pressed states.
-
-- Aggregate privacy guidance explains that single-state and lifetime noise offsets persist across restarts and can be removed with one known true value.
-
-- PostgreSQL notification examples await startup before serving traffic and document dedicated-session budgets and ordered shutdown.
-
-- DevTools instrumentation requires an explicit development build signal, so production clients from bundlers without import.meta.env retain no DevTools histories.
-
-- Repository checks execute through symlinked or junction-based checkout paths instead of silently skipping their entry points.
-
-- Stream invalidation matches logical topics within the owning tenant. Broad unscoped patterns no longer reload another tenant, and disconnect removes only that scope's watchers.
-
-- Signal subscription setup safely ignores a native socket that closes during asynchronous connection initialization.
-
-- Stream unsubscribe and disconnect cleanup wait for pending subscribe hooks, preventing room presence, ownership, and enumeration from surviving a departed socket.
-
-- Release-ledger verification rejects committed history rewrites, including reverted changes and merged branches.
-
-- Contributor backlog and review guidance uses public GitHub issues, labels, assignments and pull requests.
-
-- RPC lifecycle comments distinguish parked unsent calls from requests rejected after a disconnect or socket replacement.
-
-- CLI prompt regression checks the actual default project name passed to scaffolding after empty input.
-
-- `live.public` preserves typed handler signatures and appears in generated `$live` declarations for JavaScript and TypeScript modules.
-  **Action required:** none; see [public RPC intent and module guards](README.md#per-module-auth).
-
-- The scaffold rejects Node versions below 22.12 before prompting, creating a project or installing dependencies.
-  **Action required:** upgrade to the [supported runtime](README.md#version-compatibility) before running the scaffold.
-
-- **Breaking:** Room actions cannot use the generated client member names `data`, `presence`, `cursors`, `owner` or `rooms`, even when an optional surface is disabled. Declaration errors now identify the action to rename. **Action required:** rename any action using one of these names before upgrading.
-
-- `realtime()`, generated WebSocket hooks and README examples include stream and connection cleanup exports. The Vite plugin warns once when a routing hook omits `unsubscribe` or `close`, explaining the retained state.
-
-- Manual setup now runs a dependency-free shared counter with complete connection hooks, local-only identity, two-tab checks and restart instructions.
-
-- Clarify that stream subscriptions also pass through adapter authorization and connection limits before loading data or joining a room.
-
-- Room subscriptions release only the membership references they acquired, preserving other connections after capacity refusal, presence errors, or failed initialization.
-
-- Cron ticks align to wall-clock boundaries, avoid duplicate minutes and seconds under timer drift or clock rollback, and coalesce missed slots after a pause.
-
-- Alarm capacity and invalid-deadline refusals reject with structured `ALARM_CAPACITY` and `VALIDATION` errors through the returned promise in memory and durable modes, preserving acknowledged schedules.
-
-- Durable idempotency duplicates wait for their original result; bounded retryable responses preserve offline mutations and retry with backoff instead of entering conflict handling.
-
-- The in-process idempotency store protects accepted results and partitions admission by tenant, reserving capacity for small tenants and counting running handlers. **Action required:** handle retryable `IDEMPOTENCY_CAPACITY` when tenant or process capacity is exhausted; handlers have not run. The default limits are 1,000 per tenant and 10,000 total, with the final 1,000 reserved for tenants below 100 entries. Without a tenant resolver the whole store is available.
-
-- Idempotency erasure remains effective for long-running handlers and duplicate waiters after the recent-tombstone sweep, while fresh calls outside the grace window cache normally.
-
-- Durable alarm claims retain their execution until successful completion. Failed and interrupted executions stay inspectable for explicit retry, preserving their generation and effect idempotency key without overwriting newer schedules. **Action required:** upgrade custom stores to the full retained-execution contract and enable `due()` polling for explicit retries; see the [0.6 upgrade guide](docs/0.6-upgrade.md). The `alarm.execution.failed` event now carries operational `errorClass`/`durable` fields, without raw handler errors or topic identifiers; update diagnostic consumers.
-
-- Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.
-
-- Framework signals, room membership and multiplayer events, smooth and document updates, and automatic stream publishes declare an unsequenced delivery policy so multi-worker adapters accept them. Application publish options and replay-assigned sequences retain their existing meaning.
-
-- Apply module guards to every room stream, room-list RPC and room action in `createTestEnv`, matching the generated registry. Tests with guarded room modules now enforce those guards.
-
-- Server introspection declares the adapter version tuple; packed-consumer checks preserve startup version resolution and external runtime imports in SSR builds.
-
-- Run the installed native preflight before generated scaffold build verification, publish the Linux libc floor, and verify the minimum Node 22.12 build profile on Ubuntu 24.04.
-
-- Vite registry updates stay inside the configured live directory, serialize with startup, and contain asynchronous reload failures. Nested worktree hooks no longer inherit the parent registry.
-
-- Idempotency TTLs reject fractions, NaN, and infinity during registration so in-memory and durable stores share the same non-negative integer seconds contract. Zero still skips cache writes.
-
-- Upload cleanup checks entry ownership so a canceled request cannot remove a newer upload reusing its stream ID or release its capacity.
-
-
-- Shutdown reports whether tracked work drained or timed out, with remaining work and elapsed time available before teardown and in the hook result.
-
-- Aggregate privacy controls are documented as cohort suppression and keyed statistical noise, without a differential privacy guarantee or enforced privacy budget.
-
-- The wire fuzz gate resolves runtime primitives from the installed adapter source layout.
-
-- Circuit breaker wrappers honor the extensions guard and recovery probes, preserve handler errors for failure tracking, and return actionable availability messages while recording bounded operator diagnostics.
-
-- Redis, Postgres, and idempotency integration examples use the extensions package exports and factory names.
-
-- README entry links now describe the reader action for documentation, tutorial, and demo.
-
-- Documented erasure-hook user hashes as pseudonymous identifiers with access and retention requirements.
-
-- Clarified that tenant prefixes and logical topics share the transport topic-length budget.
-
-- Errors from connection hooks are reported without stopping offline replay or other Svelte store subscribers, while retaining the config object as the callback receiver.
-
-- Reconnect snapshots, replay responses, buffered events, and non-array pagination responses update the authoritative stream state and optimistic display together, so settling a mutation cannot restore stale data.
-
-- A server event with a null key confirms only the matching optimistic mutation, preserving unrelated function-based updates.
-
-- Removed unused optimistic-key bookkeeping from client stream merges; optimistic confirmation continues to use mutation queue entries.
-
-- Offline persistence orders writes and deletes for each stored key, so a delayed write cannot restore a settled mutation or replace a newer upload checkpoint.
-
-- Smooth configuration types accept the existing `snapshot` and
-  `snapshotDebounceMs` options for cluster handoff.
-
-- Derived streams serialize asynchronous recomputations, discard results invalidated by newer source events, and stop pending work when a dynamic stream closes or its module reloads.
-
-- IndexedDB persistence reopens closed connections and bounds database opens and restore scans to five seconds, allowing offline replay to continue when browser storage hangs. Storage warnings distinguish failed writes from failed deletions.
-
-- The scaffold exits with an actionable error when piped input omits a project
-  name or template, instead of starting an unusable prompt and exiting 13.
-
-- DevTools has a visible launcher, a named region, and restores focus after Close or Escape.
-
-- DevTools tabs, stream expanders, and capture toggles expose keyboard and assistive-technology state.
-
-- DevTools preserves focused controls and stream rows during telemetry refreshes.
-
-- DevTools fits small viewports and supports clamped pointer movement, keyboard movement, and corner docking.
-
-- DevTools uses shared host-overridable color tokens with a contrast-tested dark theme and forced-color support.
-
-- DevTools text meets AA contrast and keyboard focus has a visible, unclipped indicator.
-
-- Long DevTools paths, topics, errors, and channel identifiers wrap within the panel.
-
-- DevTools renders every retained RPC history entry, including the oldest entries in its 50-record ring.
-
-- DevTools explains prediction recovery and gives actionable instructions in empty views.
-
-- DevTools truncates payload previews at grapheme boundaries and reports omitted code units separately.
-
-- DevTools shows the bound connection state, transition age, stable failure metadata, and recovery guidance.
-
-- DevTools announces connection, error, capture, and clear transitions through one polite status region.
-
-- Cleared DevTools stream events can be restored for 30 seconds while new events continue arriving.
-
-- DevTools stream capture starts paused; disconnect and Clear captured data purge retained payloads and undo state and disable unsafe capture.
-
-- Managed streams retain adapter subscription ownership across pending requests and let the adapter send the final unsubscribe once, including when another consumer shares the topic.
-
-- DevTools keeps translated opening focus reliable and masks Smooth identifiers until unsafe payload capture is enabled.
-
-- Keyed streams consistently ignore rows without their key and warn in development. The max item count now applies to snapshots, hydration, pagination, and live additions.
-
-- Errors from connection hooks are reported without stopping offline replay or other Svelte store subscribers.
-
-- Reconnect snapshots and non-array pagination responses update the authoritative stream state during optimistic mutations, so settling a mutation cannot restore stale data.
-
-- Dynamic derived subscriptions recheck scope after asynchronous admission and initial responses, and drain ownership even when session or tenant lookup fails.
-
-- A revoked derived loader cannot return stale initial data or roll back a newer subscription for the same connection and topic.
-
-- Derived authorization checks reuse an internal identity context and preserve detached recomputation contexts, avoiding per-subscriber and per-update connection-view allocation.
-
-- Contributor templates collect reproducible evidence, document private security reports, and check tracked formatting without rewriting files.
-
-- Contribution guidance defines task readiness, review evidence, ownership, blocked work and risk-based backlog ordering.
-
-- The pretest checks validate packed npm exports and declarations with publint and Are The Types Wrong.
-
-- Verification lanes and a generated CI inventory make required checks and non-hosted coverage explicit for contributors.
-
-- A self-contained smoke command verifies two-client pubsub in development and built production and cleans up partial server startup.
-
-- Documentation links preserve legacy anchors, resolve to tracked package or source files, and receive deterministic local and scheduled external checks.
-
-- Every README code fence has compiled or explicitly scoped coverage; runnable examples execute against the packed npm package, and documented server symbols have matching declarations.
-
-- The README has generated reader routes, CLI-owned compatibility commands, and separate enforced entry-position and total-size budgets.
-
-- External documentation checks identify the realtime package in their HTTP user agent.
-
-- Formatting checks retain Git line-ending metadata for Unicode and space-containing paths.
-
-- Documentation route labels and needs reject Markdown and URL injection outside their declared owner.
-
-- Erasure rejects incomplete in-memory and document cleanup after attempting the remaining surfaces, and reports bounded operator diagnostics without private failure payloads.
-
-- Hook validation checks JavaScript and TypeScript runtime exports, avoiding false warnings for handler aliases and missing warnings for comments or type-only exports. Scaffolds use a direct message re-export.
-
-- Generated counter examples announce connection, count and error changes, offer a connection retry, and handle failed increments with labelled keyboard controls. Their Chromium accessibility checks run in the pull request verification lane.
-
-- CLI prompts use Clack 1.8 while preserving the displayed default project name, validation, cancellation, and template selection behavior.
-
-- Changing the offline storage key or store switches queue ownership, cancels former callers, restores the new scope, and keeps late restore/replay work from writing to another account. Reconfiguring persistence retries failed scans.
-
-- Offline restore reserves sequence numbers with a keys-only scan and skips unreadable values without disabling other persisted mutations. `offlinePersistence()` exposes storage health, unreadable row counts, and failed queued writes.
-
-- Offline replay keeps mutations queued by a replay callback and never sends calls that callback-driven overflow already evicted.
-
-- Unsent RPC frames remain owned by their pending requests, so disconnect or timeout rejection cannot leave a frame that sends after reconnect. Initial calls wait through failed connection attempts, including batches and binary RPCs.
-
-- Presence and room-owner erasure now report unconfirmed Redis cleanup, retain bounded retry state, and remove identity fields idempotently across join and disconnect races.
-
-- Concurrent chaos test runs use separate temporary contexts, fixture builds, result directories, and Redis Compose projects, with ownership-checked cleanup and a two-run CI regression.
-
-- Added `clearOffline()` for verified local queue/checkpoint erasure and pending-call cancellation. Persisted mutations expire after seven days by default; IndexedDB cleans expired readable rows across accounts when opened, with configurable finite retention. **Action required:** choose `offline.retentionMs` if your app needs a different window; await [offline erasure](README.md#durable-persistence-survive-a-reload) during logout.
-
-- Active offline retention checks expiry atomically before deleting, preserving fresh rows from another tab. Shared custom stores can implement `deleteExpired` for the same guarantee; rows without timestamps remain available for explicit erasure.
-
-- Production browser fixtures wire realtime initialization and shutdown, drain through the adapter on teardown, and verify the packed build with real Linux SIGTERM signals for completed and timed-out RPC work.
-
-- Aggregate erasure requires an explicit policy. `forget: 'reset'` clears pending output and held privacy values and prevents late snapshots from restoring erased data; `forget: 'retain'` preserves declared non-personal state while removing contributor identities. Missing policies report `FORGET_INCOMPLETE` without disturbing hydration or timers. **Action required:** declare a policy on every aggregate used with `live.forget`; use `retain` only when reducer state, snapshots and outputs contain no personal data.
-
-- Stream subscriptions split by the shared 50-call limit and a conservative byte budget. Oversized incoming batches reject every affected request immediately; complex arguments serialize only when sent.
-
-- Mapped streams use Svelte derived stores for lazy activation and shared teardown; repeated cleanup no longer disconnects another consumer.
-
-- Public RPC exports register in the generated server registry, matching their generated client callable paths.
-
-- Packed shutdown verification holds work behind an explicit completion gate and gives the adapter enough time to finish the realtime drain.
-
-- Smooth wire batching is verified over real sockets against the installed adapter and the historical per-entity fallback.
-
-- Browser checks cover live smooth telemetry refresh and generated counter controls across mobile, tablet, and wide desktop viewports.
-
-- Reconnect deltas retain authoritative rows that overlap optimistic creates. A seeded multi-replica corpus now checks snapshot, delta, replay, buffering, acknowledgements, and rollback convergence.
-
-- The browser fixture uses the repository's Vite 8 generation and refreshes compatible dependencies to clear its security audit.
-
-- Diagnostics use the shared `lantean/diagnostic` identity and deliver to the same process-wide event sinks as the adapter.
-
-- Verification rejects unsupported diagnostic severity literals and checks delivery of real breaker warnings to the shared event sink.
-
-- Stream cleanup is idempotent, canceled detaches preserve later resume grace, and queued reconnects discard replay cursors that age past their trust bound before the socket opens.
-
-- Shared-topic subscription regressions now cover a refused attach overlapping an unnamed, attached, or resolved sibling, including exactly one final wire release.
-
-- Verify benchmark rejection fixtures and RPC outcomes, report execution context, and describe measured in-process scope.
-
-- Skip attach-window frames already included in explicit latest/set replay responses while preserving live changes beyond the replay read.
-
-- Preserve live platform trace and request correlation when reactive publishes pass through a cluster bus.
-
-### Security
-
-- Dynamic derived outputs isolate caller identities and recompute from current subscribers, preventing departed privileged contexts from serving other callers.
-
-## [0.6.0-next.91] - 2026-10-10
-
-*Not published to npm; release candidate.*
-
-### Added
 
 - **`board.watch(...)` shows a multiplayer room without joining it.** It
   returns the reactive view `board.room(...)` returns - `others`, `cursors`,
@@ -479,6 +165,16 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - **Generated runtime error reference.** The package now ships a registry-derived reference for the `INVALID_USER_ID` signal failure, unresolved `$live` modules, and both upload-size failure boundaries. Runtime messages are built from that registry and append a stable ID plus package-local help route; each entry records cause, consequence, automatic recovery, next action, and owning sources. `npm run check` rejects missing sources or generated-page drift.
 
 ### Changed
+
+- Dynamic derived streams default to one computation per authenticated identity and use opaque output topics. Scope revocation sets the affected stream error to `FORBIDDEN`; resubscribe to refresh the view.
+
+- **Breaking:** Tenant policy metadata is typed and validated. `live.tenant(id, config)` snapshots an immutable `metadata` carrier with an entitlement label and declared action, byte, recipient-delivery, and retained-byte caps. No automatic enforcement is installed. **Action required:** replace arbitrary config fields and `null` with the documented `TenantConfig` shape; configure enforcement explicitly in its owning application or adapter.
+
+- **Breaking:** `live.tenant` rejects the unsupported `quota` option instead of retaining an unenforced limit. **Action required:** remove that option and configure actual admission limits in the owning adapter, extension or application. Tenant configuration carries metadata and does not automatically install enforcement.
+
+- **Breaking:** Unknown RPC paths use generic authorization denials by default across text, batches, binary calls, and uploads. **Action required:** set `maskNotFound: false` only if clients require explicit missing-path replies; this permits path enumeration. All transports retain development diagnostics. Four uploads per socket may await authorization, independently of private handler limits; excess starts return `TOO_MANY_UPLOADS`.
+
+- **Breaking:** Alarm scheduling and cancellation now return promises that must be awaited. Durable stores require the ordered-generation and retained-execution contract; `configureAlarm` rejects legacy topic-only stores. Upgrade the store and migrate existing rows with the runtime. Unhandled rejected mutations are no longer silent fire-and-forget writes. Reaching in-memory capacity now rejects with `ALARM_CAPACITY` instead of warning and dropping the schedule. Durable cancellation reads the current row first, so it also cancels a schedule another worker replaced.
 
 - **Offline hooks see a queued call's arguments as JSON values.**
   `beforeReplay`, `onReplayError`, `onConflict` and a custom `replay`
@@ -670,6 +366,222 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   frames.
 
 ### Fixed
+
+- Cron followers record observed schedule slots, preventing a mid-minute leadership change from repeating a minute job.
+
+- Document reconciliation configuration caps finite intervals at 2147483647 ms, preserving disabled and default values across generated channels.
+
+- Batched publication relays each event once when ordinary WebSocket clients require individual frames, preserves one watcher execution per event, and forwards compression options.
+
+- Dead-letter store declarations accept asynchronous backends and nullable capture IDs, while the built-in memory store retains synchronous return types.
+
+- Invalid RPC arguments consistently reject with INVALID_REQUEST and their original cause, without retaining pending requests or timeouts. Unsent requests capture JSON before connection status delivery.
+
+- Protocol advertisements precede parked RPCs and application connection hooks when the socket opens.
+
+- Smooth simulation ticks keep monotonic deadlines across callback work and catch up after timer delays, with at most eight ticks per callback. Idle rooms restart without old debt, and rewind history preserves distinct timestamps during catch-up.
+
+- New smooth entities are announced to peers even when they remain idle, including subscribers on other cluster instances. Repeated syncs do not repeat the announcement.
+
+- **Breaking:** The default `live.lock` now caps queued callers at 1000 per key and immediately releases timed-out queue nodes. Optional `maxExecutionMs` provides `ctx.lockSignal` cancellation without releasing mutual exclusion early; bounded-label metrics expose queue pressure and timeout events. **Action required:** handle `LOCK_QUEUE_FULL` under contention or configure `maxWaitersPerKey`; custom lock capacity remains configured on its instance. Timer delays above 2147483647 ms now reject at declaration.
+
+- Cron calendar matching in the system timezone now uses local date fields, preserving timezone changes and daylight-saving behavior while avoiding per-tick formatter allocation.
+
+- Source and IDE hook examples include `close` and `unsubscribe`, preserving subscription cleanup when copied into application hooks.
+
+- Smooth joins on non-owner cluster instances scope their initial snapshot to the subscriber's area of interest while retaining the full server shadow for later visibility changes.
+
+- Multiplayer room views restore their latest selection, locks and typing after rejoining, and hold sends throughout connection outages. Generated rooms combine restoration into one delta within the server's field limits. Retention is byte-bounded, offline releases override retained claims, and the final view leaving clears automatic restoration even during an outage.
+
+- Failed development module reloads restore aggregate window loaders and their boundary and slide timers, preserving autonomous window updates until the next successful reload.
+
+- Histogram integration guidance describes the extensions registry's fractional-second defaults and the explicit realtime range through 10 seconds.
+
+- The scaffold checks its Node prerequisite before resolving third-party dependencies, preserving the actionable upgrade message on older runtimes.
+
+- Importing the DevTools configuration API only mounts its overlay in explicit development mode. Accessible labels, duration units, telemetry messages and preview suffixes follow its presentation settings.
+
+- Forgetting a room member immediately removes its presence and cursor from connected peers, using the captured room platform for storage cleanup and owner succession when no erasure platform is configured. Bare and replay publications must confirm before erasure completes; failures remain retryable.
+
+- Failed smooth initialization releases a newly added wire subscription and empty topic record, while preserving live members, accepted resyncs, and concurrent joins.
+
+- Room departure, eviction, and user erasure remove cursor samples from connected peers. Cursor-only publishers are tracked through socket disconnect without requiring a room subscription; other tabs and cluster members retain their shared cursor until the identity leaves.
+
+- Clearing DevTools captures preserves pending RPC timing and records disconnect failures without payloads.
+
+- DevTools coalesces automatic status announcements over five seconds while confirming user actions immediately.
+
+- DevTools payload previews cut at grapheme boundaries within a bounded window, fall back to code points without `Intl.Segmenter`, never split a surrogate pair, and report omitted code units separately.
+
+- DevTools capture and payload-format toggles keep stable visible names that match their accessible names in both pressed states.
+
+- Aggregate privacy guidance explains that single-state and lifetime noise offsets persist across restarts and can be removed with one known true value.
+
+- PostgreSQL notification examples await startup before serving traffic and document dedicated-session budgets and ordered shutdown.
+
+- DevTools instrumentation requires an explicit development build signal, so production clients from bundlers without import.meta.env retain no DevTools histories.
+
+- Stream invalidation matches logical topics within the owning tenant. Broad unscoped patterns no longer reload another tenant, and disconnect removes only that scope's watchers.
+
+- Signal subscription setup safely ignores a native socket that closes during asynchronous connection initialization.
+
+- Stream unsubscribe and disconnect cleanup wait for pending subscribe hooks, preventing room presence, ownership, and enumeration from surviving a departed socket.
+
+- `live.public` preserves typed handler signatures and appears in generated `$live` declarations for JavaScript and TypeScript modules.
+  **Action required:** none; see [public RPC intent and module guards](README.md#per-module-auth).
+
+- The scaffold rejects Node versions below 22.12 before prompting, creating a project or installing dependencies.
+  **Action required:** upgrade to the [supported runtime](README.md#version-compatibility) before running the scaffold.
+
+- **Breaking:** Room actions cannot use the generated client member names `data`, `presence`, `cursors`, `owner` or `rooms`, even when an optional surface is disabled. Declaration errors now identify the action to rename. **Action required:** rename any action using one of these names before upgrading.
+
+- `realtime()`, generated WebSocket hooks and README examples include stream and connection cleanup exports. The Vite plugin warns once when a routing hook omits `unsubscribe` or `close`, explaining the retained state.
+
+- Manual setup now runs a dependency-free shared counter with complete connection hooks, local-only identity, two-tab checks and restart instructions.
+
+- Clarify that stream subscriptions also pass through adapter authorization and connection limits before loading data or joining a room.
+
+- Room subscriptions release only the membership references they acquired, preserving other connections after capacity refusal, presence errors, or failed initialization.
+
+- Cron ticks align to wall-clock boundaries, avoid duplicate minutes and seconds under timer drift or clock rollback, and coalesce missed slots after a pause.
+
+- Alarm capacity and invalid-deadline refusals reject with structured `ALARM_CAPACITY` and `VALIDATION` errors through the returned promise in memory and durable modes, preserving acknowledged schedules.
+
+- Durable idempotency duplicates wait for their original result; bounded retryable responses preserve offline mutations and retry with backoff instead of entering conflict handling.
+
+- The in-process idempotency store protects accepted results and partitions admission by tenant, reserving capacity for small tenants and counting running handlers. **Action required:** handle retryable `IDEMPOTENCY_CAPACITY` when tenant or process capacity is exhausted; handlers have not run. The default limits are 1,000 per tenant and 10,000 total, with the final 1,000 reserved for tenants below 100 entries. Without a tenant resolver the whole store is available.
+
+- Idempotency erasure remains effective for long-running handlers and duplicate waiters after the recent-tombstone sweep, while fresh calls outside the grace window cache normally.
+
+- Durable alarm claims retain their execution until successful completion. Failed and interrupted executions stay inspectable for explicit retry, preserving their generation and effect idempotency key without overwriting newer schedules. **Action required:** upgrade custom stores to the full retained-execution contract and enable `due()` polling for explicit retries; see the [0.6 upgrade guide](docs/0.6-upgrade.md). The `alarm.execution.failed` event now carries operational `errorClass`/`durable` fields, without raw handler errors or topic identifiers; update diagnostic consumers.
+
+- Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.
+
+- Framework signals, room membership and multiplayer events, smooth and document updates, and automatic stream publishes declare an unsequenced delivery policy so multi-worker adapters accept them. Application publish options and replay-assigned sequences retain their existing meaning.
+
+- Apply module guards to every room stream, room-list RPC and room action in `createTestEnv`, matching the generated registry. Tests with guarded room modules now enforce those guards.
+
+- Server introspection declares the adapter version tuple; packed-consumer checks preserve startup version resolution and external runtime imports in SSR builds.
+
+- Run the installed native preflight before generated scaffold build verification, publish the Linux libc floor, and verify the minimum Node 22.12 build profile on Ubuntu 24.04.
+
+- Vite registry updates stay inside the configured live directory, serialize with startup, and contain asynchronous reload failures. Nested worktree hooks no longer inherit the parent registry.
+
+- Idempotency TTLs reject fractions, NaN, and infinity during registration so in-memory and durable stores share the same non-negative integer seconds contract. Zero still skips cache writes.
+
+- Upload cleanup checks entry ownership so a canceled request cannot remove a newer upload reusing its stream ID or release its capacity.
+
+- Shutdown reports whether tracked work drained or timed out, with remaining work and elapsed time available before teardown and in the hook result.
+
+- Aggregate privacy controls are documented as cohort suppression and keyed statistical noise, without a differential privacy guarantee or enforced privacy budget.
+
+- Circuit breaker wrappers honor the extensions guard and recovery probes, preserve handler errors for failure tracking, and return actionable availability messages while recording bounded operator diagnostics.
+
+- Redis, Postgres, and idempotency integration examples use the extensions package exports and factory names.
+
+- README entry links now describe the reader action for documentation, tutorial, and demo.
+
+- Documented erasure-hook user hashes as pseudonymous identifiers with access and retention requirements.
+
+- Clarified that tenant prefixes and logical topics share the transport topic-length budget.
+
+- Errors from connection hooks are reported without stopping offline replay or other Svelte store subscribers, while retaining the config object as the callback receiver.
+
+- Reconnect snapshots, replay responses, buffered events, and non-array pagination responses update the authoritative stream state and optimistic display together, so settling a mutation cannot restore stale data.
+
+- A server event with a null key confirms only the matching optimistic mutation, preserving unrelated function-based updates.
+
+- Offline persistence orders writes and deletes for each stored key, so a delayed write cannot restore a settled mutation or replace a newer upload checkpoint.
+
+- Smooth configuration types accept the existing `snapshot` and
+  `snapshotDebounceMs` options for cluster handoff.
+
+- Derived streams serialize asynchronous recomputations, discard results invalidated by newer source events, and stop pending work when a dynamic stream closes or its module reloads.
+
+- IndexedDB persistence reopens closed connections and bounds database opens and restore scans to five seconds, allowing offline replay to continue when browser storage hangs. Storage warnings distinguish failed writes from failed deletions.
+
+- The scaffold exits with an actionable error when piped input omits a project
+  name or template, instead of starting an unusable prompt and exiting 13.
+
+- DevTools has a visible launcher, a named region, and restores focus after Close or Escape.
+
+- DevTools tabs, stream expanders, and capture toggles expose keyboard and assistive-technology state.
+
+- DevTools preserves focused controls and stream rows during telemetry refreshes.
+
+- DevTools fits small viewports and supports clamped pointer movement, keyboard movement, and corner docking.
+
+- DevTools uses shared host-overridable color tokens with a contrast-tested dark theme and forced-color support.
+
+- DevTools text meets AA contrast and keyboard focus has a visible, unclipped indicator.
+
+- Long DevTools paths, topics, errors, and channel identifiers wrap within the panel.
+
+- DevTools renders every retained RPC history entry, including the oldest entries in its 50-record ring.
+
+- DevTools explains prediction recovery and gives actionable instructions in empty views.
+
+- DevTools shows the bound connection state, transition age, stable failure metadata, and recovery guidance.
+
+- DevTools announces connection, error, capture, and clear transitions through one polite status region.
+
+- Cleared DevTools stream events can be restored for 30 seconds while new events continue arriving.
+
+- DevTools stream capture starts paused; disconnect and Clear captured data purge retained payloads and undo state and disable unsafe capture.
+
+- Managed streams retain adapter subscription ownership across pending requests and let the adapter send the final unsubscribe once, including when another consumer shares the topic.
+
+- DevTools keeps translated opening focus reliable and masks Smooth identifiers until unsafe payload capture is enabled.
+
+- Keyed streams consistently ignore rows without their key and warn in development. The max item count now applies to snapshots, hydration, pagination, and live additions.
+
+- Dynamic derived subscriptions recheck scope after asynchronous admission and initial responses, and drain ownership even when session or tenant lookup fails.
+
+- A revoked derived loader cannot return stale initial data or roll back a newer subscription for the same connection and topic.
+
+- Derived authorization checks reuse an internal identity context and preserve detached recomputation contexts, avoiding per-subscriber and per-update connection-view allocation.
+
+- Every README code fence has compiled or explicitly scoped coverage; runnable examples execute against the packed npm package, and documented server symbols have matching declarations.
+
+- Erasure rejects incomplete in-memory and document cleanup after attempting the remaining surfaces, and reports bounded operator diagnostics without private failure payloads.
+
+- Hook validation checks JavaScript and TypeScript runtime exports, avoiding false warnings for handler aliases and missing warnings for comments or type-only exports. Scaffolds use a direct message re-export.
+
+- Generated counter examples announce connection, count and error changes, offer a connection retry, and handle failed increments with labelled keyboard controls. Their Chromium accessibility checks run in the pull request verification lane.
+
+- CLI prompts use Clack 1.8 while preserving the displayed default project name, validation, cancellation, and template selection behavior.
+
+- Changing the offline storage key or store switches queue ownership, cancels former callers, restores the new scope, and keeps late restore/replay work from writing to another account. Reconfiguring persistence retries failed scans.
+
+- Offline restore reserves sequence numbers with a keys-only scan and skips unreadable values without disabling other persisted mutations. `offlinePersistence()` exposes storage health, unreadable row counts, and failed queued writes.
+
+- Offline replay keeps mutations queued by a replay callback and never sends calls that callback-driven overflow already evicted.
+
+- Unsent RPC frames remain owned by their pending requests, so disconnect or timeout rejection cannot leave a frame that sends after reconnect. Initial calls wait through failed connection attempts, including batches and binary RPCs.
+
+- Presence and room-owner erasure now report unconfirmed Redis cleanup, retain bounded retry state, and remove identity fields idempotently across join and disconnect races.
+
+- Added `clearOffline()` for verified local queue/checkpoint erasure and pending-call cancellation. Persisted mutations expire after seven days by default; IndexedDB cleans expired readable rows across accounts when opened, with configurable finite retention. **Action required:** choose `offline.retentionMs` if your app needs a different window; await [offline erasure](README.md#durable-persistence-survive-a-reload) during logout.
+
+- Active offline retention checks expiry atomically before deleting, preserving fresh rows from another tab. Shared custom stores can implement `deleteExpired` for the same guarantee; rows without timestamps remain available for explicit erasure.
+
+- Aggregate erasure requires an explicit policy. `forget: 'reset'` clears pending output and held privacy values and prevents late snapshots from restoring erased data; `forget: 'retain'` preserves declared non-personal state while removing contributor identities. Missing policies report `FORGET_INCOMPLETE` without disturbing hydration or timers. **Action required:** declare a policy on every aggregate used with `live.forget`; use `retain` only when reducer state, snapshots and outputs contain no personal data.
+
+- Stream subscriptions split by the shared 50-call limit and a conservative byte budget. Oversized incoming batches reject every affected request immediately; complex arguments serialize only when sent.
+
+- Mapped streams use Svelte derived stores for lazy activation and shared teardown; repeated cleanup no longer disconnects another consumer.
+
+- Public RPC exports register in the generated server registry, matching their generated client callable paths.
+
+- Reconnect deltas retain authoritative rows that overlap optimistic creates.
+
+- Diagnostics use the shared `lantean/diagnostic` identity and deliver to the same process-wide event sinks as the adapter.
+
+- Stream cleanup is idempotent, canceled detaches preserve later resume grace, and queued reconnects discard replay cursors that age past their trust bound before the socket opens.
+
+- Skip attach-window frames already included in explicit latest/set replay responses while preserving live changes beyond the replay read.
+
+- Preserve live platform trace and request correlation when reactive publishes pass through a cluster bus.
 
 <a id="scaffolder-sveltekit-2-pin"></a>
 
@@ -1174,6 +1086,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   room's reactions stream so `__reactions` is reachable in tests at all.
 
 ### Security
+
+- Dynamic derived outputs isolate caller identities and recompute from current subscribers, preventing departed privileged contexts from serving other callers.
 
 - **DevTools retains metadata only unless payload capture is explicitly
   enabled.** RPC and volatile arguments, RPC results, stream payloads, stream
