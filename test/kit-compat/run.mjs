@@ -286,4 +286,3 @@ try {
 		console.log('Report: ' + reportPath);
 	}
 }
-

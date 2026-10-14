@@ -219,4 +219,3 @@ describe('streamed devtools bootstrap', () => {
   expect(result.p.load(result.p.resolveId('/@svelte-realtime-devtools'))).toBe('');
  });
 });
-
