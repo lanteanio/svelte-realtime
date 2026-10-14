@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Live handlers register in the correct Vite SSR environment during SvelteKit 3 builds, development, and hot reloads. Client imports continue to generate WebSocket stubs.
 - Overlapping live-module changes keep handlers registered, including Windows hot reloads.
+- Newly added live files register during SvelteKit 3 development with wrapped adapters and configurations without an inline adapter.
 - The Vite plugin no longer declares the unsupported transformIndexHtml hook. Development tools load through a Vite module and work with streamed HTML responses.
 
 ## [0.5.13] - 2026-10-10

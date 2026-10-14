@@ -51,6 +51,8 @@ Mixed-version installs are rejected at install time with a peer-dep warning.
 
 SvelteKit 2 and 3 are supported. The scaffolder uses `sv@1.1.1` to create a SvelteKit 3 project and requires Node.js 22.17+ on 22.x, or Node.js 24+. For manual setup, run `npx sv@1.1.1 create my-app`, then `cd my-app` and `npm install`. Existing SvelteKit 2 projects can keep their configuration.
 
+In SvelteKit 3 development, live modules share the server environment used by SvelteKit and the WebSocket plugin. Adapter wrappers and development configurations without an inline adapter use the same loading path.
+
 ### Step 1: Install everything
 
 ```bash

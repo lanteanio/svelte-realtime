@@ -9,7 +9,7 @@ npm ci --prefix test/fixtures/kit2
 npm ci --prefix test/fixtures/kit3
 ```
 
-Run all six browser and WebSocket combinations in sequence:
+Run all eight browser and WebSocket combinations in sequence:
 
 ```sh
 npm run test:kit
@@ -24,6 +24,8 @@ node test/kit-compat/run.mjs --kit 3 --mode production
 node test/kit-compat/run.mjs --kit 3 --mode dev --hmr
 node test/kit-compat/run.mjs --kit 2 --mode dev --no-devtools
 node test/kit-compat/run.mjs --kit 3 --mode dev --no-devtools
+node test/kit-compat/run.mjs --kit 3 --mode dev --hmr --adapter wrapped
+node test/kit-compat/run.mjs --kit 3 --mode dev --hmr --adapter none
 ```
 
 The runner uses each fixture's own Vite binary and an OS-assigned port.
@@ -38,7 +40,11 @@ initialization with the harmless value `fixture-secret`.
 Devtools checks require the runtime object and overlay to load in development.
 Production and `--no-devtools` runs require both to be absent. `--hmr` replaces a
 handler, removes another, and checks both RPC results and live store delivery.
-The edited source is restored byte for byte even on failure. Run only one
+A route-only edit then verifies the updated HTTP response, fresh WebSocket RPC,
+and matching stores in both pages. Adding and removing a live file must update
+the RPC registry and preserve shared HTTP and WebSocket state. Kit 3 development also covers a renamed
+adapter and a configuration without an inline adapter.
+The edited sources are restored byte for byte even on failure. Run only one
 compatibility command at a time per fixture.
 
 Each run writes named pass/fail checks and captured server output to

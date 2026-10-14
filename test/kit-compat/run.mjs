@@ -22,14 +22,17 @@ assert.ok(['dev', 'production'].includes(mode), '--mode must be dev or productio
 const hmr = args.includes('--hmr');
 assert.ok(!hmr || mode === 'dev', '--hmr requires --mode dev');
 const devtools = !args.includes('--no-devtools');
+const adapterMode = option('--adapter', 'default');
+assert.ok(['default', 'wrapped', 'none'].includes(adapterMode), 'Unknown adapter mode');
+assert.ok(adapterMode === 'default' || (kit === '3' && mode === 'dev'), 'Adapter variants require Kit 3 dev');
 const fixture = path.join(root, 'test', 'fixtures', 'kit' + kit);
 const requireFixture = createRequire(path.join(fixture, 'package.json'));
 const { WebSocket } = requireFixture('ws');
 const vite = path.join(fixture, 'node_modules', 'vite', 'bin', 'vite.js');
 const reportPath = path.resolve(option('--report', path.join(root, 'test-results',
 	'kit-compat-' + kit + '-' + mode + (devtools ? '' : '-no-devtools') + '.json')));
-const report = { kit, mode, devtools, hmr, checks: [] };
-const env = { ...process.env, KIT_COMPAT_SECRET: 'fixture-secret', KIT_COMPAT_DEVTOOLS: String(devtools) };
+const report = { kit, mode, devtools, hmr, adapterMode, checks: [] };
+const env = { ...process.env, KIT_COMPAT_SECRET: 'fixture-secret', KIT_COMPAT_DEVTOOLS: String(devtools), KIT_COMPAT_ADAPTER: adapterMode };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 let output = '';
@@ -37,6 +40,10 @@ let child;
 let browser;
 let socket;
 let originalSource;
+let originalRoute;
+const routeFile = path.join(fixture, 'src/routes/state/+server.js');
+const addedFile = path.join(fixture, 'src/live/extra.js');
+let ownsAddedFile = false;
 const liveFile = path.join(fixture, 'src', 'live', 'counter.js');
 
 async function check(name, fn) {
@@ -115,7 +122,7 @@ function rpc(name, args = []) {
 		socket.on('message', message);
 		socket.on('error', fail);
 		socket.on('close', closed);
-		socket.send(JSON.stringify({ rpc: 'counter/' + name, id, args }));
+		socket.send(JSON.stringify({ rpc: name.includes('/') ? name : 'counter/' + name, id, args }));
 	});
 }
 
@@ -252,6 +259,89 @@ try {
 			assert.deepEqual(await after.json(), { count });
 		});
 	}
+	if (hmr) {
+		await check('route-only HMR shares HTTP and WebSocket state', async () => {
+			originalRoute = await readFile(routeFile);
+			const route = originalRoute.toString('utf8');
+			const anchor = 'Response.json({ count: state.count })';
+			assert.equal(route.split(anchor).length, 2, 'Route source anchor must occur once');
+			const changed = route.replace(anchor, "Response.json({ count: state.count }, { headers: { 'x-route-version': 'updated' } })");
+			await writeFile(routeFile, changed);
+			assert.notEqual(hash(await readFile(routeFile)), hash(originalRoute), 'Route edit reached disk');
+			const deadline = Date.now() + 15000;
+			let response;
+			while (Date.now() < deadline) {
+				response = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
+				if (response.headers.get('x-route-version') === 'updated') break;
+				await response.arrayBuffer();
+				await pause(100);
+			}
+			assert.equal(response.headers.get('x-route-version'), 'updated', 'Route HMR executed');
+			assert.equal(response.status, 200);
+			await response.arrayBuffer();
+			// A fresh socket must see the current registry even after route reloads.
+			await connectSocket(origin);
+			const echoed = await rpc('echo', ['route-reload']);
+			assert.equal(echoed.ok, true, JSON.stringify(echoed));
+			assert.deepEqual(echoed.data, { value: 'route-reload', token: 'fixture-secret', label: 'updated' });
+			const baselineResponse = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
+			assert.equal(baselineResponse.status, 200);
+			const baseline = (await baselineResponse.json()).count;
+			assert.equal(typeof baseline, 'number');
+			for (const page of pages) {
+				await expect(page.getByTestId('counter')).toHaveText(String(baseline));
+				await page.waitForFunction(() => window.compat);
+			}
+			const count = await pages[0].evaluate(() => window.compat.increment(5));
+			assert.equal(count, baseline + 5);
+			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(count));
+			const after = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
+			assert.equal(after.status, 200);
+			assert.deepEqual(await after.json(), { count });
+		});
+	}
+	if (hmr) {
+		async function waitForRpc(name, accepts) {
+			const deadline = Date.now() + 15000;
+			let result;
+			while (Date.now() < deadline) {
+				try {
+					if (socket.readyState !== WebSocket.OPEN) await connectSocket(origin);
+					result = await rpc(name);
+					if (accepts(result)) return result;
+				} catch (error) { if (socket.readyState === WebSocket.OPEN) throw error; }
+				await pause(100);
+			}
+			throw new Error('RPC did not reach expected state: ' + name + ' ' + JSON.stringify(result));
+		}
+		async function sharedStores() {
+			const response = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
+			assert.equal(response.status, 200);
+			const baseline = (await response.json()).count;
+			assert.equal(typeof baseline, 'number');
+			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(baseline));
+			const count = await pages[0].evaluate(() => window.compat.increment(1));
+			assert.equal(count, baseline + 1);
+			for (const page of pages) await expect(page.getByTestId('counter')).toHaveText(String(count));
+			const after = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
+			assert.equal(after.status, 200);
+			assert.deepEqual(await after.json(), { count });
+			return count;
+		}
+		await check('new live files share HTTP and WebSocket state', async () => {
+			await assert.rejects(readFile(addedFile), { code: 'ENOENT' });
+			ownsAddedFile = true;
+			await writeFile(addedFile, "import { live } from 'svelte-realtime/server';\nimport { state } from '../lib/server/state.js';\nexport const read = live(() => state.count);\n");
+			await waitForRpc('extra/read', result => result.ok === true);
+			const count = await sharedStores();
+			assert.equal((await rpc('extra/read')).data, count);
+		});
+		await check('removed live files unregister without splitting state', async () => {
+			await unlink(addedFile);
+			await waitForRpc('extra/read', result => result.ok === false && result.code === 'NOT_FOUND');
+			await sharedStores();
+		});
+	}
 	await check('browser has no runtime errors', () => assert.deepEqual(pageErrors, []));
 	await check('no unsupported HTML hook warning', () => {
 		assert.doesNotMatch(output, /following plugins[\s\S]{0,500}transformIndexHtml/i);
@@ -279,6 +369,13 @@ try {
 			});
 			await writeFile(liveFile, originalSource);
 			assert.equal(hash(await readFile(liveFile)), hash(originalSource), 'HMR source restored byte for byte');
+		}
+		if (originalRoute) {
+			await writeFile(routeFile, originalRoute);
+			assert.equal(hash(await readFile(routeFile)), hash(originalRoute), 'Route source restored byte for byte');
+		}
+		if (ownsAddedFile) {
+			await unlink(addedFile).catch(error => { if (error.code !== 'ENOENT') throw error; });
 		}
 		report.output = output;
 		await mkdir(path.dirname(reportPath), { recursive: true });

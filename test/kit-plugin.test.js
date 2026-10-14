@@ -24,7 +24,7 @@ function server(modern = true) {
  const runtime = { _prepareHmr: vi.fn(() => ({})), _restoreHmr: vi.fn() };
  const load = vi.fn(async id => ['svelte-realtime/server', '/@svelte-realtime-server'].includes(id) ? runtime : {});
  return {
-  config: { base: '/', plugins: modern ? [{ api: { options: { adapter: { name: 'adapter-uws' } } } }] : [] },
+  config: { base: '/', plugins: modern ? [{ name: 'vite-plugin-sveltekit-setup', api: { options: { paths: {}, adapter: { name: 'adapter-uws' } } } }] : [] },
   middlewares: { use: vi.fn() },
   httpServer: { once: (name, fn) => { listeners[name] = fn; } },
   watcher: { on: vi.fn() },
@@ -87,6 +87,35 @@ describe('SvelteKit build environments', () => {
 });
 
 describe('SvelteKit development module loading', () => {
+ it.each(['wrapped', 'none'])('uses the Kit 3 graph with a %s adapter configuration', async adapterMode => {
+  const p = plugin();
+  const s = server();
+  const options = s.config.plugins[0].api.options;
+  if (adapterMode === 'wrapped') options.adapter.name = 'custom-adapter';
+  else delete options.adapter;
+  p.configureServer(s);
+  await s.listeners.listening();
+  expect(s.load).toHaveBeenCalledWith('/@svelte-realtime-registry');
+  await p.handleHotUpdate({ file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s });
+  expect(s.graph.invalidateModule).toHaveBeenCalledWith(s.changed);
+  expect(s.load).toHaveBeenCalledWith('/@svelte-realtime-server');
+  expect(s.runtime._prepareHmr).toHaveBeenCalledExactlyOnceWith();
+  expect(s.ssrLoadModule).not.toHaveBeenCalled();
+ });
+ it('keeps the Kit 2 loader when only an adapter or an unrelated plugin has paths', async () => {
+  const p = plugin();
+  const s = server(false);
+  s.config.plugins = [
+   { name: 'vite-plugin-sveltekit-setup', api: { options: { kit: { paths: {} }, adapter: { name: 'adapter-uws' } } } },
+   { name: 'custom-plugin', api: { options: { paths: {} } } }
+  ];
+  s.environments.ssr.runner.import = vi.fn(() => { throw new Error('Wrong modern graph'); });
+  p.configureServer(s);
+  await s.listeners.listening();
+  await p.handleHotUpdate({ file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s });
+  expect(s.ssrLoadModule).toHaveBeenCalledWith('svelte-realtime/server');
+  expect(s.environments.ssr.runner.import).not.toHaveBeenCalled();
+ });
  for (const modern of [false, true]) {
   it('loads the startup registry using the ' + (modern ? 'environment runner' : 'Kit 2 loader'), async () => {
    const p = plugin();

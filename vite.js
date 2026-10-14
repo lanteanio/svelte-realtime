@@ -943,10 +943,12 @@ function _externalizeRealtime(options) {
 	}
 }
 
-/** Kit 3 exposes its adapter on the SvelteKit Vite plugin. */
+/** Kit 3 exposes flattened options on its setup plugin, independent of the adapter. */
 function _serverEnvironment(server) {
-	const inlineAdapter = server.config?.plugins?.some(plugin => plugin?.api?.options?.adapter?.name === 'adapter-uws');
-	return inlineAdapter ? server.environments.ssr : null;
+	const modernKit = server.config?.plugins?.some(plugin =>
+		plugin?.name === 'vite-plugin-sveltekit-setup' && plugin.api?.options?.paths
+	);
+	return modernKit ? server.environments.ssr : null;
 }
 
 function _loadServerModule(server, id) {
