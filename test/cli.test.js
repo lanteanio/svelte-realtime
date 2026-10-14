@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve, dirname } from 'node:path';
-import { parseArgs, detectAgent } from '../cli-utils.js';
+import { parseArgs, detectAgent, supportsScaffoldNode } from '../cli-utils.js';
 
 const _here = dirname(fileURLToPath(import.meta.url));
 const _cliSrc = readFileSync(resolve(_here, '..', 'cli.js'), 'utf8');
@@ -247,15 +247,22 @@ describe('run() helper', () => {
 		expect(_cliSrc).toMatch(/run\(\s*bin\('npx'\)\s*,\s*\[\s*'-y'\s*,\s*SV_SPEC\s*,\s*'create'\s*,\s*name\s*,/);
 	});
 
-	it('sv create runs a pinned sv that creates a SvelteKit 2 project', () => {
-		// An unpinned sv follows sv's latest release; sv 1 creates SvelteKit 3
-		// projects, whose @sveltejs/kit ^3 the adapter's peer range refuses.
+	it('sv create runs a pinned SvelteKit 3 scaffold', () => {
 		const m = /const SV_SPEC = '([^']+)'/.exec(_cliSrc);
-		expect(m && m[1]).toBe('sv@0.17.1');
+		expect(m && m[1]).toBe('sv@1.1.1');
 	});
 
 	it('bin() helper is defined and resolves package-manager binaries to .cmd on Windows', () => {
 		expect(_cliSrc).toMatch(/function\s+bin\s*\(/);
 		expect(_cliSrc).toMatch(/IS_WIN\s*&&\s*name\s*!==\s*'git'/);
+	});
+});
+
+describe('scaffold Node support', () => {
+	it.each(['20.20.0', '22.0.0', '22.16.9', '23.11.0'])('rejects Node %s before creating a project', version => {
+		expect(supportsScaffoldNode(version)).toBe(false);
+	});
+	it.each(['22.17.0', '22.18.0', '24.0.0'])('accepts Node %s', version => {
+		expect(supportsScaffoldNode(version)).toBe(true);
 	});
 });

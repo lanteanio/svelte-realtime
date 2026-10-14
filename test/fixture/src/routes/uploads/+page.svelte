@@ -23,8 +23,8 @@
 				lastResult = JSON.stringify(r);
 				return r;
 			},
-			multiChunk: async (size, chunkSize) => {
-				configure({ upload: { chunkSize } });
+			multiChunk: async (size, frameSize) => {
+				configure({ upload: { frameSize } });
 				const r = await echoBytes(makeBuffer(size, 1), 'multi');
 				lastResult = JSON.stringify(r);
 				return r;

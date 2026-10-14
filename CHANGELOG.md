@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-10-14
+
+### Added
+
+- SvelteKit 3 support alongside SvelteKit 2. Requires svelte-adapter-uws 0.5.11 or later on the 0.5 line.
+
+### Changed
+
+- New projects use sv 1.1.1 and SvelteKit 3, with adapter configuration in vite.config.ts. The scaffolder installs compatible stable package versions and uWebSockets.js 20.69.0.
+
+### Fixed
+
+- Live handlers register in the correct Vite SSR environment during SvelteKit 3 builds, development, and hot reloads. Client imports continue to generate WebSocket stubs.
+- Overlapping live-module changes keep handlers registered, including Windows hot reloads.
+- The Vite plugin no longer declares the unsupported transformIndexHtml hook. Development tools load through a Vite module and work with streamed HTML responses.
+
 ## [0.5.13] - 2026-10-10
 
 ### Fixed

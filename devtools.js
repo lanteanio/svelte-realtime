@@ -1,6 +1,6 @@
 // @ts-check
 // DevTools overlay for svelte-realtime (dev-mode only)
-// Injected by the Vite plugin via transformIndexHtml
+// Loaded by the Vite plugin in development
 
 /** @type {HTMLElement | null} */
 let panel = null;

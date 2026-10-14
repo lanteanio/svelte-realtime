@@ -18,9 +18,10 @@ test('single-chunk upload round-trips byte count and args', async ({ page }) => 
 	expect(r.lastByte).toBe(64);
 });
 
-test('multi-chunk upload with explicit small chunkSize sends sequential frames', async ({ page }) => {
-	const r = await page.evaluate(() => window.__test.multiChunk(20, 4));
-	// 20 bytes / 4-byte chunks = 5 chunks
+test('multi-chunk upload with explicit small frameSize sends sequential frames', async ({ page }) => {
+	const r = await page.evaluate(() => window.__test.multiChunk(20, 60));
+	// A 60-byte frame reserves 12 header bytes and 44 RPC metadata bytes.
+	// The remaining 4 payload bytes produce five chunks.
 	expect(r).toMatchObject({ label: 'multi', bytes: 20, chunks: 5 });
 	expect(r.firstByte).toBe(1);
 	expect(r.lastByte).toBe(20);

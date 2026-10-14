@@ -1963,12 +1963,11 @@ describe('devtools injection', () => {
 		expect(middlewares.length).toBeGreaterThan(0);
 	});
 
-	it('transformIndexHtml returns empty (devtools handled via middleware)', () => {
+	it('does not register the unsupported HTML hook', () => {
 		const plugin = svelteRealtime({ dir: 'src/live' });
 		plugin.configResolved({ root: testRoot, build: {}, command: 'serve' });
 
-		const result = plugin.transformIndexHtml();
-		expect(result).toEqual([]);
+		expect(plugin).not.toHaveProperty('transformIndexHtml');
 	});
 
 	it('does not inject devtools middleware when disabled', () => {
@@ -2444,7 +2443,7 @@ export const send = live(async (ctx, text) => {});
 		const chatFile = resolve(liveDir, 'chat.js');
 
 		const ssrMod = { id: chatFile };
-		server.modulesByFile.set(chatFile, new Set([ssrMod]));
+		server.modulesByFile.set(chatFile.replaceAll('\\', '/'), new Set([ssrMod]));
 
 		await plugin.handleHotUpdate({ file: chatFile, server });
 

@@ -4,7 +4,7 @@ import { execFileSync } from 'child_process';
 import { writeFileSync, existsSync, mkdirSync } from 'fs';
 import { resolve, join } from 'path';
 import * as p from '@clack/prompts';
-import { detectAgent, parseArgs, VALID_NAME_RE } from './cli-utils.js';
+import { detectAgent, parseArgs, supportsScaffoldNode, VALID_NAME_RE } from './cli-utils.js';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -21,11 +21,8 @@ function bin(name) {
 
 const DEMO_REPO = 'https://github.com/lanteanio/svelte-realtime-demo.git';
 
-// The last sv that creates a SvelteKit 2 project. sv 1 creates SvelteKit 3
-// projects, which svelte-adapter-uws and svelte-realtime do not support:
-// their peer range stops the install, and the adapter uses builder APIs
-// SvelteKit 3 removed.
-const SV_SPEC = 'sv@0.17.1';
+// Keep generated configuration on the supported SvelteKit 3 scaffold.
+const SV_SPEC = 'sv@1.1.1';
 
 // The scaffolded upgrade() hook is intentionally permissive so the first
 // `npm run dev` works without any identity wiring: every connection gets a
@@ -158,41 +155,32 @@ if (template === 'demo') {
 	process.exit(0);
 }
 
+if (!supportsScaffoldNode(process.versions.node)) {
+	p.cancel('Creating a SvelteKit 3 project requires Node.js 22.17+ on 22.x, or Node.js 24+. Upgrade Node.js and try again.');
+	process.exit(1);
+}
+
 p.log.step('Creating SvelteKit project');
 run(bin('npx'), ['-y', SV_SPEC, 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
 
 p.log.step('Installing dependencies');
 const add = agent === 'npm' ? 'install' : 'add';
-run(bin(agent), [add, 'svelte-adapter-uws', 'svelte-realtime'], dest);
-run(bin(agent), [add, 'uNetworking/uWebSockets.js#v20.60.0'], dest);
+run(bin(agent), [add, 'svelte-adapter-uws@^0.5.11', 'svelte-realtime@^0.5.14'], dest);
+run(bin(agent), [add, 'uNetworking/uWebSockets.js#v20.69.0'], dest);
 run(bin(agent), [add, '-D', 'ws'], dest);
 
 p.log.step('Configuring svelte-realtime');
 
 writeFileSync(
-	join(dest, 'svelte.config.js'),
-	`import adapter from 'svelte-adapter-uws';
-
-/** @type {import('@sveltejs/kit').Config} */
-const config = {
-\tkit: {
-\t\tadapter: adapter({ websocket: true })
-\t}
-};
-
-export default config;
-`
-);
-
-writeFileSync(
 	join(dest, 'vite.config.ts'),
 	`import { sveltekit } from '@sveltejs/kit/vite';
+import adapter from 'svelte-adapter-uws';
 import uws from 'svelte-adapter-uws/vite';
 import realtime from 'svelte-realtime/vite';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-\tplugins: [sveltekit(), uws(), realtime()]
+\tplugins: [sveltekit({ adapter: adapter({ websocket: true }) }), uws(), realtime()]
 });
 `
 );
@@ -275,6 +263,11 @@ function run(file, args, cwd) {
 	// on Node-internal handling of undefined env values.
 	const env = { ...process.env };
 	delete env.NODE_ENV;
+	// npm exec exports its selected package to children. A nested npx must
+	// select sv itself instead of trying to execute the package spec as a binary.
+	for (const key of Object.keys(env)) {
+		if (/^npm_config_(package|call)$/i.test(key)) delete env[key];
+	}
 	try {
 		execFileSync(file, args, {
 			cwd,

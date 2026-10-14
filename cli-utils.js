@@ -75,3 +75,12 @@ export function parseArgs(argv, opts) {
 
 	return { name, template };
 }
+
+/**
+ * Whether Node meets the requirements of the generated SvelteKit 3 project.
+ * @param {string} version
+ */
+export function supportsScaffoldNode(version) {
+	const [major, minor] = version.split('.').map(Number);
+	return major >= 24 || (major === 22 && minor >= 17);
+}

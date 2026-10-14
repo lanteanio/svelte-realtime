@@ -41,7 +41,7 @@ The three ecosystem packages move together. Bump them as a group:
 | `svelte-adapter-uws` | `svelte-realtime` | `svelte-adapter-uws-extensions` | Notes |
 |---|---|---|---|
 | `^0.4.x` | `^0.4.x` | `^0.4.x` | Legacy stable |
-| `^0.5.0` | `^0.5.0` | `^0.5.0` | Current. Node 22+ required. See `MIGRATION.md` if upgrading from 0.4. |
+| `^0.5.11` | `^0.5.14` | `^0.5.10` | Current. SvelteKit 2 or 3. Node 22+; Kit 3 requires Node 22.17+ and Svelte 5.57.1+. |
 
 Mixed-version installs are rejected at install time with a peer-dep warning.
 
@@ -49,25 +49,44 @@ Mixed-version installs are rejected at install time with a peer-dep warning.
 
 ## Manual setup
 
-Starting from a SvelteKit 2 project. If you do not have one yet, run `npx sv@0.17.1 create my-app && cd my-app && npm install` first. svelte-realtime and svelte-adapter-uws do not support SvelteKit 3 yet, and `sv` 1.0 and later create SvelteKit 3 projects.
+SvelteKit 2 and 3 are supported. The scaffolder uses `sv@1.1.1` to create a SvelteKit 3 project and requires Node.js 22.17+ on 22.x, or Node.js 24+. For manual setup, run `npx sv@1.1.1 create my-app`, then `cd my-app` and `npm install`. Existing SvelteKit 2 projects can keep their configuration.
 
 ### Step 1: Install everything
 
 ```bash
-npm install svelte-adapter-uws svelte-realtime
-npm install uNetworking/uWebSockets.js#v20.60.0
+npm install svelte-adapter-uws@^0.5.11 svelte-realtime@^0.5.14
+npm install uNetworking/uWebSockets.js#v20.69.0
 npm install -D ws
 ```
 
 What each package does:
-- `svelte-adapter-uws` (>=0.4.0) - the SvelteKit adapter that runs your app on uWebSockets.js with built-in WebSocket support
+- `svelte-adapter-uws` (>=0.5.11) - the SvelteKit adapter that runs your app on uWebSockets.js with built-in WebSocket support
 - `svelte-realtime` - this library (RPC + streams on top of the adapter)
 - `uWebSockets.js` - the native C++ HTTP/WebSocket server (installed from GitHub, not npm)
 - `ws` - dev dependency used by the adapter during `npm run dev` (not needed in production)
 
 ### Step 2: Configure the adapter
 
-Open `svelte.config.js` and replace the default adapter:
+For SvelteKit 3, set the adapter in your Vite configuration:
+
+```js
+// vite.config.js
+import { sveltekit } from '@sveltejs/kit/vite';
+import { defineConfig } from 'vite';
+import adapter from 'svelte-adapter-uws';
+import uws from 'svelte-adapter-uws/vite';
+import realtime from 'svelte-realtime/vite';
+
+export default defineConfig({
+  plugins: [
+    sveltekit({ adapter: adapter({ websocket: true }) }),
+    uws(),
+    realtime()
+  ]
+});
+```
+
+For SvelteKit 2, keep the adapter in `svelte.config.js`:
 
 ```js
 // svelte.config.js
@@ -82,10 +101,9 @@ export default {
 
 ### Step 3: Add the Vite plugins
 
-Open `vite.config.js` and add the adapter and realtime plugins:
+The SvelteKit 3 configuration above already includes all three plugins. For SvelteKit 2, add them to `vite.config.js`:
 
 ```js
-// vite.config.js
 import { sveltekit } from '@sveltejs/kit/vite';
 import uws from 'svelte-adapter-uws/vite';
 import realtime from 'svelte-realtime/vite';

@@ -7,6 +7,10 @@ const REGISTRY_ID = '\0live:__registry';
 // Public specifier user code (the injected hooks import) can reference; the
 // resolveId hook maps it to REGISTRY_ID.
 const REGISTRY_PUBLIC_ID = '/@svelte-realtime-registry';
+const DEVTOOLS_PUBLIC_ID = '/@svelte-realtime-devtools';
+const DEVTOOLS_ID = '\0live-devtools';
+const SERVER_PUBLIC_ID = '/@svelte-realtime-server';
+const SERVER_ID = '\0live-server';
 const LIVE_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\s*\(/g;
 const VALIDATED_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.validated\s*\(/g;
 const STREAM_EXPORT_RE = /export\s+const\s+(\w+)\s*=\s*live\.stream\s*\(/g;
@@ -678,6 +682,10 @@ export default function svelteRealtime(options) {
 		},
 
 		buildStart() {
+			// Kit 3 shares the plugin between client and SSR environments.
+			if (!isDev && !isSsr && this.environment?.name === 'ssr') {
+				this.emitFile({ type: 'chunk', id: REGISTRY_ID, fileName: '__live-registry.js' });
+			}
 			_fileCache.clear();
 				_codeCache.clear();
 				_warnedExports.clear();
@@ -693,7 +701,19 @@ export default function svelteRealtime(options) {
 			}
 		},
 
+		configEnvironment(name, config) {
+			if (name !== 'ssr') return;
+			const key = config.build?.rolldownOptions ? 'rolldownOptions' : 'rollupOptions';
+			const output = { external: config.build?.[key]?.external };
+			_externalizeRealtime(output);
+			// Vite 6 can share build options between environments. Return a new
+			// object so the SSR external list cannot leak into the client build.
+			return { build: { [key]: output } };
+		},
+
 		resolveId(id) {
+			if (id === DEVTOOLS_PUBLIC_ID || id === DEVTOOLS_ID) return DEVTOOLS_ID;
+			if (id === SERVER_PUBLIC_ID || id === SERVER_ID) return SERVER_ID;
 			if (id === REGISTRY_ID) return REGISTRY_ID;
 			if (id === REGISTRY_PUBLIC_ID) return REGISTRY_ID;
 			if (id.startsWith('$live/')) {
@@ -704,7 +724,11 @@ export default function svelteRealtime(options) {
 		},
 
 		load(id, loadOptions) {
-			const ssr = loadOptions?.ssr ?? isSsr;
+			const ssr = loadOptions?.ssr ?? (this.environment ? this.environment.config.consumer === 'server' : isSsr);
+			if (id === SERVER_ID) return "export * from 'svelte-realtime/server';";
+			if (id === DEVTOOLS_ID) {
+				return isDev && devtools ? "import { __devtools } from 'svelte-realtime/client';\nif (__devtools) window.__svelte_realtime_devtools = __devtools;\nimport('svelte-realtime/devtools');" : '';
+			}
 
 			// Registry module
 			if (id === REGISTRY_ID) {
@@ -765,7 +789,7 @@ export default function svelteRealtime(options) {
 			// Only the server (SSR) graph loads hooks.ws; gating on ssr keeps
 			// the server-side registry import out of any client bundle even if
 			// a client module ever pulled the hooks file in.
-			const ssr = options?.ssr ?? isSsr;
+			const ssr = options?.ssr ?? (this.environment ? this.environment.config.consumer === 'server' : isSsr);
 			if (!ssr) return null;
 			const clean = id.split('?')[0].split(sep).join('/');
 			// Scope to THIS project's src/hooks.ws.{js,ts,mjs} (root-anchored so a
@@ -800,44 +824,16 @@ export default function svelteRealtime(options) {
 				// and ws-handler resolve to the same Node module instance at runtime.
 				// Without this, Vite rewrites the import to a chunk-relative path,
 				// creating a separate module instance with its own registry Map.
-				const ext = config.build.rollupOptions.external;
-				const svelteRealtimeRe = /^svelte-realtime(\/.*)?$/;
-				if (Array.isArray(ext)) {
-					ext.push(svelteRealtimeRe);
-				} else if (typeof ext === 'string' || ext instanceof RegExp || typeof ext === 'function') {
-					config.build.rollupOptions.external = [ext, svelteRealtimeRe];
-				} else {
-					config.build.rollupOptions.external = [svelteRealtimeRe];
-				}
+				_externalizeRealtime(config.build.rollupOptions);
 			}
 		},
 
 		configureServer(server) {
-			// Inject devtools script into HTML responses (works with SvelteKit + traditional Vite)
 			if (devtools) {
-				const devtoolsScript = `<script type="module">
-import { __devtools } from 'svelte-realtime/client';
-if (__devtools) window.__svelte_realtime_devtools = __devtools;
-import('svelte-realtime/devtools');
-</script>`;
+				const base = server.config?.base || '/';
+				const script = '<script type="module" src="' + base + DEVTOOLS_PUBLIC_ID.slice(1) + '"></script>';
 				server.middlewares.use((_req, res, next) => {
-					const originalEnd = res.end;
-					/** @type {any} */
-					const _res = res;
-					_res.end = function (/** @type {any} */ chunk, /** @type {any} */ ...args) {
-						const contentType = res.getHeader('content-type');
-						if (typeof contentType === 'string' && contentType.includes('text/html') && chunk) {
-							const html = typeof chunk === 'string' ? chunk : chunk.toString();
-							if (html.includes('</body>')) {
-								chunk = html.replace('</body>', devtoolsScript + '</body>');
-								res.removeHeader('content-length');
-							} else if (html.includes('</head>')) {
-								chunk = html.replace('</head>', devtoolsScript + '</head>');
-								res.removeHeader('content-length');
-							}
-						}
-						return originalEnd.call(this, chunk, ...args);
-					};
+					_injectDevtools(res, script);
 					next();
 				});
 			}
@@ -852,16 +848,9 @@ import('svelte-realtime/devtools');
 				if (!existsSync(liveDir)) return;
 
 				try {
-					const code = _generateRegistry(liveDir, dir);
-					// Use a temporary virtual module to load the registry
-					const tempId = '/@svelte-realtime-registry';
-					server.moduleGraph.ensureEntryFromUrl(tempId);
-					await server.ssrLoadModule(tempId).catch(() => {
-						// Fallback: try to load modules individually
-						_loadRegistryDirect(server, liveDir, dir);
-					});
+					await _loadServerModule(server, REGISTRY_PUBLIC_ID);
 				} catch {
-					_loadRegistryDirect(server, liveDir, dir);
+					await _loadRegistryDirect(server, liveDir, dir);
 				}
 
 				// Pre-warm virtual modules to eliminate cold-start waterfall
@@ -898,7 +887,8 @@ import('svelte-realtime/devtools');
 		},
 
 		async handleHotUpdate({ file, server }) {
-			if (!file.startsWith(liveDir)) return;
+			file = resolve(file);
+			if (!file.startsWith(liveDir + sep)) return;
 			// The generated $types.d.ts must never re-enter this handler: the
 			// rewrite below would bump its mtime, produce the next change event
 			// and loop forever, full-reloading every connected client each time.
@@ -921,9 +911,10 @@ import('svelte-realtime/devtools');
 				.replace(/\.[jt]s$/, '');
 
 			// Server-side HMR: invalidate the changed module so Vite re-executes it
-			const ssrMods = server.moduleGraph.getModulesByFile(file);
+			const graph = _serverModuleGraph(server);
+			const ssrMods = graph.getModulesByFile(file.split(sep).join('/'));
 			if (ssrMods) {
-				for (const m of ssrMods) server.moduleGraph.invalidateModule(m);
+				for (const m of ssrMods) graph.invalidateModule(m);
 			}
 
 			// Re-register all server handlers
@@ -935,12 +926,100 @@ import('svelte-realtime/devtools');
 				server.moduleGraph.invalidateModule(mod);
 				return [mod];
 			}
-		},
-
-		transformIndexHtml() {
-			// Devtools injection handled via configureServer middleware (works with SvelteKit)
-			return [];
 		}
+	};
+}
+
+/** Keep the registry and WebSocket hooks on one runtime module instance. */
+function _externalizeRealtime(options) {
+	const external = options.external;
+	const realtime = /^svelte-realtime(\/.*)?$/;
+	if (typeof external === 'function') {
+		options.external = function (id, ...args) {
+			return realtime.test(id) || external.call(this, id, ...args);
+		};
+	} else {
+		options.external = [...(Array.isArray(external) ? external : external ? [external] : []), realtime];
+	}
+}
+
+/** Kit 3 exposes its adapter on the SvelteKit Vite plugin. */
+function _serverEnvironment(server) {
+	const inlineAdapter = server.config?.plugins?.some(plugin => plugin?.api?.options?.adapter?.name === 'adapter-uws');
+	return inlineAdapter ? server.environments.ssr : null;
+}
+
+function _loadServerModule(server, id) {
+	const environment = _serverEnvironment(server);
+	// Runner entry points are internalized. Import the runtime as a dependency
+	// so HMR clears the same instance that the live registry and hooks use.
+	const target = id === 'svelte-realtime/server' ? SERVER_PUBLIC_ID : id;
+	return environment ? environment.runner.import(target) : server.ssrLoadModule(id);
+}
+
+function _serverModuleGraph(server) {
+	return _serverEnvironment(server)?.moduleGraph ?? server.moduleGraph;
+}
+
+/** Insert once without buffering a streamed page or splitting UTF-8 characters. */
+function _injectDevtools(res, script) {
+	const write = res.write;
+	const end = res.end;
+	const writeHead = res.writeHead;
+	let pending = Buffer.alloc(0);
+	let injected = false;
+	let html;
+	const isHtml = () => html ??= String(res.getHeader('content-type') || '').includes('text/html') && !res.getHeader('content-encoding');
+	const removeLength = () => { if (!res.headersSent) res.removeHeader('content-length'); };
+	if (writeHead) res.writeHead = function (status, ...args) {
+		const index = typeof args[0] === 'string' ? 1 : 0;
+		const headers = args[index];
+		const entries = Array.isArray(headers)
+			? Array.from({ length: headers.length / 2 }, (_, i) => [headers[i * 2], headers[i * 2 + 1]])
+			: Object.entries(headers || {});
+		const type = entries.find(([key]) => key.toLowerCase() === 'content-type')?.[1] ?? res.getHeader('content-type');
+		const encoding = entries.find(([key]) => key.toLowerCase() === 'content-encoding')?.[1] ?? res.getHeader('content-encoding');
+		html = String(type || '').includes('text/html') && !encoding;
+		if (html) {
+			removeLength();
+			if (headers) {
+				const filtered = entries.filter(([key]) => key.toLowerCase() !== 'content-length');
+				args[index] = Array.isArray(headers) ? filtered.flat() : Object.fromEntries(filtered);
+			}
+		}
+		return writeHead.call(this, status, ...args);
+	};
+	const transform = (chunk, encoding, final) => {
+		const bytes = typeof chunk === 'string' ? Buffer.from(chunk, encoding) : Buffer.from(chunk || []);
+		const data = pending.length ? Buffer.concat([pending, bytes]) : bytes;
+		pending = Buffer.alloc(0);
+		const head = data.indexOf('</head>');
+		const body = data.indexOf('</body>');
+		const index = head >= 0 ? head : body;
+		if (index >= 0) {
+			injected = true;
+			return Buffer.concat([data.subarray(0, index), Buffer.from(script), data.subarray(index)]);
+		}
+		if (final) return data;
+		// Six trailing bytes are enough to retain a split closing tag.
+		const split = Math.max(0, data.length - 6);
+		pending = data.subarray(split);
+		return data.subarray(0, split);
+	};
+	if (write) res.write = function (chunk, encoding, callback) {
+		if (!isHtml() || injected) return write.apply(this, arguments);
+		removeLength();
+		if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+		const output = transform(chunk, encoding, false);
+		if (!output.length) { if (callback) queueMicrotask(callback); return true; }
+		return write.call(this, output, callback);
+	};
+	res.end = function (chunk, encoding, callback) {
+		if (!isHtml() || injected) return end.apply(this, arguments);
+		removeLength();
+		if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
+		if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+		return end.call(this, transform(chunk, encoding, true), callback);
 	};
 }
 
@@ -3078,17 +3157,31 @@ function _splitParams(str) {
  * @param {string} dir
  * @param {string} rel - Relative path of the changed file (for logging)
  */
+const _hmrQueues = new WeakMap();
 async function _hmrReloadRegistry(server, liveDir, dir, rel) {
+	// Keep clear and re-import atomic across overlapping filesystem events.
+	const previous = _hmrQueues.get(server) ?? Promise.resolve();
+	const reload = previous.catch(() => {}).then(() => _reloadRegistry(server, liveDir, dir, rel));
+	_hmrQueues.set(server, reload);
+	try {
+		await reload;
+	} finally {
+		if (_hmrQueues.get(server) === reload) _hmrQueues.delete(server);
+	}
+}
+
+async function _reloadRegistry(server, liveDir, dir, rel) {
 	// Invalidate the registry virtual module so Vite regenerates it
-	const registryMod = server.moduleGraph.getModuleById(REGISTRY_ID);
+	const graph = _serverModuleGraph(server);
+	const registryMod = graph.getModuleById(REGISTRY_ID);
 	if (registryMod) {
-		server.moduleGraph.invalidateModule(registryMod);
+		graph.invalidateModule(registryMod);
 	}
 
 	/** @type {any} */
 	let serverMod;
 	try {
-		serverMod = await server.ssrLoadModule('svelte-realtime/server');
+		serverMod = await _loadServerModule(server, 'svelte-realtime/server');
 	} catch {
 		console.error('[svelte-realtime] HMR failed: could not load svelte-realtime/server\n  See: https://svti.me/vite');
 		return;
@@ -3098,7 +3191,7 @@ async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 	const snap = serverMod._prepareHmr();
 
 	try {
-		await server.ssrLoadModule('/@svelte-realtime-registry');
+		await _loadServerModule(server, REGISTRY_PUBLIC_ID);
 		console.log(`[svelte-realtime] Hot-reloaded: ${dir}/${rel}`);
 	} catch (e) {
 		// Re-import failed - restore old handlers so the server keeps working
@@ -3117,7 +3210,7 @@ async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 async function _loadRegistryDirect(server, liveDir, dir) {
 	let serverMod;
 	try {
-		serverMod = await server.ssrLoadModule('svelte-realtime/server');
+		serverMod = await _loadServerModule(server, 'svelte-realtime/server');
 	} catch {
 		console.warn('[svelte-realtime] Could not load svelte-realtime/server for direct registration');
 		return;
@@ -3128,7 +3221,7 @@ async function _loadRegistryDirect(server, liveDir, dir) {
 
 	for (const filePath of files) {
 		try {
-			const mod = await server.ssrLoadModule(filePath);
+			const mod = await _loadServerModule(server, filePath);
 			const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
 
 			for (const [name, fn] of Object.entries(mod)) {
