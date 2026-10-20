@@ -333,7 +333,7 @@ describe('repeated live module updates', () => {
   await p.handleHotUpdate(update);
   expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
  });
- it('logs a failed live file event and retries the file on its next save', async () => {
+ it('logs a failed live file event and reloads the same write when it is reported again', async () => {
   const p = plugin();
   const s = server();
   s.runtime._prepareHmr.mockImplementationOnce(() => { throw new Error('runtime unavailable'); });
