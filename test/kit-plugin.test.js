@@ -304,6 +304,46 @@ describe('repeated live module updates', () => {
    expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
   } finally { error.mockRestore(); }
  });
+ it('lets a repeated event finish only after the reload it repeats', async () => {
+  const p = plugin();
+  const s = server(false);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  s.load.mockImplementation(async id => {
+   if (id === 'svelte-realtime/server') return s.runtime;
+   await gate;
+   return {};
+  });
+  const update = { file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s };
+  const first = p.handleHotUpdate(update);
+  let repeatDone = false;
+  const repeat = p.handleHotUpdate(update).then(result => { repeatDone = true; return result; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(repeatDone).toBe(false);
+  release();
+  expect(await repeat).toEqual(await first);
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(1);
+ });
+ it('never treats an unreadable live file as handled', async () => {
+  const p = plugin();
+  const s = server();
+  mkdirSync(join(root, 'src/live/locked.js'));
+  const update = { file: join(root, 'src/live/locked.js').replaceAll('\\', '/'), server: s };
+  await p.handleHotUpdate(update);
+  await p.handleHotUpdate(update);
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+ });
+ it('retries a new live file whose first registration threw', async () => {
+  const p = plugin();
+  const s = server();
+  s.runtime._prepareHmr.mockImplementationOnce(() => { throw new Error('runtime unavailable'); });
+  p.configureServer(s);
+  const add = s.watcher.on.mock.calls.find(([event]) => event === 'add')[1];
+  const file = join(root, 'src/live/count.js');
+  await expect(add(file)).rejects.toThrow('runtime unavailable');
+  await p.handleHotUpdate({ file: file.replaceAll('\\', '/'), server: s });
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+ });
  it('returns the same client update for a repeated event and reloads the server once', async () => {
   const p = plugin();
   const s = server(false);

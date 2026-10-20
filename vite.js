@@ -669,16 +669,23 @@ export default function svelteRealtime(options) {
 	 * rename can report one write as several events. Record the write (its
 	 * mtime and content) of a live file, keyed by its liveDir spelling, and
 	 * return it, or return null when that write was already handled. A later
-	 * save has a new mtime even when its content is unchanged.
+	 * save has a new mtime even when its content is unchanged. A file that
+	 * exists but cannot be read right now is never treated as handled.
 	 * @param {string} file
 	 * @returns {string | null}
 	 */
 	const claimVersion = (file) => {
-		let version = '\0absent';
+		let version;
 		try {
 			const { mtimeMs } = statSync(file);
 			version = mtimeMs + '\0' + readFileSync(file, 'utf8');
-		} catch {}
+		} catch (error) {
+			if (/** @type {NodeJS.ErrnoException} */ (error).code !== 'ENOENT') {
+				handledVersions.delete(file);
+				return '\0unreadable';
+			}
+			version = '\0absent';
+		}
 		if (handledVersions.get(file) === version) return null;
 		handledVersions.set(file, version);
 		return version;
@@ -691,6 +698,8 @@ export default function svelteRealtime(options) {
 	const releaseVersion = (file, version) => {
 		if (handledVersions.get(file) === version) handledVersions.delete(file);
 	};
+	/** @type {Map<string, Promise<unknown>>} */
+	const reloading = new Map();
 	/** @type {boolean} */
 	let isSsr = false;
 	/** @type {boolean} */
@@ -950,34 +959,45 @@ export default function svelteRealtime(options) {
 				.replace(/\\/g, '/')
 				.replace(/\.[jt]s$/, '');
 
-			// A repeated event for an already handled write skips only the server
-			// reload; the client update below stays the same for every event.
+			// A repeated event for an already handled write skips the server reload
+			// but waits for it, so its client update never runs ahead of the
+			// handlers. The client update below is the same for every event.
 			const version = claimVersion(file);
-			if (version !== null) {
-				let reloaded = false;
-				try {
-					_fileCache.delete(file);
-					_codeCache.delete('client:' + file);
-					_codeCache.delete('ssr:' + file);
+			if (version === null) {
+				await reloading.get(file)?.catch(() => {});
+			} else {
+				const work = (async () => {
+					let reloaded = false;
+					try {
+						_fileCache.delete(file);
+						_codeCache.delete('client:' + file);
+						_codeCache.delete('ssr:' + file);
 
-					// Regenerate type declarations on file change
-					if (typedImports) {
-						_writeTypeDeclarations(liveDir, dir);
-					}
-
-					// Server-side HMR: invalidate the changed module so Vite re-executes it
-					const graph = _serverModuleGraph(server);
-					for (const spelling of new Set([file, reported])) {
-						const ssrMods = graph.getModulesByFile(spelling.split(sep).join('/'));
-						if (ssrMods) {
-							for (const m of ssrMods) graph.invalidateModule(m);
+						// Regenerate type declarations on file change
+						if (typedImports) {
+							_writeTypeDeclarations(liveDir, dir);
 						}
-					}
 
-					// Re-register all server handlers
-					reloaded = await _hmrReloadRegistry(server, liveDir, dir, rel);
+						// Server-side HMR: invalidate the changed module so Vite re-executes it
+						const graph = _serverModuleGraph(server);
+						for (const spelling of new Set([file, reported])) {
+							const ssrMods = graph.getModulesByFile(spelling.split(sep).join('/'));
+							if (ssrMods) {
+								for (const m of ssrMods) graph.invalidateModule(m);
+							}
+						}
+
+						// Re-register all server handlers
+						reloaded = await _hmrReloadRegistry(server, liveDir, dir, rel);
+					} finally {
+						if (!reloaded) releaseVersion(file, version);
+					}
+				})();
+				reloading.set(file, work);
+				try {
+					await work;
 				} finally {
-					if (!reloaded) releaseVersion(file, version);
+					if (reloading.get(file) === work) reloading.delete(file);
 				}
 			}
 
