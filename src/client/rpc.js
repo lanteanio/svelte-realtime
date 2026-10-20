@@ -612,6 +612,7 @@ export function __binaryRpc(path) {
 
 		return new Promise((resolve, reject) => {
 			const _startTime = now();
+			const timeout = _getTimeout();
 			const timer = setTimer(() => {
 				if (now() - _startTime > 90000) {
 					pending.delete(id);
@@ -621,8 +622,8 @@ export function __binaryRpc(path) {
 				}
 				pending.delete(id);
 				_devtoolsEnd(id, false, 'TIMEOUT');
-				reject(new RpcError('TIMEOUT', `Binary RPC '${path}' timed out after 30s`));
-			}, _getTimeout());
+				reject(new RpcError('TIMEOUT', `Binary RPC '${path}' timed out after ${timeout / 1000}s`));
+			}, timeout);
 
 			pending.set(id, {
 				resolve(v) { _devtoolsEnd(id, true, v); resolve(v); },
@@ -805,7 +806,7 @@ export function batch(fn, options) {
 			const entry = pending.get(call.id);
 			if (entry) {
 				pending.delete(call.id);
-				entry.reject(new RpcError('TIMEOUT', `Batch timed out after 30s`));
+				entry.reject(new RpcError('TIMEOUT', `Batch timed out after ${effectiveTimeout / 1000}s`));
 			}
 		}
 	}, effectiveTimeout);

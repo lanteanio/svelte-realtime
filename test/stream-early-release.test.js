@@ -357,6 +357,27 @@ describe('a stream released before its subscribe is answered', () => {
 		off();
 	});
 
+	it('a stream with a declared budget released before its slow answer still releases the answer', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		// Declared 300 s budget, the app-wide timeout left at its 30 s default.
+		const store = __stream('collab/board/__data', { merge: 'crud', key: 'id', timeout: 300_000 }, true)('r30');
+		const off = store.subscribe(() => {});
+		await ticks();
+		expect(subscribeFrames()).toHaveLength(1);
+		vi.advanceTimersByTime(5_000);
+		off();
+		await ticks();
+		// The server answers two minutes in, long after the 30 s default.
+		vi.advanceTimersByTime(115_000);
+		await deliverToServer();
+		expect(member('r30').count).toBe(1);
+		await deliverToClient();
+		expect(unsubscribeFrames('board:r30')).toHaveLength(1);
+		await deliverToServer();
+		expect(net.serverTopics.has('board:r30')).toBe(false);
+		expect(member('r30').count).toBe(0);
+	});
+
 	it('released while its request sat in the adapter queue across a failed connect: released once the socket is back', async () => {
 		setStatus('connecting');
 		const off = roomData('r7').subscribe(() => {});

@@ -9137,6 +9137,27 @@ describe('function timeout defaults', () => {
 		} finally { vi.useRealTimers(); }
 	});
 
+	it('waits the declared stream budget for a loadMore page and names it in the timeout', async () => {
+		vi.useFakeTimers();
+		try {
+			const store = __stream('budget/pages', { merge: 'crud', key: 'id', timeout: 300_000 });
+			const stop = store.subscribe(() => {});
+			await vi.advanceTimersByTimeAsync(0);
+			const sent = sendQueuedFn.mock.calls[0][0];
+			simulateRpcResponse(sent.id, { ok: true, data: [{ id: 1 }], topic: 'budget-pages', merge: 'crud', key: 'id', hasMore: true, cursor: 'c1' });
+			const more = store.loadMore();
+			let settled = false;
+			more.then(() => { settled = true; }, () => { settled = true; });
+			await vi.advanceTimersByTimeAsync(299_999);
+			expect(settled).toBe(false);
+			await vi.advanceTimersByTimeAsync(1);
+			const err = await more.catch((e) => e);
+			expect(err).toMatchObject({ code: 'TIMEOUT' });
+			expect(err.message).toContain('300s');
+			stop();
+		} finally { vi.useRealTimers(); }
+	});
+
 	it('cancels an upload at its declared budget and clears settled timers', async () => {
 		vi.useFakeTimers();
 		try {

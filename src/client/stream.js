@@ -156,8 +156,10 @@ function _subscribeDone(ticket) {
  * @param {SubscribeTicket} ticket
  * @param {string | null} heldTopic - managed ref taken over from the stream
  * @param {boolean} [parked]
+ * @param {number} [timeout] - how long to wait for the answer once the socket
+ *   is up: the stream's own budget, the RPC timeout when it declares none
  */
-function _orphanSubscribe(id, ticket, heldTopic, parked) {
+function _orphanSubscribe(id, ticket, heldTopic, parked, timeout) {
 	_subscribeDone(ticket);
 	const prev = pending.get(id);
 	if (prev && prev.timer) clearTimer(prev.timer);
@@ -196,7 +198,7 @@ function _orphanSubscribe(id, ticket, heldTopic, parked) {
 			record.timer = null;
 			if (pending.get(id) === record) pending.delete(id);
 			release(ticket.topic);
-		}, _getTimeout());
+		}, timeout ?? _getTimeout());
 	};
 	const park = () => {
 		record.timer = null;
@@ -602,6 +604,8 @@ function _createMappedStore(source, fn) {
  *   `subscribeAt` helper from `svelte-realtime/testing/client`.
  */
 function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
+	// A budget the function declares outlasts the app-wide RPC timeout.
+	const _streamTimeout = () => options?.timeout ?? _getTimeout();
 	const pendingDelay = options?.pendingDelay ?? 100;
 	if (!Number.isInteger(pendingDelay) || pendingDelay < 0 || pendingDelay > 2147483647) {
 		throw new RangeError('[svelte-realtime] pendingDelay must be an integer from 0 to 2147483647');
@@ -1702,7 +1706,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		// refetch that did not wait for it).
 		if (pendingId) {
 			const prev = _dropRequest();
-			if (prev) _orphanSubscribe(prev.id, prev.ticket, null);
+			if (prev) _orphanSubscribe(prev.id, prev.ticket, null, false, _streamTimeout());
 		}
 
 		const id = _nextId();
@@ -1719,7 +1723,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_ticket = ticket;
 
 		const _startTime = now();
-		const timeout = options?.timeout ?? _getTimeout();
+		const timeout = _streamTimeout();
 		const timer = setTimer(() => {
 			pendingId = null;
 			_ticket = null;
@@ -1728,7 +1732,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			// record releases that, along with the ref an attach frame took.
 			const handedRef = _abandonAttach(true);
 			if (ticket.state === 'sent') {
-				_orphanSubscribe(id, ticket, handedRef);
+				_orphanSubscribe(id, ticket, handedRef, false, timeout);
 			} else {
 				ticket.state = 'done';
 				pending.delete(id);
@@ -1901,7 +1905,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// adapter's send queue; it goes out on the next open, after this
 				// stream has moved on to a fresh subscribe.
 				if (err && err.code === 'DISCONNECTED' && ticket.state === 'sent' && ticket.topic === null) {
-					_orphanSubscribe(id, ticket, null, true);
+					_orphanSubscribe(id, ticket, null, true, _streamTimeout());
 				} else {
 					_subscribeDone(ticket);
 				}
@@ -1936,7 +1940,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		if (inFlight) {
 			const handedRef = _managedHeldTopic;
 			_managedHeldTopic = null;
-			_orphanSubscribe(inFlight.id, inFlight.ticket, handedRef);
+			_orphanSubscribe(inFlight.id, inFlight.ticket, handedRef, false, _streamTimeout());
 		}
 		if (topicUnsub) {
 			topicUnsub();
@@ -2573,15 +2577,16 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				/** @type {SubscribeTicket} */
 				const ticket = { request: null, state: 'done', topic: null };
 				const _startTime = now();
+				const timeout = _streamTimeout();
 				const timer = setTimer(() => {
-					_orphanSubscribe(id, ticket, heldTopic);
+					_orphanSubscribe(id, ticket, heldTopic, false, timeout);
 					_loadingMore = false;
-					if (now() - _startTime > 90000) {
+					if (now() - _startTime > Math.max(90000, timeout * 3)) {
 						reject(new RpcError('DISCONNECTED', 'Connection interrupted (device sleep)'));
 						return;
 					}
-					reject(new RpcError('TIMEOUT', `loadMore '${path}' timed out after 30s`));
-				}, _getTimeout());
+					reject(new RpcError('TIMEOUT', `loadMore '${path}' timed out after ${timeout / 1000}s`));
+				}, timeout);
 
 				pending.set(id, {
 					stream: true,
@@ -2639,7 +2644,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					reject(err) {
 						// A disconnect may have left the request in the adapter's
 						// send queue, which goes out on the next open.
-						if (err && err.code === 'DISCONNECTED') _orphanSubscribe(id, ticket, heldTopic, true);
+						if (err && err.code === 'DISCONNECTED') _orphanSubscribe(id, ticket, heldTopic, true, _streamTimeout());
 						else if (heldTopic) _sendManagedRelease(heldTopic);
 						_loadingMore = false;
 						reject(err instanceof RpcError ? err : new RpcError('LOAD_MORE_ERROR', err?.message || 'Load more failed'));

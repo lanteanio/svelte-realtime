@@ -1459,7 +1459,7 @@ live.stream = function stream(topic, initFn, options) {
  * Channels have no initFn - clients subscribe to a topic and receive events immediately.
  *
  * @param {string | Function} topic - Static topic string or function (ctx, ...args) => string for dynamic channels
- * @param {{ timeout?: number, merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, max?: number }} [options]
+ * @param {{ merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, max?: number }} [options]
  * @returns {Function}
  */
 live.channel = function channel(topic, options) {
