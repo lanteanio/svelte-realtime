@@ -186,6 +186,47 @@ describe('Windows root spelling', () => {
    expect(p.transform.call(ssr, input, join(spelling, 'src/hooks.ws.js')).code).toContain('import "/@svelte-realtime-registry";');
   }
  });
+ it('takes the root from the working directory when the config has none', () => {
+  onWindows();
+  root = mkdtempSync(join(tmpdir(), 'realtime-kit-'));
+  mkdirSync(join(root, 'src/live'), { recursive: true });
+  writeFileSync(join(root, 'src/live/count.js'), "import { live } from 'svelte-realtime/server';\nexport const count = live(() => 1);\n");
+  const cwd = vi.spyOn(process, 'cwd').mockReturnValue(root);
+  try {
+   const p = realtime({ typedImports: false });
+   p.config({}, { command: 'serve' });
+   p.configResolved({ root: respell(root), command: 'serve', build: {} });
+   expect(p.load('\0live:__registry')).toContain(JSON.stringify(posix(join(root, 'src/live/count.js'))));
+  } finally { cwd.mockRestore(); }
+ });
+ it("keeps Vite's root when the configured root is another directory", () => {
+  onWindows();
+  root = mkdtempSync(join(tmpdir(), 'realtime-kit-'));
+  mkdirSync(join(root, 'src/live'), { recursive: true });
+  writeFileSync(join(root, 'src/live/count.js'), "import { live } from 'svelte-realtime/server';\nexport const count = live(() => 1);\n");
+  const p = realtime({ typedImports: false });
+  p.config({ root: join(root, 'app') }, { command: 'serve' });
+  p.configResolved({ root, command: 'serve', build: {} });
+  expect(p.load('\0live:__registry')).toContain(JSON.stringify(posix(join(root, 'src/live/count.js'))));
+ });
+ it('reloads once when one save or delete is reported under both spellings', async () => {
+  onWindows();
+  const p = viteRespelledRoot();
+  const s = server();
+  p.configureServer(s);
+  const file = join(root, 'src/live/count.js');
+  for (const spelling of [respell(root), root]) {
+   await p.handleHotUpdate({ file: posix(join(spelling, 'src/live/count.js')), server: s });
+  }
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(1);
+  writeFileSync(file, "import { live } from 'svelte-realtime/server';\nexport const count = live(() => 2);\n");
+  await p.handleHotUpdate({ file: posix(file), server: s });
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+  const unlink = s.watcher.on.mock.calls.find(([event]) => event === 'unlink')[1];
+  rmSync(file);
+  for (const spelling of [respell(root), root]) await unlink(join(spelling, 'src/live/count.js'));
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(3);
+ });
  it('keeps paths case-sensitive off Windows', () => {
   onPlatform('linux');
   const p = viteRespelledRoot();
@@ -237,7 +278,10 @@ describe('overlapping live module updates', () => {
    throw new Error('Unexpected module: ' + id);
   });
   const update = { file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s };
-  await Promise.all([p.handleHotUpdate(update), p.handleHotUpdate(update)]);
+  // Two saves of different content, the second arriving while the first reloads.
+  const first = p.handleHotUpdate(update);
+  writeFileSync(join(root, 'src/live/count.js'), "import { live } from 'svelte-realtime/server';\nexport const count = live(() => 2);\n");
+  await Promise.all([first, p.handleHotUpdate(update)]);
   expect(runtimeLoads).toBe(2);
   expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
   expect([...registrations]).toEqual(['count']);

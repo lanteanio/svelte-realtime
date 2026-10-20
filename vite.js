@@ -661,6 +661,24 @@ export default function svelteRealtime(options) {
 	let configRoot = null;
 	/** @type {string} */
 	let liveDir = '';
+	/** @type {Map<string, string>} */
+	const handledVersions = new Map();
+	/**
+	 * Vite watches a module under every spelling it was imported with, so on
+	 * Windows one save or delete can arrive once per spelling. Report whether
+	 * this version of a live file, keyed by its liveDir spelling, was handled.
+	 * @param {string} file
+	 */
+	const handled = (file) => {
+		let version = 'absent';
+		try {
+			const stat = statSync(file);
+			version = stat.mtimeMs + ':' + stat.size;
+		} catch {}
+		if (handledVersions.get(file) === version) return true;
+		handledVersions.set(file, version);
+		return false;
+	};
 	/** @type {boolean} */
 	let isSsr = false;
 	/** @type {boolean} */
@@ -674,11 +692,15 @@ export default function svelteRealtime(options) {
 		name: 'svelte-realtime',
 
 		configResolved(config) {
-			// SvelteKit and svelte-adapter-uws import routes and hooks under the
-			// root as the user spelled it. Vite 8 realpaths its own root, which on
-			// Windows can change the drive letter's case. A live module imported
-			// under both spellings would run twice and split server state.
-			root = (process.platform === 'win32' && configRoot) || config.root;
+			// SvelteKit imports routes under the root as the user spelled it, and
+			// so does svelte-adapter-uws for hooks in development. Vite 8 realpaths
+			// its own root, which on Windows can change the drive letter's case. A
+			// live module imported under both spellings would run twice and split
+			// server state, so follow the user's spelling when only case differs.
+			root = config.root;
+			if (process.platform === 'win32' && configRoot && configRoot.split(sep).join('/').toLowerCase() === root.split(sep).join('/').toLowerCase()) {
+				root = configRoot;
+			}
 			liveDir = resolve(root, dir);
 			isSsr = !!config.build?.ssr;
 			isDev = config.command === 'serve';
@@ -878,6 +900,8 @@ export default function svelteRealtime(options) {
 					file = file.split(sep).join('/');
 					if (!file.includes('/' + dir + '/') && !file.startsWith(dir + '/')) return;
 					if (!/\.[jt]s$/.test(file) || file.endsWith('.d.ts') || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
+					const live = _respellUnder(liveDir, resolve(file));
+					if (live && handled(live)) return;
 
 					_fileCache.clear();
 				_codeCache.clear();
@@ -905,6 +929,7 @@ export default function svelteRealtime(options) {
 			if (file.endsWith('.d.ts')) return [];
 			// Same non-module filter as the add/unlink watcher.
 			if (!/\.[jt]s$/.test(file) || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
+			if (handled(file)) return [];
 			_fileCache.delete(file);
 			_codeCache.delete('client:' + file);
 			_codeCache.delete('ssr:' + file);

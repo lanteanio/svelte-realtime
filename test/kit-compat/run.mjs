@@ -38,7 +38,12 @@ const { WebSocket } = requireFixture('ws');
 const vite = path.join(workdir, 'node_modules', 'vite', 'bin', 'vite.js');
 const reportPath = path.resolve(option('--report', path.join(root, 'test-results',
 	'kit-compat-' + kit + '-' + mode + (devtools ? '' : '-no-devtools') + '.json')));
-const report = { kit, mode, devtools, hmr, adapterMode, driveCase, checks: [] };
+const report = {
+	kit, mode, devtools, hmr, adapterMode, driveCase,
+	startedAt: new Date().toISOString(),
+	viteSourceHash: createHash('sha256').update(await readFile(path.join(root, 'vite.js'))).digest('hex'),
+	checks: []
+};
 const env = { ...process.env, KIT_COMPAT_SECRET: 'fixture-secret', KIT_COMPAT_DEVTOOLS: String(devtools), KIT_COMPAT_ADAPTER: adapterMode, KIT_COMPAT_REPORT_ROOT: String(driveCase !== 'as-invoked') };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -219,8 +224,11 @@ try {
 			}
 		}
 	});
+	const counterReloads = () => output.match(/Hot-reloaded: src\/live\/counter\b/g)?.length ?? 0;
+	let reloadsBeforeEdit = 0;
 	if (hmr) {
 		await check('HMR replaces and removes handlers', async () => {
+			reloadsBeforeEdit = counterReloads();
 			const initial = await rpc('removed');
 			assert.equal(initial.ok, true, JSON.stringify(initial));
 			assert.equal(initial.data, 'original');
@@ -273,6 +281,10 @@ try {
 			const after = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(after.status, 200);
 			assert.deepEqual(await after.json(), { count });
+		});
+		await check('one registry reload per live-file save', () => {
+			// Vite can report one save once per spelling of the file's path.
+			assert.equal(counterReloads() - reloadsBeforeEdit, 1, 'The single edit reloaded the registry more than once or not at all');
 		});
 	}
 	if (hmr) {

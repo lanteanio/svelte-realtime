@@ -22,7 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Live handlers register in the correct Vite SSR environment during SvelteKit 3 builds, development, and hot reloads. Client imports continue to generate WebSocket stubs.
 - Overlapping live-module changes keep handlers registered, including Windows hot reloads.
 - Newly added live files register during SvelteKit 3 development with wrapped adapters and configurations without an inline adapter.
-- On Windows, live handlers and SvelteKit routes share one instance of each server module when the working directory's drive letter is lowercase, as in many VS Code terminals. Vite 8 resolves its root with an uppercase drive letter, which previously loaded live modules a second time in development and in production builds, so state written by an RPC was invisible to routes.
+- On Windows, live handlers and SvelteKit routes share one instance of each server module when the working directory's drive letter is lowercase, as in many VS Code terminals. Vite 8 resolves its root with an uppercase drive letter, which previously loaded live modules and the modules they import a second time in development and in production builds, so state written by an RPC was invisible to routes.
 - The Vite plugin no longer declares the unsupported transformIndexHtml hook. Development tools load through a Vite module and work with streamed HTML responses.
 
 ## [0.5.13] - 2026-10-10

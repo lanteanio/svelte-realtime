@@ -56,7 +56,7 @@ for (const kit of ['2', '3']) {
 			const expected = [...commonChecks];
 			if (variant.mode === 'production') expected.push('production build');
 			if (variant.driveCase) expected.push('Vite and SvelteKit spell the root differently');
-			if (variant.args.includes('--hmr')) expected.push('HMR replaces and removes handlers', 'live stores after HMR', 'route-only HMR shares HTTP and WebSocket state', 'new live files share HTTP and WebSocket state', 'removed live files unregister without splitting state');
+			if (variant.args.includes('--hmr')) expected.push('HMR replaces and removes handlers', 'live stores after HMR', 'one registry reload per live-file save', 'route-only HMR shares HTTP and WebSocket state', 'new live files share HTTP and WebSocket state', 'removed live files unregister without splitting state');
 			assert.deepEqual(report.checks.map(check => check.name).sort(), expected.sort(),
 				name + ' did not execute exactly the required checks');
 			assert.ok(report.checks.every(check => check.status === 'passed'), name + ' contains a failed check');
