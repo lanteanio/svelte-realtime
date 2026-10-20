@@ -5181,8 +5181,8 @@ The overlay uses a fixed dark theme for diagnostic contrast, plus system colors 
 
 Use `configureDevtools` from `svelte-realtime/devtools` in development to set
 `locale`, optional `direction` (`ltr` or `rtl`), and a `messages` map from English
-labels to translated labels. Numbers, event times, and relative ages use Intl
-formatters; runtime identifiers have independent bidirectional isolation.
+labels to translated labels. Numbers and event times use the configured Intl locale; untranslated labels and relative ages stay English with `lang="en"` and left-to-right reading.
+With translated messages, labels and relative ages use that locale and its reading direction; runtime identifiers have independent bidirectional isolation.
 
 The Streams tab lists every store currently mounted on the page. For each one it shows:
 

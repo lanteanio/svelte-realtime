@@ -1,7 +1,7 @@
 export interface DevtoolsPresentation {
- /** Locale used by Intl formatters. Defaults to the browser locale. */
+ /** Number and timestamp locale; also the label and relative-age locale when messages are supplied. Defaults to the browser locale. */
  locale?: string;
- /** Defaults to the locale's reading direction. */
+ /** Defaults to ltr without translated messages, otherwise the locale's reading direction. */
  direction?: 'ltr' | 'rtl';
  /** English label or message template to translated text. */
  messages?: Record<string, string>;

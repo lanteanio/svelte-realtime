@@ -9,7 +9,7 @@ let locale;
 let messages = {};
 let numberFormat = new Intl.NumberFormat();
 let timeFormat = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-let relativeFormat = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+let relativeFormat = new Intl.RelativeTimeFormat('en', { numeric: 'auto' });
 let direction = 'ltr';
 let labelLocale = 'en';
 
@@ -31,9 +31,10 @@ export function configureDevtools(options = {}) {
  const nextLocale = options.locale;
  const nextNumber = new Intl.NumberFormat(nextLocale);
  const nextTime = new Intl.DateTimeFormat(nextLocale, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
- const nextRelative = new Intl.RelativeTimeFormat(nextLocale, { numeric: 'auto' });
  const hasTranslations = options.messages && Object.keys(options.messages).length > 0;
- labelLocale = hasTranslations ? nextNumber.resolvedOptions().locale : 'en';
+ const nextLabelLocale = hasTranslations ? nextNumber.resolvedOptions().locale : 'en';
+ const nextRelative = new Intl.RelativeTimeFormat(nextLabelLocale, { numeric: 'auto' });
+ labelLocale = nextLabelLocale;
  const language = new Intl.Locale(labelLocale);
  locale = nextLocale;
  numberFormat = nextNumber;

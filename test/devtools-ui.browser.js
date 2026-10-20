@@ -557,13 +557,27 @@ it('masks smooth identifiers by default and purges them while preserving safe te
 it.each(['de-DE', 'ar-EG'])('keeps untranslated labels English for browser locale %s', async locale => {
  await page.close();
  page = await browser.newPage({ locale });
+ const start = new Date('2026-01-01T00:00:00Z');
+ await page.clock.install({ time: start });
  await page.goto(origin);
  await page.locator('#svr-dt-launcher').waitFor();
+ await page.clock.pauseAt(new Date(start.getTime() + 60000));
  expect(await page.locator('#svelte-realtime-devtools').getAttribute('lang')).toBe('en');
  expect(await page.locator('#svelte-realtime-devtools').getAttribute('dir')).toBe('ltr');
- await page.evaluate(locale => window.configureDevtools({ locale }), locale);
- expect(await page.locator('#svelte-realtime-devtools').getAttribute('lang')).toBe('en');
- expect(await page.locator('#svr-dt-launcher').getAttribute('lang')).toBe('en');
+ await streamsFixture();
+ await page.evaluate(() => {
+  window.realDevtools.streams.get('chat').lastEventTime = Date.now() - 12000;
+  window.realDevtools.connection = { state: 'open', since: Date.now() - 3000 };
+ });
+ for (const configured of [false, true]) {
+  if (configured) await page.evaluate(locale => window.configureDevtools({ locale }), locale);
+  expect(await page.locator('#svelte-realtime-devtools').getAttribute('lang')).toBe('en');
+  expect(await page.locator('#svr-dt-launcher').getAttribute('lang')).toBe('en');
+  await page.getByRole('tab', { name: 'streams', exact: true }).click();
+  expect(await page.getByRole('tabpanel').textContent()).toContain('Last event: update 12 seconds ago');
+  await page.getByRole('tab', { name: 'connection', exact: true }).click();
+  expect(await page.locator('[data-key="connection-state"]').textContent()).toBe('Connected 3 seconds ago');
+ }
 });
 it('relabels the visible launcher together with its accessible name', async () => {
  await page.evaluate(() => window.configureDevtools({ locale: 'de', messages: {
