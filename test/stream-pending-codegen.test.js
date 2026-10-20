@@ -7,7 +7,8 @@ import { _generateClientStubs } from '../src/vite/codegen-client.js';
 import { _extractStreamOptions } from '../src/vite/extract-options.js';
 import { _generateSsrStubs } from '../src/vite/codegen-ssr.js';
 
-const fixture = resolve('test/__pending_fixture.js');
+// Per process, so parallel runs of this file do not share one fixture.
+const fixture = resolve(`test/__pending_fixture_${process.pid}.js`);
 afterEach(() => { _fileCache.delete(fixture); try { unlinkSync(fixture); } catch {} vi.restoreAllMocks(); });
 
 describe('pending indicator code generation', () => {
@@ -31,6 +32,12 @@ export const items = live.stream('items', async () => [], { pendingDelay: ${valu
 		expect(_extractStreamOptions("export const items = live.stream('items', () => [], { pendingDelay: 10, pendingDelay: 250 });", 'items').pendingDelay).toBe(250);
 		expect(() => _extractStreamOptions("export const items = live.stream('items', () => [], { pendingDelay: 10, ...unknown });", 'items')).toThrow(/pendingDelay/);
 		expect(_extractStreamOptions("export const items = live.stream('items', () => [], { ...unknown, pendingDelay: 250 });", 'items').pendingDelay).toBe(250);
+	});
+
+	it('reads a delay held in a module-level const or spread from one', () => {
+		expect(_extractStreamOptions("const DELAY = 250;\nexport const items = live.stream('items', () => [], { pendingDelay: DELAY });", 'items').pendingDelay).toBe(250);
+		expect(_extractStreamOptions("const BASE = { pendingDelay: 300 };\nexport const items = live.stream('items', () => [], { ...BASE, merge: 'set' });", 'items')).toMatchObject({ merge: 'set', pendingDelay: 300 });
+		expect(() => _extractStreamOptions("let delay = 250; delay++;\nexport const items = live.stream('items', () => [], { pendingDelay: delay });", 'items')).toThrow(/pendingDelay/);
 	});
 
 	it('exposes inert pending on static, dynamic and hydrated SSR streams', () => {

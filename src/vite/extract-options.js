@@ -439,7 +439,7 @@ export function _extractStreamOptions(source, name) {
 	// inside the init function body without false-matching on them.
 	const optStr = _extractLastOptions(rest);
 	if (optStr) {
-		_applyParsedOptions(opts, optStr);
+		_applyParsedOptions(opts, optStr, source);
 	}
 	if (opts.merge === 'crud' && opts.key === undefined) opts.key = 'id';
 
@@ -511,8 +511,10 @@ export function _extractFlagDecl(source, name) {
  * Uses _extractTopLevelStringProp for robust quoted-key and non-word value support.
  * @param {Record<string, any>} opts
  * @param {string} optStr
+ * @param {string} [source] - the whole module, so a `pendingDelay` held in a
+ *   module-level const or spread from one resolves
  */
-export function _applyParsedOptions(opts, optStr) {
+export function _applyParsedOptions(opts, optStr, source = '') {
 	const mergeVal = _extractTopLevelStringProp(optStr, 'merge');
 	if (mergeVal) opts.merge = mergeVal;
 
@@ -526,11 +528,11 @@ export function _applyParsedOptions(opts, optStr) {
 	const maxVal = _extractTopLevelRawValue(optStr, 'max');
 	if (maxVal && /^\d+$/.test(maxVal)) opts.max = parseInt(maxVal, 10);
 
-	const pendingConfig = _readConfig('', optStr, 0);
+	const pendingConfig = _readConfig(source, optStr, 0);
 	if (pendingConfig.values.has('pendingDelay')) {
 		const pendingDelayVal = pendingConfig.values.get('pendingDelay');
 		if (!pendingConfig.stable.has('pendingDelay') || typeof pendingDelayVal !== 'string' || !/^\d+$/.test(pendingDelayVal) || Number(pendingDelayVal) > 2147483647) {
-			throw new RangeError('[svelte-realtime] pendingDelay must be an integer literal from 0 to 2147483647');
+			throw new RangeError('[svelte-realtime] pendingDelay must be an integer from 0 to 2147483647, written in the options or in a module-level const');
 		}
 		opts.pendingDelay = Number(pendingDelayVal);
 	}
@@ -564,7 +566,7 @@ export function _extractChannelOptions(source, name) {
 
 	const optStr = _extractLastOptions(rest);
 	if (optStr) {
-		_applyParsedOptions(opts, optStr);
+		_applyParsedOptions(opts, optStr, source);
 	}
 	if (opts.merge === 'crud' && opts.key === undefined) opts.key = 'id';
 
