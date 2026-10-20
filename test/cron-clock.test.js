@@ -66,6 +66,24 @@ describe('cron wall-clock boundaries', () => {
 		expect(calls.map(at => Math.floor(at / 60000))).toEqual(Array.from({ length: 122 }, (_, i) => i));
 	});
 
+	it('evaluates a five-field job once when startup and the second timer share a minute boundary', async () => {
+		wall = origin + 59000;
+		const minutes = [], seconds = [];
+		register('seconds', '* * * * * *', seconds);
+		register('minutes', '* * * * *', minutes);
+		const overlapping = [...timers.values()];
+		expect(overlapping).toHaveLength(2);
+		expect(overlapping.map(timer => timer.due)).toEqual([origin + 60000, origin + 60000]);
+		for (const timer of overlapping) {
+			timers.delete(timer);
+			wall = timer.due;
+			await timer.callback();
+			await flush();
+		}
+		expect(minutes).toEqual([60000]);
+		expect(seconds).toEqual([60000]);
+	});
+
 	it('evaluates each second once when startup overlaps an aligned wakeup', async () => {
 		const calls = []; register('seconds', '* * * * * *', calls);
 		for (let i = 0; i < 82; i++) await wake(400);

@@ -2630,45 +2630,31 @@ describe('live.cron()', () => {
 		});
 
 		it('5-field schedule at 1Hz tick fires only at second :00 (not 60x per matching minute)', async () => {
-			const platform = mockPlatform();
-			setCronPlatform(platform);
-			let runs = 0;
-			// Register a 6-field job so the tick gets upgraded to 1Hz.
-			__registerCron('cron-trigger-1hz', live.cron('* * * * * *', '1hz-marker', async () => {}));
-			// Then a 5-field job. At 1Hz the dedup must keep it at once-per-matching-minute.
-			__registerCron('cron-five-field', live.cron('* * * * *', 'five-min', async () => { runs++; }));
-
-			// Drive the tick at second != 0 manually - the dedup should skip.
-			// The cron tick reads the wall clock through the runtime module, so
-			// bind it to the global Date this case swaps below.
-			const realDate = global.Date;
-			installFakeRuntimeClock();
+			let clock = Date.UTC(2026, 4, 6, 12, 34, 17);
+			setRuntimeEnv({ tz: 'UTC', clock: {
+				now: () => clock, wallEpoch: () => clock, monotonic: () => clock
+			}, timers: {
+				set: () => ({ unref() {} }), clear() {}
+			} });
+			const nativeTimeout = vi.spyOn(globalThis, 'setTimeout');
 			try {
-				const fakeNow = new realDate('2026-05-06T12:34:17Z');
-				global.Date = /** @type {any} */ (function FakeDate(...args) {
-					if (args.length === 0) return fakeNow;
-					return new realDate(...args);
-				});
-				/** @type {any} */ (global.Date).now = () => fakeNow.getTime();
-				Object.setPrototypeOf(global.Date, realDate);
+				setCronPlatform(mockPlatform());
+				let runs = 0;
+				// Register both jobs after installing the clock and timer controls.
+				__registerCron('cron-trigger-1hz', live.cron('* * * * * *', '1hz-marker', async () => {}));
+				__registerCron('cron-five-field', live.cron('* * * * *', 'five-min', async () => { runs++; }));
+				expect(nativeTimeout).not.toHaveBeenCalled();
+
 				await _tickCron();
-				await new Promise((r) => setTimeout(r, 10));
 				expect(runs).toBe(0);
 
-				// Now drive at second :00 - 5-field schedule should match.
-				const atSecondZero = new realDate('2026-05-06T12:34:00Z');
-				global.Date = /** @type {any} */ (function FakeDate(...args) {
-					if (args.length === 0) return atSecondZero;
-					return new realDate(...args);
-				});
-				/** @type {any} */ (global.Date).now = () => atSecondZero.getTime();
-				Object.setPrototypeOf(global.Date, realDate);
+				clock = Date.UTC(2026, 4, 6, 12, 35, 0);
 				await _tickCron();
-				await new Promise((r) => setTimeout(r, 10));
 				expect(runs).toBe(1);
 			} finally {
-				global.Date = realDate;
-				releaseRuntimeClock();
+				_clearCron();
+				nativeTimeout.mockRestore();
+				resetRuntimeEnv();
 			}
 		});
 
