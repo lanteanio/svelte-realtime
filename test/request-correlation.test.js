@@ -4,8 +4,42 @@ import { createTestContext } from '../src/testing.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { mockWs } from './helpers/mock-ws.js';
 import { toArrayBuffer } from './helpers/encode.js';
+import { _buildCtx } from '../src/server/ctx.js';
 
 describe('per-operation request correlation', () => {
+	it('shadows frozen platform IDs without copying live state or leaking operation mutations', () => {
+		let count = 1;
+		const send = () => {};
+		const platform = Object.freeze({ requestId: 'socket', connectionId: 'socket', send, get count() { return count; } });
+		const helpers = { publish() {}, batch() {} };
+		const first = _buildCtx({}, {}, platform, helpers, null, undefined, 'a');
+		const second = _buildCtx({}, {}, platform, helpers, null, undefined, 'b');
+		expect(Object.getPrototypeOf(first.platform)).toBe(platform);
+		expect(first.platform).not.toBe(second.platform);
+		expect(Object.keys(first.platform)).toEqual(['requestId', 'connectionId']);
+		expect(first.platform.requestId).toBe('a');
+		expect(second.platform.requestId).toBe('b');
+		expect(first.platform.send).toBe(send);
+		count = 2;
+		expect(first.platform.count).toBe(2);
+		first.platform.requestId = 'changed';
+		expect(first.requestId).toBe('a');
+		expect(second.platform.requestId).toBe('b');
+		expect(platform.requestId).toBe('socket');
+	});
+
+	it('keeps a reused client id isolated by connection identity', async () => {
+		const seen = [];
+		__register('correlation/reused', (ctx) => { seen.push([ctx.connectionId, ctx.requestId]); });
+		const first = Object.assign(mockPlatform(), { requestId: 'socket-a' });
+		const second = Object.assign(mockPlatform(), { requestId: 'socket-b' });
+		for (const platform of [first, second]) {
+			handleRpc(mockWs(), toArrayBuffer({ rpc: 'correlation/reused', id: 'chosen', args: [] }), platform);
+		}
+		await vi.waitFor(() => expect(seen).toHaveLength(2));
+		expect(seen.sort((a, b) => a[0].localeCompare(b[0]))).toEqual([['socket-a', 'chosen'], ['socket-b', 'chosen']]);
+	});
+
 	it('mirrors the operation-scoped platform in createTestContext', () => {
 		const platform = { requestId: 'connection-test', send() {} };
 		const ctx = createTestContext({

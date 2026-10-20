@@ -48,13 +48,8 @@ export function createTestContext(options) {
 	const hasTraceContext = Object.prototype.hasOwnProperty.call(opts, 'traceContext');
 	let contextPlatform = opts.platform ?? null;
 	if (contextPlatform) {
-		contextPlatform = Object.create(contextPlatform);
-		const properties = {
-			requestId: { value: requestId, enumerable: true },
-			connectionId: { value: connectionId, enumerable: true }
-		};
-		if (hasTraceContext) properties.traceContext = { value: opts.traceContext ?? null, enumerable: true };
-		Object.defineProperties(contextPlatform, properties);
+		contextPlatform = { __proto__: contextPlatform, requestId, connectionId };
+		if (hasTraceContext) Object.defineProperty(contextPlatform, 'traceContext', { value: opts.traceContext ?? null, enumerable: true });
 	}
 	const traceContext = hasTraceContext ? (opts.traceContext ?? null) : (contextPlatform?.traceContext ?? null);
 	const ctx = {
@@ -330,8 +325,10 @@ function _seedRng(seed) {
 export function createTestEnv(options) {
 	const isDev = options?.dev ?? false;
 
-	/** @type {Map<string, Set<{ ws: any, cb: ((envelope: any) => void) | null }>>} */
+	/** @type {Map<string, Set<any>>} Subscribed sockets, independent of local stream listeners. */
 	const topicSubscribers = new Map();
+	/** @type {Map<string, Set<(envelope: any) => void>>} Active callbacks, flattened outside the delivery path. */
+	const topicListeners = new Map();
 
 	/** @type {any[]} */
 	const allConnections = [];
@@ -392,11 +389,8 @@ export function createTestEnv(options) {
 			// production platform's.
 			_noteTopicPublish(topic);
 			if (_shouldChaosDropPublish()) return false;
-			const subs = topicSubscribers.get(topic);
-			if (!subs) return true;
-			for (const sub of subs) {
-				if (sub.cb) sub.cb({ event, data });
-			}
+			const listeners = topicListeners.get(topic);
+			if (listeners) for (const cb of listeners) cb({ event, data });
 			return true;
 		},
 		/**
@@ -512,53 +506,44 @@ export function createTestEnv(options) {
 		/** @type {Map<string, (topic: string, event: string, data: any) => void>} Keyed by request ID */
 		const _sendHandlers = new Map();
 
-		/** @type {Map<string, number>} Topic refcounts for the test ws */
-		const _topicRefcounts = new Map();
+		const activateListeners = (topic) => {
+			const listeners = ws._topicListeners.get(topic);
+			if (!listeners) return;
+			if (!topicListeners.has(topic)) topicListeners.set(topic, new Set());
+			const active = topicListeners.get(topic);
+			for (const cb of listeners) active.add(cb);
+		};
+		const deactivateListeners = (topic) => {
+			const active = topicListeners.get(topic);
+			if (!active) return;
+			const listeners = ws._topicListeners.get(topic);
+			if (listeners) for (const cb of listeners) active.delete(cb);
+			if (active.size === 0) topicListeners.delete(topic);
+		};
 
 		const ws = {
 			getUserData: () => userData,
 			subscribe: (topic) => {
-				const rc = (_topicRefcounts.get(topic) || 0) + 1;
-				_topicRefcounts.set(topic, rc);
+				if (subscribedTopics.has(topic)) return true;
 				subscribedTopics.add(topic);
 				if (!topicSubscribers.has(topic)) topicSubscribers.set(topic, new Set());
-				const entry = { ws, cb: null };
-				topicSubscribers.get(topic).add(entry);
-				// Store entries as an array per topic to support multiple subscriptions
-				if (!ws._topicEntries.has(topic)) ws._topicEntries.set(topic, []);
-				ws._topicEntries.get(topic).push(entry);
-				// A listener parked by an attach frame binds here: the server names
-				// the wire topic before it subscribes the socket, so the stream that
-				// is about to own this entry asked for it before the entry existed.
-				const parked = ws._pendingTopicCbs.get(topic);
-				if (parked && parked.length > 0) {
-					entry.cb = parked.shift();
-					if (parked.length === 0) ws._pendingTopicCbs.delete(topic);
-				}
+				topicSubscribers.get(topic).add(ws);
+				activateListeners(topic);
 				return true;
 			},
 			unsubscribe: (topic) => {
-				const rc = (_topicRefcounts.get(topic) || 1) - 1;
-				if (rc <= 0) {
-					_topicRefcounts.delete(topic);
-					subscribedTopics.delete(topic);
-				} else {
-					_topicRefcounts.set(topic, rc);
-				}
-				const entries = ws._topicEntries?.get(topic);
-				if (entries && entries.length > 0) {
-					const entry = entries.pop();
-					topicSubscribers.get(topic)?.delete(entry);
-					if (entries.length === 0) ws._topicEntries.delete(topic);
-				}
+				subscribedTopics.delete(topic);
+				const sockets = topicSubscribers.get(topic);
+				sockets?.delete(ws);
+				if (sockets?.size === 0) topicSubscribers.delete(topic);
+				deactivateListeners(topic);
 				return true;
 			},
 			isSubscribed: (topic) => subscribedTopics.has(topic),
 			getTopics: () => [...subscribedTopics],
 			_topics: subscribedTopics,
-			_topicEntries: new Map(),
-			/** @type {Map<string, Array<(envelope: any) => void>>} Listeners parked by an attach frame, bound by the next subscribe */
-			_pendingTopicCbs: new Map(),
+			/** @type {Map<string, Set<(envelope: any) => void>>} Local listeners receive each socket delivery once. */
+			_topicListeners: new Map(),
 			/** @type {Set<(message: { topic: string, event: string, data: any }) => void>} onMessage listeners */
 			_rawListeners: new Set(),
 			_onSend: null,
@@ -591,7 +576,7 @@ export function createTestEnv(options) {
 					if (data && data.ok) {
 						entry.resolve(data.data);
 					} else if (data) {
-						const err = new LiveError(data.code || 'UNKNOWN', data.error || 'Unknown error');
+						const err = new LiveError(data.code || 'UNKNOWN', data.error || 'Unknown error', data);
 						if (data.issues) /** @type {any} */ (err).issues = data.issues;
 						entry.reject(err);
 					}
@@ -631,51 +616,44 @@ export function createTestEnv(options) {
 				const merged = _applyTestMerge(current, envelope, state._merge, state._key, state._mergeOpts);
 				state.values.push(merged);
 			};
-			// Claim the first unclaimed entry for this topic (FIFO); mirrors the
-			// browser client's listener install. At attach time the entry does
-			// not exist yet - the server names the topic before it subscribes
-			// the socket - so the listener parks until the subscribe binds it.
-			let _claimIssued = false;
-			/** @type {((envelope: any) => void) | null} */
-			let _parkedCb = null;
-			const claimTopic = (topic) => {
-				if (_claimIssued) return;
-				const cb = (envelope) => {
-					if (!attached) { attachBuffer.push(envelope); return; }
-					applyEnvelope(envelope);
-				};
-				const entries = ws._topicEntries?.get(topic);
-				const entry = entries && entries.find(e => !e.cb);
-				_claimIssued = true;
-				if (entry) {
-					entry.cb = cb;
-					return;
-				}
-				_parkedCb = cb;
-				if (!ws._pendingTopicCbs.has(topic)) ws._pendingTopicCbs.set(topic, []);
-				/** @type {any[]} */ (ws._pendingTopicCbs.get(topic)).push(cb);
+			// Match browser topic fan-out: local listeners belong to streams,
+			// independently of which subscribe acquired a socket topic ref.
+			let listenerTopic = null;
+			const cb = (envelope) => {
+				if (!attached) { attachBuffer.push(envelope); return; }
+				applyEnvelope(envelope);
 			};
-			/** Drop a listener that parked for a subscribe that never happened. @param {string | null} topic */
-			const unparkTopic = (topic) => {
-				if (!_parkedCb || !topic) return;
-				const parked = ws._pendingTopicCbs.get(topic);
-				if (parked) {
-					const at = parked.indexOf(_parkedCb);
-					if (at >= 0) parked.splice(at, 1);
-					if (parked.length === 0) ws._pendingTopicCbs.delete(topic);
+			const releaseTopic = () => {
+				if (!listenerTopic) return;
+				const active = topicListeners.get(listenerTopic);
+				active?.delete(cb);
+				if (active?.size === 0) topicListeners.delete(listenerTopic);
+				const listeners = ws._topicListeners.get(listenerTopic);
+				listeners?.delete(cb);
+				if (listeners?.size === 0) ws._topicListeners.delete(listenerTopic);
+				listenerTopic = null;
+			};
+			const listenTopic = (topic) => {
+				if (listenerTopic === topic) return;
+				releaseTopic();
+				listenerTopic = topic;
+				if (!ws._topicListeners.has(topic)) ws._topicListeners.set(topic, new Set());
+				ws._topicListeners.get(topic).add(cb);
+				if (subscribedTopics.has(topic)) {
+					if (!topicListeners.has(topic)) topicListeners.set(topic, new Set());
+					topicListeners.get(topic).add(cb);
 				}
-				_parkedCb = null;
 			};
 
 			_sendHandlers.set(streamId, (topic, event, data) => {
 				if (topic !== '__rpc' || event !== streamId) return;
 				// Early attach: the server names the wire topic before it subscribes
-				// the socket; the entry is claimed now so frames delivered ahead of
+				// the socket; listen now so frames delivered ahead of
 				// the snapshot buffer instead of being lost. The handler stays for
 				// the real response.
 				if (data && data.attach === true) {
 					state.topic = data.topic || null;
-					if (state.topic) claimTopic(state.topic);
+					if (state.topic) listenTopic(state.topic);
 					return;
 				}
 				_sendHandlers.delete(streamId);
@@ -692,16 +670,15 @@ export function createTestEnv(options) {
 
 					// An attach frame already issued this stream's listener; a
 					// client that did not get one (or a server that sent none)
-					// claims here instead.
-					if (state.topic) claimTopic(state.topic);
-					_parkedCb = null;
+					// listens here instead.
+					if (state.topic) listenTopic(state.topic);
 					attached = true;
 					for (const envelope of attachBuffer) applyEnvelope(envelope);
 					attachBuffer = [];
 				} else if (data) {
-					unparkTopic(state.topic);
+					releaseTopic();
 					attachBuffer = [];
-					state.error = new LiveError(data.code || 'UNKNOWN', data.error || 'Unknown error');
+					state.error = new LiveError(data.code || 'UNKNOWN', data.error || 'Unknown error', data);
 				}
 			});
 
@@ -776,7 +753,7 @@ export function createTestEnv(options) {
 					if (data && data.ok) {
 						entry.resolve(data.data);
 					} else if (data) {
-						entry.reject(new LiveError(data.code || 'UNKNOWN', data.error || 'Unknown error'));
+						entry.reject(new LiveError(data.code || 'UNKNOWN', data.error || 'Unknown error', data));
 					}
 				});
 
@@ -822,13 +799,14 @@ export function createTestEnv(options) {
 			_sendHandlers.clear();
 			ws._onSend = null;
 			close(ws, { platform, subscriptions: new Set(subscribedTopics) });
-			for (const [topic, entries] of ws._topicEntries) {
-				const subs = topicSubscribers.get(topic);
-				if (subs) { for (const e of entries) subs.delete(e); }
+			for (const topic of subscribedTopics) {
+				deactivateListeners(topic);
+				const sockets = topicSubscribers.get(topic);
+				sockets?.delete(ws);
+				if (sockets?.size === 0) topicSubscribers.delete(topic);
 			}
-			ws._topicEntries.clear();
+			ws._topicListeners.clear();
 			subscribedTopics.clear();
-			_topicRefcounts.clear();
 		}
 
 		function reconnect() {
@@ -870,6 +848,7 @@ export function createTestEnv(options) {
 	function cleanup() {
 		_clearCron();
 		topicSubscribers.clear();
+		topicListeners.clear();
 		allConnections.length = 0;
 		platform.connections = 0;
 	}

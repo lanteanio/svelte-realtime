@@ -1,3 +1,5 @@
+import type { ErrorMetadata, ErrorJsonValue } from './shared/error-metadata.js';
+export type { ErrorMetadata, ErrorJsonValue } from './shared/error-metadata.js';
 import type { Platform, WebSocket } from 'svelte-adapter-uws';
 
 /** Every pressure reason emitted by the supported adapter, least to most severe. */
@@ -316,7 +318,9 @@ export interface LiveContext<UserData = RegisteredUser> {
 	 */
 	connectionId: string | undefined;
 	/**
-	 * Correlation id for this operation. For WebSocket RPCs this is the bounded
+	 * Correlation label for this operation. Pair it with connectionId when logging or joining.
+	 * Client-chosen labels may collide or be reused; never use them as authentication or idempotency keys.
+	 * For WebSocket RPCs this is the bounded
 	 * printable-ASCII envelope id (maximum 128 characters), or a fresh safe id
 	 * when an internal/malformed call has no usable envelope id. For direct
 	 * HTTP/SSR work it is the adapter's per-request id. Threaded through the
@@ -329,7 +333,7 @@ export interface LiveContext<UserData = RegisteredUser> {
 	 * @example
 	 * ```js
 	 * export default live(async (ctx, input) => {
-	 *   log.info({ requestId: ctx.requestId, userId: ctx.user?.id }, 'order received');
+	 *   log.info({ connectionId: ctx.connectionId, requestId: ctx.requestId }, 'order received');
 	 *   const order = await db.orders.create(input);
 	 *   return order;
 	 * });
@@ -4082,8 +4086,12 @@ export function guard(
  * and the client receives them as-is via `RpcError.code`.
  */
 export class LiveError extends Error {
+	/** Source-English fallback. Resolve code and params for localized display. */
+	message: string;
+	readonly params?: ErrorMetadata['params'];
+	readonly details?: ErrorJsonValue;
 	code: string;
-	constructor(code: string, message?: string);
+	constructor(code: string, message?: string, metadata?: ErrorMetadata);
 }
 
 /**

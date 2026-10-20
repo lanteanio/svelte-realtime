@@ -27,10 +27,30 @@ export const _rpcClosedSockets = new WeakSet();
 export function _recordRpcDelivery(path, outcome) {
 	const mi = state.metricsInstruments;
 	if (!mi) return;
-	const label = path === '__batch__' ? path
+	mi.rpcDelivery.inc({ path: _registeredPathLabel(path), outcome });
+}
+
+/** @param {unknown} path @returns {string} */
+export function _registeredPathLabel(path) {
+	return path === '__batch__' ? path
 		: typeof path !== 'string' || !_validPathRe.test(path) ? '__invalid__'
 		: registry.has(path) ? _metricPath(path) : '__unknown__';
-	mi.rpcDelivery.inc({ path: label, outcome });
+}
+
+/**
+ * Record a call answered before its path was resolved: a drain-window
+ * `UNAVAILABLE`, a protocol rejection, an upload refused at admission. These
+ * callers saw an error, so the RED series must count it like any other failure.
+ * Each such exit returns right after this call, so the call is recorded once.
+ * The client-supplied path labels the series only when it names a registered
+ * function.
+ * @param {unknown} path
+ * @param {string} code
+ * @param {any} [ws]
+ */
+export function _recordRejectedRpc(path, code, ws) {
+	if (!state.metricsInstruments) return;
+	_recordRpcMetrics(_registeredPathLabel(path), code, monotonicNow(), ws);
 }
 
 /** Distinct cohort labels seen, bounded so a buggy classifier cannot explode series cardinality. */

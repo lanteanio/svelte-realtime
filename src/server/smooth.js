@@ -1,7 +1,8 @@
 // @ts-check
 import { live } from '../server.js';
-import { monotonicNow, wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
+import { monotonicNow, wallEpoch, setTimer, clearTimer, setImmediateTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _subscribeTracked, releaseSubscription } from './membership.js';
 import { _getIdentityKey } from './identity.js';
 import { _tenantTopic, _topicInTenant } from './tenant.js';
 import { createInterestState, targetDelayMs } from './interest.js';
@@ -3070,8 +3071,16 @@ export const _smoothRegister = function smooth(config) {
 			// which is what the broadcast walk delivers by. Reserved-prefix
 			// topics never ride the client's own subscribe frames.
 			if (ctx.ws && ctx.platform && typeof ctx.platform.subscribe === 'function') {
-				const admission = ctx.platform.subscribe(ctx.ws, rec.wireTopic);
-				const denial = admission && typeof admission.then === 'function' ? await admission : admission;
+				let denial;
+				try {
+					const admission = ctx.platform.subscribe(ctx.ws, rec.wireTopic);
+					denial = admission && typeof admission.then === 'function' ? await admission : admission;
+				} catch (err) {
+					// A wrapper can start an immediately settling admission and then
+					// throw. Drain its queued completion before releasing membership.
+					await new Promise(resolve => setImmediateTimer(resolve));
+					throw err;
+				}
 				if (denial) {
 					throw new LiveError(
 						denial === 'UNAUTHENTICATED' ? 'UNAUTHENTICATED' : 'FORBIDDEN',
@@ -3079,9 +3088,10 @@ export const _smoothRegister = function smooth(config) {
 					);
 				}
 			} else if (ctx.ws && typeof ctx.ws.subscribe === 'function') {
-				try {
-					ctx.ws.subscribe(rec.wireTopic);
-				} catch {}
+				// A closed socket falls through to the liveness check below.
+				if (_subscribeTracked(ctx.ws, rec.wireTopic) === 'RATE_LIMITED') {
+					throw new LiveError('FORBIDDEN', 'smooth topic subscribe denied: RATE_LIMITED');
+				}
 			}
 			// Re-sync flood cutoff, AFTER admission (a denied subscribe must not be
 			// able to consume anyone's allowance) and before any O(catalog) work. The
@@ -3265,8 +3275,13 @@ export const _smoothRegister = function smooth(config) {
 				// A sibling sync on this socket can have succeeded while this one
 				// awaited admission. Only roll back a wholly unaccepted reservation.
 				if (!join.retained && ctx.ws && !_smoothClosedWs.has(ctx.ws)) {
-					if (typeof ctx.platform?.unsubscribe === 'function') ctx.platform.unsubscribe(ctx.ws, rec.wireTopic);
-					else if (typeof ctx.ws.unsubscribe === 'function') ctx.ws.unsubscribe(rec.wireTopic);
+					// Rollback releases this reservation without revoking another
+					// subscribe still awaiting its independent admission hook.
+					let released = false;
+					try { released = releaseSubscription(ctx.ws, rec.wireTopic); } catch { /* freed handle */ }
+					if (!released) {
+						try { ctx.ws.unsubscribe(rec.wireTopic); } catch { /* freed handle */ }
+					}
 				}
 				rec.syncJoins.delete(ctx.ws);
 				if (!join.retained && !rec.authority.get(key) && !rec.registry.has(key)) rec.syncRate.delete(key);

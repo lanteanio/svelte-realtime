@@ -733,7 +733,7 @@ class UploadHandle {
 			this._reportChunkZero();
 			this._settle(true, envelope.data);
 		} else if (envelope) {
-			const err = new RpcError(envelope.code || 'UNKNOWN', envelope.error || 'Upload failed');
+			const err = new RpcError(envelope.code || 'UNKNOWN', envelope.error || 'Upload failed', envelope);
 			this._settle(false, err);
 		}
 	}

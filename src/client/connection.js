@@ -189,7 +189,7 @@ export function ensureListener() {
 					entry.resolve(entry.stream ? result : result.data);
 					_warnDeprecation(result.deprecation);
 				} else {
-					entry.reject(new RpcError(result.code || 'UNKNOWN', result.error || 'Unknown error'));
+					entry.reject(new RpcError(result.code || 'UNKNOWN', result.error || 'Unknown error', result));
 				}
 			}
 			return;
@@ -214,7 +214,7 @@ export function ensureListener() {
 			entry.resolve(entry.stream ? data : data.data);
 			_warnDeprecation(data.deprecation);
 		} else if (data) {
-			const err = new RpcError(data.code || 'UNKNOWN', data.error || 'Unknown error');
+			const err = new RpcError(data.code || 'UNKNOWN', data.error || 'Unknown error', data);
 			if (data.issues) /** @type {any} */ (err).issues = data.issues;
 			entry.reject(err);
 		}

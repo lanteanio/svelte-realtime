@@ -12,6 +12,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- `LiveError` and `RpcError` accept explicit bounded JSON `params` and `details`, preserved through RPC, uploads, SSR hydration and the `createTestEnv` harness. Applications can resolve localized display text from code and parameters while retaining source-English messages for compatibility.
+
 - Declare `Register.user` once to type live contexts, socket user data, guards, stream callbacks, uploads, and generated stream loading options throughout an app. Unregistered bare `LiveContext` and `UploadContext` annotations now default to `any`, matching unregistered callback inference; supply an explicit generic to retain `unknown`.
 
 - Uploads use receiver credits: the client pauses while `maxBufferedChunks` chunks wait for the handler and resumes as `ctx.stream` is consumed, so a handler that awaits a slow sink receives every byte with default options. `FLOW_BACKPRESSURE` now fails only a sender that keeps sending past its credit, or a client without credit support that overflows the queue. A client falls back to the previous upload format once per connection against a server without credits.
@@ -28,6 +30,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - With a tenant resolver, a `configureForget` store or an enabled webhook dead-letter store, `live.forget(userId, opts)` requires `opts.tenantId` and rejects with `INVALID_REQUEST` before any purge when it is missing; `tenantId: null` still selects the untenanted scope. Previously an omitted tenant erased the untenanted scope and reported success. Calls without these configured surfaces keep the optional scope.
   **Action required:** applications with a resolver or erasure store pass `tenantId` (or an explicit `null`) on every `live.forget` call.
+
+- RPC contexts build their operation-scoped platform view as a plain object inheriting from the platform instead of defining read-only properties per call. The correlation guidance pairs `ctx.requestId`, a client-chosen label that can collide or be reused, with `ctx.connectionId`.
 
 ### Fixed
 
@@ -48,6 +52,20 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Multiplayer presence rejects lock names over 128 UTF-8 bytes and caps releases at 2048 per delta before broadcasting or updating the roster.
 
 - `live.forget(userId, { tenantId })` erases only the named tenant's records from the in-memory webhook dead-letter store, the push registry and smooth state. An equal userId in another tenant keeps its dead-lettered events, routing and smooth entries, and a dead-letter delivery still in flight for that other tenant is captured instead of being dropped by the erasure's tombstone. The dead-letter store scopes by record topic, the same rule the durable stores apply.
+
+- Upload reauthorization preserves explicit structured error parameters and details in both the client failure and the handler abort reason.
+
+- Upload metrics record a terminal outcome once, including cancellation, disconnects and rejected chunks while handler lookup or authorization is pending. A late handler completion cannot replace that failure with success.
+
+- Closing the final document mount through a platform without admission helpers now clears the adapter subscription registry. Failed smooth initialization releases its reservation without cancelling independent pending subscription hooks.
+
+- Signal channels, and stream, document and smooth subscriptions made through a platform without `subscribe`, now join through the adapter's subscription registry. They count against the per-connection subscription cap (a stream at the cap is refused with `RATE_LIMITED`) and receive per-subscriber binary publishes.
+
+- RPC metrics count calls refused before they run: `UNAVAILABLE` during a shutdown drain, `PROTOCOL_MISMATCH`, and uploads refused at admission now add to `svelte_realtime_rpc_total` and `svelte_realtime_rpc_errors_total` for text, batch, binary and upload calls. Unregistered paths fold to `__unknown__` or `__invalid__`.
+
+- `createTestEnv` keeps each stream's topic listener independent of socket membership and delivers each frame to every listener on the connection, so a refused overlapping subscribe on the same topic can no longer take a sibling stream's events.
+
+- A stream subscribe refused by its loader now releases the connection's adapter membership, derived taps and grant, so a later raw subscribe to that topic is judged afresh instead of admitted on the refused grant, and the same socket can resubscribe and receive live frames. Another stream still holding the topic on that socket keeps it, and an independent subscribe still awaiting its hook can complete.
 
 ## [0.6.0-next.91] - 2026-10-13
 

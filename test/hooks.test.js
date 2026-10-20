@@ -128,3 +128,20 @@ describe('realtimeTransport()', () => {
 		expect(a.RpcError).not.toBe(b.RpcError);
 	});
 });
+
+for (const kind of ['LiveError', 'RpcError']) {
+	it(`${kind} hydrates structured metadata and accepts older tuples`, () => {
+		const Ctor = kind === 'LiveError' ? LiveError : RpcError;
+		const transport = realtimeTransport()[kind];
+		const metadata = { params: { count: 3 }, details: ['retry'] };
+		const original = new Ctor('LIMIT', 'Limit reached', metadata);
+		const decoded = transport.decode(transport.encode(original));
+		expect(decoded).toMatchObject({ code: 'LIMIT', message: 'Limit reached', ...metadata });
+		const old = transport.decode(['LIMIT', 'Old fallback']);
+		expect(old.message).toBe('Old fallback');
+		expect(old.params).toBeUndefined(); expect(old.details).toBeUndefined();
+		const [code, message] = transport.encode(original);
+		const legacyDecoded = new Ctor(code, message);
+		expect(legacyDecoded.message).toBe('Limit reached');
+	});
+}

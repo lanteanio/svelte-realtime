@@ -97,7 +97,7 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-forbidden"></a>
 ### <code>FORBIDDEN</code>
 
-- Searchable message prefixes: <code>Authentication required</code>; <code>Derived scope changed; resubscribe to receive the current view</code>; <code>Room action '</code>; <code>Room membership is being erased</code>; <code>document read denied</code>; <code>document topic subscribe denied: </code>; <code>smooth topic subscribe denied: </code>
+- Searchable message prefixes: <code>Authentication required</code>; <code>Derived scope changed; resubscribe to receive the current view</code>; <code>Room action '</code>; <code>Room membership is being erased</code>; <code>document read denied</code>; <code>document topic subscribe denied: </code>; <code>document topic subscribe denied: RATE_LIMITED</code>; <code>smooth topic subscribe denied: </code>; <code>smooth topic subscribe denied: RATE_LIMITED</code>
 - Owning sources: [src/server/crdt.js](../src/server/crdt.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/room.js](../src/server/room.js), [src/server/smooth.js](../src/server/smooth.js)
 
 <a id="live-error-forget-incomplete"></a>
@@ -1097,38 +1097,38 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/client/connection.js:177</code>
 - <code>src/client/connection.js:192</code>
 - <code>src/client/connection.js:217</code>
-- <code>src/client/internal-state.js:135</code>
+- <code>src/client/internal-state.js:138</code>
 - <code>src/client/offline.js:312</code>
 - <code>src/client/stream.js:1890</code>
 - <code>src/client/stream.js:2622</code>
 - <code>src/client/upload.js:625</code>
 - <code>src/client/upload.js:736</code>
 - <code>src/client/upload.js:800</code>
-- <code>src/hooks.js:50</code>
-- <code>src/hooks.js:57</code>
-- <code>src/server.js:1916</code>
-- <code>src/server.js:2920</code>
+- <code>src/hooks.js:51</code>
+- <code>src/hooks.js:58</code>
+- <code>src/server.js:1952</code>
+- <code>src/server.js:2956</code>
 - <code>src/server/ctx.js:113</code>
-- <code>src/server/dispatch.js:1263</code>
-- <code>src/server/dispatch.js:1374</code>
-- <code>src/server/dispatch.js:1619</code>
-- <code>src/server/dispatch.js:1636</code>
-- <code>src/server/dispatch.js:172</code>
-- <code>src/server/dispatch.js:358</code>
-- <code>src/server/dispatch.js:392</code>
-- <code>src/server/dispatch.js:699</code>
-- <code>src/server/dispatch.js:799</code>
-- <code>src/server/dispatch.js:811</code>
-- <code>src/server/dispatch.js:858</code>
+- <code>src/server/dispatch.js:1280</code>
+- <code>src/server/dispatch.js:1394</code>
+- <code>src/server/dispatch.js:1641</code>
+- <code>src/server/dispatch.js:1658</code>
+- <code>src/server/dispatch.js:175</code>
+- <code>src/server/dispatch.js:361</code>
+- <code>src/server/dispatch.js:395</code>
+- <code>src/server/dispatch.js:702</code>
+- <code>src/server/dispatch.js:802</code>
+- <code>src/server/dispatch.js:814</code>
+- <code>src/server/dispatch.js:873</code>
 - <code>src/server/idempotency.js:880</code>
 - <code>src/server/push.js:714</code>
-- <code>src/server/upload.js:309</code>
-- <code>src/server/upload.js:421</code>
-- <code>src/server/upload.js:423</code>
-- <code>src/server/upload.js:781</code>
+- <code>src/server/upload.js:319</code>
+- <code>src/server/upload.js:440</code>
+- <code>src/server/upload.js:442</code>
+- <code>src/server/upload.js:798</code>
 - <code>src/shared/assert.js:120</code>
 - <code>src/shared/assert.js:75</code>
 - <code>src/shared/diagnostic-format.js:40</code>
-- <code>src/testing.js:594</code>
-- <code>src/testing.js:704</code>
-- <code>src/testing.js:779</code>
+- <code>src/testing.js:579</code>
+- <code>src/testing.js:681</code>
+- <code>src/testing.js:756</code>

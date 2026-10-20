@@ -9,6 +9,8 @@ import { MAX_RPC_BATCH_CALLS } from '../shared/rpc-limits.js';
 import { diagnosticErrorMessage, emitOperationalEvent, formatDiagnostic } from '../shared/diagnostic.js';
 import { monotonicNow, randomUuid } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _subscribeTracked } from './membership.js';
+import { copyErrorMetadata } from '../shared/error-metadata.js';
 import { _IS_DEV } from './env.js';
 import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './validate.js';
 import { state, registry, guards, cronRegistry, _declaredRedact, _pendingSubscribeHooks } from './state.js';
@@ -16,7 +18,7 @@ import { _getBus } from './bus.js';
 import { _ensureWrap } from './reactive.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
 import { _consumeRateLimitBucket, _resolveRegistryRateLimit, _rateLimitConfig } from './rate-limit.js';
-import { _recordRpcMetrics, _recordRpcDelivery, _rpcClosedSockets } from './metrics.js';
+import { _recordRpcMetrics, _recordRpcDelivery, _recordRejectedRpc, _rpcClosedSockets } from './metrics.js';
 import { _shouldShed } from './admission.js';
 import { _getIdentityKey, _getAuthenticatedId } from './identity.js';
 import { _bindAlarmCtx } from './alarm.js';
@@ -76,11 +78,12 @@ function _withFailureRequestId(result, requestId) {
 
 // Seam: stateful staying machinery (subscription bookkeeping, registry/guard/lazy
 // resolvers, middleware, shared validators), injected once by server.js at init.
-let _isLazyResolved, _trackStreamSub, _rollbackStreamSubscribe, _registerStaleWatch, _registerInvalidationWatch, _resolveRegistryEntry, _resolveGuard, _resolveAllLazy, _runWithMiddleware, _validate, _callTopicFn, _applyInitTransform;
+let _isLazyResolved, _trackStreamSub, _rollbackStreamSubscribe, _streamReleaseGeneration, _registerStaleWatch, _registerInvalidationWatch, _resolveRegistryEntry, _resolveGuard, _resolveAllLazy, _runWithMiddleware, _validate, _callTopicFn, _applyInitTransform;
 export function installDispatch(seams) {
 	_isLazyResolved = seams.isLazyResolved;
 	_trackStreamSub = seams.trackStreamSub;
 	_rollbackStreamSubscribe = seams.rollbackStreamSubscribe;
+	_streamReleaseGeneration = seams.streamReleaseGeneration;
 	_registerStaleWatch = seams.registerStaleWatch;
 	_registerInvalidationWatch = seams.registerInvalidationWatch;
 	_resolveRegistryEntry = seams.resolveRegistryEntry;
@@ -845,11 +848,23 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	let _subscribeDenial = null;
 	try {
 		if (typeof platform.subscribe === 'function') {
-			_subscribeDenial = await platform.subscribe(ws, topic);
+			// Another stream's failed admission on this socket may release the
+			// shared membership after this admission resolved but before this
+			// continuation runs. Admit again in that case; the adapter judges a
+			// topic it no longer holds through the subscribe hook.
+			for (;;) {
+				const releases = _streamReleaseGeneration(ws);
+				_subscribeDenial = await platform.subscribe(ws, topic);
+				if (_subscribeDenial || _streamReleaseGeneration(ws) === releases) break;
+			}
 		} else {
-			ws.subscribe(topic);
+			_subscribeDenial = _subscribeTracked(ws, topic);
 		}
 	} catch {
+		_settleClaimBarriers(ws, topic, fn);
+		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
+	}
+	if (_subscribeDenial === 'CONNECTION_CLOSED') {
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: 'CONNECTION_CLOSED', error: 'WebSocket closed' };
 	}
@@ -1147,9 +1162,11 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 	const requestId = _operationRequestId(msg.id);
 	const protocolRejection = _protocolRejection(ws, platform);
 	if (protocolRejection) {
+		_recordRejectedRpc(msg.rpc, protocolRejection.code, ws);
 		return { id: msg.id, ...protocolRejection, requestId };
 	}
 	if (_isShuttingDown()) {
+		_recordRejectedRpc(msg.rpc, 'UNAVAILABLE', ws);
 		return { id: msg.id, ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down', requestId };
 	}
 	_enterInFlight();
@@ -1261,6 +1278,7 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 		if (err instanceof LiveError) {
 			/** @type {any} */
 			const result = { id, ok: false, code: err.code, error: err.message };
+			if ('params' in err || 'details' in err) Object.assign(result, copyErrorMetadata(err));
 			if (/** @type {any} */ (err).issues) result.issues = /** @type {any} */ (err).issues;
 			return result;
 		}
@@ -1298,10 +1316,12 @@ async function _executeBinaryRpc(ws, header, payload, platform, options) {
 	const requestId = _operationRequestId(header.id);
 	const protocolRejection = _protocolRejection(ws, platform);
 	if (protocolRejection) {
+		_recordRejectedRpc(header.rpc, protocolRejection.code, ws);
 		_respond(ws, platform, header.id, protocolRejection, requestId, header.rpc);
 		return;
 	}
 	if (_isShuttingDown()) {
+		_recordRejectedRpc(header.rpc, 'UNAVAILABLE', ws);
 		_respond(ws, platform, header.id, { ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down' }, requestId, header.rpc);
 		return;
 	}
@@ -1371,7 +1391,9 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 	} catch (err) {
 		_recordRpcMetrics(path, err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
 		if (err instanceof LiveError) {
-			_respond(ws, platform, id, { ok: false, code: err.code, error: err.message }, requestId, path);
+			const result = { ok: false, code: err.code, error: err.message };
+			if ('params' in err || 'details' in err) Object.assign(result, copyErrorMetadata(err));
+			_respond(ws, platform, id, result, requestId, path);
 		} else {
 			if (options?.onError) {
 				try { options.onError(path, err, ctx); } catch {}

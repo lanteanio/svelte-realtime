@@ -22,6 +22,7 @@ import {
 	LiveError
 } from '../src/server.js';
 import { mockWs } from './helpers/mock-ws.js';
+import { WS_SUBSCRIPTIONS } from 'svelte-adapter-uws/testing';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { enforceClusterPublishPolicy } from './helpers/cluster-publish-policy.js';
 import svelteRealtime from '../src/vite.js';
@@ -269,6 +270,30 @@ describe('live.doc sync', () => {
 		expect(res.code).toBe('FORBIDDEN');
 		expect(rt.calls.acquire).toHaveLength(1);
 		expect(rt.calls.release).toHaveLength(1);
+	});
+
+	it('records the wire topic in the adapter registry when the platform has no subscribe', async () => {
+		const { name, topic } = declareBoard();
+		const platform = wirePlatform();
+		delete platform.subscribe;
+		const ws = mockWs({ id: 'u1', [WS_SUBSCRIPTIONS]: new Set() });
+		const res = await call(ws, platform, name + '/board/__doc/sync', ['r1', []]);
+		expect(res.ok).toBe(true);
+		expect(ws.getUserData()[WS_SUBSCRIPTIONS].has('__crdt:' + topic('r1'))).toBe(true);
+	});
+
+	it('refuses a sync at the subscription cap when the platform has no subscribe', async () => {
+		const { name } = declareBoard();
+		const platform = wirePlatform();
+		delete platform.subscribe;
+		const full = new Set(Array.from({ length: 65536 }, (_, i) => 'held:' + i));
+		const ws = mockWs({ id: 'u1', [WS_SUBSCRIPTIONS]: full });
+		const res = await call(ws, platform, name + '/board/__doc/sync', ['r1', []]);
+		expect(res).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+		expect(res.error).toContain('RATE_LIMITED');
+		expect(rt.calls.acquire).toHaveLength(1);
+		expect(rt.calls.release).toHaveLength(1);
+		expect(full.size).toBe(65536);
 	});
 
 	it('reports a failed replica load as an actionable INTERNAL error', async () => {

@@ -6,6 +6,19 @@ it('accepts typed server options and rejects invalid values', () => {
 	const file = resolve(import.meta.dirname, 'smooth-config-consumer.ts').replaceAll('\\', '/');
 	const source = `
 import { configureForget, introspect, live, type SmoothConfig, type TenantConfig } from '../src/server.js';
+import { LiveError, type ErrorMetadata } from '../src/server.js';
+import { RpcError } from '../src/client.js';
+const publicError = new LiveError('LIMIT', 'Limit reached', { params: { count: 3 }, details: ['retry', null] });
+const receivedError = new RpcError('LIMIT', 'Limit reached', { params: { count: 3 } });
+const metadata: ErrorMetadata = { params: publicError.params, details: receivedError.details };
+// @ts-expect-error metadata must be JSON-safe
+new LiveError('LIMIT', 'Limit reached', { details: 1n });
+// @ts-expect-error params must be an object
+new RpcError('LIMIT', 'Limit reached', { params: ['bad'] });
+// @ts-expect-error public metadata is readonly
+if (publicError.params) publicError.params.count = 4;
+void metadata;
+
 import { configureWebhooks, createDeadLetterStore, type DeadLetterStore } from '../src/server.js';
 import type { RedisDeadLetterStore } from 'svelte-adapter-uws-extensions/redis/dead-letter';
 declare const redisDeadLetter: RedisDeadLetterStore;

@@ -2,6 +2,7 @@
 import { live } from '../server.js';
 import { wallEpoch } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
+import { _subscribeTracked, trackedUnsubscribe } from './membership.js';
 import { _tenantTopic } from './tenant.js';
 import { _getAuthenticatedId } from './identity.js';
 import { _IS_DEV } from './env.js';
@@ -478,9 +479,11 @@ export function _crdtRegister(kind, config) {
 				);
 			}
 		} else if (ctx.ws && typeof ctx.ws.subscribe === 'function') {
-			try {
-				ctx.ws.subscribe(wireTopic);
-			} catch {}
+			// A closed socket falls through to the liveness check below.
+			if (_subscribeTracked(ctx.ws, wireTopic) === 'RATE_LIMITED') {
+				if (!alreadyHeld) rec.authority.release(name);
+				throw new LiveError('FORBIDDEN', 'document topic subscribe denied: RATE_LIMITED');
+			}
 		}
 		// Liveness re-check after the awaits: if the socket closed while the
 		// guard / load / subscribe was pending, its close drain already ran
@@ -598,7 +601,7 @@ export function _crdtRegister(kind, config) {
 		if (ctx.platform && typeof ctx.platform.unsubscribe === 'function') {
 			try { ctx.platform.unsubscribe(ctx.ws, rec.prefix + name); } catch { /* freed handle */ }
 		} else if (typeof ctx.ws.unsubscribe === 'function') {
-			try { ctx.ws.unsubscribe(rec.prefix + name); } catch { /* freed handle */ }
+			try { trackedUnsubscribe(ctx.ws, rec.prefix + name); } catch { /* freed handle */ }
 		}
 	});
 

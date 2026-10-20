@@ -1,3 +1,5 @@
+import type { ErrorMetadata, ErrorJsonValue } from './shared/error-metadata.js';
+export type { ErrorMetadata, ErrorJsonValue } from './shared/error-metadata.js';
 import type { Readable } from 'svelte/store';
 import type { WSEvent } from 'svelte-adapter-uws/client';
 
@@ -17,10 +19,14 @@ export const empty: Readable<undefined>;
  * Contains a `code` field for programmatic handling.
  */
 export class RpcError extends Error {
+	/** Source-English fallback. Resolve code and params for localized display. */
+	message: string;
+	readonly params?: ErrorMetadata['params'];
+	readonly details?: ErrorJsonValue;
 	code: string;
 	/** Structured validation issues (present when code === 'VALIDATION'). */
 	issues?: Array<{ path: string[]; message: string }>;
-	constructor(code: string, message?: string);
+	constructor(code: string, message?: string, metadata?: ErrorMetadata);
 }
 
 /**
@@ -191,6 +197,7 @@ export interface StreamStore<T = any> extends Readable<T> {
 	 * ```svelte
 	 * <script>
 	 *   import { auditFeed } from '$live/audit';
+	 *   import { errorText } from '$lib/error-text';
 	 *   const err = auditFeed.error;
 	 * </script>
 	 *
@@ -201,7 +208,7 @@ export interface StreamStore<T = any> extends Readable<T> {
 	 * {:else if $err?.code === 'RATE_LIMITED'}
 	 *   <p>Too many requests. Please wait a moment.</p>
 	 * {:else if $err}
-	 *   <p>Audit feed unavailable: {$err.message}</p>
+	 *   <p>Audit feed unavailable: {errorText($err)}</p>
 	 * {/if}
 	 * ```
 	 */

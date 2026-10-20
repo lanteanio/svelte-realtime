@@ -9,28 +9,28 @@
 		"total": 244,
 		"classifications": {
 			"command": 4,
-			"tutorial": 73,
+			"tutorial": 74,
 			"executed": 33,
 			"output": 5,
-			"syntax": 127,
+			"syntax": 126,
 			"fragment": 1,
 			"config": 1
 		},
 		"channels": {
 			"manual-command": 4,
-			"app-context": 73,
+			"app-context": 74,
 			"packed-runtime": 33,
 			"reviewed-output": 5,
 			"acorn": 119,
-			"svelte": 7,
+			"svelte": 6,
 			"reviewed-fragment": 1,
 			"manual-config": 1,
 			"json": 1
 		},
 		"notRunnable": {
-			"app-context": 73,
+			"app-context": 74,
 			"ambient-identifiers": 117,
-			"browser-component": 7,
+			"browser-component": 6,
 			"type-declarations-only": 1,
 			"requires-browser": 1
 		}
@@ -295,13 +295,13 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "9069c104b604d2aac9cb99c3d421f9a1e39f8c59524d1fc54738fe360962f957",
+			"fingerprint": "15413b0032e8431793d5597e63402a06b73bc47290a7945b9f168f3a16612822",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Error handling",
 			"classification": "tutorial",
 			"channel": "app-context",
-			"reason": "app-context imports: $live/chat, $live/chat"
+			"reason": "app-context imports: $lib/error-text, $live/chat, $live/chat"
 		},
 		{
 			"document": "README.md",
@@ -325,23 +325,23 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "924d9a65c5f5a24162864737c320f8ac2a79d83ced8307d8fdaa3d0aaf4fd81a",
-			"occurrence": 1,
-			"language": "svelte",
-			"section": "Error handling > Reusable error boundary component",
-			"classification": "syntax",
-			"channel": "svelte",
-			"reason": "not runnable: browser-component"
-		},
-		{
-			"document": "README.md",
-			"fingerprint": "803d35d09fa642f79fb560602ace63596ed20fa401f209ebe34ac38a1c3b67e2",
+			"fingerprint": "04f3c236467608fd5633379b96a99a46137c77a09617ae05f45a0ffaf1890e56",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Error handling > Reusable error boundary component",
 			"classification": "tutorial",
 			"channel": "app-context",
-			"reason": "app-context imports: $lib/StreamView.svelte, $live/chat"
+			"reason": "app-context imports: $lib/error-text"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "b28a0f42bd93c20e7a2392ec3bb89a4b7e4c63b3aad6a03ceac31b5664a59e9a",
+			"occurrence": 1,
+			"language": "svelte",
+			"section": "Error handling > Reusable error boundary component",
+			"classification": "tutorial",
+			"channel": "app-context",
+			"reason": "app-context imports: $lib/error-text, $lib/StreamView.svelte, $live/chat"
 		},
 		{
 			"document": "README.md",
@@ -1082,13 +1082,13 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "0ed5e7614f5ebb7a82f0255c9efa5fa67db1c46a68fdc31d62c98de907107c06",
+			"fingerprint": "ee95c5537af7d99d090d94f1bcfca0fc4b5c6fa8ac2378ca9a9f831b2c79940a",
 			"occurrence": 1,
 			"language": "svelte",
 			"section": "Access control > Subscribe-denial codes on stream stores",
 			"classification": "tutorial",
 			"channel": "app-context",
-			"reason": "app-context imports: $live/audit, $live/audit"
+			"reason": "app-context imports: $lib/error-text, $live/audit, $live/audit"
 		},
 		{
 			"document": "README.md",
@@ -1382,7 +1382,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "d4d8fb4c4d74505f49d78fca1f72b46ebdd3c1ccdc41af3697018d76eabe227e",
+			"fingerprint": "72a04f49fd8e2f5a13a6345b2a7f4f7a37e7b08566f263002c85f17de5af8b71",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Request correlation",

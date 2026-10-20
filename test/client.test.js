@@ -8934,3 +8934,22 @@ describe('DevTools connection metadata', () => {
   stop();
  });
 });
+describe('structured RPC error metadata', () => {
+	for (const mode of ['single', 'batch']) it(`preserves params and details from ${mode} replies`, async () => {
+		const metadata = { params: { count: 3 }, details: { retry: true } };
+		const call = __rpc('errors/structured');
+		const promise = mode === 'batch' ? batch(() => [call(), __rpc('errors/other')()]) : call();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		const reply = { ok: false, code: 'LIMIT', error: 'Limit reached', ...metadata };
+		if (mode === 'batch') simulateRpcResponse('__batch', { batch: [{ id: sent.batch[0].id, ...reply }, { id: sent.batch[1].id, ok: true, data: null }] });
+		else simulateRpcResponse(sent.id, reply);
+		await expect(promise).rejects.toMatchObject({ code: 'LIMIT', message: 'Limit reached', ...metadata });
+	});
+});
+
+it('preserves public upload error metadata', async () => {
+	const handle = __upload('uploads/metadata')(new Uint8Array([1]).buffer);
+	await flushUpload();
+	simulateUploadResponse(handle.streamId, { ok: false, code: 'LIMIT', error: 'Limit reached', params: { count: 3 }, details: ['retry'] });
+	await expect(handle).rejects.toMatchObject({ code: 'LIMIT', params: { count: 3 }, details: ['retry'] });
+});

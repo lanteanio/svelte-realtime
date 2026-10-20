@@ -19,6 +19,8 @@ import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { lookup as nodeDnsLookup } from 'node:dns';
 import { LiveError } from './server/live-error.js';
+import { _subscribeTracked } from './server/membership.js';
+import { releaseSubscription } from 'svelte-adapter-uws/subscriptions';
 import { _runtimeRandom, _localHlc } from './server/runtime-fallbacks.js';
 import { _validPathRe, _validSegmentRe, _validUserIdReason, _MAX_USER_ID_LENGTH, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './server/validate.js';
 import { createPiiRedactor } from './server/pii-redact.js';
@@ -106,7 +108,7 @@ import { _roomRegister, installRoom } from './server/room.js';
 import { _flagRegister, _derivedRegister, _configureDynamicDerived, _effectRegister, _aggregateRegister, installReactiveFamilies } from './server/reactive-families.js';
 import { handleRpc, _runGuard, _unknownPathReply, guard, __directCall, message, createMessage, installDispatch } from './server/dispatch.js';
 export { handleRpc, guard, __directCall, message, createMessage };
-installDispatch({ isLazyResolved: _isLazyResolved, trackStreamSub: _trackStreamSub, rollbackStreamSubscribe: _rollbackStreamSubscribe, registerStaleWatch: _registerStaleWatch, registerInvalidationWatch: _registerInvalidationWatch, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, resolveAllLazy: _resolveAllLazy, runWithMiddleware: _runWithMiddleware, validate: _validate, callTopicFn: _callTopicFn, applyInitTransform: _applyInitTransform });
+installDispatch({ isLazyResolved: _isLazyResolved, trackStreamSub: _trackStreamSub, rollbackStreamSubscribe: _rollbackStreamSubscribe, streamReleaseGeneration: _streamReleaseGeneration, registerStaleWatch: _registerStaleWatch, registerInvalidationWatch: _registerInvalidationWatch, resolveRegistryEntry: _resolveRegistryEntry, resolveGuard: _resolveGuard, resolveAllLazy: _resolveAllLazy, runWithMiddleware: _runWithMiddleware, validate: _validate, callTopicFn: _callTopicFn, applyInitTransform: _applyInitTransform });
 export { _resetUploadAutoDiscovery };
 export { _armSilentTopicWatch, _resetSilentTopicWarning, _activatePublishRateWarning, _resetPublishRateWarning };
 export { _crdtLoadError, _setCrdtRuntime, _resetCrdt };
@@ -863,13 +865,44 @@ function _afterSubscribeHooks(ws, topic, drain) {
 		: Promise.resolve().then(() => drain(undefined));
 }
 
+/**
+ * Count of failed-admission releases per socket. A stream subscribe whose
+ * adapter admission resolved can still be waiting to resume when another
+ * stream's rollback on the same socket releases the shared membership; it
+ * compares this count across its await and re-admits when it moved.
+ * @type {WeakMap<object, number>}
+ */
+const _streamReleases = new WeakMap();
+/** @param {object} ws */
+function _streamReleaseGeneration(ws) {
+	return _streamReleases.get(ws) || 0;
+}
+
+/**
+ * Give up the socket's membership in `topic` after a failed stream admission.
+ * The adapter release removes native and logical membership, derived taps and
+ * the publish grant, so a later raw subscribe is judged afresh; it leaves an
+ * independently pending admission free to finish its own authorization. A
+ * platform without the subscription registry (a legacy adapter, a bare
+ * socket) only has native membership to drop.
+ * @param {any} ws
+ * @param {string} topic
+ */
+function _releaseStreamMembership(ws, topic) {
+	_streamReleases.set(ws, _streamReleaseGeneration(ws) + 1);
+	let released = false;
+	try { released = releaseSubscription(ws, topic); } catch {}
+	if (!released) {
+		try { ws.unsubscribe(topic); } catch {}
+	}
+}
+
 function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 	if (isActive && !isActive()) return;
 	const topicMap = _wsStreamOwners.get(ws);
 	// A scope revoke can drain this pending subscription while its loader is
 	// awaiting. Its eventual failure must not unsubscribe or decrement twice.
 	if (!topicMap?.get(topic)?.some((owner) => owner.fn === fn && owner.count > 0)) return;
-	try { ws.unsubscribe(topic); } catch {}
 	if (state.metricsInstruments) state.metricsInstruments.streamGauge.dec();
 	let removedFromTopic = false;
 	if (topicMap) {
@@ -918,6 +951,9 @@ function _rollbackStreamSubscribe(ws, topic, fn, ctx, isActive) {
 		// This ws still owns other subs to this topic; count OTHER ws.
 		remainingSubscribers = wsSet ? wsSet.size - (wsSet.has(ws) ? 1 : 0) : 0;
 	}
+	// Membership on the socket is shared by every stream owning this topic, so
+	// only the last owner's failure gives it up. A surviving owner keeps it.
+	if (removedFromTopic) _releaseStreamMembership(ws, topic);
 	if (/** @type {any} */ (fn).__onUnsubscribe && ctx) {
 		_afterSubscribeHooks(ws, topic, (current) => {
 			let topics = _rollingBack.get(ws);
@@ -3573,7 +3609,7 @@ export function enableSignals(ws, options) {
 	// tenant prefix), so a tenant-scoped channel would silently never reach the
 	// client. Under multi-tenancy, use globally-unique user ids (the norm) so signals
 	// stay isolated; see the README "Multi-tenancy" note.
-	try { ws.subscribe('__signal:' + userId); } catch {}
+	_subscribeTracked(ws, '__signal:' + userId);
 }
 
 /**

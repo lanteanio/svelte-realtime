@@ -1,11 +1,12 @@
 // @ts-check
+import { copyErrorMetadata } from '../shared/error-metadata.js';
 import { monotonicNow } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _IS_DEV } from './env.js';
 import { _validPathRe, _DEFAULT_MAX_ENVELOPE_DEPTH, exceedsEnvelopeDepth } from './validate.js';
 import { state } from './state.js';
 import { _getCtxHelpers, _buildCtx } from './ctx.js';
-import { _recordRpcMetrics } from './metrics.js';
+import { _recordRpcMetrics, _recordRejectedRpc, _registeredPathLabel } from './metrics.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { REALTIME_ERROR_IDS, realtimeErrorCode, realtimeErrorMessage } from '../error-registry.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
@@ -181,7 +182,16 @@ function _respondUpload(ws, platform, streamId, payload) {
  */
 export function _rejectUploadForProtocol(ws, data, platform, rejection) {
 	if (!(data instanceof ArrayBuffer) || data.byteLength < 6) return;
-	const streamId = new DataView(data).getUint32(2, false);
+	const view = new DataView(data);
+	const streamId = view.getUint32(2, false);
+	// Only the first chunk starts a call; later chunks and control frames
+	// belong to one already counted.
+	if (state.metricsInstruments && view.getUint8(0) === _UPLOAD_FRAME_CHUNK && data.byteLength >= 10 && view.getUint32(6, false) === 0) {
+		const header = _parseUploadChunkFrame(data)?.argsHeader;
+		const path = header !== null && typeof header === 'object' && 'path' in header
+			? (header.rpc === undefined ? header.path : undefined) : header?.rpc;
+		_recordRejectedRpc(path, rejection.code, ws);
+	}
 	_respondUpload(ws, platform, streamId, rejection);
 }
 
@@ -388,7 +398,9 @@ function _cleanupUpload(ws, perWs, streamId, upload) {
  * 'settled' is also reachable directly from 'pending' on capacity rejection,
  * disconnect, or cancellation before the handler starts.
  */
-function _createUploadEntry(ws, perWs, streamId, platform) {
+function _createUploadEntry(ws, perWs, streamId, platform, path) {
+	const metricsStart = state.metricsInstruments ? monotonicNow() : 0;
+	let outcomeRecorded = false;
 	/** @type {any} */
 	const upload = {
 		streamId,
@@ -414,13 +426,22 @@ function _createUploadEntry(ws, perWs, streamId, platform) {
 		_reauthCtx: null,
 		_lastReauthBytes: 0,
 		_reauthInflight: null,
-		fail(code, error) {
+		recordOutcome(code) {
+			if (outcomeRecorded) return;
+			outcomeRecorded = true;
+			if (!state.metricsInstruments) return;
+			_recordRpcMetrics(_registeredPathLabel(path), code, metricsStart, ws);
+		},
+		fail(code, error, metadata = undefined) {
 			if (upload.phase === 'settled') return;
 			upload.phase = 'settled';
+			upload.recordOutcome(code);
 			if (upload.ctrl) {
-				try { upload.ctrl.abort(new LiveError(code, error)); } catch {}
+				try { upload.ctrl.abort(new LiveError(code, error, metadata)); } catch {}
 			}
-			_respondUpload(ws, platform, streamId, { ok: false, code, error });
+			const result = { ok: false, code, error };
+			if (metadata !== undefined) Object.assign(result, copyErrorMetadata(metadata));
+			_respondUpload(ws, platform, streamId, result);
 			_cleanupUpload(ws, perWs, streamId, upload);
 		}
 	};
@@ -448,16 +469,20 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 	let perWs = _wsUploads.get(ws);
 
 	if (seq === 0) {
+		const creditMode = argsHeader !== null && typeof argsHeader === 'object' && 'path' in argsHeader;
+		const metricsPath = creditMode ? (argsHeader.rpc === undefined ? argsHeader.path : undefined) : argsHeader?.rpc;
 		// Graceful shutdown: reject a NEW upload, symmetric with the RPC paths.
 		// Continuation frames (seq !== 0) for an already-running upload are
 		// in-flight work and fall through to the normal path below.
 		if (_isShuttingDown()) {
+			_recordRejectedRpc(metricsPath, 'UNAVAILABLE', ws);
 			_respondUpload(ws, platform, streamId, {
 				ok: false, code: 'UNAVAILABLE', error: 'Server is shutting down'
 			});
 			return;
 		}
 		if (perWs && perWs.has(streamId)) {
+			_recordRejectedRpc(metricsPath, 'INVALID_REQUEST', ws);
 			_respondUpload(ws, platform, streamId, {
 				ok: false, code: 'INVALID_REQUEST', error: 'streamId already active'
 			});
@@ -465,6 +490,7 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 		}
 		const pendingStarts = _pendingUploadStarts.get(ws) || 0;
 		if (pendingStarts >= _UPLOAD_PENDING_MAX_PER_SESSION) {
+			_recordRejectedRpc(metricsPath, 'TOO_MANY_UPLOADS', ws);
 			_respondUpload(ws, platform, streamId, {
 				ok: false, code: 'TOO_MANY_UPLOADS', error: 'too many uploads awaiting authorization on this session'
 			});
@@ -479,6 +505,7 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 		// bounded by state.UPLOAD_PENDING_MAX_AGGREGATE regardless of N.
 		const initialBytes = payload ? payload.byteLength : 0;
 		if (state.pendingUploadBytes + initialBytes > state.UPLOAD_PENDING_MAX_AGGREGATE) {
+			_recordRejectedRpc(metricsPath, 'OVERLOADED', ws);
 			_respondUpload(ws, platform, streamId, {
 				ok: false, code: 'OVERLOADED',
 				error: 'pending-upload aggregate buffer cap exceeded; retry shortly'
@@ -487,8 +514,8 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 		}
 		if (!perWs) { perWs = new Map(); _wsUploads.set(ws, perWs); }
 
-		const upload = _createUploadEntry(ws, perWs, streamId, platform);
-		upload.flow = argsHeader !== null && typeof argsHeader === 'object' && 'path' in argsHeader;
+		const upload = _createUploadEntry(ws, perWs, streamId, platform, metricsPath);
+		upload.flow = creditMode;
 		upload.lastReceived = isLast;
 		upload.bytesReceived = initialBytes;
 		upload.expectedSeq = 1;
@@ -583,7 +610,7 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 					if (upload.phase !== 'settled') {
 						const code = (err && /** @type {any} */ (err).code) || 'UNAUTHENTICATED';
 						const msg = (err && /** @type {any} */ (err).message) || 'reauth failed';
-						upload.fail(code, msg);
+						upload.fail(code, msg, err instanceof LiveError ? copyErrorMetadata(err) : undefined);
 					}
 				} finally {
 					upload._reauthInflight = null;
@@ -638,13 +665,7 @@ export function _handleUploadControlFrame(ws, data, platform) {
  * @param {{ beforeExecute?: Function, onError?: Function }} [options]
  */
 async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, options) {
-	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 	let path = '';
-	// Only a path confirmed to resolve to a registered endpoint may be used as a
-	// metric label; until then any exit (including a throw into the catch) folds
-	// to a bounded sentinel so a client-controlled unregistered path cannot
-	// allocate a distinct metric series.
-	let pathRegistered = false;
 	/** @type {any} */ let ctx = null;
 
 	// Count the upload handler as in-flight so onShutdown's drain waits for it.
@@ -660,13 +681,11 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		// a credit-mode client detects them and resends in legacy mode.
 		if (upload.flow) {
 			if (typeof argsHeader.path !== 'string' || argsHeader.rpc !== undefined) {
-				_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
 				upload.fail('INVALID_REQUEST', 'invalid upload header');
 				return;
 			}
 			path = argsHeader.path;
 		} else if (!argsHeader || typeof argsHeader.rpc !== 'string') {
-			_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
 			upload.fail('INVALID_REQUEST', 'missing rpc path');
 			return;
 		} else {
@@ -675,7 +694,6 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		const args = Array.isArray(argsHeader.args) ? argsHeader.args : [];
 
 		if (!_validPathRe.test(path)) {
-			_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
 			upload.fail('INVALID_REQUEST', 'Invalid path');
 			return;
 		}
@@ -689,13 +707,11 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		if (!fn) {
 			// Unregistered, client-controlled path (from the upload chunk-0 args
 			// header): fold to a bounded label, mirroring the RPC NOT_FOUND sites.
-			_recordRpcMetrics('__unknown__', 'NOT_FOUND', _metricsStart);
+			upload.recordOutcome('NOT_FOUND');
 			const reply = _unknownPathReply(ws, path);
 			upload.fail(reply.code, reply.error);
 			return;
 		}
-		// Resolved to a registered endpoint: `path` is now a bounded registry key.
-		pathRegistered = true;
 		upload.ctrl = new AbortController();
 		// Grant credits as the handler consumes. A grant is sent once at
 		// least half the window is free, so a fast consumer costs one small
@@ -768,17 +784,20 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			const result = await fn(ctx, ...args);
 			if (upload.phase !== 'settled') {
 				upload.phase = 'settled';
+				upload.recordOutcome('');
 				_respondUpload(ws, platform, streamId, { ok: true, data: result });
 			}
 		});
-		_recordRpcMetrics(path, '', _metricsStart, ws);
+		upload.recordOutcome('');
 	} catch (err) {
 		if (upload.phase !== 'settled') {
 			upload.phase = 'settled';
 			const code = err instanceof LiveError ? err.code : 'INTERNAL_ERROR';
-			_recordRpcMetrics(pathRegistered ? path : '__unknown__', code, _metricsStart, ws);
+			upload.recordOutcome(code);
 			if (err instanceof LiveError) {
-				_respondUpload(ws, platform, streamId, { ok: false, code: err.code, error: err.message });
+				const result = { ok: false, code: err.code, error: err.message };
+				if ('params' in err || 'details' in err) Object.assign(result, copyErrorMetadata(err));
+				_respondUpload(ws, platform, streamId, result);
 			} else {
 				if (options?.onError) {
 					try { options.onError(path, err, ctx); } catch {}
@@ -795,7 +814,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				_respondUpload(ws, platform, streamId, { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' });
 			}
 		} else {
-			_recordRpcMetrics(pathRegistered ? path : '__unknown__', err instanceof LiveError ? err.code : 'INTERNAL_ERROR', _metricsStart, ws);
+			upload.recordOutcome(err instanceof LiveError ? err.code : 'INTERNAL_ERROR');
 		}
 		// Make sure any pending for-await wakes up if we exited via throw.
 		if (upload.ctrl && !upload.ctrl.signal.aborted) {
@@ -823,6 +842,7 @@ export function _drainUploadsOnClose(ws) {
 	if (!perWs) return;
 	for (const [streamId, upload] of perWs) {
 		upload.phase = 'settled';
+		upload.recordOutcome('DISCONNECTED');
 		if (upload.ctrl) {
 			try { upload.ctrl.abort(new LiveError('DISCONNECTED', 'connection closed')); } catch {}
 		}

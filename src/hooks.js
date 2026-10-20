@@ -1,4 +1,5 @@
 // @ts-check
+import { copyErrorMetadata } from './shared/error-metadata.js';
 import { RpcError } from './client.js';
 import { LiveError } from './server.js';
 
@@ -45,16 +46,16 @@ import { LiveError } from './server.js';
 export function realtimeTransport(extras) {
 	const base = {
 		RpcError: {
-			encode: (value) => value instanceof RpcError && [value.code, value.message, /** @type {any} */ (value).issues],
-			decode: ([code, message, issues]) => {
-				const err = new RpcError(code, message);
+			encode: (value) => value instanceof RpcError && [value.code, value.message, /** @type {any} */ (value).issues, copyErrorMetadata(value)],
+			decode: ([code, message, issues, metadata]) => {
+				const err = new RpcError(code, message, metadata);
 				if (issues !== undefined) /** @type {any} */ (err).issues = issues;
 				return err;
 			}
 		},
 		LiveError: {
-			encode: (value) => value instanceof LiveError && [value.code, value.message],
-			decode: ([code, message]) => new LiveError(code, message)
+			encode: (value) => value instanceof LiveError && [value.code, value.message, copyErrorMetadata(value)],
+			decode: ([code, message, metadata]) => new LiveError(code, message, metadata)
 		}
 	};
 	if (!extras) return base;

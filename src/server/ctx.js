@@ -608,11 +608,7 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, o
 	// Inheritance preserves the full platform API without copying mutable state.
 	let contextPlatform = platform;
 	if (ws && platform) {
-		contextPlatform = Object.create(platform);
-		Object.defineProperties(contextPlatform, {
-			requestId: { value: requestId, enumerable: true },
-			connectionId: { value: connectionId, enumerable: true }
-		});
+		contextPlatform = { __proto__: platform, requestId, connectionId };
 	}
 	const ctx = {
 		user,

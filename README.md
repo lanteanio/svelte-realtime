@@ -665,10 +665,11 @@ Handle loading in your template:
 {/if}
 ```
 
-To show errors, subscribe to the `.error` store:
+To show errors, subscribe to `.error` and resolve `code` plus `params` through an app-owned [localized error resolver](docs/error-metadata.md). `message` is the source-English fallback, not a translation key:
 
 ```svelte
 <script>
+  import { errorText } from '$lib/error-text';
   import { messages } from '$live/chat';
 
   const err = messages.error;
@@ -676,7 +677,7 @@ To show errors, subscribe to the `.error` store:
 </script>
 
 {#if $err}
-  <p>Error: {$err.message} ({$err.code})</p>
+  <p>Error: {errorText($err)} ({$err.code})</p>
 {/if}
 
 {#if $status === 'reconnecting'}
@@ -745,6 +746,7 @@ For Svelte 5, you can build a reusable boundary that handles loading and error s
 ```svelte
 <!-- src/lib/StreamView.svelte -->
 <script>
+  import { errorText } from '$lib/error-text';
   /** @type {{ store: any, children: import('svelte').Snippet, loading?: import('svelte').Snippet, error?: import('svelte').Snippet<[any]> }} */
   let { store, children, loading, error } = $props();
 
@@ -762,7 +764,7 @@ For Svelte 5, you can build a reusable boundary that handles loading and error s
   {#if error}
     {@render error($err)}
   {:else}
-    <p>Error: {$err.message}</p>
+    <p>Error: {errorText($err)}</p>
   {/if}
 {:else}
   {@render children()}
@@ -773,6 +775,7 @@ Use it to wrap any stream:
 
 ```svelte
 <script>
+  import { errorText } from '$lib/error-text';
   import StreamView from '$lib/StreamView.svelte';
   import { messages, sendMessage } from '$live/chat';
 </script>
@@ -788,7 +791,7 @@ Use it to wrap any stream:
 
   {#snippet error(err)}
     <div class="error-banner">
-      <p>Could not load messages: {err.message}</p>
+      <p>Could not load messages: {errorText(err)}</p>
       <button onclick={() => location.reload()}>Retry</button>
     </div>
   {/snippet}
@@ -1794,7 +1797,7 @@ export const transport = realtimeTransport({
 });
 ```
 
-Wire from `src/hooks.js`, NOT `hooks.server.js`. SvelteKit's transport primitive needs both encode (server-side) and decode (client-side hydration) visible at build time - the wrong file silently half-works (encode runs but decode never reaches the client). `RpcError`'s optional `issues` field (carried by `live.validated()` failures) survives the round-trip. Validation runs at registration: malformed extras throw immediately so misconfiguration fails fast at app boot.
+Wire from `src/hooks.js`, NOT `hooks.server.js`. SvelteKit's transport primitive needs both encode (server-side) and decode (client-side hydration) visible at build time - the wrong file silently half-works (encode runs but decode never reaches the client). `RpcError`'s optional `issues` field and explicit `params`/`details` on either error survive the round-trip. Validation runs at registration: malformed extras throw immediately so misconfiguration fails fast at app boot.
 
 ---
 
@@ -2122,6 +2125,7 @@ When a server-side subscribe denial fires (guard rejection, access predicate, ra
 
 ```svelte
 <script>
+  import { errorText } from '$lib/error-text';
   import { auditFeed } from '$live/audit';
   const err = auditFeed.error;
 </script>
@@ -2133,7 +2137,7 @@ When a server-side subscribe denial fires (guard rejection, access predicate, ra
 {:else if $err?.code === 'RATE_LIMITED'}
   <p>Too many requests. Please wait a moment.</p>
 {:else if $err}
-  <p>Audit feed unavailable: {$err.message}</p>
+  <p>Audit feed unavailable: {errorText($err)}</p>
 {/if}
 ```
 
@@ -2605,7 +2609,7 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 
 - `svelte_realtime_rpc_total` - RPC call count by path and status
 - `svelte_realtime_rpc_duration_seconds` - RPC latency by path, with explicit fractional-second buckets from 1 ms through 10 s
-- `svelte_realtime_rpc_errors_total` - RPC execution errors by path and code
+- `svelte_realtime_rpc_errors_total` - RPC errors by path and code, including calls refused before they run (`UNAVAILABLE` during a shutdown drain, `PROTOCOL_MISMATCH`, upload admission limits), which also count in `svelte_realtime_rpc_total`
 - `svelte_realtime_rpc_delivery_total` - final text/binary RPC reply attempts by bounded `path` and `outcome`: `delivered` (accepted without pressure, not a client acknowledgement), `backpressure` (buffered or dropped), `closed`, or `exception`. Batch replies count each call; an oversized batch rejection counts once under `__batch__`; early stream attaches, uploads, direct calls and fire-and-forget calls are excluded. Execution success remains independent of delivery.
 - `svelte_realtime_stream_subscriptions` - active stream subscription gauge
 - `svelte_realtime_cron_total` - cron execution count by path and status
@@ -2804,10 +2808,10 @@ If `fallback` is omitted and the circuit is open, the call throws `LiveError('SE
 
 ## Request correlation
 
-Every live function receives `ctx.requestId` - a stable identifier for the originating operation. WebSocket handlers also receive `ctx.connectionId`, which stays fixed for the life of the socket while concurrent RPCs each get their own request id. The id flows in three directions automatically:
+Every live function receives `ctx.requestId` - a correlation label for the originating operation. WebSocket labels are client-chosen, can collide across connections, and can be reused on one connection; they are not authentication, authorization, or idempotency keys. Pair them with `ctx.connectionId` in logs and joins, and mint a separate server-generated identifier when uniqueness is required. WebSocket handlers also receive `ctx.connectionId`, which stays fixed for the life of the socket while concurrent RPCs each get their own request id. The id flows in three directions automatically:
 
 - **From clients**: WebSocket clients tag every RPC envelope with a generated id. The realtime layer validates it as 1-128 printable ASCII characters, uses a fresh safe id if it is unusable, and exposes it on both `ctx.requestId` and the operation-scoped `ctx.platform.requestId`. HTTP request handlers honor `X-Request-ID` headers (and generate one if absent).
-- **Through your handlers**: pass it to whatever you do downstream so log lines, traces, and persisted rows all share one key.
+- **Through your handlers**: pass both connection and request ids downstream; an unambiguous tuple such as `JSON.stringify([ctx.connectionId, ctx.requestId])` keeps different connections separate.
 - **Into background work**: the `svelte-adapter-uws-extensions` postgres tasks/jobs APIs persist `request_id` on every row. Pass it explicitly or pipe `ctx.platform` and the helpers extract it for you.
 - **Back to clients on failure**: RPC error payloads echo the operation id as `requestId`, including errors inside batch responses.
 
@@ -2821,22 +2825,22 @@ const jobs = createJobQueue(pgClient);
 tasks.register('processOrder', ({ input }) => processOrder(input));
 
 export const submitOrder = live(async (ctx, input) => {
-  // Option A: explicit - works anywhere ctx.requestId is in scope
+  const correlationKey = JSON.stringify([ctx.connectionId, ctx.requestId]);
   const order = await tasks.run('processOrder', {
     input,
-    requestId: ctx.requestId
+    requestId: correlationKey
   });
 
-  // Option B: pipe ctx.platform; the helpers read platform.requestId for you
+  // Explicit requestId overrides the platform fallback for downstream joins
   await jobs.enqueue('shipment-notice', { orderId: order.id }, {
-    platform: ctx.platform
+    platform: ctx.platform, requestId: correlationKey
   });
 
   return order;
 });
 ```
 
-Once the rows land, you can join them back to the originating RPC for debugging or audit:
+With the connection-qualified tuple persisted in both tables, this query correlates rows for debugging. It can still match multiple operations if a client reused an id; use a server-generated operation key for audit-grade uniqueness. Bind the same tuple as `$1`:
 
 ```sql
 -- Trace one user request across the websocket -> task -> job pipeline
@@ -2850,7 +2854,7 @@ WHERE t.request_id = $1
 ORDER BY task_created;
 ```
 
-Valid envelope ids pass opaquely after the printable-ASCII and 128-character bound. If you generate ids with a structured prefix (`o-` for orders, `a-` for audits), every downstream record carries that prefix too.
+Valid envelope ids pass opaquely after the printable-ASCII and 128-character bound. The bound prevents oversized or control-character labels; it does not establish who chose the label or make it unique. HTTP `X-Request-ID` headers are also caller input and need the same trust treatment.
 
 If you also instrument with [Prometheus metrics](#prometheus-metrics), include `requestId` in your log fields rather than as a metric label - it's high-cardinality and would blow up your label space.
 
