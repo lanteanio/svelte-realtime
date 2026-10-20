@@ -66,7 +66,7 @@ The registry-backed messages below preserve the documented prefix and append the
 
 Coverage listing only: the scanner inventories direct LiveError and RpcError constructors, literal arguments of local error helpers, code assignments on locally declared Error objects, error reply objects, structured diagnostic events, and console warning/error prefixes in src/**/*.js. Comments and example declarations are excluded. It does not infer causes or safe recovery actions from strings.
 
-Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 114 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
+Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 116 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
 
 Code anchors stay stable when messages change. Structured diagnostic IDs use the emitted event; legacy console IDs are derived from the literal prefix and change when that prefix changes. These coverage IDs are documentation anchors, not IDs appended to legacy runtime messages. Escaped \n and \r in the listing stand for actual newlines and carriage returns.
 
@@ -1089,6 +1089,20 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Searchable message prefixes: <code>An upload handler failed; the client received an internal error.</code>
 - Owning sources: [src/server/upload.js](../src/server/upload.js)
 
+<a id="diagnostic-upload.stream.ended"></a>
+### <code>upload.stream.ended</code>
+
+- Kind: structured event
+- Searchable message prefixes: <code>An upload stream ended.</code>
+- Owning sources: [src/server/upload.js](../src/server/upload.js)
+
+<a id="diagnostic-upload.stream.started"></a>
+### <code>upload.stream.started</code>
+
+- Kind: structured event
+- Searchable message prefixes: <code>An upload stream started.</code>
+- Owning sources: [src/server/upload.js](../src/server/upload.js)
+
 <a id="diagnostic-webhook.dead-letter.persist-failed"></a>
 ### <code>webhook.dead-letter.persist-failed</code>
 
@@ -1127,8 +1141,8 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/client/upload.js:833</code>
 - <code>src/hooks.js:51</code>
 - <code>src/hooks.js:58</code>
-- <code>src/server.js:2028</code>
-- <code>src/server.js:3032</code>
+- <code>src/server.js:2033</code>
+- <code>src/server.js:3037</code>
 - <code>src/server/ctx.js:113</code>
 - <code>src/server/dispatch.js:1285</code>
 - <code>src/server/dispatch.js:1399</code>
@@ -1143,10 +1157,10 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/server/dispatch.js:859</code>
 - <code>src/server/idempotency.js:880</code>
 - <code>src/server/push.js:714</code>
-- <code>src/server/upload.js:319</code>
-- <code>src/server/upload.js:440</code>
-- <code>src/server/upload.js:442</code>
-- <code>src/server/upload.js:798</code>
+- <code>src/server/upload.js:383</code>
+- <code>src/server/upload.js:509</code>
+- <code>src/server/upload.js:511</code>
+- <code>src/server/upload.js:876</code>
 - <code>src/shared/assert.js:120</code>
 - <code>src/shared/assert.js:75</code>
 - <code>src/shared/diagnostic-format.js:40</code>

@@ -3520,7 +3520,8 @@ export const avatar = live.upload(async (ctx, name, mime) => {
   maxConcurrentPerSession: 2,         // protect a node from one chatty client (default 4)
   maxConcurrentTotal: 1000,           // global cap (default unbounded; opt in)
   maxBufferedChunks: 64,              // receiver window - the client pauses while this many chunks wait (default 64)
-  reauthEvery: 5 * 1024 * 1024        // re-run module guards every 5 MB received (default unset)
+  reauthEvery: 5 * 1024 * 1024,       // re-run module guards every 5 MB received (default unset)
+  diagnostics: true                   // debug upload.stream.started / .ended events (default false)
 });
 ```
 
@@ -3531,9 +3532,7 @@ The handler signature is `(ctx, ...args)` like a regular RPC. `ctx` carries the 
 - `ctx.signal` - deprecated alias for `ctx.abortSignal`, retained during 0.x. It replaces the point-to-point `ctx.signal(userId, event, data)` method inside upload handlers. Send point-to-point events from a regular `live()` handler.
 - `ctx.upload` - `{ id }` for log correlation.
 
-Guards and global middleware run once before the first chunk is consumed. An unauthorised client never gets to send bytes.
-
-For long uploads where the user's session can be revoked mid-stream (token expiry, explicit logout, role downgrade), pass `reauthEvery: <bytes>`. The module guard is re-run against the live `ctx` every N bytes received past the last re-auth; on rejection the upload aborts with the error code (`UNAUTHENTICATED` / `FORBIDDEN`) and the consumer observes `ctx.abortSignal.aborted`. Default is unset (legacy single-check behavior at chunk-0). Reauth runs as a fire-and-forget task off the chunk-receive path so the receive loop stays sync; concurrent reauths on the same upload are coalesced.
+Guards and global middleware run once before the first chunk is consumed. An unauthorised client never gets to send bytes. For long uploads where the user's session can be revoked mid-stream (token expiry, explicit logout, role downgrade), pass `reauthEvery: <bytes>`. The module guard is re-run against the live `ctx` every N bytes received past the last re-auth; on rejection the upload aborts with the error code (`UNAUTHENTICATED` / `FORBIDDEN`) and the consumer observes `ctx.abortSignal.aborted`. Default is unset (legacy single-check behavior at chunk-0). Reauth runs as a fire-and-forget task off the chunk-receive path so the receive loop stays sync; concurrent reauths on the same upload are coalesced.
 
 ### Client
 
@@ -3592,13 +3591,13 @@ The handle is a thenable - `await handle` resolves with the handler's return val
   ac.signal.addEventListener('abort', () => handle.cancel());
   ```
 
+**`diagnostics: true` traces each stream.** The endpoint emits one `upload.stream.started` operational event when an upload resolves to it and one `upload.stream.ended` when it settles, with `outcome` (`completed`, `cancelled`, `disconnected`, `backpressure`, `cap-exceeded`, `invalid`, `rejected` or `handler-failed`), `code`, `bytes`, `chunks` and `durationMs`. Both are `debug` severity and `pseudonymous`, carry the stream id that matches `ctx.upload.id`, and never carry payload bytes; they reach the sink set with `setOperationalEventSink`.
+
 **A slow handler pauses the sender.** The server grants the client credits for at most `maxBufferedChunks` chunks ahead of what the handler has consumed from `ctx.stream`, and grants more as it consumes, so a handler that awaits a disk or network write per chunk receives every byte at its own pace. Credits start after guards and middleware pass. Only a sender that keeps sending past its credit fails with `FLOW_BACKPRESSURE`.
 
 **Frame size is auto-discovered, hard-capped, and structurally safe.** The server announces its `platform.maxPayloadLength` on the first RPC or upload response per connection, and the client sizes every later frame from it, subtracting envelope overhead (10 bytes on chunks 1+, `12 + argsLen` on chunk 0). An upload that is the first message on a connection sends chunk 0 at a conservative 12KB and switches to the cap from chunk 1. To pin an explicit value (e.g. for memory-constrained clients), `configure({ upload: { frameSize: 32 * 1024 } })` -- user-configured wins over discovery, but is silently clamped down to the discovered cap with a one-time dev warn if it exceeds the adapter's limit. The framework guarantees no wire frame ever exceeds the adapter's `maxPayloadLength`, eliminating the silent close-with-1009 failure mode that the pre-rename `chunkSize` knob could trigger when a user mirrored the adapter's cap value verbatim.
 
-The `chunkSize` field is accepted as a deprecated alias for `frameSize`; existing config still works, with a one-time dev warn pointing at the rename. See `MIGRATION.md` for the rationale and migration shape.
-
-The handle auto-starts but the first chunk is sent on the next microtask, so attaching listeners on the same line as construction (`const h = avatar(file); h.on('progress', ...);`) never misses early events.
+The `chunkSize` field is accepted as a deprecated alias for `frameSize`; existing config still works, with a one-time dev warn pointing at the rename. See `MIGRATION.md` for the rationale and migration shape. The handle auto-starts but the first chunk is sent on the next microtask, so attaching listeners on the same line as construction (`const h = avatar(file); h.on('progress', ...);`) never misses early events.
 
 ### Wire format
 

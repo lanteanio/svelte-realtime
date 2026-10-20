@@ -79,6 +79,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - The [upload wire format v1](docs/upload-wire.md) documents chunk, cancel, credit and frame-cap envelopes for clients outside the browser, with executable test vectors.
 
+- `live.upload(fn, { diagnostics: true })` emits debug `upload.stream.started` and `upload.stream.ended` operational events, the latter with the outcome, error code, bytes, chunks and duration of the stream, so a lost upload leaves a server-side trace. Off by default; no payload bytes are recorded.
+
 - `createTestEnv().connect()` clients expose `sendRaw(frame)` and `onMessage(listener)` to drive the real dispatcher with encoded frames.
 
 - A mounted stream reloads its topic in full when the adapter reports a relay gap for it (frames a clustered server lost), spread over the marker's de-herd window and with markers that arrive before the reload sharing it. No application handler is needed.

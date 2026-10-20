@@ -131,6 +131,70 @@ function _streamIdHex(streamId) {
 	return (streamId >>> 0).toString(16).padStart(8, '0');
 }
 
+// - Stream diagnostics (live.upload({ diagnostics: true })) -----------------
+//
+// One debug `upload.stream.started` once the endpoint resolves, and one
+// `upload.stream.ended` from whichever path moves the upload to 'settled'
+// (each settles only from an unsettled phase, so it fires once). Payload
+// bytes never appear; the path is a registered endpoint key and the stream
+// id matches ctx.upload.id and the requestId of error envelopes.
+
+/** Failure code -> `upload.stream.ended` outcome. Unlisted codes: 'rejected'. */
+const _UPLOAD_OUTCOME_BY_CODE = {
+	CANCELLED: 'cancelled',
+	DISCONNECTED: 'disconnected',
+	FLOW_BACKPRESSURE: 'backpressure',
+	PAYLOAD_TOO_LARGE: 'cap-exceeded',
+	OVERLOADED: 'cap-exceeded',
+	TOO_MANY_UPLOADS: 'cap-exceeded',
+	INVALID_REQUEST: 'invalid'
+};
+
+/** @param {string} code */
+function _uploadOutcomeFor(code) {
+	return Object.hasOwn(_UPLOAD_OUTCOME_BY_CODE, code) ? _UPLOAD_OUTCOME_BY_CODE[code] : 'rejected';
+}
+
+function _uploadStreamStarted(upload, path) {
+	upload._diag = true;
+	upload._diagPath = path;
+	upload._diagStart = monotonicNow();
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.upload',
+		event: 'upload.stream.started',
+		severity: 'debug',
+		dataClass: 'pseudonymous',
+		message: 'An upload stream started.',
+		attributes: { path, streamId: _streamIdHex(upload.streamId), credits: upload.flow }
+	});
+}
+
+/**
+ * @param {any} upload
+ * @param {string} outcome
+ * @param {string | null} code
+ */
+function _uploadStreamEnded(upload, outcome, code) {
+	emitOperationalEvent({
+		source: 'svelte-realtime',
+		component: 'server.upload',
+		event: 'upload.stream.ended',
+		severity: 'debug',
+		dataClass: 'pseudonymous',
+		message: 'An upload stream ended.',
+		attributes: {
+			path: upload._diagPath,
+			streamId: _streamIdHex(upload.streamId),
+			outcome,
+			code,
+			bytes: upload.bytesReceived,
+			chunks: upload.expectedSeq,
+			durationMs: Math.max(0, Math.round(monotonicNow() - upload._diagStart))
+		}
+	});
+}
+
 /**
  * The `__cap` value to attach to a response on `ws`, or 0 when the cap is
  * unknown or this connection was already told. Shared by upload envelopes and
@@ -432,10 +496,15 @@ function _createUploadEntry(ws, perWs, streamId, platform, path) {
 			if (!state.metricsInstruments) return;
 			_recordRpcMetrics(_registeredPathLabel(path), code, metricsStart, ws);
 		},
+		// Stream diagnostics; see _uploadStreamStarted.
+		_diag: false,
+		_diagPath: '',
+		_diagStart: 0,
 		fail(code, error, metadata = undefined) {
 			if (upload.phase === 'settled') return;
 			upload.phase = 'settled';
 			upload.recordOutcome(code);
+			if (upload._diag) _uploadStreamEnded(upload, _uploadOutcomeFor(code), code);
 			if (upload.ctrl) {
 				try { upload.ctrl.abort(new LiveError(code, error, metadata)); } catch {}
 			}
@@ -667,6 +736,7 @@ export function _handleUploadControlFrame(ws, data, platform) {
 async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, options) {
 	let path = '';
 	/** @type {any} */ let ctx = null;
+	let handlerStarted = false;
 
 	// Count the upload handler as in-flight so onShutdown's drain waits for it.
 	// Uploads are the longest-running handler (they span every chunk via the
@@ -712,6 +782,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			upload.fail(reply.code, reply.error);
 			return;
 		}
+		if (/** @type {any} */ (fn).__uploadOptions?.diagnostics === true) _uploadStreamStarted(upload, path);
 		upload.ctrl = new AbortController();
 		// Grant credits as the handler consumes. A grant is sent once at
 		// least half the window is free, so a fast consumer costs one small
@@ -781,10 +852,12 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				await options.beforeExecute(ws, path, args);
 			}
 
+			handlerStarted = true;
 			const result = await fn(ctx, ...args);
 			if (upload.phase !== 'settled') {
 				upload.phase = 'settled';
 				upload.recordOutcome('');
+				if (upload._diag) _uploadStreamEnded(upload, 'completed', null);
 				_respondUpload(ws, platform, streamId, { ok: true, data: result });
 			}
 		});
@@ -794,6 +867,11 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 			upload.phase = 'settled';
 			const code = err instanceof LiveError ? err.code : 'INTERNAL_ERROR';
 			upload.recordOutcome(code);
+			if (upload._diag) {
+				// Guards, middleware and admission limits refuse; the handler fails.
+				_uploadStreamEnded(upload, handlerStarted ? 'handler-failed'
+					: _uploadOutcomeFor(code) === 'cap-exceeded' ? 'cap-exceeded' : 'rejected', code);
+			}
 			if (err instanceof LiveError) {
 				const result = { ok: false, code: err.code, error: err.message };
 				if ('params' in err || 'details' in err) Object.assign(result, copyErrorMetadata(err));
@@ -841,6 +919,7 @@ export function _drainUploadsOnClose(ws) {
 	const perWs = _wsUploads.get(ws);
 	if (!perWs) return;
 	for (const [streamId, upload] of perWs) {
+		if (upload.phase !== 'settled' && upload._diag) _uploadStreamEnded(upload, 'disconnected', 'DISCONNECTED');
 		upload.phase = 'settled';
 		upload.recordOutcome('DISCONNECTED');
 		if (upload.ctrl) {

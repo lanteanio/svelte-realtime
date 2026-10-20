@@ -485,3 +485,125 @@ describe('senders that ignore the pause', () => {
 		}
 	});
 });
+
+describe('upload stream diagnostics', () => {
+	/** @param {any} ctx */
+	function capture(ctx) {
+		const records = [];
+		const restore = ctx.setOperationalEventSink((record) => { records.push(record); });
+		const stream = () => records.filter((r) => r.event.startsWith('upload.stream.'));
+		return { records, stream, restore };
+	}
+
+	it('pairs one started with one completed record for a finished upload', async () => {
+		const ctx = await setup({ frameSize: 4096 });
+		const sink = capture(ctx);
+		try {
+			env.register('files', { save: counting(ctx.live, 0, { diagnostics: true }) });
+			const handle = ctx.__upload('files/save')(new Uint8Array(30_000).fill(0xab));
+			expect(await handle).toBe(30_000);
+			const [started, ended, ...rest] = sink.stream();
+			expect(rest).toEqual([]);
+			expect(started).toMatchObject({
+				event: 'upload.stream.started', severity: 'debug', dataClass: 'pseudonymous',
+				attributes: { path: 'files/save', streamId: handle.streamIdHex, credits: true }
+			});
+			expect(ended).toMatchObject({
+				event: 'upload.stream.ended', severity: 'debug', dataClass: 'pseudonymous',
+				attributes: { path: 'files/save', streamId: handle.streamIdHex, outcome: 'completed', code: null, bytes: 30_000, chunks: ctx.chunks().length }
+			});
+			expect(Number.isInteger(ended.attributes.durationMs) && ended.attributes.durationMs >= 0).toBe(true);
+			expect(JSON.stringify(sink.stream())).not.toMatch(/abab|171,171/);
+		} finally { sink.restore(); }
+	});
+
+	it('pairs one started with one cancelled record for a cancelled upload', async () => {
+		const ctx = await setup({ frameSize: 1024 });
+		const sink = capture(ctx);
+		try {
+			let entered;
+			const started = new Promise((resolve) => { entered = resolve; });
+			env.register('files', {
+				save: ctx.live.upload(async (uctx) => {
+					entered();
+					for await (const chunk of uctx.stream) await new Promise((resolve) => setTimeout(resolve, 5, chunk));
+				}, { diagnostics: true })
+			});
+			const handle = ctx.__upload('files/save')(new ReadableStream({ pull(c) { c.enqueue(new Uint8Array(512)); } }));
+			await started;
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			handle.cancel();
+			await expect(handle).rejects.toMatchObject({ code: 'CANCELLED' });
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(sink.stream().map((r) => [r.event, r.attributes.outcome])).toEqual([
+				['upload.stream.started', undefined],
+				['upload.stream.ended', 'cancelled']
+			]);
+			expect(sink.stream()[1].attributes.code).toBe('CANCELLED');
+		} finally { sink.restore(); }
+	});
+
+	it('emits nothing for an endpoint without diagnostics', async () => {
+		const ctx = await setup();
+		const sink = capture(ctx);
+		try {
+			env.register('files', { save: counting(ctx.live), slow: counting(ctx.live, 5) });
+			expect(await ctx.__upload('files/save')(new Uint8Array(1000))).toBe(1000);
+			const handle = ctx.__upload('files/slow')(new ReadableStream({ pull(c) { c.enqueue(new Uint8Array(512)); } }));
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			handle.cancel();
+			await expect(handle).rejects.toMatchObject({ code: 'CANCELLED' });
+			expect(sink.stream()).toEqual([]);
+		} finally { sink.restore(); }
+	});
+
+	it('names the outcome of every other ending once', async () => {
+		const ctx = await setup();
+		const sink = capture(ctx);
+		try {
+			let release;
+			const gate = new Promise((resolve) => { release = resolve; });
+			env.register('slow', { _guard: ctx.guard(async () => { await gate; }), save: ctx.live.upload(async () => 1, { diagnostics: true }) });
+			env.register('denied', { _guard: ctx.guard(() => { throw new ctx.LiveError('FORBIDDEN', 'no'); }), save: ctx.live.upload(async () => 1, { diagnostics: true }) });
+			env.register('broken', { save: ctx.live.upload(async () => { throw new Error('disk full'); }, { diagnostics: true }) });
+			env.register('files', { save: ctx.live.upload(async (uctx) => { for await (const c of uctx.stream) void c; }, { diagnostics: true }) });
+			const first = (streamId, path) => {
+				const header = new TextEncoder().encode(JSON.stringify({ path }));
+				const buf = new Uint8Array(12 + header.length + 1);
+				const view = new DataView(buf.buffer);
+				buf[0] = 0x01; buf[1] = 0x01; view.setUint32(2, streamId); view.setUint16(10, header.length); buf.set(header, 12);
+				return buf.buffer;
+			};
+			const next = (streamId, seq) => {
+				const buf = new Uint8Array(11);
+				const view = new DataView(buf.buffer);
+				buf[0] = 0x01; view.setUint32(2, streamId); view.setUint32(6, seq);
+				return buf.buffer;
+			};
+			peer.sendRaw(first(1, 'slow/save'));
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			peer.sendRaw(next(1, 1));
+			release();
+			peer.sendRaw(first(2, 'denied/save'));
+			peer.sendRaw(first(3, 'broken/save'));
+			peer.sendRaw(first(4, 'files/save'));
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			peer.disconnect();
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			const ended = Object.fromEntries(sink.stream().filter((r) => r.event === 'upload.stream.ended').map((r) => [r.attributes.path, [r.attributes.outcome, r.attributes.code]]));
+			expect(ended).toEqual({
+				'slow/save': ['backpressure', 'FLOW_BACKPRESSURE'],
+				'denied/save': ['rejected', 'FORBIDDEN'],
+				'broken/save': ['handler-failed', 'INTERNAL_ERROR'],
+				'files/save': ['disconnected', 'DISCONNECTED']
+			});
+			const count = (event) => sink.stream().filter((r) => r.event === event).length;
+			expect([count('upload.stream.started'), count('upload.stream.ended')]).toEqual([4, 4]);
+		} finally { sink.restore(); peer = undefined; }
+	});
+
+	it('rejects a non-boolean diagnostics option', async () => {
+		const ctx = await setup();
+		expect(() => ctx.live.upload(async () => 1, { diagnostics: /** @type {any} */ (1) })).toThrow(/diagnostics/);
+	});
+});

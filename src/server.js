@@ -1592,7 +1592,7 @@ live.binary = function binary(fn, options) {
  * globally, 64 buffered chunks before flow-control kicks in.
  *
  * @param {(ctx: any, ...args: any[]) => Promise<any>} fn
- * @param {{ timeout?: number, maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number, reauthEvery?: number }} [options]
+ * @param {{ timeout?: number, maxSize?: number, maxConcurrentPerSession?: number, maxConcurrentTotal?: number, maxBufferedChunks?: number, reauthEvery?: number, diagnostics?: boolean }} [options]
  * @returns {Function}
  */
 live.upload = function upload(fn, options) {
@@ -1614,13 +1614,18 @@ live.upload = function upload(fn, options) {
 	if (maxBufferedChunks !== undefined && (!Number.isSafeInteger(maxBufferedChunks) || maxBufferedChunks < 1)) {
 		throw new Error('live.upload: maxBufferedChunks must be a positive integer');
 	}
+	const diagnostics = options?.diagnostics;
+	if (diagnostics !== undefined && typeof diagnostics !== 'boolean') {
+		throw new Error('live.upload: diagnostics must be a boolean');
+	}
 	state.uploadEndpoints = true;
 	/** @type {any} */ (fn).__uploadOptions = {
 		maxSize: options?.maxSize ?? 104857600,
 		maxConcurrentPerSession: options?.maxConcurrentPerSession ?? 4,
 		maxConcurrentTotal: options?.maxConcurrentTotal ?? Infinity,
 		maxBufferedChunks: maxBufferedChunks ?? 64,
-		reauthEvery: reauthEvery ?? 0
+		reauthEvery: reauthEvery ?? 0,
+		diagnostics: diagnostics === true
 	};
 	return fn;
 };

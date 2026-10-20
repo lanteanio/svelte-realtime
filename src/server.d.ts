@@ -1570,6 +1570,17 @@ export interface UploadOptions extends LiveOptions {
 	 * the same upload are coalesced.
 	 */
 	reauthEvery?: number;
+
+	/**
+	 * Emit debug operational events for this endpoint's streams: one
+	 * `upload.stream.started` once the endpoint resolves and one
+	 * `upload.stream.ended` with `outcome` (`completed`, `cancelled`,
+	 * `disconnected`, `backpressure`, `cap-exceeded`, `invalid`, `rejected`,
+	 * `handler-failed`), `code`, `bytes`, `chunks` and `durationMs`. Records
+	 * are `pseudonymous` and never carry payload bytes.
+	 * @default false
+	 */
+	diagnostics?: boolean;
 }
 
 /**
