@@ -582,8 +582,9 @@ const payloadSegmenter = typeof Intl.Segmenter === 'function' ? new Intl.Segment
 
 /**
  * Render a JSON preview capped at 200 graphemes in pretty mode or 500 in raw
- * mode, with a hard ceiling of eight code units per allowed grapheme. An
- * oversized cluster is cut at a code-point boundary. Without segmentation,
+ * mode, with a hard ceiling of eight code units per allowed grapheme. A
+ * final cluster at a clipped window is omitted unless it is the only cluster;
+ * that oversized cluster is cut at a code-point boundary. Without segmentation,
  * cap by code point to preserve surrogate
  * pairs while keeping large payloads out of the panel.
  * @param {any} value
@@ -600,10 +601,14 @@ function _renderPayload(value, raw) {
 		if (payloadSegmenter) {
 			let windowEnd = Math.min(str.length, cap * 8);
 			if (windowEnd < str.length && /[\uD800-\uDBFF]/.test(str[windowEnd - 1])) windowEnd--;
+			let lastStart = 0;
 			for (const item of payloadSegmenter.segment(str.slice(0, windowEnd))) {
 				if (count++ === cap) break;
+				lastStart = end;
 				end += item.segment.length;
 			}
+			// A clipped window can make an unfinished cluster appear complete.
+			if (windowEnd < str.length && end === windowEnd && lastStart > 0) end = lastStart;
 		} else {
 			for (const point of str) {
 				if (count++ === cap) break;

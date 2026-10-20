@@ -41,6 +41,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- Bounded DevTools previews retain whole family emoji and other joined graphemes when their segmentation window ends inside a cluster. Oversized payloads and the code-point fallback remain bounded.
+
 - Untranslated DevTools panels keep relative ages in English even on browsers using another locale, matching the panel language. Translated panels use their configured locale for relative ages.
 
 - Pending sticky presence updates stop when their room membership leaves or is erased, including after the same identity rejoins. Retired memberships discard cached roster payloads, including when erasure needs a retry. Roster refusal warnings omit the member identity.

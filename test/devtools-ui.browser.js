@@ -620,3 +620,41 @@ it('distinguishes pressed stream toggles without color in forced colors', async 
   expect(await button.evaluate(el => ({ weight: getComputedStyle(el).fontWeight, decoration: getComputedStyle(el).textDecorationLine }))).toEqual(unpressed);
  }
 });
+
+it.each([false, true])('keeps complete family emoji at the bounded segmentation window (raw=%s)', async raw => {
+ await streamsFixture();
+ expect(await page.evaluate(() => typeof Intl.Segmenter)).toBe('function');
+ const family = String.fromCodePoint(0x1f468, 0x200d, 0x1f469, 0x200d, 0x1f467, 0x200d, 0x1f466);
+ const cap = raw ? 500 : 200;
+ const payload = family.repeat(cap);
+ await page.evaluate(data => { window.realDevtools.streams.get('chat').recentEvents = [{ event: 'update', ts: Date.now(), data }]; }, payload);
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ if (raw) await page.getByRole('button', { name: 'Raw', exact: true }).click();
+ await page.locator('[data-action="toggle-stream"]').click();
+ const preview = await page.locator('#svr-dt-content bdi[dir="ltr"]').textContent();
+ const prefix = preview.slice(0, preview.indexOf('... [+'));
+ expect(prefix.startsWith('"')).toBe(true);
+ expect(prefix.length).toBeGreaterThan(1 + family.length);
+ expect(prefix.slice(1).replaceAll(family, '')).toBe('');
+ const omitted = await page.evaluate(count => new Intl.NumberFormat(navigator.language).format(count), JSON.stringify(payload).length - prefix.length);
+ expect(preview).toBe(prefix + '... [+' + omitted + ' code units]');
+ expect(preview.length).toBeLessThan(cap * 8 + 60);
+ expect(preview.isWellFormed()).toBe(true);
+});
+
+it('keeps a bounded preview when serialization falls back to one oversized grapheme', async () => {
+ await streamsFixture();
+ await page.evaluate(() => {
+  window.realDevtools.streams.get('chat').recentEvents = [{ event: 'update', ts: Date.now(), data: {
+   toJSON() { throw new Error('unserializable'); },
+   toString() { return 'a' + '\u0301'.repeat(200000); }
+  } }];
+ });
+ await page.getByRole('tab', { name: 'streams', exact: true }).click();
+ await page.locator('[data-action="toggle-stream"]').click();
+ const preview = await page.locator('#svr-dt-content bdi[dir="ltr"]').textContent();
+ expect(preview.startsWith('a\u0301')).toBe(true);
+ expect(preview).toContain('code units]');
+ expect(preview.length).toBeLessThan(1660);
+ expect(preview.isWellFormed()).toBe(true);
+});
