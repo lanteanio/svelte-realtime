@@ -700,6 +700,20 @@ export default function svelteRealtime(options) {
 	};
 	/** @type {Map<string, Promise<unknown>>} */
 	const reloading = new Map();
+	/**
+	 * Run a live file's reload so that repeated events for the same write can
+	 * wait for it before sending their client update.
+	 * @param {string} file
+	 * @param {Promise<unknown>} work
+	 */
+	const trackReload = async (file, work) => {
+		reloading.set(file, work);
+		try {
+			await work;
+		} finally {
+			if (reloading.get(file) === work) reloading.delete(file);
+		}
+	};
 	/** @type {boolean} */
 	let isSsr = false;
 	/** @type {boolean} */
@@ -916,14 +930,15 @@ export default function svelteRealtime(options) {
 			// Watch for new or deleted files in src/live/ - these don't trigger
 			// handleHotUpdate since they're not in the module graph yet (add) or
 			// have already been removed (unlink).
-			for (const event of ['add', 'unlink']) {
-				server.watcher.on(event, async (file) => {
-					file = file.split(sep).join('/');
-					if (!file.includes('/' + dir + '/') && !file.startsWith(dir + '/')) return;
-					if (!/\.[jt]s$/.test(file) || file.endsWith('.d.ts') || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
-					const live = _respellUnder(liveDir, resolve(file));
-					const version = live ? claimVersion(live) : undefined;
-					if (version === null) return;
+			/** @param {string} file */
+			const liveFileEvent = async (file) => {
+				file = file.split(sep).join('/');
+				if (!file.includes('/' + dir + '/') && !file.startsWith(dir + '/')) return;
+				if (!/\.[jt]s$/.test(file) || file.endsWith('.d.ts') || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
+				const live = _respellUnder(liveDir, resolve(file));
+				const version = live ? claimVersion(live) : undefined;
+				if (version === null) return;
+				const work = (async () => {
 					let reloaded = false;
 					try {
 						_fileCache.clear();
@@ -938,6 +953,19 @@ export default function svelteRealtime(options) {
 						reloaded = await _hmrReloadRegistry(server, liveDir, dir, rel);
 					} finally {
 						if (live && version !== undefined && !reloaded) releaseVersion(live, version);
+					}
+				})();
+				if (live) await trackReload(live, work);
+				else await work;
+			};
+			for (const event of ['add', 'unlink']) {
+				server.watcher.on(event, async (file) => {
+					// A rejected watcher listener would end the dev server, so log
+					// failures the way Vite's own add and unlink listeners do.
+					try {
+						await liveFileEvent(file);
+					} catch (error) {
+						console.error(`[svelte-realtime] Could not reload live handlers after ${event} of ${file}:`, error);
 					}
 				});
 			}
@@ -993,12 +1021,7 @@ export default function svelteRealtime(options) {
 						if (!reloaded) releaseVersion(file, version);
 					}
 				})();
-				reloading.set(file, work);
-				try {
-					await work;
-				} finally {
-					if (reloading.get(file) === work) reloading.delete(file);
-				}
+				await trackReload(file, work);
 			}
 
 			// Client-side: invalidate the virtual module so the browser picks up new stubs

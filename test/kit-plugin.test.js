@@ -333,15 +333,68 @@ describe('repeated live module updates', () => {
   await p.handleHotUpdate(update);
   expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
  });
- it('retries a new live file whose first registration threw', async () => {
+ it('logs a failed live file event and retries the file on its next save', async () => {
   const p = plugin();
   const s = server();
   s.runtime._prepareHmr.mockImplementationOnce(() => { throw new Error('runtime unavailable'); });
   p.configureServer(s);
   const add = s.watcher.on.mock.calls.find(([event]) => event === 'add')[1];
   const file = join(root, 'src/live/count.js');
-  await expect(add(file)).rejects.toThrow('runtime unavailable');
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+   await add(file);
+   expect(error).toHaveBeenCalledWith(expect.stringContaining('Could not reload live handlers after add'), expect.objectContaining({ message: 'runtime unavailable' }));
+  } finally { error.mockRestore(); }
   await p.handleHotUpdate({ file: file.replaceAll('\\', '/'), server: s });
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+ });
+ it('lets a change event wait for the reload an add event started', async () => {
+  const p = plugin();
+  const s = server(false);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  s.load.mockImplementation(async id => {
+   if (id === 'svelte-realtime/server') return s.runtime;
+   await gate;
+   return {};
+  });
+  p.configureServer(s);
+  const add = s.watcher.on.mock.calls.find(([event]) => event === 'add')[1];
+  const file = join(root, 'src/live/count.js');
+  const added = add(file);
+  let changeDone = false;
+  const change = p.handleHotUpdate({ file: file.replaceAll('\\', '/'), server: s }).then(result => { changeDone = true; return result; });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(changeDone).toBe(false);
+  release();
+  await added;
+  expect(await change).toEqual([s.registry]);
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(1);
+ });
+ it('keeps a repeated event waiting on the newest reload after an older one settles', async () => {
+  const p = plugin();
+  const s = server(false);
+  const gates = [];
+  s.load.mockImplementation(async id => {
+   if (id === 'svelte-realtime/server') return s.runtime;
+   await new Promise(resolve => gates.push(resolve));
+   return {};
+  });
+  const file = join(root, 'src/live/count.js');
+  const update = { file: file.replaceAll('\\', '/'), server: s };
+  const older = p.handleHotUpdate(update);
+  writeFileSync(file, "import { live } from 'svelte-realtime/server';\nexport const count = live(() => 2);\n");
+  const newer = p.handleHotUpdate(update);
+  await vi.waitFor(() => expect(gates).toHaveLength(1));
+  gates[0]();
+  await older;
+  let repeatDone = false;
+  const repeat = p.handleHotUpdate(update).then(() => { repeatDone = true; });
+  await vi.waitFor(() => expect(gates).toHaveLength(2));
+  await new Promise(resolve => setTimeout(resolve, 20));
+  expect(repeatDone).toBe(false);
+  gates[1]();
+  await Promise.all([newer, repeat]);
   expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
  });
  it('returns the same client update for a repeated event and reloads the server once', async () => {
