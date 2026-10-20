@@ -5,6 +5,8 @@ import { derived as realDerived } from 'svelte/store';
 
 let __rpc, __stream, __binaryRpc, __upload, _resetUploadAutoDiscovery, RpcError, batch, configure, combine, onSignal, onDerived, failure, quiescent, _resetQuiescence, health, _resetHealth, onPush, _resetPushHandlers, __devtools, MAX_OPTIMISTIC_QUEUE_DEPTH, _setCapsForTest, _resetCapsForTest, assert, getAssertionCounters, _resetAssertCounters, _resetDedupCoalesceWarned, _resetClientPublishRateWarning;
 let topicCallbacks;
+/** Last envelope per topic, handed to new listeners like the adapter's topic store; null to disable. */
+let retainedTopicValues;
 let statusCallbacks;
 let statusInitialValue;
 let failureCallbacks;
@@ -73,6 +75,7 @@ function simulateRpcResponse(correlationId, payload) {
  * Simulate a pub/sub message on a topic.
  */
 function simulateTopicMessage(topic, envelope) {
+	retainedTopicValues?.set(topic, envelope);
 	const fns = topicCallbacks.get(topic);
 	if (fns) for (const cb of fns) cb(envelope);
 }
@@ -98,6 +101,7 @@ beforeEach(async () => {
 	vi.resetModules();
 
 	topicCallbacks = new Map();
+	retainedTopicValues = null;
 	statusCallbacks = new Set();
 	statusInitialValue = 'open';
 	failureCallbacks = new Set();
@@ -125,6 +129,8 @@ beforeEach(async () => {
 				let fns = topicCallbacks.get(topic);
 				if (!fns) { fns = new Set(); topicCallbacks.set(topic, fns); }
 				fns.add(fn);
+				const retained = retainedTopicValues?.get(topic);
+				if (retained) fn(retained);
 				return () => {
 					fns.delete(fn);
 					if (fns.size === 0) topicCallbacks.delete(topic);
@@ -2925,6 +2931,34 @@ describe('__stream() hydrate reconnect', () => {
 		// Still the hydrated data, not empty
 		expect(values[values.length - 1]).toEqual([{ key: 'u1', x: 10, y: 20 }]);
 
+		unsub();
+	});
+
+	it('keeps a fresh reconnect snapshot over the retained pre-outage event', async () => {
+		// The adapter's topic store hands every new listener the last event it
+		// dispatched. After a reconnect that event predates the new snapshot.
+		retainedTopicValues = new Map();
+		const store = __stream('retained/count', { merge: 'set' });
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(sent.id, { ok: true, data: 0, topic: 'retained-count', merge: 'set' });
+		simulateTopicMessage('retained-count', { event: 'set', data: 2 });
+		expect(values[values.length - 1]).toBe(2);
+
+		// The server restarts with fresh state while the client is away.
+		simulateStatus('disconnected');
+		simulateStatus('open');
+		await new Promise((r) => setTimeout(r, 250));
+		const resent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		expect(resent.id).not.toBe(sent.id);
+		simulateRpcResponse(resent.id, { ok: true, data: 0, topic: 'retained-count', merge: 'set' });
+		expect(values[values.length - 1]).toBe(0);
+
+		// Live events after the snapshot still apply.
+		simulateTopicMessage('retained-count', { event: 'set', data: 1 });
+		expect(values[values.length - 1]).toBe(1);
 		unsub();
 	});
 

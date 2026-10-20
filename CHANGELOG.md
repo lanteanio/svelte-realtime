@@ -230,6 +230,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - With a tenant resolver, `ctx.skip(key, ms)` scopes its key to the caller's tenant. Before, one tenant calling `ctx.skip` with a key another tenant also used suppressed that tenant's calls for the cooldown window.
 
+- A stream that resubscribes after a reconnect no longer applies the last event it received before the outage on top of the fresh snapshot. After a server restart the store showed that stale value instead of the server's current one.
+
 ## [0.6.0-next.91] - 2026-10-13
 
 ### Added

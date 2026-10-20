@@ -1718,11 +1718,17 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * delta-sync resume path, so the two listener installs can never drift (a prior
 	 * copy on the resume path silently bypassed the dispatcher).
 	 */
+	/** @type {unknown} The last topic event this stream's listener received */
+	let _lastEnvelope = null;
 	function _subscribeLive() {
 		if (!topic || topicUnsub) return;
 		const topicStore = _conn().on(topic);
 		topicUnsub = topicStore.subscribe((envelope) => {
-			if (!envelope) return;
+			// The adapter's topic store hands a new listener the last event it
+			// dispatched. One this stream already received predates the snapshot
+			// a resubscribe loads, so replaying it would overwrite fresher data.
+			if (!envelope || envelope === _lastEnvelope) return;
+			_lastEnvelope = envelope;
 			if (_hiddenAt !== null) _hiddenAt = now();
 			if (!initialLoaded) buffer.push(envelope);
 			else _jitter.dispatch(envelope);
