@@ -731,8 +731,17 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 */
 	let _downAt = null;
 
-	/** @type {boolean} The lifecycle listener has seen an open and the socket is not open now (a hidden tab, an outage) */
+	/** @type {boolean} The lifecycle listener has seen an open and the socket is down now (an outage) */
 	let _listenerDown = false;
+
+	/**
+	 * @type {number | null} While the tab is hidden over an open socket
+	 * ('suspended'): when this stream last had proof the socket was alive, the
+	 * moment it hid or the last answer or frame since. A hidden page can be
+	 * frozen and notice a dead socket only on wake, so a real drop ages the
+	 * cursor from here rather than from when the drop was seen.
+	 */
+	let _hiddenAt = null;
 
 	/**
 	 * @type {number | null} Wall-clock ms when the WS subscription was released
@@ -1604,6 +1613,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		const topicStore = _conn().on(topic);
 		topicUnsub = topicStore.subscribe((envelope) => {
 			if (!envelope) return;
+			if (_hiddenAt !== null) _hiddenAt = now();
 			if (!initialLoaded) buffer.push(envelope);
 			else _jitter.dispatch(envelope);
 		});
@@ -1849,6 +1859,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				// longer ages the cursor. Over a socket the listener counts as down
 				// (an answer landing in a hidden tab) staleness runs from here.
 				_downAt = _listenerDown ? now() : null;
+				if (_hiddenAt !== null) _hiddenAt = now();
 				_reconnectAttempts = 0;
 				_clearError();
 				_status = 'connected';
@@ -2150,6 +2161,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		// its answer ages the cursor from there.
 		_downAt = agingSince ?? null;
 		_listenerDown = false;
+		_hiddenAt = null;
 		_quiescenceUnsub = _statusStore.subscribe((s) => {
 			const inFlight = s === 'loading' || s === 'reconnecting';
 			if (inFlight && !_countedInFlight) {
@@ -2171,12 +2183,16 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		/** True while `status.subscribe` reports the value current at attach. */
 		let attaching = true;
 		statusUnsub = _conn().status.subscribe((s) => {
-			if (s !== 'open') {
+			// A tab hidden over an open socket ('suspended') is up: the socket
+			// still carries this stream's subscription and frames.
+			if (s !== 'open' && s !== 'suspended') {
 				// First step away from a live connection: record when the outage
 				// began (once) so the reconnect can measure how stale the retained
 				// cursor is. Only after we have opened at least once - the initial
-				// pre-open 'connecting' is not an outage.
-				if (hasOpenedOnce && _downAt === null) _downAt = now();
+				// pre-open 'connecting' is not an outage. Behind a hidden tab the
+				// drop may only be seen on wake: age from the last proof of life.
+				if (hasOpenedOnce && _downAt === null) _downAt = _hiddenAt ?? now();
+				_hiddenAt = null;
 				_listenerDown = hasOpenedOnce;
 				if (!hasOpenedOnce && (s === 'disconnected' || s === 'failed')) {
 					droppedBeforeOpen = true;
@@ -2186,6 +2202,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				if (s === 'failed') _closedForGood();
 				return;
 			}
+			if (s === 'suspended') {
+				if (_hiddenAt === null) _hiddenAt = now();
+			} else {
+				_hiddenAt = null;
+			}
+			// Hiding or showing the tab keeps the socket and this stream's
+			// subscription: only a real drop subscribes again.
+			if (hasOpenedOnce && !_listenerDown) return;
 			_listenerDown = false;
 			// A subscribe queued behind a closed socket may age past the trust
 			// bound before its first open. Supersede it before accepting any

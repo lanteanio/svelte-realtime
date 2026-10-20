@@ -185,6 +185,11 @@ async function deliverToClient(filter = () => true) {
 	await ticks();
 }
 
+/** The adapter reports that a clustered server lost relayed frames for `topic`. */
+function relayGap(topic) {
+	for (const fn of [...(net.clientTopics.get('__replay:' + topic) || [])]) fn({ topic: '__replay:' + topic, event: 'gap', data: { lost: 1 } });
+}
+
 const subscribeFrames = () => net.toServer.filter((f) => f && f.stream || (f && Array.isArray(f.batch)));
 const unsubscribeFrames = (topic) => net.toServer.filter((f) => f && f.type === 'unsubscribe' && f.topic === topic);
 const member = (room, prefix = 'board:') => _presenceRefForTest().get(prefix + room + '\0alice');
@@ -489,18 +494,33 @@ describe('a stream released before its subscribe is answered', () => {
 	});
 
 	it('a superseded subscribe answered after its successor was refused is released', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
 		const store = __stream('locked/board/__data', { merge: 'crud', key: 'id' }, true)('r11');
-		const off = store.subscribe(() => {});
+		let off = store.subscribe(() => {});
 		await ticks();
-		// The tab comes back from the background: the stream subscribes again,
-		// superseding the request still in flight.
-		setStatus('suspended');
+		await deliverToServer();
+		await deliverToClient();
+		for (const fn of [...net.clientTopics.get('locked:r11')]) fn({ topic: 'locked:r11', event: 'created', data: { id: 9 }, seq: 7 });
+		// Released and subscribed again while the socket is down: the resume,
+		// carrying the cursor, waits in the adapter's queue.
+		setStatus('disconnected');
+		await ticks();
+		off();
+		await ticks();
+		off = store.subscribe(() => {});
+		await ticks();
+		// On open the queued resume is past the trust bound: a fresh subscribe
+		// supersedes it, and both reach the server.
+		vi.advanceTimersByTime(61_000);
+		setStatus('connecting');
 		setStatus('open');
-		await settle(150);
+		vi.advanceTimersByTime(200);
+		await ticks();
 		expect(subscribeFrames()).toHaveLength(2);
+		expect(subscribeFrames()[0].seq).toBe(7);
+		expect(subscribeFrames()[1].seq).toBeUndefined();
 
 		await deliverToServer(1);
-		expect(member('r11', 'locked:').count).toBe(1);
 		deny = true;
 		await deliverToServer();
 		await deliverToClient();
@@ -703,11 +723,10 @@ describe('a stream released before its subscribe is answered', () => {
 		await ticks();
 		await deliverToServer();
 		await deliverToClient();
-		// The tab comes back from the background: the stream subscribes again
-		// while it still holds the topic, and is released before the answer.
-		setStatus('suspended');
-		setStatus('open');
-		vi.advanceTimersByTime(200);
+		// A relay gap makes the stream subscribe again while it still holds
+		// the topic, and it is released before the answer.
+		relayGap('shared:feed');
+		vi.advanceTimersByTime(1);
 		await ticks();
 		expect(subscribeFrames()).toHaveLength(1);
 		offA();
@@ -820,7 +839,7 @@ describe('a stream released before its subscribe is answered', () => {
 		offB();
 	});
 
-	it('a stream that loaded behind a hidden tab subscribes again on the first open after a drop', async () => {
+	it('a stream that loaded behind a hidden tab subscribes again once the socket is back, while the tab is still hidden', async () => {
 		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
 		setStatus('suspended');
 		const off = roomData('r27').subscribe(() => {});
@@ -831,12 +850,30 @@ describe('a stream released before its subscribe is answered', () => {
 		setStatus('disconnected');
 		setStatus('connecting');
 		setStatus('suspended');
+		vi.advanceTimersByTime(200);
 		await ticks();
-		expect(subscribeFrames()).toHaveLength(0);
+		expect(subscribeFrames()).toHaveLength(1);
+		// Showing the tab keeps that socket and subscription.
 		setStatus('open');
 		vi.advanceTimersByTime(200);
 		await ticks();
 		expect(subscribeFrames()).toHaveLength(1);
+		off();
+	});
+
+	it('hiding and showing the tab over the same socket does not subscribe again', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+		const off = roomData('r27b').subscribe(() => {});
+		await ticks();
+		await deliverToServer();
+		await deliverToClient();
+		setStatus('suspended');
+		vi.advanceTimersByTime(200);
+		setStatus('open');
+		vi.advanceTimersByTime(200);
+		await ticks();
+		expect(subscribeFrames()).toHaveLength(0);
+		expect(unsubscribeFrames('board:r27b')).toHaveLength(0);
 		off();
 	});
 
@@ -881,8 +918,12 @@ describe('a stream released before its subscribe is answered', () => {
 		off4();
 	});
 
-	/** Load a room view behind a hidden tab, give it a replay cursor, drop the socket for `outageMs`, then show the tab. */
-	async function hiddenOutage(room, outageMs) {
+	/**
+	 * Load a room view behind a hidden tab and give it a replay cursor. The
+	 * page then sits frozen for `hiddenMs` with no traffic; the socket died
+	 * in that time, which the page sees only on wake, and it reconnects at once.
+	 */
+	async function hiddenOutage(room, hiddenMs) {
 		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
 		setStatus('suspended');
 		const off = roomData(room).subscribe(() => {});
@@ -890,11 +931,10 @@ describe('a stream released before its subscribe is answered', () => {
 		await deliverToServer();
 		await deliverToClient();
 		for (const fn of [...net.clientTopics.get('board:' + room)]) fn({ topic: 'board:' + room, event: 'created', data: { id: 9 }, seq: 7 });
+		vi.advanceTimersByTime(hiddenMs);
 		setStatus('disconnected');
 		setStatus('connecting');
 		setStatus('suspended');
-		vi.advanceTimersByTime(outageMs);
-		setStatus('open');
 		vi.advanceTimersByTime(200);
 		await ticks();
 		const frames = subscribeFrames();
@@ -902,13 +942,13 @@ describe('a stream released before its subscribe is answered', () => {
 		return frames;
 	}
 
-	it('the resubscribe on a first open after a long outage drops the stale replay cursor', async () => {
+	it('the resubscribe after a drop seen on wake drops a replay cursor older than the trust bound', async () => {
 		const frames = await hiddenOutage('r35', 61_000);
 		expect(frames).toHaveLength(1);
 		expect(frames[0].seq).toBeUndefined();
 	});
 
-	it('the resubscribe on a first open after a short outage keeps the replay cursor', async () => {
+	it('the resubscribe after a drop seen on wake keeps a replay cursor inside the trust bound', async () => {
 		const frames = await hiddenOutage('r36', 1_000);
 		expect(frames).toHaveLength(1);
 		expect(frames[0].seq).toBe(7);

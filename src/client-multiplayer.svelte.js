@@ -515,7 +515,7 @@ export class MultiplayerRoom {
 			this.#unsubs.push(deps.status.subscribe((v) => {
 				this.#status = v;
 				if (join) {
-					join.offline = v !== 'open' && v !== 'connected';
+					join.offline = v !== 'open' && v !== 'suspended' && v !== 'connected';
 					if (join.offline) _restoreJoin(join);
 				}
 			}));
