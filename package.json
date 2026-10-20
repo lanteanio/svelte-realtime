@@ -118,6 +118,8 @@
     "check:documentation": "node scripts/check-documentation-contract.js",
     "generate:documentation": "node scripts/check-documentation-contract.js --write",
     "test:scaffold": "vitest run --config vitest.scaffold.config.js",
+    "test:kit": "node test/kit-compat/matrix.mjs",
+    "test:kit-scaffold": "node test/kit-compat/scaffold.mjs",
     "verify:scaffold": "npm run test:scaffold",
     "test:chaos:parallel": "node scripts/check-chaos-isolation.js",
     "test:lifecycle": "node scripts/check-production-lifecycle.js",

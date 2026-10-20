@@ -160,6 +160,8 @@ const EXPECTED_SCRIPTS = {
 	"generate:documentation": "node scripts/check-documentation-contract.js --write",
 	"test:scaffold": "vitest run --config vitest.scaffold.config.js",
 	"verify:scaffold": "npm run test:scaffold",
+	"test:kit": "node test/kit-compat/matrix.mjs",
+	"test:kit-scaffold": "node test/kit-compat/scaffold.mjs",
 	"test:chaos:parallel": "node scripts/check-chaos-isolation.js",
 	"test:lifecycle": "node scripts/check-production-lifecycle.js",
 	"test:smooth-stack": "node scripts/check-smooth-stack.js",

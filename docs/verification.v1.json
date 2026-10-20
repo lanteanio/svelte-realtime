@@ -168,6 +168,12 @@
     "test:fuzz": [
       "node test/fuzz-wire.mjs"
     ],
+    "test:kit": [
+      "node test/kit-compat/matrix.mjs"
+    ],
+    "test:kit-scaffold": [
+      "node test/kit-compat/scaffold.mjs"
+    ],
     "test:lifecycle": [
       "node scripts/check-production-lifecycle.js"
     ],
@@ -797,6 +803,8 @@
     "test:chaos",
     "test:e2e",
     "test:examples",
+    "test:kit",
+    "test:kit-scaffold",
     "test:watch",
     "verify:browser",
     "verify:chaos",
