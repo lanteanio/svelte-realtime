@@ -175,7 +175,13 @@ export interface LiveOperationPlatform extends Platform {
 	readonly trace: Platform['trace'];
 }
 
-export interface LiveContext<UserData = unknown> {
+/** App-wide types. Augment this interface with a `user` property in your app. */
+export interface Register {}
+
+/** Registered upgrade user data; unregistered apps keep permissive callback types. */
+export type RegisteredUser = Register extends { user: infer User } ? User : any;
+
+export interface LiveContext<UserData = RegisteredUser> {
 	/** Cooperative execution deadline from live.lock({ maxExecutionMs }); pass to abort-aware work. */
 	lockSignal?: AbortSignal;
 	/** User data attached during the WebSocket upgrade handshake. */
@@ -703,7 +709,7 @@ export interface StreamOptions {
 	 * Called when a client subscribes to this stream.
 	 * Receives the context and resolved topic string.
 	 */
-	onSubscribe?(ctx: LiveContext<any>, topic: string): void | Promise<void>;
+	onSubscribe?(ctx: LiveContext, topic: string): void | Promise<void>;
 
 	/**
 	 * Called when a client disconnects from this stream. Fires for both
@@ -731,7 +737,7 @@ export interface StreamOptions {
 	 * connection (mirroring the per-sub `onSubscribe` firings). Every
 	 * firing for one drain sees the same `remainingSubscribers` value.
 	 */
-	onUnsubscribe?(ctx: LiveContext<any>, topic: string, remainingSubscribers: number): void | Promise<void>;
+	onUnsubscribe?(ctx: LiveContext, topic: string, remainingSubscribers: number): void | Promise<void>;
 
 	/**
 	 * Subscribe-time access predicate. Checked once when a client subscribes.
@@ -745,14 +751,14 @@ export interface StreamOptions {
 	 * predicate is called `filter(ctx, docId)`, so per-argument authorization
 	 * needs no re-parse of the topic string.
 	 */
-	filter?(ctx: LiveContext<any>, ...args: any[]): boolean | Promise<boolean>;
+	filter?(ctx: LiveContext, ...args: any[]): boolean | Promise<boolean>;
 
 	/**
 	 * Subscribe-time access predicate (alias for `filter`). Sync or async.
 	 * Receives the stream's call arguments after `ctx`, same as `filter`.
 	 * Use `live.access` helpers to build predicates.
 	 */
-	access?(ctx: LiveContext<any>, ...args: any[]): boolean | Promise<boolean>;
+	access?(ctx: LiveContext, ...args: any[]): boolean | Promise<boolean>;
 
 	/**
 	 * Schema version number. Increment when the data shape changes.
@@ -1052,7 +1058,7 @@ export interface StreamOptions {
 	 * Existing 2-argument `(err, ctx) => void` handlers continue to
 	 * work; the `topic` arg is silently ignored.
 	 */
-	onError?(err: unknown, ctx: LiveContext<any>, topic?: string): void | Promise<void>;
+	onError?(err: unknown, ctx: LiveContext, topic?: string): void | Promise<void>;
 }
 
 /**
@@ -1064,13 +1070,13 @@ export interface HandleRpcOptions {
 	 * Throw `LiveError` to reject the call.
 	 * Use for rate limiting, logging, metrics.
 	 */
-	beforeExecute?(ws: WebSocket<any>, rpcPath: string, args: any[]): Promise<void> | void;
+	beforeExecute?(ws: WebSocket<RegisteredUser>, rpcPath: string, args: any[]): Promise<void> | void;
 
 	/**
 	 * Called when an RPC handler throws a non-LiveError.
 	 * Use for error reporting (Sentry, logging, etc.).
 	 */
-	onError?(path: string, error: unknown, ctx: LiveContext<any>): void;
+	onError?(path: string, error: unknown, ctx: LiveContext): void;
 
 	/**
 	 * Maximum nesting depth allowed in an inbound RPC envelope. Envelopes
@@ -1107,13 +1113,13 @@ export interface CreateMessageOptions {
 	 * Optional async hook that runs before each RPC call.
 	 * Throw `LiveError` to reject.
 	 */
-	beforeExecute?(ws: WebSocket<any>, rpcPath: string, args: any[]): Promise<void> | void;
+	beforeExecute?(ws: WebSocket<RegisteredUser>, rpcPath: string, args: any[]): Promise<void> | void;
 
 	/**
 	 * Called when an RPC handler throws a non-LiveError.
 	 * Use for error reporting (Sentry, logging, etc.).
 	 */
-	onError?(path: string, error: unknown, ctx: LiveContext<any>): void;
+	onError?(path: string, error: unknown, ctx: LiveContext): void;
 
 	/**
 	 * Called when a non-RPC text frame parses as a JSON object envelope.
@@ -1143,7 +1149,7 @@ export interface CreateMessageOptions {
 	 * })
 	 * ```
 	 */
-	onJsonMessage?(ws: WebSocket<any>, msg: any, platform: Platform): void;
+	onJsonMessage?(ws: WebSocket<RegisteredUser>, msg: any, platform: Platform): void;
 
 	/**
 	 * Maximum nesting depth allowed in a parsed `onJsonMessage` envelope.
@@ -1160,7 +1166,7 @@ export interface CreateMessageOptions {
 	 * to a non-object / exceeds `maxJsonDepth`.
 	 * Use for mixing RPC with custom message handling.
 	 */
-	onUnhandled?(ws: WebSocket<any>, data: ArrayBuffer, platform: Platform): void;
+	onUnhandled?(ws: WebSocket<RegisteredUser>, data: ArrayBuffer, platform: Platform): void;
 }
 
 /**
@@ -1197,7 +1203,7 @@ export interface MetricsRegistry {
  * });
  * ```
  */
-export function live<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(fn: T): T;
+export function live<T extends (ctx: LiveContext, ...args: any[]) => any>(fn: T): T;
 
 /**
  * The shape of a single entry on a `defineTopics` map: either a static
@@ -1460,7 +1466,7 @@ export const pushHooks: {
 	 * may still register a sessionId (sessionIdentify(ws)), and vice versa - the
 	 * two registries are independent.
 	 */
-	open(ws: any, ctx: { platform: any }): void;
+	open(ws: WebSocket<RegisteredUser>, ctx: { platform: any }): void;
 	/**
 	 * Adapter close hook. Drains the per-userId AND per-sessionId push registries
 	 * AND the realtime stream-subscription bookkeeping (ws-counts, silent-topic
@@ -1472,7 +1478,7 @@ export const pushHooks: {
 	 * removes a registry entry if this exact ws is still the registered one
 	 * (handles fast device-swap / resume sequences correctly).
 	 */
-	close(ws: any, ctx?: { platform: any; subscriptions?: Set<string> | string[] }): void;
+	close(ws: WebSocket<RegisteredUser>, ctx?: { platform: any; subscriptions?: Set<string> | string[] }): void;
 };
 
 /**
@@ -1530,7 +1536,7 @@ export interface UploadOptions {
  * cancellation signal. The deprecated `signal` alias replaces the point-to-point
  * method on `LiveContext`; use `ctx.publish()` to send events from uploads.
  */
-export interface UploadContext<UserData = unknown> extends Omit<LiveContext<UserData>, 'signal'> {
+export interface UploadContext<UserData = RegisteredUser> extends Omit<LiveContext<UserData>, 'signal'> {
 	/** Async iterable yielding `Uint8Array` chunks in arrival order. */
 	stream: AsyncIterable<Uint8Array>;
 	/**
@@ -1550,7 +1556,7 @@ export namespace live {
 	 * Suppresses the module's missing-guard build warning; existing module
 	 * guards, middleware and transport authorization still run.
 	 */
-	function public<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(fn: T): T;
+	function public<T extends (ctx: LiveContext, ...args: any[]) => any>(fn: T): T;
 
 	/**
 	 * Mark a function as a stream provider with a static topic.
@@ -1566,7 +1572,7 @@ export namespace live {
 	 * }, { merge: 'crud', key: 'id', prepend: true });
 	 * ```
 	 */
-	function stream<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
+	function stream<T extends (ctx: LiveContext, ...args: any[]) => any>(
 		topic: string,
 		initFn: T,
 		options?: StreamOptions
@@ -1591,8 +1597,8 @@ export namespace live {
 	 * );
 	 * ```
 	 */
-	function stream<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
-		topicFn: (ctx: LiveContext<any>, ...args: any[]) => string,
+	function stream<T extends (ctx: LiveContext, ...args: any[]) => any>(
+		topicFn: (ctx: LiveContext, ...args: any[]) => string,
 		initFn: T,
 		options?: StreamOptions
 	): T;
@@ -1629,7 +1635,7 @@ export namespace live {
 	 * ```
 	 */
 	function channel(
-		topicFn: (ctx: LiveContext<any>, ...args: any[]) => string,
+		topicFn: (ctx: LiveContext, ...args: any[]) => string,
 		options?: { merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor'; key?: string; max?: number }
 	): Function;
 
@@ -1647,7 +1653,7 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function binary<T extends (ctx: LiveContext<any>, buffer: ArrayBuffer, ...args: any[]) => any>(
+	function binary<T extends (ctx: LiveContext, buffer: ArrayBuffer, ...args: any[]) => any>(
 		fn: T
 	): T;
 
@@ -1692,7 +1698,7 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function upload<T extends (ctx: UploadContext<any>, ...args: any[]) => any>(
+	function upload<T extends (ctx: UploadContext, ...args: any[]) => any>(
 		fn: T,
 		options?: UploadOptions
 	): T;
@@ -1714,7 +1720,7 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function middleware(fn: (ctx: LiveContext<any>, next: () => Promise<any>) => Promise<any>): void;
+	function middleware(fn: (ctx: LiveContext, next: () => Promise<any>) => Promise<any>): void;
 
 	/**
 	 * Mark a handler as fire-and-forget (volatile). The server still runs
@@ -1743,7 +1749,7 @@ export namespace live {
 	 * moveCursor.fireAndForget('board-1', { x: 100, y: 200 });
 	 * ```
 	 */
-	function volatile<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(fn: T): T;
+	function volatile<T extends (ctx: LiveContext, ...args: any[]) => any>(fn: T): T;
 
 	/**
 	 * Mark a live function (RPC, stream, or channel) as deprecated. Additive -
@@ -1789,7 +1795,7 @@ export namespace live {
 	 * ```
 	 */
 	function gate<T extends Function>(
-		predicate: (ctx: LiveContext<any>, ...args: any[]) => boolean | Promise<boolean>,
+		predicate: (ctx: LiveContext, ...args: any[]) => boolean | Promise<boolean>,
 		fn: T
 	): T;
 
@@ -1809,14 +1815,14 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function rateLimit<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
+	function rateLimit<T extends (ctx: LiveContext, ...args: any[]) => any>(
 		config: {
 			/** Maximum number of calls allowed within the window. */
 			points: number;
 			/** Time window in milliseconds. */
 			window: number;
 			/** Custom key function. Defaults to `ctx.user.id`. */
-			key?(ctx: LiveContext<any>): string;
+			key?(ctx: LiveContext): string;
 		},
 		fn: T
 	): T;
@@ -2012,10 +2018,10 @@ export namespace live {
 	 * await charge.with({ idempotencyKey: crypto.randomUUID() })(payload);
 	 * ```
 	 */
-	function idempotent<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
+	function idempotent<T extends (ctx: LiveContext, ...args: any[]) => any>(
 		config: {
 			/** Derive the idempotency key from the call. Returning a falsy value disables idempotency for that call. */
-			keyFrom?(ctx: LiveContext<any>, ...args: any[]): string | null | undefined;
+			keyFrom?(ctx: LiveContext, ...args: any[]): string | null | undefined;
 			/** Idempotency store. Defaults to a bounded in-process map. */
 			store?: IdempotencyStore;
 			/** Cache TTL in non-negative integer seconds. Defaults to 172800 (48 hours); 0 skips cache writes. */
@@ -2106,14 +2112,14 @@ export namespace live {
 	 * );
 	 * ```
 	 */
-	function lock<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
+	function lock<T extends (ctx: LiveContext, ...args: any[]) => any>(
 		keyOrConfig:
 			| string
-			| ((ctx: LiveContext<any>, ...args: any[]) => string | null | undefined)
+			| ((ctx: LiveContext, ...args: any[]) => string | null | undefined)
 			| {
 				key:
 					| string
-					| ((ctx: LiveContext<any>, ...args: any[]) => string | null | undefined);
+					| ((ctx: LiveContext, ...args: any[]) => string | null | undefined);
 				lock?: Lock;
 				/**
 				 * When set, queued callers waiting for this lock are rejected
@@ -2210,9 +2216,9 @@ export namespace live {
 	 */
 	function configurePush(
 		config:
-			| { identify: ((ws: any) => string | null | undefined) | null; sessionIdentify?: ((ws: any) => string | null | undefined) | null; remoteRegistry?: PushRemoteRegistry | null }
-			| { identify?: ((ws: any) => string | null | undefined) | null; sessionIdentify: ((ws: any) => string | null | undefined) | null; remoteRegistry?: PushRemoteRegistry | null }
-			| { identify?: ((ws: any) => string | null | undefined) | null; sessionIdentify?: ((ws: any) => string | null | undefined) | null; remoteRegistry: PushRemoteRegistry | null }
+			| { identify: ((ws: WebSocket<RegisteredUser>) => string | null | undefined) | null; sessionIdentify?: ((ws: WebSocket<RegisteredUser>) => string | null | undefined) | null; remoteRegistry?: PushRemoteRegistry | null }
+			| { identify?: ((ws: WebSocket<RegisteredUser>) => string | null | undefined) | null; sessionIdentify: ((ws: WebSocket<RegisteredUser>) => string | null | undefined) | null; remoteRegistry?: PushRemoteRegistry | null }
+			| { identify?: ((ws: WebSocket<RegisteredUser>) => string | null | undefined) | null; sessionIdentify?: ((ws: WebSocket<RegisteredUser>) => string | null | undefined) | null; remoteRegistry: PushRemoteRegistry | null }
 			| null
 	): void;
 
@@ -2453,7 +2459,7 @@ export namespace live {
 	 * });
 	 * ```
 	 */
-	function validated<S, T extends (ctx: LiveContext<any>, input: any, ...args: any[]) => any>(
+	function validated<S, T extends (ctx: LiveContext, input: any, ...args: any[]) => any>(
 		schema: S,
 		fn: T
 	): T;
@@ -2720,7 +2726,7 @@ export namespace live {
 			 * Defines which callers share one output. Defaults to authenticated identity; guests are per connection.
 			 * Include permissions in this key when sessions of the same identity can have different authorized views.
 			 */
-			scopeKey?: (ctx: LiveContext<any>, ...args: any[]) => string | number;
+			scopeKey?: (ctx: LiveContext, ...args: any[]) => string | number;
 		}
 	): T;
 	function derived<T extends () => any>(
@@ -2892,7 +2898,7 @@ export namespace live {
 		 * trust the aggregate: a healthy-looking p99 can hide a cohort that
 		 * is entirely broken, because the fast majority drowns it.
 		 */
-		cohort?: (userData: any) => string;
+		cohort?: (userData: RegisteredUser) => string;
 		/**
 		 * Pause-aware scrape path: pre-serialize the registry on a background
 		 * interval (default 5000 ms, unref'd) into an in-memory snapshot and
@@ -3042,11 +3048,11 @@ export namespace live {
 		 * connections. A boolean or plain object is rejected too; `0` and object ids
 		 * (ObjectId, Buffer uuid, Decimal) are accepted.
 		 */
-		owner(field?: string): (ctx: LiveContext<any>) => boolean;
+		owner(field?: string): (ctx: LiveContext) => boolean;
 		/** Role-based access: map role names to boolean or predicate. */
-		role(map: Record<string, true | ((ctx: LiveContext<any>) => boolean)>): (ctx: LiveContext<any>) => boolean;
+		role(map: Record<string, true | ((ctx: LiveContext) => boolean)>): (ctx: LiveContext) => boolean;
 		/** Only allow subscription if `ctx.user.teamId` identifies a team (same rule as `owner`). */
-		team(): (ctx: LiveContext<any>) => boolean;
+		team(): (ctx: LiveContext) => boolean;
 		/**
 		 * Org-scoped access: an extracted value (default arg 0) must equal
 		 * `ctx.user.organization_id` (default field). Returns false when
@@ -3064,10 +3070,10 @@ export namespace live {
 		 */
 		org(opts?: {
 			/** Extract the value to compare against. Default: arg 0. */
-			from?: (ctx: LiveContext<any>, ...args: any[]) => any;
+			from?: (ctx: LiveContext, ...args: any[]) => any;
 			/** Field on `ctx.user` that holds the org id. Default: `'organization_id'`. */
 			orgField?: string;
-		}): (ctx: LiveContext<any>, ...args: any[]) => boolean;
+		}): (ctx: LiveContext, ...args: any[]) => boolean;
 		/**
 		 * User-scoped access: an extracted value (default arg 0) must equal
 		 * `ctx.user.user_id` (default field, matching `[table]_id`
@@ -3086,10 +3092,10 @@ export namespace live {
 		 */
 		user(opts?: {
 			/** Extract the value to compare against. Default: arg 0. */
-			from?: (ctx: LiveContext<any>, ...args: any[]) => any;
+			from?: (ctx: LiveContext, ...args: any[]) => any;
 			/** Field on `ctx.user` to compare to. Default: `'user_id'`. */
 			userField?: string;
-		}): (ctx: LiveContext<any>, ...args: any[]) => boolean;
+		}): (ctx: LiveContext, ...args: any[]) => boolean;
 		/**
 		 * OR logic: any predicate returning true allows the subscription.
 		 * Args are forwarded so `org` / `user` predicates compose. Sub-predicates
@@ -3097,13 +3103,13 @@ export namespace live {
 		 * (the runtime awaits the top-level predicate, so this composes with
 		 * `live.stream({ access })`, `pipe.filter()`, and `live.gate(...)`).
 		 */
-		any(...predicates: Array<(ctx: LiveContext<any>, ...args: any[]) => boolean | Promise<boolean>>): (ctx: LiveContext<any>, ...args: any[]) => Promise<boolean>;
+		any(...predicates: Array<(ctx: LiveContext, ...args: any[]) => boolean | Promise<boolean>>): (ctx: LiveContext, ...args: any[]) => Promise<boolean>;
 		/**
 		 * AND logic: all predicates must return true. Args are forwarded so
 		 * `org` / `user` predicates compose. Sub-predicates may be sync OR async;
 		 * each is awaited in order. Returns a Promise<boolean>.
 		 */
-		all(...predicates: Array<(ctx: LiveContext<any>, ...args: any[]) => boolean | Promise<boolean>>): (ctx: LiveContext<any>, ...args: any[]) => Promise<boolean>;
+		all(...predicates: Array<(ctx: LiveContext, ...args: any[]) => boolean | Promise<boolean>>): (ctx: LiveContext, ...args: any[]) => Promise<boolean>;
 	};
 
 	/**
@@ -3125,8 +3131,8 @@ export namespace live {
 	 * );
 	 * ```
 	 */
-	function scoped<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(
-		predicate: (ctx: LiveContext<any>, ...args: Parameters<T> extends [any, ...infer R] ? R : any[]) => boolean | Promise<boolean>,
+	function scoped<T extends (ctx: LiveContext, ...args: any[]) => any>(
+		predicate: (ctx: LiveContext, ...args: Parameters<T> extends [any, ...infer R] ? R : any[]) => boolean | Promise<boolean>,
 		fn: T
 	): T;
 }
@@ -3142,21 +3148,21 @@ export interface RoomConfig {
 	 */
 	alarm?: StreamAlarmConfig;
 	/** Function that computes the room topic from context and args. */
-	topic: (ctx: LiveContext<any>, ...args: any[]) => string;
+	topic: (ctx: LiveContext, ...args: any[]) => string;
 	/** Function that returns initial data for the room. */
-	init: (ctx: LiveContext<any>, ...args: any[]) => Promise<any>;
+	init: (ctx: LiveContext, ...args: any[]) => Promise<any>;
 	/** Function that returns presence data for the connecting user. */
-	presence?: (ctx: LiveContext<any>) => any;
+	presence?: (ctx: LiveContext) => any;
 	/** Enable cursor tracking. Pass `true` or `{ throttle: ms }`. */
 	cursors?: boolean | { throttle?: number };
 	/** Room-scoped RPC actions. */
-	actions?: Record<string, (ctx: LiveContext<any>, ...args: any[]) => any>;
+	actions?: Record<string, (ctx: LiveContext, ...args: any[]) => any>;
 	/** Guard function run before data access and actions. */
-	guard?: (ctx: LiveContext<any>, ...args: any[]) => void | Promise<void>;
+	guard?: (ctx: LiveContext, ...args: any[]) => void | Promise<void>;
 	/** Called when a user joins the room. */
-	onJoin?: (ctx: LiveContext<any>, ...args: any[]) => void | Promise<void>;
+	onJoin?: (ctx: LiveContext, ...args: any[]) => void | Promise<void>;
 	/** Called when a user leaves the room. */
-	onLeave?: (ctx: LiveContext<any>, topic: string) => void | Promise<void>;
+	onLeave?: (ctx: LiveContext, topic: string) => void | Promise<void>;
 	/** Merge strategy for the data stream. @default 'crud' */
 	merge?: string;
 	/** Key field for the data stream. @default 'id' */
@@ -3193,7 +3199,7 @@ export interface RoomConfig {
 	 * multiple instances or workers additionally requires the cluster pub/sub
 	 * bus (the standard cluster wiring). @default false
 	 */
-	enumerable?: boolean | ((ctx: LiveContext<any>, room: EnumeratedRoom) => boolean | Promise<boolean>);
+	enumerable?: boolean | ((ctx: LiveContext, room: EnumeratedRoom) => boolean | Promise<boolean>);
 	/**
 	 * Opt into room ownership. The first member to join a room holds the owner
 	 * role; when the owner leaves (after the presence grace window) the role
@@ -3294,21 +3300,21 @@ export interface MultiplayerConfig {
 	 */
 	alarm?: StreamAlarmConfig;
 	/** Function that computes the room topic from context and args. */
-	topic: (ctx: LiveContext<any>, ...args: any[]) => string;
+	topic: (ctx: LiveContext, ...args: any[]) => string;
 	/** Initial data for the room's data stream. Defaults to an empty list. */
-	init?: (ctx: LiveContext<any>, ...args: any[]) => Promise<any>;
+	init?: (ctx: LiveContext, ...args: any[]) => Promise<any>;
 	/** Presence payload for the connecting user. Drives the roster. */
-	presence?: (ctx: LiveContext<any>) => any;
+	presence?: (ctx: LiveContext) => any;
 	/** Enable cursor tracking. Pass `true` or `{ throttle: ms }`. */
 	cursors?: boolean | { throttle?: number };
 	/** Room-scoped RPC actions on the data stream. */
-	actions?: Record<string, (ctx: LiveContext<any>, ...args: any[]) => any>;
+	actions?: Record<string, (ctx: LiveContext, ...args: any[]) => any>;
 	/** Guard run before data access and actions. */
-	guard?: (ctx: LiveContext<any>, ...args: any[]) => void | Promise<void>;
+	guard?: (ctx: LiveContext, ...args: any[]) => void | Promise<void>;
 	/** Called when a user joins. */
-	onJoin?: (ctx: LiveContext<any>, ...args: any[]) => void | Promise<void>;
+	onJoin?: (ctx: LiveContext, ...args: any[]) => void | Promise<void>;
 	/** Called when a user leaves. */
-	onLeave?: (ctx: LiveContext<any>, topic: string) => void | Promise<void>;
+	onLeave?: (ctx: LiveContext, topic: string) => void | Promise<void>;
 	/** Merge strategy for the data stream. @default 'crud' */
 	merge?: string;
 	/** Key field for the data stream. @default 'id' */
@@ -3374,7 +3380,7 @@ export interface MultiplayerExport extends RoomExport {
  */
 export interface SmoothConfig {
 	/** Topic name, or a function computing it from context and room args. */
-	topic: string | ((ctx: any, ...args: any[]) => string);
+	topic: string | ((ctx: LiveContext, ...args: any[]) => string);
 	/**
 	 * The shared simulation step: pure `(state, command, ctx) -> state`.
 	 * Reconciliation replays commands, so one-shot side effects must guard on
@@ -3407,7 +3413,7 @@ export interface SmoothConfig {
 	/** Starting state for a new entity: a value, or `(key) => state`. */
 	initial: any | ((key: string) => any);
 	/** Guard run before sync and commands. Throw to deny, same shape as room guards. */
-	guard?: (ctx: any, ...args: any[]) => any;
+	guard?: (ctx: LiveContext, ...args: any[]) => any;
 	/**
 	 * Per-tick continuation for entities with no queued commands - the hook
 	 * for genuinely simulated entities that keep moving between inputs.
@@ -3608,7 +3614,7 @@ export interface SmoothInterestConfig {
 	centerPolicy?:
 		| 'any'
 		| 'own-entity'
-		| ((ctx: LiveContext<any>, center: SmoothPoint, ownPos: SmoothPoint | null) => boolean | SmoothPoint);
+		| ((ctx: LiveContext, center: SmoothPoint, ownPos: SmoothPoint | null) => boolean | SmoothPoint);
 	/**
 	 * Per-subscriber delivery ceiling (an integer of at least 1): at most this
 	 * many entities are delivered to one subscriber per tick. Past the ceiling
@@ -3774,7 +3780,7 @@ export interface SmoothExport {
  */
 export interface DocConfig {
 	/** Topic name, or a function computing it from context and room args. */
-	topic: string | ((ctx: any, ...args: any[]) => string);
+	topic: string | ((ctx: LiveContext, ...args: any[]) => string);
 	/**
 	 * Per-connection per-document access. Return a boolean (widened to all
 	 * three rights) or a `{read, write, comment}` record; a missing right is
@@ -3784,7 +3790,7 @@ export interface DocConfig {
 	 * `comment` is carried for the rich-text marks layer and grants nothing
 	 * extra yet.
 	 */
-	guard?: (ctx: any, ...args: any[]) => any;
+	guard?: (ctx: LiveContext, ...args: any[]) => any;
 	/**
 	 * Durable persistence hooks - the app owns the I/O, the framework owns
 	 * the schedule. `load` returns the stored full-state bytes for a cold
@@ -3965,7 +3971,7 @@ export interface OutboundWebhookHandler {
  * projection, use the `transform` option on `live.stream({ transform })`.
  */
 export interface PipeTransform {
-	transformInit?(data: any[], ctx: LiveContext<any>): any[] | Promise<any[]>;
+	transformInit?(data: any[], ctx: LiveContext): any[] | Promise<any[]>;
 }
 
 /**
@@ -3989,7 +3995,7 @@ export interface PipeTransform {
 export function pipe<T extends Function>(stream: T, ...transforms: PipeTransform[]): T;
 export namespace pipe {
 	/** Filter items from initial data. Does NOT apply to live events. */
-	function filter(predicate: (ctx: LiveContext<any>, item: any) => boolean): PipeTransform;
+	function filter(predicate: (ctx: LiveContext, item: any) => boolean): PipeTransform;
 	/** Sort initial data by a field. */
 	function sort(field: string, direction?: 'asc' | 'desc'): PipeTransform;
 	/** Cap initial data to N items. */
@@ -4039,8 +4045,8 @@ export namespace pipe {
  * ```
  */
 export function guard(
-	...parts: Array<((ctx: LiveContext<any>) => void | Promise<void>) | { authenticated?: boolean }>
-): (ctx: LiveContext<any>) => void | Promise<void>;
+	...parts: Array<((ctx: LiveContext) => void | Promise<void>) | { authenticated?: boolean }>
+): (ctx: LiveContext) => void | Promise<void>;
 
 /**
  * Typed error that propagates `code` and `message` to the client.
@@ -4101,7 +4107,7 @@ export class LiveError extends Error {
  * ```
  */
 export function handleRpc(
-	ws: WebSocket<any>,
+	ws: WebSocket<RegisteredUser>,
 	data: ArrayBuffer,
 	platform: Platform,
 	options?: HandleRpcOptions
@@ -4119,7 +4125,7 @@ export function handleRpc(
  * ```
  */
 export function message(
-	ws: WebSocket<any>,
+	ws: WebSocket<RegisteredUser>,
 	ctx: { data: ArrayBuffer; isBinary?: boolean; platform: Platform }
 ): void;
 
@@ -4140,7 +4146,7 @@ export function message(
  */
 export function createMessage(
 	options?: CreateMessageOptions
-): (ws: WebSocket<any>, ctx: { data: ArrayBuffer; isBinary?: boolean; platform: Platform }) => void;
+): (ws: WebSocket<RegisteredUser>, ctx: { data: ArrayBuffer; isBinary?: boolean; platform: Platform }) => void;
 
 /**
  * Execute a live function directly (in-process), without WebSocket.
@@ -4192,7 +4198,7 @@ export function __directCall(
 	args: any[],
 	platform: Platform,
 	options?: {
-		user?: any;
+		user?: RegisteredUser;
 		args?: any[];
 		/**
 		 * Value to return if the loader throws. Presence of the key opts
@@ -4646,7 +4652,7 @@ export function onCronError(handler: (path: string, error: unknown) => void): vo
  * export function open(ws) { enableSignals(ws); }
  * ```
  */
-export function enableSignals(ws: WebSocket<any>, options?: { idField?: string }): void;
+export function enableSignals(ws: WebSocket<RegisteredUser>, options?: { idField?: string }): void;
 
 /**
  * Handle a real-time topic unsubscribe event. Fires onUnsubscribe lifecycle
@@ -4658,7 +4664,7 @@ export function enableSignals(ws: WebSocket<any>, options?: { idField?: string }
  * ```
  */
 export function unsubscribe(
-	ws: WebSocket<any>,
+	ws: WebSocket<RegisteredUser>,
 	topic: string,
 	ctx: { platform: Platform }
 ): void;
@@ -4681,7 +4687,7 @@ export function unsubscribe(
  * and produce identical cleanup.
  */
 export function close(
-	ws: WebSocket<any>,
+	ws: WebSocket<RegisteredUser>,
 	ctx: { platform: Platform; subscriptions?: Set<string> | string[] }
 ): void;
 
@@ -4772,7 +4778,7 @@ export interface RealtimeConfig {
 	 * The id is validated to `[a-zA-Z0-9_-]` (<= 64 chars) and is NEVER read off the
 	 * wire. Omit for the single-tenant, zero-cost default.
 	 */
-	tenant?: ((user: any) => string | null | undefined) | null;
+	tenant?: ((user: RegisteredUser) => string | null | undefined) | null;
 	/**
 	 * Opt-in admin / observability plane. When set, `realtime()` returns an
 	 * `admin(request)` handler (a Web `Request` -> `Response` router) for the
@@ -4986,9 +4992,9 @@ export interface ShutdownDrainResult {
  * `upgrade` is present only when the caller passed one in the config.
  */
 export interface RealtimeHooks {
-	open(ws: any, ctx: { platform: Platform }): void;
-	close(ws: any, ctx: { platform: Platform; subscriptions?: Set<string> | string[] }): void;
-	message(ws: any, ctx: { data: ArrayBuffer; platform: Platform }): void;
+	open(ws: WebSocket<RegisteredUser>, ctx: { platform: Platform }): void;
+	close(ws: WebSocket<RegisteredUser>, ctx: { platform: Platform; subscriptions?: Set<string> | string[] }): void;
+	message(ws: WebSocket<RegisteredUser>, ctx: { data: ArrayBuffer; platform: Platform }): void;
 	unsubscribe: typeof unsubscribe;
 	init(ctx: { platform: Platform }): void;
 	/**

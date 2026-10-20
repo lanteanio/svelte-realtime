@@ -4,7 +4,8 @@
  * without a real WebSocket server.
  */
 
-import { LiveError } from './server.js';
+import { LiveError, type RegisteredUser } from './server.js';
+import type { WebSocket } from 'svelte-adapter-uws';
 
 /**
  * Create a test environment for testing live functions.
@@ -47,16 +48,16 @@ export function createTestEnv(options?: {
  * ```
  */
 export function createTestContext(options?: {
-	user?: any;
-	ws?: any;
+	user?: RegisteredUser | null;
+	ws?: WebSocket<RegisteredUser> | null;
 	platform?: any;
 	connectionId?: string;
 	requestId?: string;
 	traceContext?: import('./server.js').OperationTraceContext | null;
 	cursor?: any;
 }): {
-	user: any;
-	ws: any;
+	user: RegisteredUser | null;
+	ws: WebSocket<RegisteredUser> | null;
 	platform: any;
 	publish: (topic: string, event: string, data: any, opts?: any) => boolean;
 	cursor: any;
@@ -126,7 +127,7 @@ export interface TestEnv {
 	 * Create a fake connected user.
 	 * @param userData - User data (like what upgrade() returns)
 	 */
-	connect(userData: any): TestClient;
+	connect(userData: RegisteredUser): TestClient;
 
 	/**
 	 * Advance fake timers (cron uses real timers; use vi.advanceTimersByTime instead).

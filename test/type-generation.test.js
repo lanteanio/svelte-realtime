@@ -110,3 +110,25 @@ void result; void nested;
 		expect(() => realtime.generateTypes({ root })).toThrow(/directory|EISDIR/i);
 	});
 });
+
+it('uses registered user data in generated stream loading options', () => {
+	const root = fixture();
+	source(root, 'profile.ts', `
+import { live } from 'svelte-realtime/server';
+export const profile = live.stream('profile', (ctx): string => ctx.user.id);
+`);
+	writeFileSync(join(root, 'consumer.ts'), `
+import 'svelte-realtime/server';
+import { profile } from '$live/profile';
+declare module 'svelte-realtime/server' {
+  interface Register { user: { id: string; role: 'reader' | 'writer' } }
+}
+profile.load({}, { user: { id: '1', role: 'reader' } });
+// @ts-expect-error generated loading options retain required registered fields
+profile.load({}, { user: { id: '1' } });
+// @ts-expect-error generated loading options reject unknown roles
+profile.load({}, { user: { id: '1', role: 'owner' } });
+`);
+	realtime.generateTypes({ root });
+	expect(diagnostics(root)).toEqual([]);
+});

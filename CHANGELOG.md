@@ -12,6 +12,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- Declare `Register.user` once to type live contexts, socket user data, guards, stream callbacks, uploads, and generated stream loading options throughout an app. Unregistered bare `LiveContext` and `UploadContext` annotations now default to `any`, matching unregistered callback inference; supply an explicit generic to retain `unknown`.
+
 - Uploads use receiver credits: the client pauses while `maxBufferedChunks` chunks wait for the handler and resumes as `ctx.stream` is consumed, so a handler that awaits a slow sink receives every byte with default options. `FLOW_BACKPRESSURE` now fails only a sender that keeps sending past its credit, or a client without credit support that overflows the queue. A client falls back to the previous upload format once per connection against a server without credits.
 
 - The [upload wire format v1](docs/upload-wire.md) documents chunk, cancel, credit and frame-cap envelopes for clients outside the browser, with executable test vectors.

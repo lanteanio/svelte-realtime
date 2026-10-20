@@ -11,7 +11,7 @@ import { LIVE_EXPORT_RE, VALIDATED_EXPORT_RE, STREAM_EXPORT_RE, GUARD_EXPORT_RE,
 // The `.load()` SSR-degradation options, shared across every generated stream
 // kind so the documented `fallback` / `onError` stay typed in one place
 // (mirrors the internal `__directCall` options type in server.d.ts).
-const LOAD_OPTS = '{ args?: any[]; user?: any; fallback?: any; onError?: (err: any) => void }';
+const LOAD_OPTS = "{ args?: any[]; user?: import('svelte-realtime/server').RegisteredUser; fallback?: any; onError?: (err: any) => void }";
 
 /**
  * Generate and write type declarations for all $live/ modules.

@@ -144,7 +144,7 @@ export function upgrade() {
 
 `message` routes RPC and streams; without it, requests time out. `unsubscribe` releases stream bookkeeping when a view leaves; without it, state lasts until disconnect. `close` releases connection state on disconnect; omitting it leaks that state.
 
-> **This file is required.** The Vite plugin will warn at startup if it finds live modules in `src/live/` but no `src/hooks.ws.js` (or `.ts`). Without it, WebSocket messages have nothing on the server side to route them, and all RPC calls will silently time out.
+> **This file is required.** The Vite plugin will warn at startup if it finds live modules in `src/live/` but no `src/hooks.ws.js` (or `.ts`). Without it, WebSocket messages have nothing on the server side to route them, and all RPC calls will silently time out. TypeScript apps can [declare the connection user type once](docs/user-types.md) for all live handlers and guards.
 
 ### Step 4: Add an in-memory counter
 
