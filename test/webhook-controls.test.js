@@ -7,9 +7,9 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { createServer } from 'node:http';
 import { createRetryBudget, createWebhookBreaker } from 'svelte-adapter-uws/plugins/webhooks';
-import { configureWebhooks, getDeadLetter, realtime } from '../src/server.js';
+import { configureWebhooks, getDeadLetter, realtime, live, __registerWebhookOut, _prepareHmr } from '../src/server.js';
 import { _fireWebhookOut } from '../src/server/webhook-out.js';
-import { state } from '../src/server/state.js';
+import { state, _webhookOutById } from '../src/server/state.js';
 
 function reset() {
 	configureWebhooks({ deadLetter: false, budget: false, breaker: false });
@@ -85,6 +85,23 @@ describe('_fireWebhookOut threads the controls into delivery', () => {
 	});
 
 	const entry = (extra) => ({ id: 'orders/wh', config: { url: `http://127.0.0.1:${port}/hook`, urlMode: 'off', ...extra } });
+
+	it.each([[60000, 1], [0, 2], [undefined, 2]])('forwards pinCacheMs=%s from registration through real delivery', async (pinCacheMs, expectedResolves) => {
+		let resolves = 0;
+		const config = {
+			url: `http://receiver.test:${port}/hook`, urlMode: 'off',
+			resolve: async () => { resolves++; return ['127.0.0.1']; },
+			...(pinCacheMs === undefined ? {} : { pinCacheMs })
+		};
+		__registerWebhookOut('orders/pinned', live.webhooks.outbound(['orders'], config));
+		try {
+			const registered = _webhookOutById.get('orders/pinned');
+			await _fireWebhookOut(registered, 'orders', 'created', { id: 1 }, null);
+			await _fireWebhookOut(registered, 'orders', 'created', { id: 2 }, null);
+			expect(srv.received).toEqual(['/hook', '/hook']);
+			expect(resolves).toBe(expectedResolves);
+		} finally { _prepareHmr(); }
+	});
 
 	it('an open breaker ejects the delivery to the DLQ without touching the network', async () => {
 		const breaker = createWebhookBreaker({ failureThreshold: 1, resetMs: 60000 });

@@ -3974,6 +3974,12 @@ export interface OutboundWebhookConfig {
 	 */
 	resolve?: (hostname: string) => string | string[] | Promise<string | string[]>;
 	/**
+	 * TTL in milliseconds for cached, validated DNS pins per host. Defaults to
+	 * 30000 with the built-in resolver, or 0 with a custom `resolve`.
+	 * Set 0 to disable caching. Range checks and connection pinning still apply.
+	 */
+	pinCacheMs?: number;
+	/**
 	 * Called when delivery fails (after retries are exhausted, or on a blocked
 	 * URL / bad payload / blocked redirect). `attempts` is how many HTTP attempts
 	 * were made. The error never contains the secret, the signature, or URL

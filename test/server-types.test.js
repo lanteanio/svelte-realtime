@@ -32,6 +32,11 @@ live.stream('budget', async (_ctx) => [], { timeout: '300000' });
 // @ts-expect-error timeout is numeric
 live.upload(async (_ctx) => 1, { timeout: '300000' });
 
+live.webhooks.outbound(['orders'], { url: 'https://receiver.example/hook', pinCacheMs: 250 });
+live.webhooks.outbound(['orders'], { url: 'https://receiver.example/hook', pinCacheMs: 0 });
+// @ts-expect-error DNS pin cache durations are numeric
+live.webhooks.outbound(['orders'], { url: 'https://receiver.example/hook', pinCacheMs: '250' });
+
 configureWebhooks({ deadLetter: redisDeadLetter });
 const asyncDeadLetter: DeadLetterStore = {
   add: async () => null, get: async () => null, remove: async () => false,

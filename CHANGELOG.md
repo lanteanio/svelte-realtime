@@ -81,6 +81,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Calling the adapter's `connect()` after `close()` revives the realtime client: new RPCs work, mounted streams reload over the new connection and clear their `CONNECTION_CLOSED` error, and status, signal, denial, health and push listeners follow the new connection. No realtime call opens a socket between the close and the app's `connect()`, and offline mutations rejected or kept stored at the close are not replayed onto the new connection.
 
+- Inline `live.webhooks.outbound()` configuration accepts the runtime-supported numeric `pinCacheMs` option, including zero to disable validated DNS pin caching.
+
 - `live.breaker()` rejects unsupported breaker objects at registration with `VALIDATION`; its type accepts the extensions `guard()` contract and legacy `isOpen()` breakers.
 
 ## [0.6.0-next.91] - 2026-10-13
