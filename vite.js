@@ -665,19 +665,26 @@ export default function svelteRealtime(options) {
 	const handledVersions = new Map();
 	/**
 	 * Vite watches a module under every spelling it was imported with, so on
-	 * Windows one save or delete can arrive once per spelling. Report whether
-	 * this version of a live file, keyed by its liveDir spelling, was handled.
+	 * Windows one save or delete can arrive once per spelling. Record the
+	 * content of a live file, keyed by its liveDir spelling, and return it, or
+	 * return null when that content is already being handled.
 	 * @param {string} file
+	 * @returns {string | null}
 	 */
-	const handled = (file) => {
-		let version = 'absent';
-		try {
-			const stat = statSync(file);
-			version = stat.mtimeMs + ':' + stat.size;
-		} catch {}
-		if (handledVersions.get(file) === version) return true;
+	const claimVersion = (file) => {
+		let version = '\0absent';
+		try { version = readFileSync(file, 'utf8'); } catch {}
+		if (handledVersions.get(file) === version) return null;
 		handledVersions.set(file, version);
-		return false;
+		return version;
+	};
+	/**
+	 * Forget a version whose reload failed, so saving it again retries.
+	 * @param {string} file
+	 * @param {string} version
+	 */
+	const releaseVersion = (file, version) => {
+		if (handledVersions.get(file) === version) handledVersions.delete(file);
 	};
 	/** @type {boolean} */
 	let isSsr = false;
@@ -901,7 +908,8 @@ export default function svelteRealtime(options) {
 					if (!file.includes('/' + dir + '/') && !file.startsWith(dir + '/')) return;
 					if (!/\.[jt]s$/.test(file) || file.endsWith('.d.ts') || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
 					const live = _respellUnder(liveDir, resolve(file));
-					if (live && handled(live)) return;
+					const version = live ? claimVersion(live) : undefined;
+					if (version === null) return;
 
 					_fileCache.clear();
 				_codeCache.clear();
@@ -912,7 +920,8 @@ export default function svelteRealtime(options) {
 					}
 
 					const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-					await _hmrReloadRegistry(server, liveDir, dir, rel);
+					const reloaded = await _hmrReloadRegistry(server, liveDir, dir, rel);
+					if (live && version !== undefined && !reloaded) releaseVersion(live, version);
 				});
 			}
 		},
@@ -929,7 +938,8 @@ export default function svelteRealtime(options) {
 			if (file.endsWith('.d.ts')) return [];
 			// Same non-module filter as the add/unlink watcher.
 			if (!/\.[jt]s$/.test(file) || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
-			if (handled(file)) return [];
+			const version = claimVersion(file);
+			if (version === null) return [];
 			_fileCache.delete(file);
 			_codeCache.delete('client:' + file);
 			_codeCache.delete('ssr:' + file);
@@ -953,7 +963,7 @@ export default function svelteRealtime(options) {
 			}
 
 			// Re-register all server handlers
-			await _hmrReloadRegistry(server, liveDir, dir, rel);
+			if (!(await _hmrReloadRegistry(server, liveDir, dir, rel))) releaseVersion(file, version);
 
 			// Client-side: invalidate the virtual module so the browser picks up new stubs
 			const mod = server.moduleGraph.getModuleById(VIRTUAL_PREFIX + rel);
@@ -3211,6 +3221,7 @@ function _splitParams(str) {
  * @param {string} liveDir
  * @param {string} dir
  * @param {string} rel - Relative path of the changed file (for logging)
+ * @returns {Promise<boolean>} Whether the new handlers were registered
  */
 const _hmrQueues = new WeakMap();
 async function _hmrReloadRegistry(server, liveDir, dir, rel) {
@@ -3219,7 +3230,7 @@ async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 	const reload = previous.catch(() => {}).then(() => _reloadRegistry(server, liveDir, dir, rel));
 	_hmrQueues.set(server, reload);
 	try {
-		await reload;
+		return await reload;
 	} finally {
 		if (_hmrQueues.get(server) === reload) _hmrQueues.delete(server);
 	}
@@ -3239,7 +3250,7 @@ async function _reloadRegistry(server, liveDir, dir, rel) {
 		serverMod = await _loadServerModule(server, 'svelte-realtime/server');
 	} catch {
 		console.error('[svelte-realtime] HMR failed: could not load svelte-realtime/server\n  See: https://svti.me/vite');
-		return;
+		return false;
 	}
 
 	// Snapshot current state, then clear everything
@@ -3248,11 +3259,13 @@ async function _reloadRegistry(server, liveDir, dir, rel) {
 	try {
 		await _loadServerModule(server, REGISTRY_PUBLIC_ID);
 		console.log(`[svelte-realtime] Hot-reloaded: ${dir}/${rel}`);
+		return true;
 	} catch (e) {
 		// Re-import failed - restore old handlers so the server keeps working
 		serverMod._restoreHmr(snap);
 		console.error(`[svelte-realtime] HMR failed for ${dir}/${rel}:`, /** @type {Error} */ (e).message);
 		console.error('[svelte-realtime] Previous handlers restored - fix the error and save again');
+		return false;
 	}
 }
 

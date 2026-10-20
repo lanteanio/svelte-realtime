@@ -236,6 +236,34 @@ describe('Windows root spelling', () => {
  });
 });
 
+describe('repeated live module updates', () => {
+ it('retries a save whose reload failed when the same content is saved again', async () => {
+  const p = plugin();
+  const s = server();
+  let failRegistry = true;
+  s.load.mockImplementation(async id => {
+   if (id === '/@svelte-realtime-server') return s.runtime;
+   if (id === '/@svelte-realtime-registry' && failRegistry) {
+    failRegistry = false;
+    throw new Error('broken import');
+   }
+   return {};
+  });
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+   const update = { file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s };
+   await p.handleHotUpdate(update);
+   expect(s.runtime._restoreHmr).toHaveBeenCalledTimes(1);
+   await p.handleHotUpdate(update);
+   expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+   // The successful reload of this content is not repeated.
+   await p.handleHotUpdate(update);
+   expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+   expect(s.runtime._restoreHmr).toHaveBeenCalledTimes(1);
+  } finally { error.mockRestore(); }
+ });
+});
+
 describe('overlapping live module updates', () => {
  it('keeps handlers registered when two registry reloads overlap', async () => {
   const p = plugin();
