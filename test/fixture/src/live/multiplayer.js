@@ -20,7 +20,8 @@
 //   room.room(() => b)     -> the joined view; its acquireLock('title') /
 //                             releaseLock('title') stamp the one declared
 //                             advisory lock on the caller's roster entry,
-//                             and setTyping(on) the typing flag.
+//                             setTyping(on) the typing flag, and
+//                             setSelection(range) the caller's selection.
 //   room.addCard(b, t)     -> publishes `created` on the main topic.
 //   moveCursor(b, x, y)    -> a separate standalone live() action kept here
 //                             to show the raw 3-arg ctx.publish(topic, event,
@@ -49,6 +50,7 @@ export const room = live.multiplayer({
 	cursors: true,
 	typing: true,
 	locks: ['title'],
+	selections: 'offset',
 	actions: {
 		addCard: async (ctx, boardId, title) => {
 			const id = 'c' + (++_cardCounter);

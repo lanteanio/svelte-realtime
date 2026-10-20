@@ -162,10 +162,8 @@ const _PRESENCE_ENTRY_MAX_BYTES = 16384;
  * Cap check for a sticky merge: the merged entry must stay under the byte
  * bound, unless the merge shrinks the entry (a release must always apply).
  *
- * BYTES, not `String.length`: the Lua twin measures `#encoded` (bytes) and a
- * JS `.length` is UTF-16 code units, so a value of 4-byte characters would let
- * the in-memory path (the default, zero-config, no-redis path) admit roughly 4x
- * what the cluster path admits. One unit or the two diverge.
+ * Measure UTF-8 bytes on both storage paths. JS `.length` counts UTF-16 code
+ * units, which undercounts multibyte characters and admits oversized entries.
  *
  * @param {string} curJson serialized entry before the merge
  * @param {string} nextJson serialized entry after the merge
@@ -175,26 +173,66 @@ function _presenceMergeWithinCap(curJson, nextJson) {
 	return nextBytes <= _PRESENCE_ENTRY_MAX_BYTES || nextBytes <= Buffer.byteLength(curJson, 'utf8');
 }
 
-// Atomic sticky-field merge into a roster entry's data field, gated on the
-// entry still being present. KEYS[1] = the roster hash; ARGV = count field,
-// data field, the JSON delta (null value = delete the field), the TTL, the
-// entry byte cap. Returns 0 (and writes nothing) when the count field is
-// gone, so a release that lands between a read and a write cannot resurrect
-// a phantom data row with no count. Returns 2 (and writes nothing) when the
-// merged entry would exceed the byte cap without shrinking the entry.
-// One round-trip; the JS fallback below covers a redis without scripting.
+// Compare-and-set of a roster entry's data field, gated on the entry still
+// being present. KEYS[1] = the roster hash; ARGV = count field, data field,
+// the row the merge was computed from, the merged row, the TTL. Returns 0 (and
+// writes nothing) when the count field is gone, so a release that lands
+// between a read and a write cannot resurrect a phantom data row with no
+// count. Returns 1 after writing. Returns `{2, current}` (or `{2}` when the
+// field is missing) when the row changed since it was read; the caller merges
+// again from `current`.
+//
+// The merge itself runs in JS, never in Lua: lua-cjson re-encodes a decoded
+// row lossily (an empty array becomes `{}`, numbers keep 14 significant
+// digits, `/` is escaped), and the row is the application's presence payload.
+// JSON.parse then JSON.stringify of a row JSON.stringify wrote gives the same
+// bytes back, so only the sticky fields change.
 export const _PRESENCE_MERGE_SCRIPT =
 	"if redis.call('HEXISTS', KEYS[1], ARGV[1]) == 0 then return 0 end\n" +
 	"local raw = redis.call('HGET', KEYS[1], ARGV[2])\n" +
-	"local cur = {}\n" +
-	"if raw then local ok, parsed = pcall(cjson.decode, raw); if ok and type(parsed) == 'table' then cur = parsed end end\n" +
-	"local delta = cjson.decode(ARGV[3])\n" +
-	"for k, v in pairs(delta) do if v == cjson.null then cur[k] = nil else cur[k] = v end end\n" +
-	"local encoded; if next(cur) == nil then encoded = '{}' else encoded = cjson.encode(cur) end\n" +
-	"if #encoded > tonumber(ARGV[5]) and (not raw or #encoded > #raw) then return 2 end\n" +
-	"redis.call('HSET', KEYS[1], ARGV[2], encoded)\n" +
-	"redis.call('EXPIRE', KEYS[1], ARGV[4])\n" +
+	"if raw ~= ARGV[3] then if raw then return {2, raw} end return {2} end\n" +
+	"redis.call('HSET', KEYS[1], ARGV[2], ARGV[4])\n" +
+	"redis.call('EXPIRE', KEYS[1], ARGV[5])\n" +
 	"return 1";
+
+// Bound on compare-and-set rounds per merge. Only the member's own writes
+// (other tabs on other replicas) race a merge, so this is never reached in
+// practice; past it the merge gives up as on a Redis failure.
+const _PRESENCE_MERGE_ATTEMPTS = 8;
+
+/** Why a sticky merge refused the delta's new values. */
+export const _PRESENCE_REFUSED_CAP = 'the roster entry would exceed ' + _PRESENCE_ENTRY_MAX_BYTES + ' bytes serialized';
+export const _PRESENCE_REFUSED_PAYLOAD = 'selection and lock fields need an object presence payload';
+
+/**
+ * Merge a sticky delta into a serialized roster row. With `stamps` false only
+ * the releases apply. Returns the merged row, or the refusal reason: the cap,
+ * or a payload that is not a plain object (a string, number, array or null
+ * has nowhere to carry a field; the row is left as it is).
+ * @param {string} raw
+ * @param {Record<string, any>} delta
+ * @param {boolean} [stamps]
+ * @returns {{ row: string, refused: string | null }}
+ */
+function _mergePresenceRow(raw, delta, stamps = true) {
+	let cur;
+	try { cur = JSON.parse(raw); } catch { cur = null; }
+	if (cur === null || typeof cur !== 'object' || Array.isArray(cur)) {
+		return { row: raw, refused: stamps && _hasStamp(delta) ? _PRESENCE_REFUSED_PAYLOAD : null };
+	}
+	for (const k of Object.keys(delta)) {
+		if (delta[k] == null) delete cur[k]; else if (stamps) cur[k] = delta[k];
+	}
+	const row = JSON.stringify(cur);
+	if (!stamps || _presenceMergeWithinCap(raw, row)) return { row, refused: null };
+	return { row: _mergePresenceRow(raw, delta, false).row, refused: _PRESENCE_REFUSED_CAP };
+}
+
+/** @param {Record<string, any>} delta */
+function _hasStamp(delta) {
+	for (const k of Object.keys(delta)) if (delta[k] != null) return true;
+	return false;
+}
 
 /**
  * Bump the cluster-wide count for (topic, key). Returns isFirst=true when
@@ -315,6 +353,7 @@ export function _retirePresenceRef(refKey, ref, release) {
 	if (ref.leaving) return ref.leaving;
 	ref.gone = true;
 	ref.data = null;
+	ref.row = null;
 	ref.cursorKey = null;
 	ref.cursorTopic = null;
 	ref.count = 0;
@@ -356,6 +395,7 @@ export async function _purgePresenceUser(platform, tenantId, userId, publishLeav
 		ref.gone = true;
 		ref.count = 0;
 		ref.data = null;
+		ref.row = null;
 		ref.cursorKey = null;
 		ref.cursorTopic = null;
 		ref.erasure ??= { presenceDone: false, ownerDone: false, ownerUnconfirmed: false, pending: null };
@@ -483,6 +523,7 @@ export async function _clusterPresenceList(platform, topic) {
 	}
 }
 
+
 /**
  * Merge a sticky presence delta into both roster stores so either snapshot
  * path (the in-memory _presenceRef iteration or the Redis 'd:'+key JSON field)
@@ -490,69 +531,151 @@ export async function _clusterPresenceList(platform, topic) {
  * the release path: releaseLock sends `{ 'lock:<k>': null }` and clearing a
  * selection sends `{ selection: null }`.
  *
- * The forward `update` publish has already been sent by the caller; this merge
- * only carries the sticky subset onto the roster entry so a subscriber who
- * loads the roster after the update still sees the field. An entry only exists
- * once presence has been set, so a missing entry (no live roster row) is a
- * no-op: there is nothing to stamp the field onto. The merged entry is capped
- * at `_PRESENCE_ENTRY_MAX_BYTES` serialized (growth beyond the cap is dropped;
- * a merge that shrinks the entry always applies).
+ * The caller publishes the forward `update` frame only after the merge completes, so
+ * it can leave out what the roster refused. Two refusals exist: the merged
+ * entry is capped at `_PRESENCE_ENTRY_MAX_BYTES` serialized, and sticky fields
+ * sit beside the presence payload's own fields, so a payload that is not a
+ * plain object takes none. Either way the delta keeps only its releases
+ * (removing fields never grows an entry, so a release can never be pinned by
+ * the cap) and the merge returns the reason; the caller then withholds
+ * the delta's new values from the frame, so live members and late joiners
+ * agree. An entry only exists once presence has been set, so a missing entry
+ * (no live roster row) is a no-op: there is nothing to stamp the field onto. A
+ * Redis failure resolves null: the frame still goes out, as it would with no
+ * roster to agree with.
+ *
+ * With `platform.redis` wired the Redis row is the roster late joiners read,
+ * so its decision governs and the local copy follows it.
  *
  * @param {any} platform
  * @param {string} topic
  * @param {string} key
  * @param {Record<string, any>} delta
+ * @returns {string | null | Promise<string | null>} why the delta's new values were refused, or null
  */
-export async function _clusterPresenceMerge(platform, topic, key, delta) {
-	// In-memory roster (the no-redis snapshot path reads ref.data by reference).
-	const ref = _presenceRef.get(topic + '\0' + key);
-	if (ref && ref.data && typeof ref.data === 'object') {
-		const next = { ...ref.data };
-		for (const k of Object.keys(delta)) {
-			if (delta[k] == null) delete next[k]; else next[k] = delta[k];
-		}
-		// Apply only within the entry byte cap; a merge that shrinks
-		// the entry always applies so a release can never be pinned by the cap.
-		let nextJson, curJson;
-		// `?? null` / `?? ''`: JSON.stringify RETURNS undefined (it does not throw)
-		// for a value whose toJSON yields undefined, and Buffer.byteLength would
-		// then throw out of the merge.
-		try { nextJson = JSON.stringify(next) ?? null; } catch { nextJson = null; }
-		try { curJson = JSON.stringify(ref.data) ?? ''; } catch { curJson = ''; }
-		if (nextJson !== null && _presenceMergeWithinCap(curJson, nextJson)) ref.data = next;
-	}
-	// Cluster roster (the redis snapshot path reads the 'd:'+key JSON field).
+export function _clusterPresenceMerge(platform, topic, key, delta) {
 	const redis = platform && platform.redis;
-	if (!redis) return;
+	const refKey = topic + '\0' + key;
+	// Same test `_clusterPresenceList` uses to pick the roster it serves.
+	if (!redis || typeof redis.hgetall !== 'function') return _localPresenceMerge(refKey, delta, true);
+	return _mergeRedisPresenceRoster(redis, topic, key, delta, refKey);
+}
+
+/**
+ * Keep the local merge synchronous; only shared storage introduces a lifetime gap.
+ * @param {any} redis
+ * @param {string} topic
+ * @param {string} key
+ * @param {Record<string, any>} delta
+ * @param {string} refKey
+ * @returns {Promise<string | null>}
+ */
+async function _mergeRedisPresenceRoster(redis, topic, key, delta, refKey) {
+	const ref = _presenceRef.get(refKey);
+	const result = await _redisPresenceMerge(redis, topic, key, delta, ref);
+	// A reconnect reads this copy. Follow the accepted Redis row, including
+	// other replicas' fields and cap decisions, only for this membership.
+	if (ref && !ref.gone && _presenceRef.get(refKey) === ref) {
+		if (result?.row !== undefined) {
+			try { ref.data = JSON.parse(result.row); } catch { /* keep the last valid payload */ }
+		} else {
+			_localPresenceMerge(refKey, delta, true);
+		}
+	}
+	return result?.refused ?? null;
+}
+
+/**
+ * Merge into the in-process roster entry. With `stamps` false only the
+ * releases apply. Returns why the delta's new values were refused, or null.
+ * @param {string} refKey
+ * @param {Record<string, any>} delta
+ * @param {boolean} stamps
+ * @returns {string | null}
+ */
+function _localPresenceMerge(refKey, delta, stamps) {
+	const ref = _presenceRef.get(refKey);
+	if (!ref || ref.data == null) return null;
+	const data = ref.data;
+	if (typeof data !== 'object' || Array.isArray(data)) {
+		return stamps && _hasStamp(delta) ? _PRESENCE_REFUSED_PAYLOAD : null;
+	}
+	const next = { ...data };
+	for (const k of Object.keys(delta)) {
+		if (delta[k] == null) delete next[k]; else if (stamps) next[k] = delta[k];
+	}
+	if (!stamps) { ref.data = next; return null; }
+	let nextJson, curJson;
+	// `?? null` / `?? ''`: JSON.stringify RETURNS undefined (it does not throw)
+	// for a value whose toJSON yields undefined, and Buffer.byteLength would
+	// then throw out of the merge.
+	try { nextJson = JSON.stringify(next) ?? null; } catch { nextJson = null; }
+	try { curJson = JSON.stringify(data) ?? ''; } catch { curJson = ''; }
+	if (nextJson !== null && _presenceMergeWithinCap(curJson, nextJson)) {
+		ref.data = next;
+		return null;
+	}
+	_localPresenceMerge(refKey, delta, false);
+	return _PRESENCE_REFUSED_CAP;
+}
+
+/**
+ * Merge into the Redis roster row ('d:'+key JSON field). Returns the accepted
+ * row and any refusal reason (its releases still apply), or null without a row.
+ * @param {any} redis
+ * @param {string} topic
+ * @param {string} key
+ * @param {Record<string, any>} delta
+ * @param {any} ref the local membership that issued this merge
+ * @returns {Promise<{ row: string, refused: string | null } | null>}
+ */
+async function _redisPresenceMerge(redis, topic, key, delta, ref) {
+	const refKey = topic + '\0' + key;
 	const hKey = _PRESENCE_KEY_PREFIX + topic;
 	const dataField = 'd:' + key;
 	const countField = 'c:' + key;
-	// Preferred path: one atomic server-side merge gated on the count field, so a
-	// concurrent release cannot leave a phantom data row behind.
+	// Preferred path: a compare-and-set gated on the count field, so a
+	// concurrent release cannot leave a phantom data row behind and a
+	// concurrent merge from another replica is never overwritten.
 	if (typeof redis.eval === 'function') {
 		try {
-			await redis.eval(
-				_PRESENCE_MERGE_SCRIPT, 1, hKey, countField, dataField,
-				JSON.stringify(delta), String(_PRESENCE_TTL_SEC), String(_PRESENCE_ENTRY_MAX_BYTES)
-			);
-		} catch { /* redis blip: in-memory already merged; forward update already sent */ }
-		return;
+			// The row this replica last wrote or saw for the member saves the
+			// read on the usual path; a stale one costs one more round.
+			let raw = ref && typeof ref.row === 'string' ? ref.row : await redis.hget(hKey, dataField);
+			for (let attempt = 0; attempt < _PRESENCE_MERGE_ATTEMPTS; attempt++) {
+				if (ref && (ref.gone || _presenceRef.get(refKey) !== ref)) return null;
+				if (raw == null) return null; // no live entry yet: nothing to carry the field
+				const { row, refused } = _mergePresenceRow(raw, delta);
+				// Even an unchanged row or a refusal must validate the cached
+				// input: another replica may have added, removed or replaced fields.
+				const res = await redis.eval(
+					_PRESENCE_MERGE_SCRIPT, 1, hKey, countField, dataField,
+					raw, row, String(_PRESENCE_TTL_SEC)
+				);
+				if (Array.isArray(res)) {
+					raw = res.length > 1 ? String(res[1]) : null;
+					continue;
+				}
+				if (ref && !ref.gone && _presenceRef.get(refKey) === ref) {
+					ref.row = Number(res) === 1 ? row : null;
+				}
+				return Number(res) === 1 ? { row, refused } : null;
+			}
+			return null;
+		} catch { return null; }
 	}
 	// Fallback for a redis without scripting: read, merge, then re-check the
 	// count still exists right before the write to narrow the same race.
-	if (typeof redis.hget !== 'function') return;
+	if (typeof redis.hget !== 'function') return null;
 	try {
 		const raw = await redis.hget(hKey, dataField);
-		if (raw == null) return; // no live entry yet: nothing to carry the field
-		let cur; try { cur = JSON.parse(raw); } catch { return; }
-		if (cur == null || typeof cur !== 'object') cur = {};
-		for (const k of Object.keys(delta)) {
-			if (delta[k] == null) delete cur[k]; else cur[k] = delta[k];
-		}
-		const encoded = JSON.stringify(cur);
-		if (!_presenceMergeWithinCap(raw, encoded)) return;
-		if (typeof redis.hexists === 'function' && !(await redis.hexists(hKey, countField))) return;
-		await redis.hset(hKey, dataField, encoded);
+		if (raw == null) return null; // no live entry yet: nothing to carry the field
+		const { row, refused } = _mergePresenceRow(raw, delta);
+		if (row === raw) return { row, refused };
+		if (typeof redis.hexists === 'function' && !(await redis.hexists(hKey, countField))) return null;
+		if (ref && (ref.gone || _presenceRef.get(refKey) !== ref)) return null;
+		await redis.hset(hKey, dataField, row);
 		try { await redis.expire(hKey, _PRESENCE_TTL_SEC); } catch { /* best-effort */ }
-	} catch { /* redis blip: in-memory already merged; forward update already sent */ }
+		return { row, refused };
+	} catch { return null; }
 }

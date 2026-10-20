@@ -17,10 +17,11 @@
 	// Entries with a presence payload: users whose join has arrived.
 	const members = $derived(view.others.filter((o) => o.data != null).map((o) => o.key).sort().join(','));
 	const locks = $derived(Object.entries(view.locks).map(([k, holder]) => k + '=' + holder).sort().join(','));
+	const selections = $derived(Object.entries(view.selections).map(([k, r]) => k + '=' + r.start + '-' + r.end).sort().join(','));
 
 	$effect(() => {
 		// @ts-ignore -- test-only API
-		window.__mp = { goto: (url) => goto(url), lock: (on) => { locking = on; } };
+		window.__mp = { goto: (url) => goto(url), lock: (on) => { locking = on; }, select: (range) => view.setSelection(range) };
 	});
 
 	// An effect that only sends: on a board switch its cleanup releases the
@@ -44,3 +45,4 @@
 <p data-testid="others">{others}</p>
 <p data-testid="members">{members}</p>
 <p data-testid="locks">{locks}</p>
+<p data-testid="selections">{selections}</p>

@@ -3,6 +3,7 @@ import { UNSEQUENCED } from './publish-helpers.js';
 import { live } from '../server.js';
 import { _getIdentityKey } from './identity.js';
 import { _clusterPresenceMerge, _trackCursorPublisher } from './presence.js';
+import { _presenceRef } from './state.js';
 import { _tenantTopic } from './tenant.js';
 import { _IS_DEV } from './env.js';
 import { randomU32 } from '../shared/runtime.js';
@@ -25,6 +26,8 @@ export function installMultiplayer(seams) {
 // (_clusterPresenceMerge) additionally caps the accumulated entry size.
 const _STICKY_MAX_KEYS = 64;
 const _STICKY_VALUE_MAX_BYTES = 1024;
+const _LOCK_KEY_MAX_BYTES = 128;
+const _STICKY_MAX_RELEASES = 2048;
 
 /**
  * A sticky value persists only when its serialized form fits the bound; null
@@ -362,21 +365,35 @@ export const _multiplayerRegister = function multiplayer(config) {
 		// sticky; typing and everything else stay ephemeral and always go out. A
 		// selection or lock the roster refuses - undeclared, over the value bound,
 		// past the per-delta key limit - is not sent either, or live members would
-		// show a lock or range no late joiner ever sees. A release (null) always
-		// goes out, since it can only clear a field (an undeclared one may be left
-		// behind on live clients by a narrower declaration), and a declared one is
-		// always merged. Reactions ride a separate path.
+		// show a lock or range no late joiner ever sees. Releases have a separate
+		// count bound and share the key byte bound. An undeclared release can
+		// clear a field left on live clients by a narrower declaration.
+		// Reactions ride a separate path.
 		const delta = args[_cursorArgCount];
 		/** @type {Record<string, any>} */
 		const sticky = {};
 		let persist = false;
 		let stickyCount = 0;
+		let releaseCount = 0;
 		/** @type {Set<string> | null} */
 		let withheld = null;
 		if (delta && typeof delta === 'object' && !Array.isArray(delta)) {
 			for (const k of Object.keys(delta)) {
 				if (k !== 'selection' && k.slice(0, 5) !== 'lock:') continue;
 				const release = delta[k] === null;
+				// A UTF-16 code unit needs at most three UTF-8 bytes. Ordinary
+				// short names need no encoding scan; huge names fail immediately.
+				if (k.startsWith('lock:') && (k.length > 5 + _LOCK_KEY_MAX_BYTES ||
+					(k.length > 5 + Math.floor(_LOCK_KEY_MAX_BYTES / 3) && Buffer.byteLength(k.slice(5), 'utf8') > _LOCK_KEY_MAX_BYTES))) {
+					_warnStickyDrop('lock key exceeds ' + _LOCK_KEY_MAX_BYTES + ' bytes', k);
+					(withheld ??= new Set()).add(k);
+					continue;
+				}
+				if (release && releaseCount++ >= _STICKY_MAX_RELEASES) {
+					_warnStickyDrop('more than ' + _STICKY_MAX_RELEASES + ' releases in one delta', k);
+					(withheld ??= new Set()).add(k);
+					continue;
+				}
 				if (!_isStickyKey(k)) {
 					if (release) continue;
 					// `locks: ['title']` allows `lock:title` and nothing else.
@@ -386,8 +403,7 @@ export const _multiplayerRegister = function multiplayer(config) {
 					(withheld ??= new Set()).add(k);
 					continue;
 				}
-				// A release stamps nothing, so the per-delta limit (which bounds
-				// what a delta adds to the entry) never holds one back.
+				// Releases do not consume the allowance for new sticky values.
 				if (release) {
 					sticky[k] = null;
 					persist = true;
@@ -408,18 +424,33 @@ export const _multiplayerRegister = function multiplayer(config) {
 				persist = true;
 			}
 		}
-		// Persist after the forward publish, so the live frame and the roster
-		// write keep the order the ordering token gives them.
-		_publishPresenceField(ctx, topic, key, args, withheld);
+		// Persist before the forward publish: the roster entry cap is only known
+		// at the merge, and new values it refuses must stay off the live frame
+		// too. The ordering token is taken at publish, after the merge, so the
+		// frames of one connection still go out in the order their merges landed.
 		if (persist) {
 			// The roster store is keyed by the WIRE data topic (the data-stream's
 			// onSubscribe acquired it tenant-prefixed); prefix here too so the sticky
-			// field lands on the same entry. The forward `:presence` publish above
+			// field lands on the same entry. The forward `:presence` publish below
 			// uses ctx.publish (logical -> the scoped wrapper prefixes it once), so
 			// only the roster key needs the explicit prefix. Null tenant -> unchanged.
 			const dataTopic = _tenantTopic(ctx.tenantId, topic);
-			await _clusterPresenceMerge(ctx.platform, dataTopic, key, sticky);
+			const refKey = dataTopic + '\0' + key;
+			const member = _presenceRef.get(refKey);
+			if (!member || member.gone) return;
+			const merged = _clusterPresenceMerge(ctx.platform, dataTopic, key, sticky);
+			const refused = merged instanceof Promise ? await merged : merged;
+			// Storage can outlive the membership. An old update must not follow
+			// its leave or attach to a new membership with the same identity.
+			if (member.gone || _presenceRef.get(refKey) !== member) return;
+			if (refused !== null) {
+				_warnStickyDrop(refused, 'roster entry');
+				for (const k of Object.keys(sticky)) {
+					if (sticky[k] !== null) (withheld ??= new Set()).add(k);
+				}
+			}
 		}
+		_publishPresenceField(ctx, topic, key, args, withheld);
 	});
 
 	// Reactions are ephemeral events, not roster fields: a reaction is a one-off

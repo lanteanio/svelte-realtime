@@ -24,6 +24,18 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `live.upload()` rejects a `maxBufferedChunks` that is not a positive integer at declaration.
 
+### Fixed
+
+- Pending sticky presence updates stop when their room membership leaves or is erased, including after the same identity rejoins. Retired memberships discard cached roster payloads, including when erasure needs a retry. Roster refusal warnings omit the member identity.
+
+- Sticky presence updates validate cached roster rows against Redis even when the local value is unchanged. Releases, repeated values and cap decisions follow concurrent changes from other replicas; reconnect snapshots use the accepted row.
+
+- Multiplayer selections and locks no longer rewrite the presence payload on the Redis roster: an empty array became `{}`, numbers lost precision and `/` came back escaped for every late joiner. The merge now runs in JS and writes with a compare-and-set, so the payload bytes are unchanged. A string, number or array payload takes no sticky field on either path and logs a one-time dev warning; previously the cluster path replaced the payload with the field.
+
+- Multiplayer presence no longer broadcasts a selection or lock that the 16 KB roster entry cap then refuses, so live members and late joiners agree. Releases in the same delta still apply.
+
+- Multiplayer presence rejects lock names over 128 UTF-8 bytes and caps releases at 2048 per delta before broadcasting or updating the roster.
+
 ## [0.6.0-next.91] - 2026-10-13
 
 ### Added

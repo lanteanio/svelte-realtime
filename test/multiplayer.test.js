@@ -13,7 +13,8 @@ import {
 	_clusterPresenceMerge,
 	_presenceRefForTest
 } from '../src/server.js';
-import { _PRESENCE_MERGE_SCRIPT, _clusterPresenceRelease } from '../src/server/presence.js';
+import { _PRESENCE_MERGE_SCRIPT, _clusterPresenceRelease, _purgePresenceUser } from '../src/server/presence.js';
+import { createCrdtChannel } from 'svelte-adapter-uws/plugins/crdt/channel';
 import { _presenceClaimBegin, _presenceClaimResolve } from '../src/server/room-owner.js';
 import { _resetStickyDropWarnings } from '../src/server/multiplayer.js';
 import { _getIdentityKey } from '../src/server/identity.js';
@@ -1055,27 +1056,16 @@ function makeFakeRedis() {
 			const m = hashes.get(h);
 			return m && m.has(field) ? 1 : 0;
 		},
-		async eval(_script, _numKeys, hKey, countField, dataField, deltaJson, _ttl, maxBytes) {
-			// Emulates the atomic sticky-merge script: gated on the count field
-			// still existing, merge the JSON delta into the data field (a null
-			// value deletes the key), refuse growth past the byte cap (a merge
-			// that shrinks the entry always applies); the TTL refresh is a
-			// no-op here.
+		async eval(_script, _numKeys, hKey, countField, dataField, expected, next) {
+			// Emulates the compare-and-set merge script: gated on the count field
+			// still existing, write the merged row only when the stored row is
+			// still the one it was computed from, otherwise hand back the current
+			// row; the TTL refresh is a no-op here.
 			const m = hashes.get(hKey);
 			if (!m || !m.has(countField)) return 0;
-			let cur = {};
-			const raw = m.get(dataField);
-			if (raw != null) { try { const p = JSON.parse(raw); if (p && typeof p === 'object') cur = p; } catch { /* corrupt: start fresh */ } }
-			const delta = JSON.parse(deltaJson);
-			for (const k of Object.keys(delta)) { if (delta[k] == null) delete cur[k]; else cur[k] = delta[k]; }
-			const encoded = JSON.stringify(cur);
-			const cap = maxBytes ? parseInt(maxBytes, 10) : Infinity;
-			// BYTES, mirroring the script's `#encoded` - Lua's `#` counts bytes,
-			// so a `.length` here would silently diverge on any multi-byte value.
-			const encodedBytes = Buffer.byteLength(encoded, 'utf8');
-			const rawBytes = raw == null ? 0 : Buffer.byteLength(raw, 'utf8');
-			if (encodedBytes > cap && (raw == null || encodedBytes > rawBytes)) return 2;
-			m.set(dataField, encoded);
+			const raw = m.has(dataField) ? m.get(dataField) : null;
+			if (raw !== expected) return raw == null ? [2] : [2, raw];
+			m.set(dataField, String(next));
 			return 1;
 		},
 		async expire() { return 1; }
@@ -1331,57 +1321,80 @@ describe('live.multiplayer() sends from members only', () => {
 });
 
 describe('live.multiplayer() sticky presence fields', () => {
-	it('carries a lock and a selection across instances for a late joiner, and clears on release', async () => {
+	// The selection value a client sends in each mode: raw offsets, or (crdt) an
+	// opaque anchor the server never interprets. Real anchor bytes from a
+	// live.doc text facet, so an array-valued payload crosses the roster too.
+	const selectionFor = (mode) => {
+		if (mode === 'offset') return { start: 0, end: 5 };
+		const ch = createCrdtChannel({ transport: { sendUpdate() {}, sync: async () => null }, reconcileIntervalMs: 0 });
+		try {
+			const t = ch.text('body');
+			t.insert(0, 'hello world');
+			return { field: 'body', a: Array.from(t.anchorRange(0, 5)) };
+		} finally {
+			ch.destroy();
+		}
+	};
+
+	it.each(['offset', 'crdt'])('carries a lock and a %s selection across instances for a late joiner, and clears on release', async (mode) => {
 		const redis = makeFakeRedis();
 		const platformA = { redis };
 		const platformB = { redis };
+		const selection = selectionFor(mode);
 
 		const room = live.multiplayer({
 			topic: (ctx, boardId) => 'board:' + boardId,
 			init: async () => [],
 			presence: (ctx) => ({ name: ctx.user?.name }),
 			locks: ['title'],
-			selections: 'offset',
+			selections: mode,
 			topicArgs: 1
 		});
-
-		// Alice joins on instance A: the data-stream auto-join writes her roster
-		// entry to the shared hash (the same write the real onSubscribe does).
-		await _clusterPresenceAcquire(platformA, 'board:b1', 'alice', { name: 'Alice' });
 
 		const publishedA = [];
 		const ctxA = {
 			user: { id: 'alice', name: 'Alice' },
+			ws: {},
 			platform: platformA,
-			publish: (topic, event, data) => publishedA.push({ topic, event, data })
+			publish: (topic, event, data) => publishedA.push({ topic, event, data }),
+			_publishWire: () => {}
 		};
 
-		joinAs('board:b1', 'alice');
-		await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': true });
-		await room.__presenceUpdate(ctxA, 'b1', { selection: { start: 0, end: 5 } });
+		// Alice joins on instance A through the data-stream subscribe that a
+		// room() view holds: it writes her roster entry to the shared hash and
+		// makes her a member, so her sends are accepted.
+		await room.__dataStream.__onSubscribe(ctxA, 'board:b1', ['b1']);
+		try {
+			await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': true });
+			await room.__presenceUpdate(ctxA, 'b1', { selection });
+			expect(publishedA.filter((p) => p.event === 'update').map((p) => p.data.selection).filter(Boolean)).toEqual([selection]);
 
-		// The late joiner on instance B loads the cluster roster and sees both
-		// sticky fields stamped on Alice's entry.
-		const rosterB = await _clusterPresenceList(platformB, 'board:b1');
-		const aliceB = rosterB.find((e) => e.key === 'alice');
-		expect(aliceB).toBeDefined();
-		expect(aliceB.data.name).toBe('Alice');
-		expect(aliceB.data['lock:title']).toBe(true);
-		expect(aliceB.data.selection).toEqual({ start: 0, end: 5 });
+			// The late joiner on instance B loads the cluster roster and sees both
+			// sticky fields stamped on Alice's entry.
+			const rosterB = await _clusterPresenceList(platformB, 'board:b1');
+			const aliceB = rosterB.find((e) => e.key === 'alice');
+			expect(aliceB).toBeDefined();
+			expect(aliceB.data.name).toBe('Alice');
+			expect(aliceB.data['lock:title']).toBe(true);
+			expect(aliceB.data.selection).toEqual(selection);
 
-		// Releasing the lock removes the field from the persisted entry.
-		await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': null });
-		const rosterB2 = await _clusterPresenceList(platformB, 'board:b1');
-		const aliceB2 = rosterB2.find((e) => e.key === 'alice');
-		expect('lock:title' in aliceB2.data).toBe(false);
-		// The selection is untouched by the lock release.
-		expect(aliceB2.data.selection).toEqual({ start: 0, end: 5 });
+			// Releasing the lock removes the field from the persisted entry.
+			await room.__presenceUpdate(ctxA, 'b1', { 'lock:title': null });
+			const rosterB2 = await _clusterPresenceList(platformB, 'board:b1');
+			const aliceB2 = rosterB2.find((e) => e.key === 'alice');
+			expect('lock:title' in aliceB2.data).toBe(false);
+			// The selection is untouched by the lock release.
+			expect(aliceB2.data.selection).toEqual(selection);
 
-		// Clearing the selection removes it too.
-		await room.__presenceUpdate(ctxA, 'b1', { selection: null });
-		const rosterB3 = await _clusterPresenceList(platformB, 'board:b1');
-		const aliceB3 = rosterB3.find((e) => e.key === 'alice');
-		expect('selection' in aliceB3.data).toBe(false);
+			// Clearing the selection removes it too.
+			await room.__presenceUpdate(ctxA, 'b1', { selection: null });
+			const rosterB3 = await _clusterPresenceList(platformB, 'board:b1');
+			const aliceB3 = rosterB3.find((e) => e.key === 'alice');
+			expect('selection' in aliceB3.data).toBe(false);
+		} finally {
+			await room.__dataStream.__onUnsubscribe(ctxA, 'board:b1', 0);
+			_presenceRefForTest().delete('board:b1\0alice');
+		}
 	});
 
 	it('keeps typing ephemeral: it never persists to the roster but the forward update still publishes', async () => {
@@ -1727,6 +1740,90 @@ describe('live.multiplayer() sticky presence fields', () => {
 // ---------------------------------------------------------------------------
 
 describe('live.multiplayer() sticky lock bounds', () => {
+	it.each([false, true])('bounds lock names in UTF-8 bytes before publish and roster merge (redis=%s)', async (clustered) => {
+		const platform = clustered ? { redis: makeFakeRedis() } : {};
+		const room = live.multiplayer({ topic: () => 'bounded', presence: () => ({}), locks: true, topicArgs: 0 });
+		await _clusterPresenceAcquire(platform, 'bounded', 'alice', {});
+		joinAs('bounded', 'alice');
+		if (!clustered) _presenceRefForTest().get('bounded\0alice').data = {};
+		const published = [];
+		const ctx = { user: { id: 'alice' }, platform, publish: (topic, event, data) => published.push(data) };
+		const accepted = 'lock:' + '\u00e9'.repeat(64);
+		const rejected = accepted + 'x';
+		const oversized = 'lock:' + 'x'.repeat(16384);
+		await room.__presenceUpdate(ctx, { [accepted]: true, [rejected]: true, [oversized]: true });
+		expect(published).toEqual([{ key: 'alice', [accepted]: true }]);
+		expect((await _clusterPresenceList(platform, 'bounded'))[0].data).toEqual({ [accepted]: true });
+		await room.__presenceUpdate(ctx, { [accepted]: null, [rejected]: null, [oversized]: null });
+		expect(published[1]).toEqual({ key: 'alice', [accepted]: null });
+		expect((await _clusterPresenceList(platform, 'bounded'))[0].data).toEqual({});
+	});
+
+	it.each([false, true])('counts four-byte characters in lock names at the byte boundary (redis=%s)', async (clustered) => {
+		const platform = clustered ? { redis: makeFakeRedis() } : {};
+		const room = live.multiplayer({ topic: () => 'bounded', presence: () => ({}), locks: true, topicArgs: 0 });
+		await _clusterPresenceAcquire(platform, 'bounded', 'alice', {});
+		joinAs('bounded', 'alice');
+		if (!clustered) _presenceRefForTest().get('bounded\0alice').data = {};
+		const published = [];
+		const ctx = { user: { id: 'alice' }, platform, publish: (topic, event, data) => published.push(data) };
+		const accepted = 'lock:' + '\u{1F600}'.repeat(32);
+		const rejected = 'lock:' + '\u{1F600}'.repeat(33);
+		await room.__presenceUpdate(ctx, { [accepted]: true, [rejected]: true });
+		expect(published).toEqual([{ key: 'alice', [accepted]: true }]);
+		expect((await _clusterPresenceList(platform, 'bounded'))[0].data).toEqual({ [accepted]: true });
+	});
+
+	it.each([false, true])('keeps a value the roster entry cap refuses off the live frame (redis=%s)', async (clustered) => {
+		const platform = clustered ? { redis: makeFakeRedis() } : {};
+		const room = live.multiplayer({ topic: () => 'capped', presence: () => ({}), locks: true, typing: true, topicArgs: 0 });
+		await _clusterPresenceAcquire(platform, 'capped', 'alice', {});
+		joinAs('capped', 'alice');
+		if (!clustered) _presenceRefForTest().get('capped\0alice').data = {};
+		const published = [];
+		const ctx = { user: { id: 'alice' }, platform, publish: (topic, event, data) => published.push(data) };
+		const fill = {};
+		for (let i = 0; i < 16; i++) fill['lock:a' + i] = 'v'.repeat(1000);
+		await room.__presenceUpdate(ctx, fill);
+		// The next value would take the entry past 16 KB; the release in the same
+		// delta still applies, and the ephemeral field still goes out.
+		await room.__presenceUpdate(ctx, { 'lock:a0': null, 'lock:x': 'w'.repeat(1000), 'lock:y': 'w'.repeat(1000), typing: true });
+		expect(published).toHaveLength(2);
+		expect(published[1]).toEqual({ key: 'alice', 'lock:a0': null, typing: true });
+		// Fold the live frames the way a client does and compare with the roster
+		// a late joiner loads: the sticky fields must agree.
+		const live_ = {};
+		for (const frame of published) {
+			for (const [k, v] of Object.entries(frame)) {
+				if (!k.startsWith('lock:')) continue;
+				if (v === null) delete live_[k]; else live_[k] = v;
+			}
+		}
+		const rosterData = (await _clusterPresenceList(platform, 'capped'))[0].data;
+		expect(rosterData).toEqual(live_);
+		expect(Object.keys(rosterData)).toHaveLength(15);
+	});
+
+	it.each([false, true])('bounds releases separately from stamps and preserves overflow locks (redis=%s)', async (clustered) => {
+		const platform = clustered ? { redis: makeFakeRedis() } : {};
+		const room = live.multiplayer({ topic: () => 'bounded', presence: () => ({}), locks: true, topicArgs: 0 });
+		await _clusterPresenceAcquire(platform, 'bounded', 'alice', { 'lock:k2047': true, 'lock:k2048': true });
+		joinAs('bounded', 'alice');
+		if (!clustered) _presenceRefForTest().get('bounded\0alice').data = { 'lock:k2047': true, 'lock:k2048': true };
+		const published = [];
+		const ctx = { user: { id: 'alice' }, platform, publish: (topic, event, data) => published.push(data) };
+		const delta = Object.fromEntries(Array.from({ length: 4096 }, (_, i) => ['lock:k' + i, null]));
+		delta['lock:new'] = true;
+		await room.__presenceUpdate(ctx, delta);
+		expect(Object.keys(published[0])).toHaveLength(2050);
+		expect(published[0]['lock:k2047']).toBeNull();
+		expect(published[0]).not.toHaveProperty('lock:k2048');
+		expect(published[0]['lock:new']).toBe(true);
+		expect((await _clusterPresenceList(platform, 'bounded'))[0].data).toEqual({ 'lock:k2048': true, 'lock:new': true });
+		await room.__presenceUpdate(ctx, { 'lock:k2048': null });
+		expect((await _clusterPresenceList(platform, 'bounded'))[0].data).toEqual({ 'lock:new': true });
+	});
+
 	const makeRoom = () => live.multiplayer({
 		topic: (ctx, boardId) => 'board:' + boardId,
 		init: async () => [],
@@ -1928,11 +2025,240 @@ describe('live.multiplayer() sticky lock bounds', () => {
 		}
 	});
 
-	// Structural guard: the shipped script must keep measuring bytes and keep
-	// its ARGV order, since nothing in CI can execute real Lua.
-	it('the merge script measures bytes and reads the cap from ARGV[5]', () => {
-		expect(_PRESENCE_MERGE_SCRIPT).toContain('#encoded > tonumber(ARGV[5])');
-		expect(_PRESENCE_MERGE_SCRIPT).toContain('#encoded > #raw');
+	// Structural guard for the unit suite (the chaos suite runs the script on a
+	// real Redis): the script compares and sets the row the merge computed in
+	// JS and never decodes it, since lua-cjson re-encodes a payload lossily.
+	it('the merge script compares and sets the row without decoding it', () => {
+		expect(_PRESENCE_MERGE_SCRIPT).not.toContain('cjson');
+		expect(_PRESENCE_MERGE_SCRIPT).toContain('raw ~= ARGV[3]');
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Sticky fields sit beside the presence payload's own fields on the roster
+// entry, so a merge must leave the payload exactly as the presence function
+// produced it, and a payload that is not a plain object takes no sticky field.
+// ---------------------------------------------------------------------------
+
+describe('live.multiplayer() sticky fields and the presence payload', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.restoreAllMocks();
+		_resetStickyDropWarnings();
+	});
+
+	const payload = { name: 'Alice', tags: [], nested: { list: [] }, n: 0.1 + 0.2, big: 12345678901234567, url: 'a/b', '2': 'two' };
+
+	async function joined(clustered, presence, extra = {}) {
+		const platform = clustered ? { redis: makeFakeRedis() } : {};
+		const room = live.multiplayer({ topic: (ctx, id) => 'board:' + id, init: async () => [], presence, locks: true, selections: true, typing: true, topicArgs: 1, ...extra });
+		const published = [];
+		const ctx = { user: { id: 'alice' }, ws: {}, platform, publish: (t, e, d) => { if (e === 'update') published.push(d); }, _publishWire: () => {} };
+		await room.__dataStream.__onSubscribe(ctx, 'board:p1', ['p1']);
+		return { room, ctx, platform, published };
+	}
+
+	it.each([false, true])('leaves the payload byte-identical through a merge and a release (redis=%s)', async (clustered) => {
+		const { room, ctx, platform } = await joined(clustered, () => payload);
+		try {
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:title': true, selection: { anchor: 1, head: 2 } });
+			const entry = (await _clusterPresenceList(platform, 'board:p1'))[0].data;
+			expect(entry['lock:title']).toBe(true);
+			const { ['lock:title']: _l, selection: _s, ...rest } = entry;
+			expect(JSON.stringify(rest)).toBe(JSON.stringify(payload));
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:title': null, selection: null });
+			const after = (await _clusterPresenceList(platform, 'board:p1'))[0].data;
+			expect(JSON.stringify(after)).toBe(JSON.stringify(payload));
+		} finally {
+			await room.__dataStream.__onUnsubscribe(ctx, 'board:p1', 0);
+			_presenceRefForTest().delete('board:p1\0alice');
+		}
+	});
+
+	it.each([
+		[false, 'Alice'], [true, 'Alice'],
+		[false, ['a', 'b']], [true, ['a', 'b']]
+	])('refuses sticky fields on a non-object payload and keeps them off the frame (redis=%s, payload=%j)', async (clustered, value) => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const { room, ctx, platform, published } = await joined(clustered, () => value);
+		try {
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:title': true, selection: { anchor: 0, head: 1 }, typing: true });
+			// The ephemeral field still goes out; the sticky ones do not.
+			expect(published).toHaveLength(1);
+			expect(published[0]).toMatchObject({ key: 'alice', typing: true });
+			expect(published[0]).not.toHaveProperty('lock:title');
+			expect(published[0]).not.toHaveProperty('selection');
+			expect((await _clusterPresenceList(platform, 'board:p1'))[0].data).toEqual(value);
+			expect(warn.mock.calls.some(([m]) => String(m).includes('need an object presence payload'))).toBe(true);
+			// A release on such a payload has nothing to clear and goes out.
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:title': null });
+			expect(published[1]).toMatchObject({ key: 'alice', 'lock:title': null });
+			expect((await _clusterPresenceList(platform, 'board:p1'))[0].data).toEqual(value);
+		} finally {
+			await room.__dataStream.__onUnsubscribe(ctx, 'board:p1', 0);
+			_presenceRefForTest().delete('board:p1\0alice');
+		}
+	});
+
+	it.each(['leave', 'erase', 'rejoin'].flatMap(end => ['written', 'missing', 'conflict'].map(reply => [end, reply])))(
+		'drops a pending sticky update after %s when Redis replies %s', async (end, reply) => {
+			vi.useFakeTimers();
+			const { room, ctx, platform, published } = await joined(true, current => ({ name: current.user.name ?? 'Alice' }));
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:seed': true });
+			published.length = 0;
+			const member = _presenceRefForTest().get('board:p1\0alice');
+			expect(typeof member.row).toBe('string');
+			const entered = Promise.withResolvers();
+			const finish = Promise.withResolvers();
+			const evalOriginal = platform.redis.eval.bind(platform.redis);
+			vi.spyOn(platform.redis, 'eval').mockImplementation((...args) => args[2].startsWith('__live-room-owner:')
+				? Promise.resolve(['', '', '']) : evalOriginal(...args)).mockImplementationOnce(async (...args) => {
+				if (reply === 'conflict') await platform.redis.hset(args[2], 'd:alice', JSON.stringify({ name: 'Remote' }));
+				const result = reply === 'missing' ? 0 : await evalOriginal(...args);
+				entered.resolve();
+				await finish.promise;
+				return result;
+			});
+			const wire = [];
+			ctx._publishWire = (topic, event, data) => wire.push({ topic, event, data });
+			const pending = room.__presenceUpdate(ctx, 'p1', { 'lock:title': true });
+			let nextCtx;
+			try {
+				await entered.promise;
+				if (end === 'erase') {
+					await _purgePresenceUser(platform, null, 'alice', ctx._publishWire);
+				} else {
+					await room.__dataStream.__onUnsubscribe(ctx, 'board:p1', 0);
+					await vi.advanceTimersByTimeAsync(5000);
+				}
+				expect(wire.some(frame => frame.event === 'leave' && frame.data.key === 'alice')).toBe(true);
+				expect(member.row).toBeNull();
+				expect(await _clusterPresenceList(platform, 'board:p1')).toEqual([]);
+				if (end === 'rejoin') {
+					nextCtx = { ...ctx, user: { id: 'alice', name: 'Fresh' }, ws: {} };
+					await room.__dataStream.__onSubscribe(nextCtx, 'board:p1', ['p1']);
+				}
+				finish.resolve();
+				await pending;
+				expect(published).toEqual([]);
+				if (nextCtx) {
+					expect((await _clusterPresenceList(platform, 'board:p1'))[0].data).toEqual({ name: 'Fresh' });
+					expect(_presenceRefForTest().get('board:p1\0alice').data).toEqual({ name: 'Fresh' });
+				} else {
+					expect(await _clusterPresenceList(platform, 'board:p1')).toEqual([]);
+					expect(_presenceRefForTest().has('board:p1\0alice')).toBe(false);
+				}
+			} finally {
+				finish.resolve();
+				await pending;
+				if (nextCtx) await room.__dataStream.__onUnsubscribe(nextCtx, 'board:p1', 0);
+				vi.clearAllTimers();
+				_presenceRefForTest().delete('board:p1\0alice');
+			}
+		}
+	);
+
+	it('scrubs the cached roster payload while a failed erasure keeps its retry target', async () => {
+		const { room, ctx, platform } = await joined(true, () => ({ name: 'Alice' }));
+		try {
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:title': true });
+			const member = _presenceRefForTest().get('board:p1\0alice');
+			expect(member.row).toContain('Alice');
+			const evalOriginal = platform.redis.eval.bind(platform.redis);
+			vi.spyOn(platform.redis, 'eval').mockImplementation((...args) => args[2].startsWith('__live-room-owner:')
+				? Promise.resolve(['', '', '']) : evalOriginal(...args));
+			vi.spyOn(platform.redis, 'hdel').mockRejectedValueOnce(new Error('storage unavailable'));
+			await expect(_purgePresenceUser(platform, null, 'alice', ctx._publishWire)).rejects.toThrow('Presence erasure');
+			expect(_presenceRefForTest().get('board:p1\0alice')).toBe(member);
+			expect(member).toMatchObject({ gone: true, data: null, row: null });
+		} finally {
+			_presenceRefForTest().delete('board:p1\0alice');
+		}
+	});
+
+	it('keeps the member identity out of roster refusal warnings', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const { room, ctx } = await joined(false, () => 'payload');
+		try {
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:title': true });
+			expect(warn).toHaveBeenCalledOnce();
+			expect(warn.mock.calls[0][0]).toContain('need an object presence payload');
+			expect(warn.mock.calls[0][0]).not.toContain(ctx.user.id);
+		} finally {
+			await room.__dataStream.__onUnsubscribe(ctx, 'board:p1', 0);
+			_presenceRefForTest().delete('board:p1\0alice');
+		}
+	});
+
+	it.each([
+		['release', { 'lock:b': true }, { 'lock:b': null }, { 'lock:a': true }],
+		['restamp', { 'lock:a': false }, { 'lock:a': true }, { 'lock:a': true }]
+	])('validates a cached unchanged %s against another replica before publishing', async (_name, remote, delta, expected) => {
+		const { room, ctx, platform, published } = await joined(true, () => ({ name: 'Alice' }));
+		try {
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:a': true });
+			const hKey = '__live-presence:board:p1';
+			const row = JSON.parse(await platform.redis.hget(hKey, 'd:alice'));
+			await platform.redis.hset(hKey, 'd:alice', JSON.stringify({ ...row, ...remote }));
+			await room.__presenceUpdate(ctx, 'p1', delta);
+			expect(published.at(-1)).toMatchObject({ key: 'alice', ...delta });
+			expect((await _clusterPresenceList(platform, 'board:p1'))[0].data).toEqual({ name: 'Alice', ...expected });
+			expect(_presenceRefForTest().get('board:p1\0alice').data).toEqual({ name: 'Alice', ...expected });
+		} finally {
+			await room.__dataStream.__onUnsubscribe(ctx, 'board:p1', 0);
+			_presenceRefForTest().delete('board:p1\0alice');
+		}
+	});
+
+	it('rechecks a cached cap refusal after another replica frees roster space', async () => {
+		const { room, ctx, platform, published } = await joined(true, () => ({ name: 'Alice' }));
+		try {
+			const fill = {};
+			for (let i = 0; i < 16; i++) fill['lock:a' + i] = 'v'.repeat(1000);
+			await room.__presenceUpdate(ctx, 'p1', fill);
+			const hKey = '__live-presence:board:p1';
+			const row = JSON.parse(await platform.redis.hget(hKey, 'd:alice'));
+			delete row['lock:a0'];
+			await platform.redis.hset(hKey, 'd:alice', JSON.stringify(row));
+			const delta = { 'lock:new': 'w'.repeat(1000) };
+			await room.__presenceUpdate(ctx, 'p1', delta);
+			expect(published.at(-1)).toMatchObject({ key: 'alice', ...delta });
+			expect((await _clusterPresenceList(platform, 'board:p1'))[0].data).toEqual({ ...row, ...delta });
+			expect(_presenceRefForTest().get('board:p1\0alice').data).toEqual({ ...row, ...delta });
+		} finally {
+			await room.__dataStream.__onUnsubscribe(ctx, 'board:p1', 0);
+			_presenceRefForTest().delete('board:p1\0alice');
+		}
+	});
+
+	it('refreshes the roster lifetime when a sticky update repeats the cached value', async () => {
+		const { room, ctx, platform } = await joined(true, () => ({ name: 'Alice' }));
+		try {
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:a': true });
+			const evalCall = vi.spyOn(platform.redis, 'eval');
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:a': true });
+			expect(evalCall).toHaveBeenCalledOnce();
+			expect(evalCall.mock.calls[0].at(-1)).toBe('3600');
+		} finally {
+			await room.__dataStream.__onUnsubscribe(ctx, 'board:p1', 0);
+			_presenceRefForTest().delete('board:p1\0alice');
+		}
+	});
+
+	it('does not overwrite a row another replica changed since this one last wrote it', async () => {
+		const { room, ctx, platform } = await joined(true, () => ({ name: 'Alice' }));
+		try {
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:a': true });
+			// Another replica holding the same member merges a field directly.
+			const hKey = '__live-presence:board:p1';
+			const row = JSON.parse(await platform.redis.hget(hKey, 'd:alice'));
+			await platform.redis.hset(hKey, 'd:alice', JSON.stringify({ ...row, 'lock:b': true }));
+			await room.__presenceUpdate(ctx, 'p1', { 'lock:c': true });
+			expect((await _clusterPresenceList(platform, 'board:p1'))[0].data).toEqual({ name: 'Alice', 'lock:a': true, 'lock:b': true, 'lock:c': true });
+		} finally {
+			await room.__dataStream.__onUnsubscribe(ctx, 'board:p1', 0);
+			_presenceRefForTest().delete('board:p1\0alice');
+		}
 	});
 });
 
@@ -2852,7 +3178,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		r.destroy();
 	});
 
-	it('a late joiner sees held locks and selections from the real roster snapshot', async () => {
+	it.each(['offset', 'crdt'])('a late joiner sees held locks and %s selections from the real roster snapshot', async (mode) => {
 		await loadShippedRuneModule();
 		const platform = { redis: makeFakeRedis() };
 		const room = live.multiplayer({
@@ -2860,30 +3186,43 @@ describe('MultiplayerRoom roster aggregation', () => {
 			init: async () => [],
 			presence: (ctx) => ({ name: ctx.user?.name }),
 			locks: ['title'],
-			selections: 'offset',
+			selections: mode,
 			topicArgs: 1
 		});
-		await _clusterPresenceAcquire(platform, 'board:b1', 'alice', { name: 'Alice' });
-		const alice = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform, publish: () => {} };
-		joinAs('board:b1', 'alice');
-		await room.__presenceUpdate(alice, 'b1', { 'lock:title': true });
-		await room.__presenceUpdate(alice, 'b1', { selection: { start: 0, end: 5 } });
+		// In crdt mode the selection is an anchor into a live.doc text; the late
+		// joiner resolves it against its own replica of that document.
+		const doc = mode === 'crdt' ? createCrdtChannel({ transport: { sendUpdate() {}, sync: async () => null }, reconcileIntervalMs: 0 }) : null;
+		if (doc) doc.text('body').insert(0, 'hello world');
+		const selection = doc ? { field: 'body', a: Array.from(doc.text('body').anchorRange(0, 5)) } : { start: 0, end: 5 };
+		const alice = { user: { id: 'alice', name: 'Alice' }, ws: {}, platform, publish: () => {}, _publishWire: () => {} };
+		await room.__dataStream.__onSubscribe(alice, 'board:b1', ['b1']);
+		let r = null;
+		try {
+			await room.__presenceUpdate(alice, 'b1', { 'lock:title': true });
+			await room.__presenceUpdate(alice, 'b1', { selection });
 
-		// Bob arrives afterwards: his presence stream loads the roster snapshot,
-		// and his room view is built from exactly what that loader returned.
-		const bob = { user: { id: 'bob', name: 'Bob' }, ws: {}, platform, publish: () => {} };
-		const roster = await room.__presenceStream(bob, 'b1');
-		const r = new MultiplayerRoom({
-			me: 'bob',
-			presence: fakeStore(roster),
-			cursors: fakeStore([]),
-			status: fakeStore('connected'),
-			move: () => {}
-		});
-		expect(r.locks).toEqual({ title: 'alice' });
-		expect(r.selections).toEqual({ alice: { start: 0, end: 5 } });
-		expect(r.others.find((p) => p.key === 'alice').data).toEqual({ name: 'Alice' });
-		r.destroy();
+			// Bob arrives afterwards: his presence stream loads the roster snapshot,
+			// and his room view is built from exactly what that loader returned.
+			const bob = { user: { id: 'bob', name: 'Bob' }, ws: {}, platform, publish: () => {} };
+			const roster = await room.__presenceStream(bob, 'b1');
+			r = new MultiplayerRoom({
+				me: 'bob',
+				presence: fakeStore(roster),
+				cursors: fakeStore([]),
+				status: fakeStore('connected'),
+				selections: mode,
+				move: () => {}
+			});
+			if (doc) { r.bindDoc(doc); flushSync(); }
+			expect(r.locks).toEqual({ title: 'alice' });
+			expect(r.selections).toEqual({ alice: doc ? { field: 'body', start: 0, end: 5 } : { start: 0, end: 5 } });
+			expect(r.others.find((p) => p.key === 'alice').data).toEqual({ name: 'Alice' });
+		} finally {
+			if (r) r.destroy();
+			if (doc) doc.destroy();
+			await room.__dataStream.__onUnsubscribe(alice, 'board:b1', 0);
+			_presenceRefForTest().delete('board:b1\0alice');
+		}
 	});
 
 	it('holds the membership stream for its lifetime without reading its value', async () => {

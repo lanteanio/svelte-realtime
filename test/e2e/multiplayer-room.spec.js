@@ -46,6 +46,7 @@ async function navigateInApp(page, path) {
 const others = (page) => page.getByTestId('others');
 const members = (page) => page.getByTestId('members');
 const locks = (page) => page.getByTestId('locks');
+const selections = (page) => page.getByTestId('selections');
 
 test('two pages that only call room(id) see each other', async ({ browser }, testInfo) => {
 	const baseURL = baseURLFromProject(testInfo);
@@ -58,6 +59,30 @@ test('two pages that only call room(id) see each other', async ({ browser }, tes
 	} finally {
 		await a.ctx.close();
 		await b.ctx.close();
+	}
+});
+
+test('a selection reaches a live member and a member who joins later', async ({ browser }, testInfo) => {
+	const baseURL = baseURLFromProject(testInfo);
+	const id = freshBoard();
+	const a = await open(browser, baseURL, 'alice', `/mp/${id}?me=alice`);
+	const b = await open(browser, baseURL, 'bob', `/mp/${id}?me=bob`);
+	let c = null;
+	try {
+		await expect(others(a.page)).toHaveText('bob');
+		await expect(others(b.page)).toHaveText('alice');
+		await a.page.evaluate(() => window.__mp.select({ start: 3, end: 7 }));
+		await expect(selections(b.page)).toHaveText('alice=3-7');
+		// Carol opens the board after the selection was made: she loads it
+		// from the roster snapshot, not from a live frame.
+		c = await open(browser, baseURL, 'carol', `/mp/${id}?me=carol`);
+		await expect(others(c.page)).toHaveText('alice,bob');
+		await expect(selections(c.page)).toHaveText('alice=3-7');
+		await expect(selections(a.page)).toHaveText('');
+	} finally {
+		await a.ctx.close();
+		await b.ctx.close();
+		if (c) await c.ctx.close();
 	}
 });
 
