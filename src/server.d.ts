@@ -3030,7 +3030,14 @@ export namespace live {
 	 * ```
 	 */
 	function breaker<T extends Function>(
-		options: { breaker: any; name?: string; fallback?: any },
+		options: {
+			breaker: ({ guard: () => void } | { isOpen: () => boolean }) & {
+				success?: () => void;
+				failure?: (error: any) => void;
+			};
+			name?: string;
+			fallback?: any;
+		},
 		fn: T
 	): T;
 

@@ -2809,7 +2809,7 @@ export const items = live.stream('items',
 );
 ```
 
-The wrapper calls the breaker's `guard()` before each operation, including recovery probes, and records successful or failed operations. Legacy breakers exposing `isOpen()` are also supported. Without a fallback, an open breaker returns `SERVICE_UNAVAILABLE` with a retry message. The optional `name` identifies the breaker in operator events (trimmed to 120 characters); it is never sent in that error response. One `breaker.open` operational event is emitted on the first refusal after registration or an admitted operation. Its `openObservedAt` is the epoch time when this wrapper observed a refusal, not the breaker's original trip time.
+The wrapper calls the breaker's `guard()` before each operation, including recovery probes, and records successful or failed operations. Legacy breakers exposing `isOpen(): boolean` are also supported. Registration throws `VALIDATION` unless the breaker exposes a callable `guard()` or `isOpen()`; a `state` property alone is not sufficient. Both APIs may provide `success()` and `failure(error)` callbacks. Without a fallback, an open breaker returns `SERVICE_UNAVAILABLE` with a retry message. The optional `name` identifies the breaker in operator events (trimmed to 120 characters); it is never sent in that error response. One `breaker.open` operational event is emitted on the first refusal after registration or an admitted operation. Its `openObservedAt` is the epoch time when this wrapper observed a refusal, not the breaker's original trip time.
 
 If `fallback` is omitted and the circuit is open, the call throws `LiveError('SERVICE_UNAVAILABLE', ...)`.
 

@@ -22,7 +22,10 @@ export function installBreaker(seams) {
 export const _breakerRegister = function breaker(options, fn) {
 	const { breaker: cb, fallback } = options;
 	const name = typeof options.name === 'string' ? options.name.trim().slice(0, 120) || 'unnamed' : 'unnamed';
-	const usesGuard = typeof cb.guard === 'function';
+	const usesGuard = typeof cb?.guard === 'function';
+	if (!usesGuard && typeof cb?.isOpen !== 'function') {
+		throw new LiveError('VALIDATION', 'live.breaker requires a breaker with guard() or isOpen()');
+	}
 	let openReported = false;
 	const refused = () => {
 		if (!openReported) {

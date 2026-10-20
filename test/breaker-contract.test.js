@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import ts from 'typescript';
+import { resolve } from 'node:path';
 import { createCircuitBreaker } from 'svelte-adapter-uws-extensions/breaker';
 import { live, __register, handleRpc, _prepareHmr } from '../src/server.js';
 import { setOperationalEventSink } from '../src/shared/diagnostic.js';
@@ -15,6 +17,13 @@ function breaker() {
 const flush = async () => { for (let i = 0; i < 30; i++) await Promise.resolve(); };
 
 describe('circuit breaker integration', () => {
+	it.each([undefined, null, {}, { state: 'broken' }, { guard: true }, { isOpen: false }])('rejects an unsupported breaker at registration: %j', (cb) => {
+		const operation = vi.fn();
+		expect(() => live.breaker({ breaker: cb, fallback: [] }, operation))
+			.toThrow(expect.objectContaining({ code: 'VALIDATION' }));
+		expect(operation).not.toHaveBeenCalled();
+	});
+
 	it('honors the canonical guard and preserves fallback without running the handler', async () => {
 		const cb = breaker();
 		cb.failure(new Error('database connection failed'));
@@ -116,4 +125,39 @@ describe('circuit breaker integration', () => {
 		expect(cb.failure).not.toHaveBeenCalled();
 	});
 
+});
+
+it('types both supported breaker APIs and rejects unsupported shapes', () => {
+	const file = resolve(import.meta.dirname, 'breaker-consumer.ts').replaceAll('\\', '/');
+	const source = `
+import { live } from '../src/server.js';
+import { createCircuitBreaker } from 'svelte-adapter-uws-extensions/breaker';
+const handler = (_ctx: unknown, value: number) => value;
+live.breaker({ breaker: createCircuitBreaker() }, handler);
+live.breaker({ breaker: { guard() {}, success() {}, failure(_error: Error) {} } }, handler);
+live.breaker({ breaker: { isOpen: () => true }, fallback: 0 }, handler);
+// @ts-expect-error an empty object cannot enforce circuit admission
+live.breaker({ breaker: {} }, handler);
+// @ts-expect-error a state property alone does not admit recovery probes
+live.breaker({ breaker: { state: 'broken' } }, handler);
+// @ts-expect-error guard must be callable
+live.breaker({ breaker: { guard: true } }, handler);
+// @ts-expect-error isOpen must return a boolean
+live.breaker({ breaker: { isOpen: () => 'open' } }, handler);
+// @ts-expect-error null is not a breaker
+live.breaker({ breaker: null }, handler);
+`;
+	const options = {
+		noEmit: true, strict: true, skipLibCheck: true,
+		target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext,
+		moduleResolution: ts.ModuleResolutionKind.Bundler
+	};
+	const host = ts.createCompilerHost(options);
+	const getSourceFile = host.getSourceFile.bind(host);
+	host.getSourceFile = (name, ...args) => name === file
+		? ts.createSourceFile(name, source, options.target, true)
+		: getSourceFile(name, ...args);
+	const diagnostics = ts.getPreEmitDiagnostics(ts.createProgram([file], options, host))
+		.map(d => ts.flattenDiagnosticMessageText(d.messageText, ' '));
+	expect(diagnostics).toEqual([]);
 });
