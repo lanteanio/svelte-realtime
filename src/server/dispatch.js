@@ -24,7 +24,7 @@ import { _registerReplayTopic } from './replay-routing.js';
 import { _tenantTopic, _tenantKey, _resolveTenant } from './tenant.js';
 import { _derivedScope } from './derived-topic.js';
 import { _ownerClaimBegin, _ownerClaimResolve, _presenceClaimBegin, _presenceClaimResolve } from './room-owner.js';
-import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame, _rejectUploadForProtocol } from './upload.js';
+import { _UPLOAD_FRAME_CHUNK, _UPLOAD_FRAME_CONTROL, _handleUploadChunkFrame, _handleUploadControlFrame, _rejectUploadForProtocol, _takeUploadCapAnnouncement } from './upload.js';
 import { _isShuttingDown, _enterInFlight, _exitInFlight } from './lifecycle.js';
 import { protocolMismatchMessage, protocolMismatchReason } from './protocol-policy.js';
 
@@ -1448,6 +1448,12 @@ function _migrateItem(item, fromVersion, toVersion, migrateFns) {
 
 function _respond(ws, platform, correlationId, payload, requestId, paths) {
 	payload = requestId ? _withFailureRequestId(payload, requestId) : payload;
+	// The first response on a connection carries the upload frame cap, so a
+	// client that called anything before uploading sizes chunk 0 from it.
+	if (state.uploadEndpoints) {
+		const cap = _takeUploadCapAnnouncement(ws, platform);
+		if (cap > 0) payload = { ...payload, __cap: cap };
+	}
 	if (_IS_DEV) {
 		// Estimate size without double-serialization.
 		const data = payload.data;

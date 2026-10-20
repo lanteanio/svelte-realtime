@@ -39,7 +39,8 @@ export function installUpload(seams) {
 //     [6..9]   seq, big-endian uint32 (0-indexed)
 //     [10..]   if hasArgs:
 //                [10..11] argsLen, big-endian uint16
-//                [12..12+argsLen-1] argsJson UTF-8: { rpc: path, args: [...] }
+//                [12..12+argsLen-1] argsJson UTF-8: { path, args? } (credit mode)
+//                                   or { rpc: path, args? } (legacy, no credits)
 //                [12+argsLen..] payload bytes
 //              else:
 //                [10..] payload bytes
@@ -54,6 +55,16 @@ export function installUpload(seams) {
 //   platform.send(ws, '__upload', streamIdHex, payload) where payload is one of:
 //     { ok: true, data: <handler return> }
 //     { ok: false, code, error }
+//     { flow: 1, creditEnd }   nonterminal receiver credit (credit mode only)
+//   Any of them may carry `__cap` (the adapter's maxPayloadLength) when it is
+//   the first envelope on the connection; RPC responses carry it the same way.
+//
+// Credit mode: a sender whose chunk-0 header names `path` may send sequence
+// numbers below the largest `creditEnd` it has received (initially 1, so only
+// chunk 0 before the first grant). Credits are granted after authorization
+// and as the handler consumes `ctx.stream`, keeping at most
+// `maxBufferedChunks` chunks queued. A chunk beyond the credit fails the
+// upload with FLOW_BACKPRESSURE. docs/upload-wire.md is the full contract.
 //
 // Per-chunk overhead is 10 bytes (12 + argsLen on chunk 0). For 64KB chunks
 // that's 0.015% overhead.
@@ -117,6 +128,23 @@ export function _resetUploadAutoDiscovery() {
 
 function _streamIdHex(streamId) {
 	return (streamId >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * The `__cap` value to attach to a response on `ws`, or 0 when the cap is
+ * unknown or this connection was already told. Shared by upload envelopes and
+ * RPC responses so the first envelope of either kind carries it, and a client
+ * that made any call before its first upload sizes chunk 0 from the real cap.
+ *
+ * @param {any} ws
+ * @param {import('svelte-adapter-uws').Platform} platform
+ * @returns {number}
+ */
+export function _takeUploadCapAnnouncement(ws, platform) {
+	_captureUploadMaxFrameSize(platform);
+	if (_uploadMaxFrameSize === 0 || _informedAboutUploadCap.has(ws)) return 0;
+	_informedAboutUploadCap.add(ws);
+	return _uploadMaxFrameSize;
 }
 
 function _respondUpload(ws, platform, streamId, payload) {
@@ -234,7 +262,7 @@ function _parseUploadControlFrame(data) {
  *
  * @param {AbortController} ctrl
  */
-function _createUploadStream(ctrl) {
+function _createUploadStream(ctrl, onConsume) {
 	/** @type {Uint8Array[]} */
 	const queue = [];
 	/** @type {{ resolve: Function, reject: Function } | null} */
@@ -256,7 +284,7 @@ function _createUploadStream(ctrl) {
 
 	function push(chunk) {
 		if (done) return;
-		if (pending) { _resolveNext(chunk, false); return; }
+		if (pending) { _resolveNext(chunk, false); onConsume(); return; }
 		queue.push(chunk);
 	}
 
@@ -287,7 +315,9 @@ function _createUploadStream(ctrl) {
 	const stream = {
 		next() {
 			if (queue.length > 0) {
-				return Promise.resolve({ value: queue.shift(), done: false });
+				const value = queue.shift();
+				onConsume();
+				return Promise.resolve({ value, done: false });
 			}
 			if (error) return Promise.reject(error);
 			if (done) return Promise.resolve({ value: undefined, done: true });
@@ -363,6 +393,11 @@ function _createUploadEntry(ws, perWs, streamId, platform) {
 	const upload = {
 		streamId,
 		phase: 'pending',
+		// Credit mode: chunks below creditEnd may be sent. Legacy uploads
+		// (flow false) keep the queue-overflow rejection instead.
+		flow: false,
+		creditEnd: 1,
+		lastReceived: false,
 		_pendingStart: true,
 		pendingChunks: [],
 		expectedSeq: 0,
@@ -453,6 +488,8 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 		if (!perWs) { perWs = new Map(); _wsUploads.set(ws, perWs); }
 
 		const upload = _createUploadEntry(ws, perWs, streamId, platform);
+		upload.flow = argsHeader !== null && typeof argsHeader === 'object' && 'path' in argsHeader;
+		upload.lastReceived = isLast;
 		upload.bytesReceived = initialBytes;
 		upload.expectedSeq = 1;
 		upload.pendingChunks.push({ payload, isLast });
@@ -477,7 +514,12 @@ export function _handleUploadChunkFrame(ws, data, platform, options) {
 		upload.fail('INVALID_REQUEST', `out-of-order chunk: expected ${upload.expectedSeq}, got ${seq}`);
 		return;
 	}
+	if (upload.flow && seq >= upload.creditEnd) {
+		upload.fail('FLOW_BACKPRESSURE', 'upload chunk exceeds receiver credit');
+		return;
+	}
 	upload.expectedSeq = seq + 1;
+	if (isLast) upload.lastReceived = true;
 
 	const payloadLen = payload ? payload.byteLength : 0;
 	if (payloadLen > 0) upload.bytesReceived += payloadLen;
@@ -612,13 +654,24 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 	// finally runs on every exit path (early return, throw, stream abort).
 	_enterInFlight();
 	try {
-		if (!argsHeader || typeof argsHeader.rpc !== 'string') {
+		// Credit-mode headers name the endpoint `path`; legacy headers `rpc`.
+		// Servers without credit support answer a `path` header with this same
+		// 'missing rpc path' rejection before any lookup or guard, which is how
+		// a credit-mode client detects them and resends in legacy mode.
+		if (upload.flow) {
+			if (typeof argsHeader.path !== 'string' || argsHeader.rpc !== undefined) {
+				_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
+				upload.fail('INVALID_REQUEST', 'invalid upload header');
+				return;
+			}
+			path = argsHeader.path;
+		} else if (!argsHeader || typeof argsHeader.rpc !== 'string') {
 			_recordRpcMetrics('__invalid__', 'INVALID_REQUEST', _metricsStart);
 			upload.fail('INVALID_REQUEST', 'missing rpc path');
 			return;
+		} else {
+			path = argsHeader.rpc;
 		}
-
-		path = argsHeader.rpc;
 		const args = Array.isArray(argsHeader.args) ? argsHeader.args : [];
 
 		if (!_validPathRe.test(path)) {
@@ -644,7 +697,19 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 		// Resolved to a registered endpoint: `path` is now a bounded registry key.
 		pathRegistered = true;
 		upload.ctrl = new AbortController();
-		upload.streamWrap = _createUploadStream(upload.ctrl);
+		// Grant credits as the handler consumes. A grant is sent once at
+		// least half the window is free, so a fast consumer costs one small
+		// envelope per half window rather than one per chunk.
+		const grantCredit = () => {
+			if (!upload.flow || upload.phase !== 'running' || upload.lastReceived) return;
+			const win = upload.options.maxBufferedChunks;
+			const end = upload.expectedSeq + win - upload.streamWrap.queueLength;
+			if (end - upload.creditEnd >= Math.max(1, win >>> 1)) {
+				upload.creditEnd = end;
+				_respondUpload(ws, platform, streamId, { flow: 1, creditEnd: end });
+			}
+		};
+		upload.streamWrap = _createUploadStream(upload.ctrl, grantCredit);
 
 		const _h = _getCtxHelpers(platform);
 		ctx = _buildCtx(ws.getUserData(), ws, platform, _h, null, null, _streamIdHex(streamId));
@@ -683,6 +748,7 @@ async function _startUpload(ws, perWs, streamId, upload, argsHeader, platform, o
 				if (chunk.payload && chunk.payload.byteLength > 0) upload.streamWrap.push(new Uint8Array(chunk.payload));
 				if (chunk.isLast) upload.streamWrap.end();
 			}
+			grantCredit();
 
 			// Capture guard + ctx for reauthEvery so the chunk pump can
 			// re-run the same gate against the live ctx without re-resolving

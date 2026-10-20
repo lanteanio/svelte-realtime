@@ -6,12 +6,12 @@
 	"fragmentCeiling": 1,
 	"executedFloor": 33,
 	"summary": {
-		"total": 245,
+		"total": 244,
 		"classifications": {
 			"command": 4,
 			"tutorial": 73,
 			"executed": 33,
-			"output": 6,
+			"output": 5,
 			"syntax": 127,
 			"fragment": 1,
 			"config": 1
@@ -20,7 +20,7 @@
 			"manual-command": 4,
 			"app-context": 73,
 			"packed-runtime": 33,
-			"reviewed-output": 6,
+			"reviewed-output": 5,
 			"acorn": 119,
 			"svelte": 7,
 			"reviewed-fragment": 1,
@@ -1691,7 +1691,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "ddcb78588e2824f2468c1f2d36a74f0f18691290469ab239c55e7b5c0ac484ef",
+			"fingerprint": "dfd9dfac1bda9107e26c4b410aec58f4c71a81230ca8a31deac650fbced4cf31",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Streaming uploads",
@@ -1718,15 +1718,6 @@
 			"classification": "syntax",
 			"channel": "acorn",
 			"reason": "not runnable: ambient-identifiers ac, handle"
-		},
-		{
-			"document": "README.md",
-			"fingerprint": "f33ef10c868f00d9a20bd070b9a76478197e72db563140a61567a4867febbba6",
-			"occurrence": 1,
-			"language": "plain",
-			"section": "Streaming uploads > Wire format",
-			"classification": "output",
-			"channel": "reviewed-output"
 		},
 		{
 			"document": "README.md",

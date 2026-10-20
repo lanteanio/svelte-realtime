@@ -1498,11 +1498,18 @@ live.upload = function upload(fn, options) {
 	if (reauthEvery !== undefined && (typeof reauthEvery !== 'number' || !(reauthEvery > 0) || !Number.isFinite(reauthEvery))) {
 		throw new Error('live.upload: reauthEvery must be a positive finite number of bytes');
 	}
+	// The receiver window: a sender in credit mode waits once this many
+	// chunks are queued, so it has to admit at least one.
+	const maxBufferedChunks = options?.maxBufferedChunks;
+	if (maxBufferedChunks !== undefined && (!Number.isSafeInteger(maxBufferedChunks) || maxBufferedChunks < 1)) {
+		throw new Error('live.upload: maxBufferedChunks must be a positive integer');
+	}
+	state.uploadEndpoints = true;
 	/** @type {any} */ (fn).__uploadOptions = {
 		maxSize: options?.maxSize ?? 104857600,
 		maxConcurrentPerSession: options?.maxConcurrentPerSession ?? 4,
 		maxConcurrentTotal: options?.maxConcurrentTotal ?? Infinity,
-		maxBufferedChunks: options?.maxBufferedChunks ?? 64,
+		maxBufferedChunks: maxBufferedChunks ?? 64,
 		reauthEvery: reauthEvery ?? 0
 	};
 	return fn;

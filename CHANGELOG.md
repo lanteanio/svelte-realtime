@@ -10,6 +10,20 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ## [Unreleased]
 
+### Added
+
+- Uploads use receiver credits: the client pauses while `maxBufferedChunks` chunks wait for the handler and resumes as `ctx.stream` is consumed, so a handler that awaits a slow sink receives every byte with default options. `FLOW_BACKPRESSURE` now fails only a sender that keeps sending past its credit, or a client without credit support that overflows the queue. A client falls back to the previous upload format once per connection against a server without credits.
+
+- The [upload wire format v1](docs/upload-wire.md) documents chunk, cancel, credit and frame-cap envelopes for clients outside the browser, with executable test vectors.
+
+- `createTestEnv().connect()` clients expose `sendRaw(frame)` and `onMessage(listener)` to drive the real dispatcher with encoded frames.
+
+### Changed
+
+- The upload frame cap (`__cap`) rides the first RPC or upload response on a connection, so an upload after any call sends chunk 0 at the full cap, and a first upload switches to it from chunk 1. The client forgets the cap when its socket drops.
+
+- `live.upload()` rejects a `maxBufferedChunks` that is not a positive integer at declaration.
+
 ## [0.6.0-next.91] - 2026-10-13
 
 ### Added

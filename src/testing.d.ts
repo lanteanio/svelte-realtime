@@ -214,6 +214,23 @@ export interface TestClient {
 	 */
 	binary(path: string, buffer: ArrayBuffer | ArrayBufferView, ...args: any[]): Promise<any>;
 
+	/**
+	 * Deliver an encoded client frame (JSON text bytes, a binary RPC frame,
+	 * or an upload chunk / control frame) through the real server
+	 * dispatcher. With `onMessage`, this bridges a hand-written wire client,
+	 * or the real browser client behind a mocked transport, to the server.
+	 * @param data - The frame bytes exactly as a WebSocket would carry them
+	 */
+	sendRaw(data: ArrayBuffer): void;
+
+	/**
+	 * Observe every message the server sends to this connection directly
+	 * (RPC responses on `__rpc`, upload responses and credits on `__upload`,
+	 * system notices). Topic publishes are not included.
+	 * @returns Unsubscribe function
+	 */
+	onMessage(listener: (message: { topic: string; event: string; data: any }) => void): () => void;
+
 	/** Simulate disconnection. */
 	disconnect(): void;
 

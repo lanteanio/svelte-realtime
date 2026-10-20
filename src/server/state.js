@@ -503,6 +503,13 @@ export const state = {
 	 */
 	pendingUploadBytes: 0,
 
+	/**
+	 * Set once any live.upload() endpoint is declared. Until then RPC
+	 * responses skip the upload frame-cap announcement entirely.
+	 * @type {boolean}
+	 */
+	uploadEndpoints: false,
+
 	// The five cap shadows below are placeholders: server.js seeds them at
 	// module-init from the public cap constants (MAX_PUSH_REGISTRY etc.) so the
 	// canonical default lives in exactly one place. Tests lower them via

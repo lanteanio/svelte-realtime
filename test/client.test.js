@@ -38,6 +38,30 @@ function simulateDenial(value) {
 }
 
 /**
+ * The mock connection's send. Unless a test opts into a server with receiver
+ * credits, it answers a credit-mode upload chunk 0 (a `path` header) the way
+ * a server without credits does, so the client resends with the `rpc` header
+ * and the frames tests inspect are the ones such a server accepts.
+ */
+let uploadServerGrantsCredits = false;
+function sendMockFrame(frame) {
+	if (!uploadServerGrantsCredits && frame instanceof ArrayBuffer && frame.byteLength >= 12) {
+		const view = new DataView(frame);
+		if (view.getUint8(0) === 0x01 && (view.getUint8(1) & 0x01) !== 0) {
+			const header = JSON.parse(new TextDecoder().decode(new Uint8Array(frame, 12, view.getUint16(10, false))));
+			if (typeof header.path === 'string') {
+				const hex = view.getUint32(2, false).toString(16).padStart(8, '0');
+				queueMicrotask(() => simulateTopicMessage('__upload', {
+					event: hex, data: { ok: false, code: 'INVALID_REQUEST', error: 'missing rpc path' }
+				}));
+				return;
+			}
+		}
+	}
+	return sendQueuedFn(frame);
+}
+
+/**
  * Simulate an RPC response arriving from the server.
  */
 function simulateRpcResponse(correlationId, payload) {
@@ -81,13 +105,14 @@ beforeEach(async () => {
 	denialsCallbacks = new Set();
 	denialsValue = null;
 	sendQueuedFn = vi.fn();
+	uploadServerGrantsCredits = false;
 	onRequestHandler = null;
 	onRequestUnsubs = new Set();
 	mockBufferedAmount = 0;
 
 	connectFn = vi.fn(() => ({
-		sendQueued: sendQueuedFn,
-		send: sendQueuedFn,
+		sendQueued: sendMockFrame,
+		send: sendMockFrame,
 		get bufferedAmount() { return mockBufferedAmount; },
 		...connShape
 	}));
@@ -4080,8 +4105,8 @@ describe('__upload()', () => {
 	it('does not pace when conn.bufferedAmount is undefined (older adapter)', async () => {
 		// Override the connect mock to omit bufferedAmount entirely
 		connectFn.mockImplementation(() => ({
-			sendQueued: sendQueuedFn,
-		send: sendQueuedFn,
+			sendQueued: sendMockFrame,
+		send: sendMockFrame,
 			// no bufferedAmount
 			...connShape
 		}));
@@ -4127,6 +4152,85 @@ describe('__upload()', () => {
 // The fix renames the knob to `frameSize` (= max wire frame bytes), enforces
 // a hard ceiling at the discovered adapter cap, and subtracts envelope
 // overhead per chunk internally.
+
+describe('__upload() receiver credits', () => {
+	beforeEach(() => { uploadServerGrantsCredits = true; });
+
+	function chunkFrames() {
+		return sendQueuedFn.mock.calls.map((c) => c[0]).filter((f) => f instanceof ArrayBuffer && new Uint8Array(f)[0] === 0x01).map(parseUploadChunk);
+	}
+
+	it('sends chunk 0 with a path header, then only the granted sequence numbers', async () => {
+		configure({ upload: { frameSize: 12 + JSON.stringify({ path: 'uploads/credit' }).length + 2 } });
+		const handle = __upload('uploads/credit')(new Uint8Array(12).map((_, i) => i).buffer);
+		const progress = [];
+		handle.on('progress', (p) => progress.push(p.sent));
+		await flushUpload();
+		expect(chunkFrames().map((f) => f.seq)).toEqual([0]);
+		expect(chunkFrames()[0].argsHeader).toEqual({ path: 'uploads/credit' });
+		expect(progress).toEqual([]);
+
+		simulateUploadResponse(handle.streamId, { flow: 1, creditEnd: 3 });
+		await flushUpload();
+		expect(chunkFrames().map((f) => f.seq)).toEqual([0, 1, 2]);
+		expect(progress).toEqual([2, 4, 6]);
+
+		// A stale or duplicate grant adds nothing.
+		simulateUploadResponse(handle.streamId, { flow: 1, creditEnd: 2 });
+		await flushUpload();
+		expect(chunkFrames()).toHaveLength(3);
+
+		simulateUploadResponse(handle.streamId, { flow: 1, creditEnd: 100 });
+		await flushUpload();
+		const frames = chunkFrames();
+		expect(frames.map((f) => f.seq)).toEqual([0, 1, 2, 3, 4, 5]);
+		expect(frames.at(-1).isLast).toBe(true);
+		expect(frames.flatMap((f) => Array.from(f.payload))).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+
+		simulateUploadResponse(handle.streamId, { ok: true, data: 'done' });
+		await expect(handle).resolves.toBe('done');
+	});
+
+	it('reports chunk 0 progress before completion of a one-chunk upload', async () => {
+		const handle = __upload('uploads/one')(new Uint8Array([1, 2, 3]).buffer);
+		const events = [];
+		handle.on('progress', (p) => events.push(['progress', p.sent]));
+		handle.on('complete', () => events.push(['complete']));
+		await flushUpload();
+		expect(chunkFrames()).toHaveLength(1);
+		expect(chunkFrames()[0].isLast).toBe(true);
+		simulateUploadResponse(handle.streamId, { ok: true, data: 1 });
+		await handle;
+		expect(events).toEqual([['progress', 3], ['complete']]);
+	});
+
+	it.each([0, -1, 1.5, '9', null])('abandons the upload on a malformed grant (%s)', async (creditEnd) => {
+		const handle = __upload('uploads/bad-grant')(new Uint8Array(100_000).buffer);
+		await flushUpload();
+		simulateUploadResponse(handle.streamId, { flow: 1, creditEnd });
+		await expect(handle).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		const last = sendQueuedFn.mock.calls.at(-1)[0];
+		expect(parseUploadCancel(last)).toEqual({ frameType: 0x02, ctrlType: 0x10, streamId: handle.streamId });
+		expect(chunkFrames()).toHaveLength(1);
+	});
+
+	it('treats only the exact legacy rejection as a server without credits', async () => {
+		const handle = __upload('uploads/strict')(new Uint8Array(100_000).buffer);
+		await flushUpload();
+		simulateUploadResponse(handle.streamId, { ok: false, code: 'INVALID_REQUEST', error: 'invalid upload header' });
+		await expect(handle).rejects.toMatchObject({ code: 'INVALID_REQUEST', message: 'invalid upload header' });
+		expect(chunkFrames()).toHaveLength(1);
+	});
+
+	it('a terminal failure releases a sender waiting for credit', async () => {
+		const handle = __upload('uploads/denied')(new Uint8Array(100_000).buffer);
+		await flushUpload();
+		simulateUploadResponse(handle.streamId, { ok: false, code: 'FORBIDDEN', error: 'no' });
+		await expect(handle).rejects.toMatchObject({ code: 'FORBIDDEN' });
+		await flushUpload();
+		expect(chunkFrames()).toHaveLength(1);
+	});
+});
 
 describe('__upload() frameSize hard cap + chunkSize alias', () => {
 	/** @type {ReturnType<typeof vi.spyOn>} */

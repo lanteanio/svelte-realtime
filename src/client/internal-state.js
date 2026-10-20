@@ -15,6 +15,8 @@ import { randomFloat } from '../client-runtime.js';
  *   config: any,
  *   isOffline: boolean,
  *   socketUp: boolean,
+ *   uploadCap: number,
+ *   uploadLegacy: boolean,
  *   maxOptimisticQueueDepth: number
  * }}
  */
@@ -28,6 +30,11 @@ export const clientState = {
 	// The adapter socket is open (or open behind a hidden tab), as its status
 	// store said. Kept by connection.js.
 	socketUp: false,
+	// Per-socket upload facts, cleared when the socket goes down: the
+	// server's announced frame cap (`__cap`, 0 until seen) and whether it
+	// lacks receiver credits. Kept by connection.js and upload.js.
+	uploadCap: 0,
+	uploadLegacy: false,
 	maxOptimisticQueueDepth: 1_000
 };
 

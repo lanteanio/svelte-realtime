@@ -157,8 +157,8 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-invalid-request"></a>
 ### <code>INVALID_REQUEST</code>
 
-- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Binary RPC payload is detached (transferred) and cannot be sent</code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>RPC request could not be encoded or sent</code>; <code>Reserved topic prefix</code>; <code>Topic function must return a string, got </code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>persistKey must be a non-empty string</code>; <code>streamId already active</code>
-- Owning sources: [src/client/offline.js](../src/client/offline.js), [src/client/rpc.js](../src/client/rpc.js), [src/server.js](../src/server.js), [src/server/derived-topic.js](../src/server/derived-topic.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/forget.js](../src/server/forget.js), [src/server/idempotency.js](../src/server/idempotency.js), [src/server/upload.js](../src/server/upload.js)
+- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Binary RPC payload is detached (transferred) and cannot be sent</code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Invalid upload credit from server</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>RPC request could not be encoded or sent</code>; <code>Reserved topic prefix</code>; <code>Topic function must return a string, got </code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>persistKey must be a non-empty string</code>; <code>streamId already active</code>
+- Owning sources: [src/client/offline.js](../src/client/offline.js), [src/client/rpc.js](../src/client/rpc.js), [src/client/upload.js](../src/client/upload.js), [src/server.js](../src/server.js), [src/server/derived-topic.js](../src/server/derived-topic.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/forget.js](../src/server/forget.js), [src/server/idempotency.js](../src/server/idempotency.js), [src/server/upload.js](../src/server/upload.js)
 
 <a id="live-error-invalid-topic"></a>
 ### <code>INVALID_TOPIC</code>
@@ -1094,25 +1094,25 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 These sites have a computed code, event, or message prefix that the literal scanner cannot resolve. They remain visible here instead of being counted as full literal coverage. Wire forwarding and application-provided messages may vary at runtime.
 
 - <code>src/client/connection.js:109</code>
-- <code>src/client/connection.js:175</code>
-- <code>src/client/connection.js:190</code>
-- <code>src/client/connection.js:215</code>
-- <code>src/client/internal-state.js:128</code>
+- <code>src/client/connection.js:177</code>
+- <code>src/client/connection.js:192</code>
+- <code>src/client/connection.js:217</code>
+- <code>src/client/internal-state.js:135</code>
 - <code>src/client/offline.js:312</code>
 - <code>src/client/stream.js:1890</code>
 - <code>src/client/stream.js:2622</code>
-- <code>src/client/upload.js:579</code>
-- <code>src/client/upload.js:629</code>
-- <code>src/client/upload.js:681</code>
+- <code>src/client/upload.js:625</code>
+- <code>src/client/upload.js:736</code>
+- <code>src/client/upload.js:800</code>
 - <code>src/hooks.js:50</code>
 - <code>src/hooks.js:57</code>
-- <code>src/server.js:1909</code>
-- <code>src/server.js:2884</code>
+- <code>src/server.js:1916</code>
+- <code>src/server.js:2891</code>
 - <code>src/server/ctx.js:113</code>
 - <code>src/server/dispatch.js:1263</code>
 - <code>src/server/dispatch.js:1374</code>
-- <code>src/server/dispatch.js:1613</code>
-- <code>src/server/dispatch.js:1630</code>
+- <code>src/server/dispatch.js:1619</code>
+- <code>src/server/dispatch.js:1636</code>
 - <code>src/server/dispatch.js:172</code>
 - <code>src/server/dispatch.js:358</code>
 - <code>src/server/dispatch.js:392</code>
@@ -1122,13 +1122,13 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/server/dispatch.js:858</code>
 - <code>src/server/idempotency.js:880</code>
 - <code>src/server/push.js:699</code>
-- <code>src/server/upload.js:281</code>
-- <code>src/server/upload.js:386</code>
-- <code>src/server/upload.js:388</code>
-- <code>src/server/upload.js:715</code>
+- <code>src/server/upload.js:309</code>
+- <code>src/server/upload.js:421</code>
+- <code>src/server/upload.js:423</code>
+- <code>src/server/upload.js:781</code>
 - <code>src/shared/assert.js:120</code>
 - <code>src/shared/assert.js:75</code>
 - <code>src/shared/diagnostic-format.js:40</code>
-- <code>src/testing.js:590</code>
-- <code>src/testing.js:700</code>
-- <code>src/testing.js:775</code>
+- <code>src/testing.js:594</code>
+- <code>src/testing.js:704</code>
+- <code>src/testing.js:779</code>

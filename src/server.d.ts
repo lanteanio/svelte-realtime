@@ -1497,9 +1497,11 @@ export interface UploadOptions {
 	maxConcurrentTotal?: number;
 
 	/**
-	 * Backpressure cap. Chunks queued ahead of the handler's draining
-	 * are bounded to this count; overflow aborts with
-	 * `LiveError('FLOW_BACKPRESSURE')`.
+	 * Receiver window, a positive integer. At most this many chunks queue
+	 * ahead of the handler's draining; the client pauses until consuming
+	 * `ctx.stream` frees room. A sender that keeps sending past its credit
+	 * (or a client without credit support that overflows the queue) fails
+	 * with `LiveError('FLOW_BACKPRESSURE')`.
 	 * @default 64
 	 */
 	maxBufferedChunks?: number;

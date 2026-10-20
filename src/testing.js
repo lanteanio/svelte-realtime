@@ -406,6 +406,8 @@ export function createTestEnv(options) {
 		 * @param {any} data
 		 */
 		send(ws, topic, event, data) {
+			const raw = ws._rawListeners;
+			if (raw && raw.size > 0) for (const listener of [...raw]) listener({ topic, event, data });
 			if (ws._onSend) ws._onSend(topic, event, data);
 			return 1;
 		},
@@ -557,6 +559,8 @@ export function createTestEnv(options) {
 			_topicEntries: new Map(),
 			/** @type {Map<string, Array<(envelope: any) => void>>} Listeners parked by an attach frame, bound by the next subscribe */
 			_pendingTopicCbs: new Map(),
+			/** @type {Set<(message: { topic: string, event: string, data: any }) => void>} onMessage listeners */
+			_rawListeners: new Set(),
 			_onSend: null,
 			_sendHandlers
 		};
@@ -832,7 +836,27 @@ export function createTestEnv(options) {
 			platform.connections++;
 		}
 
-		return { call, subscribe, binary, disconnect, reconnect };
+		/**
+		 * Deliver an encoded client frame (JSON text bytes, binary RPC, upload
+		 * chunk or control frame) through the real server dispatcher.
+		 * @param {ArrayBuffer} data
+		 */
+		function sendRaw(data) {
+			if (!connected) throw new Error('Disconnected');
+			handleRpc(ws, data, platform);
+		}
+
+		/**
+		 * Observe every message the server sends to this connection directly.
+		 * @param {(message: { topic: string, event: string, data: any }) => void} listener
+		 * @returns {() => void}
+		 */
+		function onMessage(listener) {
+			ws._rawListeners.add(listener);
+			return () => { ws._rawListeners.delete(listener); };
+		}
+
+		return { call, subscribe, binary, sendRaw, onMessage, disconnect, reconnect };
 	}
 
 	/**
@@ -885,6 +909,8 @@ export function createTestEnv(options) {
  * @property {(path: string, ...args: any[]) => Promise<any>} call
  * @property {(path: string, ...args: any[]) => TestStream} subscribe
  * @property {(path: string, buffer: ArrayBuffer, ...args: any[]) => Promise<any>} binary
+ * @property {(data: ArrayBuffer) => void} sendRaw
+ * @property {(listener: (message: { topic: string, event: string, data: any }) => void) => () => void} onMessage
  * @property {() => void} disconnect
  * @property {() => void} reconnect
  */

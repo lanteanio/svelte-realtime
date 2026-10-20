@@ -170,6 +170,8 @@ export function ensureListener() {
 	store.subscribe((envelope) => {
 		if (!envelope) return;
 		const { event: correlationId, data } = envelope;
+		// The first response on a connection may announce the upload frame cap.
+		if (data && typeof data.__cap === 'number' && data.__cap > 0) clientState.uploadCap = data.__cap;
 		if (correlationId === '__topic_error' && typeof data?.topic === 'string') {
 			const setters = _streamErrorByTopic.get(data.topic);
 			if (setters) for (const setError of setters) setError(new RpcError(data.code || 'FORBIDDEN', data.error || 'Stream access changed'));
@@ -270,6 +272,7 @@ export function ensureDisconnectListener() {
 			_settleClosedForGood();
 		} else if (s === 'disconnected') {
 			clientState.socketUp = false;
+			_forgetUploadServer();
 			for (const [id, entry] of pending) {
 				// Calls made before an open still own their frames and may wait
 				// through failed connection attempts, bounded by their timeout.
@@ -331,6 +334,7 @@ export function ensureDisconnectListener() {
 					if (entry.timer) clearTimer(entry.timer);
 					entry.reject(_connectionLost('DISCONNECTED', 'WebSocket connection replaced'));
 				}
+				_forgetUploadServer();
 			}
 			clientState.socketUp = false;
 		}
@@ -373,6 +377,15 @@ function _settleClosedForGood() {
 		for (const handle of [...pendingUploads.values()]) handle._settle(false, _connectionClosedError());
 	}
 	_closeOfflineQueue(_connectionClosedError);
+}
+
+/**
+ * A new socket may reach a different server: relearn its upload frame cap and
+ * whether it grants receiver credits.
+ */
+function _forgetUploadServer() {
+	clientState.uploadCap = 0;
+	clientState.uploadLegacy = false;
 }
 
 /**

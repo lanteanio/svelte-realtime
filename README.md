@@ -3488,7 +3488,7 @@ export const avatar = live.upload(async (ctx, name, mime) => {
   maxSize: 50 * 1024 * 1024,         // hard cap per upload (default 100MB)
   maxConcurrentPerSession: 2,         // protect a node from one chatty client (default 4)
   maxConcurrentTotal: 1000,           // global cap (default unbounded; opt in)
-  maxBufferedChunks: 64,              // backpressure - chunks queued before refusing more (default 64)
+  maxBufferedChunks: 64,              // receiver window - the client pauses while this many chunks wait (default 64)
   reauthEvery: 5 * 1024 * 1024        // re-run module guards every 5 MB received (default unset)
 });
 ```
@@ -3496,7 +3496,7 @@ export const avatar = live.upload(async (ctx, name, mime) => {
 The handler signature is `(ctx, ...args)` like a regular RPC. `ctx` carries the usual fields plus these upload fields:
 
 - `ctx.stream` - `AsyncIterable<Uint8Array>` yielding chunks in arrival order.
-- `ctx.abortSignal` - `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, `maxBufferedChunks` overflow, or a `reauthEvery` rejection. Wire cleanup and cancellable work to it.
+- `ctx.abortSignal` - `AbortSignal` that aborts on client cancel, WS disconnect, `maxSize` exceeded, a sender exceeding its `maxBufferedChunks` credit, or a `reauthEvery` rejection. Wire cleanup and cancellable work to it.
 - `ctx.signal` - deprecated alias for `ctx.abortSignal`, retained during 0.x. It replaces the point-to-point `ctx.signal(userId, event, data)` method inside upload handlers. Send point-to-point events from a regular `live()` handler.
 - `ctx.upload` - `{ id }` for log correlation.
 
@@ -3561,7 +3561,9 @@ The handle is a thenable - `await handle` resolves with the handler's return val
   ac.signal.addEventListener('abort', () => handle.cancel());
   ```
 
-**Frame size is auto-discovered, hard-capped, and structurally safe.** The server announces its `platform.maxPayloadLength` on the first upload response per connection; subsequent uploads use that value as the wire frame size, with the framework subtracting envelope overhead (10 bytes on chunks 1+, `12 + argsLen` on chunk 0) per chunk internally. The first upload uses a conservative 12KB default that fits under any realistic adapter cap. To pin an explicit value (e.g. for memory-constrained clients), `configure({ upload: { frameSize: 32 * 1024 } })` -- user-configured wins over discovery, but is silently clamped down to the discovered cap with a one-time dev warn if it exceeds the adapter's limit. The framework guarantees no wire frame ever exceeds the adapter's `maxPayloadLength`, eliminating the silent close-with-1009 failure mode that the pre-rename `chunkSize` knob could trigger when a user mirrored the adapter's cap value verbatim.
+**A slow handler pauses the sender.** The server grants the client credits for at most `maxBufferedChunks` chunks ahead of what the handler has consumed from `ctx.stream`, and grants more as it consumes, so a handler that awaits a disk or network write per chunk receives every byte at its own pace. Credits start after guards and middleware pass. Only a sender that keeps sending past its credit fails with `FLOW_BACKPRESSURE`.
+
+**Frame size is auto-discovered, hard-capped, and structurally safe.** The server announces its `platform.maxPayloadLength` on the first RPC or upload response per connection, and the client sizes every later frame from it, subtracting envelope overhead (10 bytes on chunks 1+, `12 + argsLen` on chunk 0). An upload that is the first message on a connection sends chunk 0 at a conservative 12KB and switches to the cap from chunk 1. To pin an explicit value (e.g. for memory-constrained clients), `configure({ upload: { frameSize: 32 * 1024 } })` -- user-configured wins over discovery, but is silently clamped down to the discovered cap with a one-time dev warn if it exceeds the adapter's limit. The framework guarantees no wire frame ever exceeds the adapter's `maxPayloadLength`, eliminating the silent close-with-1009 failure mode that the pre-rename `chunkSize` knob could trigger when a user mirrored the adapter's cap value verbatim.
 
 The `chunkSize` field is accepted as a deprecated alias for `frameSize`; existing config still works, with a one-time dev warn pointing at the rename. See `MIGRATION.md` for the rationale and migration shape.
 
@@ -3569,33 +3571,7 @@ The handle auto-starts but the first chunk is sent on the next microtask, so att
 
 ### Wire format
 
-Two frame markers join `0x00` (binary RPC) and `0x7B` (JSON RPC) on the existing realtime channel:
-
-```
-Chunk frame (client -> server):
-  [0]      0x01
-  [1]      flags
-            bit 0: hasArgs   (set on chunk 0 only)
-            bit 1: isLast
-            bits 2-7: reserved (must be 0)
-  [2..5]   streamId, big-endian uint32
-  [6..9]   seq, big-endian uint32 (0-indexed, contiguous)
-  [10..]   if hasArgs:  [10..11] argsLen u16  + JSON header { rpc, args }  + payload bytes
-           else:        payload bytes
-
-Cancel frame (client -> server):
-  [0]      0x02
-  [1]      0x10 (cancel)
-  [2..5]   streamId
-```
-
-Per-chunk overhead is 10 bytes (12 bytes + JSON args length on chunk 0). On 64KB chunks that's 0.015% wire overhead.
-
-Server -> client responses ride the existing `__upload` topic via `platform.send(ws, '__upload', streamIdHex, payload)`, with `payload` shaped as either `{ ok: true, data: <handler return> }` or `{ ok: false, code, error }`.
-
-### Status
-
-`live.upload` ships complete: server primitive with capacity caps + abort-on-disconnect, client `UploadHandle` with progress / cancel / events / AbortController integration, auto-discovery of the adapter's `maxPayloadLength` for chunk-size tuning, and Vite plugin generation of typed client stubs (`UploadHandle<T>` in `$live/<module>` types). Adapter follow-ups (raise default `maxPayloadLength`, expose `bufferedAmount(ws)` for true backpressure-aware pumping) are tracked separately and don't block this surface.
+Two frame markers join `0x00` (binary RPC) and `0x7B` (JSON RPC) on the existing realtime channel: `0x01` carries a chunk (10-byte header; chunk 0 adds the JSON header naming the endpoint) and `0x02` carries a cancel. Server responses and credit grants ride the `__upload` topic. The [upload wire format v1](docs/upload-wire.md) is the full contract for clients outside the browser, with test vectors; a client speaking the format from before receiver credits still works, and the server then fails it with `FLOW_BACKPRESSURE` once `maxBufferedChunks` chunks are queued.
 
 ---
 
@@ -5306,6 +5282,7 @@ describe('chat module', () => {
 | `call(path, ...args)` | Call a `live()` function |
 | `subscribe(path, ...args)` | Subscribe to a `live.stream()` |
 | `binary(path, buffer, ...args)` | Call a `live.binary()` function |
+| `sendRaw(frame)` / `onMessage(fn)` | Send an encoded frame through the dispatcher; observe direct server messages (test a hand-written wire client) |
 | `disconnect()` / `reconnect()` | Simulate connection state changes |
 
 **TestStream API:**

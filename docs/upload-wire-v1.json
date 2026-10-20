@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "endpoint": "files/save",
+  "vectors": [
+    {
+      "name": "first",
+      "frame": "chunk",
+      "streamId": 1,
+      "seq": 0,
+      "hasArgs": true,
+      "isLast": false,
+      "header": { "path": "files/save" },
+      "payload": "000102",
+      "hex": "0101000000010000000000157b2270617468223a2266696c65732f73617665227d000102"
+    },
+    {
+      "name": "last",
+      "frame": "chunk",
+      "streamId": 1,
+      "seq": 1,
+      "hasArgs": false,
+      "isLast": true,
+      "header": null,
+      "payload": "03feff",
+      "hex": "0102000000010000000103feff"
+    },
+    {
+      "name": "cancel",
+      "frame": "cancel",
+      "streamId": 1,
+      "hex": "021000000001"
+    },
+    {
+      "name": "legacy",
+      "frame": "chunk",
+      "streamId": 2,
+      "seq": 0,
+      "hasArgs": true,
+      "isLast": true,
+      "header": { "rpc": "files/save" },
+      "payload": "000102",
+      "hex": "0103000000020000000000147b22727063223a2266696c65732f73617665227d000102"
+    }
+  ]
+}
