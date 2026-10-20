@@ -23,14 +23,14 @@ describe('aggregate erasure contract', () => {
 		expect(env.entry.cohort.has('alice')).toBe(false);
 		expect(env.entry.state.byUser.alice).toBe('alice@private.test');
 		const completed = vi.fn();
-		await expect(live.forget('alice', { onForget: completed })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('alice', { tenantId: null, onForget: completed })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(completed).not.toHaveBeenCalled(); expect(env.durable).toHaveBeenCalledOnce();
 	});
 
 	it('resets all reducer and held output copies even for an untracked contributor', async () => {
 		const env = setup({ forget: 'reset', privacy: { k: 2, strategy: 'suppress', contributor: value => value.id } });
 		env.add('first'); env.add('second'); env.add('alice');
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(env.entry.state).toEqual({ byUser: {} });
 		expect(env.entry._lastWire).toEqual({ byUser: {} });
 		expect([...env.entry.cohort]).toEqual([]);
@@ -44,7 +44,7 @@ describe('aggregate erasure contract', () => {
 		const env = setup({ forget: 'reset' }, { byUser: { ...reducers().byUser, init: () => seed } });
 		env.add();
 		expect(seed).toEqual({});
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(await env.fn()).toEqual({ byUser: {} });
 		expect(seed).toEqual({});
 	});
@@ -52,7 +52,7 @@ describe('aggregate erasure contract', () => {
 	it('clears pending debounced payloads before they can publish erased contributions', async () => {
 		vi.useFakeTimers();
 		const env = setup({ forget: 'reset', debounce: 100 }); env.add();
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		await vi.advanceTimersByTimeAsync(150);
 		expect(env.platform.published.filter(value => value.topic === 'output').map(value => value.data)).toEqual([{ byUser: {} }]);
 	});
@@ -63,7 +63,7 @@ describe('aggregate erasure contract', () => {
 			lifetime: { type: 'lifetime' }, minute: { type: 'tumbling', durationMs: 60000 }, recent: { type: 'sliding', durationMs: 3000, slideMs: 1000 }
 		}, privacy: { k: 2, strategy: 'suppress', contributor: value => value.id } });
 		env.add('alice'); env.add('bob'); await vi.advanceTimersByTimeAsync(1000); env.add('alice');
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		for (const [name, win] of env.entry.windowStates) {
 			if (win.buckets) { for (const bucket of win.buckets) expect(bucket).toEqual({ byUser: {} }); }
 			else expect(win.state).toEqual({ byUser: {} });
@@ -82,7 +82,7 @@ describe('aggregate erasure contract', () => {
 		const snapshot = () => new Promise(resolve => { finish = resolve; });
 		const env = setup({ forget: 'reset', snapshot, ...(windowed ? { windows: { lifetime: { type: 'lifetime' } } } : {}) });
 		const oldHydration = env.entry._hydrationPromise;
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		finish({ byUser: { alice: 'alice@private.test' } }); await oldHydration;
 		const loader = windowed ? env.fn.__windowStreams.lifetime : env.fn;
 		expect(await loader()).toEqual({ byUser: {} });
@@ -96,14 +96,14 @@ describe('aggregate erasure contract', () => {
 		const env = setup({ snapshot, debounce: 50, ...(windowed ? { windows: { lifetime: { type: 'lifetime' } } } : {}) }, fields);
 		const hydration = env.entry._hydrationPromise;
 		const generation = env.entry._generation;
-		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(env.entry._hydrationPromise).toBe(hydration);
 		expect(env.entry._generation).toBe(generation);
 		finish({ count: 10 }); await hydration;
 		const loader = windowed ? env.fn.__windowStreams.lifetime : env.fn;
 		expect(await loader()).toEqual({ count: 10 });
 		env.add();
-		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		await vi.advanceTimersByTimeAsync(50);
 		expect(env.platform.published.at(-1).data).toEqual({ count: 11 });
 	});
@@ -115,7 +115,7 @@ describe('aggregate erasure contract', () => {
 		const env = setup({ forget: 'retain', snapshot, privacy: { k: 2, strategy: 'suppress', contributor: value => value.id }, ...(windowed ? { windows: { lifetime: { type: 'lifetime' } } } : {}) }, fields);
 		const hydration = env.entry._hydrationPromise;
 		env.add();
-		await expect(live.forget('alice')).resolves.toMatchObject({ ok: true });
+		await expect(live.forget('alice', { tenantId: null })).resolves.toMatchObject({ ok: true });
 		expect(env.entry._hydrationPromise).toBe(hydration);
 		finish({ count: 20 }); await hydration;
 		const holder = windowed ? env.entry.windowStates.get('lifetime') : env.entry;
@@ -129,9 +129,9 @@ describe('aggregate erasure contract', () => {
 		const second = live.aggregate('source', reducers(), { topic: 'other', forget: 'reset' });
 		__registerAggregate('aggregate/two', second);
 		env.add(); fail = true;
-		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(await second()).toEqual({ byUser: {} }); expect(env.durable).toHaveBeenCalledOnce();
-		fail = false; await expect(live.forget('alice')).resolves.toMatchObject({ ok: true });
+		fail = false; await expect(live.forget('alice', { tenantId: null })).resolves.toMatchObject({ ok: true });
 		expect(await env.fn()).toEqual({ byUser: {} });
 	});
 
@@ -139,15 +139,15 @@ describe('aggregate erasure contract', () => {
 		let invalid = false;
 		const env = setup({ forget: 'reset' }, { byUser: { ...reducers().byUser, init: () => invalid ? { callback() {} } : {} } });
 		env.add(); invalid = true;
-		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
-		invalid = false; await expect(live.forget('alice')).resolves.toMatchObject({ ok: true });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		invalid = false; await expect(live.forget('alice', { tenantId: null })).resolves.toMatchObject({ ok: true });
 	});
 
 	it('does not fold reentrant source updates from reset initializers', async () => {
 		let duringReset = null;
 		const env = setup({ forget: 'reset' }, { byUser: { ...reducers().byUser, init: () => { duringReset?.(); return {}; } } });
 		env.add(); duringReset = () => env.add('alice');
-		await live.forget('alice'); duringReset = null;
+		await live.forget('alice', { tenantId: null }); duringReset = null;
 		expect(await env.fn()).toEqual({ byUser: {} });
 		expect(env.platform.published.filter(value => value.topic === 'output').at(-1).data).toEqual({ byUser: {} });
 	});
@@ -162,7 +162,7 @@ describe('aggregate erasure contract', () => {
 		const env = setup({ forget: 'reset' }, { bytes: { init: () => bytes, reduce: acc => { acc[0] = 42; return acc; } } });
 		env.add();
 		expect(bytes[0]).toBe(0);
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect((await env.fn()).bytes[0]).toBe(0);
 	});
 
@@ -175,11 +175,11 @@ describe('aggregate erasure contract', () => {
 			if (fail && topic === 'output:first') throw new Error('transport unavailable');
 			return published(topic, ...args);
 		};
-		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(env.durable).toHaveBeenCalledOnce();
 		expect(env.platform.published.filter(row => row.topic === 'output:second').at(-1).data).toEqual({ byUser: {} });
 		fail = false;
-		await expect(live.forget('alice')).resolves.toMatchObject({ surfaces: { aggregateCohorts: 2 } });
+		await expect(live.forget('alice', { tenantId: null })).resolves.toMatchObject({ surfaces: { aggregateCohorts: 2 } });
 		env.add('bob');
 		expect(await env.fn.__windowStreams.first()).toEqual({ byUser: { bob: 'bob@private.test' } });
 	});
@@ -192,7 +192,7 @@ describe('aggregate erasure contract', () => {
 		setCronPlatform(null);
 		configureForget({ store: { purgeUser: async () => 0 } });
 		platform.publish('direct-source', 'added', { id: 'alice', email: 'alice@private.test' });
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(platform.published.filter(row => row.topic === 'direct-output').at(-1).data).toEqual({ byUser: {} });
 	});
 

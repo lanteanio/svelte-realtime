@@ -487,7 +487,7 @@ describe('live.smooth commands and the authoritative tick', () => {
 		await close(departed, { platform });
 		await call(mockWs({ id: 'purged' }), platform, name + '/shape/__smooth/sync', ['r1']);
 		expect(_smoothTopics.get('shape:r1').pendingJoins.has('purged')).toBe(true);
-		_purgeSmoothUser('purged');
+		_purgeSmoothUser(null, 'purged');
 		expect(_smoothTopics.get('shape:r1').pendingJoins.has('purged')).toBe(false);
 		await vi.advanceTimersByTimeAsync(20);
 		expect(platform.wirePublished.filter(p => p.event === 'update')).toEqual([]);

@@ -4,6 +4,7 @@ import { assert } from '../shared/assert.js';
 import { _validIdReason, _MAX_USER_ID_LENGTH } from './validate.js';
 import { _IS_DEV } from './env.js';
 import { state } from './state.js';
+import { _isTenancyEnabled, _resolveTenant } from './tenant.js';
 import { close } from '../server.js';
 
 /**
@@ -17,14 +18,16 @@ import { close } from '../server.js';
  * topic publishes via their own subscriptions; only push routing flips.
  * Cluster-wide push (any instance routing to any user's ws) is a separate
  * primitive in the extensions package.
- * @type {Map<string, { ws: any, platform: any }>}
+ * @type {Map<string, { ws: any, platform: any, tenantId: string | null }>}
  */
 export const _pushRegistry = new Map();
 
 /**
- * Reverse index from ws back to its registered userId. Used by
+ * Reverse index from the current route-owning ws to its userId. Used by
  * `pushHooks.close` to deregister without re-running identify(ws),
  * which may not be reliable on close (some platforms clear userData).
+ * Replacing a route retires the previous socket's reverse ownership, so its
+ * later close cannot claim a route the newest socket already closed.
  * WeakMap so sockets remain GC-eligible if close is missed.
  * @type {WeakMap<object, string>}
  */
@@ -37,7 +40,7 @@ export const _wsToPushUserId = new WeakMap();
  * by the same last-write-wins lifecycle as the userId registry - a session that
  * reconnects with the same id re-runs `pushHooks.open` and the entry flips to the
  * live socket. Cluster-wide sessionId routing is a separate extensions primitive.
- * @type {Map<string, { ws: any, platform: any }>}
+ * @type {Map<string, { ws: any, platform: any, tenantId: string | null, userId: string | null }>}
  */
 export const _pushSessionRegistry = new Map();
 
@@ -230,14 +233,27 @@ export const pushHooks = {
 		}
 		const platform = ctx.platform;
 
-		// userId registration. A connection with no userId (anonymous) is skipped
-		// here but may still register a sessionId below - the two are independent.
+		// Resolve and validate every identity before changing either registry. A
+		// failed session or tenant lookup must not replace a working user route.
 		const userId = _getPushIdentify()(ws);
+		const sessionId = _getPushSessionIdentify()(ws);
 		if (userId != null && userId !== '') {
 			const reason = _validIdReason(userId, 'userId');
 			if (reason !== null) {
 				throw new Error('[svelte-realtime] pushHooks.open: ' + reason + '. identify(ws) must return a non-empty userId string that is safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for anonymous connections.');
 			}
+		}
+		if (sessionId != null && sessionId !== '') {
+			const reason = _validIdReason(sessionId, 'sessionId');
+			if (reason !== null) {
+				throw new Error('[svelte-realtime] pushHooks.open: ' + reason + '. sessionIdentify(ws) must return a non-empty sessionId string that is safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for connections without a session.');
+			}
+		}
+		if (!userId && !sessionId) return;
+		const tenantId = _isTenancyEnabled() ? _resolveTenant(ws.getUserData?.()) : null;
+
+		// Anonymous connections may still register a session below.
+		if (userId != null && userId !== '') {
 			if (!_pushRegistry.has(userId) && _pushRegistry.size >= state.maxPushRegistry) {
 				if (!_pushRegistryWarnFired) {
 					_pushRegistryWarnFired = true;
@@ -250,7 +266,11 @@ export const pushHooks = {
 					);
 				}
 			} else {
-				_pushRegistry.set(userId, { ws, platform });
+				const previous = _pushRegistry.get(userId);
+				if (previous && previous.ws !== ws && _wsToPushUserId.get(previous.ws) === userId) {
+					_wsToPushUserId.delete(previous.ws);
+				}
+				_pushRegistry.set(userId, { ws, platform, tenantId });
 				_wsToPushUserId.set(ws, userId);
 			}
 		}
@@ -258,12 +278,7 @@ export const pushHooks = {
 		// sessionId registration (independent of userId). Resume-aware by the same
 		// last-write-wins lifecycle: a session reconnecting with the same id re-runs
 		// open and the entry flips to the live socket.
-		const sessionId = _getPushSessionIdentify()(ws);
 		if (sessionId != null && sessionId !== '') {
-			const reason = _validIdReason(sessionId, 'sessionId');
-			if (reason !== null) {
-				throw new Error('[svelte-realtime] pushHooks.open: ' + reason + '. sessionIdentify(ws) must return a non-empty sessionId string that is safe to embed in a topic name (no control chars / CR / LF / NUL / quotes / backslash, max ' + _MAX_USER_ID_LENGTH + ' chars), or null / undefined for connections without a session.');
-			}
 			if (!_pushSessionRegistry.has(sessionId) && _pushSessionRegistry.size >= state.maxPushRegistry) {
 				if (!_pushSessionRegistryWarnFired) {
 					_pushSessionRegistryWarnFired = true;
@@ -276,7 +291,11 @@ export const pushHooks = {
 					);
 				}
 			} else {
-				_pushSessionRegistry.set(sessionId, { ws, platform });
+				const previous = _pushSessionRegistry.get(sessionId);
+				if (previous && previous.ws !== ws && _wsToPushSessionId.get(previous.ws) === sessionId) {
+					_wsToPushSessionId.delete(previous.ws);
+				}
+				_pushSessionRegistry.set(sessionId, { ws, platform, tenantId, userId: userId || null });
 				_wsToPushSessionId.set(ws, sessionId);
 			}
 		}
@@ -312,10 +331,8 @@ export const pushHooks = {
 		if (userId != null) {
 			_wsToPushUserId.delete(ws);
 			const entry = _pushRegistry.get(userId);
-			// push-registry invariant: if userId was tracked in _wsToPushUserId,
-			// the registry should still have an entry for that userId (possibly
-			// pointing at a different ws if the user reconnected on another
-			// device). Missing entry means an external mutation cleared it.
+			// open retires superseded ownership. A tracked current owner must
+			// still have its route; an older socket's later close is untracked.
 			assert(entry !== undefined, 'realtime/push-registry.entry-tracked', { userIdLen: userId.length });
 			if (entry && entry.ws === ws) _pushRegistry.delete(userId);
 		}
@@ -327,38 +344,36 @@ export const pushHooks = {
  * Right-to-erasure (`live.forget`): drop a user's push-registry entry, its ws
  * reverse mapping, and EVERY session entry the user's sockets hold. The userId
  * registry is the durable-in-memory routing record keyed by raw userId (no
- * tenant segment - it relies on globally-unique userIds, so the tenant cannot
- * disambiguate here). Session entries are keyed independently of userId, so
- * beyond the common same-socket drain, a scan over the bounded session
- * registry attributes each entry's socket back to its userId through the ws
- * reverse map - a session the user registered on ANOTHER socket (an older
- * connection whose userId routing was superseded) must not survive its owner's
- * erasure.
+ * tenant segment - it relies on globally-unique userIds). Erasure matches the
+ * tenant captured and validated at registration, including an exact null
+ * scope. Later identity changes or a failed socket read cannot grant access
+ * to another tenant's routes. Session entries retain their own user and tenant
+ * attribution, including sessions on older sockets whose user route was
+ * replaced or could not be registered because the user registry was full.
  *
  * Returns the number of routing/session entries removed so the forget cascade
  * can total a per-surface count.
+ * @param {string | null} tenantId
  * @param {string} userId
  * @returns {number}
  */
-export function _purgePushUser(userId) {
+export function _purgePushUser(tenantId, userId) {
 	let count = 0;
 	const entry = _pushRegistry.get(userId);
-	if (entry) {
+	if (entry && entry.tenantId === tenantId) {
 		_pushRegistry.delete(userId);
 		count++;
-		if (entry.ws) {
-			_wsToPushUserId.delete(entry.ws);
-			// Same socket usually also carries the push sessionId; drain it too.
-			_deregisterPushSession(entry.ws);
-		}
+		if (_wsToPushUserId.get(entry.ws) === userId) _wsToPushUserId.delete(entry.ws);
 	}
-	// Cross-socket sessions: O(sessions) over the bounded registry, forget-only
-	// (never a hot path). Only the primary socket's reverse-map entry was
-	// deleted above; every OTHER socket the user registered from still maps
-	// back to the userId, which is exactly how this scan attributes them.
-	for (const sessionEntry of [..._pushSessionRegistry.values()]) {
-		if (sessionEntry.ws && _wsToPushUserId.get(sessionEntry.ws) === userId) {
-			_deregisterPushSession(sessionEntry.ws);
+	// O(sessions) over the bounded registry, only on erasure.
+	for (const [sessionId, sessionEntry] of _pushSessionRegistry) {
+		if (sessionEntry.userId === userId && sessionEntry.tenantId === tenantId) {
+			_pushSessionRegistry.delete(sessionId);
+			if (_wsToPushSessionId.get(sessionEntry.ws) === sessionId) _wsToPushSessionId.delete(sessionEntry.ws);
+			// The same socket may have registered a newer route in another scope.
+			if (_wsToPushUserId.get(sessionEntry.ws) === userId && _pushRegistry.get(userId)?.ws !== sessionEntry.ws) {
+				_wsToPushUserId.delete(sessionEntry.ws);
+			}
 			count++;
 		}
 	}
@@ -377,8 +392,8 @@ export function _deregisterPushSession(ws) {
 	if (sessionId == null) return;
 	_wsToPushSessionId.delete(ws);
 	const entry = _pushSessionRegistry.get(sessionId);
-	// Same invariant as the userId registry: a tracked sessionId should still
-	// have an entry (possibly pointing at a newer socket after a resume).
+	// open retires superseded session ownership, just like the user route.
+	// A tracked current session owner must still have its entry.
 	assert(entry !== undefined, 'realtime/push-session-registry.entry-tracked', { sessionIdLen: sessionId.length });
 	if (entry && entry.ws === ws) _pushSessionRegistry.delete(sessionId);
 }

@@ -130,7 +130,7 @@ describe('cursor samples follow room membership departures', () => {
 		const bob = await watch('bob');
 		await alice.call('board/room/__cursor/move', 'one', { x: 5 });
 		configureForget({ platform: env.platform, store: { purgeUser: async () => 0 } });
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(bob.value).toEqual([]);
 		expect(bob.events.filter(e => e.event === 'remove')).toHaveLength(1);
 	});
@@ -178,7 +178,7 @@ describe('cursor samples follow room membership departures', () => {
 		await alice.call('simple/room/__cursor/move', { x: 9 });
 		const ref = _presenceRef.get('\0cursors:simple-room\0alice');
 		configureForget({ platform: env.platform, store: { purgeUser: async () => 0 } });
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(ref).toMatchObject({ cursorKey: null, data: null, count: 0, gone: true });
 		expect(cursors.value).toEqual([]);
 		alice.disconnect();
@@ -295,10 +295,10 @@ describe('cursor samples follow room membership departures', () => {
 		const deletes = [];
 		env.platform.redis = { hincrby: async () => 0, hdel: async (hash) => { deletes.push(hash); if (fail) throw Error('offline'); return 2; } };
 		configureForget({ platform: env.platform, store: { purgeUser: async () => 0 } });
-		await expect(live.forget('alice')).rejects.toBeTruthy();
+		await expect(live.forget('alice', { tenantId: null })).rejects.toBeTruthy();
 		expect(ref).toMatchObject({ cursorKey: null, cursorTopic: null, gone: true });
 		fail = false;
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(deletes).toEqual(['__live-presence:\0cursors:simple-room', '__live-presence:\0cursors:simple-room']);
 		expect(cursors.value).toEqual([]);
 		expect(_presenceRef.has('\0cursors:simple-room\0alice')).toBe(false);
@@ -349,7 +349,7 @@ describe('cursor samples follow room membership departures', () => {
 		expect(peers.map(peer => peer.value.length)).toEqual([1, 0, 1]);
 		expect(_presenceRef.has('\0cursors:@t/one/tenant-room\0alice')).toBe(false);
 		expect(_presenceRef.has('\0cursors:@t/two/tenant-room\0alice')).toBe(true);
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(peers.map(peer => peer.value.length)).toEqual([0, 0, 1]);
 	});
 
@@ -411,7 +411,7 @@ describe('cursor samples follow room membership departures', () => {
 			await _removeCursorIfDeparted(env.platform, 'remote-shared', 'alice');
 			expect(cursors.value).toHaveLength(1);
 			expect(await env.platform.redis.hget('__live-presence:\0cursors:remote-shared', 'd:alice')).toBeNull();
-			if (ending === 'forget') await live.forget('alice');
+			if (ending === 'forget') await live.forget('alice', { tenantId: null });
 			else { member.disconnect(); await vi.advanceTimersByTimeAsync(5001); }
 			expect(cursors.value).toEqual([]);
 			expect(cursors.events.filter(e => e.event === 'remove')).toEqual([{ event: 'remove', data: { key: 'alice' } }]);

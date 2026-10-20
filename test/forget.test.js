@@ -5,10 +5,10 @@
 // descriptor-completeness guard, and the constant-shape result.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { live, configureForget, _resetForget } from '../src/server.js';
+import { live, configureForget, pushHooks, _resetForget, _resetPushRegistry } from '../src/server.js';
 import { _pushRegistry, _wsToPushUserId } from '../src/server/push.js';
 import { _presenceRef, _rateLimits } from '../src/server/state.js';
-import { _tenantKey, _tenantTopic } from '../src/server/tenant.js';
+import { _tenantKey, _tenantTopic, _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.js';
 import { _resetIdempotencyStore } from '../src/server/idempotency.js';
 import { _forgetSurfaceNames } from '../src/server/forget.js';
 import { _resetReplayRouting } from '../src/server/replay-routing.js';
@@ -21,7 +21,8 @@ import { setTimer, clearTimer, setRuntimeEnv, resetRuntimeEnv } from '../src/sha
 const SEP = String.fromCharCode(0);
 
 function resetAll() {
-	_pushRegistry.clear();
+	_resetPushRegistry();
+	_resetTenantResolver();
 	_presenceRef.clear();
 	_rateLimits.clear();
 	_resetIdempotencyStore();
@@ -32,6 +33,12 @@ beforeEach(resetAll);
 afterEach(resetAll);
 
 const flush = () => new Promise((r) => setTimeout(r, 0));
+
+function registerPush(userId, data = {}) {
+	const ws = { getUserData: () => ({ ...data, userId }) };
+	pushHooks.open(ws, { platform: {} });
+	return ws;
+}
 
 describe('live.forget - input validation', () => {
 	it('rejects a missing / empty / non-string userId', async () => {
@@ -52,12 +59,44 @@ describe('live.forget - input validation', () => {
 	});
 });
 
+describe('live.forget - tenantId under a tenant resolver', () => {
+	afterEach(async () => {
+		const { _resetTenantResolver } = await import('../src/server/tenant.js');
+		_resetTenantResolver();
+	});
+
+	it('rejects a call that omits tenantId once tenancy is enabled', async () => {
+		const { _setTenantResolver } = await import('../src/server/tenant.js');
+		_setTenantResolver((user) => user.tenant);
+		registerPush('u1', { tenant: null });
+		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		await expect(live.forget('u1', {})).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		await expect(live.forget('u1', { tenantId: undefined })).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		// Nothing was erased by the rejected calls.
+		expect(_pushRegistry.has('u1')).toBe(true);
+	});
+
+	it('accepts an explicit null tenantId as the untenanted scope', async () => {
+		const { _setTenantResolver } = await import('../src/server/tenant.js');
+		_setTenantResolver((user) => user.tenant);
+		registerPush('u1', { tenant: null });
+		const res = await live.forget('u1', { tenantId: null });
+		expect(res.ok).toBe(true);
+		expect(res.surfaces.push).toBe(1);
+	});
+
+	it('keeps tenantId optional without a tenant resolver', async () => {
+		registerPush('u1');
+		const res = await live.forget('u1');
+		expect(res.ok).toBe(true);
+		expect(res.surfaces.push).toBe(1);
+	});
+});
+
 describe('live.forget - push registry', () => {
 	it('drops the user entry and its ws reverse mapping', async () => {
-		const ws = {};
-		_pushRegistry.set('u1', { ws, platform: {} });
-		_wsToPushUserId.set(ws, 'u1');
-		_pushRegistry.set('u2', { ws: {}, platform: {} });
+		const ws = registerPush('u1');
+		registerPush('u2');
 
 		const res = await live.forget('u1');
 		expect(_pushRegistry.has('u1')).toBe(false);
@@ -312,17 +351,17 @@ describe('live.forget - durable store seam', () => {
 
 	it('folds an object breakdown into a summed durable count', async () => {
 		configureForget({ store: { async purgeUser() { return { registry: 2, session: 3 }; } } });
-		const res = await live.forget('u1');
+		const res = await live.forget('u1', { tenantId: null });
 		expect(res.surfaces.durable).toBe(5);
 	});
 
 	it('surfaces a durable failure as FORGET_STORE_FAILED (incomplete erasure must be retried)', async () => {
 		configureForget({ store: { async purgeUser() { throw new Error('redis down'); } } });
-		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		await expect(live.forget('u1', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
 	});
 
 	it('runs with no durable store wired (single-instance)', async () => {
-		_pushRegistry.set('u1', { ws: {}, platform: {} });
+		registerPush('u1');
 		const res = await live.forget('u1');
 		expect(res.surfaces.durable).toBeUndefined();
 		expect(res.rowsAffected).toBe(1);
@@ -352,7 +391,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 				}
 			}
 		});
-		const res = await live.forget('u1');
+		const res = await live.forget('u1', { tenantId: null });
 		expect(res.surfaces.durable).toBe(3);
 		expect(res.surfaces.ownerSuccessions).toBe(2);
 		// The successor (and the vacated null) reach subscribers on every replica
@@ -379,7 +418,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 			platform,
 			store: { async purgeUser() { return { rowsAffected: 1, ownerSuccessions: [{ topic: 'board/9', owner: 'u3', reason: 'succeeded' }] }; } }
 		});
-		const res = await live.forget('u1');
+		const res = await live.forget('u1', { tenantId: null });
 		expect(res.surfaces.ownerSuccessions).toBe(1);
 		expect(buffered).toContainEqual({ topic: 'board/9:owner', event: 'set', data: { key: 'u3', reason: 'succeeded' } });
 		expect(bare).toEqual([]); // routed through the buffer, not the bare publish
@@ -387,7 +426,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 
 	it('a plain count return (no envelope) stays byte-identical - no ownerSuccessions surface', async () => {
 		configureForget({ store: { async purgeUser() { return { registry: 2, session: 3 }; } } });
-		const res = await live.forget('u1');
+		const res = await live.forget('u1', { tenantId: null });
 		expect(res.surfaces.durable).toBe(5);
 		expect('ownerSuccessions' in res.surfaces).toBe(false);
 	});
@@ -403,7 +442,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 				}
 			}
 		});
-		const res = await live.forget('u1');
+		const res = await live.forget('u1', { tenantId: null });
 		expect(res.surfaces.ownerSuccessions).toBe(1);
 		expect(published).toEqual([{ t: 'room/1:owner', e: 'set', d: { key: 'u2', reason: 'succeeded' } }]);
 	});
@@ -411,7 +450,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 	it('an envelope with no platform wired publishes nothing and reports zero (no throw)', async () => {
 		configureForget({ store: { async purgeUser() { return { rowsAffected: 4, ownerSuccessions: [{ topic: 'board/1', owner: 'u2', reason: 'succeeded' }] }; } } });
 		configureForget({ platform: null });
-		const res = await live.forget('u1');
+		const res = await live.forget('u1', { tenantId: null });
 		expect(res.surfaces.durable).toBe(4);
 		expect(res.surfaces.ownerSuccessions).toBe(0);
 	});
@@ -424,7 +463,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 			platform: { publish: () => { throw new Error('bus down'); } },
 			store: { async purgeUser() { return { rowsAffected: 2, ownerSuccessions: [{ topic: 'board/1', owner: 'u2', reason: 'succeeded' }] }; } }
 		});
-		const res = await live.forget('u1');
+		const res = await live.forget('u1', { tenantId: null });
 		expect(res.ok).toBe(true);
 		expect(res.surfaces.durable).toBe(2);
 	});
@@ -450,7 +489,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 			}
 		});
 		// The erasure is still signalled incomplete (the sibling room must retry)...
-		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		await expect(live.forget('u1', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
 		// ...yet the committed room's successor already reached subscribers.
 		expect(published).toContainEqual({ t: 'board/1:owner', e: 'set', d: { key: 'u2', reason: 'succeeded' } });
 	});
@@ -469,7 +508,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 				}
 			}
 		});
-		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		await expect(live.forget('u1', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
 	});
 
 	it('routes a COMMITTED succession through the :owner replay buffer on the failure path too (resumer gap-fills the successor, not the erased owner)', async () => {
@@ -497,7 +536,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 				}
 			}
 		});
-		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+		await expect(live.forget('u1', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
 		expect(buffered).toContainEqual({ topic: 'board/9:owner', event: 'set', data: { key: 'u3', reason: 'succeeded' } });
 		expect(bare).toEqual([]); // buffer, not bare
 	});
@@ -519,7 +558,7 @@ describe('live.forget - durable store owner-succession envelope', () => {
 					}
 				}
 			});
-			await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
+			await expect(live.forget('u1', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_STORE_FAILED' });
 			const logged = JSON.stringify(errSpy.mock.calls);
 			expect(logged).not.toContain('secret-successor-id');
 			expect(logged).not.toContain('ownerSuccessions');
@@ -531,7 +570,8 @@ describe('live.forget - durable store owner-succession envelope', () => {
 
 describe('live.forget - onForget audit hook', () => {
 	it('receives a HASHED userId (never the raw id) plus tenant/cascade/counts', async () => {
-		_pushRegistry.set('u1', { ws: {}, platform: {} });
+		_setTenantResolver(user => user.tenant);
+		registerPush('u1', { tenant: 't1' });
 		let rec = null;
 		await live.forget('u1', { tenantId: 't1', onForget: (r) => { rec = r; } });
 		expect(rec).toBeTruthy();
@@ -544,7 +584,7 @@ describe('live.forget - onForget audit hook', () => {
 	});
 
 	it('a throwing onForget never aborts a completed erasure', async () => {
-		_pushRegistry.set('u1', { ws: {}, platform: {} });
+		registerPush('u1');
 		const res = await live.forget('u1', { onForget: () => { throw new Error('hook boom'); } });
 		expect(res.ok).toBe(true);
 		expect(_pushRegistry.has('u1')).toBe(false);
@@ -695,7 +735,7 @@ describe('live.forget - webhook dead-letter queue', () => {
 		store.add({ webhookId: 'wh1', topic: 't', event: 'e', data: { author: 'u2', body: 'y' }, attempts: 3, error: 'down' });
 		store.add({ webhookId: 'wh1', topic: 't', event: 'e', data: { body: 'unattributed' }, attempts: 3, error: 'down' });
 
-		const res = await live.forget('u1');
+		const res = await live.forget('u1', { tenantId: null });
 
 		expect(res.surfaces.webhookDeadLetter).toBe(1);
 		expect(store.count()).toBe(2);
@@ -705,7 +745,69 @@ describe('live.forget - webhook dead-letter queue', () => {
 	it('rejects incomplete erasure for an enabled store without purgeUser', async () => {
 		const { configureWebhooks } = await import('../src/server.js');
 		configureWebhooks({ deadLetter: { add: () => '1', get: () => null, remove: () => false, count: () => 0, list: () => [], summary: () => ({}), clear: () => {} } });
-		await expect(live.forget('u1')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('u1', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+	});
+});
+
+describe('live.forget - tenant scoping of push, smooth and dead-letter', () => {
+	afterEach(async () => {
+		const { _smoothTopics } = await import('../src/server/smooth.js');
+		const { configureWebhooks } = await import('../src/server.js');
+		const { _resetTenantResolver } = await import('../src/server/tenant.js');
+		_smoothTopics.clear();
+		configureWebhooks({ deadLetter: false });
+		_resetTenantResolver();
+	});
+
+	it('push: with a tenant resolver, only the socket of the forgotten tenant is purged', async () => {
+		const { _setTenantResolver } = await import('../src/server/tenant.js');
+		_setTenantResolver((user) => user.tenant);
+		const wsB = registerPush('u1', { tenant: 'b' });
+
+		const resA = await live.forget('u1', { tenantId: 'a' });
+		expect(resA.surfaces.push).toBe(0);
+		expect(_pushRegistry.get('u1')?.ws).toBe(wsB);
+		expect(_wsToPushUserId.get(wsB)).toBe('u1');
+
+		const resB = await live.forget('u1', { tenantId: 'b' });
+		expect(resB.surfaces.push).toBe(1);
+		expect(_pushRegistry.has('u1')).toBe(false);
+		expect(_wsToPushUserId.has(wsB)).toBe(false);
+	});
+
+	it('smooth: only records whose topic is inside the tenant scope are purged', async () => {
+		const { _smoothTopics } = await import('../src/server/smooth.js');
+		const mk = () => ({ registry: new Map([['u1', {}]]), surrogates: new Map([['inst' + SEP + 'u1', {}]]) });
+		const recA = mk();
+		const recB = mk();
+		const recPlain = mk();
+		_smoothTopics.set(_tenantTopic('a', 'arena'), recA);
+		_smoothTopics.set(_tenantTopic('b', 'arena'), recB);
+		_smoothTopics.set('arena', recPlain);
+
+		const res = await live.forget('u1', { tenantId: 'a' });
+		expect(res.surfaces.smooth).toBe(2);
+		expect(recA.registry.has('u1')).toBe(false);
+		expect(recA.surrogates.size).toBe(0);
+		expect(recB.registry.has('u1')).toBe(true);
+		expect(recB.surrogates.size).toBe(1);
+		expect(recPlain.registry.has('u1')).toBe(true);
+	});
+
+	it('dead-letter: a tenant forget leaves the same userId in another tenant and its late captures alone', async () => {
+		const { configureWebhooks, createDeadLetterStore } = await import('../src/server.js');
+		const store = createDeadLetterStore({ forgetUserId: ({ data }) => data && data.author });
+		configureWebhooks({ deadLetter: store });
+		const rec = (topic) => ({ webhookId: 'wh1', topic, event: 'e', data: { author: 'u1' }, attempts: 3, error: 'down', startedAt: 0 });
+		store.add(rec(_tenantTopic('a', 'orders')));
+		const kept = store.add(rec(_tenantTopic('b', 'orders')));
+
+		const res = await live.forget('u1', { tenantId: 'a' });
+		expect(res.surfaces.webhookDeadLetter).toBe(1);
+		expect(store.list().map((r) => r.id)).toEqual([kept]);
+		// Deliveries in flight across the erasure: tenant a's is dropped, tenant b's is captured.
+		expect(store.add(rec(_tenantTopic('a', 'orders')))).toBeNull();
+		expect(store.add(rec(_tenantTopic('b', 'orders')))).not.toBeNull();
 	});
 });
 
@@ -777,20 +879,12 @@ describe('live.forget - cascade.crdt whole-document drop', () => {
 
 describe('live.forget - cross-socket push sessions', () => {
 	it('drains session entries the user holds on sockets other than the routing socket', async () => {
-		const { _pushSessionRegistry, _wsToPushSessionId } = await import('../src/server/push.js');
-		const primaryWs = {};
-		const otherWs = {};
-		_pushRegistry.set('u1', { ws: primaryWs, platform: {} });
-		_wsToPushUserId.set(primaryWs, 'u1');
+		const { _pushSessionRegistry } = await import('../src/server/push.js');
 		// A session the user registered from ANOTHER socket (superseded routing).
-		_wsToPushUserId.set(otherWs, 'u1');
-		_pushSessionRegistry.set('sess-other', { ws: otherWs, platform: {} });
-		_wsToPushSessionId.set(otherWs, 'sess-other');
+		registerPush('u1', { sessionId: 'sess-other' });
+		registerPush('u1');
 		// An unrelated user's session survives.
-		const strangerWs = {};
-		_wsToPushUserId.set(strangerWs, 'u2');
-		_pushSessionRegistry.set('sess-stranger', { ws: strangerWs, platform: {} });
-		_wsToPushSessionId.set(strangerWs, 'sess-stranger');
+		registerPush('u2', { sessionId: 'sess-stranger' });
 
 		const res = await live.forget('u1');
 

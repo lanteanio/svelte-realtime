@@ -67,7 +67,7 @@ describe('room subscriptions release only acquired membership refs', () => {
 		const oldRef = _presenceRef.get('refs:one\0alice');
 		expect(oldRef.data).toEqual({ name: 'alice' });
 		configureForget({ platform: env.platform, store: { purgeUser: async () => 0 } });
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(oldRef).toMatchObject({ data: null, count: 0, gone: true });
 		expect(_presenceRef.has('refs:one\0alice')).toBe(false);
 		const newSocket = await join('alice');

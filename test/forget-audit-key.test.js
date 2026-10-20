@@ -77,7 +77,7 @@ it('rejects invalid call keys before any in-memory or durable erasure even witho
 	configureForget({ store: { purgeUser } });
 	_pushRegistry.set(userId, { ws: {}, platform: {} });
 	for (const hashKey of ['', 'short-secret', new Uint8Array(31), 42, {}, [], true]) {
-		await expect(live.forget(userId, { hashKey })).rejects.toMatchObject({ code: 'INVALID_REQUEST', message: expect.stringContaining('hashKey') });
+		await expect(live.forget(userId, { tenantId: null, hashKey })).rejects.toMatchObject({ code: 'INVALID_REQUEST', message: expect.stringContaining('hashKey') });
 		expect(_pushRegistry.has(userId)).toBe(true);
 	}
 	expect(purgeUser).not.toHaveBeenCalled();
@@ -89,7 +89,7 @@ it('validates a configuration atomically without replacing its working store or 
 	configureForget({ store: { purgeUser: original }, hashKey: keyA });
 	expect(() => configureForget({ store: { purgeUser: replacement }, hashKey: 'short-secret' })).toThrow(/hashKey/);
 	expect(() => configureForget({ store: {}, hashKey: keyB })).toThrow(/purgeUser/);
-	const audit = await record();
+	const audit = await record({ tenantId: null });
 	expect(audit.userIdHash).toBe(keyed(keyA));
 	expect(original).toHaveBeenCalledOnce();
 	expect(replacement).not.toHaveBeenCalled();

@@ -121,6 +121,61 @@ describe('createDeadLetterStore', () => {
 	});
 });
 
+describe('createDeadLetterStore - tenant-scoped erasure', () => {
+	const rec = (topic, author, extra = {}) => ({ webhookId: 'w', topic, event: 'e', data: { author }, attempts: 3, error: 'x', failedAt: Date.now(), ...extra });
+
+	it('purges only records whose topic is inside the tenant scope', () => {
+		const s = createDeadLetterStore({ forgetUserId: ({ data }) => data.author });
+		const a = s.add(rec('@t/a/orders', 'u1'));
+		const b = s.add(rec('@t/b/orders', 'u1'));
+		const plain = s.add(rec('orders', 'u1'));
+		const other = s.add(rec('@t/a/orders', 'u2'));
+		// A tenant id that is a prefix of another tenant's id does not reach it.
+		const prefixed = s.add(rec('@t/ab/orders', 'u1'));
+		expect(s.purgeUser('a', 'u1')).toBe(1);
+		expect(s.get(a)).toBeNull();
+		expect(s.get(b)).not.toBeNull();
+		expect(s.get(plain)).not.toBeNull();
+		expect(s.get(other)).not.toBeNull();
+		expect(s.get(prefixed)).not.toBeNull();
+		// The null scope reaches untenanted topics only.
+		expect(s.purgeUser(null, 'u1')).toBe(1);
+		expect(s.get(plain)).toBeNull();
+		expect(s.get(b)).not.toBeNull();
+		expect(s.get(prefixed)).not.toBeNull();
+	});
+
+	it('a purge tombstone suppresses late captures only inside its own tenant scope', () => {
+		const s = createDeadLetterStore({ forgetUserId: ({ data }) => data.author });
+		expect(s.purgeUser('a', 'u1')).toBe(0);
+		// In flight across the purge, same tenant: dropped.
+		expect(s.add(rec('@t/a/orders', 'u1', { startedAt: 0 }))).toBeNull();
+		// Equal userId, other tenant or untenanted: retained.
+		expect(s.add(rec('@t/b/orders', 'u1', { startedAt: 0 }))).not.toBeNull();
+		expect(s.add(rec('orders', 'u1', { startedAt: 0 }))).not.toBeNull();
+		expect(s.count()).toBe(2);
+		// A null-scope purge tombstones untenanted captures and leaves tenants alone.
+		s.purgeUser(null, 'u2');
+		expect(s.add(rec('orders', 'u2', { startedAt: 0 }))).toBeNull();
+		expect(s.add(rec('@t/a/orders', 'u2', { startedAt: 0 }))).not.toBeNull();
+	});
+
+	it('keeps tombstones apart for user ids that contain delimiter characters', () => {
+		const s = createDeadLetterStore({ forgetUserId: ({ data }) => data.author });
+		// A joined scope+user key would let tenant "a" + user "b" collide with the
+		// untenanted user "a<NUL>b"; the scopes must stay separate.
+		s.purgeUser('a', 'b');
+		const sep = String.fromCharCode(0);
+		expect(s.add(rec('orders', 'a' + sep + 'b', { startedAt: 0 }))).not.toBeNull();
+		expect(s.add(rec('orders', 'a/b', { startedAt: 0 }))).not.toBeNull();
+	});
+
+	it('rejects a non-string tenant id', () => {
+		const s = createDeadLetterStore({ forgetUserId: ({ data }) => data.author });
+		expect(() => s.purgeUser(/** @type {any} */ (5), 'u1')).toThrow();
+	});
+});
+
 describe('webhook dead-letter capture', () => {
 	beforeEach(reset);
 

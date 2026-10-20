@@ -2,7 +2,7 @@
 // noise. Unit-tests the privacy module (validation, k-anon gate, noise math,
 // determinism) plus the gate helper that the aggregate publish sites call.
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import {
 	_normalizeAggregatePrivacy,
 	_applyAggregatePrivacy,
@@ -11,7 +11,7 @@ import {
 } from '../src/server/differential-privacy.js';
 import { createSharedRandom } from 'svelte-adapter-uws/plugins/smooth/random';
 import { state } from '../src/server/state.js';
-import { live, realtime, __registerAggregate, __registerDerived, _activateDerived, _resetAggregates } from '../src/server.js';
+import { live, realtime, __registerAggregate, __registerDerived, _activateDerived, _resetAggregates, setCronPlatform } from '../src/server.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 
 const tick = () => new Promise((r) => setTimeout(r, 20));
@@ -421,5 +421,50 @@ describe('live.aggregate({ privacy }) - through the real engine', () => {
 		platform.publish('ok-src', 'updated', { v: 1 });
 		await tick();
 		expect(recomputes).toBeGreaterThan(0);
+	});
+});
+
+describe('live.aggregate({ privacy }) - sliding windows draw no fresh noise over an unchanged value', () => {
+	afterEach(() => { _resetAggregates(); state.privacySecret = null; state.cronPlatform = null; vi.useRealTimers(); });
+
+	it('an idle slide keeps the offset and publishes nothing; a changing slide re-seeds', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(Date.UTC(2026, 0, 1, 10, 0, 0));
+		state.privacySecret = SECRET;
+		const agg = live.aggregate('orders-slide', { count: { init: () => 0, reduce: (c) => c + 1, combine: (...parts) => parts.reduce((a, b) => a + b, 0) } }, {
+			topic: 'count-slide',
+			windows: { recent: { type: 'sliding', durationMs: 3000, slideMs: 1000 } },
+			privacy: { strategy: 'perturb' }
+		});
+		__registerAggregate('agg/slide', agg);
+		const platform = mockPlatform();
+		_activateDerived(platform);
+		setCronPlatform(platform); // the slide timer publishes through the captured platform
+		const releases = () => platform.published.filter((p) => p.topic === 'count-slide:recent').map((p) => p.data.count);
+
+		platform.publish('orders-slide', 'created', {});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(releases()).toHaveLength(1);
+		const first = releases()[0];
+		expect(first).not.toBe(1);
+
+		// Two slides evict empty buckets: the value is unchanged, so no fresh draw.
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(releases()).toEqual([first]);
+
+		// The third slide evicts the event: the value changes and draws fresh noise.
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(releases()).toHaveLength(2);
+		const emptied = releases()[1];
+		expect(emptied - 0).not.toBeCloseTo(first - 1, 9);
+
+		// An idle window stays silent however long it is watched.
+		await vi.advanceTimersByTimeAsync(50 * 1000);
+		expect(releases()).toEqual([first, emptied]);
+
+		// A later event still publishes within the current slide's offset.
+		platform.publish('orders-slide', 'created', {});
+		await vi.advanceTimersByTimeAsync(0);
+		expect(releases().at(-1)).toBeCloseTo(emptied + 1, 9);
 	});
 });

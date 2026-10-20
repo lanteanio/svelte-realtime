@@ -9,6 +9,7 @@
 // store instance (Redis / Postgres) with the same interface.
 
 import { now, monotonicNow } from '../shared/runtime.js';
+import { _TENANT_TOPIC_NS, _topicInTenant } from './tenant.js';
 
 // A forget tombstone lives long enough to catch a webhook delivery that was
 // already in flight when `live.forget` ran and only fails (and would be
@@ -16,6 +17,24 @@ import { now, monotonicNow } from '../shared/runtime.js';
 // budget; a single delivery whose total duration (initial attempt + all
 // backoff) exceeds this is a narrow documented residual.
 const _DEAD_LETTER_TOMBSTONE_MS = 10 * 60 * 1000;
+
+// Tombstone map key for the untenanted scope. A valid tenant id is non-empty, so
+// the empty string can never collide with a real tenant.
+const _NULL_SCOPE = '';
+
+/**
+ * The tenant scope a wire topic belongs to: the tenant id of an `@t/<id>/...`
+ * topic, `_NULL_SCOPE` for an untenanted topic, or `undefined` for a malformed
+ * `@t/` topic that no scope contains (the same partition `_topicInTenant`
+ * draws, so a tombstone lookup and a purge scan always agree).
+ * @param {string} topic
+ * @returns {string | undefined}
+ */
+function _topicScope(topic) {
+	if (typeof topic !== 'string' || !topic.startsWith(_TENANT_TOPIC_NS)) return _NULL_SCOPE;
+	const slash = topic.indexOf('/', _TENANT_TOPIC_NS.length);
+	return slash > _TENANT_TOPIC_NS.length ? topic.slice(_TENANT_TOPIC_NS.length, slash) : undefined;
+}
 
 /**
  * @typedef {object} DeadLetterRecord
@@ -60,13 +79,17 @@ export function createDeadLetterStore(options = {}) {
 	/** @type {Map<string, DeadLetterRecord>} insertion-ordered */
 	const records = new Map();
 	let seq = 0;
-	// Forget tombstones: the most recent purge time per authoring userId. A record
-	// whose delivery was already in flight when `live.forget` ran (started before
-	// the purge, fails after it) is captured by `add` AFTER the purge scanned the
-	// store, so without this it would resurrect the forgotten user's event. Mirrors
-	// the idempotency store's racing-commit tombstone. Swept by age so the map
-	// stays bounded to recent erasures.
-	/** @type {Map<string, number>} authoring userId -> last purge time (monotonic ms) */
+	// Forget tombstones: the most recent purge time per (tenant scope, authoring
+	// userId). A record whose delivery was already in flight when `live.forget`
+	// ran (started before the purge, fails after it) is captured by `add` AFTER
+	// the purge scanned the store, so without this it would resurrect the
+	// forgotten user's event. Mirrors the idempotency store's racing-commit
+	// tombstone. Keyed by scope as well as user so erasing a user in one tenant
+	// never suppresses a late capture for an equal userId in another tenant.
+	// Nested maps rather than a joined string key: an extracted userId is app
+	// data and may contain any delimiter. Swept by age so the maps stay bounded
+	// to recent erasures.
+	/** @type {Map<string, Map<string, number>>} tenant scope -> authoring userId -> last purge time (monotonic ms) */
 	const purgedAt = new Map();
 
 	// Drop expired records on access. O(n) over a bounded store; webhook failures
@@ -86,8 +109,11 @@ export function createDeadLetterStore(options = {}) {
 	function _sweepTombstones() {
 		if (purgedAt.size === 0) return;
 		const cutoff = monotonicNow() - _DEAD_LETTER_TOMBSTONE_MS;
-		for (const [u, t] of purgedAt) {
-			if (t < cutoff) purgedAt.delete(u);
+		for (const [scope, users] of purgedAt) {
+			for (const [u, t] of users) {
+				if (t < cutoff) users.delete(u);
+			}
+			if (users.size === 0) purgedAt.delete(scope);
 		}
 	}
 
@@ -117,7 +143,8 @@ export function createDeadLetterStore(options = {}) {
 				} catch { /* extractor best-effort */ }
 			}
 			if (userId !== null) {
-				const tomb = purgedAt.get(userId);
+				const scope = _topicScope(rec.topic);
+				const tomb = scope === undefined ? undefined : purgedAt.get(scope)?.get(userId);
 				// The delivery began at rec.startedAt (a MONOTONIC stamp threaded by
 				// `_fireWebhookOut`). A purge at-or-after the delivery start means
 				// live.forget ran while this delivery was in flight, so dropping the
@@ -166,18 +193,26 @@ export function createDeadLetterStore(options = {}) {
 		},
 
 		/**
-		 * Right-to-erasure purge: drop every record whose capture-time `userId`
-		 * stamp matches. Records captured without a `forgetUserId` extractor
-		 * carry no stamp and are not user-attributable (documented limitation,
-		 * same contract as the durable stores). O(n) over the bounded ring.
-		 * The `tenantId` parameter exists for signature parity with the
-		 * durable-store seam; the in-memory stamp is already the app's own id.
-		 * @param {string | null} _tenantId
+		 * Right-to-erasure purge: drop every record inside the tenant scope whose
+		 * capture-time `userId` stamp matches. The scope is the record's topic,
+		 * the same rule the durable stores apply: a tenantId matches only topics
+		 * under that tenant's `@t/<id>/` namespace, and `null` matches only
+		 * untenanted topics, so an equal userId in another tenant survives.
+		 * Records captured without a `forgetUserId` extractor carry no stamp and
+		 * are not user-attributable (documented limitation, same contract as the
+		 * durable stores). O(n) over the bounded ring.
+		 * @param {string | null} tenantId
 		 * @param {string} userId
 		 * @returns {number}
 		 */
-		purgeUser(_tenantId, userId) {
+		purgeUser(tenantId, userId) {
 			if (typeof userId !== 'string' || userId.length === 0) return 0;
+			if (tenantId != null && typeof tenantId !== 'string') {
+				throw new Error('dead-letter: purgeUser tenantId must be a string or null');
+			}
+			// Same falsy-is-untenanted reading as `_topicInTenant`, so the purge
+			// scan and the tombstone always name one scope.
+			if (!tenantId) tenantId = null;
 			// Tombstone FIRST: a delivery already in flight when this purge runs is
 			// captured (add) only after we return, so record the purge time so that
 			// late add() drops it. Recorded even with zero matching records - the
@@ -188,11 +223,14 @@ export function createDeadLetterStore(options = {}) {
 			// ~1s-cached wall clock could stamp a purge and a genuinely-later new
 			// delivery identically and over-drop the new one. Monotonic time is
 			// step-immune and sub-ms, closing both.
-			purgedAt.set(userId, monotonicNow());
+			const scope = tenantId === null ? _NULL_SCOPE : tenantId;
+			let users = purgedAt.get(scope);
+			if (users === undefined) purgedAt.set(scope, users = new Map());
+			users.set(userId, monotonicNow());
 			_sweepTombstones();
 			let n = 0;
 			for (const [id, rec] of records) {
-				if (rec.userId === userId) {
+				if (rec.userId === userId && _topicInTenant(tenantId, rec.topic)) {
 					records.delete(id);
 					n++;
 				}

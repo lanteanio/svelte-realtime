@@ -54,7 +54,7 @@ describe('presence erasure confirmation and retry', () => {
 			return remove(key, ...fields);
 		});
 		const completed = vi.fn();
-		await expect(live.forget('alice', { onForget: completed })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('alice', { tenantId: null, onForget: completed })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(completed).not.toHaveBeenCalled();
 		expect(env.durable).toHaveBeenCalledOnce();
 		expect(_presenceRef.get('room:one\0alice')).toMatchObject({ count: 0, data: null, gone: true });
@@ -64,7 +64,7 @@ describe('presence erasure confirmation and retry', () => {
 		await env.room.__dataStream.__onUnsubscribe(alice, 'room:one', 1);
 		await expect(env.join('alice')).rejects.toMatchObject({ code: 'FORBIDDEN' });
 		broken = false;
-		await expect(live.forget('alice')).resolves.toMatchObject({ ok: true, surfaces: { presence: 1 } });
+		await expect(live.forget('alice', { tenantId: null })).resolves.toMatchObject({ ok: true, surfaces: { presence: 1 } });
 		expect(_presenceRef.has('room:one\0alice')).toBe(false);
 		expect(await env.redis.hgetall('__live-presence:room:one')).toEqual({ 'c:bob': '1', 'd:bob': '{"name":"bob"}' });
 		expect(env.redis.hincrby.mock.calls.filter(([, , delta]) => delta < 0)).toEqual([]);
@@ -80,11 +80,11 @@ describe('presence erasure confirmation and retry', () => {
 			if (broken && key === '__live-room-owner:room:one') throw new Error('owner unavailable');
 			return remove(key, ...fields);
 		});
-		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(await env.redis.hget('__live-presence:room:one', 'd:alice')).toBeNull();
 		expect(await _ownerGet(env.platform, 'room:one')).toBe('alice');
 		broken = false;
-		await expect(live.forget('alice')).resolves.toMatchObject({ ok: true });
+		await expect(live.forget('alice', { tenantId: null })).resolves.toMatchObject({ ok: true });
 		expect(await _ownerGet(env.platform, 'room:one')).toBe('bob');
 		expect(await env.redis.hget('__live-room-owner:room:one', 'n:alice')).toBeNull();
 	});
@@ -98,10 +98,10 @@ describe('presence erasure confirmation and retry', () => {
 			if (lost && key === '__live-room-owner:room:one' && field === 'o') { lost = false; throw new Error('reply lost'); }
 			return result;
 		});
-		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(await _ownerGet(env.platform, 'room:one')).toBe('bob');
 		env.redis.hset.mockClear(); env.publish.mockClear();
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(env.redis.hset.mock.calls.filter(([, field]) => field === 'o')).toEqual([]);
 		expect(env.publish.mock.calls.map(call => call.slice(0, 3))).toContainEqual(['room:one:owner', 'set', { key: 'bob', reason: 'succeeded' }]);
 		expect(env.changes.mock.calls.filter(([change]) => change.reason === 'succeeded')).toHaveLength(0);
@@ -111,7 +111,7 @@ describe('presence erasure confirmation and retry', () => {
 		const env = setup(); await env.join('alice');
 		const remove = env.redis.hdel.getMockImplementation();
 		env.redis.hdel.mockImplementation((key, ...fields) => key.startsWith('__live-presence:') ? result : remove(key, ...fields));
-		await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(_presenceRef.has('room:one\0alice')).toBe(true);
 	});
 
@@ -132,7 +132,7 @@ describe('presence erasure confirmation and retry', () => {
 		await env.join('alice'); await env.join('bob');
 		await env.redis.hincrby('__live-presence:room:one', 'c:alice', 3);
 		await env.redis.hincrby('__live-room-owner:room:one', 'n:alice', 3);
-		await live.forget('alice');
+		await live.forget('alice', { tenantId: null });
 		expect(await env.redis.hget('__live-presence:room:one', 'd:alice')).toBeNull();
 		expect(await env.redis.hget('__live-room-owner:room:one', 'j:alice')).toBeNull();
 		expect(await _ownerGet(env.platform, 'room:one')).toBe('bob');
@@ -147,7 +147,7 @@ describe('presence erasure confirmation and retry', () => {
 			return incr(...args);
 		});
 		const joining = env.join('alice'); await entered.promise;
-		const erasing = live.forget('alice');
+		const erasing = live.forget('alice', { tenantId: null });
 		await Promise.resolve(); gate.resolve();
 		await Promise.all([joining, erasing]);
 		expect(await env.redis.hgetall('__live-presence:room:one')).toEqual({});
@@ -166,7 +166,7 @@ describe('presence erasure confirmation and retry', () => {
 		});
 		await env.room.__dataStream.__onUnsubscribe(alice, 'room:one', 1);
 		vi.advanceTimersByTime(5001); await entered.promise;
-		const erasing = live.forget('alice');
+		const erasing = live.forget('alice', { tenantId: null });
 		await Promise.resolve(); gate.resolve(); await erasing;
 		expect(await env.redis.hget('__live-presence:room:one', 'd:alice')).toBeNull();
 		expect(_presenceRef.has('room:one\0alice')).toBe(false);
@@ -179,7 +179,7 @@ describe('presence erasure confirmation and retry', () => {
 		const remove = env.redis.hdel.getMockImplementation();
 		env.redis.hdel.mockImplementation((key, ...fields) => { if (key.startsWith('__live-presence:')) throw new Error('down'); return remove(key, ...fields); });
 		try {
-			await expect(live.forget('alice')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+			await expect(live.forget('alice', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 			await env.join('bob', 'other');
 			expect(_presenceRef.size).toBe(1);
 			expect(_presenceRef.get('room:one\0alice').gone).toBe(true);
@@ -214,8 +214,8 @@ describe('presence erasure confirmation and retry', () => {
 			if (key === '__live-presence:room:one' && fields.includes('d:alice')) { entered.resolve(); await gate.promise; }
 			return remove(key, ...fields);
 		});
-		const first = live.forget('alice'); await entered.promise;
-		const second = live.forget('alice'); await Promise.resolve(); gate.resolve();
+		const first = live.forget('alice', { tenantId: null }); await entered.promise;
+		const second = live.forget('alice', { tenantId: null }); await Promise.resolve(); gate.resolve();
 		await Promise.all([first, second]);
 		expect(env.redis.hdel.mock.calls.filter(([key, ...fields]) => key === '__live-presence:room:one' && fields.includes('d:alice'))).toHaveLength(1);
 		expect(env.changes.mock.calls.filter(([change]) => change.reason === 'succeeded')).toHaveLength(1);

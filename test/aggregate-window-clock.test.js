@@ -835,7 +835,10 @@ describe('tumbling window specs that would close on every tick', () => {
 	});
 });
 
-describe('sliding window noise is fresh on every slide', () => {
+describe('sliding window noise is fresh on every slide that changes the value', () => {
+	// One source event per slide keeps every bucket non-empty once the window
+	// has filled, so each later slide evicts an event and changes the value.
+	// Returns the slide releases recorded after that warm-up.
 	function registerNoisySliding(name) {
 		realtime({ privacySecret: SECRET });
 		const fn = live.aggregate(`${name}:src`, {
@@ -849,30 +852,40 @@ describe('sliding window noise is fresh on every slide', () => {
 		const platform = timedPlatform();
 		_activateDerived(platform);
 		setCronPlatform(platform);
-		return () => platform.published.filter((p) => p.topic === `${name}:agg:w`).map((p) => p.data.count);
+		const slideReleases = [];
+		const slide = () => {
+			const before = platform.published.length;
+			vi.advanceTimersByTime(250);
+			for (const p of platform.published.slice(before)) if (p.topic === `${name}:agg:w`) slideReleases.push(p.data.count);
+			platform.publish(`${name}:src`, 'e', {});
+		};
+		platform.publish(`${name}:src`, 'e', {});
+		for (let i = 0; i < 4; i++) slide();
+		slideReleases.length = 0;
+		return { slide, slideReleases };
 	}
 
 	it('slides shorter than the cached clock resolution each draw new noise', () => {
 		vi.useFakeTimers({ now: B0 });
 		installCachedClock(300);
-		const values = registerNoisySliding('snoise');
+		const { slide, slideReleases } = registerNoisySliding('snoise');
 
-		vi.advanceTimersByTime(250 * 12);
-		const v = values();
-		expect(v.length).toBe(12);
-		expect(new Set(v).size).toBe(v.length);
+		for (let i = 0; i < 12; i++) slide();
+		// The true value after each slide is the same (3 events), so equal
+		// releases would mean a repeated seed.
+		expect(slideReleases.length).toBe(12);
+		expect(new Set(slideReleases).size).toBe(slideReleases.length);
 	});
 
 	it('a clock stepped back between slides never reuses the noise of an earlier slide', () => {
 		vi.useFakeTimers({ now: B0 });
 		installExactNow();
-		const values = registerNoisySliding('sstep');
+		const { slide, slideReleases } = registerNoisySliding('sstep');
 
-		vi.advanceTimersByTime(250 * 4);
+		for (let i = 0; i < 4; i++) slide();
 		vi.setSystemTime(Date.now() - 600);
-		vi.advanceTimersByTime(250 * 4);
-		const v = values();
-		expect(v.length).toBe(8);
-		expect(new Set(v).size).toBe(v.length);
+		for (let i = 0; i < 4; i++) slide();
+		expect(slideReleases.length).toBe(8);
+		expect(new Set(slideReleases).size).toBe(slideReleases.length);
 	});
 });

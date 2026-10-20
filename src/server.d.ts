@@ -1210,7 +1210,11 @@ export function live<T extends (ctx: LiveContext<any>, ...args: any[]) => any>(f
  * are not budgeted, and a constant per-window offset exposes exact changes.
  * Single-state and lifetime offsets persist across restarts with the same secret,
  * topic and noise configuration. One known true value removes that offset from
- * past and future releases of the corresponding field.
+ * past and future releases of the corresponding field. A sliding window draws
+ * fresh noise on each slide that changes its value (an unchanged slide keeps the
+ * offset and publishes nothing); a continuous subscriber learns each bucket's
+ * exact change, links the releases around every changing slide, and can average
+ * those draws away over many slides.
  */
 export interface AggregatePrivacyConfig {
 	/** k-anonymity threshold: minimum distinct contributors before the aggregate publishes. Default 5. */
@@ -2240,7 +2244,10 @@ export namespace live {
 	 *
 	 * `tenantId` is server-trusted: pass it from your own context (`ctx.tenantId`
 	 * or your own logic), never straight off the wire. Defaults to `null`
-	 * (single-tenant).
+	 * when neither a tenant resolver nor an erasure store is configured. With
+	 * a resolver, configureForget store or enabled dead-letter store, the option
+	 * is required: omission rejects with `INVALID_REQUEST`, and an explicit
+	 * `null` selects the untenanted scope.
 	 *
 	 * `cascade` defaults to `true` (the standard purge surface). The object
 	 * form extends the cascade: `cascade: { crdt: ['doc-topic', ...] }` drops
@@ -2251,12 +2258,10 @@ export namespace live {
 	 * the durably persisted copies is the app's half, in its own `persist`
 	 * store. The cascade value is also threaded to the durable store.
 	 *
-	 * Note: the push routing registry is keyed by raw userId with no tenant
-	 * segment (it assumes globally-unique userIds), so in a multi-tenant
-	 * deployment that reuses userIds across tenants, a forget can clear another
-	 * tenant's push routing entry for the same userId. That entry is routing
-	 * state only (no data/PII) and self-heals on the user's next connect. All
-	 * other surfaces are tenant-scoped.
+	 * Push routing still requires globally unique userIds, but erasure matches
+	 * each user and session route's tenant captured at registration. An equal
+	 * userId in another tenant keeps its routes, even if socket data or the
+	 * tenant resolver changed after registration.
 	 *
 	 * The result carries per-surface counts for the trusted server caller. If you
 	 * re-expose forget to untrusted clients, map the result to a constant shape
@@ -2646,8 +2651,10 @@ export namespace live {
 			 * (counted via `contributor(data)`) have fed the window - holding the
 			 * last published value, never a null/marker. 'perturb' adds zero-mean
 			 * Laplace / Gaussian noise to numeric fields. 'hybrid' (default) does
-			 * both. Noise is keyed by the operator secret, tenant, topic and window so every cluster replica
-			 * emits identical noise.
+			 * both. Noise is keyed by the operator secret, topic and window (the
+			 * tenant seed slot is reserved and empty) so every cluster replica
+			 * emits identical noise. Not a differential privacy guarantee; see
+			 * AggregatePrivacyConfig for the limits.
 			 */
 			privacy?: AggregatePrivacyConfig;
 		}
@@ -4885,8 +4892,10 @@ export interface DeadLetterStore {
 	summary(): DeadLetterSummary | Promise<DeadLetterSummary>;
 	/**
 	 * Right-to-erasure purge: drop every record whose capture-time userId
-	 * stamp (the `forgetUserId` extractor) matches. Records captured without
-	 * an extractor carry no stamp and are not user-attributable. Optional so
+	 * stamp (the `forgetUserId` extractor) matches and whose topic lies in the
+	 * tenant scope (`@t/<tenantId>/...` for a tenant, an untenanted topic for
+	 * `null`), so an equal userId in another tenant survives. Records captured
+	 * without an extractor carry no stamp and are not user-attributable. Optional so
 	 * a minimal custom store still satisfies the interface; `live.forget`
 	 * rejects FORGET_INCOMPLETE for an enabled store without it.
 	 */

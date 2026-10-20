@@ -2737,11 +2737,28 @@ function _scheduleNextBoundary(entry, win) {
 }
 
 /**
+ * Comparable form of a computed window value, for the slide's unchanged-value
+ * check. A value JSON cannot encode yields a fresh symbol, which never compares
+ * equal, so such a slide re-seeds and publishes as before.
+ * @param {unknown} value
+ * @returns {string | symbol}
+ */
+function _slideFingerprint(value) {
+	try {
+		const s = JSON.stringify(value);
+		return typeof s === 'string' ? s : Symbol('unencodable');
+	} catch {
+		return Symbol('unencodable');
+	}
+}
+
+/**
  * Arm the slide timer for a sliding window. On fire: rotate the ring
  * (advance bucketIndex; init() the new current bucket), publish the
  * post-slide state, re-arm. The publish on every slide is what gives
  * subscribers a smooth-decaying view rather than waiting for the next
- * event after the eviction.
+ * event after the eviction. A privacy window skips a slide that leaves its
+ * value unchanged (no fresh noise over a value already released).
  *
  * @param {any} entry
  * @param {any} win
@@ -2750,16 +2767,28 @@ function _scheduleNextSlide(entry, win) {
 	win.slideTimer = setTimer(() => {
 		win.slideTimer = null;
 		try {
+			// With keyed noise, remember the true value before the eviction: a
+			// slide that leaves it unchanged must not draw fresh noise over it.
+			const before = win.privacy ? _slideFingerprint(_computeWindowState(win, entry.reducers)) : null;
 			// Advance the ring head and clear the new current bucket.
 			win.bucketIndex = (win.bucketIndex + 1) % win.bucketCount;
 			win.buckets[win.bucketIndex] = _createAggregateState(entry.reducers, entry.forget);
 			// The evicted bucket's contributors leave the k-anonymity cohort too.
 			if (win.bucketCohorts) win.bucketCohorts[win.bucketIndex] = new Set();
-			// Refresh the noise seed each slide from the exact wall-clock slide
-			// epoch (replicas sliding in the same epoch share it), so the DP offset
-			// does not stay constant. It moves forward on every slide: a clock
-			// stepped back, or a slide that fires a hair early, would otherwise
-			// repeat an earlier seed and with it that slide's noise.
+			// An eviction that changes nothing (an idle window, or an empty bucket
+			// falling out) keeps the current seed and publishes nothing: re-seeding
+			// would release the same true value under a fresh independent draw on
+			// every slide, and averaging those releases removes the noise. Subscribers
+			// already hold the value, and a pending debounced publish still lands.
+			// Eviction only shrinks the cohort, so skipping cannot hide a value the
+			// threshold would newly release.
+			if (before !== null && before === _slideFingerprint(_computeWindowState(win, entry.reducers))) return;
+			// Refresh the noise seed on a slide that changes the value, from the
+			// exact wall-clock slide epoch (replicas sliding in the same epoch share
+			// it), so the noise offset does not stay constant across changing
+			// releases. It moves forward on every re-seed: a clock stepped back, or
+			// a slide that fires a hair early, would otherwise repeat an earlier seed
+			// and with it that slide's noise.
 			if (win.privacy) win._windowStart = Math.max(win._windowStart + 1, Math.floor(wallEpoch() / win.spec.slideMs));
 			// Publish the post-slide combined state so a subscriber sees
 			// values dropping out of the window even when no fresh events
@@ -3737,9 +3766,8 @@ export function close(ws, { platform, subscriptions }) {
 	if (pushUserId != null) {
 		_wsToPushUserId.delete(ws);
 		const pushEntry = _pushRegistry.get(pushUserId);
-		// push-registry invariant: if userId was tracked in _wsToPushUserId,
-		// the registry should still have an entry for that userId. Missing
-		// entry means an external mutation cleared it.
+		// open retires superseded ownership. A tracked current owner must
+		// still have its route; an older socket's later close is untracked.
 		assert(pushEntry !== undefined, 'realtime/push-registry.entry-tracked', { userIdLen: pushUserId.length });
 		if (pushEntry && pushEntry.ws === ws) _pushRegistry.delete(pushUserId);
 	}
@@ -3973,7 +4001,7 @@ export function realtime(config) {
 
 	// Aggregate noise key (opt-in, required for keyed noise): the operator
 	// secret that keys the per-window noise seed (HMAC-SHA256 over
-	// tenant|topic|windowStart). Share it across every replica so they draw
+	// topic|windowStart; the tenant slot is reserved and empty). Share it across every replica so they draw
 	// identical noise. Without it a `perturb` / `hybrid` privacy aggregate
 	// refuses to publish rather than emit attacker-removable noise.
 	if (privacySecret !== undefined) {

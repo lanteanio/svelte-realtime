@@ -19,6 +19,9 @@ import { state } from './state.js';
  * aggregate changes. Single-state and lifetime aggregates reuse their offset
  * across restarts with the same secret, topic and noise configuration. One known
  * true value removes that offset from past and future releases of that field.
+ * A sliding window re-seeds only on a slide that changes its value; a continuous
+ * observer still learns each bucket's exact change, so it can link the releases
+ * around every changing slide and average their independent draws away.
  * Epsilon, delta and sensitivity only set the noise scale.
  */
 

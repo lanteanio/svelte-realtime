@@ -3,7 +3,7 @@ import { live } from '../server.js';
 import { monotonicNow, wallEpoch, setTimer, clearTimer } from '../shared/runtime.js';
 import { LiveError } from './live-error.js';
 import { _getIdentityKey } from './identity.js';
-import { _tenantTopic } from './tenant.js';
+import { _tenantTopic, _topicInTenant } from './tenant.js';
 import { createInterestState, targetDelayMs } from './interest.js';
 import { createLagComp, rayCircleHit, rayAabbHit } from './lagcomp.js';
 import { createRttTracker } from './rtt.js';
@@ -385,15 +385,21 @@ function _warnLegacyFanout() {
  * ring when the entity key IS the identity. Entity state in the app's own
  * catalog is app data the app removes through its own ops.
  *
+ * Scoped to one tenant: a smooth record's name is its tenant-prefixed topic,
+ * so only records inside the scope (`_topicInTenant`) are touched and an equal
+ * identity in another tenant's smooth entity survives.
+ *
  * Returns the number of entries removed, for the forget cascade's per-surface
  * count. Called from the forget descriptor table.
+ * @param {string | null} tenantId
  * @param {string} identity
  * @returns {number}
  */
-export function _purgeSmoothUser(identity) {
+export function _purgeSmoothUser(tenantId, identity) {
 	let count = 0;
 	const surrogateSuffix = '\u0000' + identity;
-	for (const rec of _smoothTopics.values()) {
+	for (const [name, rec] of _smoothTopics) {
+		if (!_topicInTenant(tenantId, name)) continue;
 		if (rec.pendingJoins?.delete(identity)) count++;
 		const ws = rec.registry.get(identity);
 		if (ws !== undefined) {

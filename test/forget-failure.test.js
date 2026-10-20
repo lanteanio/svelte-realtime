@@ -43,7 +43,7 @@ describe('incomplete erasure', () => {
 		const durable = vi.fn(async () => 3);
 		configureForget({ store: { purgeUser: durable } });
 		const onForget = vi.fn();
-		await expect(live.forget('member', { onForget })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('member', { tenantId: null, onForget })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(cohort.has('member')).toBe(false);
 		expect(durable).toHaveBeenCalledWith(null, 'member', true);
 		expect(onForget).not.toHaveBeenCalled();
@@ -56,20 +56,20 @@ describe('incomplete erasure', () => {
 
 	it('rejects an enabled surface without an erasure method', async () => {
 		configureWebhooks({ deadLetter: store() });
-		await expect(live.forget('member')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('member', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 	});
 
 	it('permits a successful retry after the failed surface recovers', async () => {
 		const purgeUser = vi.fn().mockRejectedValueOnce(new Error('temporarily down')).mockResolvedValueOnce(1);
 		configureWebhooks({ deadLetter: store(purgeUser) });
-		await expect(live.forget('member')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
-		await expect(live.forget('member')).resolves.toMatchObject({ ok: true, surfaces: { webhookDeadLetter: 1 } });
+		await expect(live.forget('member', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('member', { tenantId: null })).resolves.toMatchObject({ ok: true, surfaces: { webhookDeadLetter: 1 } });
 	});
 	it.each([{}, { drop() { throw new Error('private document failure'); } }])('rejects an unavailable CRDT erasure while still invoking the durable store', async (authority) => {
 		_crdtDecls.set('broken', { authority });
 		const durable = vi.fn(async () => 1);
 		configureForget({ store: { purgeUser: durable } });
-		await expect(live.forget('member', { cascade: { crdt: ['notes'] } })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('member', { tenantId: null, cascade: { crdt: ['notes'] } })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(durable).toHaveBeenCalledOnce();
 	});
 
@@ -78,14 +78,14 @@ describe('incomplete erasure', () => {
 		const second = vi.fn(() => true);
 		_crdtDecls.set('first', { authority: { drop: first } });
 		_crdtDecls.set('second', { authority: { drop: second } });
-		await expect(live.forget('member', { cascade: { crdt: ['broken', 'healthy'] } })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('member', { tenantId: null, cascade: { crdt: ['broken', 'healthy'] } })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 		expect(first.mock.calls).toEqual([['broken'], ['healthy']]);
 		expect(second.mock.calls).toEqual([['broken'], ['healthy']]);
 	});
 
 	it.each([undefined, false, NaN, Infinity, -1, { ok: false }])('rejects a malformed purge count (%s)', async value => {
 		configureWebhooks({ deadLetter: store(() => value) });
-		await expect(live.forget('member')).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
+		await expect(live.forget('member', { tenantId: null })).rejects.toMatchObject({ code: 'FORGET_INCOMPLETE' });
 	});
 
 });

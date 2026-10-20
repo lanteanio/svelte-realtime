@@ -21,7 +21,7 @@ import { _IS_DEV } from './env.js';
 import { wallEpoch } from '../shared/runtime.js';
 import { emitOperationalEvent } from '../shared/diagnostic.js';
 import { _enterInFlight, _exitInFlight } from './lifecycle.js';
-import { _validTenantId, _tenantKey } from './tenant.js';
+import { _validTenantId, _tenantKey, _isTenancyEnabled } from './tenant.js';
 import { _validIdReason, _MAX_USER_ID_LENGTH } from './validate.js';
 import { LiveError } from './live-error.js';
 import { createHash, createHmac, createSecretKey } from 'node:crypto';
@@ -124,7 +124,7 @@ function _hashUserId(userId, key) {
  * @type {Array<{ name: string, run: (tenantId: string | null, userId: string, cascade: any) => number | Promise<number> }>}
  */
 const _descriptors = [
-	{ name: 'push', run: (_t, u) => _purgePushUser(u) },
+	{ name: 'push', run: (t, u) => _purgePushUser(t, u) },
 	{ name: 'presence', run: (t, u) => _purgePresenceUser(_forgetPlatform, t, u, null) },
 	{ name: 'rateLimit', run: (t, u) => _purgeRateLimitUser(t, u) },
 	{ name: 'idempotency', run: (t, u) => _purgeIdempotencyUser(_tenantKey(t, u)) },
@@ -133,7 +133,7 @@ const _descriptors = [
 	// cross-instance surrogates, interest state (reported center = a literal
 	// user location, LOD memory, send cadence), and the lag-comp movement
 	// ring when the entity key is the identity.
-	{ name: 'smooth', run: (_t, u) => _purgeSmoothUser(u) },
+	{ name: 'smooth', run: (t, u) => _purgeSmoothUser(t, u) },
 	// The webhook dead-letter queue retains full event payloads on delivery
 	// exhaustion. Purge rides the store's own purgeUser (the in-memory store
 	// stamps a capture-time userId via its forgetUserId extractor; the durable
@@ -231,6 +231,15 @@ const _liveForget = async function forget(userId, opts) {
 	// tenantId is server-trusted: the app passes it from its own context
 	// (ctx.tenantId or its own logic), NEVER straight off the wire. Validated to
 	// the delimiter-safe charset so it cannot smuggle a `\0` into a scan match.
+	// With a tenant resolver or qualified erasure store, every call names its scope: a
+	// missing tenantId would otherwise fold into the untenanted scope and erase
+	// nothing of the tenant's data while reporting success. An explicit null
+	// still selects the untenanted scope. Both configured erasure stores take
+	// tenantId as their first purgeUser argument, even without a local resolver.
+	// With neither a store nor a resolver the legacy option stays optional.
+	if (o.tenantId === undefined && (_isTenancyEnabled() || _forgetStore !== null || state.webhookDeadLetter !== null)) {
+		throw new LiveError('INVALID_REQUEST', 'live.forget: opts.tenantId is required when a tenant resolver or erasure store is configured (pass null for the untenanted scope)');
+	}
 	const tenantId = o.tenantId == null ? null : _validTenantId(o.tenantId);
 	// cascade: `true` (default) runs the standard purge surface; the object
 	// form extends it - `{ crdt: [...] }` names whole documents to drop (a

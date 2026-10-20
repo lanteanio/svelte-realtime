@@ -24,9 +24,18 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `live.upload()` rejects a `maxBufferedChunks` that is not a positive integer at declaration.
 
+- With a tenant resolver, a `configureForget` store or an enabled webhook dead-letter store, `live.forget(userId, opts)` requires `opts.tenantId` and rejects with `INVALID_REQUEST` before any purge when it is missing; `tenantId: null` still selects the untenanted scope. Previously an omitted tenant erased the untenanted scope and reported success. Calls without these configured surfaces keep the optional scope.
+  **Action required:** applications with a resolver or erasure store pass `tenantId` (or an explicit `null`) on every `live.forget` call.
+
 ### Fixed
 
 - Pending sticky presence updates stop when their room membership leaves or is erased, including after the same identity rejoins. Retired memberships discard cached roster payloads, including when erasure needs a retry. Roster refusal warnings omit the member identity.
+
+- Overlapping sockets for one user or session can close newest-first without false push-registry invariant warnings. Replacing a route transfers reverse ownership to the newest socket; checks for a missing current route still report real corruption.
+
+- Push erasure uses the tenant captured when a socket registers. Later resolver failures or identity changes cannot erase another tenant's routes, and a failed registration leaves existing user and session routes intact.
+
+- A sliding-window aggregate with keyed noise no longer re-seeds and republishes on a slide that leaves its value unchanged. Before, an idle window released the same value under a fresh noise draw on every slide, and averaging those releases recovered it. The privacy docs state the remaining limit for continuously observed windows whose value changes.
 
 - Sticky presence updates validate cached roster rows against Redis even when the local value is unchanged. Releases, repeated values and cap decisions follow concurrent changes from other replicas; reconnect snapshots use the accepted row.
 
@@ -35,6 +44,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - Multiplayer presence no longer broadcasts a selection or lock that the 16 KB roster entry cap then refuses, so live members and late joiners agree. Releases in the same delta still apply.
 
 - Multiplayer presence rejects lock names over 128 UTF-8 bytes and caps releases at 2048 per delta before broadcasting or updating the roster.
+
+- `live.forget(userId, { tenantId })` erases only the named tenant's records from the in-memory webhook dead-letter store, the push registry and smooth state. An equal userId in another tenant keeps its dead-lettered events, routing and smooth entries, and a dead-letter delivery still in flight for that other tenant is captured instead of being dropped by the erasure's tombstone. The dead-letter store scopes by record topic, the same rule the durable stores apply.
 
 ## [0.6.0-next.91] - 2026-10-13
 
