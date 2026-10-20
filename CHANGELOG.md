@@ -230,6 +230,15 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - With a tenant resolver, `ctx.skip(key, ms)` scopes its key to the caller's tenant. Before, one tenant calling `ctx.skip` with a key another tenant also used suppressed that tenant's calls for the cooldown window.
 
+- Live handlers register in the SvelteKit 3 SSR environment during builds, development and hot reloads. Production builds emit the registry chunk and keep `svelte-realtime` external in the SSR environment; client imports still generate WebSocket stubs.
+
+- On Windows, live handlers and SvelteKit routes share one instance of each server module when the working directory's drive letter is lowercase. Vite 8 resolves its root with an uppercase drive letter, which loaded live modules a second time in development and in production builds.
+
+- One live file save reloads the handlers once, even when Vite reports it under two path spellings or as several events. A repeated event for a write whose reload failed reloads it again, and a later save of unchanged content still reloads.
+
+- An error while the dev server handles an added or removed live file is logged instead of rejecting the watcher listener.
+
+- The Vite plugin no longer declares the unsupported `transformIndexHtml` hook. Development tools load through a Vite module and work with streamed HTML responses.
 - A stream that resubscribes after a reconnect no longer applies the last event it received before the outage on top of the fresh snapshot. After a server restart the store showed that stale value instead of the server's current one.
 
 ## [0.6.0-next.91] - 2026-10-13

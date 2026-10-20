@@ -1,31 +1,73 @@
 // @ts-check
 import { relative } from 'path';
-import { REGISTRY_ID } from './constants.js';
+import { REGISTRY_ID, REGISTRY_PUBLIC_ID, SERVER_PUBLIC_ID } from './constants.js';
 import { _findLiveFiles } from './codegen-registry.js';
+
+/**
+ * The SSR environment SvelteKit 3 loads routes and hooks from, or null for
+ * SvelteKit 2. Kit 3 exposes its flattened options on the setup plugin
+ * whether or not the configuration has an inline adapter, so the check does
+ * not depend on the adapter's name.
+ * @param {any} server
+ * @returns {any}
+ */
+export function _serverEnvironment(server) {
+	const modernKit = server.config?.plugins?.some((/** @type {any} */ plugin) =>
+		plugin?.name === 'vite-plugin-sveltekit-setup' && plugin.api?.options?.paths
+	);
+	return modernKit ? server.environments?.ssr ?? null : null;
+}
+
+/**
+ * Import a module into the server graph that SvelteKit and the WebSocket
+ * hooks use.
+ * @param {any} server
+ * @param {string} id
+ * @returns {Promise<any>}
+ */
+export function _loadServerModule(server, id) {
+	const environment = _serverEnvironment(server);
+	if (!environment) return server.ssrLoadModule(id);
+	// Runner entry points are internalized. Import the runtime as a dependency
+	// so HMR clears the same instance that the live registry and hooks use.
+	return environment.runner.import(id === 'svelte-realtime/server' ? SERVER_PUBLIC_ID : id);
+}
+
+/**
+ * @param {any} server
+ * @returns {any}
+ */
+export function _serverModuleGraph(server) {
+	return _serverEnvironment(server)?.moduleGraph ?? server.moduleGraph;
+}
 
 /**
  * Invalidate the registry virtual module, clear all server-side registrations,
  * and re-import the registry so handlers are updated. If the re-import fails
  * (e.g. syntax error), restores the previous handlers so the server keeps working.
+ * Callers serialize reloads, so a clear and its re-import never interleave
+ * with another reload.
  * @param {import('vite').ViteDevServer} server
  * @param {string} liveDir
  * @param {string} dir
  * @param {string} rel - Relative path of the changed file (for logging)
+ * @returns {Promise<boolean>} Whether the new handlers were registered
  */
 export async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 	// Invalidate the registry virtual module so Vite regenerates it
-	const registryMod = server.moduleGraph.getModuleById(REGISTRY_ID);
+	const graph = _serverModuleGraph(server);
+	const registryMod = graph.getModuleById(REGISTRY_ID);
 	if (registryMod) {
-		server.moduleGraph.invalidateModule(registryMod);
+		graph.invalidateModule(registryMod);
 	}
 
 	/** @type {any} */
 	let serverMod;
 	try {
-		serverMod = await server.ssrLoadModule('svelte-realtime/server');
+		serverMod = await _loadServerModule(server, 'svelte-realtime/server');
 	} catch {
 		console.error('[svelte-realtime] HMR failed: could not load svelte-realtime/server\n  See: https://svti.me/vite');
-		return;
+		return false;
 	}
 
 	// Snapshot current state, then clear everything
@@ -34,17 +76,19 @@ export async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 		snap = serverMod._prepareHmr();
 	} catch (error) {
 		console.error('[svelte-realtime] HMR preparation failed:', error instanceof Error ? error.message : String(error));
-		return;
+		return false;
 	}
 
 	try {
-		await server.ssrLoadModule('/@svelte-realtime-registry');
+		await _loadServerModule(server, REGISTRY_PUBLIC_ID);
 		console.log(`[svelte-realtime] Hot-reloaded: ${dir}/${rel}`);
+		return true;
 	} catch (e) {
 		// Re-import failed - restore old handlers so the server keeps working
 		serverMod._restoreHmr(snap);
 		console.error(`[svelte-realtime] HMR failed for ${dir}/${rel}:`, /** @type {Error} */ (e).message);
 		console.error('[svelte-realtime] Previous handlers restored - fix the error and save again');
+		return false;
 	}
 }
 
@@ -57,7 +101,7 @@ export async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 export async function _loadRegistryDirect(server, liveDir, dir) {
 	let serverMod;
 	try {
-		serverMod = await server.ssrLoadModule('svelte-realtime/server');
+		serverMod = await _loadServerModule(server, 'svelte-realtime/server');
 	} catch {
 		console.warn('[svelte-realtime] Could not load svelte-realtime/server for direct registration');
 		return;
@@ -68,7 +112,7 @@ export async function _loadRegistryDirect(server, liveDir, dir) {
 
 	for (const filePath of files) {
 		try {
-			const mod = await server.ssrLoadModule(filePath);
+			const mod = await _loadServerModule(server, filePath);
 			const rel = relative(liveDir, filePath).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
 
 			for (const [name, fn] of Object.entries(mod)) {
