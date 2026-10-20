@@ -665,21 +665,26 @@ export default function svelteRealtime(options) {
 	const handledVersions = new Map();
 	/**
 	 * Vite watches a module under every spelling it was imported with, so on
-	 * Windows one save or delete can arrive once per spelling. Record the
-	 * content of a live file, keyed by its liveDir spelling, and return it, or
-	 * return null when that content is already being handled.
+	 * Windows one save or delete can arrive once per spelling, and an atomic
+	 * rename can report one write as several events. Record the write (its
+	 * mtime and content) of a live file, keyed by its liveDir spelling, and
+	 * return it, or return null when that write was already handled. A later
+	 * save has a new mtime even when its content is unchanged.
 	 * @param {string} file
 	 * @returns {string | null}
 	 */
 	const claimVersion = (file) => {
 		let version = '\0absent';
-		try { version = readFileSync(file, 'utf8'); } catch {}
+		try {
+			const { mtimeMs } = statSync(file);
+			version = mtimeMs + '\0' + readFileSync(file, 'utf8');
+		} catch {}
 		if (handledVersions.get(file) === version) return null;
 		handledVersions.set(file, version);
 		return version;
 	};
 	/**
-	 * Forget a version whose reload failed, so saving it again retries.
+	 * Forget a write whose reload did not succeed, so saving it again retries.
 	 * @param {string} file
 	 * @param {string} version
 	 */
@@ -910,18 +915,21 @@ export default function svelteRealtime(options) {
 					const live = _respellUnder(liveDir, resolve(file));
 					const version = live ? claimVersion(live) : undefined;
 					if (version === null) return;
+					let reloaded = false;
+					try {
+						_fileCache.clear();
+						_codeCache.clear();
+						_warnedExports.clear();
 
-					_fileCache.clear();
-				_codeCache.clear();
-				_warnedExports.clear();
+						if (typedImports) {
+							_writeTypeDeclarations(liveDir, dir);
+						}
 
-					if (typedImports) {
-						_writeTypeDeclarations(liveDir, dir);
+						const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
+						reloaded = await _hmrReloadRegistry(server, liveDir, dir, rel);
+					} finally {
+						if (live && version !== undefined && !reloaded) releaseVersion(live, version);
 					}
-
-					const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-					const reloaded = await _hmrReloadRegistry(server, liveDir, dir, rel);
-					if (live && version !== undefined && !reloaded) releaseVersion(live, version);
 				});
 			}
 		},
@@ -938,32 +946,40 @@ export default function svelteRealtime(options) {
 			if (file.endsWith('.d.ts')) return [];
 			// Same non-module filter as the add/unlink watcher.
 			if (!/\.[jt]s$/.test(file) || file.endsWith('.test.js') || file.endsWith('.test.ts')) return;
-			const version = claimVersion(file);
-			if (version === null) return [];
-			_fileCache.delete(file);
-			_codeCache.delete('client:' + file);
-			_codeCache.delete('ssr:' + file);
-
-			// Regenerate type declarations on file change
-			if (typedImports) {
-				_writeTypeDeclarations(liveDir, dir);
-			}
-
 			const rel = relative(liveDir, file)
 				.replace(/\\/g, '/')
 				.replace(/\.[jt]s$/, '');
 
-			// Server-side HMR: invalidate the changed module so Vite re-executes it
-			const graph = _serverModuleGraph(server);
-			for (const spelling of new Set([file, reported])) {
-				const ssrMods = graph.getModulesByFile(spelling.split(sep).join('/'));
-				if (ssrMods) {
-					for (const m of ssrMods) graph.invalidateModule(m);
+			// A repeated event for an already handled write skips only the server
+			// reload; the client update below stays the same for every event.
+			const version = claimVersion(file);
+			if (version !== null) {
+				let reloaded = false;
+				try {
+					_fileCache.delete(file);
+					_codeCache.delete('client:' + file);
+					_codeCache.delete('ssr:' + file);
+
+					// Regenerate type declarations on file change
+					if (typedImports) {
+						_writeTypeDeclarations(liveDir, dir);
+					}
+
+					// Server-side HMR: invalidate the changed module so Vite re-executes it
+					const graph = _serverModuleGraph(server);
+					for (const spelling of new Set([file, reported])) {
+						const ssrMods = graph.getModulesByFile(spelling.split(sep).join('/'));
+						if (ssrMods) {
+							for (const m of ssrMods) graph.invalidateModule(m);
+						}
+					}
+
+					// Re-register all server handlers
+					reloaded = await _hmrReloadRegistry(server, liveDir, dir, rel);
+				} finally {
+					if (!reloaded) releaseVersion(file, version);
 				}
 			}
-
-			// Re-register all server handlers
-			if (!(await _hmrReloadRegistry(server, liveDir, dir, rel))) releaseVersion(file, version);
 
 			// Client-side: invalidate the virtual module so the browser picks up new stubs
 			const mod = server.moduleGraph.getModuleById(VIRTUAL_PREFIX + rel);

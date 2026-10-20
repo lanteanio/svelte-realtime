@@ -43,6 +43,8 @@ initialization with the harmless value `fixture-secret`.
 Devtools checks require the runtime object and overlay to load in development.
 Production and `--no-devtools` runs require both to be absent. `--hmr` replaces a
 handler, removes another, and checks both RPC results and live store delivery.
+That single edit must reload the registry exactly once, even when Vite reports
+the file under more than one path spelling.
 A route-only edit then verifies the updated HTTP response, fresh WebSocket RPC,
 and matching stores in both pages. Adding and removing a live file must update
 the RPC registry and preserve shared HTTP and WebSocket state. Kit 3 development also covers a renamed

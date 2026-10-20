@@ -1,6 +1,6 @@
 import { mergeConfig } from 'vite';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, utimesSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -256,11 +256,63 @@ describe('repeated live module updates', () => {
    expect(s.runtime._restoreHmr).toHaveBeenCalledTimes(1);
    await p.handleHotUpdate(update);
    expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
-   // The successful reload of this content is not repeated.
+   // Another event for the same, now handled, write does not reload again.
    await p.handleHotUpdate(update);
    expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
    expect(s.runtime._restoreHmr).toHaveBeenCalledTimes(1);
   } finally { error.mockRestore(); }
+ });
+ it('reloads a deliberate save of unchanged content', async () => {
+  const p = plugin();
+  const s = server();
+  const file = join(root, 'src/live/count.js');
+  const update = { file: file.replaceAll('\\', '/'), server: s };
+  await p.handleHotUpdate(update);
+  utimesSync(file, new Date(), new Date(Date.now() + 5000));
+  await p.handleHotUpdate(update);
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+ });
+ it('retries a save whose reload threw', async () => {
+  const p = plugin();
+  const s = server();
+  s.runtime._prepareHmr.mockImplementationOnce(() => { throw new Error('runtime unavailable'); });
+  const update = { file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s };
+  await expect(p.handleHotUpdate(update)).rejects.toThrow('runtime unavailable');
+  await p.handleHotUpdate(update);
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+ });
+ it('retries a new live file whose first registration failed', async () => {
+  const p = plugin();
+  const s = server();
+  let failRegistry = true;
+  s.load.mockImplementation(async id => {
+   if (id === '/@svelte-realtime-server') return s.runtime;
+   if (id === '/@svelte-realtime-registry' && failRegistry) {
+    failRegistry = false;
+    throw new Error('missing import');
+   }
+   return {};
+  });
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  try {
+   p.configureServer(s);
+   const add = s.watcher.on.mock.calls.find(([event]) => event === 'add')[1];
+   const file = join(root, 'src/live/count.js');
+   await add(file);
+   expect(s.runtime._restoreHmr).toHaveBeenCalledTimes(1);
+   await p.handleHotUpdate({ file: file.replaceAll('\\', '/'), server: s });
+   expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+  } finally { error.mockRestore(); }
+ });
+ it('returns the same client update for a repeated event and reloads the server once', async () => {
+  const p = plugin();
+  const s = server(false);
+  const update = { file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s };
+  const first = await p.handleHotUpdate(update);
+  const second = await p.handleHotUpdate(update);
+  expect(first).toEqual([s.registry]);
+  expect(second).toEqual(first);
+  expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(1);
  });
 });
 
