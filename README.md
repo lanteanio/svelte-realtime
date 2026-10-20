@@ -4671,7 +4671,7 @@ export const feed = live.stream('feed', async (ctx) => {
 
 Replay requires the replay extension from `svelte-adapter-uws-extensions`. When replay is not available or the gap is too large, the client falls back to a full refetch automatically.
 
-With adapter 0.4.0+, the replay end marker sends `{ reqId }` (replay complete) or `{ reqId, truncated: true }` (cache miss). When truncated, the client automatically resets its sequence number and triggers a full refetch.
+With adapter 0.4.0+, the replay end marker sends `{ reqId }` (replay complete) or `{ reqId, truncated: true }` (cache miss). When truncated, the client automatically resets its sequence number and triggers a full refetch. The same happens when a clustered server proves it lost relayed frames for a topic and sends a `gap` marker: every mounted stream on that topic drops its sequence number and reloads in full on its own, after a random delay inside the window the marker carries, and markers that arrive before that reload goes out share it.
 
 #### Auto-routing: `replay: true` is the only declaration you need
 

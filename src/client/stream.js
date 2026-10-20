@@ -694,6 +694,15 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	/** @type {(() => void) | null} */
 	let topicUnsub = null;
 
+	/** @type {(() => void) | null} Listener for the server's relay-gap markers on `__replay:<topic>` */
+	let _gapUnsub = null;
+	/** @type {string | null} The wire topic `_gapUnsub` listens for */
+	let _gapTopic = null;
+	/** @type {any} Pending re-snapshot after a gap marker, rolled inside its de-herd window */
+	let _gapTimer = null;
+	/** @type {boolean} A gap marker arrived and no subscribe has been sent since: the next one must be a full snapshot */
+	let _resnapshotOwed = false;
+
 	/** @type {string | null} Managed wire topic this instance holds a `_managedTopicRefs` ref on (see the module-level release machinery). */
 	let _managedHeldTopic = null;
 
@@ -1601,6 +1610,63 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	}
 
 	/**
+	 * The server proved it lost relayed frames for this stream's topic: what the
+	 * stream shows is short by at least `lost` frames and its resume cursor can
+	 * no longer be trusted. Drop the cursor now and re-snapshot after a local
+	 * random delay in [0, j) when the marker carries a de-herd window `j`, so a
+	 * large room does not refetch at once. Markers that arrive before that
+	 * re-snapshot is sent collapse into it; one that arrives after needs its own,
+	 * since what was lost after the snapshot was taken is only signalled by the
+	 * later marker.
+	 * @param {any} envelope
+	 */
+	function _onGapMarker(envelope) {
+		_dropResumeCursors();
+		_resnapshotOwed = true;
+		if (_gapTimer !== null) return;
+		const j = envelope.j;
+		const delay = typeof j === 'number' && j > 0 ? randomFloat() * (j > 60000 ? 60000 : j) : 0;
+		_gapTimer = setTimer(() => {
+			_gapTimer = null;
+			// A subscribe sent since (a reconnect, a resume) already asked for the
+			// full snapshot; while the socket is down the reconnect will.
+			if (!_resnapshotOwed || subCount === 0 || !clientState.socketUp || _closedForGoodNow()) return;
+			if (topicUnsub) { topicUnsub(); topicUnsub = null; }
+			_jitter.clear();
+			initialLoaded = false;
+			fetching = false;
+			buffer = [];
+			fetchAndSubscribe();
+		}, delay);
+	}
+
+	/**
+	 * Listen for relay-gap markers on the bound topic (idempotent per topic).
+	 * The adapter delivers them on the reserved `__replay:<topic>` store,
+	 * which has no wire subscription of its own.
+	 */
+	function _listenForGaps() {
+		if (_gapTopic === topic && _gapUnsub) return;
+		_stopGapListener();
+		if (!topic) return;
+		_gapTopic = topic;
+		let initial = true;
+		_gapUnsub = _conn().on('__replay:' + topic).subscribe((envelope) => {
+			// The store hands a new subscriber the last event it saw, which may
+			// be a marker an earlier listener already acted on.
+			if (initial || !envelope || envelope.event !== 'gap') return;
+			_onGapMarker(envelope);
+		});
+		initial = false;
+	}
+
+	function _stopGapListener() {
+		if (_gapUnsub) { _gapUnsub(); _gapUnsub = null; }
+		_gapTopic = null;
+		if (_gapTimer !== null) { clearTimer(_gapTimer); _gapTimer = null; }
+	}
+
+	/**
 	 * Bind this stream to its server-resolved wire topic: mark it server-managed,
 	 * hold the managed ref, route topic errors and denials here. Idempotent for
 	 * the same topic; a topic switch releases the old one. Shared by the early
@@ -1610,7 +1676,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	function _bindTopic(nextTopic) {
 		if (topic && topic !== nextTopic) _unregisterTopicErrorSetter(topic, _setError);
 		topic = nextTopic || null;
-		if (!topic) return;
+		if (!topic) { _stopGapListener(); return; }
 		// The server subscribes this connection to `topic` itself (the stream
 		// RPC runs platform.subscribe after the guard / access filter), so mark
 		// it server-managed: the client attaches its dispatch store WITHOUT
@@ -1628,6 +1694,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		}
 		_registerTopicErrorSetter(topic, _setError);
 		ensureDenialsListener();
+		_listenForGaps();
 	}
 
 	/** @type {boolean} The in-flight subscribe installed the live listener from an attach frame */
@@ -1714,6 +1781,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		const conn = _conn();
 
 		/** @type {any} */
+		// The first subscribe after a gap marker asks for a full snapshot.
+		if (_resnapshotOwed) {
+			_resnapshotOwed = false;
+			_dropResumeCursors();
+		}
 		const request = { rpc: path, id, args: dynamicArgs || [], stream: true, attach: true };
 		if (_lastSeq !== null) request.seq = _lastSeq;
 		if (_lastVersion !== undefined) request.version = _lastVersion;
@@ -1946,6 +2018,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			topicUnsub();
 			topicUnsub = null;
 		}
+		_stopGapListener();
 		// Let go of the held adapter ref once this stream has no pending work.
 		if (_managedHeldTopic) {
 			const releasedTopic = _managedHeldTopic;
@@ -2018,6 +2091,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 		_history = [];
 		_historyIndex = -1;
 		_reconnectAttempts = 0;
+		_resnapshotOwed = false;
 		_lastSeq = null;
 		_lastVersion = undefined;
 		_schemaVersion = initialSchemaVersion;

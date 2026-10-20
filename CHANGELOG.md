@@ -22,6 +22,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `createTestEnv().connect()` clients expose `sendRaw(frame)` and `onMessage(listener)` to drive the real dispatcher with encoded frames.
 
+- A mounted stream reloads its topic in full when the adapter reports a relay gap for it (frames a clustered server lost), spread over the marker's de-herd window and with markers that arrive before the reload sharing it. No application handler is needed.
+
 - Declare client request budgets with `live(fn, { timeout })`, `live.stream(..., { timeout })`, and `live.upload(fn, { timeout })`. Generated stubs carry the budget; per-call RPC overrides retain precedence over function and app-wide defaults.
 
 - Streams expose a `pending` store that turns true only once an attach has taken longer than `pendingDelay` (100 ms by default, `0` for immediate), so a quick load never flashes a spinner. Connection status and errors stay immediate.
