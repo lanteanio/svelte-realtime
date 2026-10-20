@@ -2437,11 +2437,9 @@ let localKeySource;
 
 /**
  * Load the shipped rune class. The rune source is read verbatim from the
- * package; its `./shared/color.js` import is repointed at a sibling copy of the
- * shipped color helper so the compiled module resolves locally, then it is
- * compiled to a client rune module and imported. Nothing about the class body
- * is redefined here - only its color-import specifier is rewritten so the
- * compiled output can find the shipped helper next to it.
+ * package; its local imports are repointed at the shipped modules so the
+ * compiled output resolves them from the probe directory. The class body is
+ * compiled and imported without redefining any behavior.
  *
  * Each call writes into its own unique directory (mkdtemp under runeProbeRoot)
  * and imports with a monotonic cache-buster, so concurrent or back-to-back
@@ -2458,7 +2456,8 @@ async function loadShippedRuneModule() {
 	writeFileSync(resolve(probeDir, 'color.js'), colorSource);
 
 	const runeSource = readFileSync(SHIPPED_RUNE_PATH, 'utf8')
-		.replace(/(['"])\.\/shared\/color\.js\1/g, "'./color.js'");
+		.replace(/(['"])\.\/shared\/color\.js\1/g, "'./color.js'")
+		.replace(/(['"])\.\/client\.js\1/g, JSON.stringify(pathToFileURL(resolve(SHIPPED_RUNE_PATH, '..', 'client.js')).href));
 
 	const { js } = compileModule(runeSource, {
 		filename: 'client-multiplayer.svelte.js',
@@ -2841,7 +2840,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([{ key: 'alice', data: { name: 'Alice' } }]);
 		const cursors = fakeStore([]);
-		const status = fakeStore('connected');
+		const status = fakeStore('open');
 		const r = new MultiplayerRoom({ me: 'me', presence, cursors, status, move: () => {} });
 
 		expect(r.others.map((o) => o.key)).toEqual(['alice']);
@@ -2860,7 +2859,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([]);
 		const cursors = fakeStore([{ key: 'alice', x: 1, y: 2 }]);
-		const status = fakeStore('connected');
+		const status = fakeStore('open');
 		const r = new MultiplayerRoom({ me: 'me', presence, cursors, status, move: () => {} });
 
 		expect(r.cursors).toHaveLength(1);
@@ -2880,7 +2879,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([]);
 		const cursors = fakeStore([]);
-		const status = fakeStore('connected');
+		const status = fakeStore('open');
 		const owner = fakeStore({ key: 'alice', reason: null });
 		const r = new MultiplayerRoom({ me: 'alice', presence, cursors, status, owner, move: () => {} });
 
@@ -2903,7 +2902,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		await loadShippedRuneModule();
 		const presence = fakeStore([]);
 		const cursors = fakeStore([]);
-		const status = fakeStore('connected');
+		const status = fakeStore('open');
 		const bare = new MultiplayerRoom({ me: 'alice', presence, cursors, status, move: () => {} });
 		expect(bare.owner).toBe(null);
 		expect(bare.isOwner).toBe(false);
@@ -2926,7 +2925,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence,
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -2946,7 +2945,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 42,
 			presence,
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -2968,7 +2967,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: undefined,
 			presence,
 			cursors: fakeStore([{ key: 'alice', x: 1, y: 2 }]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -2999,7 +2998,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence,
 			cursors,
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -3024,7 +3023,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence,
 			cursors: emptyStore,
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -3048,7 +3047,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence,
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -3075,7 +3074,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence: fakeStore([]),
 			cursors,
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -3102,7 +3101,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: meSource,
 			presence,
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -3126,7 +3125,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence: fakeStore([]),
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: (...args) => { moveCalls.push(args); return 'moved'; },
 			reportViewport: (...args) => { viewportCalls.push(args); return 'viewport'; }
 		});
@@ -3152,9 +3151,9 @@ describe('MultiplayerRoom roster aggregation', () => {
 		expect(r.me).toBe('me');
 		expect(r.status).toBe('loading');
 
-		status.set('connected');
+		status.set('open');
 		flushSync();
-		expect(r.status).toBe('connected');
+		expect(r.status).toBe('open');
 		r.destroy();
 	});
 
@@ -3165,7 +3164,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence: fakeStore([]),
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: (...args) => { calls.push(args); return 'sent'; }
 		});
 
@@ -3209,7 +3208,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 				me: 'bob',
 				presence: fakeStore(roster),
 				cursors: fakeStore([]),
-				status: fakeStore('connected'),
+				status: fakeStore('open'),
 				selections: mode,
 				move: () => {}
 			});
@@ -3234,7 +3233,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence: fakeStore([{ key: 'alice', data: {} }]),
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			membership,
 			move: () => {}
 		});
@@ -3253,7 +3252,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const probe = await loadOwnerProbe();
 		const membership = countingStore([]);
 		const presence = countingStore([]);
-		const { stop } = probe.inRoot({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('connected'), membership });
+		const { stop } = probe.inRoot({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('open'), membership });
 		expect([membership.subscribed, membership.released]).toEqual([1, 0]);
 		stop();
 		expect([membership.subscribed, membership.released]).toEqual([1, 1]);
@@ -3263,7 +3262,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 	it('a reader coming and going does not make a component room rejoin', async () => {
 		const probe = await loadOwnerProbe();
 		const membership = countingStore([]);
-		const { room, stop } = probe.inRoot({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), membership });
+		const { room, stop } = probe.inRoot({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('open'), membership });
 		const unread = probe.read(room);
 		unread();
 		expect([membership.subscribed, membership.released]).toEqual([1, 0]);
@@ -3276,7 +3275,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const membership = countingStore([]);
 		const sent = [];
 		const { room, stop } = probe.inRoot({
-			me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), membership,
+			me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('open'), membership,
 			setTyping: (d) => sent.push(d), move: (p) => sent.push(p)
 		});
 		room.destroy();
@@ -3294,7 +3293,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const probe = await loadOwnerProbe();
 		const membership = countingStore([]);
 		const presence = countingStore([{ key: 'alice', data: {} }]);
-		const room = new MultiplayerRoom({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('connected'), membership });
+		const room = new MultiplayerRoom({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('open'), membership });
 		const unread = probe.read(room);
 		expect(room.others.map((o) => o.key)).toEqual(['alice']);
 		unread();
@@ -3312,14 +3311,14 @@ describe('MultiplayerRoom roster aggregation', () => {
 		await loadShippedRuneModule();
 		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
 		try {
-			const view = new MultiplayerRoom({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected') });
+			const view = new MultiplayerRoom({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('open') });
 			expect(view.setTyping(true)).toBeUndefined();
 			view.setTyping(false);
 			const notes = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('setTyping() sends nothing'));
 			expect(notes).toHaveLength(1);
 			expect(notes[0]).toContain('watch()');
 
-			const room = new MultiplayerRoom({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), react: () => 'sent' });
+			const room = new MultiplayerRoom({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('open'), react: () => 'sent' });
 			room.destroy();
 			warn.mockClear();
 			expect(room.react('heart')).toBeUndefined();
@@ -3344,7 +3343,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			return { presence: fakeStore([{ key: 'in-' + id, data: {} }]), cursors: fakeStore([]), membership, setTyping: record, move: record, acquireLock: record, releaseLock: record };
 		};
 		const counts = (id) => (members.get(id) || []).reduce((a, m) => [a[0] + m.subscribed, a[1] + m.released], [0, 0]);
-		return { deps: { me: 'me', status: fakeStore('connected'), bind }, counts, sent, binds };
+		return { deps: { me: 'me', status: fakeStore('open'), bind }, counts, sent, binds };
 	}
 
 	it('a room following an args getter moves to the room it names', async () => {
@@ -3449,7 +3448,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			};
 		};
 		const answer = (id, phase = 'attached') => storeFor(id).phase.set(phase);
-		const fixed = { me: 'me', status: fakeStore('connected') };
+		const fixed = { me: 'me', status: fakeStore('open') };
 		return { deps: { ...fixed, bind: ([id]) => roomDeps(id) }, room: (id) => ({ ...fixed, ...roomDeps(id) }), sent, answer };
 	}
 
@@ -3469,6 +3468,105 @@ describe('MultiplayerRoom roster aggregation', () => {
 		await expect(Promise.resolve(r.move({ x: 2 }))).resolves.toBe('move-ack');
 		expect(sent.map(call => call[1])).toEqual(['acquireLock', 'setTyping', 'setSelection', 'releaseLock', 'move']);
 		r.destroy();
+	});
+
+	it('rejects every held caller at terminal failure and starts clean after an explicit reopen', async () => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const deps = room('a');
+		const r = new MultiplayerRoom(deps);
+		const held = [r.acquireLock('title'), r.releaseLock('title'), r.setTyping(true), r.move({ x: 1 }), r.move({ x: 2 }), r.reportViewport({ width: 10 })];
+		const outcomes = held.map(promise => promise.then(() => 'sent', error => error.code));
+		r.setSelection({ start: 1, end: 3 });
+		r.react('heart');
+		expect(sent).toEqual([]);
+		deps.status.set('failed');
+		expect(await Promise.all(outcomes)).toEqual(held.map(() => 'CONNECTION_CLOSED'));
+		await expect(r.acquireLock('later')).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		expect(r.setSelection({ start: 2, end: 4 })).toBeUndefined();
+		expect(r.react('heart')).toBeUndefined();
+		deps.status.set('connecting');
+		await expect(r.move({ x: 3 })).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' });
+		expect(sent).toEqual([]);
+		deps.status.set('open');
+		const fresh = r.acquireLock('fresh');
+		answer('a');
+		await expect(fresh).resolves.toBe('acquireLock-ack');
+		expect(sent).toEqual([['a', 'acquireLock', { 'lock:fresh': true }]]);
+		r.destroy();
+	});
+
+	it.each(['failed', 'reopened'])('settles sends held past the final view destruction when the connection is %s', async outcome => {
+		await loadShippedRuneModule();
+		const { room, sent, answer } = joiningRooms();
+		const deps = room('a');
+		const status = deps.status;
+		let listeners = 0;
+		deps.status = { subscribe(fn) {
+			listeners++;
+			const off = status.subscribe(fn);
+			return () => { listeners--; off(); };
+		} };
+		const r = new MultiplayerRoom(deps);
+		answer('a');
+		status.set('disconnected');
+		const results = [];
+		const held = r.acquireLock('title').then(value => results.push(value), error => results.push(error.code));
+		r.destroy();
+		expect(results).toEqual([]);
+		if (outcome === 'failed') status.set('failed');
+		else { status.set('open'); answer('a', 'attaching'); answer('a'); }
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(results).toEqual([outcome === 'failed' ? 'CONNECTION_CLOSED' : 'acquireLock-ack']);
+		await held;
+		expect(listeners).toBe(0);
+		expect(sent).toEqual(outcome === 'failed' ? [] : [['a', 'acquireLock', { 'lock:title': true }]]);
+	});
+
+	it('releases connection observation when the final view leaves only automatic restoration', async () => {
+		await loadShippedRuneModule();
+		const { room, answer } = joiningRooms();
+		const deps = room('a');
+		const status = deps.status;
+		let listeners = 0;
+		deps.status = { subscribe(fn) {
+			listeners++;
+			const off = status.subscribe(fn);
+			return () => { listeners--; off(); };
+		} };
+		const r = new MultiplayerRoom(deps);
+		answer('a');
+		await r.acquireLock('title');
+		status.set('disconnected');
+		r.destroy();
+		expect(listeners).toBe(0);
+	});
+
+	it('unwinds a failed shared status subscription before another view joins', async () => {
+		await loadShippedRuneModule();
+		const { room, answer } = joiningRooms();
+		const deps = room('a');
+		const status = deps.status;
+		deps.status = { subscribe() { throw new Error('status store broke'); } };
+		expect(() => new MultiplayerRoom(deps)).toThrow('status store broke');
+		let listeners = 0;
+		deps.status = { subscribe(fn) {
+			listeners++;
+			const off = status.subscribe(fn);
+			return () => { listeners--; off(); };
+		} };
+		const r = new MultiplayerRoom(deps);
+		answer('a');
+		status.set('disconnected');
+		const results = [];
+		const held = Promise.resolve(r.acquireLock('title')).then(value => results.push(value), error => results.push(error.code));
+		r.destroy();
+		status.set('failed');
+		await Promise.resolve();
+		expect(results).toEqual(['CONNECTION_CLOSED']);
+		await held;
+		expect(listeners).toBe(0);
 	});
 
 	it('restores retained presence only after a reconnect joins, with offline releases winning', async () => {
@@ -3823,7 +3921,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		// join between instances: an entry with fields and no `data`.
 		const early = { key: 'bob', typing: true, 'lock:title': true, selection: { start: 0, end: 3 } };
 		const presence = fakeStore([{ key: 'alice', data: { name: 'Alice' } }, early]);
-		const r = new MultiplayerRoom({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('connected'), move: () => {} });
+		const r = new MultiplayerRoom({ me: 'me', presence, cursors: fakeStore([]), status: fakeStore('open'), move: () => {} });
 		expect(r.others.map((p) => p.key)).toEqual(['alice']);
 		expect(r.typing).toEqual([]);
 		expect(r.locks).toEqual({});
@@ -3846,7 +3944,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const bound = [];
 		const room = new MultiplayerRoom({
 			me: 'me',
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			args: [() => ['org-1', 'b1']],
 			bind: (args) => {
 				bound.push(args);
@@ -4067,7 +4165,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const probe = await loadOwnerProbe();
 		const membership = countingStore([]);
 		const sent = [];
-		const view = probe.inBareCleanup({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), membership, setTyping: (d) => sent.push(d) });
+		const view = probe.inBareCleanup({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('open'), membership, setTyping: (d) => sent.push(d) });
 		expect(view.built).not.toBeNull();
 		expect([membership.subscribed, membership.released]).toEqual([0, 0]);
 		view.built.setTyping(false);
@@ -4103,7 +4201,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const probe = await loadOwnerProbe();
 		const membership = countingStore([]);
 		const sent = [];
-		const view = probe.inCleanup({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('connected'), membership, setTyping: (d) => sent.push(d) });
+		const view = probe.inCleanup({ me: 'me', presence: fakeStore([]), cursors: fakeStore([]), status: fakeStore('open'), membership, setTyping: (d) => sent.push(d) });
 		expect(view.built).not.toBeNull();
 		expect([membership.subscribed, membership.released]).toEqual([0, 0]);
 		view.built.setTyping(false);
@@ -4116,7 +4214,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const probe = await loadOwnerProbe();
 		const presence = countingStore([]);
 		const cursors = { subscribe() { throw new Error('cursor store broke'); } };
-		expect(() => probe.inRoot({ me: 'me', presence, cursors, status: fakeStore('connected'), membership: countingStore([]) })).toThrow('cursor store broke');
+		expect(() => probe.inRoot({ me: 'me', presence, cursors, status: fakeStore('open'), membership: countingStore([]) })).toThrow('cursor store broke');
 		expect([presence.subscribed, presence.released]).toEqual([1, 1]);
 	});
 
@@ -4125,7 +4223,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 		const source = localKeySource();
 		let userId = 'u1';
 		source.set(() => userId);
-		const room = new MultiplayerRoom({ me: source, presence: fakeStore([{ key: 'u1', data: {} }, { key: 'u2', data: {} }]), cursors: fakeStore([]), status: fakeStore('connected') });
+		const room = new MultiplayerRoom({ me: source, presence: fakeStore([{ key: 'u1', data: {} }, { key: 'u2', data: {} }]), cursors: fakeStore([]), status: fakeStore('open') });
 		expect(room.me).toBe('u1');
 		expect(room.others.map((o) => o.key)).toEqual(['u2']);
 		userId = 'u2';
@@ -4142,7 +4240,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			const membership = countingStore([]);
 			if (!byId.has(id)) byId.set(id, []);
 			byId.get(id).push(membership);
-			return { me: 'me', presence: fakeStore([{ key: 'in-' + id, data: {} }]), cursors: fakeStore([]), status: fakeStore('connected'), membership };
+			return { me: 'me', presence: fakeStore([{ key: 'in-' + id, data: {} }]), cursors: fakeStore([]), status: fakeStore('open'), membership };
 		};
 		// [subscribed, released] summed over every room built for the id.
 		const counts = (id) => (byId.get(id) || []).reduce((a, m) => [a[0] + m.subscribed, a[1] + m.released], [0, 0]);
@@ -4218,7 +4316,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence: fakeStore([]),
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -4248,7 +4346,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence,
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -4275,7 +4373,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence,
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -4300,7 +4398,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence: fakeStore([]),
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			selections: 'crdt',
 			setSelection: (delta) => { sent.push(delta); },
 			move: () => {}
@@ -4322,7 +4420,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence: fakeStore([]),
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			selections: 'crdt',
 			setSelection: (delta) => { sent.push(delta); },
 			move: () => {}
@@ -4352,7 +4450,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence,
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			selections: 'crdt',
 			move: () => {}
 		});
@@ -4383,7 +4481,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence,
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			selections: 'crdt',
 			move: () => {}
 		});
@@ -4423,7 +4521,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence,
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			move: () => {}
 		});
 
@@ -4452,7 +4550,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence: fakeStore([]),
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			reactions: fakeStore([]),
 			move: () => {},
 			setTyping: (delta) => { sent.push(['setTyping', delta]); },
@@ -4491,7 +4589,7 @@ describe('MultiplayerRoom roster aggregation', () => {
 			me: 'me',
 			presence: fakeStore([]),
 			cursors: fakeStore([]),
-			status: fakeStore('connected'),
+			status: fakeStore('open'),
 			reactions,
 			move: () => {}
 		});

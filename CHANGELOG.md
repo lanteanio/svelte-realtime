@@ -73,6 +73,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - A stream subscribe refused by its loader now releases the connection's adapter membership, derived taps and grant, so a later raw subscribe to that topic is judged afresh instead of admitted on the refused grant, and the same socket can resubscribe and receive live frames. Another stream still holding the topic on that socket keeps it, and an independent subscribe still awaiting its hook can complete.
 
+- Multiplayer rooms reject held and subsequent awaitable sends with `CONNECTION_CLOSED` after a terminal connection failure, and discard queued field updates, cursor samples and reactions instead of retaining them forever.
+
 - A tab hidden over an open socket stays live: streams keep their subscription instead of subscribing again when the tab shows, multiplayer room sends are no longer held while hidden, and a drop noticed only on wake ages the replay cursor from the last frame the hidden page received.
 
 - Timeout errors from binary RPCs, batches and `loadMore()` name the timeout that actually applied instead of always reporting 30 s.

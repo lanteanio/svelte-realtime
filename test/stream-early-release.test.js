@@ -495,6 +495,7 @@ describe('a stream released before its subscribe is answered', () => {
 
 	it('a superseded subscribe answered after its successor was refused is released', async () => {
 		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+		clientState.config.resumeMaxCursorAgeMs = 10_000;
 		const store = __stream('locked/board/__data', { merge: 'crud', key: 'id' }, true)('r11');
 		let off = store.subscribe(() => {});
 		await ticks();
@@ -509,9 +510,11 @@ describe('a stream released before its subscribe is answered', () => {
 		await ticks();
 		off = store.subscribe(() => {});
 		await ticks();
+		const queuedId = net.adapterQueue.find(frame => frame.rpc === 'locked/board/__data').id;
 		// On open the queued resume is past the trust bound: a fresh subscribe
-		// supersedes it, and both reach the server.
-		vi.advanceTimersByTime(61_000);
+		// supersedes it before its request timeout, and both reach the server.
+		vi.advanceTimersByTime(11_000);
+		expect(pending.has(queuedId)).toBe(true);
 		setStatus('connecting');
 		setStatus('open');
 		vi.advanceTimersByTime(200);

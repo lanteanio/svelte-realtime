@@ -36,7 +36,8 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
-it('the generated room rejoins after grace expiry and restores one merged delta to a peer', async () => {
+async function setupRoom() {
+	vi.resetModules();
 	vi.useFakeTimers();
 	vi.spyOn(console, 'warn').mockImplementation(() => {});
 	env = createTestEnv();
@@ -87,7 +88,8 @@ it('the generated room rejoins after grace expiry and restores one merged delta 
 	const dir = mkdtempSync(resolve(probeRoot, 'probe-'));
 	dirs.push(dir);
 	const source = readFileSync(resolve(root, 'src/client-multiplayer.svelte.js'), 'utf8')
-		.replace("'./shared/color.js'", JSON.stringify(pathToFileURL(resolve(root, 'src/shared/color.js')).href));
+		.replace("'./shared/color.js'", JSON.stringify(pathToFileURL(resolve(root, 'src/shared/color.js')).href))
+		.replace("'./client.js'", JSON.stringify(pathToFileURL(resolve(root, 'src/client.js')).href));
 	const compiled = compileModule(source, { filename: 'client-multiplayer.svelte.js', generate: 'client' }).js.code
 		.replace(/(['"])svelte\/reactivity\1/g, JSON.stringify(pathToFileURL(resolve(root, 'node_modules/svelte/src/reactivity/index-client.js')).href))
 		.replace(/from (['"])svelte\1/g, 'from ' + JSON.stringify(pathToFileURL(resolve(root, 'node_modules/svelte/src/index-client.js')).href));
@@ -113,6 +115,11 @@ export const board = live.multiplayer({
 	room = board.room('r');
 	await vi.advanceTimersByTimeAsync(0);
 	expect(roster.value.map(value => value.key)).toEqual(['alice']);
+	return { roster, frames, setOnline(value) { online = value; } };
+}
+
+it('the generated room rejoins after grace expiry and restores one merged delta to a peer', async () => {
+	const { roster, frames, setOnline } = await setupRoom();
 	const lock = room.acquireLock('title');
 	room.acquireLock('body');
 	room.setSelection({ start: 1, end: 3 });
@@ -132,7 +139,7 @@ export const board = live.multiplayer({
 	await foregroundTyping;
 	expect(roster.value[0].typing).toBe(true);
 	expect(frames.filter(frame => frame.subscribe)).toHaveLength(subscribeCount);
-	online = false;
+	setOnline(false);
 	adapter.status.set('disconnected');
 	close(ws, { platform: env.platform });
 	await vi.advanceTimersByTimeAsync(5001);
@@ -140,7 +147,7 @@ export const board = live.multiplayer({
 	const release = room.releaseLock('title');
 	frames.length = 0;
 	ws = mockWs({ id: 'alice' });
-	online = true;
+	setOnline(true);
 	adapter.status.set('open');
 	expect(frames).toEqual([]);
 	await vi.advanceTimersByTimeAsync(100);
@@ -150,4 +157,32 @@ export const board = live.multiplayer({
 	const fields = frames.flatMap(frame => frame.batch || [frame]).filter(frame => frame.rpc === 'collab/board/__presence/update');
 	expect(fields).toHaveLength(1);
 	expect(fields[0].args[1]).toEqual({ 'lock:title': null, 'lock:body': true, selection: { start: 1, end: 3 }, typing: true });
+});
+
+it('the generated room rejects held and later sends when the connection permanently fails', async () => {
+	const { frames, setOnline } = await setupRoom();
+	setOnline(false);
+	adapter.status.set('disconnected');
+	close(ws, { platform: env.platform });
+	const results = [];
+	const held = room.acquireLock('held').then(
+		() => results.push('sent'),
+		error => results.push(error.code)
+	);
+	room.setSelection({ start: 1, end: 3 });
+	await vi.advanceTimersByTimeAsync(0);
+	expect(results).toEqual([]);
+	const before = frames.length;
+	adapter.status.set('failed');
+	await vi.advanceTimersByTimeAsync(0);
+	expect(results).toEqual(['CONNECTION_CLOSED']);
+	await held;
+	const later = room.setTyping(true).then(
+		() => results.push('sent'),
+		error => results.push(error.code)
+	);
+	await vi.advanceTimersByTimeAsync(0);
+	expect(results).toEqual(['CONNECTION_CLOSED', 'CONNECTION_CLOSED']);
+	await later;
+	expect(frames).toHaveLength(before);
 });

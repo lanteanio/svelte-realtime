@@ -86,7 +86,7 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 ### <code>CONNECTION_CLOSED</code>
 
 - Searchable message prefixes: <code>Connection permanently closed</code>; <code>WebSocket closed</code>; <code>WebSocket closed during document sync</code>; <code>WebSocket closed during smooth sync</code>
-- Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/client/stream.js](../src/client/stream.js), [src/client/upload.js](../src/client/upload.js), [src/server/crdt.js](../src/server/crdt.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/smooth.js](../src/server/smooth.js)
+- Owning sources: [src/client-multiplayer.svelte.js](../src/client-multiplayer.svelte.js), [src/client/rpc.js](../src/client/rpc.js), [src/client/stream.js](../src/client/stream.js), [src/client/upload.js](../src/client/upload.js), [src/server/crdt.js](../src/server/crdt.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/smooth.js](../src/server/smooth.js)
 
 <a id="live-error-disconnected"></a>
 ### <code>DISCONNECTED</code>

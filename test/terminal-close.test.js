@@ -240,7 +240,12 @@ describe('connection closed for good (real adapter client)', () => {
 		/** @type {Promise<any>[]} */
 		const calls = [];
 		let n = 0;
-		client.configure({ onDisconnect() { calls.push(client.__rpc('session/bye')(++n)); } });
+		client.configure({ onDisconnect() {
+			const call = client.__rpc('session/bye')(++n);
+			// Teardown can dispatch another disconnect after the assertion below.
+			call.catch(() => {});
+			calls.push(call);
+		} });
 		await openWithRpc();
 		const bound = adapter.connect();
 		const sendQueued = vi.spyOn(bound, 'sendQueued');

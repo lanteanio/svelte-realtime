@@ -2,6 +2,7 @@
 import { untrack } from 'svelte';
 import { createSubscriber } from 'svelte/reactivity';
 import { colorForKey } from './shared/color.js';
+import { RpcError } from './client.js';
 
 // One-shot dev warnings, keyed by message so each DISTINCT diagnostic surfaces
 // once (the "bind a doc" hint and the "upgrade the adapter" hint are different
@@ -139,6 +140,8 @@ function _joinOf(store) {
 	if (j === undefined) {
 		const state = {
 			phase: /** @type {string | null} */ (null), hold: /** @type {JoinHold | null} */ (null),
+			error: /** @type {RpcError | null} */ (null),
+			statusOff: /** @type {(() => void) | null} */ (null),
 			fields: new Map(), bytes: 2, fieldSend: null,
 			refs: 0, offline: false, waiting: false, attached: false
 		};
@@ -158,6 +161,7 @@ function _joinOf(store) {
 				const hold = state.hold;
 				state.hold = null;
 				hold.flush();
+				_releaseJoinStatus(state);
 			});
 		}
 		if (store.status && typeof store.status.subscribe === 'function') {
@@ -167,6 +171,40 @@ function _joinOf(store) {
 		}
 	}
 	return j;
+}
+
+/** A held app send outlives its last view, but never its connection. */
+function _watchJoinStatus(state, status) {
+	if (state.statusOff !== null) return;
+	state.statusOff = () => {};
+	let off;
+	try { off = status.subscribe(v => {
+		state.offline = v !== 'open' && v !== 'suspended';
+		if (v === 'failed') {
+			state.error = new RpcError('CONNECTION_CLOSED', 'Connection permanently closed');
+			state.waiting = false;
+			const hold = state.hold;
+			state.hold = null;
+			state.fields.clear();
+			state.bytes = 2;
+			hold?.reject(state.error);
+			_releaseJoinStatus(state);
+		} else if (!state.offline) state.error = null;
+		else if (state.error === null) _restoreJoin(state);
+	}); } catch (error) {
+		state.statusOff = null;
+		throw error;
+	}
+	// A synchronous initial failure can release this observer before subscribe returns.
+	if (state.statusOff === null) off();
+	else state.statusOff = off;
+}
+
+function _releaseJoinStatus(state) {
+	if (state.refs !== 0 || state.hold !== null) return;
+	const off = state.statusOff;
+	state.statusOff = null;
+	off?.();
 }
 
 /** Keep the last fields behind the next confirmed membership attachment. */
@@ -257,6 +295,16 @@ class JoinHold {
 		let waiters = this.fieldWaiters.get(send);
 		if (!waiters) this.fieldWaiters.set(send, (waiters = []));
 		return new Promise((resolve, reject) => { /** @type {any[]} */ (waiters).push({ resolve, reject }); });
+	}
+
+	/** Reject pending callers and discard sends that cannot outlive this connection. */
+	reject(error) {
+		for (const waiters of this.fieldWaiters.values()) for (const waiter of waiters) waiter.reject(error);
+		for (const cursor of this.cursor.values()) for (const waiter of cursor.waiters) waiter.reject(error);
+		this.fields = null;
+		this.fieldWaiters.clear();
+		this.cursor.clear();
+		this.reactions.length = 0;
 	}
 
 	flush() {
@@ -507,17 +555,17 @@ export class MultiplayerRoom {
 					if (join.hold?.fields) for (const [key, field] of join.hold.fields) {
 						if (field.restored) join.hold.fields.delete(key);
 					}
+					const hold = join.hold;
+					if (hold && !hold.fields?.size && hold.fieldWaiters.size === 0 && hold.cursor.size === 0 && hold.reactions.length === 0) join.hold = null;
+					_releaseJoinStatus(join);
 				});
+				_watchJoinStatus(join, deps.status);
 			}
 			// No room (a getter that names none) has no roster or cursor streams.
 			if (deps.presence) this.#unsubs.push(deps.presence.subscribe((v) => { this.#presence = v || []; }));
 			if (deps.cursors) this.#unsubs.push(deps.cursors.subscribe((v) => { this.#cursors = v || []; }));
 			this.#unsubs.push(deps.status.subscribe((v) => {
 				this.#status = v;
-				if (join) {
-					join.offline = v !== 'open' && v !== 'suspended' && v !== 'connected';
-					if (join.offline) _restoreJoin(join);
-				}
 			}));
 			// The room's data stream: subscribing it is what makes the local user
 			// a member others see (and a candidate for ownership). Its value is
@@ -717,7 +765,13 @@ export class MultiplayerRoom {
 		const m = b.membership;
 		if (!m) return send(...args);
 		const join = _joinOf(m);
+		const detached = join.refs === 0;
+		if (detached) _watchJoinStatus(join, b.status);
 		if (name === 'setTyping' || name === 'setSelection' || name === 'acquireLock' || name === 'releaseLock') {
+			if (join.error !== null) {
+				if (detached) _releaseJoinStatus(join);
+				return name === 'setSelection' ? undefined : Promise.reject(join.error);
+			}
 			for (const [key, value] of Object.entries(args[0])) {
 				_rememberField(join, key, value, join.fieldSend || send);
 			}
@@ -728,15 +782,23 @@ export class MultiplayerRoom {
 				// subscribes its data stream later in this same flush, so the send
 				// waits for that join as well. Should nothing subscribe it, what was
 				// held goes out a microtask later.
-				if (join.phase === null || this.#ahead === null || b !== this.#ahead.bound) return send(...args);
+				if (join.phase === null || this.#ahead === null || b !== this.#ahead.bound) {
+					if (detached) _releaseJoinStatus(join);
+					return send(...args);
+				}
 				const hold = new JoinHold();
 				Promise.resolve().then(() => {
 					if (join.hold !== hold || join.phase === 'attaching' || join.offline || join.waiting) return;
 					join.hold = null;
 					hold.flush();
+					_releaseJoinStatus(join);
 				});
 				join.hold = hold;
 			} else {
+				if (join.error !== null) {
+					if (detached) _releaseJoinStatus(join);
+					return name === 'react' ? undefined : Promise.reject(join.error);
+				}
 				join.hold = new JoinHold();
 			}
 		}

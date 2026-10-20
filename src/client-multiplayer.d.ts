@@ -61,7 +61,7 @@ export interface MultiplayerRoomDeps {
 	cursors?: Readable<any[]>;
 	/** Connection-status store. */
 	status: Readable<string>;
-	/** The room's data stream. The room holds it for its lifetime, which is what makes the local user a member others see (and a candidate for ownership); its value is not read. While disconnected or its `phase` reads `'attaching'`, the room holds its sends until the join is answered; background suspension keeps sending through the open socket, as it does for a send to the room an effect names just before the view moves there. Omitted for a view that only observes. */
+	/** The room's data stream. The room holds it for its lifetime, which is what makes the local user a member others see (and a candidate for ownership); its value is not read. While disconnected or its `phase` reads `'attaching'`, the room holds its sends until the join is answered; background suspension keeps sending through the open socket, as it does for a send to the room an effect names just before the view moves there. A terminal connection failure rejects held and subsequent awaitable sends with `CONNECTION_CLOSED` and discards queued updates until the connection is explicitly reopened. Omitted for a view that only observes. */
 	membership?: Readable<any>;
 	/** Reactions sub-stream (the bounded ring of recent emotes), when enabled. */
 	reactions?: Readable<any[]>;
