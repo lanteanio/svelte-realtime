@@ -2,6 +2,7 @@
   "schemaVersion": 2,
   "scripts": {
     "check": [
+      "node scripts/check-lockfiles.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -41,6 +42,9 @@
     "check:links:external": [
       "node scripts/check-external-links.js"
     ],
+    "check:lockfiles": [
+      "node scripts/check-lockfiles.js"
+    ],
     "check:publish": [
       "publint",
       "attw --pack . --profile esm-only"
@@ -71,6 +75,7 @@
       "node scripts/check-verification-inventory.js --write"
     ],
     "prepublishOnly": [
+      "node scripts/check-lockfiles.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -93,6 +98,7 @@
       "node scripts/check-svelte-support.js"
     ],
     "pretest": [
+      "node scripts/check-lockfiles.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -121,6 +127,7 @@
       "node scripts/smoke.js"
     ],
     "test": [
+      "node scripts/check-lockfiles.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -194,6 +201,7 @@
       "node scripts/check-release-notes.js"
     ],
     "verify:fast": [
+      "node scripts/check-lockfiles.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -216,6 +224,7 @@
       "node scripts/check-svelte-support.js"
     ],
     "verify:full": [
+      "node scripts/check-lockfiles.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -245,6 +254,7 @@
       "playwright test --config test/chaos/playwright.config.js"
     ],
     "verify:pr": [
+      "node scripts/check-lockfiles.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -272,6 +282,7 @@
       "vitest run --config vitest.scaffold.config.js"
     ],
     "verify:release": [
+      "node scripts/check-lockfiles.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -311,6 +322,7 @@
       "node test/fuzz-wire.mjs"
     ],
     "verify:unit": [
+      "node scripts/check-lockfiles.js",
       "node scripts/generate-error-reference.js --check",
       "node scripts/generate-onboarding-reference.js",
       "node scripts/check-types.js",
@@ -553,6 +565,7 @@
       "job": "verify",
       "step": "Run the complete release verification contract",
       "commands": [
+        "node scripts/check-lockfiles.js",
         "node scripts/generate-error-reference.js --check",
         "node scripts/generate-onboarding-reference.js",
         "node scripts/check-types.js",
@@ -591,6 +604,7 @@
       "job": "verify",
       "step": "Run the publication lifecycle gate",
       "commands": [
+        "node scripts/check-lockfiles.js",
         "node scripts/generate-error-reference.js --check",
         "node scripts/generate-onboarding-reference.js",
         "node scripts/check-types.js",
@@ -704,6 +718,7 @@
       "job": "verify",
       "step": "5",
       "commands": [
+        "node scripts/check-lockfiles.js",
         "node scripts/generate-error-reference.js --check",
         "node scripts/generate-onboarding-reference.js",
         "node scripts/check-types.js",
