@@ -16,19 +16,22 @@ afterEach(() => {
 	}
 });
 
-function runCli(version, args) {
+function runCli(version, args, env = process.env) {
 	const fixture = mkdtempSync(join(testRoot, '.cli-node-floor-'));
 	fixtures.push(fixture);
 	const source = `import childProcess from 'node:child_process';
 import { syncBuiltinESMExports } from 'node:module';
 Object.defineProperty(process.versions, 'node', { value: ${JSON.stringify(version)} });
 // A failing prerequisite must never reach sv, git or a package manager.
-childProcess.execFileSync = () => { throw new Error('EXTERNAL_COMMAND_REACHED'); };
+childProcess.execFileSync = (file, args, options) => {
+	console.log('EXTERNAL_COMMAND_REACHED ' + JSON.stringify({ args, env: Object.keys(options?.env ?? {}).filter(key => /^(npm_config_|node_env$)/i.test(key)).sort() }));
+	throw new Error('EXTERNAL_COMMAND_REACHED');
+};
 syncBuiltinESMExports();
 process.argv = [process.execPath, ${JSON.stringify(cli)}, ...${JSON.stringify(args)}];
 await import(${JSON.stringify(cli)});`;
 	const result = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
-		cwd: fixture, encoding: 'utf8'
+		cwd: fixture, encoding: 'utf8', env
 	});
 	expect(result.error).toBeUndefined();
 	expect(readdirSync(fixture)).toEqual([]);
@@ -42,18 +45,34 @@ describe('scaffold Node prerequisite', () => {
 		expect(dependencies.filter(specifier => !isBuiltin(specifier))).toEqual([]);
 	});
 
-	it.each(['18.0.0', '20.0.0', '20.11.1', '20.19.0', '22.0.0', '22.11.0'])('rejects Node %s before prompts or external commands', version => {
+	it.each(['18.0.0', '20.0.0', '20.11.1', '20.19.0', '22.0.0', '22.11.0', '22.12.0', '22.16.9', '23.11.0'])('rejects Node %s before prompts or external commands', version => {
 		const result = runCli(version, ['example-app', '--template', 'example']);
 		expect(result.status).toBe(1);
-		expect(result.output).toContain('Node 22.12 or newer');
+		expect(result.output).toContain('Node 22.17+ on 22.x, or Node 24+');
 		expect(result.output).toContain(version);
 		expect(result.output).not.toContain('EXTERNAL_COMMAND_REACHED');
 		expect(result.output).not.toContain('Creating SvelteKit project');
 	}, PROCESS_TEST_TIMEOUT);
 
-	it.each(['22.12.0', '24.13.1'])('accepts Node %s at the prerequisite boundary', version => {
+	it.each(['22.17.0', '22.18.0', '24.0.0', '24.13.1'])('accepts Node %s at the prerequisite boundary', version => {
 		const result = runCli(version, ['--help']);
 		expect(result.status).toBe(0);
 		expect(result.output).toContain('Usage: npx svelte-realtime');
+	}, PROCESS_TEST_TIMEOUT);
+
+	it('keeps npm exec package selection out of the nested sv create', () => {
+		const result = runCli('24.13.1', ['example-app', '--template', 'example'], {
+			...process.env,
+			npm_config_package: 'svelte-realtime@0.0.0',
+			npm_config_call: 'svelte-realtime',
+			npm_config_registry: 'http://127.0.0.1:9/',
+			NODE_ENV: 'production'
+		});
+		const reached = JSON.parse(result.output.match(/EXTERNAL_COMMAND_REACHED (\{[^\r\n]+\})/)[1]);
+		expect(reached.args).toContain('sv@1.1.1');
+		expect(reached.env).toContain('npm_config_registry');
+		expect(reached.env).not.toContain('npm_config_package');
+		expect(reached.env).not.toContain('npm_config_call');
+		expect(reached.env).not.toContain('NODE_ENV');
 	}, PROCESS_TEST_TIMEOUT);
 });

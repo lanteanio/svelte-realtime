@@ -3,10 +3,11 @@
 import { execFileSync } from 'child_process';
 import { writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
 import { resolve, join } from 'path';
-// Reject the build toolchain floor before loading dependencies or starting work.
+// Reject Node versions the generated SvelteKit 3 project cannot run on before
+// loading dependencies or starting work: 22.17+ on the 22 line, or 24+.
 const [nodeMajor, nodeMinor] = process.versions.node.split('.').map(Number);
-if (nodeMajor < 22 || (nodeMajor === 22 && nodeMinor < 12)) {
-	console.error('[svelte-realtime] Scaffolding requires Node 22.12 or newer; found ' + process.versions.node + '. Upgrade Node before creating a project.');
+if (!(nodeMajor >= 24 || (nodeMajor === 22 && nodeMinor >= 17))) {
+	console.error('[svelte-realtime] Scaffolding requires Node 22.17+ on 22.x, or Node 24+; found ' + process.versions.node + '. Upgrade Node before creating a project.');
 	process.exit(1);
 }
 
@@ -302,6 +303,11 @@ function run(file, args, cwd) {
 	// on Node-internal handling of undefined env values.
 	const env = { ...process.env };
 	delete env.NODE_ENV;
+	// npm exec exports its selected package to children. A nested npx must
+	// select sv itself instead of trying to execute the package spec as a binary.
+	for (const key of Object.keys(env)) {
+		if (/^npm_config_(package|call)$/i.test(key)) delete env[key];
+	}
 	try {
 		execFileSync(file, args, {
 			cwd,

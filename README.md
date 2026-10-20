@@ -85,7 +85,7 @@ npm exec -- svelte-adapter-uws-preflight
 ```
 <!-- compatibility:end -->
 
-Mixed-version installs are rejected at install time with a peer-dep warning. Scaffold builds need Node 22.12 or newer; the pinned native server supports Node 22 or newer with a matching OS/architecture binary. Linux requires glibc 2.38 or newer; musl (including Alpine) is unsupported. Run the native preflight above before building; it checks the installed addon as well as Node, OS, architecture and libc.
+Mixed-version installs are rejected at install time with a peer-dep warning. SvelteKit 2 and 3 are supported. The scaffolder and SvelteKit 3 need Node 22.17+ on 22.x, or Node 24+; the pinned native server supports Node 22 or newer with a matching OS/architecture binary. Linux requires glibc 2.38 or newer; musl (including Alpine) is unsupported. Run the native preflight above before building; it checks the installed addon as well as Node, OS, architecture and libc.
 
 Svelte 4 and 5 are both supported; the [locked Svelte 4 profile](docs/svelte-support.md) gives exact versions and executable checks. Four features ship Svelte 5 rune modules and need Svelte 5: `live.doc`, `live.smooth`, a `live.multiplayer` export with presence, cursors, an owner or a field surface (Svelte 5.7 or later), and an enumerable `live.room` (its `rooms()` lobby view). On an older Svelte the Vite plugin stops the build with an error naming the `$live` module, the feature and the Svelte it needs. `store.rune()` needs Svelte 5 too and throws a descriptive error when called on Svelte 4.
 
@@ -93,7 +93,7 @@ Svelte 4 and 5 are both supported; the [locked Svelte 4 profile](docs/svelte-sup
 
 ## Manual setup
 
-Starting from a SvelteKit 2 project. If you do not have one yet, run `npx sv@0.17.1 create my-app && cd my-app && npm install` first. svelte-realtime and svelte-adapter-uws do not support SvelteKit 3 yet, and `sv` 1.0 and later create SvelteKit 3 projects.
+Starting from a SvelteKit 2 or 3 project. If you do not have one yet, run `npx sv@1.1.1 create my-app && cd my-app && npm install` first; it creates a SvelteKit 3 project. An existing SvelteKit 2 project that configures its adapter in `svelte.config.js` keeps that file and adds the two plugins to `vite.config.js`.
 
 ### Step 1: Install everything
 

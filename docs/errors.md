@@ -683,13 +683,6 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Searchable message prefixes: <code>[svelte-realtime] configure({ upload: { chunkSize } }) is deprecated -- </code>
 - Owning sources: [src/client/upload.js](../src/client/upload.js)
 
-<a id="diagnostic-console-8d33a16463d3e3d5"></a>
-### <code>console-8d33a16463d3e3d5</code>
-
-- Kind: legacy console prefix
-- Searchable message prefixes: <code>[svelte-realtime] Scaffolding requires Node 22.12 or newer; found </code>
-- Owning sources: [src/cli.js](../src/cli.js)
-
 <a id="diagnostic-console-8d46208763a20c24"></a>
 ### <code>console-8d46208763a20c24</code>
 
@@ -710,6 +703,13 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Kind: legacy console prefix
 - Searchable message prefixes: <code>[svelte-realtime] live.forget announce-on-failure threw:</code>
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
+
+<a id="diagnostic-console-92761fd37daff0de"></a>
+### <code>console-92761fd37daff0de</code>
+
+- Kind: legacy console prefix
+- Searchable message prefixes: <code>[svelte-realtime] Scaffolding requires Node 22.17+ on 22.x, or Node 24+; found </code>
+- Owning sources: [src/cli.js](../src/cli.js)
 
 <a id="diagnostic-console-95ba163d492eb177"></a>
 ### <code>console-95ba163d492eb177</code>

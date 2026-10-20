@@ -359,10 +359,10 @@ describe('run() helper', () => {
 		expect(_cliSrc).toMatch(/run\(\s*bin\('npx'\)\s*,\s*\[\s*'-y'\s*,\s*SCAFFOLD_SV_SPEC\s*,\s*'create'\s*,\s*name\s*,/);
 	});
 
-	it('sv create runs a pinned sv that creates a SvelteKit 2 project', () => {
-		// An unpinned sv follows its latest release; sv 1 creates SvelteKit 3
-		// projects, whose @sveltejs/kit ^3 the adapter's peer range refuses.
-		expect(SCAFFOLD_SV_SPEC).toBe('sv@0.17.1');
+	it('sv create runs a pinned SvelteKit 3 scaffold', () => {
+		// An unpinned sv follows its latest release, whose generated
+		// configuration this scaffold has not been verified against.
+		expect(SCAFFOLD_SV_SPEC).toBe('sv@1.1.1');
 	});
 
 	it('bin() helper is defined and resolves package-manager binaries to .cmd on Windows', () => {

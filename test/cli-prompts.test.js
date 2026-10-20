@@ -72,7 +72,7 @@ describe('interactive CLI prompts', { timeout: 25000 }, () => {
 		expect(result.code).toBe(1);
 		expect(result.completedSteps).toBe(2);
 		const captured = JSON.parse(result.output.match(/CLI_EXEC (\{[^\r\n]+\})/)[1]);
-		expect(captured.args).toEqual(['-y', 'sv@0.17.1', 'create', 'my-app', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
+		expect(captured.args).toEqual(['-y', 'sv@1.1.1', 'create', 'my-app', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
 	});
 
 	it('accepts a valid name and exposes every cancellable template choice', async () => {
@@ -96,6 +96,6 @@ describe('interactive CLI prompts', { timeout: 25000 }, () => {
 		expect(result.output).toMatch(new RegExp('Which template would you like\\?[^\\n]*\\n[^\\n]*' + selected));
 		const captured = JSON.parse(result.output.match(/CLI_EXEC (\{[^\r\n]+\})/)[1]);
 		if (template === 'demo') expect(captured).toEqual({ file: 'git', args: ['clone', 'https://github.com/lanteanio/svelte-realtime-demo.git', 'prompt-probe'] });
-		else expect(captured.args).toEqual(['-y', 'sv@0.17.1', 'create', 'prompt-probe', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
+		else expect(captured.args).toEqual(['-y', 'sv@1.1.1', 'create', 'prompt-probe', '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
 	});
 });

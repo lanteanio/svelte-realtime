@@ -127,6 +127,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - The unsequenced delivery policy covers rooms list deltas, cron ticks, derived and aggregate recomputes, `invalidateOn` and `staleAfterMs` reloads, inbound webhooks, the room-action `ctx.publish` shorthand and `ctx.publishThrottled` / `ctx.publishDebounced`. These frames carry no adapter sequence on a single worker either and take no publish options, so an app that needs a sequenced frame publishes it with explicit options through `ctx.platform.publish`.
 
+### Changed
+
+- New projects use sv 1.1.1 and SvelteKit 3. The scaffolder now exits before creating anything on Node 22.0 to 22.16 and on Node 23; it needs Node 22.17+ on 22.x, or Node 24+.
+
 ### Fixed
 
 - The Vite plugin ignores live exports inside comments and strings. Before, a commented-out declaration such as `// export const old = live.public(fn)` still got a client stub, a registry entry and a declaration, and a commented-out `_guard` counted as the module's guard. Values that merely contain the word, such as a `'features:export'` topic or a `key: 'export'` option, are read as written. A live export read as text at the start of a line inside a string or template, more likely an unbalanced quote above it, is reported once.
@@ -239,6 +243,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - An error while the dev server handles an added or removed live file is logged instead of rejecting the watcher listener.
 
 - The Vite plugin no longer declares the unsupported `transformIndexHtml` hook. Development tools load through a Vite module and work with streamed HTML responses.
+- The scaffolder works when started through `npm exec --package`, which exported its package selection to the nested `sv` call.
 - A stream that resubscribes after a reconnect no longer applies the last event it received before the outage on top of the fresh snapshot. After a server restart the store showed that stale value instead of the server's current one.
 
 ## [0.6.0-next.91] - 2026-10-13
