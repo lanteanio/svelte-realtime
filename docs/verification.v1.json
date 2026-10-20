@@ -684,7 +684,7 @@
       "workflow": "verify.yml",
       "automatic": true,
       "job": "verify",
-      "step": "3",
+      "step": "Install realtime and fixture dependencies",
       "commands": [
         "npm ci"
       ]
