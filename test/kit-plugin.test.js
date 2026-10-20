@@ -139,6 +139,62 @@ describe('SvelteKit development module loading', () => {
  }
 });
 
+describe('Windows root spelling', () => {
+ // SvelteKit keeps the root as the user spelled it. Vite 8 realpaths its own
+ // root, which on Windows can change the case of the drive letter.
+ let restorePlatform;
+ afterEach(() => { restorePlatform?.(); restorePlatform = undefined; });
+ function onPlatform(value) {
+  const descriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { ...descriptor, value });
+  restorePlatform = () => Object.defineProperty(process, 'platform', descriptor);
+ }
+ const onWindows = () => onPlatform('win32');
+ const respell = path => path === path.toUpperCase() ? path.toLowerCase() : path.toUpperCase();
+ const posix = path => path.replaceAll('\\', '/');
+ function viteRespelledRoot() {
+  root = mkdtempSync(join(tmpdir(), 'realtime-kit-'));
+  mkdirSync(join(root, 'src/live'), { recursive: true });
+  writeFileSync(join(root, 'src/live/count.js'), "import { live } from 'svelte-realtime/server';\nexport const count = live(() => 1);\n");
+  const p = realtime({ typedImports: false });
+  p.config({ root }, { command: 'serve' });
+  p.configResolved({ root: respell(root), command: 'serve', build: {} });
+  return p;
+ }
+ it('imports live modules under the root SvelteKit uses', () => {
+  onWindows();
+  const p = viteRespelledRoot();
+  const registry = p.load('\0live:__registry');
+  expect(registry).toContain(JSON.stringify(posix(join(root, 'src/live/count.js'))));
+  expect(p.load.call({ environment: { config: { consumer: 'server' } } }, '\0live:count')).toContain(posix(join(root, 'src/live/count.js')));
+ });
+ it('reloads a live module that Vite reports under its own spelling', async () => {
+  onWindows();
+  const p = viteRespelledRoot();
+  const s = server();
+  await p.handleHotUpdate({ file: posix(join(respell(root), 'src/live/count.js')), server: s });
+  expect(s.graph.getModulesByFile).toHaveBeenCalledWith(posix(join(root, 'src/live/count.js')));
+  expect(s.graph.invalidateModule).toHaveBeenCalledWith(s.changed);
+  expect(s.runtime._prepareHmr).toHaveBeenCalledExactlyOnceWith();
+ });
+ it('co-locates the registry with hooks loaded under either spelling', () => {
+  onWindows();
+  const p = viteRespelledRoot();
+  const input = "export { message } from 'svelte-realtime/server';";
+  const ssr = { environment: { config: { consumer: 'server' } } };
+  for (const spelling of [root, respell(root)]) {
+   expect(p.transform.call(ssr, input, join(spelling, 'src/hooks.ws.js')).code).toContain('import "/@svelte-realtime-registry";');
+  }
+ });
+ it('keeps paths case-sensitive off Windows', () => {
+  onPlatform('linux');
+  const p = viteRespelledRoot();
+  const ssr = { environment: { config: { consumer: 'server' } } };
+  expect(p.transform.call(ssr, '', join(root, 'src/hooks.ws.js'))).toBeNull();
+  expect(p.transform.call(ssr, '', join(respell(root), 'src/hooks.ws.js')).code).toContain('import "/@svelte-realtime-registry";');
+ });
+});
+
 describe('overlapping live module updates', () => {
  it('keeps handlers registered when two registry reloads overlap', async () => {
   const p = plugin();

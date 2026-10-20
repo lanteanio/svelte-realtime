@@ -25,14 +25,21 @@ const devtools = !args.includes('--no-devtools');
 const adapterMode = option('--adapter', 'default');
 assert.ok(['default', 'wrapped', 'none'].includes(adapterMode), 'Unknown adapter mode');
 assert.ok(adapterMode === 'default' || (kit === '3' && mode === 'dev'), 'Adapter variants require Kit 3 dev');
+const driveCase = option('--drive-case', 'as-invoked');
+assert.ok(['as-invoked', 'lower'].includes(driveCase), '--drive-case must be lower');
+assert.ok(driveCase === 'as-invoked' || (process.platform === 'win32' && kit === '3'), '--drive-case requires Windows and Kit 3');
 const fixture = path.join(root, 'test', 'fixtures', 'kit' + kit);
+// Vite 8 realpaths its root, which on Windows upper-cases the drive letter,
+// while SvelteKit keeps the working directory as spelled.
+const workdir = driveCase === 'lower' ? fixture.replace(/^[A-Za-z]:/, drive => drive.toLowerCase()) : fixture;
 const requireFixture = createRequire(path.join(fixture, 'package.json'));
 const { WebSocket } = requireFixture('ws');
-const vite = path.join(fixture, 'node_modules', 'vite', 'bin', 'vite.js');
+// npm scripts start Vite under the same spelling as the working directory.
+const vite = path.join(workdir, 'node_modules', 'vite', 'bin', 'vite.js');
 const reportPath = path.resolve(option('--report', path.join(root, 'test-results',
 	'kit-compat-' + kit + '-' + mode + (devtools ? '' : '-no-devtools') + '.json')));
-const report = { kit, mode, devtools, hmr, adapterMode, checks: [] };
-const env = { ...process.env, KIT_COMPAT_SECRET: 'fixture-secret', KIT_COMPAT_DEVTOOLS: String(devtools), KIT_COMPAT_ADAPTER: adapterMode };
+const report = { kit, mode, devtools, hmr, adapterMode, driveCase, checks: [] };
+const env = { ...process.env, KIT_COMPAT_SECRET: 'fixture-secret', KIT_COMPAT_DEVTOOLS: String(devtools), KIT_COMPAT_ADAPTER: adapterMode, KIT_COMPAT_REPORT_ROOT: String(driveCase !== 'as-invoked') };
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
 let output = '';
@@ -59,7 +66,7 @@ async function check(name, fn) {
 
 function start(argv, extraEnv = {}) {
 	const proc = spawn(process.execPath, argv, {
-		cwd: fixture, env: { ...env, ...extraEnv }, windowsHide: true,
+		cwd: workdir, env: { ...env, ...extraEnv }, windowsHide: true,
 		stdio: ['ignore', 'pipe', 'pipe']
 	});
 	proc.stdout.on('data', value => { output += value.toString(); });
@@ -146,6 +153,15 @@ try {
 		child = start([vite, '--force', '--host', '127.0.0.1', '--port', String(port), '--strictPort']);
 	}
 	await check('server startup', () => ready(port));
+	if (driveCase !== 'as-invoked') {
+		await check('Vite and SvelteKit spell the root differently', () => {
+			const reported = output.match(/\[kit-compat\] vite root (.+)/)?.[1]?.trim();
+			assert.ok(reported, 'Vite did not report its root');
+			const kitRoot = workdir.split(path.sep).join('/');
+			assert.equal(reported.toLowerCase(), kitRoot.toLowerCase(), 'Vite resolved another directory');
+			assert.notEqual(reported, kitRoot, 'Vite kept the working directory spelling, so this run proves nothing');
+		});
+	}
 	await check('cold WebSocket RPC before HTTP', async () => {
 		await connectSocket(origin);
 		const response = await rpc('echo', ['cold-start']);

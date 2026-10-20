@@ -21,7 +21,11 @@ for (const kit of ['2', '3']) {
 		{ mode: 'production', args: [] },
 		{ mode: 'dev', args: ['--hmr'] },
 		{ mode: 'dev', args: ['--no-devtools'] },
-		...(kit === '3' ? ['wrapped', 'none'].map(adapter => ({ mode: 'dev', args: ['--hmr', '--adapter', adapter], adapter })) : [])
+		...(kit === '3' ? ['wrapped', 'none'].map(adapter => ({ mode: 'dev', args: ['--hmr', '--adapter', adapter], adapter })) : []),
+		...(kit === '3' && process.platform === 'win32' ? [
+			{ mode: 'production', args: ['--drive-case', 'lower'], driveCase: 'lower' },
+			{ mode: 'dev', args: ['--hmr', '--drive-case', 'lower'], driveCase: 'lower' }
+		] : [])
 	]) {
 		const name = 'kit' + kit + '-' + variant.mode + variant.args.join('').replaceAll('--', '-');
 		const reportPath = path.join(reportDir, 'kit-compat-' + name + '.json');
@@ -48,8 +52,10 @@ for (const kit of ['2', '3']) {
 			assert.equal(report.hmr, variant.args.includes('--hmr'));
 			assert.equal(report.adapterMode, variant.adapter || 'default');
 			assert.equal(report.devtools, !variant.args.includes('--no-devtools'));
+			assert.equal(report.driveCase, variant.driveCase || 'as-invoked');
 			const expected = [...commonChecks];
 			if (variant.mode === 'production') expected.push('production build');
+			if (variant.driveCase) expected.push('Vite and SvelteKit spell the root differently');
 			if (variant.args.includes('--hmr')) expected.push('HMR replaces and removes handlers', 'live stores after HMR', 'route-only HMR shares HTTP and WebSocket state', 'new live files share HTTP and WebSocket state', 'removed live files unregister without splitting state');
 			assert.deepEqual(report.checks.map(check => check.name).sort(), expected.sort(),
 				name + ' did not execute exactly the required checks');
@@ -65,6 +71,6 @@ for (const kit of ['2', '3']) {
 const status = runs.every(run => run.status === 'passed') ? 'passed' : 'failed';
 const reportPath = path.join(reportDir, 'kit-compat-matrix.json');
 await writeFile(reportPath, JSON.stringify({ status, runs }, null, 2) + '\n');
-console.log('\nCompatibility matrix: ' + status + ' (' + runs.filter(run => run.status === 'passed').length + '/8)');
+console.log('\nCompatibility matrix: ' + status + ' (' + runs.filter(run => run.status === 'passed').length + '/' + runs.length + ')');
 console.log('Report: ' + reportPath);
 if (status !== 'passed') process.exitCode = 1;

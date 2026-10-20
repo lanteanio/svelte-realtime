@@ -657,6 +657,8 @@ export default function svelteRealtime(options) {
 	const dir = options?.dir || 'src/live';
 	/** @type {string} */
 	let root = '';
+	/** @type {string | null} */
+	let configRoot = null;
 	/** @type {string} */
 	let liveDir = '';
 	/** @type {boolean} */
@@ -672,7 +674,11 @@ export default function svelteRealtime(options) {
 		name: 'svelte-realtime',
 
 		configResolved(config) {
-			root = config.root;
+			// SvelteKit and svelte-adapter-uws import routes and hooks under the
+			// root as the user spelled it. Vite 8 realpaths its own root, which on
+			// Windows can change the drive letter's case. A live module imported
+			// under both spellings would run twice and split server state.
+			root = (process.platform === 'win32' && configRoot) || config.root;
 			liveDir = resolve(root, dir);
 			isSsr = !!config.build?.ssr;
 			isDev = config.command === 'serve';
@@ -796,13 +802,14 @@ export default function svelteRealtime(options) {
 			// sibling package's hooks file in a monorepo is never rewritten with
 			// our registry). Mirrors the .js/.ts/.mjs set the adapter discovers.
 			const rootNorm = root.split(sep).join('/');
-			if (!clean.startsWith(rootNorm + '/')) return null;
+			if (!_respellUnder(rootNorm, clean, '/')) return null;
 			if (!/\/src\/hooks\.ws\.(?:js|ts|mjs)$/.test(clean)) return null;
 			if (code.includes(REGISTRY_PUBLIC_ID)) return null;
 			return { code: `import ${JSON.stringify(REGISTRY_PUBLIC_ID)};\n` + code, map: null };
 		},
 
 		config(config, { command }) {
+			configRoot = config.root ? resolve(config.root) : process.cwd();
 			// During SSR build, inject the registry as an additional input
 			if (command === 'build' && config.build?.ssr) {
 				config.build.rollupOptions ??= {};
@@ -887,8 +894,9 @@ export default function svelteRealtime(options) {
 		},
 
 		async handleHotUpdate({ file, server }) {
-			file = resolve(file);
-			if (!file.startsWith(liveDir + sep)) return;
+			const reported = resolve(file);
+			file = _respellUnder(liveDir, reported);
+			if (!file) return;
 			// The generated $types.d.ts must never re-enter this handler: the
 			// rewrite below would bump its mtime, produce the next change event
 			// and loop forever, full-reloading every connected client each time.
@@ -912,9 +920,11 @@ export default function svelteRealtime(options) {
 
 			// Server-side HMR: invalidate the changed module so Vite re-executes it
 			const graph = _serverModuleGraph(server);
-			const ssrMods = graph.getModulesByFile(file.split(sep).join('/'));
-			if (ssrMods) {
-				for (const m of ssrMods) graph.invalidateModule(m);
+			for (const spelling of new Set([file, reported])) {
+				const ssrMods = graph.getModulesByFile(spelling.split(sep).join('/'));
+				if (ssrMods) {
+					for (const m of ssrMods) graph.invalidateModule(m);
+				}
 			}
 
 			// Re-register all server handlers
@@ -1023,6 +1033,24 @@ function _injectDevtools(res, script) {
 		if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
 		return end.call(this, transform(chunk, encoding, true), callback);
 	};
+}
+
+/**
+ * Return `file` spelled under `dir` when it lies inside `dir`, otherwise null.
+ * Windows paths compare case-insensitively, so a path Vite reports with a
+ * differently cased drive letter still maps onto the spelling used for imports.
+ * @param {string} dir
+ * @param {string} file
+ * @param {string} [separator]
+ * @returns {string | null}
+ */
+function _respellUnder(dir, file, separator = sep) {
+	const prefix = dir + separator;
+	if (file.startsWith(prefix)) return file;
+	if (process.platform === 'win32' && file.toLowerCase().startsWith(prefix.toLowerCase())) {
+		return dir + file.slice(dir.length);
+	}
+	return null;
 }
 
 /**

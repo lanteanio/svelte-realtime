@@ -9,7 +9,8 @@ npm ci --prefix test/fixtures/kit2
 npm ci --prefix test/fixtures/kit3
 ```
 
-Run all eight browser and WebSocket combinations in sequence:
+Run all browser and WebSocket combinations in sequence (eight, plus two
+lowercase-drive cases on Windows):
 
 ```sh
 npm run test:kit
@@ -26,6 +27,8 @@ node test/kit-compat/run.mjs --kit 2 --mode dev --no-devtools
 node test/kit-compat/run.mjs --kit 3 --mode dev --no-devtools
 node test/kit-compat/run.mjs --kit 3 --mode dev --hmr --adapter wrapped
 node test/kit-compat/run.mjs --kit 3 --mode dev --hmr --adapter none
+node test/kit-compat/run.mjs --kit 3 --mode production --drive-case lower
+node test/kit-compat/run.mjs --kit 3 --mode dev --hmr --drive-case lower
 ```
 
 The runner uses each fixture's own Vite binary and an OS-assigned port.
@@ -44,6 +47,11 @@ A route-only edit then verifies the updated HTTP response, fresh WebSocket RPC,
 and matching stores in both pages. Adding and removing a live file must update
 the RPC registry and preserve shared HTTP and WebSocket state. Kit 3 development also covers a renamed
 adapter and a configuration without an inline adapter.
+On Windows, `--drive-case lower` starts Vite from the fixture path with a
+lowercase drive letter, as a VS Code terminal often does. SvelteKit keeps that
+spelling while Vite 8 resolves its root to the uppercase one, so a module
+imported under both would run twice. The run first checks that the two
+spellings really differ, then requires routes and live handlers to share state.
 The edited sources are restored byte for byte even on failure. Run only one
 compatibility command at a time per fixture.
 
