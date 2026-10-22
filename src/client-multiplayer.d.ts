@@ -63,6 +63,8 @@ export interface MultiplayerRoomDeps {
 	status: Readable<string>;
 	/** The room's data stream. The room holds it for its lifetime, which is what makes the local user a member others see (and a candidate for ownership); its value is not read. While disconnected or its `phase` reads `'attaching'`, the room holds its sends until the join is answered; background suspension keeps sending through the open socket, as it does for a send to the room an effect names just before the view moves there. A terminal connection failure rejects held and subsequent awaitable sends with `CONNECTION_CLOSED` and discards queued updates until the connection is explicitly reopened. Omitted for a view that only observes. */
 	membership?: Readable<any>;
+	/** The namespace's data stream factory that returned `membership`. A generated namespace passes it so its own send members (`board.move(id, ...)`) called while this view holds the room wait for the same join. */
+	membershipFactory?: (...args: any[]) => Readable<any>;
 	/** Reactions sub-stream (the bounded ring of recent emotes), when enabled. */
 	reactions?: Readable<any[]>;
 	/** Owner sub-stream (the room's `{ key, reason }` owner value), when enabled. */
@@ -92,19 +94,22 @@ export interface MultiplayerRoomDeps {
  * returns, and what `namespace.room(...)` extends with the send methods. The
  * views are reactive: they refresh when the underlying stores push.
  *
- * - `others`: the presence roster, deduped by user key (latest wins), each
- *   entry stamped with a deterministic color, excluding the local user when
- *   `me` is known. When `me` is unknown it is the full deduped roster.
+ * - `others`: the joined members of the presence roster (entries that carry
+ *   presence data; an entry whose join has not landed shows nowhere), deduped
+ *   by user key (latest wins), each stamped with a deterministic color,
+ *   excluding the local user when `me` is known. When `me` is unknown it is
+ *   every joined member.
  * - `cursors`: deduped by user key (latest wins) and colored. Self is not
  *   excluded so the local user can render its own cursor.
  * - `me`: the local user's key, or `null` when the app never supplied one.
  * - `status`: the connection-status passthrough.
  *
  * The `typing` / `locks` / `selections` views are reactive projections of the
- * presence roster; `reactions` is the bounded ring of recent ephemeral emotes.
+ * same joined members, so they too show joined members only; `reactions` is
+ * the bounded ring of recent ephemeral emotes.
  */
 export interface MultiplayerView {
-	/** The presence roster: deduped, colored, self-excluded when `me` is known. */
+	/** The joined members of the presence roster: deduped, colored, self-excluded when `me` is known. */
 	readonly others: RosterEntry[];
 	/** The cursor roster: deduped and colored (self not excluded). */
 	readonly cursors: CursorEntry[];
@@ -112,12 +117,12 @@ export interface MultiplayerView {
 	readonly me: string | null;
 	/** The connection status. */
 	readonly status: string;
-	/** The user keys of remote collaborators currently flagged as typing. */
+	/** The user keys of remote joined members currently flagged as typing. */
 	readonly typing: string[];
-	/** Advisory lock holders keyed by lock key: `{ lockKey: holderUserKey }`. */
+	/** Advisory lock holders among the joined members, keyed by lock key: `{ lockKey: holderUserKey }`. */
 	readonly locks: Record<string, any>;
 	/**
-	 * Remote selection ranges keyed by user (self excluded). In `offset` mode each
+	 * Remote selection ranges of joined members keyed by user (self excluded). In `offset` mode each
 	 * value is the raw payload the holder sent. In `crdt` mode each value is resolved
 	 * against the bound live.doc to `{ field, start, end }` current offsets and re-
 	 * resolves reactively as the document is edited; an entry that cannot resolve is
@@ -173,6 +178,12 @@ export type MultiplayerSend = Pick<MultiplayerRoom, 'move' | 'reportViewport' | 
  * to the room the view is in at that moment.
  */
 export class MultiplayerRoom {
+	/**
+	 * Wrap a generated namespace send (`move`, `reportViewport`, `_setField`,
+	 * `_emitReaction`) so a direct call made while a view holds the same room
+	 * waits for that view's join. Generated client modules call it; apps do not.
+	 */
+	static bindRpc<T extends (...args: any[]) => any>(rpc: T, kind: 'move' | 'reportViewport' | 'field' | 'react', factory: (...args: any[]) => Readable<any>): T;
 	constructor(deps: MultiplayerRoomDeps);
 	/**
 	 * The send methods bound to the room the view names now. Take them in an

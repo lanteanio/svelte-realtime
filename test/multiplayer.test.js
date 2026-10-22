@@ -106,8 +106,8 @@ function factoryDeps(code, name, factory, ...args) {
 	};
 	let captured;
 	class MultiplayerRoom { constructor(deps) { captured = deps; } }
-	const members = new Function('MultiplayerRoom', `_${name}_me`, name, 'status', `return { ${line.trim().replace(/,$/, '')} };`);
-	members(MultiplayerRoom, { me: true }, ns, { status: true })[factory](...args);
+	const members = new Function('MultiplayerRoom', `_${name}_me`, name, `_${name}_sends`, 'status', `return { ${line.trim().replace(/,$/, '')} };`);
+	members(MultiplayerRoom, { me: true }, ns, ns, { status: true })[factory](...args);
 	// The factory hands over its call args and a `bind` that turns room args
 	// into the per-room deps; resolve it the way the room does.
 	const { args: passed, bind, ...fixed } = captured;
@@ -253,7 +253,7 @@ export const game = live.room({
 		const code = createPlugin().load('\0live:collab', {});
 
 		const room = factoryDeps(code, 'room', 'room', 'b1');
-		expect(Object.keys(room).sort()).toEqual(['cursors', 'me', 'membership', 'move', 'presence', 'reportViewport', 'status']);
+		expect(Object.keys(room).sort()).toEqual(['cursors', 'me', 'membership', 'membershipFactory', 'move', 'presence', 'reportViewport', 'status']);
 		expect(room.membership).toMatchObject({ tag: 'data', args: ['b1'] });
 		expect(room.presence).toMatchObject({ tag: 'presence', args: ['b1'] });
 		expect(room.move({ x: 1 })).toEqual(['move', 'b1', { x: 1 }]);
@@ -275,7 +275,7 @@ export const game = live.room({
 
 		const room = factoryDeps(code, 'board', 'room', 'b1');
 		expect(Object.keys(room).sort()).toEqual([
-			'acquireLock', 'cursors', 'me', 'membership', 'move', 'owner', 'presence', 'react',
+			'acquireLock', 'cursors', 'me', 'membership', 'membershipFactory', 'move', 'owner', 'presence', 'react',
 			'reactions', 'releaseLock', 'reportViewport', 'restorePresence', 'selections', 'setSelection', 'setTyping', 'status'
 		]);
 		expect(room.setTyping({ typing: true })).toEqual(['_setField', 'b1', { typing: true }]);
@@ -466,7 +466,7 @@ export const editor = live.multiplayer({
 		const plugin = createPlugin();
 		const code = plugin.load('\0live:collab', {});
 
-		expect(code).toContain('setSelection: (...a) => editor._setField.fireAndForget(...args, ...a)');
+		expect(code).toContain('setSelection: (...a) => _editor_sends._setField.fireAndForget(...args, ...a)');
 		// The mode rides into the room so the client picks the doc-anchored path.
 		expect(code).toContain('selections: "crdt"');
 	});
@@ -4722,14 +4722,18 @@ describe('live.multiplayer() field codegen', () => {
 		const code = plugin.load('\0live:collab', {});
 
 		// typing and lock acquire/release are awaitable (id-bearing) RPCs.
-		expect(code).toContain('setTyping: (...a) => room._setField(...args, ...a)');
-		expect(code).toContain('acquireLock: (...a) => room._setField(...args, ...a)');
-		expect(code).toContain('releaseLock: (...a) => room._setField(...args, ...a)');
+		expect(code).toContain('setTyping: (...a) => _room_sends._setField(...args, ...a)');
+		expect(code).toContain('acquireLock: (...a) => _room_sends._setField(...args, ...a)');
+		expect(code).toContain('releaseLock: (...a) => _room_sends._setField(...args, ...a)');
 		// the selection drag drops under backpressure (fire-and-forget).
-		expect(code).toContain('setSelection: (...a) => room._setField.fireAndForget(...args, ...a)');
+		expect(code).toContain('setSelection: (...a) => _room_sends._setField.fireAndForget(...args, ...a)');
 		// reactions emit fire-and-forget and the room consumes the stream.
 		expect(code).toContain('reactions: room.reactions(...args)');
-		expect(code).toContain('react: (...a) => room._emitReaction.fireAndForget(...args, ...a)');
+		expect(code).toContain('react: (...a) => _room_sends._emitReaction.fireAndForget(...args, ...a)');
+		// The namespace's own send members wait for a view's join of the same room.
+		expect(code).toContain('const _room_sends = { move: room.move, reportViewport: room.reportViewport, _setField: room._setField, _emitReaction: room._emitReaction };');
+		expect(code).toContain('room._setField = MultiplayerRoom.bindRpc(_room_sends._setField, "field", room.data);');
+		expect(code).toContain('room.move = MultiplayerRoom.bindRpc(_room_sends.move, "move", room.data);');
 	});
 
 	it('registers the presence-field, reactions stream, and reaction handlers in the registry', () => {

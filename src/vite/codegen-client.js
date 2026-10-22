@@ -344,29 +344,33 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 				// (the ack surfaces an error); the selection drag is fire-and-
 				// forget so a high-frequency drag drops under backpressure rather
 				// than queueing. Reactions ride their own stream and emit.
+				// A joined room sends through the bare RPCs: the room holds its own
+				// sends for the join, and the namespace members below are wrapped to
+				// wait for the same join.
+				const sends = mpInfo.joins ? `_${name}_sends` : name;
 				const sendDeps = [
-					`move: (...a) => ${name}.move(...args, ...a)`,
-					`reportViewport: (...a) => ${name}.reportViewport(...args, ...a)`
+					`move: (...a) => ${sends}.move(...args, ...a)`,
+					`reportViewport: (...a) => ${sends}.reportViewport(...args, ...a)`
 				];
 				if (mpInfo.typing || mpInfo.selections || mpInfo.hasLocks) {
-					sendDeps.push(`restorePresence: (...a) => ${name}._setField(...args, ...a)`);
+					sendDeps.push(`restorePresence: (...a) => ${sends}._setField(...args, ...a)`);
 				}
 				if (mpInfo.typing) {
-					sendDeps.push(`setTyping: (...a) => ${name}._setField(...args, ...a)`);
+					sendDeps.push(`setTyping: (...a) => ${sends}._setField(...args, ...a)`);
 				}
 				if (mpInfo.selections) {
-					sendDeps.push(`setSelection: (...a) => ${name}._setField.fireAndForget(...args, ...a)`);
+					sendDeps.push(`setSelection: (...a) => ${sends}._setField.fireAndForget(...args, ...a)`);
 					// The mode ('offset' | 'crdt') tells the room whether to send/resolve
 					// selections as raw offsets or as live.doc-anchored positions.
 					staticDeps.push(`selections: ${JSON.stringify(mpInfo.selections)}`);
 				}
 				if (mpInfo.hasLocks) {
-					sendDeps.push(`acquireLock: (...a) => ${name}._setField(...args, ...a)`);
-					sendDeps.push(`releaseLock: (...a) => ${name}._setField(...args, ...a)`);
+					sendDeps.push(`acquireLock: (...a) => ${sends}._setField(...args, ...a)`);
+					sendDeps.push(`releaseLock: (...a) => ${sends}._setField(...args, ...a)`);
 				}
 				if (mpInfo.reactions) {
 					viewDeps.push(`reactions: ${name}.reactions(...args)`);
-					sendDeps.push(`react: (...a) => ${name}._emitReaction.fireAndForget(...args, ...a)`);
+					sendDeps.push(`react: (...a) => ${sends}._emitReaction.fireAndForget(...args, ...a)`);
 				}
 				if (mpInfo.hasOwner) {
 					viewDeps.push(`owner: ${name}.owner(...args)`);
@@ -381,7 +385,7 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 				// needless join costs one data load, a missed one drops every
 				// send from the room.
 				const joinDeps = mpInfo.joins
-					? [`membership: ${name}.data(...args)`]
+					? [`membership: ${name}.data(...args)`, `membershipFactory: ${name}.data`]
 					: [];
 				const build = (bound) => `new MultiplayerRoom({ ${staticDeps.join(', ')}, args, bind: (args) => ({ ${bound.join(', ')} }) })`;
 				mpLines.push(`  identify(key) { _${name}_me.set(key); },`);
@@ -389,6 +393,19 @@ export function _generateClientStubs(filePath, modulePath, dir, reconcileInterva
 				mpLines.push(`  watch(...args) { return ${build(viewDeps)}; },`);
 			}
 			mpLines.push(`};`);
+			if (hasRoster && mpInfo.joins) {
+				// board.move(id, ...) and the other namespace sends, called directly
+				// while a view holds the same room (a mount effect beside
+				// board.room(() => id)), wait for that view's join like its own
+				// sends do; with no view holding the room they send as before.
+				const held = [['move', 'move'], ['reportViewport', 'reportViewport']];
+				if (hasPresenceField) held.push(['_setField', 'field']);
+				if (mpInfo.reactions) held.push(['_emitReaction', 'react']);
+				mpLines.push(`const _${name}_sends = { ${held.map(([member]) => `${member}: ${name}.${member}`).join(', ')} };`);
+				for (const [member, kind] of held) {
+					mpLines.push(`${name}.${member} = MultiplayerRoom.bindRpc(_${name}_sends.${member}, ${JSON.stringify(kind)}, ${name}.data);`);
+				}
+			}
 			lines.push(mpLines.join('\n'));
 		}
 	}

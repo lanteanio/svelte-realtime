@@ -263,7 +263,7 @@ class JoinHold {
 	fieldWaiters = new Map();
 	/** @type {Map<string, { send: Function, args: any[], waiters: any[] }>} */
 	cursor = new Map();
-	/** @type {Array<{ send: Function, args: any[] }>} */
+	/** @type {Array<{ send: Function, args: any[], waiters: any[] }>} */
 	reactions = [];
 
 	/**
@@ -281,10 +281,16 @@ class JoinHold {
 			this.cursor.set(name, { send, args, waiters });
 			return new Promise((resolve, reject) => { waiters.push({ resolve, reject }); });
 		}
-		if (name === 'react') {
-			if (this.reactions.length >= _HELD_REACTIONS_MAX) this.reactions.shift();
-			this.reactions.push({ send, args });
-			return undefined;
+		if (name === 'react' || name === 'reactAwaited') {
+			// Reactions are ephemeral: one pushed out of the ring answers an
+			// awaiting caller as sent and gone.
+			if (this.reactions.length >= _HELD_REACTIONS_MAX) {
+				for (const w of /** @type {any} */ (this.reactions.shift()).waiters) w.resolve(undefined);
+			}
+			/** @type {any[]} */
+			const waiters = [];
+			this.reactions.push({ send, args, waiters });
+			return name === 'react' ? undefined : new Promise((resolve, reject) => { waiters.push({ resolve, reject }); });
 		}
 		const delta = args[0];
 		const fields = (this.fields ??= new Map());
@@ -301,6 +307,7 @@ class JoinHold {
 	reject(error) {
 		for (const waiters of this.fieldWaiters.values()) for (const waiter of waiters) waiter.reject(error);
 		for (const cursor of this.cursor.values()) for (const waiter of cursor.waiters) waiter.reject(error);
+		for (const reaction of this.reactions) for (const waiter of reaction.waiters) waiter.reject(error);
 		this.fields = null;
 		this.fieldWaiters.clear();
 		this.cursor.clear();
@@ -346,8 +353,156 @@ class JoinHold {
 			for (const waiters of this.fieldWaiters.values()) _settle(waiters, () => undefined);
 		}
 		for (const c of this.cursor.values()) _settle(c.waiters, () => c.send(...c.args));
-		for (const r of this.reactions) _settle([], () => r.send(...r.args));
+		for (const r of this.reactions) _settle(r.waiters, () => r.send(...r.args));
 	}
+}
+
+/**
+ * Send now, or, while the binding's join is in flight, once it settles (see
+ * JoinHold). `ahead` marks the binding of a room an effect names before its
+ * view has moved there.
+ * @param {any} b @param {string} name @param {Function} send @param {any[]} args @param {boolean} ahead
+ */
+function _out(b, name, send, args, ahead) {
+	const m = b.membership;
+	if (!m) return send(...args);
+	const join = _joinOf(m);
+	const detached = join.refs === 0;
+	if (detached) _watchJoinStatus(join, b.status);
+	if (name === 'setTyping' || name === 'setSelection' || name === 'acquireLock' || name === 'releaseLock') {
+		if (join.error !== null) {
+			if (detached) _releaseJoinStatus(join);
+			return name === 'setSelection' ? undefined : Promise.reject(join.error);
+		}
+		for (const [key, value] of Object.entries(args[0])) {
+			_rememberField(join, key, value, join.fieldSend || send);
+		}
+	}
+	if (join.hold === null) {
+		if (join.phase !== 'attaching' && !join.offline && !join.waiting) {
+			// The room an effect names before the view has moved there: the view
+			// subscribes its data stream later in this same flush, so the send
+			// waits for that join as well. Should nothing subscribe it, what was
+			// held goes out a microtask later.
+			if (join.phase === null || !ahead) {
+				if (detached) _releaseJoinStatus(join);
+				return send(...args);
+			}
+			const hold = new JoinHold();
+			Promise.resolve().then(() => {
+				if (join.hold !== hold || join.phase === 'attaching' || join.offline || join.waiting) return;
+				join.hold = null;
+				hold.flush();
+				_releaseJoinStatus(join);
+			});
+			join.hold = hold;
+		} else {
+			if (join.error !== null) {
+				if (detached) _releaseJoinStatus(join);
+				return name === 'react' ? undefined : Promise.reject(join.error);
+			}
+			join.hold = new JoinHold();
+		}
+	}
+	const field = name === 'setTyping' || name === 'setSelection' || name === 'acquireLock' || name === 'releaseLock';
+	return join.hold.add(name, field && join.fieldSend ? join.fieldSend : send, args);
+}
+
+// A generated namespace's own send members (board.move(id, ...),
+// board._setField(id, ...)) join the hold of a room view that holds the same
+// room. Each live view registers its data store under the namespace's data
+// factory with the room args it bound, so a namespace call finds the room by
+// its leading args without knowing the topic function's arity.
+
+/** @type {WeakMap<Function, Map<object, { args: any[], membership: any, status: any, refs: number }>>} */
+const _namespaceRooms = new WeakMap();
+
+/** @param {Function} factory @param {any[]} args @param {any} membership @param {any} status */
+function _registerNamespaceRoom(factory, args, membership, status) {
+	let rooms = _namespaceRooms.get(factory);
+	if (!rooms) _namespaceRooms.set(factory, (rooms = new Map()));
+	let entry = rooms.get(membership);
+	if (!entry) rooms.set(membership, (entry = { args, membership, status, refs: 0 }));
+	entry.refs++;
+	return () => {
+		if (--entry.refs !== 0) return;
+		rooms.delete(membership);
+		if (rooms.size === 0) _namespaceRooms.delete(factory);
+	};
+}
+
+/** Whether two room args name the same data store (its cache key). @param {any} a @param {any} b */
+function _sameRoomArg(a, b) {
+	if (Object.is(a, b)) return true;
+	const ta = typeof a, tb = typeof b;
+	if ((ta === 'string' || ta === 'number') && (tb === 'string' || tb === 'number')) return String(a) === String(b);
+	if (a === null || b === null || ta !== 'object' || tb !== 'object') return false;
+	try { return JSON.stringify(a) === JSON.stringify(b); } catch { return false; }
+}
+
+/** @param {Function} factory @param {any[]} args */
+function _namespaceRoom(factory, args) {
+	const rooms = _namespaceRooms.get(factory);
+	if (rooms === undefined) return null;
+	for (const entry of rooms.values()) {
+		const n = entry.args.length;
+		if (args.length < n) continue;
+		let i = 0;
+		while (i < n && _sameRoomArg(args[i], entry.args[i])) i++;
+		if (i === n) return entry;
+	}
+	return null;
+}
+
+/**
+ * Route a namespace send through the hold of the room view that holds its
+ * room, or send it as it is when no view holds that room.
+ * @param {Function} factory @param {'move' | 'reportViewport' | 'field' | 'react'} kind
+ * @param {Function} send @param {any[]} args @param {boolean} oneWay
+ */
+function _namespaceOut(factory, kind, send, args, oneWay) {
+	const entry = _namespaceRoom(factory, args);
+	if (entry === null) return send(...args);
+	const n = entry.args.length;
+	const payload = args.slice(n);
+	// A field send whose delta is no object is the server's to refuse.
+	if (kind === 'field' && (payload[0] === null || typeof payload[0] !== 'object')) return send(...args);
+	const prefix = args.slice(0, n);
+	const name = kind === 'field' ? (oneWay ? 'setSelection' : 'setTyping') : kind === 'react' ? (oneWay ? 'react' : 'reactAwaited') : kind;
+	const result = _out(entry, name, (/** @type {any[]} */ ...rest) => send(...prefix, ...rest), payload, false);
+	if (!oneWay) return result;
+	if (result && typeof result.then === 'function') result.then(undefined, () => {});
+	return undefined;
+}
+
+/**
+ * Wrap a generated namespace RPC so every call shape waits for the join of a
+ * room view holding the same room.
+ * @param {any} rpc @param {'move' | 'reportViewport' | 'field' | 'react'} kind @param {Function} factory
+ */
+function _namespaceRpc(rpc, kind, factory) {
+	const call = (/** @type {any[]} */ ...args) => _namespaceOut(factory, kind, rpc, args, false);
+	call.fresh = (/** @type {any[]} */ ...args) => _namespaceOut(factory, kind, rpc.fresh, args, false);
+	call.send = (/** @type {any[]} */ ...args) => { _namespaceOut(factory, kind, rpc.send, args, true); };
+	call.fireAndForget = (/** @type {any[]} */ ...args) => { _namespaceOut(factory, kind, rpc.fireAndForget, args, true); };
+	call.with = (/** @type {any} */ opts) => {
+		const bound = rpc.with(opts);
+		return bound === rpc ? call : (/** @type {any[]} */ ...args) => _namespaceOut(factory, kind, bound, args, false);
+	};
+	// The RPC's own createOptimistic validates and shapes the change; the store
+	// it mutates runs this call instead of the bare RPC.
+	const via = (/** @type {any} */ store, /** @type {any[]} */ callArgs) => ({
+		mutate: (/** @type {any} */ _op, /** @type {any} */ change) => store.mutate(() => call(...callArgs), change)
+	});
+	call.createOptimistic = function createOptimisticCall(/** @type {any} */ store, /** @type {any} */ callArgsOrChange, /** @type {any} */ optimisticChange) {
+		if (arguments.length === 2) {
+			rpc.createOptimistic(store, callArgsOrChange);
+			return (/** @type {any[]} */ ...callArgs) => rpc.createOptimistic(via(store, callArgs), callArgs, callArgsOrChange);
+		}
+		if (!store || typeof store.mutate !== 'function' || !Array.isArray(callArgsOrChange)) return rpc.createOptimistic(store, callArgsOrChange, optimisticChange);
+		return rpc.createOptimistic(via(store, callArgsOrChange), callArgsOrChange, optimisticChange);
+	};
+	return call;
 }
 
 /**
@@ -414,6 +569,13 @@ export class MultiplayerRoom {
 		if (sameArgs(next, this.#seen)) return this.#seen;
 		return (this.#seen = next);
 	});
+
+	/**
+	 * Wrap a generated namespace send so it waits for the join of a room view
+	 * that holds the same room. Called by generated client modules.
+	 * @param {any} rpc @param {'move' | 'reportViewport' | 'field' | 'react'} kind @param {Function} factory
+	 */
+	static bindRpc(rpc, kind, factory) { return _namespaceRpc(rpc, kind, factory); }
 
 	constructor(deps) {
 		this.#deps = deps;
@@ -544,6 +706,7 @@ export class MultiplayerRoom {
 			const join = deps.membership ? _joinOf(deps.membership) : null;
 			if (join) {
 				join.refs++;
+				if (deps.membershipFactory) this.#unsubs.push(_registerNamespaceRoom(deps.membershipFactory, this.#args || [], deps.membership, deps.status));
 				join.fieldSend ??= deps.restorePresence || null;
 				this.#unsubs.push(() => {
 					if (--join.refs !== 0) return;
@@ -762,48 +925,7 @@ export class MultiplayerRoom {
 	// (see JoinHold). A binding with no data stream has no join to wait for.
 	/** @param {any} b @param {string} name @param {Function} send @param {any[]} args */
 	#out(b, name, send, args) {
-		const m = b.membership;
-		if (!m) return send(...args);
-		const join = _joinOf(m);
-		const detached = join.refs === 0;
-		if (detached) _watchJoinStatus(join, b.status);
-		if (name === 'setTyping' || name === 'setSelection' || name === 'acquireLock' || name === 'releaseLock') {
-			if (join.error !== null) {
-				if (detached) _releaseJoinStatus(join);
-				return name === 'setSelection' ? undefined : Promise.reject(join.error);
-			}
-			for (const [key, value] of Object.entries(args[0])) {
-				_rememberField(join, key, value, join.fieldSend || send);
-			}
-		}
-		if (join.hold === null) {
-			if (join.phase !== 'attaching' && !join.offline && !join.waiting) {
-				// The room an effect names before the view has moved there: the view
-				// subscribes its data stream later in this same flush, so the send
-				// waits for that join as well. Should nothing subscribe it, what was
-				// held goes out a microtask later.
-				if (join.phase === null || this.#ahead === null || b !== this.#ahead.bound) {
-					if (detached) _releaseJoinStatus(join);
-					return send(...args);
-				}
-				const hold = new JoinHold();
-				Promise.resolve().then(() => {
-					if (join.hold !== hold || join.phase === 'attaching' || join.offline || join.waiting) return;
-					join.hold = null;
-					hold.flush();
-					_releaseJoinStatus(join);
-				});
-				join.hold = hold;
-			} else {
-				if (join.error !== null) {
-					if (detached) _releaseJoinStatus(join);
-					return name === 'react' ? undefined : Promise.reject(join.error);
-				}
-				join.hold = new JoinHold();
-			}
-		}
-		const field = name === 'setTyping' || name === 'setSelection' || name === 'acquireLock' || name === 'releaseLock';
-		return join.hold.add(name, field && join.fieldSend ? join.fieldSend : send, args);
+		return _out(b, name, send, args, this.#ahead !== null && b === this.#ahead.bound);
 	}
 
 	/** @param {any} b @param {'move' | 'reportViewport'} name @param {any[]} args */
