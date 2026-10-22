@@ -5,6 +5,8 @@ import { _redactUrl, _replayWebhookOut } from './webhook-out.js';
 import { state, _webhookOutById } from './state.js';
 import { createDeadLetterStore } from './dead-letter.js';
 import { _platformPublish, UNSEQUENCED } from './publish-helpers.js';
+import { LiveError } from './live-error.js';
+import { emitOperationalEvent } from '../shared/diagnostic.js';
 
 async function _handleInboundWebhook(req, config, topic) {
 	let event;
@@ -197,26 +199,71 @@ export function getDeadLetter() {
 	return state.webhookDeadLetter;
 }
 
+// One replay call re-fires at most this many records (the default matches the
+// list endpoint's default page). Replayed records leave the queue, so a larger
+// replay calls again; naming records by id covers a precise selection. A single
+// privileged call cannot turn the whole queue into third-party traffic and an
+// unbounded result array.
+const _REPLAY_DEFAULT_LIMIT = 100;
+const _REPLAY_MAX_LIMIT = 1000;
+const _REPLAY_MAX_INITIATOR = 128;
+
+/** @param {string} message @returns {never} */
+function _invalidReplay(message) {
+	throw new LiveError('INVALID_REQUEST', 'replayDeadLetter: ' + message);
+}
+
 /**
  * Replay dead-lettered outbound-webhook events. Re-attempts delivery for each
  * matching record via its original webhook (looked up by id); on a successful
  * re-fire the record is removed. With `dryRun`, reports what WOULD replay (and
  * whether each webhook is still registered) without sending or removing.
  *
- * @param {{ topic?: string, ids?: string[], dryRun?: boolean }} [opts]
+ * A call handles at most `limit` records (default 100, at most 1000) in the
+ * store's list order. Replayed records leave the queue, so calling again
+ * continues with the records that remain; records that failed or whose webhook
+ * is gone stay at the front of that order. `ids` names records explicitly (at
+ * most 1000). Each call emits a `webhook.dead-letter.replayed` operational
+ * event with its `initiator` (default 'api') and counts.
+ *
+ * @param {{ topic?: string, ids?: string[], dryRun?: boolean, limit?: number, initiator?: string }} [opts]
  * @returns {Promise<{ dryRun: boolean, total: number, replayed: number, removed: number, results: Array<{ id: string, ok: boolean, status: string, error?: string }> }>}
  */
 export async function replayDeadLetter(opts = {}) {
-	const store = state.webhookDeadLetter;
 	const dryRun = opts.dryRun === true;
+	const limit = opts.limit === undefined ? _REPLAY_DEFAULT_LIMIT : opts.limit;
+	if (!Number.isInteger(limit) || limit < 1 || limit > _REPLAY_MAX_LIMIT) {
+		_invalidReplay('limit must be an integer from 1 to ' + _REPLAY_MAX_LIMIT);
+	}
+	let ids = null;
+	if (opts.ids !== undefined) {
+		if (!Array.isArray(opts.ids) || opts.ids.some((id) => typeof id !== 'string' || id.length === 0)) {
+			_invalidReplay('ids must be an array of non-empty strings');
+		}
+		if (opts.ids.length > _REPLAY_MAX_LIMIT) _invalidReplay('ids may name at most ' + _REPLAY_MAX_LIMIT + ' records per call');
+		if (opts.ids.length) ids = opts.ids;
+	}
+	const initiator = opts.initiator === undefined ? 'api' : opts.initiator;
+	if (typeof initiator !== 'string' || initiator.length === 0 || initiator.length > _REPLAY_MAX_INITIATOR) {
+		_invalidReplay('initiator must be a non-empty string of at most ' + _REPLAY_MAX_INITIATOR + ' characters');
+	}
+	const store = state.webhookDeadLetter;
 	if (!store) return { dryRun, total: 0, replayed: 0, removed: 0, results: [] };
 
-	// `list` / `remove` may be sync (in-memory) or async (a Redis/Postgres
+	// `list` / `get` / `remove` may be sync (in-memory) or async (a Redis/Postgres
 	// cluster store); awaiting tolerates both (await on a non-Promise is a no-op).
-	let records = await store.list({ topic: opts.topic, limit: 1000000 });
-	if (Array.isArray(opts.ids) && opts.ids.length) {
-		const want = new Set(opts.ids.map(String));
-		records = records.filter((r) => want.has(r.id));
+	/** @type {any[]} */
+	let records;
+	if (ids) {
+		records = [];
+		for (const id of new Set(ids)) {
+			const rec = await store.get(id);
+			if (rec && (opts.topic === undefined || rec.topic === opts.topic)) records.push(rec);
+		}
+	} else {
+		records = await store.list({ topic: opts.topic, limit });
+		// A store that ignores the limit still replays only one bounded call.
+		if (records.length > limit) records = records.slice(0, limit);
 	}
 
 	const results = [];
@@ -255,5 +302,13 @@ export async function replayDeadLetter(opts = {}) {
 			results.push({ id: rec.id, ok: false, status: 'failed', error: outcome.error });
 		}
 	}
+	try {
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.webhook', event: 'webhook.dead-letter.replayed',
+			severity: 'info', dataClass: 'application',
+			message: 'Dead-lettered webhook events were replayed.',
+			attributes: { initiator, dryRun, byIds: ids !== null, total: records.length, replayed, removed, failed: results.filter((r) => r.status === 'failed').length, unregistered: results.filter((r) => r.status === 'webhook-unregistered').length }
+		});
+	} catch { /* Diagnostics must not fail a replay that already ran. */ }
 	return { dryRun, total: records.length, replayed, removed, results };
 }

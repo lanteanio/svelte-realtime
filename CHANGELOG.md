@@ -154,6 +154,9 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Dynamic derived scope checks refresh replaced or removed platform clock, random and hybrid-clock sources before computation and delivery, so a cached authorization context cannot keep a revoked subscriber eligible.
 
+- Dead-letter replay is bounded: `replayDeadLetter()` and `POST /__realtime/dlq/<topic>/replay` handle at most `limit` records per call (default 100, at most 1000) or up to 1000 explicit `ids`, and the admin route answers 400 on invalid input. Each call emits a `webhook.dead-letter.replayed` operational event with its initiator and counts. Before, one call re-fired every queued record.
+  **Action required:** code that replayed a whole queue in one call calls again until `total` is 0 or only failed records remain.
+
 - With a tenant resolver, `ctx.skip(key, ms)` scopes its key to the caller's tenant. Before, one tenant calling `ctx.skip` with a key another tenant also used suppressed that tenant's calls for the cooldown window.
 
 ## [0.6.0-next.91] - 2026-10-13

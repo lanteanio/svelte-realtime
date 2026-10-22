@@ -111,11 +111,20 @@ export function _createAdminHandler(adminConfig) {
 				return _json({ error: 'bad request' }, 400);
 			}
 			if (body == null || typeof body !== 'object') body = {};
-			const out = await replayDeadLetter({
-				topic,
-				ids: Array.isArray(/** @type {any} */ (body).ids) ? /** @type {any} */ (body).ids : undefined,
-				dryRun: /** @type {any} */ (body).dryRun === true
-			});
+			const b = /** @type {any} */ (body);
+			let out;
+			try {
+				out = await replayDeadLetter({
+					topic,
+					ids: b.ids === null ? undefined : b.ids,
+					dryRun: b.dryRun === true,
+					limit: b.limit === null ? undefined : b.limit,
+					initiator: 'admin'
+				});
+			} catch (err) {
+				if (/** @type {any} */ (err)?.code === 'INVALID_REQUEST') return _json({ error: 'bad request', message: /** @type {any} */ (err).message }, 400);
+				throw err;
+			}
 			return _json(out, 200);
 		}
 		if ((m = pathname.match(/\/dlq\/([^/]+)$/))) {

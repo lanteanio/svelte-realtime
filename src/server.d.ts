@@ -5016,8 +5016,25 @@ export function getDeadLetter(): DeadLetterStore | null;
  * matching record via its original webhook (by id); a successful re-fire removes
  * the record. `dryRun` reports what would replay (and whether each webhook is
  * still registered) without sending or removing.
+ *
+ * One call handles at most `limit` records (default 100, at most 1000) in the
+ * store's list order. Replayed records leave the queue, so calling again
+ * continues with the records that remain. `ids` names records explicitly (at
+ * most 1000). An out-of-range limit, a malformed or oversized id list, or a bad
+ * initiator rejects with `INVALID_REQUEST`. Each call emits a
+ * `webhook.dead-letter.replayed` operational event carrying `initiator`
+ * (default `'api'`) and its counts.
  */
-export function replayDeadLetter(opts?: { topic?: string; ids?: string[]; dryRun?: boolean }): Promise<{
+export function replayDeadLetter(opts?: {
+	topic?: string;
+	/** Records to replay by id, at most 1000. */
+	ids?: string[];
+	dryRun?: boolean;
+	/** Records to handle in this call, 1 to 1000. Default 100. */
+	limit?: number;
+	/** Who started the replay, for the operational event (a label such as a job name, at most 128 characters). Default 'api'. */
+	initiator?: string;
+}): Promise<{
 	dryRun: boolean;
 	total: number;
 	replayed: number;

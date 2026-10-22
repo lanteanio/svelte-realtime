@@ -4502,9 +4502,9 @@ It is **off by default** - a DLQ retains the (attacker-influenceable) event payl
 | --- | --- |
 | `GET /__realtime/dlq` | Counts-only summary: `{ total, byTopic, oldest, newest }`. |
 | `GET /__realtime/dlq/<topic>` | The retained records for a topic (`?limit=`, default 100), including the event data. |
-| `POST /__realtime/dlq/<topic>/replay` | Replay. Body `{ dryRun?: boolean, ids?: string[] }` - a dry-run reports what would replay; a confirm re-fires each event and removes it on success. |
+| `POST /__realtime/dlq/<topic>/replay` | Replay. Body `{ dryRun?: boolean, ids?: string[], limit?: number }` - a dry-run reports what would replay; a confirm re-fires each event and removes it on success. One call handles at most `limit` records (default 100, max 1000) or up to 1000 named `ids`; replayed records leave the queue, so call again for the rest. Invalid input answers 400. |
 
-Replay re-runs the **complete** delivery path, so the SSRF gate is re-applied at fire time (re-resolving and re-pinning the host) - a dead-lettered event can never be replayed to a host that has since become internal or started rebinding. A record whose webhook was removed from your code since it failed reports `webhook-unregistered` rather than firing.
+Replay re-runs the **complete** delivery path, so the SSRF gate is re-applied at fire time (re-resolving and re-pinning the host) - a dead-lettered event can never be replayed to a host that has since become internal or started rebinding. A record whose webhook was removed from your code since it failed reports `webhook-unregistered` rather than firing. Every replay call emits a `webhook.dead-letter.replayed` operational event with its initiator (`'admin'` for the route, `replayDeadLetter({ initiator })` from code, default `'api'`) and its counts.
 
 `configureWebhooks({ deadLetter })` is the imperative equivalent of the `webhooks` config; `createDeadLetterStore({ max, ttlMs })` builds the synchronous default store. A cluster substitutes a durable Redis/Postgres store with the same interface; every `DeadLetterStore` method may return a promise. `add` returns a record ID or `null` when an erasure tombstone suppresses capture.
 

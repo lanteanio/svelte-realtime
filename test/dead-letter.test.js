@@ -15,6 +15,7 @@ import {
 import { monotonicNow, setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { _fireWebhookOut } from '../src/server/webhook-out.js';
 import { state, _webhookOutById } from '../src/server/state.js';
+import { setOperationalEventSink } from '../src/shared/diagnostic.js';
 
 const adminFor = (requires) => /** @type {any} */ (realtime({ admin: { requires } })).admin;
 
@@ -274,6 +275,105 @@ describe('replayDeadLetter', () => {
 	it('is a no-op when capture is off', async () => {
 		const out = await replayDeadLetter({});
 		expect(out).toMatchObject({ total: 0, replayed: 0, removed: 0, results: [] });
+	});
+});
+
+describe('replayDeadLetter - bounded calls', () => {
+	beforeEach(reset);
+	const OK = 'ok';     // transform opt-out: replay "delivers" without a socket
+	const BAD = 'bad';   // loopback url: SSRF-blocked, replay fails and keeps the record
+	function seed(kinds) {
+		configureWebhooks({ deadLetter: createDeadLetterStore({ max: 5000 }) });
+		_webhookOutById.set(OK, { id: OK, config: { url: 'http://example.com/x', transform: () => null } });
+		_webhookOutById.set(BAD, { id: BAD, config: { url: 'http://127.0.0.1:9/x' } });
+		const store = getDeadLetter();
+		return { store, ids: kinds.map((kind) => store.add({ webhookId: kind, topic: 't', event: 'e', data: 1, attempts: 3, error: 'x', failedAt: 1 })) };
+	}
+
+	it('replays at most 100 records by default; calling again continues with what remains', async () => {
+		const { store } = seed(Array(250).fill(OK));
+		const first = await replayDeadLetter({ topic: 't' });
+		expect(first.total).toBe(100);
+		expect(first.replayed).toBe(100);
+		expect(first.results).toHaveLength(100);
+		expect('next' in first).toBe(false);
+		expect(store.count()).toBe(150);
+		const second = await replayDeadLetter({ topic: 't', limit: 1000 });
+		expect(second.replayed).toBe(150);
+		expect(store.count()).toBe(0);
+	});
+
+	it('bounds a call even when the store returns more than the limit', async () => {
+		const { store } = seed(Array(5).fill(OK));
+		const list = store.list.bind(store);
+		store.list = (filter) => list({ ...filter, limit: 1000 });
+		const out = await replayDeadLetter({ topic: 't', limit: 2 });
+		expect(out.total).toBe(2);
+		expect(store.count()).toBe(3);
+	});
+
+	it('limits a dry run without removing anything', async () => {
+		const { store } = seed([OK, OK, OK]);
+		const out = await replayDeadLetter({ topic: 't', dryRun: true, limit: 2 });
+		expect(out.results.map((r) => r.status)).toEqual(['would-replay', 'would-replay']);
+		expect(store.count()).toBe(3);
+	});
+
+	it('replays named ids only, within the topic', async () => {
+		const { store, ids } = seed([OK, OK, OK]);
+		store.add({ webhookId: OK, topic: 'other', event: 'e', data: 1, attempts: 3, error: 'x', failedAt: 1 });
+		const out = await replayDeadLetter({ topic: 't', ids: [ids[0], ids[2], 'missing'] });
+		expect(out.results.map((r) => r.id).sort()).toEqual([ids[0], ids[2]].sort());
+		expect(store.count()).toBe(2);
+	});
+
+	it('rejects an out-of-range limit, an oversized or malformed id list, and a bad initiator', async () => {
+		seed([OK]);
+		for (const opts of [
+			{ limit: 1001 }, { limit: 0 }, { limit: 1.5 }, { limit: '10' },
+			{ ids: Array.from({ length: 1001 }, (_, i) => String(i)) }, { ids: 'x' }, { ids: [1] }, { ids: [''] },
+			{ initiator: '' }, { initiator: 'x'.repeat(129) }
+		]) {
+			await expect(replayDeadLetter(/** @type {any} */ (opts))).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
+		}
+		expect(getDeadLetter().count()).toBe(1);
+	});
+
+	it('reports the initiator and counts as an operational event', async () => {
+		seed([OK, BAD, OK]);
+		const events = [];
+		const restore = setOperationalEventSink((record) => { events.push(record); });
+		try {
+			await replayDeadLetter({ topic: 't', initiator: 'nightly-job', limit: 2 });
+		} finally {
+			restore();
+		}
+		expect(events).toContainEqual(expect.objectContaining({
+			event: 'webhook.dead-letter.replayed',
+			attributes: { initiator: 'nightly-job', dryRun: false, byIds: false, total: 2, replayed: 1, removed: 1, failed: 1, unregistered: 0 }
+		}));
+	});
+
+	it('admin replay honours limit, audits as admin, and answers 400 on bad input', async () => {
+		seed([OK, OK, OK]);
+		const admin = adminFor(() => true);
+		const events = [];
+		const restore = setOperationalEventSink((record) => { events.push(record); });
+		let first;
+		try {
+			const res = await admin(new Request('http://x/__realtime/dlq/t/replay', { method: 'POST', body: JSON.stringify({ limit: 2 }) }));
+			expect(res.status).toBe(200);
+			first = await res.json();
+		} finally {
+			restore();
+		}
+		expect(first.total).toBe(2);
+		expect(events).toContainEqual(expect.objectContaining({ event: 'webhook.dead-letter.replayed', attributes: expect.objectContaining({ initiator: 'admin' }) }));
+		for (const body of [{ limit: 5000 }, { ids: 'x' }, { limit: 'all' }]) {
+			const bad = await admin(new Request('http://x/__realtime/dlq/t/replay', { method: 'POST', body: JSON.stringify(body) }));
+			expect(bad.status).toBe(400);
+		}
+		expect(getDeadLetter().count()).toBe(1);
 	});
 });
 
