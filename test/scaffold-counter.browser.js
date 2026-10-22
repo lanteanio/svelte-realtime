@@ -147,21 +147,18 @@ it('keeps focus and prevents duplicate increments while a request is pending', a
 });
 
 
-it.each(browserViewports)('keeps the generated counter usable on $name', async ({ width, height }) => {
+// The counting path at each viewport runs against the real plugin and adapter in
+// scaffold-counter-live.browser.js; this ladder covers the error state it cannot force.
+it.each(browserViewports)('keeps the generated error state usable on $name', async ({ width, height }) => {
 	await page.setViewportSize({ width, height });
-	await page.evaluate(() => window.counterHarness.set(9, 'connected'));
-	const increment = page.getByRole('button', { name: 'Increase count by one', exact: true });
-	await increment.click();
-	await page.waitForFunction(() => document.querySelector('[role="status"]').textContent.includes('Count: 10'));
-	expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
-	const box = await increment.boundingBox();
-	expect(box.x).toBeGreaterThanOrEqual(0);
-	expect(box.x + box.width).toBeLessThanOrEqual(width);
 	await page.evaluate(() => window.counterHarness.set(10, 'error', { message: 'Connection unavailable. Try again.' }));
 	const retry = page.getByRole('button', { name: 'Retry connection', exact: true });
 	await retry.waitFor();
 	expect(await page.getByRole('status').textContent()).toContain('Connection unavailable');
 	expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+	const box = await retry.boundingBox();
+	expect(box.x).toBeGreaterThanOrEqual(0);
+	expect(box.x + box.width).toBeLessThanOrEqual(width);
 	expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
 	expect(errors).toEqual([]);
 });
