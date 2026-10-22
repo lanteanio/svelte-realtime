@@ -2939,7 +2939,7 @@ By default alarms are in-memory: they survive the room going idle within the pro
 // hooks.ws.js init - durable + cluster single-fire
 import { configureAlarm } from 'svelte-realtime/server';
 import { createAlarmStore } from 'svelte-adapter-uws-extensions/redis/alarm-store';
-// or: from 'svelte-adapter-uws-extensions/postgres/alarm-store'
+// or: import { createAlarmStore } from 'svelte-adapter-uws-extensions/postgres/alarm-store';
 
 configureAlarm({
   store: createAlarmStore(client), // use a generation-aware store implementation
@@ -4973,7 +4973,7 @@ In-memory map of `${topic}\0${userId} -> { count, timer, data }` populated by `l
 
 When the map reaches the cap: entries with a pending leave timer are evicted first (they were already on their way out). If still full after eviction, the new join is dropped - no entry is created, no `'join'` is published - and a one-shot warning surfaces. New joiners in this state are invisible in any subscriber's roster until existing entries clear.
 
-For multi-instance deploys, wire a cluster-aware `platform.presence` (e.g. from `svelte-adapter-uws-extensions/presence`). When `platform.presence.list` is a function, the in-memory fallback is bypassed entirely and this cap stops mattering.
+For multi-instance deploys, wire a cluster-aware `platform.presence` (e.g. from `svelte-adapter-uws-extensions/redis/presence`). When `platform.presence.list` is a function, the in-memory fallback is bypassed entirely and this cap stops mattering.
 
 ### Idempotency results (10,000)
 

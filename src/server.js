@@ -218,7 +218,7 @@ export const SILENT_TOPIC_WARN_DEDUP_MAX = 1_000_000;
 /** Max distinct topics in the dev-mode publish-rate warning dedup. FIFO-evict on cap: dropping the oldest entry just lets that topic re-warn on its next sample tick. Matches svelte-adapter-uws `PUBLISH_WARN_DEDUP_MAX`. */
 export const PUBLISH_RATE_WARN_DEDUP_MAX = 1_000_000;
 
-/** Max distinct (user, room) pairs the in-memory presence-ref map holds. FIFO-evict graces first, then WARN-then-skip on cap: new joiners don't get registered, so they're invisible in any subscriber's roster until existing entries clear. Matches the per-process safety-net convention used by the other caps in this section. For multi-instance deploys, wire `platform.presence` (e.g. `svelte-adapter-uws-extensions/presence`) to bypass this map entirely. */
+/** Max distinct (user, room) pairs the in-memory presence-ref map holds. FIFO-evict graces first, then WARN-then-skip on cap: new joiners don't get registered, so they're invisible in any subscriber's roster until existing entries clear. Matches the per-process safety-net convention used by the other caps in this section. For multi-instance deploys, wire `platform.presence` (e.g. `svelte-adapter-uws-extensions/redis/presence`) to bypass this map entirely. */
 export const MAX_PRESENCE_REF = 1_000_000;
 
 // Seed the mutable cap shadows on the shared state holder from the public

@@ -1421,7 +1421,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "2c24ab3438770a53f2b5a89e8d1ce78254568cef0ae419c9bbf3388d3906e4d4",
+			"fingerprint": "13c5556938b0a88032c1364f0fbe82b4b6741e0c38dbeea0b574a832306f0cd4",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Per-room alarms",

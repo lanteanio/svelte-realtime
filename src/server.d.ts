@@ -326,7 +326,7 @@ export interface LiveContext<UserData = RegisteredUser> {
 	 * HTTP/SSR work it is the adapter's per-request id. Threaded through the
 	 * realtime layer's `ctx`, `ctx.platform.requestId`, and (when used)
 	 * downstream task-runner work via
-	 * `svelte-adapter-uws-extensions/task-runner` - structured-log against
+	 * `svelte-adapter-uws-extensions/postgres/tasks` - structured-log against
 	 * it to correlate every step of one operation without piping the value
 	 * through your handler signatures.
 	 *
