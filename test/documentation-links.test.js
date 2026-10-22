@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { writeFileSync, unlinkSync } from 'node:fs';
-import { anchorsOf, checkLink, linksOf } from '../scripts/check-links.js';
+import { anchorsOf, checkLink, checkMainSnapshot, linksOf } from '../scripts/check-links.js';
 import { crawlUrl, looksLikeSoft404 } from '../scripts/check-external-links.js';
 import { PROCESS_TEST_TIMEOUT } from './process-fixtures.js';
 
@@ -76,5 +76,18 @@ describe('documentation link gates', () => {
 		expect(await check('settings/tokens')).toMatchObject({ ok: false, kind: 'redirect', requests: 2 });
 		expect(await check('orgs/acme/teams')).toMatchObject({ ok: false, kind: 'redirect', requests: 2 });
 		expect(await check('owner/repo')).toMatchObject({ ok: false, kind: 'redirect', requests: 2 });
+	});
+	it('accepts a moved origin/main only while its paths and anchors match the recorded snapshot', () => {
+		const recorded = { commit: 'a'.repeat(40), paths: ['README.md', 'src/index.js'], anchors: { 'README.md': ['usage'] } };
+		const read = [];
+		const tree = (content) => (commit) => { read.push(commit); return content; };
+		expect(checkMainSnapshot(recorded, null, tree(recorded))).toMatchObject({ ok: true });
+		expect(checkMainSnapshot(recorded, recorded.commit, tree(recorded))).toMatchObject({ ok: true, detail: 'matches origin/main' });
+		expect(read).toEqual([]);
+		const moved = 'b'.repeat(40);
+		expect(checkMainSnapshot(recorded, moved, tree({ paths: [...recorded.paths], anchors: { 'README.md': ['usage'] } }))).toMatchObject({ ok: true });
+		expect(read).toEqual([moved]);
+		expect(checkMainSnapshot(recorded, moved, tree({ paths: [...recorded.paths, 'src/new.js'], anchors: recorded.anchors }))).toMatchObject({ ok: false });
+		expect(checkMainSnapshot(recorded, moved, tree({ paths: recorded.paths, anchors: { 'README.md': ['usage', 'install'] } }))).toMatchObject({ ok: false, detail: expect.stringMatching(/records origin\/main aaaaaaa but origin\/main is bbbbbbb/) });
 	});
 });

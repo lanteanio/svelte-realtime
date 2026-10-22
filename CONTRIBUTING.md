@@ -279,7 +279,9 @@ Use a relative link for a packaged file. For repository-only source, use its
 GitHub `blob/dev` route; new source and its link must be staged together. Stable
 `blob/main` links use the committed `docs/main-source-tree.v1.json` snapshot.
 After a stable promotion, fetch the new main ref and run
-`node scripts/check-links.js --write-main-tree`, then review that diff.
+`node scripts/check-links.js --write-main-tree`, then review that diff. A main
+commit that changes no path and no Markdown heading, such as a lockfile update,
+leaves the snapshot valid.
 
 `npm run check:links:external` performs bounded HTTP requests and reports redirects,
 hard errors and HTML titles/headings that indicate a soft 404. Its read-only CI

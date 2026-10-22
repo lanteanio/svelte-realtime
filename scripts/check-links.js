@@ -469,15 +469,41 @@ function writeMainTree() {
 		console.error('check-links --write-main-tree FAILED: origin/main is not resolvable here; fetch it first (git fetch origin main).');
 		process.exit(1);
 	}
-	const paths = gitLines(['ls-tree', '-r', '--name-only', commit]);
+	const { paths, anchors } = treeAt(commit);
 	const body = {
 		comment: 'File list of the published stable tree (origin/main), consumed by scripts/check-links.js to validate same-repo blob/main source links without network or a full clone. Regenerate after a stable promotion: node scripts/check-links.js --write-main-tree',
 		commit,
 		paths,
-		anchors: Object.fromEntries(paths.filter((path) => /\.md$/i.test(path)).map((path) => [path, [...anchorsOf(execFileSync('git', ['-C', root, 'show', commit + ':' + path], { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 }))]]))
+		anchors
 	};
 	writeFileSync(join(root, MAIN_TREE_SNAPSHOT), JSON.stringify(body, null, '\t') + '\n');
 	console.log(`check-links: wrote ${MAIN_TREE_SNAPSHOT} at origin/main ${commit.slice(0, 7)} (${paths.length} paths).`);
+}
+
+/** The file list and Markdown anchors of a commit's tree, as the snapshot records them. */
+function treeAt(commit) {
+	const paths = gitLines(['ls-tree', '-r', '--name-only', commit]);
+	const anchors = Object.fromEntries(paths.filter((path) => /\.md$/i.test(path)).map((path) => [path, [...anchorsOf(execFileSync('git', ['-C', root, 'show', commit + ':' + path], { encoding: 'utf8', windowsHide: true, maxBuffer: 16 * 1024 * 1024 }))]]));
+	return { paths, anchors };
+}
+
+/**
+ * Whether the recorded main-tree snapshot answers for the origin/main that
+ * exists. A main commit that leaves every path and Markdown anchor alone (a
+ * lockfile update, for one) validates blob/main links exactly as the recorded
+ * commit does, so only a change in that content makes the snapshot stale.
+ * @param {{ commit: string, paths: string[], anchors: Record<string, string[]> }} recorded
+ * @param {string | null} liveCommit origin/main, or null when unavailable
+ * @param {(commit: string) => { paths: string[], anchors: Record<string, string[]> }} readTree
+ */
+export function checkMainSnapshot(recorded, liveCommit, readTree = treeAt) {
+	if (liveCommit === null) return { ok: true, detail: 'origin/main unavailable here - drift-checked on full clones' };
+	if (liveCommit === recorded.commit) return { ok: true, detail: 'matches origin/main' };
+	const live = readTree(liveCommit);
+	const same = JSON.stringify(live.paths) === JSON.stringify(recorded.paths) && JSON.stringify(live.anchors) === JSON.stringify(recorded.anchors);
+	return same
+		? { ok: true, detail: `same paths and anchors as origin/main ${liveCommit.slice(0, 7)}` }
+		: { ok: false, detail: `${MAIN_TREE_SNAPSHOT} records origin/main ${recorded.commit.slice(0, 7)} but origin/main is ${liveCommit.slice(0, 7)} with different paths or anchors.` };
 }
 
 function main() {
@@ -500,13 +526,13 @@ function main() {
 		console.log('  this checkout is the published main tip: blob/main validates against the staged tree.');
 	} else {
 		const snapshot = mainTreeSnapshot();
-		const liveMain = resolvableMainCommit();
-		if (liveMain !== null && liveMain !== snapshot.commit) {
-			console.error(`check-links FAILED: ${MAIN_TREE_SNAPSHOT} records origin/main ${snapshot.commit.slice(0, 7)} but origin/main is ${liveMain.slice(0, 7)}.`);
+		const current = checkMainSnapshot(JSON.parse(readFileSync(join(root, MAIN_TREE_SNAPSHOT), 'utf8')), resolvableMainCommit());
+		if (!current.ok) {
+			console.error(`check-links FAILED: ${current.detail}`);
 			console.error('  Regenerate it with: node scripts/check-links.js --write-main-tree');
 			process.exit(1);
 		}
-		console.log(`  main tree snapshot @${snapshot.commit.slice(0, 7)} (${snapshot.paths.size} paths, ${liveMain === null ? 'origin/main unavailable here - drift-checked on full clones' : 'matches origin/main'}).`);
+		console.log(`  main tree snapshot @${snapshot.commit.slice(0, 7)} (${snapshot.paths.size} paths, ${current.detail}).`);
 	}
 
 	let total = 0;
