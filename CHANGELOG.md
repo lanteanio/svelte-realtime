@@ -89,6 +89,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `live.breaker()` rejects unsupported breaker objects at registration with `VALIDATION`; its type accepts the extensions `guard()` contract and legacy `isOpen()` breakers.
 
+### Security
+
+- Dynamic derived scope checks refresh replaced or removed platform clock, random and hybrid-clock sources before computation and delivery, so a cached authorization context cannot keep a revoked subscriber eligible.
+
 ## [0.6.0-next.91] - 2026-10-13
 
 ### Added

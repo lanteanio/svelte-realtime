@@ -12,6 +12,7 @@ import { _gateAggregate, _cohortAdd } from './differential-privacy.js';
 import { _enumGates, _enumGateIntercept, _enumGateInterceptBatch } from './rooms-gate.js';
 import { diagnosticErrorMessage, emitOperationalEvent } from '../shared/diagnostic.js';
 import { _derivedScope, _matchesDerivedScope } from './derived-topic.js';
+import { _runtimeRandom, _localHlc } from './runtime-fallbacks.js';
 
 // Seam: the cron leader gate lives in server.js (configureCron). The webhook
 // fan-out in fireWatchers consults it through this getter, injected at init.
@@ -664,11 +665,29 @@ function _wrapPlatformPublish(platform) {
 
 /** Resolve a live context and revoke sockets whose identity/tenant scope changed. */
 function _currentDerivedContext(entry, platform, select = true) {
-	const scopeKey = entry.fn.__derivedScopeKey;
+	let scopeKey = entry.fn.__derivedScopeKey;
 	// This scratch context is used only by internal identity helpers and never
 	// escapes to scope callbacks or compute functions.
 	const identityCtx = scopeKey ? null : { user: null, ws: null };
 	const unscoped = entry.tenantId === null && !_isTenancyEnabled();
+	if (scopeKey) {
+		try {
+			const now = platform?.now || runtimeNow;
+			const random = platform?.random || _runtimeRandom;
+			const hlc = platform?.hlc || _localHlc;
+			const previous = entry.scopeRuntime;
+			if (!previous || previous.now !== now || previous.random !== random || previous.hlc !== hlc) {
+				entry.scopeRuntime = { now, random, hlc };
+				// Invalidate every view before selecting a compute context; the
+				// later delivery scan must also rebuild the remaining members.
+				for (const member of entry.subscribers.values()) member.scopeCtx = null;
+			}
+		} catch {
+			// A failed runtime lookup denies every member through the ordinary
+			// scope-validation path, including its client notification/cleanup.
+			scopeKey = () => null;
+		}
+	}
 	for (const subscriber of entry.subscribers.values()) {
 		const ws = subscriber.ctx.ws || null;
 		let user, ctx, valid = false;

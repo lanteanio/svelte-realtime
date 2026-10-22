@@ -3197,7 +3197,7 @@ Dynamic instances are isolated by authenticated identity, tenant, and arguments.
 
 Use `scopeKey(ctx, ...args)` to define an explicit sharing boundary. It must be deterministic and synchronously return a string or finite number. Callers with the same scope and arguments share every update, so the key must include all permissions that affect the result. For example, sessions of the same user with different roles can use `scopeKey: (ctx) => JSON.stringify([ctx.user.id, ctx.user.role])`. Only use an organization-wide key when every member is authorized to receive the same output. Continue to check authorization in the compute function.
 
-The scope and tenant are checked again before each computation and delivery. A connection whose scope changes is unsubscribed from its old output and receives `FORBIDDEN` in its stream error store; resubscribe to receive its new view. Output topics are opaque framework identifiers; their format is not a public API.
+The scope and tenant are checked again before each computation and delivery. Scope callbacks use current session data and platform clock, random and hybrid-clock sources, including when those sources are replaced. A connection whose scope changes is unsubscribed from its old output and receives `FORBIDDEN` in its stream error store; resubscribe to receive its new view. Output topics are opaque framework identifiers; their format is not a public API.
 
 ### Activation
 

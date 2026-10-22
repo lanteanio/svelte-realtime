@@ -105,6 +105,80 @@ describe('dynamic derived identity', () => {
 		expect(observations.at(-1)).toEqual({ label: 'after', requestId, platformRequestId: requestId, traceContext });
 	});
 
+	it.each(['now', 'random', 'hlc'])('revokes a cached scope after its %s source changes', async (name) => {
+		const read = ctx => name === 'random' ? ctx.random.float() : name === 'hlc' ? ctx.hlc().wall : ctx.now();
+		const source = value => name === 'random' ? { float: () => value } : name === 'hlc' ? () => ({ wall: value, logical: 0, nodeId: 'test' }) : () => value;
+		const { publish } = setup(read, { scopeKey: ctx => read(ctx) < 100 ? 'allowed' : 'expired' });
+		env.platform[name] = source(0);
+		const { stream } = await join({ id: 'member' });
+		const peer = (await join({ id: 'peer' })).stream;
+		const notices = [];
+		const send = env.platform.send;
+		env.platform.send = (ws, topic, event, data) => { if (event === '__topic_error') notices.push(data); return send(ws, topic, event, data); };
+		publish(); await flush();
+		expect(stream.events.map(event => event.data)).toEqual([0]);
+		expect(peer.events.map(event => event.data)).toEqual([0]);
+		env.platform[name] = source(200);
+		publish(); await flush();
+		expect(stream.events.map(event => event.data)).toEqual([0]);
+		expect(peer.events.map(event => event.data)).toEqual([0]);
+		expect(notices).toEqual([
+			expect.objectContaining({ topic: stream.topic, code: 'FORBIDDEN' }),
+			expect.objectContaining({ topic: peer.topic, code: 'FORBIDDEN' })
+		]);
+	});
+
+	it.each(['now', 'random', 'hlc'])('revokes a cached scope when its %s source is removed', async (name) => {
+		const initial = name === 'random' ? { float: () => 0 } : () => 0;
+		const { publish } = setup(() => 'allowed', { scopeKey: ctx => ctx[name] === initial ? 'allowed' : 'fallback' });
+		env.platform[name] = initial;
+		const { stream } = await join({ id: 'member' });
+		publish(); await flush();
+		expect(stream.events.map(event => event.data)).toEqual(['allowed']);
+		delete env.platform[name];
+		publish(); await flush();
+		expect(stream.events.map(event => event.data)).toEqual(['allowed']);
+		expect(_topicWsCounts.has(stream.topic)).toBe(false);
+	});
+
+	it('rechecks a changed clock after an asynchronous derived computation', async () => {
+		let finish;
+		let delayed = false;
+		const { publish } = setup(() => delayed ? new Promise(resolve => { finish = resolve; }) : 'allowed',
+			{ scopeKey: ctx => ctx.now() < 100 ? 'allowed' : 'expired' });
+		env.platform.now = () => 0;
+		const { stream } = await join({ id: 'member' });
+		publish(); await flush();
+		delayed = true; publish();
+		env.platform.now = () => 200;
+		finish('private result'); await flush();
+		expect(stream.events.map(event => event.data)).toEqual(['allowed']);
+		expect(_topicWsCounts.has(stream.topic)).toBe(false);
+	});
+
+	it('notifies and releases every cached member when a runtime lookup fails', async () => {
+		const { publish } = setup(() => 'private result', { scopeKey: () => 'runtime-lookup' });
+		const one = (await join({ id: 'one' })).stream;
+		const two = (await join({ id: 'two' })).stream;
+		publish(); await flush();
+		const notices = [];
+		const send = env.platform.send;
+		env.platform.send = (ws, topic, event, data) => { if (event === '__topic_error') notices.push(data); return send(ws, topic, event, data); };
+		const original = Object.getOwnPropertyDescriptor(env.platform, 'now');
+		Object.defineProperty(env.platform, 'now', { configurable: true, get() { throw new Error('clock unavailable'); } });
+		try {
+			publish(); await flush();
+			expect(one.events).toHaveLength(1);
+			expect(two.events).toHaveLength(1);
+			expect(notices).toHaveLength(2);
+			expect(notices.every(notice => notice.code === 'FORBIDDEN')).toBe(true);
+			expect(_topicWsCounts.has(one.topic)).toBe(false);
+		} finally {
+			if (original) Object.defineProperty(env.platform, 'now', original);
+			else delete env.platform.now;
+		}
+	});
+
 	it('preserves scope and lifecycle registration through stream wrappers', async () => {
 		const { publish } = setup((ctx) => ctx.user.id, { scopeKey: (ctx) => ctx.user.id }, (fn) => live.scoped(() => true, fn));
 		const { stream } = await join({ id: 'one' });
