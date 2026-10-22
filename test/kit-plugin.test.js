@@ -298,6 +298,43 @@ describe('repeated live module updates', () => {
 		await p.handleHotUpdate(update);
 		expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
 	});
+	it('reloads again for a repeated event that waited on a failed reload of the same write', async () => {
+		const p = plugin();
+		const s = server();
+		let failRegistry = true;
+		s.load.mockImplementation(async id => {
+			if (id === '/@svelte-realtime-server') return s.runtime;
+			if (id === '/@svelte-realtime-registry' && failRegistry) {
+				failRegistry = false;
+				throw new Error('transient failure');
+			}
+			return {};
+		});
+		const update = { file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s };
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			// Both events report the same write; the second waits for the first.
+			await Promise.all([p.handleHotUpdate(update), p.handleHotUpdate(update)]);
+		} finally { error.mockRestore(); }
+		expect(s.runtime._restoreHmr).toHaveBeenCalledTimes(1);
+		expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+		expect(s.load.mock.calls.filter(([id]) => id === '/@svelte-realtime-registry')).toHaveLength(2);
+	});
+	it('lets a change event reload a write whose add reload threw', async () => {
+		const p = plugin();
+		const s = server();
+		s.httpServer = undefined;
+		s.runtime._prepareHmr.mockImplementationOnce(() => { throw new Error('runtime unavailable'); });
+		p.configureServer(s);
+		const add = s.watcher.on.mock.calls.find(([event]) => event === 'add')[1];
+		const file = join(root, 'src/live/count.js');
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await Promise.all([add(file), p.handleHotUpdate({ file: file.replaceAll('\\', '/'), server: s })]);
+		} finally { error.mockRestore(); }
+		expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+		expect(s.load).toHaveBeenLastCalledWith('/@svelte-realtime-registry');
+	});
 	it('retries a save whose server graph invalidation threw', async () => {
 		const p = plugin();
 		const s = server();
