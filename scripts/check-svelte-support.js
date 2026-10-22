@@ -44,7 +44,7 @@ export function validateProfile({ pkg, lock, owner, node }) {
 	const packed = lock.packages['node_modules/svelte-realtime'];
 	assert.ok(packed && !packed.link, 'Install with --install-links to test a packed checkout');
 	assert.equal(packed.resolved, 'file:../../..', 'Packed fixture must resolve this checkout rather than a registry artifact');
-	assert.equal(packed.version, owner.version, 'Packed checkout version drift: regenerate the fixture lock');
+	assert.equal(packed.version, owner.version, 'Packed checkout version drift: run npm install --package-lock-only --install-links --ignore-scripts in ' + fixturePath + ', then node scripts/check-svelte-support.js --write');
 	for (const field of ['dependencies', 'peerDependencies', 'optionalDependencies', 'peerDependenciesMeta', 'engines', 'bin']) {
 		const expected = owner[field] ?? {};
 		const actual = packed[field] ?? {};

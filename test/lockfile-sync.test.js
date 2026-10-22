@@ -59,6 +59,22 @@ describe('committed lockfile sync guard', () => {
 			expect(() => checkLockSync(app, ['--install-links'], { npm })).not.toThrow();
 			expect(() => checkLockSync(app, [], { npm, label: 'app' })).toThrow(/app\/package-lock\.json is out of sync[\s\S]*Missing: local-dep@1\.0\.0 from lock file/);
 
+			const local = join(directory, 'local', 'package.json');
+			writeFileSync(local, JSON.stringify({ name: 'local-dep', version: '1.0.1' }));
+			expect(() => checkLockSync(app, ['--install-links'], { npm, label: 'app' })).toThrow(
+				/app\/package-lock\.json records stale manifest data[\s\S]*node_modules\/local-dep records version 1\.0\.0 but file:\.\.\/local is 1\.0\.1[\s\S]*npm install --package-lock-only --install-links --ignore-scripts inside app/
+			);
+			writeFileSync(local, JSON.stringify({ name: 'local-dep', version: '1.0.0', dependencies: { 'left-pad': '^1.3.0' } }));
+			expect(() => checkLockSync(app, ['--install-links'], { npm })).toThrow(/records stale dependencies of file:\.\.\/local/);
+			writeFileSync(local, JSON.stringify({ name: 'local-dep', version: '1.0.0' }));
+			expect(() => checkLockSync(app, ['--install-links'], { npm })).not.toThrow();
+
+			const appManifest = join(app, 'package.json');
+			const unversioned = readFileSync(appManifest, 'utf8');
+			writeFileSync(appManifest, JSON.stringify({ ...JSON.parse(unversioned), version: '2.0.0' }));
+			expect(() => checkLockSync(app, ['--install-links'], { npm })).toThrow(/its root package records version undefined but package\.json has 2\.0\.0/);
+			writeFileSync(appManifest, unversioned);
+
 			const manifest = JSON.parse(readFileSync(join(app, 'package.json'), 'utf8'));
 			manifest.dependencies['second-dep'] = 'file:../local';
 			writeFileSync(join(app, 'package.json'), JSON.stringify(manifest));

@@ -100,9 +100,56 @@ export function checkLockSync(directory, flags = [], { npm = npmCli(), run = spa
 		const reasons = output.split(/\r?\n/).filter((line) => /\b(?:Missing|Invalid)\b|from lock file|request to \S+ failed/.test(line))
 			.map((line) => '  ' + line.replace(/^npm (?:error|ERR!) /, '').replace(/^request to (\S+) failed.*$/, 'not in the lock, so npm needed the registry: $1'));
 		throw new Error(posix.join(label.replace(/\\/g, '/'), 'package-lock.json') + ' is out of sync with its package.json under ' + ['npm ci', ...flags].join(' ') + ':\n' +
-			(reasons.length ? reasons.join('\n') : output.trim()) + '\n' +
-			'Regenerate it inside that directory with ' + ['npm install --package-lock-only', ...flags].join(' ') + ' and commit the result.');
+			(reasons.length ? reasons.join('\n') : output.trim()) + '\n' + regenerateHint(label, flags));
 	}
+	checkRecordedManifests(directory, flags, label);
+}
+
+function regenerateHint(label, flags) {
+	return 'Regenerate it with ' + ['npm install --package-lock-only', ...flags, '--ignore-scripts'].join(' ') +
+		(label === '.' ? ' at the repository root' : ' inside ' + label.replace(/\\/g, '/')) + ' and commit the result.';
+}
+
+/**
+ * npm ci accepts a lock whose recorded versions trail the manifests they came
+ * from: the lock's own name and version, and the packed copy that a lock written
+ * with --install-links keeps of each file: dependency (its version and
+ * dependency ranges). A version bump of this checkout leaves both behind, so
+ * compare them with their sources directly.
+ */
+function checkRecordedManifests(directory, flags, label) {
+	const lockPath = join(directory, 'package-lock.json');
+	if (!existsSync(lockPath)) return;
+	const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+	const own = JSON.parse(readFileSync(join(directory, 'package.json'), 'utf8'));
+	const problems = [];
+	for (const [where, recorded] of [['the lock', lock], ['its root package', lock.packages?.[''] ?? {}]]) {
+		for (const field of ['name', 'version']) {
+			if (recorded[field] !== own[field]) problems.push('  ' + where + ' records ' + field + ' ' + recorded[field] + ' but package.json has ' + own[field]);
+		}
+	}
+	for (const [path, entry] of Object.entries(lock.packages || {})) {
+		if (!path || entry.link || typeof entry.resolved !== 'string' || !entry.resolved.startsWith('file:')) continue;
+		const manifestPath = join(resolve(directory, entry.resolved.slice('file:'.length)), 'package.json');
+		if (!existsSync(manifestPath)) continue;
+		const source = JSON.parse(readFileSync(manifestPath, 'utf8'));
+		if (entry.version !== source.version) {
+			problems.push('  ' + path + ' records version ' + entry.version + ' but ' + entry.resolved + ' is ' + source.version);
+		}
+		for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies']) {
+			if (JSON.stringify(sorted(entry[field])) !== JSON.stringify(sorted(source[field]))) {
+				problems.push('  ' + path + ' records stale ' + field + ' of ' + entry.resolved);
+			}
+		}
+	}
+	if (problems.length) {
+		throw new Error(posix.join(label.replace(/\\/g, '/'), 'package-lock.json') + ' records stale manifest data:\n' +
+			problems.join('\n') + '\n' + regenerateHint(label, flags));
+	}
+}
+
+function sorted(object = {}) {
+	return Object.fromEntries(Object.entries(object).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
 }
 
 export function checkLockfiles(directory = root, options = {}) {

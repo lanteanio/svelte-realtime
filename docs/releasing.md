@@ -120,6 +120,24 @@ the maintainer's authorization.
 command and npm-script inventories. Intentional script changes update that
 guard in the same change, alongside the generated verification inventory.
 
+## Version bump
+
+The publish-ready version bump is one commit that changes these together:
+
+1. `package.json` `version`, then `npm install --package-lock-only --ignore-scripts`
+   at the repository root so the root lock records the same version.
+2. The Svelte 4 fixture lock, which records a packed copy of this checkout and
+   therefore its version: run
+   `npm install --package-lock-only --install-links --ignore-scripts` inside
+   `test/fixtures/svelte4`, then `node scripts/check-svelte-support.js --write`
+   from the repository root to refresh the generated support table.
+3. The `CHANGELOG.md` heading for the version, dated, with `Unreleased` folded
+   into it.
+
+`npm run check` must pass on that commit. Its lockfile check names any
+committed lock that still records the previous version, with the command that
+regenerates it.
+
 ## Artifact records
 
 The [release manifest](release-manifest.md) is the artifact ledger. Its four
