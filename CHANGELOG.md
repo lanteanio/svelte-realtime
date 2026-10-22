@@ -615,7 +615,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Alarm callbacks restore the persisted tenant scope for storage access and scoped helpers on both precise timers and restart recovery.
 
-- Framework signals, room membership and multiplayer events, smooth and document updates, and automatic stream publishes declare an unsequenced delivery policy so multi-worker adapters accept them. Application publish options and replay-assigned sequences retain their existing meaning.
+- Framework signals, room membership and multiplayer events, rooms list deltas, smooth and document updates, and automatic stream publishes (cron ticks, derived and aggregate recomputes, `invalidateOn` and `staleAfterMs` reloads, inbound webhooks, the room-action `ctx.publish` shorthand, and `ctx.publishThrottled` / `ctx.publishDebounced`) declare an unsequenced delivery policy so multi-worker adapters accept them. They carry no adapter sequence on a single worker either, and these surfaces take no publish options, so an app that needs a sequenced frame publishes it itself with explicit options through `ctx.platform.publish`. Application publish options and replay-assigned sequences retain their existing meaning.
 
 - Apply module guards to every room stream, room-list RPC and room action in `createTestEnv`, matching the generated registry. Tests with guarded room modules now enforce those guards.
 
