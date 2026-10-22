@@ -54,7 +54,7 @@ jobs:
         run: npm run test:chaos:parallel
       - name: Run Redis and instance recovery at the event revision
         env:
-          PLAYWRIGHT_JUNIT_OUTPUT_NAME: test/chaos/test-results/recovery-junit.xml
+          PLAYWRIGHT_JUNIT_OUTPUT_FILE: test/chaos/test-results/recovery-junit.xml
         run: npm exec -- playwright test --config test/chaos/playwright.config.js recovery.spec.js --reporter=line,junit
       - name: Upload recovery evidence
         if: always()

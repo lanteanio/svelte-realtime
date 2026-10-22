@@ -17,7 +17,10 @@ describe('recovery chaos workflow', () => {
 	it('is bounded, read-only, and preserves machine-readable evidence', () => {
 		expect(workflow).toMatch(/permissions:\s+contents: read/);
 		expect(workflow).toContain('timeout-minutes: 20');
-		expect(workflow).toContain('PLAYWRIGHT_JUNIT_OUTPUT_NAME: test/chaos/test-results/recovery-junit.xml');
+		// An OUTPUT_NAME would be joined onto the config directory, test/chaos, so
+		// the report would land outside the uploaded folder.
+		expect(workflow).toContain('PLAYWRIGHT_JUNIT_OUTPUT_FILE: test/chaos/test-results/recovery-junit.xml');
+		expect(workflow).not.toContain('PLAYWRIGHT_JUNIT_OUTPUT_NAME');
 		expect(workflow).toContain('if: always()');
 		expect(workflow).toContain('if-no-files-found: error');
 		expect(workflow).toContain('test/chaos/test-results/**');
