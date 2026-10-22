@@ -69,7 +69,7 @@ export function validateManifest(manifest, pkg) {
 		}
 		if (destinations.has(path.destination)) failures.push(`duplicate destination: ${path.destination}`);
 		destinations.add(path.destination);
-		if (index < 3) {
+		if (index < 3 || path.owner === 'README.md') {
 			if (path.owner !== 'README.md' || !/^#[a-z0-9_-]+$/.test(path.destination)) failures.push(`path ${index} must be owned by a README anchor`);
 		} else {
 			let url;
@@ -126,7 +126,7 @@ export function validateReadme(readme, manifest, baseline) {
 	const total = readme.split('\n').length;
 	if (total > manifest.readmeMaxLines) failures.push(`README has ${total} lines; size ratchet is ${manifest.readmeMaxLines}. Move content out rather than add headroom.`);
 	const anchors = anchorsOf(readme);
-	for (const path of manifest.paths.slice(0, 3)) if (!anchors.has(path.destination.slice(1))) failures.push(`missing local destination ${path.destination}`);
+	for (const path of manifest.paths) if (path.owner === 'README.md' && !anchors.has(path.destination.slice(1))) failures.push(`missing local destination ${path.destination}`);
 	const outside = readme.slice(0, compatibility.start) + readme.slice(compatibility.end);
 	if (/uWebSockets\.js\/archive\/refs\/tags\/v\d+\.\d+\.\d+|\bv\d+\.\d+\.\d+\b/.test(outside)) failures.push('native version facts belong in the generated compatibility block');
 	return failures;

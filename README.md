@@ -26,7 +26,7 @@
 | Run the first working example | First success | [Quick start](#quick-start) | README.md |
 | Choose a supported tuple | Compatibility | [Version compatibility](#version-compatibility) | README.md |
 | Learn by building | Tutorial | [Interactive lessons](https://svelte-realtime.dev/tutorial) | svelte-realtime.dev |
-| Add realtime to an existing app | How-to | [Manual setup](https://svelte-realtime.dev/docs/manual-setup) | svelte-realtime.dev |
+| Add realtime to an existing app | How-to | [Manual setup](#manual-setup) | README.md |
 | Look up RPC behavior | Reference | [RPC reference](https://svelte-realtime.dev/docs/rpc) | svelte-realtime.dev |
 | Understand boundaries and flow | Explanation | [Architecture](https://svelte-realtime.dev/docs/architecture) | svelte-realtime.dev |
 | Deploy and operate a service | Operations | [Deployment guide](https://svelte-realtime.dev/guides/deployment) | svelte-realtime.dev |

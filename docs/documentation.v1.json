@@ -42,8 +42,8 @@
       "type": "How-to",
       "need": "Add realtime to an existing app",
       "label": "Manual setup",
-      "destination": "https://svelte-realtime.dev/docs/manual-setup",
-      "owner": "svelte-realtime.dev"
+      "destination": "#manual-setup",
+      "owner": "README.md"
     },
     {
       "key": "reference",

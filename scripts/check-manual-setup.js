@@ -19,8 +19,12 @@ const installedModules = realpathSync(join(root, 'node_modules'));
 let child, browser;
 let output = '';
 
-function run(args, cwd = app) {
-	const result = spawnSync(process.execPath, args, { cwd, encoding: 'utf8', timeout: 180000, env: { ...process.env, NODE_ENV: 'development', npm_config_cache: join(workspace, 'pack-cache') } });
+function run(args, cwd = app, nodeEnv = 'development') {
+	const env = { ...process.env, npm_config_cache: join(workspace, 'pack-cache') };
+	// A production build must see the NODE_ENV a reader's shell would give it.
+	if (nodeEnv === null) delete env.NODE_ENV;
+	else env.NODE_ENV = nodeEnv;
+	const result = spawnSync(process.execPath, args, { cwd, encoding: 'utf8', timeout: 180000, env });
 	if (result.error) throw result.error;
 	assert.equal(result.status, 0, result.stdout + result.stderr);
 	return result.stdout;
@@ -146,7 +150,7 @@ try {
 	await twoTabs(await start([npm, 'run', 'dev', '--', '--host', '127.0.0.1', '--port', String(devPort), '--strictPort'], devPort));
 	await stop();
 	console.log('manual setup: building production app');
-	run([npm, 'run', 'build']);
+	run([npm, 'run', 'build'], app, null);
 	assert.ok(existsSync(join(app, 'build/index.js')));
 	const productionPort = await port();
 	await twoTabs(await start(['build/index.js'], productionPort));

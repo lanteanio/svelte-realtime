@@ -62,6 +62,19 @@ it('rejects stale routing, missing anchors, duplicate destinations and changed o
 	expect(validateManifest(copy, pkg).join('\n')).toContain('duplicate destination');
 	expect(validateManifest(copy, pkg).join('\n')).toContain('owned by a README anchor');
 });
+it('routes the existing-app path to the verified README manual setup', () => {
+	const howTo = manifest.paths.find((path) => path.key === 'how-to');
+	expect(howTo).toMatchObject({ destination: '#manual-setup', owner: 'README.md' });
+	expect(validateManifest(manifest, pkg)).toEqual([]);
+	const copy = structuredClone(manifest);
+	copy.paths[4].destination = '#missing-setup';
+	const start = readme.indexOf(PATHS_START);
+	const end = readme.indexOf(PATHS_END) + PATHS_END.length;
+	const updated = readme.slice(0, start) + renderPaths(copy) + readme.slice(end);
+	expect(validateReadme(updated, copy).join('\n')).toContain('missing local destination #missing-setup');
+	copy.paths[4].destination = 'https://svelte-realtime.dev/docs/manual-setup';
+	expect(validateManifest(copy, pkg).join('\n')).toContain('path 4 must be owned by a README anchor');
+});
 it('rejects credentialed, foreign and noncanonical site routes', () => {
 	for (const destination of ['https://user@svelte-realtime.dev/tutorial', 'https://example.com/tutorial', 'https://svelte-realtime.dev/tutorial?q=1', 'https://svelte-realtime.dev/docs/../tutorial']) {
 		const copy = structuredClone(manifest);
