@@ -280,6 +280,10 @@ export interface LiveContext<UserData = RegisteredUser> {
 	 * limit. For cross-replica gating use `live.rateLimit({ store: 'redis' })`
 	 * or `redis/ratelimit` from svelte-adapter-uws-extensions.
 	 *
+	 * With a tenant resolver, keys are scoped to the caller's tenant: the same
+	 * key in two tenants (or a tenant and an unscoped caller) gates separately.
+	 * The 5000-entry capacity is shared across tenants.
+	 *
 	 * Throws `LiveError('INVALID_ARG', ...)` if `key` isn't a string or `ms`
 	 * isn't a positive finite number. Capped at 5000 active entries with
 	 * fail-open semantics on overflow (returns `false`, dev-warns once).

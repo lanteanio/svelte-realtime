@@ -158,6 +158,7 @@ function _getScopedHelpers(helpers, tenantId) {
 	const key = tenantId === null ? '\0none' : tenantId;
 	let wrapped = byTenant.get(key);
 	if (!wrapped) {
+		const skipPrefix = tenantId === null ? '\0\0' : '\0' + tenantId + '\0';
 		const wrapTopic = (fn, surface) => (...args) => {
 			args[0] = _ctxTopic(tenantId, args[0], surface);
 			return fn(...args);
@@ -172,7 +173,12 @@ function _getScopedHelpers(helpers, tenantId) {
 			// batch does too), so an Array.isArray check alone let a Set or a
 			// generator sail past the namespace rule with its topics untouched -
 			// the guard has to cover every iterable, not just the literal form.
-			batch: (messages) => helpers.batch(_mapBatchTopics(messages, tenantId))
+			batch: (messages) => helpers.batch(_mapBatchTopics(messages, tenantId)),
+			// The skip gate map is process-wide, so a key one tenant chose must not
+			// gate another tenant's call. Tenant ids never contain NUL and the
+			// unscoped prefix differs from every tenant prefix, so no caller key
+			// reaches another scope's gate.
+			skip: (key, ms) => helpers.skip(typeof key === 'string' ? skipPrefix + key : key, ms)
 		};
 		byTenant.set(key, wrapped);
 		if (tenantId === null) _unscopedHelperCache.set(helpers, wrapped);
@@ -632,7 +638,7 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, o
 		signal: helpers.signal,
 		batch: scopedHelpers.batch,
 		shed: helpers.shed,
-		skip: helpers.skip,
+		skip: tenancy ? scopedHelpers.skip : helpers.skip,
 		connectionId,
 		requestId,
 		// W3C operation context and vendor-neutral span boundary projected by
