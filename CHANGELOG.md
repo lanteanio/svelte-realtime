@@ -156,6 +156,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `forget: 'retain'` aggregates clear their privacy contributor cohorts whole on `live.forget`. Before, only an entry equal to the userId was removed, so a numeric or email contributor id survived an erasure that reported success. The cohorts of every tenant are cleared whatever `tenantId` the erasure names, and a thresholded output holds its last value until k contributors return. Aggregate erasure acts on the calling worker only, and a `forget: 'reset'` keeps the privacy noise key because a worker-local reset has no replica-consistent generation to re-key it with.
 
+- An upload whose arguments cannot be JSON-encoded rejects its handle with `INVALID_REQUEST` (the encoding error as `cause`) instead of throwing from the upload call, and arguments that encode past 65535 bytes reject with `PAYLOAD_TOO_LARGE` instead of sending a corrupt chunk 0. The arguments are encoded once per upload, also when the client falls back to the older upload format.
+
 - Upload reauthorization preserves explicit structured error parameters and details in both the client failure and the handler abort reason.
 
 - Upload metrics record a terminal outcome once, including cancellation, disconnects and rejected chunks while handler lookup or authorization is pending. A late handler completion cannot replace that failure with success.

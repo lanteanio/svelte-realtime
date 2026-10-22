@@ -287,6 +287,58 @@ describe('upload receiver credits through the real client and server', () => {
 		expect(ran).toBe(false);
 	});
 
+	it('resends the rpc header without encoding the arguments again', async () => {
+		const ctx = await setup({ legacyServer: true });
+		let received;
+		env.register('files', {
+			save: ctx.live.upload(async (c, label) => {
+				received = label;
+				for await (const _ of c.stream) { /* drain */ }
+				return 'saved';
+			})
+		});
+		let encodings = 0;
+		const label = {
+			toJSON() {
+				if (++encodings > 1) throw new TypeError('second encoding');
+				return 'ok';
+			}
+		};
+		const handle = ctx.__upload('files/save')(new Uint8Array([1, 2, 3]), label);
+		expect(await handle).toBe('saved');
+		expect(encodings).toBe(1);
+		expect(received).toBe('ok');
+		const headers = ctx.chunks().filter((f) => f.hasArgs).map((f) => f.header);
+		expect(headers).toEqual([{ path: 'files/save', args: ['ok'] }, { rpc: 'files/save', args: ['ok'] }]);
+	});
+
+	it('rejects an upload whose arguments cannot be encoded without sending it', async () => {
+		const ctx = await setup();
+		env.register('files', { save: counting(ctx.live) });
+		const cyclic = {};
+		cyclic.self = cyclic;
+		const handle = ctx.__upload('files/save')(new Uint8Array([1]), cyclic);
+		const errors = [];
+		handle.on('error', (e) => errors.push(e));
+		const err = await handle.then(() => null, (e) => e);
+		expect(err).toMatchObject({ code: 'INVALID_REQUEST', message: 'Upload request could not be encoded' });
+		expect(err.cause).toBeInstanceOf(TypeError);
+		expect(errors).toEqual([err]);
+		expect(ctx.frames).toEqual([]);
+		// The connection stays usable for the next upload.
+		expect(await ctx.__upload('files/save')(new Uint8Array(4))).toBe(4);
+	});
+
+	it('rejects upload arguments that do not fit the 16-bit header length', async () => {
+		const ctx = await setup();
+		env.register('files', { save: counting(ctx.live) });
+		const err = await ctx.__upload('files/save')(new Uint8Array([1]), 'x'.repeat(70_000)).then(() => null, (e) => e);
+		expect(err).toMatchObject({ code: 'PAYLOAD_TOO_LARGE' });
+		expect(ctx.frames).toEqual([]);
+		const fits = 'x'.repeat(65_535 - JSON.stringify({ path: 'files/save', args: [''] }).length);
+		expect(await ctx.__upload('files/save')(new Uint8Array(4), fits)).toBe(4);
+	});
+
 	it('relearns the frame cap after reconnecting', async () => {
 		const ctx = await setup({ frameSize: 8192 });
 		env.register('files', { ping: ctx.live(async () => 'pong'), save: counting(ctx.live) });

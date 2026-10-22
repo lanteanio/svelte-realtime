@@ -157,7 +157,7 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-invalid-request"></a>
 ### <code>INVALID_REQUEST</code>
 
-- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Binary RPC payload is detached (transferred) and cannot be sent</code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Invalid upload credit from server</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>RPC request could not be encoded or sent</code>; <code>Reserved topic prefix</code>; <code>Topic function must return a string, got </code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>live.forget: opts.tenantId is required when a tenant resolver or erasure store is configured (pass null for the untenanted scope)</code>; <code>persistKey must be a non-empty string</code>; <code>replayDeadLetter: </code>; <code>streamId already active</code>
+- Searchable message prefixes: <code>Batch exceeds maximum of </code>; <code>Binary RPC payload is detached (transferred) and cannot be sent</code>; <code>Each batch entry requires rpc and id</code>; <code>Invalid path</code>; <code>Invalid upload credit from server</code>; <code>Not a binary endpoint</code>; <code>Not an upload endpoint</code>; <code>RPC request could not be encoded or sent</code>; <code>Reserved topic prefix</code>; <code>Topic function must return a string, got </code>; <code>Upload request could not be encoded</code>; <code>args must be an array</code>; <code>idempotencyKey must be a string no longer than 256 characters</code>; <code>live.derived() scopeKey must return a string or finite number synchronously</code>; <code>live.forget(userId) requires a non-empty userId string</code>; <code>live.forget(userId, opts): opts must be an object</code>; <code>live.forget: </code>; <code>live.forget: cascade must be a boolean or an object ({ crdt?: string[] })</code>; <code>live.forget: cascade.crdt must be an array of non-empty document topic names</code>; <code>live.forget: hashKey must be a string or Uint8Array containing at least 32 bytes, or null</code>; <code>live.forget: onForget must be a function</code>; <code>live.forget: opts.tenantId is required when a tenant resolver or erasure store is configured (pass null for the untenanted scope)</code>; <code>persistKey must be a non-empty string</code>; <code>replayDeadLetter: </code>; <code>streamId already active</code>
 - Owning sources: [src/client/offline.js](../src/client/offline.js), [src/client/rpc.js](../src/client/rpc.js), [src/client/upload.js](../src/client/upload.js), [src/server.js](../src/server.js), [src/server/derived-topic.js](../src/server/derived-topic.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/forget.js](../src/server/forget.js), [src/server/idempotency.js](../src/server/idempotency.js), [src/server/upload.js](../src/server/upload.js), [src/server/webhooks.js](../src/server/webhooks.js)
 
 <a id="live-error-invalid-topic"></a>
@@ -235,8 +235,8 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 <a id="live-error-payload-too-large"></a>
 ### <code>PAYLOAD_TOO_LARGE</code>
 
-- Searchable message prefixes: <code>Binary RPC header exceeds 65535 bytes</code>; <code>Binary payload exceeds size limit</code>; <code>upload exceeds maxSize</code>
-- Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/upload.js](../src/server/upload.js), [src/testing.js](../src/testing.js)
+- Searchable message prefixes: <code>Binary RPC header exceeds 65535 bytes</code>; <code>Binary payload exceeds size limit</code>; <code>Upload arguments exceed 65535 bytes</code>; <code>upload exceeds maxSize</code>
+- Owning sources: [src/client/rpc.js](../src/client/rpc.js), [src/client/upload.js](../src/client/upload.js), [src/server/dispatch.js](../src/server/dispatch.js), [src/server/upload.js](../src/server/upload.js), [src/testing.js](../src/testing.js)
 
 <a id="live-error-protocol-mismatch"></a>
 ### <code>PROTOCOL_MISMATCH</code>
@@ -1122,9 +1122,9 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/client/offline.js:315</code>
 - <code>src/client/stream.js:2110</code>
 - <code>src/client/stream.js:2903</code>
-- <code>src/client/upload.js:632</code>
-- <code>src/client/upload.js:744</code>
-- <code>src/client/upload.js:808</code>
+- <code>src/client/upload.js:642</code>
+- <code>src/client/upload.js:756</code>
+- <code>src/client/upload.js:833</code>
 - <code>src/hooks.js:51</code>
 - <code>src/hooks.js:58</code>
 - <code>src/server.js:2028</code>

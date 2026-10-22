@@ -520,7 +520,17 @@ class UploadHandle {
 		this._args = args;
 		this._streamId = options.streamId;
 		this._total = options.total;
-		// Chunk-0 header for the current mode; see `_setFlow`.
+		// The arguments are encoded once, here: switching the chunk-0 header
+		// between modes (see `_setFlow`) must never rerun app serialization.
+		/** @type {string | undefined} */
+		this._argsBody = undefined;
+		/** @type {{ cause: unknown } | null} */
+		this._encodeFailure = null;
+		if (args.length > 0) {
+			try { this._argsBody = JSON.stringify(args); }
+			catch (cause) { this._encodeFailure = { cause }; }
+		}
+		// Chunk-0 header for the current mode.
 		this._argsJson = '';
 		this._argsLen = 0;
 		// Receiver credits: `_flow` while the server is expected to grant
@@ -661,8 +671,10 @@ class UploadHandle {
 	 */
 	_setFlow(flow) {
 		this._flow = flow;
-		const args = this._args.length > 0 ? this._args : undefined;
-		this._argsJson = JSON.stringify(flow ? { path: this._path, args } : { rpc: this._path, args });
+		// Same bytes as JSON.stringify({ path | rpc, args? }).
+		const body = this._argsBody;
+		this._argsJson = (flow ? '{"path":' : '{"rpc":') + JSON.stringify(this._path)
+			+ (body === undefined ? '' : ',"args":' + body) + '}';
 		this._argsLen = _textEncoder.encode(this._argsJson).length;
 	}
 
@@ -787,8 +799,21 @@ class UploadHandle {
 			return;
 		}
 
+		if (this._encodeFailure) {
+			const error = new RpcError('INVALID_REQUEST', 'Upload request could not be encoded');
+			Object.defineProperty(error, 'cause', { value: this._encodeFailure.cause, configurable: true, writable: true });
+			this._settle(false, error);
+			return;
+		}
+
 		ensureUploadListener();
 		this._setFlow(!clientState.uploadLegacy);
+		// argsLen is a uint16 on the wire. The `path` header is the longer
+		// one, so a fallback to `rpc` never crosses the bound.
+		if (this._argsLen > 0xFFFF) {
+			this._settle(false, new RpcError('PAYLOAD_TOO_LARGE', 'Upload arguments exceed 65535 bytes'));
+			return;
+		}
 
 		try {
 			await _pumpUpload(this);
