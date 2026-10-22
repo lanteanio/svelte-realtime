@@ -7,7 +7,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { live, configureForget, pushHooks, _resetForget, _resetPushRegistry } from '../src/server.js';
 import { _pushRegistry, _wsToPushUserId } from '../src/server/push.js';
-import { _presenceRef, _rateLimits } from '../src/server/state.js';
+import { _presenceRef, _rateLimits, state } from '../src/server/state.js';
+import { setOperationalEventSink } from '../src/shared/diagnostic.js';
 import { _tenantKey, _tenantTopic, _setTenantResolver, _resetTenantResolver } from '../src/server/tenant.js';
 import { _resetIdempotencyStore } from '../src/server/idempotency.js';
 import { _forgetSurfaceNames } from '../src/server/forget.js';
@@ -447,12 +448,42 @@ describe('live.forget - durable store owner-succession envelope', () => {
 		expect(published).toEqual([{ t: 'room/1:owner', e: 'set', d: { key: 'u2', reason: 'succeeded' } }]);
 	});
 
-	it('an envelope with no platform wired publishes nothing and reports zero (no throw)', async () => {
-		configureForget({ store: { async purgeUser() { return { rowsAffected: 4, ownerSuccessions: [{ topic: 'board/1', owner: 'u2', reason: 'succeeded' }] }; } } });
-		configureForget({ platform: null });
-		const res = await live.forget('u1', { tenantId: null });
-		expect(res.surfaces.durable).toBe(4);
-		expect(res.surfaces.ownerSuccessions).toBe(0);
+	describe('without an erasure platform', () => {
+		let saved;
+		beforeEach(() => {
+			saved = { cron: state.cronPlatform, derived: state.derivedPlatform };
+			state.cronPlatform = null;
+			state.derivedPlatform = null;
+		});
+		afterEach(() => {
+			state.cronPlatform = saved.cron;
+			state.derivedPlatform = saved.derived;
+			setOperationalEventSink(null);
+		});
+
+		it('announces through the platform the server captured at startup', async () => {
+			// The store already committed the eviction, so dropping the
+			// announcement would leave peers on the erased owner for good.
+			const published = [];
+			state.derivedPlatform = { publish: (t, e, d) => published.push({ t, e, d }) };
+			configureForget({ store: { async purgeUser() { return { rowsAffected: 4, ownerSuccessions: [{ topic: 'board/1', owner: 'u2', reason: 'succeeded' }] }; } } });
+			const res = await live.forget('u1', { tenantId: null });
+			expect(res.surfaces.durable).toBe(4);
+			expect(res.surfaces.ownerSuccessions).toBe(1);
+			expect(published).toEqual([{ t: 'board/1:owner', e: 'set', d: { key: 'u2', reason: 'succeeded' } }]);
+		});
+
+		it('reports unannounced successions when no platform exists at all', async () => {
+			const events = [];
+			setOperationalEventSink((record) => { events.push(record); });
+			configureForget({ store: { async purgeUser() { return { rowsAffected: 4, ownerSuccessions: [{ topic: 'board/1', owner: 'secret-successor', reason: 'succeeded' }] }; } } });
+			const res = await live.forget('u1', { tenantId: null });
+			expect(res.surfaces.ownerSuccessions).toBe(0);
+			expect(events).toContainEqual(expect.objectContaining({
+				event: 'forget.owner-succession-unannounced', severity: 'warn', attributes: { count: 1 }
+			}));
+			expect(JSON.stringify(events)).not.toContain('secret-successor');
+		});
 	});
 
 	it('a throwing publish never fails the forget - the durable erasure already confirmed', async () => {

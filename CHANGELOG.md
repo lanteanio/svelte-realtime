@@ -102,6 +102,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Comments in the server declarations and the README name the extensions subpaths that exist, `svelte-adapter-uws-extensions/redis/presence` and `svelte-adapter-uws-extensions/postgres/tasks`, and the durable alarm example spells its Postgres store as a complete import.
 
+- Room owner changes reported by the erasure store during `live.forget` publish through the platform captured at server startup when `configureForget({ platform })` is not set. Before, they were dropped while the erasure reported success. With no platform at all, a `forget.owner-succession-unannounced` operational event reports the count.
+
 - Coalescing declarations for static and literal-prefix stream topics now resolve before the first local subscriber and after the last disconnect, so a publisher with no local subscribers still relays coalesced through a platform with `relayCoalesced` (the Redis pub/sub bus), keeping the original-data key and the transformed payload. Platforms without it keep publishing plainly.
 
 - Pending sticky presence updates stop when their room membership leaves or is erased, including after the same identity rejoins. Retired memberships discard cached roster payloads, including when erasure needs a retry. Roster refusal warnings omit the member identity.

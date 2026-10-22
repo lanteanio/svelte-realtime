@@ -66,7 +66,7 @@ The registry-backed messages below preserve the documented prefix and append the
 
 Coverage listing only: the scanner inventories direct LiveError and RpcError constructors, literal arguments of local error helpers, code assignments on locally declared Error objects, error reply objects, structured diagnostic events, and console warning/error prefixes in src/**/*.js. Comments and example declarations are excluded. It does not infer causes or safe recovery actions from strings.
 
-Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 111 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
+Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 112 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
 
 Code anchors stay stable when messages change. Structured diagnostic IDs use the emitted event; legacy console IDs are derived from the literal prefix and change when that prefix changes. These coverage IDs are documentation anchors, not IDs appended to legacy runtime messages. Escaped \n and \r in the listing stand for actual newlines and carriage returns.
 
@@ -961,6 +961,13 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 
 - Kind: structured event
 - Searchable message prefixes: <code>Erasure could not be confirmed for every configured surface; resolve the failed cleanup and retry.</code>
+- Owning sources: [src/server/forget.js](../src/server/forget.js)
+
+<a id="diagnostic-forget.owner-succession-unannounced"></a>
+### <code>forget.owner-succession-unannounced</code>
+
+- Kind: structured event
+- Searchable message prefixes: <code>The erasure store reported room owner changes but no platform is available to publish them; configure configureForget({ platform }) or initialize the server before erasing.</code>
 - Owning sources: [src/server/forget.js](../src/server/forget.js)
 
 <a id="diagnostic-invariant.violated"></a>

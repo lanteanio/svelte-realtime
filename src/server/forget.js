@@ -179,7 +179,12 @@ export function _forgetSurfaceNames() {
  * owner eviction. Each is a wire `:owner` `set` for the room's successor (or a
  * `vacated` null), routed through the same replay path a room succession uses so
  * live subscribers update and a resuming client gap-fills the successor. Runs on
- * the forgetting instance; a malformed entry or a missing platform is skipped.
+ * the forgetting instance; a malformed entry is skipped. Without a configured
+ * erasure platform it publishes through the platform the server captured at
+ * startup (`realtime().init`, `setCronPlatform`, `_activateDerived`), the same
+ * fallback the aggregate leg uses. The store has already committed, so a retry
+ * cannot re-announce: when no platform exists at all, the unannounced count is
+ * reported as an operational event instead of being dropped silently.
  * The `onOwnerChange` SERVER hook is deliberately NOT fired here - it is bound to
  * a room's local join state (its `_ownerRooms` entry), which the forgetting
  * instance need not hold (a remote-only room, a dedicated erasure runner), so only
@@ -191,8 +196,11 @@ export function _forgetSurfaceNames() {
  *   a throwing platform swallows inside `_ownerEmit` and still counts)
  */
 function _publishOwnerSuccessions(tenantId, successions) {
-	const publish = _ownerReplayPublisher(_forgetPlatform);
-	if (!publish) return 0;
+	const publish = _ownerReplayPublisher(_forgetPlatform || state.cronPlatform || state.derivedPlatform);
+	if (!publish) {
+		if (successions.length) _reportUnannounced(successions.length);
+		return 0;
+	}
 	let n = 0;
 	for (const s of successions) {
 		if (!s || typeof s.topic !== 'string' || s.topic.length === 0) continue;
@@ -202,6 +210,18 @@ function _publishOwnerSuccessions(tenantId, successions) {
 		n++;
 	}
 	return n;
+}
+
+/** @param {number} count */
+function _reportUnannounced(count) {
+	try {
+		emitOperationalEvent({
+			source: 'svelte-realtime', component: 'server.forget', event: 'forget.owner-succession-unannounced',
+			severity: 'warn', dataClass: 'operational',
+			message: 'The erasure store reported room owner changes but no platform is available to publish them; configure configureForget({ platform }) or initialize the server before erasing.',
+			attributes: { count }
+		});
+	} catch { /* Diagnostic failures must not interrupt the erasure. */ }
 }
 
 /** @param {string[]} failedSurfaces @param {number} rowsAffected */
