@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, unlinkS
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { anchorsOf } from './check-links.js';
+import { CANDIDATE, NOT_PUBLISHED } from './check-release-ledger.js';
 import { compareVersions, versionPattern } from './release-policy.js';
 import { isScriptEntry } from './script-entry.js';
 
@@ -98,6 +99,16 @@ function engineeringBullets(body) {
 	return bullets;
 }
 
+/**
+ * The release-status marker the ledger reads from a dated block's first line,
+ * if the block carries one. Only a dated block may carry it, and only once.
+ */
+function statusMarker(block, lead) {
+	if (block.version === 'Unreleased') return undefined;
+	const marker = lead.trim();
+	return marker === CANDIDATE || marker === NOT_PUBLISHED ? marker : undefined;
+}
+
 /** Validate one governed block's consumer summary and return its entries. */
 export function validateBlockSummary(block) {
 	const name = block.version === 'Unreleased' ? 'Unreleased' : block.version;
@@ -108,7 +119,8 @@ export function validateBlockSummary(block) {
 	const start = release.indexOf(START);
 	const end = release.indexOf(END);
 	if (end <= start) throw new Error(`${name} consumer summary markers are out of order`);
-	if (release.slice(0, start).trim() !== '') throw new Error(`${name} consumer summary must be the first content in the block`);
+	const lead = release.slice(0, start);
+	if (lead.trim() !== '' && statusMarker(block, lead) === undefined) throw new Error(`${name} consumer summary must be the first content in the block, after at most the release-status marker`);
 	const after = release.slice(end + END.length).trimStart();
 	if (!after.startsWith('### ')) throw new Error(`${name} consumer summary must precede engineering detail`);
 
@@ -218,13 +230,17 @@ function releasePageTarget(version) {
 /** Render the consumer page for a dated release from its validated summary. */
 export function renderReleasePage(block) {
 	const entries = validateBlockSummary(block);
+	const marker = statusMarker(block, block.body.slice(0, block.body.indexOf(START)));
+	const status = marker === undefined ? `Released ${block.date}.`
+		: marker === CANDIDATE ? `Release candidate dated ${block.date}; not published to npm.`
+			: `Dated ${block.date}; superseded before release and not published to npm.`;
 	// Detail links pin this release's own heading anchor; `#added` resolves to
 	// whichever block is newest when the page is read.
 	const anchor = releaseAnchor(block);
 	const lines = [
 		`# svelte-realtime ${block.version}`,
 		'',
-		`Released ${block.date}.`,
+		status,
 		'',
 		'[README](../../README.md) | [migration guide](../../MIGRATION.md) | [complete changelog](../../CHANGELOG.md)',
 		'',

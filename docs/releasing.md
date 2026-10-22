@@ -157,6 +157,12 @@ entry may not point at a section the block does not have. Engineering bullets
 in governed blocks are bounded to 2000 characters each; split an oversized
 bullet into focused bullets rather than raising the bound.
 
+In a dated block, the release-status marker described under
+[artifact records](#artifact-records) is the one line allowed before the
+summary markers: the ledger check reads it as the block's first line, and the
+summary must follow it directly. The Unreleased block carries no marker. The
+generated release page states the marker's meaning instead of repeating it.
+
 When a release after `0.6.0-next.91` is dated, `node scripts/check-release-notes.js --write`
 generates `docs/releases/<version>.md`, whose detail links pin the release's
 own heading anchor, and removes the page of any earlier release. `README.md`

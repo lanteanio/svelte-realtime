@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { CANDIDATE, NOT_PUBLISHED, validateReleaseLedger } from '../scripts/check-release-ledger.js';
 import { describe, expect, it } from 'vitest';
 import { anchorsOf, slugify } from '../scripts/check-links.js';
 import {
@@ -102,5 +103,40 @@ describe('versioned release page', () => {
 		expect(() => validateReleaseRouteLinks('0.6.0-next.92', { 'README.md': link, 'MIGRATION.md': '' })).toThrow('MIGRATION.md must contain');
 		const file = (name, isFile = true) => ({ name, isFile: () => isFile });
 		expect(strayReleaseEntries([file('0.6.0-next.92.md'), file('.DS_Store'), file('notes.txt'), file('drafts', false)])).toEqual(['drafts', 'notes.txt']);
+	});
+});
+
+describe('release status marker', () => {
+	const manifest = readFileSync(new URL('../docs/release-manifest.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+	const summary = changelog().split('## [Unreleased]\n\n')[1].trimEnd();
+	const dated = (version, marker) => `## [${version}] - 2026-11-02\n\n${marker === undefined ? '' : marker + '\n\n'}${summary}\n\n`;
+	const insert = (...blocks) => CHANGELOG.replace(/^## \[0\.6\.0-next\.91\]/m, blocks.join('') + '$&');
+
+	it('accepts a candidate heading marker in both the ledger and the summary gate', () => {
+		const source = insert(dated('0.6.0-next.92', CANDIDATE));
+		expect(validateReleaseLedger(manifest, source, '0.6.0-next.92')).toEqual([]);
+		expect(validateReleaseSummaries(source).map(item => item.block.version)).toEqual(['Unreleased', '0.6.0-next.92']);
+	});
+	it('accepts a superseded heading marker below the current candidate in both gates', () => {
+		const source = insert(dated('0.6.0-next.93', CANDIDATE), dated('0.6.0-next.92', NOT_PUBLISHED));
+		expect(validateReleaseLedger(manifest, source, '0.6.0-next.93')).toEqual([]);
+		expect(validateReleaseSummaries(source).map(item => item.block.version)).toEqual(['Unreleased', '0.6.0-next.93', '0.6.0-next.92']);
+	});
+	it('still refuses any other line, or a second marker, before the summary', () => {
+		expect(() => validateReleaseSummaries(insert(dated('0.6.0-next.92', 'Intro first.')))).toThrow('first content');
+		expect(() => validateReleaseSummaries(insert(dated('0.6.0-next.92', CANDIDATE + '\n\nIntro first.')))).toThrow('first content');
+		expect(() => validateReleaseSummaries(insert(dated('0.6.0-next.92', CANDIDATE + '\n' + CANDIDATE)))).toThrow('first content');
+		expect(() => validateReleaseSummaries(insert(dated('0.6.0-next.92', 'Intro first.\n\n' + CANDIDATE)))).toThrow('first content');
+		const unreleased = CHANGELOG.replace('## [Unreleased]\n\n', '## [Unreleased]\n\n' + CANDIDATE + '\n\n');
+		expect(() => validateReleaseSummaries(unreleased)).toThrow('Unreleased consumer summary must be the first content');
+	});
+	it('renders the candidate page without the marker and without claiming a release', () => {
+		const source = insert(dated('0.6.0-next.92', CANDIDATE));
+		const page = renderReleasePage(releaseBlocks(source)[1]);
+		expect(page).not.toContain(CANDIDATE);
+		expect(page).not.toContain('Released 2026-11-02');
+		expect(page).toContain('Release candidate dated 2026-11-02; not published to npm.');
+		const published = renderReleasePage(releaseBlocks(insert(dated('0.6.0-next.92')))[1]);
+		expect(published).toContain('Released 2026-11-02.');
 	});
 });
