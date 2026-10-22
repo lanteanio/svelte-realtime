@@ -92,6 +92,12 @@ output file. Failures return a nonzero exit code; assertions are never skipped.
 The named checks let mutation runs distinguish an assertion failure from a
 startup or dependency failure.
 
+The matrix lists checks that fail because of the installed svelte-adapter-uws
+version, each with the adapter version and the adapter behaviour that causes
+it. A run that fails only those checks is reported as a known adapter failure,
+together with the checks it did not reach; the matrix still exits nonzero for
+any other failure. An entry applies only to its adapter version, and a known
+failure that passes is printed so the entry can be removed.
 
 The scaffolder smoke uses a loopback npm registry to serve candidate archives.
 All other packages resolve from the normal npm registry, and strict peer

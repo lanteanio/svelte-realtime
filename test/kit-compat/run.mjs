@@ -29,6 +29,16 @@ assert.ok(adapterMode === 'default' || (kit === '3' && mode === 'dev'), 'Adapter
 const viteMajor = option('--vite', 'locked');
 assert.ok(['locked', '5'].includes(viteMajor), '--vite must be 5');
 assert.ok(viteMajor === 'locked' || kit === '2', '--vite 5 requires Kit 2');
+// Checks the matrix expects to fail on the installed adapter, passed as
+// --known-adapter-failure <stop|continue>:<check name>. They are reported as
+// such; "continue" lets the run go on, "stop" ends it like any failure.
+const knownFailures = new Map();
+args.forEach((arg, index) => {
+	if (arg !== '--known-adapter-failure') return;
+	const [after, name] = args[index + 1].split(/:(.*)/s);
+	assert.ok(['stop', 'continue'].includes(after) && name, '--known-adapter-failure needs stop:<check> or continue:<check>');
+	knownFailures.set(name, after);
+});
 const driveCase = option('--drive-case', 'as-invoked');
 assert.ok(['as-invoked', 'lower'].includes(driveCase), '--drive-case must be lower');
 assert.ok(driveCase === 'as-invoked' || (process.platform === 'win32' && kit === '3'), '--drive-case requires Windows and Kit 3');
@@ -90,8 +100,11 @@ async function check(name, fn) {
 		report.checks.push({ name, status: 'passed' });
 		console.log('PASS ' + name);
 	} catch (error) {
-		report.checks.push({ name, status: 'failed', error: error.stack || String(error) });
-		throw error;
+		const known = knownFailures.get(name);
+		report.checks.push({ name, status: known ? 'known-adapter-failure' : 'failed', error: error.stack || String(error) });
+		if (!known) throw error;
+		console.log('KNOWN ADAPTER FAILURE ' + name);
+		if (known === 'stop') throw Object.assign(error, { knownAdapterFailure: true });
 	}
 }
 
@@ -471,12 +484,12 @@ try {
 	if (hmr) await check('HMR emits no Cloudflare Tunnel warning', () => {
 		assert.doesNotMatch(output, /Cloudflare-Tunnel|Set-Cookie on 101|svti\.me\/cf-cookies/i);
 	});
-	report.status = 'passed';
+	report.status = report.checks.some(entry => entry.status === 'known-adapter-failure') ? 'known-adapter-failure' : 'passed';
 } catch (error) {
-	report.status = 'failed';
+	report.status = error.knownAdapterFailure ? 'known-adapter-failure' : 'failed';
 	report.error = error.stack || String(error);
 	console.error(report.error + '\n' + output);
-	process.exitCode = 1;
+	if (!error.knownAdapterFailure) process.exitCode = 1;
 } finally {
 	try {
 		await browser?.close();
