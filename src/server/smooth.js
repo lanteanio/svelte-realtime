@@ -876,6 +876,11 @@ function _smoothSendUpdatesTo(rec, ws, list) {
 	}
 }
 
+/** Owed tick time a room still catches up; older debt is dropped. */
+const SMOOTH_MAX_TICK_DEBT_MS = 2000;
+/** Owed ticks run back to back before the loop yields to other work. */
+const SMOOTH_TICKS_PER_CALLBACK = 8;
+
 function _armSmoothTick(rec) {
 	if (rec.timer !== null) return;
 	const now = monotonicNow();
@@ -892,16 +897,16 @@ function _runSmoothTicks(rec) {
 			rec.timer = null;
 			_smoothTick(rec);
 			// The tick owns rearming: idle, removal, and lost ownership stop here.
-			if (rec.timer === null || monotonicNow() < rec.tickDue) return;
+			if (rec.timer === null) return;
+			const now = monotonicNow();
+			if (now < rec.tickDue) return;
+			// Every owed tick runs. Only debt beyond the bound is dropped, so a
+			// long stall cannot turn into an unbounded burst of catch-up work.
+			if (now - rec.tickDue > SMOOTH_MAX_TICK_DEBT_MS) rec.tickDue = now - SMOOTH_MAX_TICK_DEBT_MS;
+			// Yield to I/O between bursts. The timer the tick armed is due now,
+			// so the remaining debt continues in the next callback.
+			if (count === SMOOTH_TICKS_PER_CALLBACK) return;
 			clearTimer(rec.timer);
-			if (count === 8) {
-				// Bound catch-up work after a stalled event loop. Discard the older
-				// debt and yield for a full tick before starting another callback.
-				rec.timer = null;
-				rec.ticking = false;
-				_armSmoothTick(rec);
-				return;
-			}
 		}
 	} finally {
 		rec.ticking = false;

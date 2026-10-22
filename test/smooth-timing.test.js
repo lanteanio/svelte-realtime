@@ -97,14 +97,45 @@ it('catches up late timers using actual wall stamps and ignores wall-clock jumps
 	expect(next()[1].at).toBe(120);
 });
 
-it('bounds catch-up to eight ticks and yields a full period after a long stall', async () => {
+it('runs every owed tick after a stall, eight per callback', async () => {
 	await rpc('sync');
 	fire(1000);
 	expect(stamps).toHaveLength(8);
 	expect(new Set(stamps)).toEqual(new Set([101020]));
+	// The rest of the debt is due now, not a period later.
+	expect(next()[1].at).toBe(1020);
+	let callbacks = 1;
+	while (next()[1].at <= 1020) {
+		const before = stamps.length;
+		fire();
+		expect(stamps.length - before).toBeLessThanOrEqual(8);
+		callbacks++;
+	}
+	// Deadlines 20, 40, ..., 1020.
+	expect(stamps).toHaveLength(51);
+	expect(callbacks).toBe(7);
 	expect(next()[1].at).toBe(1040);
-	fire();
-	expect(stamps).toHaveLength(9);
+});
+
+it('drops only the debt beyond two seconds after a longer stall', async () => {
+	await rpc('sync');
+	fire(5000);
+	while (next()[1].at <= 5020) fire();
+	// The first deadline (20), then the two seconds owed up to 5020.
+	expect(stamps).toHaveLength(1 + 2000 / 20 + 1);
+	expect(next()[1].at).toBe(5040);
+});
+
+it('keeps sixty-Hz rooms on wall time when timers fire late under load', async () => {
+	declare(1000 / 60);
+	await rpc('sync');
+	const start = next()[1].at;
+	// Most callbacks run 5 ms late; every tenth is held up for 300 ms, far
+	// more than eight ticks.
+	for (let i = 0; mono < start + 10000 || next()[1].at <= mono; i++) fire(i % 10 === 9 ? 300 : 5);
+	const owed = Math.floor((mono - start) / (1000 / 60) + 1e-9) + 1;
+	expect(owed).toBeGreaterThanOrEqual(600);
+	expect(stamps.length).toBe(owed);
 });
 
 it('does not accrue simulation debt while a room is idle', async () => {
@@ -144,10 +175,17 @@ it('keeps fractional sixty-Hz deadlines within one timer millisecond', async () 
 	expect(Math.abs(stamps.at(-1) - stamps[0] - 599 * 1000 / 60)).toBeLessThan(1.1);
 });
 
-it('yields after eight ticks even when each callback costs more than a period', async () => {
+it('yields after eight ticks and bounds debt when each tick costs more than a period', async () => {
 	await rpc('sync');
 	workMs = 25;
 	fire();
 	expect(stamps).toHaveLength(8);
-	expect(next()[1].at).toBe(mono + 20);
+	expect(next()[1].at).toBe(mono);
+	const record = _smoothTopics.get(path);
+	for (let i = 0; i < 100; i++) {
+		const before = stamps.length;
+		fire();
+		expect(stamps.length - before).toBe(8);
+		expect(mono - record.tickDue).toBeLessThanOrEqual(2000);
+	}
 });
