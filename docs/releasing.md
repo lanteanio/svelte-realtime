@@ -130,6 +130,39 @@ release; a dated candidate heading starts with
 `*Not published to npm; release candidate.*`. A superseded unpublished heading
 starts with `*Not published to npm; superseded before release.*`.
 
+## Consumer release notes
+
+The `Unreleased` block, and every dated release after `0.6.0-next.91`, starts
+with one bounded consumer summary before its engineering detail. Earlier
+releases are records and are not rewritten to fit this template. Each summary
+entry uses this exact shape, between the
+`<!-- consumer-release-summary:start -->` and
+`<!-- consumer-release-summary:end -->` markers under a `### Consumer summary`
+heading:
+
+```markdown
+- **Added: capability.** One outcome sentence whose complete lead is 40-60 words.
+  - **Affects:** The consumers or operators whose behavior can change.
+  - **Action:** A concrete next step, or an explicit statement that none is needed.
+  - **Requires:** Runtime, configuration, dependency, or evidence prerequisites.
+  - **Compatibility:** Breaking, additive, or unchanged behavior at the boundary.
+  - **Detail:** [Added engineering detail](#added).
+```
+
+Use `Added`, `Changed`, or `Fixed` to match the linked engineering section.
+Keep failure history, implementation mechanics and test inventories out of the
+lead; the lead states one consumer outcome. The summary covers exactly the
+`### Added`, `### Changed` and `### Fixed` sections the block contains, and an
+entry may not point at a section the block does not have. Engineering bullets
+in governed blocks are bounded to 2000 characters each; split an oversized
+bullet into focused bullets rather than raising the bound.
+
+When a release after `0.6.0-next.91` is dated, `node scripts/check-release-notes.js --write`
+generates `docs/releases/<version>.md`, whose detail links pin the release's
+own heading anchor, and removes the page of any earlier release. `README.md`
+and `MIGRATION.md` must both link `./docs/releases/<version>.md` for the
+current release. `npm run check:release` runs this gate after the ledger check.
+
 ## Candidate and publication records
 
 1. Choose the version and channel after review: stable versions target `latest`,

@@ -4,11 +4,66 @@ All notable changes to `svelte-realtime` will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
 **Upgrading through 0.6?** Start with the [capability and required-action index](docs/0.6-upgrade.md).
 
 Published artifact identities are recorded in the [release manifest](docs/release-manifest.md).
 
 ## [Unreleased]
+
+<!-- consumer-release-summary:start -->
+### Consumer summary
+
+- **Added: structured error parameters.** `LiveError` and `RpcError` carry bounded JSON `params` and `details` through RPC calls, uploads, SSR hydration and the `createTestEnv` harness, so an application can render localized error text from the code and its parameters while every existing caller keeps reading the same source-English `message` it reads today.
+  - **Affects:** Applications that show server errors to users or map error codes to their own messages.
+  - **Action:** None; pass `params` or `details` when throwing to use them.
+  - **Requires:** Nothing beyond this release on both server and client.
+  - **Compatibility:** Additive; error messages and codes are unchanged.
+  - **Detail:** [Added engineering detail](#added).
+- **Added: one registered user type.** Declaring `Register.user` once types the user on live contexts, socket data, guards, stream callbacks, uploads and generated stream options across the whole app, which removes repeated generic annotations, while bare `LiveContext` and `UploadContext` annotations in an app that registers nothing now default to `any` like callback inference does.
+  - **Affects:** TypeScript applications that annotate live contexts or read the connected user.
+  - **Action:** Add a `Register` declaration to type the user everywhere; keep an explicit generic where a bare annotation must stay `unknown`.
+  - **Requires:** TypeScript declarations from this release.
+  - **Compatibility:** Type-level only; runtime behavior is unchanged.
+  - **Detail:** [Added engineering detail](#added).
+- **Added: upload flow control.** Uploads now pause the sending client while `maxBufferedChunks` chunks wait for the handler and resume as `ctx.stream` is read, so a handler that awaits a slow sink receives every byte with default options, and the documented upload wire format lets clients outside the browser speak the same protocol.
+  - **Affects:** Applications that upload files or streams, and custom upload clients.
+  - **Action:** None for the bundled client; custom clients follow the upload wire format document.
+  - **Requires:** Server and client from this release for credits; older clients fall back once per connection.
+  - **Compatibility:** Additive; `FLOW_BACKPRESSURE` now fails only a sender that ignores its credit.
+  - **Detail:** [Added engineering detail](#added).
+- **Changed: tenant-scoped erasure.** When a tenant resolver, a `configureForget` store or an enabled webhook dead-letter store is configured, `live.forget(userId, opts)` now requires `opts.tenantId` and rejects with `INVALID_REQUEST` before purging anything, instead of silently erasing the untenanted scope and reporting success for a call that named no tenant.
+  - **Affects:** Multi-tenant applications and applications with a durable erasure or dead-letter store.
+  - **Action:** Pass `tenantId`, or an explicit `null` for the untenanted scope, on every `live.forget` call.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** Breaking for calls that omitted the tenant under these configurations; unchanged otherwise.
+  - **Detail:** [Changed engineering detail](#changed).
+- **Changed: upload limits and context views.** The upload frame cap now arrives on the first RPC or upload response so later uploads start at the full cap, `live.upload()` rejects a non-integer `maxBufferedChunks` at declaration, and RPC contexts expose their platform view as a plain object that inherits from the platform rather than read-only per-call properties.
+  - **Affects:** Applications that declare uploads with custom buffering or inspect `ctx.platform` properties.
+  - **Action:** Declare `maxBufferedChunks` as a positive integer; no other change is needed.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** An invalid `maxBufferedChunks` now fails at startup; other behavior is unchanged.
+  - **Detail:** [Changed engineering detail](#changed).
+- **Fixed: presence and multiplayer consistency.** Sticky presence, multiplayer selections and multiplayer locks now stay consistent between live members, late joiners and replicas, because payloads keep their exact bytes on the Redis roster, refused entries are never broadcast, oversized lock names are rejected, and updates for departed or erased members stop instead of reappearing later.
+  - **Affects:** Applications using presence, multiplayer selections or locks, especially across replicas.
+  - **Action:** None.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** Unchanged contract; lock names over 128 UTF-8 bytes are now rejected.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: tenant isolation and subscription release.** Erasure, push routing and dead-letter records stay within their own tenant, and a stream or document subscription that is refused, closed or failed now releases its adapter membership and grant, so a later subscribe on the same socket is judged afresh and sibling streams keep their events.
+  - **Affects:** Multi-tenant applications and applications whose stream loaders can refuse a subscriber.
+  - **Action:** None.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** Unchanged contract; refused subscriptions no longer leave membership behind.
+  - **Detail:** [Fixed engineering detail](#fixed).
+- **Fixed: metrics and documentation accuracy.** RPC and upload metrics now count calls refused before they run and record exactly one terminal outcome per upload, structured error details survive upload reauthorization, and the documented extension import paths and alarm example name modules the extensions package really exports, so copied examples resolve without edits.
+  - **Affects:** Operators reading RPC and upload metrics, and developers copying extension examples.
+  - **Action:** None; dashboards may show refused calls that were previously missing.
+  - **Requires:** Nothing beyond this release.
+  - **Compatibility:** Unchanged contract; metric totals now include refused calls.
+  - **Detail:** [Fixed engineering detail](#fixed).
+
+<!-- consumer-release-summary:end -->
 
 ### Added
 

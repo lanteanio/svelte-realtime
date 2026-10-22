@@ -162,7 +162,7 @@ const EXPECTED_SCRIPTS = {
 	"test:chaos:parallel": "node scripts/check-chaos-isolation.js",
 	"test:lifecycle": "node scripts/check-production-lifecycle.js",
 	"test:smooth-stack": "node scripts/check-smooth-stack.js",
-	"check:release": "node scripts/check-release-ledger.js",
+	"check:release": "node scripts/check-release-ledger.js && node scripts/check-release-notes.js",
 	"check:svelte-support": "node scripts/check-svelte-support.js",
 	"prepublishOnly": "npm run check",
 	"verify:release": "npm run verify:full && npm run test:lifecycle && npm run test:smooth-stack && npm run smoke"
