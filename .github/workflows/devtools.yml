@@ -2,7 +2,7 @@ name: DevTools browser checks
 
 on:
   pull_request:
-    paths: ['src/**', 'test/devtools-ui.browser.js', 'vitest.devtools.config.js', 'package*.json', '.github/workflows/devtools.yml']
+    paths: ['src/**', 'test/devtools-*.browser.js', 'test/browser-viewports.js', 'vitest.devtools.config.js', 'package*.json', '.github/workflows/devtools.yml']
   push:
     branches: [main, dev]
   workflow_dispatch:
