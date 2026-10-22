@@ -327,6 +327,18 @@ describe('replayDeadLetter - bounded calls', () => {
 		expect(store.count()).toBe(2);
 	});
 
+	it('keeps failed records at the head; named ids reach the records behind them, ignoring limit', async () => {
+		const { store, ids } = seed([OK, OK, BAD, BAD, BAD]);
+		for (let call = 0; call < 2; call++) {
+			const out = await replayDeadLetter({ topic: 't', limit: 3 });
+			expect(out.results.map((r) => r.status)).toEqual(['failed', 'failed', 'failed']);
+			expect(out.replayed).toBe(0);
+		}
+		const out = await replayDeadLetter({ topic: 't', ids: [ids[0], ids[1]], limit: 1 });
+		expect(out.replayed).toBe(2);
+		expect(store.count()).toBe(3);
+	});
+
 	it('rejects an out-of-range limit, an oversized or malformed id list, and a bad initiator', async () => {
 		seed([OK]);
 		for (const opts of [

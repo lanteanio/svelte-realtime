@@ -5017,10 +5017,14 @@ export function getDeadLetter(): DeadLetterStore | null;
  * the record. `dryRun` reports what would replay (and whether each webhook is
  * still registered) without sending or removing.
  *
- * One call handles at most `limit` records (default 100, at most 1000) in the
- * store's list order. Replayed records leave the queue, so calling again
- * continues with the records that remain. `ids` names records explicitly (at
- * most 1000). An out-of-range limit, a malformed or oversized id list, or a bad
+ * One call handles the first `limit` records (default 100, at most 1000) in
+ * the store's list order (the in-memory store lists newest first). Replayed
+ * records leave the queue; failed and `webhook-unregistered` records stay in
+ * place, so later calls see them again at the head. Stop when a call replays
+ * nothing, and reach records behind a stuck head by passing their `ids`
+ * (read them with `getDeadLetter().list({ topic, limit })`) or by raising
+ * `limit`. `ids` names records explicitly (at most 1000); `limit` does not
+ * apply to an `ids` call. An out-of-range limit, a malformed or oversized id list, or a bad
  * initiator rejects with `INVALID_REQUEST`. Each call emits a
  * `webhook.dead-letter.replayed` operational event carrying `initiator`
  * (default `'api'`) and its counts.
@@ -5030,7 +5034,7 @@ export function replayDeadLetter(opts?: {
 	/** Records to replay by id, at most 1000. */
 	ids?: string[];
 	dryRun?: boolean;
-	/** Records to handle in this call, 1 to 1000. Default 100. */
+	/** Records to handle in this call, 1 to 1000. Default 100. Not applied when `ids` is given. */
 	limit?: number;
 	/** Who started the replay, for the operational event (a label such as a job name, at most 128 characters). Default 'api'. */
 	initiator?: string;
