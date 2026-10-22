@@ -102,6 +102,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Comments in the server declarations and the README name the extensions subpaths that exist, `svelte-adapter-uws-extensions/redis/presence` and `svelte-adapter-uws-extensions/postgres/tasks`, and the durable alarm example spells its Postgres store as a complete import.
 
+- A dynamic `live.derived` output topic stays within the adapter's 256-character topic limit when its module path is longer than 120 characters, including under a tenant prefix. Before, such a path plus the argument digest exceeded the limit and every subscribe was refused with `INVALID_TOPIC`. Topics of shorter paths are unchanged.
+
 - A stream subscribe sends its attach frame only after the adapter admitted the subscribe, and still before the loader reads its snapshot. Before, the frame went out ahead of the adapter's subscribe hook, so a caller the hook denied had already been told the resolved, possibly tenant-scoped, wire topic. A subscribe denied by a room guard, a stream filter or the adapter's hook is now never told the topic.
 
 - Room owner changes reported by the erasure store during `live.forget` publish through the platform captured at server startup when `configureForget({ platform })` is not set. Before, they were dropped while the erasure reported success. With no platform at all, a `forget.owner-succession-unannounced` operational event reports the count.
