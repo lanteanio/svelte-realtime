@@ -29,7 +29,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - **Added: upload flow control.** Uploads now pause the sending client while `maxBufferedChunks` chunks wait for the handler and resume as `ctx.stream` is read, so a handler that awaits a slow sink receives every byte with default options, and the documented upload wire format lets clients outside the browser speak the same protocol.
   - **Affects:** Applications that upload files or streams, and custom upload clients.
   - **Action:** None for the bundled client; custom clients follow the upload wire format document.
-  - **Requires:** Server and client from this release for credits; older clients fall back once per connection.
+  - **Requires:** Server and client from this release for credits; a client from this release falls back to the previous format once per connection against an older server, and an older client that overflows the queue fails with `FLOW_BACKPRESSURE`.
   - **Compatibility:** Additive; `FLOW_BACKPRESSURE` now fails only a sender that ignores its credit.
   - **Detail:** [Added engineering detail](#added).
 - **Changed: tenant-scoped erasure.** When a tenant resolver, a `configureForget` store or an enabled webhook dead-letter store is configured, `live.forget(userId, opts)` now requires `opts.tenantId` and rejects with `INVALID_REQUEST` before purging anything, instead of silently erasing the untenanted scope and reporting success for a call that named no tenant.
