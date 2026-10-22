@@ -424,6 +424,8 @@ export function __stream(
 		timeout?: number;
 		merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor';
 		key?: string;
+		/** `crud` only: the row field whose newer value wins (see the server's `rowVersion`). */
+		rowVersion?: string;
 		prepend?: boolean;
 		max?: number;
 		replay?: boolean;
@@ -439,6 +441,8 @@ export function __stream(
 		timeout?: number;
 		merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor';
 		key?: string;
+		/** `crud` only: the row field whose newer value wins (see the server's `rowVersion`). */
+		rowVersion?: string;
 		prepend?: boolean;
 		max?: number;
 		replay?: boolean;

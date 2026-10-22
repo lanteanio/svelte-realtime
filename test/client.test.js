@@ -9212,3 +9212,83 @@ describe('function timeout defaults', () => {
 		} finally { vi.useRealTimers(); }
 	});
 });
+
+describe('__stream() crud rowVersion', () => {
+	async function setup(path, topic, initial, response = { rowVersion: 'rev' }, options = { merge: 'crud', key: 'id' }) {
+		const store = __stream(path, options);
+		const values = [];
+		const unsub = store.subscribe((v) => values.push(v));
+		await flush();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: initial, topic, merge: 'crud', key: 'id', ...response });
+		return { store, values, unsub, last: () => values[values.length - 1] };
+	}
+
+	it('drops a write to a row that is not newer than the row held', async () => {
+		const ctx = await setup('rv/rows', 'rv-rows', [{ id: 'a', rev: 1, value: 1 }]);
+		// Two replicas published value 2 and value 3; this client got them reversed.
+		simulateTopicMessage('rv-rows', { event: 'updated', data: { id: 'a', rev: 3, value: 3 } });
+		simulateTopicMessage('rv-rows', { event: 'updated', data: { id: 'a', rev: 2, value: 2 } });
+		simulateTopicMessage('rv-rows', { event: 'created', data: { id: 'a', rev: 3, value: 'dup' } });
+		expect(ctx.last()).toEqual([{ id: 'a', rev: 3, value: 3 }]);
+		simulateTopicMessage('rv-rows', { event: 'updated', data: { id: 'a', rev: 4, value: 4 } });
+		expect(ctx.last()).toEqual([{ id: 'a', rev: 4, value: 4 }]);
+		ctx.unsub();
+	});
+
+	it('ignores a delete older than the row held, and applies one at its version', async () => {
+		const ctx = await setup('rv/del', 'rv-del', [{ id: 'a', rev: 5 }, { id: 'b', rev: 1 }]);
+		simulateTopicMessage('rv-del', { event: 'deleted', data: { id: 'a', rev: 4 } });
+		expect(ctx.last()).toEqual([{ id: 'a', rev: 5 }, { id: 'b', rev: 1 }]);
+		simulateTopicMessage('rv-del', { event: 'deleted', data: { id: 'a', rev: 5 } });
+		expect(ctx.last()).toEqual([{ id: 'b', rev: 1 }]);
+		ctx.unsub();
+	});
+
+	it('orders string versions and applies rows without a comparable version', async () => {
+		const ctx = await setup('rv/str', 'rv-str', [{ id: 'a', rev: '0002' }]);
+		simulateTopicMessage('rv-str', { event: 'updated', data: { id: 'a', rev: '0001' } });
+		expect(ctx.last()).toEqual([{ id: 'a', rev: '0002' }]);
+		simulateTopicMessage('rv-str', { event: 'updated', data: { id: 'a', note: 'no version' } });
+		expect(ctx.last()).toEqual([{ id: 'a', note: 'no version' }]);
+		ctx.unsub();
+	});
+
+	it('takes the field from the generated options before the server answers', async () => {
+		const ctx = await setup('rv/static', 'rv-static', [{ id: 'a', rev: 2 }], {}, { merge: 'crud', key: 'id', rowVersion: 'rev' });
+		simulateTopicMessage('rv-static', { event: 'updated', data: { id: 'a', rev: 1 } });
+		expect(ctx.last()).toEqual([{ id: 'a', rev: 2 }]);
+		ctx.unsub();
+	});
+
+	it('keeps a newer live row over an older copy in a page', async () => {
+		const ctx = await setup('rv/page', 'rv-page', [{ id: 'a', rev: 1 }], { rowVersion: 'rev', hasMore: true, cursor: 'c1' });
+		simulateTopicMessage('rv-page', { event: 'updated', data: { id: 'a', rev: 3 } });
+		const more = ctx.store.loadMore();
+		const sent = sendQueuedFn.mock.calls[sendQueuedFn.mock.calls.length - 1][0];
+		simulateRpcResponse(sent.id, { ok: true, data: [{ id: 'a', rev: 2 }, { id: 'b', rev: 1 }], hasMore: false, cursor: null });
+		await more;
+		expect(ctx.last()).toEqual([{ id: 'a', rev: 3 }, { id: 'b', rev: 1 }]);
+		ctx.unsub();
+	});
+
+	it('without rowVersion, the last write to arrive wins', async () => {
+		const ctx = await setup('rv/none', 'rv-none', [{ id: 'a', rev: 1 }], {});
+		simulateTopicMessage('rv-none', { event: 'updated', data: { id: 'a', rev: 3 } });
+		simulateTopicMessage('rv-none', { event: 'updated', data: { id: 'a', rev: 2 } });
+		expect(ctx.last()).toEqual([{ id: 'a', rev: 2 }]);
+		ctx.unsub();
+	});
+
+	it('applies the client\'s own optimistic change as given, and drops a stale server row under it', async () => {
+		const ctx = await setup('rv/opt', 'rv-opt', [{ id: 'a', rev: 5, value: 'server' }]);
+		let finish;
+		const op = ctx.store.mutate(() => new Promise((r) => { finish = r; }), { event: 'updated', data: { id: 'a', value: 'mine' } });
+		expect(ctx.last()).toEqual([{ id: 'a', value: 'mine' }]);
+		simulateTopicMessage('rv-opt', { event: 'updated', data: { id: 'a', rev: 4, value: 'stale' } });
+		finish('ok');
+		await op;
+		expect(ctx.last()).toEqual([{ id: 'a', value: 'mine' }]);
+		ctx.unsub();
+	});
+});

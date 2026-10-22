@@ -231,7 +231,7 @@ import { derived, writable } from 'svelte/store';
 // not module-load errors.
 import * as _svelteStore from 'svelte/store';
 import { assert } from '../shared/assert.js';
-import { mergeKeyField, rebuildIndex } from '../shared/merge.js';
+import { mergeKeyField, rebuildIndex, isStaleRow } from '../shared/merge.js';
 import { sanitizeRowData } from '../shared/safe-assign.js';
 import { now, monotonicNow, randomFloat, setTimer, clearTimer, microtask } from '../client-runtime.js';
 import { createJitterDispatch } from './jitter-dispatch.js';
@@ -614,6 +614,8 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	let key = options?.key || 'id';
 	let prepend = options?.prepend || false;
 	let max = options?.max || (merge === 'latest' ? 50 : 0);
+	/** @type {string | null} the crud field that orders writes to one row */
+	let rowVersion = options?.rowVersion || null;
 
 	/** @type {any} */
 	let currentValue;
@@ -969,6 +971,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 					continue;
 				}
 				const existing = index.get(kv);
+				if (existing !== undefined && merge === 'crud' && isStaleRow(rowVersion, item, value[existing])) continue;
 				if (existing !== undefined) {
 					// Copy before the first in-place write: `value` may be an
 					// array the store has already emitted, or - after hydrate() -
@@ -1088,6 +1091,17 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				return { value, replaced: false, modified: false };
 			}
 			if (!Array.isArray(value)) { value = []; index.clear(); }
+
+			// With a rowVersion, a write that is not newer than the held row
+			// is dropped: replicas can deliver two writes to one row in either
+			// order, and the arrival order is not the order they happened in.
+			// The client's own optimistic changes apply as given.
+			if (rowVersion && !local) {
+				const held = index.get(data[key]);
+				if (held !== undefined && isStaleRow(rowVersion, data, value[held], event === 'deleted')) {
+					return { value, replaced: false, modified: false };
+				}
+			}
 
 			if (event === 'created') {
 				const idx = index.get(data[key]);
@@ -1318,7 +1332,9 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 			// `set`, a superseded cursor sample) must not hide an earlier
 			// modification made in place.
 			if (result.modified) _dirty = true;
-			_absorbCheck(envelope);
+			// A crud row dropped as stale is not the write a pending change
+			// is waiting for, nor one that supersedes it.
+			if (result.modified || merge !== 'crud') _absorbCheck(envelope);
 			return false;
 		}
 		const result = _applyMergeFn(currentValue, _index, envelope);
@@ -1923,6 +1939,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				if (response.key) key = response.key;
 				if (response.prepend !== undefined) prepend = response.prepend;
 				if (response.max !== undefined) max = response.max;
+				if (response.rowVersion) rowVersion = response.rowVersion;
 
 				// Handle unchanged response (delta sync - nothing changed)
 				if (response.unchanged === true) {

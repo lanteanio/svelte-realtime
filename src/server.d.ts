@@ -695,6 +695,17 @@ export interface StreamOptions extends LiveOptions {
 	key?: string;
 
 	/**
+	 * `crud` only: the row field that orders writes to one row. The publisher
+	 * sets it from a monotonic source (a counter in the shared store, a row
+	 * revision); a `created` or `updated` row whose version is not greater
+	 * than the held row's is dropped, and a `deleted` below it is ignored.
+	 * Versions compare as numbers or as strings; a row without a comparable
+	 * version applies. Without it, crud applies writes in arrival order, and
+	 * `seq` cannot order them: it numbers delivery per subscriber.
+	 */
+	rowVersion?: string;
+
+	/**
 	 * Prepend new items instead of appending (crud mode only).
 	 * @default false
 	 */

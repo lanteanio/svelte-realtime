@@ -969,7 +969,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// Channel fast-path
 	if (/** @type {any} */ (fn).__isChannel) {
 		const emptyValue = streamOpts.merge === 'set' ? null : [];
-		return { id, ok: true, data: emptyValue, topic, merge: streamOpts.merge, key: streamOpts.key, max: streamOpts.max, channel: true };
+		return { id, ok: true, data: emptyValue, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, max: streamOpts.max, channel: true };
 	}
 
 	// Delta sync
@@ -979,7 +979,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 		try {
 			const currentVersion = await deltaOpts.version();
 			if (currentVersion === clientVersion) {
-				return { id, ok: true, data: [], topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, unchanged: true, version: currentVersion };
+				return { id, ok: true, data: [], topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, unchanged: true, version: currentVersion };
 			}
 			let diff = await deltaOpts.diff(clientVersion);
 			if (diff !== null && diff !== undefined) {
@@ -989,7 +989,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 				// the loader - fail-closed, never returning raw diff.
 				const _redact = /** @type {any} */ (fn).__streamPiiRedact;
 				if (_redact) diff = _redact(diff);
-				return { id, ok: true, data: diff, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, delta: true, version: currentVersion };
+				return { id, ok: true, data: diff, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, delta: true, version: currentVersion };
 			}
 		} catch {}
 	}
@@ -1000,7 +1000,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 			const missed = await platform.replay.since(topic, clientSeq);
 			if (missed) {
 				const currentSeq = await platform.replay.seq(topic);
-				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
+				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
 			}
 		} catch {}
 	}
@@ -1021,7 +1021,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 			const missed = await platform.replay.since(topic, 0);
 			if (Array.isArray(missed) && missed.length > 0) {
 				const currentSeq = await platform.replay.seq(topic);
-				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
+				return { id, ok: true, data: missed, topic, merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max, seq: currentSeq, replay: true };
 			}
 		} catch {}
 	}
@@ -1047,7 +1047,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 				}
 				const deltaResp = {
 					id, ok: true, data: events, topic,
-					merge: streamOpts.merge, key: streamOpts.key,
+					merge: streamOpts.merge, key: streamOpts.key, rowVersion: streamOpts.rowVersion,
 					prepend: streamOpts.prepend, max: streamOpts.max,
 					replay: true
 				};
@@ -1124,7 +1124,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 
 	const response = {
 		id, ok: true, data: resultData, topic, merge: streamOpts.merge,
-		key: streamOpts.key, prepend: streamOpts.prepend, max: streamOpts.max,
+		key: streamOpts.key, rowVersion: streamOpts.rowVersion, prepend: streamOpts.prepend, max: streamOpts.max,
 		hasMore: undefined, cursor: undefined, seq: undefined,
 		version: undefined, schemaVersion: undefined, replay: undefined,
 		derived: /** @type {any} */ (fn).__isDerived || undefined

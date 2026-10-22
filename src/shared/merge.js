@@ -32,6 +32,30 @@ export function mergeKeyField(merge, defaultKey) {
 }
 
 /**
+ * Whether a crud row is older than the row held at its key, by the stream's
+ * `rowVersion` field. Versions compare when both are numbers or both are
+ * strings; a row without a comparable version is never stale. A write
+ * (`created` / `updated`) must be newer than the held row; a delete is
+ * stale only below the held version.
+ *
+ * @param {string | null | undefined} field - the stream's `rowVersion`
+ * @param {any} incoming - the event's row
+ * @param {any} held - the row currently held at its key
+ * @param {boolean} [isDelete]
+ * @returns {boolean}
+ */
+export function isStaleRow(field, incoming, held, isDelete = false) {
+	if (!field || incoming == null || held == null) return false;
+	const next = incoming[field];
+	const prev = held[field];
+	if (typeof next !== typeof prev) return false;
+	if (typeof next === 'number') {
+		if (Number.isNaN(next) || Number.isNaN(prev)) return false;
+	} else if (typeof next !== 'string') return false;
+	return isDelete ? next < prev : next <= prev;
+}
+
+/**
  * Rebuild a key->index lookup Map from the given array. No-op for merge
  * strategies that do not maintain an index (`set`, `latest`).
  *

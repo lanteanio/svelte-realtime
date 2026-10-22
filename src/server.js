@@ -1303,7 +1303,7 @@ export function defineTopics(map) {
  * Topic can be a static string or a function of (ctx, ...args) => string for dynamic topics.
  * @param {string | Function} topic
  * @param {Function} initFn
- * @param {{ timeout?: number, merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, prepend?: boolean, max?: number, replay?: boolean | { size?: number }, coalesceBy?: (data: any) => string | number | null | undefined }} [options]
+ * @param {{ timeout?: number, merge?: 'crud' | 'latest' | 'set' | 'presence' | 'cursor', key?: string, rowVersion?: string, prepend?: boolean, max?: number, replay?: boolean | { size?: number }, coalesceBy?: (data: any) => string | number | null | undefined }} [options]
  * @returns {Function}
  */
 live.stream = function stream(topic, initFn, options) {
@@ -1398,6 +1398,14 @@ live.stream = function stream(topic, initFn, options) {
 	// default key on those just leaks dead bytes onto every subscribe response.
 	const merged = { merge: 'crud', ...rest };
 	if (merged.merge === 'crud' && merged.key === undefined) merged.key = 'id';
+	if (merged.rowVersion !== undefined) {
+		if (typeof merged.rowVersion !== 'string' || merged.rowVersion.length === 0) {
+			throw new Error('[svelte-realtime] live.stream rowVersion must be the name of a row field (a non-empty string)');
+		}
+		if (merged.merge !== 'crud') {
+			throw new Error("[svelte-realtime] live.stream rowVersion orders rows of a merge: 'crud' stream; '" + merged.merge + "' streams do not take it");
+		}
+	}
 	if (replay) {
 		/** @type {any} */ (initFn).__replay = typeof replay === 'object' ? replay : {};
 		// Auto-routing registry: static topics register at declaration time so

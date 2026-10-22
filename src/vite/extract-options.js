@@ -572,6 +572,9 @@ export function _applyParsedOptions(opts, optStr, source = '') {
 	const keyVal = _extractTopLevelStringProp(optStr, 'key');
 	if (keyVal) opts.key = keyVal;
 
+	const rowVersionVal = _extractTopLevelStringProp(optStr, 'rowVersion');
+	if (rowVersionVal) opts.rowVersion = rowVersionVal;
+
 	const prependVal = _extractTopLevelRawValue(optStr, 'prepend');
 	if (prependVal === 'true') opts.prepend = true;
 	else if (prependVal === 'false') opts.prepend = false;

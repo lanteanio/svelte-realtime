@@ -308,6 +308,8 @@ export const addTodo = live(async (ctx, text) => {
 {/each}
 ```
 
+**Ordering writes to one row.** By default crud is last-writer-by-arrival: each client applies `created`, `updated` and `deleted` in the order its socket delivers them. Two replicas publishing absolute values for one row can reach two clients in opposite orders, and a client that receives the older value last keeps it. An event's `seq` cannot fix this: it numbers delivery per subscriber (the resume cursor), so one event can carry different seqs on different clients. Name a monotonic field the publisher sets, such as a counter from the shared store, with `rowVersion: 'rev'`: a `created` or `updated` row whose version is not greater than the held row's is dropped, and a `deleted` below it is ignored. Versions compare as numbers or as strings; a row without a comparable version applies as before, and a deleted row's version goes with it. A wall-clock timestamp is not enough: two writes a client must order often share a millisecond.
+
 ### latest
 
 Ring buffer of the last N events. Good for activity feeds and logs.
@@ -381,6 +383,7 @@ Events: `update` (add/update by key), `remove` (remove by key), `set` (replace a
 |---|---|---|
 | `merge` | `'crud'` | Merge strategy: `'crud'`, `'latest'`, `'set'`, `'presence'`, `'cursor'` |
 | `key` | `'id'` | Key field for `crud` mode |
+| `rowVersion` | - | `crud` only: a monotonic row field; a write not newer than the held row is dropped (see [crud](#crud-default)) |
 | `prepend` | `false` | Prepend new items instead of appending (`crud` mode) |
 | `max` | `50` / `0` | Max items to keep. Defaults to 50 for `latest`, 0 (unlimited) for `crud`. Oldest items are dropped when exceeded |
 | `replay` | `false` | Enable seq-based replay for gap-free reconnection |

@@ -1,5 +1,6 @@
 // @ts-check
 import { __register, __registerGuard, __registerCron, __registerDerived, __registerEffect, __registerAggregate, __registerRoomActions, handleRpc, LiveError, _clearCron, _activateDerived, close, unsubscribe } from './server.js';
+import { isStaleRow } from './shared/merge.js';
 import { sanitizeRowData } from './shared/safe-assign.js';
 import { _noteTopicPublish } from './server/publish-helpers.js';
 
@@ -234,6 +235,8 @@ function _applyTestMerge(current, envelope, merge, key, opts) {
 
 	if (merge === 'crud') {
 		const arr = Array.isArray(current) ? [...current] : [];
+		const held = arr.findIndex(item => item[key] === data[key]);
+		if (held >= 0 && isStaleRow(opts?.rowVersion, data, arr[held], event === 'deleted')) return current;
 		if (event === 'created') {
 			const idx = arr.findIndex(item => item[key] === data[key]);
 			if (idx >= 0) arr[idx] = data;
@@ -666,7 +669,7 @@ export function createTestEnv(options) {
 
 					state._merge = data.merge || 'crud';
 					state._key = data.key || 'id';
-					state._mergeOpts = { prepend: data.prepend, max: data.max };
+					state._mergeOpts = { prepend: data.prepend, max: data.max, rowVersion: data.rowVersion };
 
 					// An attach frame already issued this stream's listener; a
 					// client that did not get one (or a server that sent none)
