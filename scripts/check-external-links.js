@@ -148,9 +148,19 @@ export function looksLikeSoft404(html) {
 	return candidates.some((candidate) => notFound.test(candidate));
 }
 
+/** First path segments on github.com that are site pages, not repository owners. */
+const GITHUB_RESERVED_OWNERS = new Set([
+	'about', 'account', 'apps', 'codespaces', 'collections', 'dashboard', 'enterprise', 'enterprises',
+	'explore', 'features', 'issues', 'join', 'login', 'logout', 'marketplace', 'new', 'notifications',
+	'organizations', 'orgs', 'pricing', 'pulls', 'search', 'sessions', 'settings', 'signup', 'sponsors',
+	'topics', 'trending', 'users'
+]);
+
 /**
  * The repository URL when `next` is GitHub's sign-in page returning to exactly
- * `current`, a page inside a github.com repository; otherwise null.
+ * `current`, a page inside a github.com repository; otherwise null. A sign-in
+ * wall in front of the repository root itself, or in front of a site page such
+ * as /settings or /orgs, has no public page to vouch for it and stays a redirect.
  */
 function githubSignInRepository(current, next) {
 	const from = new URL(current);
@@ -158,7 +168,9 @@ function githubSignInRepository(current, next) {
 	if (from.hostname !== 'github.com' || to.origin !== 'https://github.com' || to.pathname !== '/login') return null;
 	if (to.searchParams.get('return_to') !== current) return null;
 	const [owner, repo] = from.pathname.split('/').filter(Boolean);
-	return owner && repo ? `https://github.com/${owner}/${repo}` : null;
+	if (!owner || !repo || GITHUB_RESERVED_OWNERS.has(owner.toLowerCase())) return null;
+	const repository = `https://github.com/${owner}/${repo}`;
+	return repository === current ? null : repository;
 }
 
 /** Crawl one URL with manual, bounded redirect handling. */

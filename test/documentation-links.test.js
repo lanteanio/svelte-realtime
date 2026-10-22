@@ -59,4 +59,22 @@ describe('documentation link gates', () => {
 		expect(await check('owner/gone/issues/new')).toMatchObject({ ok: false, kind: 'http-error' });
 		expect(await check('owner/repo/elsewhere')).toMatchObject({ ok: false, kind: 'redirect' });
 	});
+	it('does not follow a GitHub sign-in wall that is not in front of a repository', async () => {
+		let requests = 0;
+		const fetchImpl = async (url) => {
+			if (++requests > 20) throw new Error('crawl did not stop');
+			const { pathname } = new URL(url);
+			if (pathname === '/login') return new Response('<title>Sign in</title>', { headers: { 'content-type': 'text/html' } });
+			if (pathname === '/orgs/acme') return new Response('<title>acme</title>', { headers: { 'content-type': 'text/html' } });
+			return new Response(null, { status: 302, headers: { location: 'https://github.com/login?return_to=' + encodeURIComponent(url) } });
+		};
+		const check = async (path) => {
+			requests = 0;
+			const result = await crawlUrl('https://github.com/' + path, { fetchImpl });
+			return { ...result, requests };
+		};
+		expect(await check('settings/tokens')).toMatchObject({ ok: false, kind: 'redirect', requests: 2 });
+		expect(await check('orgs/acme/teams')).toMatchObject({ ok: false, kind: 'redirect', requests: 2 });
+		expect(await check('owner/repo')).toMatchObject({ ok: false, kind: 'redirect', requests: 2 });
+	});
 });
