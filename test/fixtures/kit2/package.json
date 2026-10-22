@@ -7,15 +7,18 @@
     "build": "vite build"
   },
   "dependencies": {
-    "@sveltejs/kit": "2.59.0",
+    "@sveltejs/kit": "2.70.3",
     "svelte": "5.57.1",
     "svelte-adapter-uws": "0.5.11",
     "svelte-realtime": "file:../../..",
     "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.69.0",
-    "ws": "8.20.0"
+    "ws": "8.22.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "5.1.1",
-    "vite": "6.4.2"
+    "vite": "6.4.5"
+  },
+  "overrides": {
+    "cookie": "^0.7.2"
   }
 }
