@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, resolve, join } from 'node:path';
+import { basename, dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from '@playwright/test';
 
@@ -15,7 +15,8 @@ assert(adapterPack && realtimePack, 'Pass --adapter-pack and --realtime-pack wit
 const packages = new Map();
 for (const path of [adapterPack, realtimePack]) {
 	const bytes = readFileSync(resolve(path));
-	const manifest = JSON.parse(execFileSync('tar', ['-xOf', resolve(path), 'package/package.json'], { encoding: 'utf8', windowsHide: true }));
+	const archive = resolve(path);
+	const manifest = JSON.parse(execFileSync('tar', ['-xOf', basename(archive), 'package/package.json'], { cwd: dirname(archive), encoding: 'utf8', windowsHide: true }));
 	packages.set(manifest.name, { manifest, bytes, integrity: 'sha512-' + createHash('sha512').update(bytes).digest('base64'), shasum: createHash('sha1').update(bytes).digest('hex') });
 }
 const adapterVersion = packages.get('svelte-adapter-uws')?.manifest.version;
@@ -130,9 +131,9 @@ async function browserSmoke(app, dev) {
 			await page.goto(url);
 			await page.getByText('Count: 0', { exact: true }).waitFor();
 		}
-		await pages[0].getByRole('button', { name: '+1', exact: true }).click();
+		await pages[0].getByRole('button', { name: 'Increase count by one', exact: true }).click();
 		for (const page of pages) await page.getByText('Count: 1', { exact: true }).waitFor();
-		await pages[1].getByRole('button', { name: '+1', exact: true }).click();
+		await pages[1].getByRole('button', { name: 'Increase count by one', exact: true }).click();
 		for (const page of pages) await page.getByText('Count: 2', { exact: true }).waitFor();
 		assert(frames.some(frame => frame.direction === 'sent' && frame.payload.includes('increment')), 'No real counter RPC WebSocket frame');
 		assert(frames.some(frame => frame.direction === 'received'), 'No real WebSocket delivery');

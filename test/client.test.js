@@ -2962,6 +2962,30 @@ describe('__stream() hydrate reconnect', () => {
 		unsub();
 	});
 
+	it('keeps a cold snapshot over an event still retained by the adapter', async () => {
+		configure({ resumeGraceMs: 0 });
+		retainedTopicValues = new Map();
+		const store = __stream('retained/cold', { merge: 'set' });
+		let value;
+		const stop = store.subscribe(next => { value = next; });
+		await flush();
+		const first = sendQueuedFn.mock.calls[0][0];
+		simulateRpcResponse(first.id, { ok: true, data: 0, topic: 'retained-cold', merge: 'set' });
+		simulateTopicMessage('retained-cold', { event: 'set', data: 2 });
+		expect(value).toBe(2);
+		stop();
+		await flush();
+		const stopAgain = store.subscribe(next => { value = next; });
+		await flush();
+		const second = sendQueuedFn.mock.calls.map(call => call[0]).filter(frame => frame.rpc).at(-1);
+		expect(second.id).not.toBe(first.id);
+		simulateRpcResponse(second.id, { ok: true, data: 4, topic: 'retained-cold', merge: 'set' });
+		expect(value).toBe(4);
+		simulateTopicMessage('retained-cold', { event: 'set', data: 5 });
+		expect(value).toBe(5);
+		stopAgain();
+	});
+
 	it('channel applies live events on top of hydrated data', async () => {
 		const store = __stream('hydrate/live', { merge: 'presence' });
 		store.hydrate([{ key: 'u1', name: 'Alice' }]);

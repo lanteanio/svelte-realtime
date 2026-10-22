@@ -1720,8 +1720,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 */
 	/** @type {unknown} The last topic event this stream's listener received */
 	let _lastEnvelope = null;
+	/** @type {WeakRef<object> | null} Identity survives cold reset without retaining its payload. */
+	let _coldEnvelope = null;
 	function _subscribeLive() {
 		if (!topic || topicUnsub) return;
+		if (_coldEnvelope) {
+			_lastEnvelope = _coldEnvelope.deref() ?? null;
+			_coldEnvelope = null;
+		}
 		const topicStore = _conn().on(topic);
 		topicUnsub = topicStore.subscribe((envelope) => {
 			// The adapter's topic store hands a new listener the last event it
@@ -2202,6 +2208,11 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * subscribe() is a true cold start.
 	 */
 	function _resetSession() {
+		// Keep only identity while this store is cached without subscribers.
+		// The adapter may still own the event and replay it on a cold attach;
+		// once it releases that event, this marker must not retain user data.
+		if (_lastEnvelope && typeof _lastEnvelope === 'object') _coldEnvelope = new WeakRef(_lastEnvelope);
+		_lastEnvelope = null;
 		if (topic) _unregisterTopicErrorSetter(topic, _setError);
 		topic = null;
 		initialLoaded = false;
