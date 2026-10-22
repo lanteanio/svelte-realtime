@@ -308,6 +308,15 @@ export default function svelteRealtime(options) {
 				// creating a separate module instance with its own registry Map.
 				_externalizeRealtime(config.build.rollupOptions);
 			}
+			if (command === 'serve') {
+				// Vite otherwise discovers these client entries on the first page
+				// load and reloads the page once for each, which can abort the
+				// first navigation. Skip any the app excludes from pre-bundling.
+				const excluded = config.optimizeDeps?.exclude || [];
+				const include = ['svelte-realtime/client', ...(devtools ? ['svelte-realtime/devtools'] : [])]
+					.filter(id => !excluded.includes(id) && !excluded.includes('svelte-realtime'));
+				if (include.length) return { optimizeDeps: { include } };
+			}
 		},
 
 		configureServer(server) {
