@@ -222,8 +222,8 @@ export const counter = live.stream('count', () => {
 
 \tconst counterStatus = counter.status;
 \tconst counterError = counter.error;
-\tlet incrementing = false;
-\tlet mutationError = '';
+\tlet incrementing = $state(false);
+\tlet mutationError = $state('');
 
 \tasync function increaseCount() {
 \t\tif (incrementing || $counterStatus !== 'connected') return;
@@ -248,10 +248,9 @@ export const counter = live.stream('count', () => {
 \t\tReconnecting... {#if $counter !== undefined}Last count: {$counter}.{/if}
 \t{:else if $counter === undefined || $counterStatus === 'loading'}
 \t\tConnecting...
-\t{:else if mutationError}
-\t\tCould not increase count: {mutationError} Try Increase count by one again.
 \t{:else}
 \t\tCount: {$counter}{#if incrementing}. Updating...{/if}
+\t\t{#if mutationError} Could not increase count: {mutationError} Try Increase count by one again.{/if}
 \t{/if}
 </p>
 

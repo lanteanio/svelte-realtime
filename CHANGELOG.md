@@ -245,6 +245,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - The scaffolder works when started through `npm exec --package`, which exported its package selection to the nested `sv` call.
 - A stream that resubscribes after a reconnect no longer applies the last event it received before the outage on top of the fresh snapshot. After a server restart the store showed that stale value instead of the server's current one.
 - A stream store cached without subscribers no longer keeps its last event's data alive. It keeps only a weak reference to the event, so a later subscribe still ignores the event the adapter replays to new listeners.
+- The generated counter page keeps showing the current count, including updates from other tabs, after an increment fails, with the failure message beside it. Its pending and error state also update when the page is copied into a runes-mode project.
 
 ## [0.6.0-next.91] - 2026-10-13
 

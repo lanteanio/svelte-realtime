@@ -129,6 +129,17 @@ it('handles rejected increments and lets the user try again without an unhandled
 	expect(errors).toEqual([]);
 });
 
+it('keeps remote updates visible after a failed increment', async () => {
+	await page.evaluate(() => { window.counterHarness.set(2, 'connected'); window.counterHarness.failIncrement = true; });
+	await page.getByRole('button', { name: 'Increase count by one', exact: true }).click();
+	await page.waitForFunction(() => document.querySelector('[role="status"]').textContent.includes('Counter service unavailable'));
+	await page.evaluate(() => window.counterHarness.set(7, 'connected'));
+	await page.waitForFunction(() => document.querySelector('[role="status"]').textContent.includes('Count: 7'), null, { timeout: 2000 });
+	expect(await page.getByRole('status').textContent()).toContain('Counter service unavailable');
+	expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+	expect(errors).toEqual([]);
+});
+
 
 it('keeps focus and prevents duplicate increments while a request is pending', async () => {
 	await page.evaluate(() => { window.counterHarness.set(0, 'connected'); window.counterHarness.holdIncrement = true; });
