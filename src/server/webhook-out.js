@@ -52,6 +52,9 @@ function _reportWebhookOutFailure(config, err, event, data, attempts) {
 }
 
 function _reportDeadLetterFailure(entry, err) {
+	// The delivery already failed, so this record was the only replay copy: count
+	// it so an empty dead-letter store is never read as nothing to recover.
+	state.metricsInstruments?.deadLetterFailures?.inc();
 	emitOperationalEvent({
 		source: 'svelte-realtime',
 		component: 'server.webhook',

@@ -83,6 +83,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Streams expose a `pending` store that turns true only once an attach has taken longer than `pendingDelay` (100 ms by default, `0` for immediate), so a quick load never flashes a spinner. Connection status and errors stay immediate.
 
+- `live.metrics()` registers `svelte_realtime_webhook_dead_letter_failures_total`, counting failed webhook deliveries whose dead-letter write threw or rejected. Each one also emits the `webhook.dead-letter.persist-failed` operational event, so an empty dead-letter store can be told apart from a store that lost records.
+
 ### Changed
 
 - The upload frame cap (`__cap`) rides the first RPC or upload response on a connection, so an upload after any call sends chunk 0 at the full cap, and a first upload switches to it from chunk 1. The client forgets the cap when its socket drops.

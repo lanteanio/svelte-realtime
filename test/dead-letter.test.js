@@ -4,13 +4,15 @@
 // SSRF-blocked loopback url fails the gate terminally (no socket), and a
 // transform that opts out resolves a replay as "delivered" (nothing to send).
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
 	createDeadLetterStore,
 	configureWebhooks,
 	getDeadLetter,
 	replayDeadLetter,
-	realtime
+	realtime,
+	live,
+	setOperationalEventSink
 } from '../src/server.js';
 import { monotonicNow, setRuntimeEnv, resetRuntimeEnv } from '../src/shared/runtime.js';
 import { _fireWebhookOut } from '../src/server/webhook-out.js';
@@ -480,5 +482,73 @@ describe('async (cluster-shaped) dead-letter store', () => {
 		const replay = await admin(new Request('http://x/__realtime/dlq/orders/replay', { method: 'POST', body: '{}' }));
 		expect(await replay.json()).toMatchObject({ replayed: 1, removed: 1 });
 		expect(inner.count()).toBe(0);
+	});
+});
+
+describe('dead-letter persistence failure', () => {
+	const failingEntry = { id: 'test/wh', config: { url: 'http://127.0.0.1:9/blocked' } }; // loopback -> SSRF-blocked
+	/** @type {any[]} */
+	let records;
+	/** @type {number} */
+	let failures;
+
+	beforeEach(() => {
+		reset();
+		records = [];
+		failures = 0;
+		setOperationalEventSink((record) => records.push(record));
+		const counter = () => ({ inc() {} });
+		live.metrics({
+			counter: (/** @type {any} */ spec) => spec.name === 'svelte_realtime_webhook_dead_letter_failures_total'
+				? { inc() { failures++; } }
+				: counter(),
+			histogram: () => ({ observe() {} }),
+			gauge: () => ({ inc() {}, dec() {}, set() {} })
+		});
+	});
+
+	afterEach(() => {
+		setOperationalEventSink(null);
+		state.metricsInstruments = null;
+		reset();
+	});
+
+	const persistFailed = () => records.filter((r) => r.event === 'webhook.dead-letter.persist-failed');
+
+	it('reports a store whose add throws, with the webhook id and no payload', async () => {
+		const store = createDeadLetterStore();
+		store.add = () => { throw new Error('store offline'); };
+		configureWebhooks({ deadLetter: store });
+		await _fireWebhookOut(failingEntry, 'orders', 'created', { secret: 'payload-value' }, null);
+		const events = persistFailed();
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			component: 'server.webhook',
+			severity: 'error',
+			attributes: { webhookId: 'test/wh', error: 'store offline' }
+		});
+		expect(JSON.stringify(events[0])).not.toContain('payload-value');
+		expect(failures).toBe(1);
+	});
+
+	it('reports a store whose add rejects asynchronously', async () => {
+		const store = createDeadLetterStore();
+		store.add = () => Promise.reject(new Error('redis down'));
+		configureWebhooks({ deadLetter: store });
+		await _fireWebhookOut(failingEntry, 'orders', 'created', { id: 1 }, null);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(persistFailed()).toHaveLength(1);
+		expect(persistFailed()[0].attributes).toEqual({ webhookId: 'test/wh', error: 'redis down' });
+		expect(failures).toBe(1);
+	});
+
+	it('stays silent when the store persists the record', async () => {
+		configureWebhooks({ deadLetter: true });
+		await _fireWebhookOut(failingEntry, 'orders', 'created', { id: 1 }, null);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(getDeadLetter().count()).toBe(1);
+		expect(persistFailed()).toHaveLength(0);
+		expect(failures).toBe(0);
+		expect(records.filter((r) => r.event === 'webhook.delivery.failed')).toHaveLength(1);
 	});
 });

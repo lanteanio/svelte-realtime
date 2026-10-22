@@ -2624,6 +2624,7 @@ The six-line shim adapts realtime's options-object call shape to the extensions 
 - `svelte_realtime_cron_total` - cron execution count by path and status
 - `svelte_realtime_cron_errors_total` - cron errors by path
 - `svelte_realtime_assertion_violations_total` - production-assertion violations by category (see "Production assertions" below)
+- `svelte_realtime_webhook_dead_letter_failures_total` - failed webhook deliveries the dead-letter store could not persist (see "Dead-letter queue")
 
 ### Cohort-stratified metrics - never trust the aggregate
 
@@ -4506,7 +4507,7 @@ It is **off by default** - a DLQ retains the (attacker-influenceable) event payl
 
 Replay re-runs the **complete** delivery path, so the SSRF gate is re-applied at fire time (re-resolving and re-pinning the host) - a dead-lettered event can never be replayed to a host that has since become internal or started rebinding. A record whose webhook was removed from your code since it failed reports `webhook-unregistered` rather than firing. Every replay call emits a `webhook.dead-letter.replayed` operational event with its initiator (`'admin'` for the route, `replayDeadLetter({ initiator })` from code, default `'api'`) and its counts.
 
-`configureWebhooks({ deadLetter })` is the imperative equivalent of the `webhooks` config; `createDeadLetterStore({ max, ttlMs })` builds the synchronous default store. A cluster substitutes a durable Redis/Postgres store with the same interface; every `DeadLetterStore` method may return a promise. `add` returns a record ID or `null` when an erasure tombstone suppresses capture.
+`configureWebhooks({ deadLetter })` is the imperative equivalent of the `webhooks` config; `createDeadLetterStore({ max, ttlMs })` builds the synchronous default store. A cluster substitutes a durable Redis/Postgres store with the same interface; every `DeadLetterStore` method may return a promise. `add` returns a record ID or `null` when an erasure tombstone suppresses capture. Capture does not wait on the store: when `add` throws or rejects, the event is lost, the `webhook.dead-letter.persist-failed` operational event fires with the webhook id (never the payload), and `svelte_realtime_webhook_dead_letter_failures_total` counts it. Alert on that counter, because an empty queue alone does not prove nothing failed.
 
 ---
 
