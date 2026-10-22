@@ -96,6 +96,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - RPC contexts build their operation-scoped platform view as a plain object inheriting from the platform instead of defining read-only properties per call. The correlation guidance pairs `ctx.requestId`, a client-chosen label that can collide or be reused, with `ctx.connectionId`.
 
+- The README links to the shared translation and privacy integration contracts point at their current location in the adapter's `docs/` folder (`docs/translating.md`, `docs/privacy-integration.md`).
+
+- The [Svelte 4 support profile](docs/svelte-support.md) is checked with svelte-check 4 (4.7.7, previously 3.8.6).
+
 ### Fixed
 
 - Bounded DevTools previews retain whole family emoji and other joined graphemes when their segmentation window ends inside a cluster. Oversized payloads and the code-point fallback remain bounded.
