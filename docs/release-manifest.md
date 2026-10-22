@@ -4,16 +4,16 @@ Append-only candidate events, published identities and routing events. See
 [releasing](releasing.md) for recording a candidate, publication or rollback.
 The changelog describes behavior; this ledger identifies npm artifacts.
 
-The 150 historical published rows record the
-[primary npm registry metadata](https://registry.npmjs.org/svelte-realtime)
-as of 2026-10-10. These artifacts have no release tags; `legacy-none` records
-that absence. The registry omitted `gitHead` for `0.5.13`; its `legacy-unrecorded` marker preserves
-that missing fact instead of attributing the artifact to an invented commit.
-All other Git heads, integrity strings, shasums and publication instants are
-copied from the registry. Historical target channels are inferred from version
-syntax (`next` for prereleases, `latest` for stable versions), not a claim about
-past dist-tag movements. The observed dist-tags were `latest: 0.5.13` and
-`next: 0.6.0-next.90`; the ledger contains no historical routing events.
+Published rows copy the
+[primary npm registry metadata](https://registry.npmjs.org/svelte-realtime):
+Git head, integrity, shasum and publication instant. No published artifact has
+a release tag; `legacy-none` records that absence. Where the registry omitted
+`gitHead`, the row says `legacy-unrecorded` and the source commit is recorded
+separately under source reconstructions. Target channels follow version syntax
+(`next` for prereleases, `latest` for stable versions). Each channel's
+routing starts at the source of its first routing event, an untagged row; the
+moves that led there were not observed and are not reconstructed. Every later
+untagged publication records the route its `npm publish` performed.
 
 ## Candidate event log
 
@@ -187,6 +187,7 @@ corrections in the event log below while retaining the original row.
 | svelte-realtime | 0.5.12 | latest | a82929af181e21f85ddace975a4af2d5f1f48287 | legacy-none | sha512-dcHAAMR+X1hHx647WHdOE/R+jxvGq9DqrHB1+o4g+rcSythEifSFC6BBEa+mVQIimiXuxhDajSpWY+Jg+DX5hg== | 4957ed6d58e0f70300bb233f993bad4b30e52895 | 2026-08-29T16:51:16.023Z | No release tag. |
 | svelte-realtime | 0.5.13 | latest | legacy-unrecorded | legacy-none | sha512-wpRYc25SRFNhyi4YfaGMsGKzbTPyR3jRxigh3r58cdmsixNCOWdKqgCAbiQrUwVpnC7psV43JLTkRM9HJcZjbQ== | e530eb8dfa3b4b9caffd49ca2ab3a4a464fb27e5 | 2026-10-10T10:24:32.518Z | Registry omitted gitHead; no release tag. |
 | svelte-realtime | 0.6.0-next.91 | next | 54c8c55e2df0c0807650d20a72375d42591baec3 | legacy-none | sha512-iqTj1BZLwGvsbSsYCkLMZF9SNKJGnQz4oesal9kXUyk3gx6fmrDtZ/cvYGq7OmTGm/P+/QXOU0gDbRujNNdzrg== | 5b6b20f2e7a8593ef1458a53dd11395f62011cde | 2026-10-13T22:26:01.792Z | No release tag. Published from dev at 54c8c55, one ledger row past the qualified source d9a1f09; 49 text files carry CRLF line endings. |
+| svelte-realtime | 0.5.14 | latest | legacy-unrecorded | legacy-none | sha512-HH5bHtc3LPqJ9Jkj6JLqGkjfl4cXeKRZLw7tgFWx4HH4kQ8UMPXvZY5ELLx7XcLWneog+yPmbDvTAfeBmOgvrw== | 7dd08342ac28f562e84b16633025a6cd26df8524 | 2026-10-20T20:33:00.353Z | Registry omitted gitHead; no release tag. Published directly from main. |
 
 ## Routing, corrections and rollback events
 
@@ -199,3 +200,17 @@ even if routing is rolled back or the version is later deprecated.
 | Event ID | Event UTC | Event | Corrected event | Corrected UTC | Package | Channel | From version | To version | Corrects event | Evidence | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | svelte-realtime-next-2026-10-13-1 | 2026-10-13T22:26:01.792Z | routed | - | - | svelte-realtime | next | 0.6.0-next.90 | 0.6.0-next.91 | - | npm publish with the next tag; observed next=0.6.0-next.90 on 2026-10-13 before publication and next=0.6.0-next.91 at 2026-10-13T22:28:50.738Z. | No quarantine candidate tag was used. |
+| svelte-realtime-latest-2026-10-20-1 | 2026-10-20T20:33:00.353Z | routed | - | - | svelte-realtime | latest | 0.5.13 | 0.5.14 | - | npm publish with the latest tag from publishConfig; observed latest=0.5.14 and next=0.6.0-next.91 on 2026-10-22. | No quarantine candidate tag was used. |
+
+## Source reconstructions
+
+When the registry omitted `gitHead`, the source commit is the one whose
+committed bytes pack to the published shasum and integrity, verified with
+`node scripts/verify-release-source.js <version>` (method `git-archive-pack`:
+checkout without line-ending conversion, then `npm pack --ignore-scripts`).
+One row per such version; the published row itself is never edited.
+
+| Package | Version | Git head | Method | Verified UTC | Evidence |
+| --- | --- | --- | --- | --- | --- |
+| svelte-realtime | 0.5.13 | 39d7504fe24f60425ce5a4d4710cbeb162e67522 | git-archive-pack | 2026-10-22T19:17:51.532Z | Commit on main titled "0.5.13 fix(cli): pin sv to 0.17.1" packs to shasum e530eb8dfa3b4b9caffd49ca2ab3a4a464fb27e5 and the recorded integrity. |
+| svelte-realtime | 0.5.14 | 1a4b7482cf0aafa7bfb1f6694a415ae48a062dae | git-archive-pack | 2026-10-22T19:17:51.532Z | Commit on main titled "Describe the logged watcher failure precisely" packs to shasum 7dd08342ac28f562e84b16633025a6cd26df8524 and the recorded integrity. |

@@ -1,5 +1,6 @@
 // Reconcile recorded npm identities without contacting the registry.
 import { isScriptEntry } from './script-entry.js';
+import { validateCandidateLifecycles, validateRoutingEvents, versionPattern } from './release-policy.js';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -9,15 +10,18 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const manifestPath = 'docs/release-manifest.md';
 export const NOT_PUBLISHED = '*Not published to npm; superseded before release.*';
 export const CANDIDATE = '*Not published to npm; release candidate.*';
+export const RECONSTRUCTION_METHOD = 'git-archive-pack';
 const TABLES = {
 	'Candidate event log': ['Candidate', 'Event', 'Event UTC', 'Git head', 'Planned tag', 'Target channel', 'Evidence'],
 	'Published releases': ['Package', 'Version', 'Target channel', 'Git head', 'Git tag', 'npm integrity', 'npm shasum', 'Published UTC', 'Notes'],
-	'Routing, corrections and rollback events': ['Event ID', 'Event UTC', 'Event', 'Corrected event', 'Corrected UTC', 'Package', 'Channel', 'From version', 'To version', 'Corrects event', 'Evidence', 'Notes']
+	'Routing, corrections and rollback events': ['Event ID', 'Event UTC', 'Event', 'Corrected event', 'Corrected UTC', 'Package', 'Channel', 'From version', 'To version', 'Corrects event', 'Evidence', 'Notes'],
+	'Source reconstructions': ['Package', 'Version', 'Git head', 'Method', 'Verified UTC', 'Evidence']
 };
-const numeric = '(?:0|[1-9][0-9]*)';
-const identifier = `(?:${numeric}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)`;
-const versionPattern = new RegExp(`^${numeric}\\.${numeric}\\.${numeric}(?:-${identifier}(?:\\.${identifier})*)?$`);
+// Ledger revisions committed before this table existed omit it.
+const OPTIONAL = new Set(['Source reconstructions']);
 const hashPattern = /^[0-9a-f]{40}$/;
+// Every ledger append lands on dev; main receives the ledger only by merging dev.
+const MERGE_RULE = 'Release ledger rows are appended on dev only; merge dev into main and never record a row on main or a hotfix branch';
 
 function cells(line) { return line.split('|').slice(1, -1).map((cell) => cell.trim()); }
 function utc(value) {
@@ -28,6 +32,7 @@ function integrity(value) {
 	if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(value)) return false;
 	return Buffer.from(value.slice(7), 'base64').toString('base64') === value.slice(7);
 }
+const objects = (name, rows) => rows.map((values) => Object.fromEntries(TABLES[name].map((field, index) => [field, values[index]])));
 
 export function parseManifest(source) {
 	const lines = source.replace(/\r\n/g, '\n').split('\n');
@@ -35,6 +40,7 @@ export function parseManifest(source) {
 	for (const [name, headers] of Object.entries(TABLES)) {
 		const heading = `## ${name}`;
 		const start = lines.indexOf(heading);
+		if (start < 0 && OPTIONAL.has(name)) { tables[name] = []; continue; }
 		if (start < 0 || lines.lastIndexOf(heading) !== start) throw new Error(`Expected one manifest section: ${name}`);
 		const following = lines.findIndex((line, index) => index > start && line.startsWith('## '));
 		const section = lines.slice(start + 1, following < 0 ? lines.length : following);
@@ -65,7 +71,7 @@ export function parseHeadings(source) {
 	return headings;
 }
 
-/** The optional baseline enforces append-only rows in all three event tables. */
+/** The optional baseline enforces append-only rows in every ledger table. */
 export function validateReleaseLedger(manifest, changelog, currentVersion, baseline) {
 	let tables, headings, previous;
 	try {
@@ -75,10 +81,21 @@ export function validateReleaseLedger(manifest, changelog, currentVersion, basel
 	} catch (error) { return [error.message]; }
 	const errors = [];
 	if (previous) errors.push(...compareRows(previous, tables));
+	const releases = objects('Published releases', tables['Published releases']);
+	const reconstructions = new Map();
+	for (const row of objects('Source reconstructions', tables['Source reconstructions'])) {
+		const version = row.Version;
+		if (row.Package !== 'svelte-realtime') errors.push(`Unknown package in source reconstruction: ${row.Package}`);
+		if (reconstructions.has(version)) errors.push(`Duplicate source reconstruction: ${version}`);
+		reconstructions.set(version, row);
+		if (!hashPattern.test(row['Git head'])) errors.push(`Invalid source reconstruction Git head: ${version}`);
+		if (row.Method !== RECONSTRUCTION_METHOD) errors.push(`Unknown source reconstruction method: ${version}`);
+		if (!utc(row['Verified UTC'])) errors.push(`Invalid source reconstruction Verified UTC: ${version}`);
+		if (!row.Evidence) errors.push(`Source reconstruction requires evidence: ${version}`);
+	}
 	const published = new Set();
 	let priorTime = '';
-	for (const values of tables['Published releases']) {
-		const row = Object.fromEntries(TABLES['Published releases'].map((field, index) => [field, values[index]]));
+	for (const row of releases) {
 		const version = row.Version;
 		if (row.Package !== 'svelte-realtime') errors.push(`Unknown package in manifest: ${row.Package}`);
 		if (!versionPattern.test(version)) errors.push(`Manifest version must be exact SemVer without build metadata: ${version}`);
@@ -89,13 +106,28 @@ export function validateReleaseLedger(manifest, changelog, currentVersion, basel
 		priorTime = row['Published UTC'];
 		if (!integrity(row['npm integrity'])) errors.push(`Invalid npm integrity: ${version}`);
 		if (!hashPattern.test(row['npm shasum'])) errors.push(`Invalid npm shasum: ${version}`);
-		// The legacy 0.5.13 publication has no registry gitHead.
-		if (!hashPattern.test(row['Git head']) && !(version === '0.5.13' && row['Git head'] === 'legacy-unrecorded')) {
-			errors.push(`Invalid Git head: ${version}`);
+		const reconstruction = reconstructions.get(version);
+		if (row['Git head'] === 'legacy-unrecorded') {
+			// The registry omitted gitHead: the source is the commit whose repository bytes pack to this shasum.
+			if (row['Git tag'] !== 'legacy-none') errors.push(`Tagged release requires a recorded Git head: ${version}`);
+			if (!reconstruction) errors.push(`Unrecorded Git head requires a source reconstruction: ${version}`);
+			else if (reconstruction['Verified UTC'] < row['Published UTC']) errors.push(`Source reconstruction predates publication: ${version}`);
+		} else {
+			if (!hashPattern.test(row['Git head'])) errors.push(`Invalid Git head: ${version}`);
+			if (reconstruction) errors.push(`Source reconstruction names a release with a recorded Git head: ${version}`);
 		}
 		if (row['Git tag'] !== 'legacy-none' && row['Git tag'] !== `svelte-realtime@${version}`) errors.push(`Invalid Git tag: ${version}`);
 		if (row['Target channel'] !== (version.includes('-') ? 'next' : 'latest')) errors.push(`Invalid target channel: ${version}`);
 		if ((row['Git tag'] === 'legacy-none' || row['Git head'] === 'legacy-unrecorded') && !row.Notes) errors.push(`Legacy identity requires a note: ${version}`);
+	}
+	for (const version of reconstructions.keys()) {
+		if (!published.has(version)) errors.push(`Source reconstruction names an unpublished version: ${version}`);
+	}
+	if (!errors.length) {
+		try {
+			const lifecycles = validateCandidateLifecycles(objects('Candidate event log', tables['Candidate event log']), releases);
+			validateRoutingEvents(objects('Routing, corrections and rollback events', tables['Routing, corrections and rollback events']), releases, lifecycles);
+		} catch (error) { errors.push(`Release lifecycle: ${error.message}`); }
 	}
 	const byVersion = new Map();
 	for (const heading of headings) {
@@ -158,15 +190,21 @@ export function validateReleaseHistory(directory, workingManifest) {
 	}
 	if (offset !== data.length) throw new Error('Unexpected Git release-ledger batch output');
 	const errors = [];
+	let divergedMerge = false;
 	for (const [commit, ...parents] of edges) {
 		const current = cache.get(commit);
 		for (const parent of parents) {
 			const previous = cache.get(parent);
 			if (previous === undefined) continue;
 			if (current === undefined) errors.push(`Manifest history is append-only: ${commit} deleted the ledger from parent ${parent}`);
-			else errors.push(...compareRows(previous, current).map(error => `${commit} against parent ${parent}: ${error}`));
+			else {
+				const found = compareRows(previous, current);
+				if (found.length && parents.length > 1) divergedMerge = true;
+				errors.push(...found.map(error => `${commit} against parent ${parent}: ${error}`));
+			}
 		}
 	}
+	if (divergedMerge) errors.push(MERGE_RULE);
 	const previous = cache.get(head);
 	if (previous !== undefined) errors.push(...compareRows(previous, parseManifest(workingManifest)));
 	return errors;
@@ -191,7 +229,7 @@ function main() {
 		...validateReleaseHistory(root, manifest)
 	];
 	if (errors.length) throw new Error(errors.join('\n'));
-	console.log(`release ledger: ${parseManifest(manifest)['Published releases'].length} published identities match changelog headings; committed history is append-only and agrees with ${baselineRef}`);
+	console.log(`release ledger: ${parseManifest(manifest)['Published releases'].length} published identities match changelog headings; candidate and routing events replay; committed history is append-only and agrees with ${baselineRef}`);
 }
 if (isScriptEntry(import.meta.url)) {
 	try { main(); } catch (error) { console.error(error.message); process.exitCode = 1; }

@@ -46,6 +46,12 @@ instructions does not establish that the current candidate is ready for
 - `main` supplies stable `latest` releases after a reviewed promotion.
 - `hotfix/<stable-version>/<slug>` starts from the exact stable Git identity
   recorded in the ledger, never from whichever branch tip happens to be current.
+- Every ledger append, including stable and hotfix rows, is committed on `dev`.
+  `main` and hotfix branches receive the manifest only by merging `dev`, so
+  each branch's ledger stays a prefix of `dev`'s and merges in either direction
+  pass the history audit. A row committed on `main` while `dev` appended its own
+  makes the next merge fail that audit with no recovery short of rewriting
+  pushed history.
 
 Record the selected adapter, extensions and realtime full Git SHAs, exact
 package versions, protocol revision and native-addon spec in the release
@@ -156,9 +162,18 @@ existing fact was recorded incorrectly; do not rewrite the old identity.
 
 Historical releases without a release tag are recorded as `legacy-none`.
 If a later direct publication has no tag, record `legacy-none` with a factual
-note rather than creating a retrospective tag. `legacy-unrecorded` as a Git
-head is accepted only for the observed `0.5.13` registry omission. New missing
-metadata requires explicit investigation and a reviewed policy change.
+note rather than creating a retrospective tag, and append the `routed` event
+for the public pointer that `npm publish` moved through `publishConfig.tag`.
+Such a publication may go from `proposed` straight to `published` because no
+tag exists to record; a tagged publication always passes through `tagged`.
+
+When the registry omits `gitHead`, record `legacy-unrecorded` as the Git head
+and append a source reconstruction row naming the commit whose committed bytes
+pack to the recorded shasum and integrity. Find and prove it with
+`node scripts/verify-release-source.js <version> --head <commit>`; the script
+checks the commit out without line-ending conversion into a temporary
+directory and runs `npm pack --dry-run --ignore-scripts` there. A row without a
+matching commit cannot be recorded; investigate the publication instead.
 
 ## Coordinated publication and promotion
 
@@ -205,7 +220,7 @@ or a required check fails. Keep any created release tag immutable and use a new
 version for its replacement. If publication is ambiguous, query the exact npm
 version first. An accepted publication remains an immutable published fact:
 record it and its quarantine route, then restore the captured quarantine
-pointer if public routing never began. Record that failed routing separately;
+pointer with a `routing-aborted` event if public routing never began. Record that failed routing separately;
 never describe an existing npm version as an unpublished aborted candidate.
 
 If any public pointer already moved, stop the coordinated release and restore
@@ -213,8 +228,10 @@ the affected known-good pointers using the rollback procedure below. Do not
 continue with a partially promoted tuple, overwrite a version, move a release
 tag or use `npm unpublish` as recovery. Fix forward with a new version.
 
-For a stable hotfix, fork the exact recorded stable commit or immutable tag,
-make the smallest fix with a regression test, and prepare the next stable
+For a stable hotfix, fork the exact recorded stable commit or immutable tag:
+the row's Git head, or for `legacy-unrecorded` its source reconstruction.
+Run `node scripts/verify-release-source.js <version>` first; it must repack the
+fork point to the recorded shasum. Make the smallest fix with a regression test, and prepare the next stable
 patch version with migration notes. Review and merge that fix into `main`
 before tagging, so the stable workflow can verify its source lineage. Repeat
 the complete stable and cross-package preflight, quarantine publication,
@@ -230,14 +247,17 @@ A dist-tag is mutable routing, not an artifact identity. Verify its observed
 value before and after a separately authorized change, and append a `routed`
 or `rollback` event with a unique event ID, full UTC timestamp, package,
 channel, from-version, to-version and evidence. Use `-` for correction fields
-that do not apply. A correction event references the original event and keeps
+that do not apply and `none` for an absent pointer. A correction event references the original event and keeps
 both facts visible. When a new version fails validation, retain its published
 row and route back to a verified earlier artifact; never replace a published
 version's contents or move its Git tag. Deprecation also preserves the row.
 
 Choose a rollback target that previously occupied the affected channel and is
-supported by retained consumer evidence. Verify its exact npm Git head,
-integrity and shasum against the immutable ledger row. After authorization,
+supported by retained consumer evidence. Verify its exact npm integrity and
+shasum against the immutable ledger row; every row records both, including
+legacy rows, so the artifact is identified even where the registry omitted its
+Git head. Its source, when needed, is the row's Git head or source
+reconstruction, proven with `node scripts/verify-release-source.js <version>`. After authorization,
 restore the pointer with `npm dist-tag add <package>@<known-good-version> <channel>`,
 observe the complete channel map and install that exact restored tuple in a
 clean consumer. Record each confirmed rollback immediately with the bad and
@@ -253,11 +273,17 @@ checks against today's external state.
 
 ## Offline verification
 
-`npm run check:release` verifies table shape, published metadata, exact changelog
-headings, unpublished markers and append-only rows throughout the complete
-local Git history. Every ledger change must preserve each parent's existing
-rows as a prefix, including changes later reverted or merged. The working copy
-must also preserve `HEAD`. A committed rewrite therefore remains a failure
+`npm run check:release` verifies table shape, published metadata, source
+reconstructions, exact changelog headings, unpublished markers and append-only
+rows throughout the complete local Git history. It replays the candidate event
+log and the routing log: one Git head, planned tag and channel per candidate,
+legal state transitions, a published row bound to its candidate, a quarantine
+route for every tagged publication and a recorded route for every later
+untagged one, continuous pointers that advance SemVer, rollback only to an
+identity that previously occupied the channel and never forward again, and
+corrections that extend the latest fact they replace. Every ledger change
+must preserve each parent's existing rows as a prefix, including changes later
+reverted or merged. The working copy must also preserve `HEAD`. A committed rewrite therefore remains a failure
 after an unrelated commit or a later release tag.
 `npm run check` and `npm run verify:docs` include this check. An additional
 branch baseline can be checked with `npm run check:release -- --baseline-ref
@@ -267,10 +293,7 @@ addition, but do not bypass the committed-history audit. Verification and
 release workflows fetch full history. Shallow checkouts, source archives without
 `.git`, and unavailable baselines fail closed; use a complete Git checkout.
 
-The gate checks table shape, immutable published identities and append-only
-history; maintainers review candidate and routing transition evidence. It does
-not enforce every lifecycle decision above. The gate uses checked-in records
-and Git only. It cannot discover a new npm
+The gate uses checked-in records and Git only. It cannot discover a new npm
 publication, verify a live dist-tag, or prove that a recorded candidate workflow
 ran. Maintainers must append registry facts after every publication and review
 candidate and routing evidence. No check command publishes, tags, or reroutes a

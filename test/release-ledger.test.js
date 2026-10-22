@@ -3,9 +3,10 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { expect, it } from 'vitest';
 import { CANDIDATE, NOT_PUBLISHED, parseManifest, readBaseline, validateReleaseHistory, validateReleaseLedger } from '../scripts/check-release-ledger.js';
+import { verifyReleaseSource } from '../scripts/verify-release-source.js';
 
 const recordedManifest = readFileSync(new URL('../docs/release-manifest.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 const recordedChangelog = readFileSync(new URL('../CHANGELOG.md', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
@@ -68,11 +69,44 @@ it('distinguishes unpublished candidates from published artifacts', () => {
 	expect(check(manifest, changelog.replace('## [0.1.4] - 2026-03-14', `## [0.1.4] - 2026-03-14\n\n${NOT_PUBLISHED}`))).toContain('Published version carries');
 	expect(check(manifest, changelog.replace(NOT_PUBLISHED, CANDIDATE))).toContain('Candidate marker must name the current');
 });
+const tableEnd = (text, heading) => text.indexOf('\n\n', text.indexOf('| ---', text.indexOf(`## ${heading}`)));
+const append = (text, heading, rows) => { const end = tableEnd(text, heading); return text.slice(0, end) + '\n' + rows.join('\n') + text.slice(end); };
 it('allows the current package version to become published with its marker removed', () => {
-	const row = `| svelte-realtime | ${current} | next | ${'a'.repeat(40)} | svelte-realtime@${current} | sha512-${Buffer.alloc(64, 1).toString('base64')} | ${'b'.repeat(40)} | 2026-10-11T00:00:00.000Z | Published after verification. |\n`;
-	const updated = manifest.replace('\n\n## Routing,', `\n${row}\n## Routing,`);
+	const head = 'a'.repeat(40);
+	const row = `| svelte-realtime | ${current} | next | ${head} | svelte-realtime@${current} | sha512-${Buffer.alloc(64, 1).toString('base64')} | ${'b'.repeat(40)} | 2026-10-11T00:00:00.000Z | Published after verification. |`;
+	const event = (kind, time) => `| ${current} | ${kind} | ${time} | ${head} | svelte-realtime@${current} | next | checks passed |`;
+	const route = (id, time, channel, from, to) => `| ${id} | ${time} | routed | - | - | svelte-realtime | ${channel} | ${from} | ${to} | - | observed dist-tags | quarantine |`;
+	let updated = append(manifest, 'Published releases', [row]);
+	updated = append(updated, 'Candidate event log', [event('proposed', '2026-10-10T22:00:00.000Z'), event('tagged', '2026-10-10T23:00:00.000Z'), event('published', '2026-10-11T00:10:00.000Z')]);
+	expect(check(updated, changelog.replace(CANDIDATE, ''))).toContain('no candidate quarantine route');
+	updated = append(updated, 'Routing, corrections and rollback events', [
+		route('candidate-open', '2026-10-11T00:20:00.000Z', 'candidate', 'none', current),
+		route('next-route', '2026-10-11T00:30:00.000Z', 'next', '0.6.0-next.42', current),
+		route('candidate-close', '2026-10-11T00:40:00.000Z', 'candidate', current, 'none')
+	]);
 	expect(check(updated, changelog.replace(CANDIDATE, ''))).toBe('');
+	expect(check(updated.replace('| tagged |', '| proposed |'), changelog.replace(CANDIDATE, ''))).toContain('Release lifecycle: invalid candidate transition');
 });
+it('requires a verified source commit wherever the registry omitted gitHead', () => {
+	const reconstruction = manifest.split('\n').find((line) => line.includes('| git-archive-pack |'));
+	expect(reconstruction).toContain('| 0.5.13 |');
+	expect(check(manifest.replace(reconstruction + '\n', ''))).toContain('Unrecorded Git head requires a source reconstruction: 0.5.13');
+	expect(check(manifest.replace(reconstruction, reconstruction + '\n' + reconstruction))).toContain('Duplicate source reconstruction');
+	expect(check(manifest.replace(reconstruction, reconstruction.replace('| 0.5.13 |', '| 0.1.4 |')))).toContain('Source reconstruction names a release with a recorded Git head: 0.1.4');
+	expect(check(manifest.replace(reconstruction, reconstruction + '\n' + reconstruction.replace('| 0.5.13 |', '| 9.9.9 |')))).toContain('Source reconstruction names an unpublished version: 9.9.9');
+	expect(check(manifest.replace(reconstruction, reconstruction.replace('git-archive-pack', 'guessed')))).toContain('Unknown source reconstruction method');
+	expect(check(manifest.replace(reconstruction, reconstruction.replace(/\| [0-9a-f]{40} \|/, '| 39d7504 |')))).toContain('Invalid source reconstruction Git head');
+	expect(check(manifest.replace(reconstruction, reconstruction.replace(/\d{4}-\d{2}-\d{2}T[0-9:.]+Z/, '2026-10-01T00:00:00.000Z')))).toContain('Source reconstruction predates publication');
+	expect(check(manifest.replace('| legacy-unrecorded | legacy-none |', '| legacy-unrecorded | svelte-realtime@0.5.13 |'))).toContain('Tagged release requires a recorded Git head');
+});
+it('repacks the reconstructed 0.5.13 source to its recorded artifact', () => {
+	const repository = fileURLToPath(new URL('..', import.meta.url));
+	const verified = verifyReleaseSource(repository, recordedManifest, '0.5.13');
+	expect(verified.errors).toEqual([]);
+	expect(verified.shasum).toBe('e530eb8dfa3b4b9caffd49ca2ab3a4a464fb27e5');
+	const wrong = verifyReleaseSource(repository, recordedManifest, '0.5.13', '1a4b7482cf0aafa7bfb1f6694a415ae48a062dae');
+	expect(wrong.errors.join('\n')).toContain('packs version 0.5.14, not 0.5.13');
+}, HISTORY_TIMEOUT);
 it('rejects malformed, duplicate or noncanonical published identities', () => {
 	const cases = [
 		[firstRow, firstRow + '\n' + firstRow, 'Duplicate published version'],
@@ -104,8 +138,8 @@ it('rejects deletion, reordering and edits to committed rows while allowing appe
 	[lines[index], lines[index + 1]] = [lines[index + 1], lines[index]];
 	expect(check(lines.join('\n'), changelog, manifest)).toContain('append-only');
 	for (const [heading, row] of [
-		['Candidate event log', '| 9.0.0 | proposed | 2026-10-10T12:00:00.000Z | head | tag | latest | review |'],
-		['Routing, corrections and rollback events', '| routing-1 | time | routed | - | - | svelte-realtime | latest | old | new | - | evidence | note |']
+		['Candidate event log', `| 9.0.0 | proposed | 2026-10-10T12:00:00.000Z | ${'d'.repeat(40)} | svelte-realtime@9.0.0 | latest | review |`],
+		['Routing, corrections and rollback events', '| routing-1 | 2026-10-11T00:00:00.000Z | rollback | - | - | svelte-realtime | latest | 0.5.13 | 0.1.9 | - | evidence | note |']
 	]) {
 		const start = manifest.indexOf(`## ${heading}`);
 		const separator = manifest.indexOf('\n', manifest.indexOf('| ---', start));
@@ -165,6 +199,7 @@ it('catches a committed rewrite after an unrelated commit instead of trusting HE
 		mkdirSync(join(directory, 'scripts'));
 		writeFileSync(join(directory, 'scripts/check-release-ledger.js'), readFileSync(new URL('../scripts/check-release-ledger.js', import.meta.url)));
 		writeFileSync(join(directory, 'scripts/script-entry.js'), readFileSync(new URL('../scripts/script-entry.js', import.meta.url)));
+		writeFileSync(join(directory, 'scripts/release-policy.js'), readFileSync(new URL('../scripts/release-policy.js', import.meta.url)));
 		writeFileSync(join(directory, 'package.json'), JSON.stringify({ type: 'module', version: current }));
 		writeFileSync(join(directory, 'CHANGELOG.md'), changelog);
 		expect(() => execFileSync(process.execPath, ['scripts/check-release-ledger.js'], { cwd: directory, encoding: 'utf8', stdio: 'pipe', timeout: 150000, env: { ...process.env, RELEASE_LEDGER_BASE: 'HEAD' } })).toThrow(/Published releases row 1/);
@@ -213,5 +248,46 @@ it('fails closed without complete Git history', async () => {
 			expect(() => validateReleaseHistory(shallow, manifest)).toThrow('full Git checkout');
 			expect(() => validateReleaseHistory(archive, manifest)).toThrow();
 		} finally { await removeFixture(shallow); await removeFixture(archive); }
+	});
+}, HISTORY_TIMEOUT);
+
+const publishedRow = (version, time) => `| svelte-realtime | ${version} | ${version.includes('-') ? 'next' : 'latest'} | ${'e'.repeat(40)} | legacy-none | sha512-${Buffer.alloc(64, 2).toString('base64')} | ${'f'.repeat(40)} | ${time} | No release tag. |`;
+const withRows = (...rows) => append(manifest, 'Published releases', rows);
+const author = ['-c', 'user.name=Ledger test', '-c', 'user.email=ledger@example.invalid'];
+
+it('accepts a stable hotfix recorded on dev and merges in both directions', async () => {
+	await historyFixture(({ directory, git, commit }) => {
+		git('checkout', '-qb', 'dev');
+		const next = publishedRow('0.6.0-next.43', '2026-10-11T00:00:00.000Z');
+		commit('Record a prerelease on dev', withRows(next));
+		git('checkout', '-q', 'main');
+		writeFileSync(join(directory, 'fix.txt'), 'stable fix\n');
+		commit('Fix the stable line');
+		git('checkout', '-q', 'dev');
+		const hotfix = withRows(next, publishedRow('0.5.14', '2026-10-12T00:00:00.000Z'));
+		commit('Record the stable hotfix on dev', hotfix);
+		git(...author, 'merge', '--no-ff', '-qm', 'Merge the stable fix into dev', 'main');
+		expect(validateReleaseHistory(directory, hotfix)).toEqual([]);
+		git('checkout', '-q', 'main');
+		git(...author, 'merge', '--no-ff', '-qm', 'Promote dev', 'dev');
+		expect(validateReleaseHistory(directory, hotfix)).toEqual([]);
+	});
+}, HISTORY_TIMEOUT);
+
+it('names the dev-only rule when a row recorded on main diverges from dev', async () => {
+	await historyFixture(({ directory, git, commit }) => {
+		git('checkout', '-qb', 'dev');
+		const next = publishedRow('0.6.0-next.43', '2026-10-11T00:00:00.000Z');
+		const stable = publishedRow('0.5.14', '2026-10-10T12:00:00.000Z');
+		commit('Record a prerelease on dev', withRows(next));
+		git('checkout', '-q', 'main');
+		commit('Record the stable hotfix on main', withRows(stable));
+		git('checkout', '-q', 'dev');
+		expect(() => git(...author, 'merge', '--no-ff', '-qm', 'Merge main', 'main')).toThrow();
+		const merged = withRows(stable, next);
+		commit('Merge main', merged);
+		const errors = validateReleaseHistory(directory, merged).join('\n');
+		expect(errors).toContain('Published releases row');
+		expect(errors).toContain('Release ledger rows are appended on dev only');
 	});
 }, HISTORY_TIMEOUT);

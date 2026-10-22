@@ -2013,9 +2013,13 @@ Added cluster fan-out for `live.push({ topic })` and `live.notify({ topic })` th
   {#if $maintenance}<Banner />{/if}
   ```
 
+## [0.5.14] - 2026-10-20
+
+Added SvelteKit 3 support alongside SvelteKit 2 on the 0.5 line; it requires svelte-adapter-uws 0.5.11 or later. New projects use sv 1.1.1 and SvelteKit 3 with adapter configuration in `vite.config.ts`. Live handlers register in the correct Vite SSR environment during SvelteKit 3 builds, development and hot reloads, including overlapping changes, newly added files and Windows working directories with a lowercase drive letter; a failure while handling an added or removed live file is logged instead of ending the dev server. The Vite plugin no longer declares `transformIndexHtml`, so development tools load through a Vite module and work with streamed HTML responses. The registry records no Git head; the source commit is listed under source reconstructions in the [release manifest](docs/release-manifest.md).
+
 ## [0.5.13] - 2026-10-10
 
-The scaffolder pin to `sv@0.17.1` is described in the [folded scaffolder entry](#scaffolder-sveltekit-2-pin). Published artifact identity is retained in the [release manifest](docs/release-manifest.md); the registry provides no Git head, so no source commit is inferred.
+The scaffolder pin to `sv@0.17.1` is described in the [folded scaffolder entry](#scaffolder-sveltekit-2-pin). The registry records no Git head; the source commit is listed under source reconstructions in the [release manifest](docs/release-manifest.md).
 
 ## [0.5.12] - 2026-08-29
 
