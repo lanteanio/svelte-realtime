@@ -102,6 +102,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Comments in the server declarations and the README name the extensions subpaths that exist, `svelte-adapter-uws-extensions/redis/presence` and `svelte-adapter-uws-extensions/postgres/tasks`, and the durable alarm example spells its Postgres store as a complete import.
 
+- A stream subscribe sends its attach frame only after the adapter admitted the subscribe, and still before the loader reads its snapshot. Before, the frame went out ahead of the adapter's subscribe hook, so a caller the hook denied had already been told the resolved, possibly tenant-scoped, wire topic. A subscribe denied by a room guard, a stream filter or the adapter's hook is now never told the topic.
+
 - Room owner changes reported by the erasure store during `live.forget` publish through the platform captured at server startup when `configureForget({ platform })` is not set. Before, they were dropped while the erasure reported success. With no platform at all, a `forget.owner-succession-unannounced` operational event reports the count.
 
 - Coalescing declarations for static and literal-prefix stream topics now resolve before the first local subscriber and after the last disconnect, so a publisher with no local subscribers still relays coalesced through a platform with `relayCoalesced` (the Redis pub/sub bus), keeping the original-data key and the transformed payload. Platforms without it keep publishing plainly.
@@ -492,8 +494,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
   ran the room guard inside their loaders, after the socket was subscribed
   (and after the attach frame named the topic); a denied joiner was subscribed
   and rolled back. The guard is now the pre-subscribe filter on those streams
-  as on the data stream, so a denied joiner is never subscribed and never told
-  the wire topic; the loaders keep their own run for `.load()` and reloads.
+  as on the data stream, so a joiner the room guard denies is never subscribed
+  and never told the wire topic; the loaders keep their own run for `.load()`
+  and reloads. The attach frame still preceded the adapter's subscribe hook in
+  this release, so a caller that hook denied had already been told the topic.
 
 - **Cursor frames and presence-field updates carry an ordering token.**
   `live.multiplayer` cursor updates and presence-field updates (`typing`,

@@ -831,20 +831,6 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	// working: if the method isn't there, we fall back to raw
 	// `ws.subscribe` and only the in-realtime gates (`__streamFilter`,
 	// `live.room({ guard })`) remain the stream-RPC access checks.
-	// Name the wire topic to the client BEFORE the socket is subscribed. The
-	// client only learns the topic from the subscribe response, and that
-	// response leaves after this item's loader (and, in a batch, after every
-	// sibling's). Every frame the subscription delivers in between reaches a
-	// socket whose client has no store for the topic yet, and the adapter
-	// client drops such frames: a peer's presence join published in that
-	// window is in neither the snapshot (read after this point) nor the live
-	// stream, and nothing resends it. With the attach frame ahead of the
-	// subscribe the client's listener exists for every frame the subscription
-	// can deliver, and buffers them until the snapshot lands. Sent only when
-	// the request opts in, so an older client never sees a non-ok frame.
-	if (msg.attach === true && typeof topic === 'string') {
-		_respond(ws, platform, id, { attach: true, topic });
-	}
 	let _subscribeDenial = null;
 	try {
 		if (typeof platform.subscribe === 'function') {
@@ -871,6 +857,25 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
 	if (_subscribeDenial) {
 		_settleClaimBarriers(ws, topic, fn);
 		return { id, ok: false, code: _subscribeDenial, error: _subscribeDenial === 'UNAUTHENTICATED' ? 'Authentication required' : 'Access denied' };
+	}
+	// Name the wire topic to the client once the adapter admitted the
+	// subscribe, and before the loader reads its snapshot. The client only
+	// learns the topic from the subscribe response, and that response leaves
+	// after this item's loader (and, in a batch, after every sibling's). Every
+	// frame the subscription delivers in between reaches a socket whose client
+	// has no store for the topic yet, and the adapter client drops such frames:
+	// a peer's presence join published in that window would be in neither the
+	// snapshot nor the live stream. With the attach frame ahead of the loader
+	// the client's listener exists for every frame published after the
+	// snapshot read can no longer see it, and buffers them until the snapshot
+	// lands. A frame published between the adapter's subscribe and this send is
+	// dropped by the client, but it was published before the loader runs, so
+	// the snapshot carries its state. Sending after admission keeps a caller
+	// the adapter's subscribe hook denies from ever learning the resolved
+	// (possibly tenant-scoped) topic. Sent only when the request opts in, so an
+	// older client never sees a non-ok frame.
+	if (msg.attach === true && typeof topic === 'string') {
+		_respond(ws, platform, id, { attach: true, topic });
 	}
 	subscribedRef.isActive = _trackStreamSub(ws, topic, fn);
 	subscribedRef.topic = topic;

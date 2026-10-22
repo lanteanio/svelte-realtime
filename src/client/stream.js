@@ -19,7 +19,7 @@ const _NO_OPTIMISTIC_KEY = Symbol('no optimistic key');
 //
 // A release frame must never overtake a subscribe the server is still
 // handling. The server names a request's wire topic (its attach frame) before
-// it subscribes the socket, so an unsubscribe for that topic processed in
+// it answers the subscribe, so an unsubscribe for that topic processed in
 // between would either leave the subscription with nothing left to release it
 // or cut the subscription of a stream about to bind the topic. Until a sent
 // subscribe is named it could be for any topic, so releases wait while one a

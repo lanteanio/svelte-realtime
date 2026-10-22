@@ -226,24 +226,28 @@ describe('a stream released before its subscribe is answered', () => {
 		expect(member('r1')).toBeUndefined();
 	});
 
-	it('released after the attach frame, while the server is still subscribing: the release waits for the answer', async () => {
-		const subscribeGate = deferred();
-		const origSubscribe = env.platform.subscribe;
-		env.platform.subscribe = async (sock, topic) => {
-			await subscribeGate.promise;
-			return origSubscribe(sock, topic);
-		};
-		const off = roomData('r2').subscribe(() => {});
+	it('released after the attach frame, while the server is still loading: the release waits for the answer', async () => {
+		const loadGate = deferred();
+		env.register('gated', {
+			board: live.room({
+				topic: (ctx, id) => 'board:' + id,
+				topicArgs: 1,
+				init: () => loadGate.promise,
+				presence: (ctx) => ({ name: ctx.user.name })
+			})
+		});
+		const off = __stream('gated/board/__data', { merge: 'crud', key: 'id' }, true)('r2').subscribe(() => {});
 		await ticks();
 		const { id } = subscribeFrames()[0];
-		// The server names the topic and parks in platform.subscribe.
+		// The server names the topic once the subscribe is admitted and parks
+		// in the loader.
 		await deliverToServer(1, 'attach');
 		await deliverToClient();
 		off();
 		await ticks();
 		expect(unsubscribeFrames('board:r2')).toHaveLength(0);
 
-		subscribeGate.resolve();
+		loadGate.resolve([]);
 		await until(() => replyTo(id, false));
 		expect(member('r2').count).toBe(1);
 		await deliverToClient();

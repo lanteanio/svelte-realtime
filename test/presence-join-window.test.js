@@ -10,10 +10,11 @@
 // snapshot nor the live stream, and nothing ever resends it. One side of a pair
 // then stays permanently blind to the other.
 //
-// The server now names the wire topic in an early attach frame, sent BEFORE the
-// socket is subscribed, so the client's listener exists for every frame the
-// subscription can deliver. These tests park one joiner's loader on an app
-// await, let a peer join into the open window, and assert the wire order.
+// The server now names the wire topic in an early attach frame, sent once the
+// adapter admitted the subscribe and before the loader reads its snapshot, so
+// the client's listener exists for every frame the snapshot can miss. These
+// tests park one joiner's loader on an app await, let a peer join into the open
+// window, and assert the wire order.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { live } from '../src/server.js';
@@ -126,7 +127,7 @@ describe('presence join window (real dispatch, batched subscribe)', () => {
 		expect(wire.some((w) => w.kind === 'send' && w.data && w.data.attach === true)).toBe(false);
 	});
 
-	it('with attach requested, the attach frame for :presence precedes the subscribe and every frame the subscription delivers', async () => {
+	it('with attach requested, the attach frame for :presence precedes the peer join and the response', async () => {
 		const { aliceRes, wireTopic } = await runWindow(true);
 		const attach = wire.findIndex((w) => w.kind === 'send' && w.to === 'alice' && w.event === 'p' && w.data.attach === true && w.data.topic === wireTopic);
 		const join = wire.findIndex((w) => w.kind === 'publish' && w.topic === wireTopic && w.event === 'join' && w.data.key === 'bob');
@@ -144,19 +145,24 @@ describe('presence join window (real dispatch, batched subscribe)', () => {
 		expect(Object.keys(frame).sort()).toEqual(['attach', 'topic']);
 	});
 
-	it('the attach frame is sent before the socket is subscribed, so no frame can precede it', async () => {
-		const wireAtAttach = [];
+	it('the attach frame is sent once the adapter admitted the subscribe, before the loader reads its snapshot', async () => {
+		const attachFrames = () => wire.filter((w) => w.kind === 'send' && w.to === 'alice' && w.data && w.data.attach === true).map((w) => w.data.topic);
+		let atSubscribe = null;
+		let atLoader = null;
+		env.register('probe', {
+			feed: live.stream((ctx, id) => 'probe:' + id, async () => { atLoader = attachFrames(); return []; })
+		});
 		const alice = openConn(env, { id: 'alice', name: 'Alice' }, wire);
 		const origSubscribe = alice.ws.subscribe;
 		alice.ws.subscribe = (t) => {
-			if (t === 'board:solo:presence') wireAtAttach.push(...wire.filter((w) => w.kind === 'send' && w.to === 'alice' && w.data && w.data.attach === true));
+			if (t === 'probe:solo') atSubscribe = attachFrames();
 			return origSubscribe(t);
 		};
-		sendBatch(alice, env, joinBatch('board/room', 'solo', true));
+		sendBatch(alice, env, [{ rpc: 'probe/feed', id: 'f', args: ['solo'], stream: true, attach: true }]);
 		await settle();
-		aliceGate.resolve([]);
-		await settle();
-		expect(wireAtAttach.map((w) => w.data.topic)).toContain('board:solo:presence');
+		expect(atSubscribe).toEqual([]);
+		expect(atLoader).toEqual(['probe:solo']);
+		expect(batchResponse(wire, 'alice').f.ok).toBe(true);
 	});
 
 	it('a joiner the room guard denies gets no attach frame and no wire subscription, on the data stream and its sub-streams alike', async () => {
@@ -181,7 +187,7 @@ describe('presence join window (real dispatch, batched subscribe)', () => {
 		expect(wire.some((w) => w.kind === 'send' && w.to === 'mallory' && w.data && w.data.attach === true)).toBe(false);
 	});
 
-	it('a subscribe the adapter denies after the attach frame returns the denial, and the socket is not subscribed', async () => {
+	it('a subscribe the adapter denies returns the denial without an attach frame, and the socket is not subscribed', async () => {
 		const origSubscribe = env.platform.subscribe;
 		env.platform.subscribe = async (ws, topic) => {
 			if (ws.getUserData().id === 'mallory') return 'FORBIDDEN';
@@ -194,12 +200,9 @@ describe('presence join window (real dispatch, batched subscribe)', () => {
 		expect(res.d.ok).toBe(false);
 		expect(res.d.code).toBe('FORBIDDEN');
 		expect(res.p.ok).toBe(false);
-		// The attach frame went out first (it precedes the subscribe by design);
-		// the client's teardown on the rejected response is what undoes it.
-		const attach = wire.findIndex((w) => w.kind === 'send' && w.to === 'mallory' && w.event === 'p' && w.data.attach === true);
-		const response = wire.findIndex((w) => w.kind === 'send' && w.to === 'mallory' && w.event === '__batch');
-		expect(attach).toBeGreaterThan(-1);
-		expect(response).toBeGreaterThan(attach);
+		// The attach frame waits for the adapter's admission, so a caller the
+		// subscribe hook denies never learns the resolved wire topic.
+		expect(wire.some((w) => w.kind === 'send' && w.to === 'mallory' && w.data && w.data.attach === true)).toBe(false);
 		expect(mallory.topics.size).toBe(0);
 	});
 });
