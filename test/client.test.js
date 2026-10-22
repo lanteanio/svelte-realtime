@@ -1179,12 +1179,12 @@ describe('__stream() mutate queue-replay correctness', () => {
 // build a server-state, mutate-starts open queued entries, mutate-settles
 // either graduate (success + not absorbed) or just remove the entry.
 //
-// The win over hand-written tier-1 tests: random sequences hit interleavings
+// The win over hand-written core tests: random sequences hit interleavings
 // that the unit tests miss, including races between in-flight mutates and
 // server events that share or do not share keys.
 //
 // Scope: event-based crud changes only. Free-form function changes and
-// non-crud merges are covered by tier-1 unit tests; modelling them in a
+// non-crud merges are covered by core unit tests; modelling them in a
 // brute-force reference would just re-state the implementation.
 
 describe('__stream() mutate queue-replay property tests (fast-check)', () => {

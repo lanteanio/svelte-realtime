@@ -1,4 +1,4 @@
-// Global setup for the tier-4 docker-compose chaos suite.
+// Global setup for the docker-compose chaos suite.
 //
 // 1. Starts a one-container Redis service via docker compose. A bounded
 //    reserve-and-bind retry gives stop/start one stable host port without
