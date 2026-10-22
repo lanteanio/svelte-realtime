@@ -37,6 +37,9 @@ whose installed copy differs from the checkout. Both fixtures use
 svelte-adapter-uws 0.6.0-next.96 from the registry.
 
 The runner uses each fixture's own Vite binary and an OS-assigned port.
+Readiness requires a WebSocket RPC returning the spawned process ID and a
+fresh per-run fixture token; an unrelated listener cannot satisfy startup.
+No HTTP page request is made during this check.
 Production runs remove old build output and rebuild before starting the generated server.
 Development runs force dependency optimization, then
 open a WebSocket and execute an RPC before the first HTTP request. The browser

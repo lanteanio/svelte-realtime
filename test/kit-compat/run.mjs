@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { readFile, readdir, writeFile, mkdir, rename, unlink, rm } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { createServer, createConnection } from 'node:net';
+import { createServer } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium, expect as baseExpect } from '@playwright/test';
+import { waitForFixture } from './server-ready.mjs';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const args = process.argv.slice(2);
@@ -58,7 +59,8 @@ const report = {
 	sourceHash: sourceDigest,
 	checks: []
 };
-const env = { ...process.env, KIT_COMPAT_SECRET: 'fixture-secret', KIT_COMPAT_DEVTOOLS: String(devtools), KIT_COMPAT_ADAPTER: adapterMode, KIT_COMPAT_REPORT_ROOT: String(driveCase !== 'as-invoked') };
+const readinessToken = randomUUID();
+const env = { ...process.env, KIT_COMPAT_SECRET: 'fixture-secret', KIT_COMPAT_SESSION: readinessToken, KIT_COMPAT_DEVTOOLS: String(devtools), KIT_COMPAT_ADAPTER: adapterMode, KIT_COMPAT_REPORT_ROOT: String(driveCase !== 'as-invoked') };
 // The server masks a call to an unregistered path as FORBIDDEN by default.
 const UNREGISTERED = 'FORBIDDEN';
 // A dev reload closes sockets with 1012; the client reconnects after its
@@ -106,23 +108,6 @@ async function availablePort() {
 	const port = server.address().port;
 	await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 	return port;
-}
-
-async function ready(port) {
-	const deadline = Date.now() + 30000;
-	while (Date.now() < deadline) {
-		if (child.exitCode !== null) throw new Error('Server exited: ' + output);
-		const listening = await new Promise(resolve => {
-			const probe = createConnection({ host: '127.0.0.1', port });
-			probe.setTimeout(500);
-			probe.on('connect', () => { probe.destroy(); resolve(true); });
-			probe.on('error', () => resolve(false));
-			probe.on('timeout', () => { probe.destroy(); resolve(false); });
-		});
-		if (listening) return;
-		await pause(50);
-	}
-	throw new Error('Server did not listen: ' + output);
 }
 
 async function connectSocket(origin) {
@@ -176,7 +161,7 @@ try {
 	} else {
 		child = start([vite, '--force', '--host', '127.0.0.1', '--port', String(port), '--strictPort']);
 	}
-	await check('server startup', () => ready(port));
+	await check('server startup', () => waitForFixture({ child, origin, token: readinessToken, WebSocket }));
 	if (driveCase !== 'as-invoked') {
 		await check('Vite and SvelteKit spell the root differently', () => {
 			const reported = output.match(/\[kit-compat\] vite root (.+)/)?.[1]?.trim();
