@@ -199,4 +199,29 @@ describe('aggregate erasure contract', () => {
 	it('validates the explicit policy', () => {
 		expect(() => live.aggregate('source', reducers(), { topic: 'output', forget: 'ignore' })).toThrow(/forget/);
 	});
+
+	it.each([
+		['numeric', value => value.num],
+		['email', value => value.email]
+	])('retain clears the whole cohort when the contributor id is %s, not the userId', async (_kind, contributor) => {
+		const fields = { count: { init: () => 0, reduce: value => value + 1 } };
+		const env = setup({ forget: 'retain', privacy: { k: 3, strategy: 'suppress', contributor } }, fields);
+		env.platform.publish('source', 'added', { id: 'alice', num: 7, email: 'alice@private.test' });
+		env.platform.publish('source', 'added', { id: 'bob', num: 8, email: 'bob@private.test' });
+		expect(env.entry.cohort.size).toBe(2);
+		await expect(live.forget('alice', { tenantId: null })).resolves.toMatchObject({ ok: true });
+		expect(env.entry.cohort.size).toBe(0);
+		expect(env.entry.state).toEqual({ count: 2 });
+	});
+
+	it('retain clears every sliding-window bucket cohort', async () => {
+		const fields = { count: { init: () => 0, reduce: value => value + 1, combine: (...parts) => parts.reduce((x, y) => x + y, 0) } };
+		const env = setup({ forget: 'retain', privacy: { k: 3, strategy: 'suppress', contributor: value => value.num }, windows: { recent: { type: 'sliding', durationMs: 3000, slideMs: 1000 } } }, fields);
+		env.platform.publish('source', 'added', { id: 'alice', num: 7 });
+		env.platform.publish('source', 'added', { id: 'bob', num: 8 });
+		const holder = env.entry.windowStates.get('recent');
+		expect(holder.bucketCohorts.reduce((n, cohort) => n + cohort.size, 0)).toBe(2);
+		await expect(live.forget('alice', { tenantId: null })).resolves.toMatchObject({ ok: true });
+		expect(holder.bucketCohorts.every(cohort => cohort.size === 0)).toBe(true);
+	});
 });

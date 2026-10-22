@@ -794,7 +794,10 @@ async function _recomputeDerived(entry, platform) {
 /**
  * Arbitrary reducer state cannot be inverted or attributed from a bounded cohort.
  * An explicit reset policy clears every aggregate holder, across all contributors.
- * Missing policies and failed resets are incomplete erasure, even if no cohort
+ * A retain policy keeps reducer state (declared non-personal) and clears the
+ * k-anonymity cohorts whole, since a contributor id need not be the forgotten
+ * userId (a numeric id, an email); they rebuild from new events. Missing
+ * policies and failed resets are incomplete erasure, even if no cohort
  * currently contains the user. The historical surface name remains compatible.
  * @param {string} contributorId
  * @param {any} [platform]
@@ -819,10 +822,15 @@ export function _purgeAggregateCohorts(contributorId, platform = state.cronPlatf
 			}
 			const holders = entry.windowStates ? [...entry.windowStates.values()] : [entry];
 			for (const holder of holders) {
+				if (entry.forget === 'retain') {
+					if (holder.cohort) holder.cohort.clear();
+					if (holder.bucketCohorts) for (const cohort of holder.bucketCohorts) cohort.clear();
+					continue;
+				}
 				if (entry.forget !== 'reset') {
 					if (holder.cohort) holder.cohort.delete(contributorId);
 					if (holder.bucketCohorts) for (const cohort of holder.bucketCohorts) cohort.delete(contributorId);
-					if (entry.forget !== 'retain') failures.push(new Error('Aggregate has no erasure policy'));
+					failures.push(new Error('Aggregate has no erasure policy'));
 					continue;
 				}
 				if (holder.timer) { clearTimer(holder.timer); holder.timer = null; }

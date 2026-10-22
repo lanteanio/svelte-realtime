@@ -2673,11 +2673,16 @@ export namespace live {
 			/**
 			 * Required for confirmed live.forget erasure of arbitrary reducer data.
 			 * 'retain' declares all reducer state, snapshots and outputs non-personal:
-			 * keep them and their timers while deleting framework contributor identity.
-			 * 'reset' resets the entire aggregate across all users, windows and buckets,
-			 * cancels pending output/hydration and publishes a clean initial value.
+			 * keep them and their timers while clearing the privacy contributor
+			 * cohorts whole (a contributor id need not be the userId); a thresholded
+			 * output holds its last value until k contributors return.
+			 * 'reset' resets the entire aggregate across all users, tenants, windows
+			 * and buckets, cancels pending output/hydration and publishes a clean
+			 * initial value. A reset does not re-key privacy noise.
 			 * init() must return non-personal serializable state (no functions or shared memory).
 			 * Missing policy or failed reset reports FORGET_INCOMPLETE.
+			 * Erasure acts on the calling worker's aggregates only; run live.forget
+			 * on every worker of a cluster.
 			 */
 			forget?: 'reset' | 'retain';
 			/**

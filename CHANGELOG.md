@@ -124,6 +124,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `live.forget(userId, { tenantId })` erases only the named tenant's records from the in-memory webhook dead-letter store, the push registry and smooth state. An equal userId in another tenant keeps its dead-lettered events, routing and smooth entries, and a dead-letter delivery still in flight for that other tenant is captured instead of being dropped by the erasure's tombstone. The dead-letter store scopes by record topic, the same rule the durable stores apply.
 
+- `forget: 'retain'` aggregates clear their privacy contributor cohorts whole on `live.forget`. Before, only an entry equal to the userId was removed, so a numeric or email contributor id survived an erasure that reported success. A thresholded output holds its last value until k contributors return. The aggregate docs now state that aggregate erasure acts on the calling worker only and that a `forget: 'reset'` does not re-key perturbation noise.
+
 - Upload reauthorization preserves explicit structured error parameters and details in both the client failure and the handler abort reason.
 
 - Upload metrics record a terminal outcome once, including cancellation, disconnects and rejected chunks while handler lookup or authorization is pending. A late handler completion cannot replace that failure with success.
