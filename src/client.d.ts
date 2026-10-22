@@ -818,7 +818,8 @@ export interface OfflineStore {
 /**
  * The IndexedDB `OfflineStore` (database `svelte-realtime`, lazy open). `put`
  * resolves once its transaction commits and rejects when the database cannot
- * open or the transaction aborts; `delete` and `clear` also settle only once
+ * open or the transaction aborts (a write past its five-second budget is
+ * aborted, and one already committing settles as stored); `delete` and `clear` also settle only once
  * their transaction has committed or failed, and swallow a failure; `getAll`
  * rejects when a read fails or the database cannot open. Optional keys/get isolate unreadable rows.
  */

@@ -126,6 +126,12 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `store.mutate()` (and `createOptimistic`) starts its call before subscribers see the optimistic change, so a subscriber that sends in reaction to the change puts its frame on the wire after the call that caused it, never ahead of it. A call that throws synchronously rejects without showing the change.
 
+- The IndexedDB offline store no longer reports a write as failed when the write was still committing at its five-second timeout: the transaction is aborted, and the write settles by its abort or by its commit. A mutation it reported failed could otherwise replay on the next page load.
+
+- Open-time offline retention reads every namespace in one read-only pass and opens a single write transaction only when a row or checkpoint is due, instead of one write transaction per stored row. Restores and reconnect drains waiting on it are bounded by the storage timeout rather than by the number of stored rows.
+
+- Offline upload checkpoints, whose keys name their `persistKey`, now expire with their namespace: each carries the queue's retention expiry, and the built-in store deletes an expired one at open once no queue row of that namespace remains. A checkpoint stored without an expiry gets one at its first open. The README persistence example uses an opaque per-account key.
+
 - A generated multiplayer namespace send called directly while a view on the page holds the same room - `board.move(id, ...)` or a presence field in a mount effect beside `board.room(() => id)` - waits for that view's join like the view's own sends, instead of reaching the server ahead of the join and being dropped.
 
 - Pending sticky presence updates stop when their room membership leaves or is erased, including after the same identity rejoins. Retired memberships discard cached roster payloads, including when erasure needs a retry. Roster refusal warnings omit the member identity.

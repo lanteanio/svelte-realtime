@@ -843,7 +843,11 @@ function _putCheckpoint(scope = _scope) {
 	const value = {
 		...scope.checkpoint,
 		batchFailedSeq: scope.batch.failedSeq === Infinity ? null : scope.batch.failedSeq,
-		batchClean: scope.batch.clean
+		batchClean: scope.batch.clean,
+		// The checkpoint names its persistKey, so it expires like the rows:
+		// the built-in store deletes it at open once it is past this and no
+		// row of its namespace remains.
+		expiresAt: now() + scope.retentionMs
 	};
 	const key = _checkpointKey(scope);
 	void _write(store, key, () => store.put(key, value)).catch(() => {});

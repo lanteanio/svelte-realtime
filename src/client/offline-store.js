@@ -28,6 +28,25 @@ export function _offlineExpiry(value, retentionMs) {
 	return retentionMs === undefined ? storedExpiry : Math.min(storedExpiry, queuedAt + retentionMs);
 }
 
+/** The persistKey of a queue row key (`q:<persistKey>:<12 digits>`). */
+function _namespaceOfRow(key) {
+	return key.slice(2, -13);
+}
+
+/**
+ * Whether open-time retention acts on a checkpoint: one past its expiry
+ * whose namespace holds no queue row is deleted, and one with no expiry is
+ * stamped with the default retention from now.
+ * @param {any} value
+ * @param {number} at
+ * @param {boolean} occupied
+ */
+function _checkpointDue(value, at, occupied) {
+	if (!value || typeof value !== 'object') return false;
+	if (!Number.isFinite(value.expiresAt)) return true;
+	return value.expiresAt <= at && !occupied;
+}
+
 const STORAGE_TIMEOUT_MS = 5000;
 const _storeHealth = new WeakMap();
 export function _offlineStoreHealth(store) { return _storeHealth.get(store); }
@@ -183,6 +202,7 @@ export function createIndexedDbStore() {
 	async function commitDb(db, fn, operation) {
 		await new Promise((resolve, reject) => {
 			let settled = false;
+			let timedOut = false;
 			let tx;
 			const fail = err => {
 				if (settled) return;
@@ -190,8 +210,12 @@ export function createIndexedDbStore() {
 				_warnStorage(err, operation);
 				reject(err || new Error('[svelte-realtime] offline store write aborted'));
 			};
+			// A slow transaction is aborted, and only its abort event rejects.
+			// One that is already committing refuses the abort and may still
+			// land, so it settles by its own complete or abort event: a write
+			// is never reported failed and then found stored.
 			const timer = setTimer(() => {
-				fail(new Error('database write timed out'));
+				timedOut = true;
 				try { tx?.abort(); } catch {}
 			}, STORAGE_TIMEOUT_MS);
 			try {
@@ -201,7 +225,7 @@ export function createIndexedDbStore() {
 					if (settled) return;
 					settled = true; clearTimer(timer); resolve(undefined);
 				};
-				tx.onabort = () => fail(tx.error);
+				tx.onabort = () => fail(tx.error || (timedOut ? new Error('database write timed out') : null));
 			} catch (err) { fail(err); }
 		});
 	}
@@ -285,20 +309,109 @@ export function createIndexedDbStore() {
 		return removed;
 	}
 
+	/**
+	 * Every listed value in one read-only transaction. A value that cannot be
+	 * read is left out (a queue row is recorded unreadable) without failing
+	 * the others.
+	 * @returns {Promise<Map<string, any>>}
+	 */
+	function readValuesDb(db, keys) {
+		return new Promise((resolve, reject) => {
+			const values = new Map();
+			let settled = false;
+			let tx;
+			const fail = (err) => {
+				if (settled) return;
+				settled = true; clearTimer(timer);
+				_warnStorage(err, 'read');
+				reject(err || new Error('[svelte-realtime] offline store read failed'));
+			};
+			const timer = setTimer(() => {
+				fail(new Error('database read timed out'));
+				try { tx?.abort(); } catch {}
+			}, STORAGE_TIMEOUT_MS);
+			try {
+				tx = db.transaction(STORE_NAME, 'readonly');
+				const store = tx.objectStore(STORE_NAME);
+				for (const key of keys) {
+					const req = store.get(key);
+					req.onsuccess = () => { values.set(key, req.result); };
+					req.onerror = (event) => {
+						// Handled here: the transaction goes on reading the rest.
+						event?.preventDefault?.();
+						if (key.startsWith('q:')) health.unreadable.add(key);
+					};
+				}
+				tx.oncomplete = () => {
+					if (settled) return;
+					settled = true; clearTimer(timer); resolve(values);
+				};
+				tx.onabort = () => fail(tx.error);
+			} catch (err) { fail(err); }
+		});
+	}
+
+	/**
+	 * Open-time retention across every namespace: one keys-only scan, one
+	 * read-only pass over the values, and a read-write transaction only when
+	 * something is due. That transaction checks each row again before
+	 * deleting it, so a row another tab replaced meanwhile stays. Checkpoints
+	 * expire with their namespace: one past its `expiresAt` goes once no
+	 * queue row of that namespace remains, and one written before
+	 * checkpoints carried an expiry gets one now.
+	 */
 	async function purgeExpired(db) {
 		health.unreadable.clear();
 		health.failedErasure = false;
+		let queueKeys;
+		let checkpointKeys;
 		try {
-			const keys = await readDb(db, 'q:', true);
-			const at = now();
-			for (let i = 0; i < keys.length; i += 10) {
-				await Promise.all(keys.slice(i, i + 10).map(async key => {
-					if (!/^q:.+:\d{12}$/.test(key) || Number(key.slice(-12)) === 0) return;
-					try { await deleteExpiredDb(db, key, at, undefined); }
-					catch { if (!health.unreadable.has(key)) health.failedErasure = true; }
-				}));
-			}
+			queueKeys = (await readDb(db, 'q:', true)).filter(key => /^q:.+:\d{12}$/.test(key) && Number(key.slice(-12)) !== 0);
+			checkpointKeys = (await readDb(db, 'c:', true)).filter(key => key.length > 2);
 		} catch (err) { health.failedErasure = true; throw err; }
+		if (queueKeys.length === 0 && checkpointKeys.length === 0) return;
+		try {
+			const at = now();
+			const values = await readValuesDb(db, [...queueKeys, ...checkpointKeys]);
+			const dueRows = [];
+			const live = new Set();
+			for (const key of queueKeys) {
+				if (values.has(key) && _offlineExpiry(values.get(key), undefined) <= at) dueRows.push(key);
+				else live.add(_namespaceOfRow(key));
+			}
+			const dueCheckpoints = checkpointKeys.filter(key => values.has(key) && _checkpointDue(values.get(key), at, live.has(key.slice(2))));
+			if (dueRows.length === 0 && dueCheckpoints.length === 0) return;
+			await commitDb(db, (store) => {
+				for (const key of dueRows) {
+					const req = store.get(key);
+					req.onerror = (event) => { event?.preventDefault?.(); health.unreadable.add(key); };
+					req.onsuccess = () => {
+						let expiry;
+						try { expiry = _offlineExpiry(req.result, undefined); }
+						catch { health.unreadable.add(key); return; }
+						if (expiry <= at) store.delete(key);
+					};
+				}
+				for (const key of dueCheckpoints) {
+					const namespace = key.slice(2);
+					const prefix = 'q:' + namespace + ':';
+					// A queue row written since the scan keeps its checkpoint.
+					const rows = store.openKeyCursor(IDBKeyRange.bound(prefix, prefix + '￿'));
+					rows.onerror = (event) => { event?.preventDefault?.(); };
+					rows.onsuccess = () => {
+						const occupied = !!rows.result;
+						const req = store.get(key);
+						req.onerror = (event) => { event?.preventDefault?.(); };
+						req.onsuccess = () => {
+							const value = req.result;
+							if (!_checkpointDue(value, at, occupied)) return;
+							if (Number.isFinite(value?.expiresAt)) store.delete(key);
+							else store.put({ ...value, expiresAt: at + DEFAULT_RETENTION_MS }, key);
+						};
+					};
+				}
+			}, 'delete');
+		} catch { health.failedErasure = true; }
 	}
 	const store = {
 		getAll(prefix) { return read(prefix); },

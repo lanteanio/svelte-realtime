@@ -772,7 +772,7 @@
 		},
 		{
 			"document": "README.md",
-			"fingerprint": "8e271a1f42859a9cdeb011829d522823c216376db668a3b2f75a15a3c57c0c7d",
+			"fingerprint": "cb5018095c59b95f13fd25f05db9fd5932ebe6b7a1aee4638dbc876552f3c403",
 			"occurrence": 1,
 			"language": "js",
 			"section": "Offline queue > Durable persistence (survive a reload)",

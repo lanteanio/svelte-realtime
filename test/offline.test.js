@@ -192,9 +192,11 @@ const watch = (p) => {
  * reports its request before its transaction commits or aborts. The rows
  * outlive the client that wrote them, so a test can reload against them.
  */
-function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false, readFails = false, abortReads = false, readHangs = false, deleteHangs = false, afterGet = null, unreadableKeys = new Set() } = {}) {
+function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = false, readFails = false, abortReads = false, readHangs = false, deleteHangs = false, afterGet = null, unreadableKeys = new Set(), commitDelayMs = 0 } = {}) {
 	const map = new Map();
 	const stores = new Set();
+	/** @type {string[]} the mode of every transaction opened, in order */
+	const transactions = [];
 	let closed = false;
 	let opens = 0;
 	const later = (fn) => setTimeout(fn, 0);
@@ -204,8 +206,13 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 		createObjectStore: (name) => { stores.add(name); },
 		transaction(_name, mode) {
 			if (closed) throw new Error('InvalidStateError');
+			transactions.push(mode);
 			/** @type {any} */
-			const tx = { error: null, pending: 0, aborted: false, abort() { tx.aborted = true; later(() => tx.onabort?.()); } };
+			const tx = { error: null, pending: 0, aborted: false, committing: false, abort() {
+				// A transaction that is committing can no longer be aborted.
+				if (tx.committing) throw new Error('InvalidStateError');
+				tx.aborted = true; later(() => tx.onabort?.());
+			} };
 			const completed = () => {
 				tx.pending--;
 				later(() => { if (!tx.aborted && tx.pending === 0) tx.oncomplete?.(); });
@@ -223,6 +230,9 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 							if (abortWrites) {
 								tx.error = new Error('QuotaExceededError');
 								tx.onabort?.();
+							} else if (commitDelayMs > 0) {
+								tx.committing = true;
+								setTimeout(() => { map.set(key, copy); completed(); }, commitDelayMs);
 							} else {
 								map.set(key, copy);
 								completed();
@@ -258,7 +268,14 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 					const req = {};
 					later(async () => {
 						if (readHangs) return;
-						if (readFails || unreadableKeys.has(key)) { req.error = new Error('Failed to read large IndexedDB value'); req.onerror?.(); tx.abort(); return; }
+						if (readFails || unreadableKeys.has(key)) {
+							req.error = new Error('Failed to read large IndexedDB value');
+							// An error the handler does not prevent aborts the transaction.
+							const event = { defaultPrevented: false, preventDefault() { event.defaultPrevented = true; } };
+							req.onerror?.(event);
+							if (event.defaultPrevented) completed(); else tx.abort();
+							return;
+						}
 						if (abortReads) { tx.error = new Error('AbortError'); tx.abort(); return; }
 						req.result = structuredClone(map.get(key));
 						if (afterGet) await afterGet(key, mode);
@@ -272,6 +289,7 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 					/** @type {any} */
 					const req = { result: null };
 					let i = 0;
+					tx.pending++;
 					const step = () => later(() => {
 						if (readHangs) return;
 						if (readFails) {
@@ -286,8 +304,11 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 						}
 						const key = keys[i++];
 						if (!keysOnly && unreadableKeys.has(key)) { req.error = new Error('Failed to read large IndexedDB value'); req.onerror?.(); return; }
-						req.result = key === undefined ? null : { key, ...(keysOnly ? {} : { value: structuredClone(map.get(key)) }), continue: step };
+						let advanced = false;
+						req.result = key === undefined ? null : { key, ...(keysOnly ? {} : { value: structuredClone(map.get(key)) }), continue() { advanced = true; step(); } };
 						req.onsuccess?.();
+						// A cursor its handler does not continue is done.
+						if (!advanced) completed();
 					});
 					step();
 					return req;
@@ -299,6 +320,7 @@ function fakeIndexedDb({ openFails = false, abortWrites = false, abortDeletes = 
 	return {
 		map,
 		db,
+		transactions,
 		get opens() { return opens; },
 		open() {
 			opens++;
@@ -3651,4 +3673,97 @@ it('retention keeps rows whose readable values contain no expiry timestamp', asy
   expect(idb.map.get(unknown[0])?.args).toEqual(['unknown age']);
   expect(mod.offlinePersistence().status).toBe('ready');
  } finally { vi.unstubAllGlobals(); }
+});
+
+describe('IndexedDB store bounds', () => {
+	/** @type {any} */
+	let warn;
+	beforeEach(() => {
+		warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		vi.stubGlobal('IDBKeyRange', { bound: (lower, upper) => ({ lower, upper }) });
+	});
+	afterEach(() => {
+		warn.mockRestore();
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	it('a write still committing when its time runs out settles as stored, not failed', async () => {
+		vi.useFakeTimers();
+		const idb = fakeIndexedDb({ commitDelayMs: 6000 });
+		vi.stubGlobal('indexedDB', idb);
+		const store = mod.createIndexedDbStore();
+		let outcome = 'pending';
+		store.put('q:default:000000000001', { seq: 1 }).then(() => { outcome = 'stored'; }, () => { outcome = 'failed'; });
+		await vi.advanceTimersByTimeAsync(5500);
+		// The abort was refused: the transaction is committing.
+		expect(outcome).toBe('pending');
+		await vi.advanceTimersByTimeAsync(1000);
+		expect(outcome).toBe('stored');
+		expect(idb.map.has('q:default:000000000001')).toBe(true);
+	});
+
+	it('a write that cannot finish in time rejects once its abort lands', async () => {
+		const idb = fakeIndexedDb({ deleteHangs: true });
+		vi.stubGlobal('indexedDB', idb);
+		const store = mod.createIndexedDbStore();
+		await store.put('q:a:000000000001', { seq: 1, queuedAt: Date.now() - 10000 });
+		vi.useFakeTimers();
+		let outcome = 'pending';
+		const removing = store.deleteExpired('q:a:000000000001', { now: Date.now(), retentionMs: 1000 });
+		removing.then(() => { outcome = 'removed'; }, (err) => { outcome = err.message; });
+		await vi.advanceTimersByTimeAsync(5500);
+		expect(outcome).toMatch(/timed out/);
+		expect(idb.map.has('q:a:000000000001')).toBe(true);
+	});
+
+	it('open-time retention reads every namespace without a write transaction per row', async () => {
+		const idb = fakeIndexedDb();
+		for (let seq = 1; seq <= 25; seq++) idb.map.set(...seedEntry(['a', 'b', 'c'][seq % 3], seq, 'write', [seq], 'k' + seq));
+		idb.map.set('c:a', { lastUploadedSeq: 0, gapDetected: false, expiresAt: Date.now() + 60000 });
+		vi.stubGlobal('indexedDB', idb);
+		await mod.createIndexedDbStore().keys('q:a:');
+		expect(idb.transactions.filter(mode => mode === 'readwrite')).toEqual([]);
+		// Two key scans and one pass over the values, then the call itself.
+		expect(idb.transactions).toHaveLength(4);
+		expect(idb.map.size).toBe(26);
+	});
+
+	it('expired checkpoints go with their namespace, and older checkpoints get an expiry', async () => {
+		const idb = fakeIndexedDb();
+		const past = Date.now() - 1000;
+		idb.map.set('c:gone', { lastUploadedSeq: 3, gapDetected: false, expiresAt: past });
+		idb.map.set('c:busy', { lastUploadedSeq: 1, gapDetected: false, expiresAt: past });
+		idb.map.set(...seedEntry('busy', 2, 'write', ['kept'], 'busy-2'));
+		idb.map.set('c:legacy', { lastUploadedSeq: 2, gapDetected: true });
+		vi.stubGlobal('indexedDB', idb);
+		const before = Date.now();
+		await mod.createIndexedDbStore().keys('q:');
+		expect(idb.map.has('c:gone')).toBe(false);
+		expect(idb.map.get('c:busy')).toMatchObject({ lastUploadedSeq: 1 });
+		expect(idb.map.get('c:legacy')).toMatchObject({ lastUploadedSeq: 2, gapDetected: true });
+		expect(idb.map.get('c:legacy').expiresAt).toBeGreaterThanOrEqual(before + 7 * 24 * 60 * 60 * 1000);
+	});
+
+	it('a checkpoint is kept when its namespace gets a row before the cleanup writes', async () => {
+		const idb = fakeIndexedDb({ afterGet(key, mode) {
+			if (mode === 'readonly' && key === 'c:late') idb.map.set(...seedEntry('late', 1, 'write', ['fresh'], 'late-1'));
+		} });
+		idb.map.set('c:late', { lastUploadedSeq: 4, gapDetected: false, expiresAt: Date.now() - 1000 });
+		vi.stubGlobal('indexedDB', idb);
+		await mod.createIndexedDbStore().keys('q:');
+		expect(idb.map.get('c:late')).toMatchObject({ lastUploadedSeq: 4 });
+	});
+});
+
+it('a stored checkpoint carries the retention expiry of its queue', async () => {
+	const store = fakeStore();
+	await goOfflineAndQueue({ persist: store, retentionMs: 60000 }, [['write', ['one']]]);
+	const before = Date.now();
+	simulateStatus('open'); await flush();
+	await respondAll(() => ({ ok: true, data: 'ok' }));
+	await until(() => store.map.has('c:default'));
+	const expiresAt = store.map.get('c:default').expiresAt;
+	expect(expiresAt).toBeGreaterThanOrEqual(before + 60000);
+	expect(expiresAt).toBeLessThanOrEqual(Date.now() + 60000);
 });
