@@ -1,4 +1,11 @@
-# Migration guide: svelte-realtime 0.4.x to 0.5.x
+# Migration guides
+
+- **0.5.x to 0.6.x:** the [0.6 migration guide](./docs/0.6-upgrade.md) lists
+  prerequisites, required source edits, default changes, wire and storage
+  notes, rollback and the surfaces that need no action.
+- **0.4.x to 0.5.x:** the guide below.
+
+## 0.4.x to 0.5.x
 
 This guide is organized by **tier**. Most apps only need to read the first two sections.
 
