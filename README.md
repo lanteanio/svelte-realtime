@@ -1873,6 +1873,20 @@ live.middleware(async (ctx, next) => {
 
 Middleware runs in registration order. Each must call `next()` to continue the chain. When no middleware is registered, there is zero overhead.
 
+Middleware encloses the module guard, `beforeExecute` and the handler, so it is the place to establish request-scoped context. Run `next` inside an `AsyncLocalStorage` store and every await in that call sees it, even when two sockets' calls interleave:
+<!-- doc-code: ambient names="live" -->
+```js
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+export const requestContext = new AsyncLocalStorage();
+
+live.middleware((ctx, next) =>
+  requestContext.run({ userId: ctx.user?.id, impersonatorId: ctx.user?.impersonatorId }, next)
+);
+```
+
+Avoid `enterWith()` in `beforeExecute`: it leaks the store into whatever runs next on the event loop. The chain also runs, with the subscriber's `ctx`, around the loader re-runs made later on a subscriber's behalf: `invalidateOn` and `staleAfterMs` reloads and per-argument `live.derived` recomputes, so those reads carry the subscriber's context rather than the publisher's. A middleware that throws there skips that reload and reports to the stream's `onError`. Work with no subscriber identity (cron jobs, effects, aggregates, static derived streams, webhooks) runs outside middleware.
+
 ---
 
 ## Throttle and debounce

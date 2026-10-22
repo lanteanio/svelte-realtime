@@ -609,7 +609,10 @@ async function _invalidationReload(watcher) {
 	if (watcher.reloading) return;
 	watcher.reloading = true;
 	try {
-		const result = await watcher.fn(watcher.ctx, ...watcher.args);
+		// Re-enter the middleware chain with the subscriber's ctx, so a context the
+		// app establishes there (an AsyncLocalStorage store) belongs to the
+		// subscriber and not to whichever publish triggered this reload.
+		const result = await _runWithMiddleware(watcher.ctx, () => watcher.fn(watcher.ctx, ...watcher.args));
 		const initTransform = /** @type {any} */ (watcher.fn).__streamTransform;
 		let finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
 		const redactor = /** @type {any} */ (watcher.fn).__streamPiiRedact;
@@ -700,7 +703,8 @@ async function _staleReload(topic) {
 	if (entry.reloading) return;
 	entry.reloading = true;
 	try {
-		const result = await entry.fn(entry.ctx, ...entry.args);
+		// Same subscriber-owned middleware context as _invalidationReload.
+		const result = await _runWithMiddleware(entry.ctx, () => entry.fn(entry.ctx, ...entry.args));
 		const initTransform = /** @type {any} */ (entry.fn).__streamTransform;
 		let finalData = (initTransform && result != null) ? _applyInitTransform(initTransform, result) : result;
 		const redactor = /** @type {any} */ (entry.fn).__streamPiiRedact;
@@ -1633,7 +1637,9 @@ live.upload = function upload(fn, options) {
 /**
  * Register a global middleware that runs before per-module guards for every RPC/stream call.
  * Middleware receives `(ctx, next)` - call `next()` to continue the chain.
- * Throw a LiveError to reject the call.
+ * Throw a LiveError to reject the call. The chain also encloses the loader
+ * re-runs made later for a subscriber (invalidation and stale reloads,
+ * per-argument derived recomputes), with that subscriber's ctx.
  *
  * @param {(ctx: any, next: () => Promise<any>) => Promise<any>} fn
  */
@@ -3363,7 +3369,7 @@ export function __registerDerived(path, fn) {
  * triggered externally when the platform fires publish.
  * @param {import('svelte-adapter-uws').Platform} platform
  */
-installReactive({ cronLeader: _getCronLeader, scheduleBoundary: _scheduleNextBoundary, releaseStream: (ws, topic, platform, fn, tenantId) => _unsubscribeStream(ws, topic, platform, fn, tenantId) });
+installReactive({ cronLeader: _getCronLeader, scheduleBoundary: _scheduleNextBoundary, releaseStream: (ws, topic, platform, fn, tenantId) => _unsubscribeStream(ws, topic, platform, fn, tenantId), runWithMiddleware: _runWithMiddleware });
 
 export function _activateDerived(platform) {
 	state.derivedPlatform = platform;

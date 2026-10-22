@@ -1762,6 +1762,12 @@ export namespace live {
 	 * Middleware receives `(ctx, next)` - call `next()` to continue the chain.
 	 * Throw a LiveError to reject the call.
 	 *
+	 * The chain encloses the guard, `beforeExecute` and the handler, and also
+	 * the background loader re-runs made for a subscriber (`invalidateOn` and
+	 * `staleAfterMs` reloads, per-argument `live.derived` recomputes) with that
+	 * subscriber's ctx, so `next` inside `AsyncLocalStorage.run()` scopes a
+	 * store to one invocation.
+	 *
 	 * @param fn - Middleware function
 	 *
 	 * @example

@@ -932,6 +932,16 @@
 		},
 		{
 			"document": "README.md",
+			"fingerprint": "933f75af11dfb7a7f9481318e8c02f376df9fd2ab2825560ea5065c9970badcb",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Global middleware",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers live"
+		},
+		{
+			"document": "README.md",
 			"fingerprint": "a6dde120d7aad03d1164e6fc3f45d5890c21b58b85c2cf8064e3ba9ebc1f1468",
 			"occurrence": 1,
 			"language": "js",

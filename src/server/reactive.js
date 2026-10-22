@@ -22,10 +22,14 @@ let _cronLeaderGet = () => null;
 let _scheduleBoundary = (/** @type {any} */ entry, /** @type {any} */ win) => {};
 // Drain framework ownership when a derived subscriber no longer belongs to its scope.
 let _releaseStream = (ws, topic, platform, fn, tenantId) => {};
+// Seam: the global middleware chain lives in server.js. A per-argument derived
+// recompute runs inside it with the selected subscriber's ctx.
+let _runWithMiddleware = (/** @type {any} */ ctx, /** @type {() => any} */ handler) => handler();
 export function installReactive(seams) {
 	_cronLeaderGet = seams.cronLeader;
 	_scheduleBoundary = seams.scheduleBoundary;
 	_releaseStream = seams.releaseStream;
+	_runWithMiddleware = seams.runWithMiddleware;
 }
 
 /**
@@ -760,7 +764,7 @@ async function _recomputeDerived(entry, platform) {
 			if (!ctx || !entry.active) return;
 			generation = entry.generation;
 			entry.pending = false;
-			result = await entry.fn(ctx, ...entry.args);
+			result = await _runWithMiddleware(ctx, () => entry.fn(ctx, ...entry.args));
 			_currentDerivedContext(entry, platform, false);
 		} else {
 			result = await entry.fn();

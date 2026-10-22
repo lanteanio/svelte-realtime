@@ -110,6 +110,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Fixed
 
+- `invalidateOn` and `staleAfterMs` reloads and per-argument `live.derived` recomputes run inside the `live.middleware` chain with the subscriber's `ctx`. A store the app opens there with `AsyncLocalStorage.run()` now belongs to the subscriber; previously these re-runs inherited the async context of the publish or timer that triggered them, so audit attribution read another user's store. Middleware now also sees these re-runs, and a throw from it skips the reload and reaches the stream's `onError`.
+
 - Bounded DevTools previews retain whole family emoji and other joined graphemes when their segmentation window ends inside a cluster. Oversized payloads and the code-point fallback remain bounded.
 
 - Untranslated DevTools panels keep relative ages in English even on browsers using another locale, matching the panel language. Translated panels use their configured locale for relative ages.
