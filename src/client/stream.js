@@ -848,7 +848,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * the queue drains, `currentValue` becomes equal to `_serverValue`
 	 * and queue mode exits.
 	 *
-	 * @type {Array<{ change: any, optimisticKey: any, serverConfirmed: boolean }>}
+	 * @type {Array<{ change: any, optimisticKey: any, touched: Set<any> | null | undefined, serverConfirmed: boolean, superseded: boolean }>}
 	 */
 	const _optimisticQueue = [];
 
@@ -1333,30 +1333,68 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	 * `_replayQueue`, and on settle the entry is dropped (rather than
 	 * graduated) since the server already has the change.
 	 *
-	 * Only runs for keyed merge strategies (crud, presence, cursor) and
-	 * for "additive/idempotent" event names. A server `deleted` matching
-	 * an optimistic `created` is NOT treated as confirmation - those
-	 * combinations are exotic races and fall through to graduate-on-
-	 * success, which is idempotent for crud's index-keyed updates.
+	 * Confirmation only runs for keyed merge strategies (crud, presence,
+	 * cursor) and for "additive/idempotent" event names. A server `deleted`
+	 * matching an optimistic `created` is NOT treated as confirmation, so the
+	 * entry keeps its overlay until it settles.
+	 *
+	 * A server event that reaches what an entry changes after it was queued
+	 * also marks the entry `superseded`: on success it is dropped instead of
+	 * graduated. For a keyed merge that is an event on the entry's key, or on
+	 * a key its function change adds, removes or replaces; on a `set` or
+	 * `latest` stream it is any event. The server publishes a committed change
+	 * before it answers the call, so by the time such a call succeeds the
+	 * server state already holds the change, and applying it again would
+	 * overwrite whatever the server wrote after it. A change no event reached
+	 * before its call succeeded still graduates, and so does one recovered
+	 * past by a reconnect snapshot or a `refreshed` event, which carry no
+	 * per-key order.
 	 *
 	 * @param {{ event: string, data: any }} envelope
 	 */
 	function _absorbCheck(envelope) {
-		if (_optimisticQueue.length === 0) return;
+		if (_optimisticQueue.length === 0 || envelope.event === 'refreshed') return;
 		const data = envelope.data;
-		if (!data || typeof data !== 'object') return;
-		const k = mergeKeyField(merge, key);
-		if (!k) return;
-		const dataKey = data[k];
-		if (dataKey === undefined) return;
+		const keyed = merge === 'crud' || merge === 'presence' || merge === 'cursor';
+		const k = keyed ? mergeKeyField(merge, key) : null;
+		const dataKey = k && data && typeof data === 'object' ? data[k] : undefined;
 		let absorbing = false;
 		if (merge === 'crud') absorbing = envelope.event === 'created' || envelope.event === 'updated';
 		else if (merge === 'presence') absorbing = envelope.event === 'join';
 		else if (merge === 'cursor') absorbing = envelope.event === 'update';
-		if (!absorbing) return;
 		for (const entry of _optimisticQueue) {
-			if (entry.optimisticKey === dataKey) entry.serverConfirmed = true;
+			if (!keyed) entry.superseded = true;
+			else if (dataKey === undefined) continue;
+			else if (entry.optimisticKey === dataKey) {
+				entry.superseded = true;
+				if (absorbing) entry.serverConfirmed = true;
+			} else if (entry.optimisticKey === _NO_OPTIMISTIC_KEY && (!entry.touched || entry.touched.has(dataKey))) {
+				entry.superseded = true;
+			}
 		}
+	}
+
+	/**
+	 * The keys a function change added, removed or replaced going from
+	 * `before` to `after` in a keyed merge, or null when that cannot be told.
+	 *
+	 * @param {any} before
+	 * @param {any} after
+	 * @returns {Set<any> | null}
+	 */
+	function _diffKeys(before, after) {
+		if (!Array.isArray(after)) return null;
+		const k = mergeKeyField(merge, key);
+		const rows = new Map();
+		if (Array.isArray(before)) for (const row of before) if (row && typeof row === 'object' && row[k] !== undefined) rows.set(row[k], row);
+		const touched = new Set();
+		for (const row of after) {
+			if (!row || typeof row !== 'object' || row[k] === undefined) continue;
+			if (rows.get(row[k]) !== row) touched.add(row[k]);
+			rows.delete(row[k]);
+		}
+		for (const removed of rows.keys()) touched.add(removed);
+		return touched;
 	}
 
 	/**
@@ -1406,9 +1444,14 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 	function _replayQueue() {
 		let value = Array.isArray(_serverValue) ? _serverValue.slice() : _serverValue;
 		const index = new Map(_serverIndex);
+		const keyed = merge === 'crud' || merge === 'presence' || merge === 'cursor';
 		for (const entry of _optimisticQueue) {
 			if (entry.serverConfirmed) continue;
+			const before = value;
 			value = _applyChange(value, index, entry.change, true);
+			// A function change's keys, read off its first application: it runs
+			// on a copy, so `before` still holds the rows it started from.
+			if (entry.touched === undefined && keyed && typeof entry.change === 'function') entry.touched = _diffKeys(before, value);
 		}
 		return { value, index };
 	}
@@ -2594,7 +2637,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				_serverValue = Array.isArray(baseline) ? baseline.slice() : baseline;
 				_serverIndex = new Map(_index);
 			}
-			const entry = { change: optimisticChange, optimisticKey, serverConfirmed: false };
+			const entry = { change: optimisticChange, optimisticKey, touched: /** @type {Set<any> | null | undefined} */ (undefined), serverConfirmed: false, superseded: false };
 			_optimisticQueue.push(entry);
 			_recomputeDisplay();
 
@@ -2606,7 +2649,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				assert(entry.change != null && typeof entry.serverConfirmed === 'boolean', 'realtime/optimistic.queue.entry.shape', { hasChange: entry.change != null, serverConfirmedType: typeof entry.serverConfirmed });
 				const idx = _optimisticQueue.indexOf(entry);
 				if (idx >= 0) _optimisticQueue.splice(idx, 1);
-				if (success && !entry.serverConfirmed) {
+				if (success && !entry.serverConfirmed && !entry.superseded) {
 					_serverValue = _applyChange(
 						_serverValue,
 						/** @type {Map<any, number>} */ (_serverIndex),

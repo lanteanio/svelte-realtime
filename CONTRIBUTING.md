@@ -69,15 +69,18 @@ then review the generated diff. Update simulation goldens only for an intentiona
 behavior change, recording the seed and rationale. Never bless a failing result
 just to make a check green.
 
-The client convergence corpus runs with `npx vitest run test/optimistic-convergence.test.js`.
-A failure prints its seed, operations and delivery trace. Set
-`REALTIME_CLIENT_SEED` to that value and rerun the command to reproduce it
-(PowerShell: `$env:REALTIME_CLIENT_SEED='svti-client-sim-12'`). It uses the DST
-seeded RNG and fixed epoch with two to four independent stream stores, a model
-server, and a controlled shared transport. Per-topic events retain wire order;
-replicas receive different prefixes, reconnect recovery forms, buffered events,
-and acknowledgement/rollback schedules. This covers client optimistic CRUD
-convergence, not adapter prediction or CRDT convergence.
+The client convergence fuzzer runs with `npx vitest run test/optimistic-convergence.test.js`.
+It is a fast-check property per merge strategy (crud, set, presence): two or three
+stream stores share a topic and mutate a three-key space through real RPCs while a
+model server commits, refuses, answers late, writes on its own, and bounces the
+socket, answering each resubscribe with a full, delta or replay recovery taken
+anywhere between the attach and the answer. Every replica must end on the server
+value. A failure prints the seed, the shrink path and the shrunk schedule; set
+`REALTIME_CLIENT_SEED` and `REALTIME_CLIENT_PATH` to replay it (PowerShell:
+`$env:REALTIME_CLIENT_SEED='...'`) and `REALTIME_CLIENT_RUNS` to search longer.
+Cursor merge and `live.smooth` prediction are outside it: cursor frames are
+last-sample telemetry with no optimistic path, and smooth prediction reconciles
+against authoritative ticks rather than this queue (`test/client-smooth.test.js`).
 
 ## Formatting
 

@@ -118,6 +118,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - Coalescing declarations for static and literal-prefix stream topics now resolve before the first local subscriber and after the last disconnect, so a publisher with no local subscribers still relays coalesced through a platform with `relayCoalesced` (the Redis pub/sub bus), keeping the original-data key and the transformed payload. Platforms without it keep publishing plainly.
 
+- A successful `store.mutate()` no longer applies its change again over server state that arrived while the call was in flight. A function change on a crud stream, or any change on a `set` stream, could overwrite another client's later write and leave that replica on a value the server no longer held.
+
 - A generated multiplayer namespace send called directly while a view on the page holds the same room - `board.move(id, ...)` or a presence field in a mount effect beside `board.room(() => id)` - waits for that view's join like the view's own sends, instead of reaching the server ahead of the join and being dropped.
 
 - Pending sticky presence updates stop when their room membership leaves or is erased, including after the same identity rejoins. Retired memberships discard cached roster payloads, including when erasure needs a retry. Roster refusal warnings omit the member identity.

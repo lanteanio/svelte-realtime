@@ -1246,12 +1246,14 @@ describe('__stream() mutate queue-replay property tests (fast-check)', () => {
 			if (op.type === 'server') {
 				applyOne(serverState, op.envelope);
 				// Absorb check: any in-flight mutate with matching key, regardless
-				// of whether the server event actually changed serverState.
+				// of whether the server event actually changed serverState. Any
+				// event on the key supersedes it: on success it is not applied
+				// again over the newer server state.
 				const { event, data } = op.envelope;
-				if (event === 'created' || event === 'updated') {
-					for (const m of mutates.values()) {
-						if (!m.settled && m.key === data.id) m.absorbed = true;
-					}
+				for (const m of mutates.values()) {
+					if (m.settled || m.key !== data.id) continue;
+					m.superseded = true;
+					if (event === 'created' || event === 'updated') m.absorbed = true;
 				}
 			} else if (op.type === 'mutate-start') {
 				mutates.set(op.id, {
@@ -1266,7 +1268,7 @@ describe('__stream() mutate queue-replay property tests (fast-check)', () => {
 				if (!m || m.settled) continue;
 				m.settled = true;
 				m.success = op.success;
-				if (op.success && !m.absorbed) {
+				if (op.success && !m.absorbed && !m.superseded) {
 					applyOne(serverState, m.change);
 				}
 			}
