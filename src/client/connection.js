@@ -311,7 +311,13 @@ export function ensureDisconnectListener() {
 		send: () => false, sendQueued: () => false
 	} : _connect();
 	disconnectListenerAttached = true;
-	if (__devtools) _following.failure.subscribe(_devtoolsConnectionFailure);
+	let restartingServer = false;
+	_following.failure.subscribe((failure) => {
+		if (__devtools) _devtoolsConnectionFailure(failure);
+		// Going away and service restart are expected during dev-server reloads.
+		// The adapter emits the failure before the corresponding status change.
+		restartingServer = failure?.kind === 'ws-close' && (failure.code === 1001 || failure.code === 1012);
+	});
 
 	let lastOpenAt = 0;
 	let fastCloseCount = 0;
@@ -357,7 +363,7 @@ export function ensureDisconnectListener() {
 			if (lastOpenAt > 0) {
 				const openDuration = now() - lastOpenAt;
 				lastOpenAt = 0;
-				if (openDuration < 1000) {
+				if (openDuration < 1000 && !restartingServer) {
 					fastCloseCount++;
 					if (fastCloseCount >= 2 && !cfTunnelWarned && !clientState.config.auth) {
 						cfTunnelWarned = true;

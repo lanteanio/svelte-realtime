@@ -394,6 +394,9 @@ try {
 	await check('no unsupported HTML hook warning', () => {
 		assert.doesNotMatch(output, /following plugins[\s\S]{0,500}transformIndexHtml/i);
 	});
+	if (hmr) await check('HMR emits no Cloudflare Tunnel warning', () => {
+		assert.doesNotMatch(output, /Cloudflare-Tunnel|Set-Cookie on 101|svti\.me\/cf-cookies/i);
+	});
 	report.status = 'passed';
 } catch (error) {
 	report.status = 'failed';

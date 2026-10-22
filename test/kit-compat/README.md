@@ -49,7 +49,8 @@ Devtools checks require the runtime object and overlay to load in development.
 Production and `--no-devtools` runs require both to be absent. `--hmr` replaces a
 handler, removes another (the server masks a call to it as `FORBIDDEN`), and
 checks both RPC results and live store delivery. Browser console output is
-captured with the server output.
+captured with the server output, and HMR must not emit the Cloudflare Tunnel
+cookie warning for normal server restarts.
 That single edit must reload the registry exactly once, even when Vite reports
 the file under more than one path spelling.
 A route-only edit then verifies the updated HTTP response, fresh WebSocket RPC,

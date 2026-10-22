@@ -4882,6 +4882,35 @@ describe('CF Tunnel symptom detector', () => {
 		warnSpy.mockRestore();
 	});
 
+	it.each([1001, 1012])('does not count fast closes with code %i from a restarting server', (code) => {
+		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		try {
+			__rpc('cf/ping')().catch(() => {});
+			// A preceding abnormal close must not carry across the restart.
+			simulateFailure({ kind: 'ws-close', class: 'RETRY', code: 1006 });
+			simulateStatus('disconnected');
+			simulateStatus('open');
+			// A dev server reload or restart closes sockets right after they open.
+			for (let i = 0; i < 3; i++) {
+				simulateFailure({ kind: 'ws-close', class: 'RETRY', code });
+				simulateStatus('disconnected');
+				simulateFailure(null);
+				simulateStatus('open');
+			}
+
+			expect(warnSpy).not.toHaveBeenCalled();
+			// Closes without a restart code still count afterwards.
+			simulateFailure({ kind: 'ws-close', class: 'RETRY', code: 1006 });
+			simulateStatus('disconnected');
+			expect(warnSpy).not.toHaveBeenCalled();
+			simulateStatus('open');
+			simulateStatus('disconnected');
+			expect(warnSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
 	it('does not warn after a single fast cycle', () => {
 		const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 
