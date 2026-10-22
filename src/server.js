@@ -3756,9 +3756,12 @@ export function _prepareHmr() {
 /**
  * Restore registries from a snapshot produced by `_prepareHmr()`.
  * Called when re-import fails so the server keeps working with old handlers.
+ * Whatever the failed reload registered is dropped first, so the snapshot
+ * replaces the registries instead of merging into them.
  * @param {object} snap
  */
 export function _restoreHmr(snap) {
+	_prepareHmr();
 	_declaredCoalesce.clear();
 	_declaredCoalescePattern.clear();
 	for (const [key, value] of snap.declaredCoalesce || []) _declaredCoalesce.set(key, value);

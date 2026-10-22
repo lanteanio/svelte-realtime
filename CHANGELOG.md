@@ -105,6 +105,10 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Changed
 
+- New projects use sv 1.1.1 and SvelteKit 3. The scaffolder now exits before creating anything on Node 22.0 to 22.16 and on Node 23; it needs Node 22.17+ on 22.x, or Node 24+.
+
+- New projects no longer list `@sveltejs/adapter-auto`; the generated configuration uses svelte-adapter-uws only.
+
 - The upload frame cap (`__cap`) rides the first RPC or upload response on a connection, so an upload after any call sends chunk 0 at the full cap, and a first upload switches to it from chunk 1. The client forgets the cap when its socket drops.
 
 - `live.upload()` rejects a `maxBufferedChunks` that is not a positive integer at declaration.
@@ -126,11 +130,6 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - A stream subscriber that resumes from a replay or a delta arms the stream's `staleAfterMs` watchdog and `invalidateOn` watchers the same way a loader run does. Before, a topic whose first subscriber resumed this way was never reloaded. A socket that closes while its resume is still awaiting arms nothing.
 
 - The unsequenced delivery policy covers rooms list deltas, cron ticks, derived and aggregate recomputes, `invalidateOn` and `staleAfterMs` reloads, inbound webhooks, the room-action `ctx.publish` shorthand and `ctx.publishThrottled` / `ctx.publishDebounced`. These frames carry no adapter sequence on a single worker either and take no publish options, so an app that needs a sequenced frame publishes it with explicit options through `ctx.platform.publish`.
-
-### Changed
-
-- New projects use sv 1.1.1 and SvelteKit 3. The scaffolder now exits before creating anything on Node 22.0 to 22.16 and on Node 23; it needs Node 22.17+ on 22.x, or Node 24+.
-- New projects no longer list `@sveltejs/adapter-auto`; the generated configuration uses svelte-adapter-uws only.
 
 ### Fixed
 
@@ -245,6 +244,7 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 - The scaffolder works when started through `npm exec --package`, which exported its package selection to the nested `sv` call.
 - A stream that resubscribes after a reconnect no longer applies the last event it received before the outage on top of the fresh snapshot. After a server restart the store showed that stale value instead of the server's current one.
 - A stream store cached without subscribers no longer keeps its last event's data alive. It keeps only a weak reference to the event, so a later subscribe still ignores the event the adapter replays to new listeners.
+- A live module that fails to load (a syntax error saved during development, or a module whose top level throws) no longer crashes the server with an unhandled rejection. Calls into it answer `INTERNAL_ERROR`, the server emits an `rpc.module.load-failed` diagnostic, and the next call loads the module again. In development a broken save keeps the previous handlers until the file is fixed.
 - The generated counter page keeps showing the current count, including updates from other tabs, after an increment fails, with the failure message beside it. Its pending and error state also update when the page is copied into a runes-mode project.
 
 ## [0.6.0-next.91] - 2026-10-13

@@ -61,8 +61,13 @@ it('bounds caller waits while a late real Vite import stays ahead of every newer
 		expect(outcomes.every(message => /timed out.*queue.*import/i.test(message))).toBe(true);
 		await expect(plugin.handleHotUpdate({ file, server })).rejects.toThrow(/waiting.*import/i);
 		expect(paths()).not.toContain('count/newer');
+		const log = vi.spyOn(console, 'log');
 		release();
 		await expect.poll(paths, { timeout: 10000 }).toEqual(['count/late']);
+		// The late reload settles after it also loads the edited module; until then
+		// the queue still refuses newer work.
+		await expect.poll(() => log.mock.calls.some(([line]) => String(line).includes('Hot-reloaded')), { timeout: 10000 }).toBe(true);
+		log.mockRestore();
 		globalThis[key].armed = false;
 		writeFileSync(file, moduleSource('newer') + '\n');
 		await expect.poll(paths, { timeout: 10000 }).toEqual(['count/newer']);

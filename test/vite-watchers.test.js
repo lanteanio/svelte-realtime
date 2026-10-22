@@ -74,10 +74,12 @@ it('serializes add, unlink and ordinary edits through the same registry queue', 
 	let imports = 0;
 	server.ssrLoadModule.mockImplementation(async id => {
 		if (id === 'svelte-realtime/server') return runtime;
+		// Count registry imports; the edited chat.js also loads after its registry.
+		if (id !== '/@svelte-realtime-registry') return {};
 		if (++imports === 1) await held;
 		return {};
 	});
-	const first = server.watcher.listeners('add')[0](join(liveDir, 'one.js'));
+	const first =server.watcher.listeners('add')[0](join(liveDir, 'one.js'));
 	await flush();
 	const removed = server.watcher.listeners('unlink')[0](join(liveDir, 'two.js'));
 	const changed = plugin.handleHotUpdate({ file: join(liveDir, 'chat.js'), server });

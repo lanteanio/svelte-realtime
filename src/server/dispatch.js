@@ -33,6 +33,32 @@ import { beginDeliveryAdmission, endDeliveryAdmission } from './delivery-authori
 
 const textDecoder = new TextDecoder();
 
+/**
+ * Resolve the live function a call names. A module that fails to load (a
+ * syntax error saved in development, a module whose top level throws) answers
+ * the call as an internal error instead of rejecting outside the caller's
+ * error handling. The entry stays lazy, so a later call loads it again.
+ * @param {string} path
+ * @param {string | undefined} requestId
+ * @returns {Promise<{ fn: Function | null, failure?: undefined } | { fn?: undefined, failure: { ok: false, code: string, error: string } }>}
+ */
+async function _resolveForCall(path, requestId) {
+	try {
+		return { fn: await _resolveRegistryEntry(path) };
+	} catch (err) {
+		emitOperationalEvent({
+			source: 'svelte-realtime',
+			component: 'server.rpc',
+			event: 'rpc.module.load-failed',
+			severity: 'error',
+			dataClass: 'application',
+			message: 'A live module failed to load; the call received an internal error.',
+			attributes: { path, requestId, error: diagnosticError(err), help: 'https://svti.me/errors' }
+		});
+		return { failure: { ok: false, code: 'INTERNAL_ERROR', error: 'Internal server error' } };
+	}
+}
+
 function diagnosticError(error) {
 	let name = 'Error';
 	let code = null;
@@ -704,7 +730,8 @@ async function _executeRpc(ws, msg, platform, options) {
 export async function _executeVolatileRpc(ws, msg, platform, options) {
 	if (_IS_DEV) {
 		const path = msg.rpc;
-		const fn = await _resolveRegistryEntry(path);
+		// A load failure is reported by the call below.
+		const fn = await _resolveRegistryEntry(path).catch(() => null);
 		if (fn && !_hasVolatileMarker(fn) && !_volatileWarnSet.has(path)) {
 			if (_volatileWarnSet.size < _VOLATILE_WARN_CAP) _volatileWarnSet.add(path);
 			console.warn(formatDiagnostic({
@@ -1381,7 +1408,12 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId, tra
 	if (!_isLazyResolved()) await _resolveAllLazy();
 
 	const args = rawArgs || [];
-	const fn = await _resolveRegistryEntry(path);
+	const resolved = await _resolveForCall(path, requestId);
+	if (resolved.failure) {
+		_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart);
+		return { id, ...resolved.failure };
+	}
+	const fn = resolved.fn;
 	if (!fn) {
 		// Fold the unregistered (client-controlled) path to a bounded label - an
 		// unauthenticated caller must not be able to allocate a metric series per
@@ -1564,7 +1596,13 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 	}
 
 	if (!_isLazyResolved()) await _resolveAllLazy();
-	const fn = await _resolveRegistryEntry(path);
+	const resolved = await _resolveForCall(path, requestId);
+	if (resolved.failure) {
+		_recordRpcMetrics(path, 'INTERNAL_ERROR', _metricsStart);
+		_respond(ws, platform, id, resolved.failure, requestId, path);
+		return;
+	}
+	const fn = resolved.fn;
 	if (!fn) {
 		// Fold the unregistered (client-controlled) path to a bounded label - an
 		// unauthenticated caller must not be able to allocate a metric series per

@@ -145,7 +145,8 @@ describe('SvelteKit development module loading', () => {
 			expect(s.graph.invalidateModule).toHaveBeenCalledWith(s.changed);
 			expect(s.graph.invalidateModule).toHaveBeenCalledWith(s.registry);
 			expect(s.runtime._prepareHmr).toHaveBeenCalledExactlyOnceWith();
-			expect(s.load.mock.calls.map(call => call[0])).toEqual([modern ? '/@svelte-realtime-server' : 'svelte-realtime/server', '/@svelte-realtime-registry']);
+			// The changed module loads after the registry, so a broken save fails the reload.
+			expect(s.load.mock.calls.map(call => call[0])).toEqual([modern ? '/@svelte-realtime-server' : 'svelte-realtime/server', '/@svelte-realtime-registry', join(root, 'src/live/count.js').replaceAll('\\', '/')]);
 			if (modern) expect(s.ssrLoadModule).not.toHaveBeenCalled();
 		});
 	}
@@ -275,6 +276,32 @@ describe('repeated live module updates', () => {
 			expect(s.runtime._restoreHmr).toHaveBeenCalledTimes(1);
 		} finally { error.mockRestore(); }
 	});
+	it('restores the previous handlers when the saved live module fails to load', async () => {
+		const p = plugin();
+		const s = server();
+		const file = join(root, 'src/live/count.js');
+		const id = file.replaceAll('\\', '/');
+		let broken = true;
+		s.load.mockImplementation(async loaded => {
+			if (loaded === '/@svelte-realtime-server') return s.runtime;
+			if (loaded === id && broken) throw new SyntaxError('Unexpected token');
+			return {};
+		});
+		const snapshot = { previous: true };
+		s.runtime._prepareHmr.mockReturnValue(snapshot);
+		const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+		try {
+			await p.handleHotUpdate({ file: id, server: s });
+			expect(s.runtime._restoreHmr).toHaveBeenCalledExactlyOnceWith(snapshot);
+			expect(error).toHaveBeenCalledWith(expect.stringContaining('HMR failed for src/live/count'), 'Unexpected token');
+		} finally { error.mockRestore(); }
+		// The fixed save reloads and keeps the new handlers.
+		broken = false;
+		writeFileSync(file, "import { live } from 'svelte-realtime/server';\nexport const count = live(() => 2);\n");
+		await p.handleHotUpdate({ file: id, server: s });
+		expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
+		expect(s.runtime._restoreHmr).toHaveBeenCalledTimes(1);
+	});
 	it('reloads a deliberate save of unchanged content', async () => {
 		const p = plugin();
 		const s = server();
@@ -333,7 +360,7 @@ describe('repeated live module updates', () => {
 			await Promise.all([add(file), p.handleHotUpdate({ file: file.replaceAll('\\', '/'), server: s })]);
 		} finally { error.mockRestore(); }
 		expect(s.runtime._prepareHmr).toHaveBeenCalledTimes(2);
-		expect(s.load).toHaveBeenLastCalledWith('/@svelte-realtime-registry');
+		expect(s.load.mock.calls.slice(-2).map(call => call[0])).toEqual(['/@svelte-realtime-registry', file.replaceAll('\\', '/')]);
 	});
 	it('retries a save whose server graph invalidation threw', async () => {
 		const p = plugin();
@@ -441,6 +468,8 @@ describe('repeated live module updates', () => {
 		const gates = [];
 		s.load.mockImplementation(async id => {
 			if (id === 'svelte-realtime/server') return s.runtime;
+			// Only the registry import is held; the changed module loads at once.
+			if (id !== '/@svelte-realtime-registry') return {};
 			await new Promise(resolve => gates.push(resolve));
 			return {};
 		});
@@ -512,6 +541,8 @@ describe('overlapping live module updates', () => {
 				}
 				return {};
 			}
+			// The edited live module, loaded after the registry.
+			if (id === join(root, 'src/live/count.js').replaceAll('\\', '/')) return {};
 			throw new Error('Unexpected module: ' + id);
 		});
 		const update = { file: join(root, 'src/live/count.js').replaceAll('\\', '/'), server: s };

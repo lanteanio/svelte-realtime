@@ -1,5 +1,6 @@
 // @ts-check
-import { relative } from 'path';
+import { existsSync } from 'fs';
+import { posix, relative, sep } from 'path';
 import { REGISTRY_ID, REGISTRY_PUBLIC_ID, SERVER_PUBLIC_ID } from './constants.js';
 import { _findLiveFiles } from './codegen-registry.js';
 
@@ -51,9 +52,10 @@ export function _serverModuleGraph(server) {
  * @param {string} liveDir
  * @param {string} dir
  * @param {string} rel - Relative path of the changed file (for logging)
+ * @param {string} [file] - The changed live file, loaded before the reload counts
  * @returns {Promise<boolean>} Whether the new handlers were registered
  */
-export async function _hmrReloadRegistry(server, liveDir, dir, rel) {
+export async function _hmrReloadRegistry(server, liveDir, dir, rel, file) {
 	// Invalidate the registry virtual module so Vite regenerates it
 	const graph = _serverModuleGraph(server);
 	const registryMod = graph.getModuleById(REGISTRY_ID);
@@ -81,6 +83,11 @@ export async function _hmrReloadRegistry(server, liveDir, dir, rel) {
 
 	try {
 		await _loadServerModule(server, REGISTRY_PUBLIC_ID);
+		// The registry loads live modules on first call. Load the changed one
+		// now, so a broken save restores the previous handlers instead of
+		// failing every call into that module. The id is spelled the way the
+		// registry imports it, so Vite evaluates one module instance.
+		if (file && existsSync(file)) await _loadServerModule(server, file.split(sep).join(posix.sep));
 		console.log(`[svelte-realtime] Hot-reloaded: ${dir}/${rel}`);
 		return true;
 	} catch (e) {

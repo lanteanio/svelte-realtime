@@ -439,7 +439,7 @@ export default function svelteRealtime(options) {
 
 			// Re-register all server handlers
 			const rel = relative(liveDir, file).replace(/\\/g, '/').replace(/\.[jt]s$/, '');
-			reloaded = await _hmrReloadRegistry(server, liveDir, dir, rel);
+			reloaded = await _hmrReloadRegistry(server, liveDir, dir, rel, file);
 		} finally {
 			if (!reloaded) releaseVersion(file, version);
 		}
