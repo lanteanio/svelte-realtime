@@ -605,7 +605,8 @@ export function _buildPersistedCtx(platform, helpers, tenantId) {
 }
 
 export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, operationRequestId, persistedTenantId) {
-	let tenancy = _isTenancyEnabled();
+	const tenancyEnabled = _isTenancyEnabled();
+	let tenancy = tenancyEnabled;
 	let tenantId;
 	if (persistedTenantId === undefined) tenantId = tenancy ? _resolveTenant(user) : null;
 	else { tenancy = true; tenantId = persistedTenantId; }
@@ -638,7 +639,9 @@ export function _buildCtx(user, ws, platform, helpers, cursor, idempotencyKey, o
 		signal: helpers.signal,
 		batch: scopedHelpers.batch,
 		shed: helpers.shed,
-		skip: tenancy ? scopedHelpers.skip : helpers.skip,
+		// Background work forces tenancy on for publish scoping, but an app without
+		// a resolver keeps bare skip keys so alarms and RPC handlers share one gate.
+		skip: tenantId === null && !tenancyEnabled ? helpers.skip : scopedHelpers.skip,
 		connectionId,
 		requestId,
 		// W3C operation context and vendor-neutral span boundary projected by
