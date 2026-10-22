@@ -29,6 +29,11 @@ source heads, in addition to the coordinated checks below:
   integration suite and the packed consumer. Public imports, room members,
   cleanup hooks and declarations must agree in development and production;
   browser output must not include server implementations.
+- Run `npm run test:kit` with fresh locked fixture installs and
+  `npm run test:kit-scaffold` through both npm invocation forms. Record every
+  named development, production and HMR check, the exact installed tuple and
+  the candidate package identity. The Linux Kit verification job also runs the
+  locked matrix and `npm run test:scaffold`; retain Windows drive-case evidence.
 - Run the client/offline, stream lifecycle, simulation and browser chaos lanes
   through `npm run verify:release`. Exercise interruption, timeout, reconnect,
   replay and final cleanup, including the configured queue limits and typed

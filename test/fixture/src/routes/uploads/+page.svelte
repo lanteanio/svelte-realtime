@@ -10,6 +10,10 @@
 		for (let i = 0; i < size; i++) u8[i] = (fillStart + i) & 0xff;
 		return u8.buffer;
 	}
+	function frameSizeFor(rpc, args, payloadBytes) {
+		const envelope = args.length ? { rpc, args } : { rpc };
+		return 12 + new TextEncoder().encode(JSON.stringify(envelope)).length + payloadBytes;
+	}
 
 	onMount(() => {
 		// @ts-ignore -- test-only API
@@ -23,14 +27,15 @@
 				lastResult = JSON.stringify(r);
 				return r;
 			},
-			multiChunk: async (size, chunkSize) => {
-				configure({ upload: { chunkSize } });
+			multiChunk: async (size, payloadBytes) => {
+				const frameSize = frameSizeFor('uploads/echoBytes', ['multi'], payloadBytes);
+				configure({ upload: { frameSize } });
 				const r = await echoBytes(makeBuffer(size, 1), 'multi');
 				lastResult = JSON.stringify(r);
-				return r;
+				return { ...r, frameSize };
 			},
 			cancelMidUpload: async () => {
-				configure({ upload: { chunkSize: 4 } });
+				configure({ upload: { frameSize: frameSizeFor('uploads/slowSink', [], 1) } });
 				const handle = slowSink(makeBuffer(40, 1));
 				// Wait long enough for at least one chunk to land server-side
 				await new Promise((r) => setTimeout(r, 50));
@@ -42,13 +47,14 @@
 					return { ok: false, code: err.code, message: err.message };
 				}
 			},
-			peekProgress: async (size, chunkSize) => {
-				configure({ upload: { chunkSize } });
+			peekProgress: async (size, payloadBytes) => {
+				const frameSize = frameSizeFor('uploads/echoBytes', ['peek'], payloadBytes);
+				configure({ upload: { frameSize } });
 				const events = [];
 				const handle = echoBytes(makeBuffer(size, 1), 'peek');
 				handle.on('progress', (p) => events.push({ sent: p.sent, chunks: p.chunks }));
 				const r = await handle;
-				return { result: r, events };
+				return { result: r, events, frameSize };
 			}
 		};
 	});

@@ -796,6 +796,42 @@
       "commands": [
         "node scripts/check-manual-setup.js --fresh-install"
       ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "kit",
+      "step": "3",
+      "commands": [
+        "npm ci"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "kit",
+      "step": "4",
+      "commands": [
+        "npx playwright install --with-deps chromium"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "kit",
+      "step": "8",
+      "commands": [
+        "node test/kit-compat/matrix.mjs"
+      ]
+    },
+    {
+      "workflow": "verify.yml",
+      "automatic": true,
+      "job": "kit",
+      "step": "9",
+      "commands": [
+        "vitest run --config vitest.scaffold.config.js"
+      ]
     }
   ],
   "notFullyHosted": [
@@ -803,7 +839,6 @@
     "test:chaos",
     "test:e2e",
     "test:examples",
-    "test:kit",
     "test:kit-scaffold",
     "test:watch",
     "verify:browser",

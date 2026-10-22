@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @ts-check
 import { execFileSync } from 'child_process';
-import { writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'fs';
 import { resolve, join } from 'path';
 // Reject Node versions the generated SvelteKit 3 project cannot run on before
 // loading dependencies or starting work: 22.17+ on the 22 line, or 24+.
@@ -171,6 +171,12 @@ if (template === 'demo') {
 if (template !== 'demo') {
 	p.log.step('Creating SvelteKit project');
 	run(bin('npx'), ['-y', SCAFFOLD_SV_SPEC, 'create', name, '--template', 'minimal', '--types', 'ts', '--no-add-ons', '--no-install']);
+	// The generated configuration below uses the native adapter exclusively.
+	const manifestPath = join(dest, 'package.json');
+	const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+	delete manifest.dependencies?.['@sveltejs/adapter-auto'];
+	delete manifest.devDependencies?.['@sveltejs/adapter-auto'];
+	writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
 
 	p.log.step('Installing dependencies');
 	run(bin(agent), [add, SCAFFOLD_ADAPTER_SPEC, SCAFFOLD_REALTIME_SPEC], dest);

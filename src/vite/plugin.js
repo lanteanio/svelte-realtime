@@ -10,6 +10,7 @@ import { _generateClientStubs } from './codegen-client.js';
 import { _loadRegistryDirect, _hmrReloadRegistry, _loadServerModule, _serverModuleGraph } from './hmr.js';
 import { _respellUnder, _canonicalLiveFile, _externalizeRealtime } from './paths.js';
 import { _injectDevtools } from './devtools-inject.js';
+import { _createRegistryQueue } from './registry-queue.js';
 import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 import { _installedSvelteVersion, _runeSubpathError } from './svelte-version.js';
 
@@ -41,15 +42,8 @@ export default function svelteRealtime(options) {
 	let isDev = false;
 	/** @type {{ major: number, minor: number, version: string } | null} */
 	let svelteVersion = null;
-	/** @type {Promise<unknown>} */
-	let registryWork = Promise.resolve();
 	let registryStarting = false;
-	/** @template T @param {() => Promise<T>} run */
-	const enqueueRegistry = (run) => {
-		const work = registryWork.then(run);
-		registryWork = work.catch(() => {});
-		return work;
-	};
+	const enqueueRegistry = _createRegistryQueue();
 	/**
 	 * The live file a reported path names, spelled under liveDir, or null when
 	 * the path lies outside it.
@@ -153,7 +147,8 @@ export default function svelteRealtime(options) {
 
 		configEnvironment(name, config) {
 			if (name !== 'ssr') return;
-			const key = config.build?.rolldownOptions ? 'rolldownOptions' : 'rollupOptions';
+			// Vite 8 passes a context with the bundler version; Vite 6 passes none.
+			const key = this?.meta?.rolldownVersion || config.build?.rolldownOptions ? 'rolldownOptions' : 'rollupOptions';
 			const output = { external: config.build?.[key]?.external };
 			_externalizeRealtime(output);
 			// Vite 6 can share build options between environments. Return a new

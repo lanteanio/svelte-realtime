@@ -158,6 +158,14 @@ try {
 	await command('scaffold', [...invoke, 'app', '--template', 'example'], directory);
 	const app = join(directory, 'app');
 	const manifest = JSON.parse(readFileSync(join(app, 'package.json'), 'utf8'));
+	assert(!manifest.dependencies?.['@sveltejs/adapter-auto'] && !manifest.devDependencies?.['@sveltejs/adapter-auto'], 'Scaffold kept adapter-auto in its manifest');
+	const graph = JSON.parse(execFileSync(process.execPath, [npm, 'ls', '--all', '--json'], { cwd: app, env, encoding: 'utf8', windowsHide: true }));
+	function assertNoAuto(node) {
+		assert(!node.dependencies?.['@sveltejs/adapter-auto'], 'Scaffold installed adapter-auto');
+		for (const dependency of Object.values(node.dependencies || {})) assertNoAuto(dependency);
+	}
+	assertNoAuto(graph);
+	results.push({ name: 'installed graph excludes adapter-auto', passed: true });
 	assert(manifest.devDependencies['@sveltejs/kit'].startsWith('^3.'), 'Scaffold did not target Kit 3');
 	for (const [name, version] of [['svelte-realtime', realtimeVersion], ['svelte-adapter-uws', adapterVersion]]) {
 		assert.equal(JSON.parse(readFileSync(join(app, 'node_modules', name, 'package.json'), 'utf8')).version, version);

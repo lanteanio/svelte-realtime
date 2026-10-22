@@ -68,6 +68,12 @@ spellings really differ, then requires routes and live handlers to share state.
 The edited sources are restored byte for byte even on failure. Run only one
 compatibility command at a time per fixture.
 
+Registry work has a 30-second caller deadline. An import that outlives that
+deadline keeps the internal queue occupied until it settles; newer writes
+cannot interleave with its eventual registration. Writes that time out before
+starting can be retried by saving again. Fix or restart a permanently stalled
+dev server; the timeout does not cancel module evaluation.
+
 Each run writes named pass/fail checks and captured server output to
 `test-results/kit-compat-<major>-<mode>.json`. Use `--report <path>` for a distinct
 output file. Failures return a nonzero exit code; assertions are never skipped.

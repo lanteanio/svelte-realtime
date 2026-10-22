@@ -6,7 +6,12 @@
 
 import { test, expect } from '@playwright/test';
 
+let frames;
 test.beforeEach(async ({ page }) => {
+	frames = [];
+	page.on('websocket', socket => socket.on('framesent', ({ payload }) => {
+		if (Buffer.isBuffer(payload) && payload[0] === 0x01) frames.push(payload);
+	}));
 	await page.goto('/uploads');
 	await page.waitForFunction(() => window.__test);
 });
@@ -18,16 +23,14 @@ test('single-chunk upload round-trips byte count and args', async ({ page }) => 
 	expect(r.lastByte).toBe(64);
 });
 
-test('multi-chunk upload with explicit small chunkSize sends sequential frames', async ({ page }) => {
-	const r = await page.evaluate(() => window.__test.multiChunk(20, 4));
-	// `chunkSize` (deprecated alias of `frameSize`) caps the WIRE FRAME, and
-	// the per-chunk payload is frame minus the 12-byte chunk header and the
-	// args JSON - clamped to at least 1 byte. A 4-byte frame budget cannot
-	// carry even the header, so the payload degrades to 1 byte per frame:
-	// 20 bytes ride 20 sequential frames, reassembled in order server-side.
+test('multi-chunk upload with an envelope-derived frame cap sends sequential frames', async ({ page }) => {
+	// Derive the cap from the actual RPC envelope plus one payload byte.
+	const r = await page.evaluate(() => window.__test.multiChunk(20, 1));
 	expect(r).toMatchObject({ label: 'multi', bytes: 20, chunks: 20 });
 	expect(r.firstByte).toBe(1);
 	expect(r.lastByte).toBe(20);
+	expect(frames).toHaveLength(20);
+	expect(frames.every(frame => frame.length <= r.frameSize)).toBe(true);
 });
 
 test('cancel mid-upload rejects with CANCELLED on the client', async ({ page }) => {
@@ -37,12 +40,12 @@ test('cancel mid-upload rejects with CANCELLED on the client', async ({ page }) 
 });
 
 test('progress events fire with monotonically increasing sent counts', async ({ page }) => {
-	// chunkSize=8 caps the WIRE FRAME below the 12-byte chunk header, so the
-	// per-frame payload clamps to 1 byte: 64 bytes ride 64 frames, giving at
-	// least 8 progress events (the assertion below is a floor, not a count).
-	const r = await page.evaluate(() => window.__test.peekProgress(64, 8));
+	// A valid envelope-derived cap leaves one payload byte per frame.
+	const r = await page.evaluate(() => window.__test.peekProgress(64, 1));
 	expect(r.result.bytes).toBe(64);
 	expect(r.events.length).toBeGreaterThanOrEqual(8);
+	expect(frames).toHaveLength(64);
+	expect(frames.every(frame => frame.length <= r.frameSize)).toBe(true);
 	// Sent counts should be strictly increasing
 	for (let i = 1; i < r.events.length; i++) {
 		expect(r.events[i].sent).toBeGreaterThan(r.events[i - 1].sent);

@@ -8,6 +8,7 @@
  * @param {string} script
  */
 export function _injectDevtools(res, script) {
+	if (res.req?.method === 'HEAD') return;
 	const write = res.write;
 	const end = res.end;
 	const writeHead = res.writeHead;
@@ -45,8 +46,11 @@ export function _injectDevtools(res, script) {
 		const bytes = typeof chunk === 'string' ? Buffer.from(chunk, encoding) : Buffer.from(chunk || []);
 		const data = pending.length ? Buffer.concat([pending, bytes]) : bytes;
 		pending = Buffer.alloc(0);
-		const head = data.indexOf('</head>');
-		const body = data.indexOf('</body>');
+		// latin1 keeps one character per byte, so a match remains a byte offset
+		// even when a UTF-8 character straddles streamed chunks.
+		const text = data.toString('latin1');
+		const head = text.search(/<\/head>/i);
+		const body = text.search(/<\/body>/i);
 		const index = head >= 0 ? head : body;
 		if (index >= 0) {
 			injected = true;
