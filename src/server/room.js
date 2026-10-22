@@ -442,14 +442,17 @@ export const _roomRegister = function room(config) {
 					await _retirePresenceRef(k, r, () => {
 						const pending = [];
 						let clusterLast = true;
-						if (hadPresence || r.cursors) pending.push(_clusterPresenceRelease(ctx.platform, t, u).then((res) => {
+						// The successor is named before the roster drops the departed
+						// owner (see releaseIdentity below).
+						const succession = _ownerOnLeave(ctx.platform, t, u).then((change) => {
+							if (change) _ownerEmit(t, ctx.tenantId, change, ctx._publishWire);
+						}).catch(() => {});
+						pending.push(succession);
+						if (hadPresence || r.cursors) pending.push(Promise.all([_clusterPresenceRelease(ctx.platform, t, u), succession]).then(([res]) => {
 							clusterLast = res.isLast;
 							if (res.isLast) {
 								if (hadPresence) ctx._publishWire(t + ':presence', 'leave', { key: u }, UNSEQUENCED);
 							}
-						}).catch(() => {}));
-						pending.push(_ownerOnLeave(ctx.platform, t, u).then((change) => {
-							if (change) _ownerEmit(t, ctx.tenantId, change, ctx._publishWire);
 						}).catch(() => {}));
 						if (onLeave) Promise.resolve().then(() => onLeave(ctx, t)).catch(() => {});
 						return Promise.all(pending).then(() => clusterLast ? _removeCursorIfDeparted(ctx.platform, t, u, ctx._publishWire) : undefined);
@@ -573,21 +576,25 @@ export const _roomRegister = function room(config) {
 
 			// The final release for this identity: presence publishes 'leave'
 			// when the cluster count hits 0, and ownership runs its succession
-			// at the same transition. Both are independently best-effort.
+			// at the same transition. Both are independently best-effort, and
+			// they run side by side, but the 'leave' goes out only after the
+			// succession has published: a client reacting to the departure then
+			// already reads the new owner, never the member who just left.
 			const releaseIdentity = () => {
 				const pending = [];
 				let clusterLast = true;
+				const succession = ownerEnabled
+					? _ownerOnLeave(ctx.platform, topic, userId).then((change) => {
+						if (change) _ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
+					}).catch(() => {})
+					: undefined;
+				if (succession) pending.push(succession);
 				if (presenceFn || ref.cursors) {
-					pending.push(_clusterPresenceRelease(ctx.platform, topic, userId).then((res) => {
+					pending.push(Promise.all([_clusterPresenceRelease(ctx.platform, topic, userId), succession]).then(([res]) => {
 						clusterLast = res.isLast;
 						if (res.isLast) {
 							if (presenceFn) ctx._publishWire(topic + ':presence', 'leave', { key: userId }, UNSEQUENCED);
 						}
-					}).catch(() => {}));
-				}
-				if (ownerEnabled) {
-					pending.push(_ownerOnLeave(ctx.platform, topic, userId).then((change) => {
-						if (change) _ownerEmit(topic, ctx.tenantId, change, ctx._publishWire);
 					}).catch(() => {}));
 				}
 				if (onLeave) {
