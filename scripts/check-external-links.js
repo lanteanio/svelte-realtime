@@ -148,6 +148,19 @@ export function looksLikeSoft404(html) {
 	return candidates.some((candidate) => notFound.test(candidate));
 }
 
+/**
+ * The repository URL when `next` is GitHub's sign-in page returning to exactly
+ * `current`, a page inside a github.com repository; otherwise null.
+ */
+function githubSignInRepository(current, next) {
+	const from = new URL(current);
+	const to = new URL(next);
+	if (from.hostname !== 'github.com' || to.origin !== 'https://github.com' || to.pathname !== '/login') return null;
+	if (to.searchParams.get('return_to') !== current) return null;
+	const [owner, repo] = from.pathname.split('/').filter(Boolean);
+	return owner && repo ? `https://github.com/${owner}/${repo}` : null;
+}
+
 /** Crawl one URL with manual, bounded redirect handling. */
 export async function crawlUrl(startUrl, options = {}) {
 	const fetchImpl = options.fetchImpl || globalThis.fetch;
@@ -204,6 +217,15 @@ export async function crawlUrl(startUrl, options = {}) {
 			let next;
 			try { next = normalizedHttpUrl(new URL(location, current).href); } catch { next = null; }
 			if (!next) return { ok: false, kind: 'invalid-redirect', url: startUrl, finalUrl: current, status: response.status, redirects, detail: `invalid redirect target: ${location}` };
+			const repository = redirects.length === 0 ? githubSignInRepository(current, next) : null;
+			if (repository) {
+				// Action pages such as issues/new send anonymous visitors to sign in
+				// and back. The link is good when that repository is public.
+				const page = await crawlUrl(repository, options);
+				return page.ok
+					? { ok: true, kind: 'sign-in', url: startUrl, finalUrl: current, status: response.status, redirects, detail: `sign-in required; ${repository} is public` }
+					: { ...page, url: startUrl, detail: `sign-in required and ${repository} failed: ${page.detail}` };
+			}
 			redirects.push({ from: current, status: response.status, to: next });
 			current = next;
 			continue;

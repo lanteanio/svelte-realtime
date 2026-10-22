@@ -45,4 +45,18 @@ describe('documentation link gates', () => {
 		expect((await check('bad')).kind).toBe('http-error');
 		expect(looksLikeSoft404('<h1>Guide to HTTP 404 responses</h1>')).toBe(false);
 	});
+	it('accepts a GitHub sign-in wall only in front of a public repository', async () => {
+		const signIn = (url) => new Response(null, { status: 302, headers: { location: 'https://github.com/login?return_to=' + encodeURIComponent(url) } });
+		const fetchImpl = async (url) => {
+			const { pathname } = new URL(url);
+			if (pathname === '/login') return new Response('<title>Sign in</title>', { headers: { 'content-type': 'text/html' } });
+			if (pathname.endsWith('/new')) return signIn(url);
+			if (pathname === '/owner/repo/elsewhere') return new Response(null, { status: 302, headers: { location: 'https://github.com/login?return_to=https%3A%2F%2Fgithub.com%2Fother' } });
+			return new Response('<title>Repo</title>', { status: pathname.startsWith('/owner/gone') ? 404 : 200 });
+		};
+		const check = (path) => crawlUrl('https://github.com/' + path, { fetchImpl });
+		expect(await check('owner/repo/issues/new')).toMatchObject({ ok: true, kind: 'sign-in' });
+		expect(await check('owner/gone/issues/new')).toMatchObject({ ok: false, kind: 'http-error' });
+		expect(await check('owner/repo/elsewhere')).toMatchObject({ ok: false, kind: 'redirect' });
+	});
 });
