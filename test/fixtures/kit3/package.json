@@ -12,10 +12,10 @@
     "svelte-adapter-uws": "0.5.11",
     "svelte-realtime": "file:../../..",
     "uWebSockets.js": "github:uNetworking/uWebSockets.js#v20.69.0",
-    "ws": "8.20.0"
+    "ws": "8.22.0"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "7.0.0",
-    "vite": "8.3.0"
+    "vite": "8.3.5"
   }
 }
