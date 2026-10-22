@@ -1,14 +1,22 @@
-// A 0.5-era server module: tenant metadata with a quota field and an erasure
-// call that names no tenant. The migration rehearsal edits both lines.
-import { live, realtime, __register } from 'svelte-realtime/server';
+// A server module written against svelte-realtime 0.5.14, with the
+// registration lines the 0.5 Vite plugin generates for it. It loads and
+// serves unedited on 0.5.14; the migration rehearsal applies the documented
+// 0.6 edits to a copy.
+import { live, realtime, __register, __registerRoomActions } from 'svelte-realtime/server';
 
-export const handler = realtime({ tenant: (user) => user?.tenant ?? null });
+export const handler = realtime();
 
-export const acme = live.tenant('acme', { metadata: { entitlement: 'team' }, quota: { rpcPerSecond: 100 } });
+// A room action named after a generated client member.
+export const board = live.room({
+	topic: (ctx, boardId) => 'board:' + boardId,
+	topicArgs: 1,
+	init: async () => [],
+	actions: {
+		presence: async (ctx, boardId, status) => ({ boardId, status, by: ctx.user.id })
+	}
+});
+__register('board/board/__data', board.__dataStream);
+__registerRoomActions('board/board', async () => board);
 
-export const whoami = live((ctx) => ({ id: ctx.user.id, plan: acme.config?.metadata?.entitlement ?? null }));
+export const whoami = live((ctx) => ({ id: ctx.user.id }));
 __register('account/whoami', whoami);
-
-export function eraseUser(userId, tenantId) {
-	return live.forget(userId);
-}

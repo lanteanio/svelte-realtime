@@ -31,9 +31,10 @@ function npm(args, cwd) {
 /**
  * Check out `head` exactly as committed (no line-ending conversion), run
  * `npm pack --dry-run` there and return the tarball's shasum and integrity.
+ * With `destination`, write the tarball there instead and also return its path.
  * Uses a private index, so the repository's index and working tree stay untouched.
  */
-export function packCommit(directory, head) {
+export function packCommit(directory, head, destination) {
 	const scratch = mkdtempSync(join(tmpdir(), 'realtime-source-'));
 	try {
 		const git = (...args) => execFileSync('git', ['-c', 'core.autocrlf=false', '-c', 'core.eol=lf', ...args], {
@@ -43,8 +44,10 @@ export function packCommit(directory, head) {
 		const commit = git('rev-parse', '--verify', '--end-of-options', `${head}^{commit}`);
 		git('read-tree', commit);
 		git('checkout-index', '--all', '--force', `--prefix=${join(scratch, 'package')}/`);
-		const [packed] = JSON.parse(npm(['pack', '--dry-run', '--json', '--ignore-scripts'], join(scratch, 'package')));
-		return { commit, shasum: packed.shasum, integrity: packed.integrity, version: packed.version };
+		const mode = destination === undefined ? ['--dry-run'] : ['--pack-destination', resolve(destination)];
+		const [packed] = JSON.parse(npm(['pack', ...mode, '--json', '--ignore-scripts'], join(scratch, 'package')));
+		const result = { commit, shasum: packed.shasum, integrity: packed.integrity, version: packed.version };
+		return destination === undefined ? result : { ...result, filename: join(resolve(destination), packed.filename) };
 	} finally {
 		rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 	}

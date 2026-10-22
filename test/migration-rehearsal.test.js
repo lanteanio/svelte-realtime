@@ -1,61 +1,116 @@
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { createTestServer } from 'svelte-adapter-uws/testing';
+import { packCommit, recordedSource } from '../scripts/verify-release-source.js';
 
-// Rehearse the 0.5 to 0.6 required edits against the packed candidate: the
-// 0.5-era module fails the documented way, the edited module boots, and a real
-// WebSocket client reads its RPC result back through the adapter.
+// Rehearse the 0.5 to 0.6 required edits. The fixture is first served
+// unedited by svelte-realtime 0.5.14, repacked from its recorded source commit
+// and matched against the ledger's published shasum and integrity. The packed
+// candidate then refuses the same module the documented way, and the edited
+// module serves a real WebSocket client through the adapter.
+//
+// The candidate consumer borrows this repository's installed dependencies
+// through directory links instead of installing from a lockfile; only
+// svelte-realtime itself always comes from a tarball.
 const root = fileURLToPath(new URL('..', import.meta.url));
 const fixture = fileURLToPath(new URL('./fixtures/migration-0.5', import.meta.url));
-let temp, consumer, server;
+const manifest = readFileSync(join(root, 'docs/release-manifest.md'), 'utf8');
+const links = [];
+let temp, stable, candidate, server;
+
+function install(consumer, tarball) {
+	cpSync(fixture, consumer, { recursive: true });
+	writeFileSync(join(consumer, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
+	const target = join(consumer, 'node_modules/svelte-realtime');
+	mkdirSync(target, { recursive: true });
+	// Relative paths: GNU tar reads a drive letter as a remote host.
+	const local = (path) => relative(temp, path).split(sep).join('/');
+	execFileSync('tar', ['-xzf', local(tarball), '-C', local(target), '--strip-components=1'], { cwd: temp, timeout: 120000 });
+}
+
+// Remove every directory link before the recursive delete, so the delete can
+// never follow one into the repository's real node_modules.
+function removeTemp() {
+	for (const link of links.splice(0)) {
+		try { unlinkSync(link); } catch { rmdirSync(link); }
+	}
+	if (!temp) return;
+	for (const consumer of [stable, candidate]) {
+		const modules = consumer && join(consumer, 'node_modules');
+		let entries = [];
+		try { entries = readdirSync(modules); } catch { continue; }
+		for (const entry of entries) {
+			if (lstatSync(join(modules, entry)).isSymbolicLink()) throw new Error('refusing to delete through a remaining link: ' + join(modules, entry));
+		}
+	}
+	rmSync(temp, { recursive: true, force: true });
+}
 
 beforeAll(() => {
 	temp = mkdtempSync(join(tmpdir(), 'realtime-migration-'));
+	const tarballs = join(temp, 'tarballs');
+	mkdirSync(tarballs);
+
+	const recorded = recordedSource(manifest, '0.5.14');
+	const released = packCommit(root, recorded.head, tarballs);
+	expect({ version: released.version, shasum: released.shasum, integrity: released.integrity })
+		.toEqual({ version: '0.5.14', shasum: recorded.shasum, integrity: recorded.integrity });
+	stable = join(temp, 'stable');
+	install(stable, released.filename);
+
 	const npm = process.env.npm_execpath || join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js');
-	const [packed] = JSON.parse(execFileSync(process.execPath, [npm, 'pack', '--json', '--ignore-scripts', '--pack-destination', temp], { cwd: root, encoding: 'utf8', timeout: 120000 }));
-	consumer = join(temp, 'consumer');
-	cpSync(fixture, consumer, { recursive: true });
-	const installed = join(consumer, 'node_modules/svelte-realtime');
-	mkdirSync(installed, { recursive: true });
-	execFileSync('tar', ['-xzf', packed.filename, '-C', 'consumer/node_modules/svelte-realtime', '--strip-components=1'], { cwd: temp, timeout: 120000 });
-	writeFileSync(join(consumer, 'package.json'), JSON.stringify({ private: true, type: 'module' }));
-	// Reuse installed dependencies; the package under test is always the tarball.
+	const [packed] = JSON.parse(execFileSync(process.execPath, [npm, 'pack', '--json', '--ignore-scripts', '--pack-destination', tarballs], { cwd: root, encoding: 'utf8', timeout: 120000 }));
+	candidate = join(temp, 'candidate');
+	install(candidate, join(tarballs, packed.filename));
 	for (const entry of readdirSync(join(root, 'node_modules'))) {
 		if (entry.startsWith('.') || entry === 'svelte-realtime') continue;
-		symlinkSync(join(root, 'node_modules', entry), join(consumer, 'node_modules', entry), 'junction');
+		const link = join(candidate, 'node_modules', entry);
+		symlinkSync(join(root, 'node_modules', entry), link, 'junction');
+		links.push(link);
 	}
-}, 180000);
+}, 240000);
 afterAll(async () => {
 	await server?.close();
-	if (temp) rmSync(temp, { recursive: true, force: true });
+	removeTemp();
 });
 
 function edit(file, from, to) {
-	const path = join(consumer, file);
+	const path = join(candidate, file);
 	const source = readFileSync(path, 'utf8');
 	if (!source.includes(from)) throw new Error('0.5 fixture drifted: ' + from);
 	writeFileSync(path, source.replace(from, to));
 }
 
+it('serves the unedited module on the recorded 0.5.14 artifact', async () => {
+	const module = await import(pathToFileURL(join(stable, 'live.js')).href);
+	const { createTestEnv } = await import(pathToFileURL(join(stable, 'node_modules/svelte-realtime/test.js')).href);
+	const env = createTestEnv();
+	try {
+		const client = env.connect({ id: 'user-1' });
+		expect(Object.keys(module.board.__actions)).toEqual(['presence']);
+		await expect(client.call('board/board/__action/presence', 'b1', 'away')).resolves.toEqual({ boardId: 'b1', status: 'away', by: 'user-1' });
+		await expect(client.call('account/whoami')).resolves.toEqual({ id: 'user-1' });
+		// 0.5 answers an unregistered path with an explicit not-found reply.
+		await expect(client.call('account/missing')).rejects.toMatchObject({ code: 'NOT_FOUND' });
+	} finally {
+		env.cleanup();
+	}
+}, 60000);
+
 it('applies the documented edits and serves the migrated module through the packed candidate', async () => {
-	const module = join(consumer, 'live.js');
-	await expect(import(pathToFileURL(module).href + '?baseline')).rejects.toThrow('quota is not supported');
+	const module = join(candidate, 'live.js');
+	await expect(import(pathToFileURL(module).href + '?baseline')).rejects.toThrow("action 'presence' has the name of a member");
 
-	// Required edit: tenant configuration keeps only validated metadata.
-	edit('live.js', ", quota: { rpcPerSecond: 100 } }", ' }');
-	// Changed default: erasure names its tenant when a resolver is configured.
-	edit('live.js', 'return live.forget(userId);', 'return live.forget(userId, { tenantId });');
+	// Required edit: rename the action that collides with a generated member.
+	edit('live.js', 'presence: async (ctx, boardId, status)', 'setStatus: async (ctx, boardId, status)');
 	const migrated = await import(pathToFileURL(module).href + '?migrated');
-	const packedServer = await import(pathToFileURL(join(consumer, 'node_modules/svelte-realtime/src/server.js')).href);
-	expect(migrated.acme.config).toEqual({ metadata: { entitlement: 'team' } });
-	await expect(packedServer.live.forget('user-1')).rejects.toMatchObject({ code: 'INVALID_REQUEST' });
-	await expect(migrated.eraseUser('user-1', 'acme')).resolves.not.toThrow();
+	expect(Object.keys(migrated.board.__actions)).toEqual(['setStatus']);
 
-	server = await createTestServer({ handler: { ...migrated.handler, upgrade: () => ({ id: 'user-1', tenant: 'acme' }) } });
+	server = await createTestServer({ handler: { ...migrated.handler, upgrade: () => ({ id: 'user-1' }) } });
 	const socket = new WebSocket(server.wsUrl);
 	const frames = [];
 	socket.addEventListener('message', ({ data }) => { if (typeof data === 'string') frames.push(JSON.parse(data)); });
@@ -63,10 +118,21 @@ it('applies the documented edits and serves the migrated module through the pack
 		socket.addEventListener('open', resolve, { once: true });
 		socket.addEventListener('error', reject, { once: true });
 	});
-	socket.send(JSON.stringify({ rpc: 'account/whoami', id: 'who', args: [] }));
-	const deadline = Date.now() + 5000;
-	let reply;
-	while (!(reply = frames.find(f => f.topic === '__rpc' && f.event === 'who')?.data) && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
-	socket.close();
-	expect(reply).toMatchObject({ ok: true, data: { id: 'user-1', plan: 'team' } });
+	let sequence = 0;
+	async function call(path, args) {
+		const id = 'call-' + ++sequence;
+		socket.send(JSON.stringify({ rpc: path, id, args }));
+		const deadline = Date.now() + 5000;
+		let reply;
+		while (!(reply = frames.find(f => f.topic === '__rpc' && f.event === id)?.data) && Date.now() < deadline) await new Promise(r => setTimeout(r, 10));
+		return reply;
+	}
+	try {
+		expect(await call('board/board/__action/setStatus', ['b1', 'away'])).toMatchObject({ ok: true, data: { boardId: 'b1', status: 'away', by: 'user-1' } });
+		expect(await call('account/whoami', [])).toMatchObject({ ok: true, data: { id: 'user-1' } });
+		// Changed default: an unregistered path answers like a denied caller.
+		expect(await call('account/missing', [])).toMatchObject({ ok: false, code: 'FORBIDDEN' });
+	} finally {
+		socket.close();
+	}
 }, 180000);
