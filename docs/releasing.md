@@ -126,11 +126,12 @@ The publish-ready version bump is one commit that changes these together:
 
 1. `package.json` `version`, then `npm install --package-lock-only --ignore-scripts`
    at the repository root so the root lock records the same version.
-2. The Svelte 4 fixture lock, which records a packed copy of this checkout and
-   therefore its version: run
+2. Every fixture lock under `test/fixtures/` that installs this checkout with
+   `--install-links`, starting with `test/fixtures/svelte4`. Such a lock records
+   a packed copy of this checkout and therefore its version: run
    `npm install --package-lock-only --install-links --ignore-scripts` inside
-   `test/fixtures/svelte4`, then `node scripts/check-svelte-support.js --write`
-   from the repository root to refresh the generated support table.
+   each one. Then run `node scripts/check-svelte-support.js --write` from the
+   repository root to refresh the generated Svelte 4 support table.
 3. The `CHANGELOG.md` heading for the version, dated, with `Unreleased` folded
    into it.
 
