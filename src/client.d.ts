@@ -249,7 +249,9 @@ export interface StreamStore<T = any> extends Readable<T> {
 	optimistic(event: string, data: any): () => void;
 	/**
 	 * Apply an optimistic update + run an async operation with auto-rollback.
-	 * The optimistic change applies synchronously; the asyncOp runs after.
+	 * The asyncOp is called first, so the request it sends is on the wire
+	 * before any subscriber sees the change; the optimistic change then
+	 * applies synchronously, before `mutate` returns.
 	 * On success, returns the asyncOp's result and leaves the store as-is
 	 * (the server's confirming event will reconcile via the merge strategy).
 	 * On failure, the optimistic change is rolled back and the rejection

@@ -2547,8 +2547,10 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 		/**
 		 * Apply an optimistic update + run an async operation with auto-rollback.
-		 * The optimistic change applies synchronously; the asyncOp runs after.
-		 * If the asyncOp resolves, returns its result and leaves the change
+		 * The asyncOp is called first, so the request it sends is on the wire
+		 * before any subscriber sees the change; the optimistic change then
+		 * applies synchronously, before `mutate` returns. If the asyncOp
+		 * throws synchronously, nothing is shown. If the asyncOp resolves, returns its result and leaves the change
 		 * baked in (the server's confirming event will reconcile via the
 		 * merge strategy). If the asyncOp rejects (or throws), the optimistic
 		 * change is rolled back and the rejection propagates to the caller.
@@ -2614,6 +2616,12 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 				);
 			}
 
+			// Start the operation before the change shows: a subscriber that
+			// sends in reaction to the optimistic value then puts its frame on
+			// the wire after the frame that caused it, never ahead of it. An
+			// operation that throws synchronously rejects with nothing shown.
+			const op = asyncOp();
+
 			let optimisticKey = _NO_OPTIMISTIC_KEY;
 			if (isEvent) {
 				const k = mergeKeyField(merge, key);
@@ -2662,7 +2670,7 @@ function _createStream(path, options, dynamicArgs, initialSchemaVersion) {
 
 			let value;
 			try {
-				value = await asyncOp();
+				value = await op;
 			} catch (err) {
 				settle(false);
 				throw err;

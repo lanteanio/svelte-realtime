@@ -124,6 +124,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - When a room owner's last connection leaves, the `:owner` stream names the successor before the presence stream publishes the owner's `leave`, including when the departed owner is retired early to admit a member at capacity. A client reacting to the roster change reads the new owner, never the member who just left.
 
+- `store.mutate()` (and `createOptimistic`) starts its call before subscribers see the optimistic change, so a subscriber that sends in reaction to the change puts its frame on the wire after the call that caused it, never ahead of it. A call that throws synchronously rejects without showing the change.
+
 - A generated multiplayer namespace send called directly while a view on the page holds the same room - `board.move(id, ...)` or a presence field in a mount effect beside `board.room(() => id)` - waits for that view's join like the view's own sends, instead of reaching the server ahead of the join and being dropped.
 
 - Pending sticky presence updates stop when their room membership leaves or is erased, including after the same identity rejoins. Retired memberships discard cached roster payloads, including when erasure needs a retry. Roster refusal warnings omit the member identity.

@@ -697,6 +697,44 @@ describe('__stream() mutate', () => {
 		ctx.unsub();
 	});
 
+	it('sends its call before subscribers react to the optimistic change', async () => {
+		const ctx = await setupCrudStream('mut/order', 'mut-order', [{ id: 1 }]);
+		const save = __rpc('mut/save');
+		const follow = __rpc('mut/follow');
+		let followed = false;
+		const unsub = ctx.store.subscribe((v) => {
+			if (!followed && Array.isArray(v) && v.some((row) => row.id === 't1')) {
+				followed = true;
+				follow('after-t1').catch(() => {});
+			}
+		});
+		const before = sendQueuedFn.mock.calls.length;
+		const op = ctx.store.mutate(() => save({ id: 't1' }), { event: 'created', data: { id: 't1' } });
+		expect(followed).toBe(true);
+		const frames = sendQueuedFn.mock.calls.slice(before).map((c) => c[0]).filter((f) => f && f.rpc);
+		// The frame that caused the change is on the wire ahead of the frame a
+		// subscriber sent in reaction to it.
+		expect(frames.map((f) => f.rpc)).toEqual(['mut/save', 'mut/follow']);
+		simulateRpcResponse(frames[0].id, { ok: true, data: 'saved' });
+		simulateRpcResponse(frames[1].id, { ok: true, data: 'ok' });
+		expect(await op).toBe('saved');
+		unsub();
+		ctx.unsub();
+	});
+
+	it('a call that throws synchronously never shows its optimistic change', async () => {
+		const ctx = await setupCrudStream('mut/throw-early', 'mut-throw-early', [{ id: 1 }]);
+		const seen = ctx.values.length;
+		await expect(
+			ctx.store.mutate(
+				() => { throw new Error('sync throw'); },
+				{ event: 'created', data: { id: 't1' } }
+			)
+		).rejects.toThrow('sync throw');
+		expect(ctx.values.slice(seen).some((v) => v.some((row) => row.id === 't1'))).toBe(false);
+		ctx.unsub();
+	});
+
 	it('rejects missing asyncOp', async () => {
 		const ctx = await setupCrudStream('mut/no-op', 'mut-no-op');
 		await expect(ctx.store.mutate(null, { event: 'created', data: {} })).rejects.toThrow(/asyncOp must be a function/);
