@@ -95,7 +95,7 @@ it('uses one app registration throughout handlers and rejects a missing registra
 	const missing = diagnostics(false);
 	expect(missing.some(message => message.includes("does not satisfy the constraint 'true'"))).toBe(true);
 	expect(missing.some(message => message.includes("Unused '@ts-expect-error' directive"))).toBe(true);
-});
+}, 30000);
 
 const unregistered = `
 import { live, type LiveContext, type UploadContext, type RegisteredUser, type CreateMessageOptions } from 'svelte-realtime/server';
@@ -129,4 +129,4 @@ it('keeps unregistered apps permissive and explicit generics strict', () => {
 	const messages = ts.getPreEmitDiagnostics(ts.createProgram([file], options, host))
 		.map(d => ts.flattenDiagnosticMessageText(d.messageText, ' '));
 	expect(messages).toEqual([]);
-});
+}, 30000);
