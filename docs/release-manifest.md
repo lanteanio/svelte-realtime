@@ -207,7 +207,8 @@ even if routing is rolled back or the version is later deprecated.
 When the registry omitted `gitHead`, the source commit is the one whose
 committed bytes pack to the published shasum and integrity, verified with
 `node scripts/verify-release-source.js <version>` (method `git-archive-pack`:
-checkout without line-ending conversion, then `npm pack --ignore-scripts`).
+checkout without line-ending conversion, then `npm pack --dry-run --ignore-scripts`,
+whose reported shasum and integrity are those of the tarball it would write).
 One row per such version; the published row itself is never edited.
 
 | Package | Version | Git head | Method | Verified UTC | Evidence |

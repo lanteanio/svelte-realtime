@@ -136,8 +136,12 @@ describe('routing replay', () => {
 		const events = objects('Candidate event log', ['Candidate', 'Event', 'Event UTC', 'Git head', 'Planned tag', 'Target channel', 'Evidence']);
 		const routing = objects('Routing, corrections and rollback events', ['Event ID', 'Event UTC', 'Event', 'Corrected event', 'Corrected UTC', 'Package', 'Channel', 'From version', 'To version', 'Corrects event', 'Evidence', 'Notes']);
 		const pointers = validateRoutingEvents(routing, rows, validateCandidateLifecycles(events, rows));
-		expect(pointers.get('latest')).toBe('0.5.14');
-		expect(pointers.get('next')).toBe('0.6.0-next.91');
+		// Each channel ends on the target of its last recorded routing event.
+		for (const channel of ['latest', 'next']) {
+			const last = routing.filter((row) => row.Channel === channel).at(-1);
+			expect(last, channel).toBeDefined();
+			expect(pointers.get(channel), channel).toBe(last['To version']);
+		}
 	});
 });
 

@@ -122,9 +122,10 @@ guard in the same change, alongside the generated verification inventory.
 
 ## Artifact records
 
-The [release manifest](release-manifest.md) is the artifact ledger. Its three
-append-only tables follow the adapter's candidate, publication and routing
-format. The [changelog](https://github.com/lanteanio/svelte-realtime/blob/dev/CHANGELOG.md) describes behavior and must have one
+The [release manifest](release-manifest.md) is the artifact ledger. Its four
+append-only tables hold candidate events, published releases, routing events
+and source reconstructions; the first three follow the adapter's candidate,
+publication and routing format. The [changelog](https://github.com/lanteanio/svelte-realtime/blob/dev/CHANGELOG.md) describes behavior and must have one
 heading for every published version. `Unreleased` contains work awaiting a
 release; a dated candidate heading starts with
 `*Not published to npm; release candidate.*`. A superseded unpublished heading
