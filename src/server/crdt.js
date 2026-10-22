@@ -233,6 +233,13 @@ function _publishUpdate(rec, name, bytes, excludeWs) {
 	}
 }
 
+/** @param {Uint8Array} a @param {Uint8Array} b */
+function _sameBytes(a, b) {
+	if (a.length !== b.length) return false;
+	for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+	return true;
+}
+
 /**
  * Cluster coordinators (`platform.crdt`) whose inbound relay handlers have
  * been wired. One registration per coordinator for the process lifetime: the
@@ -275,8 +282,16 @@ function _ensureCrdtCluster(crdt) {
 		onSyncReply: (declKey, topic, bytes) => {
 			const rec = _crdtDecls.get(declKey);
 			if (!rec || !rec.authority || !rec.authority.has(topic)) return;
-			const out = rec.authority.applyUpdate(topic, bytes);
-			if (out) _publishUpdate(rec, topic, out, undefined);
+			// A reply answers the state vector sent at cold load, so it often
+			// repeats what relayed updates or an earlier reply already brought.
+			// Fan out only what it added; an encoding since the prior state
+			// vector that did not change means the reply was a no-op.
+			const sv = rec.authority.stateVector(topic);
+			const before = rec.authority.diff(topic, sv);
+			if (!rec.authority.applyUpdate(topic, bytes)) return;
+			const after = rec.authority.diff(topic, sv);
+			if (after === null || (before !== null && _sameBytes(before, after))) return;
+			_publishUpdate(rec, topic, after, undefined);
 		}
 	});
 }
@@ -363,7 +378,7 @@ export function _crdtRegister(kind, config) {
 						const p = rec.current.persist;
 						return p && typeof p.load === 'function' ? p.load(topic) : null;
 					},
-					store: async (topic, bytes) => {
+					store: async (topic, bytes, options) => {
 						const p = rec.current.persist;
 						if (!p || typeof p.store !== 'function') return;
 						// Clustered: gate the write behind a per-topic persist
@@ -382,6 +397,16 @@ export function _crdtRegister(kind, config) {
 							// takes over if the holder dies, without pinning the
 							// replica or surfacing a spurious error.
 							if (!mayWrite) return false;
+							// The bytes were captured before the lease round
+							// trip. An erasure or teardown in the meantime
+							// aborted this write: never persist what it erased.
+							if (options && options.signal && options.signal.aborted) return false;
+							// Edits and peer state merged while waiting are part
+							// of the replica now, so the write takes its current
+							// full state rather than the older capture.
+							const current = rec.authority.diff(topic, null);
+							if (current === null) return false;
+							return p.store(topic, current);
 						}
 						return p.store(topic, bytes);
 					}

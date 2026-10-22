@@ -26,6 +26,10 @@ import { WS_SUBSCRIPTIONS } from 'svelte-adapter-uws/testing';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { enforceClusterPublishPolicy } from './helpers/cluster-publish-policy.js';
 import svelteRealtime from '../src/vite.js';
+import { _purgeCrdtDocs } from '../src/server/crdt.js';
+import * as Y from 'yjs';
+import { createCrdtAuthority, normalizeCrdtAccess } from 'svelte-adapter-uws/plugins/crdt/replica';
+import { createCrdtWireCodec, CRDT_TOPIC_PREFIX } from 'svelte-adapter-uws/plugins/crdt';
 
 const textEncoder = new TextEncoder();
 const toArrayBuffer = (obj) => textEncoder.encode(JSON.stringify(obj)).buffer;
@@ -123,6 +127,7 @@ function fakeCrdtCluster(overrides = {}) {
 		onMessage(h) { handlers = h; },
 		deliverUpdate(declKey, topic, bytes) { if (handlers && handlers.onUpdate) handlers.onUpdate(declKey, topic, bytes); },
 		deliverSyncRequest(declKey, topic, sv, from) { if (handlers && handlers.onSyncRequest) handlers.onSyncRequest(declKey, topic, sv, from); },
+		deliverSyncReply(declKey, topic, bytes) { if (handlers && handlers.onSyncReply) handlers.onSyncReply(declKey, topic, bytes); },
 		relayUpdate(declKey, topic, bytes) { calls.relayed.push({ declKey, topic, bytes }); },
 		requestSync(declKey, topic, sv) { calls.syncRequested.push({ declKey, topic, sv }); },
 		sendSyncReply(declKey, topic, bytes, to) { calls.syncReplied.push({ declKey, topic, bytes, to }); },
@@ -672,7 +677,9 @@ describe('live.doc cluster wiring (platform.crdt)', () => {
 		await call(mockWs({ id: 'u1' }), clusterPlatform(crdtYes), granted.name + '/board/__doc/sync', []);
 		await rt.authority._persist().store(granted.topic, new Uint8Array([1]));
 		expect(crdtYes.calls.acquirePersist).toEqual([granted.topic]);
-		expect(stores).toEqual([{ t: granted.topic, b: new Uint8Array([1]) }]);
+		// The lease holder writes the replica's state after the lease (the
+		// scripted authority's full-state diff), not the bytes handed in.
+		expect(stores).toEqual([{ t: granted.topic, b: new Uint8Array([1, 2, 3]) }]);
 
 		// Lease denied (another instance is the writer) -> the app store is skipped.
 		stores.length = 0;
@@ -690,6 +697,127 @@ describe('live.doc cluster wiring (platform.crdt)', () => {
 		const crdt = fakeCrdtCluster({ acquirePersist: () => Promise.reject(new Error('redis down')) });
 		await call(mockWs({ id: 'u1' }), clusterPlatform(crdt), errored.name + '/board/__doc/sync', []);
 		await expect(rt.authority._persist().store(errored.topic, new Uint8Array([1]))).rejects.toThrow('redis down');
+	});
+});
+
+describe('live.doc cluster persistence and sync replies (real replica)', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		_setCrdtRuntime({ createCrdtAuthority, normalizeCrdtAccess, createCrdtWireCodec, CRDT_TOPIC_PREFIX });
+	});
+	afterEach(() => {
+		_resetCrdt();
+		_setCrdtRuntime(null);
+		vi.useRealTimers();
+	});
+
+	let seq = 0;
+	function declare(extra = {}) {
+		const t = 'pboard' + ++seq;
+		const board = live.doc({ topic: t, ...extra });
+		const n = 'pdoc' + seq;
+		registerDoc(n, board);
+		return { name: n, topic: t, declKey: 'topic:' + t };
+	}
+
+	/** One client edit as Yjs update bytes. */
+	function edit(key, value, base) {
+		const doc = new Y.Doc();
+		if (base) Y.applyUpdate(doc, base);
+		const sv = Y.encodeStateVector(doc);
+		doc.getMap('m').set(key, value);
+		return Y.encodeStateAsUpdate(doc, sv);
+	}
+	function decode(...updates) {
+		const doc = new Y.Doc();
+		for (const u of updates) Y.applyUpdate(doc, new Uint8Array(u));
+		return doc.getMap('m').toJSON();
+	}
+
+	/** A lease whose first grant the test releases by hand. */
+	function heldLease() {
+		let grant;
+		const first = new Promise((resolve) => { grant = resolve; });
+		let calls = 0;
+		const crdt = fakeCrdtCluster({ acquirePersist: () => (++calls === 1 ? first : Promise.resolve(true)) });
+		return { crdt, grant: () => grant(true) };
+	}
+
+	it('persists the replica state after the lease, including what merged while waiting for it', async () => {
+		const stores = [];
+		const { name, topic, declKey } = declare({
+			snapshotEvery: 1,
+			persist: { load: async () => null, store: (t, b) => { stores.push(Array.from(b)); } }
+		});
+		const { crdt, grant } = heldLease();
+		const platform = wirePlatform();
+		platform.crdt = crdt;
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/board/__doc/sync', []);
+		await fire(ws, platform, name + '/board/__doc/update', [Array.from(edit('a', 1))]);
+		expect(crdt.calls.acquirePersist).toEqual([topic]);
+		// A peer's edit lands while the first write waits for the lease.
+		crdt.deliverUpdate(declKey, topic, Array.from(edit('b', 2)));
+		grant();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(stores.length).toBeGreaterThanOrEqual(1);
+		expect(decode(stores[0])).toEqual({ a: 1, b: 2 });
+	});
+
+	it('does not persist a document erased while its write waited for the lease', async () => {
+		const stores = [];
+		const { name, topic } = declare({
+			snapshotEvery: 1,
+			persist: { load: async () => null, store: (t, b) => { stores.push(Array.from(b)); } }
+		});
+		const { crdt, grant } = heldLease();
+		const platform = wirePlatform();
+		platform.crdt = crdt;
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/board/__doc/sync', []);
+		await fire(ws, platform, name + '/board/__doc/update', [Array.from(edit('secret', 1))]);
+		expect(crdt.calls.acquirePersist).toEqual([topic]);
+		expect(_purgeCrdtDocs([topic])).toBe(1);
+		grant();
+		await vi.advanceTimersByTimeAsync(1);
+		expect(stores).toEqual([]);
+	});
+
+	it('fans out only what a peer sync reply adds and nothing for a reply it already holds', async () => {
+		const { name, topic, declKey } = declare();
+		const crdt = fakeCrdtCluster();
+		const platform = wirePlatform();
+		platform.crdt = crdt;
+		const ws = mockWs({ id: 'u1' });
+		await call(ws, platform, name + '/board/__doc/sync', []);
+		const a = edit('a', 1);
+		await fire(ws, platform, name + '/board/__doc/update', [Array.from(a)]);
+		const published = platform.wirePublished.length;
+
+		// The peer answers with state this replica already has.
+		crdt.deliverSyncReply(declKey, topic, Array.from(a));
+		expect(platform.wirePublished).toHaveLength(published);
+
+		// A reply carrying old and new state fans out only the new part.
+		const b = edit('b', 2, a);
+		const both = new Y.Doc();
+		Y.applyUpdate(both, a);
+		Y.applyUpdate(both, b);
+		crdt.deliverSyncReply(declKey, topic, Array.from(Y.encodeStateAsUpdate(both)));
+		expect(platform.wirePublished).toHaveLength(published + 1);
+		const sent = platform.wirePublished.at(-1);
+		expect(sent.options).toEqual({ seq: false });
+		expect(decode(sent.data.bytes)).toEqual({ b: 2 });
+		expect(decode(a, sent.data.bytes)).toEqual({ a: 1, b: 2 });
+
+		// A reply that only deletes still reaches local subscribers.
+		const editor = new Y.Doc();
+		Y.applyUpdate(editor, Y.encodeStateAsUpdate(both));
+		const sv = Y.encodeStateVector(editor);
+		editor.getMap('m').delete('a');
+		crdt.deliverSyncReply(declKey, topic, Array.from(Y.encodeStateAsUpdate(editor, sv)));
+		expect(platform.wirePublished).toHaveLength(published + 2);
+		expect(decode(Y.encodeStateAsUpdate(both), platform.wirePublished.at(-1).data.bytes)).toEqual({ b: 2 });
 	});
 });
 

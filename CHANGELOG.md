@@ -156,6 +156,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 - `forget: 'retain'` aggregates clear their privacy contributor cohorts whole on `live.forget`. Before, only an entry equal to the userId was removed, so a numeric or email contributor id survived an erasure that reported success. The cohorts of every tenant are cleared whatever `tenantId` the erasure names, and a thresholded output holds its last value until k contributors return. Aggregate erasure acts on the calling worker only, and a `forget: 'reset'` keeps the privacy noise key because a worker-local reset has no replica-consistent generation to re-key it with.
 
+- Clustered documents (`platform.crdt`): the persist-lease holder writes the replica's state as of the write, including edits and peer state merged while the lease was being acquired, instead of a snapshot captured before it. A document erased while its write waited for the lease is no longer written back. A peer sync reply fans out to local subscribers only what it added, and nothing when the replica already held it.
+
 - Smooth rooms run every owed tick instead of dropping the debt beyond eight ticks per timer callback, so a 60 Hz room keeps 60 ticks per second when timers fire late under load. Catch-up still yields after eight ticks, and only debt older than two seconds is dropped.
 
 - An upload whose arguments cannot be JSON-encoded rejects its handle with `INVALID_REQUEST` (the encoding error as `cause`) instead of throwing from the upload call, and arguments that encode past 65535 bytes reject with `PAYLOAD_TOO_LARGE` instead of sending a corrupt chunk 0. The arguments are encoded once per upload, also when the client falls back to the older upload format.
