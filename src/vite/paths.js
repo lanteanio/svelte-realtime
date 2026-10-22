@@ -1,5 +1,6 @@
 // @ts-check
-import { sep } from 'path';
+import { readdirSync } from 'fs';
+import { join, sep } from 'path';
 
 /**
  * Return `file` spelled under `dir` when it lies inside `dir`, otherwise null.
@@ -19,6 +20,33 @@ export function _respellUnder(dir, file, separator = sep) {
 		return prefix + file.slice(prefix.length);
 	}
 	return null;
+}
+
+/**
+ * Keep the configured root spelling while using the directory entries' names
+ * below it. Windows accepts differently cased imports, but caches, RPC paths
+ * and virtual module IDs must agree with the file names used by the registry.
+ * Reading entries preserves symlink paths instead of changing their identity.
+ * A deleted path keeps its reported suffix so unlink can still invalidate it.
+ * @param {string} dir
+ * @param {string} file
+ * @returns {string | null}
+ */
+export function _canonicalLiveFile(dir, file) {
+	const owned = _respellUnder(dir, file);
+	if (owned === null || process.platform !== 'win32') return owned;
+	const prefix = dir.endsWith(sep) ? dir : dir + sep;
+	const parts = owned.slice(prefix.length).split(sep);
+	let current = dir;
+	for (let index = 0; index < parts.length; index++) {
+		const part = parts[index];
+		let entries;
+		try { entries = readdirSync(current); }
+		catch { return join(current, ...parts.slice(index)); }
+		const name = entries.includes(part) ? part : entries.find(entry => entry.toLowerCase() === part.toLowerCase());
+		current = join(current, name ?? part);
+	}
+	return current;
 }
 
 /**

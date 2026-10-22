@@ -8,7 +8,7 @@ import { _checkHooksFile, _buildTopicsRegistry, _generateRegistry, _resolveFile,
 import { _generateSsrStubs } from './codegen-ssr.js';
 import { _generateClientStubs } from './codegen-client.js';
 import { _loadRegistryDirect, _hmrReloadRegistry, _loadServerModule, _serverModuleGraph } from './hmr.js';
-import { _respellUnder, _externalizeRealtime } from './paths.js';
+import { _respellUnder, _canonicalLiveFile, _externalizeRealtime } from './paths.js';
 import { _injectDevtools } from './devtools-inject.js';
 import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 import { _installedSvelteVersion, _runeSubpathError } from './svelte-version.js';
@@ -55,7 +55,7 @@ export default function svelteRealtime(options) {
 	 * the path lies outside it.
 	 * @param {string} file
 	 */
-	const ownedLiveFile = (file) => _respellUnder(liveDir, resolve(root, file));
+	const ownedLiveFile = (file) => _canonicalLiveFile(liveDir, resolve(root, file));
 	/** @type {Map<string, string>} */
 	const handledVersions = new Map();
 	/**
@@ -182,6 +182,8 @@ export default function svelteRealtime(options) {
 					const real = _resolveFile(liveDir, modulePath.replace(/\.[jt]s$/, ''));
 					if (real) return real;
 				}
+				const file = _resolveFile(liveDir, modulePath);
+				if (file) return VIRTUAL_PREFIX + relative(liveDir, file).split(sep).join('/').replace(/\.(?:[jt]s|mjs)$/, '');
 				return VIRTUAL_PREFIX + modulePath;
 			}
 			return null;
@@ -209,7 +211,7 @@ export default function svelteRealtime(options) {
 
 			// $live/ virtual module
 			if (id.startsWith(VIRTUAL_PREFIX)) {
-				const modulePath = id.slice(VIRTUAL_PREFIX.length);
+				let modulePath = id.slice(VIRTUAL_PREFIX.length);
 				const filePath = _resolveFile(liveDir, modulePath);
 
 				if (!filePath) {
@@ -219,6 +221,7 @@ export default function svelteRealtime(options) {
 					));
 					return null;
 				}
+				modulePath = relative(liveDir, filePath).split(sep).join('/').replace(/\.(?:[jt]s|mjs)$/, '');
 
 				// Code gen cache: avoid re-parsing when source content hasn't changed
 				const cacheKey = (ssr ? 'ssr:' : 'client:') + filePath;

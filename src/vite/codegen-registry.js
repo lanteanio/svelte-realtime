@@ -2,6 +2,7 @@
 import { existsSync, readdirSync, statSync, readFileSync } from 'fs';
 import { resolve, relative, sep, posix } from 'path';
 import { _readCached } from './source-cache.js';
+import { _canonicalLiveFile, _respellUnder } from './paths.js';
 import { _runtimeExports } from './hooks-exports.js';
 import { _readStringLiteral, _skipStringContent, _findMatchingBrace, _extractTemplatePattern, _parseArrowReturnTemplate, _warnUnsafeExports, _locate } from './scanner.js';
 import { _extractAggregateWindows, _extractFlagDecl, _liveSource } from './extract-options.js';
@@ -201,8 +202,8 @@ export function _resolveFile(liveDir, modulePath) {
 	for (const ext of extensions) {
 		const full = resolve(liveDir, modulePath + ext);
 		// Prevent path traversal outside the live directory
-		if (!full.startsWith(liveDir + sep)) return null;
-		if (existsSync(full)) return full;
+		if (!_respellUnder(liveDir, full)) return null;
+		if (existsSync(full)) return _canonicalLiveFile(liveDir, full);
 	}
 	return null;
 }
