@@ -99,6 +99,9 @@
     "svelte-adapter-uws-extensions": "^0.5.10",
     "vitest": "^4.0.18"
   },
+  "overrides": {
+    "cookie": "^0.7.2"
+  },
   "keywords": [
     "svelte",
     "sveltekit",
