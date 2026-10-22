@@ -26,10 +26,13 @@ const devtools = !args.includes('--no-devtools');
 const adapterMode = option('--adapter', 'default');
 assert.ok(['default', 'wrapped', 'none'].includes(adapterMode), 'Unknown adapter mode');
 assert.ok(adapterMode === 'default' || (kit === '3' && mode === 'dev'), 'Adapter variants require Kit 3 dev');
+const viteMajor = option('--vite', 'locked');
+assert.ok(['locked', '5'].includes(viteMajor), '--vite must be 5');
+assert.ok(viteMajor === 'locked' || kit === '2', '--vite 5 requires Kit 2');
 const driveCase = option('--drive-case', 'as-invoked');
 assert.ok(['as-invoked', 'lower'].includes(driveCase), '--drive-case must be lower');
 assert.ok(driveCase === 'as-invoked' || (process.platform === 'win32' && kit === '3'), '--drive-case requires Windows and Kit 3');
-const fixture = path.join(root, 'test', 'fixtures', 'kit' + kit);
+const fixture = path.join(root, 'test', 'fixtures', 'kit' + kit + (viteMajor === '5' ? '-vite5' : ''));
 // Vite 8 realpaths its root, which on Windows upper-cases the drive letter,
 // while SvelteKit keeps the working directory as spelled.
 const workdir = driveCase === 'lower' ? fixture.replace(/^[A-Za-z]:/, drive => drive.toLowerCase()) : fixture;
@@ -38,7 +41,7 @@ const { WebSocket } = requireFixture('ws');
 // npm scripts start Vite under the same spelling as the working directory.
 const vite = path.join(workdir, 'node_modules', 'vite', 'bin', 'vite.js');
 const reportPath = path.resolve(option('--report', path.join(root, 'test-results',
-	'kit-compat-' + kit + '-' + mode + (devtools ? '' : '-no-devtools') + '.json')));
+	'kit-compat-' + kit + (viteMajor === '5' ? '-vite5' : '') + '-' + mode + (devtools ? '' : '-no-devtools') + '.json')));
 // The fixtures install this checkout as a packed copy (npm ci --install-links),
 // so a run must refuse an installed copy whose source differs from the checkout.
 async function sourceHash(directory) {
@@ -54,7 +57,7 @@ const sourceDigest = await sourceHash(path.join(root, 'src'));
 assert.equal(await sourceHash(path.join(fixture, 'node_modules', 'svelte-realtime', 'src')), sourceDigest,
 	'The fixture has a stale svelte-realtime copy. Run npm ci --install-links in ' + fixture);
 const report = {
-	kit, mode, devtools, hmr, adapterMode, driveCase,
+	kit, vite: requireFixture('vite/package.json').version, mode, devtools, hmr, adapterMode, driveCase,
 	startedAt: new Date().toISOString(),
 	sourceHash: sourceDigest,
 	checks: []
@@ -78,6 +81,8 @@ const routeFile = path.join(fixture, 'src/routes/state/+server.js');
 const addedFile = path.join(fixture, 'src/live/extra.js');
 let ownsAddedFile = false;
 const liveFile = path.join(fixture, 'src', 'live', 'counter.js');
+const hooksFile = path.join(fixture, 'src', 'hooks.ws.js');
+let originalHooks;
 
 async function check(name, fn) {
 	try {
@@ -183,8 +188,10 @@ try {
 	const pageErrors = [];
 	const frames = { sent: [], received: [] };
 	const pages = [await context.newPage(), await context.newPage()];
+	const navigatedAt = new Map();
 	for (const page of pages) {
 		page.setDefaultTimeout(15000);
+		page.on('framenavigated', frame => { if (frame === page.mainFrame()) navigatedAt.set(page, Date.now()); });
 		page.on('pageerror', error => { pageErrors.push(error.message); output += '\nBrowser error: ' + error.stack; });
 		page.on('console', message => { output += '\nBrowser console ' + message.type() + ': ' + message.text(); });
 		page.on('websocket', ws => {
@@ -347,7 +354,20 @@ try {
 			}
 			throw new Error('RPC did not reach expected state: ' + name + ' ' + JSON.stringify(result));
 		}
-		async function sharedStores() {
+		// Vite 5 answers a new or removed live file with a full page reload.
+		// Drive a page only once neither the file event nor a navigation is recent.
+		async function settledPages(changedAt) {
+			const deadline = Date.now() + 15000;
+			for (const page of pages) {
+				while (Date.now() - Math.max(changedAt, navigatedAt.get(page) ?? 0) < 1500) {
+					assert.ok(Date.now() < deadline, 'The page kept reloading');
+					await pause(100);
+				}
+				await page.waitForFunction(() => window.compat);
+			}
+		}
+		async function sharedStores(changedAt) {
+			await settledPages(changedAt);
 			const response = await fetch(origin + '/state', { signal: AbortSignal.timeout(5000) });
 			assert.equal(response.status, 200);
 			const baseline = (await response.json()).count;
@@ -364,15 +384,84 @@ try {
 		await check('new live files share HTTP and WebSocket state', async () => {
 			await assert.rejects(readFile(addedFile), { code: 'ENOENT' });
 			ownsAddedFile = true;
+			const addedAt = Date.now();
 			await writeFile(addedFile, "import { live } from 'svelte-realtime/server';\nimport { state } from '../lib/server/state.js';\nexport const read = live(() => state.count);\n");
 			await waitForRpc('extra/read', result => result.ok === true);
-			const count = await sharedStores();
+			const count = await sharedStores(addedAt);
 			assert.equal((await rpc('extra/read')).data, count);
 		});
 		await check('removed live files unregister without splitting state', async () => {
+			const removedAt = Date.now();
 			await unlink(addedFile);
 			await waitForRpc('extra/read', result => result.ok === false && result.code === UNREGISTERED);
-			await sharedStores();
+			await sharedStores(removedAt);
+		});
+		// Upgrade data is fixed per connection, so each attempt opens a new one.
+		async function freshRpc(name, accepts, args = []) {
+			const deadline = Date.now() + 20000;
+			let result;
+			let lastError;
+			while (Date.now() < deadline) {
+				try {
+					await connectSocket(origin);
+					result = await rpc(name, args);
+					if (accepts(result)) return result;
+				} catch (error) { lastError = error; }
+				await pause(200);
+			}
+			throw new Error('A new connection did not reach the expected state: ' + name + ' ' + (JSON.stringify(result) ?? lastError?.message));
+		}
+		async function registryAnswers(label) {
+			const echoed = await rpc('echo', ['hooks']);
+			assert.equal(echoed.ok, true, JSON.stringify(echoed));
+			assert.deepEqual(echoed.data, { value: 'hooks', token: 'fixture-secret', label });
+			const removed = await rpc('removed');
+			assert.equal(removed.code, UNREGISTERED, JSON.stringify(removed));
+			assert.equal((await rpc('added')).data, 'replacement');
+		}
+		await check('broken live modules recover without splitting state', async () => {
+			const working = await readFile(liveFile, 'utf8');
+			assert.equal(working.split("label: 'updated'").length, 2, 'Repair anchor must occur once');
+			const broken = output.length;
+			const brokenAt = Date.now();
+			await writeFile(liveFile, working + '\nexport const broken = live(() => {;\n');
+			const deadline = Date.now() + 15000;
+			while (Date.now() < deadline && !/HMR failed for src\/live\/counter/.test(output.slice(broken))) await pause(100);
+			assert.match(output.slice(broken), /HMR failed for src\/live\/counter/, 'The broken save did not report a failed reload');
+			// The previous handlers keep serving while the module is broken.
+			await freshRpc('echo', result => result.ok === true && result.data.label === 'updated', ['hooks']);
+			await sharedStores(brokenAt);
+			const repairedAt = Date.now();
+			await writeFile(liveFile, working.replace("label: 'updated'", "label: 'repaired'"));
+			await freshRpc('echo', result => result.ok === true && result.data.label === 'repaired', ['hooks']);
+			await registryAnswers('repaired');
+			await sharedStores(repairedAt);
+		});
+		const hooksAnchor = "return { id: 'compatibility-test' };";
+		await check('hooks.ws edits keep live handlers and shared state', async () => {
+			originalHooks = await readFile(hooksFile);
+			const source = originalHooks.toString('utf8');
+			assert.equal(source.split(hooksAnchor).length, 2, 'hooks.ws anchor must occur once');
+			assert.equal((await freshRpc('connection', result => result.ok === true)).data, 'compatibility-test');
+			const editedAt = Date.now();
+			await writeFile(hooksFile, source.replace(hooksAnchor, "return { id: 'compatibility-test-edited' };"));
+			await freshRpc('connection', result => result.ok === true && result.data === 'compatibility-test-edited');
+			await registryAnswers('updated');
+			await sharedStores(editedAt);
+		});
+		await check('deleted and recreated hooks.ws restore live handlers and shared state', async () => {
+			const deleted = output.length;
+			await unlink(hooksFile);
+			// The deletion must reach the server before the file returns.
+			const deadline = Date.now() + 15000;
+			while (Date.now() < deadline && !/hooks\.ws/.test(output.slice(deleted))) await pause(100);
+			assert.match(output.slice(deleted), /hooks\.ws/, 'The server did not observe the hooks.ws deletion');
+			await pause(500);
+			const recreatedAt = Date.now();
+			await writeFile(hooksFile, originalHooks.toString('utf8').replace(hooksAnchor, "return { id: 'compatibility-test-recreated' };"));
+			await freshRpc('connection', result => result.ok === true && result.data === 'compatibility-test-recreated');
+			await registryAnswers('updated');
+			await sharedStores(recreatedAt);
 		});
 	}
 	await check('browser has no runtime errors', () => assert.deepEqual(pageErrors, []));
@@ -405,6 +494,10 @@ try {
 			});
 			await writeFile(liveFile, originalSource);
 			assert.equal(hash(await readFile(liveFile)), hash(originalSource), 'HMR source restored byte for byte');
+		}
+		if (originalHooks) {
+			await writeFile(hooksFile, originalHooks);
+			assert.equal(hash(await readFile(hooksFile)), hash(originalHooks), 'hooks.ws restored byte for byte');
 		}
 		if (originalRoute) {
 			await writeFile(routeFile, originalRoute);

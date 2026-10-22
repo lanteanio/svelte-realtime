@@ -64,10 +64,12 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             test/fixtures/kit2/package-lock.json
+            test/fixtures/kit2-vite5/package-lock.json
             test/fixtures/kit3/package-lock.json
       - run: npm ci
       - run: npx playwright install --with-deps chromium
       - run: npm ci --install-links --prefix test/fixtures/kit2
+      - run: npm ci --install-links --prefix test/fixtures/kit2-vite5
       - run: npm ci --install-links --prefix test/fixtures/kit3
       - run: npm run test:kit
       - run: npm run test:scaffold

@@ -1,15 +1,20 @@
 # SvelteKit compatibility fixtures
 
-Install the root development dependencies and both locked fixture trees:
+Install the root development dependencies and the three locked fixture trees:
 
 ```sh
 npm ci
 npx playwright install chromium
 npm ci --install-links --prefix test/fixtures/kit2
+npm ci --install-links --prefix test/fixtures/kit2-vite5
 npm ci --install-links --prefix test/fixtures/kit3
 ```
 
-Run all browser and WebSocket combinations in sequence (eight, plus two
+`kit2` runs SvelteKit 2 on Vite 6 and `kit3` runs SvelteKit 3 on Vite 8.
+`kit2-vite5` runs SvelteKit 2 on Vite 5, the oldest Vite the Kit 2 peer range
+admits; select it with `--kit 2 --vite 5`.
+
+Run all browser and WebSocket combinations in sequence (ten, plus two
 lowercase-drive cases on Windows):
 
 ```sh
@@ -21,6 +26,8 @@ Run one combination while developing:
 ```sh
 node test/kit-compat/run.mjs --kit 2 --mode production
 node test/kit-compat/run.mjs --kit 2 --mode dev --hmr
+node test/kit-compat/run.mjs --kit 2 --vite 5 --mode production
+node test/kit-compat/run.mjs --kit 2 --vite 5 --mode dev --hmr
 node test/kit-compat/run.mjs --kit 3 --mode production
 node test/kit-compat/run.mjs --kit 3 --mode dev --hmr
 node test/kit-compat/run.mjs --kit 2 --mode dev --no-devtools
@@ -33,7 +40,7 @@ node test/kit-compat/run.mjs --kit 3 --mode dev --hmr --drive-case lower
 
 Each fixture installs this checkout as a packed copy, so repeat its
 `npm ci --install-links` after changing `src/`; the runner refuses a fixture
-whose installed copy differs from the checkout. Both fixtures use
+whose installed copy differs from the checkout. All fixtures use
 svelte-adapter-uws 0.6.0-next.96 from the registry.
 
 The runner uses each fixture's own Vite binary and an OS-assigned port.
@@ -58,7 +65,12 @@ That single edit must reload the registry exactly once, even when Vite reports
 the file under more than one path spelling.
 A route-only edit then verifies the updated HTTP response, fresh WebSocket RPC,
 and matching stores in both pages. Adding and removing a live file must update
-the RPC registry and preserve shared HTTP and WebSocket state. Kit 3 development also covers a renamed
+the RPC registry and preserve shared HTTP and WebSocket state. A syntax error
+saved into a live module must report a failed reload while the previous
+handlers keep serving, and the repaired save must register the new handlers
+without splitting state. Editing `src/hooks.ws.js` must load the new upgrade
+hook on fresh connections while live handlers and shared state survive; deleting
+it and creating it again must do the same. Kit 3 development also covers a renamed
 adapter and a configuration without an inline adapter.
 On Windows, `--drive-case lower` starts Vite from the fixture path with a
 lowercase drive letter, as a VS Code terminal often does. SvelteKit keeps that
@@ -75,7 +87,7 @@ starting can be retried by saving again. Fix or restart a permanently stalled
 dev server; the timeout does not cancel module evaluation.
 
 Each run writes named pass/fail checks and captured server output to
-`test-results/kit-compat-<major>-<mode>.json`. Use `--report <path>` for a distinct
+`test-results/kit-compat-<major>[-vite5]-<mode>.json`. Use `--report <path>` for a distinct
 output file. Failures return a nonzero exit code; assertions are never skipped.
 The named checks let mutation runs distinguish an assertion failure from a
 startup or dependency failure.
