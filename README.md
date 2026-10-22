@@ -1512,6 +1512,20 @@ If the connection drops again while the queue is replaying, the replay stops the
 
 A queued call keeps a copy of its arguments in the form the wire carries them (JSON), taken when the call is made. That copy is what replays, what is stored, and what `beforeReplay`, `onReplayError`, `onConflict` and a `replay` function see (a `Date` as its ISO string, a class instance as a plain object), so `save(form)` with a `$state` form replays the values it was called with even if the form changes before the reconnect. Each queued call holds its own copy until it settles, so a large object saved over and over while offline is held once per call, up to `maxQueue`. A call whose arguments cannot be serialized (a `BigInt`, a cycle) is not queued.
 
+### Simulating offline
+
+`simulateOffline()` takes the connection down the way a dropped network does, without touching the browser: the socket closes, `status` reads `'disconnected'`, calls go to the queue above and streams wait to resubscribe. Nothing reconnects until `resumeOnline()`, which reconnects at once; streams resubscribe and the queue replays as after any reconnect. The pause spends none of the adapter's reconnect budget and never ends in `'failed'`, so a demo's "Go offline" button or an app test can drive the offline path directly:
+
+<!-- doc-code: ambient names="configure,save" -->
+```js
+import { configure, simulateOffline, resumeOnline } from 'svelte-realtime/client';
+
+configure({ offline: { queue: true } });
+simulateOffline();
+const saved = save(draft); // queued, not sent
+resumeOnline();            // reconnects; the call replays and `saved` resolves
+```
+
 ### Durable persistence (survive a reload)
 
 By default the queue lives in memory and dies with the tab. Turn on `persist` and queued mutations survive reloads and browser restarts - stored in IndexedDB, restored on the next load, and replayed on reconnect:
@@ -5473,6 +5487,7 @@ Import from `svelte-realtime/client`.
 | `combine(...stores, fn)` | Multi-store composition |
 | `onSignal(userId, callback)` | Listen for point-to-point signals |
 | `onDerived` | Reactive derived topic subscription (the adapter's, on the bound connection) |
+| `simulateOffline()` / `resumeOnline()` | Pause the connection as a dropped network would, and reconnect it ([Simulating offline](#simulating-offline)) |
 
 **Stream store methods** (on `$live/` stream imports):
 

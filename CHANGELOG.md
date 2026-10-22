@@ -67,6 +67,8 @@ Published artifact identities are recorded in the [release manifest](docs/releas
 
 ### Added
 
+- `simulateOffline()` and `resumeOnline()` from `svelte-realtime/client` pause the connection as a dropped network would and reconnect it on demand, so demos and tests can exercise the offline queue and stream recovery without stubbing `WebSocket`. Pausing a socket that just opened does not count toward the fast-close proxy diagnostic.
+
 - `LiveError` and `RpcError` accept explicit bounded JSON `params` and `details`, preserved through RPC, uploads, SSR hydration and the `createTestEnv` harness. Applications can resolve localized display text from code and parameters while retaining source-English messages for compatibility.
 
 - Declare `Register.user` once to type live contexts, socket user data, guards, stream callbacks, uploads, and generated stream loading options throughout an app. Unregistered bare `LiveContext` and `UploadContext` annotations now default to `any`, matching unregistered callback inference; supply an explicit generic to retain `unknown`.

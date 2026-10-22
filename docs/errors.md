@@ -1107,10 +1107,10 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 
 These sites have a computed code, event, or message prefix that the literal scanner cannot resolve. They remain visible here instead of being counted as full literal coverage. Wire forwarding and application-provided messages may vary at runtime.
 
-- <code>src/client/connection.js:150</code>
-- <code>src/client/connection.js:218</code>
-- <code>src/client/connection.js:233</code>
-- <code>src/client/connection.js:258</code>
+- <code>src/client/connection.js:152</code>
+- <code>src/client/connection.js:220</code>
+- <code>src/client/connection.js:235</code>
+- <code>src/client/connection.js:260</code>
 - <code>src/client/internal-state.js:140</code>
 - <code>src/client/offline.js:315</code>
 - <code>src/client/stream.js:2042</code>

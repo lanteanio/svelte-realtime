@@ -6,13 +6,13 @@
 	"fragmentCeiling": 1,
 	"executedFloor": 33,
 	"summary": {
-		"total": 244,
+		"total": 245,
 		"classifications": {
 			"command": 4,
 			"tutorial": 74,
 			"executed": 33,
 			"output": 5,
-			"syntax": 126,
+			"syntax": 127,
 			"fragment": 1,
 			"config": 1
 		},
@@ -21,7 +21,7 @@
 			"app-context": 74,
 			"packed-runtime": 33,
 			"reviewed-output": 5,
-			"acorn": 119,
+			"acorn": 120,
 			"svelte": 6,
 			"reviewed-fragment": 1,
 			"manual-config": 1,
@@ -29,7 +29,7 @@
 		},
 		"notRunnable": {
 			"app-context": 74,
-			"ambient-identifiers": 117,
+			"ambient-identifiers": 118,
 			"browser-component": 6,
 			"type-declarations-only": 1,
 			"requires-browser": 1
@@ -759,6 +759,16 @@
 			"classification": "executed",
 			"channel": "packed-runtime",
 			"verification": "test/packed-readme-examples.test.js"
+		},
+		{
+			"document": "README.md",
+			"fingerprint": "a98fdbc637016053c9d8d420122db06b6347dc44b46c24919ceb00a0b2d5115f",
+			"occurrence": 1,
+			"language": "js",
+			"section": "Offline queue > Simulating offline",
+			"classification": "syntax",
+			"channel": "acorn",
+			"reason": "not runnable: ambient-identifiers configure,save"
 		},
 		{
 			"document": "README.md",

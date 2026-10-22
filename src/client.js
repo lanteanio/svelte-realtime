@@ -33,7 +33,7 @@ export { __stream, _createStreamAtSchemaVersion, createReactiveStream } from './
  * its `status` view so a collaborative surface can react to connectivity
  * without a separate adapter import.
  */
-export { onDerived, failure, status } from './client/connection.js';
+export { onDerived, failure, status, simulateOffline, resumeOnline } from './client/connection.js';
 
 /**
  * Re-export `createSharedRandom` from the adapter's smooth plugin. The deterministic

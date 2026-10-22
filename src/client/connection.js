@@ -98,6 +98,8 @@ function _warnDeprecation(dep) {
 
 /** @type {boolean} */
 let disconnectListenerAttached = false;
+/** Set while simulateOffline() holds the connection down. */
+let _offlinePaused = false;
 let _applyStatus;
 
 /** @type {boolean} */
@@ -347,7 +349,8 @@ export function ensureDisconnectListener() {
 			_drainPendingUploadsOnDisconnect();
 		}
 		if (s === 'disconnected' || s === 'failed') {
-
+			// A close the app asked for with simulateOffline() is no symptom.
+			if (_offlinePaused) lastOpenAt = 0;
 			if (lastOpenAt > 0) {
 				const openDuration = now() - lastOpenAt;
 				lastOpenAt = 0;
@@ -480,6 +483,30 @@ export const status = {
 		return _conn().status.subscribe(fn);
 	}
 };
+
+/**
+ * Take the bound connection offline as a dropped network would: the socket
+ * closes, `status` reads 'disconnected', calls queue (with the offline queue
+ * enabled) and streams wait to resubscribe. Nothing reconnects until
+ * `resumeOnline()`, and the pause spends none of the reconnect budget.
+ * Repeated calls do nothing; after a close for good it does nothing.
+ */
+export function simulateOffline() {
+	_conn();
+	_offlinePaused = true;
+	_bound.simulateOffline?.();
+}
+
+/**
+ * Reconnect a connection `simulateOffline()` paused, at once: streams
+ * resubscribe and queued calls replay as after any reconnect. Does nothing
+ * when the connection is not paused.
+ */
+export function resumeOnline() {
+	_conn();
+	_offlinePaused = false;
+	_bound.resumeOnline?.();
+}
 
 /**
  * The failure store of the bound connection (see `status`).

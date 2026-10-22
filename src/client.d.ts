@@ -1133,6 +1133,24 @@ export const failure: Readable<Failure | null>;
  */
 export const status: Readable<string>;
 
+/**
+ * Take the connection offline as a dropped network would, until
+ * `resumeOnline()`: the socket closes, `status` reads `'disconnected'`, calls
+ * wait in the offline queue (when enabled) and streams wait to resubscribe.
+ * Browser `online` events and retry timers do not reconnect while paused, and
+ * the pause spends none of the reconnect budget. Repeated calls do nothing;
+ * after a close for good it does nothing. For demos and tests of offline
+ * behavior.
+ */
+export function simulateOffline(): void;
+
+/**
+ * Reconnect a connection paused by `simulateOffline()` at once: streams
+ * resubscribe and the offline queue replays as after any reconnect. Does
+ * nothing when the connection is not paused.
+ */
+export function resumeOnline(): void;
+
 /** A reseedable deterministic generator: the same seed yields the same draws. */
 export interface SharedRandom {
 	/** Restart the stream from a new seed. */
