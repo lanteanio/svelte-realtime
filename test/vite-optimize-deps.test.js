@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -8,6 +8,8 @@ import { ADAPTER_CLIENT_DEPS } from '../src/vite/optimize-deps.js';
 const CLIENT = 'svelte-realtime/client';
 const DEPS = [CLIENT, 'svelte-realtime/devtools'];
 const ADAPTER = ['svelte-adapter-uws/client', 'svelte-adapter-uws/plugins/smooth/random'];
+const SMOOTH_CHANNEL = 'svelte-adapter-uws/plugins/smooth/client';
+const CRDT_CHANNEL = 'svelte-adapter-uws/plugins/crdt/channel';
 const { exports } = JSON.parse(readFileSync(resolve(import.meta.dirname, '../package.json'), 'utf8'));
 
 describe('dependency optimization for generated modules', () => {
@@ -24,7 +26,7 @@ describe('dependency optimization for generated modules', () => {
 	function installRealtime(dir) {
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: 'svelte-realtime', exports }));
-		for (const entry of ['./client', './devtools']) {
+		for (const entry of Object.keys(exports)) {
 			const file = resolve(dir, exports[entry].default);
 			mkdirSync(dirname(file), { recursive: true });
 			writeFileSync(file, '');
@@ -33,11 +35,11 @@ describe('dependency optimization for generated modules', () => {
 	const installed = () => installRealtime(resolve(appRoot, 'node_modules/svelte-realtime'));
 	function installAdapter(dir) {
 		const adapterExports = {};
-		for (const id of ADAPTER) {
+		for (const id of [...ADAPTER, SMOOTH_CHANNEL, CRDT_CHANNEL]) {
 			const file = './src/' + id.slice('svelte-adapter-uws/'.length) + '.js';
 			adapterExports['.' + id.slice('svelte-adapter-uws'.length)] = { default: file };
 			mkdirSync(dirname(resolve(dir, file)), { recursive: true });
-			writeFileSync(resolve(dir, file), '');
+			writeFileSync(resolve(dir, file), id === CRDT_CHANNEL ? "import * as Y from 'yjs';\nimport { on } from '../../client.js';\n" : '');
 		}
 		mkdirSync(dir, { recursive: true });
 		writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name: 'svelte-adapter-uws', exports: adapterExports }));
@@ -49,6 +51,15 @@ describe('dependency optimization for generated modules', () => {
 		installRealtime(target);
 		link(target, resolve(appRoot, 'node_modules/svelte-realtime'));
 		return target;
+	}
+	function installPackage(name, version = '1.0.0') {
+		const dir = resolve(appRoot, 'node_modules', name);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ name, version, main: 'index.js' }));
+		writeFileSync(resolve(dir, 'index.js'), '');
+	}
+	function writeLive(source) {
+		writeFileSync(resolve(appRoot, 'src/live/mod.js'), "import { live } from 'svelte-realtime/server';\n" + source + '\n');
 	}
 	function link(target, path) {
 		mkdirSync(resolve(path, '..'), { recursive: true });
@@ -152,6 +163,86 @@ describe('dependency optimization for generated modules', () => {
 		installed();
 		installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'));
 		expect(resolveWith({}, { exclude: ['svelte-realtime'] })).toEqual([]);
+	});
+
+	describe('modules the generated code imports for the declared export kinds', () => {
+		beforeEach(() => {
+			installed();
+			installAdapter(resolve(appRoot, 'node_modules/svelte-adapter-uws'));
+			installPackage('yjs');
+		});
+
+		it('optimizes the smoothed-entity runtime for a live.smooth export', () => {
+			writeLive("export const game = live.smooth({ topic: 'game', apply: (s) => s });");
+			expect(resolveWith()).toEqual([...DEPS, 'svelte-realtime/smooth', SMOOTH_CHANNEL]);
+		});
+
+		it('optimizes the CRDT runtime for a live.doc, live.map or live.array export', () => {
+			for (const kind of ['doc', 'map', 'array']) {
+				writeLive(`export const notes = live.${kind}({ topic: 'notes' });`);
+				expect(resolveWith()).toEqual([...DEPS, 'svelte-realtime/doc', CRDT_CHANNEL]);
+			}
+		});
+
+		it('leaves out the CRDT channel when yjs is not installed', () => {
+			rmSync(resolve(appRoot, 'node_modules/yjs'), { recursive: true });
+			writeLive("export const notes = live.doc({ topic: 'notes' });");
+			expect(resolveWith()).toEqual([...DEPS, 'svelte-realtime/doc']);
+		});
+
+		it('optimizes the multiplayer view only for a multiplayer export that has one', () => {
+			writeLive("export const board = live.multiplayer({ topic: 'board' });");
+			expect(resolveWith()).toEqual(DEPS);
+			writeLive("export const board = live.multiplayer({ topic: 'board', presence: true });");
+			expect(resolveWith()).toEqual([...DEPS, 'svelte-realtime/multiplayer']);
+		});
+
+		it('optimizes the rooms list only for an enumerable room', () => {
+			writeLive("export const lobby = live.room({ topic: 'lobby' });");
+			expect(resolveWith()).toEqual(DEPS);
+			writeLive("export const lobby = live.room({ topic: 'lobby', enumerable: true });");
+			expect(resolveWith()).toEqual([...DEPS, 'svelte-realtime/rooms']);
+		});
+
+		it('optimizes the adapter runtime and leaves the realtime subpaths of a linked svelte-realtime to source', () => {
+			rmSync(resolve(appRoot, 'node_modules/svelte-realtime'), { recursive: true });
+			const target = linkedRealtime();
+			installAdapter(resolve(target, 'node_modules/svelte-adapter-uws'));
+			writeLive("export const game = live.smooth({ topic: 'game', apply: (s) => s });\nexport const notes = live.doc({ topic: 'notes' });");
+			expect(resolveWith()).toEqual([...ADAPTER, SMOOTH_CHANNEL, CRDT_CHANNEL]);
+		});
+
+		it('adds no rune module the installed Svelte cannot run', () => {
+			installPackage('svelte', '4.2.19');
+			writeLive("export const game = live.smooth({ topic: 'game', apply: (s) => s });\nexport const notes = live.doc({ topic: 'notes' });");
+			expect(resolveWith()).toEqual(DEPS);
+		});
+
+		it('keeps excluded runtime modules out of the list', () => {
+			writeLive("export const game = live.smooth({ topic: 'game', apply: (s) => s });");
+			expect(resolveWith({}, { exclude: [SMOOTH_CHANNEL] })).toEqual([...DEPS, 'svelte-realtime/smooth']);
+			expect(resolveWith({}, { exclude: ['svelte-adapter-uws', 'svelte-realtime/smooth'] })).toEqual(DEPS);
+			expect(resolveWith({}, { noDiscovery: true })).toEqual([]);
+		});
+
+		it('leaves the warnings of a live module to its first request', () => {
+			writeLive("export const game = live.smooth({ topic: 'game', apply: (s) => s });\nexport const helper = 1;");
+			const warn = console.warn;
+			const spy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+			try {
+				const plugin = realtime({ typedImports: false });
+				const resolved = { include: [] };
+				plugin.configResolved({ root: appRoot, build: {}, command: 'serve', optimizeDeps: resolved });
+				expect(resolved.include).toContain(SMOOTH_CHANNEL);
+				expect(spy).not.toHaveBeenCalled();
+				expect(console.warn).toBe(spy);
+				plugin.load.call({ error: (e) => { throw new Error(e); } }, '\0live:mod', { ssr: false });
+				expect(spy.mock.calls.flat().join('\n')).toContain("exports 'helper' which is not wrapped in live()");
+			} finally {
+				spy.mockRestore();
+			}
+			expect(console.warn).toBe(warn);
+		});
 	});
 
 	it('lists every adapter entry the realtime browser modules import', () => {

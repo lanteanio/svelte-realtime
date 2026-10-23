@@ -11,7 +11,7 @@ import { _loadRegistryDirect, _hmrReloadRegistry, _loadServerModule, _serverModu
 import { _respellUnder, _canonicalLiveFile, _externalizeRealtime } from './paths.js';
 import { _injectDevtools } from './devtools-inject.js';
 import { _createRegistryQueue } from './registry-queue.js';
-import { _includeGeneratedDeps, CLIENT_DEP, DEVTOOLS_DEPS } from './optimize-deps.js';
+import { _includeGeneratedDeps, _generatedClientImports, CLIENT_DEP, DEVTOOLS_DEPS } from './optimize-deps.js';
 import { REALTIME_ERROR_IDS, realtimeErrorMessage } from '../error-registry.js';
 import { _installedSvelteVersion, _runeSubpathError } from './svelte-version.js';
 
@@ -120,13 +120,15 @@ export default function svelteRealtime(options) {
 			liveDir = resolve(root, dir);
 			isSsr = !!config.build?.ssr;
 			isDev = config.command === 'serve';
+			svelteVersion = _installedSvelteVersion(root);
 			// Vite otherwise discovers these client entries on the first page
 			// load and reloads the page once for each, which can abort the
-			// first navigation.
+			// first navigation. Runs before the caches below are cleared, so
+			// generating the client modules here leaves no warning recorded.
 			if (isDev && !config.isPreview && config.optimizeDeps) {
-				_includeGeneratedDeps(config.root, config.optimizeDeps, !!config.resolve?.preserveSymlinks, devtools ? DEVTOOLS_DEPS : [CLIENT_DEP]);
+				_includeGeneratedDeps(config.root, config.optimizeDeps, !!config.resolve?.preserveSymlinks, devtools ? DEVTOOLS_DEPS : [CLIENT_DEP],
+					() => _generatedClientImports(liveDir, dir, reconcileIntervalMs, svelteVersion));
 			}
-			svelteVersion = _installedSvelteVersion(root);
 			_fileCache.clear();
 				_codeCache.clear();
 				_warnedExports.clear();
