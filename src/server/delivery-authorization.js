@@ -30,14 +30,24 @@ const resolved = new WeakMap();
 /** Whether a policy is configured or installed in this process; keeps every other path free. */
 let anyConfigured = false;
 /**
- * The policy record whose hooks the adapter ran last. Installed platforms
- * call it through a stable trampoline, so a reloaded hooks.ws takes over in
- * place once the adapter runs its hooks. This assumes one instance of this
+ * The active policy record; installed platforms read it once per frame
+ * through _activeAuthorize, so a newer realtime() call takes over in place
+ * once the adapter runs its hooks. This assumes one instance of this
  * module per process (one realtime module graph); a second copy would keep
  * its own active record and could not reach a platform the first installed.
  * @type {DeliveryPolicy | null}
  */
 let activePolicy = null;
+/** Options of every retired policy, by function: an equal record stays retired. @type {WeakMap<Function, any[]>} */
+const retiredPolicies = new WeakMap();
+
+/** @param {DeliveryPolicy} policy */
+function _isRetired(policy) {
+	if (policy.retired) return true;
+	if (!retiredPolicies.get(policy.authorize)?.some((options) => _sameOptions(options, policy.options))) return false;
+	policy.retired = true;
+	return true;
+}
 /** Platforms that already logged each diagnostic. @type {WeakSet<object>} */
 const reportedUnavailable = new WeakSet();
 /** @type {WeakSet<object>} */
@@ -274,7 +284,7 @@ class StalePolicyError extends Error {}
  * @returns {{ installedNow: boolean }}
  */
 export function ensureDeliveryAuthorization(platform, policy) {
-	if (policy.retired) throw new StalePolicyError('[svelte-realtime] realtime({ authorizeDelivery }): this realtime() call was replaced by a newer delivery policy');
+	if (_isRetired(policy)) throw new StalePolicyError('[svelte-realtime] realtime({ authorizeDelivery }): this realtime() call was replaced by a newer delivery policy');
 	const existing = _installationOf(platform);
 	if (existing !== undefined && !_sameOptions(existing.options, policy.options)) {
 		throw new Error('[svelte-realtime] realtime({ deliveryAuthorizationOptions }): the installed delivery policy has different options; restart the server to change them');
@@ -289,6 +299,9 @@ export function ensureDeliveryAuthorization(platform, policy) {
 	if (activePolicy === null) activePolicy = policy;
 	else if (activePolicy !== policy && !_samePolicy(activePolicy, policy)) {
 		activePolicy.retired = true;
+		const retired = retiredPolicies.get(activePolicy.authorize);
+		if (retired) retired.push(activePolicy.options);
+		else retiredPolicies.set(activePolicy.authorize, [activePolicy.options]);
 		activePolicy = policy;
 		console.warn(formatDiagnostic({
 			source: 'svelte-realtime',
@@ -346,7 +359,7 @@ function _end(ws) {
  */
 export function guardDeliveryAuthorization(ws, platform, policy, opening) {
 	if (activePolicy === policy && platform && _installationOf(platform) !== undefined) return true;
-	if (policy.retired) return _refuseStale(ws, platform);
+	if (_isRetired(policy)) return _refuseStale(ws, platform);
 	let installedNow;
 	try {
 		({ installedNow } = ensureDeliveryAuthorization(platform, policy));

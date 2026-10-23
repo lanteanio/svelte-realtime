@@ -529,3 +529,31 @@ describe('delivery authorization installation order and options', () => {
 		vi.restoreAllMocks();
 	});
 });
+
+describe('delivery authorization retirement of equal policies', () => {
+	it('refuses a record equal to a retired one', async () => {
+		vi.resetModules();
+		const api = await import('../src/server.js');
+		const warnings = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const strict = () => false;
+		const platform = mockPlatform();
+		platform.connections = 0;
+		platform.authorizeDelivery = (callback) => { platform.gate = callback; };
+		const socket = () => ({ ...mockWs({ id: 'scanner' }), ended: null, end(code) { this.ended = code; } });
+		const first = api.realtime({ authorizeDelivery: strict, authorizeWireSubscribe: false });
+		first.init({ platform });
+		const newer = api.realtime({ authorizeDelivery: () => true, authorizeWireSubscribe: false });
+		newer.open(socket(), { platform: Object.create(platform) });
+		// A later call naming the retired function and options cannot take over.
+		const alias = api.realtime({ authorizeDelivery: strict, authorizeWireSubscribe: false });
+		const ws = socket();
+		alias.open(ws, { platform: Object.create(platform) });
+		expect(ws.ended).toBe(1011);
+		expect(platform.gate(socket(), { kind: 'message', topic: 't', event: 'e', data: null, binary: false })).toBe(true);
+		expect(warnings).toHaveBeenCalledTimes(1);
+		expect(() => alias.init({ platform })).toThrow('replaced by a newer delivery policy');
+		warnings.mockRestore();
+		errors.mockRestore();
+	});
+});

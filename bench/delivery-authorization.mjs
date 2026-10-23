@@ -87,7 +87,8 @@ for (let round = 0; round < ROUNDS; round++) {
 const warn = console.warn, error = console.error;
 console.warn = console.error = () => {};
 const switches = checkOnly ? 10 : 10_000;
-const records = Array.from({ length: switches }, () => /** @type {any} */ (configureDeliveryAuthorization(() => true, undefined)));
+// The last record answers a sentinel, so the check below can tell it decided.
+const records = Array.from({ length: switches }, (_, i) => /** @type {any} */ (configureDeliveryAuthorization(i === switches - 1 ? () => 'newest' : () => true, undefined)));
 const switchStart = process.hrtime.bigint();
 for (const record of records) guardDeliveryAuthorization(ws, view, record, false);
 rows['switch to newer policy'].push(Number(process.hrtime.bigint() - switchStart) / switches);
@@ -95,7 +96,7 @@ const retiredWs = { getUserData: () => ({ id: 'u' }), ended: 0, end() { this.end
 if (guardDeliveryAuthorization(retiredWs, view, policy, false) !== false || retiredWs.ended !== 1) throw new Error('a retired policy was served');
 for (let round = 0; round < ROUNDS; round++) rows['guard, retired policy'].push(measure(() => guardDeliveryAuthorization(retiredWs, view, policy, false)));
 console.warn = warn; console.error = error;
-if (base.callback(ws, frame) !== true) throw new Error('the newest policy did not decide');
+if (base.callback(ws, frame) !== 'newest') throw new Error('the newest policy did not decide');
 console.log('no policy: realtime({}) returns the plain message and unsubscribe hooks');
 for (const [label, values] of Object.entries(rows)) {
 	const sorted = [...values].sort((a, b) => a - b);
