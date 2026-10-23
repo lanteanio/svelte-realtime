@@ -74,12 +74,16 @@ startup failure in development too, as it always has in production.
 The scaffolder smoke uses a loopback npm registry to serve candidate archives.
 All other packages resolve from the normal npm registry, and strict peer
 resolution stays enabled. It creates an isolated npm project, invokes the real
-CLI, builds the generated app, and checks counter updates in two browsers in
-production and development.
+CLI, builds the generated app, and checks counter updates in two pages in
+production and development. The development run starts with an empty Vite
+dependency cache. It fails if Vite reports dependencies optimized after its
+first optimization, reloads for changed dependencies, or loads either page
+more than once, and it names every condition that failed.
+The realtime archive must carry the version in the root package.json.
 
 ```sh
 npm pack --pack-destination test-results
-npm run test:scaffold -- --adapter-pack /path/to/svelte-adapter-uws-0.5.11.tgz --realtime-pack test-results/svelte-realtime-0.5.14.tgz
+npm run test:scaffold -- --adapter-pack /path/to/svelte-adapter-uws-0.5.11.tgz --realtime-pack test-results/svelte-realtime-0.5.15.tgz
 ```
 
 Add `--explicit-package` to exercise the npm exec package-option form too.

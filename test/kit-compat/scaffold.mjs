@@ -18,8 +18,9 @@ for (const path of [adapterPack, realtimePack]) {
  const manifest = JSON.parse(execFileSync('tar', ['-xOf', resolve(path), 'package/package.json'], { encoding: 'utf8', windowsHide: true }));
  packages.set(manifest.name, { manifest, bytes, integrity: 'sha512-' + createHash('sha512').update(bytes).digest('base64'), shasum: createHash('sha1').update(bytes).digest('hex') });
 }
+const realtimeVersion = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version;
 assert.equal(packages.get('svelte-adapter-uws')?.manifest.version, '0.5.11');
-assert.equal(packages.get('svelte-realtime')?.manifest.version, '0.5.14');
+assert.equal(packages.get('svelte-realtime')?.manifest.version, realtimeVersion);
 const directory = resolve(root, 'test-results', 'scaffold-' + Date.now());
 mkdirSync(directory, { recursive: true });
 writeFileSync(join(directory, 'package.json'), JSON.stringify({ name: 'scaffold-smoke', private: true }));
@@ -119,7 +120,9 @@ async function browserSmoke(app, dev) {
   const pages = [await context.newPage(), await context.newPage()];
   const errors = [];
   const frames = [];
-  for (const page of pages) {
+  const loads = pages.map(() => 0);
+  for (const [index, page] of pages.entries()) {
+   page.on('load', () => { loads[index]++; });
    page.on('pageerror', error => errors.push(error.message));
    page.on('websocket', socket => {
     if (new URL(socket.url()).pathname !== '/ws') return;
@@ -140,6 +143,17 @@ async function browserSmoke(app, dev) {
    await pages[0].locator('#svelte-realtime-devtools').waitFor({ state: 'attached' });
    await pages[0].keyboard.press('Control+Shift+L');
    await pages[0].locator('#svelte-realtime-devtools').waitFor({ state: 'visible' });
+   // The app's dependency cache starts empty here. Vite's scan skips the
+   // plugin's generated modules, so an entry point that only they import is
+   // met when the warmup or the browser loads them: Vite optimizes again and
+   // may reload every open page, possibly before either page has connected.
+   await pages[0].waitForTimeout(3000);
+   const failures = [];
+   const late = child.output().match(/(?:new )?dependenc(?:y|ies) optimized:[^\n]*/g);
+   if (late) failures.push('dependencies optimized after startup: ' + late.join('; '));
+   if (/optimized dependencies changed/.test(child.output())) failures.push('dependency optimization reloaded the pages');
+   if (loads.some(count => count !== 1)) failures.push('page loads ' + JSON.stringify(loads));
+   assert.deepEqual(failures, [], 'First dev session: ' + failures.join(', '));
   }
   assert.deepEqual(errors, [], 'Browser errors');
   assert(!/transformIndexHtml.*not supported|transform_index_html_unsupported/.test(child.output()), 'Unsupported Vite hook warning');
@@ -153,12 +167,12 @@ async function browserSmoke(app, dev) {
 try {
  const invoke = process.argv.includes('--explicit-package')
   ? [npm, 'exec', '--yes', '--package=' + resolve(realtimePack), '--', 'svelte-realtime']
-  : [npm, 'exec', '--yes', '--', 'svelte-realtime@0.5.14'];
+  : [npm, 'exec', '--yes', '--', 'svelte-realtime@' + realtimeVersion];
  await command('scaffold', [...invoke, 'app', '--template', 'example'], directory);
  const app = join(directory, 'app');
  const manifest = JSON.parse(readFileSync(join(app, 'package.json'), 'utf8'));
  assert(manifest.devDependencies['@sveltejs/kit'].startsWith('^3.'), 'Scaffold did not target Kit 3');
- for (const [name, version] of [['svelte-realtime', '0.5.14'], ['svelte-adapter-uws', '0.5.11']]) {
+ for (const [name, version] of [['svelte-realtime', realtimeVersion], ['svelte-adapter-uws', '0.5.11']]) {
   assert.equal(JSON.parse(readFileSync(join(app, 'node_modules', name, 'package.json'), 'utf8')).version, version);
  }
  await command('build', [npm, 'run', 'build'], app);
