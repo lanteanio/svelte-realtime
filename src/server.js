@@ -1198,6 +1198,7 @@ function _propagateWrapperPath(fn, path) {
  * @param {string} [modulePath] - Explicit module path for guard resolution (used by room sub-handlers)
  */
 export function __register(path, fn, modulePath) {
+	if (/** @type {any} */ (fn).__lazy) _keepLoaded(registry.get(path), fn);
 	registry.set(path, fn);
 	if (/** @type {any} */ (fn).__lazy) {
 		if (modulePath) /** @type {any} */ (fn).__modulePathHint = modulePath;
@@ -1212,6 +1213,33 @@ export function __register(path, fn, modulePath) {
 }
 
 /**
+ * A registry loaded again while a live module does not compile (a development
+ * reload of the WebSocket hooks, for example) replaces a loaded entry with a
+ * loader for the broken module. The loader keeps the loaded entry, so the
+ * entry keeps serving until the module loads again.
+ * @param {any} existing
+ * @param {any} loader
+ */
+function _keepLoaded(existing, loader) {
+	const loaded = existing?.__lazy ? existing.__loaded : existing;
+	if (loaded) loader.__loaded = loaded;
+}
+
+/**
+ * Run a lazy loader, falling back to the entry it replaced when the module
+ * fails to load. Without a loaded entry the failure propagates.
+ * @param {any} entry
+ */
+async function _loadLazy(entry) {
+	try {
+		return await entry();
+	} catch (error) {
+		if (entry.__loaded) return entry.__loaded;
+		throw error;
+	}
+}
+
+/**
  * Resolve a lazy registry entry. If the entry is a lazy loader (__lazy),
  * dynamically import the module, cache the resolved function, and return it.
  * @param {string} path
@@ -1222,7 +1250,10 @@ async function _resolveRegistryEntry(path) {
 	if (!entry) return null;
 	if (!/** @type {any} */ (entry).__lazy) return entry;
 	const hint = /** @type {any} */ (entry).__modulePathHint;
-	const fn = await entry();
+	const loaded = /** @type {any} */ (entry).__loaded;
+	const fn = await _loadLazy(entry);
+	// The module still fails to load: serve the loaded entry, keep the loader.
+	if (loaded && fn === loaded) return fn;
 	if (!fn) {
 		registry.delete(path);
 		return null;
@@ -1244,6 +1275,7 @@ async function _resolveRegistryEntry(path) {
  * @param {Function} fn
  */
 export function __registerGuard(modulePath, fn) {
+	if (/** @type {any} */ (fn).__lazy) _keepLoaded(guards.get(modulePath), fn);
 	guards.set(modulePath, fn);
 }
 
@@ -1256,7 +1288,9 @@ async function _resolveGuard(modulePath) {
 	const entry = guards.get(modulePath);
 	if (!entry) return null;
 	if (!/** @type {any} */ (entry).__lazy) return entry;
-	const fn = await entry();
+	const loaded = /** @type {any} */ (entry).__loaded;
+	const fn = await _loadLazy(entry);
+	if (loaded && fn === loaded) return fn;
 	if (!fn) {
 		guards.delete(modulePath);
 		return null;

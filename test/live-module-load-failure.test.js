@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { live, __register, __registerFlag, _activateDerived, handleRpc, _prepareHmr, _restoreHmr } from '../src/server.js';
+import { live, __register, __registerGuard, __registerFlag, _activateDerived, handleRpc, _prepareHmr, _restoreHmr } from '../src/server.js';
 import { setOperationalEventSink } from '../src/shared/diagnostic.js';
 import { mockPlatform } from './helpers/mock-platform.js';
 import { mockWs } from './helpers/mock-ws.js';
@@ -92,11 +92,12 @@ describe('reporting live module load failures', () => {
 		]);
 		expect(loadFailures()).toBe(1);
 
-		// A successful load caches the handler; a later failure of the same
-		// path, after it is registered lazily again, reports again.
+		// A successful load caches the handler; after a development reload clears
+		// the registry and registers the path lazily again, a failure reports again.
 		handleRpc(ws, frame({ rpc: 'reported/echo', id: 'c', args: [] }), platform, { onError });
 		await flush();
 		expect(platform.sent.find(item => item.data?.id === 'c').data).toMatchObject({ ok: true, data: 'ok' });
+		_prepareHmr();
 		__register('reported/echo', entry.loader);
 		handleRpc(ws, frame({ rpc: 'reported/echo', id: 'd', args: [] }), platform, { onError });
 		await flush();
@@ -144,6 +145,33 @@ describe('a development reload that fails', () => {
 		expect(partial.ok).toBe(false);
 		expect(['NOT_FOUND', 'FORBIDDEN', 'UNAUTHENTICATED']).toContain(partial.code);
 	});
+	it('keeps serving a loaded handler when the registry loads again while its module is broken', async () => {
+		cleanups.push(setOperationalEventSink(() => {}));
+		const guardCalls = [];
+		__register('hmr/served', live(() => 'loaded'));
+		__registerGuard('hmr', (ctx) => { guardCalls.push('loaded'); });
+		// Something re-evaluates the registry module (the adapter reloading the
+		// WebSocket hooks) while the edited module does not compile.
+		let broken = true;
+		const fixed = live(() => 'fixed');
+		const loader = async () => { if (broken) throw new SyntaxError('Unexpected token'); return fixed; };
+		loader.__lazy = true;
+		__register('hmr/served', loader);
+		const guardLoader = async () => { if (broken) throw new SyntaxError('Unexpected token'); return () => { guardCalls.push('fixed'); }; };
+		guardLoader.__lazy = true;
+		__registerGuard('hmr', guardLoader);
+		const ws = mockWs({ id: 'member' });
+		const platform = mockPlatform();
+		handleRpc(ws, frame({ rpc: 'hmr/served', id: 'while-broken', args: [] }), platform);
+		await flush();
+		expect(platform.sent.find(item => item.data?.id === 'while-broken').data).toMatchObject({ ok: true, data: 'loaded' });
+		broken = false;
+		handleRpc(ws, frame({ rpc: 'hmr/served', id: 'after-fix', args: [] }), platform);
+		await flush();
+		expect(platform.sent.find(item => item.data?.id === 'after-fix').data).toMatchObject({ ok: true, data: 'fixed' });
+		expect(guardCalls).toEqual(['loaded', 'fixed']);
+	});
+
 	it.each([
 		['registers nothing', () => {}],
 		['registers the flag again before the edited module fails', () => __registerFlag('flag:hmr-kept', 'idle')]
