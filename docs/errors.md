@@ -66,7 +66,7 @@ The registry-backed messages below preserve the documented prefix and append the
 
 Coverage listing only: the scanner inventories direct LiveError and RpcError constructors, literal arguments of local error helpers, code assignments on locally declared Error objects, error reply objects, structured diagnostic events, and console warning/error prefixes in src/**/*.js. Comments and example declarations are excluded. It does not infer causes or safe recovery actions from strings.
 
-Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 120 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
+Full cause, consequence, recovery and next-action guidance above covers 4 registered events (2 distinct runtime codes). The source inventory below currently finds 40 literal runtime codes and 122 operational event/prefix entries. A code appearing here does not mean every occurrence has full guidance.
 
 Code anchors stay stable when messages change. Structured diagnostic IDs use the emitted event; legacy console IDs are derived from the literal prefix and change when that prefix changes. These coverage IDs are documentation anchors, not IDs appended to legacy runtime messages. Escaped \n and \r in the listing stand for actual newlines and carriage returns.
 
@@ -1054,11 +1054,25 @@ Code anchors stay stable when messages change. Structured diagnostic IDs use the
 - Searchable message prefixes: <code>A binary RPC handler failed.</code>
 - Owning sources: [src/server/dispatch.js](../src/server/dispatch.js)
 
+<a id="diagnostic-rpc.execution.failed-after-answer"></a>
+### <code>rpc.execution.failed-after-answer</code>
+
+- Kind: structured event
+- Searchable message prefixes: <code>An RPC handler failed after a middleware had already answered the call.</code>
+- Owning sources: [src/server/dispatch.js](../src/server/dispatch.js)
+
 <a id="diagnostic-rpc.execution.non-live-error"></a>
 ### <code>rpc.execution.non-live-error</code>
 
 - Kind: structured event
 - Searchable message prefixes: <code>An RPC handler threw a non-LiveError; raw errors are hidden from clients.</code>
+- Owning sources: [src/server/dispatch.js](../src/server/dispatch.js)
+
+<a id="diagnostic-rpc.middleware.next-after-answer"></a>
+### <code>rpc.middleware.next-after-answer</code>
+
+- Kind: structured event
+- Searchable message prefixes: <code>A middleware called next() after the call was answered; the handler did not run.</code>
 - Owning sources: [src/server/dispatch.js](../src/server/dispatch.js)
 
 <a id="diagnostic-rpc.path.not-found"></a>
@@ -1170,20 +1184,20 @@ These sites have a computed code, event, or message prefix that the literal scan
 - <code>src/hooks.js:51</code>
 - <code>src/hooks.js:58</code>
 - <code>src/server.js:2253</code>
-- <code>src/server.js:3257</code>
+- <code>src/server.js:3260</code>
 - <code>src/server/ctx.js:113</code>
-- <code>src/server/dispatch.js:1447</code>
-- <code>src/server/dispatch.js:1564</code>
-- <code>src/server/dispatch.js:1804</code>
-- <code>src/server/dispatch.js:1831</code>
-- <code>src/server/dispatch.js:1848</code>
-- <code>src/server/dispatch.js:281</code>
-- <code>src/server/dispatch.js:467</code>
-- <code>src/server/dispatch.js:501</code>
-- <code>src/server/dispatch.js:808</code>
-- <code>src/server/dispatch.js:908</code>
-- <code>src/server/dispatch.js:920</code>
-- <code>src/server/dispatch.js:975</code>
+- <code>src/server/dispatch.js:1011</code>
+- <code>src/server/dispatch.js:1485</code>
+- <code>src/server/dispatch.js:1602</code>
+- <code>src/server/dispatch.js:1843</code>
+- <code>src/server/dispatch.js:1870</code>
+- <code>src/server/dispatch.js:1887</code>
+- <code>src/server/dispatch.js:312</code>
+- <code>src/server/dispatch.js:498</code>
+- <code>src/server/dispatch.js:532</code>
+- <code>src/server/dispatch.js:844</code>
+- <code>src/server/dispatch.js:944</code>
+- <code>src/server/dispatch.js:956</code>
 - <code>src/server/idempotency.js:880</code>
 - <code>src/server/push.js:714</code>
 - <code>src/server/upload.js:383</code>

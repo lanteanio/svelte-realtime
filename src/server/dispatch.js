@@ -99,9 +99,11 @@ export function installDispatch(seams) {
 
 /**
  * @typedef {object} RpcChainHooks
+ * @property {string} [path] - the called path, for diagnostics
  * @property {boolean} [isStream] - the frame is a stream subscribe
  * @property {() => void} [cancel] - the call was refused while its chain still runs
  * @property {() => void} [settled] - that still-running chain has ended
+ * @property {{ pending?: Promise<void> }} [track] - receives the promise that settles with that chain
  */
 
 /** @param {any} v */
@@ -149,21 +151,50 @@ async function _runRpcChainThroughMiddleware(ctx, runChain, hooks) {
 	let chainRun = null;
 	let chainDone = false;
 	let decided = false;
+	const path = hooks?.path;
 	const detach = () => {
 		decided = true;
 		const run = chainRun;
 		if (!run || chainDone) return;
 		hooks?.cancel?.();
 		_enterInFlight();
-		run.then(() => {}, () => {}).then(() => {
+		const settled = run.then(() => {}, (err) => {
+			// Nobody receives this failure: the caller already has its answer.
+			emitOperationalEvent({
+				source: 'svelte-realtime',
+				component: 'server.rpc',
+				event: 'rpc.execution.failed-after-answer',
+				severity: 'warn',
+				dataClass: 'application',
+				message: 'An RPC handler failed after a middleware had already answered the call.',
+				attributes: { path, error: { name: err instanceof Error ? err.name : typeof err, code: err instanceof LiveError ? err.code : null } }
+			});
+		}).then(() => {
 			_exitInFlight();
 			hooks?.settled?.();
 		});
+		if (hooks?.track) hooks.track.pending = settled;
 	};
 	let answer;
 	try {
 		answer = await _runWithMiddleware(ctx, () => {
-			if (decided) throw new Error('middleware called next() after the call was answered');
+			if (decided) {
+				// A rejected promise, not a throw: `setTimeout(next)` must not
+				// become an uncaught exception, while an awaiting caller still
+				// sees why nothing ran.
+				emitOperationalEvent({
+					source: 'svelte-realtime',
+					component: 'server.rpc',
+					event: 'rpc.middleware.next-after-answer',
+					severity: 'warn',
+					dataClass: 'application',
+					message: 'A middleware called next() after the call was answered; the handler did not run.',
+					attributes: { path }
+				});
+				const late = Promise.reject(new Error('middleware called next() after the call was answered'));
+				late.catch(() => {});
+				return late;
+			}
 			const run = runChain();
 			chainRun = run;
 			// The middleware may drop the promise; the outcome is read below.
@@ -740,7 +771,12 @@ async function _executeBatch(ws, msg, platform, options) {
 				results[i] = { id: call?.id || '', ok: false, code: 'INVALID_REQUEST', error: 'Each batch entry requires rpc and id', requestId: _operationRequestId(call?.id) };
 				continue;
 			}
-			results[i] = await _executeSingleRpc(ws, call, platform, options);
+			// An entry a middleware answered early may still be running; the
+			// next entry starts only after it ends.
+			/** @type {{ pending?: Promise<void> }} */
+			const track = {};
+			results[i] = await _executeSingleRpc(ws, call, platform, options, track);
+			if (track.pending) await track.pending;
 		}
 	} else {
 		results = await Promise.all(batch.map((call) => {
@@ -1292,7 +1328,7 @@ async function _executeStreamRpc(ws, platform, fn, ctx, args, msg, subscribedRef
  * waits for it to settle. Counting happens before the first `await` so there is
  * no gap between the gate check and the in-flight increment.
  */
-async function _executeSingleRpc(ws, msg, platform, options) {
+async function _executeSingleRpc(ws, msg, platform, options, track) {
 	const requestId = _operationRequestId(msg.id);
 	const protocolRejection = _protocolRejection(ws, platform);
 	if (protocolRejection) {
@@ -1311,15 +1347,15 @@ async function _executeSingleRpc(ws, msg, platform, options) {
 				kind: 'server',
 				parent: platform.traceContext,
 				attributes: { 'rpc.system': 'svelte-realtime' }
-			}, () => _executeSingleRpcInner(ws, msg, platform, options, requestId))
-			: await _executeSingleRpcInner(ws, msg, platform, options, requestId);
+			}, () => _executeSingleRpcInner(ws, msg, platform, options, requestId, track))
+			: await _executeSingleRpcInner(ws, msg, platform, options, requestId, track);
 		return _withFailureRequestId(result, requestId);
 	} finally {
 		_exitInFlight();
 	}
 }
 
-async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
+async function _executeSingleRpcInner(ws, msg, platform, options, requestId, track) {
 	const { rpc: path, id, args: rawArgs, stream: isStream, cursor: clientCursor } = msg;
 	const _metricsStart = state.metricsInstruments ? monotonicNow() : 0;
 
@@ -1354,6 +1390,8 @@ async function _executeSingleRpcInner(ws, msg, platform, options, requestId) {
 	// Only a middleware can answer while the chain still runs; the chain's
 	// subscribe bookkeeping is then released when it ends, not here.
 	const _hooks = _hasMiddleware() ? {
+		path,
+		track,
 		isStream: !!isStream,
 		cancel() { _subscribedRef.cancelled = true; },
 		settled() {
@@ -1549,7 +1587,7 @@ async function _executeBinaryRpcInner(ws, header, payload, platform, options, re
 
 			const result = await fn(ctx, payload, ...(extraArgs || []));
 			return { ok: true, data: result };
-		});
+		}, _hasMiddleware() ? { path } : undefined);
 		// Consumed only by an answer that succeeds, so a middleware refusal
 		// leaves the one-shot deprecation signal for a later call.
 		if (answer.ok !== false) {
@@ -1787,12 +1825,13 @@ async function _runDirectCall(path, args, platform, options) {
 	const ctx = _buildCtx(userValue, null, platform, _h, null);
 
 	// Run global middleware chain, then guard, then execution
-	// A middleware's response envelope is a wire answer; a direct call turns
-	// it back into what the caller of `.load()` expects: data, or a LiveError
-	// so `fallback` and `onError` apply.
+	// A direct call answers with what the middleware returns, so redacting,
+	// caching and catch-and-default middleware keep working. Only a response
+	// envelope is a wire answer, turned back into what `.load()` expects: its
+	// data, or a LiveError so `fallback` and `onError` apply.
 	let _chainValue;
 	let _chainReturned = false;
-	const _answer = await _runRpcChain(ctx, async () => {
+	const _answer = await _runWithMiddleware(ctx, async () => {
 		const value = await _directCallChain();
 		_chainValue = value;
 		_chainReturned = true;

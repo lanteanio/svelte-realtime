@@ -1773,7 +1773,7 @@ export namespace live {
 	 * to reject the call at once (a handler already started runs to its end).
 	 * Applies to RPC, stream and upload calls. Returning anything else without
 	 * calling `next()` fails the call with `INTERNAL_ERROR`; calling `next()`
-	 * after the call was answered throws.
+	 * after the call was answered rejects without running the handler.
 	 *
 	 * The chain encloses the guard, `beforeExecute` and the handler, and also
 	 * the background loader re-runs made for a topic's subscribers

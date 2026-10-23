@@ -92,6 +92,7 @@ const transports = [
 describe('RPC answers whatever the global middleware returns', () => {
 	let env, ran, finished, errors, events, restoreSink, unhandled;
 	const onUnhandled = (err) => { unhandled.push(err); };
+	const onUncaught = (err) => { unhandled.push(err); };
 
 	beforeEach(() => {
 		env = createTestEnv();
@@ -101,6 +102,7 @@ describe('RPC answers whatever the global middleware returns', () => {
 		events = [];
 		unhandled = [];
 		process.on('unhandledRejection', onUnhandled);
+		process.on('uncaughtException', onUncaught);
 		restoreSink = setOperationalEventSink((record) => { events.push(record); });
 		const slow = async () => { ran++; await tick(30); finished++; return 'done'; };
 		const fails = () => { ran++; throw new LiveError('CONFLICT', 'Version mismatch', { details: { version: 3 } }); };
@@ -121,6 +123,7 @@ describe('RPC answers whatever the global middleware returns', () => {
 	afterEach(async () => {
 		await tick(40);
 		process.off('unhandledRejection', onUnhandled);
+		process.off('uncaughtException', onUncaught);
 		if (typeof restoreSink === 'function') restoreSink(); else setOperationalEventSink(null);
 		_resetMiddleware();
 		env.cleanup();
@@ -294,6 +297,57 @@ describe('RPC answers whatever the global middleware returns', () => {
 		expect([...topics]).toEqual([]);
 	});
 
+	it('a late next() from a timer or a detached async function does not crash the process', async () => {
+		let n = 0;
+		live.middleware(async (ctx, next) => {
+			if (n++ === 0) setTimeout(next, 5);
+			else (async () => { await tick(5); next(); })();
+			return { ok: false, code: 'FORBIDDEN', error: 'No' };
+		});
+		const c = conn(env);
+		handleRpc(c.ws, textFrame('mw/ok', 'r1'), env.platform);
+		handleRpc(c.ws, textFrame('mw/ok', 'r2'), env.platform);
+		expect(await answerFor(c, 'r1')).toMatchObject({ code: 'FORBIDDEN' });
+		expect(await answerFor(c, 'r2')).toMatchObject({ code: 'FORBIDDEN' });
+		await tick(40);
+		expect(ran).toBe(0);
+		expect(events.filter((e) => e.event === 'rpc.middleware.next-after-answer').map((e) => e.attributes.path)).toEqual(['mw/ok', 'mw/ok']);
+	});
+
+	it('a handler failing after an early answer emits an event without its message', async () => {
+		env.register('late', { boom: live(async () => { await tick(20); throw new Error('secret detail'); }) });
+		live.middleware(async (ctx, next) => {
+			next();
+			return { ok: false, code: 'TIMEOUT', error: 'Took too long' };
+		});
+		const c = conn(env);
+		handleRpc(c.ws, textFrame('late/boom', 'r1'), env.platform);
+		expect(await answerFor(c, 'r1')).toMatchObject({ code: 'TIMEOUT' });
+		await tick(50);
+		const failed = events.filter((e) => e.event === 'rpc.execution.failed-after-answer');
+		expect(failed).toHaveLength(1);
+		expect(failed[0].attributes).toEqual({ path: 'late/boom', error: { name: 'Error', code: null } });
+		expect(JSON.stringify(failed[0])).not.toContain('secret detail');
+	});
+
+	it('a sequential batch starts the next entry only after an early-answered one ends', async () => {
+		const log = [];
+		env.register('shop', {
+			createOrder: live(async () => { log.push('order:start'); await tick(30); log.push('order:end'); return 1; }),
+			charge: live(async () => { log.push('charge:start'); return 2; })
+		});
+		live.middleware((ctx, next) => Promise.race([
+			next(),
+			tick(5).then(() => ({ ok: false, code: 'TIMEOUT', error: 'Took too long' }))
+		]));
+		const c = conn(env);
+		handleRpc(c.ws, textEncoder.encode(JSON.stringify({ batch: [{ rpc: 'shop/createOrder', id: 'a', args: [] }, { rpc: 'shop/charge', id: 'b', args: [] }], sequential: true })).buffer, env.platform);
+		const batch = await answerFor(c, '__batch', 1000);
+		expect(batch.batch[0]).toMatchObject({ id: 'a', code: 'TIMEOUT' });
+		expect(batch.batch[1]).toMatchObject({ id: 'b', ok: true, data: 2 });
+		expect(log).toEqual(['order:start', 'order:end', 'charge:start']);
+	});
+
 	function trackTopics(c) {
 		const topics = new Set();
 		c.ws.subscribe = (t) => { topics.add(t); return true; };
@@ -386,9 +440,26 @@ describe('RPC answers whatever the global middleware returns', () => {
 			await expect(__directCall('mw/ok', [], env.platform, { user: { id: 'u1' } })).resolves.toBe(5);
 		});
 
-		it('a middleware that skips next() without an envelope throws', async () => {
-			live.middleware(async () => undefined);
-			await expect(__directCall('mw/ok', [], env.platform, { user: { id: 'u1' } })).rejects.toThrow(/next\(\)/);
+		it('a redacting middleware returns its own value', async () => {
+			env.register('acct', { me: live(async () => ({ id: 'u1', email: 'a@example.test' })) });
+			live.middleware(async (ctx, next) => {
+				const user = await next();
+				return { ...user, email: undefined };
+			});
+			await expect(__directCall('acct/me', [], env.platform, { user: { id: 'u1' } })).resolves.toEqual({ id: 'u1', email: undefined });
+		});
+
+		it('a caching middleware that skips next() returns its cached value', async () => {
+			live.middleware(async () => ['cached']);
+			await expect(__directCall('mw/ok', [], env.platform, { user: { id: 'u1' } })).resolves.toEqual(['cached']);
+			expect(ran).toBe(0);
+		});
+
+		it('a middleware that catches and returns null returns null', async () => {
+			live.middleware(async (ctx, next) => {
+				try { return await next(); } catch { return null; }
+			});
+			await expect(__directCall('mw/fails', [], env.platform, { user: { id: 'u1' } })).resolves.toBeNull();
 		});
 
 		it('a pass-through middleware returns the handler value unchanged', async () => {

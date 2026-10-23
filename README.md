@@ -1871,7 +1871,7 @@ live.middleware(async (ctx, next) => {
 });
 ```
 
-Middleware runs in registration order and applies to RPC, stream and upload calls. Each must call `next()` and return its result, or return `{ ok: false, code, error }` (or throw a `LiveError`) to refuse the call. A refusal answers at once, so a middleware can time a call out with `Promise.race`; a handler already started still runs to its end. A failure from `next()` that the middleware swallows answers with that failure, a middleware that returns without calling `next()` and without an envelope fails the call with `INTERNAL_ERROR`, and calling `next()` after the call was answered throws. When no middleware is registered, there is zero overhead.
+Middleware runs in registration order and applies to RPC, stream and upload calls. Each must call `next()` and return its result, or return `{ ok: false, code, error }` (or throw a `LiveError`) to refuse the call. A refusal answers at once, so a middleware can time a call out with `Promise.race`; a handler already started still runs to its end. A failure from `next()` that the middleware swallows answers with that failure, a middleware that returns without calling `next()` and without an envelope fails the call with `INTERNAL_ERROR`, and calling `next()` after the call was answered rejects without running the handler. When no middleware is registered, there is zero overhead.
 
 Middleware encloses the module guard, `beforeExecute` and the handler, so it is the place to establish request-scoped context. Run `next` inside an `AsyncLocalStorage` store and every await in that call sees it, even when two sockets' calls interleave:
 <!-- doc-code: ambient names="live" -->
@@ -3443,14 +3443,14 @@ export const betaFeed = live.gate(
   const feed = betaFeed.when(tabActive);
 </script>
 
-{#if $feed !== undefined}
+{#if $feed}
   {#each $feed as item (item.id)}
     <p>{item.title}</p>
   {/each}
 {/if}
 ```
 
-When the predicate returns false, the server responds with a graceful no-op (no error, no subscription). The client store stays `undefined`. `.when()` accepts a boolean, a Svelte store, or a getter function. When given a store, it subscribes/unsubscribes reactively as the value changes. Getter functions are evaluated once at subscribe time; for reactivity with Svelte 5 `$state`, wrap in `$derived` or pass a store.
+When the predicate returns false, the server responds with a graceful no-op (no error, no subscription). The client store holds `null`. `.when()` accepts a boolean, a Svelte store, or a getter function. When given a store, it subscribes/unsubscribes reactively as the value changes. Getter functions are evaluated once at subscribe time; for reactivity with Svelte 5 `$state`, wrap in `$derived` or pass a store.
 
 ---
 
